@@ -123,6 +123,17 @@
       "sectionOrder": ["Problem", "Pattern", "Explanation", "Solution"]
     },
     {
+      "id": "advanced-sql-practice",
+      "file": "/advanced-sql-practice.md",
+      "title": "Advanced SQL Practice",
+      "category": "Databases",
+      "itemLabel": "Problem",
+      "itemsPlural": "advanced SQL problems",
+      "storagePrefix": "sdf:advanced-sql-practice",
+      "defaultRevealedSections": ["Problem"],
+      "sectionOrder": ["Problem", "Pattern", "Explanation", "Solution"]
+    },
+    {
       "id": "csharp",
       "file": "/csharp-interview-primer.md",
       "title": "C#",
