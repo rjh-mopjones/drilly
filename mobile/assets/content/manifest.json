@@ -112,6 +112,20 @@
       "sectionOrder": []
     },
     {
+      "id": "sql-patterns",
+      "file": "/sql-patterns-primer.md",
+      "title": "Patterns",
+      "category": "Databases",
+      "itemLabel": "Topic",
+      "itemsPlural": "SQL patterns",
+      "storagePrefix": "ip:sql-patterns",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": []
+    },
+    {
       "id": "sql-practice",
       "file": "/sql-practice.md",
       "title": "SQL Practice",
