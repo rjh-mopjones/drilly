@@ -84,6 +84,20 @@
       "sectionOrder": []
     },
     {
+      "id": "go",
+      "file": "/go-interview-primer.md",
+      "title": "Go",
+      "category": "Languages",
+      "itemLabel": "Topic",
+      "itemsPlural": "Go topics",
+      "storagePrefix": "ip:go",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": []
+    },
+    {
       "id": "kotlin",
       "file": "/kotlin-interview-primer.md",
       "title": "Kotlin",
