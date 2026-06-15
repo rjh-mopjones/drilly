@@ -292,6 +292,78 @@ func good(paths []string) error {
 
 `defer` is cheap in modern Go (1.14+ open-coded the common cases to near-zero cost), so don't avoid it for performance superstition — just keep it function-scoped and mind the argument-evaluation timing.
 
+### Q106. Why can a function that "returns `nil`" still produce an interface value that is not `== nil`? Walk through the two-word representation and how it bites in error handling.
+
+An interface value in Go is a two-word pair: a type descriptor (the `itab`/type pointer) and a data pointer. An interface is `== nil` only when *both* words are zero. The classic trap is returning a typed nil pointer through an interface return:
+
+```go
+func do() error {
+    var p *MyError // typed nil, *MyError = nil
+    // ... never assigned ...
+    return p // BUG: interface gets {type: *MyError, data: nil}
+}
+
+func main() {
+    if err := do(); err != nil {
+        fmt.Println("got error:", err) // this fires! err is non-nil
+    }
+}
+```
+
+`p` is a nil `*MyError`, but assigning it to the `error` return type stamps the interface's type word with `*MyError`. The data word is nil, but the type word is not, so `err != nil` is true. You've returned a "non-nil error that is nil." This is one of the most common production bugs in Go HTTP/gRPC handlers — a wrapper returns `error` from a helper that hands back a typed nil, and every caller's `if err != nil` path lights up spuriously.
+
+The fix is to never return a concrete pointer typed as the interface when it might be nil. Return the literal `nil`, or guard explicitly:
+
+```go
+func do() error {
+    p := compute() // *MyError or nil
+    if p == nil {
+        return nil // untyped nil -> both words zero
+    }
+    return p
+}
+```
+
+The senior tell here is understanding *why* `errors.Is`/`errors.As` and the `if err != nil` idiom can't save you: they operate on the interface value you handed them, and you handed them a non-nil one. `vet`'s `nilness` pass and `staticcheck` (SA4023) catch some shapes of this, but not all — the discipline of returning untyped `nil` from error paths is the real defense.
+
+### Q107. Explain Go's escape analysis: what decides whether a value lands on the stack or the heap, and how do you actually inspect and act on it in production?
+
+Escape analysis is a compile-time pass (`cmd/compile`) that proves whether a value's lifetime is bounded by its function's frame. If the compiler can prove the value never outlives the call, it goes on the goroutine's stack — reclaimed for free on return, zero GC pressure. If it *might* outlive the frame, it "escapes" to the heap and becomes the GC's problem. The key inversion senior candidates must internalize: taking `&x` does *not* force a heap allocation, and *not* taking an address does not guarantee a stack one. The compiler reasons about reachability, not syntax.
+
+Common escape triggers: returning a pointer to a local; storing a pointer in a heap object or a longer-lived struct; capturing a variable in a closure that escapes; passing a value to something typed `interface{}`/`any` (the value gets boxed); sending a pointer on a channel; and allocations whose size isn't known at compile time (e.g. `make([]T, n)` with dynamic `n`, or a slice that may `append`-grow). `fmt.Println(x)` famously escapes its arguments because they cross an `interface{}` boundary inside `fmt`.
+
+You inspect it with the compiler, not a profiler:
+
+```sh
+go build -gcflags='-m -m' ./...   # "-m -m" gives the reasoning chain
+# escapes to heap; moved to heap: x; &x does not escape ...
+```
+
+For runtime evidence, `go test -bench . -benchmem` shows `allocs/op`; `pprof` (`-memprofile`, then `pprof -alloc_objects`) localizes the hot allocators in a running service.
+
+The senior payoff is knowing when to *act*. Heap allocations are usually the dominant latency tax in high-throughput Go services because they feed GC. Practical levers: pass small structs by value to keep them on the stack; pre-size slices/maps to avoid growth-driven escapes; use `sync.Pool` for transient buffers in hot paths; and use `strings.Builder` instead of `+=` so the backing array is amortized rather than reallocated. But measure first — escape analysis interacts with inlining, and a refactor that "looks" allocation-free can defeat inlining and make things worse. Tune GC frequency separately with `GOGC` and put a hard ceiling on heap growth with `GOMEMLIMIT` (Go 1.19+) to convert OOM-kills into back-pressure.
+
+### Q108. Two structs with the same fields can have different `unsafe.Sizeof`. Why, and when does it actually matter?
+
+Go lays out struct fields in declaration order, and each field must start at an offset that is a multiple of its alignment (usually its size, capped at the platform word — 8 on amd64/arm64). To satisfy that, the compiler inserts *padding* bytes between fields, and *tail padding* so the whole struct is a multiple of its largest field's alignment (so it aligns correctly inside an array). Reordering fields changes how much padding is needed.
+
+```go
+type Bad struct {  // 24 bytes on amd64
+    a bool   // 1 byte + 7 padding
+    b int64  // 8 bytes
+    c bool   // 1 byte + 7 tail padding
+}
+type Good struct { // 16 bytes
+    b int64  // 8
+    a bool   // 1
+    c bool   // 1 + 6 tail padding
+}
+```
+
+Rule of thumb: order fields from widest alignment to narrowest. `go vet`'s `fieldalignment` analyzer (or `betteralign`) flags and even auto-fixes these. It matters when you have *many* instances — millions of structs in a cache, a slice of records, hot-path message types — where 8 wasted bytes per element multiplies into real memory and worse cache-line utilization. For a handful of long-lived structs, don't bother; readability wins.
+
+Two senior caveats. First, struct *order is observable* — never blindly reorder a struct that's serialized field-by-field, mapped to a C layout via cgo, or whose layout a test asserts. Second, false sharing: an empty struct or atomically-updated counter shared across goroutines can sit on the same 64-byte cache line as another hot field, causing cross-core invalidation. The fix is deliberate *over*-padding — Go 1.19 added `sync/atomic` types and the idiom of a `_ [64]byte` pad (or aligning to `cpu.CacheLinePad`) to push contended fields onto separate cache lines, the opposite of packing for size. Knowing both directions — pack to save memory, pad to avoid false sharing — is what separates the senior answer from the textbook one.
+
 ---
 
 ## Interfaces & Type System
@@ -484,6 +556,63 @@ type ReadWriteCloser interface { Reader; Writer; Closer }
 The principle, sometimes phrased as the interface-segregation half of "the bigger the interface, the weaker the abstraction" (Rob Pike): a one-method interface is satisfied by almost everything and composes with almost everything; a ten-method interface is satisfied by almost nothing and forces fakes to stub ten methods in tests. Small interfaces are *more* powerful precisely because they demand less.
 
 Practical consequences: declare interfaces with the fewest methods your consumer needs (often one or two), and **build bigger contracts by embedding** rather than defining fat interfaces from scratch. When a function only reads, take an `io.Reader`, not `*os.File` — you instantly gain testability (pass a `strings.NewReader`) and reach (anyone's `Reader` works). This is the structural-typing payoff from Q10 made concrete: small + implicit + embeddable is why Go's I/O ecosystem interoperates as well as it does.
+
+### Q109. Assigning a concrete value to an interface "boxes" it. Walk through what the compiler actually emits, when it allocates, and how devirtualization and PGO can recover the cost.
+
+When you assign a concrete value `T` to an interface, the runtime builds an `iface` (or `eface` for `any`) consisting of two words: a pointer to the `itab` (type descriptor + method dispatch table) and a *data word*. The data word must be a pointer, so any non-pointer value has to live somewhere the data word can point at. If the value can't be proven to stay on the stack, the compiler calls `runtime.convT*` (e.g. `convT64`, `convTstring`, `convTslice`) which **heap-allocates a copy** — this is the "boxing" allocation people get bitten by in hot loops.
+
+There are real escape hatches. Small integers in `[0,255]` come from a static `stastaticbytes` table, the empty string and zero-length values are interned, and if escape analysis proves the boxed value doesn't outlive the conversion, the backing storage stays on the stack and there's no `convT*` call at all. The classic production footgun is `fmt.Println(x)`: passing anything through `...any` forces a boxing conversion, and because `fmt` uses reflection the value almost always escapes. Run `go build -gcflags=-m` and you'll see `x escapes to heap` on the conversion line — that's the allocation, not the print.
+
+```go
+func sum(xs []int) any {
+    var total int
+    for _, x := range xs { total += x }
+    return total // convT64: total escapes to heap, one alloc per call
+}
+```
+
+The other half is dispatch cost. A method call through an interface is an indirect call via the `itab`, so it can't be inlined and defeats further optimization. Since Go 1.20 the compiler does **devirtualization**: if it can prove the concrete type at the call site (e.g. the interface was just assigned a known concrete type locally), it rewrites the dynamic call into a static one that *can* then be inlined. With **PGO** (profile-guided optimization, stable since 1.21), the compiler uses profile data to devirtualize the *most common* concrete type at a call site even across function boundaries, emitting a type check plus a fast static path and falling back to the dynamic call otherwise. The senior takeaway: don't preemptively swap interfaces for concrete types "for speed" — measure with `pprof`, and reach for PGO before contorting your API. Where it actually matters is allocation in tight loops, which `-gcflags=-m` and a heap profile will expose far more reliably than intuition.
+
+### Q110. A type's methods use pointer receivers. Explain precisely why `var x SomeInterface = T{}` can fail to compile while `&T{}` works, how this interacts with map elements and slices, and the addressability rule behind it.
+
+The method set of `T` contains only the value-receiver methods; the method set of `*T` contains *both* value- and pointer-receiver methods. So if `Save()` has a pointer receiver, `T` does **not** satisfy an interface requiring `Save()`, but `*T` does. That's why `var x I = T{}` is a compile error and `var x I = &T{}` compiles. The reason isn't arbitrary: calling a pointer-receiver method needs the *address* of the value so mutations are visible. The compiler will implicitly take that address (`t.Save()` becomes `(&t).Save()`) — but **only when `t` is addressable**.
+
+This is where it bites people. A local variable is addressable, so direct method calls on it work fine even with pointer receivers. But interface satisfaction is checked on the *type*, not the addressable expression, so the type set rule (`*T` only) is what governs assignment to an interface. And several common expressions are **not addressable**: map elements and the return value of a function call. You can't take `&m[k]`, so you can't call a pointer-receiver method on a map element, nor store a map element directly into an interface that needs pointer methods.
+
+```go
+type Counter struct{ n int }
+func (c *Counter) Inc() { c.n++ }
+
+m := map[string]Counter{"a": {}}
+m["a"].Inc()        // compile error: cannot call pointer method on m["a"] (not addressable)
+
+v := m["a"]; v.Inc(); m["a"] = v   // workaround: copy out, mutate, copy back
+// or store pointers: map[string]*Counter
+```
+
+The senior-level consequence is an API design rule: if a type has *any* pointer-receiver method, treat `*T` as "the type" — accept and return `*T`, and store `*T` in collections. Mixing value and pointer receivers on the same type is a smell precisely because it makes the method set depend on whether you're holding a `T` or `*T`, and `slog`/`json`/`fmt` interface checks (`Stringer`, `Marshaler`) will silently *not* fire on a `T` value whose `String()`/`MarshalJSON()` is pointer-receiver. That "why didn't my `String()` get called?" bug is almost always a value stored where the method set didn't include the pointer method.
+
+### Q111. You want a generic function that constructs its own collection (e.g. `New[S]()`) and calls pointer-receiver methods on it. Why does the naive version panic or fail to compile, and what is the `*T` constraint idiom that fixes it?
+
+The naive generic over a value type can't call pointer methods, because the type parameter's method set follows the same value/pointer rule as concrete types: a constraint `interface{ Insert(E) }` is satisfied by `*OrderedSet[E]`, not `OrderedSet[E]`, when `Insert` has a pointer receiver. So you're forced to instantiate with the pointer type — and then `var s S` gives you a **nil pointer**, and the first method call panics with a nil dereference. You can't `new` it either, because inside the generic body you only know `S`, not the element type it points to.
+
+The idiom is the **two-parameter pointer constraint**: one type parameter for the value type `T`, and a second constrained to `*T` *and* the method interface. The `*T` element in the constraint's type set is what lets the compiler know `PT` is exactly a pointer to `T`, so `new(T)` yields something convertible to `PT` and the pointer methods are in scope.
+
+```go
+type Set[E any] interface{ Insert(E); Has(E) bool }
+
+// PT must be *T and must implement Set[E]
+func NewSet[E, T any, PT interface{ *T; Set[E] }]() PT {
+    return PT(new(T)) // new(T) is *T, convertible to PT — non-nil, methods callable
+}
+
+// type inference fills in PT:
+s := NewSet[int, OrderedSet[int]]()
+```
+
+The reason `new(T)` is the move (not `var s PT`) is that `var s PT` declares a nil pointer of the constraint type, whereas `new(T)` allocates a real `T` and the `*T` element in the constraint makes the conversion legal. This is the same pattern the standard `encoding`-style "decode into a fresh `*T`" generics use.
+
+That said, the senior answer ends with "and usually you shouldn't." This constraint juggling is genuinely ugly and leaks into every caller's type-inference story. If the function doesn't *need* to construct the collection itself, the cleaner design is to **accept the interface value** — `func InsertAll[E any](s Set[E], seq iter.Seq[E])` — which works for both value- and pointer-receiver implementations with zero constraint gymnastics. Reach for the `*T` idiom only when the function must own construction of `T` (factories, generic decoders); otherwise prefer accepting an already-built `Set[E]`.
 
 ---
 
@@ -787,6 +916,51 @@ The **race detector** (`go test -race`, `go run -race`) instruments memory acces
 
 What it **misses**: it only sees races on code paths *actually executed* during the run. A race in a branch your test never hits is invisible. It does not detect deadlocks (the runtime's `all goroutines are asleep` panic catches only total deadlock), goroutine leaks, or logical races like check-then-act on a map even when each op is individually locked. It also has real cost — ~5–10x CPU and memory — so it's a testing tool, not a production setting. The takeaway: `-race` proves the presence of races on exercised paths, never their absence.
 
+### Q112. Walk through the GMP scheduler: what is `P` for, how does work-stealing and `handoffp` work, and how does the runtime preempt a goroutine stuck in a tight loop?
+
+The scheduler has three entities: `G` (a goroutine — stack, PC, and state), `M` (an OS thread, the thing the kernel actually schedules), and `P` (a logical processor / scheduling context). The count of `P`s is `GOMAXPROCS`; a `P` is the *permission* to run Go code and owns a local runnable queue (a 256-slot ring) plus mcache for allocation. An `M` must hold a `P` to execute Go. This `G:M:P` design — rather than `G:M` directly — exists so the run queues live on `P`, giving you per-CPU queues with almost no lock contention and a clean place to "park" work when an `M` blocks.
+
+Scheduling order when an `M` looks for work: its `P`'s local queue, then the global queue (checked occasionally, ~1/61 ticks, so the global queue can't starve), then the netpoller, then *work-stealing* — it picks a random victim `P` and steals **half** its local queue. Stealing half (not one) is what makes load rebalance in O(log) rounds instead of one-at-a-time thrashing.
+
+`handoffp` is the blocking-syscall path. When a `G` makes a *blocking* syscall the `M` is stuck in the kernel, so `entersyscallblock`/sysmon detaches the `P` from that `M` and hands it to an idle `M` (or spins up a new one) so the other goroutines on that `P` keep running. When the syscall returns, the original `M` tries to reacquire a `P`; if none is free, its `G` goes on the global queue and the `M` parks. Contrast this with blocking on a channel or mutex: that's a *cooperative* park — the `G` is descheduled and the `M`+`P` immediately pick up other work, no thread handoff needed.
+
+Preemption: before Go 1.14, preemption was cooperative — only at function-call safepoints (the stack-growth check). A goroutine in a tight loop with no calls (`for {}`) could wedge a `P` forever and stall GC's stop-the-world. Go 1.14 added **asynchronous preemption**: `sysmon` notices a `G` running >10ms and sends the `M` a `SIGURG`; the signal handler parks the `G` at an async-safe point and requeues it. The senior tell here is knowing this is *also* why you occasionally see weird interactions with code that's sensitive to signals, and why `GODEBUG=asyncpreemptoff=1` exists as an escape hatch.
+
+### Q113. A counter using `atomic.AddInt64` scales worse than expected as you add cores. What's happening, and how do `sync/atomic`, the Go memory model, and `atomic.Value`/`atomic.Pointer` fit together?
+
+The likely culprit is **cache-line contention** (often "false sharing" when it's *different* fields, true sharing when it's the same counter). An atomic add isn't free: it's a locked read-modify-write that must own the cache line exclusively (MESI), so every core hammering one `int64` serializes on the cache-coherence protocol and bounces the line between L1s. Adding cores makes it *worse*, not better. The fix for a hot counter is to shard it — per-`P`/per-shard counters summed on read — or to batch locally and flush. False sharing specifically is when two unrelated atomics share a 64-byte line; the fix is padding (`_ [56]byte`) or aligning to a cache line so independent writers don't collide.
+
+On the memory model: as of Go 1.19 the model formally specifies that `sync/atomic` operations are **sequentially consistent** — an atomic write happens-before a subsequent atomic read that observes it. There is no relaxed/acquire-release API in Go; you get SC or nothing. That matters because people assume a plain `var ready bool` flag set in one goroutine and read in another "works" — it's a data race with no happens-before edge, and the compiler/CPU may reorder or cache it indefinitely. Use `atomic.Bool` or a channel/mutex to establish the ordering.
+
+Prefer the typed atomics added in Go 1.19 — `atomic.Int64`, `atomic.Bool`, `atomic.Pointer[T]` — over the loose `atomic.AddInt64(&x, …)` functions. The typed versions can't be accidentally accessed non-atomically, and `atomic.Int64` is guaranteed 8-byte aligned even on 32-bit platforms (the classic bug: a bare `int64` as a struct's second 32-bit-aligned field panics on `atomic.AddInt64` on 32-bit ARM/x86). `atomic.Pointer[T]` is the modern, type-safe lock-free swap primitive; `atomic.Value` is the older `interface{}`-based version that panics if you store inconsistent concrete types. For a read-mostly config struct, an `atomic.Pointer[Config]` with copy-on-write swaps beats an `RWMutex` because readers never touch a contended lock.
+
+```go
+type Config struct{ /* ... */ }
+var cfg atomic.Pointer[Config]
+
+func Get() *Config { return cfg.Load() }       // wait-free reads
+func Set(c *Config) { cfg.Store(c) }           // atomic publish; happens-before the Load
+```
+
+### Q114. Compare `errgroup` with hand-rolled `WaitGroup`+channel fan-out. What does `SetLimit` do, what are the cancellation and error-aggregation semantics, and what bugs does `errgroup.WithContext` *not* save you from?
+
+`errgroup.Group` is `WaitGroup` plus first-error capture plus (with `WithContext`) cancellation. `g.Go(fn)` runs `fn` in a goroutine; `g.Wait()` blocks until all return and yields the **first** non-nil error (subsequent errors are dropped — if you need all of them, collect into a slice guarded by a mutex yourself). With `errgroup.WithContext(ctx)` the returned `ctx` is cancelled the instant any `fn` returns an error *or* when `Wait` returns. That's the structured-concurrency win over raw `WaitGroup`: a fast failure tears down the siblings, instead of them running to completion wastefully.
+
+`g.SetLimit(n)` bounds concurrency to `n` active goroutines — it's a built-in semaphore, so `g.Go` *blocks* once `n` are in flight. This replaces the classic worker-pool boilerplate (buffered channel as a token bucket). There's also `g.TryGo` which returns false instead of blocking when the limit is hit. The common bug: calling `SetLimit` after you've already started goroutines panics, and using `SetLimit(0)` deadlocks since no `Go` can ever proceed.
+
+The traps `WithContext` does *not* save you from: (1) The cancellation is **cooperative** — `ctx` being cancelled does nothing unless your `fn` actually selects on `ctx.Done()` or passes `ctx` to a context-aware call. A `fn` running a tight CPU loop or a blocking syscall that ignores `ctx` runs to completion regardless, so "cancel on first error" silently doesn't happen. (2) It does **not** protect shared state — concurrent writes from the goroutines are still a data race; you need your own mutex/atomic, and `go test -race` is the only thing that'll catch it. (3) The classic Go 1.22 footgun: pre-1.22, `for _, item := range items { g.Go(func() error { return process(item) }) }` captured the loop variable by reference, so every goroutine saw the *last* `item`. Go 1.22 changed loop variables to per-iteration scope, fixing this — but if your `go.mod` declares an older language version, the old aliasing behavior still applies, so on a senior bar you must know *why* the same code behaves differently across versions.
+
+```go
+g, ctx := errgroup.WithContext(ctx)
+g.SetLimit(8)                       // at most 8 concurrent
+for _, u := range urls {
+    g.Go(func() error {            // u is per-iteration as of Go 1.22
+        return fetch(ctx, u)       // MUST honor ctx for cancel-on-error to work
+    })
+}
+err := g.Wait()                     // first error; ctx already cancelled
+```
+
 ---
 
 ## Goroutines & Scheduler
@@ -901,6 +1075,43 @@ For one-off diagnosis, reach for `net/http/pprof`: the **goroutine profile** (`/
 | Mysterious pauses / preemption | `go tool trace` | GC STW, long-running G, syscall stalls |
 
 The senior move is to reason top-down: schedtrace tells you *which class* of problem (CPU vs blocking vs GC), then pprof/trace tells you *where*. Don't guess — Go's observability here is genuinely excellent, so measure first.
+
+### Q115. The `runnext` slot can cause starvation and the global run queue can be starved by busy local queues. Walk through both fairness hazards and the exact mechanisms the runtime uses to bound them.
+
+Two separate fairness problems live in the scheduler, and a senior candidate should name both.
+
+First, the per-P `runnext` slot. When a goroutine readies another goroutine (e.g. a channel send wakes a receiver), the woken G is not pushed to the tail of the local run queue — it goes into the single-slot `runnext`, which is scheduled with higher priority than the rest of the local queue. This is a deliberate latency optimization for ping-pong workloads (request handler hands to a worker and immediately blocks), because it keeps a hot pair of goroutines on the same P with warm caches. The hazard: two goroutines that keep readying each other could monopolize the P and starve everything else in the local queue. The runtime defends against this by giving `runnext` an inheritance-limiting timestamp — a G that lands in `runnext` is forced into the normal queue order rather than re-winning the slot indefinitely, so a tight ping-pong cannot starve siblings forever.
+
+Second, global run queue starvation. Each P prefers its own local queue (fast, lock-free). If a P always finds work locally, it could ignore the global queue (and the netpoller) indefinitely, starving goroutines parked there. The runtime fixes this with the `schedtick % 61 == 0` check: every 61st scheduling decision, the P pulls from the *global* run queue first instead of its local one. 61 is just a prime chosen to avoid harmonic patterns. Without this, a P feeding itself locally would never drain global work.
+
+The takeaway for production: these are why a single hot goroutine pair doesn't wedge a P, and why goroutines woken from a global source (timers, network readiness) still make progress even on a saturated P. If you ever see global-queue latency under `GODEBUG=schedtrace`, the 61-tick drain is the relevant lever — not something you tune, but something you should be able to explain.
+
+### Q116. `sysmon` is the runtime's background babysitter, but it runs on no P and has a backoff. Explain everything it does, why it can be late, and how that interacts with `GOMAXPROCS=1` and CGO-heavy services.
+
+`sysmon` is a dedicated OS thread spawned at startup that runs *without* a P and outside the normal GMP scheduling, so it can act when every P is busy. It has several jobs, and the discriminating point is that it polls on an adaptive backoff: it starts at ~20µs sleeps and ramps up to a 10ms ceiling when the program is idle. That backoff is why its reactions are best-effort, not real-time.
+
+Its responsibilities: (1) **Retake Ps from long syscalls.** When an M enters a blocking syscall, it detaches its P (`_Psyscall`). If the syscall returns quickly the M reattaches; but if it's been blocked for more than ~10µs–20µs, `sysmon` hands the P to an idle M (or spins up a new one) so the P isn't idle while the M waits in the kernel. (2) **Async preemption.** `sysmon` notices a G that's monopolized its M for more than ~10ms and sends `SIGURG` to that M; the signal handler parks the G at a safe point (since Go 1.14 this works even inside tight loops with no function calls). (3) **Netpoller polling** if no P has polled recently, and (4) **forcing GC** if it's been too long.
+
+The failure mode interviewers probe: with `GOMAXPROCS=1`, a single CPU-bound goroutine in a tight loop *before* 1.14 could wedge the entire program — GC couldn't get a stop-the-world point and nothing else ran. Post-1.14 async preemption fixes this, but `sysmon`'s 10ms+backoff latency means you can still see ~10ms tail-latency spikes from a hot loop on a one-P runtime.
+
+The CGO angle: a cgo call counts as a syscall-like blocking transition, so `sysmon`'s P-retake keeps the P productive — but each blocked cgo call can force creation of a new M (OS thread). A service that fans out thousands of concurrent blocking cgo calls can balloon its thread count (visible as `threads` climbing in `/debug/pprof/threadcreate`), because there's no thread pool ceiling beyond what the OS imposes. That's a classic production surprise: goroutines are cheap, but cgo-blocked Ms are not.
+
+### Q117. A goroutine "leak" and an unbounded-goroutine-spawn incident look similar in metrics but have opposite fixes. Distinguish them, and show how you'd diagnose each in a running production service.
+
+These get conflated, but they're different bugs. A **leak** is a goroutine blocked *forever* — parked on a channel send/receive that no one will service, a `select` with no reachable case, or a `<-ctx.Done()` whose context never cancels. It doesn't consume CPU; it consumes memory (its stack, plus whatever it retains) and a slot in `runtime.NumGoroutine()`, accumulating monotonically with no plateau. An **unbounded spawn** is the opposite: you're creating goroutines faster than they finish (e.g. one goroutine per inbound request with no worker-pool bound, or a `for` loop launching goroutines without backpressure). Here the goroutines *do* make progress, but arrival outpaces completion, so CPU and the scheduler's run queues saturate.
+
+The metric that disambiguates: leaks show a sawtooth-free, ever-rising `NumGoroutine` that survives load dropping to zero — park the traffic and the count stays high. Unbounded spawn tracks load and *drains* when traffic stops (assuming the work eventually completes). For diagnosis, the goroutine profile is the single best tool:
+
+```go
+import "net/http/pprof"
+// then: go tool pprof http://host/debug/pprof/goroutine
+// or for a human-readable dump of every stack:
+//   curl 'http://host/debug/pprof/goroutine?debug=2'
+```
+
+`debug=2` prints every goroutine's stack *and how long it's been blocked*. A leak shows hundreds or thousands of goroutines parked at the identical line (e.g. `chan receive` in your code) with large wait durations — that line is your bug. An unbounded spawn shows a huge population but spread across active states (`runnable`, `running`, `select`) with short waits.
+
+Fixes are opposite, which is why the distinction matters: a leak is fixed by giving the goroutine a way *out* — a `context` for cancellation, a buffered channel, or a `select` with `ctx.Done()`. An unbounded spawn is fixed by adding a *bound* — a worker pool, a semaphore (`golang.org/x/sync/semaphore` or a buffered channel acting as a token bucket), or `errgroup.Group.SetLimit` (Go 1.20+). In tests, gate both with `go.uber.org/goleak` in `TestMain` so a leaked goroutine fails CI instead of paging you at 3am. Confusing the two leads to the classic wrong fix: adding more workers to a *leak* just leaks faster.
 
 ---
 
@@ -1059,6 +1270,32 @@ func (b *Buffer) Write(p []byte) { /* ... */ }
 ```
 
 Bottom line: default to values for small immutable data, pointers for large or mutated data, and let the profiler — not folklore — settle the marginal cases.
+
+### Q118. Walk me through how the GC pacer decides *when* to start a cycle, and how a high-allocation workload can fall into a "mark-assist death spiral." How would you diagnose it?
+
+The pacer's job is to start the next concurrent mark phase early enough that marking finishes *before* the live heap grows past the goal, while not starting so early that you burn CPU. The goal is computed off `GOGC`: after a cycle finds a live heap of L, the next cycle targets a heap of roughly `L * (1 + GOGC/100)` (so default `GOGC=100` means "let the heap double before the next collection"). The pacer estimates the allocation rate and the scan rate, then back-solves for a trigger heap size such that marking completes right as you hit the goal. With `GOMEMLIMIT` set, there's a second, hard-ish ceiling: the pacer will also trigger to keep the heap under the limit regardless of `GOGC`.
+
+The death spiral happens when allocation outruns the background mark workers. Go doesn't pause-the-world to catch up — instead every goroutine that allocates during an active mark phase pays an "allocation tax" called **mark assist**: it must do a proportional amount of marking work before its allocation is granted. If your mutators allocate faster than the dedicated 25%-of-`GOMAXPROCS` background markers can scan, assist debt piles up, and goroutines spend more and more of their time marking instead of doing real work — which slows the program, which... doesn't actually break the loop, but it tanks p99 latency badly. The classic trigger is a workload that suddenly allocates a huge transient graph (e.g. unmarshaling a giant JSON blob) so the live-heap estimate the pacer used is wildly wrong.
+
+Diagnosis: `GODEBUG=gctrace=1` is the first tool — each line shows wall/CPU time in the assist vs background vs idle buckets, and a rising assist fraction is the smoking gun. Better, use the execution tracer (`runtime/trace` + `go tool trace`), which has a dedicated view for mark-assist time per goroutine, or `pprof` with the `/debug/pprof/profile` CPU profile where you'll see `runtime.gcAssistAlloc` eating samples. The fix is almost always to reduce allocation rate (the real cure) — pool the transient buffers, stream instead of buffering — or, if the machine has spare RAM and you're latency-sensitive, *raise* `GOGC` so cycles run less often and there's more headroom before assists kick in. Raising `GOGC` to reduce GC CPU is a real tradeoff against peak RSS, which is exactly why `GOMEMLIMIT` exists as the backstop.
+
+### Q119. A Go service's `runtime.MemStats` shows `HeapReleased` rising and `HeapIdle` high, yet the container's RSS stays flat near the limit and eventually gets OOM-killed. What's going on and how do you fix it?
+
+This is the `MADV_FREE` vs `MADV_DONTNEED` gotcha. When the background scavenger returns unused heap pages to the OS, on Linux it has historically used `madvise(MADV_FREE)`. `MADV_FREE` is cheap — it just tells the kernel "you *may* reclaim these pages if you need them" — but the pages stay in the process's RSS until the kernel actually comes under memory pressure and reclaims them lazily. So the Go runtime's own accounting (`HeapReleased`) correctly says "I gave this back," while `/proc/self/status` RSS and your container metrics show no drop. That's fine on a bare host, but a cgroup memory limit / OOM killer often looks at RSS-ish counters and kills you before the kernel bothers to reclaim the `MADV_FREE` pages.
+
+The fix at runtime is `GODEBUG=madvdontneed=1`, which forces `MADV_DONTNEED` instead: pages are unmapped eagerly, RSS drops immediately, at the cost of more minor page faults (and slightly more CPU) when that memory is touched again. Note the default flipped over Go's history — modern Go (1.16+) already defaults to `MADV_DONTNEED` on Linux precisely because the "RSS doesn't drop" surprise burned too many people in containers — so if you're on a recent runtime and still seeing this, suspect something else.
+
+That "something else" is usually one of: (1) the scavenger is deliberately slow — it only releases pages that have been idle for a full GC cycle and paces itself to ~1% of CPU, so a spiky workload can hold a high-water mark of `HeapIdle` for a while; you can force it with `debug.FreeOSMemory()` but that's a blunt, expensive instrument. (2) The real fix is setting `GOMEMLIMIT` to slightly below the cgroup limit so the GC runs harder *before* you hit the ceiling, keeping the live heap (not just released pages) small. (3) The memory isn't Go heap at all — `GOMEMLIMIT` and the scavenger don't cover mmap'd files, cgo allocations, or thread stacks, so if RSS is dominated by those, no amount of GC tuning helps and you need to look outside the heap profile.
+
+### Q120. The "memory ballast" trick (allocating a giant unused byte slice at startup) was popular for latency tuning. Explain why it worked, why it's now an anti-pattern, and exactly how `GOMEMLIMIT` replaces it — including where `GOMEMLIMIT` still fails.
+
+Ballast worked by exploiting the `GOGC`-relative heap goal. Allocating a large slice like `ballast := make([]byte, 10<<30)` and keeping a reference to it inflates the *live heap* the pacer measures. Since the next GC triggers at roughly `live * (1 + GOGC/100)`, a 10 GiB live floor with `GOGC=100` means the GC won't fire until the heap reaches ~20 GiB — so a service whose real working set is a few hundred MB collects far less often, slashing GC CPU and mark-assist latency spikes. The slice is never written, so on Linux it stays demand-zero (mostly not resident) and costs little actual RAM. Twitch famously used this to cut p99 latency dramatically.
+
+It's an anti-pattern now because it's a fragile hack: the magic number is hardware-specific, it relies on the OS not faulting in the ballast (touch it and you really do eat 10 GiB), and it expresses intent indirectly — a future reader has no idea why there's a giant dangling slice. Worst of all, it's a *floor* on GC frequency with no *ceiling* on memory: a real allocation spike can still push you well past your RAM and OOM.
+
+`GOMEMLIMIT` (Go 1.19+) is the principled replacement. Instead of faking a live heap, you declare the actual ceiling — `GOMEMLIMIT=8GiB` or `debug.SetMemoryLimit()` — and the runtime treats it as a soft limit, running the GC as often as needed to stay under it while otherwise honoring `GOGC`. The idiomatic combo for a latency-sensitive service with dedicated RAM is `GOGC=off` (or very high) *plus* `GOMEMLIMIT` set near the real limit: the GC essentially won't run during normal operation (ballast-like behavior, low GC CPU), but `GOMEMLIMIT` guarantees it kicks in hard if you approach the ceiling — giving you the upside of ballast *with* a safety net.
+
+Where `GOMEMLIMIT` still fails: it's a *soft* limit, so under sustained over-allocation the GC will hammer CPU but cannot stop the heap from blowing past the limit — and the runtime deliberately caps GC at ~50% of CPU (over a `2*GOMAXPROCS`-second window) to avoid total livelock, meaning a genuinely leaky or over-allocating program will still grow and eventually OOM, just slower and at high CPU. Set the limit too low and you get exactly that thrashing instead of an OOM. It also only governs Go-runtime memory; cgo, mmap, and OS-side caches are invisible to it. And critically, the runtime does **not** auto-detect cgroup limits — you must wire `GOMEMLIMIT` to the container limit yourself (e.g. via the `automemlimit` library or an explicit env var), leaving some headroom for non-heap RSS.
 
 ---
 
@@ -1292,6 +1529,53 @@ func writeFile(path string, data []byte) (err error) {
 
 Two subtleties. First, the result must be a *named* return (`err error`) so the deferred closure can assign to it — assigning to a local `err` in a closure that returns `error` normally would do nothing. Second, the `err == nil` guard: if `Write` already failed, that's the more interesting error, so don't clobber it with the `Close` error. You could also `err = errors.Join(err, cerr)` to keep both (Go 1.20+), which is increasingly my preference. For read-only files, `defer f.Close()` is fine — there's nothing to flush — but get in the habit of distinguishing the two, because the write case is a genuine bug interviewers look for.
 
+### Q121. `errors.Is` and `errors.As` traverse the *error tree*, not a linked list. Explain how `errors.Join` and an `Unwrap() []error` method change traversal, and what gotcha bites code that hand-rolls `errors.Unwrap`.
+
+Since Go 1.20, an error is a *tree*, not a chain. There are two unwrap shapes: the classic `Unwrap() error` (single parent, produced by `fmt.Errorf("...: %w", err)`) and `Unwrap() []error` (multiple parents, produced by `errors.Join`). `errors.Is` and `errors.As` walk this tree pre-order, depth-first: they test the current node, then recurse into each child returned by whichever `Unwrap` method exists. So `errors.Is(joined, ErrA)` returns true if *any* leaf matches.
+
+The gotcha: the top-level function `errors.Unwrap(err)` only ever calls `Unwrap() error`. It deliberately does **not** understand `Unwrap() []error`, so calling `errors.Unwrap` on a `Join` result returns `nil`. Code that hand-rolls a `for err != nil { err = errors.Unwrap(err) }` loop to "walk the chain" will silently skip every joined error and miss matches that `errors.Is` would have found. If you must walk manually, type-assert both interfaces:
+
+```go
+switch x := err.(type) {
+case interface{ Unwrap() error }:
+    // single parent
+case interface{ Unwrap() []error }:
+    // joined — recurse over x.Unwrap()
+}
+```
+
+Two more senior traps. First, `%w` with multiple verbs — `fmt.Errorf("%w and %w", e1, e2)` — is valid since 1.20 and produces an `Unwrap() []error`, not a chain; people who learned the 1.13 single-`%w` rule get this wrong. Second, `errors.As` matches the *first* node in pre-order that assigns to the target type, so if two different wrapped errors satisfy the same target, you get the shallower/leftmost one — order is part of the contract, not arbitrary.
+
+### Q122. A `recover()` only catches panics in its own goroutine. Walk through why, what actually happens when a goroutine you spawned panics unrecovered, and how you'd build a safe `go` wrapper for a server.
+
+`recover` is defined to stop the *current goroutine's* panicking sequence — it reads the panic state attached to the running goroutine's stack. A panic unwinds only that goroutine's stack, running its deferred functions; there is no shared stack and no cross-goroutine propagation. So a `defer recover()` in your request handler does nothing for a goroutine you launched with `go work()` — when `work` panics and no deferred `recover` runs on *its* stack, the runtime takes down the entire process. This is the classic production outage: one unhandled panic in a background worker kills every in-flight request, not just the one that triggered it.
+
+`net/http` papers over this for the *handler* goroutine only — the server wraps each request in a recover that turns a panic into a 500 (and, for HTTP/2, an `ErrAbortHandler` is special-cased to drop silently). But any goroutine the handler spawns is on its own. So the rule for senior code is: every `go` statement that runs work which could panic needs its own recover at the top of its stack.
+
+```go
+func Go(fn func()) {
+    go func() {
+        defer func() {
+            if r := recover(); r != nil {
+                slog.Error("recovered panic in goroutine",
+                    "panic", r, "stack", string(debug.Stack()))
+            }
+        }()
+        fn()
+    }()
+}
+```
+
+Two caveats I'd raise unprompted. Blanket-recovering everything is a real tradeoff: some panics (a nil map write from a data race, memory corruption) leave the program in an undefined state, and swallowing them hides the bug while the process limps on serving garbage — a fail-fast crash plus restart is often safer. And recover cannot stop `runtime.Goexit`, fatal runtime errors like concurrent map writes (those print `fatal error:` and bypass recover entirely), or OOM kills. So a recover wrapper is a *containment* tool for logic panics, not a universal safety net.
+
+### Q123. `errors.Is`/`errors.As` are reflection-free but still tree-walks; `errors.As` uses reflection. What are the real performance and design costs of deep error wrapping on a hot path, and how would you decide between sentinel errors, typed errors, and status codes for a high-throughput service?
+
+The cost has two parts: allocation at *creation* and traversal at *inspection*. Each `fmt.Errorf("...: %w", err)` allocates a new wrapper struct plus the formatted string — on a hot path that returns errors frequently (e.g. cache misses modeled as errors), that's real GC pressure. `errors.Is` is cheap-ish (a loop of interface comparisons and an optional `Is(error) bool` method call), but `errors.As` calls `reflectlite` to check assignability on every node, which is measurably slower and scales with tree depth. Wrap a sentinel five layers deep and check it in a tight loop and you'll see it in a `pprof` CPU profile.
+
+The senior move is to stop treating expected control-flow outcomes as wrapped errors. If "not found" drives logic and happens millions of times a second, model it as a sentinel checked with `==` at the boundary, or better, as a boolean/enum return (`val, ok := cache.Get(k)`) so there's no allocation and no tree walk at all. Reserve rich wrapping for the *exceptional* path where a human will read the chain.
+
+For the API-design question, I'd map it to who consumes the error. **Sentinels** (`io.EOF`, `sql.ErrNoRows`) — when callers branch on a small, closed set of conditions and you accept the coupling that the value is now part of your public contract. **Typed errors** (a struct implementing `error`, retrieved with `errors.As`) — when callers need *data* off the error: a `RetryableError{After time.Duration}`, a `ValidationError{Field, Rule}`. **Opaque + behavior interfaces** — instead of exporting the type, export an interface like `interface{ Temporary() bool }` and let callers test behavior, which decouples them from your concrete type. For a high-throughput RPC service the pragmatic answer is usually a typed error carrying a `codes.Code`-style enum: cheap to switch on at the edge, maps cleanly to gRPC/HTTP status, and avoids both the allocation churn of deep `%w` chains and the brittle public coupling of exported sentinels.
+
 ---
 
 ## Standard Library
@@ -1496,6 +1780,54 @@ slices.Equal(a, b)
 Note `SortFunc` takes a *comparison* returning an int (use `cmp.Compare`), not a less-than bool — that's the migration footgun from `sort.Slice`.
 
 The `maps` package (also 1.21) gives `maps.Keys`, `maps.Values`, `maps.Clone`, `maps.Equal`, `maps.Copy`. In Go 1.21 `maps.Keys` returned a slice; in 1.23 the iterator-based versions in the stdlib return `iter.Seq` (range-over-func), so check your Go version — `for k := range maps.Keys(m)` is the 1.23 idiom, while older code expects a slice. Both `slices` and `maps` are pure helpers over built-in types; they don't introduce new container types, they just replace the hand-rolled loops everyone used to write.
+
+### Q124. The default `http.Client` is biting you in production: connection leaks, port exhaustion, and stalls. Walk through the `http.Transport` internals that cause these and how you'd tune them.
+
+Almost every "Go service falls over under load" story traces back to the zero-value `http.Client`/`http.DefaultTransport`. The transport maintains a pool of idle keep-alive connections keyed by host. The trap: `MaxIdleConnsPerHost` defaults to **2**. If you hammer one backend with 500 concurrent requests, you get 500 live connections, but on completion only 2 are retained — the other ~498 are torn down and must be re-dialed (full TCP + TLS handshake) on the next burst. You see high latency, CPU burn on TLS, and `TIME_WAIT` socket accumulation. Fix: raise `MaxIdleConnsPerHost` to match your real concurrency to that host, and set `MaxIdleConns`/`MaxConnsPerHost` as global caps.
+
+The far more common bug is the **leaked connection**: a connection is only returned to the idle pool when the response body is *fully read and closed*. If you `defer resp.Body.Close()` but `return` early (e.g. on a non-200 status) without draining the body, the unread bytes mean the connection can't be reused — it's discarded, not pooled. Under churn this looks like unbounded dialing. The idiom is to always drain: `io.Copy(io.Discard, resp.Body)` before `Close()`, or just read it.
+
+The other footgun is timeouts. `Client.Timeout` covers the *whole* request including reading the body; people set it generously, then a slow/malicious peer that dribbles bytes holds a goroutine + connection hostage. Senior answer: layer the granular `Transport` timeouts — `DialContext` with a `net.Dialer{Timeout}`, `TLSHandshakeTimeout`, `ResponseHeaderTimeout`, and `IdleConnTimeout` — plus a per-request `context.WithTimeout` rather than relying solely on the blunt `Client.Timeout`.
+
+```go
+t := &http.Transport{
+	MaxIdleConns:        100,
+	MaxIdleConnsPerHost: 100, // not the default 2
+	IdleConnTimeout:     90 * time.Second,
+	DialContext:         (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
+	TLSHandshakeTimeout: 5 * time.Second,
+}
+```
+
+One last gotcha: never create a fresh `Transport` per request. Each one has its own pool, so you get zero reuse and a connection storm — and the GC won't reclaim the FDs promptly. Build one `Transport`/`Client` at startup and share it; it's safe for concurrent use.
+
+### Q125. `encoding/json` is showing up hot in your pprof profile. Explain *why* it's slow, what `json.Decoder` does and does not buy you, and the concrete failure modes at scale.
+
+The cost is reflection. `Marshal`/`Unmarshal` walk the type with `reflect` on essentially every call: resolving struct fields, evaluating tags, doing type switches and indirect calls, and allocating heavily. There's a per-type cache of field metadata (`cachedTypeFields`) so the *tag-parsing* work is amortized, but the per-value reflective dispatch and the allocations are not. On a `pprof` `alloc_space` profile you'll see `json` dominating; the encoder building intermediate buffers and the decoder boxing values into `interface{}` are the usual culprits.
+
+The standard fix candidates: (1) reuse buffers/encoders and avoid decoding into `map[string]interface{}` (each value becomes a heap-allocated boxed interface — decode into typed structs instead); (2) for the truly hot path, code-generated marshallers (easyjson, or the new `encoding/json/v2` experiment) skip reflection entirely. Reaching for a third-party lib is a real tradeoff, not a free win — you trade `encoding/json`'s correctness and maintenance for speed, so reserve it for measured hotspots.
+
+A subtle and important point: `json.Decoder` is **not** truly streaming in v1. People assume `Decoder.Decode` reads incrementally and bounds memory, but for a single top-level value it buffers the whole value before parsing — so decoding one giant JSON object is no cheaper on memory than `Unmarshal`. Where `Decoder` genuinely helps is a *stream of values* (newline-delimited JSON, or `Decoder.Token()` to walk a huge array element-by-element without holding it all). If you want to reject oversized payloads, wrap the reader in `http.MaxBytesReader` and call `Decoder.DisallowUnknownFields()` to fail loudly on schema drift.
+
+The classic production failure is silent integer/precision loss: decoding a JSON number into `interface{}` yields a `float64`, so a 64-bit ID like `9007199254740993` gets mangled. Use `Decoder.UseNumber()` (which yields `json.Number`, a string you parse exactly) or decode into a typed `int64` field. And remember `omitempty` only omits zero values — it will *not* omit an empty struct or a zero `time.Time`, which trips people up when they expect a field to vanish.
+
+### Q126. You're using `sync.Pool` to cut allocations. Explain how it interacts with the garbage collector and the scheduler, and the failure modes that make it a footgun.
+
+`sync.Pool` is not a cache — it's a GC-aware free list, and that distinction is the whole interview. Internally it's sharded per-P (per scheduler processor): each P has its own `poolLocal` with a lock-free `private` slot plus a shared deque, padded to a cache line to avoid false sharing between cores. `Get` first hits the current P's local, then steals from other Ps, then falls back to `New`. Because it's per-P and pinned during access, it scales without a central lock — but it means the object you `Get` may be one a *different* goroutine just `Put`. So you must reset/zero pooled objects on `Get` or you'll leak data across requests (a real security bug — one user's buffer contents served to another).
+
+The GC interaction is the key gotcha: pooled objects are dropped on GC. Originally `runtime.GC` cleared the pool entirely each cycle, which caused latency cliffs right after a GC. Since Go 1.13 there's a **victim cache**: on GC the primary pool contents move to the "victim" tier instead of being freed, and only get evicted on the *next* GC if untouched. So objects survive ~two GC cycles, smoothing out the behavior — but it still means `sync.Pool` is the wrong tool for things that must persist (DB connections, long-lived caches). For those, use a real pool with explicit lifetime.
+
+The two failure modes that bite teams: **(1) pooling variable-sized buffers.** If you `Put` back buffers that have grown to wildly different capacities, `Get` hands out an arbitrary one — you might grab a 1-byte buffer for a 10MB job, or worse, retain giant buffers that pin memory forever. Guard the `Put` (e.g. don't return buffers over some cap), or you get memory bloat that looks like a leak. **(2) Pooling the wrong thing.** `sync.Pool` only pays off for objects allocated and discarded at high frequency with real per-allocation cost (large buffers, `gzip.Writer`, `bytes.Buffer`). For small, cheap structs the pool's bookkeeping and the `interface{}` boxing on `Put` cost more than the allocation you avoided — benchmark with `-benchmem` before assuming it's a win.
+
+```go
+var bufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
+
+b := bufPool.Get().(*bytes.Buffer)
+b.Reset() // must reset — may be another goroutine's leftover
+defer func() {
+	if b.Cap() < 64<<10 { bufPool.Put(b) } // don't pool monsters
+}()
+```
 
 ---
 
@@ -1713,6 +2045,47 @@ Then fail the build if it drops below a number (or below the previous commit's n
 
 Now the limits, which is what interviewers actually want. Coverage measures *which lines executed*, not *whether you asserted anything about the result*. A test that calls a function and checks nothing produces 100% coverage and zero confidence. It says nothing about whether you tested the *right* inputs — boundary values, error paths, concurrent access, the empty case. It can't see missing branches you never wrote, and it rewards the wrong behavior: chasing 100% pushes people to test trivial getters and error-wrapping while leaving the genuinely hard logic under-specified. Mutation testing (e.g. `go-mutesting`) is a better signal — it changes your code and checks whether tests fail — but it's slow and rarely run in CI. My position: use coverage as a *ratchet* to prevent regressions and to surface entirely untested files, not as a quality target. 80% with thoughtful assertions on the hard paths beats 100% of shallow line-touching every time, and the race detector (`-race` in CI) catches a class of bugs coverage can't even model.
 
+### Q127. How do you deterministically test code that depends on time, timeouts, and goroutine scheduling? Walk through `testing/synctest` and why `time.Sleep`-based tests are a trap.
+
+The naive approach — sleep in the test and assert afterwards — is the root of most flaky CI: you're racing the scheduler. If you sleep "long enough" the suite is slow; if you don't, it flakes under load. The old-school fix is dependency injection: pass a `Clock` interface (`Now()`, `After()`, `NewTimer()`) and swap in a fake in tests. That works but it's invasive — every package needs to thread a clock through, and you can't fake the runtime scheduler, only your own time calls.
+
+`testing/synctest` (experimental in 1.24 behind `GOEXPERIMENT=synctest`, stable in 1.25) solves this at the runtime level. `synctest.Test(t, func(t *testing.T){...})` runs your function inside a "bubble" where the `time` package uses a *fake clock*, and all goroutines spawned inside the bubble share it. Time only advances when *every* goroutine in the bubble is durably blocked — blocked on a channel, mutex, or timer that nothing inside the bubble can unblock. At that point the runtime jumps the fake clock to the next timer instead of waiting wall-clock. So a test exercising a 30-second timeout finishes in microseconds and is fully deterministic.
+
+```go
+func TestTimeout(t *testing.T) {
+    synctest.Test(t, func(t *testing.T) {
+        ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+        defer cancel()
+        done := make(chan error, 1)
+        go func() { done <- slowOp(ctx) }()
+
+        synctest.Wait() // block until all bubble goroutines are durably blocked
+        // fake clock auto-advances to fire the 30s timer
+        if err := <-done; !errors.Is(err, context.DeadlineExceeded) {
+            t.Fatalf("want deadline exceeded, got %v", err)
+        }
+    })
+}
+```
+
+The two gotchas seniors get asked about: (1) "durably blocked" excludes goroutines blocked on something *outside* the bubble (real network I/O, a mutex held by an external goroutine) — those keep the clock from advancing and you'll see a panic if a goroutine is still running when the bubble exits. (2) `synctest.Wait()` is the synchronization primitive you use instead of sleeps — it returns once the bubble reaches a stable blocked state, letting you assert on intermediate state without racing. It also doubles as goroutine-leak detection: a goroutine that never finishes will panic the bubble.
+
+### Q128. Your CI has a test that passes locally but fails 1-in-200 runs on the build server. Walk through how you'd hunt it down, and how you'd prevent the whole class of bug.
+
+First, reproduce deterministically — you can't fix what you can't trigger. `go test -run TestFlaky -count=1000 -race ./...` in a loop forces the failure; `-count=1` (not cached) plus high iteration counts surfaces order-dependent flakes, and `-race` catches the most common cause: a data race on shared state between the test and a goroutine it spawned, or between parallel subtests. The race detector is not best-effort detection of "possible" races — it instruments memory accesses and reports an *actual* observed race with both stacks, so a `-race` failure is always a real bug, never a false positive. The asymmetry matters: it only finds races on code paths that *executed*, so a clean `-race` run doesn't prove the absence of races.
+
+The server-only angle is a tell. CI boxes have different core counts and are usually under heavy load, which changes scheduling and exposes races and timing assumptions that a quiet 10-core laptop hides. Pin it with `GOMAXPROCS=1` and `GOMAXPROCS=$(nproc)` to see if parallelism is the trigger, and bump the count under `stress` or `go test -cpu 1,2,4`. If it's timing, the real fix is removing wall-clock dependence (see `synctest`), not bumping the timeout.
+
+The other big bucket is goroutine and state leakage between tests. A goroutine spawned by test A that outlives it can mutate global state or a shared resource while test B runs. Wire `go.uber.org/goleak` in via `goleak.VerifyTestMain(m)` in `TestMain`, or `defer goleak.VerifyNone(t)` per test — it snapshots `runtime.Stack`, ignores known runtime/system goroutines, and fails if any test goroutine is still alive at teardown. That converts "mysterious flake three tests later" into "this specific test leaked." Combine that with avoiding package-level mutable state, `t.Cleanup` for deterministic teardown ordering, and `t.Setenv`/`t.TempDir` instead of hand-rolled global mutation, and you eliminate the class rather than patching the instance.
+
+### Q129. Benchmarks lie constantly. Explain the failure modes of Go microbenchmarks and how you'd profile a hot path to drive a real optimization.
+
+The classic failure modes, roughly in order of how often they burn people: (1) **setup bleeding into measurement** — expensive construction inside the loop inflates `ns/op`; reset with `b.ResetTimer()` after setup, or use `b.StopTimer()`/`b.StartTimer()` to fence per-iteration setup, though stop/start has its own overhead. (2) **dead-code elimination** — if the result isn't observed, the compiler may delete the work; assign to a package-level sink (`var Sink T; Sink = result`) or use `b.Loop()` (Go 1.24+), which is the modern, harder-to-misuse loop — `for b.Loop()` keeps inputs and results alive across iterations and runs setup exactly once, replacing the old `for i := 0; i < b.N; i++` idiom and its footguns. (3) **not reporting allocations** — `b.ReportAllocs()` (or `-benchmem`) surfaces `allocs/op` and `B/op`, often the metric that actually matters for tail latency since allocations drive GC pressure.
+
+The deeper trap is that a microbenchmark measures a function in isolation with a warm cache and predictable branches — production has cache misses, branch mispredicts, and GC running concurrently. So I never trust a single run: `go test -bench=. -count=10 -benchmem` then feed it to `benchstat`, which reports the mean, variance, and whether the delta between old and new is statistically significant (`p < 0.05`) or just noise. A "20% faster" claim from a single run with high variance is meaningless; benchstat is how you avoid shipping a regression dressed up as a win.
+
+For actually finding *where* to optimize, profile rather than guess. `go test -bench=BenchmarkHot -cpuprofile cpu.prof -memprofile mem.prof` writes profiles you open with `go tool pprof`; `top`, `list <func>`, and the flame graph in `pprof -http` show where cycles and allocations go. Two senior tells: high time in `runtime.mallocgc` means you're allocation-bound — chase escape analysis (`go build -gcflags='-m'`) and pool or stack-allocate — not CPU-bound. And the memory profile defaults to `inuse_space`; switch to `-alloc_space` to see total allocation churn that the GC is absorbing, which is usually the real cost in a service. Only after the profile points at a hot path do you optimize it, re-benchmark with benchstat, and confirm the win is real and didn't just move the cost somewhere the microbenchmark can't see.
+
 ---
 
 ## Modules & Build
@@ -1850,6 +2223,47 @@ use (
 Builds inside the workspace resolve `sharedlib` to your local copy without touching any `go.mod`. The rule: **`go.work` is for your machine — gitignore it** (or commit it only in deliberately monorepo-shaped repos). It's the right tool for the job that people used to abuse `replace` for.
 
 `replace` and `exclude` live in `go.mod`. `replace github.com/org/lib => ./fork` or `=> github.com/org/lib v1.2.4-patched` redirects a module to a fork, a local path, or a pinned version — legitimate for vendoring a security patch before upstream merges it. `exclude github.com/org/lib v1.3.0` tells MVS to skip a known-bad version. The senior caution: a local-path `replace` committed to a shared repo is a classic landmine — it builds on the author's laptop and nowhere else. In review, treat any `replace => ./` or `=> /Users/...` in a committed `go.mod` as a bug, and reach for `go.work` instead.
+
+### Q130. Walk through the chain of trust when `go get` fetches a brand-new module version. What exactly does GOPROXY, GOSUMDB, and `go.sum` each verify, where does GONOSUMCHECK/GOPRIVATE fit, and what's the failure mode if a malicious proxy serves you tampered code?
+
+The two mechanisms are orthogonal: `GOPROXY` controls *where bytes come from*, `GOSUMDB` controls *whether you trust those bytes*. When you request a version not already pinned in `go.sum`, the `go` command downloads the module zip and `go.mod` from the proxy chain (default `https://proxy.golang.org,direct`), computes a hash of the tree (the `h1:` dirhash) and the `go.mod`, then consults the checksum database (default `sum.golang.org`) to fetch the canonical `go.sum` lines for that module@version. If the computed hash disagrees with what the transparency log says, the build aborts. Only after that check passes does the hash get written into your `go.sum`.
+
+The key insight is that `sum.golang.org` is a *Merkle-tree transparency log* (Trillian-backed), not just a trusted server you query. The `go` command verifies inclusion proofs and consistency proofs against a cached signed tree head, so a compromised checksum server cannot retroactively rewrite a hash without detection — the same property that makes Certificate Transparency work. This is why a malicious proxy can't simply hand you backdoored code and a matching checksum: the checksum has to be the one already published in the append-only log, which the proxy doesn't control. The proxy is explicitly *outside* the trusted computing base.
+
+Where the env vars fit: `GOPRIVATE` (or the finer `GONOSUMDB`/`GONOSUMCHECK`/`GOINSECURE`/`GONOSUMDB`) is a glob list of module prefixes — e.g. `GOPRIVATE=github.com/acme/*` — for which the `go` command bypasses *both* the proxy and the sumdb, fetching `direct` over VCS and not validating against the public log (because your private repo will never be in it). The trap teams hit: forgetting to set `GOPRIVATE` for internal modules, so `go` leaks private import paths to the public proxy/sumdb as lookup requests, and the build fails or stalls when those private paths 404 in the public log.
+
+The realistic failure mode worth naming: if you set `GOFLAGS=-insecure`, `GONOSUMCHECK`, or `GOSUMDB=off` to "make CI green," you've silently removed the only thing preventing a poisoned proxy or a rewritten Git tag from injecting code — `go.sum` only protects versions you've *already* seen; the sumdb is what protects versions you're seeing for the first time. CVE-class proxy-validation bugs (e.g. the 2026 checksum-bypass issue) are dangerous precisely because they undermine this first-fetch guarantee, the one place users have no local baseline to compare against.
+
+### Q131. A `go 1.17`+ module has a `go.mod` listing dozens of `// indirect` requirements, while a `go 1.16` module barely had any. Explain module graph pruning and lazy module loading — why was this introduced, and what breaks if you manually delete the "noise"?
+
+Pre-1.17, MVS had to load the `go.mod` of *every* module in the transitive closure to build the complete module graph, even modules whose packages you never import. On a large dependency tree that meant downloading hundreds of `go.mod` files just to resolve a build, and a `go build` could surface version conflicts from packages nobody in your project actually uses. Module graph *pruning* (Go 1.17) fixed this: if the main module declares `go 1.17` or higher, the graph used for MVS only includes the immediate requirements of each dependency that is *itself* at `go 1.17`+. The transitive requirements of those modules are pruned out unless they're needed to provide a package you import.
+
+To make pruning sound, the `go.mod` must now record an explicit `require` for *every module that provides a transitively-imported package*, not just your direct imports — hence the wall of `// indirect` lines. Those entries aren't noise; they're the pruned graph's load-bearing structure. They let the `go` command know the exact version of a transitively-imported package without having to read the intermediate modules' `go.mod` files. That enables *lazy loading*: `go build ./...` no longer reads or even downloads `go.mod` files for parts of the graph that don't contribute packages to the current command.
+
+If you hand-delete `// indirect` lines to "tidy up," you'll get one of two outcomes. Best case, the next `go` command (or `go mod tidy`) silently re-adds them. Worse case — if the deleted line was the version that pinned a transitively-imported package above some other constraint — you get a *different* selected version and a behavior change, or a "missing go.sum entry" / "updates to go.mod needed" error in `-mod=readonly` mode (the default since 1.16), which fails CI rather than auto-editing. The correct tool is always `go mod tidy`, and `go mod tidy -go=1.17` if you're migrating the directive.
+
+The senior tell here is knowing the debugging escape hatch: pruning means `go mod graph` shows you the *pruned* view, which can hide a dependency you're trying to trace. `go mod graph -go=1.16` reconstructs the full unpruned graph, and `go mod why -m <module>` tells you which import path keeps a given module in the build. Reach for those before assuming `go.sum` is corrupt.
+
+### Q132. You need bit-for-bit reproducible release binaries across CI runners and developer laptops, plus `runtime/debug.ReadBuildInfo()` working at runtime. What inputs make a Go build non-reproducible, and what's the precise `go build` invocation — including the GOTOOLCHAIN angle — to lock it down?
+
+The non-determinism sources, in rough order of how often they bite: (1) absolute file paths embedded in the binary (the build directory differs between `/home/alice/repo` and `/runner/work/...`); (2) the embedded VCS stamp (commit, dirty flag, build time) added automatically since Go 1.18 via `-buildvcs`; (3) DWARF/debug sections that can carry path or environment residue; (4) `CGO` — if cgo is enabled, the host C toolchain and its paths leak in non-deterministically, so a static, reproducible build almost always wants `CGO_ENABLED=0`; and critically (5) the *compiler version itself* — Go 1.x and 1.y produce different machine code, so "reproducible" is only meaningful relative to a pinned toolchain.
+
+The invocation:
+
+```go
+// shell, but the flags are what matter
+CGO_ENABLED=0 GOFLAGS=-trimpath \
+go build -trimpath \
+  -buildvcs=false \
+  -ldflags="-s -w -X main.version=v1.4.2 -buildid=" \
+  -o app ./cmd/app
+```
+
+`-trimpath` rewrites all embedded source paths to the module path, killing source (1). `-buildvcs=false` removes the VCS stamp so two checkouts at the same commit but different timestamps/dirty states match — note the tradeoff: you lose the automatic commit stamp, so you re-inject version via `-ldflags -X`. `-ldflags "-s -w"` strips the symbol table and DWARF, shrinking the binary ~25-30% and removing a class of path residue; `-buildid=` zeroes the otherwise-varying content build ID. With those, the same source + same toolchain yields identical bytes.
+
+The GOTOOLCHAIN piece is what separates a senior answer from a checklist. Since Go 1.21, the `go` directive in `go.mod` (e.g. `go 1.22.4`) plus `toolchain go1.22.4` lets `GOTOOLCHAIN` (default `auto`) *download and switch to the exact compiler* declared by the module, so every machine builds with the same toolchain regardless of what's on `PATH`. For locked-down/air-gapped CI you'd set `GOTOOLCHAIN=local` to forbid silent downloads (and fail loudly if the installed toolchain doesn't match), or pin to a specific version. Without this, "reproducible" silently means "reproducible only if everyone happens to have the same `go` installed" — which is exactly the assumption that breaks six months later.
+
+One caveat to flag: stripping with `-s -w` is fine for binaries you ship with external crash reporting, but it removes the symbol info `pprof` and stack symbolication rely on, and there have been edge cases (e.g. `-ldflags` not always reflected in build info when `-trimpath` + `CGO_ENABLED=0` combine) — so verify with `go version -m ./app` that `runtime/debug.ReadBuildInfo()` still reports the settings and the `-X` version you expect.
 
 ---
 
@@ -2008,6 +2422,56 @@ Reach for the tracer when:
 - **You want to see concurrency actually happening** — whether your 8 workers run in parallel or serialize behind one lock.
 
 The mental split: **pprof tells you what's expensive; the tracer tells you why time is passing.** If you've optimized CPU to the floor and the service is still slow, the answer is almost always in the trace — blocking, contention, or GC — not the profile. The tracer is heavier and produces large files, so capture short windows (a few seconds) around a known slow event rather than running it continuously.
+
+### Q133. Walk through Go's GC pacer. What do `GOGC` and `GOMEMLIMIT` actually control, and how do they interact to produce a "GC death spiral" in a memory-constrained container?
+
+The pacer's job is to decide *when* to start a GC cycle so that the mark phase finishes roughly when the live heap has grown to its target, all while the program keeps allocating. With the default `GOGC=100`, the target is "let the heap grow to 2x the live set from the last cycle before the next collection completes." `GOGC=200` means grow to 3x (less CPU spent in GC, higher peak memory); `GOGC=50` means 1.5x (more frequent GC, lower memory, more CPU). It's a ratio, so it's blind to absolute memory ceilings — a service with a 50 MB live set targets 100 MB regardless of whether the container has 512 MB or 8 GB.
+
+`GOMEMLIMIT` (Go 1.19+) adds a *soft* absolute ceiling in bytes. It doesn't replace `GOGC`; it bounds it. The pacer takes the minimum of the `GOGC`-derived target and the memory-limit-derived target, so as the heap approaches `GOMEMLIMIT` the GC runs more and more aggressively to stay under it. Critically it's a *soft* limit: Go will burn unbounded CPU on GC rather than respect it, and it will never return memory to the OS in a way that violates it, but it will not refuse an allocation — there's no hard cap and no panic.
+
+The death spiral happens when live memory genuinely approaches `GOMEMLIMIT`. The pacer can't shrink the live set, so to honor the limit it schedules GC back-to-back; you can hit the runtime's safeguard where GC is capped at ~50% of CPU, but even short of that you've turned a latency service into something spending most of its cycles marking, with throughput collapsing while RSS sits pinned at the limit. The fix is to treat `GOMEMLIMIT` as a backstop, not a tuning knob: set it to ~80% of the cgroup hard limit (leaving headroom for stacks, off-heap, and the OS), keep a sane `GOGC`, and *fix the live-set growth* — the limit existed to prevent OOM-kills from transient spikes, not to make a leak run forever.
+
+The classic failure mode it solves: in a container, `GOGC=100` alone is dangerous because the runtime has no idea about the cgroup limit, so a heap that doubles can blow past the limit and get OOM-killed by the kernel mid-cycle. Setting `GOMEMLIMIT` (or using `automemlimit`-style detection) lets the pacer collect *before* the kernel kills you. Set it via the env var or `debug.SetMemoryLimit`; observe pacer behavior with `GODEBUG=gctrace=1`, which prints live heap, goal, and the wall/CPU time of each cycle.
+
+### Q134. A struct field guarded by an atomic counter shows terrible throughput under contention even though each goroutine touches a different field. Diagnose it, and show how Go's memory layout rules force you to fix it.
+
+This is false sharing. Cache coherence operates at cache-line granularity (64 bytes on x86-64/arm64), not per-variable. If two atomics — say a per-shard counter array, or two hot fields in one struct — land in the same 64-byte line, every write by core A invalidates the line in core B's cache, and B must re-fetch from L3/memory before its *own* unrelated write. The cores ping-pong the line even though they never touch the same bytes. Throughput craters and it scales *negatively* with core count, which is the tell: adding goroutines makes it slower, not faster.
+
+The fix is padding to push each hot field onto its own line. Go gives you no `alignas`, so you pad explicitly:
+
+```go
+type counter struct {
+    n atomic.Int64
+    _ [56]byte // 8 (Int64) + 56 = 64 → next counter starts on a fresh line
+}
+var counters [16]counter // each on its own cache line
+```
+
+Two layout rules make this work and are themselves senior gotchas. First, Go guarantees field order in memory matches source order (unlike C++), so padding placement is deterministic. Second, alignment: a struct is aligned to its largest field's alignment, and on 32-bit platforms an `int64`/`atomic.Int64` field needs 8-byte alignment — historically the runtime only guaranteed this for the *first* field, which is why `atomic.Int64` (Go 1.19) wraps the value with an `align64` marker; pre-generics code put 64-bit atomics first in the struct to avoid `LoadUint64` panicking on misaligned access on 32-bit ARM.
+
+Two cautions. Padding trades memory for cache locality, so only pad fields that are genuinely hot and concurrently written by *different* cores — padding cold fields just wastes cache and bloats the struct. And verify before/after with a real benchmark plus `perf stat` (look at cache-misses / `mem_load…l3_miss`); `sync.Pool` already does this internally — its `poolLocal` is padded so each P's local pool sits on its own line, which is why reaching for `sync.Pool` can fix contention you'd otherwise hand-pad.
+
+### Q135. Your benchmark says the function is allocation-free and runs in 0.3 ns. You don't believe it. What is the compiler doing to lie to you, and how do you write a benchmark that tells the truth?
+
+Two compiler optimizations routinely produce fictional numbers. First, **dead-code elimination**: if a benchmark computes a value and discards it, the optimizer proves the result is unused and deletes the whole call, leaving you timing an empty loop — that's where sub-nanosecond results come from. The standard defense is a package-level sink the optimizer can't reason away:
+
+```go
+var sink uint64
+
+func BenchmarkHash(b *testing.B) {
+    var local uint64
+    for b.Loop() { // Go 1.24+; replaces the manual for i := 0; i < b.N loop
+        local = hash(data)
+    }
+    sink = local
+}
+```
+
+In Go 1.24+, `b.Loop()` is the correct tool: it's specifically designed so the compiler does *not* optimize away the loop body and keeps function arguments alive across iterations, removing the need for most manual sink tricks. On older Go you assign to a package-level `sink` after the loop. The other defense is `runtime.KeepAlive` when you need a value to survive past a point without forcing a heap store.
+
+Second, **inlining and escape analysis**: a function that allocates when called across a package boundary may be inlined into the benchmark and have its allocation proven non-escaping, so it's stack-allocated and `b.ReportAllocs()` shows zero — a true result for the inlined call site but a lie about production, where the call doesn't inline and the value escapes. Confirm what actually happened with `go build -gcflags='-m'` (escape decisions, "inlining call to…") and `-gcflags='-m -m'` for the reasoning. If you want to defeat inlining to measure the real cost, the `//go:noinline` pragma forces the non-inlined path.
+
+The deeper point for a senior: microbenchmarks measure a *call site under specific optimization conditions*, not "the cost of the function." The number is only meaningful with `b.ReportAllocs()` enabled, run via `-count=10` and compared with `benchstat` for statistical significance (a single run's noise dwarfs most "wins"), and ideally validated against a CPU profile of the real workload — because the function that's hot in a micro is rarely the one hot in production, and the optimizer makes decisions in the full program it never makes in isolation.
 
 ---
 
@@ -2273,6 +2737,75 @@ My default: start with stdlib `ServeMux`. Reach for **chi** when you want sub-ro
 
 The honest heuristic: if you find yourself reimplementing route groups, param parsing, and a middleware registry by hand, adopt chi. If you're building a large API surface and value convention over assembling pieces, gin/echo. Don't pull in a framework for a three-route service — that's dependency cost with no payoff.
 
+### Q136. Walk through `http.Server`'s timeout knobs — `ReadHeaderTimeout`, `ReadTimeout`, `WriteTimeout`, `IdleTimeout` — and explain exactly which phase each one covers. Why is a zero-value `http.Server{}` a production liability, and how do per-handler timeouts via `http.TimeoutHandler` or `NewResponseController` differ?
+
+The dangerous fact first: `http.Server{}` with all timeouts at their zero value means *no timeouts at all*. A single client that opens a connection and dribbles one header byte every 20 seconds (Slowloris) ties up a goroutine and a file descriptor indefinitely. `http.ListenAndServe` uses exactly this zero-value server, which is why you almost never want it in production — construct an explicit `&http.Server{}`.
+
+The phases, in order along a connection's life: `ReadHeaderTimeout` bounds the time from the start of the request to the end of the request *headers*. `ReadTimeout` bounds the time from accepting the connection to the end of the *body* read — it's the superset that includes headers. `WriteTimeout` covers from the end of header read to the end of writing the response (so for a body-less GET it's effectively the whole handler-plus-write window). `IdleTimeout` bounds how long a keep-alive connection sits between requests; if it's zero, `ReadTimeout` is used as a fallback, which is usually wrong because you don't want to recycle idle keep-alives on the same clock as an active read.
+
+```go
+srv := &http.Server{
+    Addr:              ":8080",
+    Handler:           mux,
+    ReadHeaderTimeout: 5 * time.Second,  // Slowloris guard, cheapest win
+    ReadTimeout:       15 * time.Second,
+    WriteTimeout:      15 * time.Second,
+    IdleTimeout:       60 * time.Second,
+}
+```
+
+The catch with `WriteTimeout`/`ReadTimeout` is they're *whole-connection deadlines set at accept time* — they're useless for long-poll, SSE, or streaming uploads because they'd kill a legitimately long request. That's what `http.NewResponseController` (Go 1.20+) fixed: inside a handler you can call `rc.SetReadDeadline(...)` / `rc.SetWriteDeadline(...)` to reset the deadline *per phase*, e.g. push the write deadline forward after each SSE event. `http.TimeoutHandler` is a different tool — it's a middleware that returns 503 after a deadline, but it buffers the entire response in memory (so it breaks streaming and Flush) and doesn't actually cancel the handler goroutine, which keeps running. So: coarse server timeouts as a baseline DoS guard, `TimeoutHandler` for cheap whole-request budgets on buffered endpoints, and `NewResponseController` for anything that streams.
+
+### Q137. Go runs every request in its own goroutine, and the server cancels `r.Context()` when the client disconnects. Explain the failure modes this creates: goroutine leaks from ignored cancellation, the "write after handler return" trap, and why detaching background work from the request context needs care.
+
+The goroutine-per-request model is what makes Go web services pleasant — blocking I/O reads like straight-line code, and the netpoller parks the goroutine cheaply. But it pushes cancellation discipline onto you. When the client hangs up (or HTTP/2 resets the stream, or `WriteTimeout` fires), `r.Context()` is cancelled. If your handler launches downstream calls that don't *thread that context through*, those calls keep running — you've decoupled the work from the thing that asked for it. The classic leak is a fan-out goroutine that writes to an unbuffered channel whose only reader is the handler; once the handler returns on cancellation, the writer blocks forever:
+
+```go
+// LEAK: if ctx is cancelled and handler returns, this goroutine blocks on ch forever
+go func() { ch <- doWork() }()
+select {
+case res := <-ch:
+    fmt.Fprint(w, res)
+case <-r.Context().Done():
+    http.Error(w, "client gone", 499) // handler returns, nobody drains ch
+}
+```
+
+Fix it by making `ch` buffered (size 1) so the writer can always complete, or by passing `r.Context()` into `doWork` so it aborts too. The general rule: any goroutine you spawn must have a guaranteed exit — a cancellable context, a buffered channel, or a `done` signal.
+
+The second trap is the *write-after-return* one. After your handler function returns, the `http.ResponseWriter` is no longer valid — the server may have recycled the connection for the next keep-alive request. So a goroutine you spawned with `go func(){ w.Write(...) }()` that outlives the handler is a data race / corruption bug, not just a leak. The `ResponseWriter` is also not safe for concurrent use, so two goroutines writing to it need your own mutex even within the handler's lifetime.
+
+The third subtlety is *intentional* detachment. Sometimes you want fire-and-forget work (audit log, metric flush) that should survive the request finishing — but if you pass `r.Context()` it gets cancelled the instant you respond. Don't reach for `context.Background()` blindly, because you lose the request's trace/values. Go 1.21's `context.WithoutCancel(r.Context())` is the right tool: it keeps the values (trace IDs, logger) but severs the cancellation, and you bound it with your own `context.WithTimeout` so the detached work can't run forever.
+
+### Q138. You're building an SSE / long-lived streaming endpoint in Go. Walk through making it work correctly under both HTTP/1.1 and HTTP/2: the `Flusher` assertion, why `WriteTimeout` is hostile, detecting client disconnect, and the HTTP/2 `MaxConcurrentStreams` / head-of-line behavior that bites at scale.
+
+Streaming means you must defeat Go's response buffering. The `net/http` writer buffers output (and HTTP/1.1 with a content-length-unknown body uses chunked transfer encoding), so the bytes don't reach the client until you flush. Historically you'd do a type assertion `w.(http.Flusher)` and call `Flush()` after each event; since Go 1.20 the cleaner path is `http.NewResponseController(w)` and `rc.Flush()`, which works through middleware wrappers that may not forward the `Flusher` interface (a real bug source — a logging middleware that wraps `ResponseWriter` silently breaks flushing unless it implements `Unwrap()`).
+
+```go
+func sse(w http.ResponseWriter, r *http.Request) {
+    w.Header().Set("Content-Type", "text/event-stream")
+    w.Header().Set("Cache-Control", "no-cache")
+    rc := http.NewResponseController(w)
+    for {
+        select {
+        case <-r.Context().Done(): // client disconnect, HTTP/2 RST_STREAM, or deadline
+            return
+        case ev := <-events:
+            fmt.Fprintf(w, "data: %s\n\n", ev)
+            // push the write deadline forward so a global WriteTimeout doesn't kill us
+            _ = rc.SetWriteDeadline(time.Now().Add(30 * time.Second))
+            if err := rc.Flush(); err != nil {
+                return // connection gone
+            }
+        }
+    }
+}
+```
+
+The `WriteTimeout` interaction is the part people miss: a server-wide `WriteTimeout` is an absolute deadline set when the response phase begins, so an SSE stream that runs for minutes gets abruptly killed. Either leave `WriteTimeout` at zero for these routes (and rely on `IdleTimeout` + heartbeat events to detect dead peers) or, better, reset the deadline per event with `NewResponseController` as above. For disconnect detection, `r.Context().Done()` is the correct signal on modern Go — the old `http.CloseNotifier` is deprecated. Send periodic heartbeat comments (`: ping\n\n`) because a TCP peer that vanishes without a FIN won't trip the context until a write actually fails.
+
+At scale, HTTP/2 changes the math. Under HTTP/1.1 each SSE stream is its own TCP connection, so the cost is FDs and goroutines. Under HTTP/2 many streams multiplex onto one connection, governed by `Server.MaxConcurrentStreams` (default 250 in Go's server). Long-lived SSE streams *never close*, so they permanently occupy stream slots — a client opening 250 SSE streams on one connection starves all its other requests on that connection, and you get mysterious stalls that look like the server hanging. The fix is capacity-aware: cap SSE streams per connection at the application layer, bump `MaxConcurrentStreams` deliberately if you understand the memory cost (each stream holds buffers), and prefer dedicated connections or WebSocket/HTTP/1.1 for genuinely long-lived fan-out rather than letting them squat on a shared h2 connection's multiplexing budget.
+
 ---
 
 ## Database (database/sql)
@@ -2448,6 +2981,56 @@ if email.Valid {
 ```
 
 For `QueryRowContext` (single row), there's no `Close` to worry about, but you must handle `sql.ErrNoRows` explicitly with `errors.Is(err, sql.ErrNoRows)` — that's how "not found" surfaces, and conflating it with a real error (or ignoring it) is a common mistake. Also ensure your `Scan` destination count and types exactly match the `SELECT` column list; a mismatch is a runtime error, not a compile error, so column-order drift after a schema change bites silently.
+
+### Q139. A `QueryContext` times out, yet you sometimes see the row get inserted anyway, and other times the next query on a "fresh" connection blows up. Walk through what `database/sql` does on context cancellation, and explain `driver.ErrBadConn`'s role and its safety constraint.
+
+When the context you pass to `QueryContext`/`ExecContext`/`BeginTx` fires, `database/sql` doesn't just return `context.DeadlineExceeded` to you — it spawns a watcher goroutine that calls the driver's cancel path (for query-in-flight) and, critically, decides the fate of the underlying connection. If the driver can interrupt cleanly the conn goes back to the pool; if the connection is left in an indeterminate protocol state, the pool discards it. That discard is the source of the "next query blows up" symptom in older/buggy drivers: the conn was returned to the pool mid-protocol, and the *next* borrower inherits a corrupted byte stream.
+
+`driver.ErrBadConn` is the sentinel a driver returns to say "this `driver.Conn` is dead — don't hand it back, get a new one." When `database/sql` sees it, it transparently retries the operation on a different pooled connection (up to a small retry budget, historically ~2 plus a fresh-conn attempt). This is why a flaky server that closes idle conns mostly *just works* in Go — the first borrow hits a dead conn, gets `ErrBadConn`, and the pool silently re-runs on a healthy one.
+
+The hard constraint — and the senior gotcha — is that `ErrBadConn` is only safe to return *if the server could not possibly have executed the operation*. If the write made it to the wire, a retry would double-apply it. So a driver must **not** return `ErrBadConn` once it has flushed the query; it must surface the real error instead. The same logic forbids returning `ErrBadConn` on context cancellation: cancellation is your explicit intent, not a sick connection, and retrying it would re-run a statement you asked to abort. This is exactly the "insert happened anyway" case — the statement reached the server before your deadline tripped, so it ran; cancellation only stopped you from *reading the result*. Treat non-idempotent writes under tight deadlines as at-least-once, and lean on `BeginTx` so the rollback path is well-defined.
+
+```go
+ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+defer cancel()
+_, err := db.ExecContext(ctx, "INSERT INTO ledger(...) VALUES (...)")
+// err == context.DeadlineExceeded does NOT prove the row is absent.
+// For non-idempotent writes, design for at-least-once (idempotency key / unique constraint).
+```
+
+There's also a documented gap (golang/go#34775): under `BeginTx`, when the context cancels, the package issues a rollback, but there's a window where a statement already dispatched can still execute on the server before the connection is torn down. Don't assume "context cancelled" means "nothing committed."
+
+### Q140. The GitHub MySQL-driver "three bugs" post is a classic. Reconstruct the three failure modes — they all live at the `database/sql`↔driver boundary — and state the design lesson each one teaches.
+
+**Bug 1 — stale connections returning `packets.go: invalid connection`.** A TCP socket is full-duplex, but the MySQL wire protocol is request/response and fully client-driven once in the command phase. When the server (or a load balancer) closes an idle connection, the client doesn't *learn* this until its next write+read. So a pooled conn that looks alive gets borrowed, the query is written, and the read fails with "invalid connection." The fix lives in the pool config, not the driver: set `SetConnMaxLifetime` (and/or `SetConnMaxIdleTime`) shorter than whatever upstream — the DB's `wait_timeout`, a proxy's idle reaper, an ELB's 350s — will silently kill the socket. Lesson: **the pool can't detect a half-open connection cheaply, so you must age connections out before the network does it for you.**
+
+**Bug 2 — connection setup ignoring your deadline.** `QueryContext` enforces your timeout on the *query*, but the original `driver.Driver.Open` had no context. So establishing a connection — TCP handshake, TLS negotiation, MySQL auth, half a dozen round trips — ran outside your deadline entirely. Under a slow/unhealthy DB, requests with a 200ms SLA would hang for seconds *before the query even started*. The platform fix was `driver.DriverContext`/`Connector` and context-aware dialing in the driver. Lesson: **a request deadline must cover connection acquisition, not just execution** — and acquisition includes waiting for a pool slot when `MaxOpenConns` is saturated, which `database/sql` does honor via the borrow context.
+
+**Bug 3 — silent data corruption during cancellation inside `Scan`.** If a query was interrupted while you were iterating `rows.Scan`, the driver drained the in-flight result packets into the *same* connection buffer it was reading rows from, so `Scan` could hand you bytes from the drained tail with no error. Corruption with no signal is worse than a crash. The fix was buffer discipline (double-buffering) in the driver, but the consumer-side lesson is permanent: **always check `rows.Err()` after the loop and the error from `rows.Close()`** — those are the only places a late-arriving I/O fault on a cancelled/aborted iteration will surface.
+
+The meta-lesson across all three: `database/sql` is a thin pool + retry shim over a leaky protocol abstraction. The standard library cannot hide that the wire protocol is stateful and client-managed, so correctness depends on (a) aging connections, (b) making context cover the whole lifecycle, and (c) treating `Err()`/`Close()` returns as load-bearing, not boilerplate.
+
+### Q141. Your service runs fine direct-to-Postgres but throws `prepared statement "stmtcache_..." does not exist` (or leaks server-side statements) once you put pgbouncer in transaction-pooling mode in front of it. Explain how `database/sql` prepared statements interact with the pool, why this breaks, and the fixes.
+
+A `*sql.Stmt` from `db.Prepare`/`PrepareContext` is prepared **on one specific physical connection** (the server allocates state keyed to that session). But `*sql.DB` is a pool, so the `Stmt` doesn't own a connection — it tracks the set of conns it has prepared itself on and, when you `Exec`/`Query` it, tries to use one of those. If none is free, the pool grabs a *different* connection and **re-prepares the statement on it transparently**, then caches that. So a single logical `*sql.Stmt` can balloon into N server-side prepared statements (one per pooled conn), and each prepare is an extra round trip. That's the hidden cost of "prepare once, reuse" — under a hot pool it's prepare-per-connection.
+
+This collides head-on with pgbouncer in **transaction** (or statement) pooling mode. There, the server connection you got for `PREPARE` is handed to someone else the moment your transaction ends, and your next `Exec` of the same `*sql.Stmt` lands on a *different* backend that never saw that prepare — hence `prepared statement "..." does not exist`. The Go pool *thinks* it's reusing a conn it prepared on; pgbouncer has multiplexed that conn away underneath it. The abstraction `database/sql` relies on — that a pooled `driver.Conn` maps 1:1 to a stable server session — is exactly what transaction pooling violates.
+
+Fixes, in order of preference: (1) **Don't use server-side prepared statements through a transaction pooler.** With `pgx` via `database/sql`, set the query-exec mode to simple protocol / disable statement caching (e.g. `default_query_exec_mode=simple_protocol` in the connection string, or use `pgx`'s `QueryExecModeSimpleProtocol`). With lib/pq, avoid `db.Prepare` and pass args inline to `QueryContext` so each call is self-contained. (2) If you genuinely need a prepared statement reused safely, **pin it to a single connection** with `db.Conn(ctx)` and prepare on that `*sql.Conn` — then it can't migrate across backends, at the cost of holding a pool slot. (3) Or run pgbouncer in **session** pooling mode, which keeps the backend bound for the client's session and makes prepared statements behave — but you lose most of pgbouncer's multiplexing benefit.
+
+```go
+// Safe reuse: pin to one connection so the prepared stmt can't migrate.
+conn, err := db.Conn(ctx)
+if err != nil { return err }
+defer conn.Close() // returns the pinned conn to the pool
+
+stmt, err := conn.PrepareContext(ctx, "SELECT … WHERE id = $1")
+if err != nil { return err }
+defer stmt.Close()
+// every stmt.ExecContext now runs on this one backend session
+```
+
+The senior framing: choose your protocol mode deliberately. Implicit prepared statements are a silent multiplier on round trips and a correctness landmine behind transaction poolers; for pooler-fronted Postgres, simple-protocol or explicitly pinned connections are usually the right call.
 
 ---
 
@@ -2638,6 +3221,65 @@ How to choose: use a **mutex** when the state is simple, access is fine-grained,
 **Empty-interface APIs** — `func Process(v interface{})` (or `any` since 1.18) pushes type errors to runtime and forces type switches everywhere. Since generics landed, most `any`-based APIs should be type parameters instead. Reserve `any` for genuinely heterogeneous data (JSON, `fmt`-style varargs); everywhere else it's lost type safety.
 
 A few more worth naming: **god packages** (`util`); **returning concrete error types** instead of wrapping with `%w` and checking via `errors.Is`/`errors.As`; **starting goroutines without a lifecycle** (no way to stop them, no `context` — a leak); and **panic-as-control-flow** in library code (return errors; reserve `panic` for truly unrecoverable programmer bugs). The through-line: every one of these is importing a habit from another language instead of leaning into Go's small, explicit feature set.
+
+### Q142. Go gives you three ways to signal errors — sentinel values (`var ErrNotFound = errors.New(...)`), concrete error types, and "opaque" errors. How do you choose, and what does wrapping with `%w` commit you to?
+
+The three are a spectrum of coupling, and the right default is the *least* coupling the caller can tolerate. Opaque errors — you return an error, the caller checks `if err != nil` and does nothing type-specific — are the goal whenever the caller has no decision to make based on *which* error it is. They let you change wording, add context, or swap the underlying cause without breaking anyone, because nobody is inspecting the value.
+
+Reach for a **sentinel** only when callers genuinely need to branch on one well-known condition and there's no payload to carry — `io.EOF`, `sql.ErrNoRows`. The cost is real coupling: the variable is now imported by everyone who checks it, and you can never stop returning it. Reach for a **concrete error type** when the error carries data the caller needs structured access to — a field-validation error exposing which field failed, a `*net.OpError`. `errors.As` then lets the caller pull the typed value out of a wrapped chain. The jub0bs/Cheney view is that concrete types are usually better than sentinels because they're extensible (add fields without breaking the check) and harder to accidentally compare with `==`.
+
+The thing that trips mid-level people up is what `fmt.Errorf("...: %w", err)` actually *means*. `%w` is not "a nicer `%v`" — it publishes the wrapped error as part of your package's API contract. Once you wrap with `%w`, a caller is entitled to write `errors.Is(err, ErrFoo)` or `errors.As(err, &target)` through your function and *depend on it forever*. If a refactor later swaps your data layer and that inner error disappears, you've made a silent breaking change. Use `%w` only when you've consciously decided the inner error is public; use `%v` to add context while keeping the cause opaque and your hands free.
+
+```go
+// %w: pgx.ErrNoRows is now part of this function's contract — callers may errors.Is on it.
+return fmt.Errorf("loading user %d: %w", id, err)
+// %v: cause is flattened to text, caller can log it but cannot branch on it. Implementation stays private.
+return fmt.Errorf("loading user %d: %v", id, err)
+```
+
+Two practical notes: don't wrap at every layer — wrapping N times produces "context: context: context: real error" noise and N decisions to support; wrap at boundaries where you add genuine context. And if a sentinel or type *is* public, document and test it like any other API surface, because `errors.Is`/`errors.As` matching is now behavior people rely on.
+
+### Q143. Unpack "accept interfaces, return concrete types." Where should the interface be *defined*, and why does returning an interface bite you when the value can be nil?
+
+The proverb is Postel's Law applied to APIs: be liberal in what you accept (an interface — any value with the methods you need), conservative in what you emit (a concrete struct — the caller gets the full, documented surface). Accepting an interface makes your function testable and decoupled: callers pass a fake in tests, a real client in prod, and you never import their concrete type. Returning a concrete `*Client` instead of some `Doer` interface means callers can use every method you ship, and you can *add* methods later without it being a breaking change — adding a method to a returned interface breaks every implementer, adding one to a returned struct breaks nobody.
+
+The senior twist is *where the interface lives*. In Go, because satisfaction is structural and implicit, the **consumer** defines the interface, not the producer. The package that *needs* "something I can read from" defines a one-or-two-method interface for exactly that; it does not import a fat `Storage` interface the producer published. This is interface segregation for free, and it's why `io.Reader` is one method. Producer-side interfaces are an anti-pattern dressed as abstraction: they force you to predict every consumer's needs and create import coupling. The compile-time check `var _ MyIface = (*MyType)(nil)` is fine to assert satisfaction without an import dependency, but it doesn't change *who owns* the interface.
+
+Now the failure mode that catches almost everyone: a non-nil interface holding a nil pointer. An interface value is a (type, value) pair and is `nil` only when *both* halves are nil. If you return an interface but construct it from a typed nil pointer, the `== nil` check at the call site is false even though the underlying pointer is nil.
+
+```go
+func newThing() error {        // returns interface
+    var e *MyError = nil       // typed nil
+    if somethingWentWrong() {
+        e = &MyError{...}
+    }
+    return e                   // BUG: even when e is nil, the returned error has type *MyError, so != nil
+}
+
+if err := newThing(); err != nil {   // always true — the (type=*MyError, value=nil) pair is non-nil
+    log.Fatal(err)                    // boom, or a nil-deref inside err.Error()
+}
+```
+
+This is exactly why "return concrete types" matters beyond style: declare the function as returning `error`, but return a literal `nil` (not a typed nil variable) on the success path. The cleanest fix is `return nil` explicitly, or only assign the error when you actually have one. The same trap shows up with `any`/`interface{}` returns and is a classic interview discriminator — a mid-level candidate writes the buggy version above without noticing.
+
+### Q144. Struct embedding promotes fields and methods and can satisfy interfaces "for free." When is embedding the right design tool, and what are its failure modes versus plain composition?
+
+Embedding is method/field *promotion*: embed `T` in `S` and `T`'s exported methods become callable on `S`, and `S` automatically satisfies any interface `T` satisfies. It's the right tool for three things. First, decoration/forwarding: embed an interface in a struct so you override one method and the rest forward automatically — `http` middleware that wraps a `ResponseWriter`, or a `Logger` that embeds `slog.Logger` and adds fields. Second, mixing in behavior you don't want to re-type — embedding `sync.Mutex` so `s.Lock()` works directly. Third, building a type that *is-a-kind-of* its embedded type for interface satisfaction, e.g. embedding `io.Reader` to get a `ReadCloser` by adding `Close`.
+
+But embedding is not inheritance, and treating it like inheritance is where it goes wrong. There's no virtual dispatch: if embedded `Base` has a method `A()` that calls `B()`, and you "override" `B()` on the outer type, `Base.A()` still calls `Base.B()` — promotion is just syntactic forwarding to the embedded value, which has no knowledge of the outer struct. People coming from Java/C++ expect polymorphic callbacks and get silently wrong behavior.
+
+The other failure modes are about leaking surface area. Embedding `sync.Mutex` (exported) promotes `Lock`/`Unlock` into your *public* API — now callers can lock your internals; embed it as an unexported field instead (`mu sync.Mutex`) unless promotion is intentional. Embedding a concrete type or a fat interface promotes *its entire method set*, which can accidentally satisfy interfaces you didn't intend and couples your type to changes in the embedded type's API. And ambiguity: embed two types that both have `Foo()` and a bare `s.Foo()` won't compile — you must disambiguate.
+
+```go
+type Server struct {
+    *log.Logger          // intentional: promote Print/Printf onto Server
+    cache map[string]int // plain composition: accessed via methods, no promotion
+    mu    sync.Mutex     // unexported: Lock/Unlock NOT part of Server's public API
+}
+```
+
+The rule I give: embed when you genuinely want the embedded type's interface to *be* part of your type's contract (decoration, interface satisfaction); use a named field (plain composition) when it's an implementation detail. "Has-a" is the default; "is-substitutable-for" earns embedding. When in doubt, prefer the named field — it's the reversible, lower-coupling choice, and you can always promote later by deleting the field name.
 
 ---
 
@@ -2905,6 +3547,83 @@ fmt.Println(m["id"]) // 9.007199254740992e+15 — precision already lost
 
 Fixes: decode into a typed struct with an `int64`/`json.Number` field, or call `dec.UseNumber()` on a `json.Decoder` so numbers arrive as `json.Number` (a string you convert losslessly via `.Int64()`). For large IDs, the safest contract is to send them as JSON strings. This bites people constantly when proxying arbitrary JSON through `any`.
 
+### Q145. This code uses `errgroup` to run two lookups concurrently, then does a third call after `Wait`. A reviewer says the third call will intermittently fail with `context canceled`. Why, and how does shadowing `ctx` make it worse?
+
+The trap is that `errgroup.WithContext` returns a *derived* context that is canceled the moment `Wait` returns — not just on the first error. The docs are explicit: "the derived Context is canceled the first time a function passed to Go returns a non-nil error or the first time Wait returns, whichever occurs first." So even on the fully-successful path, `gctx` is dead after `g.Wait()`.
+
+```go
+func lookups(ctx context.Context) error {
+    g, ctx := errgroup.WithContext(ctx) // <-- shadows the caller's ctx
+    g.Go(func() error { return checkA(ctx) })
+    g.Go(func() error { return checkB(ctx) })
+    if err := g.Wait(); err != nil {
+        return err
+    }
+    return checkC(ctx) // ctx is now the CANCELED derived context
+}
+```
+
+The `g, ctx := ...` shadowing is what makes it lethal: the author *intended* `checkC` to use the original request context, but the `:=` rebound `ctx` to the group's context for the rest of the scope. `checkC` inherits a context that's already canceled, so any HTTP call or DB query inside it returns `context canceled` — and only "intermittently" if `checkC` sometimes finishes its work synchronously before noticing. The fix is to not shadow (use a distinct name like `gctx` for the group context and pass the original `ctx` to `checkC`), or move `checkC` into a third `g.Go`. `go vet` won't catch this; it's a semantics bug, not a syntax one. As a senior, I treat "reuse `ctx :=` from `errgroup.WithContext`" as a code-review red flag on its own.
+
+### Q146. Spot every bug: a worker pool that calls `wg.Add(1)` inside the spawned goroutine, and a `Counter` struct with a `sync.Mutex` field whose `Inc` method has a value receiver. Why does each fail, and which does `go vet` catch?
+
+Two independent classic faults, both of which "sometimes pass" and so survive naive testing.
+
+```go
+func process(items []int) {
+    var wg sync.WaitGroup
+    for _, n := range items {
+        go func() {
+            wg.Add(1)            // BUG 1: Add raced against Wait
+            defer wg.Done()
+            work(n)
+        }()
+    }
+    wg.Wait()
+}
+```
+
+Bug 1 — `Add` inside the goroutine. `WaitGroup` requires that `Add` with a positive delta *happens-before* `Wait` when the counter is at zero. Here the goroutines may not have been scheduled yet when `wg.Wait()` runs; the counter is still 0, `Wait` returns immediately, and `process` exits while workers are still running — a silent under-wait, not a crash. Worse, if a late `Done` runs after the counter hits zero you can drive it negative and panic with `sync: negative WaitGroup counter`. The rule is iron: call `wg.Add(1)` on the parent goroutine *before* `go`, never inside it. (Go 1.25 added `wg.Go(func(){...})` which does the `Add`/`Done` correctly for you and sidesteps this entirely.)
+
+```go
+type Counter struct {
+    mu sync.Mutex
+    n  int
+}
+func (c Counter) Inc() { c.mu.Lock(); c.n++; c.mu.Unlock() } // BUG 2: value receiver
+```
+
+Bug 2 — value receiver copies the mutex. Each `Inc` call operates on a *copy* of the struct, so each goroutine locks its own private mutex (zero contention, zero protection) and increments a throwaway `n` that's discarded on return — the real counter never moves and `-race` flags the writes. A copied `sync.Mutex` can also copy a *locked* state, deadlocking a future `Lock`. The fix is a pointer receiver `func (c *Counter) Inc()`, and you should pass `*Counter` around, never `Counter`. This one `go vet`'s `copylocks` pass *does* catch — but only at the obvious call sites; it misses cases where the struct is copied via a `[]Counter` slice element, a map value, or returned by value from a constructor, so don't lean on it as a guarantee. The WaitGroup `Add`-placement bug `vet` does not catch at all.
+
+### Q147. Predict the output and explain the mechanism: a function with a named return `err`, a `defer` that wraps the error, and a separate `defer fmt.Println(i)` registered inside a `for i := range 3` loop. What does each print, and what changed in Go 1.22?
+
+This probes two orthogonal `defer` rules that people conflate. Take it apart:
+
+```go
+func do() (err error) {
+    defer func() {
+        if err != nil {
+            err = fmt.Errorf("do failed: %w", err) // sees & mutates the named return
+        }
+    }()
+    err = errors.New("boom")
+    return err
+}
+```
+
+A deferred *closure* (no arguments) reads the named return value `err` at the time it *runs*, which is after the `return` has assigned the result variable but before the function truly returns. So `do()` yields `do failed: boom` — the defer can inspect and rewrite the result. This is the legitimate, powerful pattern (used for error-wrapping and panic-to-error recovery). The subtlety: it only works because `err` is a *named* return; with `func do() error` the defer would have nothing to mutate and the wrap would be lost.
+
+Contrast with argument evaluation timing:
+
+```go
+for i := range 3 {
+    defer fmt.Println(i)        // args evaluated NOW
+    defer func() { fmt.Println(i) }() // i read LATER, at function exit
+}
+```
+
+`defer fmt.Println(i)` evaluates its *argument* immediately at the `defer` statement, snapshotting `i` each iteration, so it prints `2 1 0` (LIFO). The closure form reads `i` when it runs at function exit. Pre-1.22 the loop variable was shared across iterations, so all three closures printed `2` — the infamous capture bug. As of Go 1.22 each iteration gets a *fresh* `i`, so the closures now print `2 1 0` too, matching the argument-form. The senior insight: the 1.22 change fixed the *closure* family of bugs but did nothing to the *argument-evaluation* rule (which was never buggy) — and it can silently alter behavior of old code that *relied* on the shared variable (e.g. accumulating into one captured variable across iterations), so a module's `go 1.22` line in `go.mod` is what gates the new semantics, not the toolchain version.
+
 ---
 
 ## Cloud-Native Go
@@ -3050,6 +3769,68 @@ if err := srv.Shutdown(shutdownCtx); err != nil { // stops accepting, drains in-
 
 `srv.Shutdown` stops accepting new connections and waits for in-flight requests to finish, up to the timeout — set that timeout *below* the grace period so you finish before `SIGKILL`. The subtlety interviewers love: there's a race between Kubernetes removing the pod from Service endpoints and `SIGTERM` arriving, so a well-behaved service flips its readiness probe to failing first (or sleeps a few seconds before calling `Shutdown`) to let `kube-proxy`/the load balancer stop routing new traffic, *then* drains. Skip that and you drop requests on every single rolling deploy. Also remember to cancel the root `context` you pass to outbound calls and background goroutines so they unwind too, not just the HTTP server.
 
+### Q148. Walk through a zero-downtime graceful shutdown for a Go HTTP service in Kubernetes. Where exactly does naive `srv.Shutdown(ctx)` drop requests, and what's the correct sequence?
+
+The naive version — trap SIGTERM, call `srv.Shutdown(ctx)`, exit — drops requests because of a race the Go code can't see. When Kubernetes terminates a pod, two things happen *concurrently*: SIGTERM is sent to your process, and the pod's removal from Service `Endpoints`/`EndpointSlices` is propagated to every kube-proxy and external load balancer. That propagation is eventually consistent and takes hundreds of milliseconds to seconds. If you call `Shutdown` the instant you get SIGTERM, you stop accepting new connections while load balancers are *still* sending you traffic — those clients get connection-refused or RST. The endpoint controller is not your synchronization point.
+
+The correct sequence decouples "stop being routable" from "stop the server". On SIGTERM, first flip your readiness probe to fail (and ideally keep liveness passing so you aren't killed mid-drain), then **sleep** for a fixed drain window to let endpoint removal propagate, *then* call `Shutdown`:
+
+```go
+func main() {
+    ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
+    defer stop()
+    ready := &atomic.Bool{}
+    ready.Store(true)
+    // /readyz returns 503 once ready==false
+
+    srv := &http.Server{Addr: ":8080", Handler: h}
+    go srv.ListenAndServe()
+
+    <-ctx.Done()           // SIGTERM
+    ready.Store(false)     // start failing readiness -> LB stops routing
+    time.Sleep(5 * time.Second) // drain window: wait out endpoint propagation
+
+    sctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+    defer cancel()
+    srv.Shutdown(sctx)     // finish in-flight, then close listeners
+}
+```
+
+Two senior-level details. First, `terminationGracePeriodSeconds` must exceed `drain + Shutdown timeout`, or the kubelet SIGKILLs you mid-drain — budget it explicitly (e.g. 5s sleep + 25s shutdown ⇒ grace period 35s+). Second, the cleaner alternative to the in-app sleep is a `preStop` hook (`sleep 5`): the kubelet runs preStop *before* sending SIGTERM, so your drain window happens up front and your Go code's SIGTERM handler can go straight to `Shutdown`. Also note `Shutdown` does **not** terminate hijacked or long-lived connections (WebSockets, in-flight streaming) — you must cancel those yourself via a context you thread into handlers, or they'll hang until the timeout fires.
+
+### Q149. Your Go service runs in a Kubernetes pod with `cpu.limit: 2` on a 64-core node, and you see severe CPU throttling and GC latency spikes. What's the runtime cause, and how do you fix it across Go versions?
+
+The cause is that before Go 1.25, `GOMAXPROCS` defaults to `runtime.NumCPU()`, which reads the *host's* logical CPU count — 64 — not the cgroup CPU quota. So the scheduler spins up 64 OS threads eligible to run Go code, but the CFS bandwidth controller only grants you `quota/period` = 2 CPU-seconds per 100ms period. The runtime happily schedules work across far more threads than the cgroup allows, burns through the quota early in each period, and then gets *throttled* — every runnable goroutine is frozen until the next CFS period. This shows up as tail-latency cliffs and, worst of all, stalled GC: a stop-the-world phase or background mark that needs the threads can't run while throttled, so GC pauses balloon and the whole process falls behind, piling up more goroutines and more throttling.
+
+The fix depends on version. On Go ≤1.24, set `GOMAXPROCS` to match the limit. Either set the env var explicitly from the downward API, or — better — use Uber's `go.uber.org/automaxprocs`, which reads cgroup v1/v2 quota at startup and calls `runtime.GOMAXPROCS(quota/period)` for you (a blank import is enough). Round *down* and floor at 1; for fractional limits like `1500m` you typically pick 1 or 2 and tune empirically.
+
+```go
+import _ "go.uber.org/automaxprocs" // sets GOMAXPROCS from cgroup quota at init
+```
+
+On Go 1.25+, this is fixed in the runtime itself: `GOMAXPROCS` becomes cgroup-aware by default, reading the CPU limit on Linux and updating dynamically if the limit changes — so you can drop `automaxprocs`. Two caveats worth raising in an interview: an explicit `GOMAXPROCS` env var or `runtime.GOMAXPROCS()` call overrides the auto-detection on every version, so a stale hardcoded value silently defeats the fix; and CPU *requests* (`cpu.request`, which maps to cgroup `cpu.shares`/`weight`) are not a hard cap and don't cause throttling — only *limits* (quota) do. The matching memory-side control is `GOMEMLIMIT`: set it to ~90% of the container memory limit so the GC runs harder as you approach the cap and you avoid the kernel OOM-killer instead of getting a clean GC response.
+
+### Q150. You're writing a Kubernetes controller in Go (controller-runtime). Explain why leader election alone doesn't guarantee a single active writer, and how `context` cancellation must flow through your reconcile loop to make failover safe.
+
+Leader election via a Kubernetes `Lease` gives you mutual exclusion *by convention*, not by enforcement. The lease is a timed lock: the leader renews it every `RenewDeadline`; if it can't renew within the deadline, controller-runtime cancels the manager's context and the standby replicas race to acquire the lease after `LeaseDuration` expires. The gap is that the API server doesn't fence your writes — nothing stops a former leader that's been *network-partitioned or GC-paused* past the lease deadline from waking up and issuing a `Update`/`Patch` it computed while it thought it was leader. For a window, two replicas can both believe they're the leader. This is the classic distributed-lock fencing problem; leases reduce the window but don't eliminate split-brain writes.
+
+That's why context cancellation discipline is the real safety mechanism, not the lease. When leadership is lost, controller-runtime cancels the context it hands to your `Reconcile(ctx, req)`. Your code must actually *honor* that cancellation: thread `ctx` into every API call and long operation, and never swallow `ctx.Err()`. A reconcile that ignores `ctx` and keeps looping or keeps writing after cancellation is precisely the stale-leader writer that corrupts state.
+
+```go
+func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+    if err := r.Get(ctx, req.NamespacedName, &obj); err != nil {
+        return ctrl.Result{}, client.IgnoreNotFound(err)
+    }
+    // long step — must abort when leadership/ctx is lost, not run to completion
+    if err := r.expensiveStep(ctx); err != nil {
+        return ctrl.Result{}, err // ctx.Canceled requeues; do NOT keep writing
+    }
+    ...
+}
+```
+
+To defend against the residual split-brain window you add fencing at the write layer: use optimistic concurrency (the `resourceVersion` in `Update` makes a write by a stale leader fail with a conflict because the new leader already bumped it), make reconciliation idempotent so a duplicate write is harmless, and rely on `Patch`/server-side apply with the object's generation rather than blind full updates. Set `LeaseDuration` / `RenewDeadline` / `RetryPeriod` deliberately: short values fail over fast but cause spurious leadership loss under brief API-server blips (a leadership flap forces a full re-list and re-reconcile, which is expensive); long values are stable but extend the unavailability window after a real crash. The senior answer is that correctness comes from idempotent, version-fenced writes plus honored cancellation — the lease just keeps the *normal* case to one writer.
+
 ---
 
 ## Security
@@ -3193,6 +3974,45 @@ f, err := root.Open(name) // escaping paths error out
 ```
 
 Template escaping is the one with the sharpest footgun: **`html/template` auto-escapes; `text/template` does not.** They share an identical API, so it's trivially easy to import the wrong one and ship XSS. `html/template` is context-aware — it escapes differently inside HTML body, attributes, JS, CSS, and URLs — which `text/template` never does. Rule: use `html/template` for anything rendered in a browser; reserve `text/template` for non-HTML output (config files, emails-as-text, code generation). And never defeat the escaping by wrapping user input in `template.HTML`, `template.JS`, or `template.URL` — those types tell the engine "trust me, this is safe," and using them on untrusted data reopens exactly the XSS hole the package exists to close.
+
+### Q151. Go does silent integer conversions — `int32(someInt64)` won't panic on overflow. Walk through why this is a real security bug class (CWE-190), how `gosec`'s G115 rule catches it, and how you'd write a safe downcast.
+
+This is one of the most underappreciated footguns in Go. Unlike Rust (which panics in debug builds) or a checked cast, Go silently truncates and wraps when you convert between integer types. `int32(int64(1) << 40)` is `0`, and `uint16(70000)` is `4464` — no panic, no error, no `GODEBUG` knob. The compiler trusts you. That makes it CWE-190 (Integer Overflow or Wraparound), and it's a real exploit primitive: an attacker-controlled length, file size, array index, or capacity that wraps to a small or negative value defeats your bounds check and feeds a downstream `make([]byte, n)` or slice operation a wrong size. The Kubernetes security audit famously found these via `strconv.Atoi` results being assigned into smaller-or-platform-dependent types.
+
+The platform-dependence is the subtle part. `int` is 64-bit on amd64/arm64 but 32-bit on a 32-bit build (and on `GOARCH=386`, wasm in some modes, etc.). So `int(someUint64)` is safe on your laptop and silently truncates in a 32-bit container or on a 32-bit edge device. Code that passes review and tests on amd64 ships a vuln to the one architecture you didn't test. `strconv.Atoi` returns `int`, so `int16(atoiResult)` is the canonical trap.
+
+`gosec`'s **G115** flags conversions between integer types where the destination can't represent the full source range — `int64`→`int32`, `uint`→`int`, `int`→`uint`, etc. It was contentious (lots of false positives in code that had already range-checked, e.g. the moby/docker threads) because the analyzer is flow-insensitive and can't always see your guard. The right response isn't to disable it blanket; it's to make the safety explicit.
+
+A safe downcast checks bounds against the destination type's limits before converting:
+
+```go
+import "math"
+
+func toInt32(v int64) (int32, error) {
+    if v < math.MinInt32 || v > math.MaxInt32 {
+        return 0, fmt.Errorf("value %d overflows int32", v)
+    }
+    return int32(v), nil
+}
+```
+
+For unsigned destinations, also guard the negative case (`v < 0`). In practice I'd reach for a vetted library like `go-safecast` rather than hand-rolling per type, and I'd keep G115 on in CI so new conversions are forced through a checked helper or an explicit `//nolint:gosec` with a comment justifying why the value is already bounded. The reviewable signal — "this conversion is safe because X" — is the whole point.
+
+### Q152. A data race in Go is described as undefined behavior, not just "a wrong value." Explain how a race can actually corrupt memory or crash the runtime (not merely produce a stale read), and why `-race` is necessary but not sufficient as a defense.
+
+Engineers underestimate races because the mental model is "I might read a stale `int`." For word-sized aligned scalars that's roughly true. But Go's larger values — interfaces, slices, strings, maps — are multi-word structs, and the Go memory model gives you *no* atomicity across those words. A racing write to an `interface{}` can leave the type-word and data-word from two different assignments: you observe type `*Foo` but a `*Bar` pointer, and the next method dispatch jumps through a garbage itab. Same for a slice header (ptr/len/cap torn so `len` exceeds the backing array) or a string (ptr from one value, len from a longer one — now you can read out of bounds). That's genuine memory corruption born purely from a data race, with no `unsafe` in sight.
+
+It gets worse with maps. Concurrent map writes are detected by the runtime itself, which will `throw("concurrent map writes")` and hard-crash the process — uncatchable by `recover`. And a racing write to a pointer field can hand the garbage collector a non-pointer bit pattern that it tries to follow, leading to a runtime fatal error. So "data race" sits in the same UB bucket as a use-after-free in C: the standard says all bets are off, and the compiler is free to assume races don't happen when optimizing.
+
+`go test -race` (and `go build -race`) instruments memory accesses with ThreadSanitizer and reports the racing goroutines with stacks — it's the single best tool we have. But it only detects races on code paths that actually execute *and actually interleave badly during that run*. It's a dynamic detector: no coverage of a path means no detection, and a race that only manifests under production timing/load may never trigger in CI. It also roughly 2–20x's CPU and ~5–10x's memory, so you can't run it always in prod. The senior answer: treat `-race` as a fuzzing/stress companion (run it in CI under load, with realistic concurrency, alongside `go test -race -count` and fuzz targets), and combine it with design that removes the race class — confine shared state behind a single goroutine/channel, or `sync/atomic` (use `atomic.Pointer[T]` and friends from Go 1.19+ rather than racy plain assignments), or a mutex with a clear ownership discipline. Don't mix atomic and plain access to the same variable — that's still a race on weak-memory architectures even if it "works" on x86's strong model.
+
+### Q153. You're reviewing a Go service that verifies JWTs. What are the verification-side failure modes you specifically look for, and why do they keep recurring even with mature libraries?
+
+The classics first. **Algorithm confusion / `alg:none`:** a verifier that trusts the token's own header to pick the algorithm can be tricked. If the attacker sets `alg: none`, a naive verifier accepts an unsigned token; the `alg: HS256`-vs-`RS256` confusion is nastier — the attacker signs with HMAC using your *public* RSA key as the HMAC secret, and a library that keys off the header verifies it as valid. The fix is to never let the token choose: pin the expected algorithm(s) explicitly. In `golang-jwt/jwt/v5` you pass `jwt.WithValidMethods([]string{"RS256"})` and in your keyfunc you assert `token.Method.(*jwt.SigningMethodRSA)` before returning the key — reject anything else. Returning the verification key from the keyfunc *without* checking the method is the recurring bug.
+
+**Trusting claims before verifying the signature.** People `jwt.Parse` and then read `claims["sub"]`, but if they don't actually wire up the keyfunc and check the returned `err`/`token.Valid`, they're parsing attacker-controlled JSON and treating it as authenticated. Decoding is not verifying. Equally, **missing claim validation**: a structurally valid, correctly signed token that's expired, not-yet-valid, or issued for a different audience/issuer is still "valid signature" — you must check `exp`, `nbf`, `aud`, and `iss`. v5 validates `exp`/`nbf`/`iat` by default and gives you `WithAudience`/`WithIssuer`/`WithExpirationRequired`; the failure mode is people who hand-roll claim checks and forget one, or who don't require `exp` at all and mint effectively immortal tokens.
+
+The reasons these recur even with good libraries: the API surface *can* be used unsafely (the keyfunc indirection exists precisely to support key rotation/JWKS, but it pushes the algorithm-pinning responsibility onto the caller), copy-pasted Stack Overflow snippets predate the safer v5 defaults, and the symptoms are invisible in the happy path — every legitimate token works, so tests pass and the hole only shows up under an active attacker. Beyond the parsing: verify signature with constant-time comparison (the library handles this; don't reimplement HMAC compare with `==` — use `subtle.ConstantTimeCompare` or `hmac.Equal` if you ever do it by hand), source RS256 keys from a pinned/rotated JWKS rather than an attacker-influenceable `jku`/`kid`, and bound token size before parsing so an enormous header isn't a cheap DoS. A senior reviewer treats "the JWT library verifies it" as the *start* of the review, not the end.
 
 ---
 
@@ -3413,6 +4233,72 @@ func (l *Limiters) reap() {
 
 A few realities: this is **per-process**. Behind a load balancer with N instances, a per-instance limit of 100/s is really up to 100N/s — if you need a true global limit you push it to a shared store (Redis with a token-bucket Lua script, or a sidecar/gateway like Envoy). Token bucket is the right default over a fixed window because a fixed window allows a 2x burst across the boundary (full quota at 0.999s, full quota again at 1.001s); the bucket smooths that. And put the limiter check *before* expensive work — the whole point is to shed load cheaply, so reject at the edge, not after you've already hit the database.
 
+### Q154. A request enters your gateway with a 2s client deadline, fans out to 4 downstream services, and one of them is slow. Walk through how a *deadline budget* should propagate — and explain why naively passing the same `context.Context` to every hop is the wrong answer at staff level.
+
+The naive answer is "pass `ctx` through `context.WithTimeout(parent, 2*time.Second)` and let cancellation propagate" — and for *cancellation* that's correct. The deeper point is **budget accounting**: the 2s is a total, and each hop must spend a *share* of the remaining budget, not the whole thing, or you get no buffer for retries, serialization, and the response trip back to the client.
+
+Concretely, derive a per-call timeout from the *remaining* deadline rather than a fixed constant. At each hop read `deadline, ok := ctx.Deadline()`, compute `remaining := time.Until(deadline)`, subtract a small egress reserve (you must leave time to actually write the response), and cap any single downstream call to a fraction of that.
+
+```go
+func childCtx(ctx context.Context, reserve time.Duration) (context.Context, context.CancelFunc) {
+    dl, ok := ctx.Deadline()
+    if !ok {
+        return context.WithTimeout(ctx, 500*time.Millisecond) // never unbounded
+    }
+    budget := time.Until(dl) - reserve
+    if budget <= 0 {
+        // already over budget — fail fast, don't even dial
+        return context.WithCancel(ctx) // immediately-doomed; caller should check
+    }
+    return context.WithTimeout(ctx, budget)
+}
+```
+
+Where senior candidates separate themselves: **propagating the deadline over the wire**. A `context` deadline is in-process only; the downstream gRPC/HTTP service has no idea about it unless you serialize it. gRPC does this for you (it sends `grpc-timeout`), but for HTTP you must set a header (e.g. an `X-Request-Deadline` or `Envoy`-style timeout) and have the receiver rebuild a `context` from it — otherwise the downstream happily works for its *own* configured timeout long after your client has hung up. The classic failure mode is **work amplification under deadline**: the client gives up at 2s and retries, but the original request keeps running downstream because nobody told it to stop, so retries pile real load on a service that's already saturated. Always check `ctx.Err()` before doing expensive work and propagate the deadline, not just the cancel signal.
+
+### Q155. Under overload, retries and timeouts make things *worse*, not better. Explain load shedding as a resilience pattern, why it beats "just add more retries," and sketch an adaptive shedder in Go.
+
+The counterintuitive truth: in an overloaded system, the textbook resilience tools become accelerants. Retries multiply offered load exactly when the server can least afford it (a 3x retry policy turns a 1x overload into 3x — a *retry storm*). Timeouts cause the client to abandon work the server is still grinding on, so the server burns CPU producing responses nobody will read. Both push a degraded system into collapse. **Load shedding** is the admission-control answer: it's better to cleanly reject a fraction of requests *fast* (HTTP 429/503 with `Retry-After`) than to accept everything and have *all* requests time out. A service that sheds 30% of traffic and serves the other 70% at p99=50ms is far healthier than one that accepts 100% and serves everything at p99=8s.
+
+Static shedding (a fixed concurrency cap via a buffered semaphore) is the floor. The staff-level answer is **adaptive shedding keyed on a signal that actually correlates with overload** — usually queue latency or in-flight count, not CPU (CPU lags and is noisy). A simple, effective approach is to shed based on how long requests are spending in the accept queue; once that exceeds a threshold, drop new work. Netflix's "concurrency-limits" (Little's Law / TCP-Vegas-style gradient) and Google's CoDel-inspired controlled-delay queue are the production references.
+
+```go
+type Shedder struct{ inflight, limit int64 }
+
+func (s *Shedder) Handle(w http.ResponseWriter, r *http.Request, next http.HandlerFunc) {
+    n := atomic.AddInt64(&s.inflight, 1)
+    defer atomic.AddInt64(&s.inflight, -1)
+    if n > atomic.LoadInt64(&s.limit) {
+        w.Header().Set("Retry-After", "1")
+        http.Error(w, "overloaded", http.StatusServiceUnavailable) // shed fast
+        return
+    }
+    next(w, r)
+}
+```
+
+Two things that distinguish a real answer. First, **shed cheaply and early** — at the edge, before you've allocated a goroutine, parsed the body, or taken a DB connection; shedding after the expensive work is pointless. Second, **prioritize what you keep**: a flat shedder drops health checks and paying-customer requests with equal probability. Criticality-aware shedding (drop `best-effort` before `critical`, drop a retry before a first attempt — read a `retry-attempt` header) is what keeps the system *useful* under load rather than merely *alive*. Pair shedding with client-side concurrency limits and a circuit breaker so the client stops hammering a shedding server.
+
+### Q156. You use `singleflight` to collapse duplicate cache-miss loads. Name the three production failure modes this introduces, and explain the `shared` return value and `Forget`.
+
+`singleflight.Group.Do(key, fn)` is the standard thundering-herd fix: N concurrent callers for the same key run `fn` once and all receive that one result. The trap is that it silently couples the fate of all those callers, and `golang.org/x/sync/singleflight` has sharp edges senior candidates must name.
+
+**Failure mode 1 — error/panic poisoning.** If the single in-flight `fn` returns an error (or panics, or calls `runtime.Goexit`), *every* waiting caller gets that same error. A transient blip on one leader call fails 500 piggybacking requests simultaneously. Worse, the standard package does **not** carry a per-caller context into `fn`: it uses the first caller's effective execution, so if that leader's context is canceled, all followers are poisoned even though their own deadlines were fine. This is exactly why context-aware forks (and `DoChan` patterns) exist where `fn`'s context is only canceled once *all* callers have canceled. The `shared` boolean — the often-ignored third return value — tells you the result was delivered to more than one caller; it's how you detect and meter coalescing, and a signal that a poisoned error had blast radius.
+
+**Failure mode 2 — head-of-line blocking / unbounded latency.** All followers are only as fast as the single leader. If `fn` is slow, every coalesced caller waits the full duration — `Do` ignores individual caller deadlines entirely. The fix is `DoChan`, which returns a `<-chan Result`, so each caller can `select` on its *own* `ctx.Done()` and bail independently while `fn` keeps running for the others:
+
+```go
+ch := g.DoChan(key, fn)
+select {
+case res := <-ch:
+    return res.Val, res.Err
+case <-ctx.Done():
+    return nil, ctx.Err() // I leave; the flight continues for others
+}
+```
+
+**Failure mode 3 — stale-result pinning and cache stampede on a poisoned key.** While a flight is in progress, a result is "pinned"; callers that arrive after a *successful* `fn` completed but before the cache is written may still re-trigger. More importantly, if you cache a bad/empty result you've now stampeded everyone onto garbage. `Forget(key)` deletes the in-flight (or just-completed) entry so the *next* call starts a fresh flight — use it after a failed load so you don't serve a poisoned result to the next wave, and use it deliberately to avoid one slow flight pinning latency for an unbounded number of late arrivals. Also remember `singleflight` is per-process: in a fleet of M instances you still get up to M concurrent backend loads, so it complements — never replaces — a distributed lock or request-coalescing cache.
+
 ---
 
 ## Tooling
@@ -3532,3 +4418,27 @@ go test -bench=BenchmarkDecode -benchmem -count=6 ./codec
 **`go tool`.** It fronts the bundled tools: `go tool pprof <profile>` for CPU/heap analysis, `go tool trace` for the execution tracer (goroutine scheduling, GC, syscalls), `go tool objdump` for disassembly. As of 1.24, `go tool` can also run module-pinned tools declared in `go.mod`, replacing the old `tools.go` hack.
 
 **GODEBUG knobs.** Runtime behavior you toggle by env var, no recompile: `GODEBUG=gctrace=1` prints a line per GC cycle (reach for this before pprof when you suspect GC pressure); `schedtrace=1000` dumps scheduler state every second; `inittrace=1` times package init; `http2debug=1/2` for HTTP/2 frames. Since 1.21, `GODEBUG` also carries *compatibility* settings — e.g. `GODEBUG=httpservecontentkeepheaders=1` — letting you opt back into old behavior after a toolchain upgrade, with defaults pinned by the `go` line in `go.mod`.
+
+### Q157. A service in a 512 MiB container keeps getting OOM-killed under bursty load even though heap profiles look fine at steady state. Walk through how you'd use `GOMEMLIMIT`, `GODEBUG=gctrace=1`, and pprof to diagnose and fix it — and explain the failure mode you're guarding against.
+
+The core failure mode is that Go's GC by default only triggers based on `GOGC` (heap growth ratio, default 100 = collect when heap doubles). Under a burst, live heap can spike and the next GC target lands above what the container allows, so the kernel OOM-killer fires before Go ever runs a collection. The runtime has no idea the container limit exists — it's happy to grow the heap to multiple GiB if the ratio says so.
+
+The fix is `GOMEMLIMIT`, a soft memory limit (added in Go 1.19) that makes the GC run more aggressively as total runtime memory approaches the limit, effectively overriding `GOGC` when memory is tight. Critically it covers *all* runtime memory (heap, stacks, the runtime's own structures), not just the heap you see in a profile — that's why your heap profile "looks fine" while the process still dies; goroutine stacks, mmap'd arenas, and off-heap allocations count against the cgroup but not against your heap pprof. Set `GOMEMLIMIT` to roughly 80-90% of the container limit (e.g. `GOMEMLIMIT=450MiB` for a 512 MiB container), never equal to it — you must leave headroom for non-Go memory and for the lag between hitting the limit and GC reclaiming. Setting it *equal* to the cgroup limit re-introduces the OOM race.
+
+To diagnose, turn on `GODEBUG=gctrace=1` and read the lines: each GC prints `gc # @elapsed %cpu, heap_before->heap_target->heap_after MB, goal MB`. If you see the target climbing toward the container ceiling with infrequent GCs, that confirms `GOGC` is letting the heap run away. After setting `GOMEMLIMIT` you'll see GCs firing far more often as you approach the limit, and the CPU% in the trace will rise — that's the tradeoff. The danger of `GOMEMLIMIT` is the *GC death spiral*: if live heap genuinely exceeds the limit, the GC runs back-to-back burning all your CPU trying to stay under a limit it can't meet. So `GOMEMLIMIT` is a backstop against transient spikes, not a substitute for actually reducing live memory. For the latter, take an `inuse_space` heap profile under load (`go tool pprof http://host/debug/pprof/heap`) to find the retained allocations, and use `-alloc_space` plus the allocation profile to find churn that's inflating the heap between collections.
+
+### Q158. `go build -gcflags=-m` says your hot-path function's argument "escapes to heap." Explain how escape analysis decides that, why it's a per-package analysis, and three concrete code patterns that force a heap allocation a senior engineer should recognize on sight.
+
+Escape analysis runs in the compiler and decides, per variable, whether its lifetime can be proven to end when the function returns — if so it lives on the stack (cheap, freed automatically on return); if the compiler *cannot* prove that, it conservatively heap-allocates so the GC manages it. Run `go build -gcflags='-m'` (or `-m -m` for the reasoning chain) to see the decisions; `escapes to heap` and `moved to heap` are the lines to grep for. The key word is *prove* — escape analysis is conservative, so "might outlive the frame" becomes "does escape."
+
+It's fundamentally a per-package analysis because the compiler only sees the bodies of functions in the current package plus the *export information* of imported packages. For a called function in another package, the compiler relies on summarized escape tags baked into the package's export data (and only if that function is inlinable or its parameters' escape behavior is recorded). This is also why inlining and escape analysis are intertwined: inlining a callee exposes its body to the caller's escape analysis, which can turn a heap allocation back into a stack one. Cross-package, non-inlined calls are an analysis boundary — the compiler must assume the worst about pointer parameters.
+
+Three patterns to recognize instantly: (1) **Returning a pointer to a local** — `func f() *T { var t T; return &t }` — `t` must outlive the frame, so it's heap-allocated (this is fine and idiomatic, just know it allocates). (2) **Storing into an `interface{}` / `any`** — assigning a value to an interface boxes it; `fmt.Println(x)` takes `...any`, so even an `int` escapes via the interface conversion. This is the classic reason `fmt` calls allocate. (3) **Capturing a variable by reference in a closure that escapes**, or taking the address of a value that's stored in a slice/map of pointers, or anything passed to a function whose parameter the compiler can't prove is non-escaping. A more subtle one: a value whose size isn't known at compile time (e.g. a slice backing array sized by a runtime variable) can't go on the stack and is forced to the heap. The senior move is to verify with `-gcflags=-m` and a `-benchmem` benchmark rather than guessing — but knowing these shapes lets you spot the allocation before you measure.
+
+### Q159. `govulncheck` reports zero vulnerabilities but your `trivy`/`grype` scan flags a CVE in a dependency listed in `go.sum`. Which do you trust for the release gate, why, and how does Go's module checksum and reproducible-build machinery factor into your supply-chain story?
+
+You investigate both but you do *not* treat them as interchangeable, because they answer different questions. Manifest scanners like `trivy`, `grype`, or `snyk` work off `go.mod`/`go.sum` and report every known CVE in every module version present in the dependency graph — including transitive deps you never call. `govulncheck` (the official Go team tool, backed by the curated Go vulnerability database at vuln.go.dev) does **reachability analysis**: it traces the actual call graph from your `main` and only reports a vuln if your code can reach the affected symbol. So the common case is real: a CVE exists in a package in your `go.sum`, but it's in a function you never call, and `govulncheck` correctly stays silent.
+
+For a release gate I trust `govulncheck` to decide *whether to ship*, because a flood of unreachable CVEs trains engineers to ignore the gate (alert fatigue is the actual security failure). But I don't *discard* the manifest scanner's finding — I record it, because reachability can change the moment someone adds a call to that symbol, and `govulncheck`'s analysis can have gaps (reflection-based dispatch, `cgo`, and code generation can hide reachable paths). The right posture: `govulncheck` blocks the build; the broader scanner feeds a backlog of "upgrade when convenient" deps. Run `govulncheck ./...` in CI and pin the Go toolchain version, since stdlib vulns are tied to the toolchain.
+
+The supply-chain story rests on two more pieces. `go.sum` plus the public checksum database (`sum.golang.org`, consulted via `GONOSUMCHECK`/`GONOSUMDB`/`GOFLAGS` and the `GOSUMDB`/`GOPRIVATE` knobs) gives *integrity*: every module's content is hashed and verified against an append-only transparency log, so a compromised proxy or a retroactively-edited tag is detected on download — `go.sum` is your tamper-evidence, not a vuln list. Reproducible builds (perfectly reproducible since Go 1.21, using `-trimpath` to strip local paths and the build ID that hashes sources, deps, flags, and toolchain) give *verifiability*: anyone can rebuild the exact binary from the pinned inputs and confirm it matches what you shipped. Together — verified inputs (`go.sum` + checksum DB), a reachability-aware gate (`govulncheck`), and bit-for-bit reproducible output — you can answer "what's in this binary and can I prove it" end to end, which is the real senior/staff question behind any of these tools.
