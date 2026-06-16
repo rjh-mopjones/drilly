@@ -126,6 +126,20 @@
       "sectionOrder": []
     },
     {
+      "id": "db-theory",
+      "file": "/db-theory-primer.md",
+      "title": "DB Theory",
+      "category": "Databases",
+      "itemLabel": "Topic",
+      "itemsPlural": "DB theory topics",
+      "storagePrefix": "ip:db-theory",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": []
+    },
+    {
       "id": "sql-patterns",
       "file": "/sql-patterns-primer.md",
       "title": "Patterns",
