@@ -4,7 +4,7 @@ type: interview-primer
 
 # SQL Patterns Primer
 
-Recognition-layer drill for SQL interview prep. The two SQL Practice sources teach you *how to write* each pattern; this primer teaches you *how to spot* which pattern a problem needs in under 30 seconds. 25 topics, ~150-180 questions. All examples in **Postgres 17/18** — uses `MERGE`, `JSON_TABLE`, `tablefunc.crosstab`, `PERCENTILE_CONT`, `LATERAL`, `DISTINCT ON`, `FILTER`, `EXCLUDE` constraints freely.
+Recognition-layer drill for SQL interview prep. The two SQL Practice sources teach you *how to write* each pattern; this primer teaches you *how to spot* which pattern a problem needs in under 30 seconds. 26 topics, ~160-190 questions. All examples in **Postgres 17/18** — uses `MERGE`, `JSON_TABLE`, `tablefunc.crosstab`, `PERCENTILE_CONT`, `LATERAL`, `DISTINCT ON`, `FILTER`, `EXCLUDE` constraints freely.
 
 Pair with **Postgres** (engine-operational depth) and **SQL Practice** / **Advanced SQL Practice** (worked problems) under the Databases category.
 
@@ -52,7 +52,7 @@ Three signals. (1) **Process visibility** — senior SQL interviewers want to se
 
 **What follows from this topic**
 
-Every later topic in the primer expands one branch of this tree. Topic 2 (Pattern Signal Tables) compresses the tree into two lookup grids you can scan mid-interview. Topics 3-22 are the leaves — each one drills one pattern at the recognition layer. Topic 23 (Query Plan Reading) is what you reach for when the pattern is right but the query is slow. Topic 24 (Anti-patterns) is the negative space — recognising when a candidate is about to make a textbook mistake. Topic 25 (Closing) is the consolidation. If you can't walk this tree on a cold prompt, fix it first; drilling the leaves before the trunk doesn't compound.
+Every later topic in the primer expands one branch of this tree. Topic 2 (Pattern Signal Tables) compresses the tree into two lookup grids you can scan mid-interview. Topics 3-23 are the leaves — each one drills one pattern at the recognition layer. Topic 24 (Query Plan Reading) is what you reach for when the pattern is right but the query is slow. Topic 25 (Anti-patterns) is the negative space — recognising when a candidate is about to make a textbook mistake. Topic 26 (Closing) is the consolidation. If you can't walk this tree on a cold prompt, fix it first; drilling the leaves before the trunk doesn't compound.
 
 ### Q1. A prompt says "find consecutive days where revenue exceeded 100k for at least 3 days in a row". Walk the tree.
 
@@ -125,7 +125,7 @@ Two signals fold into one. (1) **Vocabulary fluency** — senior SQL candidates 
 
 **What follows from this topic**
 
-The 23 individual pattern topics that follow are the expansion of each row in these tables. Drilling them in order is fine, but in practice you should drill them in *frequency order* — joins, group by, window functions, top-N per group, and gaps & islands cover the majority of interview prompts and deserve 70% of your practice budget. The Postgres-specific power features (topic 22) and statistical SQL (topic 18) come up less often but separate staff candidates from senior. If you can read a prompt and name the pattern within 30 seconds using these tables, the rest of the interview is mechanical query construction.
+The 24 individual pattern topics that follow are the expansion of each row in these tables. Drilling them in order is fine, but in practice you should drill them in *frequency order* — joins, group by, window functions, top-N per group, and gaps & islands cover the majority of interview prompts and deserve 70% of your practice budget. The Postgres-specific power features (topic 23) and statistical SQL (topic 18) come up less often but separate staff candidates from senior. If you can read a prompt and name the pattern within 30 seconds using these tables, the rest of the interview is mechanical query construction.
 
 | Words in prompt | Reach for |
 |---|---|
@@ -143,6 +143,8 @@ The 23 individual pattern topics that follow are the expansion of each row in th
 | "find pairs where" | Self-join with inequality predicate |
 | "exists / not exists" | `EXISTS` (semi-join) / `NOT EXISTS` (anti-join) |
 | "missing values", "fill gaps" | `GENERATE_SERIES` + `LEFT JOIN` |
+| "clean this dump", "no reliable id", "build a key", "scrambled / dirty data" | Messy Data & Cleaning |
+| "N/A as null", "strip $/commas", "text-stored date/number" | Messy Data & Cleaning (sentinels + safe casts) |
 | "upsert", "merge", "idempotent insert" | `INSERT ... ON CONFLICT` or `MERGE` |
 | "rank with ties" | `RANK()` (gaps) / `DENSE_RANK()` (no gaps) |
 | "Nth percentile" | `PERCENTILE_CONT(p) WITHIN GROUP (ORDER BY x)` |
@@ -233,7 +235,7 @@ Three signals. (1) **Semantic clarity** — picking the wrong join (`INNER` when
 
 **What follows from this topic**
 
-Joins are the foundation for nearly every multi-table SQL pattern. Anti-joins (covered in topic 15) build directly on `LEFT JOIN ... IS NULL`. Top-N per group (topic 12) uses `LATERAL` as one of three valid patterns. Self-joins recur in gaps & islands (topic 10), sessionization (topic 11), and hierarchical queries one level deep. The `ON` vs `WHERE` distinction matters in query plan reading (topic 23) because misplaced predicates change the join order and index selection. If you internalise joins as "describing set relationships" rather than "iteration patterns", every later pattern that uses them feels like composition rather than syntax memorisation.
+Joins are the foundation for nearly every multi-table SQL pattern. Anti-joins (covered in topic 15) build directly on `LEFT JOIN ... IS NULL`. Top-N per group (topic 12) uses `LATERAL` as one of three valid patterns. Self-joins recur in gaps & islands (topic 10), sessionization (topic 11), and hierarchical queries one level deep. The `ON` vs `WHERE` distinction matters in query plan reading (topic 24) because misplaced predicates change the join order and index selection. If you internalise joins as "describing set relationships" rather than "iteration patterns", every later pattern that uses them feels like composition rather than syntax memorisation.
 
 ### Q1. Prompt: "list customers and their orders, including customers with no orders". `INNER` or `LEFT`?
 
@@ -1845,6 +1847,278 @@ Without `NULLS LAST`, Postgres puts NULLs first in `ASC` order (with `NULLS FIRS
 
 ---
 
+## Messy Data & Cleaning
+
+### Summary
+
+**What this topic covers**
+
+The single most common real-world SQL task and the one most under-drilled: turning a grubby, scrambled, keyless dump into clean, keyed, queryable data. Sub-patterns: (1) **constructing a unique key** from a table that arrived without a reliable identifier — composite natural key vs generated surrogate (`ROW_NUMBER`, `gen_random_uuid`, or a deterministic hash) with a *stable* tiebreaker; (2) **near-duplicate collapse** — rows that differ only by casing, whitespace or formatting, normalised *before* grouping; (3) **text-identifier normalisation** — trim, case-fold, strip punctuation, collapse internal whitespace so `" aapl "`, `AAPL` and `Aapl.US` reconcile; (4) **sentinel-as-NULL** — turning `'N/A'`, `''`, `'-'`, `'null'` into real NULLs; (5) **safe text→date and text→numeric coercion** without failing the whole query; (6) **broken referential integrity** — finding orphans both ways and deciding drop / quarantine / backfill; (7) a full **clean-then-key CTE pipeline** as the capstone; (8) **post-clean validation**. The 10 questions favour the naive-version-breaks-on-dirty-data framing. This topic is specifically the *cleaning and key-construction* angle — the dedup *mechanism* (`ROW_NUMBER() = 1` / `DISTINCT ON`) lives in Window Functions — Ranking (topic 6), NULL semantics in topic 19; here the focus is deciding *what* to clean and *what the key is*.
+
+**Mental model**
+
+Dirty data is a layered problem and the order of operations is the whole game: **normalise → coerce types → null-out sentinels → dedup → assign key**, in that sequence, because every later step depends on the earlier ones being done. You cannot dedup `" AAPL "` against `aapl` until you've normalised; you cannot null-out `'N/A'` in a numeric column until you've decided it isn't a number; you cannot build a natural key until the key columns are clean and typed. Stage the work as a CTE chain where each CTE does exactly one transformation and is independently inspectable — that staging is itself the senior signal, because it lets you reconcile row counts at every step. The other core idea is **determinism**: a cleaning pipeline that produces a different key set on each rerun (because you used `gen_random_uuid()` or an unstable sort) is unreproducible and unauditable. Prefer a content hash of the normalised business columns, and when you must use `ROW_NUMBER`, give it a stable tiebreaker (`ctid`, a source line number, an ingestion timestamp) so the same input always yields the same output. Treat the raw dump as immutable; clean into a staging layer; never mutate in place until validated.
+
+**Key terms**
+
+- **Staging layer** — a `raw_*` table held verbatim plus a cleaned CTE/materialised layer derived from it; never clean in place.
+- **Natural key** — a key built from business columns (`ticker`, `trade_date`, `counterparty`); reliable only *after* normalisation.
+- **Surrogate key** — a generated identifier: `gen_random_uuid()` (random, opaque), `ROW_NUMBER()` (ordinal), or a hash.
+- **Deterministic / content key** — `md5`/`digest` of the normalised business columns; reproducible across reruns, unlike a random UUID.
+- **Stable tiebreaker** — the `ORDER BY` column(s) that make `ROW_NUMBER` deterministic when business columns tie (`ctid`, source line, load time).
+- **Normalisation** — trimming, case-folding, punctuation-stripping and whitespace-collapsing text so logically-equal values compare equal.
+- **Sentinel value** — a placeholder (`'N/A'`, `''`, `'-'`, `'null'`, `'0'`) standing in for missing data that must become a real NULL.
+- **`NULLIF(a, b)`** — returns NULL when `a = b`; the one-sentinel-at-a-time tool. `CASE`/`NULLIF` chains for several.
+- **Safe cast** — coercing `text` to `date`/`numeric` without aborting the query on the one bad row; `pg_input_is_valid()` (PG16+) or a `CASE`/regex guard.
+- **Orphan row** — a row whose foreign key has no match (or a parent with no children); found with anti-joins.
+- **Quarantine** — routing un-cleanable rows to a reject table instead of silently dropping them.
+- **Reconciliation** — the post-clean sanity pass: row counts before/after, duplicate-key checks, per-column null rates, distinct-value spot checks.
+
+**Why interviewers ask this**
+
+Three signals. (1) **It is the job.** Almost every real analytical or migration task starts with a dump that has duplicates, sentinels, text-typed dates and no trustworthy key; an interviewer handing you a deliberately grubby table is testing whether you've actually done the work or only solved clean textbook problems. Candidates who reach straight for `GROUP BY` on un-normalised text, or `::date` on a column with `'N/A'` in it, out themselves immediately. (2) **Order-of-operations discipline** — the senior tell is staging the cleaning as an explicit pipeline and being able to say *why* normalise precedes dedup precedes keying. (3) **Defensive instinct** — a senior candidate never silently drops rows: they quarantine, count what they dropped, and flag it. The under-specified-dataset response (state assumptions, ask for the grain/key, clean conservatively) is the staff-level behaviour the question is really probing.
+
+**Common confusions**
+
+- "`SELECT DISTINCT` deduplicates the dump" — only byte-identical rows; `" AAPL "` and `AAPL` survive as two rows. Normalise first.
+- "`gen_random_uuid()` is a good key for a cleaned table" — it's random, so a rerun produces different keys; use a content hash for a reproducible key.
+- "An empty string is the same as NULL" — in Postgres `''` is a real value, not NULL; it passes `IS NOT NULL` and breaks `COALESCE` and aggregate-skipping until you `NULLIF` it.
+- "`::date` will just cast the text column" — one unparseable value aborts the *entire* query; you need a row-level guard, not a blanket cast.
+- "Cleaning means deleting the bad rows" — silently dropping rows is a correctness and trust failure; quarantine and count them.
+- "`ROW_NUMBER()` gives a stable key" — only with a deterministic `ORDER BY`; without a stable tiebreaker the same input can key differently across runs.
+
+**What follows from this topic**
+
+Cleaning is the gate to everything downstream. Once the dump is normalised, typed, sentinel-free, deduped and keyed, it becomes a well-behaved table that every other pattern in this primer assumes as its starting point — the joins (topic 3) finally match, the NULL-aware aggregates (topic 19) compute correctly, and the dedup mechanics (topic 6) apply cleanly. The staged-CTE habit here is the same composition discipline as Subqueries vs CTEs (topic 5). And a cleaned, keyed staging table is exactly what feeds an idempotent load via `INSERT ... ON CONFLICT` / `MERGE` (topic 21, next) — cleaning produces the key that upsert relies on.
+
+### Q1. A table arrives with duplicates, near-duplicates and no reliable identifier. Build a unique key. What are your options and how do you pick a tiebreaker?
+
+First decision: **natural composite key vs generated surrogate**. A natural key is the set of business columns that *should* uniquely identify a row — for a `raw_trades` dump, perhaps `(ticker, trade_date, counterparty, notional)`. It's only trustworthy *after* normalisation (Q3), and only if those columns are genuinely unique together; on a dirty dump they often aren't, which is the trap.
+
+When the natural key is unreliable or you need an opaque identifier, generate a surrogate — but the *kind* matters:
+
+```sql
+-- (a) ordinal surrogate: deterministic ONLY with a stable tiebreaker
+ROW_NUMBER() OVER (ORDER BY trade_date, ticker, ctid) AS trade_key
+-- (b) random surrogate: opaque but NON-reproducible across reruns
+gen_random_uuid() AS trade_key                      -- pgcrypto / built-in PG13+
+-- (c) deterministic content key: reproducible, the senior default
+md5(lower(trim(ticker)) || '|' || trade_date || '|' || counterparty) AS trade_key
+```
+
+Option (c) — a hash of the *normalised* business columns — is usually the right answer for a cleaned staging table, because the same input always produces the same key, which makes the load idempotent (topic 21) and auditable. `gen_random_uuid()` is wrong here precisely because a rerun re-keys every row. 
+
+The **tiebreaker** question only bites when two rows are genuinely identical on the business columns. `ROW_NUMBER` needs a deterministic `ORDER BY` or the key is non-reproducible — append a stable physical tiebreaker like `ctid` (Postgres physical row address), a source line number, or an ingestion timestamp. The dedup *mechanism* once you have the key — `ROW_NUMBER() OVER (PARTITION BY key ORDER BY ...) = 1` or `DISTINCT ON` — is covered in topic 6; the skill *here* is choosing what the key is and making it deterministic.
+
+### Q2. De-duplicate rows that aren't byte-identical — they differ only by casing, whitespace or formatting.
+
+`SELECT DISTINCT` and `GROUP BY` compare raw values, so `'AAPL'`, `' aapl '` and `'Aapl'` are three distinct rows to them. The fix is to **normalise into a canonical form, then group on the canonical form** — never on the raw column.
+
+```sql
+-- NAIVE: leaves near-dupes intact
+SELECT DISTINCT ticker, counterparty FROM raw_trades;
+
+-- ROBUST: collapse on a normalised key, keep one real row per group
+WITH norm AS (
+  SELECT *,
+         lower(regexp_replace(trim(ticker), '\s+', ' ', 'g')) AS ticker_norm,
+         lower(trim(counterparty))                            AS cpty_norm
+  FROM raw_trades
+)
+SELECT DISTINCT ON (ticker_norm, cpty_norm) *
+FROM norm
+ORDER BY ticker_norm, cpty_norm, ingested_at DESC;   -- keep the latest real row
+```
+
+`DISTINCT ON` (Postgres-specific) keeps one full row per normalised group; the portable form is `ROW_NUMBER() OVER (PARTITION BY ticker_norm, cpty_norm ORDER BY ingested_at DESC) = 1`. The senior point: you dedup on the *derived* canonical columns but still emit the original (or a chosen representative) values — don't let normalisation silently overwrite the source. For fuzzy near-dupes beyond formatting (typos, `Acme Corp` vs `Acme Corporation`), exact normalisation isn't enough; you'd reach for similarity (`pg_trgm`'s `similarity()` / `%` operator) and that becomes an entity-resolution problem, which is a different, harder tool — name the escalation, don't pretend `lower()` solves it.
+
+### Q3. Normalise text identifiers so `" aapl "`, `AAPL` and `Aapl.US` reconcile.
+
+Normalisation is a pipeline of cheap string ops applied in a deliberate order; the goal is a canonical form where logically-equal values are byte-equal.
+
+```sql
+SELECT
+  trim(ticker)                                   AS step1_trim,        -- strip leading/trailing ws
+  lower(trim(ticker))                            AS step2_casefold,    -- AAPL -> aapl
+  regexp_replace(lower(trim(ticker)),
+                 '\s+', ' ', 'g')                AS step3_collapse_ws, -- internal runs -> single space
+  regexp_replace(lower(trim(ticker)),
+                 '[^a-z0-9]', '', 'g')           AS step4_strip_punct  -- aapl.us -> aapl, then .us handled
+FROM raw_trades;
+```
+
+- `trim()` / `btrim()` is ANSI and removes surrounding whitespace; `lower()` / `upper()` are ANSI case-folding. `initcap()` is Postgres-specific (title-case) and useful for names, not codes.
+- `regexp_replace(col, '\s+', ' ', 'g')` collapses internal whitespace runs — the `'g'` flag (Postgres) means replace-all; without it only the first match is replaced. Regex replacement is **not** portable ANSI; SQL Server uses different functions, so call out the dialect.
+- Stripping punctuation (`[^a-z0-9]`) reconciles `Aapl.US` → `aapl` plus a suffix you may want to split off rather than delete — be careful that `.US` is a meaningful exchange suffix, not noise. That's a judgement call: over-normalising can merge genuinely different identifiers (`BRK.A` vs `BRK.B`).
+
+The senior framing: normalise *enough* to reconcile true duplicates but not so aggressively that you collapse distinct entities. Document the canonical form, and keep the raw value alongside the normalised one so the transformation is reversible and auditable.
+
+### Q4. Sentinel values masquerading as NULL — turn `'N/A'`, `''`, `'-'`, `'null'` into real NULLs, and explain why it must happen before any join or aggregate.
+
+Dirty dumps encode "missing" as a grab-bag of string sentinels. Until you convert them to real NULLs, they are *values*: `''` passes `IS NOT NULL`, `'N/A'` joins as a literal, `'0'` sums as zero, and `COALESCE` never fires. This silently corrupts every downstream join and aggregate (topic 19 covers the NULL semantics this feeds).
+
+```sql
+-- single sentinel:
+NULLIF(counterparty, 'N/A')                         AS counterparty
+-- several sentinels: NULLIF chain or a CASE
+NULLIF(NULLIF(NULLIF(trim(counterparty), ''), '-'), 'N/A') AS counterparty
+-- clearer for many, and case-insensitive:
+CASE WHEN lower(trim(counterparty)) IN ('', '-', 'n/a', 'null', 'none')
+     THEN NULL ELSE trim(counterparty) END          AS counterparty
+```
+
+`NULLIF(a, b)` returns NULL when `a = b` — perfect for one sentinel, awkward when nested for many; the `CASE ... IN (...)` form reads better past two or three and lets you case-fold first. Do this **before** joins and aggregates because: a `JOIN ... ON a.cpty = b.cpty` will match `'N/A'` to `'N/A'` and fabricate relationships; `SUM(amount)` over a column where missing is `'0'` undercounts vs treating it as unknown; and an anti-join (`NOT EXISTS`) behaves completely differently once the sentinel is a real NULL. The reflex: the first CTE after raw ingestion nulls out sentinels per column, so every later stage sees honest NULLs.
+
+### Q5. Cast text-stored dates safely when formats are mixed and some values are unparseable.
+
+Two problems: mixed formats, and rows that aren't dates at all. A blanket `trade_date::date` aborts the **entire query** on the first bad value — unacceptable in a cleaning pass over millions of rows.
+
+Postgres has no `TRY_CAST` in core (unlike SQL Server's `TRY_CONVERT` or BigQuery's `SAFE_CAST`), so you guard at the row level:
+
+```sql
+-- PG16+: validate before casting, so bad rows yield NULL instead of aborting
+CASE WHEN pg_input_is_valid(trade_date, 'date')
+     THEN trade_date::date END                          AS trade_date
+
+-- explicit known formats with to_date (handles a specific pattern, not validation):
+to_date(trade_date, 'YYYY-MM-DD')                        -- ISO
+to_date(trade_date, 'MM/DD/YYYY')                        -- US
+
+-- portable guard for older PG: regex-gate before casting
+CASE WHEN trade_date ~ '^\d{4}-\d{2}-\d{2}$'
+     THEN trade_date::date END                           AS trade_date
+```
+
+Key points: `to_date`/`to_timestamp` parse a *known* format string but still throw on garbage, so they don't replace validation — they handle the "which format" half. `pg_input_is_valid(text, type)` (Postgres 16+) is the clean modern guard: it returns boolean, so the `CASE` yields NULL on un-parseable rows without aborting. For genuinely mixed formats in one column, branch on a regex per shape and `to_date` each, or normalise upstream. And beware ambiguity — `03/04/2026` is March-4 or April-3 depending on locale; an interviewer wants you to *flag* that assumption, not silently pick one. Rows that fail to parse should land in a quarantine column/table (Q7), not vanish.
+
+### Q6. Cast text-stored numbers safely — strip currency symbols, thousands separators and stray characters before `::numeric`.
+
+`'$1,234.50'::numeric` errors — the `$` and `,` aren't valid numeric input. Strip to a bare number first, then guard the cast exactly as with dates.
+
+```sql
+-- strip everything except digits, sign and decimal point, then cast safely
+WITH cleaned AS (
+  SELECT *,
+         regexp_replace(notional, '[^0-9.\-]', '', 'g') AS notional_bare
+  FROM raw_trades
+)
+SELECT
+  CASE WHEN pg_input_is_valid(notional_bare, 'numeric')
+       THEN notional_bare::numeric END AS notional
+FROM cleaned;
+```
+
+Watch the order and the edge cases: strip currency/grouping characters with `regexp_replace(col, '[^0-9.\-]', '', 'g')`, but be deliberate — blindly removing `,` is wrong in locales where comma is the *decimal* separator (`1.234,50` → you'd produce `1.23450`). Parentheses-as-negative accounting notation (`(1,234)` meaning `-1234`) needs its own handling. After stripping, guard with `pg_input_is_valid(..., 'numeric')` (PG16+) or a regex gate (`~ '^-?\d+(\.\d+)?$'`) so a value like `'twelve'` becomes NULL rather than aborting the query. Always cast to `numeric`, never `float`, for money — `float` introduces binary rounding error. The senior tell is naming the locale and accounting-notation traps unprompted; the naive `replace(col,',','')::numeric` works on the demo data and breaks on the real dump.
+
+### Q7. Detecting and handling broken referential integrity — find orphans on both sides and decide what to do.
+
+A dump rarely respects foreign keys: `raw_trades.ticker` may reference instruments that aren't in `instruments`, and `instruments` may list tickers no trade uses. Find both directions with **anti-joins** (the mechanics are topic 15; here it's the cleaning decision):
+
+```sql
+-- trades whose instrument is missing (orphan children):
+SELECT t.* FROM trades t
+LEFT JOIN instruments i ON i.ticker = t.ticker
+WHERE i.ticker IS NULL;
+
+-- instruments referenced by no trade (childless parents):
+SELECT i.* FROM instruments i
+WHERE NOT EXISTS (SELECT 1 FROM trades t WHERE t.ticker = i.ticker);
+```
+
+Then the judgement, which is the actual question — **drop, quarantine, or backfill**:
+
+- **Backfill** when the missing parent is recoverable: derive the instrument from the trade, or join a reference source to supply it. Preferred when you can do it without inventing data.
+- **Quarantine** when the row is consequential but un-fixable now: route orphans to a `trades_rejected` table with a reason, so they're visible, countable and re-processable — never silently dropped.
+- **Drop** only when the orphan is provably noise and you've recorded the count. Even then, log how many and why.
+
+The senior tell: you do *not* `INNER JOIN` the orphans away and move on — that silently discards data and hides a real integrity problem. Quantify the orphan rate first (it might be 0.01% noise or 30% signalling a broken extract), and let the rate drive the decision.
+
+### Q8. Walk a full "clean then key" pipeline as a staged CTE chain.
+
+The capstone: take `raw_trades` through every stage in the correct order, one transformation per CTE so each is inspectable and the row count is reconcilable at every step.
+
+```sql
+WITH raw AS (                       -- 0. immutable source, untouched
+  SELECT *, ctid AS src_row FROM raw_trades
+),
+normalised AS (                     -- 1. canonicalise text identifiers
+  SELECT src_row,
+         lower(regexp_replace(trim(ticker), '\s+', '', 'g')) AS ticker,
+         lower(trim(counterparty))                           AS counterparty,
+         trim(trade_date)                                    AS trade_date_txt,
+         regexp_replace(notional, '[^0-9.\-]', '', 'g')      AS notional_bare
+  FROM raw
+),
+typed AS (                          -- 2. safe type coercion (bad -> NULL)
+  SELECT src_row, ticker, counterparty,
+         CASE WHEN pg_input_is_valid(trade_date_txt, 'date')
+              THEN trade_date_txt::date END                  AS trade_date,
+         CASE WHEN pg_input_is_valid(notional_bare, 'numeric')
+              THEN notional_bare::numeric END                AS notional
+  FROM normalised
+),
+denulled AS (                       -- 3. sentinels -> real NULL
+  SELECT src_row, ticker,
+         NULLIF(counterparty, 'n/a') AS counterparty,
+         trade_date, notional
+  FROM typed
+),
+deduped AS (                        -- 4. one row per natural key, stable tiebreak
+  SELECT *,
+         ROW_NUMBER() OVER (PARTITION BY ticker, trade_date, counterparty, notional
+                            ORDER BY src_row) AS rn
+  FROM denulled
+),
+keyed AS (                          -- 5. assign deterministic content key
+  SELECT md5(ticker || '|' || coalesce(trade_date::text,'') || '|' ||
+             coalesce(counterparty,'') || '|' || coalesce(notional::text,'')) AS trade_key,
+         ticker, trade_date, counterparty, notional
+  FROM deduped WHERE rn = 1
+)
+SELECT * FROM keyed;
+```
+
+The order is load-bearing: normalise before typing (so trims/strips precede casts), type before keying (so the key sees real dates/numbers), null-out sentinels before dedup (so `'n/a'` and NULL collapse together), dedup before keying (so the key is unique). Each CTE is one idea; you can `SELECT count(*)` off any stage to see where rows were lost. This staged readability is the senior signal — a single 200-line subquery that does it all at once is the anti-pattern.
+
+### Q9. Validation and reconciliation after cleaning — how do you prove the cleaning actually worked?
+
+Cleaning without verification is faith, not engineering. Run a battery of cheap sanity queries and compare against expectations:
+
+```sql
+-- row count before vs after (did I lose more than I intended?)
+SELECT (SELECT count(*) FROM raw_trades)  AS raw_rows,
+       (SELECT count(*) FROM keyed)        AS clean_rows;
+
+-- duplicate-key check: MUST return zero rows
+SELECT trade_key, count(*) FROM keyed GROUP BY trade_key HAVING count(*) > 1;
+
+-- per-column null rate (did a cast silently null everything out?)
+SELECT avg((trade_date IS NULL)::int) AS pct_date_null,
+       avg((notional  IS NULL)::int) AS pct_notional_null
+FROM keyed;
+
+-- distinct-value spot check on a low-cardinality column
+SELECT counterparty, count(*) FROM keyed GROUP BY counterparty ORDER BY 2 DESC;
+```
+
+What each catches: **row-count delta** tells you how many rows the dedup/quarantine removed — a 2% drop may be fine, a 40% drop means a join fan-out or over-aggressive normalisation. **Duplicate-key check** must be empty; if not, your key isn't actually unique and the dedup grain was wrong. **Null-rate per column** catches the silent disaster where a bad format string made `pg_input_is_valid` reject *every* date — a 100% null rate screams a parsing bug, not missing data. **Distinct-value spot checks** surface remaining un-normalised variants (`acme` and `acme corp` both present means Q3 didn't fully reconcile). The senior reflex is to bracket every cleaning step with a before/after count and to treat a surprising number as a bug in the cleaning, not an accepted loss.
+
+### Q10. Senior interview angle: you're handed an under-specified, dirty dataset and told "clean this up". How do you behave?
+
+This question grades judgement and communication more than syntax. The junior move is to start typing transformations against assumptions. The senior move is to make the assumptions *explicit and negotiated* before destroying anything.
+
+Concretely, narrate and ask:
+
+- **Establish the grain and key first.** "What's one row supposed to represent — one trade, one trade-version, one settlement? What *should* uniquely identify it?" You cannot dedup or key without knowing the intended grain, and the interviewer often hasn't said it on purpose.
+- **State assumptions out loud.** "I'm treating `'N/A'`, `''` and `'-'` as missing; I'm reconciling tickers case-insensitively; I'm reading `MM/DD/YYYY` for the date column — flag if any of those is wrong." This converts silent guesses into reviewable decisions.
+- **Clean defensively and reversibly.** Stage into a `raw_*` table and a cleaned layer; never mutate the source. Quarantine un-cleanable rows rather than dropping them.
+- **Never silently drop rows.** Every row removed gets counted and, ideally, retained in a reject table with a reason. "I dropped 1,204 rows: 900 unparseable dates, 304 orphaned tickers" is a senior answer; a smaller output table with no explanation is a red flag.
+- **Validate and report.** Close with the reconciliation pass (Q9) and a short data-quality summary: row counts, null rates, how many were quarantined and why.
+
+The meta-signal: a senior engineer treats "clean this" as a *specification gap* to be closed collaboratively, defends the data's integrity (count everything, drop nothing silently, keep it reversible), and leaves an audit trail. The cleaning SQL is the easy half; the judgement about what "clean" means and the discipline not to quietly lose data is what the interviewer is actually buying.
+
+---
+
 ## UPSERT, MERGE & Idempotency
 
 ### Summary
@@ -2293,7 +2567,7 @@ Three signals. (1) **Code-review eye** — given a query, senior candidates spot
 
 **What follows from this topic**
 
-Anti-patterns are the negative space that every other topic complements — knowing the patterns is one half, recognising their absence (or misuse) is the other. Pair with query plan reading (topic 23) for the diagnostic angle. If you internalise the smells and their fixes, you'll catch them in PR review and write production-safe queries reflexively.
+Anti-patterns are the negative space that every other topic complements — knowing the patterns is one half, recognising their absence (or misuse) is the other. Pair with query plan reading (topic 24) for the diagnostic angle. If you internalise the smells and their fixes, you'll catch them in PR review and write production-safe queries reflexively.
 
 ### Q1. The `SELECT *` smell. Why is it bad in production code?
 
@@ -2347,7 +2621,7 @@ The final consolidation — a quick-reference cheat list of every SQL pattern re
 
 **Mental model**
 
-The senior SQL interview isn't about knowing more syntax — it's about **recognising the pattern faster** and **articulating the tradeoff cleanly**. The 25 topics in this primer cover the recognition; the tradeoff vocabulary is what separates senior from staff. The vocabulary: **`DISTINCT ON` vs `ROW_NUMBER`** — Postgres concision vs portability. **`LATERAL` vs window function** — index-aligned per-group vs full-partition sort. **`UNION` vs `UNION ALL`** — dedup cost vs no-dedup speed. **`NOT IN` vs `NOT EXISTS`** — NULL hazard vs NULL-safe. **`FILTER` vs `CASE WHEN`** — modern syntax vs legacy. **`ON CONFLICT` vs `MERGE`** — simple upsert vs multi-action. **`tstzrange` + `&&` vs explicit boundary predicates** — index-friendly range types vs portable verbosity. **`COUNT(*)` vs `COUNT(col)`** — total vs non-NULL. **`PERCENTILE_CONT` vs `PERCENTILE_DISC`** — interpolated vs exact. **BTREE vs GIN vs GiST vs BRIN** — equality/range vs containment vs overlap vs huge-sorted. The drill discipline is daily: read five SQL prompts, name the pattern in 30 seconds, name the alternative and the tradeoff. Over weeks, recognition becomes reflex; over months, you can name the pattern from the first sentence and articulate the tradeoff before any code is written.
+The senior SQL interview isn't about knowing more syntax — it's about **recognising the pattern faster** and **articulating the tradeoff cleanly**. The 26 topics in this primer cover the recognition; the tradeoff vocabulary is what separates senior from staff. The vocabulary: **`DISTINCT ON` vs `ROW_NUMBER`** — Postgres concision vs portability. **`LATERAL` vs window function** — index-aligned per-group vs full-partition sort. **`UNION` vs `UNION ALL`** — dedup cost vs no-dedup speed. **`NOT IN` vs `NOT EXISTS`** — NULL hazard vs NULL-safe. **`FILTER` vs `CASE WHEN`** — modern syntax vs legacy. **`ON CONFLICT` vs `MERGE`** — simple upsert vs multi-action. **`tstzrange` + `&&` vs explicit boundary predicates** — index-friendly range types vs portable verbosity. **`COUNT(*)` vs `COUNT(col)`** — total vs non-NULL. **`PERCENTILE_CONT` vs `PERCENTILE_DISC`** — interpolated vs exact. **BTREE vs GIN vs GiST vs BRIN** — equality/range vs containment vs overlap vs huge-sorted. The drill discipline is daily: read five SQL prompts, name the pattern in 30 seconds, name the alternative and the tradeoff. Over weeks, recognition becomes reflex; over months, you can name the pattern from the first sentence and articulate the tradeoff before any code is written.
 
 **Key terms**
 
