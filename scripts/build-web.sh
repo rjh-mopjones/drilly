@@ -20,6 +20,7 @@
 #   mobile/dist/sql-practice.md
 #   mobile/dist/advanced-sql-practice.md
 #   mobile/dist/csharp-interview-primer.md
+#   mobile/dist/ai-engineering-primer.md
 #   mobile/dist/system-design-patterns-primer.md
 #   mobile/dist/dsa-patterns-primer.md
 #   mobile/dist/sql-patterns-primer.md
@@ -40,7 +41,7 @@ cd "$MOBILE"
 bunx expo export --platform web --clear
 
 echo "→ Mirroring web/public/* (manifest + markdown) into $OUT"
-for f in service-worker.js manifest.json patterns.md neetcode-150.md java-interview-primer.md go-interview-primer.md kotlin-interview-primer.md postgres-interview-primer.md db-theory-primer.md sql-patterns-primer.md sql-practice.md advanced-sql-practice.md csharp-interview-primer.md system-design-patterns-primer.md dsa-patterns-primer.md; do
+for f in service-worker.js manifest.json patterns.md neetcode-150.md java-interview-primer.md go-interview-primer.md kotlin-interview-primer.md postgres-interview-primer.md db-theory-primer.md sql-patterns-primer.md sql-practice.md advanced-sql-practice.md csharp-interview-primer.md ai-engineering-primer.md system-design-patterns-primer.md dsa-patterns-primer.md; do
   if [ -f "$WEB_PUBLIC/$f" ]; then
     cp "$WEB_PUBLIC/$f" "$OUT/$f"
     echo "   ✓ $f"

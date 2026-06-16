@@ -188,6 +188,20 @@
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
       "sectionOrder": []
+    },
+    {
+      "id": "ai-engineering",
+      "file": "/ai-engineering-primer.md",
+      "title": "AI Engineering",
+      "category": "Machine Learning",
+      "itemLabel": "Topic",
+      "itemsPlural": "AI engineering topics",
+      "storagePrefix": "ip:ai-engineering",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": []
     }
   ]
 }
