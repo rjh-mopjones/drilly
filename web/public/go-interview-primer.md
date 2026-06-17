@@ -364,6 +364,21 @@ Rule of thumb: order fields from widest alignment to narrowest. `go vet`'s `fiel
 
 Two senior caveats. First, struct *order is observable* — never blindly reorder a struct that's serialized field-by-field, mapped to a C layout via cgo, or whose layout a test asserts. Second, false sharing: an empty struct or atomically-updated counter shared across goroutines can sit on the same 64-byte cache line as another hot field, causing cross-core invalidation. The fix is deliberate *over*-padding — Go 1.19 added `sync/atomic` types and the idiom of a `_ [64]byte` pad (or aligning to `cpu.CacheLinePad`) to push contended fields onto separate cache lines, the opposite of packing for size. Knowing both directions — pack to save memory, pad to avoid false sharing — is what separates the senior answer from the textbook one.
 
+### Q160. Walk through the major Go releases and what each changed for how you actually write application code (1.11 modules → 1.18 generics → 1.21 stdlib/PGO → 1.22 loop+routing → 1.25 runtime). And how does Go's compatibility promise interact with the `go` directive?
+
+The framing interviewers want is *what changed for the code I write*, not a changelog. The big inflection points:
+
+- **1.11–1.16 — modules.** `go.mod`/`go.sum` (1.11) and the end of `GOPATH` as mandatory (modules on by default in 1.16). This is the dependency-management baseline; everything since assumes it. (Mechanics in topic Modules & Build, Q53.)
+- **1.13 — error wrapping.** `fmt.Errorf("...: %w", err)` plus `errors.Is`/`errors.As`. This reshaped idiomatic error handling away from string matching. (Error Handling topic.)
+- **1.18 — generics.** Type parameters and constraints — the biggest *language* change since v1. It didn't replace interfaces; it slotted alongside them, and it enabled the `slices`/`maps` packages that landed later. `any` became the alias for `interface{}` here. (Interfaces & Type System, Q13.)
+- **1.19 — memory/runtime knobs.** `GOMEMLIMIT` soft memory ceiling and the typed atomics (`atomic.Int64`, `atomic.Bool`, `atomic.Pointer[T]`); the memory model was also formally specified. (Memory & GC Q31; Concurrency.)
+- **1.20 — incremental.** `comparable` relaxed to admit interface types; compiler devirtualization; `errors.Join` for multi-errors.
+- **1.21 — stdlib consolidation + PGO.** `slices`, `maps`, `cmp`, and `log/slog` (structured logging) entered the standard library; `min`/`max`/`clear` builtins; profile-guided optimization went stable. This is the release that made a lot of hand-rolled utility code and third-party logging libraries redundant. (Stdlib Q46; Cloud-Native Q90.)
+- **1.22 — the one that changes behavior.** Per-iteration **loop variable scoping** (the famous goroutine/closure footgun fix) and `range` over integers; `net/http.ServeMux` gained method + path-pattern routing (`GET /items/{id}`), narrowing the need for a third-party router. (Common Pitfalls Q80/Q147; Web Services Q68.)
+- **1.23–1.25 — iterators and container-awareness.** Range-over-func **iterators** (`iter.Seq`, 1.23) generalized `for range` to custom sequences; 1.25 made the runtime **cgroup-aware** so `GOMAXPROCS` respects a container CPU limit natively (previously you needed `uber-go/automaxprocs`). (Goroutines & Scheduler Q24; Cloud-Native.)
+
+The compatibility angle is the senior tell. Go's **compatibility promise** says code that builds today keeps building and behaving on future 1.x toolchains — which is *why* a behavior change like 1.22 loop scoping had to be gated. The mechanism is the **`go` directive in `go.mod`**: it declares the *language version* your module is compiled against, independent of which toolchain runs the build. So a module with `go 1.21` compiled by a 1.22+ toolchain still gets the *old* loop semantics — the new behavior only applies once you bump the directive to `go 1.22`. That decoupling (language version in `go.mod` vs the actual toolchain, which `GOTOOLCHAIN` selects — Q57) is how Go ships an incompatible fix without breaking the promise: the change is opt-in per module, by editing one line. The practical consequence: "the same code behaves differently on two machines" almost always traces to a different `go` directive, not a different toolchain.
+
 ---
 
 ## Interfaces & Type System
