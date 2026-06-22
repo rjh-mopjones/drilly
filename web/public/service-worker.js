@@ -20,7 +20,7 @@
  * CACHE_VERSION — the old cache is deleted on activate.
  */
 
-const CACHE_VERSION = "v2";
+const CACHE_VERSION = "v3";
 const CACHE = `drilly-${CACHE_VERSION}`;
 
 const MERMAID_CDN =
@@ -41,10 +41,16 @@ const CONTENT_URLS = [
   "/patterns.md",
   "/neetcode-150.md",
   "/java-interview-primer.md",
+  "/go-interview-primer.md",
   "/kotlin-interview-primer.md",
   "/postgres-interview-primer.md",
+  "/db-theory-primer.md",
+  "/sql-patterns-primer.md",
   "/sql-practice.md",
+  "/advanced-sql-practice.md",
   "/csharp-interview-primer.md",
+  "/ai-engineering-primer.md",
+  "/sql-postgres-cheatsheet.html",
   "/system-design-patterns-primer.md",
   "/dsa-patterns-primer.md",
 ];
@@ -116,13 +122,20 @@ self.addEventListener("fetch", (event) => {
   const req = event.request;
   if (req.method !== "GET") return;
 
-  // SPA navigations → network-first, cached shell offline.
+  const url = new URL(req.url);
+
+  // SPA navigations → network-first, cached shell offline. But a real
+  // standalone HTML file (e.g. the printable cheat sheet) must serve ITSELF,
+  // never the SPA shell — so don't use the /index.html fallback key for it
+  // (that would also poison the shell cache with the file's response).
   if (req.mode === "navigate") {
-    event.respondWith(networkFirst(req, "/index.html"));
+    const isStandaloneHtml =
+      url.origin === self.location.origin &&
+      url.pathname.endsWith(".html") &&
+      url.pathname !== "/index.html";
+    event.respondWith(networkFirst(req, isStandaloneHtml ? undefined : "/index.html"));
     return;
   }
-
-  const url = new URL(req.url);
 
   // Markdown + manifest → network-first (fresh online, cached offline).
   if (url.origin === self.location.origin && isContent(url)) {

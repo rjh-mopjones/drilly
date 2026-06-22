@@ -45,7 +45,20 @@ const CACHE_DIR = IS_WEB ? "" : (FS.cacheDirectory ?? "") + "content/";
 export function openExternalSource(externalUrl: string): void {
   const isAbsolute = /^https?:\/\//.test(externalUrl);
   if (IS_WEB) {
-    window.open(externalUrl, "_blank", "noopener");
+    // A synthetic anchor click is the reliable way to open a new tab from an
+    // event handler — window.open() is frequently swallowed by popup blockers
+    // when called from react-native-web's Pressable onPress.
+    if (typeof document !== "undefined") {
+      const a = document.createElement("a");
+      a.href = externalUrl;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } else {
+      window.open(externalUrl, "_blank");
+    }
     return;
   }
   const url = isAbsolute
