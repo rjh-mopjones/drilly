@@ -1,0 +1,1206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SQL &amp; Postgres Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+/* spanning title bar */
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>SQL &amp; Postgres Cheat Sheet</h1><span class="meta">Postgres 17/18 · ANSI noted · generic examples · drilly</span></div>
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="pg">PG</span> Postgres-specific &nbsp; <span class="ansi">ANSI</span> standard SQL &nbsp; <span class="warn">!</span> footgun</li>
+<li>Dialect: <b>Postgres 17 / 18</b>. Examples use generic <code>trades</code> / <code>instruments</code> tables.</li>
+<li><code>x::type</code> is PG cast; <code>CAST(x AS type)</code> is ANSI.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps the colour bars). 4 columns are built into the layout.</li>
+</ul></section>
+
+<section class="card diagram"><h3>Logical Query Execution Order</h3>
+<div class="mermaid">
+flowchart TD
+  A["FROM / JOIN"] --> B["WHERE (row filter)"]
+  B --> C["GROUP BY"]
+  C --> D["HAVING (group filter)"]
+  D --> E["SELECT (cols, window fns)"]
+  E --> F["DISTINCT"]
+  F --> G["ORDER BY"]
+  G --> H["LIMIT / OFFSET"]
+</div>
+<p class="cap">SELECT aliases are created at step 5 — invisible to WHERE/GROUP BY/HAVING, usable in ORDER BY.</p></section>
+
+<section class="card"><h3>Table Design &amp; DDL</h3>
+<pre><code>CREATE TABLE IF NOT EXISTS trades (
+  id     bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  ref    text NOT NULL UNIQUE,
+  ccy    char(3) NOT NULL DEFAULT 'USD',
+  qty    numeric(18,4) NOT NULL CHECK (qty &gt; 0),
+  px     numeric(18,6) NOT NULL,
+  notnl  numeric(18,4) GENERATED ALWAYS AS (qty*px) STORED,
+  ts     timestamptz NOT NULL DEFAULT now()
+);</code></pre>
+<ul>
+<li><code>TEMP</code> = session-scoped, dropped on disconnect</li>
+<li><code>UNLOGGED</code> = no WAL, fast, lost on crash <span class="warn">!</span></li>
+</ul>
+
+<h4>Auto-increment keys</h4>
+<table><thead><tr><th>Form</th><th>Note</th></tr></thead><tbody>
+<tr><td><code>GENERATED ALWAYS AS IDENTITY</code></td><td><span class="ansi">ANSI</span> preferred; blocks manual insert</td></tr>
+<tr><td><code>GENERATED BY DEFAULT AS IDENTITY</code></td><td>manual insert allowed</td></tr>
+<tr><td><code>serial</code>/<code>bigserial</code></td><td><span class="pg">PG</span> legacy; owns a seq, weaker</td></tr>
+</tbody></table>
+<ul><li>Override ALWAYS: <code>INSERT ... OVERRIDING SYSTEM VALUE</code></li></ul>
+
+<h4>Generated columns</h4>
+<ul>
+<li><code>GENERATED ALWAYS AS (expr) STORED</code> — expr of same-row cols, deterministic</li>
+<li><span class="pg">PG</span> only <code>STORED</code> (no VIRTUAL until PG18)</li>
+</ul>
+
+<h4>ALTER TABLE recipes</h4>
+<table><thead><tr><th>Goal</th><th>Syntax</th></tr></thead><tbody>
+<tr><td>Add col</td><td><code>ADD COLUMN c int [DEFAULT x]</code></td></tr>
+<tr><td>Drop col</td><td><code>DROP COLUMN c</code></td></tr>
+<tr><td>Change type</td><td><code>ALTER c TYPE bigint USING c::bigint</code></td></tr>
+<tr><td>Set/drop dflt</td><td><code>ALTER c SET/DROP DEFAULT</code></td></tr>
+<tr><td>Not null</td><td><code>ALTER c SET/DROP NOT NULL</code></td></tr>
+<tr><td>Add constr</td><td><code>ADD CONSTRAINT k CHECK(...)</code></td></tr>
+<tr><td>Drop constr</td><td><code>DROP CONSTRAINT k</code></td></tr>
+<tr><td>Rename</td><td><code>RENAME [COLUMN c] TO d</code></td></tr>
+</tbody></table>
+
+<h4>DROP vs TRUNCATE vs DELETE</h4>
+<table><thead><tr><th></th><th>DELETE</th><th>TRUNCATE</th><th>DROP</th></tr></thead><tbody>
+<tr><td>Speed</td><td>slow/row</td><td>fast</td><td>fast</td></tr>
+<tr><td>WHERE</td><td>yes</td><td>no</td><td>no</td></tr>
+<tr><td>Row triggers</td><td>fire</td><td>skip</td><td>n/a</td></tr>
+<tr><td>FK respect</td><td>yes</td><td>needs CASCADE</td><td>needs CASCADE</td></tr>
+<tr><td>Identity reset</td><td>no</td><td><code>RESTART IDENTITY</code></td><td>gone</td></tr>
+<tr><td>Txn-safe</td><td>yes</td><td>yes <span class="pg">PG</span></td><td>yes</td></tr>
+<tr><td>WAL/MVCC</td><td>per-row</td><td>minimal</td><td>drops</td></tr>
+</tbody></table>
+
+<h4>Declarative partitioning</h4>
+<pre><code>CREATE TABLE trades (id bigint, ts date, ...)
+  PARTITION BY RANGE (ts);
+CREATE TABLE trades_2025 PARTITION OF trades
+  FOR VALUES FROM ('2025-01-01') TO ('2026-01-01');
+-- LIST:
+  PARTITION BY LIST (ccy);
+  ... FOR VALUES IN ('USD','EUR');
+-- HASH:
+  PARTITION BY HASH (id);
+  ... FOR VALUES WITH (MODULUS 4, REMAINDER 0);</code></pre>
+<ul><li>PK must include partition key <span class="warn">!</span></li><li><code>DEFAULT</code> partition catches unmatched</li></ul>
+</section>
+
+<section class="card"><h3>Data Types &amp; Casting</h3>
+<h4>Type picker</h4>
+<table><thead><tr><th>Need</th><th>Use</th><th>Note</th></tr></thead><tbody>
+<tr><td>Whole #</td><td><code>int</code> / <code>bigint</code></td><td>FK/ids → bigint</td></tr>
+<tr><td>Money/exact</td><td><code>numeric(p,s)</code></td><td>never <code>float</code> <span class="warn">!</span></td></tr>
+<tr><td>Text</td><td><code>text</code></td><td>varchar = no perf gain</td></tr>
+<tr><td>Time</td><td><code>timestamptz</code></td><td>default; UTC-aware</td></tr>
+<tr><td>Bool</td><td><code>boolean</code></td><td>t/f/null</td></tr>
+<tr><td>UUID</td><td><code>uuid</code></td><td><code>gen_random_uuid()</code> <span class="pg">PG</span></td></tr>
+<tr><td>Doc</td><td><code>jsonb</code></td><td>indexed; json=raw text</td></tr>
+<tr><td>List</td><td><code>int[]</code></td><td>GIN-indexable</td></tr>
+<tr><td>Span</td><td><code>tstzrange</code></td><td>+ exclusion constraint</td></tr>
+<tr><td>Fixed set</td><td><code>enum</code></td><td>ordered; alter=add only</td></tr>
+<tr><td>Address</td><td><code>inet</code>/<code>cidr</code></td><td>IP-aware ops</td></tr>
+</tbody></table>
+<h4>numeric(p,s)</h4>
+<ul><li><code>p</code>=total digits, <code>s</code>=after decimal</li><li><code>numeric(12,2)</code> → 9999999999.99</li><li>bare <code>numeric</code> = unbounded exact</li></ul>
+<h4>json vs jsonb</h4>
+<table><thead><tr><th></th><th>json</th><th>jsonb</th></tr></thead><tbody>
+<tr><td>Store</td><td>verbatim text</td><td>binary, dedup keys</td></tr>
+<tr><td>Index</td><td>no</td><td>GIN <code>@&gt;</code> <code>?</code></td></tr>
+<tr><td>Pick</td><td>rarely</td><td>default</td></tr>
+</tbody></table>
+<h4>Casting</h4>
+<pre><code>val::numeric        -- PG
+CAST(val AS numeric) -- ANSI
+'2026-01-01'::date
+'{1,2}'::int[]
+col::text           -- enum→text</code></pre>
+<span class="pg">PG</span> <code>::</code> shorthand · <span class="ansi">ANSI</span> <code>CAST()</code>
+<h4>Safe cast <span class="pg">PG16+</span></h4>
+<pre><code>SELECT CASE WHEN pg_input_is_valid(s,'integer')
+            THEN s::int END
+FROM raw;   -- NULL on bad input, no error</code></pre>
+<h4>serial vs identity</h4>
+<ul><li><code>serial</code> = legacy seq+default; ownership quirks <span class="warn">!</span></li><li>Prefer <code>GENERATED ALWAYS AS IDENTITY</code> <span class="ansi">ANSI</span></li><li><code>BY DEFAULT</code> variant lets explicit inserts override</li></ul>
+</section>
+
+<section class="card"><h3>DML — Writing Data</h3>
+<h4>INSERT</h4>
+<pre><code>INSERT INTO trades (id, sym, qty, px)
+VALUES (1,'AAPL',100,191.20),
+       (2,'MSFT', 50,DEFAULT);   -- DEFAULT = column default
+-- bulk from query
+INSERT INTO trades_archive
+SELECT * FROM trades WHERE ts &lt; now()-interval '1y';</code></pre>
+<table><thead><tr><th>Form</th><th>Use</th></tr></thead><tbody>
+<tr><td><code>VALUES (..),(..)</code></td><td>multi-row, one stmt</td></tr>
+<tr><td><code>INSERT..SELECT</code></td><td>copy/derive rows</td></tr>
+<tr><td><code>DEFAULT VALUES</code></td><td>all-default row</td></tr>
+<tr><td><code>OVERRIDING SYSTEM VALUE</code></td><td>write identity col</td></tr>
+</tbody></table>
+
+<h4>RETURNING <span class="pg">PG</span></h4>
+<ul><li>Works on INSERT / UPDATE / DELETE / MERGE</li>
+<li>Returns affected rows w/o re-query — grab generated keys</li></ul>
+<pre><code>INSERT INTO trades(sym,qty) VALUES('IBM',10)
+RETURNING id, ts;          -- get serial/default
+UPDATE trades SET qty=qty+5 WHERE id=1 RETURNING *;</code></pre>
+
+<h4>Join-UPDATE / DELETE <span class="pg">PG</span></h4>
+<pre><code>UPDATE settlements s
+SET status='confirmed'
+FROM trades t                      -- extra rel in FROM
+WHERE s.trade_id=t.id AND t.sym='AAPL';
+
+DELETE FROM trades t
+USING counterparties c             -- extra rel in USING
+WHERE t.cp_id=c.id AND c.blocked;</code></pre>
+<span class="warn">!</span> No JOIN keyword — list rels in <code>FROM</code>/<code>USING</code>, link in <code>WHERE</code>. Beware unjoined preds = cartesian.
+
+<h4>UPSERT — ON CONFLICT <span class="pg">PG</span></h4>
+<pre><code>INSERT INTO instruments(isin,name,px)
+VALUES('US0378331005','Apple',191)
+ON CONFLICT (isin) DO UPDATE
+  SET px = EXCLUDED.px,            -- proposed row
+      name = EXCLUDED.name
+WHERE instruments.px &lt;&gt; EXCLUDED.px;   -- optional guard
+-- ignore dupes:
+INSERT INTO instruments(isin) VALUES('..')
+ON CONFLICT DO NOTHING;</code></pre>
+<ul><li><code>EXCLUDED.*</code> = the row that failed to insert</li>
+<li>Conflict target = unique/PK index cols (or <code>ON CONSTRAINT name</code>)</li></ul>
+
+<h4>MERGE <span class="ansi">ANSI</span> (PG15+)</h4>
+<pre><code>MERGE INTO positions p
+USING eod_trades t ON p.sym=t.sym
+WHEN MATCHED AND t.qty=0 THEN DELETE
+WHEN MATCHED THEN UPDATE SET qty=p.qty+t.qty
+WHEN NOT MATCHED THEN INSERT(sym,qty) VALUES(t.sym,t.qty);</code></pre>
+<table><thead><tr><th>vs ON CONFLICT</th></tr></thead><tbody>
+<tr><td>Multi-action (UPDATE+DELETE+INSERT)</td></tr>
+<tr><td>Joins arbitrary source rel, no unique index needed</td></tr>
+<tr><td><span class="warn">!</span> No <code>RETURNING</code> pre-PG17; PG17+ supports it</td></tr>
+</tbody></table>
+</section>
+
+<section class="card"><h3>SELECT &amp; Query Mechanics</h3>
+<h4>Logical execution order</h4>
+<ul>
+<li><code>FROM</code>/<code>JOIN</code> &rarr; build row set</li>
+<li><code>WHERE</code> &rarr; filter rows</li>
+<li><code>GROUP BY</code> &rarr; aggregate</li>
+<li><code>HAVING</code> &rarr; filter groups</li>
+<li><code>SELECT</code> &rarr; compute cols/aliases</li>
+<li><code>DISTINCT</code> &rarr; dedupe</li>
+<li><code>ORDER BY</code> &rarr; sort</li>
+<li><code>LIMIT</code>/<code>OFFSET</code> &rarr; slice</li>
+</ul>
+<span class="warn">!</span> SELECT aliases run <em>after</em> WHERE, so <code>WHERE alias=...</code> fails. ORDER BY/GROUP BY <em>can</em> see them <span class="pg">PG</span>.
+<h4>Operators</h4>
+<table><thead><tr><th>Op</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>=</code> <code>&lt;&gt;</code>/<code>!=</code></td><td>eq / not eq</td></tr>
+<tr><td><code>a BETWEEN x AND y</code></td><td>inclusive both ends</td></tr>
+<tr><td><code>IN (..)</code></td><td>set membership</td></tr>
+<tr><td><code>LIKE</code> <span class="ansi">ANSI</span></td><td>case-sens <code>%</code> <code>_</code></td></tr>
+<tr><td><code>ILIKE</code> <span class="pg">PG</span></td><td>case-insens</td></tr>
+<tr><td><code>~</code> <code>~*</code> <span class="pg">PG</span></td><td>regex / case-insens</td></tr>
+<tr><td><code>!~</code> <code>!~*</code> <span class="pg">PG</span></td><td>negated regex</td></tr>
+<tr><td><code>SIMILAR TO</code> <span class="ansi">ANSI</span></td><td>SQL regex (rare)</td></tr>
+</tbody></table>
+<span class="warn">!</span> <code>x IN (NULL)</code> &amp; <code>x &lt;&gt; NULL</code> never true &mdash; use <code>IS NULL</code>.
+<h4>CASE &amp; null helpers</h4>
+<pre><code>CASE WHEN qty &gt; 0 THEN 'long'
+     WHEN qty &lt; 0 THEN 'short'
+     ELSE 'flat' END</code></pre>
+<table><thead><tr><th>Fn</th><th>Returns</th></tr></thead><tbody>
+<tr><td><code>COALESCE(a,b,..)</code></td><td>first non-NULL</td></tr>
+<tr><td><code>NULLIF(a,b)</code></td><td>NULL if a=b (guard /0)</td></tr>
+<tr><td><code>GREATEST(..)</code>/<code>LEAST(..)</code></td><td>max/min, skip NULLs</td></tr>
+</tbody></table>
+<h4>Pagination</h4>
+<pre><code>-- offset: simple, slow deep pages
+SELECT * FROM trades
+ORDER BY ts DESC, id DESC
+LIMIT 50 OFFSET 5000;
+-- keyset: O(1) deep, needs unique tiebreak
+SELECT * FROM trades
+WHERE (ts, id) &lt; (:ts, :id)
+ORDER BY ts DESC, id DESC
+LIMIT 50;</code></pre>
+<span class="warn">!</span> OFFSET still scans+discards skipped rows; keyset seeks via index. Tuple compare order must match <code>ORDER BY</code>.
+<h4>DISTINCT vs DISTINCT ON <span class="pg">PG</span></h4>
+<pre><code>-- dedupe whole row
+SELECT DISTINCT ccy FROM trades;
+-- 1 row per ccy: latest trade
+SELECT DISTINCT ON (ccy) ccy, ts, px
+FROM trades
+ORDER BY ccy, ts DESC;</code></pre>
+<span class="warn">!</span> <code>DISTINCT ON</code> leading <code>ORDER BY</code> cols must match the ON list; the rest picks the kept row.
+</section>
+
+<section class="card"><h3>Joins &amp; Set Operations</h3>
+<table><thead><tr><th>Join</th><th>Keeps</th></tr></thead><tbody>
+<tr><td><code>INNER</code></td><td>matched rows only</td></tr>
+<tr><td><code>LEFT</code></td><td>all left + matched right (NULL fill)</td></tr>
+<tr><td><code>RIGHT</code></td><td>all right + matched left</td></tr>
+<tr><td><code>FULL</code></td><td>all both sides, NULL where no match</td></tr>
+<tr><td><code>CROSS</code></td><td>cartesian product (no ON)</td></tr>
+</tbody></table>
+<h4>ON / USING / NATURAL</h4>
+<table><thead><tr><th>Form</th><th>Note</th></tr></thead><tbody>
+<tr><td><code>ON a.id=b.id</code></td><td>explicit, any predicate</td></tr>
+<tr><td><code>USING(id)</code></td><td>equal-named cols, one merged output col</td></tr>
+<tr><td><code>NATURAL JOIN</code></td><td><span class="warn">!</span> auto-joins all same-name cols; brittle, avoid</td></tr>
+</tbody></table>
+<h4>LATERAL — per-row subquery / top-N per group</h4>
+<pre><code>SELECT i.symbol, t.*
+FROM instruments i
+CROSS JOIN LATERAL (
+  SELECT * FROM trades t
+  WHERE t.instrument_id = i.id
+  ORDER BY t.ts DESC LIMIT 3
+) t;</code></pre>
+<ul><li><code>LEFT JOIN LATERAL ... ON true</code> keeps left rows with no match.</li>
+<li>Subquery may reference earlier FROM items.</li></ul>
+<h4>Semi / Anti join</h4>
+<pre><code>-- semi: counterparties WITH trades
+SELECT * FROM counterparties c
+WHERE EXISTS (SELECT 1 FROM trades t
+              WHERE t.cp_id = c.id);
+-- anti: WITHOUT trades
+SELECT * FROM counterparties c
+WHERE NOT EXISTS (SELECT 1 FROM trades t
+                  WHERE t.cp_id = c.id);</code></pre>
+<ul><li>Anti alt: <code>LEFT JOIN ... WHERE t.id IS NULL</code>.</li>
+<li><span class="warn">!</span> <code>NOT IN (subquery)</code> returns no rows if any value is NULL — use <code>NOT EXISTS</code>.</li></ul>
+<h4>Set operations</h4>
+<table><thead><tr><th>Op</th><th>Result</th></tr></thead><tbody>
+<tr><td><code>UNION</code></td><td>both, dedup'd</td></tr>
+<tr><td><code>UNION ALL</code></td><td>both, keep dups (faster)</td></tr>
+<tr><td><code>INTERSECT</code></td><td>rows in both</td></tr>
+<tr><td><code>EXCEPT</code></td><td>in 1st not 2nd <span class="ansi">ANSI</span> (Oracle: MINUS)</td></tr>
+</tbody></table>
+<ul><li>Each takes <code>ALL</code> variant; default dedups (sort/hash cost).</li>
+<li>Columns matched by position; types must be compatible. <code>ORDER BY</code> only on final query.</li></ul>
+</section>
+
+<section class="card diagram"><h3>Join Algorithm — what the planner picks</h3>
+<div class="mermaid">
+flowchart TD
+  A{"Row counts?"} -->|"small / indexed inner"| NL["Nested Loop"]
+  A -->|"both large, equality join"| HJ["Hash Join"]
+  A -->|"inputs already sorted on key"| MJ["Merge Join"]
+  NL --> N1["index on inner = fast"]
+  HJ --> N2["builds hash of smaller side; needs work_mem"]
+  MJ --> N3["great for range / pre-sorted"]
+</div></section>
+
+<section class="card"><h3>Aggregation &amp; Grouping</h3>
+<h4>Aggregate functions</h4>
+<table><thead><tr><th>Fn</th><th>Returns</th></tr></thead><tbody>
+<tr><td><code>count(*)</code></td><td>all rows incl NULLs</td></tr>
+<tr><td><code>count(col)</code></td><td>non-NULL rows only <span class="warn">!</span></td></tr>
+<tr><td><code>count(DISTINCT col)</code></td><td>distinct non-NULL</td></tr>
+<tr><td><code>sum/avg</code></td><td>skip NULL; sum∅=NULL</td></tr>
+<tr><td><code>min/max</code></td><td>any orderable type</td></tr>
+<tr><td><code>bool_and/bool_or</code></td><td>all-true / any-true</td></tr>
+<tr><td><code>string_agg(c,',')</code></td><td>concat w/ delimiter</td></tr>
+<tr><td><code>array_agg(c)</code></td><td>values → array</td></tr>
+<tr><td><code>jsonb_agg(c)</code></td><td>values → JSON array <span class="pg">PG</span></td></tr>
+<tr><td><code>jsonb_object_agg(k,v)</code></td><td>k/v → JSON obj <span class="pg">PG</span></td></tr>
+</tbody></table>
+
+<h4>GROUP BY / HAVING</h4>
+<ul>
+<li><code>WHERE</code> filters rows (pre-group); <code>HAVING</code> filters groups (post-agg).</li>
+<li><code>HAVING</code> can use aggregates; <code>WHERE</code> cannot.</li>
+<li>Every non-aggregated SELECT col must be in <code>GROUP BY</code>.</li>
+</ul>
+<pre><code>SELECT counterparty_id, sum(notional) AS vol
+FROM trades
+WHERE status = 'SETTLED'
+GROUP BY counterparty_id
+HAVING sum(notional) &gt; 1e6;</code></pre>
+
+<h4>FILTER &amp; conditional pivot</h4>
+<span class="pg">PG</span> per-aggregate <code>FILTER (WHERE ...)</code> beats <code>CASE</code>:
+<pre><code>SELECT
+  count(*) FILTER (WHERE side='BUY')  AS buys,
+  count(*) FILTER (WHERE side='SELL') AS sells,
+  sum(notional) FILTER (WHERE ccy='USD') AS usd
+FROM trades GROUP BY instrument_id;</code></pre>
+<span class="ansi">ANSI</span> fallback: <code>sum(CASE WHEN side='BUY' THEN 1 ELSE 0 END)</code>.
+
+<h4>DISTINCT / ORDER BY inside agg</h4>
+<pre><code>string_agg(DISTINCT ccy, ',' ORDER BY ccy)
+array_agg(price ORDER BY ts DESC)</code></pre>
+<span class="warn">!</span> <code>ORDER BY</code> inside agg sorts its input only.
+
+<h4>GROUPING SETS / ROLLUP / CUBE</h4>
+<table><thead><tr><th>Clause</th><th>Adds subtotals for</th></tr></thead><tbody>
+<tr><td><code>ROLLUP(a,b)</code></td><td>(a,b),(a),()</td></tr>
+<tr><td><code>CUBE(a,b)</code></td><td>all combos +()</td></tr>
+<tr><td><code>GROUPING SETS((a),(b),())</code></td><td>explicit list</td></tr>
+</tbody></table>
+<pre><code>SELECT desk, ccy, sum(notional)
+FROM trades
+GROUP BY ROLLUP(desk, ccy);
+-- grouping(desk) =1 marks subtotal rows</code></pre>
+</section>
+
+<section class="card"><h3>Window Functions</h3>
+<h4>Anatomy</h4>
+<pre><code>fn() OVER (
+  PARTITION BY cpty
+  ORDER BY trade_ts
+  ROWS BETWEEN 1 PRECEDING
+       AND CURRENT ROW)</code></pre>
+<ul><li>PARTITION/ORDER/frame all optional; bare <code>OVER ()</code> = whole result.</li><li>Name &amp; reuse via <code>WINDOW w AS (...)</code> then <code>OVER w</code>.</li><li>Runs after WHERE/GROUP/HAVING, before ORDER/LIMIT.</li></ul>
+<h4>Ranking (ORDER BY required)</h4>
+<table><thead><tr><th>Fn</th><th>Ties</th><th>Seq on tie</th></tr></thead><tbody>
+<tr><td><code>ROW_NUMBER</code></td><td>broken arbitrarily</td><td>1,2,3,4</td></tr>
+<tr><td><code>RANK</code></td><td>same rank, gaps</td><td>1,1,3,4</td></tr>
+<tr><td><code>DENSE_RANK</code></td><td>same, no gaps</td><td>1,1,2,3</td></tr>
+<tr><td><code>NTILE(n)</code></td><td>n buckets</td><td>even split</td></tr>
+<tr><td><code>PERCENT_RANK</code></td><td>(rank-1)/(N-1)</td><td>0..1</td></tr>
+</tbody></table>
+<h4>Offset / value</h4>
+<table><thead><tr><th>Fn</th><th>Returns</th></tr></thead><tbody>
+<tr><td><code>LAG(c,o,def)</code></td><td>row o before (def 1)</td></tr>
+<tr><td><code>LEAD(c,o,def)</code></td><td>row o after</td></tr>
+<tr><td><code>FIRST_VALUE(c)</code></td><td>first in frame</td></tr>
+<tr><td><code>LAST_VALUE(c)</code></td><td>last <span class="warn">!</span> see frame</td></tr>
+<tr><td><code>NTH_VALUE(c,n)</code></td><td>nth in frame</td></tr>
+</tbody></table>
+<h4>Frames</h4>
+<table><thead><tr><th>Unit</th><th>Counts</th></tr></thead><tbody>
+<tr><td><code>ROWS</code></td><td>physical rows</td></tr>
+<tr><td><code>RANGE</code></td><td>peers w/ same ORDER val</td></tr>
+<tr><td><code>GROUPS</code></td><td>peer groups (PG11+)</td></tr>
+</tbody></table>
+<ul><li>Bounds: <code>UNBOUNDED PRECEDING</code>, <code>n PRECEDING</code>, <code>CURRENT ROW</code>, <code>n FOLLOWING</code>, <code>UNBOUNDED FOLLOWING</code>.</li><li><span class="warn">!</span> Default frame w/ ORDER BY = <code>RANGE UNBOUNDED PRECEDING TO CURRENT ROW</code> → <code>LAST_VALUE</code> stops at current row. Fix: add <code>ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING</code>.</li><li>No ORDER BY → frame = whole partition.</li><li><code>EXCLUDE CURRENT ROW</code> / <code>TIES</code> / <code>GROUP</code> (PG11+).</li></ul>
+<h4>Running total / rolling avg</h4>
+<pre><code>SUM(qty) OVER (PARTITION BY cpty
+  ORDER BY trade_ts) AS run_tot,
+AVG(px) OVER (ORDER BY trade_ts
+  ROWS 6 PRECEDING) AS ma7</code></pre>
+<h4>Can't filter window inline <span class="warn">!</span></h4>
+<pre><code>WITH r AS (
+  SELECT *, ROW_NUMBER() OVER (
+    PARTITION BY cpty
+    ORDER BY trade_ts DESC) rn
+  FROM trades)
+SELECT * FROM r WHERE rn = 1;</code></pre>
+<ul><li>Window fns illegal in WHERE/HAVING/GROUP BY — wrap in CTE/subquery. <span class="pg">PG</span> <code>QUALIFY</code> not supported.</li></ul>
+</section>
+
+<section class="card"><h3>CTEs &amp; Recursion</h3>
+<h4>Basic &amp; chaining</h4>
+<pre><code>WITH big AS (
+  SELECT counterparty_id, SUM(notional) AS tot
+  FROM trades GROUP BY counterparty_id
+), ranked AS (
+  SELECT *, rank() OVER (ORDER BY tot DESC) AS r
+  FROM big
+)
+SELECT * FROM ranked WHERE r &lt;= 10;</code></pre>
+<ul><li>Comma-chain many CTEs; each sees earlier ones.</li><li>Scope = the single statement.</li></ul>
+<h4>Inlining</h4>
+<table><thead><tr><th>Clause</th><th>Effect</th></tr></thead><tbody>
+<tr><td><code>NOT MATERIALIZED</code></td><td>inline into outer query (folds, pushes predicates)</td></tr>
+<tr><td><code>MATERIALIZED</code></td><td>force one-time eval, reuse result <span class="warn">!</span> blocks predicate pushdown</td></tr>
+<tr><td>default (PG12+)</td><td>inline if used once &amp; side-effect-free</td></tr>
+</tbody></table>
+<pre><code>WITH t AS NOT MATERIALIZED (
+  SELECT * FROM trades WHERE book='FX'
+) SELECT * FROM t WHERE notional &gt; 1e6;</code></pre>
+<p>Pre-PG12 always materialized (optimisation fence).</p>
+<h4>Data-modifying CTE <span class="pg">PG</span></h4>
+<pre><code>WITH moved AS (
+  DELETE FROM settlements
+  WHERE status='stale'
+  RETURNING *
+)
+INSERT INTO settlements_archive
+SELECT * FROM moved;</code></pre>
+<ul><li><code>INSERT/UPDATE/DELETE ... RETURNING</code> feeds rows downstream.</li><li>All sub-statements see the <em>same</em> snapshot <span class="warn">!</span> a modifying CTE can't see another's changes; order of execution not guaranteed.</li><li>Outer must reference the CTE or it still runs once.</li></ul>
+<h4>WITH RECURSIVE</h4>
+<pre><code>WITH RECURSIVE nums(n) AS (
+  SELECT 1                 -- base
+  UNION ALL
+  SELECT n+1 FROM nums     -- recursive
+  WHERE n &lt; 100
+)
+SELECT n FROM nums;</code></pre>
+<pre><code>WITH RECURSIVE tree AS (
+  SELECT id, parent_id, 1 AS lvl
+  FROM instruments WHERE parent_id IS NULL
+  UNION ALL
+  SELECT c.id, c.parent_id, t.lvl+1
+  FROM instruments c JOIN tree t
+    ON c.parent_id = t.id
+)
+SELECT * FROM tree;</code></pre>
+<ul><li><code>UNION</code> dedups; <code>UNION ALL</code> faster, needs own guard.</li><li>Recursive term refs CTE name exactly once.</li></ul>
+<h4>SEARCH / CYCLE <span class="pg">PG14+</span> <span class="ansi">ANSI</span></h4>
+<pre><code>WITH RECURSIVE tree AS ( ... )
+  SEARCH DEPTH FIRST BY id SET ord
+  CYCLE id SET is_cyc USING path
+SELECT * FROM tree ORDER BY ord;</code></pre>
+<table><thead><tr><th>Clause</th><th>Adds col</th></tr></thead><tbody>
+<tr><td><code>SEARCH DEPTH/BREADTH FIRST BY col SET ord</code></td><td>ordering col</td></tr>
+<tr><td><code>CYCLE col SET flag USING path</code></td><td>bool flag + path array; stops at repeat</td></tr>
+</tbody></table>
+<ul><li>CYCLE guards infinite loops on cyclic graphs <span class="warn">!</span></li></ul>
+</section>
+
+<section class="card"><h3>JSON &amp; JSONB</h3>
+<h4>Operators</h4>
+<table><thead><tr><th>Op</th><th>Returns</th><th>Use</th></tr></thead><tbody>
+<tr><td><code>-&gt;</code></td><td>json/jsonb</td><td><code>j-&gt;'k'</code>, <code>j-&gt;0</code></td></tr>
+<tr><td><code>-&gt;&gt;</code></td><td>text</td><td><code>j-&gt;&gt;'k'</code></td></tr>
+<tr><td><code>#&gt;</code></td><td>jsonb</td><td><code>j#&gt;'{a,b}'</code> path</td></tr>
+<tr><td><code>#&gt;&gt;</code></td><td>text</td><td><code>j#&gt;&gt;'{a,0}'</code></td></tr>
+<tr><td><code>@&gt;</code></td><td>bool</td><td>left contains right</td></tr>
+<tr><td><code>&lt;@</code></td><td>bool</td><td>left contained by</td></tr>
+<tr><td><code>?</code></td><td>bool</td><td>key/elem exists</td></tr>
+<tr><td><code>?|</code></td><td>bool</td><td>any key in array</td></tr>
+<tr><td><code>?&amp;</code></td><td>bool</td><td>all keys in array</td></tr>
+</tbody></table>
+<span class="pg">PG</span> all jsonb operators are PG-specific. <code>@&gt;</code>,<code>?</code>,<code>?|</code>,<code>?&amp;</code> only on <code>jsonb</code>, not <code>json</code>.
+
+<h4>jsonpath / query</h4>
+<table><thead><tr><th>Expr</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>@@</code></td><td>jsonb matches jsonpath predicate</td></tr>
+<tr><td><code>@?</code></td><td>jsonpath returns any item</td></tr>
+<tr><td><code>jsonb_path_query</code></td><td>SETOF matching items</td></tr>
+<tr><td><code>jsonb_path_exists</code></td><td>bool</td></tr>
+</tbody></table>
+<pre><code>SELECT jsonb_path_query(doc,
+  '$.legs[*] ? (@.qty &gt; 100).symbol')
+FROM trades;
+-- predicate filter on doc
+SELECT * FROM trades
+WHERE doc @@ '$.ccy == "USD"';</code></pre>
+
+<h4>JSON_TABLE <span class="pg">PG17</span></h4>
+<pre><code>SELECT t.* FROM trades,
+JSON_TABLE(doc, '$.legs[*]' COLUMNS (
+  symbol text PATH '$.symbol',
+  qty    int  PATH '$.qty',
+  id FOR ORDINALITY
+)) AS t;</code></pre>
+
+<h4>Build</h4>
+<pre><code>jsonb_build_object('sym',s,'qty',q)
+jsonb_build_array(1,2,3)
+to_jsonb(row_or_val)
+jsonb_agg(x) / jsonb_object_agg(k,v)</code></pre>
+
+<h4>Modify (immutable, returns new)</h4>
+<table><thead><tr><th>Op</th><th>Effect</th></tr></thead><tbody>
+<tr><td><code>jsonb_set(j,'{a,b}',v)</code></td><td>set path; add <code>true</code> arg to create</td></tr>
+<tr><td><code>j || j2</code></td><td>shallow merge / append</td></tr>
+<tr><td><code>j - 'key'</code></td><td>delete top key/elem</td></tr>
+<tr><td><code>j #- '{a,b}'</code></td><td>delete at path</td></tr>
+</tbody></table>
+<span class="warn">!</span> <code>||</code> merges only top level; nested keys overwrite wholesale.
+
+<h4>Indexing</h4>
+<table><thead><tr><th>Index</th><th>Supports</th></tr></thead><tbody>
+<tr><td><code>GIN (col)</code> default</td><td><code>@&gt;</code> <code>?</code> <code>?|</code> <code>?&amp;</code> path</td></tr>
+<tr><td><code>GIN (col jsonb_path_ops)</code></td><td><code>@&gt;</code> only — smaller/faster</td></tr>
+<tr><td><code>btree ((col-&gt;&gt;'k'))</code></td><td>equality on one key</td></tr>
+</tbody></table>
+<pre><code>CREATE INDEX ON trades
+  USING gin (doc jsonb_path_ops);</code></pre>
+
+<h4>json vs jsonb</h4>
+<ul>
+<li><code>json</code>: raw text, preserves whitespace/dup keys/order, no index.</li>
+<li><code>jsonb</code>: binary, dedups keys (last wins), reorders, GIN-indexable. <span class="pg">PG</span></li>
+<li>Default to <code>jsonb</code> unless you need byte-exact round-trip.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Dates, Times &amp; Intervals</h3>
+<h4>Types</h4>
+<table><thead><tr><th>Type</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>timestamptz</code></td><td>tz-aware, stores UTC <span class="pg">PG</span> — default choice</td></tr>
+<tr><td><code>timestamp</code></td><td>no tz, wall-clock; <span class="warn">!</span> ambiguous</td></tr>
+<tr><td><code>date</code> / <code>time</code></td><td>day only / time only</td></tr>
+<tr><td><code>interval</code></td><td>duration (months/days/secs)</td></tr>
+</tbody></table>
+<h4>Now / current</h4>
+<table><thead><tr><th>Expr</th><th>Gives</th></tr></thead><tbody>
+<tr><td><code>now()</code> / <code>current_timestamp</code></td><td>txn start, tz</td></tr>
+<tr><td><code>current_date</code> / <code>current_time</code></td><td>date / time</td></tr>
+<tr><td><code>clock_timestamp()</code></td><td>real wall-clock, mid-txn</td></tr>
+<tr><td><code>statement_timestamp()</code></td><td>stmt start</td></tr>
+</tbody></table>
+<h4>Extract / truncate</h4>
+<pre><code>EXTRACT(year FROM t)        -- numeric field
+date_part('dow', t)         -- 0=Sun
+date_trunc('month', t)      -- floor to bucket
+date_trunc('day', t, 'UTC') -- tz-aware PG16+
+t AT TIME ZONE 'Europe/London'</code></pre>
+<ul>
+<li><code>EXTRACT</code> fields: <code>year month day hour minute second dow doy week epoch quarter</code></li>
+<li><code>EXTRACT(epoch FROM a-b)</code> → seconds diff</li>
+</ul>
+<h4>Format / parse</h4>
+<pre><code>to_char(t,'YYYY-MM-DD HH24:MI:SS')
+to_date('2026-06-10','YYYY-MM-DD')
+to_timestamp('10/06 14:30','DD/MM HH24:MI')
+'2026-06-10'::date          -- cast (PG) <span class="pg">PG</span>
+CAST('2026-06-10' AS date)  -- <span class="ansi">ANSI</span></code></pre>
+<table><thead><tr><th>Pat</th><th>Means</th></tr></thead><tbody>
+<tr><td><code>YYYY</code> / <code>YY</code></td><td>4 / 2-digit year</td></tr>
+<tr><td><code>MM</code> / <code>Mon</code> / <code>Month</code></td><td>month num / Jan / January</td></tr>
+<tr><td><code>DD</code> / <code>Dy</code> / <code>Day</code></td><td>day num / Mon / Monday</td></tr>
+<tr><td><code>HH24</code> / <code>HH12</code></td><td>00-23 / 01-12</td></tr>
+<tr><td><code>MI</code> / <code>SS</code> / <code>MS</code></td><td>minute / second / millisec</td></tr>
+<tr><td><code>AM</code> / <code>TZ</code> / <code>D</code></td><td>meridiem / tz / day-of-wk</td></tr>
+</tbody></table>
+<h4>Intervals / arithmetic</h4>
+<pre><code>t + interval '1 day 2 hours'
+settled_at - traded_at        -- interval
+age(timestamp '2026-06-10', dob) -- yr/mo/day
+age(t)                        -- vs current_date
+justify_interval(interval '30 days') -- → 1 mon
+date '2026-06-10' + 7         -- date +int = date</code></pre>
+<span class="warn">!</span> <code>+ interval '1 month'</code> clamps month-end (Jan 31 → Feb 28).
+<h4>generate_series — buckets / gap-fill</h4>
+<pre><code>SELECT g::date AS day, count(s.id)
+FROM generate_series(
+       date '2026-06-01',
+       date '2026-06-30',
+       interval '1 day') g
+LEFT JOIN settlements s
+  ON date_trunc('day', s.settled_at) = g
+GROUP BY g ORDER BY g;</code></pre>
+<ul><li>Fills zero-rows for empty days (LEFT JOIN onto series).</li>
+<li>Numeric form: <code>generate_series(1,10)</code>.</li></ul>
+</section>
+
+<section class="card"><h3>String, Number &amp; Util Functions</h3>
+<h4>String</h4>
+<table><thead><tr><th>Fn</th><th>Result</th></tr></thead><tbody>
+<tr><td><code>length(s)</code> / <code>char_length</code></td><td>chars</td></tr>
+<tr><td><code>lower</code> / <code>upper</code> / <code>initcap</code></td><td>case fold</td></tr>
+<tr><td><code>trim</code> / <code>ltrim</code> / <code>rtrim(s[,chars])</code></td><td>strip ends</td></tr>
+<tr><td><code>lpad</code> / <code>rpad(s,len[,fill])</code></td><td>pad to len</td></tr>
+<tr><td><code>substring(s,start,len)</code></td><td>1-based slice</td></tr>
+<tr><td><code>position(sub IN s)</code></td><td>idx or 0</td></tr>
+<tr><td><code>left</code> / <code>right(s,n)</code></td><td>n chars (neg=trim)</td></tr>
+<tr><td><code>split_part(s,delim,k)</code></td><td>k-th field (1-based)</td></tr>
+<tr><td><code>replace(s,from,to)</code></td><td>literal swap</td></tr>
+<tr><td><code>starts_with(s,pre)</code></td><td>bool</td></tr>
+</tbody></table>
+<h4>Regex / Format <span class="pg">PG</span></h4>
+<pre><code>regexp_replace(s,'\d+','#','g')  -- all
+regexp_matches(s,'(\w+)@(\w+)')  -- setof text[]
+s ~ '^TR\d+'        -- match  ~* = i-case
+s !~ 'x'            -- not match
+format('%s=%L', col, val)  -- %I ident %L literal</code></pre>
+<ul>
+<li><code>a || b</code> &rarr; NULL if any NULL <span class="warn">!</span> <span class="ansi">ANSI</span></li>
+<li><code>concat(a,b)</code> skips NULL; <code>concat_ws(',',…)</code></li>
+</ul>
+<h4>Numeric</h4>
+<table><thead><tr><th>Fn</th><th>Note</th></tr></thead><tbody>
+<tr><td><code>round(n,d)</code></td><td>d places (numeric)</td></tr>
+<tr><td><code>ceil</code> / <code>floor</code> / <code>trunc(n,d)</code></td><td>trunc tow. 0</td></tr>
+<tr><td><code>abs</code> / <code>mod(a,b)</code> / <code>power(a,b)</code></td><td><code>^</code> = power</td></tr>
+<tr><td><code>random()</code></td><td>[0,1); <code>random(lo,hi)</code> PG17+</td></tr>
+<tr><td><code>width_bucket(v,lo,hi,n)</code></td><td>histogram bin</td></tr>
+</tbody></table>
+<h4>Util</h4>
+<table><thead><tr><th>Fn</th><th>Returns</th></tr></thead><tbody>
+<tr><td><code>coalesce(a,b,…)</code></td><td>1st non-NULL</td></tr>
+<tr><td><code>nullif(a,b)</code></td><td>NULL if a=b</td></tr>
+<tr><td><code>greatest</code> / <code>least(…)</code></td><td>skips NULL</td></tr>
+<tr><td><code>gen_random_uuid()</code> <span class="pg">PG13+</span></td><td>uuid v4</td></tr>
+<tr><td><code>generate_series(a,b[,step])</code></td><td>setof rows</td></tr>
+</tbody></table>
+<pre><code>SELECT d::date
+FROM generate_series('2026-01-01','2026-12-31',
+     interval '1 day') AS g(d);</code></pre>
+<ul><li>cast: <code>x::int</code> <span class="pg">PG</span> vs <code>CAST(x AS int)</code> <span class="ansi">ANSI</span></li></ul>
+</section>
+
+<section class="card"><h3>Indexing</h3>
+<h4>Index types</h4>
+<table><thead><tr><th>Type</th><th>Use for</th></tr></thead><tbody>
+<tr><td>B-tree</td><td>default; <code>=</code> <code>&lt;</code> <code>&gt;</code> <code>BETWEEN</code>, <code>ORDER BY</code>, <code>LIKE 'x%'</code></td></tr>
+<tr><td>Hash</td><td><code>=</code> only; no range/sort</td></tr>
+<tr><td>GIN</td><td>jsonb, arrays, FTS <code>tsvector</code>, trigram (pg_trgm)</td></tr>
+<tr><td>GiST</td><td>ranges, geometry/PostGIS, nearest-neighbour (KNN)</td></tr>
+<tr><td>SP-GiST</td><td>non-balanced: quadtrees, IP/inet, text prefix</td></tr>
+<tr><td>BRIN</td><td>huge tables, naturally ordered (time/append); tiny</td></tr>
+</tbody></table>
+<h4>Composite + leftmost prefix</h4>
+<pre><code>CREATE INDEX ix_t ON trades (counterparty_id, trade_date);
+-- serves: (cp), (cp,date)  NOT: (date) alone</code></pre>
+<ul>
+<li>Order: equality cols first, then range/sort col last.</li>
+<li>Index also serves <code>ORDER BY counterparty_id, trade_date</code>.</li>
+</ul>
+<h4>Covering / partial / expression</h4>
+<pre><code>-- covering: index-only scan (PG11+)
+CREATE INDEX ix_c ON trades (counterparty_id) INCLUDE (amount);
+-- partial: only matching rows indexed
+CREATE INDEX ix_open ON settlements (trade_id)
+  WHERE status = 'PENDING';
+-- expression: matches the same expr in WHERE
+CREATE INDEX ix_low ON counterparties (lower(name));</code></pre>
+<h4>Unique &amp; online build</h4>
+<pre><code>CREATE UNIQUE INDEX ix_u ON instruments (isin);
+CREATE INDEX CONCURRENTLY ix_x ON trades (trade_date);</code></pre>
+<ul>
+<li><code>CONCURRENTLY</code> <span class="pg">PG</span>: no table lock; slower, can't run in a txn, may leave INVALID index on failure.</li>
+</ul>
+<h4>When the index is NOT used <span class="warn">!</span></h4>
+<table><thead><tr><th>Cause</th><th>Fix</th></tr></thead><tbody>
+<tr><td>Low selectivity (returns most rows)</td><td>seq scan is cheaper — expected</td></tr>
+<tr><td><code>WHERE upper(col)=...</code> wraps column</td><td>expression index on <code>upper(col)</code></td></tr>
+<tr><td>Type mismatch (<code>col = '5'</code> vs int)</td><td>cast literal / fix types</td></tr>
+<tr><td>Leading wildcard <code>LIKE '%x'</code></td><td>trigram GIN index</td></tr>
+<tr><td><code>LIKE 'x%'</code> non-C locale</td><td>add <code>text_pattern_ops</code> opclass</td></tr>
+<tr><td>Stale stats</td><td><code>ANALYZE</code> the table</td></tr>
+</tbody></table>
+</section>
+
+<section class="card diagram"><h3>Index Type Decision</h3>
+<div class="mermaid">
+flowchart TD
+  A{"Query shape?"} -->|"= , < > , range, ORDER BY, LIKE 'x%'"| BT["B-tree (default)"]
+  A -->|"equality only, no range"| H["Hash"]
+  A -->|"jsonb @>, array, full-text, trigram"| GIN["GIN"]
+  A -->|"ranges, geo, nearest-neighbour"| GIST["GiST"]
+  A -->|"huge table, naturally ordered (time)"| BRIN["BRIN"]
+  A -->|"fuzzy text similarity"| TRGM["GIN + pg_trgm"]
+</div></section>
+
+<section class="card"><h3>EXPLAIN — Catch & Fix Slow Queries</h3>
+<h4>1. Catch slow queries</h4>
+<table><thead><tr><th>Tool</th><th>Use</th></tr></thead><tbody>
+<tr><td><code>pg_stat_statements</code></td><td>Top offenders by <code>total_exec_time</code>, <code>mean_exec_time</code>, <code>calls</code></td></tr>
+<tr><td><code>auto_explain</code></td><td>Logs plans of slow stmts (<code>auto_explain.log_min_duration</code>)</td></tr>
+<tr><td><code>log_min_duration_statement</code></td><td>Log any stmt &gt; N ms</td></tr>
+</tbody></table>
+<pre><code>SELECT query, calls, mean_exec_time, total_exec_time
+FROM pg_stat_statements
+ORDER BY total_exec_time DESC LIMIT 20;</code></pre>
+
+<h4>2. Read the plan</h4>
+<pre><code>EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM trades WHERE counterparty_id = 42;</code></pre>
+<ul>
+<li>Read <b>inner → outer</b>, bottom-up; child nodes feed parents.</li>
+<li>Compare <code>estimated rows</code> vs <code>actual rows</code> (=<code>rows × loops</code>).</li>
+<li>Hunt the node with the biggest <code>actual time</code> / shared-buffer reads.</li>
+<li><code>BUFFERS</code> shows heap/index pages hit vs read from disk.</li>
+</ul>
+
+<h4>3. Scan nodes</h4>
+<table><thead><tr><th>Node</th><th>Meaning</th></tr></thead><tbody>
+<tr><td>Seq Scan</td><td>Full table read; fine if small / most rows match</td></tr>
+<tr><td>Index Scan</td><td>Walk index → fetch heap rows</td></tr>
+<tr><td>Index Only Scan</td><td>All cols in index; needs visibility map (VACUUM)</td></tr>
+<tr><td>Bitmap Heap Scan</td><td>Build bitmap from index(es), then heap; mid-selectivity</td></tr>
+</tbody></table>
+
+<h4>4. Join nodes</h4>
+<table><thead><tr><th>Node</th><th>Good when</th></tr></thead><tbody>
+<tr><td>Nested Loop</td><td>Inner side tiny / indexed; few outer rows</td></tr>
+<tr><td>Hash Join</td><td>Large equi-join; build hash on smaller side</td></tr>
+<tr><td>Merge Join</td><td>Both inputs sorted on join key</td></tr>
+</tbody></table>
+
+<h4>5. Red flags</h4>
+<ul>
+<li><span class="warn">!</span> est. vs actual rows off by 10×+ → stale stats, run <code>ANALYZE</code></li>
+<li><span class="warn">!</span> Seq Scan on big table w/ selective filter → missing index</li>
+<li><span class="warn">!</span> Nested Loop with huge <code>loops</code> count → N+1-style blowup</li>
+<li><span class="warn">!</span> Sort/Hash <code>Disk: ...kB</code> → raise <code>work_mem</code></li>
+<li><span class="warn">!</span> high <code>Rows Removed by Filter</code> → predicate not using index</li>
+</ul>
+
+<h4>6. Cause → fix</h4>
+<table><thead><tr><th>Symptom</th><th>Fix</th></tr></thead><tbody>
+<tr><td>Seq Scan, selective</td><td><code>CREATE INDEX</code> on filter/join col</td></tr>
+<tr><td>Bad row estimates</td><td><code>ANALYZE tbl</code>; bump stats target; <code>CREATE STATISTICS</code></td></tr>
+<tr><td>Sort spills to disk</td><td><code>SET work_mem='64MB'</code> (per-op, session)</td></tr>
+<tr><td>Non-sargable pred</td><td>Avoid <code>col+1=x</code>, leading <code>%</code> in LIKE</td></tr>
+<tr><td>N+1 / Nested Loop</td><td>Rewrite as set-based JOIN</td></tr>
+<tr><td>Func on indexed col</td><td><code>lower(x)=…</code> → expression index <span class="pg">PG</span></td></tr>
+</tbody></table>
+</section>
+
+<section class="card diagram"><h3>Slow Query — catch then fix</h3>
+<div class="mermaid">
+flowchart TD
+  A["pg_stat_statements: top by mean/total time"] --> B["EXPLAIN (ANALYZE, BUFFERS)"]
+  B --> C{"estimate vs actual rows match?"}
+  C -->|"no, way off"| D["stale stats: ANALYZE / raise stats target"]
+  C -->|"yes"| E{"biggest actual-time node?"}
+  E -->|"Seq Scan on big table"| F["add index / make predicate sargable"]
+  E -->|"Nested Loop over many rows"| G["index inner, or force hash via stats"]
+  E -->|"Sort/Hash spills to disk"| H["raise work_mem"]
+  E -->|"Rows Removed by Filter high"| I["index the filter column"]
+</div></section>
+
+<section class="card"><h3>Transactions, Locking &amp; Isolation</h3>
+<pre><code>BEGIN;
+  UPDATE accounts SET bal = bal-100 WHERE id=1;
+  SAVEPOINT sp1;
+  UPDATE accounts SET bal = bal+100 WHERE id=2;
+  ROLLBACK TO sp1;   -- undo to savepoint, txn alive
+COMMIT;              -- or ROLLBACK</code></pre>
+<ul>
+<li>Locks/snapshots are txn-scoped; released at COMMIT/ROLLBACK.</li>
+<li>Statement error aborts whole txn → only ROLLBACK/ROLLBACK&nbsp;TO allowed until cleared.</li>
+</ul>
+
+<h4>Isolation × anomaly (PG)</h4>
+<table><thead><tr><th>Level</th><th>Dirty</th><th>Non-rep</th><th>Phantom</th><th>Write skew</th></tr></thead>
+<tbody>
+<tr><td>Read Committed <em>(default)</em></td><td>no</td><td>yes</td><td>yes</td><td>yes</td></tr>
+<tr><td>Repeatable Read</td><td>no</td><td>no</td><td>no*</td><td>yes</td></tr>
+<tr><td>Serializable</td><td>no</td><td>no</td><td>no</td><td>no</td></tr>
+</tbody></table>
+<ul>
+<li>RR uses one snapshot for whole txn → no phantoms (*stricter than ANSI). <span class="pg">PG</span></li>
+<li>Serializable = SSI (predicate tracking); may abort with <code>serialization_failure (40001)</code> → retry. <span class="pg">PG</span></li>
+<li><code>SET TRANSACTION ISOLATION LEVEL REPEATABLE READ;</code></li>
+</ul>
+
+<h4>Row lock compatibility (✓ = coexist)</h4>
+<table><thead><tr><th>held ↓ / req →</th><th>KEY SHARE</th><th>SHARE</th><th>NO KEY UPD</th><th>UPDATE</th></tr></thead>
+<tbody>
+<tr><td>FOR KEY SHARE</td><td>✓</td><td>✓</td><td>✓</td><td>✗</td></tr>
+<tr><td>FOR SHARE</td><td>✓</td><td>✓</td><td>✗</td><td>✗</td></tr>
+<tr><td>FOR NO KEY UPDATE</td><td>✓</td><td>✗</td><td>✗</td><td>✗</td></tr>
+<tr><td>FOR UPDATE</td><td>✗</td><td>✗</td><td>✗</td><td>✗</td></tr>
+</tbody></table>
+<ul><li>FK checks take <code>KEY SHARE</code>; plain UPDATE of non-key cols takes <code>NO KEY UPDATE</code> → fewer FK conflicts.</li></ul>
+
+<h4>Queue / worker pattern</h4>
+<pre><code>SELECT id FROM jobs
+WHERE status='ready'
+ORDER BY id
+FOR UPDATE SKIP LOCKED   -- skip rows others hold
+LIMIT 10;                -- or NOWAIT → error if locked</code></pre>
+<ul><li><code>SKIP LOCKED</code>: each worker grabs disjoint rows, no contention. <span class="pg">PG</span></li></ul>
+
+<h4>Advisory locks (app-defined, key = bigint)</h4>
+<table><thead><tr><th>Fn</th><th>Behaviour</th></tr></thead>
+<tbody>
+<tr><td><code>pg_advisory_lock(k)</code></td><td>session lock, blocks</td></tr>
+<tr><td><code>pg_try_advisory_lock(k)</code></td><td>→ bool, non-blocking</td></tr>
+<tr><td><code>pg_advisory_xact_lock(k)</code></td><td>txn-scoped, auto-release</td></tr>
+<tr><td><code>pg_advisory_unlock(k)</code></td><td>release session lock</td></tr>
+</tbody></table>
+
+<h4>Deadlocks <span class="warn">!</span></h4>
+<ul>
+<li>Cause: txn A locks r1→r2, txn B locks r2→r1.</li>
+<li>PG auto-detects after <code>deadlock_timeout</code> (1s) &amp; aborts one (<code>40P01</code>); survivor proceeds.</li>
+<li>Avoid: lock rows in a consistent order; keep txns short; take <code>SELECT … FOR UPDATE</code> up front; use <code>SKIP LOCKED</code> for queues.</li>
+</ul>
+</section>
+
+<section class="card diagram"><h3>Deadlock — wait-for cycle</h3>
+<div class="mermaid">
+flowchart LR
+  T1["Txn 1<br/>holds row A<br/>wants row B"] -->|"waits for B"| T2["Txn 2<br/>holds row B<br/>wants row A"]
+  T2 -->|"waits for A"| T1
+</div>
+<p class="cap">Cycle = deadlock. PG's detector (after deadlock_timeout, default 1s) aborts one txn with SQLSTATE 40P01. Avoid: lock rows in a consistent order; keep txns short; SELECT … FOR UPDATE up front; SKIP LOCKED for queues.</p></section>
+
+<section class="card diagram"><h3>MVCC — tuple version chain</h3>
+<div class="mermaid">
+flowchart LR
+  V1["v1<br/>xmin=100 xmax=150"] -->|"UPDATE @150"| V2["v2<br/>xmin=150 xmax=0"]
+</div>
+<p class="cap">A row UPDATE writes a NEW tuple; the old one stays until VACUUM. A snapshot sees the version whose xmin committed before it and whose xmax did not — readers never block writers.</p></section>
+
+<section class="card"><h3>Constraints &amp; Integrity</h3>
+<table><thead><tr><th>Constraint</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>PRIMARY KEY</code></td><td>UNIQUE + NOT NULL; one per table</td></tr>
+<tr><td><code>UNIQUE</code></td><td>no dup values; NULLs allowed &amp; distinct by default</td></tr>
+<tr><td><code>NOT NULL</code></td><td>column must have value</td></tr>
+<tr><td><code>CHECK (expr)</code></td><td>row-level boolean; NULL passes</td></tr>
+<tr><td><code>FOREIGN KEY</code></td><td>references parent key</td></tr>
+<tr><td><code>EXCLUDE</code></td><td>generalized uniqueness via operators</td></tr>
+</tbody></table>
+
+<h4>Keys &amp; uniqueness</h4>
+<pre><code>CREATE TABLE trades (
+  id    uuid PRIMARY KEY DEFAULT gen_random_uuid(), -- PG
+  ref   text NOT NULL,
+  book  text NOT NULL,
+  UNIQUE NULLS NOT DISTINCT (ref, book)  -- PG15+
+);</code></pre>
+<ul>
+<li><span class="pg">PG</span> <code>NULLS NOT DISTINCT</code> treats NULLs as equal (PG15+); default <span class="ansi">ANSI</span> is <code>NULLS DISTINCT</code> <span class="warn">!</span></li>
+<li><span class="pg">PG</span> <code>gen_random_uuid()</code> built-in (PG13+)</li>
+</ul>
+
+<h4>Foreign key actions</h4>
+<table><thead><tr><th><code>ON DELETE/UPDATE</code></th><th>Effect on child</th></tr></thead><tbody>
+<tr><td><code>NO ACTION</code></td><td>default; error, check deferrable</td></tr>
+<tr><td><code>RESTRICT</code></td><td>error immediately, no defer</td></tr>
+<tr><td><code>CASCADE</code></td><td>delete/update child rows too</td></tr>
+<tr><td><code>SET NULL</code></td><td>set FK cols NULL</td></tr>
+<tr><td><code>SET DEFAULT</code></td><td>set FK cols to DEFAULT</td></tr>
+</tbody></table>
+<pre><code>settlement_id uuid REFERENCES settlements(id)
+  ON DELETE SET NULL ON UPDATE CASCADE,
+FOREIGN KEY (cpty) REFERENCES counterparties(id)
+  ON DELETE CASCADE</code></pre>
+<ul><li>PG15+ <code>SET NULL (col_list)</code> nulls only listed cols</li></ul>
+
+<h4>Deferrable (check at COMMIT)</h4>
+<pre><code>ALTER TABLE trades ADD CONSTRAINT fk_book
+  FOREIGN KEY (book) REFERENCES books(id)
+  DEFERRABLE INITIALLY DEFERRED;
+-- per-tx override:
+SET CONSTRAINTS fk_book IMMEDIATE;</code></pre>
+<ul><li>Defers FK/UNIQUE check to txn end &rarr; allows transient violations (e.g. cyclic inserts) <span class="warn">!</span> only constraints declared DEFERRABLE</li></ul>
+
+<h4>EXCLUDE (no overlaps)</h4>
+<pre><code>CREATE EXTENSION btree_gist;  -- for = on scalars
+ALTER TABLE bookings ADD CONSTRAINT no_overlap
+  EXCLUDE USING gist (
+    room WITH =, during WITH &amp;&amp;);</code></pre>
+<ul><li>No two rows where <code>room=</code> AND time ranges overlap (<code>&amp;&amp;</code>)</li><li>Generalizes UNIQUE (which is <code>WITH =</code> on all cols)</li></ul>
+
+<h4>DOMAIN (reusable typed constraint)</h4>
+<pre><code>CREATE DOMAIN ccy AS char(3)
+  CHECK (VALUE ~ '^[A-Z]{3}$');     -- PG ~ regex
+CREATE DOMAIN pos_amt AS numeric
+  NOT NULL CHECK (VALUE &gt; 0);
+-- use like a type:
+amount pos_amt, currency ccy</code></pre>
+<ul><li>Centralizes CHECK/NOT NULL/DEFAULT across tables <span class="warn">!</span> domain NOT NULL is weak vs col NULLs from outer joins</li></ul>
+</section>
+
+<section class="card"><h3>Functions, Procedures &amp; Triggers</h3>
+<h4>CREATE FUNCTION</h4>
+<pre><code>CREATE FUNCTION pnl(t_id bigint)
+RETURNS numeric LANGUAGE sql STABLE AS $$
+  SELECT qty*price FROM trades WHERE id=t_id;
+$$;</code></pre>
+<table><thead><tr><th>Return form</th><th>Use</th></tr></thead><tbody>
+<tr><td><code>RETURNS scalar</code></td><td>single value</td></tr>
+<tr><td><code>RETURNS SETOF instruments</code></td><td>rows of a type</td></tr>
+<tr><td><code>RETURNS TABLE(sym text, n int)</code></td><td>inline rowset</td></tr>
+<tr><td><code>RETURNS void</code></td><td>side-effect only</td></tr>
+</tbody></table>
+<ul><li><code>sql</code>: simple, inlinable, planner-visible.</li><li><code>plpgsql</code>: control flow, loops, exceptions, dynamic <code>EXECUTE</code>.</li></ul>
+<h4>Volatility <span class="warn">!</span></h4>
+<table><thead><tr><th>Class</th><th>Meaning / use</th></tr></thead><tbody>
+<tr><td><code>IMMUTABLE</code></td><td>same args→same result always; usable in expr index</td></tr>
+<tr><td><code>STABLE</code></td><td>const within one stmt (reads tables); index scans ok</td></tr>
+<tr><td><code>VOLATILE</code></td><td>default; may change per call (<code>random()</code>, <code>now()</code> not const)</td></tr>
+</tbody></table>
+<ul><li><span class="warn">!</span> Wrong class = stale plans / lost index use. Don't mark table-reading fn IMMUTABLE.</li></ul>
+<h4>Procedure <span class="pg">PG</span> (PG11+)</h4>
+<pre><code>CREATE PROCEDURE settle(d date)
+LANGUAGE plpgsql AS $$
+BEGIN
+  UPDATE settlements SET done=true WHERE dt=d;
+  COMMIT;            -- legal in proc, NOT in fn
+END $$;
+CALL settle('2026-06-10');</code></pre>
+<ul><li>Invoke with <code>CALL</code>, not <code>SELECT</code>. Can <code>COMMIT</code>/<code>ROLLBACK</code>; no return value (use <code>INOUT</code>).</li></ul>
+<h4>Triggers</h4>
+<pre><code>CREATE FUNCTION audit_trade()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  INSERT INTO trade_log(tid,act,at)
+  VALUES (NEW.id, TG_OP, now());
+  RETURN NEW;        -- BEFORE: NEW shapes write
+END $$;
+
+CREATE TRIGGER trg_audit
+AFTER INSERT OR UPDATE ON trades
+FOR EACH ROW EXECUTE FUNCTION audit_trade();</code></pre>
+<table><thead><tr><th>Timing</th><th>Return / note</th></tr></thead><tbody>
+<tr><td><code>BEFORE</code> ROW</td><td>NEW (modify), NULL=skip row</td></tr>
+<tr><td><code>AFTER</code> ROW</td><td>return ignored; for audit/cascade</td></tr>
+<tr><td><code>INSTEAD OF</code></td><td>on views only, FOR EACH ROW</td></tr>
+<tr><td>STATEMENT</td><td>once/stmt; use transition tables</td></tr>
+</tbody></table>
+<ul><li><code>OLD</code>/<code>NEW</code>, <code>TG_OP</code>, <code>TG_TABLE_NAME</code> in fn body. DELETE→<code>RETURN OLD</code>.</li><li><span class="warn">!</span> Audit/denorm/validation OK. Hidden <em>business logic</em> in triggers = anti-pattern: invisible, hard to test, surprise side-effects.</li></ul>
+</section>
+
+<section class="card"><h3>Views, Admin, Roles &amp; psql</h3>
+
+<h4>Views</h4>
+<pre><code>CREATE VIEW open_trades AS
+  SELECT * FROM trades WHERE status='OPEN'
+  WITH CHECK OPTION;</code></pre>
+<ul>
+<li>Auto-updatable if 1 table, no DISTINCT/GROUP/agg/window/UNION.</li>
+<li><code>WITH CHECK OPTION</code>: blocks INSERT/UPDATE that violate WHERE. <code>LOCAL</code> = this view only; <code>CASCADED</code> = +underlying views.</li>
+<li>Non-updatable view: add <code>INSTEAD OF</code> trigger.</li>
+</ul>
+
+<h4>Materialized views</h4>
+<pre><code>CREATE MATERIALIZED VIEW mv_pnl AS
+  SELECT cpty_id, sum(pnl) FROM settlements
+  GROUP BY cpty_id;
+REFRESH MATERIALIZED VIEW mv_pnl;
+-- non-blocking; needs UNIQUE index:
+CREATE UNIQUE INDEX ON mv_pnl(cpty_id);
+REFRESH MATERIALIZED VIEW CONCURRENTLY mv_pnl;</code></pre>
+<ul>
+<li>Stores data on disk; stale until REFRESH. <span class="warn">!</span> plain REFRESH takes ACCESS EXCLUSIVE lock.</li>
+<li><code>WITH NO DATA</code> = unscannable until first refresh.</li>
+</ul>
+
+<h4>Schemas &amp; search_path</h4>
+<pre><code>CREATE SCHEMA ops;
+SET search_path = ops, public;
+SHOW search_path;</code></pre>
+
+<h4>Roles &amp; grants</h4>
+<pre><code>CREATE ROLE trader NOLOGIN;          -- group role
+CREATE ROLE alice LOGIN PASSWORD '..';
+GRANT trader TO alice;               -- membership
+GRANT SELECT, INSERT ON trades TO trader;
+GRANT USAGE ON SCHEMA ops TO trader;
+REVOKE INSERT ON trades FROM trader;</code></pre>
+<table><thead><tr><th>Object</th><th>Privs</th></tr></thead><tbody>
+<tr><td>table</td><td>SELECT INSERT UPDATE DELETE</td></tr>
+<tr><td>schema</td><td>USAGE CREATE</td></tr>
+<tr><td>sequence</td><td>USAGE SELECT UPDATE</td></tr>
+</tbody></table>
+<ul><li><code>ALTER DEFAULT PRIVILEGES</code> for future objects.</li></ul>
+
+<h4>Row-level security <span class="pg">PG</span></h4>
+<pre><code>ALTER TABLE trades ENABLE ROW LEVEL SECURITY;
+CREATE POLICY own_desk ON trades
+  USING (desk = current_setting('app.desk'))
+  WITH CHECK (desk = current_setting('app.desk'));</code></pre>
+<ul><li><code>USING</code> filters read/update visibility; <code>WITH CHECK</code> gates writes. Table owner &amp; BYPASSRLS skip it.</li></ul>
+
+<h4>Sequences &amp; bulk load</h4>
+<pre><code>nextval('s'); currval('s'); setval('s',1000);
+COPY trades FROM '/tmp/t.csv' CSV HEADER;
+COPY (SELECT * FROM trades) TO STDOUT CSV;</code></pre>
+<ul><li><code>\copy</code> in psql = client-side (no server FS access).</li></ul>
+
+<h4>psql meta-commands</h4>
+<table><thead><tr><th>Cmd</th><th>Does</th></tr></thead><tbody>
+<tr><td><code>\d</code></td><td>list relations</td></tr>
+<tr><td><code>\dt</code></td><td>tables only</td></tr>
+<tr><td><code>\d+ trades</code></td><td>table detail+size</td></tr>
+<tr><td><code>\di</code> / <code>\dv</code></td><td>indexes / views</td></tr>
+<tr><td><code>\df</code> / <code>\dn</code></td><td>functions / schemas</td></tr>
+<tr><td><code>\du</code></td><td>roles</td></tr>
+<tr><td><code>\timing</code></td><td>show query time</td></tr>
+<tr><td><code>\x</code></td><td>expanded rows</td></tr>
+<tr><td><code>\dp</code></td><td>grants/privs</td></tr>
+</tbody></table>
+<pre><code>EXPLAIN (ANALYZE, BUFFERS) SELECT ...;</code></pre>
+</section>
+
+<section class="card"><h3>Data Cleaning &amp; De-duping</h3>
+<h4>Sentinels &rarr; NULL (do BEFORE joins/aggregates)</h4>
+<pre><code>NULLIF(col,'N/A')
+CASE WHEN lower(trim(c)) IN ('','-','n/a','null')
+     THEN NULL ELSE c END</code></pre>
+<span class="warn">!</span> sentinels skew <code>COUNT</code>/<code>SUM</code>/joins if left as text.
+
+<h4>Normalise text</h4>
+<pre><code>lower(trim(regexp_replace(c,'\s+',' ','g')))
+-- ' AAPL '  ->  'aapl'</code></pre>
+<span class="pg">PG</span> collapses runs of whitespace; trims edges; case-folds.
+
+<h4>Safe casts: strip then guard</h4>
+<pre><code>SELECT regexp_replace(amt,'[^0-9.\-]','','g')::numeric
+WHERE pg_input_is_valid(
+        regexp_replace(amt,'[^0-9.\-]','','g'),'numeric');</code></pre>
+<table><thead><tr><th>Fn</th><th>Use</th></tr></thead><tbody>
+<tr><td><code>pg_input_is_valid</code></td><td>PG16+ test cast w/o error</td></tr>
+<tr><td><code>::numeric</code> <span class="pg">PG</span></td><td>= <code>CAST(.. AS numeric)</code> <span class="ansi">ANSI</span></td></tr>
+</tbody></table>
+
+<h4>Dedup: keep one row per key</h4>
+<pre><code>-- newest per key
+SELECT DISTINCT ON (k) *           -- PG only
+FROM t ORDER BY k, ts DESC;
+
+-- portable / for DELETE
+SELECT * FROM (
+  SELECT *, row_number() OVER
+    (PARTITION BY k ORDER BY ts DESC) rn
+  FROM t) s WHERE rn=1;</code></pre>
+<span class="pg">PG</span> <code>DISTINCT ON</code> is non-ANSI; <code>ORDER BY</code> must lead with key.
+
+<h4>Delete dupes via ctid</h4>
+<pre><code>DELETE FROM t a USING t b
+WHERE a.k=b.k AND a.ctid &lt; b.ctid;  -- keep 1</code></pre>
+<span class="pg">PG</span> <code>ctid</code> = physical row id (not stable across <code>VACUUM</code>).
+
+<h4>Deterministic key (reproducible)</h4>
+<pre><code>md5(lower(trim(sym))||'|'||trade_dt||'|'||cpty)</code></pre>
+<span class="warn">!</span> use business cols, NOT <code>gen_random_uuid()</code> &mdash; UUID changes every run.
+
+<h4>Orphans / broken FKs</h4>
+<pre><code>SELECT t.* FROM trades t
+LEFT JOIN instruments i ON i.id=t.instr_id
+WHERE i.id IS NULL;   -- drop/quarantine/backfill</code></pre>
+<span class="warn">!</span> never silently drop &mdash; quarantine to a side table.
+
+<h4>Validate before/after</h4>
+<table><thead><tr><th>Check</th><th>SQL</th></tr></thead><tbody>
+<tr><td>row delta</td><td><code>SELECT count(*)</code> pre vs post</td></tr>
+<tr><td>dup keys</td><td><code>GROUP BY k HAVING count(*)&gt;1</code></td></tr>
+<tr><td>null-rate/col</td><td><code>avg((c IS NULL)::int)</code></td></tr>
+</tbody></table>
+</section>
+
+<section class="card"><h3>Gotchas &amp; Footguns</h3>
+<h4>NULL &amp; 3-valued logic</h4>
+<ul>
+<li><code>NULL = NULL</code> &rarr; <code>UNKNOWN</code> (not true). Use <code>IS NULL</code> / <code>IS NOT NULL</code>.</li>
+<li><code>a IS NOT DISTINCT FROM b</code> = NULL-safe equality <span class="ansi">ANSI</span>.</li>
+<li>WHERE keeps rows only when predicate is TRUE; UNKNOWN is dropped.</li>
+</ul>
+<h4>NOT IN trap <span class="warn">!</span></h4>
+<pre><code>-- if subquery yields any NULL,
+-- NOT IN returns ZERO rows
+SELECT * FROM trades t
+WHERE t.cpty_id NOT IN
+  (SELECT cpty_id FROM blocked);  -- broken if NULL
+
+-- safe:
+WHERE NOT EXISTS (
+  SELECT 1 FROM blocked b
+  WHERE b.cpty_id = t.cpty_id);</code></pre>
+<h4>count &amp; aggregates</h4>
+<table><thead><tr><th>Expr</th><th>Counts</th></tr></thead><tbody>
+<tr><td><code>count(*)</code></td><td>all rows incl NULL</td></tr>
+<tr><td><code>count(col)</code></td><td>non-NULL only</td></tr>
+<tr><td><code>count(DISTINCT col)</code></td><td>distinct non-NULL</td></tr>
+<tr><td><code>sum/avg(col)</code></td><td>skip NULL (avg!=sum/count(*))</td></tr>
+</tbody></table>
+<h4>Integer division <span class="warn">!</span></h4>
+<pre><code>5 / 2          -- = 2 (int floor)
+5::numeric / 2 -- = 2.5  PG cast ::
+5 * 1.0 / 2    -- = 2.5  (ANSI)</code></pre>
+<h4>Timestamps</h4>
+<ul>
+<li><code>timestamp</code> = wall clock, NO tz conversion &rarr; silent off-by-hours. Prefer <code>timestamptz</code>.</li>
+<li>timestamptz stores UTC; converts on display per <code>SET timezone</code>.</li>
+<li>Cast: <code>ts AT TIME ZONE 'UTC'</code>.</li>
+</ul>
+<h4>GROUP BY</h4>
+<ul>
+<li>Every non-aggregated SELECT col must appear in <code>GROUP BY</code> (else <code>column must appear in GROUP BY</code>).</li>
+<li>Exception: cols functionally dependent on grouped PK <span class="pg">PG</span>.</li>
+</ul>
+<h4>Non-sargable / index killers <span class="warn">!</span></h4>
+<table><thead><tr><th>Kills index</th><th>Fix</th></tr></thead><tbody>
+<tr><td><code>date(ts)=…</code></td><td><code>ts &gt;= d AND ts &lt; d+1</code></td></tr>
+<tr><td><code>col::text=…</code></td><td>compare in col type</td></tr>
+<tr><td><code>func(col)=…</code></td><td>expression index</td></tr>
+<tr><td><code>col LIKE '%x'</code></td><td>leading % unindexable</td></tr>
+</tbody></table>
+<h4>DISTINCT / UNION cost</h4>
+<ul>
+<li><code>DISTINCT</code> &amp; <code>UNION</code> sort+dedup (slow). Use <code>UNION ALL</code> if dupes OK.</li>
+<li><code>''</code> empty string is NOT NULL &mdash; <code>'' IS NULL</code> &rarr; false.</li>
+<li>Oracle quirk: in PG <code>''</code> never coerces to NULL.</li>
+</ul>
+</section>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  try {
+    mermaid.initialize({ startOnLoad: true, theme: "neutral",
+      flowchart: { useMaxWidth: true, htmlLabels: true, nodeSpacing: 18, rankSpacing: 18 },
+      themeVariables: { fontSize: "9px" } });
+  } catch (e) { /* offline / blocked CDN: diagrams degrade to source text, rest of sheet is fine */ }
+</script>
+</body>
+</html>

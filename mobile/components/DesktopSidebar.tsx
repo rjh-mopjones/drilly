@@ -9,7 +9,7 @@ import {
 } from "react-native";
 import { router, usePathname } from "expo-router";
 import { useManifest } from "../lib/manifest";
-import { refreshSource, warmExternalCaches } from "../lib/content";
+import { refreshSource, warmExternalCaches, openExternalSource } from "../lib/content";
 import {
   formatRelativeTime,
   getLastFullRefresh,
@@ -233,13 +233,16 @@ function SourceTreeNode({
   palette,
 }: SourceTreeNodeProps) {
   const styles = useMemo(() => makeStyles(palette), [palette]);
-  const items = useSourceItems(source, expanded);
+  const isExternal = !!source.externalUrl;
+  const items = useSourceItems(source, expanded && !isExternal);
   const active = source.id === activeSourceId;
 
   return (
     <View>
       <Pressable
-        onPress={onToggle}
+        onPress={
+          isExternal ? () => openExternalSource(source.externalUrl!) : onToggle
+        }
         style={({ pressed }) => [
           styles.sourceRow,
           pressed && styles.sourceRowPressed,
@@ -252,7 +255,9 @@ function SourceTreeNode({
             { backgroundColor: active ? palette.accent : "transparent" },
           ]}
         />
-        <Text style={styles.toggleGlyph}>{expanded ? "▾" : "▸"}</Text>
+        <Text style={styles.toggleGlyph}>
+          {isExternal ? "↗" : expanded ? "▾" : "▸"}
+        </Text>
         <Text
           style={[styles.sourceTitle, active && styles.sourceTitleActive]}
           numberOfLines={1}
@@ -261,7 +266,7 @@ function SourceTreeNode({
         </Text>
       </Pressable>
 
-      {expanded && (
+      {expanded && !isExternal && (
         <View style={styles.itemsList}>
           {items === null ? (
             <Text style={styles.itemsHint}>Loading…</Text>

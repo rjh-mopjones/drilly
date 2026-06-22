@@ -10,6 +10,7 @@ import {
 import { router } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useManifest } from "../lib/manifest";
+import { openExternalSource } from "../lib/content";
 import type { SourceConfig } from "../lib/parser";
 import { useTheme, type Palette } from "../lib/theme";
 import { SourceCard } from "./SourceCard";
@@ -106,7 +107,11 @@ export function SourceLibrary() {
             <SourceCard
               key={s.id}
               source={s}
-              onPress={() => router.push(`/source/${s.id}`)}
+              onPress={() =>
+                s.externalUrl
+                  ? openExternalSource(s.externalUrl)
+                  : router.push(`/source/${s.id}`)
+              }
             />
           ))}
         </View>

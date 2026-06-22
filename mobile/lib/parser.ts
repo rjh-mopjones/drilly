@@ -1,9 +1,3 @@
-// MIRROR — do not edit directly.
-// Source of truth: packages/parser/src/parser.ts (consumed by web via @drilly/parser).
-// Re-sync via `bun run sync-content` (which runs scripts/sync-content.sh) — that
-// script copies parser.ts here. Mobile inlines this instead of using the workspace
-// dep so EAS cloud builds don't need to resolve `@drilly/parser: workspace:*`.
-
 export interface Section {
   name: string;
   content: string;
@@ -16,7 +10,7 @@ export interface Pattern {
   sections: Section[];
 }
 
-export type SourceId = "patterns" | "neetcode" | "java";
+export type SourceId = "patterns" | "neetcode" | "java" | "kotlin";
 
 export interface SourceConfig {
   id: SourceId;
@@ -40,6 +34,13 @@ export interface SourceConfig {
   sectionHeadingLevel?: number;
   /** When true, items don't need explicit "N." numbering — IDs assigned by encounter order. */
   autoNumberItems?: boolean;
+  /**
+   * When set, tapping this source opens this URL (new tab on web, system
+   * browser on native) instead of the markdown card reader. Used for
+   * standalone artifacts like the printable A4 cheat sheet. A root-relative
+   * path ("/foo.html") is resolved against REMOTE_BASE on native.
+   */
+  externalUrl?: string;
 }
 
 export const SOURCES: Record<SourceId, SourceConfig> = {
@@ -88,6 +89,19 @@ export const SOURCES: Record<SourceId, SourceConfig> = {
     itemLabel: "Topic",
     itemsPlural: "Java topics",
     storagePrefix: "ip:java",
+    defaultRevealedSections: [],
+    itemHeadingLevel: 2,
+    sectionHeadingLevel: 3,
+    autoNumberItems: true,
+    sectionOrder: [],
+  },
+  kotlin: {
+    id: "kotlin",
+    file: "/kotlin-interview-primer.md",
+    title: "Kotlin",
+    itemLabel: "Topic",
+    itemsPlural: "Kotlin topics",
+    storagePrefix: "ip:kotlin",
     defaultRevealedSections: [],
     itemHeadingLevel: 2,
     sectionHeadingLevel: 3,

@@ -17,7 +17,7 @@
 
 // Use the legacy API — stable, matches the FileSystem.cacheDirectory pattern.
 // The new API (Paths/File/Directory) is fine but verbose for this use case.
-import { Platform } from "react-native";
+import { Platform, Linking } from "react-native";
 import * as FS from "expo-file-system/legacy";
 import { Asset } from "expo-asset";
 import type { SourceConfig } from "./parser";
@@ -35,6 +35,24 @@ const BUNDLED: Record<string, number> = {
 
 const IS_WEB = Platform.OS === "web";
 const CACHE_DIR = IS_WEB ? "" : (FS.cacheDirectory ?? "") + "content/";
+
+/**
+ * Open a source's `externalUrl` (e.g. the printable A4 cheat sheet) instead
+ * of the card reader. Web opens a new tab; native opens the system browser.
+ * A root-relative path is resolved against REMOTE_BASE on native (the device
+ * has no notion of same-origin), but left as-is on web (co-hosted).
+ */
+export function openExternalSource(externalUrl: string): void {
+  const isAbsolute = /^https?:\/\//.test(externalUrl);
+  if (IS_WEB) {
+    window.open(externalUrl, "_blank", "noopener");
+    return;
+  }
+  const url = isAbsolute
+    ? externalUrl
+    : `${REMOTE_BASE}${externalUrl.startsWith("/") ? "" : "/"}${externalUrl}`;
+  void Linking.openURL(url);
+}
 
 async function ensureCacheDir(): Promise<void> {
   if (IS_WEB) return; // Browser HTTP cache covers caching on web.

@@ -34,6 +34,13 @@ export interface SourceConfig {
   sectionHeadingLevel?: number;
   /** When true, items don't need explicit "N." numbering — IDs assigned by encounter order. */
   autoNumberItems?: boolean;
+  /**
+   * When set, tapping this source opens this URL (new tab on web, system
+   * browser on native) instead of the markdown card reader. Used for
+   * standalone artifacts like the printable A4 cheat sheet. A root-relative
+   * path ("/foo.html") is resolved against REMOTE_BASE on native.
+   */
+  externalUrl?: string;
 }
 
 export const SOURCES: Record<SourceId, SourceConfig> = {
