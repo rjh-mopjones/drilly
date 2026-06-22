@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Finance Domain Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+/* spanning title bar */
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>Finance Domain Cheat Sheet</h1><span class="meta">domain fluency for engineers · trade lifecycle · positions · reconciliation · drilly</span></div>
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="warn">!</span> = pitfall / false-friend (a term engineers commonly misread).</li>
+<li><b>Fluency, not depth</b>: each concept = what it is + why an engineer cares + what it means for the data/system. No trading-strategy or pricing maths.</li>
+<li>The <b>domain layer</b> that ties the others together &mdash; cross-refs the <b>System Design</b>, <b>SQL</b>, and <b>Java/C#</b> sheets rather than repeating them.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+</ul></section>
+
+<section class="card"><h3>Instruments &amp; Basics</h3>
+<h4>Core instrument types</h4>
+<table><thead><tr><th>Instrument</th><th>What it is</th></tr></thead><tbody>
+<tr><td><code>Equity</code></td><td>Ownership share in a company</td></tr>
+<tr><td><code>Bond</code></td><td>Loan to issuer; pays coupons, repays par</td></tr>
+<tr><td><code>Future</code></td><td>Exchange-traded contract to buy/sell at a future date/price</td></tr>
+<tr><td><code>Option</code></td><td>Right (not obligation) to buy (<code>call</code>) / sell (<code>put</code>) at a strike</td></tr>
+<tr><td><code>Swap</code></td><td>Exchange of cash flows (e.g. fixed-for-floating)</td></tr>
+</tbody></table>
+<ul>
+<li><b>Derivative</b> = value <em>derived</em> from an underlying (future/option/swap qualify). Sensitivities (the &quot;Greeks&quot;) exist but are pricing-desk concerns, not yours.</li>
+</ul>
+<h4>Direction &amp; jargon</h4>
+<table><thead><tr><th>Term</th><th>Means</th></tr></thead><tbody>
+<tr><td><code>long</code></td><td>Own it / bet price up</td></tr>
+<tr><td><code>short</code></td><td>Sold-borrowed / bet price down</td></tr>
+<tr><td><code>the book</code></td><td>A portfolio / set of positions</td></tr>
+<tr><td><code>notional</code></td><td>Contract face amount — what exposure is calculated on</td></tr>
+<tr><td><code>par</code></td><td>A bond&apos;s face / redemption value</td></tr>
+</tbody></table>
+<ul>
+<li><span class="warn">!</span> long/short is <em>direction</em>, not time horizon. A &quot;short&quot; can be held for months.</li>
+<li><span class="warn">!</span> &quot;the book&quot; is a portfolio, <em>not</em> a ledger or a DB table.</li>
+<li><span class="warn">!</span> notional ≠ market value — a $10m notional swap may have near-zero present value.</li>
+</ul>
+<h4>Engineer angle</h4>
+<ul>
+<li>These are the entity types your <b>security master</b> (instrument reference data) + <b>position system</b> model.</li>
+<li>Instrument is the dimension; position/trade rows reference it by id. Symbol conventions differ per vendor (e.g. Bloomberg vs Reuters tickers) — normalise to an internal id. See <b>SQL</b> sheet for modelling, <b>System Design</b> sheet for reference-data distribution.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Identifiers &amp; the Security Master</h3>
+<h4>Common instrument IDs</h4>
+<table><thead><tr><th>ID</th><th>What (one line)</th></tr></thead><tbody>
+<tr><td><code>Ticker</code></td><td>Short exchange/vendor symbol; NOT globally unique</td></tr>
+<tr><td><code>ISIN</code></td><td>12-char global standard ID (ISO 6166)</td></tr>
+<tr><td><code>CUSIP</code></td><td>9-char US/Canada ID</td></tr>
+<tr><td><code>SEDOL</code></td><td>7-char UK/Ireland ID</td></tr>
+<tr><td><code>FIGI</code></td><td>Open, Bloomberg-issued global ID</td></tr>
+</tbody></table>
+
+<h4>Why a Security Master exists</h4>
+<ul>
+<li>One instrument carries MANY ids across vendors/venues &amp; asset classes — none is universal.</li>
+<li>The <strong>security master</strong> holds one internal <em>canonical id</em> + a mapping table to every external id (ISIN, CUSIP, ticker, FIGI...).</li>
+<li>Raw ticker feeds are messy: reused symbols, corporate actions, renames, exchange suffixes.</li>
+</ul>
+
+<h4>Engineer angle</h4>
+<ul>
+<li>Instrument lookups <strong>join through the master</strong>; never key business data (trades, positions) on a raw ticker.</li>
+<li>Canonical id is the FK everywhere — see <em>SQL</em> sheet for the mapping-table join pattern.</li>
+<li><span class="warn">!</span> Vendor symbol conventions differ (e.g. Bloomberg vs Reuters suffix styles). NEVER string-strip/regex two symbols to decide they're the same instrument — map via the master. (-&gt; <em>SQL</em> sheet: messy-identifier cleaning.)</li>
+<li>Mapping is many-to-many over time — model effective dates, not a single static row.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Trade Lifecycle</h3>
+<h4>Stages (1 line each)</h4>
+<table><thead><tr><th>Stage</th><th>What</th></tr></thead><tbody>
+<tr><td><code>Order</code></td><td>Intent to trade (buy/sell, qty, price)</td></tr>
+<tr><td><code>Execution</code></td><td>Order (partially) matched in the market</td></tr>
+<tr><td><code>Trade/Fill</code></td><td>The resulting done deal</td></tr>
+<tr><td><code>Confirmation</code></td><td>Both sides agree the economics</td></tr>
+<tr><td><code>Clearing</code></td><td>Central party nets &amp; guarantees obligations</td></tr>
+<tr><td><code>Settlement</code></td><td>Actual exchange of cash vs security</td></tr>
+</tbody></table>
+
+<h4>Timing &amp; failures</h4>
+<table><thead><tr><th>Term</th><th>Means</th></tr></thead><tbody>
+<tr><td><code>T+1 / T+2</code></td><td>Settle 1 or 2 business days after trade date</td></tr>
+<tr><td><code>FAIL</code></td><td>Securities/cash didn't move on time</td></tr>
+<tr><td><code>BREAK</code></td><td>Mismatch between two systems' records</td></tr>
+</tbody></table>
+<ul><li>Recon &amp; break-detection = nightly batch + intraday jobs; model state transitions explicitly (see <code>System Design</code> sheet for sagas/idempotency).</li></ul>
+
+<h4>Office split (who you build for)</h4>
+<table><thead><tr><th>Office</th><th>Does</th></tr></thead><tbody>
+<tr><td>Front</td><td>Trading / revenue</td></tr>
+<tr><td>Middle</td><td>Risk, PnL, trade validation</td></tr>
+<tr><td>Back</td><td>Settlement, recon, books &amp; records</td></tr>
+</tbody></table>
+<ul><li>An Operations dev team typically automates <strong>Middle/Back</strong> office workflows.</li></ul>
+
+<h4>Data model</h4>
+<span class="warn">!</span> False-friend: <code>Order</code> (intent) vs <code>Execution</code> (match event) vs <code>Trade/Fill</code> (done deal) are <strong>different entities</strong>.
+<ul><li>One order &rarr; many executions/fills &rarr; aggregated into a trade. Model as parent/child rows, never one flat table (see <code>SQL</code> sheet for 1:N keys).</li><li>Every stage is an append-only state change &mdash; never overwrite; audit trail is regulatory.</li></ul>
+</section>
+
+<section class="card diagram"><h3>Trade Lifecycle</h3>
+<div class="mermaid">
+flowchart LR
+  O["Order<br/>(intent)"] --> E["Execution<br/>(match)"]
+  E --> T["Trade / Fill<br/>(done deal)"]
+  T --> C["Confirmation<br/>(both agree)"]
+  C --> Cl["Clearing<br/>(net + guarantee)"]
+  Cl --> S["Settlement<br/>(cash vs security, T+1/T+2)"]
+</div>
+<p class="cap">One order → many executions/fills → a trade. A settlement FAIL = it didn't move on time; a BREAK = two systems disagree.</p></section>
+
+<section class="card"><h3>Positions, PnL &amp; NAV</h3>
+<h4>The core distinction <span class="warn">!</span></h4>
+<table><thead><tr><th>Concept</th><th>Nature</th><th>Engineer's view</th></tr></thead><tbody>
+<tr><td><code>trade</code></td><td>EVENT</td><td>Immutable fact; append-only</td></tr>
+<tr><td><code>position</code></td><td>DERIVED state</td><td>Fold/reduce over trade events</td></tr>
+<tr><td><code>balance</code></td><td>point-in-time AGGREGATE</td><td>Snapshot at instant <code>t</code></td></tr>
+</tbody></table>
+<ul><li>Engineers conflate these constantly. A position is <em>computed</em>, not stored as truth.</li></ul>
+<h4>Position = fold over trades</h4>
+<ul>
+<li>Running aggregate of all trades for one <code>(instrument, portfolio)</code>: net qty, avg cost.</li>
+<li>Classic event-sourcing problem &rarr; see <strong>System Design</strong> sheet (Event Sourcing / CQRS): events = source of truth, position = materialised read-model fold.</li>
+<li>Snapshots speed replay; the SQL aggregation is a <code>GROUP BY</code> &rarr; <strong>SQL</strong> sheet.</li>
+</ul>
+<h4>PnL</h4>
+<table><thead><tr><th>Term</th><th>Meaning</th></tr></thead><tbody>
+<tr><td>Realised PnL</td><td>Locked in by <em>closing</em> a position</td></tr>
+<tr><td>Unrealised PnL</td><td>Paper gain/loss on <em>open</em> position at current price</td></tr>
+</tbody></table>
+<ul><li>Unrealised PnL changes every tick even with zero trades &rarr; it depends on price feed, not just your data.</li></ul>
+<h4>Marks &amp; NAV</h4>
+<table><thead><tr><th>Term</th><th>One-liner</th></tr></thead><tbody>
+<tr><td>Mark-to-market (MtM)</td><td>Revalue open positions at current market price</td></tr>
+<tr><td>The close / closing price</td><td>Official end-of-day price used for marks</td></tr>
+<tr><td>NAV (Net Asset Value)</td><td>assets &minus; liabilities, per fund/portfolio</td></tr>
+</tbody></table>
+<ul>
+<li>NAV is typically <em>struck daily</em> after the close &rarr; a scheduled end-of-day batch job, not real-time.</li>
+<li><span class="warn">!</span> Same position yields different PnL/NAV depending on <em>which</em> mark price you used &mdash; store the price source &amp; timestamp, not just the number.</li>
+</ul>
+</section>
+
+<section class="card diagram"><h3>Position = fold over trade events</h3>
+<div class="mermaid">
+flowchart LR
+  T1["+100 @ 10"] --> P1["pos 100"]
+  T2["+50 @ 11"] --> P2["pos 150"]
+  T3["-30 @ 12"] --> P3["pos 120"]
+  P1 --> P2 --> P3
+</div>
+<p class="cap">Position is derived state (a fold of immutable trade events) — event-sourcing. Snapshot + delta replay for as-of queries (→ System Design sheet).</p></section>
+
+<section class="card"><h3>Counterparties, Custody &amp; Reconciliation</h3>
+<h4>Who's who</h4>
+<table><thead><tr><th>Term</th><th>One line</th></tr></thead><tbody>
+<tr><td><code>Counterparty</code></td><td>The other side of a trade (you buy, they sell)</td></tr>
+<tr><td><code>Broker</code></td><td>Agent who executes your orders in the market</td></tr>
+<tr><td><code>Custodian</code></td><td>Holds your securities &amp; cash safely; settles trades</td></tr>
+</tbody></table>
+
+<h4>Reconciliation</h4>
+<ul>
+<li><b>Recon</b> = match your internal records vs an external source (custodian / counterparty / exchange) to <i>prove they agree</i>.</li>
+<li><b>Break</b> = an unmatched or mismatched item to investigate &amp; resolve.</li>
+<li>Runs daily / intraday; ops chase breaks until cleared (T+0, aged-break reports).</li>
+</ul>
+
+<h4>How matching works</h4>
+<table><thead><tr><th>Step</th><th>Detail</th></tr></thead><tbody>
+<tr><td>Match key</td><td><code>trade_id</code>, else <code>instrument+date+qty</code></td></tr>
+<tr><td>Tolerance</td><td>Allow small price/qty rounding diffs</td></tr>
+<tr><td>Classify</td><td>matched / unmatched / broken</td></tr>
+</tbody></table>
+
+<h4>Why an engineer cares</h4>
+<ul>
+<li>Core <b>ops engineering</b>: the bread-and-butter of an ops dev team — ingest two feeds, match, surface &amp; route breaks.</li>
+<li>System: idempotent loaders, audit trail per break, dashboards, replay.</li>
+</ul>
+
+<p><span class="warn">!</span> Recon is fundamentally a <b>JOIN + DIFF</b> on imperfect data from two systems with different conventions (symbology, date/tz, sign, rounding, dupes). It's the messy-data problem in business form — see <b>SQL</b> sheet (cleaning / dedup / fuzzy keys) and <b>System Design</b> sheet (idempotent ingestion); data-quality work, not arithmetic.</p>
+</section>
+
+<section class="card diagram"><h3>Reconciliation Pipeline</h3>
+<div class="mermaid">
+flowchart LR
+  X["External feed<br/>(custodian / counterparty)"] --> N["Normalise to<br/>internal shape"]
+  I["Internal records"] --> M{"Match on keys<br/>+ tolerances"}
+  N --> M
+  M --> OK["Matched"]
+  M --> BRK["Unmatched / Broken<br/>→ investigate"]
+</div>
+<p class="cap">A join + diff on imperfect data from two systems with different conventions (→ SQL cleaning/dedup). Chunk by date/counterparty to scale.</p></section>
+
+<section class="card"><h3>Treasury, Cash &amp; FX</h3>
+<h4>Core concepts</h4>
+<table><thead><tr><th>Term</th><th>One-liner</th></tr></thead><tbody>
+<tr><td>Cash management</td><td>Right cash, right place, right currency, right time</td></tr>
+<tr><td>Funding</td><td>Sourcing cash to meet obligations as they fall due</td></tr>
+<tr><td>Margin / Collateral</td><td>Assets posted to cover potential loss / counterparty exposure</td></tr>
+<tr><td>Nostro / Vostro</td><td>"Our"/"your" account held at another bank per currency</td></tr>
+</tbody></table>
+
+<h4>FX &amp; multi-currency</h4>
+<ul>
+<li><b>Trade ccy</b> = currency a deal is priced in; <b>settlement ccy</b> = what you actually pay/receive. They can differ.</li>
+<li>Quote <code>EUR/USD = 1.10</code> means 1 EUR = 1.10 USD. <span class="warn">!</span> Inverting the quote, or applying it in the wrong direction, is a common bug class — silent, off by the square of the rate.</li>
+<li>A rate has a <b>timestamp + source</b>; store both. Same pair differs by venue/snapshot.</li>
+</ul>
+
+<h4>Minor-unit traps <span class="warn">!</span></h4>
+<table><thead><tr><th>Code</th><th>Trap</th></tr></thead><tbody>
+<tr><td>GBP vs GBp</td><td>Pounds vs pence — factor of 100 (vendor symbol convention; Bloomberg/Reuters differ)</td></tr>
+<tr><td>USD</td><td>2 dp — cents, not dollars</td></tr>
+<tr><td>JPY</td><td>0 dp — NO minor unit; ÷100 corrupts the amount</td></tr>
+</tbody></table>
+<ul><li>Minor-unit count varies per currency (<code>ISO 4217</code> exponent) — never hard-code 2. Off-by-100 / wrong-scale errors result.</li></ul>
+
+<h4>Engineer angle</h4>
+<ul>
+<li>Always store <code>currency</code> beside every <code>amount</code> — a bare number is meaningless.</li>
+<li>Use an exact decimal type, never <code>float</code> (see Java/C# exact-money card; SQL currency-unit gotcha).</li>
+<li>Define rounding rule + scale per currency explicitly; persist the FX rate used on conversion for audit.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Market Structure &amp; Data</h3>
+
+<h4>Venues</h4>
+<table><thead><tr><th>Term</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>Exchange</code></td><td>Central regulated venue; matched order book; anonymous</td></tr>
+<tr><td><code>OTC</code></td><td>Over-the-counter; bilateral deal direct with a counterparty; bespoke (e.g. many swaps)</td></tr>
+</tbody></table>
+
+<h4>Price Vocabulary</h4>
+<table><thead><tr><th>Term</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>bid</code></td><td>Best buy price</td></tr>
+<tr><td><code>ask</code>/<code>offer</code></td><td>Best sell price</td></tr>
+<tr><td><code>spread</code></td><td><code>ask - bid</code></td></tr>
+<tr><td><code>mid</code></td><td>Midpoint <code>(bid+ask)/2</code></td></tr>
+<tr><td><code>lot size</code></td><td>Min tradable increment</td></tr>
+</tbody></table>
+
+<h4>Market vs Reference Data</h4>
+<table><thead><tr><th></th><th>Market data</th><th>Reference data</th></tr></thead><tbody>
+<tr><td>What</td><td>Real-time prices/quotes/trades</td><td>Static instrument/counterparty attrs (security master)</td></tr>
+<tr><td>Shape</td><td>High-volume time-series</td><td>Slow-changing rows</td></tr>
+<tr><td>Writes</td><td>Append-mostly, firehose</td><td>Changes rarely</td></tr>
+<tr><td>Reads</td><td>Recent + range scans</td><td>Read everywhere, hot</td></tr>
+</tbody></table>
+
+<ul>
+<li><span class="warn">!</span> Totally different storage/update profiles &mdash; don't jam both in one table. Reference data = cache + CDC candidate (slow-changing, hot reads); market data = high-volume time-series store.</li>
+<li>See <strong>System Design</strong> sheet: reference-vs-market-data architecture. Vendor symbol conventions differ (e.g. Bloomberg vs Reuters tickers) &mdash; normalise in the security master.</li>
+</ul>
+
+</section>
+
+<section class="card diagram"><h3>Reference vs Market Data</h3>
+<div class="mermaid">
+flowchart TD
+  R["Reference data<br/>(security master, counterparties)<br/>slow-changing, read-everywhere"] --> RC["cache / CDC"]
+  M["Market data<br/>(prices, quotes, trades)<br/>high-volume, real-time"] --> TS["time-series store / stream"]
+</div>
+<p class="cap">Opposite characteristics → opposite stores (→ System Design sheet).</p></section>
+
+<section class="card"><h3>Risk &amp; Regulation (vocabulary)</h3>
+<h4>Risk types (one line each)</h4>
+<table><thead><tr><th>Type</th><th>Loss from</th></tr></thead><tbody>
+<tr><td>Market</td><td>Price / rate / FX moves against you</td></tr>
+<tr><td>Credit</td><td>A counterparty defaults / fails to pay</td></tr>
+<tr><td>Operational</td><td>Failures in people, process or systems (bugs, outages, fat-finger)</td></tr>
+<tr><td>Liquidity</td><td>Can't sell or fund a position without a big loss</td></tr>
+</tbody></table>
+<ul>
+<li>You'll surface these as columns/limits, not compute them — risk engines own the maths. Greeks (price sensitivities) are a quant concern; for you they're just more numbers to store and serve.</li>
+</ul>
+<h4>Why audit trail &amp; immutability are non-negotiable</h4>
+<ul>
+<li>Regulators (and your own auditors) must <b>reconstruct who did what, when, from what input data</b> — sometimes years later.</li>
+<li><span class="warn">!</span> <b>Never silently correct a number.</b> Don't <code>UPDATE</code> a booked trade. Post a new compensating / reversing entry so the original and the fix both survive.</li>
+<li>This is the <i>accept-and-reconcile</i> / never-silently-correct pattern — see the <b>System Design</b> sheet. For ML-driven decisions, the AI-governance sheet covers model explainability.</li>
+</ul>
+<h4>How regulation constrains HOW you build</h4>
+<table><thead><tr><th>Term</th><th>Means for you</th></tr></thead><tbody>
+<tr><td>Change control</td><td>Prod changes are reviewed, approved, logged — no ad-hoc hotfixes</td></tr>
+<tr><td>Segregation of duties</td><td>The dev who writes a fix can't also approve the prod data change</td></tr>
+<tr><td>Data retention</td><td>Records kept N years; deletes are policy-driven, not casual</td></tr>
+<tr><td>Lineage</td><td>Trace every figure back to its source inputs</td></tr>
+</tbody></table>
+<h4>Engineer angle</h4>
+<ul>
+<li>Design for <b>append-only history</b> + full <b>lineage from day one</b> — retrofitting it is brutal.</li>
+<li>Prefer event logs / bitemporal tables over in-place mutation (-&gt; <b>SQL</b> sheet for temporal modelling). Treat audit fields (<code>who</code>, <code>when</code>, <code>source</code>) as mandatory, not optional.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Financial-Systems Patterns I</h3>
+<h4>Event sourcing for trades/positions</h4>
+<ul>
+<li>Trades are <strong>immutable events</strong> (append-only log); never updated in place.</li>
+<li>A <code>position</code> is a <strong>fold</strong> (reduce) over a portfolio's trade events.</li>
+<li><strong>As-of / point-in-time</strong> queries replay events up to a timestamp.</li>
+<li>Periodic <strong>snapshots</strong>: <code>snapshot + delta</code> = <code>O(delta)</code>, not <code>O(full history)</code>.</li>
+<li>Corrections = <strong>new compensating events</strong>, not mutation -> full audit trail. (-&gt; System Design: Event Sourcing &amp; CQRS)</li>
+</ul>
+<h4>Idempotency in trade processing</h4>
+<ul>
+<li>Same trade event may be <strong>redelivered</strong>; dedupe on a business <strong>idempotency key</strong> (e.g. source trade id), not a transport id.</li>
+<li>Persist seen keys; on replay, <strong>no-op</strong> — never double-book.</li>
+<li><span class="warn">!</span> <code>at-least-once</code> delivery is the norm => the consumer <strong>must</strong> be idempotent; "exactly-once" is usually idempotent + dedup, not magic. (-&gt; System Design: messaging delivery semantics)</li>
+</ul>
+<h4>Ordering per portfolio/account</h4>
+<table><thead><tr><th>Scope</th><th>Rule</th></tr></thead><tbody>
+<tr><td>Within one portfolio</td><td>apply <strong>in order</strong> (a buy then sell must not reorder)</td></tr>
+<tr><td>Across portfolios</td><td>process in <strong>parallel</strong> — independent</td></tr>
+</tbody></table>
+<ul>
+<li>Partition / key the stream by <code>portfolioId</code> so order is preserved per key, throughput scales across keys.</li>
+<li><span class="warn">!</span> Global ordering kills throughput — only order <strong>where it matters</strong>. (-&gt; System Design partitioning; Java/C# keyed-executor)</li>
+</ul>
+</section>
+
+<section class="card"><h3>Financial-Systems Patterns II</h3>
+
+<h4>Exact money handling</h4>
+<ul>
+<li><span class="warn">!</span> NEVER <code>float</code>/<code>double</code> for money — binary FP can't represent <code>0.10</code>; rounding errors compound &amp; break reconciliation.</li>
+<li>Use exact decimal (<code>BigDecimal</code>/C# <code>decimal</code>) or store <strong>minor units</strong> as integers (cents/pence). See Java/C# cheat sheets.</li>
+<li>Define rounding explicitly (e.g. HALF_EVEN) — never rely on a default.</li>
+<li>Always persist the <code>currency</code> alongside the amount; an amount without a currency is meaningless. Money = (amount, currency, scale).</li>
+</ul>
+
+<h4>Reconciliation pipeline</h4>
+<table><thead><tr><th>Stage</th><th>Does</th></tr></thead><tbody>
+<tr><td>Ingest</td><td>Read external file/feed (CSV, fixed-width)</td></tr>
+<tr><td>Normalise</td><td>Map to internal shape; fix dates/symbols (SQL cheat sheet: cleaning)</td></tr>
+<tr><td>Match</td><td>Join on keys (trade id, date, amount) with <em>tolerances</em></td></tr>
+<tr><td>Classify</td><td>matched / unmatched / broken (amount or date mismatch)</td></tr>
+<tr><td>Report</td><td>Breaks list for ops investigation</td></tr>
+</tbody></table>
+<ul><li>Slow batch &rarr; parallelise: chunk by date or counterparty. See System Design cheat sheet (scaling a slow batch).</li></ul>
+
+<h4>Accept-and-reconcile vs reject-and-reprocess</h4>
+<table><thead><tr><th></th><th>Behaviour</th></tr></thead><tbody>
+<tr><td>Accept &amp; reconcile</td><td>Stamp rate + timestamp used, proceed; fix breaks downstream</td></tr>
+<tr><td>Reject &amp; reprocess</td><td>Block until correct; unpredictable latency, can loop</td></tr>
+</tbody></table>
+<ul>
+<li>High-throughput pricing/PnL favours accept-and-reconcile — don't block the hot path.</li>
+<li><span class="warn">!</span> Audit trail is mandatory: what value, which source, when. See System Design cheat sheet (Consistency &amp; CAP).</li>
+</ul>
+
+<h4>Reference vs market data</h4>
+<table><thead><tr><th>Reference</th><th>Market</th></tr></thead><tbody>
+<tr><td>Slow-changing (instruments, counterparties, calendars)</td><td>High-volume, fast (prices, quotes)</td></tr>
+<tr><td>Cache + CDC to propagate changes</td><td>Time-series stream; append-only</td></tr>
+</tbody></table>
+<ul><li>Vendor symbol conventions differ (e.g. Bloomberg vs Reuters tickers) — normalise to an internal id at ingest.</li></ul>
+
+</section>
+
+<section class="card"><h3>Scenario Prompts (drill)</h3>
+<p>Drive each like the <strong>System Design</strong> sheet's method: <em>restate &rarr; assumptions &rarr; diagnose &rarr; simple-first &rarr; flag tradeoffs</em>. Lead with the data model and invariants, not the framework.</p>
+
+<h4>Prompts (don't answer — reason aloud)</h4>
+<ul>
+<li>Design a <strong>real-time position-keeping service</strong> from a trade event stream. <em>(per-portfolio ordering, idempotency on retries, fold/event-sourcing the stream, periodic snapshots to bound replay)</em></li>
+<li>Design an <strong>end-of-day NAV/PnL calc</strong> that's also queryable intraday. <em>(batch close vs streaming, as-of / point-in-time semantics, CQRS read model, what "the close" actually means)</em></li>
+<li>Design a <strong>reconciliation system</strong> matching internal trades to a custodian feed. <em>(fuzzy join + diff on messy keys, amount/date tolerances, classify breaks, chunk-by-counterparty to scale)</em></li>
+<li>Design a <strong>multi-currency cash/treasury ledger</strong> with point-in-time balances. <em>(exact money + currency unit, FX rate direction &amp; pair, append-only history, balance = aggregate-as-of, no mutating rows)</em></li>
+</ul>
+
+<h4>Recurring tensions to surface</h4>
+<table><thead><tr><th>Tension</th><th>The trap</th></tr></thead><tbody>
+<tr><td>Ordering</td><td>Global order is expensive — partition the key (e.g. portfolio) <span class="warn">!</span></td></tr>
+<tr><td>Idempotency</td><td>Replays/double-delivery must not double-count; dedupe on event id</td></tr>
+<tr><td>As-of</td><td>"Now" vs "as it stood at T" — bitemporal, not last-write-wins</td></tr>
+<tr><td>Money</td><td>Never floats; integer minor units + currency (see <strong>SQL</strong>/<strong>Java/C#</strong> sheets) <span class="warn">!</span></td></tr>
+<tr><td>Read vs write</td><td>Hot ingest path vs ad-hoc query path want different stores (CQRS)</td></tr>
+</tbody></table>
+
+<ul>
+<li>Always ask: <code>what's the source of truth</code>, <code>can I rebuild state from the log</code>, <code>what's the tolerance for stale/wrong</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Speaking the Language (false-friends)</h3>
+<p>Same English word, different meaning to the business. Get these wrong and your schema/API lies to stakeholders.</p>
+<h4>Lifecycle terms (don't conflate)</h4>
+<table><thead><tr><th>Term</th><th>Means</th></tr></thead><tbody>
+<tr><td><code>order</code></td><td>Intent to trade (not yet done)</td></tr>
+<tr><td><code>execution</code></td><td>A match event (order met liquidity)</td></tr>
+<tr><td><code>fill</code></td><td>Quantity executed (partial or full)</td></tr>
+<tr><td><code>trade</code></td><td>The done deal (one or more fills)</td></tr>
+<tr><td><code>position</code></td><td>Net holding — <em>derived</em>, not stored raw</td></tr>
+<tr><td><code>balance</code></td><td>Point-in-time aggregate (cash/qty)</td></tr>
+</tbody></table>
+<ul>
+<li><span class="warn">!</span> One order &rarr; many fills &rarr; one trade. Model them as separate entities; <code>position</code>/<code>balance</code> are computed, never a writable column.</li>
+</ul>
+<h4>Words that aren't what they sound like</h4>
+<table><thead><tr><th>Term</th><th>Means (not...)</th></tr></thead><tbody>
+<tr><td><code>book</code></td><td>A portfolio — NOT a DB ledger/table</td></tr>
+<tr><td><code>long</code></td><td>Own it (direction) — NOT duration</td></tr>
+<tr><td><code>short</code></td><td>Sold-borrowed (direction) — NOT brief</td></tr>
+<tr><td><code>basis point</code></td><td><code>0.01%</code> — 100bp = 1%</td></tr>
+<tr><td><code>notional</code></td><td>Contract face amount</td></tr>
+<tr><td><code>market value</code></td><td>Current worth = qty &times; price</td></tr>
+<tr><td><code>mark</code> / MTM</td><td>Revalue at current price</td></tr>
+<tr><td>the <code>close</code></td><td>Official EOD price (snapshot)</td></tr>
+</tbody></table>
+<ul>
+<li><span class="warn">!</span> <code>notional</code> &ne; <code>market value</code> — a $1M-notional swap can be worth ~$0. Store both; never reuse one column.</li>
+<li>Use <code>bp</code> for rates/fees to dodge float rounding (see SQL / Java/C# sheets on <code>DECIMAL</code> vs float for money).</li>
+</ul>
+<h4>Post-trade (often used interchangeably — they aren't)</h4>
+<table><thead><tr><th>Stage</th><th>What happens</th></tr></thead><tbody>
+<tr><td><code>execution</code></td><td>The match (trade is born)</td></tr>
+<tr><td><code>clearing</code></td><td>Netting + guarantee before money moves</td></tr>
+<tr><td><code>settlement</code></td><td>Cash/securities actually change hands</td></tr>
+<tr><td><code>T+2</code></td><td>Settles 2 business days after trade date</td></tr>
+</tbody></table>
+<ul>
+<li><span class="warn">!</span> Trade done &ne; settled. Status is a state machine (executed&rarr;cleared&rarr;settled), not a boolean — model failed/pending settlements explicitly (see System Design sheet on saga/state-machine patterns).</li>
+<li><code>T+2</code> uses <em>business</em> days — needs a holiday calendar, not <code>+ INTERVAL '2 days'</code>.</li>
+</ul>
+</section>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  try {
+    mermaid.initialize({ startOnLoad: true, theme: "neutral",
+      flowchart: { useMaxWidth: true, htmlLabels: true, nodeSpacing: 18, rankSpacing: 18 },
+      themeVariables: { fontSize: "9px" } });
+  } catch (e) { /* offline / blocked CDN: diagrams degrade to source text, rest of sheet is fine */ }
+</script>
+</body>
+</html>

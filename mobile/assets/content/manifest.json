@@ -250,6 +250,18 @@
       "storagePrefix": "ip:system-design-cheatsheet",
       "defaultRevealedSections": [],
       "sectionOrder": []
+    },
+    {
+      "id": "finance-domain-cheatsheet",
+      "file": "/finance-domain-cheatsheet.html",
+      "title": "Finance Domain",
+      "category": "Cheat Sheets",
+      "externalUrl": "/finance-domain-cheatsheet.html",
+      "itemLabel": "Section",
+      "itemsPlural": "open printable A4 sheet ↗",
+      "storagePrefix": "ip:finance-domain-cheatsheet",
+      "defaultRevealedSections": [],
+      "sectionOrder": []
     }
   ]
 }
