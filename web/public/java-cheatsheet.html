@@ -1,0 +1,1016 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SQL &amp; Postgres Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+/* spanning title bar */
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>Java Cheat Sheet</h1><span class="meta">Java 21 LTS · senior/JVM focus · generic examples · drilly</span></div>
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="warn">!</span> footgun / gotcha &nbsp; <code>☐</code> review checklist item</li>
+<li>Baseline: <b>Java 21 LTS</b>; newer features tagged inline (e.g. "(21)"). JVM flags assume HotSpot.</li>
+<li>Senior focus: concurrency · JVM/GC · low-latency · performance. Last 3 cards = common bugs + review/debug.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
+</ul></section>
+
+<section class="card diagram"><h3>JVM Memory & Object Layout</h3>
+<div class="mermaid">
+flowchart TD
+  JVM["JVM process"] --> Heap["Heap (GC-managed)"]
+  JVM --> Meta["Metaspace (class meta, native)"]
+  JVM --> Stacks["Thread stacks (frames, locals)"]
+  JVM --> Code["JIT code cache"]
+  Heap --> Young["Young: Eden + S0/S1"]
+  Heap --> Old["Old (tenured)"]
+  Young -->|"survives minor GCs"| Old
+</div>
+<p class="cap">Most allocation hits a thread-local TLAB in Eden (lock-free bump pointer). Object header ≈ 12-16B (mark word + klass ptr).</p></section>
+
+<section class="card"><h3>Concurrency — Fundamentals</h3>
+<h4>ExecutorService factories</h4>
+<table><thead><tr><th>Factory</th><th>Use</th></tr></thead><tbody>
+<tr><td><code>newFixedThreadPool(n)</code></td><td>bounded CPU/IO pool, unbounded queue <span class="warn">!</span></td></tr>
+<tr><td><code>newVirtualThreadPerTaskExecutor()</code></td><td>(21) 1 vthread/task; blocking IO at scale</td></tr>
+<tr><td><code>newScheduledThreadPool(n)</code></td><td>delayed / periodic</td></tr>
+<tr><td><code>newCachedThreadPool()</code></td><td>elastic, 60s idle reap; spikes <span class="warn">!</span></td></tr>
+</tbody></table>
+<ul>
+<li><code>execute(Runnable)</code> fire&amp;forget; <code>submit</code>→<code>Future</code> (captures exceptions)</li>
+<li><code>shutdown()</code> drain; <code>shutdownNow()</code> interrupt+return pending; then <code>awaitTermination(t)</code></li>
+<li>try-with-resources on <code>ExecutorService</code> (19+) auto-closes (joins all)</li>
+</ul>
+<h4>Pool sizing</h4>
+<table><thead><tr><th>Load</th><th>Threads</th></tr></thead><tbody>
+<tr><td>CPU-bound</td><td>≈ cores (+1)</td></tr>
+<tr><td>IO-bound</td><td>cores × (1 + wait/compute)</td></tr>
+<tr><td>blocking IO</td><td>prefer virtual threads (21)</td></tr>
+</tbody></table>
+<ul><li>Bounded queue + <code>RejectedExecutionHandler</code> (<code>AbortPolicy</code> default / <code>CallerRunsPolicy</code> backpressure)</li></ul>
+<h4>CompletableFuture</h4>
+<pre><code>CompletableFuture.supplyAsync(this::load, ex)
+  .thenApply(this::parse)        // sync map
+  .thenCompose(this::fetchMore)  // flatMap, CF&lt;T&gt;
+  .thenCombine(other, this::merge)
+  .exceptionally(t -&gt; fallback)  // handle(v,t) sees both
+CompletableFuture.allOf(a,b).join(); // anyOf = first</code></pre>
+<ul><li><span class="warn">!</span> no executor → <code>ForkJoinPool.commonPool()</code> (shared, sized cores−1). Pass your own.</li>
+<li><code>...Async</code> variants hop executor; non-async run on completing thread</li></ul>
+<h4>Locks &amp; atomics</h4>
+<table><thead><tr><th>Type</th><th>Note</th></tr></thead><tbody>
+<tr><td><code>synchronized</code></td><td>reentrant, JVM, no tryLock/timeout</td></tr>
+<tr><td><code>ReentrantLock</code></td><td><code>tryLock(t)</code>, fairness, condition, manual unlock in <code>finally</code></td></tr>
+<tr><td><code>ReadWriteLock</code></td><td>many readers / 1 writer</td></tr>
+<tr><td><code>StampedLock</code></td><td>optimistic read (validate stamp); not reentrant <span class="warn">!</span></td></tr>
+<tr><td>atomics</td><td><code>AtomicInteger/Long/Reference</code>, <code>LongAdder</code> (hot counters), CAS lock-free</td></tr>
+</tbody></table>
+<h4>Coordination</h4>
+<table><thead><tr><th>Tool</th><th>Use</th></tr></thead><tbody>
+<tr><td><code>CountDownLatch</code></td><td>one-shot gate; <code>await</code>/<code>countDown</code></td></tr>
+<tr><td><code>CyclicBarrier</code></td><td>reusable rendezvous of N, opt. action</td></tr>
+<tr><td><code>Semaphore(p)</code></td><td>permits = throttle/rate-limit</td></tr>
+<tr><td><code>Phaser</code></td><td>dynamic parties, multi-phase</td></tr>
+</tbody></table>
+<h4>BlockingQueue (producer/consumer)</h4>
+<pre><code>BlockingQueue&lt;T&gt; q = new ArrayBlockingQueue&lt;&gt;(cap);
+q.put(x);          // blocks if full
+T x = q.take();    // blocks if empty
+// offer/poll(t) = timed; add/remove throw</code></pre>
+<ul><li><code>ArrayBlockingQueue</code> bounded, 1 lock; <code>LinkedBlockingQueue</code> opt-bounded, 2 locks (↑throughput)</li></ul>
+</section>
+
+<section class="card"><h3>Memory Model &amp; Lock-Free</h3>
+<h4>JMM &amp; happens-before</h4>
+<ul>
+<li>No HB edge → writes may be invisible/reordered across threads. Single-thread order preserved; cross-thread is not, absent sync.</li>
+<li>HB sources: <code>monitor unlock→lock</code>, <code>volatile write→read</code>, <code>Thread.start</code>, <code>join</code>, <code>final</code> field freeze (ctor end).</li>
+</ul>
+<h4>volatile</h4>
+<ul>
+<li>Guarantees visibility + no reorder across the access. <span class="warn">!</span> NOT atomic for compound ops: <code>i++</code> is read-mod-write → lost updates.</li>
+<li>Use for flags / publish-once refs; use atomics for counters.</li>
+</ul>
+<h4>Safe publication</h4>
+<table><thead><tr><th>Mechanism</th><th>Note</th></tr></thead><tbody>
+<tr><td><code>final</code> field</td><td>visible after ctor; no leak of <code>this</code></td></tr>
+<tr><td><code>volatile</code> / <code>AtomicRef</code></td><td>write publishes object + its writes</td></tr>
+<tr><td>static initializer</td><td>JVM guarantees once + visible</td></tr>
+<tr><td>concurrent collection</td><td>put-then-get is safe</td></tr>
+</tbody></table>
+<h4>Atomics + CAS</h4>
+<pre><code>AtomicInteger n = new AtomicInteger();
+int v;
+do { v = n.get(); }       // CAS loop
+while (!n.compareAndSet(v, v+1));
+n.updateAndGet(x -&gt; x+1);  // built-in</code></pre>
+<ul>
+<li><code>AtomicInteger/Long/Reference</code>; lock-free, spins under contention.</li>
+<li><span class="warn">!</span> ABA: value A→B→A passes CAS — use <code>AtomicStampedReference</code>.</li>
+<li><code>LongAdder</code>/<code>LongAccumulator</code>: striped cells, beats Atomic for hot counters; <code>sum()</code> not atomic snapshot.</li>
+</ul>
+<h4>VarHandle (9+)</h4>
+<ul>
+<li>Replaces <code>sun.misc.Unsafe</code> for field-level atomics + fences.</li>
+<li>Modes: <code>getVolatile</code>, <code>getAcquire</code>/<code>setRelease</code>, <code>getOpaque</code>, <code>compareAndSet</code>; <code>fullFence()</code>/<code>loadLoadFence()</code>.</li>
+</ul>
+<pre><code>static final VarHandle V =
+  MethodHandles.lookup()
+    .findVarHandle(C.class,"f",int.class);
+V.compareAndSet(obj, 0, 1);</code></pre>
+<h4>ConcurrentHashMap</h4>
+<ul>
+<li>CAS + bin-level locks; reads lock-free. <span class="warn">!</span> No null key/value.</li>
+<li><code>computeIfAbsent</code> atomic per-key; <span class="warn">!</span> don't recursively update same map inside mapping fn (deadlock/livelock).</li>
+<li><code>size()</code> approximate under concurrency; iterators weakly consistent.</li>
+</ul>
+<h4>False sharing</h4>
+<ul>
+<li>Two hot fields on one 64B line → cache-line ping-pong, no logical contention.</li>
+<li>Fix: pad to line size or <code>@jdk.internal.vm.annotation.Contended</code> (needs <code>-XX:-RestrictContended</code>). <code>LongAdder</code> cells already padded.</li>
+</ul>
+</section>
+
+<section class="card diagram"><h3>Memory Model — happens-before</h3>
+<div class="mermaid">
+flowchart LR
+  W["Thread A: write x"] -->|"volatile write → read<br/>(establishes HB)"| R["Thread B: read x sees it"]
+</div>
+<p class="cap">No HB edge ⇒ B may never see A's write, or see it reordered. Edges: volatile, monitor unlock→lock, Thread.start/join, final-field freeze.</p></section>
+
+<section class="card"><h3>Virtual Threads &amp; Structured Concurrency (21)</h3>
+<h4>What &amp; how</h4>
+<ul>
+<li>VT = cheap (millions), JVM-scheduled onto a pool of carrier platform threads; mounts on carrier while running, unmounts on blocking I/O.</li>
+<li>Create: <code>Thread.ofVirtual().start(r)</code> or <code>Executors.newVirtualThreadPerTaskExecutor()</code>.</li>
+</ul>
+<pre><code>try (var ex =
+  Executors.newVirtualThreadPerTaskExecutor()) {
+  ex.submit(() -&gt; handle(req));   // 1 VT / request
+}</code></pre>
+<h4>Use vs avoid</h4>
+<table><thead><tr><th>WIN</th><th>AVOID</th></tr></thead>
+<tbody>
+<tr><td>blocking I/O, thread-per-request</td><td>CPU-bound work</td></tr>
+<tr><td>high fan-out, many waits</td><td>pooling/reusing VTs</td></tr>
+</tbody></table>
+<ul>
+<li><span class="warn">!</span> Don't pool VTs — they're disposable, one per task. Pooling defeats the model.</li>
+<li>Limit a scarce resource (DB conns) with a <code>Semaphore</code>, not a thread pool.</li>
+</ul>
+<h4>Pinning <span class="warn">!</span></h4>
+<table><thead><tr><th>cause</th><th>fix</th></tr></thead>
+<tbody>
+<tr><td><code>synchronized</code> over I/O</td><td>use <code>ReentrantLock</code></td></tr>
+<tr><td>native frame on stack</td><td>unavoidable; isolate</td></tr>
+</tbody></table>
+<ul><li>Pinned VT holds its carrier → starves scheduler. Detect: <code>-Djdk.tracePinnedThreads=full</code>.</li></ul>
+<h4>StructuredTaskScope (preview)</h4>
+<pre><code>try (var s = new StructuredTaskScope
+       .ShutdownOnFailure()) {
+  var a = s.fork(() -&gt; fetchA());
+  var b = s.fork(() -&gt; fetchB());
+  s.join();             // wait all
+  s.throwIfFailed();
+  return combine(a.get(), b.get());
+}</code></pre>
+<ul>
+<li><code>ShutdownOnFailure</code>: any subtask fails → cancel siblings. <code>ShutdownOnSuccess</code>: first ok → cancel rest.</li>
+<li>Scoped lifetime: subtasks can't outlive the scope; cancellation propagates down.</li>
+</ul>
+<h4>ThreadLocal → ScopedValue (preview)</h4>
+<ul>
+<li><span class="warn">!</span> Millions of VTs × <code>ThreadLocal</code> = memory blowup + mutable, unbounded lifetime.</li>
+<li><code>ScopedValue</code>: immutable, bound for a dynamic scope, inherited by forked subtasks.</li>
+</ul>
+<pre><code>private static final ScopedValue&lt;User&gt; U =
+  ScopedValue.newInstance();
+ScopedValue.where(U, user).run(() -&gt; handle());</code></pre>
+</section>
+
+<section class="card diagram"><h3>Thread vs Virtual Thread</h3>
+<div class="mermaid">
+flowchart TD
+  PT["Platform thread = 1 OS thread (~1MB stack)"] --> Lim["limited to thousands"]
+  VT["Virtual thread (21)"] --> Carrier["mounts on a carrier platform thread"]
+  Carrier -->|"blocks on I/O"| Unmount["unmounts, frees carrier"]
+  VT --> Many["millions; great for blocking I/O"]
+</div>
+<p class="cap">Pinning: a vthread stuck on its carrier inside synchronized over I/O — use ReentrantLock. Don't pool vthreads.</p></section>
+
+<section class="card"><h3>Functional Interfaces & Lambdas</h3>
+<h4>Core fn interfaces (java.util.function)</h4>
+<table><thead><tr><th>Type</th><th>Shape</th><th>SAM</th></tr></thead><tbody>
+<tr><td>Supplier&lt;T&gt;</td><td>()-&gt;T</td><td>get()</td></tr>
+<tr><td>Consumer&lt;T&gt;</td><td>T-&gt;void</td><td>accept(t)</td></tr>
+<tr><td>BiConsumer&lt;T,U&gt;</td><td>(T,U)-&gt;void</td><td>accept(t,u)</td></tr>
+<tr><td>Function&lt;T,R&gt;</td><td>T-&gt;R</td><td>apply(t)</td></tr>
+<tr><td>BiFunction&lt;T,U,R&gt;</td><td>(T,U)-&gt;R</td><td>apply(t,u)</td></tr>
+<tr><td>Predicate&lt;T&gt;</td><td>T-&gt;bool</td><td>test(t)</td></tr>
+<tr><td>BiPredicate&lt;T,U&gt;</td><td>(T,U)-&gt;bool</td><td>test(t,u)</td></tr>
+<tr><td>UnaryOperator&lt;T&gt;</td><td>T-&gt;T</td><td>apply(t)</td></tr>
+<tr><td>BinaryOperator&lt;T&gt;</td><td>(T,T)-&gt;T</td><td>apply(t,t)</td></tr>
+<tr><td>Runnable</td><td>()-&gt;void</td><td>run()</td></tr>
+<tr><td>Callable&lt;T&gt;</td><td>()-&gt;T <em>throws</em></td><td>call()</td></tr>
+</tbody></table>
+<p><code>Function</code> chains: <code>.andThen(g)</code> (f then g), <code>.compose(g)</code> (g then f); <code>Predicate</code>: <code>.and/.or/.negate</code>.</p>
+
+<h4>Primitive specializations <span class="warn">!</span> avoid boxing</h4>
+<table><thead><tr><th>Type</th><th>Shape</th></tr></thead><tbody>
+<tr><td>IntSupplier</td><td>()-&gt;int</td></tr>
+<tr><td>IntFunction&lt;R&gt;</td><td>int-&gt;R</td></tr>
+<tr><td>ToIntFunction&lt;T&gt;</td><td>T-&gt;int</td></tr>
+<tr><td>IntPredicate</td><td>int-&gt;bool</td></tr>
+<tr><td>IntUnaryOperator</td><td>int-&gt;int</td></tr>
+<tr><td>IntBinaryOperator</td><td>(int,int)-&gt;int</td></tr>
+</tbody></table>
+<p>Also <code>Long*</code>/<code>Double*</code>; <code>IntToLongFunction</code> etc. for cross-prim. Use over <code>Function&lt;Integer,…&gt;</code> in hot/stream paths.</p>
+
+<h4>@FunctionalInterface & method refs</h4>
+<ul>
+<li><code>@FunctionalInterface</code>: exactly 1 abstract method (SAM); <code>default</code>/<code>static</code>/<code>Object</code> methods don't count. Annotation = compile check, optional.</li>
+<li><code>Type::staticM</code> → static call</li>
+<li><code>obj::instM</code> → bound to that instance</li>
+<li><code>Type::instM</code> → unbound; 1st arg is receiver (<code>String::length</code>)</li>
+<li><code>Type::new</code> → constructor ref (<code>ArrayList::new</code>)</li>
+</ul>
+
+<h4>Captures</h4>
+<pre><code>int n = 5;          // effectively final
+Runnable r = () -&gt; use(n);   // captured by VALUE
+// n = 6;   // ERROR: makes n non-final</code></pre>
+<ul>
+<li>Captures effectively-final locals (by value), enclosing fields, <code>this</code>.</li>
+<li><span class="warn">!</span> Cannot reassign/mutate captured local. Workaround: <code>final int[] box={0}</code> or atomic — but prefer streams.</li>
+</ul>
+
+<h4>Lambda vs anonymous class</h4>
+<table><thead><tr><th></th><th>Lambda</th><th>Anon class</th></tr></thead><tbody>
+<tr><td>Class file</td><td>none (<code>invokedynamic</code>)</td><td>new <code>$1.class</code></td></tr>
+<tr><td><code>this</code></td><td>enclosing instance</td><td>the anon instance</td></tr>
+<tr><td>Shadowing</td><td>cannot redeclare param names</td><td>own scope</td></tr>
+<tr><td>State</td><td>stateless (capture only)</td><td>can have fields</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> In a lambda <code>this</code> ≠ the lambda; refers to enclosing object — safe for <code>this.field</code>, no accidental self-ref.</p>
+</section>
+
+<section class="card"><h3>Streams (deep)</h3>
+<h4>Pipeline</h4>
+<p>source &rarr; intermediate (lazy) &rarr; terminal (eager). Nothing runs until terminal; pipeline reusable once only.</p>
+<table><thead><tr><th>Stage</th><th>Ops</th></tr></thead><tbody>
+<tr><td>Intermediate (lazy)</td><td><code>map</code> <code>filter</code> <code>flatMap</code> <code>distinct</code> <code>sorted</code> <code>limit</code> <code>peek</code></td></tr>
+<tr><td>Terminal (eager)</td><td><code>collect</code> <code>reduce</code> <code>forEach</code> <code>count</code> <code>anyMatch</code> <code>findFirst</code> <code>toList</code></td></tr>
+</tbody></table>
+<span class="warn">!</span> <code>peek</code> = debug only; may be elided if result unused (JDK fuses/skips).
+<h4>Collectors</h4>
+<table><thead><tr><th>Collector</th><th>Use</th></tr></thead><tbody>
+<tr><td><code>toList()</code></td><td>unmodifiable (16+); ordered</td></tr>
+<tr><td><code>toMap(k,v,merge)</code></td><td>merge fn REQUIRED for dup keys <span class="warn">!</span></td></tr>
+<tr><td><code>groupingBy(f,dn)</code></td><td>Map&lt;K,List&gt;; +downstream</td></tr>
+<tr><td><code>partitioningBy(p)</code></td><td>Map&lt;Boolean,List&gt;</td></tr>
+<tr><td><code>counting</code> <code>joining</code></td><td>aggregate / String concat</td></tr>
+<tr><td><code>mapping</code> <code>teeing</code></td><td>transform / merge 2 collectors</td></tr>
+</tbody></table>
+<pre><code>// dup-key crash without merge fn:
+m = s.collect(toMap(W::name, W::age));        // IllegalStateException
+m = s.collect(toMap(W::name, W::age, (a,b)-&gt;a)); // keep first
+// group + count:
+Map&lt;Dept,Long&gt; r = e.stream()
+  .collect(groupingBy(E::dept, counting()));</code></pre>
+<h4>Primitive streams</h4>
+<ul>
+<li><code>IntStream</code>/<code>LongStream</code>/<code>DoubleStream</code> &mdash; no boxing</li>
+<li><code>sum() average() max() summaryStatistics()</code></li>
+<li><code>mapToInt</code> in, <code>boxed()</code> out to <code>Stream&lt;Integer&gt;</code></li>
+</ul>
+<pre><code>double avg = e.stream()
+  .mapToInt(E::age).average().orElse(0);</code></pre>
+<h4>reduce</h4>
+<pre><code>int sum = nums.stream()
+  .reduce(0, Integer::sum, Integer::sum);
+//        ^id  ^accumulator  ^combiner</code></pre>
+<ul>
+<li>identity must be neutral: <code>x op id == x</code></li>
+<li>combiner merges partials; used ONLY in parallel</li>
+<li>accumulator/combiner must be associative + stateless</li>
+</ul>
+<h4>parallel()</h4>
+<ul>
+<li>worth it ONLY: large N, CPU-bound, stateless, no shared mutable, splittable source (array/range)</li>
+<li>shares one <code>ForkJoinPool.commonPool()</code> JVM-wide <span class="warn">!</span></li>
+<li>blocking I/O in parallel starves the pool</li>
+<li>often SLOWER &mdash; always measure (JMH)</li>
+</ul>
+</section>
+
+<section class="card"><h3>Garbage Collection (deep)</h3>
+<h4>Generational model</h4>
+<ul>
+<li>Hypothesis: most objects die young.</li>
+<li>Young = Eden + 2 Survivor (S0/S1) -&gt; minor GC; survivors copied S0&lt;-&gt;S1, age++.</li>
+<li>Age &gt; threshold -&gt; tenured to Old gen.</li>
+<li>Old fills -&gt; major / G1 mixed GC; Old exhausted -&gt; full GC (stop-the-world, slow).</li>
+</ul>
+<h4>Collectors</h4>
+<table><thead><tr><th>GC</th><th>Model</th><th>Use for</th></tr></thead><tbody>
+<tr><td>G1 (default)</td><td>region-based, pause target, concurrent mark + evac</td><td>balanced, most apps</td></tr>
+<tr><td>Parallel</td><td>STW, multi-thread copy/compact</td><td>throughput / batch, pause OK</td></tr>
+<tr><td>ZGC</td><td>concurrent, colored ptrs, region</td><td>sub-ms pause, huge heaps (TB)</td></tr>
+<tr><td>Shenandoah</td><td>concurrent compact</td><td>low pause, mid heaps</td></tr>
+</tbody></table>
+<h4>Key flags</h4>
+<table><tbody>
+<tr><td><code>-Xms</code>/<code>-Xmx</code></td><td>min/max heap; set EQUAL in prod (no resize churn)</td></tr>
+<tr><td><code>-XX:+UseG1GC</code></td><td>G1 (default 21)</td></tr>
+<tr><td><code>-XX:MaxGCPauseMillis=N</code></td><td>G1 soft pause target</td></tr>
+<tr><td><code>-XX:+UseZGC</code></td><td>ZGC (add <code>-XX:+ZGenerational</code>)</td></tr>
+<tr><td><code>-Xlog:gc*:file=gc.log</code></td><td>unified GC logging (9+)</td></tr>
+</tbody></table>
+<h4>Footguns &amp; tuning</h4>
+<ul>
+<li><span class="warn">!</span> Humongous objs (&gt; ½ G1 region) allocate straight into Old -&gt; fragmentation, premature GC. Size region via <code>-XX:G1HeapRegionSize</code>.</li>
+<li>Allocation rate drives GC frequency: cut garbage (pooling, reuse, primitives) -&gt; fewer pauses.</li>
+<li><span class="warn">!</span> Promotion failure / evac failure (Old can't fit survivors) -&gt; full GC. Symptom of undersized Old or high promotion.</li>
+<li>Tune pause vs throughput: lower <code>MaxGCPauseMillis</code> = more frequent, shorter GCs.</li>
+</ul>
+<h4>Reading GC logs</h4>
+<ul>
+<li>Watch: pause time, heap before-&gt;after, GC frequency, % time in GC.</li>
+<li>Rising after-GC heap each cycle =&gt; leak; frequent full GCs =&gt; undersized heap / leak.</li>
+<li>Tools: JFR (low overhead, <code>-XX:+FlightRecorder</code>), GCViewer, GCeasy, <code>jstat -gc</code>.</li>
+</ul>
+</section>
+
+<section class="card diagram"><h3>Garbage Collection</h3>
+<div class="mermaid">
+flowchart TD
+  A["Allocate in Eden"] --> B{"Eden full?"}
+  B -->|"yes"| C["Minor GC: copy live to Survivor"]
+  C --> D{"age > threshold?"}
+  D -->|"yes"| E["Promote to Old"]
+  D -->|"no"| A
+  E --> F{"Old full / alloc fail?"}
+  F -->|"yes"| G["Major / Mixed GC (G1) or concurrent (ZGC)"]
+</div>
+<p class="cap">Pick by goal: G1 = balanced default · ZGC/Shenandoah = sub-ms pauses, big heaps · Parallel = max throughput.</p></section>
+
+<section class="card"><h3>JVM Memory &amp; Object Layout</h3>
+<h4>Runtime regions</h4>
+<table><thead><tr><th>Region</th><th>Holds</th><th>Scope</th></tr></thead><tbody>
+<tr><td>Heap</td><td>all objects/arrays; GC-managed (Eden/Survivor/Old)</td><td>shared</td></tr>
+<tr><td>Thread stack</td><td>frames: locals, operand stack, refs</td><td>per-thread</td></tr>
+<tr><td>Metaspace</td><td>class metadata; native mem, not heap</td><td>shared</td></tr>
+<tr><td>Code cache</td><td>JIT-compiled native code</td><td>shared</td></tr>
+</tbody></table>
+<p>Metaspace is off-heap native memory <span class="warn">!</span> grows till <code>-XX:MaxMetaspacespace</code>/OS; leak = classloader churn, not heap.</p>
+<h4>TLAB</h4>
+<ul>
+<li>Per-thread chunk of Eden; alloc = bump pointer + bound check, <b>lock-free</b> fast path.</li>
+<li>Slow path (TLAB full) → new TLAB or direct Eden alloc (contended).</li>
+</ul>
+<h4>Object header (64-bit)</h4>
+<table><thead><tr><th>Part</th><th>Bytes</th><th>Contains</th></tr></thead><tbody>
+<tr><td>Mark word</td><td>8</td><td>identity hash, GC age, lock bits/biased ptr</td></tr>
+<tr><td>Klass ptr</td><td>4*/8</td><td>type metadata ptr (*4 if compressed)</td></tr>
+<tr><td>+ array len</td><td>4</td><td>arrays only</td></tr>
+</tbody></table>
+<ul>
+<li>Header ~12B (compressed) / 16B; objects 8-byte aligned → padding.</li>
+<li><code>jol</code> (Java Object Layout) tool inspects real layout.</li>
+</ul>
+<h4>Compressed oops</h4>
+<ul>
+<li><code>-XX:+UseCompressedOops</code> default when heap &lt; 32G; 32-bit refs on 64-bit JVM via 8-byte scaling.</li>
+<li><span class="warn">!</span> Heap ≥ 32G disables it → bigger refs, often <i>less</i> usable memory than 31G.</li>
+</ul>
+<h4>Escape analysis (JIT)</h4>
+<table><thead><tr><th>Opt</th><th>Effect</th></tr></thead><tbody>
+<tr><td>Scalar replace</td><td>object fields → registers/stack; no alloc</td></tr>
+<tr><td>Stack alloc</td><td>non-escaping object on frame; freed on return</td></tr>
+<tr><td>Lock elision</td><td>drop sync on thread-local object</td></tr>
+</tbody></table>
+<p>Only for non-escaping objects; defeated by storing ref in a field/returning it.</p>
+<h4>Off-heap (avoid GC for big buffers)</h4>
+<pre><code>// direct buffer: native mem, GC frees via Cleaner
+ByteBuffer b = ByteBuffer.allocateDirect(1 &lt;&lt; 20);
+
+// FFM API (21): deterministic free via Arena
+try (Arena a = Arena.ofConfined()) {
+    MemorySegment s = a.allocate(1L &lt;&lt; 20);
+    s.set(ValueLayout.JAVA_INT, 0, 42);
+} // freed here</code></pre>
+<ul>
+<li>Direct buffer cleanup is non-deterministic (tied to GC) <span class="warn">!</span>; Arena is scoped/explicit.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Low-Latency Java</h3>
+
+<h4>Allocation in the hot path</h4>
+<ul>
+<li>☐ Reuse objects/buffers; avoid per-iteration <code>new</code></li>
+<li>☐ <code>int[]</code>/<code>long[]</code> over <code>List&lt;Integer&gt;</code> — no boxing, contiguous</li>
+<li>☐ Avoid autoboxing: <code>Integer</code> cache only -128..127; map keys box</li>
+<li>☐ No <code>streams</code>/lambdas in hottest loops — capture allocs, megamorphic calls; plain <code>for</code></li>
+<li>☐ Defer String concat/format; no varargs in hot path</li>
+</ul>
+<span class="warn">!</span> Allocation pressure = GC frequency. Less garbage beats faster GC.
+
+<h4>GC for low pause</h4>
+<table><thead><tr><th>GC</th><th>Pause</th><th>Use</th></tr></thead><tbody>
+<tr><td>ZGC</td><td>sub-ms, heap-indep</td><td>large heap, latency-critical</td></tr>
+<tr><td>Shenandoah</td><td>sub-ms concurrent</td><td>same; non-Oracle JDK</td></tr>
+<tr><td>G1</td><td>~10ms+ target</td><td>default, balanced</td></tr>
+</tbody></table>
+<ul>
+<li>☐ <code>-XX:+UseZGC</code> (gen ZGC default 21)</li>
+<li>☐ Size heap big enough to absorb churn between collections</li>
+<li>☐ Concurrent GC trades CPU/throughput for pause</li>
+</ul>
+
+<h4>Mechanical sympathy</h4>
+<ul>
+<li>☐ Cache-friendly: arrays of primitives, struct-of-arrays vs array-of-objects</li>
+<li>☐ Avoid pointer chasing (linked lists, deep refs) — cache misses dominate</li>
+<li>☐ 64B cache line; pad to avoid <em>false sharing</em></li>
+<li>☐ <code>@Contended</code> (<code>jdk.internal.vm.annotation</code>; <code>-XX:-RestrictContended</code>) on hot concurrent fields</li>
+</ul>
+
+<h4>Warmup &amp; JIT</h4>
+<ul>
+<li>☐ Hot methods C2-compiled after ~10k calls — warm up before measuring/serving</li>
+<li>☐ Drive representative load pre-traffic so steady-state is JIT'd</li>
+<li>☐ <code>-XX:+AlwaysPreTouch</code> pages in heap upfront (no fault stalls)</li>
+<li>☐ Avoid deopt: stable types, no rare exceptions in hot path</li>
+</ul>
+
+<h4>Threading / coordination</h4>
+<table><thead><tr><th>Technique</th><th>Note</th></tr></thead><tbody>
+<tr><td>busy-spin</td><td>lowest latency, burns a core; pin thread</td></tr>
+<tr><td><code>LockSupport.park</code></td><td>yields CPU, wakeup cost</td></tr>
+<tr><td>single-writer</td><td>one writer/field → no contention, no locks</td></tr>
+<tr><td>lock-free ring</td><td>Disruptor: pre-alloc slots, seq counters</td></tr>
+</tbody></table>
+<span class="warn">!</span> Virtual threads (21) help throughput, NOT tail latency — pinning + scheduler hops.
+
+<h4>Object pooling</h4>
+<ul>
+<li>☐ Only when measurement proves allocation dominates</li>
+<li>☐ Usually a smell with modern GC; pools add complexity, leaks, false sharing</li>
+<li>☐ Risk: pooled objects survive to old gen → worse GC</li>
+</ul>
+</section>
+
+<section class="card"><h3>JIT, JMH &amp; Profiling</h3>
+<h4>Tiered compilation</h4>
+<table><thead><tr><th>Tier</th><th>What</th></tr></thead><tbody>
+<tr><td>0</td><td>Interpreter, counts calls/back-edges</td></tr>
+<tr><td>1-3</td><td>C1: fast compile, profiling probes</td></tr>
+<tr><td>4</td><td>C2: aggressive optimized native</td></tr>
+</tbody></table>
+<ul>
+<li>Hot = invocation + back-edge counters cross threshold → promote.</li>
+<li><code>-XX:+PrintCompilation</code> traces compiles &amp; deopts.</li>
+</ul>
+<h4>Key optimizations</h4>
+<table><thead><tr><th>Opt</th><th>Effect</th></tr></thead><tbody>
+<tr><td>Inlining</td><td>Splice callee body; enables rest</td></tr>
+<tr><td>Escape analysis</td><td>Stack-alloc / scalar replace; lock elision</td></tr>
+<tr><td>Devirtualization</td><td>Mono/bimorphic call → direct/inline</td></tr>
+<tr><td>Loop unroll</td><td>Fewer branches, vectorize</td></tr>
+<tr><td>DCE</td><td>Drop unused computation</td></tr>
+</tbody></table>
+<ul>
+<li><span class="warn">!</span> C2 speculates on profile; assumption break → <b>deopt</b> back to interpreter, recompile.</li>
+<li><b>OSR</b>: long-running loop compiled mid-execution, swaps frame on-stack — no need to re-enter method.</li>
+</ul>
+<h4>JMH microbenchmarks</h4>
+<pre><code>@State(Scope.Thread) public class B {
+  int x = 42;
+  @Benchmark
+  public void m(Blackhole bh){ bh.consume(work(x)); }
+}
+// @Warmup/@Measurement(iterations=N)
+// @Fork(2) fresh JVM, kills profile pollution</code></pre>
+<ul>
+<li><code>@Benchmark</code>, warmup + measurement iters, <code>@Fork</code> = fresh JVM.</li>
+<li><code>Blackhole.consume()</code> / return value defeats DCE; <code>@State</code> holds non-const inputs.</li>
+</ul>
+<h4>Why naive benchmarks lie</h4>
+<table><thead><tr><th>Trap</th><th>Fix</th></tr></thead><tbody>
+<tr><td>JIT not warmed</td><td>Warmup iters before measure</td></tr>
+<tr><td>DCE drops result</td><td>Blackhole / return</td></tr>
+<tr><td>Constant folding</td><td>@State, non-final inputs</td></tr>
+<tr><td>GC / noise</td><td>@Fork, multiple forks</td></tr>
+</tbody></table>
+<h4>Profiling</h4>
+<table><thead><tr><th>Tool</th><th>Use</th></tr></thead><tbody>
+<tr><td>async-profiler</td><td>CPU/alloc/lock flame graphs, low overhead, no safepoint bias</td></tr>
+<tr><td>JFR</td><td>Built-in: <code>jcmd &lt;pid&gt; JFR.start</code>, view in JMC</td></tr>
+</tbody></table>
+<ul><li><span class="warn">!</span> <code>-Xprof</code> removed; <code>hprof</code> gone — use JFR/async-profiler.</li></ul>
+</section>
+
+<section class="card diagram"><h3>JIT Tiered Compilation</h3>
+<div class="mermaid">
+flowchart LR
+  I["Interpreter"] -->|"warm"| C1["C1 (fast + profiling)"]
+  C1 -->|"hot (counters)"| C2["C2 (aggressive opt)"]
+  C2 -.->|"assumption broken"| Deopt["Deoptimize → back to C1/interp"]
+</div>
+<p class="cap">Optimizations: inlining, escape analysis, devirtualization, loop unrolling. Warm up before measuring — JMH handles this.</p></section>
+
+<section class="card"><h3>Collections &amp; Performance</h3>
+<h4>Impl pick (Big-O)</h4>
+<table><thead><tr><th>Type</th><th>Ops</th><th>Use</th></tr></thead><tbody>
+<tr><td>ArrayList</td><td>get O(1), add-end amort O(1), insert/remove-mid O(n)</td><td>default list</td></tr>
+<tr><td>LinkedList</td><td>get O(n), ends O(1)</td><td>rarely worth it <span class="warn">!</span></td></tr>
+<tr><td>ArrayDeque</td><td>push/pop/peek O(1)</td><td>stack &amp; queue (beats Stack/LinkedList)</td></tr>
+<tr><td>HashMap</td><td>get/put O(1) avg, O(n)/O(log n) worst</td><td>default map</td></tr>
+<tr><td>LinkedHashMap</td><td>O(1), keeps order</td><td>insertion/access order (LRU)</td></tr>
+<tr><td>TreeMap</td><td>O(log n), sorted</td><td>range/nav queries</td></tr>
+<tr><td>HashSet</td><td>O(1) avg</td><td>membership</td></tr>
+<tr><td>TreeSet</td><td>O(log n), sorted</td><td>sorted/nav set</td></tr>
+</tbody></table>
+
+<h4>HashMap internals</h4>
+<ul>
+<li>Array of buckets; key → <code>hash(key)</code> spread → index.</li>
+<li>Load factor 0.75: resize when size &gt; cap*0.75 → cap doubles &amp; full rehash (O(n) spike).</li>
+<li>Bucket treeifies (list→red-black tree) at 8 entries if cap ≥ 64; needs <code>Comparable</code>/good <code>hashCode</code> else stays O(n). <span class="warn">!</span> bad hashCode = all in one bucket.</li>
+</ul>
+
+<h4>Presize (avoid resize/copy)</h4>
+<pre><code>new HashMap&lt;&gt;((int)(n/0.75)+1);
+new ArrayList&lt;&gt;(n);</code></pre>
+
+<h4>Concurrent</h4>
+<table><thead><tr><th>Type</th><th>When</th></tr></thead><tbody>
+<tr><td>ConcurrentHashMap</td><td>concurrent map; no null k/v</td></tr>
+<tr><td>CopyOnWriteArrayList</td><td>read-heavy, rare writes <span class="warn">!</span> write copies array</td></tr>
+<tr><td>ConcurrentLinkedQueue</td><td>unbounded lock-free queue</td></tr>
+<tr><td>ArrayBlockingQueue / LinkedBlockingQueue</td><td>bounded/unbounded producer-consumer</td></tr>
+</tbody></table>
+
+<h4>Hot/large data — avoid boxing</h4>
+<ul>
+<li>Primitive collections: Eclipse Collections, fastutil, Agrona — no <code>Integer</code>/<code>Long</code> autobox, less GC, cache-friendly.</li>
+</ul>
+
+<h4>Immutability gotchas</h4>
+<ul>
+<li><code>List.of</code>/<code>Map.of</code>/<code>Set.of</code> → immutable, no nulls, throws on mutate.</li>
+<li><code>Arrays.asList</code> → fixed-size view backed by array; <code>set</code> ok, <code>add</code>/<code>remove</code> throws. <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card diagram"><h3>Collection Decision</h3>
+<div class="mermaid">
+flowchart TD
+  A{"Need?"} -->|"indexed list"| AL["ArrayList"]
+  A -->|"FIFO/stack/deque"| AD["ArrayDeque"]
+  A -->|"key → value"| M{"ordered?"}
+  M -->|"no"| HM["HashMap"]
+  M -->|"insertion"| LHM["LinkedHashMap"]
+  M -->|"sorted"| TM["TreeMap"]
+  A -->|"unique set"| S{"ordered?"}
+  S -->|"no"| HS["HashSet"]
+  S -->|"sorted"| TS["TreeSet"]
+  A -->|"concurrent map"| CHM["ConcurrentHashMap"]
+</div></section>
+
+<section class="card"><h3>Generics &amp; Variance</h3>
+
+<h4>Type erasure (compile-time only)</h4>
+<ul>
+<li>U+2610 No <code>new T()</code>, no <code>new T[n]</code>, no <code>T.class</code> — type gone at runtime.</li>
+<li>U+2610 <code>instanceof List&lt;String&gt;</code> illegal; only <code>instanceof List&lt;?&gt;</code>. <span class="warn">!</span></li>
+<li>U+2610 <code>List&lt;String&gt;</code> &amp; <code>List&lt;Integer&gt;</code> share one <code>Class</code> object.</li>
+<li>U+2610 Compiler inserts casts + <strong>bridge methods</strong> (synthetic, restore polymorphism after erasure of overridden generic methods).</li>
+</ul>
+
+<h4>Bounds</h4>
+<pre><code>&lt;T extends Comparable&lt;T&gt;&gt;          // upper bound
+&lt;T extends Number &amp; Runnable&gt;       // multiple: class first, then ifaces
+&lt;T extends Comparable&lt;? super T&gt;&gt;   // recursive, flexible</code></pre>
+
+<h4>PECS — Producer Extends, Consumer Super</h4>
+<table><thead><tr><th>Wildcard</th><th>Role</th><th>Can</th></tr></thead><tbody>
+<tr><td><code>? extends T</code></td><td>producer (read)</td><td>get <code>T</code>; cannot <code>add</code> (except <code>null</code>)</td></tr>
+<tr><td><code>? super T</code></td><td>consumer (write)</td><td><code>add</code> <code>T</code>/subtypes; get only <code>Object</code></td></tr>
+<tr><td><code>?</code></td><td>unbounded</td><td>read <code>Object</code>; add only <code>null</code></td></tr>
+</tbody></table>
+<pre><code>void copy(List&lt;? super T&gt; dst, List&lt;? extends T&gt; src)</code></pre>
+
+<h4>Variance</h4>
+<table><thead><tr><th></th><th>Generics</th><th>Arrays</th></tr></thead><tbody>
+<tr><td>Variance</td><td>invariant</td><td>covariant</td></tr>
+<tr><td><code>List&lt;String&gt;</code> as <code>List&lt;Object&gt;</code>?</td><td>no</td><td>—</td></tr>
+<tr><td>Safety</td><td>compile-safe</td><td><code>ArrayStoreException</code> at runtime <span class="warn">!</span></td></tr>
+</tbody></table>
+<pre><code>Object[] a = new String[1];
+a[0] = 42;   // compiles, throws ArrayStoreException</code></pre>
+
+<h4>Varargs &amp; raw types</h4>
+<ul>
+<li>U+2610 Generic varargs create unchecked heap-pollution warning; annotate <code>@SafeVarargs</code> (static/final/private only) if truly safe. <span class="warn">!</span></li>
+<li>U+2610 Raw <code>List</code> defeats type checks — legacy interop only; never write new raw code.</li>
+<li>U+2610 <strong>Wildcard capture</strong>: helper method captures <code>?</code> into a named <code>T</code> to enable swaps/writes:</li>
+</ul>
+<pre><code>void swap(List&lt;?&gt; l, int i, int j){ cap(l,i,j); }
+private &lt;T&gt; void cap(List&lt;T&gt; l,int i,int j){
+  l.set(i, l.set(j, l.get(i))); }</code></pre>
+</section>
+
+<section class="card"><h3>Records, Sealed &amp; Pattern Matching</h3>
+
+<h4>record — immutable data carrier</h4>
+<pre><code>record Point(int x, int y) {
+  Point {                 // compact ctor: validate/normalize
+    if (x &lt; 0) throw new IllegalArgumentException();
+  }
+}</code></pre>
+<ul>
+<li>Auto <code>equals</code>/<code>hashCode</code>/<code>toString</code> + accessors <code>x()</code>,<code>y()</code></li>
+<li>Final, implicitly extends <code>Record</code>: <code>implements</code> interfaces, never <code>extends</code></li>
+<li>Components are final; copy/derive via new instance</li>
+<li>Use: DTOs, value objects, map keys, multiple-return; <span class="warn">!</span> not JPA entities (need no-arg ctor + mutability)</li>
+</ul>
+
+<h4>sealed — closed hierarchy</h4>
+<pre><code>sealed interface Shape permits Circle, Rect {}
+record Circle(double r) implements Shape {}
+record Rect(double w, double h) implements Shape {}</code></pre>
+<ul>
+<li>Permitted subtypes must be <code>final</code>, <code>sealed</code>, or <code>non-sealed</code></li>
+<li><code>permits</code> optional if subtypes in same file</li>
+</ul>
+
+<h4>Pattern matching (21)</h4>
+<table><thead><tr><th>Form</th><th>Example</th></tr></thead><tbody>
+<tr><td>instanceof</td><td><code>if (o instanceof String s) s.length()</code></td></tr>
+<tr><td>switch type</td><td><code>case Integer i -&gt; ...</code></td></tr>
+<tr><td>guard</td><td><code>case Integer i when i &gt; 0 -&gt; ...</code></td></tr>
+<tr><td>record decon</td><td><code>case Point(int x, int y) -&gt; ...</code></td></tr>
+<tr><td>nested</td><td><code>case Rect(var w, var h)</code></td></tr>
+<tr><td>null</td><td><code>case null -&gt; ...</code> (else NPE)</td></tr>
+</tbody></table>
+
+<h4>Exhaustiveness</h4>
+<pre><code>String area(Shape s) {
+  return switch (s) {            // no default needed
+    case Circle(var r) -&gt; "circ " + r;
+    case Rect(var w, var h) -&gt; "rect " + w*h;
+  };                            // compiler enforces all permits
+}</code></pre>
+<ul>
+<li>sealed + record patterns = closed algebraic match; new subtype =&gt; compile error (good)</li>
+<li><span class="warn">!</span> guard-only branches don't prove exhaustiveness — compiler may still demand <code>default</code></li>
+</ul>
+</section>
+
+<section class="card"><h3>Exceptions (senior view)</h3>
+<h4>Taxonomy &amp; policy</h4>
+<table><thead><tr><th>Type</th><th>Catch?</th><th>Use for</th></tr></thead><tbody>
+<tr><td><code>Error</code></td><td>No</td><td>JVM fatal (OOM, StackOverflow) — let it die</td></tr>
+<tr><td><code>RuntimeException</code></td><td>Rarely</td><td>Programming bugs (NPE, IAE, ISE)</td></tr>
+<tr><td><code>Exception</code> (checked)</td><td>Yes</td><td>Recoverable, caller can act (IO, parse)</td></tr>
+</tbody></table>
+<ul>
+<li>Prefer <b>unchecked</b> for programming errors; checked only when caller has a sane recovery.</li>
+<li>Checked leaks into signatures &amp; streams/lambdas — don't overuse.</li>
+</ul>
+
+<h4>Cost (hot paths)</h4>
+<ul>
+<li><code>fillInStackTrace()</code> is the expensive part, not throw/catch.</li>
+<li>Control-flow exceptions: override <code>fillInStackTrace</code> (return <code>this</code>) or reuse a singleton stackless instance.</li>
+</ul>
+<pre><code>class Signal extends RuntimeException {
+  static final Signal I = new Signal();
+  Signal(){ super(null,null,false,false); } // no trace
+  public Throwable fillInStackTrace(){ return this; }
+}</code></pre>
+
+<h4>try-with-resources</h4>
+<pre><code>try (var a = open(); var b = open()) { use(a,b); }
+// close() called in REVERSE: b then a</code></pre>
+<ul>
+<li>If body throws &amp; <code>close()</code> throws, close's is <b>suppressed</b> — get via <code>e.getSuppressed()</code>. <span class="warn">!</span></li>
+</ul>
+
+<h4>Multi-catch</h4>
+<pre><code>catch (IOException | SQLException e) { ... } // e effectively final</code></pre>
+
+<h4>Anti-patterns</h4>
+<table><thead><tr><th>Don't</th><th>Why</th></tr></thead><tbody>
+<tr><td>catch + ignore</td><td>silent failure; at least log/rethrow</td></tr>
+<tr><td>catch <code>Throwable</code>/broad <code>Exception</code></td><td>swallows Error, InterruptedException, bugs</td></tr>
+<tr><td>log-and-rethrow</td><td>double logging; do one or the other</td></tr>
+<tr><td><code>return</code>/<code>throw</code> in <code>finally</code></td><td>swallows pending exception/return <span class="warn">!</span></td></tr>
+<tr><td>swallow <code>InterruptedException</code></td><td>re-set flag: <code>Thread.currentThread().interrupt()</code></td></tr>
+</tbody></table>
+
+<h4>Wrap, preserve cause</h4>
+<pre><code>catch (SQLException e) {
+  throw new RepoException("load user " + id, e); // keep cause
+}</code></pre>
+<ul>
+<li>Never <code>new X(e.getMessage())</code> — loses stack/cause chain.</li>
+<li>Add context (the <i>id</i>, the <i>op</i>) at wrap site; don't restate the type.</li>
+</ul>
+</section>
+
+<section class="card"><h3>equals / hashCode &amp; Immutability</h3>
+<h4>equals contract (5 laws)</h4>
+<ul>
+<li>Reflexive: <code>x.equals(x)</code></li>
+<li>Symmetric: <code>x.equals(y) == y.equals(x)</code></li>
+<li>Transitive: x=y, y=z &rarr; x=z</li>
+<li>Consistent: repeated calls, same inputs, same result</li>
+<li><code>x.equals(null) == false</code> (never NPE)</li>
+</ul>
+<span class="warn">!</span> Override <code>hashCode</code> whenever you override <code>equals</code>: equal objects MUST share a hash. Break it &rarr; lost keys in <code>HashMap</code>/<code>HashSet</code>.
+<span class="warn">!</span> Symmetry breaks when a subclass adds fields to equals; prefer <code>getClass()</code> check or composition over inheritance.
+
+<h4>Canonical skeleton</h4>
+<pre><code>@Override public boolean equals(Object o){
+  if (this == o) return true;
+  if (!(o instanceof Point p)) return false; // pattern (21)
+  return x == p.x &amp;&amp; y == p.y;
+}
+@Override public int hashCode(){
+  return Objects.hash(x, y); // or cache for immutables
+}</code></pre>
+<ul>
+<li>Bad <code>hashCode</code> (e.g. constant) &rarr; all entries one bucket &rarr; O(n) lookups.</li>
+<li>Immutable + heavy hash &rarr; cache in a <code>final</code> field (lazy or eager).</li>
+</ul>
+
+<h4>Comparable / Comparator</h4>
+<ul>
+<li><code>compareTo</code> SHOULD be consistent with <code>equals</code> (<code>==0 iff equals</code>); else <code>TreeMap</code>/<code>TreeSet</code> drop "duplicate" keys silently.<span class="warn">!</span></li>
+<li><code>Comparator.comparing(A::x).thenComparing(A::y).reversed()</code></li>
+<li>Use <code>Integer.compare(a,b)</code> not <code>a-b</code> (overflow).<span class="warn">!</span></li>
+</ul>
+
+<h4>Immutability recipe</h4>
+<table><thead><tr><th>Rule</th><th>Why</th></tr></thead><tbody>
+<tr><td><code>final class</code></td><td>no override breaking invariants</td></tr>
+<tr><td><code>final</code> fields, no setters</td><td>state fixed post-construct</td></tr>
+<tr><td>defensive copy IN</td><td>caller can't mutate held ref</td></tr>
+<tr><td>defensive copy OUT</td><td>caller can't mutate internals (<code>List.copyOf</code>)</td></tr>
+<tr><td>no <code>this</code>-escape in ctor</td><td>no partially-built object leak</td></tr>
+</tbody></table>
+
+<h4>Payoff</h4>
+<ul>
+<li>Thread-safe with zero locks; freely shareable/cacheable.</li>
+<li>Safe as <code>Map</code>/<code>Set</code> keys (hash never drifts).</li>
+<li><code>record Point(int x,int y){}</code> gives <code>equals</code>/<code>hashCode</code>/<code>toString</code>/final fields free &mdash; still copy mutable components in the compact ctor.<span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Modern Language, java.time &amp; Handy APIs</h3>
+<h4>Syntax (Java 21)</h4>
+<table><thead><tr><th>Feature</th><th>Form</th></tr></thead><tbody>
+<tr><td><code>var</code></td><td>local infer; not fields/params/return; not <code>var x=null</code></td></tr>
+<tr><td>text block</td><td><code>"""</code> ... <code>"""</code>; strips incidental indent; <code>\</code> joins lines</td></tr>
+<tr><td>switch expr</td><td><code>-&gt;</code> arms, <code>yield</code> in blocks; exhaustive</td></tr>
+<tr><td>instanceof</td><td><code>if (o instanceof String s)</code> binds <code>s</code></td></tr>
+</tbody></table>
+<pre><code>String s = switch (day) {
+  case MON, FRI -&gt; "busy";
+  default -&gt; { yield "x"; }
+};
+String j = """
+  {"k": 1}""";</code></pre>
+
+<h4>java.time (immutable, thread-safe)</h4>
+<table><thead><tr><th>Type</th><th>Use</th></tr></thead><tbody>
+<tr><td><code>Instant</code></td><td>UTC machine timestamp (store this)</td></tr>
+<tr><td><code>LocalDate/Time/DateTime</code></td><td>no zone (wall clock)</td></tr>
+<tr><td><code>ZonedDateTime</code></td><td>instant + <code>ZoneId</code> + DST rules</td></tr>
+<tr><td><code>Duration</code></td><td>time-based (sec/nanos)</td></tr>
+<tr><td><code>Period</code></td><td>date-based (Y/M/D)</td></tr>
+<tr><td><code>DateTimeFormatter</code></td><td>reusable; replaces <code>SimpleDateFormat</code></td></tr>
+</tbody></table>
+<span class="warn">!</span> Replaces <code>Date</code>/<code>Calendar</code>/<code>SimpleDateFormat</code> (mutable, not thread-safe). Store <code>Instant</code>, convert at edges.
+<pre><code>Instant now = Instant.now();
+ZonedDateTime z = now.atZone(ZoneId.of("Europe/London"));
+Duration d = Duration.between(a, b);</code></pre>
+
+<h4>Optional</h4>
+<ul>
+<li><code>ofNullable</code> / <code>map</code> / <code>filter</code> / <code>flatMap</code></li>
+<li><code>orElseGet(sup)</code> lazy; <code>orElseThrow()</code></li>
+<li><span class="warn">!</span> return type only — not fields/params/collections; never blind <code>.get()</code></li>
+<li><code>orElse(x)</code> evals <code>x</code> eagerly; prefer <code>orElseGet</code></li>
+</ul>
+
+<h4>Objects &amp; Math</h4>
+<table><thead><tr><th>Call</th><th>Does</th></tr></thead><tbody>
+<tr><td><code>Objects.requireNonNull(x,"msg")</code></td><td>NPE fail-fast</td></tr>
+<tr><td><code>requireNonNullElse(x,def)</code></td><td>null-coalesce</td></tr>
+<tr><td><code>Objects.equals/hash(...)</code></td><td>null-safe eq/hashCode</td></tr>
+<tr><td><code>Math.addExact/multiplyExact</code></td><td>throws on overflow</td></tr>
+</tbody></table>
+
+<h4>Collections &amp; String</h4>
+<ul>
+<li><code>List/Set/Map.of(...)</code> immutable; <span class="warn">!</span> throws on add &amp; on null/dup keys</li>
+<li><code>stream().toList()</code> (16) unmodifiable; <code>Collectors.toList()</code> = no guarantee</li>
+<li><code>strip</code>/<code>isBlank</code>/<code>repeat(n)</code>/<code>lines()</code>/<code>"%d".formatted(x)</code></li>
+</ul>
+</section>
+
+<section class="card"><h3>Common Java Bugs — Spot-the-Bug</h3>
+<table><thead><tr><th>Bug</th><th>Why</th><th>Fix</th></tr></thead><tbody>
+<tr><td><code>a == b</code> on String/Integer</td><td>compares refs; Integer cache -128..127 makes <code>==</code> "work" then fail at 128 <span class="warn">!</span></td><td>always <code>a.equals(b)</code> / <code>Objects.equals</code></td></tr>
+<tr><td>override <code>equals</code>, not <code>hashCode</code></td><td>unequal hashes → wrong bucket; HashMap/HashSet lookups miss</td><td>override both (or <code>record</code>); keep consistent</td></tr>
+<tr><td>autobox null <code>Integer</code></td><td><code>int x = map.get(k)</code> on miss → NPE on unbox</td><td><code>Optional</code>, <code>getOrDefault</code>, helpful NPE msgs (14+)</td></tr>
+<tr><td>chained <code>a.b().c()</code></td><td>any link null → NPE, no hint</td><td><code>requireNonNull</code> early; <code>Optional.map</code></td></tr>
+<tr><td>remove in for-each</td><td><code>ConcurrentModificationException</code> from fail-fast iterator</td><td><code>it.remove()</code> / <code>coll.removeIf(..)</code></td></tr>
+<tr><td>shared field, no sync</td><td>data race; thread reads stale/torn value, no visibility guarantee</td><td><code>volatile</code> / <code>AtomicX</code> / <code>synchronized</code></td></tr>
+<tr><td>unclosed stream/conn</td><td>resource/fd leak; finally is verbose &amp; error-prone</td><td>try-with-resources (<code>AutoCloseable</code>)</td></tr>
+<tr><td><code>double</code> for money</td><td>binary float can't hold 0.10 → rounding drift</td><td><code>BigDecimal</code>; <code>new BigDecimal("0.1")</code> not <code>(0.1)</code> <span class="warn">!</span></td></tr>
+<tr><td><code>SimpleDateFormat</code> shared</td><td>not thread-safe; concurrent parse corrupts/throws</td><td><code>java.time</code> + <code>DateTimeFormatter</code> (immutable)</td></tr>
+<tr><td>swallow / <code>catch(Exception)</code></td><td>hides real bug, eats interrupts</td><td>catch narrow; log+rethrow; never empty</td></tr>
+<tr><td>mutable <code>static</code> state</td><td>shared across threads/tests; hidden coupling</td><td>final/immutable; inject deps</td></tr>
+<tr><td>return <code>null</code> for list</td><td>caller NPE on iterate</td><td>return <code>List.of()</code> / empty</td></tr>
+<tr><td><code>int*int</code> overflow</td><td>silently wraps past 2^31</td><td><code>(long)a*b</code>, <code>Math.multiplyExact</code></td></tr>
+</tbody></table>
+</section>
+
+<section class="card"><h3>Reviewing Java Code — Checklist</h3>
+<h4>Correctness</h4>
+<ul>
+<li>&#9744; Null/empty/edge inputs handled; no implicit NPE on chained calls</li>
+<li>&#9744; <code>equals</code>/<code>hashCode</code> overridden together &amp; consistent; use records where data-only</li>
+<li>&#9744; Off-by-one in loops/slices; integer overflow (<code>Math.*Exact</code>, use <code>long</code>)</li>
+<li>&#9744; Immutability preferred; <code>final</code> fields, no leaking mutable internals</li>
+<li>&#9744; <code>switch</code>/pattern matching (21) exhaustive; no silent default swallow</li>
+</ul>
+<h4>Concurrency</h4>
+<ul>
+<li>&#9744; Shared mutable state guarded: <code>volatile</code>/lock/<code>Atomic*</code>; publish safely</li>
+<li>&#9744; No check-then-act races (use <code>computeIfAbsent</code>, CAS, single lock scope)</li>
+<li>&#9744; Pools sized &amp; bounded; bounded queue + reject policy, not unbounded</li>
+<li>&#9744; No blocking under lock; no <code>synchronized</code> on virtual threads (21) → pinning <span class="warn">!</span></li>
+</ul>
+<h4>Resources</h4>
+<ul>
+<li>&#9744; try-with-resources for every <code>AutoCloseable</code>; no manual close in <code>finally</code></li>
+<li>&#9744; No leak on exception path (streams, connections, locks released)</li>
+<li>&#9744; Bounded buffers/collections; stream/IO not loaded fully into memory</li>
+</ul>
+<h4>API / Design</h4>
+<ul>
+<li>&#9744; Minimal public surface; back-compat preserved (no signature/semantic breaks)</li>
+<li>&#9744; <code>Optional</code> as return only — never field/param/collection element</li>
+<li>&#9744; Defensive copies in/out for mutable params &amp; getters</li>
+<li>&#9744; Exceptions specific, carry <code>cause</code>; no swallowed <code>catch</code></li>
+</ul>
+<h4>Tests</h4>
+<ul>
+<li>&#9744; Assertions meaningful (state/behaviour), not just "no throw"</li>
+<li>&#9744; Edge + failure paths covered; boundaries &amp; nulls tested</li>
+<li>&#9744; Deterministic — no <code>sleep</code>/wall-clock timing; inject clock, await conditions <span class="warn">!</span></li>
+</ul>
+<h4>Security</h4>
+<ul>
+<li>&#9744; No <code>ObjectInputStream</code> on untrusted input (deserialization RCE) <span class="warn">!</span></li>
+<li>&#9744; Validate/sanitise all external input at boundary</li>
+<li>&#9744; No secrets in code/logs; no PII or tokens in log lines</li>
+<li>&#9744; SQL via <code>PreparedStatement</code>; <code>Runtime.exec</code> with arg array, no shell string</li>
+</ul>
+</section>
+
+<section class="card"><h3>Debugging Java — Method &amp; JVM Tooling</h3>
+<h4>Loop</h4>
+<ul>
+<li>Reproduce — minimal, deterministic case (fix seed, pin clock/timezone, single thread)</li>
+<li>Isolate — <code>git bisect</code>; binary-search the input &amp; the code path</li>
+<li>Hypothesis → instrument (log/JFR/breakpoint) → fix → verify with a new test that fails before, passes after</li>
+</ul>
+<h4>Symptom → tool</h4>
+<table><thead><tr><th>Symptom</th><th>Tool</th></tr></thead><tbody>
+<tr><td>High CPU / hot method</td><td>async-profiler, JFR flame graph</td></tr>
+<tr><td>OOM / leak</td><td>heap dump + Eclipse MAT</td></tr>
+<tr><td>Hang / deadlock</td><td>thread dump (<code>jstack</code> / Thread.print)</td></tr>
+<tr><td>GC pauses</td><td><code>-Xlog:gc*</code> + GCViewer</td></tr>
+<tr><td>Slow method</td><td>profiler (sampling)</td></tr>
+</tbody></table>
+<h4>jcmd — Swiss army knife</h4>
+<pre><code>jcmd &lt;pid&gt; VM.flags        # effective JVM flags
+jcmd &lt;pid&gt; GC.heap_info     # heap usage now
+jcmd &lt;pid&gt; Thread.print     # = jstack
+jcmd &lt;pid&gt; GC.heap_dump f.hprof
+jstack &lt;pid&gt;                # thread/lock dump
+jmap -dump:live,format=b,file=h.hprof &lt;pid&gt;</code></pre>
+<p>Or capture at crash: <code>-XX:+HeapDumpOnOutOfMemoryError</code> <code>-XX:HeapDumpPath=/tmp</code>.</p>
+<h4>Reading a stack trace</h4>
+<ul>
+<li>Top frame = where it was thrown; walk down toward your code</li>
+<li><code>Caused by:</code> chains — true root cause is the <em>last</em> (bottom) Caused by</li>
+<li><code>... N more</code> = frames identical to the enclosing trace (elided)</li>
+</ul>
+<h4>Remote debug (JDWP)</h4>
+<pre><code>-agentlib:jdwp=transport=dt_socket,
+  server=y,suspend=n,address=*:5005</code></pre>
+<ul>
+<li><code>suspend=y</code> to wait for debugger before <code>main</code></li>
+<li>Conditional breakpoints (e.g. <code>id == 42</code>) to avoid stepping a loop <span class="warn">!</span> evaluating expressions can mutate state / call methods</li>
+</ul>
+<h4>Leak hunting (MAT)</h4>
+<ul>
+<li>Dominator tree — find the object retaining the most heap</li>
+<li>Heap grows &amp; stays high after a Full GC ⇒ real leak, not pressure</li>
+<li>Path to GC Roots (exclude weak/soft) shows what still holds the ref — common: static collections, <code>ThreadLocal</code>, unbounded caches, listeners never removed</li>
+</ul>
+</section>
+
+<section class="card diagram"><h3>Deadlock — wait-for cycle</h3>
+<div class="mermaid">
+flowchart LR
+  T1["Thread 1<br/>holds lock A<br/>wants B"] -->|"waits for B"| T2["Thread 2<br/>holds lock B<br/>wants A"]
+  T2 -->|"waits for A"| T1
+</div>
+<p class="cap">Cycle = deadlock (no auto-recovery in the JVM). Find via thread dump (jstack/jcmd Thread.print). Avoid: global lock ordering, tryLock with timeout, shrink critical sections.</p></section>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  try {
+    mermaid.initialize({ startOnLoad: true, theme: "neutral",
+      flowchart: { useMaxWidth: true, htmlLabels: true, nodeSpacing: 18, rankSpacing: 18 },
+      themeVariables: { fontSize: "9px" } });
+  } catch (e) { /* offline / blocked CDN: diagrams degrade to source text, rest of sheet is fine */ }
+</script>
+</body>
+</html>

@@ -214,6 +214,18 @@
       "storagePrefix": "ip:sql-cheatsheet",
       "defaultRevealedSections": [],
       "sectionOrder": []
+    },
+    {
+      "id": "java-cheatsheet",
+      "file": "/java-cheatsheet.html",
+      "title": "Java",
+      "category": "Cheat Sheets",
+      "externalUrl": "/java-cheatsheet.html",
+      "itemLabel": "Section",
+      "itemsPlural": "open printable A4 sheet ↗",
+      "storagePrefix": "ip:java-cheatsheet",
+      "defaultRevealedSections": [],
+      "sectionOrder": []
     }
   ]
 }

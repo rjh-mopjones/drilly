@@ -20,7 +20,7 @@
  * CACHE_VERSION — the old cache is deleted on activate.
  */
 
-const CACHE_VERSION = "v3";
+const CACHE_VERSION = "v4";
 const CACHE = `drilly-${CACHE_VERSION}`;
 
 const MERMAID_CDN =
@@ -51,6 +51,7 @@ const CONTENT_URLS = [
   "/csharp-interview-primer.md",
   "/ai-engineering-primer.md",
   "/sql-postgres-cheatsheet.html",
+  "/java-cheatsheet.html",
   "/system-design-patterns-primer.md",
   "/dsa-patterns-primer.md",
 ];
