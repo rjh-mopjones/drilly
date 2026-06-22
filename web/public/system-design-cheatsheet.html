@@ -1,0 +1,990 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SQL &amp; Postgres Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+/* spanning title bar */
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>System Design Cheat Sheet</h1><span class="meta">interviews + scenarios · building blocks · estimation · illustrative numbers · drilly</span></div>
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="warn">!</span> = pitfall / gotcha. Numbers are <b>illustrative ballparks</b> (latency, QPS) — rules of thumb, not SLAs.</li>
+<li>For <b>system design interviews + general scenarios</b>. Tech (Redis, Kafka, Cassandra, S3) named only as generic examples.</li>
+<li>Flow: numbers → building blocks &amp; scaling → networking/protocols → tradeoffs → interview method → canonical designs.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+</ul></section>
+
+<section class="card"><h3>Latency Numbers Every Engineer Should Know</h3>
+<h4>Reference Ladder (illustrative)</h4>
+<table><thead><tr><th>Operation</th><th>~Time</th><th>Scale</th></tr></thead><tbody>
+<tr><td>L1 cache ref</td><td>1 ns</td><td>ns</td></tr>
+<tr><td>L2 cache ref</td><td>4 ns</td><td>ns</td></tr>
+<tr><td>Mutex lock/unlock</td><td>25 ns</td><td>ns</td></tr>
+<tr><td>Main memory (RAM) ref</td><td>100 ns</td><td>ns</td></tr>
+<tr><td>Compress 1KB</td><td>2 us</td><td>us</td></tr>
+<tr><td>Read 1MB seq from RAM</td><td>3 us</td><td>us</td></tr>
+<tr><td>SSD random read</td><td>16 us</td><td>us</td></tr>
+<tr><td>Read 1MB seq from SSD</td><td>50 us</td><td>us</td></tr>
+<tr><td>Round trip in same DC</td><td>0.5 ms</td><td>ms</td></tr>
+<tr><td>Read 1MB from disk</td><td>1 ms</td><td>ms</td></tr>
+<tr><td>HDD disk seek</td><td>2&ndash;10 ms</td><td>ms</td></tr>
+<tr><td>RT CA&rarr;NL&rarr;CA</td><td>150 ms</td><td>100ms+</td></tr>
+</tbody></table>
+<h4>Orders of Magnitude</h4>
+<ul>
+<li><code>ns</code> cache/RAM &rarr; <code>us</code> SSD/intra-DC &rarr; <code>ms</code> disk/cross-DC &rarr; <code>100ms+</code> cross-continent</li>
+<li>Each tier is roughly ~1000&times; the last. <span class="warn">!</span> An intercontinental RTT &asymp; ~1.5M RAM reads.</li>
+</ul>
+<h4>Rules of Thumb</h4>
+<ul>
+<li>Memory fast &gt; disk slow &gt; network slower &gt; cross-region very slow.</li>
+<li>SSD &raquo; HDD (no seek; random read ~100&times; faster).</li>
+<li>Sequential &raquo; random for both SSD &amp; disk.</li>
+<li>Avoid disk on hot path; cache in RAM. Batch/pipeline network calls; one cross-region hop dwarfs all local work.</li>
+<li>Speed of light floor: ~5 ms per 1000 km RTT &mdash; geography caps latency. <span class="warn">!</span> Can't optimize below physics; replicate closer to users.</li>
+</ul>
+<h4>Throughput Ballparks (illustrative)</h4>
+<table><thead><tr><th>Component</th><th>~Capacity</th></tr></thead><tbody>
+<tr><td>Single app server (simple op)</td><td>tens of k QPS</td></tr>
+<tr><td>One RDBMS</td><td>~thousands writes/s</td></tr>
+<tr><td>In-memory cache (Redis)</td><td>100k+ ops/s</td></tr>
+<tr><td>Message queue (Kafka, per broker)</td><td>100k+ msg/s</td></tr>
+</tbody></table>
+<ul><li><span class="warn">!</span> Treat all figures as order-of-magnitude ballparks, not SLAs; benchmark your own workload.</li></ul>
+</section>
+
+<section class="card"><h3>Capacity Estimation (Back-of-Envelope)</h3>
+<h4>Powers of 2 / Scale</h4>
+<table><thead><tr><th>Pow</th><th>Val</th><th>Unit</th></tr></thead><tbody>
+<tr><td>2^10</td><td>~1K (1024)</td><td>KB</td></tr>
+<tr><td>2^20</td><td>~1M</td><td>MB</td></tr>
+<tr><td>2^30</td><td>~1B (1G)</td><td>GB</td></tr>
+<tr><td>2^40</td><td>~1T</td><td>TB</td></tr>
+<tr><td>2^50</td><td>~1Q</td><td>PB</td></tr>
+</tbody></table>
+<ul><li>ASCII char=1B, UUID=16B, timestamp=8B, typical row ~1KB</li></ul>
+
+<h4>Method (order of attack)</h4>
+<ul>
+<li>1. State assumptions (DAU, actions/user, payload, retention)</li>
+<li>2. DAU &rarr; QPS (split <b>read</b> vs <b>write</b>; use R:W ratio e.g. 100:1)</li>
+<li>3. Storage &rarr; Bandwidth &rarr; servers/RAM</li>
+<li>4. Round aggressively; carry units; sanity-check magnitude <span class="warn">!</span></li>
+</ul>
+
+<h4>QPS</h4>
+<pre><code>QPS = DAU x actions/user / 86,400
+day ~= 10^5 s
+peak = avg x (2..10)</code></pre>
+<table><thead><tr><th>DAU</th><th>act/u</th><th>avg QPS</th></tr></thead><tbody>
+<tr><td>1M</td><td>10</td><td>~115</td></tr>
+<tr><td>100M</td><td>10</td><td>~11.5K</td></tr>
+<tr><td>1B</td><td>20</td><td>~230K</td></tr>
+</tbody></table>
+
+<h4>Storage / Bandwidth</h4>
+<pre><code>store = items/day x bytes x repl x days
+bw    = QPS x payload</code></pre>
+<ul>
+<li>Ex: 1M posts/day x 1KB x 3 x 365 &asymp; <b>~1.1 TB/yr</b></li>
+<li>Ingress = write QPS x size; Egress = read QPS x size (egress&gt;&gt;ingress for read-heavy)</li>
+<li>Add index/metadata overhead ~10-30%; replication usually x3 <span class="warn">!</span></li>
+</ul>
+
+<h4>Availability (nines, downtime/yr)</h4>
+<table><thead><tr><th>SLA</th><th>Down/yr</th><th>~per day</th></tr></thead><tbody>
+<tr><td>99%</td><td>3.65 d</td><td>14.4 min</td></tr>
+<tr><td>99.9%</td><td>8.76 h</td><td>1.44 min</td></tr>
+<tr><td>99.99%</td><td>52.6 min</td><td>8.6 s</td></tr>
+<tr><td>99.999%</td><td>5.26 min</td><td>0.86 s</td></tr>
+</tbody></table>
+<ul><li>Series deps multiply: 3x 99.9% &rarr; ~99.7%. Redundancy adds nines <span class="warn">!</span></li></ul>
+</section>
+
+<section class="card"><h3>Scaling Fundamentals</h3>
+<h4>Vertical vs Horizontal</h4>
+<table><thead><tr><th></th><th>Vertical (up)</th><th>Horizontal (out)</th></tr></thead><tbody>
+<tr><td>How</td><td>bigger box (CPU/RAM)</td><td>more boxes</td></tr>
+<tr><td>Limit</td><td>hardware ceiling</td><td>~unbounded</td></tr>
+<tr><td>Needs</td><td>nothing extra</td><td>LB + statelessness</td></tr>
+<tr><td>SPOF</td><td>yes <span class="warn">!</span></td><td>no (redundant)</td></tr>
+<tr><td>Cost</td><td>superlinear</td><td>linear, commodity</td></tr>
+<tr><td>Use</td><td>quick win, DB primary</td><td>web/app tier, growth</td></tr>
+</tbody></table>
+
+<h4>Stateless services</h4>
+<ul>
+<li>Push session/state to shared store (<code>Redis</code>/DB) -&gt; any node serves any request.</li>
+<li>Enables horizontal scale + trivial failover + rolling deploys.</li>
+<li><span class="warn">!</span> Sticky sessions are a crutch — break elasticity &amp; even load.</li>
+</ul>
+
+<h4>Scale cube (3 levers)</h4>
+<table><thead><tr><th>Axis</th><th>Lever</th><th>Scales</th></tr></thead><tbody>
+<tr><td>X: replication</td><td>clone nodes behind LB</td><td>load/throughput</td></tr>
+<tr><td>Y: functional</td><td>split by service/verb</td><td>team + domain</td></tr>
+<tr><td>Z: partitioning</td><td>shard data by key</td><td>data volume</td></tr>
+</tbody></table>
+
+<h4>Evolution path (apply in order, as bottleneck appears)</h4>
+<table><thead><tr><th>#</th><th>Step</th><th>Relieves</th></tr></thead><tbody>
+<tr><td>1</td><td>single server (app+DB)</td><td>—</td></tr>
+<tr><td>2</td><td>split DB onto own host</td><td>resource contention</td></tr>
+<tr><td>3</td><td>LB + app replicas (stateless)</td><td>app CPU, HA</td></tr>
+<tr><td>4</td><td>add cache (read-heavy)</td><td>DB read load, latency</td></tr>
+<tr><td>5</td><td>DB read replicas</td><td>read scaling</td></tr>
+<tr><td>6</td><td>CDN for static/edge</td><td>bandwidth, geo latency</td></tr>
+<tr><td>7</td><td>shard DB (partition)</td><td>write/data ceiling</td></tr>
+<tr><td>8</td><td>queue + async workers</td><td>spikes, decoupling</td></tr>
+<tr><td>9</td><td>microservices</td><td>team/domain scale</td></tr>
+</tbody></table>
+
+<ul>
+<li><span class="warn">!</span> Don't pre-scale — measure &amp; find the bottleneck first.</li>
+<li><span class="warn">!</span> Design for 10x, not 1000x; 1000x = different architecture anyway.</li>
+<li><span class="warn">!</span> Each step adds ops + consistency cost — earn it.</li>
+</ul>
+</section>
+
+<section class="card diagram"><h3>Scaling Evolution</h3>
+<div class="mermaid">
+flowchart TD
+  C["Clients"] --> LB["Load Balancer"]
+  LB --> A1["App server"]
+  LB --> A2["App server (replica)"]
+  A1 --> Ca["(Cache)"]
+  A1 --> P["(DB primary — writes)"]
+  P --> R["(Read replicas)"]
+  C -.->|static| CDN["CDN"]
+  A1 --> Q["Queue"] --> W["Async workers"]
+</div>
+<p class="cap">Add tiers only as a bottleneck appears: LB+replicas → cache → read replicas → CDN → queue → shards.</p></section>
+
+<section class="card diagram"><h3>End-to-End Request Flow</h3>
+<div class="mermaid">
+flowchart LR
+  U["Client"] --> D["DNS"] --> CDN["CDN edge"]
+  CDN -->|miss / dynamic| LB["Load Balancer"]
+  LB --> G["API Gateway"] --> S["Service"]
+  S --> Ca["(Cache)"]
+  S --> DB["(Database)"]
+</div></section>
+
+<section class="card"><h3>Load Balancing</h3>
+<h4>L4 vs L7</h4>
+<table><thead><tr><th></th><th>L4</th><th>L7</th></tr></thead><tbody>
+<tr><td>Layer</td><td>Transport (TCP/UDP)</td><td>Application (HTTP)</td></tr>
+<tr><td>Routes by</td><td>IP + port</td><td>path/header/cookie/host</td></tr>
+<tr><td>Payload</td><td>opaque, no insight</td><td>HTTP-aware</td></tr>
+<tr><td>TLS</td><td>passthrough</td><td>terminate/re-encrypt</td></tr>
+<tr><td>Speed</td><td>fast, low CPU</td><td>slower, more CPU</td></tr>
+<tr><td>Use</td><td>raw throughput</td><td>content routing, WAF</td></tr>
+</tbody></table>
+
+<h4>Algorithms</h4>
+<table><thead><tr><th>Alg</th><th>Picks</th><th>Note</th></tr></thead><tbody>
+<tr><td>Round-robin</td><td>next in rotation</td><td>uniform nodes</td></tr>
+<tr><td>Weighted RR</td><td>by capacity weight</td><td>mixed node sizes</td></tr>
+<tr><td>Least-conn</td><td>fewest active conns</td><td>long-lived/varied req</td></tr>
+<tr><td>Least-resp-time</td><td>lowest latency+conns</td><td>adapts to slow nodes</td></tr>
+<tr><td>IP/consistent hash</td><td>hash(key)→node</td><td>sticky, cache affinity</td></tr>
+<tr><td>Random</td><td>uniform draw</td><td>cheap, decent at scale</td></tr>
+</tbody></table>
+
+<h4>Health &amp; stickiness</h4>
+<ul>
+<li><b>Active:</b> LB probes <code>/health</code> on interval; eject on N fails, re-add on M passes.</li>
+<li><b>Passive:</b> infer from live traffic errors/timeouts; eject outliers.</li>
+<li><b>Sticky:</b> cookie or src-IP pins client to one node (in-mem session/cache hit). <span class="warn">!</span> breaks statelessness, uneven load, lost on node death — prefer shared session store + stateless nodes.</li>
+</ul>
+
+<h4>HA &amp; global</h4>
+<ul>
+<li>LB is a SPOF — run a pair: <b>active-passive</b> w/ floating/virtual IP (VRRP failover), or active-active behind <b>anycast</b>.</li>
+<li><b>Global (GeoDNS/anycast):</b> route user to nearest healthy region; per-region LB handles local spread.</li>
+<li>DNS LB: cheap, coarse; <span class="warn">!</span> client TTL caching delays failover.</li>
+</ul>
+
+<h4>Where used</h4>
+<ul>
+<li>Edge → web/app tier (internet-facing, L7+TLS).</li>
+<li>Service → service (internal/east-west, mesh sidecar).</li>
+<li>Front of DB read replicas (spread read load; writes → primary).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Caching</h3>
+<h4>Layers (closest→farthest)</h4>
+<table><thead><tr><th>Layer</th><th>Holds</th><th>Note</th></tr></thead><tbody>
+<tr><td>Browser/client</td><td>HTTP cache, headers</td><td><code>Cache-Control</code>, <code>ETag</code></td></tr>
+<tr><td>CDN/edge</td><td>static + cacheable API</td><td>geo-near, offload origin</td></tr>
+<tr><td>App/local in-mem</td><td>hot objects</td><td>fastest, per-node, not shared</td></tr>
+<tr><td>Distributed</td><td>shared KV (Redis/Memcached)</td><td>cross-node, network hop</td></tr>
+<tr><td>DB buffer pool</td><td>pages/index</td><td>last line</td></tr>
+</tbody></table>
+
+<h4>Write/Read strategies</h4>
+<table><thead><tr><th>Pattern</th><th>How</th><th>Trade-off</th></tr></thead><tbody>
+<tr><td>Cache-aside (lazy)</td><td>app reads cache; miss→load DB, populate</td><td>most common; stale risk, first miss slow</td></tr>
+<tr><td>Read-through</td><td>cache lib loads on miss</td><td>app simpler; couples cache+DB</td></tr>
+<tr><td>Write-through</td><td>write cache+DB sync</td><td>consistent; slower writes</td></tr>
+<tr><td>Write-back</td><td>write cache, async flush DB</td><td>fast; <span class="warn">!</span> data loss on crash</td></tr>
+<tr><td>Write-around</td><td>write DB only; cache on read</td><td>avoids churn; cold reads miss</td></tr>
+</tbody></table>
+
+<h4>Eviction</h4>
+<table><thead><tr><th>Policy</th><th>Evicts</th></tr></thead><tbody>
+<tr><td>LRU</td><td>least-recently used (default)</td></tr>
+<tr><td>LFU</td><td>least-frequently used</td></tr>
+<tr><td>FIFO</td><td>oldest inserted</td></tr>
+<tr><td>TTL</td><td>on expiry; + max size limit</td></tr>
+</tbody></table>
+
+<h4>Invalidation (hard problem)</h4>
+<ul>
+<li>TTL expiry (simplest, bounded staleness)</li>
+<li>Write-through (always fresh)</li>
+<li>Explicit delete/update on write</li>
+<li>Versioned keys (<code>user:42:v3</code>) — no delete race</li>
+</ul>
+
+<h4>Failure modes <span class="warn">!</span></h4>
+<table><thead><tr><th>Problem</th><th>Fix</th></tr></thead><tbody>
+<tr><td>Stampede / thundering herd (mass miss→DB)</td><td>request coalescing, lock/single-flight, stale-while-revalidate, jittered TTL</td></tr>
+<tr><td>Penetration (missing keys hammer DB)</td><td>negative cache, bloom filter</td></tr>
+<tr><td>Avalanche (mass simultaneous expiry)</td><td>randomized/jittered TTLs</td></tr>
+</tbody></table>
+
+<h4>Redis vs Memcached</h4>
+<table><thead><tr><th></th><th>Redis</th><th>Memcached</th></tr></thead><tbody>
+<tr><td>Data types</td><td>rich (list/set/zset/hash)</td><td>strings only</td></tr>
+<tr><td>Persistence</td><td>RDB/AOF</td><td>none (pure cache)</td></tr>
+<tr><td>Threading</td><td>mostly single-thread</td><td>multithreaded</td></tr>
+<tr><td>Extras</td><td>pub/sub, Lua, TTL, cluster</td><td>simple, low overhead</td></tr>
+</tbody></table>
+</section>
+
+<section class="card diagram"><h3>Cache-Aside Flow</h3>
+<div class="mermaid">
+flowchart TD
+  R["Read"] --> Q{"in cache?"}
+  Q -->|hit| Ret["return"]
+  Q -->|miss| DB["(load from DB)"] --> Pop["populate cache"] --> Ret
+  W["Write"] --> WDB["(write DB)"] --> Inv["invalidate / update cache"]
+</div></section>
+
+<section class="card"><h3>SQL vs NoSQL — Database Selection</h3>
+<h4>Pick SQL when</h4>
+<ul>
+<li>Relationships &amp; multi-table <code>JOIN</code>s</li>
+<li>Transactions / ACID (money, orders, inventory)</li>
+<li>Strong consistency required</li>
+<li>Ad-hoc / unpredictable queries, reporting</li>
+<li>Structured, stable schema</li>
+<li><span class="warn">!</span> Default choice for most apps — start here unless a constraint forces otherwise</li>
+</ul>
+<h4>Pick NoSQL when</h4>
+<ul>
+<li>Massive scale, horizontal sharding</li>
+<li>Flexible / rapidly evolving schema</li>
+<li>Very high write throughput</li>
+<li>Simple, known access patterns (key lookups)</li>
+<li>Denormalized, self-contained records</li>
+<li><span class="warn">!</span> Schema is "flexible" not "free" — model around query patterns up front; cross-entity queries hurt</li>
+</ul>
+<h4>NoSQL families</h4>
+<table><thead><tr><th>Type</th><th>e.g.</th><th>Use</th></tr></thead><tbody>
+<tr><td>Key-Value</td><td>Redis, Dynamo</td><td>Cache, sessions, counters</td></tr>
+<tr><td>Document</td><td>Mongo</td><td>JSON, flexible nested objects</td></tr>
+<tr><td>Wide-column</td><td>Cassandra, Bigtable</td><td>Huge writes, time-series, logs</td></tr>
+<tr><td>Graph</td><td>Neo4j</td><td>Deep relationships, traversal</td></tr>
+<tr><td>Time-series</td><td>InfluxDB</td><td>Metrics, IoT, monitoring</td></tr>
+</tbody></table>
+<h4>ACID vs BASE</h4>
+<table><thead><tr><th>ACID (SQL)</th><th>BASE (NoSQL)</th></tr></thead><tbody>
+<tr><td><b>A</b>tomic — all-or-nothing</td><td><b>B</b>asically <b>A</b>vailable</td></tr>
+<tr><td><b>C</b>onsistent — valid state</td><td><b>S</b>oft state</td></tr>
+<tr><td><b>I</b>solated — no interference</td><td><b>E</b>ventual consistency</td></tr>
+<tr><td><b>D</b>urable — survives crash</td><td>Favor availability over strict consistency</td></tr>
+</tbody></table>
+<h4>Tradeoffs</h4>
+<table><thead><tr><th></th><th>Normalize</th><th>Denormalize</th></tr></thead><tbody>
+<tr><td>Fit</td><td>SQL</td><td>NoSQL</td></tr>
+<tr><td>Dup data</td><td>Low</td><td>High</td></tr>
+<tr><td>Reads</td><td>Joins</td><td>Single-fetch, fast</td></tr>
+<tr><td>Writes</td><td>One place</td><td>Fan-out updates</td></tr>
+</tbody></table>
+<ul>
+<li>Indexing: speeds reads, slows writes &amp; costs storage</li>
+<li><span class="warn">!</span> Denormalized dup means updates must touch every copy — easy to drift</li>
+<li>"NoSQL = no scale problems" is a myth: hot partitions &amp; bad key design still bottleneck</li>
+</ul>
+</section>
+
+<section class="card"><h3>Replication &amp; Partitioning</h3>
+<h4>Replication topologies</h4>
+<table><thead><tr><th>Type</th><th>Writes</th><th>Conflict</th><th>Use</th></tr></thead><tbody>
+<tr><td>Leader-follower</td><td>leader only; reads from followers (async lag)</td><td>none (single writer)</td><td>read-heavy, most RDBMS</td></tr>
+<tr><td>Multi-leader</td><td>any region</td><td>LWW / version vec / CRDT / app merge</td><td>multi-region, offline edit</td></tr>
+<tr><td>Leaderless (quorum)</td><td>any node, <code>W</code> ack</td><td>read-repair, vector clocks</td><td>Dynamo/Cassandra, HA</td></tr>
+</tbody></table>
+<ul><li>Quorum: <code>R+W&gt;N</code> &rarr; strong-ish read; <code>N</code>=replicas. e.g. N=3,W=2,R=2.</li><li><span class="warn">!</span> R+W&le;N risks stale reads.</li></ul>
+<h4>Replication lag &amp; sync mode</h4>
+<table><thead><tr><th>Problem</th><th>Fix</th></tr></thead><tbody>
+<tr><td>Read-your-writes</td><td>read from leader after own write; sticky session</td></tr>
+<tr><td>Monotonic reads</td><td>pin user to one replica</td></tr>
+<tr><td>Sync replicate</td><td>durable, no data loss, slow / blocks on slow follower</td></tr>
+<tr><td>Async replicate</td><td>fast; <span class="warn">!</span> acked writes lost on leader failover</td></tr>
+<tr><td>Semi-sync</td><td>1 sync follower = balance</td></tr>
+</tbody></table>
+<h4>Partitioning / sharding</h4>
+<table><thead><tr><th>Scheme</th><th>+</th><th>&minus;</th></tr></thead><tbody>
+<tr><td>Range</td><td>range scans, ordered</td><td>hot spots (sequential keys)</td></tr>
+<tr><td>Hash</td><td>even spread</td><td>no range scans</td></tr>
+<tr><td>Directory</td><td>flexible, easy rebal</td><td>lookup = SPOF/extra hop</td></tr>
+</tbody></table>
+<h4>Consistent hashing</h4>
+<ul><li>Nodes + keys on a ring; key &rarr; next node clockwise.</li><li>Add/remove node remaps only <code>~1/N</code> keys (vs hash-mod-N = all keys move).</li><li><b>Virtual nodes</b>: many points per physical node &rarr; even spread + smooth rebalance on heterogeneous hardware.</li></ul>
+<h4>Pitfalls &amp; rebalancing</h4>
+<ul><li><span class="warn">!</span> Hot/celebrity shard &rarr; add random salt/sub-shard the key; dedicated replica or cache.</li><li><span class="warn">!</span> Cross-shard joins &amp; txns expensive (scatter-gather, 2PC) &rarr; co-locate related data via shared shard key.</li><li>Rebalance w/o downtime: consistent hashing OR fixed partition count (&gt;&gt;nodes), move whole partitions; never hash-mod-N.</li></ul>
+</section>
+
+<section class="card diagram"><h3>Leader–Follower Replication</h3>
+<div class="mermaid">
+flowchart TD
+  W["Writes"] --> L["(Leader)"]
+  L -->|replicate async| F1["(Follower)"]
+  L -->|replicate async| F2["(Follower)"]
+  R["Reads"] --> F1
+  R --> F2
+</div>
+<p class="cap">Reads scale on followers; replication lag → read-your-writes issues. Sync = durable/slow, async = fast/may lose recent writes on failover.</p></section>
+
+<section class="card diagram"><h3>Consistent Hashing</h3>
+<div class="mermaid">
+flowchart LR
+  K["key → hash(key)"] --> P["position on ring"]
+  P --> N["owned by next node clockwise"]
+  N --> V["virtual nodes even the load;<br/>add/remove a node remaps only ~1/N keys"]
+</div></section>
+
+<section class="card"><h3>Consistency &amp; CAP</h3>
+<ul>
+<li><b>CAP:</b> in a network <b>P</b>artition you must pick — <b>C</b> (reject/err to stay correct) or <b>A</b> (serve possibly-stale). <span class="warn">!</span> Not "pick 2 of 3": P is unavoidable in a distributed system, so the real choice is CP vs AP.</li>
+<li><b>PACELC:</b> if <b>P</b>artition → C-vs-A; <b>E</b>lse (normal ops) → <b>L</b>atency-vs-<b>C</b>onsistency. Strong reads cost round-trips even with no partition.</li>
+</ul>
+<h4>Consistency models (strong → weak)</h4>
+<table><thead><tr><th>Model</th><th>Guarantee</th><th>Cost</th></tr></thead><tbody>
+<tr><td>Linearizable / strong</td><td>Looks like single copy; respects real-time order</td><td>Highest (consensus/quorum)</td></tr>
+<tr><td>Sequential</td><td>Some global order, all see same; not real-time</td><td>High</td></tr>
+<tr><td>Causal</td><td>Cause seen before effect; concurrent ops unordered</td><td>Medium</td></tr>
+<tr><td>Eventual</td><td>Replicas converge if writes stop</td><td>Lowest, may read stale</td></tr>
+</tbody></table>
+<h4>Session guarantees</h4>
+<table><thead><tr><th>Name</th><th>Promise</th></tr></thead><tbody>
+<tr><td>Read-your-writes</td><td>See your own prior write</td></tr>
+<tr><td>Monotonic reads</td><td>Never go back in time</td></tr>
+<tr><td>Monotonic writes</td><td>Your writes apply in order</td></tr>
+<tr><td>Writes-follow-reads</td><td>Write ordered after reads it depends on</td></tr>
+</tbody></table>
+<h4>Where it lands</h4>
+<table><thead><tr><th>CP-ish</th><th>AP-ish</th></tr></thead><tbody>
+<tr><td>etcd, ZooKeeper, Consul</td><td>Dynamo, Cassandra</td></tr>
+<tr><td>Banking, locks, config, leader election</td><td>Carts, feeds, counts, sessions</td></tr>
+<tr><td>Rejects on partition</td><td>Serves stale, reconciles later</td></tr>
+</tbody></table>
+<h4>Quorum (R + W &gt; N)</h4>
+<ul>
+<li>Read <code>R</code> + write <code>W</code> replicas of <code>N</code>; <code>R+W&gt;N</code> ⇒ read set overlaps latest write ⇒ strong-ish reads.</li>
+<li>Read-heavy: small <code>R</code>, large <code>W</code> (e.g. R=1,W=N). Write-heavy: large <code>R</code>, small <code>W</code> (W=1).</li>
+<li>Balanced quorum: <code>R=W=⌊N/2⌋+1</code>. <span class="warn">!</span> R+W&gt;N alone gives overlap, not full linearizability (needs read-repair / sync writes).</li>
+</ul>
+</section>
+
+<section class="card diagram"><h3>CAP — choose under partition</h3>
+<div class="mermaid">
+flowchart TD
+  P["Network partition happens (P unavoidable)"] --> C["CP: stay Consistent<br/>reject/err, sacrifice Availability"]
+  P --> A["AP: stay Available<br/>serve stale, sacrifice Consistency"]
+</div>
+<p class="cap">PACELC: Else (no partition) trade Latency vs Consistency.</p></section>
+
+<section class="card"><h3>Messaging &amp; Streaming</h3>
+<h4>Why async</h4>
+<ul>
+<li>Decouple producer/consumer (independent scale, deploy, fail)</li>
+<li>Buffer/absorb spikes, smooth bursty load to steady consumer rate</li>
+<li>Built-in retry on failure; fan-out one event to many consumers</li>
+</ul>
+<h4>Shapes</h4>
+<table><thead><tr><th>Type</th><th>Delivery</th><th>Traits</th></tr></thead><tbody>
+<tr><td>Queue (SQS, RabbitMQ)</td><td>Point-to-point; 1 consumer per msg</td><td>Competing consumers, work distribution, msg gone on ack</td></tr>
+<tr><td>Pub/Sub (SNS, topics)</td><td>Every subscriber gets a copy</td><td>Fan-out, broadcast; no replay</td></tr>
+<tr><td>Log/stream (Kafka)</td><td>Ordered partitions, consumer groups</td><td>Replayable, retention, offset-based, high throughput</td></tr>
+</tbody></table>
+<h4>Delivery semantics</h4>
+<table><thead><tr><th>Mode</th><th>Risk</th><th>Use</th></tr></thead><tbody>
+<tr><td>At-most-once</td><td>May lose msgs</td><td>Metrics, fire-and-forget</td></tr>
+<tr><td>At-least-once</td><td>May dup <span class="warn">!</span></td><td>Default; needs idempotent consumer</td></tr>
+<tr><td>Exactly-once</td><td>Hard/costly</td><td>Usually = at-least-once + dedup key</td></tr>
+</tbody></table>
+<ul>
+<li>Ordering guaranteed <em>only</em> within a partition/key — pick partition key carefully</li>
+<li><strong>Idempotency keys</strong> to dedup on consumer (e.g. <code>messageId</code> in a seen-set)</li>
+<li><strong>DLQ</strong> routes poison messages after N retries — alert &amp; inspect, don't drop <span class="warn">!</span></li>
+<li><strong>Backpressure</strong> when consumers lag: monitor lag/queue depth, autoscale or throttle producers</li>
+</ul>
+<h4>Sync vs Async</h4>
+<table><thead><tr><th></th><th>Sync (REST/gRPC)</th><th>Async (queue/log)</th></tr></thead><tbody>
+<tr><td>Result</td><td>Immediate response</td><td>Eventual</td></tr>
+<tr><td>Coupling</td><td>Tight (caller waits)</td><td>Loose</td></tr>
+<tr><td>Failure</td><td>Cascades</td><td>Resilient, retry/buffer</td></tr>
+<tr><td>Use</td><td>Reads, user-facing CRUD</td><td>Spikes, fan-out, long jobs</td></tr>
+</tbody></table>
+<h4>Use cases</h4>
+<ul>
+<li>Order processing, async notifications/email</li>
+<li>Event sourcing, CDC, log aggregation</li>
+<li>Stream processing / real-time analytics</li>
+</ul>
+</section>
+
+<section class="card diagram"><h3>Pub/Sub Messaging</h3>
+<div class="mermaid">
+flowchart LR
+  Pr["Producer"] --> B["(Broker / Topic / Log)"]
+  B --> C1["Consumer group 1"]
+  B --> C2["Consumer group 2"]
+</div>
+<p class="cap">Queue = one consumer per msg; pub/sub = every group gets a copy; log (Kafka) = ordered partitions, replayable.</p></section>
+
+<section class="card"><h3>CDN &amp; Content Delivery</h3>
+<ul>
+<li>Geo-distributed <strong>edge</strong> servers (PoPs) cache content near users &rarr; lower RTT, offload origin, absorb traffic spikes.</li>
+<li>Best for static + cacheable dynamic; user routed to nearest edge via anycast/GeoDNS.</li>
+</ul>
+<h4>Push vs Pull</h4>
+<table><thead><tr><th>Mode</th><th>How</th><th>Use</th></tr></thead><tbody>
+<tr><td>Pull</td><td>CDN fetches from origin on first miss, caches by TTL</td><td>Default; large/changing catalogs</td></tr>
+<tr><td>Push</td><td>You upload assets to CDN ahead of time</td><td>Big files, rare updates, predictable load</td></tr>
+</tbody></table>
+<h4>Caching &amp; invalidation</h4>
+<table><thead><tr><th>Lever</th><th>Mechanism</th></tr></thead><tbody>
+<tr><td>TTL</td><td><code>Cache-Control: max-age</code>, <code>s-maxage</code>, <code>ETag</code></td></tr>
+<tr><td>Cache-bust</td><td>Hash in filename <code>app.3f9a.js</code> &rarr; immutable, infinite TTL</td></tr>
+<tr><td>Purge</td><td>Explicit invalidate/purge on deploy (slow, global propagation)</td></tr>
+</tbody></table>
+<ul>
+<li><span class="warn">!</span> Prefer versioned URLs over purge &mdash; purge is slow to propagate &amp; can't be relied on instantly.</li>
+<li><span class="warn">!</span> Cache <code>Vary</code> / query strings explode key cardinality &amp; tank hit rate.</li>
+</ul>
+<h4>Content types</h4>
+<table><thead><tr><th>Type</th><th>How served</th></tr></thead><tbody>
+<tr><td>Static (img/JS/CSS/video)</td><td>Always cacheable; long TTL</td></tr>
+<tr><td>Dynamic</td><td>Edge compute / ESI fragments; short/no TTL</td></tr>
+<tr><td>Private</td><td>Signed URLs/cookies + expiry; per-user tokens</td></tr>
+</tbody></table>
+<h4>Benefits</h4>
+<ul>
+<li>Latency &darr; (edge proximity); origin load &amp; bandwidth cost &darr;.</li>
+<li>DDoS absorption at edge; TLS termination; resilience to origin outage (stale-while-revalidate).</li>
+</ul>
+</section>
+
+<section class="card"><h3>API Gateway &amp; Rate Limiting</h3>
+<h4>Gateway responsibilities</h4>
+<ul>
+<li>Single entry point; <code>routing</code> + service discovery</li>
+<li>Auth/authz (validate JWT/API key, propagate identity)</li>
+<li>TLS termination; mTLS to backends</li>
+<li>Rate limiting + quotas; throttling</li>
+<li>Request aggregation / fan-out (<code>BFF</code> per client type)</li>
+<li>Response caching; protocol translation (REST&harr;gRPC, HTTP/2)</li>
+<li>Logging, metrics, tracing, request IDs</li>
+<li><span class="warn">!</span> Keep it thin — no business logic; gateway is a chokepoint &amp; SPOF, scale it horizontally</li>
+</ul>
+
+<h4>Rate-limit algorithms</h4>
+<table><thead><tr><th>Algo</th><th>Behavior</th><th>Trade-off</th></tr></thead><tbody>
+<tr><td>Fixed window</td><td>Count per clock window</td><td>Simple; 2&times; burst at window edges</td></tr>
+<tr><td>Sliding log</td><td>Timestamps per req</td><td>Exact; high memory/CPU</td></tr>
+<tr><td>Sliding counter</td><td>Weighted prev+cur window</td><td>Good balance; near-accurate, cheap</td></tr>
+<tr><td>Token bucket</td><td>Tokens refill at rate <code>r</code>, cap <code>b</code></td><td>Allows bursts up to <code>b</code></td></tr>
+<tr><td>Leaky bucket</td><td>Queue drains at fixed rate</td><td>Smooths to constant output; adds latency</td></tr>
+</tbody></table>
+
+<h4>Distributed limiting (Redis)</h4>
+<ul>
+<li>Fixed window: <code>INCR key</code>; set <code>EXPIRE</code> on first hit; reject if &gt; limit</li>
+<li>Token bucket: store tokens + last-refill ts; refill on read via Lua (atomic, race-free)</li>
+<li>Key by <code>user_id</code> / <code>IP</code> / <code>api_key</code> / route; e.g. <code>rl:{key}:{window}</code></li>
+<li><span class="warn">!</span> Multi-step check-then-set must be atomic — use Lua/<code>MULTI</code> to avoid TOCTOU overcount</li>
+<li>Local in-memory pre-check + async sync trades accuracy for latency</li>
+</ul>
+
+<h4>Response contract</h4>
+<table><thead><tr><th>Field</th><th>Value</th></tr></thead><tbody>
+<tr><td>Status</td><td><code>429 Too Many Requests</code></td></tr>
+<tr><td><code>Retry-After</code></td><td>secs until reset</td></tr>
+<tr><td><code>X-RateLimit-Limit/Remaining/Reset</code></td><td>quota hints</td></tr>
+</tbody></table>
+
+<h4>Where to enforce</h4>
+<ul>
+<li>Edge/gateway: coarse global + per-client abuse protection</li>
+<li>Per-service: fine-grained, protects downstream from internal callers (defense in depth)</li>
+<li>Tiering: free vs paid limits keyed on API key/plan</li>
+</ul>
+</section>
+
+<section class="card"><h3>Resilience Patterns</h3>
+<ul>
+<li><b>Timeouts</b> <span class="warn">!</span> ALWAYS set connect + read; never wait forever. Budget across chain: child timeout &lt; parent remaining. Default &lt; one user-perceptible unit (e.g. 1-2s), not 60s.</li>
+<li><b>Retries</b>: only <code>idempotent</code> ops. Exponential backoff + <b>jitter</b> (avoid synchronized retry storms). Cap attempts (~3). Use a <i>retry budget</i> (e.g. ≤10% of req rate) so retries can't amplify a failing dependency.</li>
+</ul>
+<h4>Circuit breaker</h4>
+<table><thead><tr><th>State</th><th>Behaviour</th><th>Transition</th></tr></thead><tbody>
+<tr><td>Closed</td><td>calls pass, count fails</td><td>fails &gt; threshold &rarr; Open</td></tr>
+<tr><td>Open</td><td>fail fast, don't call</td><td>after cooldown &rarr; Half-open</td></tr>
+<tr><td>Half-open</td><td>let N probes through</td><td>ok &rarr; Closed; fail &rarr; Open</td></tr>
+</tbody></table>
+<span class="warn">!</span> Pairs with timeouts: trips on slow + failing deps, stops cascading failure.
+<h4>Isolation &amp; overload</h4>
+<table><thead><tr><th>Pattern</th><th>Use</th></tr></thead><tbody>
+<tr><td>Bulkhead</td><td>separate thread-pool / conn-pool per dependency; one slow dep can't exhaust all resources</td></tr>
+<tr><td>Load shedding</td><td>at capacity, drop low-priority / non-critical requests first (return 429/503 fast)</td></tr>
+<tr><td>Graceful degradation</td><td>serve stale cache, partial/default response, disable nonessential features</td></tr>
+<tr><td>Backpressure</td><td>signal upstream to slow down; bounded queues, reject when full (vs unbounded &rarr; OOM)</td></tr>
+</tbody></table>
+<h4>Safe writes</h4>
+<ul>
+<li><b>Idempotency keys</b>: client sends unique <code>Idempotency-Key</code>; server dedupes &rarr; retried POST/charge runs once. Enables retries on non-idempotent writes.</li>
+<li>Store key+result; return cached result on replay. TTL the keys.</li>
+<li><span class="warn">!</span> Without keys: retry on write = duplicate orders / double charge.</li>
+</ul>
+</section>
+
+<section class="card diagram"><h3>Circuit Breaker States</h3>
+<div class="mermaid">
+stateDiagram-v2
+  [*] --> Closed
+  Closed --> Open: failures > threshold
+  Open --> HalfOpen: after cooldown
+  HalfOpen --> Closed: trial succeeds
+  HalfOpen --> Open: trial fails
+</div>
+<p class="cap">Open = fail fast (don't hammer a sick dependency). Pair with timeouts, retries+jitter, bulkheads.</p></section>
+
+<section class="card"><h3>Microservices &amp; Communication</h3>
+<h4>Monolith vs Microservices</h4>
+<table><thead><tr><th></th><th>Monolith</th><th>Microservices</th></tr></thead><tbody>
+<tr><td>Deploy</td><td>One unit</td><td>Independent per svc</td></tr>
+<tr><td>Scale</td><td>Whole app</td><td>Per service</td></tr>
+<tr><td>Dev speed</td><td>Fast early, simple</td><td>Team autonomy, polyglot</td></tr>
+<tr><td>Cost</td><td>Low ops</td><td>Distributed-sys + ops complexity, network</td></tr>
+</tbody></table>
+<ul><li><b>Default: start monolith</b>; split out services only when scaling/team/deploy pain is real.</li></ul>
+
+<h4>Sync comms (caller waits, tighter coupling)</h4>
+<table><thead><tr><th>Style</th><th>Use</th></tr></thead><tbody>
+<tr><td><code>REST</code>/JSON</td><td>Ubiquitous, simple, public/external APIs, human-debuggable</td></tr>
+<tr><td><code>gRPC</code></td><td>Fast binary protobuf, streaming, schema'd; internal svc-to-svc</td></tr>
+</tbody></table>
+
+<h4>Async comms (events/messages)</h4>
+<ul><li>Pub/sub or queue (Kafka, RabbitMQ) &rarr; <b>loose coupling</b>, resilience, buffering, fan-out.</li><li>Cost: <b>eventual consistency</b>, harder tracing/ordering, dedupe needed.</li></ul>
+
+<h4>Discovery &amp; routing</h4>
+<table><thead><tr><th>Concern</th><th>Options</th></tr></thead><tbody>
+<tr><td>Registry</td><td>Consul / Eureka / DNS</td></tr>
+<tr><td>Load balance</td><td>Client-side (svc picks) vs server-side (LB/proxy)</td></tr>
+<tr><td>Aggregate</td><td>API composition; <code>BFF</code> per client type</td></tr>
+</tbody></table>
+
+<h4>Data &amp; distributed txns</h4>
+<ul><li><b>DB per service</b> — own schema, <span class="warn">!</span> no shared tables / cross-svc joins.</li><li><b>SAGA</b> over 2PC: sequence of local txns + <b>compensating actions</b> on failure.</li></ul>
+<table><thead><tr><th>SAGA</th><th>Coordination</th></tr></thead><tbody>
+<tr><td>Choreography</td><td>Events; no central brain, can get tangled</td></tr>
+<tr><td>Orchestration</td><td>Central coordinator drives steps; clearer, single point</td></tr>
+</tbody></table>
+
+<h4><span class="warn">!</span> Pitfalls</h4>
+<ul><li><b>Distributed monolith</b>: services so chatty/coupled via sync calls you get network cost without independence — worst of both.</li><li><b>N+1 cross-service calls</b>: per-item remote fetch in a loop; batch or denormalize.</li></ul>
+</section>
+
+<section class="card"><h3>Storage &amp; Search</h3>
+
+<h4>Pick the right store</h4>
+<table><thead><tr><th>Need</th><th>Store</th></tr></thead><tbody>
+<tr><td>Files/images/video/backups</td><td>Blob/object (S3-like)</td></tr>
+<tr><td>Transactions, app state</td><td>OLTP row store (Postgres/MySQL)</td></tr>
+<tr><td>Full-text/facet/relevance</td><td>Search index (ES/OpenSearch)</td></tr>
+<tr><td>Analytics/aggregation</td><td>OLAP columnar (Snowflake/BigQuery)</td></tr>
+<tr><td>Metrics/events over time</td><td>Time-series DB</td></tr>
+<tr><td>Raw heterogeneous data</td><td>Data lake</td></tr>
+</tbody></table>
+<ul><li>Specialized store beats overloading the primary DB.</li></ul>
+
+<h4>Blob / object store</h4>
+<ul>
+<li>Cheap, durable (11 9s), near-infinite scale; flat key namespace.</li>
+<li>Serve via CDN; offload origin, low latency at edge.</li>
+<li><span class="warn">!</span> Store the <code>URL/key</code> in DB, never the blob bytes — bloats rows, kills cache.</li>
+<li>Direct client up/download via pre-signed URLs (bypass app server).</li>
+</ul>
+
+<h4>Search (inverted index)</h4>
+<ul>
+<li>Inverted index: term → doc list; ranking (BM25/TF-IDF), faceting, fuzzy, autocomplete.</li>
+<li><span class="warn">!</span> Not the source of truth — sync from primary DB (CDC / dual-write / batch reindex). Eventually consistent.</li>
+<li>Denormalize docs at index time; reindex on schema change.</li>
+</ul>
+
+<h4>OLTP vs OLAP</h4>
+<table><thead><tr><th></th><th>OLTP</th><th>OLAP</th></tr></thead><tbody>
+<tr><td>Layout</td><td>Row</td><td>Columnar</td></tr>
+<tr><td>Workload</td><td>Many small txns</td><td>Few big scans/aggs</td></tr>
+<tr><td>Writes</td><td>Hot, frequent</td><td>Bulk load</td></tr>
+<tr><td>Query</td><td>Point/by-key</td><td>Scan, GROUP BY</td></tr>
+<tr><td>Norm.</td><td>Normalized</td><td>Star/denorm</td></tr>
+</tbody></table>
+<ul><li>Move OLTP→OLAP via <code>ETL</code> (batch) or <code>CDC</code> (streamed log tail, near-real-time).</li></ul>
+
+<h4>Lake vs Warehouse</h4>
+<table><thead><tr><th></th><th>Lake</th><th>Warehouse</th></tr></thead><tbody>
+<tr><td>Schema</td><td>On read</td><td>On write</td></tr>
+<tr><td>Data</td><td>Raw/any</td><td>Structured</td></tr>
+<tr><td>Cost</td><td>Low (object store)</td><td>Higher</td></tr>
+<tr><td>Use</td><td>ML, exploration</td><td>BI, reporting</td></tr>
+</tbody></table>
+<ul><li><b>Lakehouse</b>: warehouse semantics (schema, ACID tables) on lake storage — one copy, both workloads.</li></ul>
+
+</section>
+
+<section class="card"><h3>Networking &amp; Protocols</h3>
+<h4>Layer model (TCP/IP)</h4>
+<table><thead><tr><th>Layer</th><th>Job</th><th>Examples</th></tr></thead><tbody>
+<tr><td>Link</td><td>frames on wire</td><td>Ethernet, ARP, MAC</td></tr>
+<tr><td>Internet</td><td>addressing, routing</td><td>IP, ICMP</td></tr>
+<tr><td>Transport</td><td>host-to-host delivery</td><td>TCP, UDP</td></tr>
+<tr><td>Application</td><td>app semantics</td><td>HTTP, DNS, TLS</td></tr>
+</tbody></table>
+
+<h4>TCP vs UDP</h4>
+<table><thead><tr><th></th><th>TCP</th><th>UDP</th></tr></thead><tbody>
+<tr><td>Conn</td><td>3-way handshake (SYN/SYN-ACK/ACK)</td><td>connectionless</td></tr>
+<tr><td>Delivery</td><td>reliable, ordered, retransmit</td><td>best-effort, may drop/reorder</td></tr>
+<tr><td>Flow</td><td>congestion + flow control</td><td>none (app handles)</td></tr>
+<tr><td>Overhead</td><td>higher (20B+ hdr, ACKs)</td><td>low (8B hdr)</td></tr>
+<tr><td>Use</td><td>web, APIs, DB, file xfer</td><td>video/voice, gaming, DNS</td></tr>
+</tbody></table>
+<ul><li><span class="warn">!</span> TCP head-of-line blocking: one lost segment stalls all later bytes on that conn.</li></ul>
+
+<h4>DNS resolution</h4>
+<ul><li>Path: client &rarr; recursive resolver &rarr; <code>root</code> &rarr; <code>TLD</code> (.com) &rarr; <code>authoritative</code> NS.</li>
+<li>Cached at each hop by record <code>TTL</code> (short TTL = fast failover, more queries).</li>
+<li>Records: <code>A</code> (IPv4), <code>AAAA</code> (IPv6), <code>CNAME</code> (alias), <code>NS</code>, <code>MX</code>.</li>
+<li>GeoDNS / latency routing returns nearest IP &rarr; steers users to closest region/CDN edge.</li></ul>
+
+<h4>TLS (HTTPS = HTTP over TLS)</h4>
+<ul><li>Handshake: asymmetric (cert/key exchange) to agree a <em>symmetric</em> session key; bulk data uses fast symmetric cipher.</li>
+<li>Cost in RTTs: TLS 1.2 &asymp; 2-RTT; <code>TLS 1.3</code> = 1-RTT (0-RTT on resume).</li>
+<li>Cert validates server identity via CA chain; SNI selects vhost.</li></ul>
+
+<h4>HTTP versions</h4>
+<table><thead><tr><th>Ver</th><th>Transport</th><th>Key traits</th></tr></thead><tbody>
+<tr><td>1.1</td><td>TCP</td><td>1 req/conn, keep-alive, pipelining weak, HOL blocking</td></tr>
+<tr><td>2</td><td>TCP+TLS</td><td>multiplexed streams/1 conn, HPACK hdr compress, server push; still TCP HOL</td></tr>
+<tr><td>3</td><td>QUIC/UDP</td><td>no TCP HOL, per-stream loss, faster handshake (TLS built-in), conn migration</td></tr>
+</tbody></table>
+
+<h4>Connection reuse &amp; ports</h4>
+<ul><li>keep-alive + pooling: reuse TCP/TLS conns &rarr; skip per-request handshake (saves RTTs + CPU).</li>
+<li>Ports: <code>80</code> HTTP, <code>443</code> HTTPS/QUIC.</li>
+<li>L4 LB = routes by IP/port (TCP/UDP, fast, opaque); L7 LB = routes by HTTP path/host/header (smart, TLS-terminating). See LB card.</li></ul>
+</section>
+
+<section class="card diagram"><h3>TCP + TLS Handshake</h3>
+<div class="mermaid">
+sequenceDiagram
+  participant C as Client
+  participant S as Server
+  C->>S: TCP SYN
+  S->>C: SYN-ACK
+  C->>S: ACK (connected)
+  C->>S: TLS ClientHello
+  S->>C: ServerHello + cert
+  C->>S: key exchange
+  S->>C: Finished (encrypted)
+  C->>S: HTTP request
+</div>
+<p class="cap">Each RTT adds latency — TLS 1.3 is 1-RTT, HTTP/3 (QUIC) folds transport+TLS together. Reuse connections (keep-alive/pooling).</p></section>
+
+<section class="card"><h3>API &amp; Realtime Protocols</h3>
+<h4>API styles</h4>
+<table><thead><tr><th>Style</th><th>Shape</th><th>When</th></tr></thead><tbody>
+<tr><td>REST</td><td>Resources + HTTP verbs, JSON, cacheable, ubiquitous</td><td>Public/CRUD APIs <span class="warn">!</span> over/under-fetch</td></tr>
+<tr><td>gRPC</td><td>Binary protobuf, HTTP/2, bi-di streaming, low latency</td><td>Internal service RPC <span class="warn">!</span> weak browser support</td></tr>
+<tr><td>GraphQL</td><td>Client picks fields, 1 endpoint, typed schema</td><td>Aggregate many sources, mobile <span class="warn">!</span> caching + query-cost</td></tr>
+</tbody></table>
+<h4>HTTP status codes</h4>
+<table><thead><tr><th>Class</th><th>Codes</th></tr></thead><tbody>
+<tr><td>2xx ok</td><td>200 OK, 201 created, 204 no content</td></tr>
+<tr><td>3xx redir</td><td>301 perm, 302/307 temp, 304 not-modified</td></tr>
+<tr><td>4xx client</td><td>400 bad, 401 auth, 403 forbidden, 404 missing, 409 conflict, 429 rate-limit</td></tr>
+<tr><td>5xx server</td><td>500 internal, 502 bad-gateway, 503 unavailable, 504 timeout</td></tr>
+</tbody></table>
+<h4>Realtime / push</h4>
+<table><thead><tr><th>Tech</th><th>Duplex</th><th>Cost / use</th></tr></thead><tbody>
+<tr><td>Short poll</td><td>Req/resp</td><td>High waste; simplest, legacy</td></tr>
+<tr><td>Long poll</td><td>Req/resp held</td><td>Near-realtime; holds conns <span class="warn">!</span></td></tr>
+<tr><td>SSE</td><td>Server&rarr;client</td><td>One-way stream/HTTP, auto-reconnect; feeds/notifs</td></tr>
+<tr><td>WebSocket</td><td>Full-duplex</td><td>Persistent TCP; chat/games/collab</td></tr>
+</tbody></table>
+<h4>Pick</h4>
+<ul>
+<li>Notifications / live feeds &rarr; <code>SSE</code></li>
+<li>Chat / collab / games &rarr; <code>WebSocket</code></li>
+<li>Simple / legacy client &rarr; <code>long polling</code></li>
+<li>Internal service-to-service &rarr; <code>gRPC</code></li>
+</ul>
+</section>
+
+<section class="card diagram"><h3>Realtime Protocol Choice</h3>
+<div class="mermaid">
+flowchart TD
+  Q{"what do you need?"} -->|server→client stream| SSE["SSE"]
+  Q -->|full-duplex chat/games| WS["WebSocket"]
+  Q -->|occasional / simple / legacy| LP["Long polling"]
+  Q -->|internal service RPC| G["gRPC streaming"]
+</div></section>
+
+<section class="card"><h3>Throughput vs Latency Tradeoffs</h3>
+<table><thead><tr><th>Term</th><th>Meaning</th></tr></thead><tbody>
+<tr><td>Latency</td><td>time for ONE op (ms)</td></tr>
+<tr><td>Throughput</td><td>ops/sec (QPS)</td></tr>
+</tbody></table>
+<ul><li>Different axes: optimizing one often hurts the other (e.g. batching raises QPS but adds wait).</li></ul>
+
+<h4>Little's Law</h4>
+<pre><code>L = &lambda; &times; W
+concurrency = arrival_rate &times; latency</code></pre>
+<ul><li>1000 QPS &times; 0.2s = <code>200</code> in-flight.</li><li>Sizes thread pools, conn pools, queue depth.</li></ul>
+
+<h4>Tail latency</h4>
+<ul><li>Track <code>p50/p95/p99/p99.9</code>, not avg <span class="warn">!</span> avg hides the tail.</li><li>Fan-out amplifies: req hitting 100 services waits on slowest &rarr; p99 of one &asymp; typical of whole.</li><li>Fixes: hedged/backup requests, tail-tolerant design, copy-the-fastest.</li></ul>
+
+<h4>Queueing</h4>
+<ul><li>M/M/1: wait &asymp; <code>1/(1-&rho;)</code> &rarr; as utilization &rarr;100%, latency &rarr; &infin;.</li><li>Keep <code>&rho; &asymp; 60-70%</code>; add capacity BEFORE saturation <span class="warn">!</span> last 10% util is exponential.</li></ul>
+
+<h4>Knobs</h4>
+<table><thead><tr><th>Lever</th><th>Tput</th><th>Latency</th></tr></thead><tbody>
+<tr><td>Batching / pipelining</td><td>&uarr;</td><td>&uarr; (worse)</td></tr>
+<tr><td>Parallelism</td><td>&uarr;</td><td>&asymp;/&darr;</td></tr>
+<tr><td>Compression / big payloads</td><td>&uarr; net</td><td>&uarr; CPU</td></tr>
+<tr><td>Connection pooling</td><td>&uarr;</td><td>&darr; (no handshake)</td></tr>
+<tr><td>Async / non-blocking</td><td>&uarr;</td><td>&asymp;</td></tr>
+<tr><td>Caching</td><td>&uarr;</td><td>&darr;&darr;</td></tr>
+</tbody></table>
+
+<h4>Overload protection</h4>
+<ul><li><b>Backpressure</b>: signal upstream to slow (bounded queues, reject when full).</li><li><b>Load shedding</b>: drop low-priority reqs to protect p99 of the rest <span class="warn">!</span> failing fast beats queue collapse.</li></ul>
+</section>
+
+<section class="card"><h3>Driving the System Design Interview</h3>
+<h4>7-Step Flow (45 min)</h4>
+<table><thead><tr><th>#</th><th>Step</th><th>Do</th><th>~min</th></tr></thead><tbody>
+<tr><td>1</td><td>Scope / requirements</td><td>Functional + non-functional (scale, latency, consistency, availability). Ask, don't assume</td><td>5</td></tr>
+<tr><td>2</td><td>Capacity estimate</td><td>QPS (read/write), storage, bandwidth</td><td>5</td></tr>
+<tr><td>3</td><td>API design</td><td>Endpoints/signatures, req/resp shape</td><td>—</td></tr>
+<tr><td>4</td><td>High-level design</td><td>Boxes + arrows; data flow</td><td>10</td></tr>
+<tr><td>5</td><td>Data model</td><td>Schema + storage choice (SQL/NoSQL/blob/cache)</td><td>—</td></tr>
+<tr><td>6</td><td>Deep-dive</td><td>1-2 components the interviewer cares about</td><td>15</td></tr>
+<tr><td>7</td><td>Wrap</td><td>Bottlenecks, tradeoffs, scaling, failure modes</td><td>10</td></tr>
+</tbody></table>
+<ul><li>Steps 3 &amp; 5 fold into the 10/15-min blocks.</li></ul>
+<h4>Tradeoff Vocabulary</h4>
+<table><thead><tr><th>Axis</th><th>A</th><th>B</th></tr></thead><tbody>
+<tr><td>Store</td><td>SQL (joins, ACID)</td><td>NoSQL (scale, flexible)</td></tr>
+<tr><td>Consistency</td><td>Strong</td><td>Eventual</td></tr>
+<tr><td>Calls</td><td>Sync (simple)</td><td>Async (decoupled, queue)</td></tr>
+<tr><td>Schema</td><td>Normalize (writes)</td><td>Denormalize (reads)</td></tr>
+<tr><td>Goal</td><td>Latency</td><td>Throughput</td></tr>
+<tr><td>Delivery</td><td>Push (fanout)</td><td>Pull (on-demand)</td></tr>
+<tr><td>CAP</td><td>CP (consistent)</td><td>AP (available)</td></tr>
+</tbody></table>
+<h4>Behaviour</h4>
+<ul>
+<li>Narrate reasoning out loud; <b>drive</b> the conversation, don't wait to be led.</li>
+<li>State assumptions explicitly ("assuming 10M DAU, read-heavy 100:1").</li>
+<li>Confirm scope before designing; lead interviewer to the deep-dive.</li>
+</ul>
+<h4>Common Mistakes <span class="warn">!</span></h4>
+<ul>
+<li>Jumping to a solution w/o gathering requirements.</li>
+<li>Skipping capacity estimation.</li>
+<li>Naming a choice but <b>not stating its tradeoff</b>.</li>
+<li>Over-engineering for scale you'll never hit.</li>
+<li>Ignoring failure modes (node death, network partition, hot key).</li>
+<li>Staying too high-level — no deep-dive on any component.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Canonical Designs I</h3>
+
+<h4>URL Shortener (read-heavy)</h4>
+<table><thead><tr><th>Path</th><th>Flow</th></tr></thead><tbody>
+<tr><td>Write</td><td>gen short key → store <code>key→URL</code></td></tr>
+<tr><td>Read</td><td>lookup → <code>301</code>/<code>302</code> redirect</td></tr>
+<tr><td>Key gen</td><td>base62(counter) / hash+collision-check / random</td></tr>
+<tr><td>Counter</td><td>distributed: Snowflake / Redis INCR / ZooKeeper</td></tr>
+<tr><td>Scale</td><td>cache hot URLs; KV store; CDN edge</td></tr>
+</tbody></table>
+<ul>
+<li><span class="warn">!</span> <code>301</code> caches in browser (loses analytics); <code>302</code> = every hit reaches you</li>
+<li><span class="warn">!</span> hashing → collisions; counter → predictable/enumerable keys</li>
+</ul>
+
+<h4>Rate Limiter</h4>
+<table><thead><tr><th>Item</th><th>Choice</th></tr></thead><tbody>
+<tr><td>Algo</td><td>token bucket (burst) / sliding-window-counter (accuracy)</td></tr>
+<tr><td>Store</td><td>central Redis, key per user/IP</td></tr>
+<tr><td>Atomic</td><td><code>INCR</code>+<code>TTL</code> or Lua script</td></tr>
+<tr><td>Reject</td><td><code>429</code> + <code>Retry-After</code></td></tr>
+<tr><td>Place</td><td>API gateway / edge, before app</td></tr>
+</tbody></table>
+<ul>
+<li><span class="warn">!</span> fixed window → 2x burst at boundary; sliding window smooths it</li>
+<li><span class="warn">!</span> distributed counters race → use Lua/atomic, not GET-then-SET</li>
+</ul>
+
+<h4>Distributed KV Store (Dynamo-style)</h4>
+<table><thead><tr><th>Concern</th><th>Mechanism</th></tr></thead><tbody>
+<tr><td>Partition</td><td>consistent hashing (+ virtual nodes)</td></tr>
+<tr><td>Replicate</td><td>factor <code>N</code> across ring</td></tr>
+<tr><td>Consistency</td><td>quorum <code>R+W&gt;N</code></td></tr>
+<tr><td>Conflicts</td><td>vector clocks / LWW</td></tr>
+<tr><td>Membership</td><td>gossip protocol</td></tr>
+<tr><td>Failure</td><td>hinted handoff, read repair</td></tr>
+</tbody></table>
+<ul>
+<li><code>W=N,R=1</code> fast reads; <code>R=N,W=1</code> fast writes; <code>R=W=⌈(N+1)/2⌉</code> balanced</li>
+<li><span class="warn">!</span> LWW silently drops concurrent writes (clock skew)</li>
+</ul>
+
+</section>
+
+<section class="card"><h3>Canonical Designs II</h3>
+
+<h4>News Feed / Timeline</h4>
+<ul><li>Components: post svc, fan-out svc, feed cache (per-user list of postIds in Redis), timeline assembler, ranking svc.</li></ul>
+<table><thead><tr><th>Strategy</th><th>Write</th><th>Read</th><th>Best for</th></tr></thead><tbody>
+<tr><td>Fan-out WRITE (push)</td><td>Expensive (push to all followers)</td><td>Fast (read own cache)</td><td>Normal users</td></tr>
+<tr><td>Fan-out READ (pull)</td><td>Cheap (just store)</td><td>Slow (merge N feeds)</td><td>Celebrities</td></tr>
+<tr><td>HYBRID</td><td>Push normals, skip celebs</td><td>Merge precomputed + pull celeb posts</td><td>Real systems</td></tr>
+</tbody></table>
+<ul><li><span class="warn">!</span> Celebrity fan-out (millions of followers) = write storm; exclude from push, pull at read.</li><li>Cache: bounded list (~latest 500-1000) per user; backfill from store on miss.</li><li>Ranking: post-fetch, ML/recency score; chrono is simpler baseline.</li></ul>
+
+<h4>Chat / Messaging</h4>
+<ul><li>Components: WS gateway (sticky/conn registry), message svc, store (wide-column by <code>conversationId</code>), presence (Redis), push svc.</li></ul>
+<table><thead><tr><th>Concern</th><th>Approach</th></tr></thead><tbody>
+<tr><td>Realtime</td><td>WebSocket (fallback long-poll)</td></tr>
+<tr><td>Store</td><td>Wide-column, PK=conv, CK=ts (per-conv order)</td></tr>
+<tr><td>Ordering</td><td>Server seq# per conversation</td></tr>
+<tr><td>Presence</td><td>Heartbeat + Redis key w/ TTL</td></tr>
+<tr><td>Receipts</td><td>delivered / read ACK events</td></tr>
+<tr><td>Offline</td><td>Persist + push notification</td></tr>
+<tr><td>Group</td><td>Fan-out to member sessions</td></tr>
+</tbody></table>
+<ul><li><span class="warn">!</span> Conn registry maps userId&rarr;gateway node; route msgs cross-node via pub/sub.</li></ul>
+
+<h4>Notification System</h4>
+<ul><li>Flow: <code>ingest &rarr; dedup/throttle &rarr; prefs &rarr; per-channel queue &rarr; sender &rarr; retry/DLQ</code>.</li></ul>
+<table><thead><tr><th>Stage</th><th>Detail</th></tr></thead><tbody>
+<tr><td>Ingest</td><td>API/event &rarr; queue (decouple)</td></tr>
+<tr><td>Dedup</td><td>Idempotency key, recent-cache</td></tr>
+<tr><td>Prefs</td><td>Opt-out, channel, quiet hours</td></tr>
+<tr><td>Channels</td><td>push / email / SMS workers</td></tr>
+<tr><td>Reliability</td><td>Retry w/ backoff, DLQ for poison</td></tr>
+<tr><td>Rate limit</td><td>Per-user cap (avoid spam)</td></tr>
+</tbody></table>
+<ul><li>Fan-out: one event &rarr; many recipients via queue workers.</li><li><span class="warn">!</span> Template/rendering svc separate from delivery; dedup BEFORE fan-out.</li></ul>
+</section>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  try {
+    mermaid.initialize({ startOnLoad: true, theme: "neutral",
+      flowchart: { useMaxWidth: true, htmlLabels: true, nodeSpacing: 18, rankSpacing: 18 },
+      themeVariables: { fontSize: "9px" } });
+  } catch (e) { /* offline / blocked CDN: diagrams degrade to source text, rest of sheet is fine */ }
+</script>
+</body>
+</html>
