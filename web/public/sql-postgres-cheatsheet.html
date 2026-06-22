@@ -1084,6 +1084,7 @@ COPY (SELECT * FROM trades) TO STDOUT CSV;</code></pre>
 </section>
 
 <section class="card"><h3>Data Cleaning &amp; De-duping</h3>
+<p><b>Pipeline:</b> profile &rarr; normalise identifiers &rarr; coerce types/sentinels &rarr; dedupe (deterministic tiebreak) &rarr; assign key (flag unkeyable rows) &rarr; validate. <span class="warn">!</span> order matters &mdash; capture info before you collapse it.</p>
 <h4>Sentinels &rarr; NULL (do BEFORE joins/aggregates)</h4>
 <pre><code>NULLIF(col,'N/A')
 CASE WHEN lower(trim(c)) IN ('','-','n/a','null')
@@ -1094,6 +1095,7 @@ CASE WHEN lower(trim(c)) IN ('','-','n/a','null')
 <pre><code>lower(trim(regexp_replace(c,'\s+',' ','g')))
 -- ' AAPL '  ->  'aapl'</code></pre>
 <span class="pg">PG</span> collapses runs of whitespace; trims edges; case-folds.
+<span class="warn">!</span> Case-sensitive unit trap: capture markers like <code>GBp</code> (pence) vs <code>GBP</code> (pounds) from the <b>raw</b> value <b>before</b> <code>lower()</code> &mdash; case-folding first destroys the &times;100 you need to normalise the price.
 
 <h4>Safe casts: strip then guard</h4>
 <pre><code>SELECT regexp_replace(amt,'[^0-9.\-]','','g')::numeric
@@ -1104,17 +1106,25 @@ WHERE pg_input_is_valid(
 <tr><td><code>::numeric</code> <span class="pg">PG</span></td><td>= <code>CAST(.. AS numeric)</code> <span class="ansi">ANSI</span></td></tr>
 </tbody></table>
 
+<h4>Safe date parse (mixed/corrupt formats)</h4>
+<pre><code>CASE
+  WHEN pg_input_is_valid(d,'date') THEN d::date  -- PG16+
+  WHEN d ~ '^\d{2}/\d{2}/\d{4}$'  THEN to_date(d,'DD/MM/YYYY')
+  ELSE NULL                       -- unparseable / impossible (mon 13)
+END</code></pre>
+<span class="warn">!</span> Return <code>NULL</code> for bad values &mdash; never let one corrupt row abort the whole batch.
+
 <h4>Dedup: keep one row per key</h4>
 <pre><code>-- newest per key
 SELECT DISTINCT ON (k) *           -- PG only
 FROM t ORDER BY k, ts DESC;
 
--- portable / for DELETE
+-- portable / for DELETE; deterministic tiebreak
 SELECT * FROM (
-  SELECT *, row_number() OVER
-    (PARTITION BY k ORDER BY ts DESC) rn
+  SELECT *, row_number() OVER (PARTITION BY k
+    ORDER BY quality_col DESC NULLS LAST, ts DESC) rn
   FROM t) s WHERE rn=1;</code></pre>
-<span class="pg">PG</span> <code>DISTINCT ON</code> is non-ANSI; <code>ORDER BY</code> must lead with key.
+<span class="pg">PG</span> <code>DISTINCT ON</code> is non-ANSI; <code>ORDER BY</code> must lead with key. Tiebreak on a quality column so the winner is deterministic; <b>flag rows with no usable key</b> rather than dropping them.
 
 <h4>Delete dupes via ctid</h4>
 <pre><code>DELETE FROM t a USING t b
@@ -1137,6 +1147,7 @@ WHERE i.id IS NULL;   -- drop/quarantine/backfill</code></pre>
 <tr><td>dup keys</td><td><code>GROUP BY k HAVING count(*)&gt;1</code></td></tr>
 <tr><td>null-rate/col</td><td><code>avg((c IS NULL)::int)</code></td></tr>
 </tbody></table>
+<span class="warn">!</span> The dangerous dirty data doesn't error &mdash; it cleans into a <b>plausible wrong answer</b>: unit mismatch (pence/pounds), comma-as-decimal vs thousands by locale, a sign that may encode direction. Clean defensively; flag every assumption, don't silently transform.
 </section>
 
 <section class="card"><h3>Gotchas &amp; Footguns</h3>

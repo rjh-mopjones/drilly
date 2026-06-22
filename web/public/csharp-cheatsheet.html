@@ -553,6 +553,8 @@ var all = await Task.WhenAll(t1, t2);  // ~ allOf</code></pre>
 <li>Thread <code>CancellationToken</code> through calls (cooperative, like checking a flag).</li>
 <li>In <b>libraries</b>: <code>await x.ConfigureAwait(false)</code> — don't capture/resume on caller's context (perf, avoids deadlock).</li>
 </ul>
+<h4>Keyed / striped concurrency (ordered per key, parallel across keys)</h4>
+<ul><li>Route the same key to the same worker: a per-key <code>Channel&lt;T&gt;</code>, a TPL Dataflow <code>ActionBlock</code> per partition, or a keyed <code>SemaphoreSlim</code>. Per-key ordering, parallel across keys (&rarr; System Design sheet).</li></ul>
 </section>
 
 <section class="card diagram"><h3>async / await flow</h3>
@@ -917,10 +919,13 @@ flowchart TD
 </ul>
 <h4>Idioms</h4>
 <ul>
+<li>&#9744; Money in <code>double</code>/<code>float</code> → use <code>decimal</code> (<code>0.1m</code>), binary types can't hold it <span class="warn">!</span></li>
 <li>&#9744; Public mutable fields instead of <code>{ get; set; }</code> properties</li>
 <li>&#9744; Mutable <code>struct</code> (copy-by-value surprises) <span class="warn">!</span></li>
 <li>&#9744; <code>catch {}</code> / <code>catch (Exception)</code> too broad</li>
 <li>&#9744; Mutable <code>static</code> state — thread-safety</li>
+<li>&#9744; Two <code>ConcurrentDictionary</code> reads in one op aren't atomic — another thread updates between them; use one dict with a record/tuple value <span class="warn">!</span></li>
+<li>&#9744; Modifying a collection during <code>foreach</code> → <code>InvalidOperationException</code>; iterate a copy / use <code>RemoveAll</code> / index loop</li>
 <li>&#9744; String concat in loops → use <code>StringBuilder</code></li>
 <li>&#9744; Non-PascalCase public members; magic <code>(MyEnum)intValue</code> casts</li>
 </ul>

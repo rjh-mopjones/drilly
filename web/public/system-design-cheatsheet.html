@@ -410,10 +410,11 @@ flowchart TD
 <tr><td>Hash</td><td>even spread</td><td>no range scans</td></tr>
 <tr><td>Directory</td><td>flexible, easy rebal</td><td>lookup = SPOF/extra hop</td></tr>
 </tbody></table>
+<ul><li><b>Key choice drives parallelism</b>: partition by a <b>natural business boundary</b> (e.g. portfolio), not a high-skew/hot dimension (one hot instrument) &mdash; one key dominates &amp; serialises load.</li></ul>
 <h4>Consistent hashing</h4>
 <ul><li>Nodes + keys on a ring; key &rarr; next node clockwise.</li><li>Add/remove node remaps only <code>~1/N</code> keys (vs hash-mod-N = all keys move).</li><li><b>Virtual nodes</b>: many points per physical node &rarr; even spread + smooth rebalance on heterogeneous hardware.</li></ul>
 <h4>Pitfalls &amp; rebalancing</h4>
-<ul><li><span class="warn">!</span> Hot/celebrity shard &rarr; add random salt/sub-shard the key; dedicated replica or cache.</li><li><span class="warn">!</span> Cross-shard joins &amp; txns expensive (scatter-gather, 2PC) &rarr; co-locate related data via shared shard key.</li><li>Rebalance w/o downtime: consistent hashing OR fixed partition count (&gt;&gt;nodes), move whole partitions; never hash-mod-N.</li></ul>
+<ul><li><span class="warn">!</span> Hot/celebrity shard &rarr; salt/sub-shard the key, dedicated replica or cache &mdash; but <b>can't salt an ordering key</b> (salt breaks per-key order): give the hot entity a <b>dedicated partition</b>, or use async/non-blocking IO inside the worker.</li><li><span class="warn">!</span> Cross-shard joins &amp; txns expensive (scatter-gather, 2PC) &rarr; co-locate related data via shared shard key.</li><li>Rebalance w/o downtime: consistent hashing OR fixed partition count (&gt;&gt;nodes), move whole partitions; never hash-mod-N.</li></ul>
 </section>
 
 <section class="card diagram"><h3>Leader–Follower Replication</h3>
@@ -466,6 +467,12 @@ flowchart LR
 <li>Read-heavy: small <code>R</code>, large <code>W</code> (e.g. R=1,W=N). Write-heavy: large <code>R</code>, small <code>W</code> (W=1).</li>
 <li>Balanced quorum: <code>R=W=⌊N/2⌋+1</code>. <span class="warn">!</span> R+W&gt;N alone gives overlap, not full linearizability (needs read-repair / sync writes).</li>
 </ul>
+<h4>Conflict on stale data: accept vs reject</h4>
+<ul>
+<li><b>Accept &amp; reconcile</b> (preferred at high throughput): take the write, fix later. <b>Reject &amp; reprocess</b> adds unpredictable latency and can loop under load.</li>
+<li>Stamp each event with its <b>value + fetch-timestamp</b> so a downstream can reconcile / pick the latest deterministically.</li>
+<li><span class="warn">!</span> In finance, an <b>audit trail is mandatory</b> &mdash; correct via a new compensating entry, <b>never silently overwrite a number</b>.</li>
+</ul>
 </section>
 
 <section class="card diagram"><h3>CAP — choose under partition</h3>
@@ -475,6 +482,21 @@ flowchart TD
   P --> A["AP: stay Available<br/>serve stale, sacrifice Consistency"]
 </div>
 <p class="cap">PACELC: Else (no partition) trade Latency vs Consistency.</p></section>
+
+<section class="card"><h3>Event Sourcing, CQRS &amp; As-Of Queries</h3>
+<h4>Event sourcing</h4>
+<ul>
+<li>Store the <b>append-only log of events</b> as the source of truth; current state = fold/replay of events. Full audit trail for free (finance &#10003;).</li>
+<li><b>As-of / point-in-time</b>: replay events up to time <code>T</code>. Naive = O(history) <span class="warn">!</span> &rarr; keep periodic <b>snapshots</b>; answer = nearest snapshot + <b>delta replay</b> = <code>O(delta)</code>.</li>
+<li>Cache (e.g. Redis) snapshots in front of the durable store; on cache loss, fall back to the durable snapshot + replay.</li>
+</ul>
+<h4>CQRS (split read / write)</h4>
+<table><thead><tr><th>Write store</th><th>Read projection</th></tr></thead><tbody>
+<tr><td>Append + lookup by known key</td><td>Denormalised for complex queries</td></tr>
+<tr><td>Source of truth</td><td>Derived, <b>eventually consistent</b></td></tr>
+</tbody></table>
+<ul><li><span class="warn">!</span> Need a real-time, zero-staleness point lookup? Hit the <b>write store by key directly</b>, not the lagging projection.</li></ul>
+</section>
 
 <section class="card"><h3>Messaging &amp; Streaming</h3>
 <h4>Why async</h4>
@@ -496,7 +518,8 @@ flowchart TD
 <tr><td>Exactly-once</td><td>Hard/costly</td><td>Usually = at-least-once + dedup key</td></tr>
 </tbody></table>
 <ul>
-<li>Ordering guaranteed <em>only</em> within a partition/key — pick partition key carefully</li>
+<li>Ordering guaranteed <em>only</em> within a partition/key. Ask: <b>global or per-entity ordering?</b> Usually per-entity &rarr; that entity is the partition key. <span class="warn">!</span> Global ordering = one partition = <b>no parallelism</b>.</li>
+<li><strong>Keyed/striped executor</strong> = the in-process version: <code>hash(key) % N</code> routes a key to a fixed worker &rarr; ordered per entity, parallel across entities (&rarr; Java/C# concurrency cards).</li>
 <li><strong>Idempotency keys</strong> to dedup on consumer (e.g. <code>messageId</code> in a seen-set)</li>
 <li><strong>DLQ</strong> routes poison messages after N retries — alert &amp; inspect, don't drop <span class="warn">!</span></li>
 <li><strong>Backpressure</strong> when consumers lag: monitor lag/queue depth, autoscale or throttle producers</li>
@@ -854,6 +877,13 @@ concurrency = arrival_rate &times; latency</code></pre>
 <tr><td>Caching</td><td>&uarr;</td><td>&darr;&darr;</td></tr>
 </tbody></table>
 
+<h4>Scaling a slow batch / report</h4>
+<ul>
+<li><b>Diagnose first</b> <span class="warn">!</span>: is it the <b>query</b> or the <b>processing</b>? (<code>EXPLAIN ANALYZE</code> &rarr; SQL sheet.)</li>
+<li>Fix the query layer first: indexes, type-mismatch on the join/filter, push work into SQL (aggregate in DB, fetch less).</li>
+<li>Can the DB parallelise natively (partition scans, parallel query) before you add app complexity?</li>
+<li>Then chunk by <b>natural key</b> &amp; parallelise: thread pool <b>sized to the DB connection pool</b>, bulk-write results.</li></ul>
+
 <h4>Overload protection</h4>
 <ul><li><b>Backpressure</b>: signal upstream to slow (bounded queues, reject when full).</li><li><b>Load shedding</b>: drop low-priority reqs to protect p99 of the rest <span class="warn">!</span> failing fast beats queue collapse.</li></ul>
 </section>
@@ -880,11 +910,12 @@ concurrency = arrival_rate &times; latency</code></pre>
 <tr><td>Delivery</td><td>Push (fanout)</td><td>Pull (on-demand)</td></tr>
 <tr><td>CAP</td><td>CP (consistent)</td><td>AP (available)</td></tr>
 </tbody></table>
-<h4>Behaviour</h4>
+<h4>Behaviour (the reflex)</h4>
 <ul>
-<li>Narrate reasoning out loud; <b>drive</b> the conversation, don't wait to be led.</li>
-<li>State assumptions explicitly ("assuming 10M DAU, read-heavy 100:1").</li>
-<li>Confirm scope before designing; lead interviewer to the deep-dive.</li>
+<li>Restate the problem &rarr; state assumptions out loud &rarr; ask 1-2 scoping questions (labs under-specify on purpose).</li>
+<li><b>Diagnose before fixing</b> <span class="warn">!</span>: logs / metrics / <code>EXPLAIN ANALYZE</code> / <code>git log</code> &mdash; never optimise blind.</li>
+<li>Propose the <b>simplest correct</b> solution first, <em>then</em> optimise; narrate reasoning and <b>drive</b> the conversation.</li>
+<li><b>Flag what any fix or data-clean costs</b> &mdash; never silently drop a row or lose data.</li>
 </ul>
 <h4>Common Mistakes <span class="warn">!</span></h4>
 <ul>

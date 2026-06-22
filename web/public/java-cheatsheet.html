@@ -144,6 +144,12 @@ q.put(x);          // blocks if full
 T x = q.take();    // blocks if empty
 // offer/poll(t) = timed; add/remove throw</code></pre>
 <ul><li><code>ArrayBlockingQueue</code> bounded, 1 lock; <code>LinkedBlockingQueue</code> opt-bounded, 2 locks (↑throughput)</li></ul>
+<h4>Keyed / striped executor (ordered per key, parallel across keys)</h4>
+<pre><code>var pool = new ExecutorService[N];        // N single-thread executors
+// ... Executors.newSingleThreadExecutor() each
+int i = (key.hashCode() &amp; 0x7fffffff) % N;
+pool[i].submit(task);   // same key -> same thread</code></pre>
+<ul><li>Per-key ordering without a global lock; the app-level version of partitioning by key (&rarr; System Design sheet).</li></ul>
 </section>
 
 <section class="card"><h3>Memory Model &amp; Lock-Free</h3>
@@ -189,6 +195,7 @@ V.compareAndSet(obj, 0, 1);</code></pre>
 <li>CAS + bin-level locks; reads lock-free. <span class="warn">!</span> No null key/value.</li>
 <li><code>computeIfAbsent</code> atomic per-key; <span class="warn">!</span> don't recursively update same map inside mapping fn (deadlock/livelock).</li>
 <li><code>size()</code> approximate under concurrency; iterators weakly consistent.</li>
+<li><span class="warn">!</span> <b>Cross-map reads aren't atomic</b>: reading two related maps in one logical op (each thread-safe) lets another thread update <em>between</em> the reads. Fix: <b>one map with a composite/record value</b> &rarr; a single atomic lookup.</li>
 </ul>
 <h4>False sharing</h4>
 <ul>
