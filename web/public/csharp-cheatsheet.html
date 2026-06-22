@@ -1,0 +1,938 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SQL &amp; Postgres Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+/* spanning title bar */
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>C# Cheat Sheet</h1><span class="meta">for Java devs · C# 12 / .NET 8 · Java | C# comparison · drilly</span></div>
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li>For a <b>Java dev learning C#</b>: tables read <b>Java | C#</b>. <span class="warn">!</span> = Java-dev trap / gotcha &nbsp; <code>☐</code> = review checklist item.</li>
+<li>Baseline: <b>C# 12 / .NET 8 (LTS)</b>; newer features tagged inline (e.g. "record (C#9)").</li>
+<li>Two "watch out" cards: <b>Java→C# Gotchas</b> (writing C#) and <b>Reviewing C# Code</b> (reading others' C#).</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+</ul></section>
+
+<section class="card diagram"><h3>Java → C# at a glance</h3>
+<div class="mermaid">
+flowchart TD
+  J["You know Java"] --> P["package → namespace"]
+  J --> N["camelCase methods → PascalCase"]
+  J --> G["getX()/setX() → properties (no parens)"]
+  J --> S["Streams → LINQ"]
+  J --> C["CompletableFuture → Task + async/await"]
+  J --> E["checked exceptions → none"]
+  J --> V["(new) class vs struct = ref vs value"]
+</div></section>
+
+<section class="card"><h3>Orientation &amp; Syntax (Java → C#)</h3>
+<table><thead><tr><th>Java</th><th>C#</th></tr></thead><tbody>
+<tr><td><code>package com.x;</code></td><td><code>namespace X;</code> (file-scoped, C#10)</td></tr>
+<tr><td><code>import java.util.*;</code></td><td><code>using System.Collections.Generic;</code></td></tr>
+<tr><td><code>import static</code></td><td><code>using static System.Math;</code></td></tr>
+<tr><td><code>public static void main(String[] a)</code></td><td>top-level stmts OR <code>static void Main(string[] args)</code></td></tr>
+<tr><td><code>System.out.println(x)</code></td><td><code>Console.WriteLine(x)</code></td></tr>
+<tr><td><code>final</code> field</td><td><code>readonly</code> (runtime) / <code>const</code> (compile-time)</td></tr>
+<tr><td><code>final</code> class/method</td><td><code>sealed</code> class; methods non-virtual by default</td></tr>
+<tr><td><code>x instanceof Foo f</code></td><td><code>x is Foo f</code></td></tr>
+<tr><td><code>this</code> / <code>super</code></td><td><code>this</code> / <code>base</code></td></tr>
+</tbody></table>
+
+<h4>Naming <span class="warn">!</span></h4>
+<ul>
+<li>Methods, properties, classes, namespaces, public members: <code>PascalCase</code> (not camelCase!)</li>
+<li>Locals &amp; params: <code>camelCase</code>; private fields often <code>_camelCase</code></li>
+<li>Interfaces prefixed <code>I</code>: <code>IList</code>, <code>IEnumerable</code></li>
+</ul>
+
+<h4>Types</h4>
+<table><thead><tr><th>Java</th><th>C#</th></tr></thead><tbody>
+<tr><td><code>int long double bool char byte</code></td><td>same (also <code>uint ulong sbyte decimal</code>)</td></tr>
+<tr><td><code>String</code></td><td><code>string</code> (alias for <code>System.String</code>)</td></tr>
+<tr><td><code>Object</code></td><td><code>object</code> (alias for <code>System.Object</code>)</td></tr>
+<tr><td>local type inference <code>var</code> (Java 10)</td><td><code>var</code> = static inference — NOT <code>Object</code>! <span class="warn">!</span></td></tr>
+</tbody></table>
+
+<h4>File layout</h4>
+<ul>
+<li>Namespace need NOT match folder path (Java forces it)</li>
+<li>Multiple public types per file allowed; filename need not match type</li>
+<li>Entry point can be a whole <code>Program.cs</code> (top-level, C#9+):</li>
+</ul>
+<pre><code>// Program.cs — entire file
+Console.WriteLine("hi");</code></pre>
+
+<h4>String equality <span class="warn">!</span></h4>
+<ul><li><code>==</code> on <code>string</code> compares VALUE (operator overload), unlike Java's reference compare</li></ul>
+<pre><code>string a = "hi", b = "h" + "i";
+a == b        // true (value)
+a.Equals(b)   // true
+// Java: a == b would be reference cmp</code></pre>
+</section>
+
+<section class="card"><h3>Reference vs Value Types (class vs struct)</h3>
+<p>Big shift: <code>class</code> = reference type (heap; variable holds a reference; assign/pass copies the reference). <code>struct</code> = value type (copied by value on assign/pass/return). <span class="warn">!</span> Java has no user-defined value types — every <code>new</code> object is a reference.</p>
+<table><thead><tr><th>Java</th><th>C#</th></tr></thead><tbody>
+<tr><td>All objects ref types</td><td><code>class</code> = ref type (heap)</td></tr>
+<tr><td>Primitives only (int, long…)</td><td><code>struct</code> = value type, incl. your own</td></tr>
+<tr><td>boxed <code>Integer</code>, autobox</td><td><code>int</code>,<code>double</code>,<code>bool</code> ARE structs</td></tr>
+<tr><td>—</td><td><code>DateTime</code>,<code>Guid</code>,<code>decimal</code>,<code>TimeSpan</code> structs</td></tr>
+<tr><td>null for any object</td><td>struct can't be null; <code>int?</code>/<code>T?</code> for nullable</td></tr>
+</tbody></table>
+<h4>Copy semantics</h4>
+<pre><code>struct Point { public int X, Y; }
+var a = new Point { X=1 };
+var b = a;        // whole struct copied
+b.X = 9;          // a.X still 1
+
+class Box { public int X; }
+var p = new Box { X=1 };
+var q = p; q.X = 9;  // p.X == 9 (same ref)</code></pre>
+<ul>
+<li>Passing a struct to a method copies it; mutations don't escape (unless <code>ref</code>).</li>
+<li><code>default(T)</code>: struct = all-zero fields (never null); class = <code>null</code>.</li>
+</ul>
+<h4>When to use struct</h4>
+<ul>
+<li>Small (~≤16 bytes), immutable, value-like: a <code>Point</code>, <code>Money</code>, <code>Color</code>.</li>
+<li>Else use <code>class</code> (identity, large, mutable, polymorphism).</li>
+<li>Prefer <code>readonly struct</code> — fields immutable, avoids hidden defensive copies. <span class="warn">!</span> mutable structs are a classic trap.</li>
+</ul>
+<h4>Records</h4>
+<pre><code>record class Person(string Name);  // ref, value-equality
+record struct Coord(int X, int Y); // value type + value-equality
+readonly record struct Money(decimal Amt, string Ccy);</code></pre>
+<ul>
+<li><code>record</code> (C#9) = value-based <code>Equals</code>/<code>GetHashCode</code> + <code>with</code> copies; <code>record class</code> still a ref type.</li>
+</ul>
+<h4>Boxing</h4>
+<pre><code>object o = 42;     // boxes: heap alloc + copy
+int n = (int)o;    // unbox</code></pre>
+<ul>
+<li>Storing a struct in <code>object</code> or a non-generic interface boxes it. <span class="warn">!</span> Avoid in hot paths/loops — use generics (<code>List&lt;int&gt;</code> doesn't box).</li>
+</ul>
+</section>
+
+<section class="card diagram"><h3>Value type vs Reference type</h3>
+<div class="mermaid">
+flowchart TD
+  A["var b = a;"] --> Q{"type of a?"}
+  Q -->|"struct (value)"| VC["whole value COPIED<br/>b independent of a"]
+  Q -->|"class (reference)"| RC["reference copied<br/>b and a share one object"]
+</div>
+<p class="cap">Java has only reference types (plus primitives). C# structs (incl. int, DateTime, Guid, your own) copy by value — mutating a copy never affects the original.</p></section>
+
+<section class="card"><h3>Nullable Reference Types &amp; Null Handling</h3>
+
+<h4>NRT (C#8+) — opt-in</h4>
+<p><code>&lt;Nullable&gt;enable&lt;/Nullable&gt;</code> in .csproj. Compiler tracks nullability of <em>reference</em> types and warns on possible null deref. Closest C# gets to "explicit null" — but it's static analysis, not a wrapper type.</p>
+<table><thead><tr><th>Java</th><th>C#</th></tr></thead><tbody>
+<tr><td><code>String s</code> (any may be null)</td><td><code>string s</code> = non-null intent; warns if assigned null</td></tr>
+<tr><td><code>@Nullable String s</code></td><td><code>string? s</code> = may be null</td></tr>
+<tr><td>NPE at runtime</td><td>compiler <span class="warn">!</span> <em>warning</em> at build (no enforcement)</td></tr>
+</tbody></table>
+<span class="warn">!</span> NRT warnings don't fail the build by default and erase at runtime — a non-null <code>string</code> can still be null from un-annotated/legacy code.
+
+<h4>Null operators</h4>
+<table><thead><tr><th>Java</th><th>C#</th></tr></thead><tbody>
+<tr><td><code>opt.map(x-&gt;x.f)</code> (no plain op)</td><td><code>x?.f</code> null-conditional → null if <code>x</code> null</td></tr>
+<tr><td><code>a!=null?a:b</code></td><td><code>a ?? b</code> null-coalescing</td></tr>
+<tr><td><code>if(a==null)a=b;</code></td><td><code>a ??= b</code> assign-if-null</td></tr>
+<tr><td>—</td><td><code>x!</code> null-forgiving: suppress warning <span class="warn">!</span></td></tr>
+</tbody></table>
+<pre><code>int? len = name?.Length;      // null if name null
+string s = arg ?? "default";
+cache ??= new();
+var n = node!.Next;           // "trust me, not null"</code></pre>
+<span class="warn">!</span> <code>!</code> only silences the compiler — it does NOT null-check. Wrong use = surprise NRE. Use sparingly.
+
+<h4>Nullable VALUE types — <code>int?</code></h4>
+<p><code>int?</code> = <code>Nullable&lt;int&gt;</code> (a struct, pre-NRT, always existed). Applies to <code>int bool DateTime</code> structs etc.</p>
+<pre><code>int? age = null;
+if (age.HasValue) Use(age.Value);   // .Value throws if null
+int a = age.GetValueOrDefault();    // 0 if null
+int b = age ?? -1;                  // also works</code></pre>
+
+<h4>No idiomatic Optional</h4>
+<span class="warn">!</span> C# has no <code>Optional&lt;T&gt;</code>. Don't port Java <code>Optional&lt;T&gt;</code> fields/returns — use <code>T?</code> + NRT instead. (<code>Nullable&lt;T&gt;</code> is values only; not a monad — no <code>.map</code>.)
+
+<h4>Guard / require-non-null</h4>
+<table><thead><tr><th>Java</th><th>C#</th></tr></thead><tbody>
+<tr><td><code>Objects.requireNonNull(x)</code></td><td><code>ArgumentNullException.ThrowIfNull(x)</code> (.NET6+)</td></tr>
+</tbody></table>
+<pre><code>void Save(Order o) {
+  ArgumentNullException.ThrowIfNull(o);
+  // o flows as non-null after this
+}</code></pre>
+</section>
+
+<section class="card"><h3>Properties (not getters/setters)</h3>
+<table><thead><tr><th>Java</th><th>C#</th></tr></thead><tbody>
+<tr><td><code>getName()</code> / <code>setName(v)</code></td><td><code>Name { get; set; }</code></td></tr>
+<tr><td><code>p.getName()</code></td><td><code>p.Name</code> <span class="warn">!</span> no <code>()</code></td></tr>
+<tr><td>final field + getter</td><td><code>{ get; init; }</code> (C#9)</td></tr>
+<tr><td>builder / many setters</td><td>object initializer</td></tr>
+</tbody></table>
+
+<h4>Auto-property</h4>
+<pre><code>public string Name { get; set; }
+public int Age { get; private set; } // set only inside class
+</code></pre>
+
+<h4>init-only &amp; read-only</h4>
+<pre><code>public string Id { get; init; }   // set in ctor/initializer only
+public string Slug { get; } = "x"; // read-only, set in ctor only
+</code></pre>
+
+<h4>Expression-bodied (computed)</h4>
+<pre><code>public string Full =&gt; $"{First} {Last}"; // no backing field, runs each read
+</code></pre>
+
+<h4>Object initializer</h4>
+<pre><code>var p = new Person { Name = "alice", Age = 3 };
+</code></pre>
+
+<h4>required (C#11)</h4>
+<pre><code>public required string Name { get; init; }
+// caller MUST set Name in initializer or won't compile
+</code></pre>
+
+<ul>
+<li><span class="warn">!</span> A property <b>looks like a field but runs code</b> — reviewers watch for heavy logic / side-effects in getters.</li>
+<li>Convention: properties are <code>PascalCase</code>, not <code>camelCase</code>.</li>
+<li><code>get;</code>/<code>set;</code>/<code>init;</code> can each have own access modifier.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Methods, Params &amp; Overloading</h3>
+<table><thead><tr><th>Java</th><th>C#</th></tr></thead><tbody>
+<tr><td><code>int square(int x){...}</code></td><td><code>int Square(int x){...}</code> (PascalCase)</td></tr>
+<tr><td>varargs <code>int... xs</code></td><td><code>params int[] xs</code></td></tr>
+<tr><td>overloading only</td><td>overloading <em>+ optional/named args, ref/out/in</em></td></tr>
+<tr><td>no out-params; return obj/array</td><td><code>out</code> / tuples</td></tr>
+</tbody></table>
+
+<h4>ref / out / in (no Java equivalent)</h4>
+<ul>
+<li><code>out</code>: callee MUST assign; multiple returns.</li>
+<li><code>ref</code>: in+out; caller MUST pre-init.</li>
+<li><code>in</code>: pass by readonly ref (perf, big structs).</li>
+</ul>
+<pre><code>bool ok = int.TryParse(s, out int n);
+// ^ inline out var (C#7)
+void Swap(ref int a, ref int b){ (a,b)=(b,a); }
+Swap(ref x, ref y);   // ref at BOTH call &amp; sig
+void Sum(in BigStruct s){ /* s readonly */ }</code></pre>
+<span class="warn">!</span> <code>ref</code>/<code>out</code>/<code>in</code> required at call site too, not just declaration.
+
+<h4>Optional &amp; named args</h4>
+<pre><code>void Log(string msg, Level lvl = Level.Info);
+Log("hi");                 // uses default
+Log("hi", lvl: Level.Warn);// named arg</code></pre>
+<ul><li>Cuts overload count vs Java telescoping.</li>
+<li>Defaults must be compile-time constants.</li>
+<li>Named args let you skip/reorder optionals.</li></ul>
+
+<h4>params (~ varargs)</h4>
+<pre><code>int Sum(params int[] xs) =&gt; xs.Sum();
+Sum(1,2,3);  Sum();  Sum(arr);</code></pre>
+
+<h4>Expression-bodied</h4>
+<pre><code>int Square(int x) =&gt; x*x;
+string Name =&gt; $"{first} {last}"; // prop too</code></pre>
+
+<h4>Local functions (nested)</h4>
+<pre><code>int Outer(int n){
+  return Calc(n) + 1;
+  static int Calc(int v) =&gt; v*v; // static: no captures
+}</code></pre>
+<ul><li>Can capture enclosing locals (unless <code>static</code>).</li>
+<li>Recursion + closures; cleaner than Java's helper methods.</li></ul>
+
+<h4>Tuples for multiple return</h4>
+<pre><code>(int min, int max) MinMax(int[] a) =&gt;
+    (a.Min(), a.Max());
+var (lo, hi) = MinMax(nums);  // deconstruct</code></pre>
+<span class="warn">!</span> Lightweight — no class needed (Java forces a wrapper/record).
+</section>
+
+<section class="card"><h3>Collections Mapping (Java → C#)</h3>
+<h4>Concrete types</h4>
+<table><thead><tr><th>Java</th><th>C#</th></tr></thead><tbody>
+<tr><td><code>ArrayList&lt;T&gt;</code></td><td><code>List&lt;T&gt;</code></td></tr>
+<tr><td><code>HashMap&lt;K,V&gt;</code></td><td><code>Dictionary&lt;K,V&gt;</code></td></tr>
+<tr><td><code>LinkedHashMap</code></td><td>none direct <span class="warn">!</span></td></tr>
+<tr><td><code>TreeMap</code></td><td><code>SortedDictionary&lt;K,V&gt;</code></td></tr>
+<tr><td><code>HashSet&lt;T&gt;</code></td><td><code>HashSet&lt;T&gt;</code></td></tr>
+<tr><td><code>TreeSet</code></td><td><code>SortedSet&lt;T&gt;</code></td></tr>
+<tr><td><code>ArrayDeque</code></td><td><code>Queue&lt;T&gt;</code> / <code>Stack&lt;T&gt;</code></td></tr>
+<tr><td><code>int[]</code></td><td><code>int[]</code></td></tr>
+<tr><td><code>List.of(..)</code></td><td><code>ImmutableArray&lt;T&gt;</code> / RO wrapper</td></tr>
+<tr><td><code>Collections.emptyList()</code></td><td><code>[]</code> / <code>Array.Empty&lt;T&gt;()</code></td></tr>
+</tbody></table>
+<ul><li><span class="warn">!</span> <code>Dictionary</code> happens to keep insert order in practice — never rely on it (unlike <code>LinkedHashMap</code>).</li></ul>
+
+<h4>Interfaces</h4>
+<table><thead><tr><th>Java</th><th>C#</th></tr></thead><tbody>
+<tr><td><code>List&lt;T&gt;</code></td><td><code>IList&lt;T&gt;</code></td></tr>
+<tr><td><code>Collection&lt;T&gt;</code></td><td><code>ICollection&lt;T&gt;</code></td></tr>
+<tr><td><code>Iterable&lt;T&gt;</code></td><td><code>IEnumerable&lt;T&gt;</code></td></tr>
+<tr><td><code>Map&lt;K,V&gt;</code></td><td><code>IDictionary&lt;K,V&gt;</code></td></tr>
+</tbody></table>
+
+<h4>Dictionary access</h4>
+<table><thead><tr><th>Java</th><th>C#</th></tr></thead><tbody>
+<tr><td><code>map.get(k)</code> → null</td><td><code>d[k]</code> → <b>throws</b> if missing <span class="warn">!</span></td></tr>
+<tr><td><code>getOrDefault(k,def)</code></td><td><code>d.GetValueOrDefault(k)</code></td></tr>
+<tr><td>—</td><td><code>d.TryGetValue(k, out v)</code></td></tr>
+<tr><td><code>containsKey(k)</code></td><td><code>d.ContainsKey(k)</code></td></tr>
+</tbody></table>
+<pre><code>if (d.TryGetValue("a", out var v))
+    Use(v);            // idiomatic lookup
+var x = d.GetValueOrDefault("a", -1);</code></pre>
+
+<h4>Init</h4>
+<pre><code>var l = new List&lt;int&gt; {1,2,3};
+var d = new Dictionary&lt;string,int&gt; {["a"]=1, ["b"]=2};
+int[] arr = [1,2,3];        // collection expr (C#12)
+List&lt;int&gt; xs = [1,2,3];     // C#12</code></pre>
+
+<ul><li><span class="warn">!</span> Indexing a missing key throws <code>KeyNotFoundException</code> — there is no silent null like Java's <code>map.get</code>. Use <code>TryGetValue</code>/<code>GetValueOrDefault</code>.</li></ul>
+</section>
+
+<section class="card"><h3>LINQ vs Streams</h3>
+<p>Both lazy pipelines over sequences. LINQ on <code>IEnumerable&lt;T&gt;</code> (no <code>.stream()</code> needed) via <code>using System.Linq;</code></p>
+<table><thead><tr><th>Java Stream</th><th>C# LINQ</th></tr></thead><tbody>
+<tr><td>.filter(p)</td><td>.Where(p)</td></tr>
+<tr><td>.map(f)</td><td>.Select(f)</td></tr>
+<tr><td>.flatMap(f)</td><td>.SelectMany(f)</td></tr>
+<tr><td>.collect(toList())</td><td>.ToList()</td></tr>
+<tr><td>.reduce(..)</td><td>.Aggregate(..)</td></tr>
+<tr><td>.count()</td><td>.Count()</td></tr>
+<tr><td>.sorted(c)</td><td>.OrderBy / .ThenBy</td></tr>
+<tr><td>.distinct()</td><td>.Distinct()</td></tr>
+<tr><td>.limit(n)</td><td>.Take(n)</td></tr>
+<tr><td>.skip(n)</td><td>.Skip(n)</td></tr>
+<tr><td>.anyMatch(p)</td><td>.Any(p)</td></tr>
+<tr><td>.allMatch(p)</td><td>.All(p)</td></tr>
+<tr><td>.findFirst()</td><td>.FirstOrDefault()</td></tr>
+<tr><td>Collectors.groupingBy</td><td>.GroupBy</td></tr>
+<tr><td>Collectors.toMap</td><td>.ToDictionary</td></tr>
+</tbody></table>
+<h4>Two syntaxes (same result)</h4>
+<pre><code>// method chain
+xs.Where(x =&gt; x &gt; 0).Select(x =&gt; x * 2);
+// query syntax (SQL-like)
+from x in xs where x &gt; 0 select x * 2;</code></pre>
+<h4>Deferred execution (key!)</h4>
+<ul>
+<li>Query is <b>lazy</b> — built, not run. Executes only on enumeration: <code>foreach</code>, <code>.ToList()</code>, <code>.Count()</code>, <code>.First()</code>.</li>
+<li>Re-enumerating <b>re-runs</b> the whole pipeline against the current source (no caching).</li>
+</ul>
+<p><span class="warn">!</span> Multiple enumeration of an <code>IEnumerable</code> re-executes the source (DB/IO &rarr; N+1, or captured-variable surprises). Materialize <b>once</b> with <code>.ToList()</code> if reused.</p>
+<pre><code>var adults = people
+    .Where(p =&gt; p.Age &gt;= 18)
+    .Select(p =&gt; p.Name)
+    .ToList();</code></pre>
+</section>
+
+<section class="card diagram"><h3>LINQ deferred execution</h3>
+<div class="mermaid">
+flowchart LR
+  S["source"] --> W[".Where(...)"]
+  W --> Se[".Select(...)"]
+  Se --> Q["query object (nothing run yet)"]
+  Q -->|"foreach / ToList() / Count()"| X["NOW it executes"]
+</div>
+<p class="cap">Re-enumerating re-runs the whole pipeline (DB/IO N+1). Materialise once with .ToList() if you reuse it.</p></section>
+
+<section class="card"><h3>Generics (vs Java — reified!)</h3>
+
+<h4>Big difference: reified vs erased</h4>
+<ul>
+<li>Java erases generics; C# <b>keeps them at runtime</b> (reified). <span class="warn">!</span></li>
+<li><code>typeof(T)</code> works; Java can't do <code>T.class</code>.</li>
+<li><code>new T()</code> allowed with <code>new()</code> constraint.</li>
+<li><code>T[]</code> arrays work directly; no unchecked-cast hacks.</li>
+<li><code>is</code>/<code>as</code> work with generic types.</li>
+<li><code>List&lt;int&gt; != List&lt;string&gt;</code> at runtime — distinct types.</li>
+</ul>
+
+<table><thead><tr><th>Java</th><th>C#</th></tr></thead><tbody>
+<tr><td><code>List&lt;Integer&gt;</code> (boxed)</td><td><code>List&lt;int&gt;</code> (no box) <span class="warn">!</span></td></tr>
+<tr><td>erased: <code>T.class</code> illegal</td><td><code>typeof(T)</code></td></tr>
+<tr><td><code>new T()</code> impossible</td><td><code>new T()</code> via <code>new()</code></td></tr>
+<tr><td><code>instanceof List</code> only (raw)</td><td><code>x is List&lt;int&gt;</code> exact</td></tr>
+</tbody></table>
+
+<h4>No primitive specialization</h4>
+<ul>
+<li><code>List&lt;int&gt;</code> stores ints inline — no boxing, no <code>Integer</code> wrapper.</li>
+<li>No need for <code>IntStream</code>/<code>int[]</code> escape hatches.</li>
+</ul>
+
+<h4>Constraints (<code>where</code>)</h4>
+<table><thead><tr><th>where</th><th>means</th></tr></thead><tbody>
+<tr><td><code>class</code> / <code>struct</code></td><td>ref type / value type</td></tr>
+<tr><td><code>new()</code></td><td>has public ctor</td></tr>
+<tr><td><code>Base</code> / <code>IFoo</code></td><td>extends/implements</td></tr>
+<tr><td><code>notnull</code></td><td>non-nullable</td></tr>
+<tr><td><code>unmanaged</code></td><td>blittable value type</td></tr>
+</tbody></table>
+<pre><code>void Add&lt;T&gt;(T x)
+  where T : class, IComparable&lt;T&gt;, new() { }</code></pre>
+<span class="warn">!</span> <code>new()</code> must come last in the list.
+
+<h4>Variance: declaration-site (not wildcards)</h4>
+<ul>
+<li>Java = use-site (<code>&lt;? extends&gt;</code>/<code>&lt;? super&gt;</code>); C# = declaration-site on the interface.</li>
+<li><code>out T</code> = covariant (producer): <code>IEnumerable&lt;out T&gt;</code>.</li>
+<li><code>in T</code> = contravariant (consumer): <code>Action&lt;in T&gt;</code>, <code>IComparer&lt;in T&gt;</code>.</li>
+<li>PECS is baked into the type — caller writes no wildcards.</li>
+</ul>
+<pre><code>IEnumerable&lt;object&gt; xs = new List&lt;string&gt;(); // ok, out</code></pre>
+
+<h4>Generic methods &amp; default(T)</h4>
+<pre><code>T Max&lt;T&gt;(T a, T b) where T : IComparable&lt;T&gt;
+  =&gt; a.CompareTo(b) &gt;= 0 ? a : b;
+
+int i = default;        // 0
+string? s = default(string); // null</code></pre>
+<ul>
+<li><code>default(T)</code> = type's zero value (0 / null / empty struct).</li>
+<li>Type args usually inferred: <code>Max(3, 9)</code>.</li>
+</ul>
+
+</section>
+
+<section class="card"><h3>Delegates, Events &amp; Lambdas</h3>
+
+<h4>Functional types</h4>
+<table><thead><tr><th>Java</th><th>C#</th></tr></thead><tbody>
+<tr><td><code>Function&lt;T,R&gt;</code></td><td><code>Func&lt;T,R&gt;</code></td></tr>
+<tr><td><code>Supplier&lt;T&gt;</code></td><td><code>Func&lt;T&gt;</code></td></tr>
+<tr><td><code>Consumer&lt;T&gt;</code></td><td><code>Action&lt;T&gt;</code></td></tr>
+<tr><td><code>Runnable</code></td><td><code>Action</code></td></tr>
+<tr><td><code>Predicate&lt;T&gt;</code></td><td><code>Predicate&lt;T&gt;</code> / <code>Func&lt;T,bool&gt;</code></td></tr>
+<tr><td><code>BiFunction&lt;A,B,R&gt;</code></td><td><code>Func&lt;A,B,R&gt;</code></td></tr>
+</tbody></table>
+<ul>
+<li><code>Func&lt;...,R&gt;</code>: last type param = return; up to 16 in-args + 1 result.</li>
+<li><code>Action&lt;...&gt;</code>: returns <code>void</code>, up to 16 args.</li>
+<li><span class="warn">!</span> No checked exceptions in C# → none of Java's "lambda can't throw" pain. Any lambda may throw.</li>
+</ul>
+
+<h4>Delegates = typed function pointers</h4>
+<pre><code>delegate int Op(int a, int b);  // named type
+Op add = (a, b) =&gt; a + b;
+int r = add(2, 3);              // invoke directly</code></pre>
+<ul><li>Built-in <code>Func</code>/<code>Action</code> usually replace custom delegates; declare your own only for clarity or <code>ref</code>/<code>out</code> params.</li></ul>
+
+<h4>Lambdas &amp; method groups</h4>
+<pre><code>x =&gt; x * 2;            // expr lambda
+(a, b) =&gt; a + b;       // multi-arg
+x =&gt; { Log(x); return x + 1; }; // statement
+list.Where(IsValid);  // method group (Java: this::isValid)</code></pre>
+
+<h4>Events</h4>
+<pre><code>public event EventHandler Clicked;   // EventHandler(object?,EventArgs)
+
+Clicked += OnClicked;   // subscribe
+Clicked -= OnClicked;   // unsubscribe
+Clicked?.Invoke(this, EventArgs.Empty); // raise (null-safe)</code></pre>
+<ul>
+<li><code>event</code> = multicast delegate restricted to <code>+=</code>/<code>-=</code> outside the class (no direct invoke/assign). Java: listener-list boilerplate.</li>
+<li>Standard pattern: <code>EventHandler</code> or <code>EventHandler&lt;TArgs&gt;</code>; handler sig <code>(object? sender, TArgs e)</code>.</li>
+<li><span class="warn">!</span> <code>+=</code> never reassigns — it adds a handler. Forgetting <code>-=</code> leaks the subscriber.</li>
+</ul>
+
+</section>
+
+<section class="card"><h3>async / await (vs CompletableFuture/threads)</h3>
+<table><thead><tr><th>Java</th><th>C#</th></tr></thead><tbody>
+<tr><td><code>CompletableFuture&lt;T&gt;</code></td><td><code>Task&lt;T&gt;</code></td></tr>
+<tr><td><code>CompletableFuture&lt;Void&gt;</code></td><td><code>Task</code> (no result)</td></tr>
+<tr><td><code>.thenApply / .thenCompose</code></td><td><code>await</code> (language keyword)</td></tr>
+<tr><td><code>.get()</code> (blocks)</td><td><code>await</code> (yields, no block)</td></tr>
+<tr><td><code>allOf / anyOf</code></td><td><code>Task.WhenAll / WhenAny</code></td></tr>
+<tr><td>no equivalent</td><td><code>async</code> / <code>await</code> built-in</td></tr>
+</tbody></table>
+
+<h4>Shape</h4>
+<pre><code>async Task&lt;int&gt; GetAsync(string url) {
+    var resp = await httpClient.GetAsync(url);   // Task&lt;T&gt; -&gt; T
+    var body = await resp.Content.ReadAsStringAsync();
+    return body.Length;
+}</code></pre>
+<ul>
+<li><code>await</code> unwraps <code>Task&lt;T&gt;</code> &rarr; <code>T</code>, suspends method, frees the thread until done.</li>
+<li><b>Async all the way</b>: callers <code>await</code> too — don't block at any layer.</li>
+</ul>
+
+<h4>Traps <span class="warn">!</span></h4>
+<ul>
+<li>NEVER <code>.Result</code> / <code>.Wait()</code> / <code>.GetAwaiter().GetResult()</code> on a Task — blocks a thread &amp; can deadlock (context capture).</li>
+<li><code>async void</code> ONLY for event handlers. Else <code>async Task</code> — exceptions in <code>async void</code> are unobservable &amp; crash the process.</li>
+</ul>
+
+<h4>Cancellation &amp; library code</h4>
+<pre><code>async Task DoAsync(CancellationToken ct) {
+    await Task.Delay(1000, ct);   // cooperative cancel
+    ct.ThrowIfCancellationRequested();
+}
+var all = await Task.WhenAll(t1, t2);  // ~ allOf</code></pre>
+<ul>
+<li>Thread <code>CancellationToken</code> through calls (cooperative, like checking a flag).</li>
+<li>In <b>libraries</b>: <code>await x.ConfigureAwait(false)</code> — don't capture/resume on caller's context (perf, avoids deadlock).</li>
+</ul>
+</section>
+
+<section class="card diagram"><h3>async / await flow</h3>
+<div class="mermaid">
+flowchart LR
+  A["async Task&lt;T&gt; M()"] --> B["await ioCall()"]
+  B -->|"not done"| Y["thread RETURNS to caller (no block)"]
+  Y --> C["I/O completes → resume after await"]
+  C --> D["return T → Task&lt;T&gt; completes"]
+</div>
+<p class="cap">Never .Result/.Wait() — that blocks (and can deadlock). 'async all the way'. ~ Java CompletableFuture but language-level.</p></section>
+
+<section class="card"><h3>Exceptions (NO checked exceptions)</h3>
+
+<h4>Biggest surprise</h4>
+<ul>
+<li>C# has <strong>no checked exceptions</strong> — no <code>throws</code> clause, compiler <em>never</em> forces a catch. <span class="warn">!</span> Any method can throw anything; freedom + risk — read docs/source to know what throws.</li>
+<li>No equivalent of Java's checked/unchecked split — all exceptions are like Java's <code>RuntimeException</code>.</li>
+</ul>
+
+<h4>Mechanics — mostly identical</h4>
+<table><thead><tr><th>Java</th><th>C#</th></tr></thead><tbody>
+<tr><td><code>try/catch/finally</code></td><td><code>try/catch/finally</code> (same)</td></tr>
+<tr><td><code>throw new X()</code></td><td><code>throw new X()</code></td></tr>
+<tr><td><code>throws IOException</code></td><td>— (no signature decl)</td></tr>
+<tr><td><code>e.getMessage()</code></td><td><code>e.Message</code></td></tr>
+<tr><td><code>e.printStackTrace()</code></td><td><code>e.StackTrace</code> / <code>e.ToString()</code></td></tr>
+<tr><td><code>e.getCause()</code></td><td><code>e.InnerException</code></td></tr>
+</tbody></table>
+
+<h4>Rethrow — STACK TRACE TRAP <span class="warn">!</span></h4>
+<pre><code>catch (Exception ex)
+{
+    Log(ex);
+    throw;        // ✓ rethrow, PRESERVES stack
+    // throw ex;  // ✗ RESETS stack to here
+}</code></pre>
+<ul><li><code>throw;</code> = bare rethrow (no Java equivalent — Java's <code>throw e;</code> keeps the stack; C#'s <code>throw ex;</code> loses it).</li></ul>
+
+<h4>Exception filters (no Java equiv)</h4>
+<pre><code>catch (HttpRequestException e)
+      when (e.StatusCode == 404)
+{ ... }</code></pre>
+<ul><li>Filter runs <em>before</em> stack unwinds; falls through to next <code>catch</code> if false.</li></ul>
+
+<h4>No multi-catch <span class="warn">!</span></h4>
+<ul>
+<li>No <code>catch (A | B e)</code> syntax. Instead:</li>
+<li>Catch a common base + <code>switch</code> on type, or use <code>when</code> filters.</li>
+</ul>
+<pre><code>catch (Exception e) when (e is IOException or TimeoutException)
+{ ... }</code></pre>
+
+<h4>Common types</h4>
+<table><thead><tr><th>Java</th><th>C#</th></tr></thead><tbody>
+<tr><td><code>IllegalArgumentException</code></td><td><code>ArgumentException</code></td></tr>
+<tr><td>null arg check</td><td><code>ArgumentNullException</code></td></tr>
+<tr><td><code>IllegalStateException</code></td><td><code>InvalidOperationException</code></td></tr>
+<tr><td><code>UnsupportedOperationException</code></td><td><code>NotSupportedException</code></td></tr>
+<tr><td><code>SQLException</code> (checked)</td><td><code>DbException</code> (unchecked)</td></tr>
+</tbody></table>
+<pre><code>ArgumentNullException.ThrowIfNull(arg); // .NET 6+</code></pre>
+
+<h4>Review red flags <span class="warn">!</span></h4>
+<ul>
+<li>☐ Empty <code>catch { }</code> — silently swallows.</li>
+<li>☐ <code>catch (Exception)</code> too broad — hides bugs.</li>
+<li>☐ <code>throw ex;</code> — resets stack; use <code>throw;</code>.</li>
+<li>☐ Catch-and-ignore where a <code>when</code> filter would be precise.</li>
+</ul>
+</section>
+
+<section class="card"><h3>using &amp; IDisposable (try-with-resources)</h3>
+
+<table><thead><tr><th>Java</th><th>C#</th></tr></thead><tbody>
+<tr><td><code>AutoCloseable.close()</code></td><td><code>IDisposable.Dispose()</code></td></tr>
+<tr><td><code>try (var f = ...) { }</code></td><td><code>using (var f = ...) { }</code></td></tr>
+<tr><td>resource scoped to try block</td><td><code>using var f = ...;</code> (C#8) scoped to enclosing block</td></tr>
+<tr><td>(no direct equiv)</td><td><code>await using</code> + <code>IAsyncDisposable</code></td></tr>
+</tbody></table>
+
+<h4>using statement (explicit block)</h4>
+<pre><code>using (var f = File.OpenText(p))
+{
+    var line = f.ReadLine();
+} // Dispose() called here, even on throw</code></pre>
+
+<h4>using declaration (C#8) — like try-with-resources, no block</h4>
+<pre><code>using var f = File.OpenText(p);
+var s = f.ReadToEnd();
+// disposed at end of enclosing scope (method/block)</code></pre>
+
+<h4>async cleanup</h4>
+<pre><code>await using var conn = new SqlConnection(cs);
+await conn.OpenAsync();
+// calls DisposeAsync() — type must be IAsyncDisposable</code></pre>
+
+<h4>Implementing</h4>
+<pre><code>class Cache : IDisposable
+{
+    private readonly Stream _s;
+    public void Dispose() =&gt; _s.Dispose();
+}</code></pre>
+<ul>
+<li>Managed-only? Just dispose your fields. <em>No finalizer needed.</em></li>
+<li>Owns unmanaged handle? Use full dispose pattern: <code>Dispose(bool)</code> + <code>GC.SuppressFinalize(this)</code> + finalizer. Rare — prefer <code>SafeHandle</code>.</li>
+</ul>
+
+<h4>Java-dev traps</h4>
+<ul>
+<li><span class="warn">!</span> <code>IDisposable</code> created but not in <code>using</code> = leak. C# has no try-with-resources enforcement — analyzer warns (CA2000), not the compiler.</li>
+<li><span class="warn">!</span> <code>new HttpClient()</code> per request = socket exhaustion. Reuse one instance or use <code>IHttpClientFactory</code>.</li>
+<li><span class="warn">!</span> Multiple resources: stack declarations <code>using var a=..; using var b=..;</code> — disposed reverse order. No need to nest.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Records, Pattern Matching &amp; Tuples</h3>
+
+<h4>Records (C#9)</h4>
+<table><thead><tr><th>Java</th><th>C#</th></tr></thead><tbody>
+<tr><td><code>record Point(int x, int y){}</code></td><td><code>public record Point(int X, int Y);</code></td></tr>
+<tr><td>auto equals/hashCode/toString</td><td>value <code>==</code>, <code>Equals</code>, <code>ToString()</code>, deconstruct</td></tr>
+<tr><td>accessors <code>p.x()</code></td><td>props <code>p.X</code> (init-only, immutable)</td></tr>
+</tbody></table>
+<ul>
+<li><code>record class</code> = ref type (default); <code>record struct</code> = value type (C#10).</li>
+<li><span class="warn">!</span> record <code>==</code> is structural; plain <code>class ==</code> is reference (unlike Java where <code>==</code> is always reference).</li>
+</ul>
+
+<h4>with — non-destructive mutation</h4>
+<pre><code>var p2 = p with { X = 5 };  // copy, change X</code></pre>
+<ul><li>No Java equivalent — Java needs a manual copy/builder.</li></ul>
+
+<h4>switch EXPRESSION (C#8)</h4>
+<pre><code>var area = shape switch {
+  Circle c      =&gt; Math.PI * c.R * c.R,
+  Rectangle r   =&gt; r.W * r.H,
+  _             =&gt; 0.0   // _ = default
+};</code></pre>
+<ul><li>Returns a value; arms are <code>pattern =&gt; expr</code>, comma-separated. <span class="warn">!</span> non-exhaustive throws at runtime.</li></ul>
+
+<h4>Patterns</h4>
+<table><thead><tr><th>Kind</th><th>C#</th></tr></thead><tbody>
+<tr><td>type + bind</td><td><code>o is string s</code></td></tr>
+<tr><td>property</td><td><code>p is { Age: &gt;= 18 }</code></td></tr>
+<tr><td>positional</td><td><code>p is (0, 0)</code></td></tr>
+<tr><td>relational/logical</td><td><code>n is &gt; 0 and &lt; 10</code>, <code>or</code>, <code>not null</code></td></tr>
+<tr><td>list (C#11)</td><td><code>arr is [1, .., 9]</code>, <code>[var first, ..]</code></td></tr>
+</tbody></table>
+
+<h4>Tuples</h4>
+<pre><code>(string Name, int Age) t = ("a", 3);
+var (n, a) = t;           // deconstruct
+t.Name; t.Age;            // named access</code></pre>
+<ul><li>Lightweight <code>ValueTuple</code>, value equality. <span class="warn">!</span> not the same as a record — no type name, no methods.</li></ul>
+
+</section>
+
+<section class="card"><h3>Strings & Text</h3>
+
+<h4>Interpolation &amp; formatting</h4>
+<table><thead><tr><th>Java</th><th>C#</th></tr></thead><tbody>
+<tr><td><code>String.format("Hi %s",n)</code></td><td><code>$"Hi {n}"</code> (interpolation)</td></tr>
+<tr><td><code>%03d</code></td><td><code>{age:D3}</code> format spec after <code>:</code></td></tr>
+<tr><td><code>String.format(...)</code></td><td><code>string.Format("Hi {0}",n)</code></td></tr>
+</tbody></table>
+<pre><code>var s = $"Hi {name}, age {age:D3}, {price:C2}";</code></pre>
+
+<h4>Literals</h4>
+<table><thead><tr><th>Java</th><th>C#</th></tr></thead><tbody>
+<tr><td><code>"C:\\path"</code></td><td><code>@"C:\path"</code> verbatim, no escapes</td></tr>
+<tr><td>text block <code>"""</code></td><td>raw string <code>"""</code> (C#11)</td></tr>
+</tbody></table>
+<pre><code>var p = @"C:\logs\app.txt";
+var json = """{ "id": 1 }""";   // raw, C#11
+var s = $$"""{{name}} is {{age}}"""; // raw+interp</code></pre>
+
+<h4>Immutability &amp; building</h4>
+<ul>
+<li><code>string</code> immutable (same as Java).</li>
+<li>Loops/concat → <code>StringBuilder</code> (<code>.Append</code>, <code>.ToString()</code>).</li>
+<li><code>char</code> is a value type; index via <code>s[0]</code>.</li>
+</ul>
+
+<h4>Common API (mostly same, note casing)</h4>
+<table><thead><tr><th>Java</th><th>C#</th></tr></thead><tbody>
+<tr><td><code>isEmpty()</code></td><td><code>string.IsNullOrEmpty(s)</code> / <code>IsNullOrWhiteSpace(s)</code></td></tr>
+<tr><td><code>split(",")</code></td><td><code>s.Split(',')</code> → array</td></tr>
+<tr><td><code>String.join(",",x)</code></td><td><code>string.Join(",", x)</code></td></tr>
+<tr><td><code>substring(a,b)</code></td><td><code>s.Substring(a,len)</code> (2nd arg = LENGTH<span class="warn">!</span>)</td></tr>
+<tr><td><code>contains/startsWith</code></td><td><code>Contains</code> / <code>StartsWith</code> (PascalCase)</td></tr>
+<tr><td><code>trim</code> / <code>toUpperCase</code></td><td><code>Trim</code> / <code>ToUpper</code> / <code>ToLower</code></td></tr>
+</tbody></table>
+
+<h4>Spans (advanced)</h4>
+<ul><li><code>ReadOnlySpan&lt;char&gt;</code> for alloc-free slicing: <code>s.AsSpan(2,4)</code>.</li></ul>
+
+<h4>Gotchas <span class="warn">!</span></h4>
+<ul>
+<li><code>==</code> compares VALUE for <code>string</code> (not reference like Java — no <code>.equals()</code> needed).</li>
+<li><code>Substring</code> 2nd arg is length, not end index.</li>
+<li>Concat in a loop allocates each time → use <code>StringBuilder</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Modifiers, Enums &amp; Namespaces</h3>
+<h4>Access modifiers</h4>
+<table><thead><tr><th>Java</th><th>C#</th></tr></thead><tbody>
+<tr><td>public</td><td>public</td></tr>
+<tr><td>private</td><td>private</td></tr>
+<tr><td>(package-private, default)</td><td>internal (assembly)</td></tr>
+<tr><td>protected</td><td>protected</td></tr>
+<tr><td>—</td><td>protected internal (this OR assembly)</td></tr>
+<tr><td>—</td><td>private protected (this AND assembly, C#7.2)</td></tr>
+</tbody></table>
+<ul>
+<li><span class="warn">!</span> Class default = <code>internal</code>; member default = <code>private</code>. No package-private.</li>
+<li><span class="warn">!</span> No packages — only <b>namespaces</b> (logical) + <b>assemblies</b> (.dll, the visibility boundary).</li>
+</ul>
+
+<h4>Class/method modifiers</h4>
+<table><thead><tr><th>Java</th><th>C#</th></tr></thead><tbody>
+<tr><td>final class</td><td>sealed class</td></tr>
+<tr><td>abstract</td><td>abstract</td></tr>
+<tr><td>methods virtual by default</td><td>NON-virtual by default</td></tr>
+<tr><td>@Override</td><td>override (required)</td></tr>
+<tr><td>static nested util</td><td>static class (all members static)</td></tr>
+<tr><td>—</td><td>partial class/method (split files)</td></tr>
+</tbody></table>
+<ul><li><span class="warn">!</span> To be overridable, base method needs <code>virtual</code>; child needs <code>override</code>. <code>new</code> hides (no polymorphism).</li></ul>
+<pre><code>class Base { public virtual void F() {} }
+class D : Base { public override void F() {} }
+class H : Base { public new void F() {} } // hides</code></pre>
+
+<h4>const vs readonly</h4>
+<table><thead><tr><th>Java</th><th>C#</th></tr></thead><tbody>
+<tr><td>static final (compile-time)</td><td>const (compile-time, implicitly static)</td></tr>
+<tr><td>final (set once at runtime)</td><td>readonly (set in ctor/init)</td></tr>
+</tbody></table>
+
+<h4>Enums — NOT a class</h4>
+<ul>
+<li><span class="warn">!</span> Just named int constants — no methods/fields/ctors like Java.</li>
+<li>Add behavior via <code>switch</code> or extension methods.</li>
+</ul>
+<pre><code>enum Color { Red, Green, Blue } // 0,1,2
+int n = (int)Color.Red;
+Color c = (Color)1; // Green
+
+[Flags]
+enum Perm { None=0, Read=1, Write=2, Exec=4 }
+var p = Perm.Read | Perm.Write;
+bool w = p.HasFlag(Perm.Write);</code></pre>
+
+<h4>Namespaces &amp; usings</h4>
+<table><thead><tr><th>Java</th><th>C#</th></tr></thead><tbody>
+<tr><td>package x.y;</td><td>namespace X.Y; (file-scoped, C#10)</td></tr>
+<tr><td>import a.b.C;</td><td>using A.B;</td></tr>
+<tr><td>import static</td><td>using static A.B;</td></tr>
+<tr><td>—</td><td>global using A.B; (whole project, C#10)</td></tr>
+</tbody></table>
+<pre><code>namespace App.Core;          // file-scoped
+global using System.Linq;    // one file, applies everywhere
+using Dict = System.Collections.Generic.Dictionary&lt;string,int&gt;; // alias</code></pre>
+</section>
+
+<section class="card diagram"><h3>C# type hierarchy</h3>
+<div class="mermaid">
+flowchart TD
+  O["object (System.Object) — root of everything"] --> VT["System.ValueType"]
+  O --> RT["Reference types: class, interface, string, array, delegate"]
+  VT --> Structs["struct (int, double, bool, DateTime, Guid, your structs)"]
+  VT --> Enums["enum"]
+</div>
+<p class="cap">Unlike Java, value types and reference types share one root (object); boxing bridges a value type into object.</p></section>
+
+<section class="card"><h3>.NET Tooling &amp; Ecosystem (vs Maven/Gradle)</h3>
+<h4>dotnet CLI ~ mvn/gradle</h4>
+<table><thead><tr><th>Maven/Gradle</th><th>dotnet CLI</th></tr></thead><tbody>
+<tr><td>archetype:generate</td><td><code>dotnet new console</code> / <code>classlib</code> / <code>webapi</code></td></tr>
+<tr><td>mvn compile</td><td><code>dotnet build</code></td></tr>
+<tr><td>mvn exec:java</td><td><code>dotnet run</code></td></tr>
+<tr><td>mvn test</td><td><code>dotnet test</code></td></tr>
+<tr><td>add dep to pom</td><td><code>dotnet add package X</code></td></tr>
+<tr><td>mvn dependency:resolve</td><td><code>dotnet restore</code> (auto on build)</td></tr>
+<tr><td>mvn package</td><td><code>dotnet publish -c Release</code></td></tr>
+</tbody></table>
+<p><span class="warn">!</span> No <code>mvnw</code> wrapper — the SDK version is pinned via <code>global.json</code> instead.</p>
+
+<h4>NuGet = Maven Central</h4>
+<ul>
+<li>One central feed (nuget.org); deps live IN the <code>.csproj</code>, not a separate file.</li>
+<li><code>dotnet add package</code> edits the csproj + restores.</li>
+</ul>
+<pre><code>&lt;PackageReference Include="Newtonsoft.Json" Version="13.0.3" /&gt;</code></pre>
+
+<h4>Project / solution files</h4>
+<table><thead><tr><th>Java</th><th>C#</th></tr></thead><tbody>
+<tr><td>pom.xml / build.gradle</td><td><code>.csproj</code> (per project)</td></tr>
+<tr><td>multi-module parent pom</td><td><code>.sln</code> (groups projects)</td></tr>
+<tr><td>XML/Groovy/Kotlin DSL</td><td>XML, SDK-style (terse)</td></tr>
+</tbody></table>
+<pre><code>&lt;Project Sdk="Microsoft.NET.Sdk"&gt;
+  &lt;PropertyGroup&gt;
+    &lt;TargetFramework&gt;net8.0&lt;/TargetFramework&gt;
+    &lt;Nullable&gt;enable&lt;/Nullable&gt;
+  &lt;/PropertyGroup&gt;
+&lt;/Project&gt;</code></pre>
+<p><span class="warn">!</span> SDK-style csproj auto-includes all <code>*.cs</code> — no <code>&lt;sourceDirectory&gt;</code> globs needed.</p>
+
+<h4>Target framework (~ Java release)</h4>
+<ul>
+<li><code>&lt;TargetFramework&gt;net8.0&lt;/TargetFramework&gt;</code> — moniker, not just runtime.</li>
+<li>LTS = <code>net8.0</code> &amp; <code>net6.0</code> (~ Java 17/21 LTS). STS = net7/net9.</li>
+</ul>
+
+<h4>Layout &amp; config</h4>
+<table><thead><tr><th>Java</th><th>C#</th></tr></thead><tbody>
+<tr><td>Main.java</td><td><code>Program.cs</code> (entry)</td></tr>
+<tr><td>target/</td><td><code>bin/</code> + <code>obj/</code> (gitignore)</td></tr>
+<tr><td>application.properties</td><td><code>appsettings.json</code></td></tr>
+</tbody></table>
+
+<h4>Test / mock / assert libs</h4>
+<table><thead><tr><th>Java</th><th>C#</th></tr></thead><tbody>
+<tr><td>JUnit</td><td>xUnit / NUnit / MSTest</td></tr>
+<tr><td>Mockito</td><td>Moq / NSubstitute</td></tr>
+<tr><td>AssertJ</td><td>FluentAssertions</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> Tests live in a separate <code>classlib</code> project referencing the SUT — not a <code>src/test</code> folder.</p>
+</section>
+
+<section class="card"><h3>Reviewing C# Code — What to Flag</h3>
+<h4>async</h4>
+<ul>
+<li>&#9744; <code>async void</code> — only for event handlers; else <code>async Task</code> (else exceptions can't be caught) <span class="warn">!</span></li>
+<li>&#9744; Blocking on async: <code>.Result</code> / <code>.Wait()</code> / <code>.GetAwaiter().GetResult()</code> — deadlock + thread-block <span class="warn">!</span></li>
+<li>&#9744; Fire-and-forget <code>Task</code> not awaited (swallows exceptions)</li>
+<li>&#9744; Library code missing <code>.ConfigureAwait(false)</code></li>
+<li>&#9744; <code>CancellationToken</code> not threaded through async calls</li>
+<li>&#9744; <code>throw ex;</code> resets stack trace — use bare <code>throw;</code> <span class="warn">!</span></li>
+</ul>
+<h4>LINQ / IEnumerable</h4>
+<ul>
+<li>&#9744; Multiple enumeration of a deferred query (re-runs / N+1 to DB) <span class="warn">!</span></li>
+<li>&#9744; Returning <code>IEnumerable&lt;T&gt;</code> then enumerating repeatedly — materialize once</li>
+<li>&#9744; Missing/premature <code>.ToList()</code></li>
+<li>&#9744; LINQ allocations (closures, delegates) in hot paths</li>
+</ul>
+<h4>Disposal</h4>
+<ul>
+<li>&#9744; <code>IDisposable</code> not in <code>using</code> → leak</li>
+<li>&#9744; <code>new HttpClient()</code> per request → socket exhaustion; reuse / <code>IHttpClientFactory</code> <span class="warn">!</span></li>
+<li>&#9744; Streams / DB connections not disposed</li>
+</ul>
+<h4>Nullability / Equality</h4>
+<ul>
+<li>&#9744; Overuse of null-forgiving <code>!</code> / suppressed NRT warnings</li>
+<li>&#9744; <code>==</code> vs <code>.Equals()</code> on reference types (ref vs value compare)</li>
+<li>&#9744; <code>DateTime.Now</code> vs <code>.UtcNow</code> for instants <span class="warn">!</span></li>
+<li>&#9744; <code>DateTime</code> vs <code>DateTimeOffset</code> for points in time</li>
+</ul>
+<h4>Idioms</h4>
+<ul>
+<li>&#9744; Public mutable fields instead of <code>{ get; set; }</code> properties</li>
+<li>&#9744; Mutable <code>struct</code> (copy-by-value surprises) <span class="warn">!</span></li>
+<li>&#9744; <code>catch {}</code> / <code>catch (Exception)</code> too broad</li>
+<li>&#9744; Mutable <code>static</code> state — thread-safety</li>
+<li>&#9744; String concat in loops → use <code>StringBuilder</code></li>
+<li>&#9744; Non-PascalCase public members; magic <code>(MyEnum)intValue</code> casts</li>
+</ul>
+</section>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  try {
+    mermaid.initialize({ startOnLoad: true, theme: "neutral",
+      flowchart: { useMaxWidth: true, htmlLabels: true, nodeSpacing: 18, rankSpacing: 18 },
+      themeVariables: { fontSize: "9px" } });
+  } catch (e) { /* offline / blocked CDN: diagrams degrade to source text, rest of sheet is fine */ }
+</script>
+</body>
+</html>

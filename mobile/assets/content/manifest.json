@@ -226,6 +226,18 @@
       "storagePrefix": "ip:java-cheatsheet",
       "defaultRevealedSections": [],
       "sectionOrder": []
+    },
+    {
+      "id": "csharp-cheatsheet",
+      "file": "/csharp-cheatsheet.html",
+      "title": "C#",
+      "category": "Cheat Sheets",
+      "externalUrl": "/csharp-cheatsheet.html",
+      "itemLabel": "Section",
+      "itemsPlural": "open printable A4 sheet ↗",
+      "storagePrefix": "ip:csharp-cheatsheet",
+      "defaultRevealedSections": [],
+      "sectionOrder": []
     }
   ]
 }
