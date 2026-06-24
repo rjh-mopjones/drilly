@@ -112,6 +112,20 @@
       "sectionOrder": []
     },
     {
+      "id": "python",
+      "file": "/python-interview-primer.md",
+      "title": "Python",
+      "category": "Languages",
+      "itemLabel": "Topic",
+      "itemsPlural": "Python topics",
+      "storagePrefix": "ip:python",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": []
+    },
+    {
       "id": "kotlin",
       "file": "/kotlin-interview-primer.md",
       "title": "Kotlin",
