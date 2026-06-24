@@ -98,6 +98,20 @@
       "sectionOrder": []
     },
     {
+      "id": "rust",
+      "file": "/rust-interview-primer.md",
+      "title": "Rust",
+      "category": "Languages",
+      "itemLabel": "Topic",
+      "itemsPlural": "Rust topics",
+      "storagePrefix": "ip:rust",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": []
+    },
+    {
       "id": "kotlin",
       "file": "/kotlin-interview-primer.md",
       "title": "Kotlin",

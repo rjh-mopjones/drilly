@@ -42,6 +42,7 @@ const CONTENT_URLS = [
   "/neetcode-150.md",
   "/java-interview-primer.md",
   "/go-interview-primer.md",
+  "/rust-interview-primer.md",
   "/kotlin-interview-primer.md",
   "/postgres-interview-primer.md",
   "/db-theory-primer.md",
