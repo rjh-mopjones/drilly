@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Go Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+/* spanning title bar */
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>Go Cheat Sheet</h1><span class="meta">Go 1.23 · senior/backend focus · generic examples · drilly</span></div>
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="warn">!</span> footgun / gotcha &nbsp; <code>&#9744;</code> review checklist item</li>
+<li>Baseline: <b>Go 1.23</b>; version-gated behaviour tagged inline (e.g. "(1.22)"). Behaviour gated by the <code>go</code> directive in <code>go.mod</code>, not the toolchain <span class="warn">!</span></li>
+<li>Senior focus: concurrency · runtime/GC · the type-system footguns. Last 3 cards = <b>code review checklist</b> + common bugs + debugging.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
+</ul></section>
+
+<section class="card diagram"><h3>Goroutines &amp; the Scheduler (G·M·P)</h3>
+<div class="mermaid">
+flowchart TD
+  G["Goroutines (G)<br/>2KB stack, grows"] --> P["Logical procs (P)<br/>= GOMAXPROCS"]
+  P --> M["OS threads (M)"]
+  M --> CPU["CPU cores"]
+  P -.->|"local runqueue<br/>empty → steal"| P2["other P"]
+</div>
+<p class="cap">M:N scheduler — many G multiplexed onto few M via P. Blocking syscall → M parks, P hands off to a fresh M (work continues). Preemptive since 1.14 (async, signal-based). 1.25 runtime is cgroup-aware: GOMAXPROCS respects container CPU limits natively.</p>
+<ul>
+<li><code>go f()</code> ≈ cheap (µs, 2KB). But every goroutine needs an answer to <b>"how does this end"</b> — closed chan, cancelled ctx, or finite loop. No answer = leak <span class="warn">!</span></li>
+<li><code>runtime.Gosched()</code> yields; <code>GOMAXPROCS(n)</code> caps parallelism (default <code>NumCPU</code>).</li>
+</ul></section>
+
+<section class="card"><h3>Channels</h3>
+<table><thead><tr><th>Kind</th><th>Behaviour</th></tr></thead><tbody>
+<tr><td>unbuffered <code>make(chan T)</code></td><td>send blocks until a receiver is ready (rendezvous / handoff)</td></tr>
+<tr><td>buffered <code>make(chan T, n)</code></td><td>send blocks only when full; recv blocks when empty</td></tr>
+<tr><td>direction <code>chan&lt;- T</code> / <code>&lt;-chan T</code></td><td>send-only / recv-only — type at the API boundary</td></tr>
+<tr><td><code>nil</code> channel</td><td>send <b>and</b> recv block forever <span class="warn">!</span> (use to disable a <code>select</code> case)</td></tr>
+</tbody></table>
+<h4>close — who &amp; rules</h4>
+<ul>
+<li><b>The sender closes, never the receiver.</b> One closer only.</li>
+<li>send on closed = <b>panic</b> <span class="warn">!</span>; close of closed = <b>panic</b> <span class="warn">!</span>; recv on closed = zero value + <code>ok==false</code> (drains buffer first).</li>
+<li><code>v, ok := &lt;-ch</code> tests closed; <code>for v := range ch</code> exits when closed.</li>
+</ul>
+<pre><code>select {
+case v := &lt;-ch:      use(v)
+case out &lt;- x:        // send
+case &lt;-ctx.Done():    return ctx.Err()
+default:              // non-blocking
+}</code></pre>
+<ul><li><code>select</code> picks a ready case at random; <code>default</code> makes it non-blocking.</li></ul>
+</section>
+
+<section class="card"><h3>sync &amp; Coordination</h3>
+<table><thead><tr><th>Type</th><th>Note</th></tr></thead><tbody>
+<tr><td><code>sync.Mutex</code></td><td><b>not reentrant</b> <span class="warn">!</span> (re-lock on same goroutine = deadlock). Lock in caller, <code>defer mu.Unlock()</code>.</td></tr>
+<tr><td><code>sync.RWMutex</code></td><td>many readers / 1 writer; writer-starvation possible under read load</td></tr>
+<tr><td><code>sync.WaitGroup</code></td><td><code>Add</code> before <code>go</code>, <code>defer wg.Done()</code>, <code>wg.Wait()</code>. <code>Add</code> inside the goroutine races <span class="warn">!</span></td></tr>
+<tr><td><code>sync.Once</code></td><td><code>once.Do(f)</code> runs <code>f</code> exactly once (lazy init)</td></tr>
+<tr><td><code>sync.Map</code></td><td>only for read-mostly / disjoint-key sets; plain map+Mutex usually wins</td></tr>
+<tr><td><code>atomic.Int64</code> / <code>Bool</code> / <code>Pointer[T]</code></td><td>(1.19) typed lock-free counters/flags</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> <b>Never copy a value after first use if it contains a <code>Mutex</code>/<code>WaitGroup</code></b> — copies the lock state. <code>go vet</code> catches most via <code>copylocks</code>.</p>
+<h4>errgroup (golang.org/x/sync)</h4>
+<pre><code>g, ctx := errgroup.WithContext(ctx)
+for _, u := range urls {
+  u := u                  // pre-1.22 capture fix !
+  g.Go(func() error { return fetch(ctx, u) })
+}
+err := g.Wait()           // first non-nil; cancels ctx</code></pre>
+</section>
+
+<section class="card"><h3>Memory Model &amp; Races</h3>
+<ul>
+<li>A <b>data race</b> (concurrent access, ≥1 write, no synchronisation) is <b>undefined behaviour</b> <span class="warn">!</span> — not "eventually consistent". Can corrupt, not just stale-read.</li>
+<li>No happens-before edge → writes from one goroutine may be invisible/reordered in another.</li>
+</ul>
+<h4>happens-before sources</h4>
+<table><thead><tr><th>Edge</th><th>Establishes</th></tr></thead><tbody>
+<tr><td>chan send → corresponding recv</td><td>send (and prior writes) visible to receiver</td></tr>
+<tr><td>chan close → recv that observes it</td><td>same</td></tr>
+<tr><td><code>mu.Unlock()</code> → next <code>mu.Lock()</code></td><td>critical-section writes published</td></tr>
+<tr><td><code>sync/atomic</code> store → load</td><td>release/acquire ordering</td></tr>
+<tr><td><code>once.Do</code> return</td><td>init writes visible to all callers</td></tr>
+</tbody></table>
+<p><b>Always run <code>go test -race</code>.</b> The detector is sound (no false positives) but only flags races it <i>observes</i> at runtime — exercise the concurrent paths.</p>
+</section>
+
+<section class="card"><h3>Slices, Arrays &amp; Maps</h3>
+<h4>Slice = (ptr, len, cap) header</h4>
+<pre><code>s := []int{1,2,3}
+t := s[:2]          // shares backing array !
+t = append(t, 9)    // OVERWRITES s[2] if cap allows !
+u := append([]int{}, s...) // safe copy
+b := make([]byte, n) // pre-size to avoid regrowth</code></pre>
+<ul>
+<li><code>append</code> reallocates only when <code>len &gt; cap</code>; until then writes alias the original <span class="warn">!</span></li>
+<li>Re-slicing keeps the <b>whole</b> backing array alive (memory leak holding a small slice of a huge buffer) <span class="warn">!</span> — <code>copy</code> out.</li>
+<li>Use the 3-index slice <code>s[a:b:c]</code> to cap and force a fresh array on next append.</li>
+</ul>
+<h4>Maps</h4>
+<ul>
+<li><b>Write to a nil map panics</b> <span class="warn">!</span>; read of nil map is fine (zero value). <code>m := map[K]V{}</code> or <code>make</code>.</li>
+<li>Iteration order is <b>randomised</b> — never rely on it; sort keys for determinism.</li>
+<li><b>Concurrent map read+write panics</b> ("fatal error: concurrent map ...", not recoverable) <span class="warn">!</span> — guard with a Mutex or <code>sync.Map</code>.</li>
+<li><code>v, ok := m[k]</code> distinguishes "absent" from "zero value".</li>
+</ul>
+</section>
+
+<section class="card"><h3>Interfaces &amp; nil</h3>
+<ul>
+<li>An interface value is a <b>(type, value)</b> tuple. It's <code>nil</code> only when <b>both</b> are nil.</li>
+</ul>
+<h4>The typed-nil trap <span class="warn">!</span></h4>
+<pre><code>func do() error {
+  var e *MyErr = nil
+  return e            // (*MyErr, nil) — NOT nil iface !
+}
+if do() != nil { /* ALWAYS true */ }
+// Fix: return nil explicitly, or
+//   if e == nil { return nil }</code></pre>
+<ul>
+<li>Assertion: <code>v, ok := x.(T)</code> (safe); <code>x.(T)</code> without <code>ok</code> panics on mismatch <span class="warn">!</span></li>
+<li><code>switch v := x.(type) { case T: ... }</code> for multi-type dispatch.</li>
+<li><code>any</code> = alias for <code>interface{}</code> (1.18). Accept interfaces, return concrete types. Keep interfaces small (1–2 methods) and define them on the <b>consumer</b> side.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Errors</h3>
+<ul>
+<li>Errors are <b>values</b>, returned as the last result. No exceptions. <code>if err != nil { return ... }</code> — handle or propagate, don't ignore.</li>
+<li>Wrap with <code>%w</code> to preserve the chain: <code>fmt.Errorf("load %s: %w", id, err)</code>.</li>
+<li><code>errors.Is(err, ErrNotFound)</code> — sentinel match through the chain.</li>
+<li><code>errors.As(err, &amp;target)</code> — extract a typed error from the chain.</li>
+<li>Sentinels: <code>var ErrX = errors.New("...")</code>. Custom: implement <code>Error() string</code> (+ <code>Unwrap()</code>).</li>
+</ul>
+<h4>panic / recover — boundaries only</h4>
+<pre><code>defer func() {
+  if r := recover(); r != nil {
+    log.Printf("recovered: %v", r)
+  }
+}()</code></pre>
+<ul>
+<li><code>recover</code> works <b>only</b> inside a deferred func <span class="warn">!</span>. Use for true invariants / server top-of-handler — not control flow.</li>
+<li>A panic in a goroutine with no <code>recover</code> crashes the <b>whole process</b> <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>defer / panic / recover Timing</h3>
+<ul>
+<li>Deferred calls run <b>LIFO</b> at <b>function</b> return (not block/scope end) — including on panic-unwind.</li>
+<li><b>Args are evaluated at the <code>defer</code> statement</b>, body runs later <span class="warn">!</span>:</li>
+</ul>
+<pre><code>x := 1
+defer fmt.Println(x)   // prints 1
+x = 2                  // (captured at defer time)
+
+// Closure sees the LATER value:
+defer func(){ fmt.Println(x) }() // prints 2</code></pre>
+<h4>Named returns + defer</h4>
+<pre><code>func f() (err error) {
+  defer func(){ if err != nil { err = wrap(err) } }()
+  return doThing()      // defer can mutate err !
+}</code></pre>
+<h4>defer in a loop <span class="warn">!</span></h4>
+<pre><code>for _, p := range paths {
+  f, _ := os.Open(p)
+  defer f.Close()       // STACKS — none close until f() returns !
+}
+// Fix: extract a per-iteration helper that defers+returns.</code></pre>
+</section>
+
+<section class="card"><h3>Receivers — value vs pointer</h3>
+<table><thead><tr><th>Receiver</th><th>Effect</th></tr></thead><tbody>
+<tr><td><code>func (t T) M()</code></td><td>operates on a <b>copy</b> — mutations don't persist</td></tr>
+<tr><td><code>func (t *T) M()</code></td><td>mutates the original; required to change state</td></tr>
+</tbody></table>
+<ul>
+<li>Use a <b>pointer receiver</b> to mutate, for large structs (avoid copy), or for any type holding a <code>sync.Mutex</code> <span class="warn">!</span> (a value receiver copies the lock).</li>
+<li><b>Be consistent</b>: if any method needs a pointer receiver, give them all pointer receivers.</li>
+</ul>
+<h4>Method sets &amp; interfaces <span class="warn">!</span></h4>
+<ul>
+<li><code>*T</code>'s method set includes both value- and pointer-receiver methods; <code>T</code>'s includes only value-receiver ones.</li>
+<li>So if <code>M</code> has a pointer receiver, <b>only <code>*T</code> satisfies</b> the interface — a <code>T</code> value won't. (And you can't take the address of a map element / non-addressable value to call it.)</li>
+</ul>
+</section>
+
+<section class="card"><h3>Generics (1.18+) &amp; Iterators</h3>
+<pre><code>func Map[T, U any](s []T, f func(T) U) []U {
+  r := make([]U, len(s))
+  for i, v := range s { r[i] = f(v) }
+  return r
+}
+type Number interface{ ~int | ~float64 }
+func Sum[T Number](xs []T) T { ... }</code></pre>
+<ul>
+<li>Constraints are interfaces; <code>~int</code> = "any type whose underlying type is int". <code>comparable</code> for map keys / <code>==</code>.</li>
+<li>Type inference usually lets you omit explicit type args.</li>
+<li><b>Don't over-reach</b> — if one concrete type or a plain interface works, skip generics. They don't monomorphise like Rust/C++ (dictionary/shape-based) so they're not always faster.</li>
+<li>(1.23) range-over-func iterators: <code>iter.Seq[T]</code> / <code>iter.Seq2[K,V]</code> drive <code>for x := range myIter</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Runtime, GC &amp; Performance</h3>
+<ul>
+<li>Concurrent <b>tri-colour mark-sweep</b> GC, non-generational, sub-ms STW pauses. You tune <i>frequency</i>, not pauses.</li>
+<li><code>GOGC</code> (default 100) — grow heap to 2× live set before next GC; raise to trade RAM for fewer GCs.</li>
+<li><code>GOMEMLIMIT</code> (1.19) — soft heap ceiling; turns OOM-kills into back-pressure (GC works harder near the limit).</li>
+</ul>
+<h4>Allocation = the latency tax</h4>
+<ul>
+<li><b>Escape analysis</b>: values that outlive their frame escape to the heap. <code>go build -gcflags=-m</code> shows decisions.</li>
+<li>Levers: pass small structs by value (stay on stack); pre-size slices/maps; <code>sync.Pool</code> for transient buffers; <code>strings.Builder</code> over <code>+=</code>.</li>
+<li><b>Measure first</b> — refactors that "look" alloc-free can defeat inlining and regress. <code>pprof</code> heap + <code>-benchmem</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Tooling &amp; Testing</h3>
+<table><thead><tr><th>Command</th><th>Use</th></tr></thead><tbody>
+<tr><td><code>go test ./...</code></td><td>run; <code>-run Name</code> filter</td></tr>
+<tr><td><code>go test -race</code></td><td>data-race detector — run in CI <span class="warn">!</span></td></tr>
+<tr><td><code>go test -bench . -benchmem</code></td><td>benchmarks + alloc stats</td></tr>
+<tr><td><code>go test -cover</code></td><td>coverage; <code>-coverprofile</code></td></tr>
+<tr><td><code>go vet ./...</code></td><td>copylocks, printf, loopclosure, nilfunc</td></tr>
+</tbody></table>
+<pre><code>func TestX(t *testing.T) {
+  cases := []struct{ in, want int }{ {1,2}, {3,4} }
+  for _, c := range cases {
+    c := c                  // pre-1.22 capture !
+    t.Run(fmt.Sprint(c.in), func(t *testing.T) {
+      t.Parallel()
+      if got := X(c.in); got != c.want { t.Errorf(...) }
+    })
+  }
+}</code></pre>
+<ul><li>Modules: <code>go.mod</code> <code>go</code> directive sets the <b>language version</b>; <code>GOTOOLCHAIN</code> selects the build toolchain.</li></ul>
+</section>
+
+<section class="card"><h3>&#9733; Code Review Checklist</h3>
+<h4>Receiver type — value vs pointer</h4>
+<ul>
+<li>&#9744; Pointer receiver where the method must mutate (value receiver silently no-ops).</li>
+<li>&#9744; No value receiver on a type holding a <code>sync.Mutex</code>/<code>WaitGroup</code> — copies the lock <span class="warn">!</span></li>
+<li>&#9744; Receiver kind consistent across all methods of the type.</li>
+</ul>
+<h4>Goroutine / closure capture</h4>
+<ul>
+<li>&#9744; Loop var captured by a goroutine/closure — shared-var bug pre-1.22; per-iteration &amp; safe in <b>1.22+</b>, but confirm the module's <code>go</code> directive <span class="warn">!</span></li>
+<li>&#9744; Loop value passed as an arg / re-shadowed (<code>v := v</code>) where older semantics apply.</li>
+</ul>
+<h4>Concurrency / shared state</h4>
+<ul>
+<li>&#9744; Every var touched by &gt;1 goroutine (maps, slices, counters, flags) is read/written under the same lock or via <code>atomic</code>.</li>
+<li>&#9744; Map access guarded; no struct-with-mutex copies; <code>-race</code> clean in CI.</li>
+</ul>
+<h4>Error handling</h4>
+<ul>
+<li>&#9744; No dropped errors (<code>_ =</code> or unchecked); wrap with <code>%w</code> where a caller inspects.</li>
+<li>&#9744; <code>defer x.Close()</code> error checked where it matters (writers/flush).</li>
+</ul>
+<h4>Nil</h4>
+<ul>
+<li>&#9744; Nil-pointer deref guarded; no write to a nil map.</li>
+<li>&#9744; No typed-nil returned as an <code>error</code>/interface (<code>!= nil</code> always true) <span class="warn">!</span>; nil channel/func paths considered.</li>
+</ul>
+<h4>Channels</h4>
+<ul>
+<li>&#9744; Direction-typed params; buffering size justified.</li>
+<li>&#9744; Exactly one closer (the sender); no send-on-closed / double-close; <code>select</code> has <code>default</code>/<code>ctx</code> where non-blocking intended.</li>
+</ul>
+<h4>Defer timing</h4>
+<ul>
+<li>&#9744; Fires at <b>function</b> return — present on every early-return path; not stacking inside a loop body unless intended <span class="warn">!</span></li>
+<li>&#9744; Deferred-arg value captured at the <code>defer</code> point is the one you mean; per-iteration cleanup extracted to a helper.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Common Bugs — Spot-the-Bug</h3>
+<table><thead><tr><th>Symptom</th><th>Cause</th></tr></thead><tbody>
+<tr><td>goroutines all print last item</td><td>loop-var captured (pre-1.22) <span class="warn">!</span></td></tr>
+<tr><td>panic: assignment to nil map</td><td>forgot <code>make</code> / map literal <span class="warn">!</span></td></tr>
+<tr><td>mutations lost / data race on a field</td><td>value-receiver copied the <code>Mutex</code> <span class="warn">!</span></td></tr>
+<tr><td>panic: send on closed channel</td><td>receiver closed, or two closers <span class="warn">!</span></td></tr>
+<tr><td>caller's slice silently mutated</td><td><code>append</code> aliased shared backing array <span class="warn">!</span></td></tr>
+<tr><td><code>err != nil</code> always true</td><td>typed-nil returned as interface <span class="warn">!</span></td></tr>
+<tr><td>memory/goroutine count climbs</td><td>goroutine leak — no <code>ctx</code>/<code>done</code> exit <span class="warn">!</span></td></tr>
+<tr><td>slow leak under load</td><td><code>time.After</code> in a hot <code>select</code> (use <code>time.NewTimer</code>+Stop) <span class="warn">!</span></td></tr>
+</tbody></table>
+</section>
+
+<section class="card"><h3>Debugging Go — Tooling</h3>
+<h4>Symptom → tool</h4>
+<table><thead><tr><th>Symptom</th><th>Tool</th></tr></thead><tbody>
+<tr><td>data race</td><td><code>go test/run -race</code></td></tr>
+<tr><td>high CPU / hot path</td><td><code>pprof</code> cpu profile + flame graph</td></tr>
+<tr><td>memory growth / leak</td><td><code>pprof</code> heap (<code>-inuse_space</code>)</td></tr>
+<tr><td>lock contention</td><td><code>pprof</code> mutex / block profile</td></tr>
+<tr><td>GC pauses / churn</td><td><code>GODEBUG=gctrace=1</code></td></tr>
+<tr><td>scheduler stalls</td><td><code>GODEBUG=schedtrace=1000</code></td></tr>
+<tr><td>hang / deadlock</td><td>goroutine dump (below)</td></tr>
+</tbody></table>
+<pre><code>import _ "net/http/pprof"  // /debug/pprof/*
+go tool pprof http://host/debug/pprof/heap
+
+SIGQUIT (Ctrl-\) → full goroutine dump
+runtime.Stack(buf, true)  // in-process</code></pre>
+<ul>
+<li>Runtime <b>deadlock detector</b> fires only when <b>all</b> goroutines block ("fatal error: all goroutines are asleep").</li>
+<li><code>dlv debug</code> / <code>dlv test</code> for interactive stepping.</li>
+</ul>
+</section>
+
+<section class="card diagram"><h3>Goroutine leak — blocked forever</h3>
+<div class="mermaid">
+flowchart LR
+  P["producer<br/>send on unbuffered ch"] -->|"blocks: no receiver"| X["(stuck)"]
+  C["consumer<br/>returned early"] -.->|"never recv"| P
+</div>
+<p class="cap">No receiver / no close ⇒ producer parks forever, its stack &amp; captured memory never freed. Fix: <code>ctx</code> cancellation, a <code>done</code> channel, buffered/closed channels, or <code>select</code> with <code>&lt;-ctx.Done()</code>. Every <code>go</code> needs a defined exit.</p></section>
+
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  try {
+    mermaid.initialize({ startOnLoad: true, theme: "neutral",
+      flowchart: { useMaxWidth: true, htmlLabels: true, nodeSpacing: 18, rankSpacing: 18 },
+      themeVariables: { fontSize: "9px" } });
+  } catch (e) { /* offline / blocked CDN: diagrams degrade to source text, rest of sheet is fine */ }
+</script>
+</body>
+</html>
