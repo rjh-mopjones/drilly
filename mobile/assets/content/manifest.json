@@ -246,6 +246,20 @@
       "sectionOrder": []
     },
     {
+      "id": "gcp",
+      "file": "/gcp-interview-primer.md",
+      "title": "Google Cloud",
+      "category": "Cloud",
+      "itemLabel": "Topic",
+      "itemsPlural": "GCP topics",
+      "storagePrefix": "ip:gcp",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": []
+    },
+    {
       "id": "ai-engineering",
       "file": "/ai-engineering-primer.md",
       "title": "AI Engineering",
@@ -328,6 +342,18 @@
       "itemLabel": "Section",
       "itemsPlural": "open printable A4 sheet ↗",
       "storagePrefix": "ip:aws-cheatsheet",
+      "defaultRevealedSections": [],
+      "sectionOrder": []
+    },
+    {
+      "id": "gcp-cheatsheet",
+      "file": "/gcp-cheatsheet.html",
+      "title": "Google Cloud",
+      "category": "Cheat Sheets",
+      "externalUrl": "/gcp-cheatsheet.html",
+      "itemLabel": "Section",
+      "itemsPlural": "open printable A4 sheet ↗",
+      "storagePrefix": "ip:gcp-cheatsheet",
       "defaultRevealedSections": [],
       "sectionOrder": []
     },

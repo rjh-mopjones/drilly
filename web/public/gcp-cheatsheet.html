@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Google Cloud Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+/* spanning title bar */
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>Google Cloud Cheat Sheet</h1><span class="meta">senior/backend &amp; architecture focus · service selection · generic examples · drilly</span></div>
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="warn">!</span> footgun / cost or security trap &nbsp; <code>&#9744;</code> architecture review item</li>
+<li>Focus: <b>service selection</b>, the tradeoffs interviewers probe, and the classic cost/security anti-patterns. Last 2 cards = <b>architecture review checklist</b> + common pitfalls.</li>
+<li>Mapped to the GCP <b>Architecture Framework</b>: operational excellence · security · reliability · cost · performance · sustainability. AWS analogue noted where handy.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
+</ul></section>
+
+<section class="card"><h3>Resource Hierarchy &amp; Projects</h3>
+<pre><code>Organization
+ └─ Folders (dept / env)
+     └─ Projects  (isolation + billing + quota unit)
+         └─ Resources (VMs, buckets, ...)</code></pre>
+<ul>
+<li><b>IAM policy inherits downward</b>: a role at org/folder applies to everything beneath <span class="warn">!</span></li>
+<li><b>Project</b> = the fundamental unit — has ID (global, immutable), number, name; APIs enabled per project; quotas per project.</li>
+<li>Billing account is separate from IAM — split billing admin from resource admin.</li>
+<li>Regions contain <b>zones</b> (failure domains). Design across ≥2 zones (regional) for HA.</li>
+<li>Global vs regional vs zonal resources — VPC is <b>global</b>, subnets regional, VMs zonal.</li>
+</ul>
+</section>
+
+<section class="card"><h3>IAM — Roles &amp; Service Accounts</h3>
+<pre><code># binding = member + role on a resource
+gcloud projects add-iam-policy-binding acme-prod \
+  --member="serviceAccount:app@acme-prod.iam.gserviceaccount.com" \
+  --role="roles/storage.objectViewer"</code></pre>
+<ul>
+<li>Role types: <b>basic</b> (Owner/Editor/Viewer — too broad, avoid <span class="warn">!</span>), <b>predefined</b> (service-scoped, preferred), <b>custom</b>.</li>
+<li>Permissions are granted only via <b>roles</b>, never directly.</li>
+<li><b>Service account</b> = identity <i>and</i> resource. Attach to VM/Cloud Run/GKE; never download SA keys if avoidable <span class="warn">!</span></li>
+<li><b>Workload Identity Federation</b> = keyless auth for CI/external; <b>GKE Workload Identity</b> = pods → SA. Prefer over keys.</li>
+<li>Org policies (constraints) cap what's allowed; IAM Conditions for context.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Compute Engine — Purchasing &amp; Scaling</h3>
+<table><thead><tr><th>Option</th><th>Use / save</th></tr></thead><tbody>
+<tr><td>On-demand</td><td>baseline; auto <b>sustained-use</b> discount</td></tr>
+<tr><td>Committed-use (1/3 yr)</td><td>steady load; up to ~57–70%</td></tr>
+<tr><td>Spot VMs</td><td>fault-tolerant/batch; up to ~91%; preemptible = 24h cap <span class="warn">!</span></td></tr>
+<tr><td>Sole-tenant</td><td>compliance/licensing</td></tr>
+</tbody></table>
+<ul>
+<li>Families: general (E2/N2/N4), compute (C), memory (M), accelerator (A/G). Custom machine types available.</li>
+<li><b>MIGs</b>: autoscaling (CPU/LB/custom/schedule), autohealing, rolling/canary updates; regional MIG spreads across zones.</li>
+<li><b>Live migration</b> keeps VMs up during host maintenance (Spot excluded).</li>
+<li>Enforce <b>Shielded VM</b>; scope the default SA down <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Serverless — Cloud Run / Functions</h3>
+<ul>
+<li><b>Cloud Run</b>: run any container, request-driven, <b>scales to zero</b>; key trait = <b>concurrency &gt;1 per instance</b> (unlike Lambda's 1) → cheaper for I/O-bound.</li>
+<li><code>min-instances</code> to cut cold starts; CPU <i>always-on</i> vs <i>request-only</i> — always-on idles cost money <span class="warn">!</span></li>
+<li>Revisions + <b>traffic splitting</b> for canary/blue-green. Jobs for run-to-completion.</li>
+<li><b>Cloud Functions gen2</b> runs on Cloud Run; triggers HTTP / Pub/Sub / Storage / Eventarc.</li>
+<li>Reach a VPC via <b>Serverless VPC Access</b> connector / Direct VPC egress.</li>
+<li>Guard invocation with IAM (authenticated) — don't leave public unless intended <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>GKE — Autopilot vs Standard</h3>
+<table><thead><tr><th></th><th>Autopilot</th><th>Standard</th></tr></thead><tbody>
+<tr><td>nodes</td><td>Google-managed</td><td>you manage node pools</td></tr>
+<tr><td>billing</td><td>per-pod resources</td><td>per-node</td></tr>
+<tr><td>use</td><td>hands-off, prod default</td><td>full control, DaemonSets/GPUs</td></tr>
+</tbody></table>
+<ul>
+<li>Regional cluster = HA control plane across zones (vs zonal).</li>
+<li><b>Workload Identity</b> to map KSAs → GCP SAs (never mount SA keys) <span class="warn">!</span></li>
+<li>VPC-native (alias IPs); private clusters; Gateway API / container-native LB via NEGs.</li>
+<li>Cost: Spot node pools, cluster autoscaler + node auto-provisioning, Autopilot bin-packing.</li>
+<li>Release channels for auto-upgrade/repair; Artifact Registry + Binary Authorization.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Cloud Storage — Classes &amp; Rules</h3>
+<table><thead><tr><th>Class</th><th>Min · use</th></tr></thead><tbody>
+<tr><td>Standard</td><td>—; hot</td></tr>
+<tr><td>Nearline</td><td>30d; &lt;1×/month</td></tr>
+<tr><td>Coldline</td><td>90d; &lt;1×/quarter</td></tr>
+<tr><td>Archive</td><td>365d; rarely</td></tr>
+</tbody></table>
+<ul>
+<li><b>Strongly consistent</b> globally (read-after-write, list). 11 nines durability.</li>
+<li>Location: region / dual-region / multi-region (availability vs cost/latency).</li>
+<li><b>Uniform bucket-level access</b> (IAM) &gt; legacy ACLs; turn on <b>Public Access Prevention</b> <span class="warn">!</span></li>
+<li>Lifecycle rules to tier/expire; versioning; retention policy + bucket lock (WORM).</li>
+<li>Signed URLs for temp access; CMEK via Cloud KMS.</li>
+<li>Early-deletion fees on cold classes; watch egress/retrieval cost <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card diagram"><h3>VPC — global net, firewall, NAT</h3>
+<div class="mermaid">
+flowchart LR
+  LB["Global HTTPS LB<br/>anycast VIP"] --> A["subnet region-A<br/>(private VMs / GKE)"]
+  LB --> B["subnet region-B"]
+  A --> NAT["Cloud NAT"] --> INT["internet egress"]
+  A --> PGA["Private Google Access → Google APIs"]
+</div>
+<ul>
+<li><b>VPC is global</b>; <b>subnets are regional</b> (primary + secondary/alias ranges). (AWS VPC is regional — key difference <span class="warn">!</span>)</li>
+<li>Firewall rules are <b>stateful</b>, on the VPC, priority-ordered, target by tag/SA.</li>
+<li><b>Cloud NAT</b> = managed egress for private VMs (no NAT instances). <b>Private Google Access</b> to reach Google APIs without external IP.</li>
+<li><b>Shared VPC</b> (host/service projects) is the org pattern; peering is non-transitive.</li>
+<li>Health-check ranges must be allowed: <code>35.191.0.0/16</code>, <code>130.211.0.0/22</code> <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Load Balancing</h3>
+<table><thead><tr><th>LB</th><th>Use</th></tr></thead><tbody>
+<tr><td>Global external App LB (L7)</td><td>global HTTP(S), anycast, CDN+Armor</td></tr>
+<tr><td>External passthrough Network LB (L4)</td><td>TCP/UDP, preserve src IP</td></tr>
+<tr><td>Internal App / Network LB</td><td>internal traffic</td></tr>
+</tbody></table>
+<ul>
+<li>Google LBs are <b>global &amp; software-defined</b> — a single anycast VIP, no pre-warming (unlike AWS) <span class="warn">!</span></li>
+<li>Backends: instance groups or <b>NEGs</b> (zonal / <b>serverless</b> for Cloud Run/Functions / internet / hybrid).</li>
+<li>Cross-region failover via global LB + health checks; URL maps for host/path routing.</li>
+<li>Cloud CDN + Cloud Armor attach to the external App LB; Certificate Manager for TLS.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Databases — pick one</h3>
+<table><thead><tr><th>Need</th><th>Service</th></tr></thead><tbody>
+<tr><td>managed SQL (MySQL/PG/SQLServer)</td><td>Cloud SQL</td></tr>
+<tr><td>PG, high perf + analytics</td><td>AlloyDB</td></tr>
+<tr><td>global, horizontal, strong SQL</td><td>Cloud Spanner</td></tr>
+<tr><td>document, real-time, mobile</td><td>Firestore</td></tr>
+<tr><td>wide-column, PB-scale, low-latency</td><td>Bigtable</td></tr>
+<tr><td>analytics warehouse</td><td>BigQuery</td></tr>
+</tbody></table>
+<ul>
+<li>Cloud SQL <b>HA</b> = synchronous standby + auto-failover (not read scaling); add <b>read replicas</b> for reads.</li>
+<li><b>Spanner</b>: TrueTime, external consistency, scales horizontally — but pricey; avoid hotspot keys <span class="warn">!</span></li>
+<li>Serverless apps → Cloud SQL Auth Proxy / connectors (avoid public IP) <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Firestore &amp; Bigtable</h3>
+<ul>
+<li><b>Firestore</b>: document DB, strong consistency, real-time listeners, offline SDKs. <b>Every query needs an index</b>; no joins <span class="warn">!</span> Native vs Datastore mode.</li>
+<li>Security Rules gate direct client access; transactions supported.</li>
+<li><b>Bigtable</b>: wide-column, PB-scale, µs single-key + range scans, HBase API. <b>No cross-row transactions, no secondary indexes.</b></li>
+<li><b>Row-key design is everything</b> — sequential/timestamp-prefixed keys create hotspots <span class="warn">!</span> Use field-promotion/salting/reversed keys.</li>
+<li>Fit: time-series, IoT, AdTech, analytics serving. SSD vs HDD; nodes scale throughput.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Pub/Sub &amp; Eventing</h3>
+<ul>
+<li><b>Pub/Sub</b> = global, serverless topics/subscriptions (≈ SNS+SQS combined). Push or pull; <b>at-least-once</b> → be idempotent <span class="warn">!</span></li>
+<li>Ack deadline; redelivery; <b>dead-letter topic</b> + retry backoff (always set a DLT) <span class="warn">!</span></li>
+<li>Ordering keys (per-key order) &amp; optional exactly-once; retention + <b>seek/replay</b> &amp; snapshots.</li>
+<li>Fan-out = many subscriptions per topic; schemas (Avro/Protobuf); filtering.</li>
+<li><b>Pub/Sub Lite</b> = cheaper, throughput-provisioned, zonal (less durable/ops).</li>
+<li><b>Eventarc</b> routes events (Audit Logs / Storage / Pub/Sub) → Cloud Run/Functions/GKE (CloudEvents).</li>
+</ul>
+</section>
+
+<section class="card"><h3>BigQuery — essentials &amp; cost</h3>
+<ul>
+<li>Serverless columnar warehouse; <b>storage &amp; compute separate</b>. Pricing: <b>on-demand (per-TB scanned)</b> vs <b>slots</b> (editions, autoscaling reservations).</li>
+<li>Cut cost: <b>partition</b> + <b>cluster</b> tables; avoid <code>SELECT *</code> <span class="warn">!</span>; dry-run; custom quotas; BI Engine.</li>
+<li>Streaming (Storage Write API) vs batch loads; external/federated tables (BigLake).</li>
+<li>Nested/repeated fields (arrays/structs); materialized views; scheduled queries; BQML.</li>
+<li>Authorized views + column/row-level security for governance.</li>
+<li>Wrong tool for OLTP / low-latency point lookups <span class="warn">!</span> Pattern: Pub/Sub → Dataflow → BigQuery.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Security &amp; Observability</h3>
+<h4>Secure</h4>
+<ul>
+<li><b>Cloud KMS</b> (key rings/keys/versions, rotation, CMEK, Cloud HSM/EKM); envelope encryption; default encryption at rest.</li>
+<li><b>Secret Manager</b> for secrets (versions, rotation, IAM) — not env/plaintext <span class="warn">!</span></li>
+<li><b>Cloud Armor</b> = WAF + DDoS on the external App LB (OWASP rules, rate limiting, adaptive).</li>
+<li><b>IAP</b> = zero-trust/BeyondCorp access to apps/VMs without a VPN. <b>VPC Service Controls</b> = perimeters vs data exfiltration.</li>
+<li><b>Security Command Center</b> (CSPM/threats); Binary Authorization (trusted images).</li>
+</ul>
+<h4>Observe</h4>
+<ul>
+<li>Cloud Monitoring (metrics/alerts/uptime/PromQL) + Cloud Logging (sinks to BigQuery/GCS/Pub-Sub, log-based metrics; Ops Agent for VM mem/disk <span class="warn">!</span>).</li>
+<li>Cloud Trace, Error Reporting, Profiler. <b>Cloud Audit Logs</b> = who-did-what (≈ CloudTrail); Data Access logs cost <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Architecture Framework &amp; DR</h3>
+<p><b>Pillars</b>: operational excellence · security/privacy/compliance · reliability · cost · performance · sustainability.</p>
+<h4>DR (RTO/RPO ↓, cost ↑)</h4>
+<table><thead><tr><th>Pattern</th><th>RTO/RPO</th></tr></thead><tbody>
+<tr><td>Backup &amp; restore</td><td>hours; cheapest</td></tr>
+<tr><td>Cold / pilot-light</td><td>10s of min</td></tr>
+<tr><td>Warm standby</td><td>minutes</td></tr>
+<tr><td>Hot / multi-region</td><td>~0; priciest</td></tr>
+</tbody></table>
+<ul>
+<li>Zone = failure domain; <b>regional</b> survives a zone loss; <b>multi-region</b> for DR/global.</li>
+<li>Cross-region data: Spanner multi-region, GCS dual/multi-region, Cloud SQL cross-region replicas.</li>
+<li>Stateless + externalized state; retries w/ backoff+jitter; idempotency; quotas are a reliability risk <span class="warn">!</span> Practice DiRT.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Cost Optimization</h3>
+<ul>
+<li>Compute: committed-use for baseline, Spot for fault-tolerant, auto sustained-use, right-size via Recommender, scale to zero (Cloud Run).</li>
+<li>Storage: GCS Autoclass/tiering (mind early-deletion fees), Hyperdisk over old PD, prune snapshots.</li>
+<li><b>Network egress is the silent bill</b> <span class="warn">!</span> internet egress, inter-region, cross-zone; Premium vs Standard tier.</li>
+<li><b>BigQuery</b>: on-demand bytes-scanned vs slots; partition/cluster; custom quotas; no <code>SELECT *</code>.</li>
+<li>Visibility: Budgets + alerts, billing export to BigQuery, labels for allocation, Active Assist/Recommender.</li>
+<li>Anti-patterns: idle external IPs/disks, always-on Cloud Run CPU, un-tiered logs, cross-region chatter.</li>
+</ul>
+</section>
+
+<section class="card"><h3>&#9733; Architecture Review Checklist</h3>
+<h4>Security</h4>
+<ul>
+<li>&#9744; No basic/Owner roles handed out broadly; predefined/custom + least privilege.</li>
+<li>&#9744; No service-account keys in code/repo — Workload Identity (Federation) instead.</li>
+<li>&#9744; Public Access Prevention on buckets; CMEK where required; secrets in Secret Manager.</li>
+<li>&#9744; Edge protected (Cloud Armor); IAP/VPC-SC where exfiltration/zero-trust matters.</li>
+</ul>
+<h4>Reliability</h4>
+<ul>
+<li>&#9744; Regional (multi-zone) for every stateful tier; no single-zone prod DB.</li>
+<li>&#9744; Decoupled via Pub/Sub; dead-letter topics; retries w/ backoff+jitter; idempotent consumers.</li>
+<li>&#9744; Defined RTO/RPO + tested DR; global LB + health-check failover.</li>
+</ul>
+<h4>Performance &amp; Cost</h4>
+<ul>
+<li>&#9744; Right service for the access pattern (Bigtable/Firestore key design; BigQuery not for OLTP).</li>
+<li>&#9744; BigQuery partitioned/clustered, no SELECT *; Cloud Run concurrency &amp; CPU tuned.</li>
+<li>&#9744; Private Google Access / Cloud NAT to avoid external IPs; minimize cross-region egress.</li>
+<li>&#9744; Budgets/alerts; labels for cost allocation; no idle IPs/disks.</li>
+</ul>
+<h4>Operations</h4>
+<ul>
+<li>&#9744; IaC (Terraform + GCS backend), not click-ops; project/env separation.</li>
+<li>&#9744; Monitoring + Logging + Trace + alerts; Audit Logs on; runbooks/SLOs.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Common Pitfalls — Spot-the-Anti-pattern</h3>
+<table><thead><tr><th>Smell</th><th>Fix</th></tr></thead><tbody>
+<tr><td>Owner/Editor granted broadly</td><td>predefined/custom least-privilege <span class="warn">!</span></td></tr>
+<tr><td>SA key JSON in repo/env</td><td>Workload Identity Federation <span class="warn">!</span></td></tr>
+<tr><td>public GCS bucket</td><td>Public Access Prevention + signed URLs <span class="warn">!</span></td></tr>
+<tr><td>single-zone prod DB</td><td>regional / HA config <span class="warn">!</span></td></tr>
+<tr><td>VMs with external IPs for egress</td><td>Cloud NAT + Private Google Access <span class="warn">!</span></td></tr>
+<tr><td>BigQuery SELECT * on huge table</td><td>partition/cluster, select columns <span class="warn">!</span></td></tr>
+<tr><td>no dead-letter topic on Pub/Sub</td><td>add DLT + alert <span class="warn">!</span></td></tr>
+<tr><td>sequential Bigtable/Firestore keys</td><td>spread the key (salt/reverse) <span class="warn">!</span></td></tr>
+<tr><td>always-allocated Cloud Run CPU idle</td><td>request-only CPU / min-instances tuned <span class="warn">!</span></td></tr>
+<tr><td>state in a Cloud Run instance</td><td>externalize to GCS/Firestore/Memorystore <span class="warn">!</span></td></tr>
+</tbody></table>
+</section>
+
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  try {
+    mermaid.initialize({ startOnLoad: true, theme: "neutral",
+      flowchart: { useMaxWidth: true, htmlLabels: true, nodeSpacing: 18, rankSpacing: 18 },
+      themeVariables: { fontSize: "9px" } });
+  } catch (e) { /* offline / blocked CDN: diagrams degrade to source text, rest of sheet is fine */ }
+</script>
+</body>
+</html>
