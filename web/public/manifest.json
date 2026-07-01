@@ -232,6 +232,20 @@
       "sectionOrder": []
     },
     {
+      "id": "aws",
+      "file": "/aws-interview-primer.md",
+      "title": "AWS",
+      "category": "Cloud",
+      "itemLabel": "Topic",
+      "itemsPlural": "AWS topics",
+      "storagePrefix": "ip:aws",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": []
+    },
+    {
       "id": "ai-engineering",
       "file": "/ai-engineering-primer.md",
       "title": "AI Engineering",
@@ -302,6 +316,18 @@
       "itemLabel": "Section",
       "itemsPlural": "open printable A4 sheet ↗",
       "storagePrefix": "ip:cpp-cheatsheet",
+      "defaultRevealedSections": [],
+      "sectionOrder": []
+    },
+    {
+      "id": "aws-cheatsheet",
+      "file": "/aws-cheatsheet.html",
+      "title": "AWS",
+      "category": "Cheat Sheets",
+      "externalUrl": "/aws-cheatsheet.html",
+      "itemLabel": "Section",
+      "itemsPlural": "open printable A4 sheet ↗",
+      "storagePrefix": "ip:aws-cheatsheet",
       "defaultRevealedSections": [],
       "sectionOrder": []
     },

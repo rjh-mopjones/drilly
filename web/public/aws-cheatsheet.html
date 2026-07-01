@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AWS Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+/* spanning title bar */
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>AWS Cheat Sheet</h1><span class="meta">senior/backend &amp; architecture focus · service selection · generic examples · drilly</span></div>
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="warn">!</span> footgun / cost or security trap &nbsp; <code>&#9744;</code> architecture review item</li>
+<li>Focus: <b>service selection</b>, the tradeoffs interviewers probe, and the classic cost/security anti-patterns. Last 2 cards = <b>architecture review checklist</b> + common pitfalls.</li>
+<li>Mapped to the <b>Well-Architected</b> pillars: operational excellence · security · reliability · performance · cost · sustainability.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
+</ul></section>
+
+<section class="card"><h3>Global Infrastructure &amp; Shared Responsibility</h3>
+<ul>
+<li><b>Region</b> = geographic area; <b>AZ</b> = ≥1 isolated datacenter in a region (design across ≥2). <b>Edge</b> = CloudFront/Route 53 PoPs.</li>
+<li>Pick a region on: <b>latency</b>, <b>cost</b> (prices vary), <b>compliance/residency</b>, <b>service availability</b> (new services land in us-east-1 first).</li>
+<li>Multi-AZ = high availability <i>within</i> a region; multi-region = DR / global reach.</li>
+</ul>
+<h4>Shared Responsibility <span class="warn">!</span></h4>
+<table><thead><tr><th>AWS ("of" the cloud)</th><th>You ("in" the cloud)</th></tr></thead><tbody>
+<tr><td>HW, region/AZ, hypervisor, managed-service internals</td><td>IAM, data, encryption, patching EC2, SG/NACL config, app code</td></tr>
+</tbody></table>
+<p>Managed services shift more to AWS (S3 patches itself; EC2 you patch). Misconfig (open bucket, over-broad IAM) is always <b>your</b> side <span class="warn">!</span></p>
+</section>
+
+<section class="card"><h3>IAM — Policy Evaluation</h3>
+<pre><code>{ "Effect":"Allow",
+  "Action":["s3:GetObject"],
+  "Resource":"arn:aws:s3:::my-bucket/*",
+  "Condition":{"IpAddress":{"aws:SourceIp":"10.0.0.0/8"}}}</code></pre>
+<h4>Decision order <span class="warn">!</span></h4>
+<ul>
+<li>Explicit <b>Deny</b> → always wins.</li>
+<li>Else explicit <b>Allow</b> → permitted.</li>
+<li>Else <b>implicit deny</b> (default).</li>
+<li>SCP / permission boundary / session policy must <i>also</i> allow — intersection.</li>
+</ul>
+<ul>
+<li><b>Roles &gt; long-lived keys</b>: EC2 → instance profile, Lambda → execution role, cross-account → <code>sts:AssumeRole</code>. Never hardcode access keys <span class="warn">!</span></li>
+<li>Identity-based (on principal) vs resource-based (on S3 bucket/SQS/KMS — enables cross-account).</li>
+<li>Least privilege; verify with IAM Access Analyzer. ABAC via tags for scale.</li>
+</ul>
+</section>
+
+<section class="card"><h3>EC2 — Purchasing &amp; Scaling</h3>
+<table><thead><tr><th>Model</th><th>Use / save</th></tr></thead><tbody>
+<tr><td>On-Demand</td><td>spiky/unknown; no commit; priciest</td></tr>
+<tr><td>Savings Plans / RI</td><td>steady baseline; up to ~72% for 1–3yr commit</td></tr>
+<tr><td>Spot</td><td>fault-tolerant/batch; up to ~90% off; 2-min interrupt <span class="warn">!</span></td></tr>
+<tr><td>Dedicated Host</td><td>licensing/compliance (per-socket)</td></tr>
+</tbody></table>
+<ul>
+<li>Families: general (m/t), compute (c), memory (r/x), storage (i/d), accelerated (p/g). <b>Graviton</b> (ARM) = cheaper/greener.</li>
+<li><b>Auto Scaling</b>: target-tracking (easiest) / step / scheduled / predictive. Scale on the right metric, not just CPU.</li>
+<li>T-series are <b>burstable</b> on CPU credits — steady high load exhausts them <span class="warn">!</span></li>
+<li>Enforce <b>IMDSv2</b> (blocks SSRF creds theft) <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Lambda — Limits &amp; Cold Starts</h3>
+<table><thead><tr><th>Limit</th><th>Value</th></tr></thead><tbody>
+<tr><td>timeout</td><td>15 min max</td></tr>
+<tr><td>memory</td><td>128 MB–10 GB (CPU scales with it)</td></tr>
+<tr><td>/tmp</td><td>512 MB–10 GB</td></tr>
+<tr><td>payload</td><td>6 MB sync · 256 KB async</td></tr>
+<tr><td>concurrency</td><td>1000/acct default (soft)</td></tr>
+</tbody></table>
+<ul>
+<li><b>Cold start</b>: new exec env init. Cut with smaller packages, <b>provisioned concurrency</b>, or <b>SnapStart</b> (Java). VPC-attached cold starts improved (Hyperplane ENIs).</li>
+<li>Billed on <b>GB-seconds + requests</b>. Right-size memory (more memory = more CPU = often cheaper/faster).</li>
+<li>Async invokes retry twice → send failures to a <b>DLQ/destination</b> <span class="warn">!</span></li>
+<li>Design for <b>idempotency</b> (at-least-once). Not for long/steady heavy compute → Fargate/EC2.</li>
+</ul>
+</section>
+
+<section class="card"><h3>S3 — Classes &amp; Rules</h3>
+<table><thead><tr><th>Class</th><th>Use</th></tr></thead><tbody>
+<tr><td>Standard</td><td>hot, frequent</td></tr>
+<tr><td>Intelligent-Tiering</td><td>unknown/changing access (auto-tiers)</td></tr>
+<tr><td>Standard-IA / One Zone-IA</td><td>infrequent (1-Zone = re-creatable only)</td></tr>
+<tr><td>Glacier Instant/Flexible/Deep</td><td>archive; retrieval mins→12h; cheapest</td></tr>
+</tbody></table>
+<ul>
+<li>11 nines <b>durability</b>; <b>strong</b> read-after-write consistency (all ops).</li>
+<li>Security: <b>Block Public Access on</b> by default; prefer bucket policy/IAM over ACLs; presigned URLs for temp access <span class="warn">!</span></li>
+<li>Encrypt: SSE-S3 / SSE-KMS (audited, use bucket keys to cut cost) / SSE-C.</li>
+<li>Versioning + lifecycle to tier/expire; replication CRR/SRR for DR.</li>
+<li>Perf: auto-scales per prefix; multipart for &gt;100 MB; watch <b>retrieval + request + egress</b> cost <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Storage — EBS · EFS · FSx</h3>
+<table><thead><tr><th>Type</th><th>Shape / use</th></tr></thead><tbody>
+<tr><td>EBS gp3</td><td>single-AZ block, one instance; DB/boot; IOPS &amp; throughput set independently (cheaper than gp2)</td></tr>
+<tr><td>EBS io2 BX</td><td>high-IOPS mission-critical DB</td></tr>
+<tr><td>Instance store</td><td>ephemeral NVMe; lost on stop <span class="warn">!</span></td></tr>
+<tr><td>EFS</td><td>elastic NFS, multi-AZ, shared by many; Linux</td></tr>
+<tr><td>FSx</td><td>Windows (SMB) / Lustre (HPC) / ONTAP / OpenZFS</td></tr>
+</tbody></table>
+<ul>
+<li>EBS = one attach (except io1/io2 multi-attach); <b>EFS = shared</b> across instances/AZs.</li>
+<li>Snapshots are incremental → S3; copy cross-region for DR. AWS Backup centralizes.</li>
+</ul>
+</section>
+
+<section class="card diagram"><h3>VPC — SG vs NACL, routing</h3>
+<div class="mermaid">
+flowchart LR
+  IGW["IGW"] --> PUB["public subnet<br/>ALB / NAT GW"]
+  PUB --> PRIV["private subnet<br/>app / EC2"]
+  PRIV --> DB["private subnet<br/>RDS"]
+  PRIV -->|"egress via"| NAT["NAT GW"] --> IGW
+</div>
+<table><thead><tr><th></th><th>Security Group</th><th>NACL</th></tr></thead><tbody>
+<tr><td>scope</td><td>ENI/instance</td><td>subnet</td></tr>
+<tr><td>state</td><td><b>stateful</b> (return auto)</td><td><b>stateless</b> (allow both ways) <span class="warn">!</span></td></tr>
+<tr><td>rules</td><td>allow only</td><td>allow + deny, ordered</td></tr>
+</tbody></table>
+<ul>
+<li>Public subnet = route to IGW; private = route to <b>NAT GW</b> for egress.</li>
+<li>Gateway endpoints (S3/DynamoDB, free) &amp; interface/<b>PrivateLink</b> keep traffic off the internet.</li>
+<li>Peering is <b>non-transitive</b> → Transit Gateway for hub-and-spoke.</li>
+<li>"Can't reach internet": check IGW/NAT route, SG egress, NACL, public IP <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Route 53 &amp; CloudFront</h3>
+<h4>Routing policies</h4>
+<table><thead><tr><th>Policy</th><th>Use</th></tr></thead><tbody>
+<tr><td>simple / weighted</td><td>single / A-B split</td></tr>
+<tr><td>latency</td><td>lowest-latency region</td></tr>
+<tr><td>failover</td><td>active-passive DR (health check)</td></tr>
+<tr><td>geolocation / geoproximity</td><td>by user location</td></tr>
+<tr><td>multivalue</td><td>simple client-side LB w/ health</td></tr>
+</tbody></table>
+<ul>
+<li><b>Alias</b> (free, zone apex, points at AWS resources) vs <b>CNAME</b> (not at apex) <span class="warn">!</span></li>
+<li><b>CloudFront</b>: edge cache; origins S3 (use <b>OAC</b>, not public bucket) / ALB / custom; invalidations, TTLs, signed URLs.</li>
+<li>CloudFront Functions (light, viewer) vs Lambda@Edge (heavier).</li>
+<li><b>Global Accelerator</b> = anycast IPs, TCP/UDP, non-HTTP, fast failover — vs CloudFront (HTTP caching).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Load Balancers — ALB vs NLB vs GWLB</h3>
+<table><thead><tr><th></th><th>ALB</th><th>NLB</th><th>GWLB</th></tr></thead><tbody>
+<tr><td>layer</td><td>7 (HTTP)</td><td>4 (TCP/UDP)</td><td>3 (appliances)</td></tr>
+<tr><td>routing</td><td>host/path/header</td><td>flow hash</td><td>GENEVE</td></tr>
+<tr><td>perf</td><td>rich features</td><td>ultra-low latency, millions conn</td><td>firewalls/IDS</td></tr>
+<tr><td>IP</td><td>dynamic</td><td>static/EIP</td><td>—</td></tr>
+</tbody></table>
+<ul>
+<li>ALB: path/host routing, OIDC/Cognito auth, gRPC/WebSocket, Lambda targets.</li>
+<li>NLB: preserves source IP, static IP, TLS passthrough; picks when you need L4/extreme scale.</li>
+<li>Targets go unhealthy → check health-check path, SG chain (LB→target), and the target's own status <span class="warn">!</span></li>
+<li>Enable <b>cross-zone</b> for even spread (free on ALB; NLB charges cross-AZ data <span class="warn">!</span>).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Databases — pick one</h3>
+<table><thead><tr><th>Need</th><th>Service</th></tr></thead><tbody>
+<tr><td>relational, managed</td><td>RDS (Postgres/MySQL/…)</td></tr>
+<tr><td>relational, HA + scale reads</td><td>Aurora (6-way storage, fast failover)</td></tr>
+<tr><td>relational, bursty/idle</td><td>Aurora Serverless v2</td></tr>
+<tr><td>key-value, any scale</td><td>DynamoDB</td></tr>
+<tr><td>in-memory / cache</td><td>ElastiCache / MemoryDB</td></tr>
+<tr><td>analytics / warehouse</td><td>Redshift</td></tr>
+</tbody></table>
+<h4>Multi-AZ vs Read Replica <span class="warn">!</span></h4>
+<ul>
+<li><b>Multi-AZ</b> = sync standby for <b>HA/failover</b>, not read scaling.</li>
+<li><b>Read replica</b> = async copy for <b>read scaling</b>, not automatic failover.</li>
+<li>Lambda + RDS → use <b>RDS Proxy</b> (connection pooling) <span class="warn">!</span></li>
+<li>Aurora Global / DynamoDB Global Tables for cross-region.</li>
+</ul>
+</section>
+
+<section class="card"><h3>DynamoDB — design</h3>
+<ul>
+<li><b>Model access patterns first</b>, then keys. Partition key must spread load — avoid <b>hot partitions</b> <span class="warn">!</span></li>
+<li><b>Query</b> (by key, cheap) not <b>Scan</b> (full table, avoid in hot paths) <span class="warn">!</span></li>
+<li><b>GSI</b> = different PK, eventually consistent, own capacity; <b>LSI</b> = same PK/alt SK, at create time only.</li>
+<li>Capacity: on-demand (spiky/unknown) vs provisioned+autoscale (steady/cheaper). Strong reads cost 2×.</li>
+<li>Item ≤ <b>400 KB</b>; offload big blobs to S3 (store the key).</li>
+<li>Streams → Lambda for CDC; TTL for expiry; transactions &amp; conditional writes (optimistic lock); DAX for µs reads.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Messaging — SQS · SNS · EventBridge · Kinesis</h3>
+<table><thead><tr><th>Service</th><th>Use</th></tr></thead><tbody>
+<tr><td>SQS</td><td>decouple, buffer work; consumer pulls</td></tr>
+<tr><td>SNS</td><td>pub/sub fan-out (push)</td></tr>
+<tr><td>EventBridge</td><td>event bus, content routing, SaaS/schedule</td></tr>
+<tr><td>Kinesis</td><td>ordered streaming, replay, multiple consumers</td></tr>
+</tbody></table>
+<ul>
+<li>SQS <b>Standard</b> (at-least-once, best-effort order) vs <b>FIFO</b> (ordered, dedup, lower TPS).</li>
+<li><b>Visibility timeout</b> must exceed processing time or you get duplicates <span class="warn">!</span> Always set a <b>DLQ</b>.</li>
+<li><b>Fan-out</b> = SNS → many SQS. EventBridge for filtering/routing &amp; 3rd-party.</li>
+<li>Kinesis: shards + partition key (ordering per shard); replay via retention; Firehose = managed delivery to S3/Redshift.</li>
+<li>Assume <b>at-least-once</b> everywhere → make consumers idempotent.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Integration — API GW · Step Functions</h3>
+<ul>
+<li><b>API Gateway</b>: HTTP API (cheaper/faster, JWT) vs REST API (usage plans, API keys, VTL, caching) vs WebSocket. Authz: IAM / Cognito / Lambda authorizer.</li>
+<li>Throttle + usage plans to protect backends; cache to cut cost/latency.</li>
+<li><b>ALB vs API GW</b>: ALB for simple container HTTP; API GW for managed auth/throttle/keys/serverless.</li>
+<li><b>Step Functions</b>: orchestrate workflows; <b>Standard</b> (long, auditable, exactly-once) vs <b>Express</b> (high-volume, short). Built-in retry/catch, Map/Parallel, direct SDK calls, <b>saga</b> for distributed txns.</li>
+<li>Orchestration (Step Functions) vs choreography (EventBridge/SNS) — central control vs loose coupling.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Observability &amp; Security</h3>
+<h4>Observe</h4>
+<ul>
+<li><b>CloudWatch</b> metrics + alarms (static/anomaly/composite) + Logs (Insights, metric filters). Memory/disk need the <b>CloudWatch Agent</b> <span class="warn">!</span></li>
+<li><b>X-Ray</b> = distributed traces/service map. <b>CloudTrail</b> = API <i>audit</i> (who did what) — not monitoring. <b>Config</b> = resource compliance/history.</li>
+</ul>
+<h4>Secure</h4>
+<ul>
+<li><b>KMS</b> envelope encryption; key policy + IAM; rotate; multi-region keys for DR.</li>
+<li><b>Secrets Manager</b> (rotation, cost) vs <b>SSM Parameter Store</b> (cheap/simple).</li>
+<li>Edge: <b>WAF</b> (L7 rules, rate limit) + <b>Shield</b> (DDoS); <b>GuardDuty</b> (threat detection), Macie (PII), Inspector (vulns), Security Hub (aggregate).</li>
+<li><b>Cognito</b>: user pools (authn) vs identity pools (temp AWS creds).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Well-Architected &amp; DR</h3>
+<p><b>6 pillars</b>: operational excellence · security · reliability · performance efficiency · cost optimization · sustainability.</p>
+<h4>DR strategies (RTO/RPO ↓, cost ↑)</h4>
+<table><thead><tr><th>Strategy</th><th>RTO/RPO</th></tr></thead><tbody>
+<tr><td>Backup &amp; restore</td><td>hours; cheapest</td></tr>
+<tr><td>Pilot light</td><td>10s of min; core running small</td></tr>
+<tr><td>Warm standby</td><td>minutes; scaled-down live</td></tr>
+<tr><td>Multi-site active-active</td><td>~0; priciest</td></tr>
+</tbody></table>
+<ul>
+<li><b>RTO</b> = time to recover; <b>RPO</b> = tolerable data loss.</li>
+<li>Design stateless (externalize state to S3/Dynamo/ElastiCache); retries with <b>backoff + jitter</b>; idempotency.</li>
+<li>Reduce blast radius (cells, multi-AZ). Quotas are a reliability risk <span class="warn">!</span> Test with FIS game days.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Cost Optimization</h3>
+<ul>
+<li>Compute: Savings Plans/RI for baseline, Spot for fault-tolerant, <b>Graviton</b>, right-size, scale to zero.</li>
+<li>Storage: S3 Intelligent-Tiering, gp3 over gp2, kill snapshot/log sprawl, lifecycle to Glacier.</li>
+<li><b>Data transfer is the silent bill</b> <span class="warn">!</span> cross-AZ chatter, inter-region, internet egress, and <b>NAT Gateway data processing</b> charges.</li>
+<li>Visibility: Cost Explorer, Budgets + anomaly detection, CUR, cost-allocation tags, Compute Optimizer, Trusted Advisor.</li>
+<li>Reserved capacity also for RDS/ElastiCache/OpenSearch/Redshift.</li>
+<li>Anti-patterns: idle/forgotten resources, over-provisioning, un-tiered logs, single huge NAT for cross-AZ.</li>
+</ul>
+</section>
+
+<section class="card"><h3>&#9733; Architecture Review Checklist</h3>
+<h4>Security</h4>
+<ul>
+<li>&#9744; No hardcoded keys — roles everywhere; least-privilege IAM; no <code>*</code> actions/resources without reason.</li>
+<li>&#9744; S3 Block Public Access on; encryption at rest (KMS) &amp; TLS in transit.</li>
+<li>&#9744; Secrets in Secrets Manager/SSM, not env/plaintext; KMS key policies scoped.</li>
+<li>&#9744; Edge protected (WAF/Shield); security groups least-open; private subnets for data.</li>
+</ul>
+<h4>Reliability</h4>
+<ul>
+<li>&#9744; Multi-AZ for every stateful tier (DB, cache); no single-AZ prod DB.</li>
+<li>&#9744; Decoupled with queues; DLQs on async; retries with backoff+jitter; idempotent consumers.</li>
+<li>&#9744; Defined RTO/RPO &amp; a tested DR strategy; health checks + failover.</li>
+</ul>
+<h4>Performance &amp; Cost</h4>
+<ul>
+<li>&#9744; Right service for the access pattern (Query not Scan; cache hot reads; CDN static).</li>
+<li>&#9744; Auto scaling on the right metric; right-sized instances / Lambda memory.</li>
+<li>&#9744; VPC endpoints to avoid NAT/egress cost; minimize cross-AZ traffic.</li>
+<li>&#9744; Budgets/alarms set; tags for cost allocation; no forgotten resources.</li>
+</ul>
+<h4>Operations</h4>
+<ul>
+<li>&#9744; IaC (CFN/CDK/Terraform), not click-ops; env/account separation.</li>
+<li>&#9744; Metrics + logs + traces + alarms; CloudTrail on; runbooks.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Common Pitfalls — Spot-the-Anti-pattern</h3>
+<table><thead><tr><th>Smell</th><th>Fix</th></tr></thead><tbody>
+<tr><td>access keys in code/env</td><td>IAM roles / instance profile <span class="warn">!</span></td></tr>
+<tr><td>public S3 bucket</td><td>Block Public Access + OAC/presigned <span class="warn">!</span></td></tr>
+<tr><td>single-AZ RDS in prod</td><td>Multi-AZ <span class="warn">!</span></td></tr>
+<tr><td>Lambda in VPC hitting S3/DDB via NAT</td><td>gateway VPC endpoint (free) <span class="warn">!</span></td></tr>
+<tr><td>DynamoDB Scan on hot path</td><td>redesign keys / GSI, use Query <span class="warn">!</span></td></tr>
+<tr><td>no DLQ on async/SQS</td><td>add DLQ + alarm <span class="warn">!</span></td></tr>
+<tr><td>IAM <code>"Action":"*"</code></td><td>least privilege <span class="warn">!</span></td></tr>
+<tr><td>state stored in Lambda /tmp</td><td>externalize to S3/Dynamo <span class="warn">!</span></td></tr>
+<tr><td>chatty cross-AZ / big NAT bill</td><td>endpoints, co-locate, cache <span class="warn">!</span></td></tr>
+</tbody></table>
+</section>
+
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  try {
+    mermaid.initialize({ startOnLoad: true, theme: "neutral",
+      flowchart: { useMaxWidth: true, htmlLabels: true, nodeSpacing: 18, rankSpacing: 18 },
+      themeVariables: { fontSize: "9px" } });
+  } catch (e) { /* offline / blocked CDN: diagrams degrade to source text, rest of sheet is fine */ }
+</script>
+</body>
+</html>
