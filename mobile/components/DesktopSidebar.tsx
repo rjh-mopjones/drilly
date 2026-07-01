@@ -300,6 +300,22 @@ function SourceTreeNode({
               );
             })
           )}
+          {/* Pinned last item: the printable A4 cheat sheet (opens externally). */}
+          {source.cheatSheetUrl && (
+            <Pressable
+              onPress={() => openExternalSource(source.cheatSheetUrl!)}
+              style={({ pressed }) => [
+                styles.itemRow,
+                pressed && styles.sourceRowPressed,
+              ]}
+              accessibilityLabel="Open printable cheat sheet"
+            >
+              <Text style={[styles.itemNumber, styles.cheatGlyph]}>▤</Text>
+              <Text style={[styles.itemTitle, styles.cheatItemTitle]} numberOfLines={1}>
+                Cheat Sheet ↗
+              </Text>
+            </Pressable>
+          )}
         </View>
       )}
     </View>
@@ -434,6 +450,13 @@ function makeStyles(p: Palette) {
       fontSize: 12,
       lineHeight: 16,
       flex: 1,
+    },
+    cheatGlyph: {
+      color: p.accent,
+    },
+    cheatItemTitle: {
+      color: p.accent,
+      fontWeight: "600",
     },
   });
 }
