@@ -294,6 +294,21 @@
       "cheatSheetUrl": "/gcp-cheatsheet.html"
     },
     {
+      "id": "linux",
+      "file": "/linux-interview-primer.md",
+      "title": "Linux",
+      "category": "DevOps",
+      "itemLabel": "Topic",
+      "itemsPlural": "Linux topics",
+      "storagePrefix": "ip:linux",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": [],
+      "cheatSheetUrl": "/linux-cheatsheet.html"
+    },
+    {
       "id": "ai-engineering",
       "file": "/ai-engineering-primer.md",
       "title": "AI Engineering",
