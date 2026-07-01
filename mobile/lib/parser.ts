@@ -41,6 +41,14 @@ export interface SourceConfig {
    * path ("/foo.html") is resolved against REMOTE_BASE on native.
    */
   externalUrl?: string;
+  /**
+   * When set, this source's item list renders a pinned "Cheat Sheet" entry
+   * as its last item; tapping it opens this URL (new tab on web, system
+   * browser on native) — same resolution rules as {@link externalUrl}. Lets
+   * a primer carry its printable A4 cheat sheet inline instead of as a
+   * separate library card.
+   */
+  cheatSheetUrl?: string;
 }
 
 export const SOURCES: Record<SourceId, SourceConfig> = {

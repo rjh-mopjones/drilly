@@ -13,7 +13,8 @@
       "itemHeadingLevel": 2,
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
-      "sectionOrder": []
+      "sectionOrder": [],
+      "cheatSheetUrl": "/system-design-cheatsheet.html"
     },
     {
       "id": "patterns",
@@ -23,7 +24,9 @@
       "itemLabel": "Question",
       "itemsPlural": "example questions",
       "storagePrefix": "sdf:patterns",
-      "defaultRevealedSections": ["Problem"],
+      "defaultRevealedSections": [
+        "Problem"
+      ],
       "sectionOrder": [
         "Problem",
         "Summary",
@@ -66,8 +69,18 @@
       "itemLabel": "Problem",
       "itemsPlural": "interview problems",
       "storagePrefix": "sdf:neetcode",
-      "defaultRevealedSections": ["Problem"],
-      "sectionOrder": ["Problem", "Pattern", "Explanation", "Python", "Rust", "Go", "C++"]
+      "defaultRevealedSections": [
+        "Problem"
+      ],
+      "sectionOrder": [
+        "Problem",
+        "Pattern",
+        "Explanation",
+        "Python",
+        "Rust",
+        "Go",
+        "C++"
+      ]
     },
     {
       "id": "java",
@@ -81,7 +94,8 @@
       "itemHeadingLevel": 2,
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
-      "sectionOrder": []
+      "sectionOrder": [],
+      "cheatSheetUrl": "/java-cheatsheet.html"
     },
     {
       "id": "go",
@@ -95,7 +109,8 @@
       "itemHeadingLevel": 2,
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
-      "sectionOrder": []
+      "sectionOrder": [],
+      "cheatSheetUrl": "/go-cheatsheet.html"
     },
     {
       "id": "rust",
@@ -151,7 +166,8 @@
       "itemHeadingLevel": 2,
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
-      "sectionOrder": []
+      "sectionOrder": [],
+      "cheatSheetUrl": "/sql-postgres-cheatsheet.html"
     },
     {
       "id": "db-theory",
@@ -189,8 +205,15 @@
       "itemLabel": "Problem",
       "itemsPlural": "SQL problems",
       "storagePrefix": "sdf:sql-practice",
-      "defaultRevealedSections": ["Problem"],
-      "sectionOrder": ["Problem", "Pattern", "Explanation", "Solution"]
+      "defaultRevealedSections": [
+        "Problem"
+      ],
+      "sectionOrder": [
+        "Problem",
+        "Pattern",
+        "Explanation",
+        "Solution"
+      ]
     },
     {
       "id": "advanced-sql-practice",
@@ -200,8 +223,15 @@
       "itemLabel": "Problem",
       "itemsPlural": "advanced SQL problems",
       "storagePrefix": "sdf:advanced-sql-practice",
-      "defaultRevealedSections": ["Problem"],
-      "sectionOrder": ["Problem", "Pattern", "Explanation", "Solution"]
+      "defaultRevealedSections": [
+        "Problem"
+      ],
+      "sectionOrder": [
+        "Problem",
+        "Pattern",
+        "Explanation",
+        "Solution"
+      ]
     },
     {
       "id": "csharp",
@@ -215,7 +245,8 @@
       "itemHeadingLevel": 2,
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
-      "sectionOrder": []
+      "sectionOrder": [],
+      "cheatSheetUrl": "/csharp-cheatsheet.html"
     },
     {
       "id": "cpp",
@@ -229,7 +260,8 @@
       "itemHeadingLevel": 2,
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
-      "sectionOrder": []
+      "sectionOrder": [],
+      "cheatSheetUrl": "/cpp-cheatsheet.html"
     },
     {
       "id": "aws",
@@ -243,7 +275,8 @@
       "itemHeadingLevel": 2,
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
-      "sectionOrder": []
+      "sectionOrder": [],
+      "cheatSheetUrl": "/aws-cheatsheet.html"
     },
     {
       "id": "gcp",
@@ -257,7 +290,8 @@
       "itemHeadingLevel": 2,
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
-      "sectionOrder": []
+      "sectionOrder": [],
+      "cheatSheetUrl": "/gcp-cheatsheet.html"
     },
     {
       "id": "ai-engineering",
@@ -274,106 +308,10 @@
       "sectionOrder": []
     },
     {
-      "id": "sql-cheatsheet",
-      "file": "/sql-postgres-cheatsheet.html",
-      "title": "SQL & Postgres",
-      "category": "Cheat Sheets",
-      "externalUrl": "/sql-postgres-cheatsheet.html",
-      "itemLabel": "Section",
-      "itemsPlural": "open printable A4 sheet ↗",
-      "storagePrefix": "ip:sql-cheatsheet",
-      "defaultRevealedSections": [],
-      "sectionOrder": []
-    },
-    {
-      "id": "java-cheatsheet",
-      "file": "/java-cheatsheet.html",
-      "title": "Java",
-      "category": "Cheat Sheets",
-      "externalUrl": "/java-cheatsheet.html",
-      "itemLabel": "Section",
-      "itemsPlural": "open printable A4 sheet ↗",
-      "storagePrefix": "ip:java-cheatsheet",
-      "defaultRevealedSections": [],
-      "sectionOrder": []
-    },
-    {
-      "id": "csharp-cheatsheet",
-      "file": "/csharp-cheatsheet.html",
-      "title": "C#",
-      "category": "Cheat Sheets",
-      "externalUrl": "/csharp-cheatsheet.html",
-      "itemLabel": "Section",
-      "itemsPlural": "open printable A4 sheet ↗",
-      "storagePrefix": "ip:csharp-cheatsheet",
-      "defaultRevealedSections": [],
-      "sectionOrder": []
-    },
-    {
-      "id": "go-cheatsheet",
-      "file": "/go-cheatsheet.html",
-      "title": "Go",
-      "category": "Cheat Sheets",
-      "externalUrl": "/go-cheatsheet.html",
-      "itemLabel": "Section",
-      "itemsPlural": "open printable A4 sheet ↗",
-      "storagePrefix": "ip:go-cheatsheet",
-      "defaultRevealedSections": [],
-      "sectionOrder": []
-    },
-    {
-      "id": "cpp-cheatsheet",
-      "file": "/cpp-cheatsheet.html",
-      "title": "C++",
-      "category": "Cheat Sheets",
-      "externalUrl": "/cpp-cheatsheet.html",
-      "itemLabel": "Section",
-      "itemsPlural": "open printable A4 sheet ↗",
-      "storagePrefix": "ip:cpp-cheatsheet",
-      "defaultRevealedSections": [],
-      "sectionOrder": []
-    },
-    {
-      "id": "aws-cheatsheet",
-      "file": "/aws-cheatsheet.html",
-      "title": "AWS",
-      "category": "Cheat Sheets",
-      "externalUrl": "/aws-cheatsheet.html",
-      "itemLabel": "Section",
-      "itemsPlural": "open printable A4 sheet ↗",
-      "storagePrefix": "ip:aws-cheatsheet",
-      "defaultRevealedSections": [],
-      "sectionOrder": []
-    },
-    {
-      "id": "gcp-cheatsheet",
-      "file": "/gcp-cheatsheet.html",
-      "title": "Google Cloud",
-      "category": "Cheat Sheets",
-      "externalUrl": "/gcp-cheatsheet.html",
-      "itemLabel": "Section",
-      "itemsPlural": "open printable A4 sheet ↗",
-      "storagePrefix": "ip:gcp-cheatsheet",
-      "defaultRevealedSections": [],
-      "sectionOrder": []
-    },
-    {
-      "id": "system-design-cheatsheet",
-      "file": "/system-design-cheatsheet.html",
-      "title": "System Design",
-      "category": "Cheat Sheets",
-      "externalUrl": "/system-design-cheatsheet.html",
-      "itemLabel": "Section",
-      "itemsPlural": "open printable A4 sheet ↗",
-      "storagePrefix": "ip:system-design-cheatsheet",
-      "defaultRevealedSections": [],
-      "sectionOrder": []
-    },
-    {
       "id": "finance-domain-cheatsheet",
       "file": "/finance-domain-cheatsheet.html",
       "title": "Finance Domain",
-      "category": "Cheat Sheets",
+      "category": "System Design",
       "externalUrl": "/finance-domain-cheatsheet.html",
       "itemLabel": "Section",
       "itemsPlural": "open printable A4 sheet ↗",

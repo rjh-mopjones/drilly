@@ -11,7 +11,7 @@ import {
 } from "react-native";
 import { router } from "expo-router";
 import { parseContent, type SourceConfig, type Pattern } from "../lib/parser";
-import { loadSource, refreshSource } from "../lib/content";
+import { loadSource, refreshSource, openExternalSource } from "../lib/content";
 import { useManifest } from "../lib/manifest";
 import {
   setLastRefreshed,
@@ -146,6 +146,25 @@ export function ItemList({ source }: Props) {
         </Pressable>
       ))}
 
+        {/* Pinned last item: the printable A4 cheat sheet (opens externally). */}
+        {source.cheatSheetUrl && (
+          <Pressable
+            style={({ pressed }) => [
+              styles.item,
+              styles.cheatItem,
+              pressed && styles.itemPressed,
+            ]}
+            onPress={() => openExternalSource(source.cheatSheetUrl!)}
+            accessibilityLabel="Open printable cheat sheet"
+          >
+            <Text style={[styles.itemNumber, styles.cheatIcon]}>▤</Text>
+            <Text style={[styles.itemTitle, styles.cheatTitle]} numberOfLines={2}>
+              Cheat Sheet
+            </Text>
+            <Text style={styles.itemMeta}>A4 ↗</Text>
+          </Pressable>
+        )}
+
         <View style={styles.footer} />
       </ScrollView>
     </View>
@@ -206,6 +225,17 @@ function makeStyles(p: Palette) {
       borderBottomColor: p.surfacePressed,
     },
     itemPressed: { backgroundColor: p.surfacePressed },
+    cheatItem: {
+      borderTopWidth: 1,
+      borderTopColor: p.border,
+    },
+    cheatIcon: {
+      color: p.accent,
+    },
+    cheatTitle: {
+      color: p.accent,
+      fontWeight: "600",
+    },
     itemNumber: {
       color: p.textMuted,
       fontSize: 14,
