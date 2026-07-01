@@ -314,10 +314,12 @@ function makeStyles(p: Palette, eink: boolean) {
     },
     sectionCard: eink
       ? {
-          marginBottom: 4,
-          // No border, no rounded chrome, no surface tint — flat layout
-          // so the page reads as one continuous document with bold
-          // section dividers.
+          // Flat layout, separated by whitespace only. No border/chrome and
+          // crucially NO full-width divider line — repeating 1px black
+          // rules shimmer and tear during scroll (esp. on e-ink partial
+          // refresh). The bold uppercase header + this gap carry the
+          // section structure instead.
+          marginBottom: 18,
         }
       : {
           marginBottom: 10,
@@ -332,9 +334,8 @@ function makeStyles(p: Palette, eink: boolean) {
           flexDirection: "row",
           alignItems: "center",
           paddingHorizontal: 0,
-          paddingVertical: 14,
-          borderTopWidth: 1,
-          borderTopColor: p.text,
+          paddingVertical: 8,
+          // No borderTop — the divider line caused scroll tearing on e-ink.
         }
       : {
           flexDirection: "row",
