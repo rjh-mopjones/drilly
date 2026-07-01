@@ -218,6 +218,20 @@
       "sectionOrder": []
     },
     {
+      "id": "cpp",
+      "file": "/cpp-interview-primer.md",
+      "title": "C++",
+      "category": "Languages",
+      "itemLabel": "Topic",
+      "itemsPlural": "C++ topics",
+      "storagePrefix": "ip:cpp",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": []
+    },
+    {
       "id": "ai-engineering",
       "file": "/ai-engineering-primer.md",
       "title": "AI Engineering",
@@ -276,6 +290,18 @@
       "itemLabel": "Section",
       "itemsPlural": "open printable A4 sheet ↗",
       "storagePrefix": "ip:go-cheatsheet",
+      "defaultRevealedSections": [],
+      "sectionOrder": []
+    },
+    {
+      "id": "cpp-cheatsheet",
+      "file": "/cpp-cheatsheet.html",
+      "title": "C++",
+      "category": "Cheat Sheets",
+      "externalUrl": "/cpp-cheatsheet.html",
+      "itemLabel": "Section",
+      "itemsPlural": "open printable A4 sheet ↗",
+      "storagePrefix": "ip:cpp-cheatsheet",
       "defaultRevealedSections": [],
       "sectionOrder": []
     },

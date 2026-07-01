@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>C++ Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+/* spanning title bar */
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>C++ Cheat Sheet</h1><span class="meta">C++20 baseline · senior/backend focus · generic examples · drilly</span></div>
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="warn">!</span> footgun / UB &nbsp; <code>&#9744;</code> review checklist item</li>
+<li>Baseline: <b>C++20</b>; version-gated features tagged inline (e.g. "(C++17)", "(C++23)").</li>
+<li>Senior focus: ownership &amp; lifetime · move semantics · UB &amp; the memory model · templates. Last 3 cards = <b>code review checklist</b> + common bugs + debugging.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
+</ul></section>
+
+<section class="card"><h3>RAII &amp; Smart Pointers</h3>
+<p><b>RAII</b>: a resource's lifetime = an object's lifetime. Acquire in the ctor, release in the dtor. Cleanup is automatic and exception-safe — no manual <code>delete</code>, no <code>finally</code>.</p>
+<table><thead><tr><th>Type</th><th>Use</th></tr></thead><tbody>
+<tr><td><code>unique_ptr&lt;T&gt;</code></td><td>sole owner, move-only, zero overhead. <b>Default choice.</b></td></tr>
+<tr><td><code>shared_ptr&lt;T&gt;</code></td><td>shared ownership; atomic refcount + control block <span class="warn">!</span> (not free)</td></tr>
+<tr><td><code>weak_ptr&lt;T&gt;</code></td><td>non-owning observer; breaks <code>shared_ptr</code> cycles; <code>.lock()</code> to use</td></tr>
+</tbody></table>
+<pre><code>auto p = std::make_unique&lt;Widget&gt;(args);   // never `new`
+auto s = std::make_shared&lt;Widget&gt;(args);   // 1 alloc (obj+ctrl)
+std::unique_ptr&lt;FILE, decltype(&amp;fclose)&gt;
+    f(fopen(path,"r"), &amp;fclose);           // custom deleter</code></pre>
+<ul>
+<li>Prefer <code>make_unique</code>/<code>make_shared</code> — exception-safe, one allocation.</li>
+<li><b>Cycle = leak</b> <span class="warn">!</span> two <code>shared_ptr</code>s pointing at each other never hit refcount 0 → make one a <code>weak_ptr</code>.</li>
+<li>Pass params by <code>const T&amp;</code>/<code>T*</code>; take <code>unique_ptr</code> by value only to <b>transfer</b> ownership.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Rule of Five / Zero</h3>
+<p>The five special members: destructor, copy ctor, copy assign, move ctor, move assign.</p>
+<pre><code>struct Buf {
+  Buf(const Buf&amp;);            // copy ctor
+  Buf&amp; operator=(const Buf&amp;); // copy assign
+  Buf(Buf&amp;&amp;) noexcept;        // move ctor
+  Buf&amp; operator=(Buf&amp;&amp;) noexcept;
+  ~Buf();                     // dtor
+};</code></pre>
+<ul>
+<li><b>Rule of Zero</b> <span class="pg">prefer</span>: own nothing raw — hold <code>vector</code>/<code>string</code>/<code>unique_ptr</code> members, write <b>none</b> of the five, let the compiler default them.</li>
+<li><b>Rule of Five</b>: if you write one (because you manage a raw resource), you almost always need all five.</li>
+<li>Declaring a dtor/copy <b>suppresses</b> the implicit move <span class="warn">!</span> → silent expensive copies.</li>
+<li>Make move ops <code>noexcept</code> — else <code>vector</code> reallocation copies instead of moving <span class="warn">!</span></li>
+<li><code>=default</code> / <code>=delete</code> to be explicit.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Move Semantics &amp; Value Categories</h3>
+<ul>
+<li><b>lvalue</b> = has a name/address; <b>rvalue</b> (prvalue/xvalue) = temporary, safe to pilfer.</li>
+<li><code>std::move(x)</code> is <b>just a cast</b> to <code>T&amp;&amp;</code> — it moves nothing; it lets the next overload move.</li>
+<li><code>std::forward&lt;T&gt;(x)</code> — perfect-forward inside a <code>T&amp;&amp;</code> template (forwarding ref).</li>
+</ul>
+<pre><code>template&lt;class T&gt;
+void wrap(T&amp;&amp; x) {            // forwarding ref
+  sink(std::forward&lt;T&gt;(x));   // keeps lvalue/rvalue-ness
+}
+auto v2 = std::move(v1);      // v1 now valid-but-unspecified</code></pre>
+<ul>
+<li>A moved-from object is <b>valid but unspecified</b> — only safe to destroy or reassign. Reading its value is a bug <span class="warn">!</span></li>
+<li>Don't <code>return std::move(local)</code> — it <b>disables</b> NRVO/copy-elision <span class="warn">!</span> Just <code>return local;</code>.</li>
+<li>Guaranteed copy elision (C++17) for prvalues: <code>return Widget{...};</code> constructs in place.</li>
+</ul>
+</section>
+
+<section class="card"><h3>const · constexpr · Casts</h3>
+<ul>
+<li><b>const-correctness</b>: mark member fns <code>const</code> when they don't mutate; pass read-only params by <code>const&amp;</code>.</li>
+<li><code>const</code> = runtime immutable; <code>constexpr</code> = usable at compile time; <code>consteval</code> = <b>must</b> run at compile time (C++20); <code>constinit</code> = static init, no dynamic-init order issues.</li>
+<li><code>mutable</code> = a member that stays writable through a <code>const</code> method (caches, mutexes).</li>
+</ul>
+<table><thead><tr><th>Cast</th><th>Use</th></tr></thead><tbody>
+<tr><td><code>static_cast</code></td><td>related types, up/down (no check), numeric</td></tr>
+<tr><td><code>dynamic_cast</code></td><td>checked down-cast on polymorphic types (RTTI)</td></tr>
+<tr><td><code>const_cast</code></td><td>strip const — writing through it if the object is truly const is UB <span class="warn">!</span></td></tr>
+<tr><td><code>reinterpret_cast</code></td><td>bit reinterpret — aliasing/UB minefield <span class="warn">!</span></td></tr>
+</tbody></table>
+<p>Avoid C-style casts — they silently pick any of the above. Prefer <code>enum class</code> over plain <code>enum</code>.</p>
+</section>
+
+<section class="card"><h3>STL Containers — pick &amp; cost</h3>
+<table><thead><tr><th>Container</th><th>Lookup</th><th>Note</th></tr></thead><tbody>
+<tr><td><code>vector</code></td><td>O(1) idx</td><td><b>default</b>; contiguous, cache-friendly; <code>reserve()</code></td></tr>
+<tr><td><code>array&lt;T,N&gt;</code></td><td>O(1)</td><td>fixed size, on stack, no alloc</td></tr>
+<tr><td><code>deque</code></td><td>O(1) idx</td><td>fast push front/back; not contiguous</td></tr>
+<tr><td><code>list</code></td><td>O(n)</td><td>stable iterators; rarely worth it</td></tr>
+<tr><td><code>map</code>/<code>set</code></td><td>O(log n)</td><td>ordered (RB-tree)</td></tr>
+<tr><td><code>unordered_map</code></td><td>O(1) avg</td><td>hash; O(n) worst; <code>load_factor</code></td></tr>
+</tbody></table>
+<ul>
+<li><b>Iterator/reference invalidation</b> <span class="warn">!</span> <code>vector</code>: any reallocation (push_back past cap) invalidates <b>all</b>; erase invalidates from the point on. <code>map</code>/<code>list</code>: only the erased node.</li>
+<li><code>emplace_back(args...)</code> constructs in place; <code>push_back</code> may copy/move.</li>
+<li><code>vector&lt;bool&gt;</code> is a bit-packed <b>proxy</b> — not a real container of <code>bool</code> <span class="warn">!</span></li>
+<li>Views (non-owning): <code>string_view</code>, <code>span&lt;T&gt;</code> — cheap params, but must not outlive the data <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Iterators &amp; Algorithms</h3>
+<p>Categories: input · output · forward · bidirectional · random-access · <b>contiguous</b> (C++20).</p>
+<pre><code>std::sort(v.begin(), v.end());
+std::sort(v.begin(), v.end(),
+          [](auto&amp; a, auto&amp; b){ return a.k &lt; b.k; });
+auto it = std::find(v.begin(), v.end(), x);
+auto n  = std::count_if(v.begin(), v.end(), pred);
+std::transform(a.begin(), a.end(),
+               std::back_inserter(out), f);</code></pre>
+<h4>erase–remove idiom <span class="warn">!</span></h4>
+<pre><code>v.erase(std::remove_if(v.begin(), v.end(), pred),
+        v.end());          // remove_* only reorders!
+// C++20: std::erase_if(v, pred);</code></pre>
+<ul>
+<li><code>remove</code>/<code>remove_if</code> <b>don't erase</b> — they shuffle kept elements front and return the new logical end.</li>
+<li><code>std::sort</code> is unstable — use <code>stable_sort</code> to preserve ties.</li>
+<li>Beware the <code>accumulate</code> init-type trap: <code>accumulate(v.begin(),v.end(), 0)</code> sums as <code>int</code> even for doubles <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Templates &amp; Concepts (C++20)</h3>
+<pre><code>template&lt;std::integral T&gt;        // concept-constrained
+T gcd(T a, T b){ return b? gcd(b, a%b) : a; }
+
+template&lt;class T&gt;
+concept Addable = requires(T a, T b){ a + b; };
+
+if constexpr (std::is_pointer_v&lt;T&gt;) { ... }  // compile-time branch</code></pre>
+<ul>
+<li>Definitions live in <b>headers</b> — templates instantiate at the call site <span class="warn">!</span></li>
+<li><b>Concepts</b> replace most SFINAE/<code>enable_if</code> — clearer errors, constrained overloads.</li>
+<li><code>if constexpr</code> discards the untaken branch at compile time (no instantiation).</li>
+<li>Variadics + <b>fold expressions</b> (C++17): <code>(... + args)</code>.</li>
+<li>Watch template <b>code bloat</b>: each type combo = a fresh instantiation.</li>
+<li>Need <code>typename</code>/<code>template</code> disambiguators for dependent names.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Lambdas &amp; std::function</h3>
+<pre><code>int base = 10;
+auto f = [base](int x){ return x + base; };  // capture by value
+auto g = [&amp;](int x){ total += x; };          // capture by ref !
+auto h = [p = std::move(ptr)]{ use(*p); };   // init-capture (C++14)
+auto gen = [](auto x){ return x*x; };        // generic (C++14)</code></pre>
+<ul>
+<li>Capture by <b>ref</b> only if the lambda won't outlive the referent — else dangling <span class="warn">!</span></li>
+<li>Capturing <code>this</code> captures the <b>pointer</b>; the object must outlive the lambda. Use <code>[*this]</code> (C++17) to copy.</li>
+<li><code>[=]</code> on a member fn captures <code>this</code>, not the members — surprise dangling <span class="warn">!</span></li>
+<li><code>std::function</code> = type erasure → heap alloc + indirect call. Prefer a template/<code>auto</code> param on hot paths.</li>
+<li>Prefer lambdas over <code>std::bind</code>.</li>
+</ul>
+</section>
+
+<section class="card diagram"><h3>Polymorphism &amp; the vtable</h3>
+<div class="mermaid">
+flowchart LR
+  obj["Derived object<br/>[vptr | fields]"] --> vt["vtable (per class)"]
+  vt --> f1["&amp;Derived::foo"]
+  vt --> f2["&amp;Base::bar"]
+</div>
+<p class="cap">Each polymorphic object stores a hidden <code>vptr</code> → its class vtable of function pointers. A virtual call = load vptr, index, indirect call (one extra indirection, defeats inlining).</p>
+<ul>
+<li><b>Virtual destructor</b> on any class deleted through a base pointer <span class="warn">!</span> else UB / partial destruction.</li>
+<li><b>Object slicing</b> <span class="warn">!</span> copying a Derived into a Base value drops the derived part. Store base <code>*</code>/references, never by value.</li>
+<li>Mark overrides <code>override</code>; use <code>final</code> to seal.</li>
+<li>Don't call virtuals from ctors/dtors — dispatch resolves to the current type, not the derived one <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Exceptions &amp; Error Handling</h3>
+<h4>Safety guarantees</h4>
+<table><thead><tr><th>Level</th><th>Meaning</th></tr></thead><tbody>
+<tr><td>nothrow</td><td>never throws (<code>noexcept</code>)</td></tr>
+<tr><td>strong</td><td>commit-or-rollback; state unchanged on throw</td></tr>
+<tr><td>basic</td><td>valid but unspecified state; no leaks</td></tr>
+<tr><td>none</td><td>can leak/corrupt — avoid</td></tr>
+</tbody></table>
+<ul>
+<li>RAII gives exception safety for free — unwinding runs dtors.</li>
+<li><b>Never let a destructor throw</b> <span class="warn">!</span> → <code>std::terminate</code> during unwinding.</li>
+<li><code>catch (const std::exception&amp; e)</code> — by const ref, never by value (slicing).</li>
+<li>Zero-cost model: no penalty on the happy path; throwing is expensive — not for control flow.</li>
+<li>Alternatives: <code>std::optional</code> (maybe), <code>std::expected&lt;T,E&gt;</code> (C++23), <code>std::error_code</code>. <code>-fno-exceptions</code> builds exist (embedded).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Concurrency</h3>
+<pre><code>std::jthread t([](std::stop_token st){    // C++20: auto-joins
+  while(!st.stop_requested()){ ... }
+});
+{
+  std::scoped_lock lk(m1, m2);   // deadlock-free multi-lock
+  ...
+}
+std::condition_variable cv;
+cv.wait(lk, []{ return ready; }); // predicate form — no spurious wakeups</code></pre>
+<table><thead><tr><th>Tool</th><th>Use</th></tr></thead><tbody>
+<tr><td><code>lock_guard</code>/<code>scoped_lock</code></td><td>RAII lock; <code>scoped_lock</code> takes many (ordered)</td></tr>
+<tr><td><code>unique_lock</code></td><td>movable, works with <code>condition_variable</code></td></tr>
+<tr><td><code>shared_mutex</code></td><td>many readers / 1 writer</td></tr>
+<tr><td><code>call_once</code>/<code>once_flag</code></td><td>thread-safe lazy init</td></tr>
+<tr><td><code>async</code>/<code>future</code></td><td>run + get a result later</td></tr>
+</tbody></table>
+<ul>
+<li>A <b>data race</b> is UB <span class="warn">!</span> — any concurrent access with ≥1 write and no synchronisation.</li>
+<li>Always lock multiple mutexes in a consistent order (or use <code>scoped_lock</code>) to avoid deadlock.</li>
+<li>Run <b>TSan</b> (<code>-fsanitize=thread</code>) in CI.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Memory Model &amp; Atomics</h3>
+<pre><code>std::atomic&lt;int&gt; cnt{0};
+cnt.fetch_add(1, std::memory_order_relaxed); // counter: no ordering needed
+
+// publish pattern:
+data = compute();
+flag.store(true, std::memory_order_release);
+// reader:
+if (flag.load(std::memory_order_acquire)) use(data);</code></pre>
+<table><thead><tr><th>Order</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>seq_cst</code></td><td>default; single total order; safest, priciest</td></tr>
+<tr><td><code>acquire</code>/<code>release</code></td><td>pairwise publish/consume of data</td></tr>
+<tr><td><code>relaxed</code></td><td>atomicity only, no ordering (counters)</td></tr>
+</tbody></table>
+<ul>
+<li><code>release</code> store <i>synchronizes-with</i> an <code>acquire</code> load of the same var → establishes happens-before.</li>
+<li><code>compare_exchange_weak</code> in a loop (may spuriously fail); watch the <b>ABA</b> problem <span class="warn">!</span></li>
+<li><code>volatile</code> is <b>not</b> atomic and gives no cross-thread ordering <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Undefined Behaviour — catalog</h3>
+<p>UB = the optimizer assumes it never happens and rewrites your code around it. Not "works differently" — <b>anything</b> may happen <span class="warn">!</span></p>
+<table><thead><tr><th>UB</th><th>Trigger</th></tr></thead><tbody>
+<tr><td>use-after-free / dangling</td><td>ref/ptr/iterator/<code>string_view</code> outlives data</td></tr>
+<tr><td>out-of-bounds</td><td><code>v[i]</code> past end, bad pointer math</td></tr>
+<tr><td>uninitialised read</td><td>reading a member never set</td></tr>
+<tr><td>signed overflow</td><td><code>INT_MAX + 1</code></td></tr>
+<tr><td>data race</td><td>unsynchronised concurrent write</td></tr>
+<tr><td>invalid downcast</td><td><code>static_cast</code> to wrong derived</td></tr>
+<tr><td>strict aliasing</td><td>read via unrelated pointer type</td></tr>
+<tr><td>shift ≥ width / by negative</td><td><code>x &lt;&lt; 32</code> on 32-bit int</td></tr>
+</tbody></table>
+<p>Catch it: <b>ASan</b> (memory), <b>UBSan</b> (<code>-fsanitize=undefined</code>), <b>TSan</b> (races), <b>MSan</b> (uninit), valgrind. Turn on <code>-Wall -Wextra</code>.</p>
+</section>
+
+<section class="card"><h3>Compilation · Headers · ODR · Build</h3>
+<p>Pipeline: <b>preprocess → compile (per TU) → link</b>. Each <code>.cpp</code> is a translation unit.</p>
+<ul>
+<li><b>ODR</b>: every entity defined <b>once</b> across the program (inline/templates exempt but definitions must be identical) <span class="warn">!</span></li>
+<li>Headers: declarations + <code>inline</code>/<code>constexpr</code>/templates. <code>#pragma once</code> (or include guards).</li>
+<li><b>Never <code>using namespace</code> in a header</b> <span class="warn">!</span></li>
+<li><code>inline</code> = "multiple identical definitions OK" (linkage), not just an inlining hint.</li>
+<li><code>static</code>/anonymous namespace = internal linkage (TU-local).</li>
+<li><b>PIMPL</b> hides implementation, cuts rebuild coupling &amp; compile time.</li>
+<li><code>extern "C"</code> disables name-mangling for C interop.</li>
+</ul>
+<pre><code># fast, strict dev build
+g++ -std=c++20 -Wall -Wextra -O2 \
+    -fsanitize=address,undefined app.cpp</code></pre>
+<p>Speed: forward-declare, PCH, unity builds, C++20 <b>modules</b>.</p>
+</section>
+
+<section class="card"><h3>&#9733; Code Review Checklist</h3>
+<h4>Memory &amp; ownership</h4>
+<ul>
+<li>&#9744; No raw <code>new</code>/<code>delete</code>; ownership expressed via smart pointers/containers.</li>
+<li>&#9744; Right pointer: <code>unique_ptr</code> (sole) vs <code>shared_ptr</code> (shared) vs <code>weak_ptr</code> (break cycle).</li>
+<li>&#9744; RAII for every resource (file, socket, lock, handle); no leak/double-free path.</li>
+<li>&#9744; No returning a ref/pointer to a local or expired temporary.</li>
+</ul>
+<h4>Special members &amp; const</h4>
+<ul>
+<li>&#9744; Rule of Zero where possible; if any of the five, all correct; move ops <code>noexcept</code>.</li>
+<li>&#9744; No accidental deep copies of heavy objects (pass <code>const&amp;</code> / <code>std::move</code>).</li>
+<li>&#9744; const-correct APIs; no <code>const_cast</code>/C-casts; <code>enum class</code>; no narrowing.</li>
+</ul>
+<h4>Lifetime &amp; UB traps</h4>
+<ul>
+<li>&#9744; No dangling <code>string_view</code>/<code>span</code>; no use-after-move; members initialised.</li>
+<li>&#9744; No iterator/reference invalidation across a container mutation.</li>
+</ul>
+<h4>Concurrency &amp; errors</h4>
+<ul>
+<li>&#9744; Shared state guarded; consistent lock order; correct memory-order on atomics.</li>
+<li>&#9744; Exception safety (strong/basic) held; no throwing dtor; <code>noexcept</code> accurate.</li>
+</ul>
+<h4>STL, headers &amp; gates</h4>
+<ul>
+<li>&#9744; Right container for the access pattern; algorithm over hand-rolled loop; <code>reserve</code> where sizes known.</li>
+<li>&#9744; <code>string_view</code>/<code>span</code> params over owning copies where non-owning.</li>
+<li>&#9744; Include-what-you-use; no ODR violation; no <code>using namespace</code> in headers.</li>
+<li>&#9744; clang-format clean; clang-tidy / <code>-Wall -Wextra -Werror</code>; ASan/UBSan/TSan on tests.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Common Bugs — Spot-the-Bug</h3>
+<table><thead><tr><th>Symptom</th><th>Cause</th></tr></thead><tbody>
+<tr><td>crash / garbage after a copy</td><td>Rule-of-Three violated (shallow copy → double free) <span class="warn">!</span></td></tr>
+<tr><td>silent slow copies in a <code>vector</code></td><td>move ctor not <code>noexcept</code> <span class="warn">!</span></td></tr>
+<tr><td>iterator crash mid-loop</td><td>push_back reallocated the <code>vector</code> <span class="warn">!</span></td></tr>
+<tr><td>reads garbage from a moved var</td><td>use-after-move <span class="warn">!</span></td></tr>
+<tr><td>dangling after returning</td><td><code>string_view</code>/ref to a temporary/local <span class="warn">!</span></td></tr>
+<tr><td>leak that never drops to 0</td><td><code>shared_ptr</code> cycle — needs <code>weak_ptr</code> <span class="warn">!</span></td></tr>
+<tr><td>base slice loses behaviour</td><td>object slicing (stored by value) <span class="warn">!</span></td></tr>
+<tr><td>UB only under <code>-O2</code></td><td>signed overflow / strict aliasing <span class="warn">!</span></td></tr>
+<tr><td>remove didn't shrink size</td><td>forgot <code>erase</code> after <code>remove_if</code> <span class="warn">!</span></td></tr>
+</tbody></table>
+</section>
+
+<section class="card"><h3>Debugging &amp; Sanitizers</h3>
+<table><thead><tr><th>Symptom</th><th>Tool</th></tr></thead><tbody>
+<tr><td>heap corruption / use-after-free</td><td><code>-fsanitize=address</code> (ASan)</td></tr>
+<tr><td>UB (overflow, alignment, aliasing)</td><td><code>-fsanitize=undefined</code> (UBSan)</td></tr>
+<tr><td>data race</td><td><code>-fsanitize=thread</code> (TSan)</td></tr>
+<tr><td>uninitialised reads</td><td>MSan / valgrind memcheck</td></tr>
+<tr><td>leaks</td><td>LSan / valgrind</td></tr>
+<tr><td>crash / step through</td><td><code>gdb</code> / <code>lldb</code> (build <code>-g</code>)</td></tr>
+<tr><td>"what asm did I get"</td><td>godbolt / <code>-S</code></td></tr>
+<tr><td>hot path / perf</td><td><code>perf</code>, google-benchmark</td></tr>
+</tbody></table>
+<ul>
+<li>Dev builds: <code>-g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer</code>.</li>
+<li>Sanitizers find bugs they <b>observe at runtime</b> — exercise the paths (tests + fuzzing).</li>
+<li>Measure before optimising: profile, then fix data layout (AoS→SoA, cache locality) before micro-tuning.</li>
+</ul>
+</section>
+
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  try {
+    mermaid.initialize({ startOnLoad: true, theme: "neutral",
+      flowchart: { useMaxWidth: true, htmlLabels: true, nodeSpacing: 18, rankSpacing: 18 },
+      themeVariables: { fontSize: "9px" } });
+  } catch (e) { /* offline / blocked CDN: diagrams degrade to source text, rest of sheet is fine */ }
+</script>
+</body>
+</html>
