@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Kubernetes Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+/* spanning title bar */
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>Kubernetes Cheat Sheet</h1><span class="meta">DevOps/SRE focus · kubectl + manifests · troubleshooting · drilly</span></div>
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="warn">!</span> footgun / gotcha &nbsp; <code>&#9744;</code> manifest review item</li>
+<li>Focus: the objects, <code>kubectl</code>, and failure modes interviewers probe + a <b>troubleshooting playbook</b>. Cloud-agnostic; EKS/GKE/AKS notes where they matter.</li>
+<li>Mental model: <b>declarative reconciliation</b> — you write desired state, controllers converge actual → desired.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+</ul></section>
+
+<section class="card diagram"><h3>Architecture</h3>
+<div class="mermaid">
+flowchart TD
+  U["kubectl / CI"] --> API["kube-apiserver"]
+  API --> ETCD["etcd (state)"]
+  API --> SCH["scheduler"]
+  API --> CM["controller-mgr"]
+  API --> KUBELET["kubelet (per node)"]
+  KUBELET --> CRI["containerd → Pods"]
+  KUBELET --> KP["kube-proxy"]
+</div>
+<p class="cap">Control plane = api-server + etcd + scheduler + controller-manager. Node = kubelet + kube-proxy + runtime. Everything goes through the api-server; etcd is the single source of truth.</p>
+</section>
+
+<section class="card"><h3>Core Objects</h3>
+<table><thead><tr><th>Kind</th><th>Purpose</th></tr></thead><tbody>
+<tr><td>Pod</td><td>smallest unit; 1+ containers share net/IP/vol — ephemeral <span class="warn">!</span></td></tr>
+<tr><td>Deployment</td><td>stateless; → ReplicaSet → Pods; rollouts</td></tr>
+<tr><td>StatefulSet</td><td>stable identity + per-pod PVC (DBs)</td></tr>
+<tr><td>DaemonSet</td><td>one pod per node (agents)</td></tr>
+<tr><td>Job / CronJob</td><td>run-to-completion / scheduled</td></tr>
+<tr><td>Service</td><td>stable VIP+DNS over pods (by label)</td></tr>
+<tr><td>Ingress / Gateway</td><td>L7 HTTP routing</td></tr>
+<tr><td>ConfigMap / Secret</td><td>config / sensitive data</td></tr>
+<tr><td>PVC / PV / SC</td><td>storage claim / volume / class</td></tr>
+</tbody></table>
+</section>
+
+<section class="card"><h3>kubectl Essentials</h3>
+<pre><code>kubectl get pods -A -o wide
+kubectl describe pod &lt;p&gt;      # EVENTS = gold !
+kubectl logs &lt;p&gt; -f --previous -c &lt;ctr&gt;
+kubectl exec -it &lt;p&gt; -- sh
+kubectl apply -f app.yaml     # declarative
+kubectl rollout status deploy/app
+kubectl rollout undo deploy/app
+kubectl scale deploy/app --replicas=5
+kubectl get events --sort-by=.lastTimestamp
+kubectl top pod / node        # needs metrics-server
+kubectl debug -it &lt;p&gt; --image=busybox  # ephemeral
+kubectl explain pod.spec.containers</code></pre>
+<p><b>Debug order:</b> describe (events) → logs → exec → node/scheduler <span class="warn">!</span></p>
+</section>
+
+<section class="card"><h3>Minimal Deployment + Service</h3>
+<pre><code>apiVersion: apps/v1
+kind: Deployment
+metadata: { name: web }
+spec:
+  replicas: 3
+  selector: { matchLabels: { app: web } }
+  template:
+    metadata: { labels: { app: web } }
+    spec:
+      containers:
+      - name: web
+        image: my-registry/web:1.2.3   # never :latest !
+        ports: [{ containerPort: 8080 }]
+        resources:
+          requests: { cpu: 100m, memory: 128Mi }
+          limits:   { cpu: 500m, memory: 256Mi }
+        readinessProbe:
+          httpGet: { path: /healthz, port: 8080 }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: web }
+spec:
+  selector: { app: web }   # must match pod labels !
+  ports: [{ port: 80, targetPort: 8080 }]</code></pre>
+</section>
+
+<section class="card"><h3>Services &amp; Ingress</h3>
+<table><thead><tr><th>Type</th><th>Reaches</th></tr></thead><tbody>
+<tr><td>ClusterIP</td><td>in-cluster only (default)</td></tr>
+<tr><td>NodePort</td><td>node IP : 30000–32767</td></tr>
+<tr><td>LoadBalancer</td><td>cloud LB → external</td></tr>
+<tr><td>headless (None)</td><td>DNS → pod IPs (StatefulSet)</td></tr>
+</tbody></table>
+<ul>
+<li>DNS: <code>svc.ns.svc.cluster.local</code>. Service selects pods by <b>label</b> → EndpointSlices.</li>
+<li><b>No endpoints?</b> selector mismatch or no <b>ready</b> pods <span class="warn">!</span></li>
+<li><b>Ingress</b> = L7 rules; needs an <b>ingress controller</b> installed (the resource alone does nothing) <span class="warn">!</span> Gateway API is the successor.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Config &amp; Secrets</h3>
+<pre><code>kubectl create configmap app-cfg --from-file=app.conf
+kubectl create secret generic db --from-literal=pass=s3cr3t</code></pre>
+<ul>
+<li><b>Secret = base64, NOT encryption</b> <span class="warn">!</span> Enable etcd encryption-at-rest / KMS; lock down RBAC.</li>
+<li><b>env vars are fixed at pod start</b> — change a ConfigMap and you must restart pods to pick it up; mounted volumes update (with lag) <span class="warn">!</span></li>
+<li>Roll pods on change via a checksum annotation. Never bake secrets into images.</li>
+<li>External Secrets Operator / Vault / CSI Secrets Store for real secret mgmt.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Probes &amp; Lifecycle</h3>
+<table><thead><tr><th>Probe</th><th>Fail →</th></tr></thead><tbody>
+<tr><td>liveness</td><td>kubelet <b>restarts</b> container</td></tr>
+<tr><td>readiness</td><td><b>removed</b> from Service endpoints (no restart)</td></tr>
+<tr><td>startup</td><td>guards slow start; gates the other two</td></tr>
+</tbody></table>
+<ul>
+<li><b>Liveness ≠ readiness.</b> A liveness probe that checks a <i>dependency</i> → cascading restarts <span class="warn">!</span></li>
+<li>Shutdown: SIGTERM → <code>terminationGracePeriodSeconds</code> → SIGKILL. Use a <b>preStop sleep</b> to cover the endpoint-removal race <span class="warn">!</span></li>
+<li><b>PodDisruptionBudget</b> protects availability during drains/upgrades.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Resources &amp; QoS</h3>
+<ul>
+<li><b>requests</b> = scheduling &amp; reservation; <b>limits</b> = hard cap.</li>
+<li>Over <b>memory</b> limit → <b>OOMKilled (137)</b>. Over <b>CPU</b> limit → <b>throttled</b>, not killed <span class="warn">!</span></li>
+</ul>
+<table><thead><tr><th>QoS</th><th>When</th></tr></thead><tbody>
+<tr><td>Guaranteed</td><td>requests == limits (all ctrs) — evicted last</td></tr>
+<tr><td>Burstable</td><td>requests &lt; limits</td></tr>
+<tr><td>BestEffort</td><td>none set — evicted first <span class="warn">!</span></td></tr>
+</tbody></table>
+<ul><li>CPU in millicores (<code>500m</code>); memory <code>Mi</code>. <code>LimitRange</code>/<code>ResourceQuota</code> per namespace.</li></ul>
+</section>
+
+<section class="card"><h3>Scheduling</h3>
+<ul>
+<li><b>nodeSelector</b> = simple label match. <b>Affinity</b> = required/preferred rules (node &amp; pod).</li>
+<li><b>Taints repel, tolerations allow</b> — control-plane/GPU nodes are tainted; effects NoSchedule/PreferNoSchedule/NoExecute.</li>
+<li><b>Pod anti-affinity</b> spreads replicas; <b>topologySpreadConstraints</b> (maxSkew) balances across zones.</li>
+<li>Priority + preemption evicts lower-priority pods under pressure.</li>
+</ul>
+<pre><code>tolerations:
+- key: node-role.kubernetes.io/control-plane
+  effect: NoSchedule</code></pre>
+</section>
+
+<section class="card"><h3>Autoscaling</h3>
+<table><thead><tr><th>Scaler</th><th>Scales</th></tr></thead><tbody>
+<tr><td>HPA</td><td>pod <b>replicas</b> (CPU/mem/custom)</td></tr>
+<tr><td>VPA</td><td>pod <b>requests/limits</b> (recreates)</td></tr>
+<tr><td>Cluster Autoscaler</td><td><b>nodes</b> (Pending pods)</td></tr>
+<tr><td>Karpenter</td><td>just-in-time right-sized nodes</td></tr>
+</tbody></table>
+<ul>
+<li>HPA: <code>ceil(replicas × current/target)</code>; <b>needs requests set</b> + metrics-server <span class="warn">!</span></li>
+<li>HPA + VPA on the same metric conflict. KEDA for event-driven / scale-to-zero.</li>
+<li>Pods with local storage / PDBs can block node scale-down.</li>
+</ul>
+</section>
+
+<section class="card"><h3>RBAC &amp; Security</h3>
+<ul>
+<li>Request pipeline: <b>authn → authz (RBAC) → admission</b>.</li>
+<li>Role/RoleBinding = namespaced; ClusterRole/ClusterRoleBinding = cluster-wide. Rules = apiGroups × resources × verbs.</li>
+<li>Pods authenticate via a <b>ServiceAccount</b> token; least-privilege, avoid <code>cluster-admin</code>/wildcards <span class="warn">!</span></li>
+<li><code>kubectl auth can-i --as=…</code> to test.</li>
+</ul>
+<h4>Pod hardening</h4>
+<ul>
+<li>SecurityContext: <code>runAsNonRoot</code>, drop ALL caps, <code>readOnlyRootFilesystem</code>, no <code>privileged</code> <span class="warn">!</span></li>
+<li><b>Pod Security Admission</b> (baseline/restricted). <b>NetworkPolicy</b> = default-allow until a policy selects the pod, then default-deny (needs Calico/Cilium).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Networking &amp; DNS</h3>
+<ul>
+<li>Model: every pod gets its own IP; pods talk without NAT. <b>CNI</b> wires it (Calico/Cilium/Flannel/AWS-VPC-CNI).</li>
+<li><b>CoreDNS</b> resolves services/pods. Watch <code>ndots:5</code> — unqualified lookups fan out and add latency <span class="warn">!</span> (NodeLocal DNSCache helps).</li>
+<li>kube-proxy programs Service VIPs (iptables/IPVS); Cilium can replace it with eBPF.</li>
+<li>Service mesh (Istio/Linkerd) = mTLS + traffic mgmt + observability — often more complexity than you need <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Helm · Kustomize · GitOps</h3>
+<ul>
+<li><b>Helm</b>: templated charts + <code>values.yaml</code>; <code>helm install/upgrade/rollback</code>; releases &amp; history. Powerful but YAML-templating is error-prone.</li>
+<li><b>Kustomize</b>: template-free bases + per-env overlays/patches; built into <code>kubectl -k</code>.</li>
+<li><b>GitOps</b> (ArgoCD/Flux): Git is desired state; pull-based reconcile + drift detection — beats <code>kubectl apply</code> from CI.</li>
+<li>Secrets in Git: sealed-secrets / SOPS / external secrets <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Cluster Ops</h3>
+<ul>
+<li><b>Upgrade order:</b> control plane first, then nodes. Kubelet may lag api-server by a couple minors but never lead; go one minor at a time <span class="warn">!</span></li>
+<li>Node ops: <code>cordon</code> → <code>drain</code> (respects PDBs) → replace → <code>uncordon</code>.</li>
+<li><b>etcd</b>: odd member count for quorum; <code>etcdctl snapshot save</code>; back it up — it's the whole cluster <span class="warn">!</span></li>
+<li>Backups: Velero (PVs + objects). Managed clusters run the control plane/etcd for you.</li>
+<li>Cost: right-size requests, spot node pools, autoscaler/Karpenter, bin-packing.</li>
+</ul>
+</section>
+
+<section class="card"><h3>&#9733; Troubleshooting Playbook</h3>
+<h4>Pending</h4>
+<ul><li>&#9744; <code>describe pod</code> events → insufficient cpu/mem, taints, affinity, unbound PVC, quota.</li></ul>
+<h4>CrashLoopBackOff</h4>
+<ul><li>&#9744; <code>logs --previous</code>, exit code, bad config/cmd, failing liveness probe.</li></ul>
+<h4>ImagePullBackOff / ErrImagePull</h4>
+<ul><li>&#9744; image name/tag typo, private registry needs <code>imagePullSecrets</code>, registry/network.</li></ul>
+<h4>OOMKilled (137)</h4>
+<ul><li>&#9744; memory limit too low or leak — raise limit / fix app; check <code>describe</code>.</li></ul>
+<h4>Service returns nothing</h4>
+<ul><li>&#9744; <code>get endpoints svc</code> empty → selector mismatch / no ready pods / wrong port / NetworkPolicy.</li></ul>
+<h4>DNS failing</h4>
+<ul><li>&#9744; CoreDNS pods/logs, <code>ndots</code>, test with <code>kubectl run -it --rm dnsutils</code>.</li></ul>
+<h4>Stuck Terminating</h4>
+<ul><li>&#9744; finalizers, node gone, grace period; patch/remove finalizer as last resort <span class="warn">!</span></li></ul>
+</section>
+
+<section class="card"><h3>&#9744; Manifest Review Checklist</h3>
+<ul>
+<li>&#9744; <b>resources.requests &amp; limits</b> set (mem limit == request for Guaranteed critical apps).</li>
+<li>&#9744; <b>readiness</b> (and liveness/startup where apt) probes — not checking dependencies in liveness.</li>
+<li>&#9744; Image is a <b>pinned tag/digest</b>, never <code>:latest</code>.</li>
+<li>&#9744; <b>runAsNonRoot</b>, drop ALL caps, read-only rootfs, no <code>privileged</code>/hostPath/hostNetwork.</li>
+<li>&#9744; Least-privilege ServiceAccount + RBAC; <code>automountServiceAccountToken:false</code> if unused.</li>
+<li>&#9744; Labels match Service/selector; multiple replicas + <b>PodDisruptionBudget</b>.</li>
+<li>&#9744; preStop + terminationGracePeriod for graceful shutdown; NetworkPolicy in place.</li>
+<li>&#9744; No secrets in env plaintext / image; config externalised.</li>
+</ul>
+</section>
+
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  try {
+    mermaid.initialize({ startOnLoad: true, theme: "neutral",
+      flowchart: { useMaxWidth: true, htmlLabels: true, nodeSpacing: 18, rankSpacing: 18 },
+      themeVariables: { fontSize: "9px" } });
+  } catch (e) { /* offline / blocked CDN: diagrams degrade to source text, rest of sheet is fine */ }
+</script>
+</body>
+</html>

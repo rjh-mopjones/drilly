@@ -26,6 +26,7 @@
 #   mobile/dist/aws-interview-primer.md
 #   mobile/dist/gcp-interview-primer.md
 #   mobile/dist/linux-interview-primer.md
+#   mobile/dist/kubernetes-interview-primer.md
 #   mobile/dist/ai-engineering-primer.md
 #   mobile/dist/sql-postgres-cheatsheet.html   ← standalone A4 print cheat sheet (Cheat Sheets category, externalUrl)
 #   mobile/dist/java-cheatsheet.html           ← standalone A4 print cheat sheet (Cheat Sheets category, externalUrl)
@@ -35,6 +36,7 @@
 #   mobile/dist/aws-cheatsheet.html            ← standalone A4 print cheat sheet (Cheat Sheets category, externalUrl)
 #   mobile/dist/gcp-cheatsheet.html            ← standalone A4 print cheat sheet (Cheat Sheets category, externalUrl)
 #   mobile/dist/linux-cheatsheet.html          ← standalone A4 print cheat sheet (attached to the Linux primer via cheatSheetUrl)
+#   mobile/dist/kubernetes-cheatsheet.html     ← standalone A4 print cheat sheet (attached to the Kubernetes primer via cheatSheetUrl)
 #   mobile/dist/system-design-cheatsheet.html  ← standalone A4 print cheat sheet (Cheat Sheets category, externalUrl)
 #   mobile/dist/finance-domain-cheatsheet.html ← standalone A4 print cheat sheet (Cheat Sheets category, externalUrl)
 #   mobile/dist/system-design-patterns-primer.md
@@ -57,7 +59,7 @@ cd "$MOBILE"
 bunx expo export --platform web --clear
 
 echo "→ Mirroring web/public/* (manifest + markdown) into $OUT"
-for f in service-worker.js manifest.json patterns.md neetcode-150.md java-interview-primer.md go-interview-primer.md rust-interview-primer.md python-interview-primer.md kotlin-interview-primer.md cpp-interview-primer.md postgres-interview-primer.md db-theory-primer.md sql-patterns-primer.md sql-practice.md advanced-sql-practice.md csharp-interview-primer.md aws-interview-primer.md gcp-interview-primer.md linux-interview-primer.md ai-engineering-primer.md sql-postgres-cheatsheet.html java-cheatsheet.html csharp-cheatsheet.html go-cheatsheet.html cpp-cheatsheet.html aws-cheatsheet.html gcp-cheatsheet.html linux-cheatsheet.html system-design-cheatsheet.html finance-domain-cheatsheet.html system-design-patterns-primer.md dsa-patterns-primer.md; do
+for f in service-worker.js manifest.json patterns.md neetcode-150.md java-interview-primer.md go-interview-primer.md rust-interview-primer.md python-interview-primer.md kotlin-interview-primer.md cpp-interview-primer.md postgres-interview-primer.md db-theory-primer.md sql-patterns-primer.md sql-practice.md advanced-sql-practice.md csharp-interview-primer.md aws-interview-primer.md gcp-interview-primer.md linux-interview-primer.md kubernetes-interview-primer.md ai-engineering-primer.md sql-postgres-cheatsheet.html java-cheatsheet.html csharp-cheatsheet.html go-cheatsheet.html cpp-cheatsheet.html aws-cheatsheet.html gcp-cheatsheet.html linux-cheatsheet.html kubernetes-cheatsheet.html system-design-cheatsheet.html finance-domain-cheatsheet.html system-design-patterns-primer.md dsa-patterns-primer.md; do
   if [ -f "$WEB_PUBLIC/$f" ]; then
     cp "$WEB_PUBLIC/$f" "$OUT/$f"
     echo "   ✓ $f"

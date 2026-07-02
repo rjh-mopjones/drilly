@@ -309,6 +309,21 @@
       "cheatSheetUrl": "/linux-cheatsheet.html"
     },
     {
+      "id": "kubernetes",
+      "file": "/kubernetes-interview-primer.md",
+      "title": "Kubernetes",
+      "category": "DevOps",
+      "itemLabel": "Topic",
+      "itemsPlural": "Kubernetes topics",
+      "storagePrefix": "ip:kubernetes",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": [],
+      "cheatSheetUrl": "/kubernetes-cheatsheet.html"
+    },
+    {
       "id": "ai-engineering",
       "file": "/ai-engineering-primer.md",
       "title": "AI Engineering",
