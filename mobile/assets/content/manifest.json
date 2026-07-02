@@ -354,6 +354,21 @@
       "cheatSheetUrl": "/terraform-cheatsheet.html"
     },
     {
+      "id": "docker",
+      "file": "/docker-interview-primer.md",
+      "title": "Docker / Containers",
+      "category": "DevOps",
+      "itemLabel": "Topic",
+      "itemsPlural": "Docker topics",
+      "storagePrefix": "ip:docker",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": [],
+      "cheatSheetUrl": "/docker-cheatsheet.html"
+    },
+    {
       "id": "ai-engineering",
       "file": "/ai-engineering-primer.md",
       "title": "AI Engineering",

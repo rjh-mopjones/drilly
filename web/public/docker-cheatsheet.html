@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Docker / Containers Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+/* spanning title bar */
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>Docker / Containers Cheat Sheet</h1><span class="meta">DevOps focus · images · layers · Dockerfile · networking · compose · drilly</span></div>
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="warn">!</span> footgun / anti-pattern &nbsp; <code>&#9744;</code> Dockerfile-review item</li>
+<li>Focus: the five interview pillars — <b>images, layers, Dockerfile, networking, compose</b> — plus builds, security &amp; debugging.</li>
+<li>Mental model: a container = an <b>isolated process</b> (namespaces + cgroups + a union FS), sharing the host kernel — not a VM.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+</ul></section>
+
+<section class="card diagram"><h3>Image · Layer · Container</h3>
+<div class="mermaid">
+flowchart TD
+  D["Dockerfile"] -->|build| IMG["Image = read-only layers + config"]
+  IMG --> L1["layer: base"]
+  IMG --> L2["layer: deps"]
+  IMG --> L3["layer: app"]
+  IMG -->|run| C["Container<br/>= image + thin writable layer"]
+</div>
+<p class="cap">Each RUN/COPY/ADD = a cached, content-addressed layer, shared across images. A container adds one writable copy-on-write layer (ephemeral → use volumes for data).</p>
+</section>
+
+<section class="card"><h3>CLI Reference</h3>
+<pre><code>docker build -t app:1.2 .        # build from Dockerfile
+docker run -d --name web -p 8080:80 app:1.2
+docker ps [-a]                   # running / all
+docker exec -it web sh           # shell in a container
+docker logs -f --tail=100 web
+docker inspect web               # full JSON (.State ...)
+docker stats     docker top web  # live resources
+docker images    docker history app:1.2
+docker system df                 # disk usage
+docker system prune [-a]         # reclaim space !</code></pre>
+<p>Exit codes: <b>137</b>=OOM/SIGKILL · <b>143</b>=SIGTERM · 139=segfault · 125/126/127=docker/exec errors.</p>
+</section>
+
+<section class="card"><h3>Dockerfile Instructions</h3>
+<table><thead><tr><th>Instr</th><th>Does</th></tr></thead><tbody>
+<tr><td>FROM</td><td>base image (or stage AS)</td></tr>
+<tr><td>RUN</td><td>exec at build → a layer</td></tr>
+<tr><td>COPY</td><td>copy context in (prefer over ADD)</td></tr>
+<tr><td>ADD</td><td>COPY + URL/tar-extract <span class="warn">!</span></td></tr>
+<tr><td>WORKDIR</td><td>set/create cwd (not RUN cd)</td></tr>
+<tr><td>ENV / ARG</td><td>runtime env / build-time var</td></tr>
+<tr><td>EXPOSE</td><td><b>docs only</b> — does NOT publish <span class="warn">!</span></td></tr>
+<tr><td>USER</td><td>drop from root</td></tr>
+<tr><td>ENTRYPOINT/CMD</td><td>executable / default args</td></tr>
+<tr><td>HEALTHCHECK</td><td>liveness probe</td></tr>
+</tbody></table>
+<p>ARG is visible in history — <b>never a secret</b> <span class="warn">!</span></p>
+</section>
+
+<section class="card"><h3>Layer Caching Rules</h3>
+<ul>
+<li>Cache invalidates from the <b>first changed instruction to the end</b> → order <b>least→most</b> frequently changing.</li>
+<li><b>Copy deps first, install, THEN copy source</b> — so a code change doesn't bust the deps layer:</li>
+</ul>
+<pre><code>COPY package.json package-lock.json ./
+RUN npm ci               # cached unless deps change
+COPY . .                 # only this busts on code edit
+RUN npm run build</code></pre>
+<ul>
+<li><code>.dockerignore</code> shrinks context &amp; stops <code>.git/node_modules</code> busting cache <span class="warn">!</span></li>
+<li>Clean up in the <b>same</b> RUN (a later delete doesn't shrink the image) <span class="warn">!</span></li>
+<li>Pin base by tag/digest; don't <code>apt upgrade</code> in builds.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Multi-Stage &amp; Base Images</h3>
+<pre><code># build stage
+FROM golang:1.22 AS build
+WORKDIR /src
+COPY . .
+RUN CGO_ENABLED=0 go build -o /app ./cmd
+# tiny final stage
+FROM gcr.io/distroless/static
+COPY --from=build /app /app
+USER nonroot
+ENTRYPOINT ["/app"]</code></pre>
+<table><thead><tr><th>Base</th><th>Use</th></tr></thead><tbody>
+<tr><td>scratch</td><td>static binary (Go/Rust)</td></tr>
+<tr><td>distroless</td><td>app+runtime, no shell → small &amp; secure</td></tr>
+<tr><td>alpine (~5MB)</td><td>tiny, musl libc gotchas <span class="warn">!</span></td></tr>
+<tr><td>debian-slim</td><td>glibc, safe default</td></tr>
+</tbody></table>
+</section>
+
+<section class="card"><h3>CMD vs ENTRYPOINT</h3>
+<ul>
+<li><b>ENTRYPOINT</b> = the executable; <b>CMD</b> = default args (overridable by <code>docker run img args</code>).</li>
+<li><b>Exec form</b> <code>["nginx","-g","daemon off;"]</code> → your process is <b>PID 1</b>, gets SIGTERM → graceful stop.</li>
+<li><b>Shell form</b> <code>nginx -g ...</code> → wrapped in <code>/bin/sh -c</code>, <b>swallows signals</b> → no graceful shutdown, 10s then SIGKILL <span class="warn">!</span></li>
+<li>PID 1 must reap zombies &amp; handle signals — add <code>--init</code>/tini if your app can't.</li>
+<li>Entrypoint script: do setup then <code>exec "$@"</code> (hand off PID 1) <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>BuildKit &amp; buildx</h3>
+<pre><code># build secret — NOT baked into any layer
+RUN --mount=type=secret,id=npmrc \
+    npm ci
+docker build --secret id=npmrc,src=$HOME/.npmrc .
+
+# package-manager cache across builds
+RUN --mount=type=cache,target=/root/.cache go build ./...
+
+# multi-arch + shared CI cache
+docker buildx build --platform linux/amd64,linux/arm64 \
+  --cache-to type=registry,ref=acme/app:cache \
+  --cache-from type=registry,ref=acme/app:cache -t app .</code></pre>
+<ul>
+<li>Secrets via <code>ARG</code>/<code>COPY</code> persist in image history forever — use BuildKit <code>--secret</code> <span class="warn">!</span></li>
+<li>CI cache never hits? runners are ephemeral → registry cache (<code>--cache-to/from</code>).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Registries &amp; Tags</h3>
+<pre><code>docker tag app:1.2 ghcr.io/acme/app:1.2
+docker push ghcr.io/acme/app:1.2
+docker pull ghcr.io/acme/app@sha256:...   # by digest</code></pre>
+<ul>
+<li>Ref = <code>registry/namespace/repo:tag</code> (defaults docker.io/library, :latest).</li>
+<li>Tags are <b>mutable pointers</b>; <b>digests</b> (@sha256) are immutable — deploy by digest for reproducibility <span class="warn">!</span></li>
+<li><code>:latest</code> is a trap (surprise upgrades, unclear what's running) <span class="warn">!</span></li>
+<li>Build once → <b>promote the same digest</b> across envs; don't rebuild per env.</li>
+<li>Docker Hub anon pull limits break CI → auth / pull-through mirror.</li>
+</ul>
+</section>
+
+<section class="card diagram"><h3>Networking</h3>
+<div class="mermaid">
+flowchart LR
+  H["host :8080"] -->|"-p 8080:80 (DNAT)"| C1["web :80"]
+  C1 -->|"by name (DNS)"| C2["db :5432"]
+  C1 --> NET["user-defined bridge"]
+  C2 --> NET
+</div>
+<table><thead><tr><th>Driver</th><th>Use</th></tr></thead><tbody>
+<tr><td>bridge (default)</td><td>private net + NAT; <b>no DNS on default bridge</b> <span class="warn">!</span></td></tr>
+<tr><td>user-defined bridge</td><td>containers resolve <b>each other by name</b></td></tr>
+<tr><td>host</td><td>share host net, no isolation/mapping</td></tr>
+<tr><td>none / overlay / macvlan</td><td>no net / multi-host / L2 IP</td></tr>
+</tbody></table>
+<ul>
+<li><code>-p host:container</code> publishes; <b>EXPOSE does not</b> <span class="warn">!</span></li>
+<li>Two containers can't talk? default bridge, no DNS → user-defined network / compose. <code>localhost</code> = the container itself; host = <code>host.docker.internal</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Volumes &amp; Storage</h3>
+<table><thead><tr><th>Type</th><th>Use</th></tr></thead><tbody>
+<tr><td><b>named volume</b></td><td>Docker-managed persistent data (prod)</td></tr>
+<tr><td><b>bind mount</b></td><td>host path → dev / live source</td></tr>
+<tr><td><b>tmpfs</b></td><td>in-memory, secrets/scratch</td></tr>
+</tbody></table>
+<pre><code>docker run -v mydata:/var/lib/pg ...        # named
+docker run --mount type=bind,src=$PWD,dst=/app ...
+docker volume ls | prune</code></pre>
+<ul>
+<li>Writable layer is ephemeral — persist with a volume <span class="warn">!</span></li>
+<li>Volumes aren't removed with the container (dangling volumes eat disk) — <code>run --rm -v</code> / <code>volume prune</code>.</li>
+<li>Root container → files owned by root on the host (UID mismatch pain) <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Compose</h3>
+<pre><code>services:
+  web:
+    build: .
+    ports: ["8080:80"]
+    depends_on:
+      db: { condition: service_healthy }   # wait for READY !
+    environment: { DB_HOST: db }
+  db:
+    image: postgres:16
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD","pg_isready","-U","postgres"]
+      interval: 5s
+      retries: 5
+volumes: { pgdata: {} }</code></pre>
+<pre><code>docker compose up -d --build   |   down [-v]
+docker compose logs -f web     |   exec web sh
+docker compose config          # render merged config</code></pre>
+<ul>
+<li>Compose makes a user-defined net → services reach each other <b>by service name</b>.</li>
+<li>Plain <code>depends_on</code> waits for START, not READY — add <code>condition: service_healthy</code> <span class="warn">!</span></li>
+<li>Override files (<code>-f base.yml -f prod.yml</code>) &amp; <code>.env</code> for per-env config.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Resources &amp; Runtime</h3>
+<pre><code>docker run --memory=512m --cpus=1.5 \
+  --restart=on-failure:3 --init \
+  --log-opt max-size=10m --log-opt max-file=3 app</code></pre>
+<ul>
+<li>Over <b>memory</b> limit → <b>OOMKilled (137)</b>; over <b>CPU</b> → <b>throttled</b>, not killed.</li>
+<li>Old JVM/Node saw HOST memory, not the cgroup → OOM; modern runtimes respect cgroups <span class="warn">!</span></li>
+<li>Default <code>json-file</code> logs grow unbounded → set <code>max-size/max-file</code> <span class="warn">!</span></li>
+<li><code>--ulimit nofile</code> fixes "too many open files"; <code>--shm-size</code> for Chrome/Postgres.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Security</h3>
+<ul>
+<li>Shared kernel → weaker isolation than a VM; defense in depth.</li>
+<li>Run <b>non-root</b> (<code>USER</code>); <code>--cap-drop ALL</code> then add only what's needed; <code>--read-only</code> + tmpfs.</li>
+<li><code>--security-opt no-new-privileges</code>; keep the default <b>seccomp</b>/AppArmor profile.</li>
+<li><b>Never</b> <code>--privileged</code>, <code>--net/--pid=host</code>, or mount <code>/var/run/docker.sock</code> (= root on host) <span class="warn">!</span></li>
+<li>No secrets in image/ENV/ARG (leak in history/inspect) — BuildKit <code>--secret</code> at build, mounted files/secret manager at runtime <span class="warn">!</span></li>
+<li>The <code>docker</code> group = root-equivalent.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Image Supply Chain</h3>
+<ul>
+<li><b>Scan</b> images for CVEs (Trivy / Grype / Docker Scout) in CI &amp; at the registry; fail on criticals.</li>
+<li><b>Patch</b> = rebuild regularly (a pinned base rots) — digests for reproducibility + a rebuild pipeline for security.</li>
+<li>Minimal base = fewer packages = fewer CVEs.</li>
+<li><b>Sign</b> images (cosign/sigstore) &amp; verify in admission; <b>SBOM</b> (syft) to know contents; <b>provenance</b>/SLSA attestations.</li>
+<li>Only run signed+scanned images (Kyverno/OPA/Binary Authorization).</li>
+</ul>
+</section>
+
+<section class="card"><h3>&#9744; Dockerfile Review Checklist</h3>
+<ul>
+<li>&#9744; <b>Multi-stage</b>: no build tools/SDK in the final image.</li>
+<li>&#9744; <b>Minimal pinned base</b> (distroless/slim + tag or digest, not <code>:latest</code>).</li>
+<li>&#9744; <b>Non-root <code>USER</code></b>; no secrets in ARG/ENV/layers.</li>
+<li>&#9744; <b><code>.dockerignore</code></b> present; deps copied &amp; installed before source (cache).</li>
+<li>&#9744; Cleanup in the same RUN; versions pinned.</li>
+<li>&#9744; <b>Exec-form</b> ENTRYPOINT/CMD (PID 1 signals); <code>--init</code> if needed.</li>
+<li>&#9744; <b>HEALTHCHECK</b> defined; ports published, not just EXPOSEd.</li>
+<li>&#9744; Image scanned; runs read-only + cap-dropped.</li>
+</ul>
+</section>
+
+<section class="card"><h3>&#9733; Troubleshooting Playbook</h3>
+<h4>Exits immediately (code 0/1)</h4>
+<ul><li>&#9744; <code>logs</code> + exit code; main process ended / wrong CMD → run with a shell / override entrypoint.</li></ul>
+<h4>OOMKilled (137)</h4>
+<ul><li>&#9744; <code>inspect .State.OOMKilled</code>; raise <code>--memory</code> or fix leak; check runtime is cgroup-aware.</li></ul>
+<h4>Image is huge</h4>
+<ul><li>&#9744; <code>history</code>/dive; multi-stage, smaller base, clean in-layer, <code>.dockerignore</code>.</li></ul>
+<h4>Cache never hits in CI</h4>
+<ul><li>&#9744; ephemeral runners → <code>buildx --cache-to/from</code> registry; fix instruction order &amp; context.</li></ul>
+<h4>Containers can't connect</h4>
+<ul><li>&#9744; user-defined network + service name (not localhost); check <code>network inspect</code>, ports.</li></ul>
+<h4>Disk full</h4>
+<ul><li>&#9744; <code>system df</code> → <code>system prune</code> (mind <code>-a</code>); rotate logs; prune volumes/build cache.</li></ul>
+</section>
+
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  try {
+    mermaid.initialize({ startOnLoad: true, theme: "neutral",
+      flowchart: { useMaxWidth: true, htmlLabels: true, nodeSpacing: 18, rankSpacing: 18 },
+      themeVariables: { fontSize: "9px" } });
+  } catch (e) { /* offline / blocked CDN: diagrams degrade to source text, rest of sheet is fine */ }
+</script>
+</body>
+</html>
