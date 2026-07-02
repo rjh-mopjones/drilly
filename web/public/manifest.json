@@ -324,6 +324,21 @@
       "cheatSheetUrl": "/kubernetes-cheatsheet.html"
     },
     {
+      "id": "observability",
+      "file": "/observability-interview-primer.md",
+      "title": "Observability",
+      "category": "DevOps",
+      "itemLabel": "Topic",
+      "itemsPlural": "Observability topics",
+      "storagePrefix": "ip:observability",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": [],
+      "cheatSheetUrl": "/observability-cheatsheet.html"
+    },
+    {
       "id": "ai-engineering",
       "file": "/ai-engineering-primer.md",
       "title": "AI Engineering",
