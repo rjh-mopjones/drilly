@@ -54,6 +54,21 @@ export function SourceLibrary() {
   const { sources, refresh } = useManifest();
   const grouped = useMemo(() => groupByCategory(sources), [sources]);
   const [refreshing, setRefreshing] = useState(false);
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+
+  const toggleCategory = useCallback((category: string) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(category)) next.delete(category);
+      else next.add(category);
+      return next;
+    });
+  }, []);
+  const collapseAll = useCallback(
+    () => setCollapsed(new Set(grouped.map((g) => g.category))),
+    [grouped],
+  );
+  const expandAll = useCallback(() => setCollapsed(new Set()), []);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -100,22 +115,50 @@ export function SourceLibrary() {
         </View>
       </View>
 
-      {grouped.map(({ category, sources: groupSources }) => (
-        <View key={category} style={styles.group}>
-          <Text style={styles.groupHeader}>{category}</Text>
-          {groupSources.map((s) => (
-            <SourceCard
-              key={s.id}
-              source={s}
-              onPress={() =>
-                s.externalUrl
-                  ? openExternalSource(s.externalUrl)
-                  : router.push(`/source/${s.id}`)
-              }
-            />
-          ))}
-        </View>
-      ))}
+      <View style={styles.collapseBar}>
+        <Pressable
+          onPress={collapseAll}
+          style={styles.collapseBtn}
+          accessibilityLabel="Collapse all sections"
+        >
+          <Text style={styles.collapseBtnText}>▸ Collapse all</Text>
+        </Pressable>
+        <Pressable
+          onPress={expandAll}
+          style={styles.collapseBtn}
+          accessibilityLabel="Expand all sections"
+        >
+          <Text style={styles.collapseBtnText}>▾ Expand all</Text>
+        </Pressable>
+      </View>
+
+      {grouped.map(({ category, sources: groupSources }) => {
+        const isCollapsed = collapsed.has(category);
+        return (
+          <View key={category} style={styles.group}>
+            <Pressable
+              onPress={() => toggleCategory(category)}
+              style={styles.groupHeaderRow}
+              accessibilityLabel={`${isCollapsed ? "Expand" : "Collapse"} ${category}`}
+            >
+              <Text style={styles.groupToggle}>{isCollapsed ? "▸" : "▾"}</Text>
+              <Text style={styles.groupHeader}>{category}</Text>
+            </Pressable>
+            {!isCollapsed &&
+              groupSources.map((s) => (
+                <SourceCard
+                  key={s.id}
+                  source={s}
+                  onPress={() =>
+                    s.externalUrl
+                      ? openExternalSource(s.externalUrl)
+                      : router.push(`/source/${s.id}`)
+                  }
+                />
+              ))}
+          </View>
+        );
+      })}
 
       <View style={styles.footer} />
     </ScrollView>
@@ -166,15 +209,40 @@ function makeStyles(p: Palette) {
     group: {
       marginTop: 12,
     },
+    collapseBar: {
+      flexDirection: "row",
+      gap: 6,
+      paddingHorizontal: 12,
+      paddingTop: 10,
+    },
+    collapseBtn: {
+      paddingHorizontal: 8,
+      paddingVertical: 4,
+      borderRadius: 6,
+    },
+    collapseBtnText: {
+      color: p.textMuted,
+      fontSize: 12,
+      fontWeight: "600",
+    },
+    groupHeaderRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      paddingHorizontal: 16,
+      paddingBottom: 6,
+      paddingTop: 12,
+    },
+    groupToggle: {
+      color: p.textMuted,
+      fontSize: 10,
+      width: 14,
+    },
     groupHeader: {
       color: p.textMuted,
       fontSize: 11,
       fontWeight: "600",
       letterSpacing: 1.5,
       textTransform: "uppercase",
-      paddingHorizontal: 16,
-      paddingBottom: 6,
-      paddingTop: 12,
     },
     footer: { height: 32 },
   });

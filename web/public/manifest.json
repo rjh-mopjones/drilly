@@ -4,8 +4,8 @@
     {
       "id": "sd-patterns",
       "file": "/system-design-patterns-primer.md",
-      "title": "Patterns",
-      "category": "System Design",
+      "title": "System Design Patterns",
+      "category": "System Fundamentals",
       "itemLabel": "Topic",
       "itemsPlural": "system design patterns",
       "storagePrefix": "ip:sd-patterns",
@@ -19,8 +19,8 @@
     {
       "id": "patterns",
       "file": "/patterns.md",
-      "title": "Example Questions",
-      "category": "System Design",
+      "title": "System Design Questions",
+      "category": "System Fundamentals",
       "itemLabel": "Question",
       "itemsPlural": "example questions",
       "storagePrefix": "sdf:patterns",
@@ -186,7 +186,7 @@
     {
       "id": "sql-patterns",
       "file": "/sql-patterns-primer.md",
-      "title": "Patterns",
+      "title": "SQL Patterns",
       "category": "Databases",
       "itemLabel": "Topic",
       "itemsPlural": "SQL patterns",
@@ -198,31 +198,13 @@
       "sectionOrder": []
     },
     {
-      "id": "sql-practice",
-      "file": "/sql-practice.md",
-      "title": "SQL Practice",
+      "id": "sql-questions",
+      "file": "/sql-questions.md",
+      "title": "SQL Questions",
       "category": "Databases",
       "itemLabel": "Problem",
-      "itemsPlural": "SQL problems",
-      "storagePrefix": "sdf:sql-practice",
-      "defaultRevealedSections": [
-        "Problem"
-      ],
-      "sectionOrder": [
-        "Problem",
-        "Pattern",
-        "Explanation",
-        "Solution"
-      ]
-    },
-    {
-      "id": "advanced-sql-practice",
-      "file": "/advanced-sql-practice.md",
-      "title": "Advanced SQL Practice",
-      "category": "Databases",
-      "itemLabel": "Problem",
-      "itemsPlural": "advanced SQL problems",
-      "storagePrefix": "sdf:advanced-sql-practice",
+      "itemsPlural": "SQL questions",
+      "storagePrefix": "sdf:sql-questions",
       "defaultRevealedSections": [
         "Problem"
       ],
@@ -446,7 +428,7 @@
       "id": "finance-domain-cheatsheet",
       "file": "/finance-domain-cheatsheet.html",
       "title": "Finance Domain",
-      "category": "System Design",
+      "category": "System Fundamentals",
       "externalUrl": "/finance-domain-cheatsheet.html",
       "itemLabel": "Section",
       "itemsPlural": "open printable A4 sheet ↗",

@@ -123,6 +123,14 @@ export function DesktopSidebar() {
     });
   }, []);
 
+  // Collapse / expand every category section at once.
+  const collapseAll = useCallback(() => {
+    setCollapsedCategories(new Set(grouped.map((g) => g.category)));
+  }, [grouped]);
+  const expandAll = useCallback(() => {
+    setCollapsedCategories(new Set());
+  }, []);
+
   const onRefresh = useCallback(async () => {
     if (busy) return;
     setBusy(true);
@@ -177,6 +185,23 @@ export function DesktopSidebar() {
             <Text style={styles.iconGlyph}>⚙</Text>
           </Pressable>
         </View>
+      </View>
+
+      <View style={styles.collapseBar}>
+        <Pressable
+          onPress={collapseAll}
+          style={({ pressed }) => [styles.collapseBtn, pressed && styles.sourceRowPressed]}
+          accessibilityLabel="Collapse all sections"
+        >
+          <Text style={styles.collapseBtnText}>▸ Collapse all</Text>
+        </Pressable>
+        <Pressable
+          onPress={expandAll}
+          style={({ pressed }) => [styles.collapseBtn, pressed && styles.sourceRowPressed]}
+          accessibilityLabel="Expand all sections"
+        >
+          <Text style={styles.collapseBtnText}>▾ Expand all</Text>
+        </Pressable>
       </View>
 
       <ScrollView style={styles.body} contentContainerStyle={styles.bodyInner}>
@@ -368,6 +393,24 @@ function makeStyles(p: Palette) {
       color: p.textMuted,
       fontSize: 18,
       lineHeight: 20,
+    },
+    collapseBar: {
+      flexDirection: "row",
+      gap: 6,
+      paddingHorizontal: 12,
+      paddingVertical: 6,
+      borderBottomWidth: 1,
+      borderBottomColor: p.border,
+    },
+    collapseBtn: {
+      paddingHorizontal: 8,
+      paddingVertical: 4,
+      borderRadius: 6,
+    },
+    collapseBtnText: {
+      color: p.textMuted,
+      fontSize: 11,
+      fontWeight: "600",
     },
     body: { flex: 1 },
     bodyInner: { paddingVertical: 8 },
