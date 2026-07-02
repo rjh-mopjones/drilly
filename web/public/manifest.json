@@ -384,6 +384,21 @@
       "cheatSheetUrl": "/cicd-cheatsheet.html"
     },
     {
+      "id": "networking",
+      "file": "/networking-interview-primer.md",
+      "title": "Networking",
+      "category": "DevOps",
+      "itemLabel": "Topic",
+      "itemsPlural": "Networking topics",
+      "storagePrefix": "ip:networking",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": [],
+      "cheatSheetUrl": "/networking-cheatsheet.html"
+    },
+    {
       "id": "ai-engineering",
       "file": "/ai-engineering-primer.md",
       "title": "AI Engineering",
