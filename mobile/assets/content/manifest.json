@@ -399,6 +399,21 @@
       "cheatSheetUrl": "/networking-cheatsheet.html"
     },
     {
+      "id": "git",
+      "file": "/git-interview-primer.md",
+      "title": "Git",
+      "category": "DevOps",
+      "itemLabel": "Topic",
+      "itemsPlural": "Git topics",
+      "storagePrefix": "ip:git",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": [],
+      "cheatSheetUrl": "/git-cheatsheet.html"
+    },
+    {
       "id": "ai-engineering",
       "file": "/ai-engineering-primer.md",
       "title": "AI Engineering",

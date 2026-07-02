@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Git Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+/* spanning title bar */
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>Git Cheat Sheet</h1><span class="meta">engineer/DevOps focus · object model · branching · undo · recovery · drilly</span></div>
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="warn">!</span> footgun / data-loss &nbsp; <code>&#9744;</code> recovery / review step</li>
+<li>Focus: the mental model + the commands interviews probe — object model, branches, merge/rebase, undo, and recovery.</li>
+<li>Golden rules: a <b>branch is a pointer</b>; Git stores <b>snapshots</b>; <b>never rewrite shared history</b>; the <b>reflog</b> saves you.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+</ul></section>
+
+<section class="card diagram"><h3>The Three Trees</h3>
+<div class="mermaid">
+flowchart LR
+  W["working dir"] -->|"git add"| I["index / staging"]
+  I -->|"git commit"| H["HEAD (repo)"]
+  H -->|"restore / checkout"| W
+  I -->|"restore --staged"| W
+</div>
+<p class="cap">add: working→index. commit: index→a new commit. HEAD = last commit. diff = working↔index; diff --staged = index↔HEAD.</p>
+</section>
+
+<section class="card"><h3>Object Model</h3>
+<ul>
+<li><b>blob</b> = file contents · <b>tree</b> = a directory (→ blobs/trees) · <b>commit</b> = one tree + parent(s) + author/msg · <b>tag</b> object.</li>
+<li>Everything content-addressed by SHA → identical content stored once; changing anything changes the hash &amp; all descendants (immutable history).</li>
+<li><b>Snapshots, not diffs</b> (each commit = full state; deltas only in packfiles at storage time).</li>
+<li>A <b>branch/HEAD/ref</b> = a file holding a commit SHA — a movable pointer.</li>
+</ul>
+<pre><code>git cat-file -p HEAD    git ls-tree HEAD
+git rev-parse HEAD~2</code></pre>
+</section>
+
+<section class="card"><h3>Basics</h3>
+<pre><code>git status -sb          git add -p          # stage hunks
+git commit -m "msg"     git commit --amend  # fix last (unpushed!)
+git diff                # working vs index
+git diff --staged       # index vs HEAD
+git log --oneline --graph --all
+git show HEAD:path      git blame -L 10,20 file</code></pre>
+<ul>
+<li>Refs: <code>HEAD</code>, <code>HEAD~3</code> (ancestor), <code>HEAD^2</code> (2nd merge parent), <code>A..B</code> range.</li>
+<li>Commit msg: imperative subject ≤50, body explains <b>why</b>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Branches &amp; Remotes</h3>
+<pre><code>git switch -c feature/x         # create+switch
+git branch -vv                  # upstream + ahead/behind
+git fetch                       # download, no merge (safe)
+git pull --rebase               # fetch + rebase (linear)
+git push -u origin feature/x
+git push origin --delete old</code></pre>
+<ul>
+<li><code>origin/main</code> = read-only cache of the remote at last <b>fetch</b>.</li>
+<li>"rejected non-fast-forward" = remote has commits you lack → fetch/rebase first, don't blind-force <span class="warn">!</span></li>
+<li><b>Detached HEAD</b>: on a SHA/tag, not a branch — commit there &amp; switch away = "lost" (reflog recovers) <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Merge vs Rebase</h3>
+<table><thead><tr><th></th><th>merge</th><th>rebase</th></tr></thead><tbody>
+<tr><td>history</td><td>true, with bubbles</td><td>linear, clean</td></tr>
+<tr><td>commits</td><td>preserved + merge commit</td><td>rewritten (new SHAs)</td></tr>
+<tr><td>safe on shared?</td><td>yes</td><td><b>NO</b> <span class="warn">!</span></td></tr>
+</tbody></table>
+<ul>
+<li><b>Fast-forward</b>: no divergence → just move the pointer (<code>--no-ff</code> forces a bubble).</li>
+<li><b>3-way merge</b>: combine both tips + merge-base → a 2-parent commit (conflicts if same lines).</li>
+<li><b>Golden rule:</b> never rebase/rewrite commits others have pulled <span class="warn">!</span> Your own PR branch → <code>--force-with-lease</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Undo — reset / revert / restore</h3>
+<table><thead><tr><th>reset</th><th>HEAD·index·wd</th></tr></thead><tbody>
+<tr><td>--soft</td><td>move HEAD only (keep staged)</td></tr>
+<tr><td>--mixed (default)</td><td>+ reset index (keep edits)</td></tr>
+<tr><td>--hard</td><td>+ reset wd → <b>DISCARD</b> <span class="warn">!</span></td></tr>
+</tbody></table>
+<pre><code>git reset --soft HEAD~1     # uncommit, keep staged
+git restore --staged file   # unstage
+git restore file            # discard edits (loss!)
+git revert &lt;sha&gt;             # NEW commit that undoes (shared-safe)
+git reset --hard origin/main</code></pre>
+<p><b>Local/unpushed</b> → reset. <b>Shared/pushed</b> → <b>revert</b> <span class="warn">!</span></p>
+</section>
+
+<section class="card"><h3>Stash &amp; Reflog</h3>
+<pre><code>git stash push -u -m "wip"   git stash list
+git stash pop                # apply + drop
+git stash apply stash@{1}
+git reflog                   # every HEAD move (safety net!)
+git reset --hard HEAD@{1}    # undo a bad reset/rebase
+git checkout -b recover &lt;sha-from-reflog&gt;</code></pre>
+<ul>
+<li><b>Reflog</b> records where HEAD/branches have been (~90 days) → recover "lost" commits after reset/rebase/amend/branch-delete <span class="warn">!</span></li>
+<li><code>git fsck --lost-found</code> for dangling commits when reflog won't help.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Interactive Rebase</h3>
+<pre><code>git rebase -i HEAD~5</code></pre>
+<table><thead><tr><th>cmd</th><th>does</th></tr></thead><tbody>
+<tr><td>pick</td><td>keep</td></tr>
+<tr><td>reword</td><td>change message</td></tr>
+<tr><td>edit</td><td>stop to amend/split</td></tr>
+<tr><td>squash / fixup</td><td>fold into prev (keep / drop msg)</td></tr>
+<tr><td>drop</td><td>remove</td></tr>
+</tbody></table>
+<ul>
+<li>Reorder by moving lines; <code>exec</code> runs tests between commits.</li>
+<li><code>commit --fixup=&lt;sha&gt;</code> + <code>rebase -i --autosquash</code> to auto-arrange.</li>
+<li>Clean up a messy feature branch before a PR — LOCAL only <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Conflicts</h3>
+<pre><code>&lt;&lt;&lt;&lt;&lt;&lt;&lt; HEAD        (ours)
+your change
+||||||| base        (zdiff3 shows ancestor)
+=======
+their change
+&gt;&gt;&gt;&gt;&gt;&gt;&gt; branch     (theirs)</code></pre>
+<ul>
+<li>Edit to the intended result, remove all markers, <code>git add</code>, then <code>commit</code>/<code>--continue</code>. Bail: <code>merge/rebase --abort</code>.</li>
+<li>Enable <code>merge.conflictStyle=zdiff3</code> (shows the base) &amp; <code>rerere.enabled</code> (auto-reapply resolutions) <span class="warn">!</span></li>
+<li>In a <b>rebase</b>, "ours" = the branch you rebase ONTO (flips vs merge) <span class="warn">!</span></li>
+<li>A clean text merge can still be semantically broken → run tests.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Cherry-pick &amp; Bisect</h3>
+<pre><code>git cherry-pick &lt;sha&gt;        # apply one commit here (new SHA)
+git cherry-pick A..B         # a range
+git bisect start
+git bisect bad; git bisect good v1.0
+git bisect run ./test.sh     # AUTOMATE the search
+git bisect reset</code></pre>
+<ul>
+<li>Cherry-pick to backport a fix to a release branch.</li>
+<li>Bisect = binary search for the commit that broke it (log2 n) — atomic commits make it powerful.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Branching &amp; PRs</h3>
+<ul>
+<li><b>Trunk-based</b> (short branches + feature flags + CI) = modern default; GitHub Flow (main + PRs); GitFlow = heavy, scheduled releases; long branches → merge hell <span class="warn">!</span></li>
+<li>PR merge modes: <b>merge commit</b> (full history) · <b>squash</b> (one clean commit, popular) · <b>rebase</b> (linear, keep commits).</li>
+<li>Branch protection: required review + CI checks, up-to-date branch, CODEOWNERS, no direct push to main.</li>
+<li>Keep a PR current: rebase onto main (then <code>--force-with-lease</code>) or merge main in.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Tags &amp; Config</h3>
+<pre><code>git tag -a v1.2.0 -m "release"   # annotated (preferred)
+git push origin v1.2.0           # tags NOT pushed by default!
+git describe --tags              # v1.2.0-14-gabc123</code></pre>
+<ul>
+<li><b>Annotated</b> (object + tagger/msg/sign) vs <b>lightweight</b> (bare pointer). Sign releases (<code>-s</code>).</li>
+</ul>
+<pre><code>git config --global pull.rebase true
+git config --global merge.conflictStyle zdiff3
+git config --global alias.lg "log --oneline --graph --all"</code></pre>
+<p>Levels: system → global → local. <code>.gitignore</code> can't untrack already-tracked files → <code>git rm --cached</code> <span class="warn">!</span></p>
+</section>
+
+<section class="card"><h3>Internals · Big Repos · Hooks</h3>
+<ul>
+<li>Loose objects → <b>packfiles</b> (delta-compressed) via <code>git gc</code>; unreachable objects pruned after the reflog grace window.</li>
+<li>Big repos: <b>shallow clone</b> <code>--depth 1</code> (CI), <b>partial clone</b> <code>--filter=blob:none</code>, <b>sparse-checkout</b>, <b>Git LFS</b> for big binaries (never commit large binaries raw — every clone keeps every version) <span class="warn">!</span></li>
+<li>Submodule = pinned pointer to another repo (extra <code>--init --recursive</code>); subtree = copied-in.</li>
+<li><b>Hooks</b> (pre-commit/commit-msg/pre-push) are local &amp; advisory → CI/branch-protection enforces. Share via pre-commit/Husky/lefthook.</li>
+</ul>
+</section>
+
+<section class="card"><h3>&#9733; Recovery Playbook</h3>
+<ul>
+<li>&#9744; <b>Committed to wrong branch:</b> <code>git branch new; git reset --hard HEAD~1</code> (on the wrong one) — or cherry-pick.</li>
+<li>&#9744; <b>Committed a secret:</b> <code>git filter-repo</code> to purge from ALL history <b>+ ROTATE the secret</b> (it's already leaked) <span class="warn">!</span></li>
+<li>&#9744; <b>Undo last commit, keep work:</b> <code>git reset --soft HEAD~1</code>.</li>
+<li>&#9744; <b>Undo a pushed commit:</b> <code>git revert &lt;sha&gt;</code> (never reset+force on shared).</li>
+<li>&#9744; <b>Lost commits (bad reset/rebase):</b> <code>git reflog</code> → <code>git reset --hard HEAD@{n}</code>.</li>
+<li>&#9744; <b>Force-push clobbered main:</b> recover the old SHA from reflog / a good clone → reset + push.</li>
+<li>&#9744; <b>Bad merge:</b> <code>git revert -m 1 &lt;merge-sha&gt;</code> (mind the re-merge gotcha).</li>
+<li>&#9744; <b>Which commit broke it:</b> <code>git bisect run</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>&#9744; Safe-Habits Checklist</h3>
+<ul>
+<li>&#9744; Only rewrite <b>local/unpushed</b> history; on shared branches use <code>revert</code>.</li>
+<li>&#9744; <code>--force-with-lease</code>, never bare <code>--force</code>.</li>
+<li>&#9744; <code>fetch</code> &amp; review before you act; <code>pull --rebase</code>/<code>--ff-only</code> for clean history.</li>
+<li>&#9744; Small, atomic commits (better review / bisect / revert); clean the branch before a PR.</li>
+<li>&#9744; Enable <code>zdiff3</code> + <code>rerere</code>; a <code>.gitignore</code> for junk; global identity + signing set up.</li>
+<li>&#9744; Never commit secrets/large binaries; protect <code>main</code> (no force-push, required checks).</li>
+<li>&#9744; When in doubt, it's in the <b>reflog</b> — don't panic.</li>
+</ul>
+</section>
+
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  try {
+    mermaid.initialize({ startOnLoad: true, theme: "neutral",
+      flowchart: { useMaxWidth: true, htmlLabels: true, nodeSpacing: 18, rankSpacing: 18 },
+      themeVariables: { fontSize: "9px" } });
+  } catch (e) { /* offline / blocked CDN: diagrams degrade to source text, rest of sheet is fine */ }
+</script>
+</body>
+</html>
