@@ -369,6 +369,21 @@
       "cheatSheetUrl": "/docker-cheatsheet.html"
     },
     {
+      "id": "cicd",
+      "file": "/cicd-interview-primer.md",
+      "title": "CI/CD",
+      "category": "DevOps",
+      "itemLabel": "Topic",
+      "itemsPlural": "CI/CD topics",
+      "storagePrefix": "ip:cicd",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": [],
+      "cheatSheetUrl": "/cicd-cheatsheet.html"
+    },
+    {
       "id": "ai-engineering",
       "file": "/ai-engineering-primer.md",
       "title": "AI Engineering",
