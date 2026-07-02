@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Cassandra Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+/* spanning title bar */
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>Cassandra Cheat Sheet</h1><span class="meta">distributed NoSQL · partitioning · consistency · data modeling · drilly</span></div>
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="warn">!</span> footgun / anti-pattern &nbsp; <code>&#9744;</code> data-model review item</li>
+<li>Focus: the architecture &amp; the <b>query-first data modeling</b> that interviews live on — plus storage internals, consistency &amp; ops.</li>
+<li>Golden rule: <b>model around your queries</b>, denormalize, one table per access pattern. Partition key = distribution; clustering = order.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+</ul></section>
+
+<section class="card diagram"><h3>Architecture</h3>
+<div class="mermaid">
+flowchart LR
+  C["client"] --> CO["coordinator (any node)"]
+  CO --> R1["replica 1"]
+  CO --> R2["replica 2"]
+  CO --> R3["replica 3"]
+  R1 -. gossip .- R2
+  R2 -. gossip .- R3
+</div>
+<p class="cap">Masterless peer-to-peer ring — every node equal, no leader/SPOF. Nodes gossip membership. Any node coordinates a request &amp; forwards to the RF replicas. AP in CAP with tunable consistency; write-optimized (LSM).</p>
+</section>
+
+<section class="card"><h3>Partitioning &amp; the Ring</h3>
+<ul>
+<li>Data placed by <b>consistent hashing</b> on a <b>token ring</b>: <code>hash(partition key)</code> → token → owning node(s) (Murmur3).</li>
+<li><b>Vnodes</b>: each node owns many small token ranges → balance + fast rebuild/streaming.</li>
+<li>The <b>partition key choice = load balance</b>. Low-cardinality / celebrity key → <b>hot partition</b> <span class="warn">!</span></li>
+<li>Adding a node reshuffles only neighbouring ranges (run <code>nodetool cleanup</code> after).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Replication</h3>
+<ul>
+<li><b>RF</b> = copies per partition (3 typical); replicas = the token owner + next nodes clockwise.</li>
+<li><b>NetworkTopologyStrategy</b> (production): RF <b>per DC</b>, replicas on distinct <b>racks</b>. SimpleStrategy = dev only <span class="warn">!</span></li>
+<li>A <b>snitch</b> tells nodes the DC/rack topology.</li>
+</ul>
+<pre><code>CREATE KEYSPACE app WITH replication =
+ {'class':'NetworkTopologyStrategy','dc1':3,'dc2':3};</code></pre>
+</section>
+
+<section class="card"><h3>Tunable Consistency</h3>
+<table><thead><tr><th>CL</th><th>meaning</th></tr></thead><tbody>
+<tr><td>ONE / LOCAL_ONE</td><td>1 replica (fast, may be stale)</td></tr>
+<tr><td>QUORUM</td><td>majority of ALL replicas</td></tr>
+<tr><td>LOCAL_QUORUM</td><td>majority in local DC (multi-DC workhorse)</td></tr>
+<tr><td>ALL</td><td>every replica (no availability slack)</td></tr>
+</tbody></table>
+<ul>
+<li><b>Strong (read-your-writes) ⇔ R + W &gt; RF</b> — e.g. RF3, W=QUORUM(2), R=QUORUM(2): 2+2&gt;3 ✓ <span class="warn">!</span></li>
+<li>RF3 + QUORUM tolerates 1 node down. Conflicts = last-write-wins by timestamp (clock skew risk).</li>
+</ul>
+</section>
+
+<section class="card"><h3>CQL &amp; Primary Key</h3>
+<pre><code>CREATE TABLE users_by_id (
+  id uuid PRIMARY KEY, email text, name text);
+
+CREATE TABLE messages_by_conv (
+  conv_id uuid, bucket date, ts timeuuid,
+  sender text, body text,
+  PRIMARY KEY ((conv_id, bucket), ts)
+) WITH CLUSTERING ORDER BY (ts DESC);
+SELECT * FROM messages_by_conv
+ WHERE conv_id=? AND bucket=? LIMIT 50;</code></pre>
+<ul>
+<li><b>PK = partition key + clustering columns.</b> Partition key = WHICH node; clustering = ORDER within the partition. <code>((a,b),c)</code> = composite partition key.</li>
+<li>Query by the WHOLE partition key + clustering columns <b>in order</b>; INSERT is an <b>UPSERT</b> (no existence check) <span class="warn">!</span></li>
+<li><b><code>ALLOW FILTERING</code> = red flag</b> (full scan) — remodel instead <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Query-First Modeling</h3>
+<ul>
+<li>Start from <b>access patterns</b>, not entities. <b>Denormalize</b>; <b>one table per query</b>.</li>
+<li><b>No joins, no ad-hoc queries.</b> Duplicate data across tables; keep in sync on write (batch/app).</li>
+<li>Choose partition key for <b>even distribution</b>, clustering for <b>order/uniqueness</b>.</li>
+<li>Need another lookup (by email)? → a second table <code>users_by_email</code>, not a secondary index <span class="warn">!</span></li>
+<li>Validate partition size BEFORE shipping.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Partition Anti-patterns</h3>
+<table><thead><tr><th>Smell</th><th>Fix</th></tr></thead><tbody>
+<tr><td>hot partition (one node hot)</td><td>higher-cardinality / composite key <span class="warn">!</span></td></tr>
+<tr><td>unbounded partition (grows forever)</td><td>add a <b>time/hash bucket</b> to the PK <span class="warn">!</span></td></tr>
+<tr><td>huge partition (&gt;100MB)</td><td>bucket to bound size</td></tr>
+<tr><td>tombstone-heavy partition</td><td>TTL+TWCS, avoid deletes <span class="warn">!</span></td></tr>
+</tbody></table>
+<p>Target: partitions ≲100MB / ≲100k rows (2B-cell hard limit). Even spread across the ring.</p>
+</section>
+
+<section class="card diagram"><h3>Write &amp; Read Paths</h3>
+<div class="mermaid">
+flowchart LR
+  W["write"] --> CL["commit log (durable)"]
+  W --> MT["memtable (RAM)"]
+  MT -->|flush| SS["immutable SSTable"]
+</div>
+<ul>
+<li><b>Write</b> = append to commit log + memtable → ACK at CL → later flush to SSTable. Very fast, no read-before-write. Down replica → <b>hinted handoff</b>.</li>
+<li><b>Read</b> merges the memtable + many SSTables (newest cell wins), using <b>bloom filters</b> + partition index + caches; <b>read repair</b> fixes stale replicas. Many SSTables/tombstones → slow reads <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>SSTables &amp; Compaction</h3>
+<p>LSM tree: immutable SSTables merged in the background to discard overwrites/expired data &amp; cut read count.</p>
+<table><thead><tr><th>Strategy</th><th>Use</th></tr></thead><tbody>
+<tr><td>STCS (default)</td><td>write-heavy; read/space amp; needs 2× disk</td></tr>
+<tr><td>LCS</td><td>read/update-heavy; ~1 SSTable/level; high write amp</td></tr>
+<tr><td>TWCS</td><td><b>time-series + TTL</b> — drop whole windows cheaply</td></tr>
+<tr><td>UCS (5.0)</td><td>unified, tunable STCS↔LCS</td></tr>
+</tbody></table>
+<p>Throttle compaction so it doesn't starve queries; watch pending compactions.</p>
+</section>
+
+<section class="card"><h3>Tombstones · Deletes · TTL</h3>
+<ul>
+<li>A <b>delete is a write</b> — it writes a <b>tombstone</b> masking old data until compaction removes it.</li>
+<li><b>gc_grace_seconds</b> (default 10d) keeps tombstones so a repair can propagate the delete to all replicas <span class="warn">!</span></li>
+<li><b>Run repair within gc_grace</b> or deleted data can <b>resurrect (zombies)</b> <span class="warn">!</span></li>
+<li>Too many tombstones → slow reads / <code>TombstoneOverwhelmingException</code> (100k abort). The <b>queue pattern is an anti-pattern</b> <span class="warn">!</span></li>
+<li><b>TTL</b> auto-expires (→ tombstone → compacted). Prefer TTL+TWCS over explicit deletes.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Repair &amp; Anti-Entropy</h3>
+<ul>
+<li>Replicas drift → 3 mechanisms fix them: <b>hinted handoff</b> (brief outages), <b>read repair</b> (only read data), <b>nodetool repair</b> (everything).</li>
+<li><code>nodetool repair</code> uses <b>Merkle trees</b> to compare ranges &amp; stream only differences.</li>
+<li><b>Must repair every node within gc_grace_seconds</b> — use <b>Cassandra Reaper</b> to schedule/throttle <span class="warn">!</span></li>
+<li>Full vs incremental; <code>-pr</code> primary-range to avoid redundant work.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Types · Indexing · LWT · Batch</h3>
+<ul>
+<li>Collections (set/map/list — keep small; list has read-before-write) · UDTs · <b>counters</b> (approximate, not exact accounting) · static columns.</li>
+<li><b>Secondary index (2i)</b> = local, scatter-gather across nodes — only for restricted/low-card queries; often a <b>separate table</b> is better <span class="warn">!</span> <b>SAI</b> (5.0) is the modern index (+ vector/ANN).</li>
+<li><b>LWT</b> (IF NOT EXISTS / CAS) = linearizable via Paxos → ~4× latency; use rarely (uniqueness) <span class="warn">!</span></li>
+<li><b>Batch ≠ performance.</b> Logged batch = atomicity across a FEW related tables; a multi-partition batch for bulk load overloads the coordinator &amp; is SLOWER than parallel async writes <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Ops &amp; Tuning</h3>
+<pre><code>nodetool status          # UN/DN, ownership, load
+nodetool tablestats ks.tbl   tablehistograms
+nodetool compactionstats     tpstats   # dropped/pending
+nodetool repair -pr          nodetool cleanup
+nodetool snapshot            nodetool decommission</code></pre>
+<ul>
+<li>Add node → bootstraps &amp; streams → <code>cleanup</code> old nodes. Backups = <code>snapshot</code> (SSTable hard-links) + off-node copy.</li>
+<li>JVM heap ~8–16GB, G1GC; long GC pause → node flaps &amp; dropped mutations <span class="warn">!</span></li>
+<li>Watch <b>p99/p999 latency</b>, SSTables/read, tombstones/read, pending compactions, hints. Key cache good; row cache dangerous.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Cassandra vs Alternatives</h3>
+<table><thead><tr><th>Need</th><th>Pick</th></tr></thead><tbody>
+<tr><td>huge writes, always-on, multi-DC</td><td>Cassandra</td></tr>
+<tr><td>same, fully managed on AWS</td><td>DynamoDB</td></tr>
+<tr><td>Cassandra-compatible, faster/node</td><td>ScyllaDB (C++)</td></tr>
+<tr><td>ACID, joins, ad-hoc queries</td><td>Postgres</td></tr>
+<tr><td>rich document queries</td><td>MongoDB</td></tr>
+</tbody></table>
+<ul>
+<li>5.0: <b>SAI</b> indexes, <b>Accord/ACC</b> transactions, vector search, UCS.</li>
+<li>Reality check: most apps DON'T need Cassandra — its modeling + ops burden only pays off at real scale/write-volume/availability needs <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>&#9744; Data-Model Review Checklist</h3>
+<ul>
+<li>&#9744; Table designed for a <b>specific query</b> (query-first, denormalized).</li>
+<li>&#9744; Partition key gives <b>even distribution</b> (no hot/celebrity key).</li>
+<li>&#9744; Partition size <b>bounded</b> (bucketing) — ≲100MB / ≲100k rows.</li>
+<li>&#9744; Clustering columns give the needed order; queries hit the WHOLE partition key + key-order prefix.</li>
+<li>&#9744; <b>No <code>ALLOW FILTERING</code></b>; extra lookups = extra tables (or SAI), not 2i.</li>
+<li>&#9744; Right consistency (LOCAL_QUORUM default; R+W&gt;RF where you need strong).</li>
+<li>&#9744; Tombstone hygiene (TTL+TWCS, avoid delete-heavy/queue patterns).</li>
+<li>&#9744; No multi-partition batch for bulk; LWT only where truly needed.</li>
+<li>&#9744; Repair scheduled within gc_grace (Reaper).</li>
+</ul>
+</section>
+
+<section class="card"><h3>&#9733; Troubleshooting Playbook</h3>
+<h4>One node overloaded</h4>
+<ul><li>&#9744; Hot partition → higher-cardinality/composite partition key or bucket.</li></ul>
+<h4>Reads timing out (tombstones)</h4>
+<ul><li>&#9744; <code>TombstoneOverwhelmingException</code> / delete-heavy → TTL+TWCS, remodel to avoid deletes.</li></ul>
+<h4>High p99 read latency</h4>
+<ul><li>&#9744; Too many SSTables / compaction backlog / wide partition / GC → compaction strategy, partition design, heap.</li></ul>
+<h4>Deleted data came back</h4>
+<ul><li>&#9744; Zombie: didn't repair within gc_grace → run repair; raise CLs (R+W&gt;RF) for stale reads.</li></ul>
+<h4>Query needs ALLOW FILTERING</h4>
+<ul><li>&#9744; Redesign a table around that query (or SAI).</li></ul>
+<h4>Bulk-load batch slow</h4>
+<ul><li>&#9744; Multi-partition batch → parallel async token-aware writes.</li></ul>
+</section>
+
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  try {
+    mermaid.initialize({ startOnLoad: true, theme: "neutral",
+      flowchart: { useMaxWidth: true, htmlLabels: true, nodeSpacing: 18, rankSpacing: 18 },
+      themeVariables: { fontSize: "9px" } });
+  } catch (e) { /* offline / blocked CDN: diagrams degrade to source text, rest of sheet is fine */ }
+</script>
+</body>
+</html>

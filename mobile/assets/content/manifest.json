@@ -234,6 +234,21 @@
       ]
     },
     {
+      "id": "cassandra",
+      "file": "/cassandra-interview-primer.md",
+      "title": "Cassandra",
+      "category": "Databases",
+      "itemLabel": "Topic",
+      "itemsPlural": "Cassandra topics",
+      "storagePrefix": "ip:cassandra",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": [],
+      "cheatSheetUrl": "/cassandra-cheatsheet.html"
+    },
+    {
       "id": "csharp",
       "file": "/csharp-interview-primer.md",
       "title": "C#",

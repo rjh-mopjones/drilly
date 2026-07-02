@@ -22,6 +22,7 @@
 #   mobile/dist/db-theory-primer.md
 #   mobile/dist/sql-practice.md
 #   mobile/dist/advanced-sql-practice.md
+#   mobile/dist/cassandra-interview-primer.md
 #   mobile/dist/csharp-interview-primer.md
 #   mobile/dist/aws-interview-primer.md
 #   mobile/dist/gcp-interview-primer.md
@@ -35,6 +36,7 @@
 #   mobile/dist/git-interview-primer.md
 #   mobile/dist/ai-engineering-primer.md
 #   mobile/dist/sql-postgres-cheatsheet.html   ← standalone A4 print cheat sheet (Cheat Sheets category, externalUrl)
+#   mobile/dist/cassandra-cheatsheet.html      ← standalone A4 print cheat sheet (attached to the Cassandra primer via cheatSheetUrl)
 #   mobile/dist/java-cheatsheet.html           ← standalone A4 print cheat sheet (Cheat Sheets category, externalUrl)
 #   mobile/dist/csharp-cheatsheet.html         ← standalone A4 print cheat sheet (Cheat Sheets category, externalUrl)
 #   mobile/dist/go-cheatsheet.html             ← standalone A4 print cheat sheet (Cheat Sheets category, externalUrl)
@@ -71,26 +73,26 @@ cd "$MOBILE"
 bunx expo export --platform web --clear
 
 echo "→ Mirroring web/public/* (manifest + markdown) into $OUT"
-for f in service-worker.js manifest.json patterns.md neetcode-150.md java-interview-primer.md go-interview-primer.md rust-interview-primer.md python-interview-primer.md kotlin-interview-primer.md cpp-interview-primer.md postgres-interview-primer.md db-theory-primer.md sql-patterns-primer.md sql-practice.md advanced-sql-practice.md csharp-interview-primer.md aws-interview-primer.md gcp-interview-primer.md linux-interview-primer.md kubernetes-interview-primer.md observability-interview-primer.md terraform-interview-primer.md docker-interview-primer.md cicd-interview-primer.md networking-interview-primer.md git-interview-primer.md ai-engineering-primer.md sql-postgres-cheatsheet.html java-cheatsheet.html csharp-cheatsheet.html go-cheatsheet.html cpp-cheatsheet.html aws-cheatsheet.html gcp-cheatsheet.html linux-cheatsheet.html kubernetes-cheatsheet.html observability-cheatsheet.html terraform-cheatsheet.html docker-cheatsheet.html cicd-cheatsheet.html networking-cheatsheet.html git-cheatsheet.html system-design-cheatsheet.html finance-domain-cheatsheet.html system-design-patterns-primer.md dsa-patterns-primer.md; do
-  if [ -f "$WEB_PUBLIC/$f" ]; then
-    cp "$WEB_PUBLIC/$f" "$OUT/$f"
-    echo "   ✓ $f"
-  fi
+for f in service-worker.js manifest.json patterns.md neetcode-150.md java-interview-primer.md go-interview-primer.md rust-interview-primer.md python-interview-primer.md kotlin-interview-primer.md cpp-interview-primer.md postgres-interview-primer.md db-theory-primer.md sql-patterns-primer.md sql-practice.md advanced-sql-practice.md cassandra-interview-primer.md csharp-interview-primer.md aws-interview-primer.md gcp-interview-primer.md linux-interview-primer.md kubernetes-interview-primer.md observability-interview-primer.md terraform-interview-primer.md docker-interview-primer.md cicd-interview-primer.md networking-interview-primer.md git-interview-primer.md ai-engineering-primer.md sql-postgres-cheatsheet.html cassandra-cheatsheet.html java-cheatsheet.html csharp-cheatsheet.html go-cheatsheet.html cpp-cheatsheet.html aws-cheatsheet.html gcp-cheatsheet.html linux-cheatsheet.html kubernetes-cheatsheet.html observability-cheatsheet.html terraform-cheatsheet.html docker-cheatsheet.html cicd-cheatsheet.html networking-cheatsheet.html git-cheatsheet.html system-design-cheatsheet.html finance-domain-cheatsheet.html system-design-patterns-primer.md dsa-patterns-primer.md; do
+	if [ -f "$WEB_PUBLIC/$f" ]; then
+		cp "$WEB_PUBLIC/$f" "$OUT/$f"
+		echo "   ✓ $f"
+	fi
 done
 
 # favicon.svg / icons.svg too, so the web app keeps its existing branding
 for f in favicon.svg icons.svg; do
-  if [ -f "$WEB_PUBLIC/$f" ]; then
-    cp "$WEB_PUBLIC/$f" "$OUT/$f"
-  fi
+	if [ -f "$WEB_PUBLIC/$f" ]; then
+		cp "$WEB_PUBLIC/$f" "$OUT/$f"
+	fi
 done
 
 # Self-hosted JetBrains Mono (code font), served at /fonts/ and precached
 # by the service worker so code blocks render correctly offline.
 if [ -d "$WEB_PUBLIC/fonts" ]; then
-  mkdir -p "$OUT/fonts"
-  cp "$WEB_PUBLIC/fonts/"*.woff2 "$OUT/fonts/" 2>/dev/null || true
-  echo "   ✓ fonts/ ($(ls "$WEB_PUBLIC/fonts" | wc -l | tr -d ' ') files)"
+	mkdir -p "$OUT/fonts"
+	cp "$WEB_PUBLIC/fonts/"*.woff2 "$OUT/fonts/" 2>/dev/null || true
+	echo "   ✓ fonts/ ($(ls "$WEB_PUBLIC/fonts" | wc -l | tr -d ' ') files)"
 fi
 
 # Inject the @font-face declarations + preloads into <head>. Expo's
@@ -98,7 +100,8 @@ fi
 # deterministic post-step. Without this the MONO_FONT family has nothing
 # to resolve to and code falls back to the platform monospace.
 echo "→ Injecting JetBrains Mono @font-face into index.html"
-FONT_HEAD=$(cat <<'HTML'
+FONT_HEAD=$(
+	cat <<'HTML'
 <link rel="preload" as="font" type="font/woff2" crossorigin="anonymous" href="/fonts/jetbrains-mono-400-normal.woff2" />
 <link rel="preload" as="font" type="font/woff2" crossorigin="anonymous" href="/fonts/jetbrains-mono-700-normal.woff2" />
 <style id="drilly-fonts">
