@@ -545,16 +545,19 @@
       "sectionOrder": []
     },
     {
-      "id": "finance-domain-cheatsheet",
-      "file": "/finance-domain-cheatsheet.html",
+      "id": "finance-domain",
+      "file": "/finance-domain-interview-primer.md",
       "title": "Finance Domain",
-      "category": "System Fundamentals",
-      "externalUrl": "/finance-domain-cheatsheet.html",
-      "itemLabel": "Section",
-      "itemsPlural": "open printable A4 sheet ↗",
-      "storagePrefix": "ip:finance-domain-cheatsheet",
+      "category": "Computational Finance",
+      "itemLabel": "Topic",
+      "itemsPlural": "finance topics",
+      "storagePrefix": "ip:finance-domain",
       "defaultRevealedSections": [],
-      "sectionOrder": []
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": [],
+      "cheatSheetUrl": "/finance-domain-cheatsheet.html"
     }
   ]
 }
