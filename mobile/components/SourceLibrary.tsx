@@ -148,7 +148,10 @@ export function SourceLibrary() {
           <View key={category} style={styles.group}>
             <Pressable
               onPress={() => toggleCategory(category)}
-              style={styles.groupHeaderRow}
+              style={({ pressed }) => [
+                styles.groupHeaderRow,
+                pressed && styles.groupHeaderPressed,
+              ]}
               accessibilityLabel={`${isCollapsed ? "Expand" : "Collapse"} ${category}`}
             >
               <Text style={styles.groupToggle}>{isCollapsed ? "▸" : "▾"}</Text>
@@ -235,23 +238,28 @@ function makeStyles(p: Palette) {
       fontSize: 12,
       fontWeight: "600",
     },
+    // Section eyebrow — legible near-body caps (was tiny muted grey) with a
+    // finger-sized tap target, matching the desktop sidebar treatment.
     groupHeaderRow: {
       flexDirection: "row",
       alignItems: "center",
+      minHeight: 52,
       paddingHorizontal: 16,
-      paddingBottom: 6,
-      paddingTop: 12,
+      paddingVertical: 8,
+      gap: 8,
     },
+    groupHeaderPressed: { backgroundColor: p.surfacePressed },
     groupToggle: {
       color: p.textMuted,
-      fontSize: 10,
-      width: 14,
+      fontSize: 13,
+      width: 16,
+      textAlign: "center",
     },
     groupHeader: {
-      color: p.textMuted,
-      fontSize: 11,
-      fontWeight: "600",
-      letterSpacing: 1.5,
+      color: p.text,
+      fontSize: 13,
+      fontWeight: "700",
+      letterSpacing: 1,
       textTransform: "uppercase",
     },
     footer: { height: 32 },
