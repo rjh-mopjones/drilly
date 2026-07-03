@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Concurrency &amp; Parallelism Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt; --fs-mono: 6.6pt; --fs-h3: 7.8pt; --gap: 5px; --pad: 3px;
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>Concurrency &amp; Parallelism Cheat Sheet</h1><span class="meta">threads · locks · memory models · lock-free · async · channels · drilly</span></div>
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="warn">!</span> footgun / classic trap &nbsp; <code>&#9744;</code> reasoning step</li>
+<li>Focus: writing &amp; reasoning about <b>correct concurrent code</b> — the programming angle (kernel mechanism is the OS sheet).</li>
+<li>3 concerns of shared state: <b>atomicity · visibility · ordering</b>. Get all three or it's a bug.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+</ul></section>
+
+<section class="card"><h3>Concurrency vs Parallelism</h3>
+<table><thead><tr><th></th><th>Concurrency</th><th>Parallelism</th></tr></thead><tbody>
+<tr><td>about</td><td>structure / interleaving</td><td>simultaneous execution</td></tr>
+<tr><td>needs</td><td>1 core is enough</td><td>≥2 cores</td></tr>
+<tr><td>goal</td><td>responsiveness, IO overlap</td><td>throughput / speed</td></tr>
+</tbody></table>
+<ul>
+<li>"Dealing with many things" vs "doing many things." You can have concurrency without parallelism (event loop).</li>
+<li><b>Amdahl</b>: speedup ≤ 1/(s + (1−s)/N); a 5% serial part caps you at 20×. <span class="warn">!</span> Coordination overhead can make more threads <i>slower</i>.</li>
+<li>Two paradigms: <b>shared memory</b> (threads+locks) vs <b>message passing</b> (channels/actors).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Race Condition vs Data Race</h3>
+<ul>
+<li><b>Data race</b>: 2 threads touch same memory, ≥1 write, no ordering → UB. Fix with sync/atomics.</li>
+<li><b>Race condition</b>: wrong result from timing; can exist even with atomics (check-then-act).</li>
+</ul>
+<pre><code>// count++ is 3 ops, not atomic:
+T1: load 0        T2: load 0
+T1: add  1        T2: add  1
+T1: store 1       T2: store 1   // lost update → 1 not 2 !</code></pre>
+<p><span class="warn">!</span> <code>volatile</code>/atomic-read does NOT make <code>x++</code> safe — it's read-modify-write. Use an atomic add or a lock.</p>
+</section>
+
+<section class="card"><h3>Locks</h3>
+<table><thead><tr><th>Type</th><th>Use</th></tr></thead><tbody>
+<tr><td>mutex</td><td>1 owner, exclusive</td></tr>
+<tr><td>reentrant</td><td>same thread re-locks</td></tr>
+<tr><td>read-write</td><td>N readers <b>or</b> 1 writer</td></tr>
+<tr><td>spinlock</td><td>busy-wait, very short CS, multicore</td></tr>
+</tbody></table>
+<ul>
+<li>Always release in <code>finally</code> / RAII / <code>defer</code>. <span class="warn">!</span></li>
+<li>Coarse lock = simple, low concurrency; fine lock = scalable, deadlock-prone.</li>
+<li>Hold locks briefly; never do IO / call unknown code under a lock (lock convoy, deadlock).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Semaphore · Monitor · Condvar</h3>
+<table><thead><tr><th>Primitive</th><th>Semantics</th></tr></thead><tbody>
+<tr><td>mutex</td><td>ownership, binary</td></tr>
+<tr><td>counting semaphore</td><td>N permits, no owner (pools, rate limit)</td></tr>
+<tr><td>monitor</td><td>lock + condition variables</td></tr>
+</tbody></table>
+<pre><code>// ALWAYS re-check predicate in a while:
+synchronized(q){
+  while(q.isEmpty())      // not if — spurious wakeups !
+      q.wait();
+  x = q.remove();
+}</code></pre>
+<p><span class="warn">!</span> <code>if(cond) wait()</code> is a bug. <code>notifyAll</code> when multiple predicates share a monitor.</p>
+</section>
+
+<section class="card"><h3>Memory Model &amp; Happens-Before</h3>
+<ul>
+<li>Compiler &amp; CPU <b>reorder</b> for speed; without a happens-before edge, one thread may never see another's write.</li>
+<li><b>Java</b>: <code>volatile</code> = visibility + ordering (not atomicity); <code>synchronized</code> unlock→lock; <code>final</code> safe publication.</li>
+<li><b>C++ <code>memory_order</code></b>: relaxed &lt; acquire/release &lt; seq_cst. Pair release-store with acquire-load.</li>
+</ul>
+<pre><code>// Double-checked locking (Java, correct):
+private volatile Singleton inst;   // volatile is essential !
+Singleton get(){
+  if(inst==null) synchronized(this){
+    if(inst==null) inst=new Singleton();
+  }
+  return inst;
+}</code></pre>
+</section>
+
+<section class="card"><h3>Atomics &amp; Lock-Free</h3>
+<ul>
+<li><b>CAS</b>(addr, expected, new): atomically swap iff unchanged → retry loop.</li>
+<li>Progress: <b>lock-free</b> (some thread advances) &gt; <b>wait-free</b> (all bounded) &gt; blocking.</li>
+</ul>
+<pre><code>// CAS push (Treiber stack)
+do { old = top; n.next = old; }
+while(!CAS(&top, old, n));</code></pre>
+<p><span class="warn">!</span> <b>ABA</b>: value goes A→B→A, CAS wrongly succeeds. Fix: tagged pointer / hazard pointers / epoch GC. Lock-free ≠ always faster — under low contention a mutex often wins.</p>
+</section>
+
+<section class="card"><h3>Deadlock &amp; Friends</h3>
+<p>Needs all <b>4 Coffman</b>: mutual excl · hold-and-wait · no preempt · <b>circular wait</b>.</p>
+<pre><code>T1: lock A; lock B     // classic
+T2: lock B; lock A     // → deadlock
+// fix: GLOBAL lock ordering (always A before B)</code></pre>
+<ul>
+<li><b>Livelock</b>: threads react, no progress. <b>Starvation</b>: unlucky thread never runs.</li>
+<li><b>Priority inversion</b>: low holds lock high needs → priority inheritance (Mars Pathfinder). <span class="warn">!</span></li>
+<li>Also: try-lock + backoff, lock timeout, single big lock.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Thread Pool Sizing</h3>
+<table><thead><tr><th>Workload</th><th>Threads ≈</th></tr></thead><tbody>
+<tr><td>CPU-bound</td><td>#cores (+1)</td></tr>
+<tr><td>IO-bound</td><td>cores × (1 + wait/compute)</td></tr>
+</tbody></table>
+<ul>
+<li>Pool avoids per-task thread creation cost. <b>Fork-join</b> = <b>work-stealing</b> deques for recursive splits.</li>
+<li><span class="warn">!</span> Unbounded queue → hides overload → OOM. Bound the queue + a rejection policy.</li>
+<li>Blocking inside a small pool → starvation/deadlock (esp. dependent tasks). Virtual threads (Loom) relax this.</li>
+</ul>
+</section>
+
+<section class="card diagram"><h3>Async / Event Loop</h3>
+<div class="mermaid">
+flowchart LR
+  Q["task queue"] --> L{"event loop<br/>(1 thread)"}
+  L -->|run to await| L
+  L -->|await IO| IO["OS async IO"]
+  IO -->|ready| Q
+</div>
+<ul>
+<li>One thread, many tasks; <code>await</code> yields at IO points (cooperative). Great for IO-bound, huge fan-out.</li>
+<li><span class="warn">!</span> <b>Never block the loop</b> — a CPU-heavy or sync-IO call freezes ALL tasks. Offload to a worker/pool.</li>
+<li>Coroutines: stackless (async/await state machine) vs stackful (goroutines). Microtasks (promises) drain before macrotasks.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Concurrent Data Structures</h3>
+<ul>
+<li><b>ConcurrentHashMap</b>: CAS on bins / lock striping — reads mostly lock-free.</li>
+<li><b>CopyOnWrite</b>: read-heavy, rare writes (listener lists).</li>
+<li><b>BlockingQueue</b>: the backbone of producer-consumer (bounded → backpressure).</li>
+<li><span class="warn">!</span> Thread-safe methods ≠ thread-safe <i>sequences</i>: <code>if(!m.contains(k)) m.put(k,v)</code> still races → use <code>putIfAbsent</code>/<code>compute</code>.</li>
+<li>Immutable / persistent structures sidestep the whole problem.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Channels · CSP · Actors</h3>
+<pre><code>// Go: share memory BY communicating
+ch := make(chan int, 8)   // buffered → backpressure
+go func(){ for v := range ch { work(v) } }()
+select {                  // multiplex
+case v := &lt;-ch: use(v)
+case &lt;-ctx.Done(): return
+}</code></pre>
+<table><thead><tr><th></th><th>CSP</th><th>Actors</th></tr></thead><tbody>
+<tr><td>addressing</td><td>anon channels</td><td>named mailbox</td></tr>
+<tr><td>coupling</td><td>via channel</td><td>via actor ref</td></tr>
+<tr><td>failure</td><td>caller handles</td><td>supervision / let-it-crash</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> Unbuffered channel with no ready receiver → deadlock.</p>
+</section>
+
+<section class="card"><h3>Language Models</h3>
+<table><thead><tr><th>Lang</th><th>Model / catch</th></tr></thead><tbody>
+<tr><td>Java</td><td>threads + j.u.c, JMM, virtual threads</td></tr>
+<tr><td>Go</td><td>goroutines + channels, GMP sched, <code>-race</code></td></tr>
+<tr><td>Rust</td><td><code>Send/Sync</code> → data-race-free at compile time</td></tr>
+<tr><td>Python</td><td><b>GIL</b> → threads don't parallelize CPU <span class="warn">!</span></td></tr>
+<tr><td>C++</td><td><code>std::thread</code> + <code>std::atomic</code> orders</td></tr>
+<tr><td>JS</td><td>single-thread event loop + web workers</td></tr>
+</tbody></table>
+<p>Python CPU-bound → multiprocessing / native / free-threaded 3.13+.</p>
+</section>
+
+<section class="card"><h3>Scaling &amp; Contention</h3>
+<ul>
+<li><b>False sharing</b>: two vars on one 64B cache line → cores ping-pong ownership. Pad / <code>@Contended</code>. <span class="warn">!</span></li>
+<li><b>MESI</b> coherence + <b>NUMA</b>: remote memory is slow; pin &amp; shard per core.</li>
+<li>Contention collapse: past a point, more threads = more lock waiting = slower.</li>
+<li>Fixes: shard/thread-local aggregate, read-mostly (RCU/seqlock), lock-free, batch. <b>Little's law</b>: L = λ·W to size pools.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Distributed Concurrency</h3>
+<ul>
+<li><b>Optimistic</b> (version/CAS, retry on conflict) vs <b>pessimistic</b> (lock upfront). OCC wins under low contention.</li>
+<li><b>Idempotency</b> + at-least-once → dedup keys. <b>Backpressure</b> &amp; load shedding over unbounded buffering.</li>
+<li>Rate limit: token bucket. <span class="warn">!</span> Distributed locks need <b>fencing tokens</b> (a lease can expire mid-op).</li>
+<li><b>Sagas</b> + compensation instead of distributed 2PC.</li>
+</ul>
+</section>
+
+<section class="card"><h3>&#9744; Spot-the-Bug &amp; Interview Checklist</h3>
+<ul>
+<li>&#9744; Find the <b>shared mutable state</b> — that's where races live.</li>
+<li>&#9744; Compound op (check-then-act / read-modify-write)? Make it atomic or lock it.</li>
+<li>&#9744; Publication safe? (visibility — <code>volatile</code>/final/sync, not just "I set it").</li>
+<li>&#9744; Multiple locks? Impose a global order; hold briefly; no IO under lock.</li>
+<li>&#9744; <code>wait()</code> inside a <code>while</code>, not <code>if</code>.</li>
+<li>&#9744; Slower with more threads? Contention / false sharing / GIL / IO-bound / too-small pool.</li>
+<li>&#9744; Pick the primitive: counter→atomic; pool→semaphore; pipeline→queue/channel; read-heavy→RWLock/COW.</li>
+<li>&#9744; Reason out loud via an explicit T1/T2 interleaving.</li>
+</ul>
+</section>
+
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  try {
+    mermaid.initialize({ startOnLoad: true, theme: "neutral",
+      flowchart: { useMaxWidth: true, htmlLabels: true, nodeSpacing: 18, rankSpacing: 18 },
+      themeVariables: { fontSize: "9px" } });
+  } catch (e) { /* offline / blocked CDN: diagrams degrade to source text, rest of sheet is fine */ }
+</script>
+</body>
+</html>

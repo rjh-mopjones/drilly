@@ -63,6 +63,21 @@
       "cheatSheetUrl": "/operating-systems-cheatsheet.html"
     },
     {
+      "id": "concurrency",
+      "file": "/concurrency-interview-primer.md",
+      "title": "Concurrency & Parallelism",
+      "category": "System Fundamentals",
+      "itemLabel": "Topic",
+      "itemsPlural": "concurrency topics",
+      "storagePrefix": "ip:concurrency",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": [],
+      "cheatSheetUrl": "/concurrency-cheatsheet.html"
+    },
+    {
       "id": "dsa-patterns",
       "file": "/dsa-patterns-primer.md",
       "title": "Patterns",
