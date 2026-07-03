@@ -108,6 +108,21 @@
       "cheatSheetUrl": "/ood-patterns-cheatsheet.html"
     },
     {
+      "id": "testing",
+      "file": "/testing-interview-primer.md",
+      "title": "Testing & QA",
+      "category": "System Fundamentals",
+      "itemLabel": "Topic",
+      "itemsPlural": "testing topics",
+      "storagePrefix": "ip:testing",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": [],
+      "cheatSheetUrl": "/testing-cheatsheet.html"
+    },
+    {
       "id": "dsa-patterns",
       "file": "/dsa-patterns-primer.md",
       "title": "Patterns",
