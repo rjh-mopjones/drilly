@@ -146,7 +146,17 @@ Networking primitives feed directly into Load Balancing (where L4 vs L7 decision
 
 ### Q8. Walk me through what happens at each layer when you make an HTTPS request.
 
-**DNS**: resolve the hostname to an IP — a cache lookup first (browser → OS → resolver), so it's often ~0 RTT on a warm cache and ~1 RTT cold. **L3 (IP)**: route packets to the destination IP. **L4 (TCP)**: 3-way handshake (1 RTT) to establish the connection, with congestion control (Cubic, BBR) shaping throughput. **TLS**: handshake — 2 RTT on TLS 1.2, 1 RTT on TLS 1.3, **0 RTT with session resumption**. **L7 (HTTP)**: the actual request/response (1 RTT, plus more if the body is large enough that TCP slow-start needs several round trips to ramp up).
+**Before any layer — DNS**: resolve the hostname to an IP (browser → OS → resolver cache; ~0 RTT warm, ~1 RTT cold). Then the request descends the stack. The classic **OSI 7-layer** model (top to bottom), noting that real TCP/IP collapses L5–L7 into "the application" and TLS doesn't map cleanly onto one OSI layer:
+
+- **L7 — Application (HTTP)**: the client builds the HTTP request — method, path, headers, body. With HTTPS this is the plaintext that will be encrypted.
+- **L6 — Presentation (TLS)**: encryption/encoding. The **TLS handshake** runs here (2 RTT on 1.2, 1 RTT on 1.3, 0 RTT with resumption); after it, the HTTP bytes are encrypted. In practice TLS sits between TCP and HTTP rather than in a tidy OSI slot.
+- **L5 — Session (TLS session / connection state)**: the negotiated session and keep-alive connection — exactly what session resumption reuses to skip work.
+- **L4 — Transport (TCP)**: splits the byte stream into segments, adds source/dest **ports** (443 for HTTPS), runs the **3-way handshake (1 RTT)**, reliable delivery + retransmits, and congestion control (Cubic/BBR). (HTTP/3 uses **UDP + QUIC** instead.)
+- **L3 — Network (IP)**: wraps each segment in an IP **packet** with source/dest IP; routers hop it toward the destination, decrementing TTL.
+- **L2 — Data Link (Ethernet / WiFi)**: frames the packet for the local link with **MAC addresses**; **ARP** resolves next-hop IP → MAC; switches forward by MAC.
+- **L1 — Physical**: the actual bits on copper / fiber / radio — NIC → switch → router.
+
+At the server it climbs back up L1 → L7, TLS decrypts, and the app handles the request; the response reverses the whole trip.
 
 **Which RTTs are unavoidable vs cacheable/eliminable** — the senior signal, stated explicitly:
 
