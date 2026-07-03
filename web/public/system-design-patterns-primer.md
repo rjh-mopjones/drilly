@@ -31,8 +31,6 @@ Senior/staff system design interview prep. Patterns and components — not worke
 21. [[#AI & LLM Infrastructure]]
 22. [[#Modern Frameworks: Kafka, Flink, Temporal]]
 
----
-
 ## Foundational Mental Models
 
 ### Summary
@@ -103,8 +101,6 @@ p50 is a lie at scale because it averages over working users; it doesn't reflect
 
 Six suspects: (1) **GC pause** — bursty, kills the tail. (2) **Lock contention** — most requests pass cheaply, occasional ones queue. (3) **Cold cache** on some keys — most hot, occasional cold trip to disk. (4) **Tail-of-fanout** — request makes 10 parallel sub-calls; p99 of the whole is p99.9 of the sub-call. (5) **Head-of-line blocking** in shared resources (HTTP/1.1 pipeline, single-threaded Redis). (6) **Noisy neighbour** in shared infra. Diagnose via flame graphs (`async-profiler` / `dotnet-trace`), tracing (per-request span breakdown), and percentile breakdown by code path.
 
----
-
 ## Networking & Protocols
 
 ### Summary
@@ -150,7 +146,16 @@ Networking primitives feed directly into Load Balancing (where L4 vs L7 decision
 
 ### Q8. Walk me through what happens at each layer when you make an HTTPS request.
 
-**L3 (IP)**: routing your packet to the destination IP. **L4 (TCP)**: 3-way handshake (1 RTT) establishing the connection, with congestion control (Cubic, BBR) shaping throughput. **TLS**: handshake — 2 RTT on TLS 1.2, 1 RTT on TLS 1.3, **0 RTT with session resumption**. **L7 (HTTP)**: request/response semantics on top. Each layer adds overhead; the senior signal is knowing which RTTs are unavoidable vs cacheable.
+**DNS**: resolve the hostname to an IP — a cache lookup first (browser → OS → resolver), so it's often ~0 RTT on a warm cache and ~1 RTT cold. **L3 (IP)**: route packets to the destination IP. **L4 (TCP)**: 3-way handshake (1 RTT) to establish the connection, with congestion control (Cubic, BBR) shaping throughput. **TLS**: handshake — 2 RTT on TLS 1.2, 1 RTT on TLS 1.3, **0 RTT with session resumption**. **L7 (HTTP)**: the actual request/response (1 RTT, plus more if the body is large enough that TCP slow-start needs several round trips to ramp up).
+
+**Which RTTs are unavoidable vs cacheable/eliminable** — the senior signal, stated explicitly:
+
+- **DNS** — cacheable by TTL; ~0 RTT on a warm cache.
+- **TCP handshake** — *eliminable* via connection reuse (keep-alive / connection pooling); QUIC (HTTP/3) folds it into the TLS handshake so it disappears entirely.
+- **TLS handshake** — *amortizable*: 2 RTT → 1 RTT (TLS 1.3) → 0 RTT via session resumption or QUIC 0-RTT.
+- **The request/response round trip itself** — the one genuinely **unavoidable** RTT: you have to ask and be answered.
+
+So a **cold** connection costs roughly DNS + 1 (TCP) + 1 (TLS 1.3) before the first byte; a **warm, reused** connection to a resumed TLS session costs ~0 setup RTT — just the request. That's why connection reuse and terminating TLS at the edge (warm connections already open at the POP) are the biggest latency levers, far more than raw bandwidth. Caveat: TLS **0-RTT early data is replay-vulnerable**, so only use it for idempotent requests (GETs), never state-changing ones.
 
 ### Q9. HTTP/1.1 vs HTTP/2 vs HTTP/3 — what's the actual difference?
 
@@ -175,8 +180,6 @@ The same IP is advertised from multiple POPs via BGP; routers send each user's p
 ### Q14. Senior interview angle: a user from one country reports "the site is slow" — what do you check?
 
 Order: (1) **DNS resolution** — slow or wrong record? `dig` + `mtr`. (2) **TLS handshake** — slow handshake = certificate chain bloat, lack of session resumption. (3) **Network path** — packet loss / high RTT to nearest POP. (4) **CDN coverage** — is there a POP in their region? (5) **MTU / fragmentation** — uncommon but happens with VPNs. (6) **Application latency** at the regional origin. (7) **JS bundle size** — if a perf regression, the largest payload often dominates. Tools: WebPageTest from the user's region, Chrome DevTools network tab, `mtr`, real-user monitoring (RUM).
-
----
 
 ## Load Balancing & Traffic Management
 
@@ -246,8 +249,6 @@ Algorithm: pick 2 backends at random, route to whichever has fewer in-flight req
 
 Likely **long-lived connections + recent deploys** = uneven steady-state. When backend A restarts, its connections move to B and C; A comes back with zero connections; new clients connect to A (less loaded by the LB's connection count metric), but A's actual load (work per connection) is much higher because new clients tend to be active. Fixes: **least-connections** with active-connection tracking, **consistent hashing** for partitioned work, **connection draining** with re-balancing on reconnect, or **L7 LB** that load-balances per request, not per connection.
 
----
-
 ## Data Storage Foundations
 
 ### Summary
@@ -310,8 +311,6 @@ A column store (ClickHouse, DuckDB, Snowflake, BigQuery, Parquet on S3) stores a
 ### Q25. Senior interview angle: when is "just put everything in Postgres" the right answer?
 
 Way more often than candidates think. Modern Postgres scales to: ~10-50 TB total data, ~10k writes/sec sustained on a well-tuned box, ~100k reads/sec with read replicas, JSON + full-text + GIS + vectors all in one engine. The "we need a separate DB for X" story is usually wrong below 1 TB scale. Defensible threshold: stick with Postgres until you hit a *specific* limit (column-store analytics, sub-ms read latency at scale, billion-key KV, write rate above primary capacity); then pick the right specialist tool for that specific workload, not as a wholesale replacement.
-
----
 
 ## Database Scaling Patterns
 
@@ -385,8 +384,6 @@ Pure hash sharding gives every shard ~equal *key count* but wildly unequal *data
 
 Three user-visible bugs to think about: (1) **Vanished writes on next read** — user just wrote, replica doesn't have it, UI shows old state. Fix: read-your-writes routing. (2) **Double-charge if retried** — user clicks "pay", times out, retries, replica didn't show the first attempt's record, second attempt also charges. Fix: idempotency keys + read from primary for safety-critical reads. (3) **Stale UI** — dashboards show old data. Fix: explicit "last updated 30s ago" UI cue or push updates via WebSocket/SSE. Long-term: investigate why lag is 30s (under-provisioned replica, slow disk, network saturation), don't paper over.
 
----
-
 ## Caching
 
 ### Summary
@@ -455,8 +452,6 @@ A single key (celebrity user, viral post, "/" endpoint) gets so many requests th
 
 Suspects in order: (1) **Key format change** — new deploy generates different cache keys → entire cache cold. Diff key formats across deploys. (2) **TTL change** — shorter TTL → more turnover. Check config drift. (3) **Deploy invalidation strategy** — if the deploy explicitly invalidated, that's expected; design for warm-up. (4) **Working set grew** — new feature adds new keys, evicts hot ones. Right answer is larger cache, not more aggressive eviction. (5) **Bug**: cache key includes a request-scoped value (request-id, timestamp) → 100% miss. The most common one — log a hash of the cache key and the value source per request to spot it.
 
----
-
 ## CAP, PACELC & Consistency Models
 
 ### Summary
@@ -524,8 +519,6 @@ Spanner offers **external consistency** (a.k.a. linearizability) globally — ac
 ### Q44. Senior interview angle: "is your system strongly consistent?"
 
 Never just say yes. The right answer: *"strongly consistent for X operations under Y conditions; eventually consistent for Z."* Examples: "Postgres single-region writes are strongly consistent; cross-region reads from a replica are eventually consistent up to ~100ms lag." Or: "DynamoDB strongly-consistent reads cost 2× and only work on the same region; eventually-consistent reads are the default." Avoid blanket claims; precision is what gets you promoted.
-
----
 
 ## Distributed Consensus & Coordination
 
@@ -604,8 +597,6 @@ Three tiers of seriousness. (1) **For coordination of best-effort work** (e.g. "
 
 Epidemic-style state propagation: each node periodically picks a few peers at random and exchanges state diffs. Converges in **O(log N)** rounds — surprisingly fast even at thousands of nodes. Used by Cassandra (cluster membership, schema), Consul (Serf), HashiCorp products. **SWIM** is a popular gossip-based membership protocol. Trades **freshness** (state is eventually correct, not instantly correct) for **partition tolerance** (no central coordination point). Reach for it for cluster-membership-style problems; not for things requiring strict ordering.
 
----
-
 ## Messaging, Queues & Streaming
 
 ### Summary
@@ -681,8 +672,6 @@ When a fast producer outpaces a slow consumer, *something* has to give: queue gr
 ### Q60. Stream processing: stateless vs stateful, and what are watermarks?
 
 **Stateless**: filter / map / route — Kafka Streams stateless ops, Flink stateless processing. No need to remember anything between messages. **Stateful**: joins, aggregations over time windows. Need state — typically RocksDB-backed (Flink, Kafka Streams). **Windowing types**: tumbling (non-overlapping), sliding (overlapping), session (gap-defined), hopping (sliding with stride). **Event time vs processing time**: event time is when the event happened; processing time is when your code sees it. They diverge — late data arrives 5 minutes after the event. **Watermarks** are a threshold ("we believe all data with event time < T has arrived") used to finalize windows. The art is choosing the right watermark policy: too eager loses late data, too lazy delays output.
-
----
 
 ## Resilience & Failure Patterns
 
@@ -776,8 +765,6 @@ Brooker (Senior Principal Engineer at AWS, the canonical voice on this) frames i
 
 A common naive defence against overload: "we'll buffer the excess requests and process them later." Brooker's point: **deferred load is still load**, and your downstream's capacity didn't change. If your offered load permanently exceeds capacity, queue depth grows without bound, latency grows without bound, OOM eventually. The only escape: **reduce the offered load** — load shed (return 429), shrink the work per request (fewer features under stress), or scale capacity (slow). Queues smooth bursts; they don't fix steady-state overcapacity. The discipline: always model your steady-state, not just your peak.
 
----
-
 ## Asynchronous & Event-Driven Patterns
 
 ### Summary
@@ -842,8 +829,6 @@ A pre-computed query result, persisted, refreshed on write (or async). Trade **w
 
 Schemas change; events live forever. **Backward-compatible**: new readers handle old data (added an optional field — readers without it ignore). **Forward-compatible**: old readers handle new data (additions don't break parsing). **Full-compatible**: both — the gold standard for event schemas. **Schema Registry** (Confluent's, Apicurio): centralises schema versioning, enforces compatibility on publish, blocks breaking changes at the broker. Pair with **Avro** or **Protobuf** for binary efficiency + schema enforcement. JSON Schema is acceptable but less rigorous. Without a schema registry, you eventually get the "we published a breaking change three months ago" outage.
 
----
-
 ## Data Modelling & Aggregation Patterns
 
 ### Summary
@@ -903,8 +888,6 @@ Three approaches. (1) **Fanout-on-write (push)**: when you post, write a copy of
 ### Q79. Senior interview angle: pre-computation vs on-demand — how do you decide?
 
 Three axes. (1) **Read frequency vs write frequency** — if a query is run 1000× per write, pre-compute. (2) **Result staleness tolerance** — if the read can tolerate 1-hour-stale data, batch pre-compute is fine; if it needs second-fresh, streaming materialised view; if it must be live, on-demand. (3) **Result size** — pre-computing 100GB of "all possible aggregations" trades storage for compute; pre-computing 1KB of "top-10 by region" is trivial. The right answer is usually **rollup pyramids**: pre-compute the top-level aggregations; query on-demand for drill-downs that pre-computation can't anticipate.
-
----
 
 ## Search
 
@@ -966,8 +949,6 @@ BM25 for **lexical match** (keyword precision, exact terms) + vector ANN for **s
 
 Postgres FTS is fine until: (1) **multilingual** — Postgres has per-language configs but limited compared to Elasticsearch's analyzers + plugins. (2) **Faceting at scale** — aggregations across millions of docs with multiple filter dimensions. (3) **Relevance tuning needs** — Elasticsearch's BM25 parameters, custom analyzers, custom scoring. (4) **Write rate exceeds Postgres FTS indexing capacity** (~thousands/sec on a tuned box). (5) **Hybrid lexical + vector at scale**. Postgres FTS handles up to ~1M docs and basic search needs trivially; beyond that, Elasticsearch / OpenSearch / Tantivy / Meilisearch / Typesense earn their complexity.
 
----
-
 ## Geospatial, Time-Series & Real-Time
 
 ### Summary
@@ -1027,8 +1008,6 @@ Client heartbeats every ~30s to a presence service. Service stores `user:123 →
 ### Q87. Real-time push to the browser — what's the stack?
 
 For one-way push (notifications, live updates): **SSE** (Server-Sent Events) — simpler than WebSockets, browser-native auto-reconnect, HTTP-friendly. For bidirectional (chat, collab): **WebSockets** with sticky load balancing + fan-out via Redis pub/sub or Kafka. For mobile background push: **APNs** (iOS), **FCM** (Android) — operating-system-level delivery, survives app-not-running. Composition pattern: SSE/WS for in-app live, FCM/APNs for offline notifications. Don't pick WebSockets just because you've heard of them — SSE is the right answer more often than people think.
-
----
 
 ## Observability, SLOs & Operations
 
@@ -1100,8 +1079,6 @@ Alerting on raw error counts is noisy (one bad minute fires constantly) and miss
 
 **Shadow traffic**: copy production traffic to a new version of the service; *don't* serve the response to users — just compare results, latency, error rates. Lets you validate a major rewrite or model change against real production load before exposure. Costs: 2× downstream load (the new version makes the same DB/API calls), careful handling of side effects (the new version must not write twice, send duplicate emails, etc.). Use for: model deployments, query engine rewrites, infrastructure migrations.
 
----
-
 ## Security at the System Level
 
 ### Summary
@@ -1169,8 +1146,6 @@ Security primitives feed Networking (mTLS terminates on the service mesh sidecar
 ### Q99. Senior interview angle: how do you protect a public API from abuse?
 
 Layered defence: (1) **WAF** (Cloudflare, AWS WAF) — block known bad patterns, signatures, OWASP rules. (2) **DDoS protection** — anycast scrubbing centres, rate limits on connections per IP. (3) **Per-user rate limiting** (token bucket in Redis) with **auth-aware buckets** — authenticated users get higher limits. (4) **Bot detection** — Cloudflare Bot Management, hCaptcha, BotID; behavioural fingerprinting. (5) **Anomaly detection** on usage patterns. (6) **Secret rotation** — credentials in Vault, never in env vars in images. The senior signal: layered defence — no single layer is sufficient.
-
----
 
 ## Cost & Capacity Engineering
 
@@ -1244,8 +1219,6 @@ Target steady-state utilisation at 60-70% of peak capacity. Why not 90%? Because
 
 Tier framework (Hello Interview / Exponent style): (1) **functional correctness**, (2) **scalable to spec**, (3) **production readiness** — SLOs defined, error budgets, capacity headroom. (4) **operational maturity** — runbooks, on-call rotation, chaos engineering, capacity planning, cost models. (5) **real-world case-study fluency** — "Netflix solves this by X, here's the war story". Staff candidates are expected to hit tier 4 reflexively and tier 5 to win the room. Hitting tier 1-2 only is a senior signal, not staff.
 
----
-
 ## Data Structures for System Design
 
 ### Summary
@@ -1313,8 +1286,6 @@ A linked list with multiple "skip levels" — each level is a sparser linked lis
 ### Q110. Trie / radix tree — and where do they show up at scale?
 
 **Trie**: tree where each path from root spells a key character-by-character. Prefix queries are O(prefix length). Use cases: (1) **Autocomplete** — "what words start with 'sys'?" — trie traversal from the 's' node. (2) **IP routing tables** — longest-prefix match for routing decisions. **Radix tree** (compressed trie): merge single-child chains into one edge; much more space-efficient. Used in Linux kernel routing, Postgres GIN indexes. When the question is "fast prefix queries on millions of strings", trie/radix is the answer.
-
----
 
 ## Anti-patterns & Smells
 
@@ -1395,8 +1366,6 @@ Microservices require: distributed tracing (you can't debug a request without it
 ### Q119. Coordination on the hot path — what's wrong with it?
 
 Every distributed lock, every consensus step, every coordination point is a potential availability hit. If the lock service is down, your service is down. If the consensus quorum can't be reached, your service can't proceed. **Push coordination to the edges** — initialisation, config loading, leader election (which is rare) — and keep the data plane local. Pattern: a service uses a leader-elected coordinator to *assign* work (each partition has one owner), then operates locally on its assigned work without coordinating per request.
-
----
 
 ## Tradeoff Vocabulary
 
@@ -1498,8 +1467,6 @@ Name the axis and the endpoint you're picking. "I'm choosing **availability over
 
 (1) **Requirements** (5 min) — functional + non-functional; clarify scale, SLOs, consistency expectations, dominant access patterns. (2) **Capacity estimation** (5 min) — QPS, storage, bandwidth, peak vs avg, with assumptions written down. (3) **High-level design** (10 min) — boxes-and-arrows architecture; name the components and why. (4) **Data model** (5-10 min) — schemas, partition keys, indexes; show you've thought about scale. (5) **Deep dive into 1-2 components** (10-15 min) — typically the most interesting / risky one; failure modes, tradeoffs, capacity. (6) **Wrap-up** (5 min) — review tradeoffs you made, what you'd revisit, what you'd monitor. **Bring war stories** throughout — "at company X we hit this exact problem, here's what we did."
 
----
-
 ## AI & LLM Infrastructure
 
 ### Summary
@@ -1575,8 +1542,6 @@ The bug: training computes features one way (batch pipeline, Pandas, last week's
 ### Q132. What's the inference latency breakdown for an LLM request — and where are the levers?
 
 (1) **Time-to-first-token (TTFT)**: prompt processing (the LLM reads the input) — proportional to input length, often 50-500ms on a 7B model, seconds on 70B+. (2) **Time-per-output-token (TPOT)**: 10-50ms per token typically. (3) **Total latency** = TTFT + TPOT × output_length. Levers: (a) **smaller / quantised models** (4-bit, 8-bit GPTQ/AWQ — 2-3× faster, mild quality loss), (b) **prompt caching** (Anthropic / OpenAI APIs — cache the prefix, slash TTFT for chatbots), (c) **speculative decoding** (small model proposes tokens, large model verifies — 2-3× speedup), (d) **prefix sharing** in batching (vLLM PagedAttention), (e) **shorter outputs** via response-length caps.
-
----
 
 ## Modern Frameworks: Kafka, Flink, Temporal
 
@@ -1654,8 +1619,6 @@ The lighter tier: **job queues for periodic / async work**. Sidekiq (Ruby/Redis)
 
 Cloudflare Workers, Vercel Edge Functions, AWS Lambda@Edge, Deno Deploy. **Edge compute** runs at the CDN POP — sub-50ms latency for users globally, no cold start (V8 isolates), but constrained runtime (no traditional Node modules, time/CPU/memory limits, no native binaries). Wins: (1) **personalised CDN responses** without origin round trips (A/B test routing, geo routing, auth checks). (2) **API aggregation** at the edge (compose multiple backend calls, return one response). (3) **Static + dynamic** in one — render a page with edge-fetched content. Loses: heavy compute, large dependencies, stateful workloads. Match the workload to the runtime; edge isn't a universal replacement for backend services.
 
----
-
 ## War Stories — Bring Receipts
 
 Senior/staff system design interviews care less about pattern catalogue trivia and more about whether you've felt the pain. Prepare *one production war story per major area*. The shape:
@@ -1663,7 +1626,5 @@ Senior/staff system design interviews care less about pattern catalogue trivia a
 > *"At &lt;company&gt;, our &lt;symptom&gt; alert fired at &lt;time&gt;. We saw &lt;metric&gt; climbing, traced it to &lt;root cause&gt;. We mitigated with &lt;immediate action&gt; and the permanent fix was &lt;architectural change&gt;. The lesson was &lt;takeaway&gt;."*
 
 Have one ready for: a **retry storm** (synchronised retries with no jitter that took down a downstream); a **cache stampede** that DDoS'd your DB when a hot key expired; a **replication lag** outage where read-your-writes broke a payment flow; a **dual-write inconsistency** that you eventually fixed with outbox; a **circuit breaker that false-tripped** at peak; a **noisy neighbour** scenario you fixed with bulkheads; a **migration that took an exclusive lock** and blocked production; a **multi-region failover** where async replication lost recent commits; a **deploy that wiped the cache** and 10×ed DB load. These are the questions that separate "read about distributed systems" from "ran them at scale".
-
----
 
 *End of primer. ~125 questions across 20 senior-interview pattern areas, derived from the vault's `System Design Path.md` curriculum. Pair with the "Example Questions" source (worked design problems like rate limiter, URL shortener, etc.) for the full system-design toolkit. Coverage hits ~85% of what shows up in real senior/staff system design rounds; the remaining 15% is whichever specialisation the role probes (real-time, ML serving, payments, mobile-scale fanout) — pick one and study deep.*
