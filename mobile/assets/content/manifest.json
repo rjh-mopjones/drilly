@@ -246,6 +246,21 @@
       "cheatSheetUrl": "/redis-cheatsheet.html"
     },
     {
+      "id": "yugabyte",
+      "file": "/yugabyte-interview-primer.md",
+      "title": "YugabyteDB",
+      "category": "Databases",
+      "itemLabel": "Topic",
+      "itemsPlural": "YugabyteDB topics",
+      "storagePrefix": "ip:yugabyte",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": [],
+      "cheatSheetUrl": "/yugabyte-cheatsheet.html"
+    },
+    {
       "id": "csharp",
       "file": "/csharp-interview-primer.md",
       "title": "C#",

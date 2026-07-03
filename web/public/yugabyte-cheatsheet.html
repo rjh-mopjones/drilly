@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>YugabyteDB Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+/* spanning title bar */
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>YugabyteDB Cheat Sheet</h1><span class="meta">distributed SQL · Postgres-compatible · Raft · geo-distribution · drilly</span></div>
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="warn">!</span> footgun / anti-pattern &nbsp; <code>&#9744;</code> schema/design review item</li>
+<li>Focus: the distributed-SQL architecture + the <b>PK/sharding data modeling</b> that interviews live on, plus multi-region &amp; consistency.</li>
+<li>Golden rule: the <b>primary key is the sharding key</b> — design it to distribute load &amp; avoid hotspots.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+</ul></section>
+
+<section class="card diagram"><h3>Architecture</h3>
+<div class="mermaid">
+flowchart TD
+  C["client (PG / CQL driver)"] --> Q["YSQL / YCQL query layer<br/>(on a YB-TServer)"]
+  Q --> T["tablet leader (Raft)"]
+  T --> D["DocDB (RocksDB/LSM)"]
+  M["YB-Master ×3 (Raft)<br/>metadata · placement · balancer"] -. control .- Q
+</div>
+<p class="cap">Distributed SQL: YSQL (Postgres) + YCQL (Cassandra) APIs over <b>DocDB</b>. <b>YB-Master</b> = control plane (not in the data path); <b>YB-TServer</b> = data + query layer. Spanner-inspired, shared-nothing, strongly consistent.</p>
+</section>
+
+<section class="card"><h3>Distributed SQL / NewSQL</h3>
+<ul>
+<li>NewSQL = <b>SQL + ACID + horizontal scale + HA</b> (RDBMS guarantees at NoSQL scale).</li>
+<li><b>CP</b> in CAP (strongly consistent, never split-brain). Spanner lineage.</li>
+<li>Scale by adding nodes; no single point of failure; multi-region capable.</li>
+<li>Peers: CockroachDB (closest), Spanner, TiDB, Citus/Vitess (middleware), Aurora (shared-storage, not shared-nothing).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Sharding &amp; Tablets</h3>
+<table><thead><tr><th></th><th>HASH (default)</th><th>RANGE (ASC/DESC)</th></tr></thead><tbody>
+<tr><td>distribution</td><td>even</td><td>ordered</td></tr>
+<tr><td>range scans</td><td>no</td><td>yes</td></tr>
+<tr><td>hotspot risk</td><td>low</td><td><b>monotonic PK → hotspot</b> <span class="warn">!</span></td></tr>
+</tbody></table>
+<ul>
+<li>Rows → <b>tablets</b> (shards) by the PK. Tablets <b>auto-split</b> as they grow; presplit with <code>SPLIT INTO</code>.</li>
+<li><b>Colocation</b>: pack small reference tables into one tablet (local joins, less overhead).</li>
+</ul>
+</section>
+
+<section class="card diagram"><h3>Replication &amp; Raft</h3>
+<div class="mermaid">
+flowchart LR
+  L["tablet leader"] -->|replicate log| F1["follower"]
+  L -->|replicate log| F2["follower"]
+  L -. commit on majority .- F1
+</div>
+<ul>
+<li>Each tablet = a <b>Raft group</b> (RF=3: leader + 2 followers). A write commits once a <b>majority/quorum</b> acks → strong consistency + durability.</li>
+<li><b>RF=N survives ⌊N/2⌋ failures</b> (RF3→1, RF5→2). Leader dies → automatic election (seconds), no SPOF.</li>
+<li>Spread replicas across nodes → zones → regions for zone/region fault tolerance.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Consistency &amp; Transactions</h3>
+<ul>
+<li>Isolation: <b>Snapshot Isolation</b> (YSQL default) · <b>Serializable</b> (no write-skew, more retries) · Read Committed.</li>
+<li><b>Single-shard</b> ops = fast (one Raft write, linearizable). <b>Multi-shard</b> distributed txns = 2PC-style: <b>provisional records/write intents</b> + a <b>transaction status tablet</b> flips COMMITTED atomically.</li>
+<li>Conflicts → serialization failures (40001) → <b>app must retry</b> <span class="warn">!</span> Keep txns single-shard &amp; short.</li>
+<li>MVCC readers don't block writers.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Time: HLC (not TrueTime)</h3>
+<ul>
+<li>Orders events with <b>Hybrid Logical Clocks</b> = physical time (NTP) + a logical counter — no atomic clocks (unlike Spanner's TrueTime + commit-wait).</li>
+<li>Assumes bounded skew: <code>max_clock_skew_usec</code> — keep <b>NTP/chrony tight</b> <span class="warn">!</span></li>
+<li>Clock skew → occasional <b>read restarts</b>; excessive skew can break guarantees.</li>
+</ul>
+</section>
+
+<section class="card"><h3>YSQL — Postgres Compat</h3>
+<pre><code>-- reuses the REAL Postgres query layer over DocDB
+CREATE TABLE users (
+  id   uuid,
+  email text,
+  PRIMARY KEY ((id) HASH)          -- distribute by id
+);
+CREATE TABLE orders (
+  user_id uuid, order_ts timestamptz, amt numeric,
+  PRIMARY KEY ((user_id) HASH, order_ts DESC)  -- hash + range
+);</code></pre>
+<ul>
+<li>Joins, secondary indexes, FKs, triggers, PL/pgSQL, extensions, PG drivers/ORMs — mostly just work (<code>ysqlsh</code>).</li>
+<li>Differences: tracks a PG version, sequence/SERIAL contention at scale, distributed-execution nuances <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>PK / Sharding Data Modeling</h3>
+<ul>
+<li><b>The PK IS the sharding key</b> — drives distribution &amp; performance, not just uniqueness.</li>
+<li><code>((col) HASH)</code> = even spread (point lookups). <code>col ASC/DESC</code> = ordered (range scans).</li>
+<li><b>Monotonic PK (SERIAL/timestamp) on range shard = write hotspot</b> → hash-shard, use UUIDv4, or add a bucket/salt <span class="warn">!</span></li>
+<li>Composite: <code>((tenant_id) HASH, created_at DESC)</code> — distribute tenants, order within one. Colocate small tables.</li>
+<li>Global sequences contend → prefer UUIDs / cached sequences.</li>
+</ul>
+</section>
+
+<section class="card"><h3>YCQL vs YSQL</h3>
+<ul>
+<li><b>YSQL</b> = full relational Postgres API (joins, rich SQL) — recommended for new apps.</li>
+<li><b>YCQL</b> = Cassandra-CQL API over the same engine, but <b>strongly consistent, global indexes, distributed txns</b> (unlike Cassandra — no tunable consistency / repair / gc_grace zombies) <span class="warn">!</span></li>
+<li>Use YCQL for Cassandra-style key/wide-row/time-series or migrating off Cassandra. Separate keyspaces (no shared tables).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Indexes &amp; Query Execution</h3>
+<ul>
+<li>Secondary indexes are <b>distributed, global &amp; strongly consistent</b> (not Cassandra's local 2i) — but each write updates the index too (write cost) <span class="warn">!</span></li>
+<li><b>Covering indexes</b> (<code>INCLUDE (cols)</code>) → <b>index-only scans</b> (avoid a second RPC).</li>
+<li><b>Pushdowns</b>: filter/projection/aggregate/LIMIT pushed to DocDB → less data over the network.</li>
+<li><b>Cross-tablet joins</b> shuffle data across nodes → slow; colocate/denormalize/index <span class="warn">!</span></li>
+<li>Tune with <code>EXPLAIN (ANALYZE, DIST)</code> — see RPCs, rows, pushdowns.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Multi-Region</h3>
+<table><thead><tr><th>Option</th><th>Trait</th></tr></thead><tbody>
+<tr><td>sync stretched cluster</td><td>zero-RPO region failover; <b>high write latency</b> (cross-region quorum) <span class="warn">!</span></td></tr>
+<tr><td>geo-partitioning (row-level)</td><td>pin rows to a region (residency + local latency)</td></tr>
+<tr><td>follower reads / read replicas</td><td>local low-latency reads (bounded staleness)</td></tr>
+<tr><td>xCluster</td><td>async replication (DR / active-active; data-loss window)</td></tr>
+</tbody></table>
+<p><b>Preferred region</b> pins tablet leaders to keep writes local. Pick by residency / latency / RPO need.</p>
+</section>
+
+<section class="card"><h3>HA &amp; Ops</h3>
+<ul>
+<li>No SPOF: node/zone/region loss → automatic Raft leader election (seconds) + self-heal re-replication. Rolling upgrades = zero downtime.</li>
+<li>Scale out by adding TServers (auto-rebalance). Pool YSQL connections (heavy per-conn like Postgres) <span class="warn">!</span></li>
+</ul>
+<pre><code>yugabyted start            # quick start
+yb-admin -init_master_addrs ... list_tablets
+ysqlsh / ycqlsh
+# K8s operator/Helm · Anywhere (self-managed) · Managed/Aeon (DBaaS)
+# snapshots + PITR · TLS · RBAC · Voyager (migrate)</code></pre>
+</section>
+
+<section class="card"><h3>YugabyteDB vs Alternatives</h3>
+<table><thead><tr><th>Need</th><th>Pick</th></tr></thead><tbody>
+<tr><td>scale-out Postgres, open source, multi-cloud</td><td>YugabyteDB</td></tr>
+<tr><td>same, from-scratch PG reimpl (BSL)</td><td>CockroachDB</td></tr>
+<tr><td>managed global SQL on GCP</td><td>Spanner (TrueTime)</td></tr>
+<tr><td>managed PG, no write scale-out</td><td>Aurora (single-writer)</td></tr>
+<tr><td>single node / small / simple</td><td>Postgres</td></tr>
+</tbody></table>
+<p>Reality check: most apps are fine on Postgres/Aurora until they need horizontal write scale, active multi-region, or beyond-single-primary HA <span class="warn">!</span></p>
+</section>
+
+<section class="card"><h3>&#9744; Schema / Design Review Checklist</h3>
+<ul>
+<li>&#9744; Do you actually need distributed SQL (vs Postgres/Aurora)?</li>
+<li>&#9744; PK chosen to <b>distribute load &amp; avoid hotspots</b> — no bare monotonic SERIAL/timestamp on a range shard.</li>
+<li>&#9744; Right sharding (HASH for spread, range only where ordered scans are needed).</li>
+<li>&#9744; Composite PK groups related rows (tenant/user) + orders within.</li>
+<li>&#9744; RF &amp; replica placement give the needed node/zone/region fault tolerance.</li>
+<li>&#9744; Transactions kept single-shard &amp; short; app retries 40001 serialization errors.</li>
+<li>&#9744; Indexes match access patterns (covering/index-only where hot); not over-indexed.</li>
+<li>&#9744; Multi-region topology fits the residency/latency/RPO need; leaders in the preferred region.</li>
+<li>&#9744; Connection pooling; NTP tight; TLS/RBAC on.</li>
+</ul>
+</section>
+
+<section class="card"><h3>&#9733; Troubleshooting Playbook</h3>
+<h4>One node hot / writes bottlenecked</h4>
+<ul><li>&#9744; Monotonic PK on range shard → hash-shard, UUIDv4, or bucket/salt.</li></ul>
+<h4>Cross-region write latency 100ms+</h4>
+<ul><li>&#9744; Sync quorum spans regions → preferred-region leaders / geo-partition, or accept for zero-RPO.</li></ul>
+<h4>Slow txn / lots of retries</h4>
+<ul><li>&#9744; Multi-tablet txn or conflicts → colocate, shorten, single-shard, handle 40001.</li></ul>
+<h4>Slow join</h4>
+<ul><li>&#9744; Cross-tablet shuffle → colocation/denormalize/index/index-only scan; check <code>EXPLAIN DIST</code>.</li></ul>
+<h4>Read-restart errors</h4>
+<ul><li>&#9744; Clock skew → tighten NTP / <code>max_clock_skew</code>.</li></ul>
+<h4>Remote-region read latency</h4>
+<ul><li>&#9744; Leader far → follower reads / read replica / geo-partition.</li></ul>
+</section>
+
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  try {
+    mermaid.initialize({ startOnLoad: true, theme: "neutral",
+      flowchart: { useMaxWidth: true, htmlLabels: true, nodeSpacing: 18, rankSpacing: 18 },
+      themeVariables: { fontSize: "9px" } });
+  } catch (e) { /* offline / blocked CDN: diagrams degrade to source text, rest of sheet is fine */ }
+</script>
+</body>
+</html>
