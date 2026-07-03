@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Operating Systems Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+/* spanning title bar */
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>Operating Systems Cheat Sheet</h1><span class="meta">CS fundamentals · processes · scheduling · memory · concurrency · drilly</span></div>
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="warn">!</span> footgun / classic-exam trap &nbsp; <code>&#9744;</code> reasoning step</li>
+<li>Focus: the mechanisms &amp; algorithms interviews probe — how scheduling, paging, deadlock &amp; syscalls actually work (theory, not Linux admin).</li>
+<li>Mental model: the kernel is a <b>resource manager + protection layer</b>; user↔kernel via <b>syscalls (traps)</b>.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+</ul></section>
+
+<section class="card"><h3>Process vs Thread</h3>
+<table><thead><tr><th></th><th>Process</th><th>Thread</th></tr></thead><tbody>
+<tr><td>address space</td><td>own (isolated)</td><td><b>shared</b></td></tr>
+<tr><td>private</td><td>everything</td><td>stack, regs, PC, TLS</td></tr>
+<tr><td>create/switch</td><td>expensive</td><td>cheap</td></tr>
+<tr><td>comms</td><td>IPC</td><td>shared memory</td></tr>
+<tr><td>a crash</td><td>isolated</td><td>kills the process</td></tr>
+</tbody></table>
+<ul>
+<li>Address space: text · data/BSS · <b>heap↑</b> · mmap · <b>↓stack</b>. PCB holds state/regs/PC/page-tables/files.</li>
+<li><code>fork()</code> = COW copy (returns twice); <code>exec()</code> replaces the image. <b>Zombie</b> = unreaped child; <b>orphan</b> → reparented to init.</li>
+</ul>
+</section>
+
+<section class="card"><h3>CPU Scheduling</h3>
+<table><thead><tr><th>Algo</th><th>Note</th></tr></thead><tbody>
+<tr><td>FCFS</td><td>simple; convoy effect <span class="warn">!</span></td></tr>
+<tr><td>SJF/SRTF</td><td>optimal avg wait; can starve; needs prediction</td></tr>
+<tr><td>Round-Robin</td><td>quantum; fair/responsive</td></tr>
+<tr><td>Priority</td><td>starvation → <b>aging</b></td></tr>
+<tr><td>MLFQ</td><td>approximates SJF, favours interactive</td></tr>
+</tbody></table>
+<ul>
+<li>Preemptive (timer interrupt) vs non-preemptive. Metrics: turnaround, waiting, response, throughput.</li>
+<li>Quantum too big → FCFS; too small → context-switch overhead <span class="warn">!</span> Linux = CFS (vruntime, RB-tree).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Synchronization</h3>
+<ul>
+<li><b>Race condition</b>: concurrent access, ≥1 write, no ordering (<code>count++</code> = load/inc/store — lost update) <span class="warn">!</span></li>
+<li>Critical section needs: <b>mutual exclusion + progress + bounded waiting</b>.</li>
+<li>Primitives: <b>mutex</b> (ownership) · <b>semaphore</b> (counter, no owner; binary≈mutex, counting=N) · <b>monitor/condvar</b> (wait in a loop on the predicate).</li>
+<li>Built on atomics (test-and-set, <b>CAS</b>); <b>spinlock</b> = busy-wait (only short sections, multicore).</li>
+<li>Classics: producer-consumer, readers-writers, dining philosophers.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Deadlock</h3>
+<p>Needs ALL <b>4 Coffman conditions</b> at once:</p>
+<ul>
+<li>&#9744; mutual exclusion · hold-and-wait · no preemption · <b>circular wait</b>.</li>
+</ul>
+<table><thead><tr><th>Strategy</th><th>How</th></tr></thead><tbody>
+<tr><td>prevention</td><td>break one condition (e.g. lock ordering kills circular wait)</td></tr>
+<tr><td>avoidance</td><td>safe states — <b>Banker's algorithm</b></td></tr>
+<tr><td>detection+recovery</td><td>wait-for graph → kill/rollback</td></tr>
+<tr><td>ostrich</td><td>ignore (most OSes)</td></tr>
+</tbody></table>
+<p>Two threads lock A,B vs B,A → deadlock; fix = <b>global lock ordering</b> <span class="warn">!</span> Livelock/starvation ≠ deadlock.</p>
+</section>
+
+<section class="card"><h3>IPC</h3>
+<table><thead><tr><th>Mechanism</th><th>Use</th></tr></thead><tbody>
+<tr><td>pipe / FIFO</td><td>byte stream (related / named)</td></tr>
+<tr><td>message queue</td><td>discrete messages via kernel</td></tr>
+<tr><td><b>shared memory</b></td><td>fastest; needs a semaphore to sync <span class="warn">!</span></td></tr>
+<tr><td>socket</td><td>bidirectional; works across machines</td></tr>
+<tr><td>signal</td><td>async notify (SIGTERM/KILL/SEGV)</td></tr>
+</tbody></table>
+<p>Shared memory (fast, DIY sync) vs message passing (safe, copy cost). Threads share memory → no IPC needed.</p>
+</section>
+
+<section class="card diagram"><h3>Virtual Memory &amp; Paging</h3>
+<div class="mermaid">
+flowchart LR
+  VA["virtual addr = page# | offset"] --> TLB{"TLB hit?"}
+  TLB -->|hit| PA["frame | offset"]
+  TLB -->|miss| PT["page table walk"]
+  PT -->|present| PA
+  PT -->|not present| PF["page fault → load from disk"]
+</div>
+<ul>
+<li>Fixed <b>pages</b>↔<b>frames</b>; per-process <b>page table</b> (multi-level); <b>TLB</b> caches translations (flushed on context switch <span class="warn">!</span>).</li>
+<li><b>Demand paging</b>; page fault = trap → find on disk → evict a frame → load → restart the instruction. Major fault = disk I/O = slow.</li>
+<li><b>COW</b> makes fork cheap. Internal frag on the last page; no external frag (unlike segmentation).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Page Replacement &amp; Thrashing</h3>
+<table><thead><tr><th>Algo</th><th>Note</th></tr></thead><tbody>
+<tr><td>OPT</td><td>evict farthest-future use (ideal, unimplementable)</td></tr>
+<tr><td>FIFO</td><td>simple; <b>Belady's anomaly</b> <span class="warn">!</span></td></tr>
+<tr><td>LRU</td><td>evict least-recently-used (good, costly)</td></tr>
+<tr><td>Clock/2nd-chance</td><td>reference bit — cheap LRU approx</td></tr>
+</tbody></table>
+<ul>
+<li><b>Thrashing</b>: too few frames for the <b>working set</b> → constant paging, CPU util collapses → reduce multiprogramming / add RAM <span class="warn">!</span></li>
+<li>Locality of reference is why paging works.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Memory Management</h3>
+<ul>
+<li>Logical (virtual) → physical via the <b>MMU</b>. Base/limit for relocation + protection.</li>
+<li><b>External frag</b> (free memory scattered — segmentation/contiguous) vs <b>internal frag</b> (slack inside a block — fixed partitions/pages).</li>
+<li>Fit: first / best / worst. <b>Segmentation</b> = variable logical segments (ext frag) vs <b>paging</b> = fixed (no ext frag).</li>
+<li>Allocators: free lists, buddy, slab. Bugs: leak, double-free, dangling.</li>
+</ul>
+</section>
+
+<section class="card"><h3>File Systems</h3>
+<ul>
+<li><b>Inode</b> = file metadata + block pointers (the NAME lives in the directory entry, not the inode).</li>
+<li><b>Hard link</b> = another name for the same inode; <b>soft link</b> = a file holding a path (can dangle) <span class="warn">!</span></li>
+<li>Allocation: contiguous (frag) · linked/FAT (bad random access) · <b>indexed</b> (inode direct + single/double/triple indirect → huge files).</li>
+<li><b>Journaling</b> = write-ahead log for crash consistency (ext4/NTFS); vs COW FS (ZFS/btrfs). <b>VFS</b> unifies filesystems.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Storage &amp; I/O</h3>
+<ul>
+<li><b>HDD</b>: seek + rotational latency → slow random. <b>SSD</b>: uniform low latency, erase-before-write, wear/TRIM.</li>
+<li>Disk scheduling: FCFS / SSTF / <b>SCAN(elevator)</b> / C-SCAN (matters on HDD, not SSD).</li>
+<li><b>RAID</b>: 0 stripe · 1 mirror · 5 parity(1 fail) · 6 (2 fail) · 10 mirror+stripe.</li>
+<li>I/O: polling vs <b>interrupts</b> vs <b>DMA</b> (bulk, no CPU). Page/buffer cache; blocking vs async vs epoll (C10K).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Interrupts, Traps &amp; Syscalls</h3>
+<ul>
+<li><b>Interrupt</b> = async (external device). <b>Trap/exception</b> = sync (caused by the instruction): syscall, <b>fault</b> (page fault — restart), abort.</li>
+<li>Handling: save state → kernel mode → <b>vector table</b> → ISR → restore → iret.</li>
+<li><b>System call</b>: put number+args in registers → trap (<code>syscall</code>) → kernel validates &amp; dispatches → result in a register → return. Never trust user pointers <span class="warn">!</span></li>
+<li>The <b>timer interrupt</b> enables preemptive scheduling. Syscalls are costly (mode switch + cache/TLB).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Kernel · Protection · Security</h3>
+<ul>
+<li><b>Dual mode</b>: Ring 0 kernel vs Ring 3 user; privileged instructions kernel-only. Per-process page tables → isolation.</li>
+<li><b>Monolithic</b> (Linux — fast, big TCB) vs <b>microkernel</b> (services in user space — robust, IPC cost) vs hybrid (NT, XNU).</li>
+<li>Least privilege; DAC vs MAC (SELinux) vs RBAC. A user crash is isolated; a kernel bug is total.</li>
+<li>Exploit defenses: <b>ASLR</b> (randomize addresses) + <b>DEP/NX</b> (no-exec data) + <b>stack canaries</b> vs buffer overflows; seccomp/sandboxing; Spectre/Meltdown = speculative side channels <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Virtualization · Boot · Perf</h3>
+<ul>
+<li><b>VM</b> (hypervisor, own kernel — strong isolation, heavy) vs <b>container</b> (shares host kernel — light, weaker isolation). Containers = <b>namespaces</b> (isolate view) + <b>cgroups</b> (limit resources) <span class="warn">!</span></li>
+<li><b>Boot</b>: firmware (BIOS/UEFI) → POST → bootloader (GRUB) → kernel + initramfs → mount root → <b>init/PID 1</b> (systemd).</li>
+<li><b>Perf latency:</b> cache ns · RAM ~100ns · SSD µs · HDD seek ~ms. Context switch (regs + TLB flush + cold cache) &amp; major page faults are the costs.</li>
+<li>Load avg counts R + D (uninterruptible) tasks → high load + idle CPU = I/O wait <span class="warn">!</span> USE method to find bottlenecks; /proc, perf, eBPF.</li>
+</ul>
+</section>
+
+<section class="card"><h3>&#9733; "What happens when you run a program"</h3>
+<ul>
+<li>1. Shell <code>fork()</code>s a child, then <code>exec()</code>s the binary.</li>
+<li>2. Loader maps the ELF/PE into a fresh <b>address space</b> (text/data/heap/stack); the dynamic linker resolves shared libs.</li>
+<li>3. Jump to <code>_start</code>→<code>main</code>; pages fault in on demand (<b>demand paging</b>).</li>
+<li>4. The scheduler time-slices it onto a CPU (context switches); <b>syscalls</b> (traps) do I/O.</li>
+<li>5. On exit, the parent <code>wait()</code>s &amp; reaps it (else it's a zombie).</li>
+</ul>
+</section>
+
+<section class="card"><h3>&#9744; Interview Reasoning Checklist</h3>
+<ul>
+<li>&#9744; Process vs thread: what's shared (address space) vs private (stack/regs)?</li>
+<li>&#9744; Concurrency bug? Find the shared state + missing ordering → mutex/CAS/monitor.</li>
+<li>&#9744; Deadlock? Check the 4 conditions; break circular wait via lock ordering.</li>
+<li>&#9744; Memory question? Distinguish virtual vs physical, paging vs segmentation, int vs ext frag.</li>
+<li>&#9744; "Slow"? CPU vs memory vs I/O vs lock-bound (USE); high load+idle CPU = iowait.</li>
+<li>&#9744; "Adding threads slower"? Context switches / contention / false sharing / GIL / I/O-bound.</li>
+<li>&#9744; VM vs container: separate kernel (strong) vs shared kernel (light).</li>
+<li>&#9744; Use real latency numbers; trace the interleaving for spot-the-bug.</li>
+</ul>
+</section>
+
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  try {
+    mermaid.initialize({ startOnLoad: true, theme: "neutral",
+      flowchart: { useMaxWidth: true, htmlLabels: true, nodeSpacing: 18, rankSpacing: 18 },
+      themeVariables: { fontSize: "9px" } });
+  } catch (e) { /* offline / blocked CDN: diagrams degrade to source text, rest of sheet is fine */ }
+</script>
+</body>
+</html>
