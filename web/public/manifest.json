@@ -93,6 +93,21 @@
       "cheatSheetUrl": "/api-design-cheatsheet.html"
     },
     {
+      "id": "ood-patterns",
+      "file": "/ood-patterns-interview-primer.md",
+      "title": "OOD & Design Patterns",
+      "category": "System Fundamentals",
+      "itemLabel": "Topic",
+      "itemsPlural": "OOD topics",
+      "storagePrefix": "ip:ood-patterns",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": [],
+      "cheatSheetUrl": "/ood-patterns-cheatsheet.html"
+    },
+    {
       "id": "dsa-patterns",
       "file": "/dsa-patterns-primer.md",
       "title": "Patterns",
