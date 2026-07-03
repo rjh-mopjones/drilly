@@ -23,6 +23,14 @@ import { useTheme, type Palette } from "../lib/theme";
 const SIDEBAR_WIDTH = 300;
 
 /**
+ * True when a Pressable is pressed or hovered. `hovered` is a
+ * react-native-web extension not present in the base RN state type, so we
+ * accept it as an optional field (always false/undefined on native).
+ */
+const isHot = (s: { pressed: boolean; hovered?: boolean }) =>
+  s.pressed || !!s.hovered;
+
+/**
  * Group sources by their `category` field while preserving manifest order.
  */
 function groupByCategory(
@@ -210,14 +218,14 @@ export function DesktopSidebar() {
       <View style={styles.collapseBar}>
         <Pressable
           onPress={collapseAll}
-          style={({ pressed }) => [styles.collapseBtn, pressed && styles.sourceRowPressed]}
+          style={(s) => [styles.collapseBtn, isHot(s) && styles.sourceRowPressed]}
           accessibilityLabel="Collapse all sections"
         >
           <Text style={styles.collapseBtnText}>▸ Collapse all</Text>
         </Pressable>
         <Pressable
           onPress={expandAll}
-          style={({ pressed }) => [styles.collapseBtn, pressed && styles.sourceRowPressed]}
+          style={(s) => [styles.collapseBtn, isHot(s) && styles.sourceRowPressed]}
           accessibilityLabel="Expand all sections"
         >
           <Text style={styles.collapseBtnText}>▾ Expand all</Text>
@@ -231,9 +239,9 @@ export function DesktopSidebar() {
             <View key={category} style={styles.group}>
               <Pressable
                 onPress={() => toggleCategory(category)}
-                style={({ pressed }) => [
+                style={(s) => [
                   styles.groupHeaderRow,
-                  pressed && styles.sourceRowPressed,
+                  isHot(s) && styles.sourceRowPressed,
                 ]}
                 accessibilityLabel={`${collapsed ? "Expand" : "Collapse"} ${category}`}
               >
@@ -288,9 +296,9 @@ function SourceTreeNode({
         onPress={
           isExternal ? () => openExternalSource(source.externalUrl!) : onToggle
         }
-        style={({ pressed }) => [
+        style={(s) => [
           styles.sourceRow,
-          pressed && styles.sourceRowPressed,
+          isHot(s) && styles.sourceRowPressed,
           active && styles.sourceRowActive,
         ]}
       >
@@ -328,9 +336,9 @@ function SourceTreeNode({
                 <Pressable
                   key={it.id}
                   onPress={() => router.push(`/reader/${source.id}/${it.id}`)}
-                  style={({ pressed }) => [
+                  style={(s) => [
                     styles.itemRow,
-                    pressed && styles.sourceRowPressed,
+                    isHot(s) && styles.sourceRowPressed,
                     isActiveItem && styles.sourceRowActive,
                   ]}
                 >
@@ -355,10 +363,10 @@ function SourceTreeNode({
           {source.cheatSheetUrl && (
             <Pressable
               onPress={() => openExternalSource(source.cheatSheetUrl!)}
-              style={({ pressed }) => [
+              style={(s) => [
                 styles.itemRow,
                 styles.cheatRow,
-                pressed && styles.sourceRowPressed,
+                isHot(s) && styles.sourceRowPressed,
               ]}
               accessibilityLabel="Open printable cheat sheet"
             >
@@ -448,7 +456,7 @@ function makeStyles(p: Palette) {
       flexDirection: "row",
       alignItems: "center",
       minHeight: 40,
-      paddingLeft: 16,
+      paddingLeft: 14,
       paddingRight: 16,
       paddingTop: 10,
       paddingBottom: 6,
@@ -469,12 +477,13 @@ function makeStyles(p: Palette) {
     },
     // Middle tier — the category (a source, e.g. "Operating Systems"). Bold
     // sans, bigger, with a right-aligned topic count.
-    // Same left gutter as the section eyebrow so the two chevrons line up.
+    // Indented one step right of the section eyebrow (14) so the tiers read
+    // as a tree: section -> category -> topic.
     sourceRow: {
       flexDirection: "row",
       alignItems: "center",
       minHeight: 44,
-      paddingLeft: 16,
+      paddingLeft: 26,
       paddingRight: 14,
       paddingVertical: 9,
       gap: 6,
@@ -507,7 +516,7 @@ function makeStyles(p: Palette) {
     itemsList: { position: "relative", paddingBottom: 6 },
     rail: {
       position: "absolute",
-      left: 27,
+      left: 34,
       top: 2,
       bottom: 8,
       width: 1.5,
@@ -517,7 +526,7 @@ function makeStyles(p: Palette) {
     itemsHint: {
       color: p.textMuted,
       fontSize: 12,
-      paddingLeft: 34,
+      paddingLeft: 44,
       paddingVertical: 6,
       fontStyle: "italic",
     },
@@ -527,14 +536,14 @@ function makeStyles(p: Palette) {
       alignItems: "flex-start",
       minHeight: 38,
       paddingVertical: 8,
-      paddingLeft: 34,
+      paddingLeft: 44,
       paddingRight: 12,
       gap: 9,
     },
     // Brighter rail segment marking the active topic, sitting over the spine.
     itemRailActive: {
       position: "absolute",
-      left: 26,
+      left: 33,
       top: 7,
       bottom: 7,
       width: 2.5,
