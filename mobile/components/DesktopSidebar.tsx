@@ -294,12 +294,6 @@ function SourceTreeNode({
           active && styles.sourceRowActive,
         ]}
       >
-        <View
-          style={[
-            styles.accentStrip,
-            { backgroundColor: active ? palette.textMuted : "transparent" },
-          ]}
-        />
         <Text style={styles.toggleGlyph}>
           {isExternal ? "↗" : expanded ? "▾" : "▸"}
         </Text>
@@ -454,15 +448,17 @@ function makeStyles(p: Palette) {
       flexDirection: "row",
       alignItems: "center",
       minHeight: 40,
-      paddingHorizontal: 16,
+      paddingLeft: 16,
+      paddingRight: 16,
       paddingTop: 10,
       paddingBottom: 6,
-      gap: 9,
+      gap: 6,
     },
     groupToggle: {
       color: p.textMuted,
       fontSize: 11,
-      width: 12,
+      width: 14,
+      textAlign: "center",
     },
     groupHeader: {
       color: p.text,
@@ -473,21 +469,18 @@ function makeStyles(p: Palette) {
     },
     // Middle tier — the category (a source, e.g. "Operating Systems"). Bold
     // sans, bigger, with a right-aligned topic count.
+    // Same left gutter as the section eyebrow so the two chevrons line up.
     sourceRow: {
       flexDirection: "row",
       alignItems: "center",
       minHeight: 44,
+      paddingLeft: 16,
       paddingRight: 14,
       paddingVertical: 9,
+      gap: 6,
     },
     sourceRowPressed: { backgroundColor: p.surfacePressed },
     sourceRowActive: { backgroundColor: p.surfacePressed },
-    // Neutral selection indicator (no coloured accent) — a subtle grey rail.
-    accentStrip: {
-      width: 3,
-      height: 22,
-      marginRight: 8,
-    },
     toggleGlyph: {
       color: p.textMuted,
       fontSize: 12,
@@ -499,7 +492,6 @@ function makeStyles(p: Palette) {
       fontSize: 15,
       fontWeight: "600",
       flex: 1,
-      marginLeft: 2,
     },
     sourceTitleActive: {
       color: p.textStrong,
