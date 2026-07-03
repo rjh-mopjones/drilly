@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>API Design Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt; --fs-mono: 6.6pt; --fs-h3: 7.8pt; --gap: 5px; --pad: 3px;
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>API Design Cheat Sheet</h1><span class="meta">REST · HTTP · versioning · auth · pagination · GraphQL/gRPC · webhooks · drilly</span></div>
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="warn">!</span> footgun / classic trap &nbsp; <code>&#9744;</code> design-review step</li>
+<li>An API is a <b>contract + a product</b> for developers. Optimize for DX, consistency, evolvability.</li>
+<li>Golden rule: <b>never break existing clients silently.</b> Additive changes only.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+</ul></section>
+
+<section class="card"><h3>HTTP Methods</h3>
+<table><thead><tr><th>Verb</th><th>Safe</th><th>Idem.</th><th>Use</th></tr></thead><tbody>
+<tr><td>GET</td><td>✓</td><td>✓</td><td>read (cacheable)</td></tr>
+<tr><td>POST</td><td>✗</td><td>✗</td><td>create / actions</td></tr>
+<tr><td>PUT</td><td>✗</td><td>✓</td><td>full replace</td></tr>
+<tr><td>PATCH</td><td>✗</td><td>~</td><td>partial update</td></tr>
+<tr><td>DELETE</td><td>✗</td><td>✓</td><td>remove</td></tr>
+</tbody></table>
+<p><b>Idempotent</b> = same call N times, same server state. <span class="warn">!</span> POST isn't — use idempotency keys.</p>
+</section>
+
+<section class="card"><h3>Status Codes</h3>
+<table><tbody>
+<tr><td><b>200</b></td><td>OK</td><td><b>201</b></td><td>Created</td></tr>
+<tr><td><b>202</b></td><td>Accepted (async)</td><td><b>204</b></td><td>No Content</td></tr>
+<tr><td><b>301</b></td><td>Moved</td><td><b>304</b></td><td>Not Modified</td></tr>
+<tr><td><b>400</b></td><td>Bad Request</td><td><b>401</b></td><td>Unauthenticated</td></tr>
+<tr><td><b>403</b></td><td>Forbidden</td><td><b>404</b></td><td>Not Found</td></tr>
+<tr><td><b>409</b></td><td>Conflict</td><td><b>410</b></td><td>Gone</td></tr>
+<tr><td><b>422</b></td><td>Unprocessable</td><td><b>429</b></td><td>Too Many Req</td></tr>
+<tr><td><b>500</b></td><td>Server Error</td><td><b>503</b></td><td>Unavailable</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> <b>4xx = client's fault</b> (don't retry as-is); <b>5xx = server's fault</b> (retryable). 401=who are you, 403=you can't.</p>
+</section>
+
+<section class="card"><h3>REST Resource Modeling</h3>
+<pre><code>GET    /v1/orders?status=paid&amp;limit=20
+POST   /v1/orders
+GET    /v1/orders/{id}
+PATCH  /v1/orders/{id}
+DELETE /v1/orders/{id}
+GET    /v1/orders/{id}/items   // nested</code></pre>
+<ul>
+<li><b>Nouns, plural</b>, not verbs. <span class="warn">!</span> Not <code>/getOrder</code> or <code>/createOrder</code>.</li>
+<li>Stateless; the URI names a resource; the method is the verb.</li>
+<li>Actions that don't fit CRUD → sub-resource or <code>POST /orders/{id}/refunds</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Error Model (RFC 7807)</h3>
+<pre><code>HTTP/1.1 422 Unprocessable Entity
+Content-Type: application/problem+json
+{
+  "type":"https://acme.io/errors/validation",
+  "title":"Validation failed",
+  "status":422,
+  "code":"invalid_field",
+  "errors":[
+    {"field":"email","msg":"is required"}
+  ]
+}</code></pre>
+<p>Machine <b>code</b> + human <b>title</b> + field-level detail. <span class="warn">!</span> Never leak stack traces / SQL.</p>
+</section>
+
+<section class="card"><h3>Pagination</h3>
+<table><thead><tr><th></th><th>Offset</th><th>Cursor/Keyset</th></tr></thead><tbody>
+<tr><td>simple</td><td>✓</td><td>✗</td></tr>
+<tr><td>deep pages</td><td>slow <span class="warn">!</span></td><td>fast</td></tr>
+<tr><td>stable on insert</td><td>drifts/dupes</td><td>✓</td></tr>
+<tr><td>jump to page N</td><td>✓</td><td>✗</td></tr>
+</tbody></table>
+<pre><code>GET /v1/orders?limit=20&amp;cursor=eyJpZCI6MTIzfQ
+{ "data":[…], "next_cursor":"eyJpZCI6MTQzfQ" }</code></pre>
+<p>Default to <b>cursor</b> for large / real-time feeds.</p>
+</section>
+
+<section class="card"><h3>Versioning &amp; Evolution</h3>
+<p><b>Non-breaking</b> (safe, additive):</p>
+<ul><li>add optional field / endpoint / enum value (if clients tolerate)</li></ul>
+<p><b>Breaking</b> <span class="warn">!</span>:</p>
+<ul><li>remove/rename field, tighten validation, change type, change default, new required field</li></ul>
+<table><thead><tr><th>Where</th><th>Example</th></tr></thead><tbody>
+<tr><td>URI</td><td><code>/v2/orders</code> (common, clear)</td></tr>
+<tr><td>header</td><td><code>API-Version: 2</code></td></tr>
+<tr><td>media type</td><td><code>Accept: …;v=2</code></td></tr>
+</tbody></table>
+<p>Deprecate with <code>Sunset</code> header + docs; give a migration window.</p>
+</section>
+
+<section class="card"><h3>Auth</h3>
+<table><thead><tr><th>Method</th><th>For</th></tr></thead><tbody>
+<tr><td>API key</td><td>identify the app/tenant</td></tr>
+<tr><td>OAuth2 + OIDC</td><td>delegated user auth</td></tr>
+<tr><td>JWT (bearer)</td><td>stateless claims, <code>exp</code></td></tr>
+<tr><td>mTLS</td><td>service-to-service</td></tr>
+</tbody></table>
+<ul>
+<li><code>Authorization: Bearer &lt;token&gt;</code>. Scopes limit what a token can do.</li>
+<li><span class="warn">!</span> JWT can't be easily revoked → short expiry + refresh, or use opaque tokens for revocation.</li>
+<li>authN (who you are) ≠ authZ (what you may do).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Rate Limiting</h3>
+<table><thead><tr><th>Algo</th><th>Note</th></tr></thead><tbody>
+<tr><td>token bucket</td><td>allows bursts, steady refill (common)</td></tr>
+<tr><td>leaky bucket</td><td>smooths to constant rate</td></tr>
+<tr><td>fixed window</td><td>simple; edge-burst <span class="warn">!</span></td></tr>
+<tr><td>sliding window</td><td>accurate, more state</td></tr>
+</tbody></table>
+<pre><code>HTTP/1.1 429 Too Many Requests
+RateLimit-Limit: 100
+RateLimit-Remaining: 0
+Retry-After: 12</code></pre>
+</section>
+
+<section class="card"><h3>Idempotency Keys</h3>
+<pre><code>POST /v1/payments
+Idempotency-Key: 8f3a-…-b21   // client-generated
+{ "amount": 4200, "currency": "usd" }</code></pre>
+<ul>
+<li>Server stores key → result. Retry with same key → returns the SAME response, no double charge.</li>
+<li>Pair with backoff + jitter on retries; dedup on the consumer side.</li>
+<li><span class="warn">!</span> "Exactly once" = at-least-once delivery + idempotent handling.</li>
+</ul>
+</section>
+
+<section class="card"><h3>REST vs GraphQL vs gRPC</h3>
+<table><thead><tr><th></th><th>REST</th><th>GraphQL</th><th>gRPC</th></tr></thead><tbody>
+<tr><td>transport</td><td>HTTP/1-2</td><td>HTTP</td><td>HTTP/2</td></tr>
+<tr><td>shape</td><td>resources</td><td>client-picks</td><td>RPC + protobuf</td></tr>
+<tr><td>fetching</td><td>fixed</td><td>no over/under</td><td>fixed, typed</td></tr>
+<tr><td>caching</td><td>easy (HTTP)</td><td>hard <span class="warn">!</span></td><td>manual</td></tr>
+<tr><td>streaming</td><td>SSE/WS</td><td>subs</td><td>bidi native</td></tr>
+<tr><td>best for</td><td>public/web</td><td>flexible clients</td><td>internal svc↔svc</td></tr>
+</tbody></table>
+<p>GraphQL watch: the <b>N+1</b> → batch with DataLoader.</p>
+</section>
+
+<section class="card"><h3>Caching</h3>
+<pre><code>GET /v1/orders/123
+→ ETag: "a1b2"
+   Cache-Control: private, max-age=60
+
+GET /v1/orders/123
+   If-None-Match: "a1b2"
+→ 304 Not Modified   // no body, cheap</code></pre>
+<ul>
+<li><code>ETag</code> + conditional GET saves bandwidth. Compress (gzip/br). Prefer field selection over huge payloads.</li>
+<li>Avoid chatty APIs — batch or expand related resources.</li>
+</ul>
+</section>
+
+<section class="card diagram"><h3>Webhooks</h3>
+<div class="mermaid">
+sequenceDiagram
+  participant S as Your API
+  participant C as Consumer
+  S->>C: POST /hook (event + HMAC sig)
+  C-->>S: 2xx (ack fast)
+  Note over S,C: no 2xx → retry w/ backoff → DLQ
+</div>
+<ul>
+<li><b>Sign</b> payloads (HMAC) so consumers verify authenticity.</li>
+<li>Retry w/ exponential backoff; <b>at-least-once</b> → consumer dedups on event ID.</li>
+<li><span class="warn">!</span> Ordering NOT guaranteed. Ack fast, process async. Guard against SSRF.</li>
+</ul>
+</section>
+
+<section class="card"><h3>API Security — OWASP Top Hits</h3>
+<ul>
+<li><span class="warn">!</span> <b>BOLA/IDOR (#1)</b>: <code>GET /orders/{id}</code> without checking the caller OWNS it → check object-level authz every time.</li>
+<li><b>Mass assignment</b>: binding <code>{"role":"admin"}</code> → allowlist writable fields.</li>
+<li><b>Excessive data exposure</b>: don't return internal/PII fields "just because."</li>
+<li>Validate all input; TLS everywhere; no secrets in URLs; CORS locked to known origins; rate-limit everything.</li>
+</ul>
+</section>
+
+<section class="card"><h3>&#9744; API Design-Review Checklist</h3>
+<ul>
+<li>&#9744; Resources are nouns; methods carry the verb; consistent naming.</li>
+<li>&#9744; Right status codes; consistent error model (problem+json).</li>
+<li>&#9744; Pagination on every collection (cursor for scale).</li>
+<li>&#9744; Idempotency for POST/payments; safe retries.</li>
+<li>&#9744; AuthN + <b>object-level</b> authZ on every endpoint (BOLA).</li>
+<li>&#9744; Rate limited; input validated; no data over-exposure.</li>
+<li>&#9744; Versioning + backward-compat plan; only additive changes.</li>
+<li>&#9744; OpenAPI contract, examples, changelog; caching where it helps.</li>
+<li>&#9744; Right style: REST public · gRPC internal · GraphQL flexible clients · webhooks for events.</li>
+</ul>
+</section>
+
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  try {
+    mermaid.initialize({ startOnLoad: true, theme: "neutral",
+      flowchart: { useMaxWidth: true, htmlLabels: true, nodeSpacing: 18, rankSpacing: 18 },
+      themeVariables: { fontSize: "9px" } });
+  } catch (e) { /* offline / blocked CDN: diagrams degrade to source text, rest of sheet is fine */ }
+</script>
+</body>
+</html>
