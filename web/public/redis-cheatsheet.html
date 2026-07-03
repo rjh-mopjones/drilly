@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Redis Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+/* spanning title bar */
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>Redis Cheat Sheet</h1><span class="meta">in-memory data-structure store · caching · data types · patterns · drilly</span></div>
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="warn">!</span> footgun / anti-pattern &nbsp; <code>&#9744;</code> cache/design review item</li>
+<li>Focus: the data types, the single-threaded model, caching &amp; the classic patterns interviews live on.</li>
+<li>Golden rules: pick the right <b>data structure</b>; set <b>TTLs + an eviction policy</b>; keep commands O(1)/O(log N) — the single thread blocks on O(N).</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+</ul></section>
+
+<section class="card"><h3>Architecture</h3>
+<ul>
+<li>Redis = in-memory <b>key–value data-structure server</b> (rich types, not a dumb blob cache).</li>
+<li><b>Single-threaded</b> command execution → each command is <b>atomic</b>; but one slow O(N) command <b>blocks everyone</b> <span class="warn">!</span></li>
+<li>Fast: all in RAM, mostly O(1), no locks, RESP protocol, epoll. (6+ adds I/O threads for networking only.)</li>
+<li>Memory-bound (data must fit in RAM). Use for cache / sessions / rate-limit / leaderboard / queue / pub-sub — NOT a primary store for data &gt; RAM or complex queries.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Data Types</h3>
+<table><thead><tr><th>Type</th><th>Use / ops</th></tr></thead><tbody>
+<tr><td>string</td><td>cache/counter — SET/GET, INCR</td></tr>
+<tr><td>hash</td><td>an object — HSET/HGETALL</td></tr>
+<tr><td>list</td><td>queue/stack — LPUSH/BRPOP/LTRIM</td></tr>
+<tr><td>set</td><td>unique/tags — SADD/SINTER</td></tr>
+<tr><td><b>zset</b></td><td>leaderboard/window — ZADD/ZRANGEBYSCORE</td></tr>
+<tr><td>stream</td><td>durable log + groups — XADD/XREADGROUP</td></tr>
+<tr><td>HLL</td><td>approx unique count — PFADD/PFCOUNT</td></tr>
+<tr><td>bitmap</td><td>flags/DAU — SETBIT/BITCOUNT</td></tr>
+<tr><td>geo</td><td>nearby — GEOADD/GEOSEARCH</td></tr>
+</tbody></table>
+<p><code>OBJECT ENCODING key</code> shows the internal layout.</p>
+</section>
+
+<section class="card"><h3>Keys · TTL · Eviction</h3>
+<pre><code>SET user:1 alice EX 3600     # value + TTL
+EXPIRE k 60    TTL k    PERSIST k</code></pre>
+<ul>
+<li>Namespaced keys <code>type:id:field</code>. Expiry = lazy (on access) + active (sampling).</li>
+<li><b>maxmemory + eviction policy</b>: <code>noeviction</code> (default — errors on write!) · <code>allkeys-lru</code>/<code>lfu</code> · <code>volatile-*</code> (only keys with a TTL) <span class="warn">!</span></li>
+<li><b>Eviction (memory pressure) ≠ expiry (TTL elapsed).</b> For a cache: allkeys-lru/lfu + TTLs; noeviction + no TTLs → OOM <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Persistence: RDB vs AOF</h3>
+<table><thead><tr><th></th><th>RDB</th><th>AOF</th></tr></thead><tbody>
+<tr><td>what</td><td>point-in-time snapshot (fork+COW)</td><td>append log of writes</td></tr>
+<tr><td>durability</td><td>lose since last snapshot</td><td>fsync everysec (~1s) / always</td></tr>
+<tr><td>restart</td><td>fast</td><td>slower (replay)</td></tr>
+<tr><td>size</td><td>compact</td><td>larger, rewritten</td></tr>
+</tbody></table>
+<ul>
+<li>In-memory ≠ non-durable. <b>Hybrid RDB+AOF</b> is the recommended default.</li>
+<li>BGSAVE/AOF-rewrite <b>fork</b> → latency spike + COW memory on write-heavy loads <span class="warn">!</span> Back up the RDB off-box.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Single-Thread Footguns</h3>
+<ul>
+<li><b>Never <code>KEYS *</code> in prod</b> — O(N), freezes the server → use <code>SCAN</code> (cursor) <span class="warn">!</span></li>
+<li>Beware big-key O(N): <code>SMEMBERS</code>/<code>HGETALL</code>/<code>LRANGE 0 -1</code>/<code>SORT</code> on huge keys; <code>DEL</code> big key → <code>UNLINK</code> (async).</li>
+<li><b>Pipelining</b>: batch commands to amortize RTT (throughput, not atomicity).</li>
+<li>Spot slow commands with <code>SLOWLOG GET</code>; latency from fork/swap/big-keys.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Pub/Sub vs Streams · Txn · Lua</h3>
+<ul>
+<li><b>Pub/Sub</b> = fire-and-forget, <b>at-most-once, no persistence</b> (no subscriber → lost) <span class="warn">!</span> <b>Streams</b> = durable log + consumer groups + ack + replay.</li>
+<li><b>MULTI/EXEC</b> = queued + atomic, but <b>NO rollback</b> on a runtime error <span class="warn">!</span> <b>WATCH</b> = optimistic CAS (EXEC aborts if a watched key changed → retry).</li>
+<li><b>Lua (EVAL/EVALSHA)</b> runs atomically (blocks the server) — the way to do multi-step read-modify-write. Keep scripts short. Redis 7 <b>Functions</b> persist &amp; replicate.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Caching Patterns</h3>
+<ul>
+<li><b>Cache-aside (lazy):</b> miss → load DB → <code>SET key val EX ttl</code> → return; hit → return. The default.</li>
+<li>Write-through (write cache+DB together) · write-behind (async flush). Always set a <b>TTL</b>.</li>
+<li><b>Invalidation:</b> TTL vs delete-on-write vs event-driven. "Two hard problems…"</li>
+<li><b>Stampede/thundering herd</b> (hot key expires → all miss → hammer DB): single-flight <b>lock</b>, early recompute, <b>TTL jitter</b> <span class="warn">!</span></li>
+<li>Penetration (cache the null / Bloom filter); avalanche (spread TTLs). Client-side caching (RESP3) for hot keys.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Distributed Lock</h3>
+<pre><code>SET lock:res &lt;token&gt; NX PX 30000     # acquire
+# release ONLY if it's still my token (atomic):
+EVAL "if redis.call('get',KEYS[1])==ARGV[1]
+      then return redis.call('del',KEYS[1]) else return 0 end"
+      1 lock:res &lt;token&gt;</code></pre>
+<ul>
+<li>NX = mutual exclusion; PX = auto-release so a crash can't deadlock.</li>
+<li>Never bare <code>DEL</code> — you may delete someone else's re-acquired lock <span class="warn">!</span></li>
+<li>Work &gt; TTL → lock expires mid-work → 2 holders (watchdog renew).</li>
+<li><b>Redlock</b> for multi-node; Kleppmann: fine for efficiency, NOT correctness without <b>fencing tokens</b> <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Rate Limit &amp; Patterns</h3>
+<ul>
+<li><b>Fixed window:</b> <code>INCR k</code> + <code>EXPIRE k 60</code> (allows 2× boundary bursts).</li>
+<li><b>Sliding window:</b> a <b>ZSET</b> of timestamps — ZADD, ZREMRANGEBYSCORE (drop old), ZCARD.</li>
+<li><b>Token bucket:</b> atomic <b>Lua</b> (tokens + last-refill) — the robust one.</li>
+<li>Sessions: <code>SET session:id data EX ttl</code>, sliding TTL, shared across app servers.</li>
+<li>Queues: list + <code>BRPOP</code> → reliable via <code>LMOVE</code> to a processing list → Streams groups → a real broker.</li>
+<li>Leaderboard (ZSET) · uniques (HLL) · DAU (bitmap) · dedup (set/Bloom).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Replication</h3>
+<ul>
+<li>Primary → replicas, <b>asynchronous</b> (read scaling + HA). Initial full sync (RDB) then a command stream; PSYNC = partial resync.</li>
+<li><b>Async ⇒ a crash can lose the last unreplicated writes</b>; failover promotes a replica that may miss them <span class="warn">!</span></li>
+<li><code>WAIT n timeout</code> for stronger acks; <code>min-replicas-to-write</code> to refuse writes if too few healthy.</li>
+<li>Replicas read-only; watch replication lag (<code>INFO replication</code>). A no-persistence replica restart can wipe the primary <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>HA: Sentinel vs Cluster</h3>
+<table><thead><tr><th>Sentinel</th><th>Cluster</th></tr></thead><tbody>
+<tr><td>HA for 1 non-sharded dataset</td><td>sharding + HA</td></tr>
+<tr><td>auto-failover + discovery</td><td>16384 hash slots</td></tr>
+<tr><td>≥3 sentinels, quorum</td><td>≥3 masters (+replicas)</td></tr>
+</tbody></table>
+<ul>
+<li><b>Sentinel:</b> monitors, quorum SDOWN→ODOWN, promotes a replica, tells clients the new primary.</li>
+<li><b>Cluster:</b> key→slot via CRC16; smart clients follow <b>MOVED/ASK</b>; multi-key ops need one slot → <b>hash tags</b> <code>user:{123}:x</code> <span class="warn">!</span> Built-in gossip failover.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Memory</h3>
+<ul>
+<li>Small aggregates use compact <b>encodings</b> (listpack/ziplist, intset, embstr) → convert to hashtable/skiplist past thresholds. Keeping collections small saves lots of memory.</li>
+<li>Find hogs: <code>INFO memory</code>, <code>MEMORY USAGE k</code>, <code>redis-cli --bigkeys</code>.</li>
+<li><b>Big keys</b> (multi-MB / millions of elements) → slow O(N) ops block the loop; split/cap them <span class="warn">!</span></li>
+<li><b>Hot keys</b> bottleneck one node (even in Cluster) → client-side cache / split.</li>
+<li>Fragmentation (<code>mem_fragmentation_ratio</code>, jemalloc, activedefrag); prefer hashes over millions of tiny keys.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Ops · Monitoring · Security</h3>
+<pre><code>INFO   INFO memory   INFO replication
+SLOWLOG GET   LATENCY DOCTOR   redis-cli --bigkeys</code></pre>
+<ul>
+<li>Watch: hit rate (<code>keyspace_hits/misses</code>), <code>used_memory</code>, <code>evicted_keys</code>, clients, replication lag, persistence status.</li>
+<li><code>MONITOR</code> = every command — great for debug, NEVER leave on in prod <span class="warn">!</span></li>
+<li><b>Never expose Redis to the internet</b> — bind private, protected-mode, <code>requirepass</code>/<b>ACLs</b>/TLS, rename dangerous commands (FLUSHALL/CONFIG/KEYS) <span class="warn">!</span></li>
+<li>Pool client connections (don't open one per request). Disable THP; never let Redis swap.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Ecosystem &amp; Alternatives</h3>
+<ul>
+<li>Redis 7: Functions, ACLs, RESP3 + client-side caching, sharded pub/sub.</li>
+<li><b>Redis Stack modules:</b> RedisJSON, <b>RediSearch</b> (index/full-text/<b>vector</b> search), RedisTimeSeries, RedisBloom.</li>
+<li><b>Valkey</b> = the Linux-Foundation BSD fork after the 2024 licence change (AWS/Google/Oracle) — near drop-in.</li>
+<li><b>Memcached</b> = simpler, multi-threaded, pure LRU cache, no persistence/rich types. <b>MemoryDB</b> = durable Redis-as-a-DB. KeyDB/Dragonfly = multi-threaded rewrites.</li>
+</ul>
+</section>
+
+<section class="card"><h3>&#9744; Cache / Design Review Checklist</h3>
+<ul>
+<li>&#9744; Right data structure for the access pattern (ZSET for ranked/window, hash for objects).</li>
+<li>&#9744; Every cache key has a <b>TTL</b>; an <b>eviction policy</b> set (allkeys-lru/lfu), not noeviction-with-no-TTLs.</li>
+<li>&#9744; No <code>KEYS</code>/unbounded O(N) in hot paths (use SCAN); no giant/big keys or hot keys.</li>
+<li>&#9744; Stampede protection (lock/early-recompute/jitter) on hot keys; a defined invalidation strategy.</li>
+<li>&#9744; Compound read-modify-write done atomically (Lua/WATCH), not check-then-act races.</li>
+<li>&#9744; Locks: NX+PX + safe Lua release (+ watchdog); know the correctness caveats.</li>
+<li>&#9744; Persistence &amp; replication data-loss window understood &amp; acceptable (WAIT if needed).</li>
+<li>&#9744; Secured (no public bind, auth/ACL/TLS); connections pooled; memory sized with headroom.</li>
+</ul>
+</section>
+
+<section class="card"><h3>&#9733; Troubleshooting Playbook</h3>
+<h4>Server froze</h4>
+<ul><li>&#9744; Someone ran <code>KEYS *</code> / a big-key O(N) → SCAN, split keys; check SLOWLOG.</li></ul>
+<h4>p99 latency spike</h4>
+<ul><li>&#9744; Fork (BGSAVE/AOF-rewrite), swap/THP, big DEL (→UNLINK), hot key → LATENCY DOCTOR.</li></ul>
+<h4>OOM / evicting / write errors</h4>
+<ul><li>&#9744; maxmemory + noeviction + no TTLs, or a big key → set policy, add TTLs, split keys.</li></ul>
+<h4>Low hit rate</h4>
+<ul><li>&#9744; TTLs too short, wrong keys cached, eviction thrashing, cold cache.</li></ul>
+<h4>Lost data on failover</h4>
+<ul><li>&#9744; Async replication window → WAIT / min-replicas; accept the tradeoff.</li></ul>
+<h4>Lock let two run</h4>
+<ul><li>&#9744; Work &gt; TTL or unsafe DEL → safe Lua unlock + watchdog + fencing token.</li></ul>
+</section>
+
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  try {
+    mermaid.initialize({ startOnLoad: true, theme: "neutral",
+      flowchart: { useMaxWidth: true, htmlLabels: true, nodeSpacing: 18, rankSpacing: 18 },
+      themeVariables: { fontSize: "9px" } });
+  } catch (e) { /* offline / blocked CDN: diagrams degrade to source text, rest of sheet is fine */ }
+</script>
+</body>
+</html>

@@ -231,6 +231,21 @@
       "cheatSheetUrl": "/cassandra-cheatsheet.html"
     },
     {
+      "id": "redis",
+      "file": "/redis-interview-primer.md",
+      "title": "Redis",
+      "category": "Databases",
+      "itemLabel": "Topic",
+      "itemsPlural": "Redis topics",
+      "storagePrefix": "ip:redis",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": [],
+      "cheatSheetUrl": "/redis-cheatsheet.html"
+    },
+    {
       "id": "csharp",
       "file": "/csharp-interview-primer.md",
       "title": "C#",

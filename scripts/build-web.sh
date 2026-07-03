@@ -22,6 +22,7 @@
 #   mobile/dist/db-theory-primer.md
 #   mobile/dist/sql-questions.md
 #   mobile/dist/cassandra-interview-primer.md
+#   mobile/dist/redis-interview-primer.md
 #   mobile/dist/csharp-interview-primer.md
 #   mobile/dist/aws-interview-primer.md
 #   mobile/dist/gcp-interview-primer.md
@@ -36,6 +37,7 @@
 #   mobile/dist/ai-engineering-primer.md
 #   mobile/dist/sql-postgres-cheatsheet.html   ← standalone A4 print cheat sheet (Cheat Sheets category, externalUrl)
 #   mobile/dist/cassandra-cheatsheet.html      ← standalone A4 print cheat sheet (attached to the Cassandra primer via cheatSheetUrl)
+#   mobile/dist/redis-cheatsheet.html          ← standalone A4 print cheat sheet (attached to the Redis primer via cheatSheetUrl)
 #   mobile/dist/java-cheatsheet.html           ← standalone A4 print cheat sheet (Cheat Sheets category, externalUrl)
 #   mobile/dist/csharp-cheatsheet.html         ← standalone A4 print cheat sheet (Cheat Sheets category, externalUrl)
 #   mobile/dist/go-cheatsheet.html             ← standalone A4 print cheat sheet (Cheat Sheets category, externalUrl)
@@ -72,7 +74,7 @@ cd "$MOBILE"
 bunx expo export --platform web --clear
 
 echo "→ Mirroring web/public/* (manifest + markdown) into $OUT"
-for f in service-worker.js manifest.json patterns.md neetcode-150.md java-interview-primer.md go-interview-primer.md rust-interview-primer.md python-interview-primer.md kotlin-interview-primer.md cpp-interview-primer.md postgres-interview-primer.md db-theory-primer.md sql-patterns-primer.md sql-questions.md cassandra-interview-primer.md csharp-interview-primer.md aws-interview-primer.md gcp-interview-primer.md linux-interview-primer.md kubernetes-interview-primer.md observability-interview-primer.md terraform-interview-primer.md docker-interview-primer.md cicd-interview-primer.md networking-interview-primer.md git-interview-primer.md ai-engineering-primer.md sql-postgres-cheatsheet.html cassandra-cheatsheet.html java-cheatsheet.html csharp-cheatsheet.html go-cheatsheet.html cpp-cheatsheet.html aws-cheatsheet.html gcp-cheatsheet.html linux-cheatsheet.html kubernetes-cheatsheet.html observability-cheatsheet.html terraform-cheatsheet.html docker-cheatsheet.html cicd-cheatsheet.html networking-cheatsheet.html git-cheatsheet.html system-design-cheatsheet.html finance-domain-cheatsheet.html system-design-patterns-primer.md dsa-patterns-primer.md; do
+for f in service-worker.js manifest.json patterns.md neetcode-150.md java-interview-primer.md go-interview-primer.md rust-interview-primer.md python-interview-primer.md kotlin-interview-primer.md cpp-interview-primer.md postgres-interview-primer.md db-theory-primer.md sql-patterns-primer.md sql-questions.md cassandra-interview-primer.md redis-interview-primer.md csharp-interview-primer.md aws-interview-primer.md gcp-interview-primer.md linux-interview-primer.md kubernetes-interview-primer.md observability-interview-primer.md terraform-interview-primer.md docker-interview-primer.md cicd-interview-primer.md networking-interview-primer.md git-interview-primer.md ai-engineering-primer.md sql-postgres-cheatsheet.html cassandra-cheatsheet.html redis-cheatsheet.html java-cheatsheet.html csharp-cheatsheet.html go-cheatsheet.html cpp-cheatsheet.html aws-cheatsheet.html gcp-cheatsheet.html linux-cheatsheet.html kubernetes-cheatsheet.html observability-cheatsheet.html terraform-cheatsheet.html docker-cheatsheet.html cicd-cheatsheet.html networking-cheatsheet.html git-cheatsheet.html system-design-cheatsheet.html finance-domain-cheatsheet.html system-design-patterns-primer.md dsa-patterns-primer.md; do
 	if [ -f "$WEB_PUBLIC/$f" ]; then
 		cp "$WEB_PUBLIC/$f" "$OUT/$f"
 		echo "   ✓ $f"
