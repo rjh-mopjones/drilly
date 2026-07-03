@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ScrollView,
   RefreshControl,
@@ -55,6 +55,16 @@ export function SourceLibrary() {
   const grouped = useMemo(() => groupByCategory(sources), [sources]);
   const [refreshing, setRefreshing] = useState(false);
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  const didInitCollapse = useRef(false);
+
+  // Every category starts collapsed on first load, once the manifest has
+  // populated the tree. Runs a single time — the user's toggles win after
+  // that, and collapse/expand-all stay available.
+  useEffect(() => {
+    if (didInitCollapse.current || grouped.length === 0) return;
+    didInitCollapse.current = true;
+    setCollapsed(new Set(grouped.map((g) => g.category)));
+  }, [grouped]);
 
   const toggleCategory = useCallback((category: string) => {
     setCollapsed((prev) => {

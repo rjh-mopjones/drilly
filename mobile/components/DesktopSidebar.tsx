@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -65,13 +65,14 @@ export function DesktopSidebar() {
   const [refreshedLabel, setRefreshedLabel] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   /**
-   * Collapsed category names. Start empty (everything expanded) so a fresh
-   * visit shows the full tree; the user collapses what they don't care
-   * about.
+   * Collapsed category names. Every category starts collapsed on first load
+   * (see the init effect below) so a fresh visit shows a compact list of
+   * section headers; the user expands what they care about.
    */
   const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(
     () => new Set(),
   );
+  const didInitCollapse = useRef(false);
 
   // Hydrate the "Updated …" label.
   useEffect(() => {
@@ -93,6 +94,25 @@ export function DesktopSidebar() {
       activeItemId: m && m[2] ? Number(m[2]) : null,
     };
   }, [pathname]);
+
+  // Collapse every category by default, once the manifest has populated the
+  // tree. Runs a single time — after that the user's toggles win, and
+  // collapse/expand-all stay available. On a deep-link we leave the active
+  // source's category expanded so the sidebar doesn't hide where you are.
+  useEffect(() => {
+    if (didInitCollapse.current || grouped.length === 0) return;
+    didInitCollapse.current = true;
+    const activeCategory = activeSourceId
+      ? sources.find((s) => s.id === activeSourceId)?.category
+      : null;
+    setCollapsedCategories(
+      new Set(
+        grouped
+          .map((g) => g.category)
+          .filter((category) => category !== activeCategory),
+      ),
+    );
+  }, [grouped, activeSourceId, sources]);
 
   // Auto-expand the source tree whenever the URL points at one of its items.
   useEffect(() => {
