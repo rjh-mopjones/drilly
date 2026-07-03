@@ -146,6 +146,22 @@
       "itemCount": 21
     },
     {
+      "id": "front-end",
+      "file": "/front-end-interview-primer.md",
+      "title": "Front End",
+      "category": "System Fundamentals",
+      "itemLabel": "Topic",
+      "itemsPlural": "front-end topics",
+      "storagePrefix": "ip:front-end",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": [],
+      "cheatSheetUrl": "/front-end-cheatsheet.html",
+      "itemCount": 21
+    },
+    {
       "id": "dsa-patterns",
       "file": "/dsa-patterns-primer.md",
       "title": "Patterns",

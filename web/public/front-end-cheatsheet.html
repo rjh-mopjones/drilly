@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Front End Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt; --fs-mono: 6.6pt; --fs-h3: 7.8pt; --gap: 5px; --pad: 3px;
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>Front End Cheat Sheet</h1><span class="meta">browser internals · event loop · cookies · caching · web performance · drilly</span></div>
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="warn">!</span> footgun / classic trap &nbsp; <code>&#9744;</code> reasoning step</li>
+<li>Focus: how the browser works + web performance (not CSS/styling).</li>
+<li>North star: <b>don't block the main thread</b>; measure before you optimize.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+</ul></section>
+
+<section class="card diagram"><h3>Critical Rendering Path</h3>
+<div class="mermaid">
+flowchart LR
+  H["HTML"] --> D["DOM"]
+  C["CSS"] --> O["CSSOM"]
+  D --> R["Render tree"]
+  O --> R
+  R --> L["Layout / reflow"]
+  L --> P["Paint"]
+  P --> X["Composite (GPU)"]
+</div>
+<ul>
+<li><b>CSS is render-blocking</b>; a sync <code>&lt;script&gt;</code> is parser-blocking → use <code>defer</code>/<code>async</code>.</li>
+<li>Fewer bytes on the critical path = faster first paint. <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Event Loop</h3>
+<pre><code>console.log(1);
+setTimeout(()=>console.log(4));      // macrotask
+Promise.resolve().then(()=>console.log(3)); // microtask
+console.log(2);
+// → 1 2 3 4</code></pre>
+<ul>
+<li><b>Microtasks</b> (promises, queueMicrotask) drain <b>fully</b> between macrotasks.</li>
+<li><b>Macrotasks</b>: timers, events, I/O.</li>
+<li><code>rAF</code> runs right before paint. <span class="warn">!</span> Long task = frozen UI.</li>
+</ul>
+</section>
+
+<section class="card"><h3>JS Engine (V8)</h3>
+<ul>
+<li>parse → <b>bytecode</b> (Ignition) → <b>JIT</b> (TurboFan) → deopt if shapes change.</li>
+<li><b>Hidden classes</b>: keep object shapes consistent; init all props in one place. <span class="warn">!</span></li>
+<li><b>GC</b>: generational mark-sweep; leaks keep objects reachable (see below).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Cookies &amp; Storage</h3>
+<table><thead><tr><th></th><th>Size</th><th>Sent to server</th><th>Life</th></tr></thead><tbody>
+<tr><td>cookie</td><td>~4KB</td><td>every request <span class="warn">!</span></td><td>Expires/Max-Age</td></tr>
+<tr><td>localStorage</td><td>~5MB</td><td>no</td><td>persistent</td></tr>
+<tr><td>sessionStorage</td><td>~5MB</td><td>no</td><td>per tab</td></tr>
+<tr><td>IndexedDB</td><td>large</td><td>no</td><td>persistent, async</td></tr>
+</tbody></table>
+<p>Cookie flags: <code>HttpOnly</code> (JS can't read), <code>Secure</code>, <b><code>SameSite</code></b> Lax/Strict/None. <span class="warn">!</span> Tokens in JS-readable storage = XSS-exposed → prefer HttpOnly cookies.</p>
+</section>
+
+<section class="card"><h3>Browser Security</h3>
+<ul>
+<li><b>SOP</b>: origin = scheme + host + port; cross-origin reads blocked.</li>
+<li><b>CORS</b>: server opts in via <code>Access-Control-Allow-*</code>; non-simple → preflight <code>OPTIONS</code>.</li>
+<li><b>CSP</b>: allowlist sources → mitigates XSS.</li>
+<li><b>SameSite</b> cookies + tokens → mitigate CSRF; <code>frame-ancestors</code> → clickjacking. Cross-ref Security sheet.</li>
+</ul>
+</section>
+
+<section class="card"><h3>HTTP for the Browser</h3>
+<table><thead><tr><th></th><th>Note</th></tr></thead><tbody>
+<tr><td>HTTP/1.1</td><td>HOL blocking, ~6 conns/host</td></tr>
+<tr><td>HTTP/2</td><td>multiplex 1 conn, header compress</td></tr>
+<tr><td>HTTP/3</td><td>QUIC/UDP, no TCP HOL</td></tr>
+</tbody></table>
+<p>DNS → TCP → TLS → HTTP. <span class="warn">!</span> Under H2/H3 don't over-bundle. Flatten request waterfalls.</p>
+</section>
+
+<section class="card"><h3>Caching</h3>
+<pre><code>Cache-Control: max-age=31536000, immutable  // hashed assets
+Cache-Control: no-cache        // revalidate via ETag
+→ If-None-Match: "abc" → 304 Not Modified</code></pre>
+<ul>
+<li>Layers: memory → disk → <b>Service Worker</b> → network; plus <b>bfcache</b>.</li>
+<li>Bust cache with content-hash filenames.</li>
+<li>SW strategies: cache-first / network-first / stale-while-revalidate.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Performance — Loading</h3>
+<ul>
+<li>Hints: <code>preconnect</code>, <code>preload</code> (critical), <code>prefetch</code> (next), <code>dns-prefetch</code>.</li>
+<li><b>Code split</b> + route chunks; dynamic <code>import()</code>; <code>loading="lazy"</code>.</li>
+<li>Minify + <b>tree-shake</b> + compress (br/gzip); optimize images (AVIF/WebP, <code>srcset</code>).</li>
+<li>Kill render-blocking CSS/JS; inline critical CSS. <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Performance — Runtime</h3>
+<pre><code>// layout thrash — read/write/read/write
+els.forEach(e=>{ e.style.h = e.offsetHeight+1 }) // !
+// fix: batch reads, then writes
+const hs = els.map(e=>e.offsetHeight);
+els.forEach((e,i)=>e.style.h = hs[i]+1);</code></pre>
+<ul>
+<li><b>reflow</b> (geometry) &gt; <b>repaint</b> (pixels) &gt; <b>composite</b> (transform/opacity, cheap, GPU).</li>
+<li>16.6ms/frame; break long tasks; <b>debounce</b> (wait for idle) vs <b>throttle</b> (rate-limit); virtualize long lists.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Core Web Vitals</h3>
+<table><thead><tr><th>Metric</th><th>Good</th><th>Is</th></tr></thead><tbody>
+<tr><td><b>LCP</b></td><td>≤2.5s</td><td>largest paint (loading)</td></tr>
+<tr><td><b>INP</b></td><td>≤200ms</td><td>interaction latency</td></tr>
+<tr><td><b>CLS</b></td><td>≤0.1</td><td>layout shift</td></tr>
+<tr><td>TTFB</td><td>≤0.8s</td><td>server response</td></tr>
+<tr><td>FCP</td><td>≤1.8s</td><td>first paint</td></tr>
+</tbody></table>
+<p>Lab (Lighthouse) ≠ field (RUM). <span class="warn">!</span> Measure with <code>web-vitals</code> + PerformanceObserver first.</p>
+</section>
+
+<section class="card"><h3>Rendering Strategies</h3>
+<table><thead><tr><th></th><th>HTML at</th><th>Best for</th></tr></thead><tbody>
+<tr><td>CSR</td><td>client</td><td>app-like SPA</td></tr>
+<tr><td>SSR</td><td>request time</td><td>dynamic + SEO</td></tr>
+<tr><td>SSG</td><td>build time</td><td>static content</td></tr>
+<tr><td>ISR</td><td>build + revalidate</td><td>large mostly-static</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> SSR/SSG still pay a <b>hydration</b> cost — looks interactive before it is. Islands/streaming cut it.</p>
+</section>
+
+<section class="card"><h3>Web APIs</h3>
+<ul>
+<li><b>Web Worker</b>: CPU off main thread (no DOM, postMessage).</li>
+<li><b>Service Worker</b>: network proxy, offline, push.</li>
+<li><b>IntersectionObserver</b>: lazy-load / infinite scroll.</li>
+<li><b>History API</b>: SPA routing (<code>pushState</code>).</li>
+<li>WebSocket/SSE; IndexedDB; <code>AbortController</code> to cancel fetch.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Memory Leaks (spot them)</h3>
+<ul>
+<li>Detached DOM kept by a JS ref.</li>
+<li>Listeners/timers/intervals never removed. <span class="warn">!</span></li>
+<li>Closures capturing large scopes; growing global/module maps &amp; caches.</li>
+<li>Find: DevTools Memory → heap snapshots, "Detached" nodes, retainers.</li>
+</ul>
+</section>
+
+<section class="card"><h3>&#9744; Playbook: slow page / "type a URL"</h3>
+<ul>
+<li>&#9744; DNS → TLS → HTML → CRP → JS parse/exec → hydrate → interactive.</li>
+<li>&#9744; <b>Measure first</b>: LCP/INP/CLS, the request waterfall, main-thread flame chart.</li>
+<li>&#9744; Loading slow? cut critical bytes, preconnect, split, compress, lazy-load.</li>
+<li>&#9744; Janky? find reflow/thrash/long tasks; debounce; virtualize; move CPU to a worker.</li>
+<li>&#9744; Big bundle? analyze, tree-shake, drop deps, dynamic-import routes.</li>
+<li>&#9744; Leak? snapshot, find detached nodes + retainers, remove listeners.</li>
+<li>&#9744; Pick storage/rendering by the constraint (SEO, offline, size, sent-to-server).</li>
+</ul>
+</section>
+
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  try {
+    mermaid.initialize({ startOnLoad: true, theme: "neutral",
+      flowchart: { useMaxWidth: true, htmlLabels: true, nodeSpacing: 18, rankSpacing: 18 },
+      themeVariables: { fontSize: "9px" } });
+  } catch (e) { /* offline / blocked CDN: diagrams degrade to source text, rest of sheet is fine */ }
+</script>
+</body>
+</html>
