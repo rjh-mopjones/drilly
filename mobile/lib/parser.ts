@@ -49,6 +49,13 @@ export interface SourceConfig {
    * separate library card.
    */
   cheatSheetUrl?: string;
+  /**
+   * Number of top-level items (topics) in this source, shown as a count on
+   * the sidebar category row. Backfilled into the manifest by
+   * `scripts/backfill-item-counts.ts` so the sidebar needn't eagerly parse
+   * every source. Omitted for external-only sources.
+   */
+  itemCount?: number;
 }
 
 export const SOURCES: Record<SourceId, SourceConfig> = {

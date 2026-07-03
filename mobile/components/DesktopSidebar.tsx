@@ -20,7 +20,7 @@ import type { SourceConfig } from "../lib/parser";
 import { invalidateSourceItemsCache, useSourceItems } from "../lib/useSourceItems";
 import { useTheme, type Palette } from "../lib/theme";
 
-const SIDEBAR_WIDTH = 280;
+const SIDEBAR_WIDTH = 300;
 
 /**
  * Group sources by their `category` field while preserving manifest order.
@@ -297,7 +297,7 @@ function SourceTreeNode({
         <View
           style={[
             styles.accentStrip,
-            { backgroundColor: active ? palette.accent : "transparent" },
+            { backgroundColor: active ? palette.textMuted : "transparent" },
           ]}
         />
         <Text style={styles.toggleGlyph}>
@@ -309,10 +309,19 @@ function SourceTreeNode({
         >
           {source.title}
         </Text>
+        {typeof source.itemCount === "number" && !isExternal && (
+          <Text style={styles.sourceCount}>{source.itemCount}</Text>
+        )}
       </Pressable>
 
       {expanded && !isExternal && (
         <View style={styles.itemsList}>
+          {items && items.length > 0 && (
+            <View
+              style={[styles.rail, source.cheatSheetUrl ? { bottom: 46 } : null]}
+              pointerEvents="none"
+            />
+          )}
           {items === null ? (
             <Text style={styles.itemsHint}>Loading…</Text>
           ) : items.length === 0 ? (
@@ -331,6 +340,9 @@ function SourceTreeNode({
                     isActiveItem && styles.sourceRowActive,
                   ]}
                 >
+                  {isActiveItem && (
+                    <View style={styles.itemRailActive} pointerEvents="none" />
+                  )}
                   <Text style={styles.itemNumber}>{it.id}</Text>
                   <Text
                     style={[
@@ -351,6 +363,7 @@ function SourceTreeNode({
               onPress={() => openExternalSource(source.cheatSheetUrl!)}
               style={({ pressed }) => [
                 styles.itemRow,
+                styles.cheatRow,
                 pressed && styles.sourceRowPressed,
               ]}
               accessibilityLabel="Open printable cheat sheet"
@@ -434,38 +447,45 @@ function makeStyles(p: Palette) {
     },
     body: { flex: 1 },
     bodyInner: { paddingVertical: 8 },
-    group: { paddingTop: 4, paddingBottom: 4 },
+    group: { paddingTop: 2, paddingBottom: 2 },
+    // Top tier — the section eyebrow (e.g. "SYSTEM FUNDAMENTALS"). Legible
+    // caps, near-body colour (not the old tiny muted grey), for tier signal.
     groupHeaderRow: {
       flexDirection: "row",
       alignItems: "center",
+      minHeight: 40,
       paddingHorizontal: 16,
-      paddingTop: 8,
-      paddingBottom: 4,
+      paddingTop: 10,
+      paddingBottom: 6,
+      gap: 9,
     },
     groupToggle: {
       color: p.textMuted,
-      fontSize: 10,
+      fontSize: 11,
       width: 12,
     },
     groupHeader: {
-      color: p.textMuted,
-      fontSize: 10,
+      color: p.text,
+      fontSize: 12,
       fontWeight: "700",
-      letterSpacing: 1.4,
+      letterSpacing: 1,
       textTransform: "uppercase",
-      marginLeft: 2,
     },
+    // Middle tier — the category (a source, e.g. "Operating Systems"). Bold
+    // sans, bigger, with a right-aligned topic count.
     sourceRow: {
       flexDirection: "row",
       alignItems: "center",
-      paddingRight: 16,
-      paddingVertical: 8,
+      minHeight: 44,
+      paddingRight: 14,
+      paddingVertical: 9,
     },
     sourceRowPressed: { backgroundColor: p.surfacePressed },
     sourceRowActive: { backgroundColor: p.surfacePressed },
+    // Neutral selection indicator (no coloured accent) — a subtle grey rail.
     accentStrip: {
       width: 3,
-      height: 20,
+      height: 22,
       marginRight: 8,
     },
     toggleGlyph: {
@@ -476,49 +496,84 @@ function makeStyles(p: Palette) {
     },
     sourceTitle: {
       color: p.text,
-      fontSize: 14,
-      fontWeight: "500",
+      fontSize: 15,
+      fontWeight: "600",
       flex: 1,
       marginLeft: 2,
     },
     sourceTitleActive: {
       color: p.textStrong,
-      fontWeight: "600",
+      fontWeight: "700",
     },
-    itemsList: { paddingLeft: 28, paddingBottom: 4 },
+    sourceCount: {
+      color: p.textMuted,
+      fontSize: 11,
+      fontVariant: ["tabular-nums"],
+      marginLeft: 8,
+    },
+    // Bottom tier — numbered topics, connected by a vertical rail (spine).
+    itemsList: { position: "relative", paddingBottom: 6 },
+    rail: {
+      position: "absolute",
+      left: 27,
+      top: 2,
+      bottom: 8,
+      width: 1.5,
+      backgroundColor: p.border,
+      borderRadius: 1,
+    },
     itemsHint: {
       color: p.textMuted,
       fontSize: 12,
-      paddingHorizontal: 16,
+      paddingLeft: 34,
       paddingVertical: 6,
       fontStyle: "italic",
     },
     itemRow: {
+      position: "relative",
       flexDirection: "row",
       alignItems: "flex-start",
-      paddingVertical: 5,
-      paddingHorizontal: 8,
-      gap: 8,
+      minHeight: 38,
+      paddingVertical: 8,
+      paddingLeft: 34,
+      paddingRight: 12,
+      gap: 9,
+    },
+    // Brighter rail segment marking the active topic, sitting over the spine.
+    itemRailActive: {
+      position: "absolute",
+      left: 26,
+      top: 7,
+      bottom: 7,
+      width: 2.5,
+      backgroundColor: p.textMuted,
+      borderRadius: 2,
     },
     itemNumber: {
       color: p.textMuted,
       fontSize: 11,
       fontVariant: ["tabular-nums"],
-      width: 22,
+      width: 20,
       textAlign: "right",
-      marginTop: 1,
+      marginTop: 2,
     },
     itemTitle: {
       color: p.text,
-      fontSize: 12,
-      lineHeight: 16,
+      fontSize: 13.5,
+      lineHeight: 18,
       flex: 1,
     },
+    // Pinned cheat-sheet link — neutral (no blue), set off by a top divider.
+    cheatRow: {
+      marginTop: 4,
+      borderTopWidth: 1,
+      borderTopColor: p.border,
+    },
     cheatGlyph: {
-      color: p.accent,
+      color: p.textMuted,
     },
     cheatItemTitle: {
-      color: p.accent,
+      color: p.text,
       fontWeight: "600",
     },
   });

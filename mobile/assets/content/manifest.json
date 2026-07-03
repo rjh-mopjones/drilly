@@ -14,7 +14,8 @@
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
       "sectionOrder": [],
-      "cheatSheetUrl": "/system-design-cheatsheet.html"
+      "cheatSheetUrl": "/system-design-cheatsheet.html",
+      "itemCount": 22
     },
     {
       "id": "patterns",
@@ -45,7 +46,8 @@
         "Multi-Region & DR",
         "Common Mistakes / Anti-patterns",
         "Talking Points for the Interview"
-      ]
+      ],
+      "itemCount": 41
     },
     {
       "id": "operating-systems",
@@ -60,7 +62,8 @@
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
       "sectionOrder": [],
-      "cheatSheetUrl": "/operating-systems-cheatsheet.html"
+      "cheatSheetUrl": "/operating-systems-cheatsheet.html",
+      "itemCount": 21
     },
     {
       "id": "concurrency",
@@ -75,7 +78,8 @@
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
       "sectionOrder": [],
-      "cheatSheetUrl": "/concurrency-cheatsheet.html"
+      "cheatSheetUrl": "/concurrency-cheatsheet.html",
+      "itemCount": 21
     },
     {
       "id": "api-design",
@@ -90,7 +94,8 @@
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
       "sectionOrder": [],
-      "cheatSheetUrl": "/api-design-cheatsheet.html"
+      "cheatSheetUrl": "/api-design-cheatsheet.html",
+      "itemCount": 21
     },
     {
       "id": "ood-patterns",
@@ -105,7 +110,8 @@
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
       "sectionOrder": [],
-      "cheatSheetUrl": "/ood-patterns-cheatsheet.html"
+      "cheatSheetUrl": "/ood-patterns-cheatsheet.html",
+      "itemCount": 21
     },
     {
       "id": "testing",
@@ -120,7 +126,8 @@
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
       "sectionOrder": [],
-      "cheatSheetUrl": "/testing-cheatsheet.html"
+      "cheatSheetUrl": "/testing-cheatsheet.html",
+      "itemCount": 21
     },
     {
       "id": "security",
@@ -135,7 +142,8 @@
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
       "sectionOrder": [],
-      "cheatSheetUrl": "/security-cheatsheet.html"
+      "cheatSheetUrl": "/security-cheatsheet.html",
+      "itemCount": 21
     },
     {
       "id": "dsa-patterns",
@@ -149,7 +157,8 @@
       "itemHeadingLevel": 2,
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
-      "sectionOrder": []
+      "sectionOrder": [],
+      "itemCount": 27
     },
     {
       "id": "neetcode",
@@ -170,7 +179,8 @@
         "Rust",
         "Go",
         "C++"
-      ]
+      ],
+      "itemCount": 150
     },
     {
       "id": "java",
@@ -185,7 +195,8 @@
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
       "sectionOrder": [],
-      "cheatSheetUrl": "/java-cheatsheet.html"
+      "cheatSheetUrl": "/java-cheatsheet.html",
+      "itemCount": 19
     },
     {
       "id": "go",
@@ -200,7 +211,8 @@
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
       "sectionOrder": [],
-      "cheatSheetUrl": "/go-cheatsheet.html"
+      "cheatSheetUrl": "/go-cheatsheet.html",
+      "itemCount": 18
     },
     {
       "id": "rust",
@@ -214,7 +226,8 @@
       "itemHeadingLevel": 2,
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
-      "sectionOrder": []
+      "sectionOrder": [],
+      "itemCount": 18
     },
     {
       "id": "python",
@@ -228,7 +241,8 @@
       "itemHeadingLevel": 2,
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
-      "sectionOrder": []
+      "sectionOrder": [],
+      "itemCount": 18
     },
     {
       "id": "kotlin",
@@ -242,7 +256,8 @@
       "itemHeadingLevel": 2,
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
-      "sectionOrder": []
+      "sectionOrder": [],
+      "itemCount": 15
     },
     {
       "id": "postgres",
@@ -257,7 +272,8 @@
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
       "sectionOrder": [],
-      "cheatSheetUrl": "/sql-postgres-cheatsheet.html"
+      "cheatSheetUrl": "/sql-postgres-cheatsheet.html",
+      "itemCount": 17
     },
     {
       "id": "db-theory",
@@ -271,7 +287,8 @@
       "itemHeadingLevel": 2,
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
-      "sectionOrder": []
+      "sectionOrder": [],
+      "itemCount": 16
     },
     {
       "id": "sql-patterns",
@@ -285,7 +302,8 @@
       "itemHeadingLevel": 2,
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
-      "sectionOrder": []
+      "sectionOrder": [],
+      "itemCount": 26
     },
     {
       "id": "sql-questions",
@@ -303,7 +321,8 @@
         "Pattern",
         "Explanation",
         "Solution"
-      ]
+      ],
+      "itemCount": 137
     },
     {
       "id": "cassandra",
@@ -318,7 +337,8 @@
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
       "sectionOrder": [],
-      "cheatSheetUrl": "/cassandra-cheatsheet.html"
+      "cheatSheetUrl": "/cassandra-cheatsheet.html",
+      "itemCount": 21
     },
     {
       "id": "redis",
@@ -333,7 +353,8 @@
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
       "sectionOrder": [],
-      "cheatSheetUrl": "/redis-cheatsheet.html"
+      "cheatSheetUrl": "/redis-cheatsheet.html",
+      "itemCount": 21
     },
     {
       "id": "yugabyte",
@@ -348,7 +369,8 @@
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
       "sectionOrder": [],
-      "cheatSheetUrl": "/yugabyte-cheatsheet.html"
+      "cheatSheetUrl": "/yugabyte-cheatsheet.html",
+      "itemCount": 21
     },
     {
       "id": "csharp",
@@ -363,7 +385,8 @@
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
       "sectionOrder": [],
-      "cheatSheetUrl": "/csharp-cheatsheet.html"
+      "cheatSheetUrl": "/csharp-cheatsheet.html",
+      "itemCount": 20
     },
     {
       "id": "cpp",
@@ -378,7 +401,8 @@
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
       "sectionOrder": [],
-      "cheatSheetUrl": "/cpp-cheatsheet.html"
+      "cheatSheetUrl": "/cpp-cheatsheet.html",
+      "itemCount": 21
     },
     {
       "id": "aws",
@@ -393,7 +417,8 @@
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
       "sectionOrder": [],
-      "cheatSheetUrl": "/aws-cheatsheet.html"
+      "cheatSheetUrl": "/aws-cheatsheet.html",
+      "itemCount": 21
     },
     {
       "id": "gcp",
@@ -408,7 +433,8 @@
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
       "sectionOrder": [],
-      "cheatSheetUrl": "/gcp-cheatsheet.html"
+      "cheatSheetUrl": "/gcp-cheatsheet.html",
+      "itemCount": 21
     },
     {
       "id": "linux",
@@ -423,7 +449,8 @@
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
       "sectionOrder": [],
-      "cheatSheetUrl": "/linux-cheatsheet.html"
+      "cheatSheetUrl": "/linux-cheatsheet.html",
+      "itemCount": 21
     },
     {
       "id": "kubernetes",
@@ -438,7 +465,8 @@
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
       "sectionOrder": [],
-      "cheatSheetUrl": "/kubernetes-cheatsheet.html"
+      "cheatSheetUrl": "/kubernetes-cheatsheet.html",
+      "itemCount": 21
     },
     {
       "id": "observability",
@@ -453,7 +481,8 @@
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
       "sectionOrder": [],
-      "cheatSheetUrl": "/observability-cheatsheet.html"
+      "cheatSheetUrl": "/observability-cheatsheet.html",
+      "itemCount": 21
     },
     {
       "id": "terraform",
@@ -468,7 +497,8 @@
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
       "sectionOrder": [],
-      "cheatSheetUrl": "/terraform-cheatsheet.html"
+      "cheatSheetUrl": "/terraform-cheatsheet.html",
+      "itemCount": 21
     },
     {
       "id": "docker",
@@ -483,7 +513,8 @@
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
       "sectionOrder": [],
-      "cheatSheetUrl": "/docker-cheatsheet.html"
+      "cheatSheetUrl": "/docker-cheatsheet.html",
+      "itemCount": 21
     },
     {
       "id": "cicd",
@@ -498,7 +529,8 @@
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
       "sectionOrder": [],
-      "cheatSheetUrl": "/cicd-cheatsheet.html"
+      "cheatSheetUrl": "/cicd-cheatsheet.html",
+      "itemCount": 21
     },
     {
       "id": "networking",
@@ -513,7 +545,8 @@
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
       "sectionOrder": [],
-      "cheatSheetUrl": "/networking-cheatsheet.html"
+      "cheatSheetUrl": "/networking-cheatsheet.html",
+      "itemCount": 21
     },
     {
       "id": "git",
@@ -528,7 +561,8 @@
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
       "sectionOrder": [],
-      "cheatSheetUrl": "/git-cheatsheet.html"
+      "cheatSheetUrl": "/git-cheatsheet.html",
+      "itemCount": 21
     },
     {
       "id": "ai-engineering",
@@ -542,7 +576,8 @@
       "itemHeadingLevel": 2,
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
-      "sectionOrder": []
+      "sectionOrder": [],
+      "itemCount": 5
     },
     {
       "id": "finance-domain",
@@ -557,7 +592,8 @@
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
       "sectionOrder": [],
-      "cheatSheetUrl": "/finance-domain-cheatsheet.html"
+      "cheatSheetUrl": "/finance-domain-cheatsheet.html",
+      "itemCount": 21
     }
   ]
 }
