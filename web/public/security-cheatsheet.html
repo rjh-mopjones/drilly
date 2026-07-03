@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Security Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt; --fs-mono: 6.6pt; --fs-h3: 7.8pt; --gap: 5px; --pad: 3px;
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.ok{background:#1f7a5a;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>Security Cheat Sheet</h1><span class="meta">threat modeling · crypto · authN/Z · OWASP · web vulns · defense · drilly</span></div>
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="warn">VULN</span> the weakness &nbsp; <span class="ok">FIX</span> the mitigation &nbsp; <code>&#9744;</code> review step</li>
+<li>Defensive/educational reference. North star: <b>defense in depth</b> + <b>least privilege</b> + <b>secure defaults</b>.</li>
+<li>Every weakness pairs with a fix — that's the interview signal.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+</ul></section>
+
+<section class="card"><h3>Fundamentals</h3>
+<ul>
+<li><b>CIA</b>: Confidentiality · Integrity · Availability (+ authenticity, non-repudiation).</li>
+<li><b>Defense in depth</b>: layers, so one failure isn't fatal.</li>
+<li><b>Least privilege</b>: minimum access needed, nothing more.</li>
+<li><b>Fail secure</b> / deny by default; secure defaults.</li>
+<li><b>Threat model</b> with <b>STRIDE</b>: Spoofing, Tampering, Repudiation, Info disclosure, DoS, Elevation.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Hash vs Encrypt vs Encode</h3>
+<table><thead><tr><th></th><th>Purpose</th><th>Reversible</th></tr></thead><tbody>
+<tr><td>Encoding</td><td>format (base64)</td><td>yes, no key <span class="warn">!</span></td></tr>
+<tr><td>Hashing</td><td>integrity/fingerprint</td><td>no (one-way)</td></tr>
+<tr><td>Encryption</td><td>confidentiality</td><td>yes, with key</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> Encoding is NOT security. Hashing ≠ encryption. Passwords are <b>hashed</b>, not encrypted.</p>
+</section>
+
+<section class="card"><h3>Crypto</h3>
+<table><thead><tr><th></th><th>Symmetric</th><th>Asymmetric</th></tr></thead><tbody>
+<tr><td>keys</td><td>one shared</td><td>public + private</td></tr>
+<tr><td>e.g.</td><td>AES-GCM</td><td>RSA, ECC</td></tr>
+<tr><td>speed</td><td>fast</td><td>slow</td></tr>
+<tr><td>use</td><td>bulk data</td><td>key exchange, signatures</td></tr>
+</tbody></table>
+<ul>
+<li>TLS = asymmetric handshake → symmetric session key.</li>
+<li><span class="warn">!</span> Don't roll your own crypto; never reuse a nonce/IV; use GCM not ECB.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Password Storage</h3>
+<pre><code>store = argon2id( salt + password )   FIX
+# per-user random salt, high work factor
+# NEVER: md5/sha1/sha256(password)   VULN</code></pre>
+<ul>
+<li>Use <b>Argon2id</b> / bcrypt / scrypt — slow &amp; salted by design.</li>
+<li>Salt stops rainbow tables; work factor stops brute force.</li>
+<li>Add rate limiting + breached-password checks + MFA.</li>
+</ul>
+</section>
+
+<section class="card"><h3>AuthN vs AuthZ</h3>
+<table><tbody>
+<tr><td><b>AuthN</b></td><td>who are you? (login, MFA, passkeys)</td></tr>
+<tr><td><b>AuthZ</b></td><td>what may you do? (RBAC/ABAC)</td></tr>
+</tbody></table>
+<ul>
+<li>MFA = know + have + are. Prefer <b>WebAuthn/passkeys</b> (phishing-resistant).</li>
+<li><span class="warn">!</span> Always enforce authorization <b>server-side</b>; deny by default.</li>
+</ul>
+</section>
+
+<section class="card"><h3>SQL Injection</h3>
+<pre><code>// VULN — string concat
+db.query("SELECT * FROM users WHERE id="+id)
+
+// FIX — parameterized query
+db.query("SELECT * FROM users WHERE id=?", [id])</code></pre>
+<p>Fix = <b>parameterized queries / prepared statements / ORM</b>. Input validation is defense-in-depth, not the fix. Least-privilege DB user.</p>
+</section>
+
+<section class="card"><h3>XSS</h3>
+<table><thead><tr><th>Type</th><th>Where</th></tr></thead><tbody>
+<tr><td>Stored</td><td>persisted, served to all</td></tr>
+<tr><td>Reflected</td><td>echoed from request</td></tr>
+<tr><td>DOM</td><td>client-side JS sink</td></tr>
+</tbody></table>
+<ul>
+<li><span class="ok">FIX</span> context-aware <b>output encoding</b> + <b>CSP</b> + sanitize (DOMPurify) + <code>HttpOnly</code> cookies.</li>
+<li><span class="warn">!</span> <code>innerHTML</code>/<code>dangerouslySetInnerHTML</code> with user data = XSS.</li>
+</ul>
+</section>
+
+<section class="card"><h3>CSRF · SSRF · Clickjacking</h3>
+<ul>
+<li><b>CSRF</b> <span class="ok">FIX</span>: anti-CSRF token + <code>SameSite</code> cookies.</li>
+<li><b>SSRF</b> <span class="ok">FIX</span>: allowlist URLs; block link-local &amp; <code>169.254.169.254</code> metadata. <span class="warn">!</span></li>
+<li><b>Clickjacking</b> <span class="ok">FIX</span>: <code>X-Frame-Options</code> / <code>frame-ancestors</code>.</li>
+<li><b>Open redirect</b> <span class="ok">FIX</span>: validate redirect targets.</li>
+</ul>
+</section>
+
+<section class="card"><h3>OWASP Top 10</h3>
+<table><tbody>
+<tr><td>A01</td><td>Broken Access Control</td></tr>
+<tr><td>A02</td><td>Cryptographic Failures</td></tr>
+<tr><td>A03</td><td>Injection</td></tr>
+<tr><td>A04</td><td>Insecure Design</td></tr>
+<tr><td>A05</td><td>Security Misconfiguration</td></tr>
+<tr><td>A06</td><td>Vulnerable Components</td></tr>
+<tr><td>A07</td><td>Auth Failures</td></tr>
+<tr><td>A08</td><td>Data Integrity Failures</td></tr>
+<tr><td>A09</td><td>Logging/Monitoring Failures</td></tr>
+<tr><td>A10</td><td>SSRF</td></tr>
+</tbody></table>
+</section>
+
+<section class="card"><h3>JWT &amp; Session</h3>
+<ul>
+<li>Cookies: <code>Secure</code> + <code>HttpOnly</code> + <code>SameSite</code>.</li>
+<li><span class="warn">!</span> JWT: reject <code>alg:none</code>/alg confusion; strong secret; short expiry + refresh rotation; no sensitive data in payload; can't easily revoke.</li>
+<li>Rotate session ID on login (session fixation).</li>
+<li>OAuth: validate redirect URI, use <b>PKCE</b> + state.</li>
+</ul>
+</section>
+
+<section class="card"><h3>AppSec Testing</h3>
+<table><thead><tr><th>Tool</th><th>Finds</th></tr></thead><tbody>
+<tr><td>SAST</td><td>code flaws (static)</td></tr>
+<tr><td>DAST</td><td>running-app flaws</td></tr>
+<tr><td>SCA</td><td>vulnerable deps (CVEs)</td></tr>
+<tr><td>secret scan</td><td>leaked keys in repo</td></tr>
+<tr><td>pen test</td><td>chained real-world attacks</td></tr>
+</tbody></table>
+<p>Shift left: run in CI, gate merges.</p>
+</section>
+
+<section class="card"><h3>Supply Chain &amp; Secrets</h3>
+<ul>
+<li>Secrets in a <b>vault</b>/secret manager — <span class="warn">!</span> never in git or committed env files; rotate.</li>
+<li>Pin &amp; lock deps; watch <b>typosquatting / dependency confusion</b>.</li>
+<li><b>SBOM</b> + artifact <b>signing</b> (Sigstore) + <b>SLSA</b> provenance.</li>
+<li>Scan images; use minimal/distroless; run <b>non-root</b>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Cloud / Infra / Memory</h3>
+<ul>
+<li>Cloud: <b>IAM least privilege</b>; no public buckets; <b>IMDSv2</b>; shared-responsibility model.</li>
+<li>Network: TLS/mTLS, HSTS, segmentation, <b>zero trust</b>.</li>
+<li>Memory (see OS sheet): overflow/UAF → <b>ASLR + DEP/NX + canaries</b>; memory-safe langs (Rust) prevent the class.</li>
+</ul>
+</section>
+
+<section class="card"><h3>&#9744; Threat-Model / Review Checklist</h3>
+<ul>
+<li>&#9744; Map trust boundaries &amp; data flows; run <b>STRIDE</b> per boundary.</li>
+<li>&#9744; AuthN strong (MFA); AuthZ enforced server-side, object-level (no IDOR).</li>
+<li>&#9744; All input parameterized; all output encoded.</li>
+<li>&#9744; Secrets in a vault; TLS everywhere; least privilege.</li>
+<li>&#9744; Deps scanned &amp; pinned; images minimal + non-root.</li>
+<li>&#9744; Security headers (CSP/HSTS/X-Frame-Options); cookies hardened.</li>
+<li>&#9744; Logging w/o secrets/PII; alerting + an IR plan.</li>
+<li>&#9744; Fail closed; validate at the boundary; assume breach.</li>
+</ul>
+</section>
+
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  try {
+    mermaid.initialize({ startOnLoad: true, theme: "neutral",
+      flowchart: { useMaxWidth: true, htmlLabels: true, nodeSpacing: 18, rankSpacing: 18 },
+      themeVariables: { fontSize: "9px" } });
+  } catch (e) { /* offline / blocked CDN: diagrams degrade to source text, rest of sheet is fine */ }
+</script>
+</body>
+</html>
