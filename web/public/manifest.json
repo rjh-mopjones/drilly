@@ -626,6 +626,22 @@
       "sectionOrder": [],
       "cheatSheetUrl": "/finance-domain-cheatsheet.html",
       "itemCount": 21
+    },
+    {
+      "id": "quant-methods",
+      "file": "/quant-methods-interview-primer.md",
+      "title": "Quantitative Methods",
+      "category": "Computational Finance",
+      "itemLabel": "Topic",
+      "itemsPlural": "quant topics",
+      "storagePrefix": "ip:quant-methods",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": [],
+      "cheatSheetUrl": "/quant-methods-cheatsheet.html",
+      "itemCount": 21
     }
   ]
 }
