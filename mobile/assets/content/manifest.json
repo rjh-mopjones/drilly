@@ -612,6 +612,22 @@
       "itemCount": 21
     },
     {
+      "id": "how-llms-work",
+      "file": "/how-llms-work-interview-primer.md",
+      "title": "Large Language Models",
+      "category": "Machine Learning",
+      "itemLabel": "Topic",
+      "itemsPlural": "LLM internals topics",
+      "storagePrefix": "ip:how-llms-work",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": [],
+      "cheatSheetUrl": "/how-llms-work-cheatsheet.html",
+      "itemCount": 21
+    },
+    {
       "id": "finance-domain",
       "file": "/finance-domain-interview-primer.md",
       "title": "Finance Domain",
