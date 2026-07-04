@@ -676,6 +676,22 @@
       "itemCount": 21
     },
     {
+      "id": "mlops",
+      "file": "/mlops-interview-primer.md",
+      "title": "MLOps",
+      "category": "Machine Learning",
+      "itemLabel": "Topic",
+      "itemsPlural": "MLOps topics",
+      "storagePrefix": "ip:mlops",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": [],
+      "cheatSheetUrl": "/mlops-cheatsheet.html",
+      "itemCount": 21
+    },
+    {
       "id": "finance-domain",
       "file": "/finance-domain-interview-primer.md",
       "title": "Finance Domain",
