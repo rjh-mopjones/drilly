@@ -660,6 +660,22 @@
       "itemCount": 21
     },
     {
+      "id": "deep-learning",
+      "file": "/deep-learning-interview-primer.md",
+      "title": "Deep Learning",
+      "category": "Machine Learning",
+      "itemLabel": "Topic",
+      "itemsPlural": "deep learning topics",
+      "storagePrefix": "ip:deep-learning",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": [],
+      "cheatSheetUrl": "/deep-learning-cheatsheet.html",
+      "itemCount": 21
+    },
+    {
       "id": "finance-domain",
       "file": "/finance-domain-interview-primer.md",
       "title": "Finance Domain",
