@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Classical Algorithms Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt; --fs-mono: 6.6pt; --fs-h3: 7.8pt; --gap: 5px; --pad: 3px;
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:12.5pt; margin:0; letter-spacing:.4px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>Classical Algorithms Cheat Sheet</h1><span class="meta">linear · trees · boosting · SVM · k-means · PCA · drilly</span></div>
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="warn">!</span> footgun / classic trap &nbsp; <code>&#9744;</code> reasoning step</li>
+<li>One algorithm per card: objective → how it's fit → key knob → tradeoff.</li>
+<li>Cross-cutting concepts (bias-variance, metrics, CV) are on the ML Fundamentals sheet.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+</ul></section>
+
+<section class="card"><h3>Linear Regression</h3>
+<pre><code>yhat = w·x + b   min MSE
+normal eq: w = (X^T X)^-1 X^T y   (O(p^3))
+or gradient descent for big/sparse</code></pre>
+<p>Assumes linearity/homoscedasticity/independence. <span class="warn">!</span> Multicollinearity → unstable coefficients.</p>
+</section>
+
+<section class="card"><h3>Regularized Linear</h3>
+<table><thead><tr><th></th><th>Penalty</th><th>Effect</th></tr></thead><tbody>
+<tr><td>Ridge L2</td><td>sum(w^2)</td><td>shrink, keep all</td></tr>
+<tr><td>Lasso L1</td><td>sum(|w|)</td><td><b>sparse</b> (select)</td></tr>
+<tr><td>ElasticNet</td><td>both</td><td>grouped</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> Standardize first; pick lambda by CV.</p>
+</section>
+
+<section class="card"><h3>Logistic Regression</h3>
+<pre><code>p = sigmoid(w·x + b),  log(p/(1-p)) = w·x + b
+min log-loss (convex);  grad = X^T (p - y)</code></pre>
+<ul>
+<li>Classification, linear boundary; multiclass via softmax/OvR.</li>
+<li>Interpret via odds ratios; the honest baseline.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Naive Bayes / kNN</h3>
+<ul>
+<li><b>NB</b>: P(y|x) ∝ P(y)·prod P(x_i|y); naive independence; Laplace smoothing; text/spam. <span class="warn">!</span> Log-space.</li>
+<li><b>kNN</b>: lazy, vote of k nearest; k = bias/variance. <span class="warn">!</span> MUST scale; curse of dimensionality.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Decision Trees</h3>
+<pre><code>split to cut impurity: Gini = 1 - sum(p_k^2)
+(or entropy);  regression -> variance/MSE</code></pre>
+<ul>
+<li>No scaling, mixed types, interpretable.</li>
+<li><span class="warn">!</span> High variance → prune / max_depth / min_leaf. Unstable.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Random Forest</h3>
+<ul>
+<li><b>Bagging</b> (bootstrap) + <b>random feature subset per split</b> → decorrelate → average → <b>less variance</b>.</li>
+<li><b>OOB error</b> = free validation. Parallel, robust, low tuning.</li>
+<li>Knobs: n_estimators, max_features, max_depth. <span class="warn">!</span> Can't extrapolate.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Bagging vs Boosting</h3>
+<table><thead><tr><th></th><th>Bagging</th><th>Boosting</th></tr></thead><tbody>
+<tr><td>trees</td><td>parallel</td><td>sequential</td></tr>
+<tr><td>fights</td><td>variance</td><td>bias</td></tr>
+<tr><td>example</td><td>Random Forest</td><td>GBM/XGB</td></tr>
+</tbody></table>
+<p>Also: stacking (meta-learner), voting (hard/soft).</p>
+</section>
+
+<section class="card"><h3>Gradient Boosting</h3>
+<pre><code>F_m = F_{m-1} + eta * h_m
+h_m fits the NEGATIVE GRADIENT of the loss
+(= residuals for MSE)</code></pre>
+<ul>
+<li><b>eta</b> (shrinkage) vs n_estimators; depth = interaction order.</li>
+<li>Low bias, overfits → early stopping / subsample. <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>XGBoost vs LightGBM vs CatBoost</h3>
+<table><thead><tr><th></th><th>Trick</th></tr></thead><tbody>
+<tr><td>XGBoost</td><td>reg. objective, 2nd-order (Hessian), sparsity-aware</td></tr>
+<tr><td>LightGBM</td><td>histogram, <b>leaf-wise</b>, GOSS+EFB → fast</td></tr>
+<tr><td>CatBoost</td><td>ordered boosting, native categoricals</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> LightGBM leaf-wise overfits → cap num_leaves. Tabular default = GBTs.</p>
+</section>
+
+<section class="card"><h3>SVM &amp; Kernels</h3>
+<pre><code>max margin = min 0.5*||w||^2 (+ C*slack)
+support vectors define the boundary</code></pre>
+<ul>
+<li><b>C</b>: large = hard fit, small = wide margin.</li>
+<li><b>Kernel trick</b>: K(x,x') = implicit high-dim dot product → non-linear.</li>
+<li>RBF `exp(-gamma·||x-x'||^2)`; gamma = reach. <span class="warn">!</span> Scale; O(n^2)-O(n^3).</li>
+</ul>
+</section>
+
+<section class="card"><h3>k-Means</h3>
+<pre><code>min within-cluster SS (inertia)
+Lloyd: assign nearest centroid -> recompute -> repeat
+init: k-means++</code></pre>
+<ul>
+<li>Local min (restart); choose k by elbow/silhouette.</li>
+<li><span class="warn">!</span> Assumes spherical/equal clusters; scale; sensitive to outliers.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Hierarchical / DBSCAN / GMM</h3>
+<ul>
+<li><b>Hierarchical</b>: linkage (Ward), dendrogram, cut for k, O(n^2).</li>
+<li><b>DBSCAN</b>: density (eps, min_samples), arbitrary shapes + <b>noise</b>, no k. <span class="warn">!</span> Varying density.</li>
+<li><b>GMM + EM</b>: soft, elliptical clusters; k-means = GMM special case.</li>
+</ul>
+</section>
+
+<section class="card"><h3>PCA</h3>
+<pre><code>directions of max variance =
+eigenvectors of Cov = (1/n) X^T X
+(compute via SVD of centered X)</code></pre>
+<ul>
+<li>Rank by explained variance; pick #comp by cumulative %.</li>
+<li><span class="warn">!</span> Standardize; linear + unsupervised; = min reconstruction error.</li>
+</ul>
+</section>
+
+<section class="card"><h3>t-SNE / UMAP / LDA</h3>
+<ul>
+<li><b>t-SNE</b>: local structure, VIZ only. <span class="warn">!</span> Don't cluster on it / read distances.</li>
+<li><b>UMAP</b>: faster, more global; general-purpose.</li>
+<li><b>LDA</b>: SUPERVISED, max between/within-class variance (≤ C-1 dims).</li>
+</ul>
+</section>
+
+<section class="card"><h3>&#9744; Which Algorithm? / Interview</h3>
+<ul>
+<li>&#9744; <b>Tabular → gradient-boosted trees</b> (XGB/LGBM) by default.</li>
+<li>&#9744; Need interpretability/baseline → linear/logistic.</li>
+<li>&#9744; Small-medium, high-dim → SVM; text → Naive Bayes; simple → kNN (scale!).</li>
+<li>&#9744; Cluster: spherical→k-means, shapes+noise→DBSCAN, soft→GMM.</li>
+<li>&#9744; Reduce dims: linear/decorrelate→PCA, viz→t-SNE/UMAP, supervised→LDA.</li>
+<li>&#9744; Derive: logistic grad = X^T(p-y); RF cuts variance via decorrelation; GBM fits neg-gradient; PCA = eigen/SVD of covariance.</li>
+<li>&#9744; State the objective, the fit, the key knob, the complexity, the tradeoff.</li>
+</ul>
+</section>
+
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  try {
+    mermaid.initialize({ startOnLoad: true, theme: "neutral",
+      flowchart: { useMaxWidth: true, htmlLabels: true, nodeSpacing: 18, rankSpacing: 18 },
+      themeVariables: { fontSize: "9px" } });
+  } catch (e) { /* offline / blocked CDN: diagrams degrade to source text, rest of sheet is fine */ }
+</script>
+</body>
+</html>

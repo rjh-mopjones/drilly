@@ -644,6 +644,22 @@
       "itemCount": 21
     },
     {
+      "id": "classical-algorithms",
+      "file": "/classical-algorithms-interview-primer.md",
+      "title": "Classical Algorithms",
+      "category": "Machine Learning",
+      "itemLabel": "Topic",
+      "itemsPlural": "algorithm topics",
+      "storagePrefix": "ip:classical-algorithms",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": [],
+      "cheatSheetUrl": "/classical-algorithms-cheatsheet.html",
+      "itemCount": 21
+    },
+    {
       "id": "finance-domain",
       "file": "/finance-domain-interview-primer.md",
       "title": "Finance Domain",
