@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>C++ for Financial Math Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt; --fs-mono: 6.6pt; --fs-h3: 7.8pt; --gap: 5px; --pad: 3px;
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:12.5pt; margin:0; letter-spacing:.4px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>C++ for Financial Math Cheat Sheet</h1><span class="meta">pricing libs · templates · Monte Carlo · perf · QuantLib · drilly</span></div>
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="warn">!</span> footgun / classic trap &nbsp; <code>&#9744;</code> reasoning step</li>
+<li>C++ <b>applied to quant</b> (not a language tutorial). Formulas in ASCII, code in C++.</li>
+<li>Themes: <b>value semantics + RAII</b>, <b>zero-cost abstraction</b>, <b>layout beats FLOPs</b>.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+</ul></section>
+
+<section class="card"><h3>Why C++ in Finance</h3>
+<ul>
+<li>Latency + numerical control + legacy pricing libs.</li>
+<li><b>Two-language problem</b>: C++ compute core, Python front (pybind11).</li>
+<li><b>QuantLib</b> = reference open-source library.</li>
+<li>Target C++17/20; use Python for research, C++ for the hot path.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Floating Point</h3>
+<pre><code>bool eq(double a,double b,double eps=1e-9){
+  return std::abs(a-b) &lt;= eps*std::max({1.0,std::abs(a),std::abs(b)});
+}</code></pre>
+<ul>
+<li><b>double</b> for prices; never <code>==</code> — use epsilon/ULP. <span class="warn">!</span></li>
+<li><b>Money is NOT a double</b> — integer cents / decimal (0.1 is inexact).</li>
+<li>Catastrophic cancellation bites finite-diff Greeks; <code>-ffast-math</code> breaks NaN. <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>RAII &amp; Ownership</h3>
+<ul>
+<li>RAII = lifetime-bound resources; <b>deterministic dtor</b> (no GC pauses).</li>
+<li><b>Rule of 0</b> (prefer); rule of 3/5 if you write one, consider all.</li>
+<li><code>unique_ptr</code> (owning, zero-cost) &gt; <code>shared_ptr</code> (atomic refcount — off hot path). <span class="warn">!</span></li>
+<li>Never raw <code>new</code>/<code>delete</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Templates &amp; CRTP</h3>
+<pre><code>template&lt;class D&gt; struct Engine {
+  double price(){ return static_cast&lt;D*&gt;(this)-&gt;calc(); }
+};  // CRTP: static dispatch, inlinable, no vtable</code></pre>
+<ul>
+<li>CRTP / templates remove <b>virtual dispatch</b> on the hot path.</li>
+<li><b>Expression templates</b> (Eigen) fuse <code>a=b+c+d</code>, zero temporaries.</li>
+<li>Constrain with <b>concepts</b>: <code>template&lt;std::floating_point T&gt;</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Pricing Library OO</h3>
+<pre><code>Instrument  --has--&gt;  Payoff
+Instrument  --uses--&gt; PricingEngine (Strategy)
+  Analytic / Tree / MonteCarlo engines</code></pre>
+<p>Separate <b>what to price</b> (instrument+payoff) from <b>how</b> (engine). Visitor across types; Factory to build; keep market data (curves/vols) separate.</p>
+</section>
+
+<section class="card"><h3>Move &amp; RVO</h3>
+<ul>
+<li><code>std::move</code> is a <b>cast</b>; move ctor steals the buffer O(1) vs O(n) copy.</li>
+<li>Return big objects by value — <b>RVO/NRVO</b> elides the copy.</li>
+<li><span class="warn">!</span> <code>return std::move(local)</code> disables RVO; <code>move</code> on <code>const</code> copies.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Cache &amp; Layout</h3>
+<ul>
+<li><b>SoA &gt; AoS</b> for bulk pricing (vectorizes, cache-friendly).</li>
+<li>64B cache lines; <b>pad to avoid false sharing</b>. <span class="warn">!</span></li>
+<li>No allocation on the hot path — <code>reserve</code>, reuse buffers, pools/arena.</li>
+<li>Layout, not FLOP count, usually dominates numeric perf.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Eigen + Cholesky</h3>
+<pre><code>// correlated normals: X = L * Z, Sigma = L L^T
+Eigen::LLT&lt;MatrixXd&gt; llt(Sigma);
+MatrixXd L = llt.matrixL();
+VectorXd X = L * Z;   // Z ~ iid N(0,1)</code></pre>
+<p>Eigen = expression templates + SIMD; call BLAS/LAPACK/MKL for heavy ops. Cholesky is THE correlated-draw primitive.</p>
+</section>
+
+<section class="card"><h3>RNG (&lt;random&gt;)</h3>
+<pre><code>std::mt19937_64 g(seed);
+std::normal_distribution&lt;double&gt; N(0,1);
+double z = N(g);</code></pre>
+<ul>
+<li>Never <code>rand()</code>. Fixed seed for reproducibility.</li>
+<li><span class="warn">!</span> Parallel MC: <b>one engine per thread</b>, distinct seeds — never share.</li>
+<li>Sobol (quasi-random) → faster MC convergence.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Monte Carlo Pricer</h3>
+<pre><code>double sum=0, sum2=0;
+for(int i=0;i&lt;N;i++){
+  double z=Nd(g);
+  double ST=S*exp((r-0.5*sig*sig)*T + sig*sqrt(T)*z);
+  double pay=std::max(ST-K,0.0);
+  sum+=pay; sum2+=pay*pay;
+}
+double price=exp(-r*T)*sum/N;         // stderr ~ 1/sqrt(N)</code></pre>
+<p>Template on payoff+generator to inline; antithetic +z/-z for variance reduction.</p>
+</section>
+
+<section class="card"><h3>Numerical Methods</h3>
+<pre><code>// Newton for implied vol: f(sig)=BS(sig)-mkt
+sig -= (bs(sig)-mkt)/vega(sig);   // repeat</code></pre>
+<ul>
+<li>Newton (fast, needs derivative) vs bisection (robust) vs Brent (both).</li>
+<li>Trees (backward induction, American), finite-diff PDE (Crank-Nicolson).</li>
+<li>Watch stability &amp; step size.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Low Latency</h3>
+<ul>
+<li>Kill <b>virtual dispatch</b> on hot path → CRTP / templates / <code>variant</code>.</li>
+<li><code>[[likely]]</code>, inlining, <b>SIMD</b> (<code>-O3 -march=native</code>), SoA.</li>
+<li>No exceptions/allocation on hot path; <b>PGO</b> + LTO. <span class="warn">!</span> Measure, don't guess.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Concurrency</h3>
+<ul>
+<li><code>std::execution::par</code> for easy MC; <code>std::atomic</code> + memory orders.</li>
+<li>Parallel MC: split paths, <b>per-thread RNG</b>, reduce partials. <span class="warn">!</span></li>
+<li>Float non-associativity → results vary by thread count (reproducibility).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Python Bridge &amp; Tooling</h3>
+<pre><code>PYBIND11_MODULE(pricer, m){
+  m.def("bs", &amp;black_scholes);
+}</code></pre>
+<ul>
+<li>pybind11 wraps C++; <b>release the GIL</b> around compute; zero-copy NumPy.</li>
+<li>Build: CMake; sanitizers ASan/UBSan/<b>TSan</b>; Google Benchmark (<code>DoNotOptimize</code>).</li>
+<li>Test numerics with tolerances + golden values + parity properties.</li>
+</ul>
+</section>
+
+<section class="card"><h3>&#9744; QuantLib Patterns &amp; Interview</h3>
+<ul>
+<li>&#9744; <b>Handle/Observer</b>: quote changes → dependents recompute (lazy).</li>
+<li>&#9744; <b>PricingEngine</b> = Strategy; term structures as objects; bootstrap curves.</li>
+<li>&#9744; Date/Calendar/DayCount conventions = bug-prone, handle carefully.</li>
+<li>&#9744; Greeks: bump-and-revalue (N+1, cancellation) vs <b>AAD</b> (all Greeks ~1 pricing).</li>
+<li>&#9744; Interview: implement Black-Scholes; design an MC hierarchy; price a tree.</li>
+<li>&#9744; "What does this print / UB": lifetime, dangling ref, static-init order.</li>
+<li>&#9744; "Optimize this pricer": profile → virtual/alloc/cache → fix, then measure.</li>
+</ul>
+</section>
+
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  try {
+    mermaid.initialize({ startOnLoad: true, theme: "neutral",
+      flowchart: { useMaxWidth: true, htmlLabels: true, nodeSpacing: 18, rankSpacing: 18 },
+      themeVariables: { fontSize: "9px" } });
+  } catch (e) { /* offline / blocked CDN: diagrams degrade to source text, rest of sheet is fine */ }
+</script>
+</body>
+</html>
