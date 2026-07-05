@@ -10473,22 +10473,77 @@ ExecutionReport {
 ```
 
 #### High-Level Design
-```mermaid
-flowchart TB
-    P[Participants] -->|FIX / binary order entry| FH[Feed Handler / Gateway]
-    FH --> SEQ[Sequencer: monotonic seq + append]
-    SEQ --> J[(Journal / Event Store)]
-    SEQ -->|route by hash instrumentId| CORES
-    subgraph CORES[Matching Cores: one thread per shard]
-        direction LR
-        S0[Shard 0: AAPL book]
-        S1[Shard 1: MSFT book]
-        S2[Shard N: ...]
-    end
-    CORES --> MD[Market Data Publisher: top-of-book, latest wins]
-    CORES --> ER[Execution Reports: fills, acks, cancels, sequenced]
-    MD --> SUB[Subscribers]
-    ER --> P
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 620" role="img" aria-label="Matching engine high-level architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box" x="280" y="20" width="200" height="46" rx="9"/>
+  <text class="lbl" x="380" y="44">Participants</text>
+
+  <rect class="box" x="264" y="100" width="232" height="46" rx="9"/>
+  <text class="lbl" x="380" y="124">Feed Handler / Gateway</text>
+
+  <rect class="box" x="280" y="180" width="200" height="46" rx="9"/>
+  <text class="lbl" x="380" y="204">Sequencer</text>
+
+  <ellipse class="store" cx="650" cy="190" rx="75" ry="10"/>
+  <path class="store" d="M575,190 v36 a75,10 0 0 0 150,0 v-36"/>
+  <text class="sub" x="650" y="212">Journal / Event Store</text>
+
+  <rect class="grp" x="150" y="270" width="470" height="152" rx="12"/>
+  <text class="sub" x="385" y="291" font-weight="600">Matching Cores · one thread per shard</text>
+  <rect class="box" x="170" y="314" width="132" height="44" rx="8"/>
+  <text class="sub" x="236" y="337">Shard 0 · AAPL</text>
+  <rect class="box" x="314" y="314" width="132" height="44" rx="8"/>
+  <text class="sub" x="380" y="337">Shard 1 · MSFT</text>
+  <rect class="box" x="458" y="314" width="132" height="44" rx="8"/>
+  <text class="sub" x="524" y="337">Shard N · …</text>
+
+  <rect class="box" x="150" y="474" width="230" height="46" rx="9"/>
+  <text class="sub" x="265" y="498">Market Data Publisher</text>
+
+  <rect class="box" x="410" y="474" width="200" height="46" rx="9"/>
+  <text class="sub" x="510" y="498">Execution Reports</text>
+
+  <rect class="box" x="150" y="552" width="230" height="46" rx="9"/>
+  <text class="sub" x="265" y="576">Subscribers</text>
+
+  <path class="flow" d="M380,66 L380,100"/>
+  <text class="edge" x="392" y="84" text-anchor="start">orders + cancels</text>
+
+  <path class="flow" d="M380,146 L380,180"/>
+
+  <path class="flow" d="M480,203 L575,203"/>
+  <text class="edge" x="527" y="195">append</text>
+
+  <path class="flow" d="M380,226 L380,270"/>
+  <text class="edge" x="392" y="250" text-anchor="start">route by hash(instrumentId)</text>
+
+  <path class="flow" d="M265,422 L265,474"/>
+  <text class="edge" x="277" y="450" text-anchor="start">top-of-book · latest wins</text>
+
+  <path class="flow" d="M510,422 L510,474"/>
+  <text class="edge" x="522" y="450" text-anchor="start">fills · acks · sequenced</text>
+
+  <path class="flow" d="M265,520 L265,552"/>
+
+  <path class="flow" d="M610,497 L735,497 L735,43 L480,43"/>
+  <text class="edge" x="728" y="66" text-anchor="end">acks / fills</text>
+</svg>
 ```
 
 **How to read the diagram:** every event flows in one direction. It is validated once at the edge, sequenced once into the durable log, then routed to exactly one matching core based on its instrument. Matching produces two output streams: stateless market data (only the latest snapshot matters) and sequenced execution reports (gaps are detectable).

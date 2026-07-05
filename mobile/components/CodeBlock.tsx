@@ -4,6 +4,7 @@ import { useTheme, MONO_FONT, type Palette } from "../lib/theme";
 import { useSettings } from "../lib/settings";
 import { highlight } from "../lib/syntaxHighlight";
 import MermaidView from "./MermaidView";
+import SvgDiagram from "./SvgDiagram";
 
 interface Props {
   /** Fence info string, e.g. "python", "rust", "java", "" if absent. */
@@ -54,6 +55,7 @@ const LANG_LABEL: Record<string, string> = {
   html: "HTML",
   css: "CSS",
   mermaid: "Diagram",
+  svg: "Diagram",
 };
 
 export function CodeBlock({ language, code }: Props) {
@@ -76,13 +78,19 @@ export function CodeBlock({ language, code }: Props) {
   const canonical = LANG_ALIAS[normalised] ?? normalised;
   const label = canonical ? (LANG_LABEL[canonical] ?? canonical) : "Code";
   const isMermaid = canonical === "mermaid";
+  // Hand-authored inline-SVG architecture diagrams (```svg fence). Guard on
+  // the content actually being an <svg> so a stray svg code sample still
+  // renders as source, not as a diagram.
+  const isSvg = canonical === "svg" && code.trim().startsWith("<svg");
 
   return (
     <View style={styles.wrapper}>
       <View style={styles.tag}>
         <Text style={styles.tagText}>{label}</Text>
       </View>
-      {isMermaid ? (
+      {isSvg ? (
+        <SvgDiagram source={code} scheme={palette.scheme} palette={palette} />
+      ) : isMermaid ? (
         // Mermaid blocks render inside a WebView with inline HTML that
         // loads mermaid from a CDN, then auto-sizes via postMessage.
         <MermaidView
