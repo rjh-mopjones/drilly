@@ -194,6 +194,22 @@
       "cheatSheetUrl": "/data-structures-cheatsheet.html"
     },
     {
+      "id": "algorithms",
+      "file": "/algorithms-interview-primer.md",
+      "title": "Algorithms",
+      "category": "Data Structures & Algorithms",
+      "itemLabel": "Topic",
+      "itemsPlural": "algorithms topics",
+      "storagePrefix": "ip:algorithms",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": [],
+      "itemCount": 21,
+      "cheatSheetUrl": "/algorithms-cheatsheet.html"
+    },
+    {
       "id": "dsa-patterns",
       "file": "/dsa-patterns-primer.md",
       "title": "Patterns",

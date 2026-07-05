@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Algorithms Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt; --fs-mono: 6.6pt; --fs-h3: 7.8pt; --gap: 5px; --pad: 3px;
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:12.5pt; margin:0; letter-spacing:.4px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.4pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>Algorithms Cheat Sheet</h1><span class="meta">paradigms · complexity · recurrences · graph picker · DP recipe · drilly</span></div>
+
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="warn">!</span> footgun / classic trap &nbsp; <code>&#9744;</code> checklist step</li>
+<li>Interviews test <b>which paradigm</b>: from the ops + input size, name the technique and its complexity, then justify.</li>
+<li>Bounds are typical; hash/quicksort are <b>expected</b>. Constants &amp; cache still decide real speed.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+</ul></section>
+
+<section class="card"><h3>Sorting Complexity</h3>
+<table><thead><tr><th>Sort</th><th>Best</th><th>Avg</th><th>Worst</th><th>Spc</th><th>Stbl</th></tr></thead><tbody>
+<tr><td>Bubble</td><td>n</td><td>n^2</td><td>n^2</td><td>1</td><td>Y</td></tr>
+<tr><td>Insertion</td><td>n</td><td>n^2</td><td>n^2</td><td>1</td><td>Y</td></tr>
+<tr><td>Selection</td><td>n^2</td><td>n^2</td><td>n^2</td><td>1</td><td>N</td></tr>
+<tr><td>Merge</td><td>n log n</td><td>n log n</td><td>n log n</td><td>n</td><td>Y</td></tr>
+<tr><td>Quick</td><td>n log n</td><td>n log n</td><td>n^2</td><td>log n</td><td>N</td></tr>
+<tr><td>Heap</td><td>n log n</td><td>n log n</td><td>n log n</td><td>1</td><td>N</td></tr>
+<tr><td>Counting</td><td>n+k</td><td>n+k</td><td>n+k</td><td>k</td><td>Y</td></tr>
+<tr><td>Radix</td><td>nd</td><td>nd</td><td>nd</td><td>n+k</td><td>Y</td></tr>
+</tbody></table>
+<p class="cap"><span class="warn">!</span> Comparison sorts can't beat Omega(n log n). Counting/radix need bounded keys.</p>
+</section>
+
+<section class="card"><h3>Paradigm Decision Tree</h3>
+<ul>
+<li><b>Brute force</b> first — get correctness + a complexity to beat.</li>
+<li><b>Greedy</b>: a locally-best choice is provably globally optimal (exchange argument). Fast, but prove it.</li>
+<li><b>Divide &amp; conquer</b>: split into independent subproblems, combine (sort, search).</li>
+<li><b>DP</b>: overlapping subproblems + optimal substructure → memoize.</li>
+<li><b>Graph</b>: model as nodes/edges → BFS/DFS/shortest-path/flow.</li>
+<li><span class="warn">!</span> Greedy fails? It usually means DP.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Recurrences &amp; Master Thm</h3>
+<pre><code>T(n) = a T(n/b) + O(n^d)
+compare d vs log_b(a):
+  d >  log_b a : O(n^d)
+  d == log_b a : O(n^d log n)
+  d <  log_b a : O(n^(log_b a))</code></pre>
+<ul>
+<li>Merge sort: 2T(n/2)+O(n) → n log n.</li>
+<li>Binary search: T(n/2)+O(1) → log n.</li>
+<li>Karatsuba: 3T(n/2)+O(n) → n^1.585.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Binary Search on the Answer</h3>
+<pre><code>lo, hi = min, max
+while lo < hi:
+  mid = lo + (hi-lo)/2   # no overflow
+  if feasible(mid): hi = mid
+  else:             lo = mid+1
+return lo               # first feasible</code></pre>
+<p><span class="warn">!</span> Works when feasibility is <b>monotonic</b>. Nail the invariant + which side keeps <code>mid</code>, or you infinite-loop.</p>
+</section>
+
+<section class="card"><h3>DP Recipe</h3>
+<ul>
+<li><b>1. State</b> — what minimal info defines a subproblem? (indices, remaining capacity, mask)</li>
+<li><b>2. Transition</b> — how does a state build from smaller ones?</li>
+<li><b>3. Base case</b> — smallest subproblems.</li>
+<li><b>4. Order</b> — memoize (top-down) or fill in dependency order (bottom-up).</li>
+<li><b>5. Answer</b> — which state(s) hold it. Complexity = #states x transition cost.</li>
+</ul>
+<p class="cap">Classic: knapsack, LCS/edit distance, LIS (n log n w/ patience), coin change, grid, interval, bitmask, tree DP.</p>
+</section>
+
+<section class="card"><h3>Graph Algorithm Picker</h3>
+<table><thead><tr><th>Need</th><th>Use</th><th>Time</th></tr></thead><tbody>
+<tr><td>reach / components</td><td>BFS/DFS</td><td>V+E</td></tr>
+<tr><td>order w/ deps</td><td>topo sort</td><td>V+E</td></tr>
+<tr><td>unweighted SP</td><td>BFS</td><td>V+E</td></tr>
+<tr><td>weighted SP (+)</td><td>Dijkstra</td><td>E log V</td></tr>
+<tr><td>neg edges</td><td>Bellman-Ford</td><td>VE</td></tr>
+<tr><td>all-pairs SP</td><td>Floyd-Warshall</td><td>V^3</td></tr>
+<tr><td>MST</td><td>Kruskal/Prim</td><td>E log V</td></tr>
+<tr><td>max flow</td><td>Dinic</td><td>V^2 E</td></tr>
+</tbody></table>
+</section>
+
+<section class="card"><h3>Traversal &amp; Backtracking</h3>
+<pre><code>def backtrack(state):
+  if goal(state): record(); return
+  for choice in options(state):
+    if valid(choice):
+      apply(choice)
+      backtrack(state)
+      undo(choice)   # the key step</code></pre>
+<ul>
+<li>Prune early (bounds/constraints) to cut the exponential.</li>
+<li>Subsets 2^n, permutations n!, combinations nCk.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Greedy vs DP</h3>
+<table><thead><tr><th></th><th>Greedy</th><th>DP</th></tr></thead><tbody>
+<tr><td>Choice</td><td>commit now</td><td>try all, keep best</td></tr>
+<tr><td>Needs</td><td>greedy-choice prop.</td><td>overlap + substructure</td></tr>
+<tr><td>Speed</td><td>usually faster</td><td>#states x transition</td></tr>
+<tr><td>Proof</td><td>exchange argument</td><td>induction on states</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> "It looks greedy" is not a proof. Find a counterexample or prove the exchange.</p>
+</section>
+
+<section class="card"><h3>Bit Manipulation</h3>
+<pre><code>x & 1          # odd?
+x & (x-1)      # clear lowest set bit
+x & -x         # isolate lowest set bit
+x >> k, x << k # divide/mult by 2^k
+a ^ b ^ b == a # XOR self-inverse
+popcount(x)    # count set bits
+for s = m; s; s = (s-1)&m  # subsets of m</code></pre>
+<p>Power of two: <code>x &amp;&amp; !(x &amp; (x-1))</code>. Bitmask = set of ≤ ~20 items.</p>
+</section>
+
+<section class="card"><h3>Number Theory</h3>
+<pre><code>gcd(a,b) = gcd(b, a mod b)   # Euclid
+lcm = a / gcd * b
+fast pow: square-and-multiply O(log e)
+sieve of Eratosthenes: O(n log log n)
+Fermat: a^(p-1) == 1 (mod p), p prime
+inverse: a^(p-2) mod p</code></pre>
+<p><span class="warn">!</span> Take mod at every step to avoid overflow; watch negative mod.</p>
+</section>
+
+<section class="card"><h3>Randomized &amp; Selection</h3>
+<ul>
+<li><b>Quickselect</b>: partition around a random pivot → O(n) average k-th smallest; median-of-medians = O(n) worst.</li>
+<li><b>Reservoir sampling</b>: pick k from a stream of unknown length, uniform, O(1) memory.</li>
+<li><b>Fisher-Yates</b>: unbiased shuffle in O(n) — swap i with random j in [i, n).</li>
+<li><b>Monte Carlo</b> (fast, maybe wrong) vs <b>Las Vegas</b> (always right, random time).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Range Techniques</h3>
+<table><thead><tr><th>Need</th><th>Use</th></tr></thead><tbody>
+<tr><td>static range sum</td><td>prefix sum O(1)</td></tr>
+<tr><td>many range adds</td><td>difference array</td></tr>
+<tr><td>2D region sum</td><td>2D prefix + incl-excl</td></tr>
+<tr><td>static min/gcd</td><td>sparse table O(1)</td></tr>
+<tr><td>upd + query</td><td>Fenwick/segtree (DS primer)</td></tr>
+</tbody></table>
+</section>
+
+<section class="card"><h3>Complexity from Constraints</h3>
+<table><thead><tr><th>n up to</th><th>Target</th></tr></thead><tbody>
+<tr><td>≤ 10-12</td><td>O(n!) / O(2^n) OK</td></tr>
+<tr><td>≤ 20-25</td><td>O(2^n) bitmask</td></tr>
+<tr><td>≤ 500</td><td>O(n^3)</td></tr>
+<tr><td>≤ 5000</td><td>O(n^2)</td></tr>
+<tr><td>≤ 1e5-1e6</td><td>O(n log n) / O(n)</td></tr>
+<tr><td>≥ 1e9</td><td>O(log n) / O(1) math</td></tr>
+</tbody></table>
+<p class="cap">~1e8 simple ops per second is the rough budget. Read n first, pick the target, then the algorithm.</p>
+</section>
+
+<section class="card"><h3>P, NP &amp; When Stuck</h3>
+<ul>
+<li><b>P</b>: solvable in poly time. <b>NP</b>: a solution is <i>checkable</i> in poly time.</li>
+<li><b>NP-complete</b>: hardest in NP (SAT, TSP-decision, subset-sum, vertex cover). No known poly algorithm.</li>
+<li>Show hardness by <b>reduction</b> from a known NP-hard problem.</li>
+<li>NP-hard in interview → say so, then: <b>approximation</b>, <b>heuristic/greedy</b>, DP over small n, or branch &amp; bound.</li>
+</ul>
+</section>
+
+<section class="card"><h3>&#9744; Interview Playbook</h3>
+<ul>
+<li>&#9744; Read n / constraints → set the complexity target <i>before</i> choosing an algorithm.</li>
+<li>&#9744; Brute force first (state it), then optimize toward the target.</li>
+<li>&#9744; Match the paradigm: sorted/monotonic → binary search; overlap+substructure → DP; provable local → greedy; nodes/edges → graph.</li>
+<li>&#9744; Name the recurrence &amp; solve it (Master Theorem) for D&amp;C.</li>
+<li>&#9744; For DP: state → transition → base → order → answer, out loud.</li>
+<li>&#9744; Pick the graph algorithm from weights/signs (BFS / Dijkstra / Bellman-Ford / Floyd-Warshall).</li>
+<li>&#9744; Prove greedy (exchange argument) or fall back to DP.</li>
+<li>&#9744; Check edge cases: empty, single, duplicates, overflow, negative, disconnected.</li>
+</ul>
+</section>
+
+</div>
+</body>
+</html>
