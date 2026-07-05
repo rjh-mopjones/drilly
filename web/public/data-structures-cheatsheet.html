@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Data Structures Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt; --fs-mono: 6.6pt; --fs-h3: 7.8pt; --gap: 5px; --pad: 3px;
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:12.5pt; margin:0; letter-spacing:.4px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.4pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>Data Structures Cheat Sheet</h1><span class="meta">Big-O · internals · trade-offs · which-structure-for-which-job · drilly</span></div>
+
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="warn">!</span> footgun / classic trap &nbsp; <code>&#9744;</code> checklist step</li>
+<li>Interviews test <b>structure choice</b>: given the ops + a complexity target, name the structure that hits it and why.</li>
+<li>All bounds are typical; hash/heap are <b>amortized/expected</b>, not worst-case. Constants and cache locality decide real speed.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+</ul></section>
+
+<section class="card"><h3>Big-O Master Table</h3>
+<table><thead><tr><th>Structure</th><th>Access</th><th>Search</th><th>Ins</th><th>Del</th></tr></thead><tbody>
+<tr><td>Array (dynamic)</td><td>O(1)</td><td>O(n)</td><td>O(1)*</td><td>O(n)</td></tr>
+<tr><td>Linked list</td><td>O(n)</td><td>O(n)</td><td>O(1)†</td><td>O(1)†</td></tr>
+<tr><td>Stack / Queue</td><td>O(n)</td><td>O(n)</td><td>O(1)</td><td>O(1)</td></tr>
+<tr><td>Hash table</td><td>—</td><td>O(1)~</td><td>O(1)~</td><td>O(1)~</td></tr>
+<tr><td>Balanced BST</td><td>—</td><td>O(log n)</td><td>O(log n)</td><td>O(log n)</td></tr>
+<tr><td>Binary heap</td><td>O(1)‡</td><td>O(n)</td><td>O(log n)</td><td>O(log n)</td></tr>
+<tr><td>Trie</td><td>—</td><td>O(L)</td><td>O(L)</td><td>O(L)</td></tr>
+<tr><td>B-tree</td><td>—</td><td>O(log n)</td><td>O(log n)</td><td>O(log n)</td></tr>
+</tbody></table>
+<p class="cap">* amortized append &nbsp; † with node ref &nbsp; ‡ peek-min only &nbsp; ~ expected; O(n) worst. L = key length. Space O(n) unless noted.</p>
+</section>
+
+<section class="card"><h3>Array vs Linked List</h3>
+<table><thead><tr><th></th><th>Array</th><th>List</th></tr></thead><tbody>
+<tr><td>Index i</td><td>O(1)</td><td>O(n)</td></tr>
+<tr><td>Insert/del mid</td><td>O(n) shift</td><td>O(1) splice†</td></tr>
+<tr><td>Append</td><td>O(1) amort.</td><td>O(1)</td></tr>
+<tr><td>Memory</td><td>contiguous</td><td>node+ptr overhead</td></tr>
+<tr><td>Cache</td><td>friendly</td><td>pointer-chasing</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> The list's O(1) insert assumes you <b>already hold the node</b>; finding it is O(n). In practice arrays win by cache locality unless you splice a lot.</p>
+</section>
+
+<section class="card"><h3>Dynamic Array (amortized)</h3>
+<ul>
+<li>Full → allocate 2x, copy n, keep going. A single append is O(n), but n appends cost O(n) total → <b>O(1) amortized</b>.</li>
+<li><span class="warn">!</span> Growth factor 2 (or 1.5) matters; growing by +1 makes append O(n).</li>
+<li>Capacity ≥ size; shrink lazily to avoid thrashing.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Hash Table Internals</h3>
+<ul>
+<li><b>Bucket = hash(key) mod m.</b> Collisions are inevitable (pigeonhole).</li>
+<li><b>Chaining</b>: bucket → list/tree of entries. Simple; degrades gracefully.</li>
+<li><b>Open addressing</b>: probe (linear/quadratic/double) to next free slot; needs <b>tombstones</b> on delete. <span class="warn">!</span></li>
+<li><b>Load factor</b> alpha = n/m; resize (rehash all) when alpha &gt; ~0.7 → keeps O(1).</li>
+<li><span class="warn">!</span> O(1) is <b>expected</b>; adversarial/bad hash → O(n). Iteration order is unspecified.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Trees · BST · Balanced</h3>
+<ul>
+<li><b>BST invariant</b>: left &lt; node &lt; right. In-order traversal = sorted.</li>
+<li><span class="warn">!</span> Plain BST on sorted input degenerates to a list → O(n). Balancing forces h = O(log n).</li>
+<li><b>AVL</b>: strict height-balance, faster lookups, more rotations.</li>
+<li><b>Red-Black</b>: looser balance, fewer rotations on write → the engine behind Java <code>TreeMap</code> / C++ <code>std::map</code>.</li>
+<li>Rotation = local O(1) re-link restoring balance.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Traversals</h3>
+<pre><code>DFS (stack/recursion):
+  pre  : node, L, R
+  in   : L, node, R   # BST -> sorted
+  post : L, R, node
+BFS (queue): level by level</code></pre>
+<p>DFS space O(h); BFS space O(width). Use BFS for shortest path in an unweighted graph.</p>
+</section>
+
+<section class="card"><h3>Heaps &amp; Priority Queues</h3>
+<pre><code>array heap: child(i)=2i+1,2i+2
+            parent(i)=(i-1)/2
+push: append + sift-up   O(log n)
+pop : swap root/last + sift-down
+heapify whole array:     O(n)</code></pre>
+<ul>
+<li>Min-heap = O(1) peek-min; not searchable (O(n)).</li>
+<li>Uses: Dijkstra/Prim, top-k (size-k heap), merge k lists, scheduling, heapsort.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Tries (Prefix Trees)</h3>
+<ul>
+<li>One node per char; path spells the key. Ops O(L) in key length, independent of n.</li>
+<li>Wins for <b>prefix</b> queries / autocomplete — a hash set can't do "all keys starting with…".</li>
+<li><b>Radix/Patricia</b>: compress single-child chains → less space.</li>
+<li><span class="warn">!</span> Memory-heavy (pointers per node); a hash set is smaller for pure membership.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Graph Representations</h3>
+<table><thead><tr><th></th><th>Adj list</th><th>Adj matrix</th></tr></thead><tbody>
+<tr><td>Space</td><td>O(V+E)</td><td>O(V^2)</td></tr>
+<tr><td>Edge exists?</td><td>O(deg)</td><td>O(1)</td></tr>
+<tr><td>Iterate nbrs</td><td>O(deg)</td><td>O(V)</td></tr>
+<tr><td>Best for</td><td>sparse</td><td>dense</td></tr>
+</tbody></table>
+<p>Most interview graphs are <b>sparse</b> → adjacency list (map/array of lists) is the default.</p>
+</section>
+
+<section class="card"><h3>Union-Find (DSU)</h3>
+<pre><code>find(x): follow parent to root
+         (path compression)
+union(a,b): link smaller root
+            under larger (by rank)</code></pre>
+<ul>
+<li>Both optimizations → near <b>O(1) amortized</b> (inverse Ackermann).</li>
+<li>Uses: Kruskal MST, connectivity/components, dynamic equivalence, cycle detection in undirected graphs.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Segment / Fenwick Trees</h3>
+<table><thead><tr><th>Need</th><th>Use</th></tr></thead><tbody>
+<tr><td>static range sum</td><td>prefix-sum array O(1)</td></tr>
+<tr><td>point-upd + range-q</td><td>Fenwick (BIT) O(log n)</td></tr>
+<tr><td>range-upd + range-q</td><td>segment tree + lazy</td></tr>
+<tr><td>min/max/gcd range</td><td>segment tree</td></tr>
+</tbody></table>
+<p>BIT = smaller/faster but sum-like ops only; segtree = general (any associative op) + lazy propagation.</p>
+</section>
+
+<section class="card"><h3>Skip Lists &amp; Probabilistic</h3>
+<ul>
+<li><b>Skip list</b>: layered linked list, coin-flip levels → O(log n) <b>expected</b>; simpler to write than a balanced BST. Redis sorted sets use it.</li>
+<li><b>Bloom filter</b>: k hashes into a bit array; "possibly present" or "definitely absent" — <b>false positives, never false negatives</b>. <span class="warn">!</span> No delete (use Counting Bloom).</li>
+<li><b>Count-Min Sketch</b>: approx frequencies; <b>HyperLogLog</b>: approx cardinality. Tiny memory, bounded error.</li>
+</ul>
+</section>
+
+<section class="card"><h3>B-Trees &amp; B+ Trees</h3>
+<ul>
+<li>High fanout (hundreds of keys/node = one disk page) → very shallow → few disk seeks. The DB/filesystem index structure.</li>
+<li><b>B+ tree</b>: values only in leaves, leaves <b>linked</b> → great for range scans + sequential I/O.</li>
+<li><span class="warn">!</span> A binary BST is wrong for disk: h ~ log2(n) seeks vs log_fanout(n).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Composite Structures</h3>
+<table><tbody>
+<tr><td><b>LRU cache</b></td><td>hashmap + doubly linked list</td></tr>
+<tr><td><b>LFU cache</b></td><td>freq buckets + key map</td></tr>
+<tr><td><b>Sliding-window max</b></td><td>monotonic deque</td></tr>
+<tr><td><b>Static range-min</b></td><td>sparse table O(1) query</td></tr>
+<tr><td><b>Rank / k-th</b></td><td>order-statistics tree / BIT</td></tr>
+</tbody></table>
+<p>Pattern: <b>keep two structures in sync</b> — one for lookup (map), one for order/priority (list/heap/tree).</p>
+</section>
+
+<section class="card"><h3>Which Structure for Which Job</h3>
+<table><thead><tr><th>Need</th><th>Use</th></tr></thead><tbody>
+<tr><td>index / random access</td><td>array</td></tr>
+<tr><td>membership / dedup</td><td>hash set</td></tr>
+<tr><td>key → value, O(1)</td><td>hash map</td></tr>
+<tr><td>sorted / range / floor</td><td>balanced BST (TreeMap)</td></tr>
+<tr><td>min/max repeatedly</td><td>heap</td></tr>
+<tr><td>FIFO / BFS</td><td>queue</td></tr>
+<tr><td>LIFO / DFS / undo</td><td>stack</td></tr>
+<tr><td>prefix / autocomplete</td><td>trie</td></tr>
+<tr><td>connectivity/grouping</td><td>union-find</td></tr>
+<tr><td>range sum + updates</td><td>Fenwick / segtree</td></tr>
+</tbody></table>
+</section>
+
+<section class="card"><h3>&#9744; Interview Playbook</h3>
+<ul>
+<li>&#9744; List the required <b>operations</b> + each op's <b>target complexity</b> before picking anything.</li>
+<li>&#9744; Map ops → structure (see the table) and say <b>why</b> it hits the target.</li>
+<li>&#9744; Name the trade-off you're accepting (memory, ordering, worst-case).</li>
+<li>&#9744; Hash = expected O(1) but no order + O(n) worst; tree = O(log n) but sorted + range.</li>
+<li>&#9744; "Repeatedly need the extreme" → heap. "Need order too" → balanced BST, not a heap.</li>
+<li>&#9744; O(1) get/put/evict → hashmap + DLL. O(1) random → array + index map.</li>
+<li>&#9744; On-disk / huge → B+ tree, not a binary BST.</li>
+<li>&#9744; Recall amortized vs worst-case honestly; mention cache locality when arrays win.</li>
+</ul>
+</section>
+
+</div>
+</body>
+</html>

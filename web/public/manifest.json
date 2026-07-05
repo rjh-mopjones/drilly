@@ -178,6 +178,22 @@
       "itemCount": 21
     },
     {
+      "id": "data-structures",
+      "file": "/data-structures-interview-primer.md",
+      "title": "Data Structures",
+      "category": "Data Structures & Algorithms",
+      "itemLabel": "Topic",
+      "itemsPlural": "data structure topics",
+      "storagePrefix": "ip:data-structures",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": [],
+      "itemCount": 21,
+      "cheatSheetUrl": "/data-structures-cheatsheet.html"
+    },
+    {
       "id": "dsa-patterns",
       "file": "/dsa-patterns-primer.md",
       "title": "Patterns",
