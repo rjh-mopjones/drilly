@@ -78,8 +78,10 @@ async function renderToSvg(
     startOnLoad: false,
     theme: scheme === "dark" ? "dark" : "default",
     securityLevel: "loose",
-    flowchart: { htmlLabels: true, useMaxWidth: true },
-    sequence: { useMaxWidth: true },
+    // useMaxWidth:false -> mermaid emits the diagram at natural size with a
+    // clean viewBox; we then scale-to-fit deterministically in SvgHost.
+    flowchart: { htmlLabels: true, useMaxWidth: false },
+    sequence: { useMaxWidth: false },
   });
   renderCounter += 1;
   const id = `mmd-${renderCounter}-${Date.now().toString(36)}`;
@@ -109,18 +111,62 @@ function SvgHost({
     host.innerHTML = svg;
     const el = host.querySelector("svg") as SVGSVGElement | null;
     if (!el) return;
-    el.style.height = "auto";
     el.style.transformOrigin = "top left";
     el.style.display = "block";
-    if (fit) {
-      el.style.width = "100%";
-      el.style.maxWidth = "100%";
-      el.style.transform = "";
-    } else {
-      el.style.width = "";
-      el.style.maxWidth = "none";
-      el.style.transform = `scale(${scale})`;
+    el.style.maxWidth = "none";
+
+    // Intrinsic size from the viewBox (mermaid always emits one); fall back
+    // to the rendered bounding box.
+    let vbW = 0;
+    let vbH = 0;
+    const vb = el.getAttribute("viewBox");
+    if (vb) {
+      const parts = vb.split(/[ ,]+/).map(Number);
+      vbW = parts[2] || 0;
+      vbH = parts[3] || 0;
     }
+    if (!vbW || !vbH) {
+      try {
+        const b = el.getBBox();
+        vbW = vbW || b.width;
+        vbH = vbH || b.height;
+      } catch {
+        /* getBBox can throw if not yet laid out */
+      }
+    }
+    el.style.width = vbW ? `${vbW}px` : "";
+    el.style.height = vbH ? `${vbH}px` : "auto";
+
+    if (!fit) {
+      // Fullscreen: natural size, user-driven zoom via the scale prop.
+      el.style.transform = `scale(${scale})`;
+      host.style.height = "";
+      host.style.overflow = "";
+      return;
+    }
+
+    // Inline: deterministically scale the diagram down to the container
+    // width (never up). Re-run on container resize so it stays responsive.
+    const applyFit = () => {
+      const avail =
+        (host.parentElement && host.parentElement.clientWidth) ||
+        host.clientWidth ||
+        vbW;
+      const s = vbW > 0 && avail > 0 && vbW > avail ? avail / vbW : 1;
+      el.style.transform = `scale(${s})`;
+      host.style.height = vbH ? `${Math.ceil(vbH * s)}px` : "";
+      host.style.width = "100%";
+      host.style.overflow = "hidden";
+    };
+    applyFit();
+    let ro: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== "undefined" && host.parentElement) {
+      ro = new ResizeObserver(applyFit);
+      ro.observe(host.parentElement);
+    }
+    return () => {
+      if (ro) ro.disconnect();
+    };
   }, [svg, fit, scale]);
 
   // RNW forwards a callback ref the underlying DOM element on web.
