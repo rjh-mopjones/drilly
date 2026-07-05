@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>LeetCode Design Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt; --fs-mono: 6.6pt; --fs-h3: 7.8pt; --gap: 5px; --pad: 3px;
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:12.5pt; margin:0; letter-spacing:.4px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.5pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>LeetCode Design Cheat Sheet</h1><span class="meta">72 problems · structure + trick per problem · 5 languages in the app · drilly</span></div>
+
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="warn">!</span> footgun / classic trap &nbsp; <code>&#9744;</code> checklist step</li>
+<li>Design problems test <b>data-structure choice</b>: given the ops + a complexity target, pick the structure that hits it.</li>
+<li>Each theme card: <b>problem → core structure → the trick</b>. Full solutions (Py/Java/Rust/Go/C++) live in the primer.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+</ul></section>
+
+<section class="card"><h3>The Design Method</h3>
+<ul>
+<li><b>1. Clarify the ops</b> + the required complexity of each (O(1)? O(log n)?). That target dictates the structure.</li>
+<li><b>2. Pick structure</b> from the ops (see quick-pick card).</li>
+<li><b>3. State the invariant</b> the structure maintains between calls.</li>
+<li><b>4. Edge cases</b>: empty, single element, full/capacity, duplicate keys, wraparound.</li>
+<li><span class="warn">!</span> Almost every "O(1)" design = <b>hashmap + a second structure</b> (list / heap / array) kept in sync.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Quick-Pick: Ops → Structure</h3>
+<table><thead><tr><th>Need</th><th>Use</th></tr></thead><tbody>
+<tr><td>O(1) get/put + evict</td><td>hashmap + doubly linked list</td></tr>
+<tr><td>O(1) insert/remove/random</td><td>array + index map (swap-pop)</td></tr>
+<tr><td>running min/median/top-k</td><td>heap(s)</td></tr>
+<tr><td>prefix / ordered keys</td><td>trie / BST / TreeMap</td></tr>
+<tr><td>range sum + updates</td><td>BIT / segment tree</td></tr>
+<tr><td>overlap / booking</td><td>sorted map / sweep / diff</td></tr>
+<tr><td>FIFO/LIFO with a twist</td><td>deque / two stacks</td></tr>
+</tbody></table>
+</section>
+
+<section class="card"><h3>A · Stacks &amp; Queues</h3>
+<table><tbody>
+<tr><td><b>Min Stack</b></td><td>2nd stack of running mins (or pairs)</td></tr>
+<tr><td><b>Max Stack</b></td><td>stack + TreeMap for O(log n) popMax</td></tr>
+<tr><td><b>Queue via Stacks</b></td><td>in-stack + out-stack, lazy transfer, amortized O(1)</td></tr>
+<tr><td><b>Stack via Queues</b></td><td>rotate queue on push → newest at front</td></tr>
+<tr><td><b>Circular Queue</b></td><td>fixed array + head/tail mod capacity</td></tr>
+<tr><td><b>Circular Deque</b></td><td>array + head/tail, push/pop both ends mod cap</td></tr>
+<tr><td><b>Front-Mid-Back Q</b></td><td>two deques, rebalance to keep sizes even</td></tr>
+<tr><td><b>Stack w/ Increment</b></td><td>stack + lazy increment-delta array</td></tr>
+<tr><td><b>Online Stock Span</b></td><td>monotonic stack of (price, span)</td></tr>
+</tbody></table>
+<p class="cap"><span class="warn">!</span> Two-stack queue is O(1) <b>amortized</b>, not worst-case.</p>
+</section>
+
+<section class="card"><h3>B · Lists · Iterators · Editors</h3>
+<table><tbody>
+<tr><td><b>Design Linked List</b></td><td>sentinel head, walk by index</td></tr>
+<tr><td><b>Browser History</b></td><td>array + cursor (or two stacks)</td></tr>
+<tr><td><b>BST Iterator</b></td><td>controlled inorder via explicit stack, O(h) space</td></tr>
+<tr><td><b>Peeking Iterator</b></td><td>cache one lookahead element</td></tr>
+<tr><td><b>Nested List Iterator</b></td><td>stack of iterators / flatten lazily</td></tr>
+<tr><td><b>Flatten 2D Vector</b></td><td>row + col cursors, skip empties</td></tr>
+<tr><td><b>Zigzag Iterator</b></td><td>queue of active iterators, round-robin</td></tr>
+<tr><td><b>RLE Iterator</b></td><td>index into (count,val) pairs, decrement</td></tr>
+<tr><td><b>Iterator for Combo</b></td><td>bitmask / next-combination in lex order</td></tr>
+<tr><td><b>Text Editor</b></td><td>two stacks split at cursor (gap buffer)</td></tr>
+</tbody></table>
+<p class="cap"><span class="warn">!</span> Lazy iterators: do work in <code>next()</code>/<code>hasNext()</code>, not the constructor.</p>
+</section>
+
+<section class="card"><h3>C · Hashing &amp; O(1)</h3>
+<table><tbody>
+<tr><td><b>Design HashMap/Set</b></td><td>array of buckets + chaining, hash = key % size</td></tr>
+<tr><td><b>Insert/Del/Random</b></td><td>list + value→index map; swap-with-last on delete</td></tr>
+<tr><td><b>... Duplicates</b></td><td>same, but map value → set of indices</td></tr>
+<tr><td><b>All O(1)</b></td><td>doubly linked list of count-buckets + key map</td></tr>
+<tr><td><b>Number Container</b></td><td>map idx→num + num→sorted set of idx</td></tr>
+<tr><td><b>Phone Directory</b></td><td>free-set / queue of available slots</td></tr>
+<tr><td><b>Snapshot Array</b></td><td>per-index sorted (snapId → val), binary search</td></tr>
+<tr><td><b>Bitset</b></td><td>bit array + flip-flag for O(1) flipAll</td></tr>
+</tbody></table>
+<p class="cap"><span class="warn">!</span> Random-in-O(1) needs a <b>contiguous array</b>; the map tracks positions.</p>
+</section>
+
+<section class="card"><h3>D · Caches &amp; Memory</h3>
+<table><tbody>
+<tr><td><b>LRU Cache</b></td><td>hashmap + doubly linked list; move-to-front on use</td></tr>
+<tr><td><b>LFU Cache</b></td><td>freq→DLL of nodes + key map + minFreq pointer</td></tr>
+<tr><td><b>MRU Queue</b></td><td>fenwick/sqrt-decomp for O(√n) fetch, or BIT</td></tr>
+<tr><td><b>Memory Allocator</b></td><td>id→intervals; scan/free array of mIDs</td></tr>
+</tbody></table>
+<p class="cap">LRU: <code>OrderedDict</code> (Py) / <code>LinkedHashMap</code> (Java) collapse the DLL. <span class="warn">!</span> Update recency on <b>get</b> too.</p>
+</section>
+
+<section class="card"><h3>E · Tries &amp; Strings</h3>
+<table><tbody>
+<tr><td><b>Trie</b></td><td>26-way children + isEnd flag</td></tr>
+<tr><td><b>Add/Search Words</b></td><td>trie + DFS on <code>.</code> wildcard</td></tr>
+<tr><td><b>Magic Dictionary</b></td><td>trie + DFS allowing exactly one mismatch</td></tr>
+<tr><td><b>Stream of Characters</b></td><td>trie of <b>reversed</b> words, match suffix of stream</td></tr>
+<tr><td><b>Encode/Decode Strings</b></td><td>length-prefix each: <code>len#payload</code></td></tr>
+<tr><td><b>TinyURL</b></td><td>two maps long↔short, counter or random code</td></tr>
+<tr><td><b>Autocomplete</b></td><td>trie + heap/sort top-3 by frequency</td></tr>
+<tr><td><b>Compressed Str Iter</b></td><td>parse letter+count lazily, decrement</td></tr>
+<tr><td><b>In-Memory FS</b></td><td>trie of dir/file nodes (map name→node)</td></tr>
+</tbody></table>
+<p class="cap"><span class="warn">!</span> Encode: delimiter-splitting breaks; <b>length-prefix</b> is unambiguous.</p>
+</section>
+
+<section class="card"><h3>F · Trees · Heaps · Streams</h3>
+<table><tbody>
+<tr><td><b>Serialize Binary Tree</b></td><td>preorder + null markers; queue to rebuild</td></tr>
+<tr><td><b>Serialize BST</b></td><td>preorder only; BST bounds reconstruct (no nulls)</td></tr>
+<tr><td><b>Serialize N-ary</b></td><td>preorder + child-count (or null sentinel)</td></tr>
+<tr><td><b>Median from Stream</b></td><td>max-heap (low) + min-heap (high), balanced</td></tr>
+<tr><td><b>Kth Largest Stream</b></td><td>min-heap of size k; top = answer</td></tr>
+<tr><td><b>Stock Price Fluct</b></td><td>map ts→price + two heaps (lazy-delete stale)</td></tr>
+<tr><td><b>Food Rating System</b></td><td>per-cuisine heap/TreeSet by (rating, name)</td></tr>
+</tbody></table>
+<p class="cap"><span class="warn">!</span> Two-heap median: keep sizes within 1; rebalance every insert.</p>
+</section>
+
+<section class="card"><h3>F · (cont.) Graph</h3>
+<table><tbody>
+<tr><td><b>Leaderboard</b></td><td>map player→score; top(K) = sort/heap the scores</td></tr>
+<tr><td><b>Graph Shortest Path</b></td><td>adjacency + Dijkstra per query (or Floyd-Warshall)</td></tr>
+</tbody></table>
+<p class="cap">Lazy-delete pattern: push new, discard heap-top if it disagrees with the source-of-truth map.</p>
+</section>
+
+<section class="card"><h3>G · Time · Rate · Calendar</h3>
+<table><tbody>
+<tr><td><b>Logger Rate Limiter</b></td><td>map msg→next-allowed timestamp</td></tr>
+<tr><td><b>Hit Counter</b></td><td>queue of timestamps; evict older than 300s</td></tr>
+<tr><td><b>Moving Average</b></td><td>fixed-size ring buffer + running sum</td></tr>
+<tr><td><b>My Calendar I</b></td><td>TreeMap of intervals; check neighbor overlap</td></tr>
+<tr><td><b>My Calendar II</b></td><td>sweep-line / two lists (booked + overlaps)</td></tr>
+<tr><td><b>My Calendar III</b></td><td>diff map (+1 start, -1 end), max prefix sum</td></tr>
+<tr><td><b>Auth Manager</b></td><td>map token→expiry; renew/lazy-expire</td></tr>
+<tr><td><b>ATM Machine</b></td><td>5 denom counts; greedy largest-first, dry-run</td></tr>
+</tbody></table>
+<p class="cap"><span class="warn">!</span> Calendar III: the <b>difference array + running max</b> is the clean K-booking pattern.</p>
+</section>
+
+<section class="card"><h3>H · OO Systems &amp; Games</h3>
+<table><tbody>
+<tr><td><b>Design Twitter</b></td><td>follow map + per-user tweet list; merge k heaps for feed</td></tr>
+<tr><td><b>Underground System</b></td><td>check-in map + (start,end)→(total,count) averages</td></tr>
+<tr><td><b>Parking System</b></td><td>3 counters by size</td></tr>
+<tr><td><b>Snake Game</b></td><td>deque body + set for O(1) self-collision</td></tr>
+<tr><td><b>Tic-Tac-Toe</b></td><td>row/col/diag counters, +1/-1 per player</td></tr>
+<tr><td><b>Movie Rental</b></td><td>maps + TreeSet/heap per movie (avail) + rented set</td></tr>
+<tr><td><b>Video Platform</b></td><td>id recycler (min-heap) + per-video stats maps</td></tr>
+<tr><td><b>Todo List</b></td><td>per-user tasks; filter by tag, sort by due date</td></tr>
+</tbody></table>
+<p class="cap"><span class="warn">!</span> Twitter feed: don't merge all tweets — <b>heap the k followees' latest</b>.</p>
+</section>
+
+<section class="card"><h3>I · Range Query &amp; Advanced</h3>
+<table><tbody>
+<tr><td><b>Range Sum (immutable)</b></td><td>prefix-sum array, query = P[j+1]-P[i]</td></tr>
+<tr><td><b>Range Sum (mutable)</b></td><td>Fenwick (BIT) / segment tree, O(log n)</td></tr>
+<tr><td><b>Range Sum 2D immut.</b></td><td>2D prefix sums, inclusion-exclusion</td></tr>
+<tr><td><b>Range Sum 2D mutable</b></td><td>2D BIT, O(log m · log n)</td></tr>
+<tr><td><b>Skiplist</b></td><td>randomized multi-level linked list, O(log n) exp.</td></tr>
+<tr><td><b>Excel Sum Formula</b></td><td>cell graph + topological recompute on set</td></tr>
+</tbody></table>
+<p class="cap">Prefix sums = <b>immutable</b>; BIT/segtree = <b>point-update + range-query</b>.</p>
+</section>
+
+<section class="card"><h3>&#9744; Interview Playbook</h3>
+<ul>
+<li>&#9744; Restate the ops + each op's target complexity <i>before</i> coding.</li>
+<li>&#9744; Say the structure out loud + <b>why</b> it hits the target.</li>
+<li>&#9744; O(1) get/put/evict → hashmap + DLL (LRU); order-by-freq → freq buckets (LFU).</li>
+<li>&#9744; O(1) random → array + index map, swap-with-last delete.</li>
+<li>&#9744; Running min/median/top-k → heap(s); "top of stream" → size-k min-heap.</li>
+<li>&#9744; Prefix / ordered / bounds → trie or TreeMap/BST.</li>
+<li>&#9744; Range sum + updates → BIT; static → prefix sums.</li>
+<li>&#9744; Overlap/booking → sorted map or difference-array sweep.</li>
+<li>&#9744; State the invariant maintained between calls; then edge cases (empty, full, dup, wraparound).</li>
+<li>&#9744; Mention the stdlib shortcut (<code>OrderedDict</code>, <code>LinkedHashMap</code>, <code>TreeMap</code>, <code>heapq</code>, <code>container/list</code>).</li>
+</ul>
+</section>
+
+</div>
+</body>
+</html>

@@ -216,6 +216,30 @@
       "itemCount": 150
     },
     {
+      "id": "leetcode-design",
+      "file": "/leetcode-design.md",
+      "title": "LeetCode Design",
+      "category": "Data Structures & Algorithms",
+      "itemLabel": "Problem",
+      "itemsPlural": "design problems",
+      "storagePrefix": "sdf:leetcode-design",
+      "defaultRevealedSections": [
+        "Problem"
+      ],
+      "sectionOrder": [
+        "Problem",
+        "Pattern",
+        "Explanation",
+        "Python",
+        "Java",
+        "Rust",
+        "Go",
+        "C++"
+      ],
+      "itemCount": 72,
+      "cheatSheetUrl": "/leetcode-design-cheatsheet.html"
+    },
+    {
       "id": "java",
       "file": "/java-interview-primer.md",
       "title": "Java",
