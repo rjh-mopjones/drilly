@@ -10385,3 +10385,303 @@ These are the things a Trade Republic interviewer will be listening for — surf
 - **Stale / gap handling** — regulated broker, you need a story for "what happens when market data is late or missing".
 - **Audit trail** — every fire traceable to the exact tick. For a broker this isn't optional.
 - **Trade-off you'd revisit at 10× scale:** moving the sub index from in-memory-per-shard to a shared low-latency store (Redis / Aerospike) if sub count outgrows RAM; accept a network hop per tick in exchange for unbounded sub scale.
+
+### 42. Design a Matching Engine / Limit Order Book
+#### Problem
+Process a continuous stream of inbound events (new orders, cancels and cancel/replaces, and market-data ticks) and match buy and sell orders in strict price-time priority, deterministically, at very high throughput and very low (microsecond) latency, producing a stream of fills and execution reports plus a published top-of-book.
+
+#### Summary
+**The picture in your head:** a single, extremely disciplined auctioneer standing at one desk for one stock. On the desk are two sorted stacks of paper slips: buyers on the left (highest price they will pay on top) and sellers on the right (lowest price they will accept on top). When a new slip arrives, the auctioneer checks whether the best buyer and the best seller now agree on a price; if they cross, the auctioneer matches them, tears up the filled slips, and keeps going until nobody crosses any more. One desk, one stock, one auctioneer, and everything happens in the exact order the slips landed. Speed matters (the queue behind the desk is enormous) and determinism matters even more (two auditors replaying the same slips in the same order must reach byte-identical results).
+
+**The single-request walkthrough:** an order for symbol `AAPL` arrives at the feed handler. It is validated, stamped with a monotonic sequence number, and routed, by hashing `instrumentId`, to the one worker thread that owns the `AAPL` book. That worker takes the order off its ring buffer and runs the matching loop: a buy limit at 190.05 walks down the ask side from the best (lowest) ask; at each price level it fills `min(incoming_qty, resting_qty)` against the oldest resting order first (FIFO, which is time priority), emits a fill for each match, removes fully-consumed resting orders, and continues while the incoming price still crosses the level. When the incoming order is exhausted it stops; if quantity remains and it is a limit, the remainder rests on the bid side at 190.05 and becomes new liquidity; if it is IOC, FOK, or market, the remainder is cancelled. Each fill produces an execution report to both parties and an update to the published top-of-book. The whole path is a few microseconds and touches no locks.
+
+**The pieces (and what each one is for):**
+- **The feed handler / gateway** - decodes the wire protocol (FIX, or a binary exchange protocol), validates the order (price is a valid tick, quantity positive, account permissioned), and normalises it into an internal event. It is the only part that talks to the outside world.
+- **The sequencer** - stamps every inbound event with a gap-free monotonic sequence number and appends it to an ordered input log. This log, not the in-memory book, is the source of truth. Sequencing is what makes the system replayable and deterministic.
+- **The matching cores (one per instrument shard)** - each is a single-threaded worker owning a set of order books. It is where the limit order book lives and where matching happens. Single-threaded on purpose: no locks, no reordering, reproducible output.
+- **The order book itself** - two sides. Bids sorted price-descending, asks sorted price-ascending, with a FIFO queue of resting orders at each price level so that time priority is preserved. Best bid and best ask are the tops of the two structures.
+- **The market-data publisher** - broadcasts top-of-book and incremental book updates to subscribers. Ticks are stateless snapshots; only the latest matters.
+- **The execution-report path** - sends fills, partial fills, acks, and cancels back to the owning participants, sequenced so a client can detect a gap.
+
+**The thing that makes it hard - determinism under partitioning:** the output of a matching engine is not just "correct", it must be the same every time for the same ordered input, because trades are money and regulators, participants, and your own recovery process all replay the log and must agree to the byte. That forces two hard rules. First, a single book is matched by exactly one thread; you never parallelise one book across cores, because concurrent matching reorders fills and destroys price-time priority. Second, you get throughput by sharding across instruments: N single-threaded workers, and every event is routed by hashing `instrumentId` so the same symbol always lands on the same worker. Same instrument, same thread, in-order, lock-free. The moment you try to make one book faster by adding threads, you have broken the product.
+
+**Why the standard solution works:** the keyed-executor / single-writer model turns a concurrency problem into a partitioning problem. Because each book is touched by one thread, there is no lock, no contention, and no non-determinism inside a book; because books are independent, you scale linearly by adding shards until a single hot instrument saturates one core. The ordered input log gives you event sourcing for free: to recover, replay the log (from a snapshot) and you deterministically rebuild the exact book. The book is self-bounding, because resting orders leave on fill, cancel, or expiry and a crossing order never rests, so memory reflects genuine outstanding liquidity, not uptime.
+
+**If you were building it tomorrow:**
+- One process (JVM or C++) per matching-core group; inbound events on a per-shard LMAX Disruptor ring buffer (single writer, pre-allocated slots, no hot-path allocation, mechanical sympathy).
+- Book as a price-level array indexed by tick, with an intrusive doubly linked list per level for O(1) FIFO append/remove and an O(1) best-price pointer; fall back to a `TreeMap<Price, Deque<Order>>` where the tick range is wide or sparse.
+- Sequencer writes a durable, gap-free journal; periodic snapshots so recovery replays minutes, not days.
+- Route by `hash(instrumentId) % shards`; at the infrastructure edge, partition the Kafka ingest topic by instrument key so all events for a symbol sit on one partition and are consumed in offset order, which is the same single-writer guarantee one layer down.
+- Bounded queues everywhere with an explicit rejection policy; cross-instrument events (basket, portfolio) handled on a separate boundary, never inside a single book.
+
+#### Clarifying Questions
+- Which order types must we support? (assume market, limit, IOC, FOK, plus cancel and cancel/replace)
+- Continuous matching, or auction/call phases (open, close)? (assume continuous; note auctions as a mode)
+- Single venue, or multi-venue routing? (assume one matching venue per instrument)
+- Is self-trade prevention required for a participant trading both sides? (assume yes)
+- What are the tick size and price range per instrument? (drives the array-vs-tree choice)
+- Latency target: internal matching budget in microseconds? (assume single-digit to tens of micros p99)
+- Durability and regulatory replay requirements? (assume full event-sourced audit and deterministic replay)
+- Do we need basket / cross-instrument orders? (flag: different boundary)
+
+#### Requirements
+- **FR:**
+  - Accept new orders (market, limit, IOC, FOK), cancels, and cancel/replace for each instrument
+  - Match in strict price-time (price first, then FIFO time) priority; generate fills and execution reports
+  - Maintain and publish top-of-book and incremental book updates per instrument
+  - Enforce self-trade prevention and produce gap-free, sequenced output
+  - Deterministically rebuild book state from the ordered input log (event sourcing)
+- **NFR:**
+  - Single-digit to low-tens microsecond internal matching latency at p99
+  - Deterministic, reproducible output for a given ordered input (bit-for-bit on replay)
+  - Throughput of ~1-3M messages/sec at peak across the venue
+  - No hot-path allocation, no locks inside a book; bounded queues with defined backpressure
+  - Fast recovery: snapshot plus replay, RTO in seconds, RPO zero (nothing acknowledged is lost)
+
+#### Scale Estimate
+Derive from a liquid equities / derivatives venue.
+- **Peak message rate ~1-3M msg/s:** a top exchange (order entry plus cancels, and cancels dominate at 10-20x fills in modern markets) runs ~1M msg/s sustained with multi-million bursts on open, close, and news. Take 2M msg/s as the planning peak.
+- **Instruments ~10k:** a single venue lists O(1e4) symbols (equities plus listed derivatives). Spread evenly that is 2M / 1e4 = 200 msg/s per instrument on average, but the distribution is heavily skewed: the top 10 symbols can take 30-40% of traffic (the hot-key problem below).
+- **Shards ~16-64 cores:** at ~1-5M matches/sec achievable per single-threaded core for a lean in-memory book, 2M msg/s needs only a handful of cores for raw throughput; you run more (16-64) to isolate hot instruments and leave headroom, routing by `hash(instrumentId)`.
+- **Resting order state ~64-128 B/order:** an order record holds id (8B), participant (8B), side (1B), price as a tick (4-8B), quantity plus remaining (8-16B), timestamp/sequence (8-16B), and intrusive list pointers (16B), which is ~64-96B logical; round to 128B with padding and headers.
+- **Book depth ~1e4-1e5 resting orders for a liquid symbol:** memory per hot book = 1e5 x 128B = ~12.8MB; across 10k instruments with a long tail (most books tiny), total resting-order memory is order O(1-10GB), comfortably RAM-resident per matching host. Crucially this is bounded by outstanding liquidity, not by uptime.
+- **Latency budget:** wire-in to match to wire-out target ~5-20 microseconds internal; the matching loop for a typical marketable order touches 1-3 price levels, so the arithmetic is trivial and the budget is spent on queueing, serialisation, and cache misses, which is exactly why the design forbids locks and hot-path allocation.
+- **Journal write rate:** 2M events/s x ~64B framed = ~128MB/s sequential append to the durable log; well within an NVMe logging tier, and sequential so it does not compete with random book access.
+- **Market-data fanout:** top-of-book updates published at up to the tick rate to thousands of subscribers; this is stateless snapshot fanout (latest wins), scaled by a separate publisher tier, not by the matching core.
+
+#### API Contract
+```
+submit_order(instrument_id, participant_id, side, type, price?, quantity,
+             tif, client_order_id) ->
+  { status: ACCEPTED | REJECTED, order_id, seq, reason? }
+  # price required for limit/IOC/FOK; omitted for market
+  # type: MARKET | LIMIT ; tif: DAY | IOC | FOK
+
+cancel_order(instrument_id, order_id | client_order_id, participant_id) ->
+  { status: CANCELLED | TOO_LATE | UNKNOWN, seq }
+
+replace_order(instrument_id, order_id, new_price?, new_quantity) ->
+  { status: REPLACED | TOO_LATE, new_order_id, seq }   # loses time priority
+
+# Asynchronous execution report (fill) pushed to both parties:
+ExecutionReport {
+  seq, exec_id, order_id, client_order_id, instrument_id,
+  liquidity: MAKER | TAKER, side, last_price, last_qty,
+  leaves_qty, cum_qty, status: NEW | PARTIALLY_FILLED | FILLED | CANCELLED,
+  transact_time
+}
+```
+
+#### High-Level Design
+```
+Participants
+     |  (FIX / binary order entry)
+     v
+[ Feed Handler / Gateway ]   validate, normalise
+     |
+     v
+[ Sequencer ]  monotonic seq + append  --->  [ Journal / Event Store ]
+     |
+     |  route by hash(instrumentId)
+     v
++----------------------------------------------------+
+|  Matching Cores (single-threaded per shard)        |
+|   shard 0: books { AAPL, ... }                     |
+|   shard 1: books { MSFT, ... }                     |
+|   ...      each core: 1 thread, N order books      |
++----------------------------------------------------+
+     |                          |
+     v                          v
+[ Market Data Publisher ]   [ Execution Report Path ]
+ top-of-book (latest wins)   fills / acks / cancels (sequenced)
+     |                          |
+     v                          v
+ Subscribers                Owning participants
+```
+
+**How to read the diagram:** every event flows in one direction. It is validated once at the edge, sequenced once into the durable log, then routed to exactly one matching core based on its instrument. Matching produces two output streams: stateless market data (only the latest snapshot matters) and sequenced execution reports (gaps are detectable).
+
+**Why the flow is shaped this way:** sequencing happens before matching so the log is the single source of truth and the match is a pure function of the ordered log. Routing by instrument hash guarantees the single-writer invariant: one book is only ever touched by one thread, so matching is lock-free and deterministic. The two output paths are separated because they have different consistency needs, market data being loss-tolerant snapshot fanout and execution reports being exactly-ordered and durable.
+
+**What this layout buys you:** linear throughput scaling by adding shards, deterministic and replayable matching, and clean failure isolation (a crash on one core loses only its books, which replay from the log). The tradeoff is that a single hot instrument is bounded by one core, which is the fundamental limit you manage rather than eliminate.
+
+#### Data Model
+- **Order book (per instrument):** two sides.
+  - `bids`: price-descending levels; `asks`: price-ascending levels.
+  - Each **price level** is a FIFO queue (intrusive doubly linked list) of resting orders in arrival order (time priority).
+  - `best_bid` and `best_ask` pointers are the tops of the two sides.
+- **Order record:** `(order_id, participant_id, side, price_tick, quantity, remaining_qty, tif, enqueue_seq, prev_ptr, next_ptr)`.
+- **Price level:** `(price_tick, total_resting_qty, head_ptr, tail_ptr, order_count)`.
+- **Instrument state:** latest top-of-book snapshot (published), last-applied sequence number.
+- **Not stored / overwritten:** market-data ticks are the latest snapshot per instrument, not an accumulating list. The book accumulates only resting orders, which leave on fill, cancel, or expiry.
+
+#### Algorithm Comparison
+
+| Structure | Best-price access | Insert / cancel at level | Memory | Best for |
+|---|---|---|---|---|
+| `TreeMap<Price, Deque<Order>>` | O(log n) | O(log n) + O(1) FIFO | compact, sparse-friendly | wide or sparse tick ranges, general venues |
+| Price-level array indexed by tick + best pointer | O(1) | O(1) | O(price range), can be large if sparse | HFT hot books with a bounded, dense tick range |
+| Skip list of levels | O(log n) expected | O(log n) expected | pointer overhead | ordered levels without rebalancing, simpler than a balanced tree |
+
+The production HFT answer is the tick-indexed array: prices are discrete ticks in a bounded range, so a level is an O(1) array index and best-price is an O(1) pointer walk, with an intrusive linked list per level for O(1) FIFO. Use the TreeMap when the tick range is wide or sparse enough that a dense array wastes too much memory.
+
+#### Detailed Design
+**The matching loop (incoming order against the opposite side):**
+```
+match(order):
+  book = books[order.instrument]
+  opp  = (order.side == BUY) ? book.asks : book.bids
+  while order.remaining > 0 and opp.best exists
+        and crosses(order, opp.best_price):
+      level = opp.best_level            # best price on the opposite side
+      while order.remaining > 0 and level not empty:
+          resting = level.head          # FIFO: oldest first = time priority
+          if self_trade(order, resting):
+              apply STP policy (cancel newest / cancel resting / decrement)
+              continue
+          traded = min(order.remaining, resting.remaining)
+          emit_fill(order, resting, level.price, traded)
+          order.remaining   -= traded
+          resting.remaining -= traded
+          if resting.remaining == 0:
+              level.remove_head()       # fully consumed order leaves the book
+      if level empty:
+          opp.remove_level()            # advance the best pointer
+  # remainder handling
+  if order.remaining > 0:
+      if order.type == LIMIT and order.tif == DAY:
+          book.side(order.side).rest(order)   # becomes new resting liquidity
+      else:                                    # MARKET / IOC leftover / FOK miss
+          cancel_remainder(order)
+```
+`crosses(buy, ask_price)` is `buy.price >= ask_price`; for a sell it is `sell.price <= bid_price`. FOK is a two-pass variant: first walk to confirm the full quantity is available at acceptable prices, and only then execute, otherwise reject with no fill at all.
+
+**Keyed-executor dispatch (the single-writer invariant):**
+```
+// N single-threaded workers; same instrument always -> same worker
+int shard = Math.floorMod(instrumentId.hashCode(), workers.length);
+workers[shard].submit(event);        // bounded queue per worker
+
+// each worker:
+while (running) {
+    Event e = queue.take();          // in-order for this shard
+    Book book = books.get(e.instrumentId);
+    book.apply(e);                   // lock-free: only this thread touches this book
+}
+```
+Same instrument -> same thread -> in-order, lock-free book access, parallel across books. You never split one book across threads; you shard across instruments.
+
+**The lower-latency evolution (LMAX Disruptor):** replace the `ExecutorService` plus bounded queue with a per-shard Disruptor ring buffer. It is a pre-allocated ring with a single writer per shard, so there is no lock contention and no hot-path allocation; consumers track a sequence and the producer never overwrites unconsumed slots, which is the backpressure. Mechanical sympathy (contiguous memory, cache-friendly, no garbage) is where the microseconds come from. The partitioning model is unchanged, one writer per shard, just a tighter implementation.
+
+**Sequencing and event sourcing:** the sequencer assigns a gap-free monotonic sequence number to every event and appends it to the durable log before matching. Because matching is a deterministic function of the ordered log, replaying the log from a snapshot reconstructs the exact book. Output execution reports carry their own monotonic sequence so a participant can detect a gap and request replay.
+
+```mermaid
+flowchart LR
+    IN[Inbound events] --> SEQ[Sequencer: seq + append]
+    SEQ --> LOG[(Ordered log)]
+    SEQ -->|hash instrumentId| R{Router}
+    R --> W0[Shard 0 single writer]
+    R --> W1[Shard 1 single writer]
+    R --> W2[Shard 2 single writer]
+    W0 --> MD[Market data latest wins]
+    W0 --> ER[Exec reports sequenced]
+```
+
+```mermaid
+flowchart TB
+    O[Incoming order] --> X{Crosses best opposite?}
+    X -->|no| REST[Rest on book if LIMIT DAY, else cancel]
+    X -->|yes| L[Take best opposite level]
+    L --> F[Fill min qty vs FIFO head]
+    F --> C{Resting consumed?}
+    C -->|yes| RM[Remove resting order]
+    C -->|no| K[Keep resting remainder]
+    RM --> X
+    K --> D{Incoming exhausted?}
+    D -->|no| X
+    D -->|yes| DONE[Emit fills + update top-of-book]
+```
+
+#### Potential Follow-Up Questions
+**Q: Will the order book not just grow forever, like an unbounded queue?**
+No, and this is the key distinction. The book accumulates only resting orders, and every resting order leaves on fill, cancel, or expiry; a crossing order never rests. Book size tracks genuine outstanding liquidity, which is bounded by market participation, not by how long the process has been running. *If pushed:* the thing you must bound explicitly is the input queue per worker (bounded ring plus rejection policy), and per-participant order caps to stop one account inflating the book.
+
+**Q: Why not just keep the latest price per instrument and fill against that?**
+Because price is a scalar and filling needs quantity and time-priority at each level. The best bid and ask are the top of the book; the book produces the price, not the other way round. A latest-price snapshot cannot tell you how much size is available or who is first in the queue, so it cannot produce a correct fill. *If pushed:* the latest-price snapshot is exactly what market data is, a stateless overwrite for display, which is a different concern from the accumulating book that matching needs.
+
+**Q: How do you process events per instrument at this rate?**
+Shard across instruments with a keyed executor: N single-threaded workers, route each event by `hash(instrumentId)` so the same symbol always lands on the same worker. One book, one thread, in-order, lock-free. *If pushed:* at the infrastructure edge, partition the Kafka topic by instrument key so all events for a symbol are on one partition consumed in offset order, the same guarantee one layer down.
+
+**Q: Market vs limit vs IOC vs FOK, how do they differ in the loop?**
+Limit rests any unfilled remainder at its price. Market crosses whatever is available and cancels any unfilled remainder (there is no price to rest at). IOC fills what it can immediately and cancels the rest. FOK is all-or-nothing: a pre-check confirms the entire quantity is available before any fill, otherwise it rejects with zero fills. *If pushed:* market orders need a price band or collar to avoid sweeping the book to absurd prices on a thin instrument.
+
+**Q: How do you prevent self-trades?**
+Detect when the incoming and resting orders share a participant (or STP group) and apply a policy: cancel-newest, cancel-resting, or decrement-and-cancel. It is checked at the point of match, before emitting a fill. *If pushed:* STP groups let a firm stop its own desks crossing while still trading against the street; the policy choice is a venue rule, not a code default.
+
+**Q: How do you recover after a crash?**
+Event sourcing: the ordered input log is the source of truth. Restore the latest snapshot, then replay the log from that snapshot's sequence number to deterministically rebuild the exact book. RPO is zero for anything acknowledged (it was journalled before the ack) and RTO is seconds, because snapshots keep the replay short. *If pushed:* a hot standby replays the same sequenced log in lockstep so failover is a promotion, not a cold rebuild.
+
+**Q: How do you guarantee determinism?**
+Single writer per book plus a total order on input. Matching is a pure function of the ordered log, with no wall-clock reads, no random tie-breaks, and no concurrency inside a book, so the same input yields byte-identical output every time. *If pushed:* any non-determinism (timestamps, hash iteration order, floating point) must be pushed out of the hot path or removed; use integer tick prices, not floats, and sequence numbers, not wall-clock, for tie-breaking.
+
+**Q: How do you test it?**
+Deterministic replay: capture a production log, replay it, and assert bit-identical fills and book state. Property-based tests assert invariants (price-time priority never violated, quantity conserved, no crossed book left resting). *If pushed:* a reference model (a slow, obviously-correct matcher) run in shadow against the fast engine on the same input is the strongest correctness check.
+
+**Q: How do you handle a hot instrument that saturates one core?**
+First accept it: a single book is deliberately one core for determinism, so you cannot thread it. You mitigate by giving hot symbols their own dedicated shard and core, pinning threads with NUMA-local memory, and shedding with backpressure if a burst exceeds the bounded queue. *If pushed:* if one symbol genuinely exceeds a core, the answer is a faster core and tighter code (Disruptor, no allocation), not parallelising the book; splitting a book is a correctness bug, not a scaling option.
+
+#### Bottlenecks & Mitigations
+- **Single hot book bounded by one core** - by design a book is single-threaded, so a very active symbol cannot be sped up by adding threads. Give it a dedicated shard, pin the thread to a core with NUMA-local memory, and strip hot-path allocation; scale the venue by sharding other instruments away from it.
+- **Input queue growth under burst** - the per-worker queue is the thing that can grow without bound if producers outrun the matcher. Use a bounded ring buffer with an explicit rejection / backpressure policy (reject new orders with a busy code, never silently drop) so overload degrades predictably.
+- **Hot-path allocation and GC** - object churn per event causes GC pauses that blow the microsecond budget. Pre-allocate order slots, reuse objects, and use the Disruptor ring so steady-state allocation is zero.
+- **Journal write on the critical path** - if every event must be durably written before ack, the log write can dominate latency. Use sequential append to fast storage, batch-flush with group commit, and keep the journal on its own device so it does not contend with book memory access.
+- **Cross-instrument events** - basket orders or portfolio risk checks touch multiple books and break the shared-nothing per-book model. Handle them on a separate coordinating boundary (a two-phase reservation across the relevant cores), never by taking locks inside the single-writer books.
+- **Market-data fanout pressure** - thousands of subscribers on a hot tick can back up the publisher. Keep publishing as latest-wins snapshot fanout on a separate tier with conflation, so a slow subscriber gets the newest book, not a backlog.
+
+#### Failure Modes
+
+| Layer | Failure | Detection | Mitigation |
+|---|---|---|---|
+| Matching core | Worker thread crashes mid-match | heartbeat gap, last-applied seq stalls for a shard | restart worker, restore snapshot plus replay log from last seq; hot standby promotes if the primary is dead |
+| Sequencer | Sequence gap or duplicate assigned | monotonicity check on the log, gap detector | halt ingest, alarm; refuse to match past a gap because determinism depends on a total order |
+| Journal | Durable log write fails or disk full | write error, flush-latency spike | stop acking (fail closed on durability), fail over to standby journal; never ack an unjournalled order |
+| Input queue | Bounded queue full under burst | queue depth at capacity, rejection counter climbing | reject new orders with a busy code (backpressure), shed lowest-priority flow, alert; never grow unbounded |
+| Book integrity | Crossed book left resting (bid >= ask) | invariant check after each apply | treat as a correctness incident: halt the instrument, snapshot, replay against the reference model |
+| Market data | Publisher backlog or slow subscriber | publish latency, subscriber lag | conflate to latest snapshot, drop stale intermediates; a slow subscriber never backpressures the matcher |
+| Cross-instrument | Basket op partially applied across cores | reservation timeout, mismatch across shards | two-phase reserve / commit with timeout and compensating cancel; keep it off the single-book hot path |
+
+#### Observability — Key Metrics & SLOs
+
+- **`match.latency_p99_micros`**: wire-in to fill wire-out per event, per shard - alert if p99 exceeds the budget (e.g. > 20 micros) for 1min; this is the core product SLO.
+- **`shard.queue_depth`**: inbound ring depth per worker - alert as it approaches capacity (backpressure imminent), watched per shard because one hot instrument moves independently.
+- **`sequence.gap_detected`**: any gap or duplicate in the input or output sequence - page immediately; determinism and audit both depend on gap-free sequencing.
+- **`match.fill_rate` and `book.depth`**: fills/sec and resting-order count per instrument - a baseline for anomaly detection (a book that stops leaving orders, or depth growing unbounded, signals a bug).
+- **`journal.append_latency_p99`**: durable write latency - alert if it starts dominating the critical path.
+- **`stp.trigger_rate`**: self-trade-prevention activations - a spike can indicate a misconfigured participant or a probing strategy.
+- **SLOs:** p99 internal matching latency within budget (single-digit to tens of micros), zero tolerated sequence gaps, and deterministic replay verified continuously against a reference model.
+
+#### Multi-Region & DR
+
+- **Replication mode:** primary-backup with sequenced replication. The primary journals every event with its sequence number; one or more hot standbys consume the same sequenced log and replay it in lockstep, so a standby's book is a deterministic copy of the primary's, not an approximation.
+- **RTO / RPO:** RPO zero, because nothing is acknowledged to a participant until it is journalled and (for strict venues) replicated, so no acknowledged order is lost on failover. RTO seconds, because failover is promoting an already-caught-up standby plus a short catch-up replay of any tail, not a cold rebuild.
+- **Determinism across failover:** because both primary and standby replay the identical ordered log, the promoted standby continues from the exact book state and downstream participants see a continuous, gap-free execution-report sequence.
+- **Cross-region trade-off:** true synchronous cross-region replication adds WAN RTT to the ack path, which is unacceptable for a microsecond matcher; keep the matcher and its hot standby in one low-latency region (same datacentre or adjacent racks) and replicate asynchronously to a distant DR region for catastrophe recovery, accepting a small bounded gap there.
+
+#### Common Mistakes / Anti-patterns
+
+- **Accumulating market-data ticks** - treating ticks as an ever-growing list instead of a latest-wins snapshot; ticks are stateless, only the book accumulates, and only resting orders at that. Conflating the two is the classic conceptual error.
+- **Parallelising a single book** - trying to speed up one hot instrument by matching it on multiple threads, which reorders fills and destroys price-time priority. One book is one writer, always; you scale across instruments, not within one.
+- **Unbounded input queues** - letting a worker's inbound queue grow without limit so a burst becomes unbounded memory and latency; the queue must be bounded with an explicit rejection / backpressure policy.
+- **Non-deterministic ordering** - reading wall-clock time, relying on hash-map iteration order, or using floating-point prices, any of which make replay diverge; use integer tick prices and sequence numbers for tie-breaking.
+- **Failing to sequence** - matching before assigning a gap-free monotonic sequence, which leaves you with no source of truth, no deterministic replay, and no audit trail; sequence first, then match.
+- **Resting a crossing order** - a marketable order that should have matched being placed on the book, leaving a crossed book (bid >= ask); the loop must fully match while it crosses and only rest a genuine remainder.
+
+#### Talking Points for the Interview
+
+- **Determinism is the product, not a nice-to-have** - lead with single-writer-per-book plus a total input order, and explain that trades are money so replay must be byte-identical; this is the first thing a trading-firm interviewer listens for.
+- **State you overwrite vs state you accumulate** - articulate that ticks are latest-wins snapshots while the book accumulates only self-bounding resting orders; naming this distinction unprompted signals you understand the domain, not just data structures.
+- **You shard across instruments, never within a book** - the keyed-executor, same-instrument-same-thread invariant is the whole scaling story, and knowing that splitting a book is a correctness bug rather than a scaling lever is the senior tell.
+- **The tick-indexed array is the HFT answer** - being able to say why (discrete bounded tick prices give O(1) best-price and O(1) level access) and when you would fall back to a TreeMap distinguishes shipped from studied.
+- **Disruptor over a lock queue for the last few microseconds** - single-writer ring, mechanical sympathy, no hot-path allocation; cite it as the implementation that keeps the same partitioning model but buys the latency.
+- **Event sourcing gives you recovery and audit for free** - the ordered log is the source of truth, snapshots keep replay short, and a hot standby replaying the same log makes failover a promotion.
+- **Flag cross-instrument orders as a different boundary** - basket and portfolio operations break shared-nothing per-book isolation and need a separate coordinating layer; recognising this rather than jamming it into one book shows architectural judgement.
