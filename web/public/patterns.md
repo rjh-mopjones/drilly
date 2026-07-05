@@ -10473,30 +10473,22 @@ ExecutionReport {
 ```
 
 #### High-Level Design
-```
-Participants
-     |  (FIX / binary order entry)
-     v
-[ Feed Handler / Gateway ]   validate, normalise
-     |
-     v
-[ Sequencer ]  monotonic seq + append  --->  [ Journal / Event Store ]
-     |
-     |  route by hash(instrumentId)
-     v
-+----------------------------------------------------+
-|  Matching Cores (single-threaded per shard)        |
-|   shard 0: books { AAPL, ... }                     |
-|   shard 1: books { MSFT, ... }                     |
-|   ...      each core: 1 thread, N order books      |
-+----------------------------------------------------+
-     |                          |
-     v                          v
-[ Market Data Publisher ]   [ Execution Report Path ]
- top-of-book (latest wins)   fills / acks / cancels (sequenced)
-     |                          |
-     v                          v
- Subscribers                Owning participants
+```mermaid
+flowchart TB
+    P[Participants] -->|FIX / binary order entry| FH[Feed Handler / Gateway]
+    FH --> SEQ[Sequencer: monotonic seq + append]
+    SEQ --> J[(Journal / Event Store)]
+    SEQ -->|route by hash instrumentId| CORES
+    subgraph CORES[Matching Cores: one thread per shard]
+        direction LR
+        S0[Shard 0: AAPL book]
+        S1[Shard 1: MSFT book]
+        S2[Shard N: ...]
+    end
+    CORES --> MD[Market Data Publisher: top-of-book, latest wins]
+    CORES --> ER[Execution Reports: fills, acks, cancels, sequenced]
+    MD --> SUB[Subscribers]
+    ER --> P
 ```
 
 **How to read the diagram:** every event flows in one direction. It is validated once at the edge, sequenced once into the durable log, then routed to exactly one matching core based on its instrument. Matching produces two output streams: stateless market data (only the latest snapshot matters) and sequenced execution reports (gaps are detectable).
