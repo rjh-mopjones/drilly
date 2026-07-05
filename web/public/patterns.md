@@ -10685,3 +10685,291 @@ First accept it: a single book is deliberately one core for determinism, so you 
 - **Disruptor over a lock queue for the last few microseconds** - single-writer ring, mechanical sympathy, no hot-path allocation; cite it as the implementation that keeps the same partitioning model but buys the latency.
 - **Event sourcing gives you recovery and audit for free** - the ordered log is the source of truth, snapshots keep replay short, and a hot standby replaying the same log makes failover a promotion.
 - **Flag cross-instrument orders as a different boundary** - basket and portfolio operations break shared-nothing per-book isolation and need a separate coordinating layer; recognising this rather than jamming it into one book shows architectural judgement.
+
+### 43. Design a High-Throughput Market Data Ingest Pipeline
+#### Problem
+Absorb many independent high-rate inbound streams (market-data ticks plus order flow, one stream per instrument, venue, or feed handler), normalise them into one canonical event format, stamp them into a single totally-ordered sequence, and fan them out to per-instrument consumers deterministically, at millions of messages per second, without dropping order flow, losing per-instrument ordering, or exhausting memory. This pipeline stops at "hands events to the per-instrument processing layer"; the matching cores of question 42 are the downstream sink.
+
+#### Summary
+**The picture in your head:** a sorting mailroom behind a busy exchange. Couriers (venues, feed handlers) back their vans up to many loading bays at once and dump sacks of letters. Runners at each bay do one thing only, empty the van fast so it can leave, and drop everything onto one numbered conveyor belt. The belt stamps every letter with the next number in sequence, so from here on there is a single, undeniable order of arrival. Further down, the belt sorts letters into pigeonholes by destination desk (instrument), and each desk is worked by one clerk who processes its letters strictly in belt order. If the mailroom gets flooded, junk mail (stale price ticks) is binned because only the latest flyer matters, but cheques (order flow) are never binned, the mailroom instead tells the courier to slow down.
+
+**The single-request walkthrough:** trace two messages. A price tick for `AAPL` arrives on a UDP multicast feed. The feed handler drains it from the socket immediately (it never blocks on anything downstream), the normaliser decodes the venue's binary frame into a pre-allocated canonical event struct, and the sequencer stamps it with the next monotonic sequence number and writes it into the ring buffer. The fan-out hashes `instrumentId` and routes it to the `AAPL` consumer shard; if the consumer is momentarily behind, the tick is conflated (the latest `AAPL` tick overwrites the previous queued one). Now an order to buy `AAPL` arrives on the order-entry stream. Same path to the sequencer, same hash to the same `AAPL` shard, but this one cannot be dropped: if the shard is saturated the pipeline applies backpressure (slow the producer, or NACK an external client with "system busy") rather than lose it. Both are handed to the matching core in sequence order; question 42 takes it from there.
+
+**The pieces (and what each one is for):**
+- **Feed handlers (the edge)** - one thin process or thread per inbound stream whose only job is to drain the socket as fast as possible and do zero business logic, so the kernel receive buffer never fills. On TCP a slow reader turns into backpressure onto the sender; on UDP multicast it turns into dropped packets and a corrupted feed view. The reader must never block on downstream work.
+- **The normaliser** - each venue speaks a different protocol (FIX, an ITCH-style binary, a proprietary frame), so this stage decodes each into one canonical internal event. Parsing is allocation-free on the hot path: decode into pre-allocated structs, never a fresh object per message.
+- **The sequencer (fan-in)** - all normalised streams converge here and are stamped with a gap-free monotonic sequence number, producing one totally-ordered event log. This is the point where "many streams" becomes "one ordered stream", and that log is the single source of truth for replay and recovery. It is a single-writer thread that does almost nothing (assign sequence, write slot), which is exactly why it is fast.
+- **The fan-out (partition by instrument)** - from the sequenced log, events are dispatched to per-instrument consumer shards by hashing `instrumentId`, so the same instrument always lands on the same consumer in order. This is the hand-off to question 42's matching cores.
+- **The conflation map** - a per-instrument slot holding the latest tick, used to shed stale market data under load without touching order flow.
+- **Bounded ring buffers between stages** - decouple ingest from processing so a slow stage cannot stall the socket drain, while staying bounded so overload cannot turn into unbounded memory growth.
+
+**The thing that makes it hard - ordering under load, and the backpressure-vs-conflation split:** two forces fight. You must preserve strict per-instrument ordering (the matching core downstream is deterministic and depends on it), and you must survive bursts of millions of messages per second without running out of memory. The senior insight is that not all messages are equal under overload. Market-data ticks are state you overwrite: a tick is a stateless snapshot, so under load you conflate, keep only the latest per instrument and bin the stale intermediates, because nobody needs the price from 3ms ago when a newer one is queued. Order flow is state you accumulate: a buy or sell can never be silently dropped, so under load you apply backpressure (slow the producer, or reject an external client explicitly with a NACK) so the sender knows. Getting this distinction right, and never mixing the two, is what separates a pipeline that degrades gracefully from one that either loses trades or falls over. (This overwrite-vs-accumulate distinction is the same one that governs the book in question 42.)
+
+**Why the standard solution works:** thin non-blocking feed handlers keep the sockets drained so you never lose the feed at the edge; a single-writer sequencer gives you one total order cheaply and a replayable log for free; partitioning by instrument gives linear fan-out while preserving per-instrument order; and bounded queues plus the conflation-or-backpressure rule mean overload has a defined, safe outcome instead of an OOM. Batching (draining everything available from the ring in one go) amortises per-message cost and is a big part of how LMAX-style designs hit millions of messages per second on modest hardware.
+
+**If you were building it tomorrow:**
+- UDP multicast plus a compact binary protocol for the exchange-grade tick firehose; gRPC server-streaming over HTTP/2 for service-to-service streams that want schemas and reliability; REST/HTTP only for the control plane.
+- Thin feed handlers pinned to cores, draining sockets into per-stream bounded ring buffers, zero business logic.
+- Allocation-free normalisation into pre-allocated canonical structs.
+- A single-writer LMAX Disruptor sequencer writing one ordered ring; batched consumer draining.
+- Fan-out by `hash(instrumentId) % shards`; conflation map for ticks, NACK/backpressure for order flow.
+- Shard the whole pipeline by instrument range when one sequencer hits its ceiling; keep cross-instrument events (basket, portfolio risk) on a separate coordinating boundary.
+
+#### Clarifying Questions
+- Data plane or control plane, or both? (assume both: a tick firehose plus an order-entry/control path)
+- Which venues and protocols must we ingest? (FIX, ITCH-style binary, proprietary; assume several)
+- Can we drop market-data ticks under load? (assume yes, via conflation)
+- What are the order-flow guarantees? (assume no silent loss, explicit NACK on overload)
+- Is UDP multicast available on the internal network for fan-out? (assume yes for market data)
+- Throughput target and latency budget? (assume ~1-3M msg/s peak, microsecond-scale ingest-to-dispatch)
+- Are there cross-instrument events (basket orders, portfolio risk)? (flag: different boundary)
+- Do consumers need replay from arbitrary points, or just latest-plus-recovery? (drives log retention)
+
+#### Requirements
+- **FR:**
+  - Ingest many concurrent streams across venues/protocols and normalise into one canonical event
+  - Stamp all events into a single gap-free monotonic sequence (one ordered log)
+  - Fan out to per-instrument consumers preserving per-instrument order
+  - Conflate market-data ticks under load; never silently drop order flow
+  - Expose a data-plane subscribe stream and a control-plane order/query API
+- **NFR:**
+  - Millions of messages/sec peak throughput across the venue
+  - Microsecond-scale ingest-to-dispatch latency at p99
+  - Zero order-flow loss; bounded, predictable memory under sustained overload
+  - Deterministic ordering and a replayable log for recovery
+  - No hot-path allocation, no locks on the sequencing path
+
+#### Scale Estimate
+Derive from a liquid multi-venue feed.
+- **Peak message rate ~1-3M msg/s:** market data dominates and cancels dominate order flow (10-20x fills), so a venue aggregate of a few million messages/sec at open, close, and on news is realistic. Take 2M msg/s as the planning peak.
+- **Instruments ~10k:** O(1e4) symbols across equities and listed derivatives; spread evenly that is 2M / 1e4 = 200 msg/s per instrument, but the distribution is heavily skewed, with the top 10 symbols taking 30-40% of all traffic (the skew that makes load balancing hard, below).
+- **Wire size, binary vs JSON:** a canonical tick (instrument id, price, size, side, venue, timestamp, sequence) is ~24-40 bytes as packed binary but ~150-250 bytes as JSON (field names, quotes, ASCII numbers). At 2M msg/s that is ~48-80 MB/s binary versus ~300-500 MB/s JSON, a 6-10x bandwidth and parse-cost penalty. This is why the data plane is binary and why JSON/REST is disqualified for the firehose.
+- **Ring-buffer memory:** size for burst tolerance, not average. A ring of 2^20 (~1.05M) slots at 64 bytes per slot = 64 MB per ring; that absorbs ~0.5s of a 2M msg/s burst before backpressure/conflation engages, comfortably RAM-resident and pre-allocated once (no per-message allocation).
+- **Per-stage queue depth:** target steady-state depth near zero; alarm well before capacity. A ring at 2^20 with a warn threshold at 50% gives ~250ms of headroom at peak to react (shed ticks, NACK orders) before it fills.
+- **Sequencer throughput ceiling:** a single-writer sequencer doing only "assign sequence, write slot" sustains tens of millions of ops/sec on one core (LMAX published ~6M+ msg/s on 2011 hardware), so 2M msg/s fits one sequencer with headroom; shard the pipeline only when a single sequencer is genuinely the ceiling.
+- **Network bandwidth:** ~50-80 MB/s binary ingress at 2M msg/s; multicast fan-out publishes once and reaches N consumers without N copies, so egress does not multiply by consumer count the way unicast would (a key reason multicast is used for market-data distribution).
+
+#### API Contract
+```
+# Data plane (streaming): one subscribe -> unbounded ordered stream of events
+subscribe(instrument_id | instrument_set, from_seq?) -> stream<Event>
+  # server-streaming (gRPC/HTTP2) or UDP multicast group join for the firehose
+  # from_seq lets a consumer resume after a gap
+
+# Control plane (request/response, REST/HTTP or gRPC unary):
+submit_order(instrument_id, participant_id, side, type, price?, quantity, tif,
+             client_order_id) -> { status: ACCEPTED | REJECTED | BUSY, seq, reason? }
+cancel_order(instrument_id, order_id, participant_id) -> { status, seq }
+
+# Canonical normalised event (one shape for every venue/protocol):
+Event {
+  seq,                 # monotonic, assigned by the sequencer
+  instrument_id,
+  kind: TICK | ORDER | CANCEL | TRADE,
+  venue, side, price, quantity,
+  source_ts,           # venue timestamp
+  ingest_ts            # our receive timestamp
+}
+```
+
+#### High-Level Design
+```
+   feed A (FIX)      feed B (ITCH bin)     feed C (proprietary)
+      |                   |                      |
+      v                   v                      v
+[ Feed Handler ]    [ Feed Handler ]      [ Feed Handler ]   <- thin, drain socket only
+      |                   |                      |
+      +---------> [ Normaliser: decode -> canonical struct ] <-+
+                              |
+                              v
+                  [ Sequencer (single writer) ]  fan-in: assign seq
+                              |
+                              v
+                  [ Ordered log / ring buffer ]  --> [ Journal / snapshot ]
+                              |
+                  partition by hash(instrumentId)  fan-out
+              +---------------+----------------+
+              v               v                v
+        [ shard 0 ]     [ shard 1 ]      [ shard N ]
+        consumer +      consumer +       consumer +
+        conflation      conflation       conflation
+              |               |                |
+              v               v                v
+         Matching core   Matching core    Matching core   (question 42)
+```
+
+**How to read the diagram:** messages flow one way, from many independent feeds on the left, through thin feed handlers that only drain sockets, into one normaliser and one sequencer where many streams fan in to a single ordered log, then fan out by instrument to per-shard consumers that hand off to the matching cores of question 42.
+
+**Why the flow is shaped this way:** the feed handlers are deliberately thin so the socket is always drained and the feed view stays intact under load. Fan-in to a single-writer sequencer is what creates one total order cheaply and produces the replayable log that is the source of truth. Fan-out by instrument hash preserves per-instrument ordering while allowing linear parallelism, because ordering only has to hold within a book and books are independent.
+
+**What this layout buys you:** graceful behaviour under overload (conflate ticks, backpressure orders), deterministic per-instrument ordering, linear scale-out by adding shards, and clean recovery by replaying the sequenced log. The tradeoff is that the sequencer is a single-writer stage (a deliberate ceiling you manage by sharding the pipeline) and that cross-instrument events do not fit the shared-nothing model and need a separate boundary.
+
+#### Data Model
+- **Canonical event record:** `(seq, instrument_id, kind, venue, side, price, quantity, source_ts, ingest_ts)`; fixed-size, packed, decoded into pre-allocated structs.
+- **Sequence number:** monotonic, gap-free, assigned by the single-writer sequencer; the primary key of the ordered log and the basis for gap detection and replay.
+- **Ring-buffer slot:** pre-allocated fixed-size slot holding one canonical event; the buffer is a power-of-two ring with producer and consumer sequence cursors (single writer, mechanical-sympathy layout).
+- **Conflation map:** `instrument_id -> latest_tick_slot`; under load, a new tick for an instrument overwrites the previous unconsumed one so only the freshest is delivered. Order-flow events are never placed in this map; they go on the durable, non-lossy path.
+- **Journal / snapshot:** the sequenced log persisted for replay, plus periodic snapshots of consumer state so recovery replays seconds, not hours.
+
+#### Algorithm Comparison
+
+| Transport | Connection model | Streaming | Serialisation | Backpressure | Latency | Ordering / reliability | Best for |
+|---|---|---|---|---|---|---|---|
+| REST / HTTP/1.1 | new request/response per call (or keep-alive), header overhead per message | none (poll) | JSON text, allocation-heavy parse | none native | highest | ordered per response, reliable (TCP) | control plane, external APIs, low-rate |
+| gRPC / HTTP/2 streaming | one long-lived multiplexed connection, server-streaming | yes (one subscribe -> unbounded stream) | Protobuf binary, parse into pre-allocated structs | per-stream via HTTP/2 flow control | low, but TCP head-of-line blocking | ordered, reliable (TCP), schema-typed | service-to-service streams wanting schemas/tooling/reliability |
+| UDP multicast + binary | connectionless, one publish reaches N subscribers | yes (continuous) | compact binary (ITCH-style) | none (shed/conflate at app layer) | lowest | app-level sequence + gap detection; unreliable transport | exchange-grade, colocated, lowest-latency market data |
+
+The honest hierarchy: UDP multicast plus binary is the lowest-latency path for internal/exchange market data (one publish fans out to N with no per-consumer copy, and no TCP head-of-line blocking or retransmit latency); gRPC server-streaming is the right choice for service-to-service streams where you want schemas, tooling, and reliability and can tolerate TCP; REST/HTTP is for the control plane and external-facing APIs. Name all three and place each rather than declaring a single winner. Do not overclaim gRPC as the fastest path; because it is TCP it has head-of-line blocking and is not what colocated market data uses.
+
+#### Detailed Design
+**Feed handler drain loop (never block on downstream):**
+```
+loop:
+    n = socket.recv(buf)          # drain the socket first, always
+    if n <= 0: continue
+    event = normalise(buf, n)     # decode into a pre-allocated struct
+    if not ring.try_publish(event):   # bounded ring; do NOT block the reader
+        if event.kind == TICK:
+            conflation[event.instrument] = event   # overwrite latest, shed stale
+        else:
+            nack(event, reason = "system_busy")    # order flow: explicit reject
+    # the reader never waits on the matcher; a stalled consumer must never
+    # cause the socket buffer to fill (TCP backpressure / UDP packet loss)
+```
+
+**Allocation-free normalisation:** each venue decoder reads the wire frame field by field into a reused canonical struct drawn from a pre-allocated pool, so steady-state allocation is zero and there is no per-message garbage to collect. FIX is tag=value ASCII, ITCH-style is fixed-offset binary; both map onto the same canonical `Event`.
+
+**Single-writer sequencer (fan-in to one order):**
+```
+// exactly one thread writes the ring; it does almost nothing
+seq = 0
+loop:
+    event = inbound.poll()        # from the normaliser stage
+    if event == null: continue
+    seq += 1
+    event.seq = seq               # assign the total order
+    slot = ring.claim()           # single writer, no lock
+    ring.write(slot, event)       # publish; consumers advance their own cursor
+    journal.append(event)         # durable, sequential, source of truth
+```
+Because one writer assigns the sequence, the order is total and gap-free with no locking, and the journal is the replay source of truth.
+
+**Conflation for ticks vs backpressure for order flow:** the two message classes are handled differently under load. Ticks flow through the conflation map (latest overwrites stale) so a slow consumer receives the newest book, not a backlog. Order flow is never conflated: if its bounded path is full, apply backpressure to the producer (flow control) or return an explicit NACK to an external client, so nothing is lost silently.
+
+**Batched draining (mechanical sympathy):** a consumer drains everything currently available between its cursor and the producer cursor in one pass and processes it as a batch, amortising per-message overhead and staying cache-friendly. This batching is a large part of how the pipeline reaches millions of messages/sec on modest hardware.
+
+**Sharding the pipeline (the scale-out evolution):** when a single sequencer is the ceiling, shard the whole pipeline by instrument range; each shard has its own feed handlers, sequencer, and consumers and shares nothing. Global ordering is only required within a book, and books are independent, so per-shard sequencing suffices. The exception is cross-instrument events (basket orders, portfolio risk checks) that span shards; they break shared-nothing and need a separate coordinating boundary (a two-phase reservation), never a lock across shards.
+
+```mermaid
+flowchart LR
+    F1[Feed A] --> H1[Feed handler]
+    F2[Feed B] --> H2[Feed handler]
+    F3[Feed C] --> H3[Feed handler]
+    H1 --> N[Normaliser]
+    H2 --> N
+    H3 --> N
+    N --> S[Sequencer single writer]
+    S --> L[(Ordered ring / log)]
+    S --> J[(Journal / snapshot)]
+    L -->|hash instrumentId| P{Partition}
+    P --> C0[Shard 0 consumer]
+    P --> C1[Shard 1 consumer]
+    P --> C2[Shard 2 consumer]
+    C0 --> M[Matching cores Q42]
+    C1 --> M
+    C2 --> M
+```
+
+```mermaid
+flowchart TB
+    E[Event ready, downstream full?] --> Q{Kind?}
+    Q -->|TICK| CF[Conflate: latest overwrites stale in map]
+    Q -->|ORDER / CANCEL| BP{External client?}
+    BP -->|yes| NK[NACK: system busy]
+    BP -->|no| FC[Backpressure: slow the producer]
+    CF --> OK[Feed handler keeps draining]
+    NK --> OK
+    FC --> OK
+```
+
+#### Potential Follow-Up Questions
+**Q: How do you deal with many ticker streams and load coming in from all of them at once?**
+Thin feed handlers, one per stream, whose only job is to drain the socket so the kernel buffer never fills; they do zero business logic and hand off to a shared normaliser and a single sequencer that fans the streams into one ordered log. *If pushed:* pin feed handlers to cores, size the per-stream ring for burst, and shard the whole pipeline by instrument range once one sequencer is the ceiling.
+
+**Q: Do you load balance across the consumers?**
+Not round-robin. You partition by `instrumentId` so the same instrument always goes to the same consumer, because per-instrument ordering must hold and round-robin would interleave a book across consumers and destroy it. *If pushed:* the real problem is not even spread, it is skew, a few hot instruments carry most of the load; assign shards by measured load and give whales dedicated cores. You cannot split one hot instrument's stream. Stateless edges (feed-handler gateways, market-data publishers) do load-balance normally because they carry no per-instrument ordering.
+
+**Q: Why not just use REST/HTTP for the feed?**
+Because the data plane is a firehose and request/response has per-message connection and header overhead, no native streaming, and JSON parse cost; at millions of messages/sec that is 6-10x the bandwidth and CPU of packed binary. REST is right for the control plane (submit_order, cancel, query) where the rate is low and human-legibility and tooling matter. *If pushed:* the split is data plane vs control plane; use a streaming transport for the firehose and REST for the low-rate control path.
+
+**Q: Then why not gRPC for the fastest path?**
+gRPC server-streaming is excellent for service-to-service streams (long-lived multiplexed connection, Protobuf, per-stream HTTP/2 flow control), but it runs over TCP, so it has head-of-line blocking and retransmit latency and is not the fastest path. Exchange-grade, colocated market data uses UDP multicast with a compact binary protocol: one publish fans out to N subscribers with no per-consumer copy and no TCP head-of-line blocking. *If pushed:* name the hierarchy, UDP multicast for lowest-latency market data, gRPC for reliable service-to-service streams, REST for control and external APIs.
+
+**Q: Backpressure or dropping, which do you use?**
+Depends on the message class. Market-data ticks are stateless snapshots, so under load you conflate (keep the latest per instrument, drop stale intermediates); order flow accumulates and can never be silently dropped, so you apply backpressure or an explicit NACK. *If pushed:* it is the overwrite-vs-accumulate distinction from question 42; the pipeline must treat the two classes differently and never conflate order flow.
+
+**Q: How do you recover or replay after a crash?**
+The sequenced log is the source of truth. Restore the latest snapshot of consumer state, then replay the log from that snapshot's sequence number to deterministically rebuild. RPO is zero for anything journalled before ack; RTO is seconds because snapshots keep the replay short. *If pushed:* a hot standby replays the same sequenced log in lockstep so failover is a promotion, not a cold rebuild.
+
+**Q: How do you guarantee ordering across many streams?**
+The single-writer sequencer is the one place that assigns order; many streams fan in and leave with a total, gap-free sequence. Downstream, partitioning by instrument preserves that order per book. *If pushed:* there is no wall-clock tie-breaking and no concurrent writer on the sequencing path, because either would make the order non-deterministic.
+
+**Q: How do you test it under overload?**
+Replay a captured production log at 1x, 2x, and 10x speed and assert: zero order-flow loss, ticks conflated (not backlogged), per-instrument order preserved, and bounded memory. Chaos-test by stalling a consumer and killing the sequencer mid-flight to verify backpressure and replay. *If pushed:* a slow reference consumer run in shadow validates that fan-out ordering matches the sequenced log exactly.
+
+#### Bottlenecks & Mitigations
+- **Sequencer single-writer ceiling** - one thread assigns the total order, so its throughput bounds the shard. Keep it doing almost nothing (assign sequence, write slot, sequential journal append), and shard the whole pipeline by instrument range when one sequencer is genuinely saturated.
+- **Hot instrument / skew** - a few symbols carry most of the load, and one instrument's stream cannot be split without breaking ordering. Assign shards by measured load, give whales dedicated cores with NUMA-local memory, and accept that a single hot book is bounded by one consumer (as in question 42).
+- **Unbounded queue OOM** - an unbounded queue under sustained overload just moves the failure from dropped packets to out-of-memory. Bound every inter-stage buffer, size for burst, and define the full behaviour (conflate ticks, NACK/backpressure order flow).
+- **GC pauses from per-message allocation** - allocating a fresh object per message causes pauses that blow the microsecond budget. Parse into pre-allocated pooled structs and use pre-allocated ring slots so steady-state allocation is zero.
+- **Network saturation** - JSON on the firehose is 6-10x the bytes of packed binary, and unicast fan-out multiplies egress by consumer count. Use compact binary on the data plane and UDP multicast for fan-out so one publish reaches N consumers.
+- **Slow consumer stalling the pipeline** - a lagging consumer must never back up the sequencer or the socket drain. Decouple with bounded rings, conflate its tick stream to the latest, and for order flow apply backpressure at the producer rather than letting the stall propagate to the edge.
+
+#### Failure Modes
+
+| Layer | Failure | Detection | Mitigation |
+|---|---|---|---|
+| Feed handler | Handler process dies, one feed goes dark | per-feed heartbeat and message-rate drop to zero | restart handler, rejoin multicast group / reconnect; gap detection triggers replay of missed sequence range |
+| Sequencer | Single-writer sequencer crashes | last-assigned seq stalls, downstream cursor stops advancing | promote hot standby that has replayed the same log; resume from last durable seq; refuse to match past a gap |
+| Consumer | Shard consumer falls behind | consumer lag (producer cursor minus consumer cursor) climbing | conflate its tick stream to latest; backpressure order flow at the producer; alert and, if persistent, move the shard to a dedicated core |
+| Transport | UDP multicast packet loss / gap | monotonic app-level sequence gap on the feed | request retransmit from an arbitration/recovery feed, or replay the missed range from the journal; never silently skip |
+| Buffer | Bounded ring full under burst | queue depth at capacity, drop/NACK counters climbing | conflate ticks, NACK/backpressure order flow; never grow unbounded; alarm before capacity |
+| Cross-region | Replication link to standby down | replication lag metric, standby seq falling behind | continue on primary; buffer within RPO budget; on link recovery the standby catches up by replaying the sequenced log |
+
+#### Observability — Key Metrics & SLOs
+
+- **`ingest.dispatch_latency_p99_micros`**: wire-receive to consumer-dispatch per event - alert if p99 exceeds the budget (e.g. > 50 micros) for 1min; the core pipeline SLO.
+- **`stage.queue_depth`**: ring depth at each stage (feed handler, normaliser, per-shard consumer) - alert as it approaches capacity, watched per stage because a single slow stage moves independently.
+- **`sequence.gap_detected`**: any gap or duplicate in the assigned sequence or on an inbound feed - page immediately; ordering, replay, and audit all depend on gap-free sequencing.
+- **`marketdata.conflation_rate`**: ticks shed by conflation per instrument per second - expected to rise under load; a sudden spike flags a lagging consumer or a burst.
+- **`orderflow.nack_rate`**: order-flow rejections due to backpressure - alert on any sustained non-zero value, because order flow should almost never be shed.
+- **`shard.messages_per_sec` and `consumer.lag`**: throughput per shard and producer-minus-consumer cursor distance - baseline for skew and stall detection.
+- **SLOs:** p99 ingest-to-dispatch within budget (tens of micros), zero order-flow loss, zero tolerated sequence gaps, and bounded memory verified under replay at multiples of peak.
+
+#### Multi-Region & DR
+
+- **Replication mode:** primary-backup with sequenced-log replication. The primary journals every event with its sequence number; one or more hot standbys consume the same sequenced log and replay it in lockstep, so a standby's consumer state is a deterministic copy of the primary's, not an approximation. The log, not any in-memory buffer, is the source of truth.
+- **Gap detection and recovery:** every consumer and standby tracks the monotonic sequence and detects a gap the instant one appears; recovery is replaying the missing sequence range from the journal (or a retransmit feed), never skipping. Snapshots bound how far back a replay must go.
+- **RTO / RPO:** RPO zero for anything acknowledged (journalled and, for strict venues, replicated before ack). RTO seconds, because failover promotes an already-caught-up standby plus a short tail replay, not a cold rebuild.
+- **Cross-region trade-off:** synchronous cross-region replication adds WAN RTT to the ack path, which is unacceptable for a microsecond pipeline; keep the pipeline and its hot standby in one low-latency region (same datacentre or adjacent racks) and replicate asynchronously to a distant DR region for catastrophe recovery, accepting a small bounded gap there.
+
+#### Common Mistakes / Anti-patterns
+
+- **Using REST/HTTP for the data plane** - request/response with per-message header overhead, no native streaming, and JSON parse cost cannot carry a multi-million-message firehose; REST belongs on the low-rate control plane, streaming transports on the data plane.
+- **Unbounded queues** - an unbounded buffer under sustained overload converts dropped packets into an out-of-memory crash; every inter-stage buffer must be bounded with a defined full behaviour.
+- **Round-robin load balancing across per-instrument consumers** - spreading one instrument's events across consumers interleaves and destroys per-instrument order; you partition by instrument, not round-robin, and only stateless edges load-balance freely.
+- **Dropping order flow silently** - shedding a buy or sell without telling anyone loses trades; order flow gets backpressure or an explicit NACK, never a silent drop.
+- **Not conflating ticks and treating them as durable events** - queueing every stale tick like a durable message backs up the pipeline; ticks are latest-wins snapshots and must be conflated under load.
+- **Per-message allocation** - a fresh object per message causes GC pauses that blow the latency budget; parse into pre-allocated pooled structs and ring slots.
+- **Assuming even load and ignoring skew** - sizing for the average when a few hot instruments carry most of the traffic; plan for skew, measure per-instrument load, and dedicate resources to whales.
+- **Blocking the feed handler on downstream work** - if the socket reader waits on the matcher, the kernel buffer fills and you drop or backpressure at the worst possible place; the reader must always drain first and hand off to a bounded buffer.
+
+#### Talking Points for the Interview
+
+- **Data plane vs control plane is the framing** - split transport by traffic class: a streaming binary data plane for the firehose, REST for the low-rate control plane, and say why request/response cannot carry millions of messages/sec.
+- **Backpressure for orders, conflation for ticks** - lead with the overwrite-vs-accumulate consequence: ticks are snapshots you conflate under load, order flow accumulates and is never silently dropped; this is the senior signal and it ties straight to question 42.
+- **Partitioning is the load balancing, and skew is the real problem** - you partition by instrument to preserve ordering, not round-robin; the hard part is hot instruments, not even spread, and you cannot split one hot stream.
+- **The single-writer sequencer and why ordering forces it** - one writer assigns a total, gap-free order cheaply and produces the replayable log; concurrency on that path would make ordering non-deterministic.
+- **UDP multicast beats gRPC beats REST for progressively lower latency** - name the honest hierarchy and place each; do not overclaim gRPC as the fastest path, since TCP head-of-line blocking is why colocated market data uses multicast.
+- **Bounded everything** - bounded rings between every stage with a defined full behaviour is what turns overload into graceful degradation instead of an OOM.
+- **This pipeline is the front half of the matching engine** - it stops at handing ordered, per-instrument events to the matching cores of question 42, which is the downstream sink; being explicit about that boundary shows you see the whole system.
