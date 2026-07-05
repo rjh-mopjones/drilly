@@ -692,6 +692,22 @@
       "itemCount": 21
     },
     {
+      "id": "data-engineering-ml",
+      "file": "/data-engineering-ml-interview-primer.md",
+      "title": "Data Engineering for ML",
+      "category": "Machine Learning",
+      "itemLabel": "Topic",
+      "itemsPlural": "DE-for-ML topics",
+      "storagePrefix": "ip:data-engineering-ml",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": [],
+      "cheatSheetUrl": "/data-engineering-ml-cheatsheet.html",
+      "itemCount": 21
+    },
+    {
       "id": "finance-domain",
       "file": "/finance-domain-interview-primer.md",
       "title": "Finance Domain",
