@@ -30,6 +30,28 @@ def twoSum(nums, target):
         seen[n] = i
 ```
 
+#### Java
+
+`getOrDefault` isn't needed here — a plain `containsKey`/`get` pair reads cleanest, and recording `seen.put(n, i)` *after* the lookup is what stops an element pairing with itself. Autoboxing `int` into the `HashMap<Integer, Integer>` is transparent.
+
+```java
+import java.util.*;
+
+class Solution {
+    public int[] twoSum(int[] nums, int target) {
+        Map<Integer, Integer> seen = new HashMap<>();
+        for (int i = 0; i < nums.length; i++) {
+            int comp = target - nums[i];
+            if (seen.containsKey(comp)) {
+                return new int[]{seen.get(comp), i};
+            }
+            seen.put(nums[i], i);
+        }
+        return new int[]{};
+    }
+}
+```
+
 #### Rust
 
 `HashMap::get` returns `Option<&V>` — `if let Some(&j)` destructures and copies the index out without cloning. The `i as i32` cast is purely for LeetCode's signature; idiomatic Rust would keep `usize` end-to-end.
@@ -126,6 +148,31 @@ def addTwoNumbers(l1, l2):
         curr.next = ListNode(val)
         curr = curr.next
     return dummy.next
+```
+
+#### Java
+
+Use the stock LeetCode `ListNode`; a `dummy` sentinel makes the first-node case disappear. Java has no tuple, so the carry/digit split stays two plain statements — clearer than any trick here.
+
+```java
+import java.util.*;
+
+class Solution {
+    public ListNode addTwoNumbers(ListNode l1, ListNode l2) {
+        ListNode dummy = new ListNode();
+        ListNode curr = dummy;
+        int carry = 0;
+        while (l1 != null || l2 != null || carry != 0) {
+            int val = carry;
+            if (l1 != null) { val += l1.val; l1 = l1.next; }
+            if (l2 != null) { val += l2.val; l2 = l2.next; }
+            carry = val / 10;
+            curr.next = new ListNode(val % 10);
+            curr = curr.next;
+        }
+        return dummy.next;
+    }
+}
 ```
 
 #### Rust
@@ -271,6 +318,45 @@ def findMedianSortedArrays(nums1, nums2):
         else:
             lo = i + 1
     return 0.0
+```
+
+#### Java
+
+Promote partition values to `long` and use `Long.MIN_VALUE`/`Long.MAX_VALUE` as sentinels so the boundary comparisons never overflow. Java has no tuple swap, so ensure-shorter is a manual three-line swap of the two array references.
+
+```java
+class Solution {
+    public double findMedianSortedArrays(int[] nums1, int[] nums2) {
+        if (nums1.length > nums2.length) {
+            int[] tmp = nums1; nums1 = nums2; nums2 = tmp;
+        }
+        int m = nums1.length, n = nums2.length;
+        int half = (m + n + 1) / 2;
+        int lo = 0, hi = m;
+
+        while (lo <= hi) {
+            int i = (lo + hi) / 2;
+            int j = half - i;
+
+            long left1  = (i > 0) ? nums1[i - 1] : Long.MIN_VALUE;
+            long left2  = (j > 0) ? nums2[j - 1] : Long.MIN_VALUE;
+            long right1 = (i < m) ? nums1[i]     : Long.MAX_VALUE;
+            long right2 = (j < n) ? nums2[j]     : Long.MAX_VALUE;
+
+            if (left1 <= right2 && left2 <= right1) {
+                if ((m + n) % 2 == 1) {
+                    return (double) Math.max(left1, left2);
+                }
+                return (Math.max(left1, left2) + Math.min(right1, right2)) / 2.0;
+            } else if (left1 > right2) {
+                hi = i - 1;
+            } else {
+                lo = i + 1;
+            }
+        }
+        return 0.0;
+    }
+}
 ```
 
 #### Rust
@@ -431,6 +517,35 @@ def longestPalindrome(s):
     return res
 ```
 
+#### Java
+
+No closures over mutable locals in Java, so track `bestStart`/`bestLen` as fields (or return-by-effect on instance state) and have `expand` update them directly. `s.substring(start, end)` is the single allocation, built only at the end.
+
+```java
+class Solution {
+    private int bestStart = 0, bestLen = 0;
+
+    public String longestPalindrome(String s) {
+        for (int i = 0; i < s.length(); i++) {
+            expand(s, i, i);
+            expand(s, i, i + 1);
+        }
+        return s.substring(bestStart, bestStart + bestLen);
+    }
+
+    private void expand(String s, int l, int r) {
+        while (l >= 0 && r < s.length() && s.charAt(l) == s.charAt(r)) {
+            if (r - l + 1 > bestLen) {
+                bestLen = r - l + 1;
+                bestStart = l;
+            }
+            l--;
+            r++;
+        }
+    }
+}
+```
+
 #### Rust
 
 Operating on `s.as_bytes()` avoids UTF-8 decoding for every comparison — safe here because the input is ASCII. Casting to `isize` lets `l` go negative as a loop-termination signal, then the helper returns the `(start, len)` pair so the outer loop tracks only the best.
@@ -544,6 +659,25 @@ def change(amount, coins):
     return dp[amount]
 ```
 
+#### Java
+
+`new int[amount + 1]` zero-initializes automatically — no fill needed. The coin-outer / amount-inner loop order is what counts combinations rather than permutations; enhanced for-loop over `coins` keeps it clean.
+
+```java
+class Solution {
+    public int change(int amount, int[] coins) {
+        int[] dp = new int[amount + 1];
+        dp[0] = 1;
+        for (int coin : coins) {
+            for (int a = coin; a <= amount; a++) {
+                dp[a] += dp[a - coin];
+            }
+        }
+        return dp[amount];
+    }
+}
+```
+
 #### Rust
 
 `vec![0i32; amount + 1]` allocates the DP table once; the inclusive range `coin..=amount` keeps the inner loop bounds-safe without index arithmetic. The `coin as usize` cast happens once per coin, not per iteration.
@@ -629,6 +763,26 @@ def reverse(x):
     return res
 ```
 
+#### Java
+
+Widen `res` to `long` during the build to dodge signed-overflow, then bounds-check against `Integer.MIN_VALUE`/`Integer.MAX_VALUE` before narrowing. Java's `%` truncates toward zero like C, so negatives need no sign normalization.
+
+```java
+class Solution {
+    public int reverse(int x) {
+        long res = 0;
+        while (x != 0) {
+            res = res * 10 + x % 10;
+            x /= 10;
+        }
+        if (res < Integer.MIN_VALUE || res > Integer.MAX_VALUE) {
+            return 0;
+        }
+        return (int) res;
+    }
+}
+```
+
 #### Rust
 
 `checked_mul` + `and_then(|r| r.checked_add(...))` is the idiomatic overflow-aware chain — returning `0` on `None` matches the problem's contract. Rust's `i32 % 10` truncates toward zero like C, so no sign normalization is needed.
@@ -707,6 +861,26 @@ One-liner using `set(nums)` — readable, but it allocates the full set before c
 ```python
 def containsDuplicate(nums):
     return len(nums) != len(set(nums))
+```
+
+#### Java
+
+`HashSet.add` returns `false` when the element was already present — the same check-and-insert-in-one-call idiom as Rust/C++, and it short-circuits on the first duplicate.
+
+```java
+import java.util.*;
+
+class Solution {
+    public boolean containsDuplicate(int[] nums) {
+        Set<Integer> seen = new HashSet<>();
+        for (int n : nums) {
+            if (!seen.add(n)) {
+                return true;
+            }
+        }
+        return false;
+    }
+}
 ```
 
 #### Rust
@@ -788,6 +962,27 @@ def isAnagram(s, t):
     return all(c == 0 for c in count)
 ```
 
+#### Java
+
+A fixed `int[26]` (auto-zeroed) replaces a map entirely; `s.charAt(i) - 'a'` indexes it directly. Early-exit on length mismatch, then increment for `s` and decrement for `t` in one pass.
+
+```java
+class Solution {
+    public boolean isAnagram(String s, String t) {
+        if (s.length() != t.length()) return false;
+        int[] count = new int[26];
+        for (int i = 0; i < s.length(); i++) {
+            count[s.charAt(i) - 'a']++;
+            count[t.charAt(i) - 'a']--;
+        }
+        for (int c : count) {
+            if (c != 0) return false;
+        }
+        return true;
+    }
+}
+```
+
 #### Rust
 
 Iterating `s.bytes()` instead of `s.chars()` skips UTF-8 decoding — safe because the inputs are constrained to lowercase ASCII. The fixed `[i32; 26]` array lives on the stack, no allocation.
@@ -866,6 +1061,27 @@ def groupAnagrams(strs):
         key = tuple(sorted(s))
         groups.setdefault(key, []).append(s)
     return list(groups.values())
+```
+
+#### Java
+
+Sort the string's chars via `toCharArray` + `Arrays.sort`, then `new String(chars)` as the map key. `computeIfAbsent(key, k -> new ArrayList<>())` is Java's tidy get-or-create-then-mutate.
+
+```java
+import java.util.*;
+
+class Solution {
+    public List<List<String>> groupAnagrams(String[] strs) {
+        Map<String, List<String>> groups = new HashMap<>();
+        for (String s : strs) {
+            char[] chars = s.toCharArray();
+            Arrays.sort(chars);
+            String key = new String(chars);
+            groups.computeIfAbsent(key, k -> new ArrayList<>()).add(s);
+        }
+        return new ArrayList<>(groups.values());
+    }
+}
 ```
 
 #### Rust
@@ -964,6 +1180,39 @@ def topKFrequent(nums, k):
             return res[:k]
 ```
 
+#### Java
+
+`getOrDefault(n, 0) + 1` folds the count update into one lookup. Buckets are an `List<Integer>[]` indexed by frequency; walk them high-to-low, adding until the result reaches `k`.
+
+```java
+import java.util.*;
+
+class Solution {
+    public int[] topKFrequent(int[] nums, int k) {
+        Map<Integer, Integer> count = new HashMap<>();
+        for (int n : nums) {
+            count.put(n, count.getOrDefault(n, 0) + 1);
+        }
+        List<Integer>[] buckets = new List[nums.length + 1];
+        for (int i = 0; i <= nums.length; i++) {
+            buckets[i] = new ArrayList<>();
+        }
+        for (Map.Entry<Integer, Integer> e : count.entrySet()) {
+            buckets[e.getValue()].add(e.getKey());
+        }
+        int[] res = new int[k];
+        int idx = 0;
+        for (int i = buckets.length - 1; i > 0 && idx < k; i--) {
+            for (int v : buckets[i]) {
+                res[idx++] = v;
+                if (idx == k) return res;
+            }
+        }
+        return res;
+    }
+}
+```
+
 #### Rust
 
 `vec![vec![]; n + 1]` allocates the bucket array (note: each inner `vec![]` is a fresh allocation — fine here because buckets are tiny). `buckets.iter().rev()` is the clean way to scan high-to-low without manual indexing.
@@ -1058,6 +1307,37 @@ def decode(s):
         res.append(s[j + 1:j + 1 + length])
         i = j + 1 + length
     return res
+```
+
+#### Java
+
+Design problem: implement the `Codec` class with `encode`/`decode`. `StringBuilder` avoids quadratic concatenation; on decode, `indexOf('#', i)` finds the delimiter and `substring(start, start + length)` does the bounded slice.
+
+```java
+import java.util.*;
+
+class Codec {
+    public String encode(List<String> strs) {
+        StringBuilder sb = new StringBuilder();
+        for (String s : strs) {
+            sb.append(s.length()).append('#').append(s);
+        }
+        return sb.toString();
+    }
+
+    public List<String> decode(String s) {
+        List<String> res = new ArrayList<>();
+        int i = 0;
+        while (i < s.length()) {
+            int j = s.indexOf('#', i);
+            int length = Integer.parseInt(s.substring(i, j));
+            int start = j + 1;
+            res.add(s.substring(start, start + length));
+            i = start + length;
+        }
+        return res;
+    }
+}
 ```
 
 #### Rust
@@ -1180,6 +1460,30 @@ def productExceptSelf(nums):
     return res
 ```
 
+#### Java
+
+`new int[n]` zero-inits, so seed nothing — the first prefix pass writes running left-products, then a reverse pass multiplies by the running suffix. Only the output array is allocated; the running vars are `O(1)`.
+
+```java
+class Solution {
+    public int[] productExceptSelf(int[] nums) {
+        int n = nums.length;
+        int[] res = new int[n];
+        int prefix = 1;
+        for (int i = 0; i < n; i++) {
+            res[i] = prefix;
+            prefix *= nums[i];
+        }
+        int suffix = 1;
+        for (int i = n - 1; i >= 0; i--) {
+            res[i] *= suffix;
+            suffix *= nums[i];
+        }
+        return res;
+    }
+}
+```
+
 #### Rust
 
 `vec![1i32; n]` initializes the output to 1 so the prefix pass can just assign. The reverse pass uses `(0..n).rev()` — Rust's clean reverse-range without manual `i -= 1`.
@@ -1283,6 +1587,35 @@ def isValidSudoku(board):
     return True
 ```
 
+#### Java
+
+Bitmask trick: a single `short`/`int` per region holds the seen-digit bits, so `1 << (c - '1')` encodes a digit, `&` checks and `|=` inserts — faster and lighter than nine `HashSet`s. Three `int[9]` arrays cover rows, cols, and boxes.
+
+```java
+class Solution {
+    public boolean isValidSudoku(char[][] board) {
+        int[] rows = new int[9];
+        int[] cols = new int[9];
+        int[] boxes = new int[9];
+        for (int r = 0; r < 9; r++) {
+            for (int c = 0; c < 9; c++) {
+                char ch = board[r][c];
+                if (ch == '.') continue;
+                int bit = 1 << (ch - '1');
+                int b = (r / 3) * 3 + c / 3;
+                if ((rows[r] & bit) != 0 || (cols[c] & bit) != 0 || (boxes[b] & bit) != 0) {
+                    return false;
+                }
+                rows[r] |= bit;
+                cols[c] |= bit;
+                boxes[b] |= bit;
+            }
+        }
+        return true;
+    }
+}
+```
+
 #### Rust
 
 Bitmask trick: `u16` is plenty for 9 digits, so `1u16 << (ch as u8 - b'1')` encodes the digit as a bit. `rows[r] & bit != 0` is the check, `|=` is the insert — faster than `HashSet` and cache-friendlier.
@@ -1383,6 +1716,30 @@ def longestConsecutive(nums):
     return best
 ```
 
+#### Java
+
+Dump `nums` into a `HashSet` for `O(1)` lookups (also dedups). The `!set.contains(n - 1)` guard restricts the inner walk to sequence starts, keeping it `O(n)` overall.
+
+```java
+import java.util.*;
+
+class Solution {
+    public int longestConsecutive(int[] nums) {
+        Set<Integer> set = new HashSet<>();
+        for (int n : nums) set.add(n);
+        int best = 0;
+        for (int n : set) {
+            if (!set.contains(n - 1)) {
+                int length = 1;
+                while (set.contains(n + length)) length++;
+                best = Math.max(best, length);
+            }
+        }
+        return best;
+    }
+}
+```
+
 #### Rust
 
 `nums.into_iter().collect::<HashSet<_>>()` consumes and dedups in one expression. The walk uses `&(n + length)` for the `contains` call because `HashSet<i32>::contains` takes `&i32`.
@@ -1473,6 +1830,28 @@ def isPalindrome(s):
         l += 1
         r -= 1
     return True
+```
+
+#### Java
+
+`Character.isLetterOrDigit` and `Character.toLowerCase` mirror Python's `isalnum`/`lower` and generalize past ASCII. Two pointers skip non-alphanumerics from each end, then compare case-insensitively — no filtered copy, so `O(1)` extra space.
+
+```java
+class Solution {
+    public boolean isPalindrome(String s) {
+        int l = 0, r = s.length() - 1;
+        while (l < r) {
+            while (l < r && !Character.isLetterOrDigit(s.charAt(l))) l++;
+            while (l < r && !Character.isLetterOrDigit(s.charAt(r))) r--;
+            if (Character.toLowerCase(s.charAt(l)) != Character.toLowerCase(s.charAt(r))) {
+                return false;
+            }
+            l++;
+            r--;
+        }
+        return true;
+    }
+}
 ```
 
 #### Rust
@@ -1567,6 +1946,25 @@ def twoSum(numbers, target):
             r -= 1
 ```
 
+#### Java
+
+No import needed — pure `int[]` and primitives. The three-branch `while (l < r)` skeleton is identical to the other languages; return the freshly built `new int[]{l + 1, r + 1}` to honor the 1-indexed contract.
+
+```java
+class Solution {
+    public int[] twoSum(int[] numbers, int target) {
+        int l = 0, r = numbers.length - 1;
+        while (l < r) {
+            int s = numbers[l] + numbers[r];
+            if (s == target) return new int[]{l + 1, r + 1};
+            else if (s < target) l++;
+            else r--;
+        }
+        return new int[0];
+    }
+}
+```
+
 #### Rust
 
 `loop { ... return ... }` instead of `while l < r` because the problem guarantees a solution — no fallthrough return needed. The `as i32` casts only happen on the return shape.
@@ -1653,6 +2051,36 @@ def threeSum(nums):
             else:
                 r -= 1
     return res
+```
+
+#### Java
+
+`Arrays.sort(int[])` is a dual-pivot quicksort that sorts in place, enabling the two-pointer scan. `Arrays.asList(a, b, c)` builds the inner triplet directly into the `List<List<Integer>>` result.
+
+```java
+import java.util.*;
+
+class Solution {
+    public List<List<Integer>> threeSum(int[] nums) {
+        Arrays.sort(nums);
+        List<List<Integer>> res = new ArrayList<>();
+        int n = nums.length;
+        for (int i = 0; i < n - 2; i++) {
+            if (i > 0 && nums[i] == nums[i - 1]) continue;
+            int l = i + 1, r = n - 1;
+            while (l < r) {
+                int s = nums[i] + nums[l] + nums[r];
+                if (s == 0) {
+                    res.add(Arrays.asList(nums[i], nums[l], nums[r]));
+                    l++;
+                    while (l < r && nums[l] == nums[l - 1]) l++;
+                } else if (s < 0) l++;
+                else r--;
+            }
+        }
+        return res;
+    }
+}
 ```
 
 #### Rust
@@ -1764,6 +2192,24 @@ def maxArea(height):
     return res
 ```
 
+#### Java
+
+`Math.max`/`Math.min` on primitives compile to branchless intrinsics — no boxing. The move-the-shorter-side rule is a single `if/else`, no need to track which pointer moved.
+
+```java
+class Solution {
+    public int maxArea(int[] height) {
+        int l = 0, r = height.length - 1, res = 0;
+        while (l < r) {
+            res = Math.max(res, Math.min(height[l], height[r]) * (r - l));
+            if (height[l] < height[r]) l++;
+            else r--;
+        }
+        return res;
+    }
+}
+```
+
 #### Rust
 
 `height[l].min(height[r]) * (r - l) as i32` uses methods on `i32`, no `std::cmp::min` import. Note the precedence: `(r - l) as i32` casts the width, not the product.
@@ -1851,6 +2297,31 @@ def trap(height):
             maxR = max(maxR, height[r])
             res += maxR - height[r]
     return res
+```
+
+#### Java
+
+`Math.max` keeps the running-max update readable; everything else is primitive arithmetic. The `maxL <= maxR` branch is what makes this `O(1)` space rather than the prefix/suffix-array version.
+
+```java
+class Solution {
+    public int trap(int[] height) {
+        int l = 0, r = height.length - 1;
+        int maxL = height[l], maxR = height[r], res = 0;
+        while (l < r) {
+            if (maxL <= maxR) {
+                l++;
+                maxL = Math.max(maxL, height[l]);
+                res += maxL - height[l];
+            } else {
+                r--;
+                maxR = Math.max(maxR, height[r]);
+                res += maxR - height[r];
+            }
+        }
+        return res;
+    }
+}
 ```
 
 #### Rust
@@ -1952,6 +2423,23 @@ def maxProfit(prices):
     return profit
 ```
 
+#### Java
+
+Indexed loop from 1 rather than slicing (Java arrays don't slice cheaply). `Math.max`/`Math.min` fold the running profit and running-minimum updates into two tidy lines.
+
+```java
+class Solution {
+    public int maxProfit(int[] prices) {
+        int buy = prices[0], profit = 0;
+        for (int i = 1; i < prices.length; i++) {
+            profit = Math.max(profit, prices[i] - buy);
+            buy = Math.min(buy, prices[i]);
+        }
+        return profit;
+    }
+}
+```
+
 #### Rust
 
 `&prices[1..]` borrows the tail without allocating — slicing in Rust is free. Method-form `profit.max(...)` and `buy.min(...)` mirror the Python shape directly.
@@ -2028,6 +2516,31 @@ def lengthOfLongestSubstring(s):
         seen.add(c)
         res = max(res, r - l + 1)
     return res
+```
+
+#### Java
+
+`HashSet<Character>` gives the window membership check; `s.charAt(r)` avoids allocating a char array. The inner `while (seen.contains(c))` shrinks the window one char at a time until the duplicate is evicted.
+
+```java
+import java.util.*;
+
+class Solution {
+    public int lengthOfLongestSubstring(String s) {
+        Set<Character> seen = new HashSet<>();
+        int l = 0, res = 0;
+        for (int r = 0; r < s.length(); r++) {
+            char c = s.charAt(r);
+            while (seen.contains(c)) {
+                seen.remove(s.charAt(l));
+                l++;
+            }
+            seen.add(c);
+            res = Math.max(res, r - l + 1);
+        }
+        return res;
+    }
+}
 ```
 
 #### Rust
@@ -2123,6 +2636,29 @@ def characterReplacement(s, k):
             l += 1
         res = max(res, r - l + 1)
     return res
+```
+
+#### Java
+
+A stack `int[26]` counter indexed by `s.charAt(r) - 'A'` is cheaper than a `HashMap` for the constrained uppercase alphabet. `maxFreq` is only ever raised via `Math.max`, never rescanned — that never-decreasing invariant is what keeps the pass `O(n)`.
+
+```java
+class Solution {
+    public int characterReplacement(String s, int k) {
+        int[] count = new int[26];
+        int l = 0, res = 0, maxFreq = 0;
+        for (int r = 0; r < s.length(); r++) {
+            count[s.charAt(r) - 'A']++;
+            maxFreq = Math.max(maxFreq, count[s.charAt(r) - 'A']);
+            while ((r - l + 1) - maxFreq > k) {
+                count[s.charAt(l) - 'A']--;
+                l++;
+            }
+            res = Math.max(res, r - l + 1);
+        }
+        return res;
+    }
+}
 ```
 
 #### Rust
@@ -2228,6 +2764,33 @@ def checkInclusion(s1, s2):
         if s1_count == window:
             return True
     return False
+```
+
+#### Java
+
+`Arrays.equals(int[], int[])` compares the two 26-slot frequency arrays in `O(26) = O(1)` — the trick that keeps each slide constant-time. `new int[26]` zero-initializes automatically.
+
+```java
+import java.util.*;
+
+class Solution {
+    public boolean checkInclusion(String s1, String s2) {
+        int n1 = s1.length(), n2 = s2.length();
+        if (n1 > n2) return false;
+        int[] s1c = new int[26], win = new int[26];
+        for (int i = 0; i < n1; i++) {
+            s1c[s1.charAt(i) - 'a']++;
+            win[s2.charAt(i) - 'a']++;
+        }
+        if (Arrays.equals(s1c, win)) return true;
+        for (int i = n1; i < n2; i++) {
+            win[s2.charAt(i) - 'a']++;
+            win[s2.charAt(i - n1) - 'a']--;
+            if (Arrays.equals(s1c, win)) return true;
+        }
+        return false;
+    }
+}
 ```
 
 #### Rust
@@ -2340,6 +2903,42 @@ def minWindow(s, t):
             missing += 1
             l += 1
     return s[start:end]
+```
+
+#### Java
+
+`getOrDefault(c, 0)` folds the contains-check and read into one lookup for the `need` map; tracking `missing` as a single counter keeps the inner test `O(1)` instead of comparing two maps. `s.substring(start, end)` extracts the best window at the end.
+
+```java
+import java.util.*;
+
+class Solution {
+    public String minWindow(String s, String t) {
+        Map<Character, Integer> need = new HashMap<>();
+        for (char c : t.toCharArray()) need.merge(c, 1, Integer::sum);
+        int missing = t.length();
+        int l = 0, start = 0, end = 0;
+        for (int r = 0; r < s.length(); r++) {
+            char c = s.charAt(r);
+            if (need.getOrDefault(c, 0) > 0) missing--;
+            need.merge(c, -1, Integer::sum);
+            if (missing == 0) {
+                while (need.getOrDefault(s.charAt(l), 0) < 0) {
+                    need.merge(s.charAt(l), 1, Integer::sum);
+                    l++;
+                }
+                if (end == 0 || r + 1 - l < end - start) {
+                    start = l;
+                    end = r + 1;
+                }
+                need.merge(s.charAt(l), 1, Integer::sum);
+                missing++;
+                l++;
+            }
+        }
+        return s.substring(start, end);
+    }
+}
 ```
 
 #### Rust
@@ -2457,6 +3056,30 @@ def maxSlidingWindow(nums, k):
     return res
 ```
 
+#### Java
+
+`ArrayDeque<Integer>` is the O(1)-at-both-ends container; use `peekLast`/`pollLast` for the monotonic back and `peekFirst`/`pollFirst` for the stale-front eviction. Prefer it over the synchronized legacy `Stack`/`LinkedList`.
+
+```java
+import java.util.*;
+
+class Solution {
+    public int[] maxSlidingWindow(int[] nums, int k) {
+        Deque<Integer> dq = new ArrayDeque<>();
+        int n = nums.length;
+        int[] res = new int[n - k + 1];
+        int idx = 0;
+        for (int i = 0; i < n; i++) {
+            while (!dq.isEmpty() && nums[dq.peekLast()] <= nums[i]) dq.pollLast();
+            dq.addLast(i);
+            if (dq.peekFirst() == i - k) dq.pollFirst();
+            if (i >= k - 1) res[idx++] = nums[dq.peekFirst()];
+        }
+        return res;
+    }
+}
+```
+
 #### Rust
 
 `VecDeque::back().map_or(false, |&j| nums[j] <= n)` collapses the empty-check and the comparison into one expression. `i.wrapping_sub(k)` avoids panicking on the first window where `i < k`.
@@ -2547,6 +3170,29 @@ def isValid(s):
         else:
             stack.append(c)
     return not stack
+```
+
+#### Java
+
+`ArrayDeque<Character>` serves as the stack with `push`/`pop`/`isEmpty` — prefer it over the synchronized legacy `Stack`. A `Map` of closer-to-opener lets a single `containsKey` branch handle all three closing brackets.
+
+```java
+import java.util.*;
+
+class Solution {
+    public boolean isValid(String s) {
+        Deque<Character> stack = new ArrayDeque<>();
+        Map<Character, Character> pairs = Map.of(')', '(', ']', '[', '}', '{');
+        for (char c : s.toCharArray()) {
+            if (pairs.containsKey(c)) {
+                if (stack.isEmpty() || stack.pop() != pairs.get(c)) return false;
+            } else {
+                stack.push(c);
+            }
+        }
+        return stack.isEmpty();
+    }
+}
 ```
 
 #### Rust
@@ -2648,6 +3294,39 @@ class MinStack:
 
     def getMin(self):
         return self.min_stack[-1]
+```
+
+#### Java
+
+Two parallel `ArrayDeque<Integer>` stacks; `push` pairs each value with `Math.min(val, minStack.peek())`. `peek` reads the top without popping, so `getMin` is O(1). Autoboxing means `peek()` returns an `Integer` — fine for the comparison and `Math.min`.
+
+```java
+import java.util.*;
+
+class MinStack {
+    private final Deque<Integer> stack = new ArrayDeque<>();
+    private final Deque<Integer> minStack = new ArrayDeque<>();
+
+    public MinStack() {}
+
+    public void push(int val) {
+        stack.push(val);
+        minStack.push(minStack.isEmpty() ? val : Math.min(val, minStack.peek()));
+    }
+
+    public void pop() {
+        stack.pop();
+        minStack.pop();
+    }
+
+    public int top() {
+        return stack.peek();
+    }
+
+    public int getMin() {
+        return minStack.peek();
+    }
+}
 ```
 
 #### Rust
@@ -2757,6 +3436,35 @@ def evalRPN(tokens):
         else:
             stack.append(int(t))
     return stack[0]
+```
+
+#### Java
+
+`ArrayDeque<Integer>` as the operand stack; `Integer.parseInt` handles the numeric tokens. Java's integer `/` truncates toward zero already (matching the spec), so no float workaround is needed.
+
+```java
+import java.util.*;
+
+class Solution {
+    public int evalRPN(String[] tokens) {
+        Deque<Integer> stack = new ArrayDeque<>();
+        for (String t : tokens) {
+            switch (t) {
+                case "+", "-", "*", "/" -> {
+                    int b = stack.pop(), a = stack.pop();
+                    switch (t) {
+                        case "+" -> stack.push(a + b);
+                        case "-" -> stack.push(a - b);
+                        case "*" -> stack.push(a * b);
+                        default  -> stack.push(a / b);
+                    }
+                }
+                default -> stack.push(Integer.parseInt(t));
+            }
+        }
+        return stack.pop();
+    }
+}
 ```
 
 #### Rust
@@ -2874,6 +3582,39 @@ def generateParenthesis(n):
     return res
 ```
 
+#### Java
+
+`StringBuilder` mutated with `append`/`deleteCharAt` and cloned via `toString()` only at the leaves avoids the per-call string allocation. A private recursive helper is cleaner than a lambda here, since Java lambdas can't self-reference for recursion.
+
+```java
+import java.util.*;
+
+class Solution {
+    public List<String> generateParenthesis(int n) {
+        List<String> res = new ArrayList<>();
+        bt(new StringBuilder(), 0, 0, n, res);
+        return res;
+    }
+
+    private void bt(StringBuilder s, int open, int close, int n, List<String> res) {
+        if (s.length() == 2 * n) {
+            res.add(s.toString());
+            return;
+        }
+        if (open < n) {
+            s.append('(');
+            bt(s, open + 1, close, n, res);
+            s.deleteCharAt(s.length() - 1);
+        }
+        if (close < open) {
+            s.append(')');
+            bt(s, open, close + 1, n, res);
+            s.deleteCharAt(s.length() - 1);
+        }
+    }
+}
+```
+
 #### Rust
 
 Mutating a shared `String` with `push`/`pop` and cloning only at leaves avoids the per-call allocation. The free-function `fn bt` (with explicit args) is more idiomatic than a closure when recursion is involved — closures can't recurse without trickery.
@@ -2956,6 +3697,30 @@ def dailyTemperatures(temperatures):
             res[j] = i - j
         stack.append(i)
     return res
+```
+
+#### Java
+
+`ArrayDeque<Integer>` holds indices in the monotonic stack; `new int[n]` defaults to 0, so indices left on the stack need no cleanup. `peek`/`pop` map directly to the peek-then-resolve pattern.
+
+```java
+import java.util.*;
+
+class Solution {
+    public int[] dailyTemperatures(int[] temperatures) {
+        int n = temperatures.length;
+        int[] res = new int[n];
+        Deque<Integer> stack = new ArrayDeque<>();
+        for (int i = 0; i < n; i++) {
+            while (!stack.isEmpty() && temperatures[i] > temperatures[stack.peek()]) {
+                int j = stack.pop();
+                res[j] = i - j;
+            }
+            stack.push(i);
+        }
+        return res;
+    }
+}
 ```
 
 #### Rust
@@ -3051,6 +3816,34 @@ def carFleet(target, position, speed):
         if not stack or t > stack[-1]:
             stack.append(t)
     return len(stack)
+```
+
+#### Java
+
+There's no zip, so pack `position`/`speed` into an `int[][]` and sort it with `Comparator` on the first column descending — `(a, b) -> b[0] - a[0]`. A plain `double[]`-backed count via a running "max time so far" avoids an explicit stack, but a `Deque<Double>` keeps the parallel to the Python.
+
+```java
+import java.util.*;
+
+class Solution {
+    public int carFleet(int target, int[] position, int[] speed) {
+        int n = position.length;
+        int[][] cars = new int[n][2];
+        for (int i = 0; i < n; i++) {
+            cars[i][0] = position[i];
+            cars[i][1] = speed[i];
+        }
+        Arrays.sort(cars, (a, b) -> b[0] - a[0]);
+        Deque<Double> stack = new ArrayDeque<>();
+        for (int[] c : cars) {
+            double t = (double) (target - c[0]) / c[1];
+            if (stack.isEmpty() || t > stack.peek()) {
+                stack.push(t);
+            }
+        }
+        return stack.size();
+    }
+}
 ```
 
 #### Rust
@@ -3150,6 +3943,35 @@ def largestRectangleArea(heights):
     for i, h in stack:
         res = max(res, h * (len(heights) - i))
     return res
+```
+
+#### Java
+
+An `int[]{start, height}` pair on an `ArrayDeque` avoids boxing while carrying both fields; `peek`/`pop` operate on the head so pushes go to the front. `Math.max` folds the running best.
+
+```java
+import java.util.*;
+
+class Solution {
+    public int largestRectangleArea(int[] heights) {
+        Deque<int[]> stack = new ArrayDeque<>(); // {start, height}
+        int res = 0;
+        int n = heights.length;
+        for (int i = 0; i < n; i++) {
+            int start = i;
+            while (!stack.isEmpty() && stack.peek()[1] > heights[i]) {
+                int[] top = stack.pop();
+                res = Math.max(res, top[1] * (i - top[0]));
+                start = top[0];
+            }
+            stack.push(new int[]{start, heights[i]});
+        }
+        for (int[] p : stack) {
+            res = Math.max(res, p[1] * (n - p[0]));
+        }
+        return res;
+    }
+}
 ```
 
 #### Rust
@@ -3270,6 +4092,25 @@ def search(nums, target):
     return -1
 ```
 
+#### Java
+
+`l + (r - l) / 2` is the overflow-safe midpoint — habit worth keeping even though the bounds here never overflow `int`. Pure primitives, so no imports needed.
+
+```java
+class Solution {
+    public int search(int[] nums, int target) {
+        int l = 0, r = nums.length - 1;
+        while (l <= r) {
+            int m = l + (r - l) / 2;
+            if (nums[m] == target) return m;
+            else if (nums[m] < target) l = m + 1;
+            else r = m - 1;
+        }
+        return -1;
+    }
+}
+```
+
 #### Rust
 
 `l + (r - l) / 2` is the overflow-safe midpoint formula — habit worth keeping even though `i32` won't overflow here. Casting `nums.len() as i32 - 1` requires the array to be non-empty; an empty slice would underflow `usize` first.
@@ -3363,6 +4204,27 @@ def searchMatrix(matrix, target):
     return False
 ```
 
+#### Java
+
+`mid / n` and `mid % n` decompose the flat index into row/col — no nested search. Keeping `mid` an `int` makes the `r = mid - 1` decrement safe at zero.
+
+```java
+class Solution {
+    public boolean searchMatrix(int[][] matrix, int target) {
+        int m = matrix.length, n = matrix[0].length;
+        int l = 0, r = m * n - 1;
+        while (l <= r) {
+            int mid = l + (r - l) / 2;
+            int val = matrix[mid / n][mid % n];
+            if (val == target) return true;
+            else if (val < target) l = mid + 1;
+            else r = mid - 1;
+        }
+        return false;
+    }
+}
+```
+
 #### Rust
 
 `(mid as usize) / n` casts only at the index site. The `i32` `mid` lets the loop go negative without underflow when shrinking past zero.
@@ -3453,6 +4315,27 @@ def minEatingSpeed(piles, h):
         else:
             l = m + 1
     return l
+```
+
+#### Java
+
+Binary-search the answer in `[1, max(piles)]`; `(p + m - 1) / m` is integer-ceiling without floats. Accumulate `hours` in a `long` so the sum can't overflow `int` when speeds are small and piles large.
+
+```java
+class Solution {
+    public int minEatingSpeed(int[] piles, int h) {
+        int l = 1, r = 0;
+        for (int p : piles) r = Math.max(r, p);
+        while (l < r) {
+            int m = l + (r - l) / 2;
+            long hours = 0;
+            for (int p : piles) hours += (p + m - 1) / m;
+            if (hours <= h) r = m;
+            else l = m + 1;
+        }
+        return l;
+    }
+}
 ```
 
 #### Rust
@@ -3548,6 +4431,24 @@ def findMin(nums):
     return nums[l]
 ```
 
+#### Java
+
+Comparing `nums[m]` to `nums[r]` (not `nums[l]`) is the canonical form — the right side is unambiguous about which half holds the pivot. Strict `l < r` ends with `l == r` pointing at the minimum.
+
+```java
+class Solution {
+    public int findMin(int[] nums) {
+        int l = 0, r = nums.length - 1;
+        while (l < r) {
+            int m = l + (r - l) / 2;
+            if (nums[m] > nums[r]) l = m + 1;
+            else r = m;
+        }
+        return nums[l];
+    }
+}
+```
+
 #### Rust
 
 `usize` for indices works here because we never decrement past zero. The structural form is identical to Python.
@@ -3634,6 +4535,30 @@ def search(nums, target):
             else:
                 r = m - 1
     return -1
+```
+
+#### Java
+
+No chained comparisons, so the range checks spell out `&&` explicitly. The two-case split on `nums[l] <= nums[m]` (which half is sorted) is the whole trick and reads the same as C++.
+
+```java
+class Solution {
+    public int search(int[] nums, int target) {
+        int l = 0, r = nums.length - 1;
+        while (l <= r) {
+            int m = l + (r - l) / 2;
+            if (nums[m] == target) return m;
+            if (nums[l] <= nums[m]) {
+                if (nums[l] <= target && target < nums[m]) r = m - 1;
+                else l = m + 1;
+            } else {
+                if (nums[m] < target && target <= nums[r]) l = m + 1;
+                else r = m - 1;
+            }
+        }
+        return -1;
+    }
+}
 ```
 
 #### Rust
@@ -3754,6 +4679,42 @@ class TimeMap:
             else:
                 r = m - 1
         return res
+```
+
+#### Java
+
+`computeIfAbsent` folds the missing-key check into the `set` append in one line. Store `String[]{value}` alongside the timestamp via a `List<int[]>`-style pairing — here a `List<Object[]>` would box; cleaner is a small record-like `String[]` keyed list, but two parallel structures per key keep it primitive-friendly.
+
+```java
+import java.util.*;
+
+class TimeMap {
+    private Map<String, List<Object[]>> store = new HashMap<>();
+
+    public TimeMap() {}
+
+    public void set(String key, String value, int timestamp) {
+        store.computeIfAbsent(key, k -> new ArrayList<>())
+             .add(new Object[]{timestamp, value});
+    }
+
+    public String get(String key, int timestamp) {
+        List<Object[]> vals = store.getOrDefault(key, Collections.emptyList());
+        int l = 0, r = vals.size() - 1;
+        String res = "";
+        while (l <= r) {
+            int m = l + (r - l) / 2;
+            int ts = (int) vals.get(m)[0];
+            if (ts <= timestamp) {
+                res = (String) vals.get(m)[1];
+                l = m + 1;
+            } else {
+                r = m - 1;
+            }
+        }
+        return res;
+    }
+}
 ```
 
 #### Rust
@@ -3888,6 +4849,25 @@ def reverseList(head):
     return prev
 ```
 
+#### Java
+
+Standard three-pointer reversal; `prev` starts `null` so the original head becomes the new tail. Assumes the LeetCode `ListNode` definition — don't redeclare it.
+
+```java
+class Solution {
+    public ListNode reverseList(ListNode head) {
+        ListNode prev = null, curr = head;
+        while (curr != null) {
+            ListNode nxt = curr.next;
+            curr.next = prev;
+            prev = curr;
+            curr = nxt;
+        }
+        return prev;
+    }
+}
+```
+
 #### Rust
 
 `node.next.take()` is the key move: it swaps `next` with `None`, transferring ownership of the rest of the list to `head`. Without `take`, the borrow checker would block reassignment of `node.next`.
@@ -3986,6 +4966,31 @@ def mergeTwoLists(l1, l2):
         curr = curr.next
     curr.next = l1 or l2
     return dummy.next
+```
+
+#### Java
+
+A `new ListNode()` dummy sentinel removes the first-node special case. Java has no truthy `or`, so the leftover tail attaches with a ternary `curr.next = l1 != null ? l1 : l2`.
+
+```java
+class Solution {
+    public ListNode mergeTwoLists(ListNode l1, ListNode l2) {
+        ListNode dummy = new ListNode();
+        ListNode curr = dummy;
+        while (l1 != null && l2 != null) {
+            if (l1.val <= l2.val) {
+                curr.next = l1;
+                l1 = l1.next;
+            } else {
+                curr.next = l2;
+                l2 = l2.next;
+            }
+            curr = curr.next;
+        }
+        curr.next = l1 != null ? l1 : l2;
+        return dummy.next;
+    }
+}
 ```
 
 #### Rust
@@ -4115,6 +5120,41 @@ def reorderList(head):
         second.next = t1
         first = t1
         second = t2
+```
+
+#### Java
+
+Java references tolerate the three-pointer rewiring the Rust version can't, so the in-place three-phase form ports directly. `slow.next = null` severs the list so the interleave loop can use `second != null` cleanly.
+
+```java
+class Solution {
+    public void reorderList(ListNode head) {
+        if (head == null || head.next == null) return;
+        ListNode slow = head, fast = head.next;
+        while (fast != null && fast.next != null) {
+            slow = slow.next;
+            fast = fast.next.next;
+        }
+        ListNode second = slow.next;
+        slow.next = null;
+        ListNode prev = null;
+        while (second != null) {
+            ListNode nxt = second.next;
+            second.next = prev;
+            prev = second;
+            second = nxt;
+        }
+        ListNode first = head;
+        second = prev;
+        while (second != null) {
+            ListNode t1 = first.next, t2 = second.next;
+            first.next = second;
+            second.next = t1;
+            first = t1;
+            second = t2;
+        }
+    }
+}
 ```
 
 #### Rust
@@ -4265,6 +5305,26 @@ def removeNthFromEnd(head, n):
     return dummy.next
 ```
 
+#### Java
+
+A dummy before `head` lets `fast` run `n + 1` steps ahead so `slow` lands one before the target; `dummy.next` returns the possibly-new head. Pure pointer walking, no allocation beyond the sentinel.
+
+```java
+class Solution {
+    public ListNode removeNthFromEnd(ListNode head, int n) {
+        ListNode dummy = new ListNode(0, head);
+        ListNode fast = dummy, slow = dummy;
+        for (int i = 0; i <= n; i++) fast = fast.next;
+        while (fast != null) {
+            fast = fast.next;
+            slow = slow.next;
+        }
+        slow.next = slow.next.next;
+        return dummy.next;
+    }
+}
+```
+
 #### Rust
 
 Owned `Box<ListNode>` makes the two-pointer dance prohibitively painful — easier to collect values, drop the target index, and rebuild. The `vals.iter().rev()` + chained `Some(Box::new(...))` is the canonical 'build list from values' pattern.
@@ -4372,6 +5432,34 @@ def copyRandomList(head):
     return old_to_new[head]
 ```
 
+#### Java
+
+Seeding the `HashMap` with `map.put(null, null)` makes the second pass branchless — a null `next`/`random` lookup just returns null. Assumes the LeetCode `Node` type with `val`, `next`, `random`.
+
+```java
+import java.util.*;
+
+class Solution {
+    public Node copyRandomList(Node head) {
+        Map<Node, Node> map = new HashMap<>();
+        map.put(null, null);
+        Node cur = head;
+        while (cur != null) {
+            map.put(cur, new Node(cur.val));
+            cur = cur.next;
+        }
+        cur = head;
+        while (cur != null) {
+            Node copy = map.get(cur);
+            copy.next = map.get(cur.next);
+            copy.random = map.get(cur.random);
+            cur = cur.next;
+        }
+        return map.get(head);
+    }
+}
+```
+
 #### Rust
 
 Rust's borrow checker can't handle a graph with arbitrary forward/backward links via `Box`; production code would use `Rc<RefCell<Node>>` or raw pointers. This stub demonstrates the index-based representation that is the safe Rust alternative — real solution requires a different data structure.
@@ -4473,6 +5561,24 @@ def hasCycle(head):
         if slow == fast:
             return True
     return False
+```
+
+#### Java
+
+Both pointers start at `head`, so the `slow == fast` check comes after the move to avoid a false positive on iteration zero. Reference `==` compares identity, exactly what cycle detection needs.
+
+```java
+class Solution {
+    public boolean hasCycle(ListNode head) {
+        ListNode slow = head, fast = head;
+        while (fast != null && fast.next != null) {
+            slow = slow.next;
+            fast = fast.next.next;
+            if (slow == fast) return true;
+        }
+        return false;
+    }
+}
 ```
 
 #### Rust
@@ -4579,6 +5685,28 @@ def findDuplicate(nums):
         slow = nums[slow]
         fast = nums[fast]
     return slow
+```
+
+#### Java
+
+Two-phase Floyd over the array-as-implicit-linked-list; a `do/while` fits the "compare after move" first phase better than Python's `while True/break`. Pure `int` indexing, no extra space.
+
+```java
+class Solution {
+    public int findDuplicate(int[] nums) {
+        int slow = nums[0], fast = nums[0];
+        do {
+            slow = nums[slow];
+            fast = nums[nums[fast]];
+        } while (slow != fast);
+        slow = nums[0];
+        while (slow != fast) {
+            slow = nums[slow];
+            fast = nums[fast];
+        }
+        return slow;
+    }
+}
 ```
 
 #### Rust
@@ -4703,6 +5831,69 @@ class LRUCache:
             lru = self.left.next
             self.remove(lru)
             del self.cache[lru.key]
+```
+
+#### Java
+
+`LinkedHashMap` has a built-in `removeEldestEntry` hook and access-order mode, but writing the hashmap-plus-doubly-linked-list by hand shows the O(1) mechanics; two sentinel nodes drop every null-check. `getOrDefault`/explicit `containsKey` mirror the Python dict.
+
+```java
+import java.util.*;
+
+class LRUCache {
+    private static class Node {
+        int key, val;
+        Node prev, next;
+        Node(int key, int val) { this.key = key; this.val = val; }
+    }
+
+    private final int cap;
+    private final Map<Integer, Node> cache = new HashMap<>();
+    private final Node left = new Node(0, 0);   // LRU sentinel
+    private final Node right = new Node(0, 0);  // MRU sentinel
+
+    public LRUCache(int capacity) {
+        cap = capacity;
+        left.next = right;
+        right.prev = left;
+    }
+
+    private void remove(Node node) {
+        node.prev.next = node.next;
+        node.next.prev = node.prev;
+    }
+
+    private void insert(Node node) {
+        node.prev = right.prev;
+        node.next = right;
+        right.prev.next = node;
+        right.prev = node;
+    }
+
+    public int get(int key) {
+        if (cache.containsKey(key)) {
+            Node node = cache.get(key);
+            remove(node);
+            insert(node);
+            return node.val;
+        }
+        return -1;
+    }
+
+    public void put(int key, int value) {
+        if (cache.containsKey(key)) {
+            remove(cache.get(key));
+        }
+        Node node = new Node(key, value);
+        cache.put(key, node);
+        insert(node);
+        if (cache.size() > cap) {
+            Node lru = left.next;
+            remove(lru);
+            cache.remove(lru.key);
+        }
+    }
+}
 ```
 
 #### Rust
@@ -4863,6 +6054,33 @@ def mergeKLists(lists):
     return dummy.next
 ```
 
+#### Java
+
+`PriorityQueue` is a min-heap by default; give it a `Comparator.comparingInt(n -> n.val)` so it orders by node value — no tie-breaker index needed since the comparator never falls through to comparing `ListNode` objects.
+
+```java
+import java.util.*;
+
+class Solution {
+    public ListNode mergeKLists(ListNode[] lists) {
+        PriorityQueue<ListNode> heap =
+            new PriorityQueue<>(Comparator.comparingInt(n -> n.val));
+        for (ListNode node : lists) {
+            if (node != null) heap.offer(node);
+        }
+        ListNode dummy = new ListNode(0);
+        ListNode curr = dummy;
+        while (!heap.isEmpty()) {
+            ListNode node = heap.poll();
+            curr.next = node;
+            curr = curr.next;
+            if (node.next != null) heap.offer(node.next);
+        }
+        return dummy.next;
+    }
+}
+```
+
 #### Rust
 
 `BinaryHeap` is a max-heap by default; production code would wrap entries in `Reverse(...)` to invert. Owned `Box` linked lists make per-list-head heap entries painful, so this implementation flattens to a sorted vec and rebuilds — O(n log n) but trivial to write.
@@ -5006,6 +6224,43 @@ def reverseKGroup(head, k):
     return dummy.next
 ```
 
+#### Java
+
+Private `getKth` walks `k` steps and returns `null` on a short group — the loop-termination signal. The four-pointer dance (`groupPrev`, `kth`, `groupNext`, `tmp`) is identical to the C++/Go form; seed `prev = groupNext` so the reversal stops at the boundary.
+
+```java
+class Solution {
+    public ListNode reverseKGroup(ListNode head, int k) {
+        ListNode dummy = new ListNode(0, head);
+        ListNode groupPrev = dummy;
+        while (true) {
+            ListNode kth = getKth(groupPrev, k);
+            if (kth == null) break;
+            ListNode groupNext = kth.next;
+            ListNode prev = groupNext, curr = groupPrev.next;
+            while (curr != groupNext) {
+                ListNode nxt = curr.next;
+                curr.next = prev;
+                prev = curr;
+                curr = nxt;
+            }
+            ListNode tmp = groupPrev.next;
+            groupPrev.next = kth;
+            groupPrev = tmp;
+        }
+        return dummy.next;
+    }
+
+    private ListNode getKth(ListNode curr, int k) {
+        while (curr != null && k > 0) {
+            curr = curr.next;
+            k--;
+        }
+        return curr;
+    }
+}
+```
+
 #### Rust
 
 Same `Box` ownership obstacle as the other linked-list problems. The values-to-vec, `chunks_mut(k).reverse()` chain is much shorter than a true in-place pointer reversal — sacrifices in-place for readability.
@@ -5138,6 +6393,23 @@ def invertTree(root):
     return root
 ```
 
+#### Java
+
+No parallel assignment in Java — grab the swapped subtrees into locals first, then recurse. Equivalent to the C++ `std::swap` then recurse; the base case returns `null`.
+
+```java
+class Solution {
+    public TreeNode invertTree(TreeNode root) {
+        if (root == null) return null;
+        TreeNode left = invertTree(root.right);
+        TreeNode right = invertTree(root.left);
+        root.left = left;
+        root.right = right;
+        return root;
+    }
+}
+```
+
 #### Rust
 
 `root.map(|mut node| { ... })` is the idiomatic 'do something to Option's inner value, returning a new Option'. `node.left.take()` is needed to move ownership out of `node` so it can be passed to the recursive call.
@@ -5224,6 +6496,19 @@ def maxDepth(root):
     return 1 + max(maxDepth(root.left), maxDepth(root.right))
 ```
 
+#### Java
+
+`Math.max` of the two recursive calls is the whole algorithm; the `null` base case returns 0 and makes the recursion self-terminating.
+
+```java
+class Solution {
+    public int maxDepth(TreeNode root) {
+        if (root == null) return 0;
+        return 1 + Math.max(maxDepth(root.left), maxDepth(root.right));
+    }
+}
+```
+
 #### Rust
 
 Pattern match on `Option` — `None => 0`, `Some(node) => 1 + ...`. `max_depth(node.left).max(max_depth(node.right))` uses the method form of `max` on `i32`.
@@ -5308,6 +6593,28 @@ def diameterOfBinaryTree(root):
         return 1 + max(l, r)
     dfs(root)
     return res[0]
+```
+
+#### Java
+
+Java has no `nonlocal`, so a one-element `int[] res` is the standard mutable-box for closure-shared state threaded through the recursive helper. `dfs` returns height while updating `res[0]` as a side effect.
+
+```java
+class Solution {
+    public int diameterOfBinaryTree(TreeNode root) {
+        int[] res = {0};
+        dfs(root, res);
+        return res[0];
+    }
+
+    private int dfs(TreeNode node, int[] res) {
+        if (node == null) return 0;
+        int l = dfs(node.left, res);
+        int r = dfs(node.right, res);
+        res[0] = Math.max(res[0], l + r);
+        return 1 + Math.max(l, r);
+    }
+}
 ```
 
 #### Rust
@@ -5422,6 +6729,26 @@ def isBalanced(root):
     return dfs(root) != -1
 ```
 
+#### Java
+
+The `-1` sentinel both signals "imbalanced" and short-circuits every ancestor call. `Math.abs(l - r) > 1` is the balance check; `dfs(root) != -1` collapses to the boolean answer.
+
+```java
+class Solution {
+    public boolean isBalanced(TreeNode root) {
+        return dfs(root) != -1;
+    }
+
+    private int dfs(TreeNode node) {
+        if (node == null) return 0;
+        int l = dfs(node.left);
+        int r = dfs(node.right);
+        if (l == -1 || r == -1 || Math.abs(l - r) > 1) return -1;
+        return 1 + Math.max(l, r);
+    }
+}
+```
+
 #### Rust
 
 Same `-1` sentinel as Python; `(l - r).abs()` is the method form. Inner `fn dfs` for the same recursion-can't-be-closure reason as problem 51.
@@ -5524,6 +6851,20 @@ def isSameTree(p, q):
     return isSameTree(p.left, q.left) and isSameTree(p.right, q.right)
 ```
 
+#### Java
+
+Three base-case lines cover every structural mismatch; the recursive `&&` short-circuits so the right subtree is skipped once the left fails. Reads identically to the C++/Go pointer form.
+
+```java
+class Solution {
+    public boolean isSameTree(TreeNode p, TreeNode q) {
+        if (p == null && q == null) return true;
+        if (p == null || q == null || p.val != q.val) return false;
+        return isSameTree(p.left, q.left) && isSameTree(p.right, q.right);
+    }
+}
+```
+
 #### Rust
 
 Tuple match `(p, q)` is the cleanest expression of the four cases — `(None, None)`, `(Some, Some)`, and `_` for the mixed case. No null checks needed.
@@ -5614,6 +6955,26 @@ def isSubtree(root, subRoot):
     if isSameTree(root, subRoot):
         return True
     return isSubtree(root.left, subRoot) or isSubtree(root.right, subRoot)
+```
+
+#### Java
+
+Reuse `isSameTree` as a private helper; the `||` recursion halts as soon as a match is found. Straightforward O(m * n) DFS — no KMP-on-serialization speedup.
+
+```java
+class Solution {
+    public boolean isSubtree(TreeNode root, TreeNode subRoot) {
+        if (root == null) return false;
+        if (isSameTree(root, subRoot)) return true;
+        return isSubtree(root.left, subRoot) || isSubtree(root.right, subRoot);
+    }
+
+    private boolean isSameTree(TreeNode p, TreeNode q) {
+        if (p == null && q == null) return true;
+        if (p == null || q == null || p.val != q.val) return false;
+        return isSameTree(p.left, q.left) && isSameTree(p.right, q.right);
+    }
+}
 ```
 
 #### Rust
@@ -5724,6 +7085,27 @@ def lowestCommonAncestor(root, p, q):
             return root
 ```
 
+#### Java
+
+Iterative pointer reassignment walks the BST with O(1) space — no recursion, no stack. The `else` branch (the split point) is the answer.
+
+```java
+class Solution {
+    public TreeNode lowestCommonAncestor(TreeNode root, TreeNode p, TreeNode q) {
+        while (root != null) {
+            if (p.val < root.val && q.val < root.val) {
+                root = root.left;
+            } else if (p.val > root.val && q.val > root.val) {
+                root = root.right;
+            } else {
+                return root;
+            }
+        }
+        return null;
+    }
+}
+```
+
 #### Rust
 
 Walks via `&Option<Box<TreeNode>>` references — no ownership moves. Returns the value `i32` rather than the node because re-extracting a `Box` from a reference would require cloning.
@@ -5827,6 +7209,35 @@ def levelOrder(root):
             if node.right: q.append(node.right)
         res.append(level)
     return res
+```
+
+#### Java
+
+`ArrayDeque` is the fast, non-synchronized deque — `offer`/`poll` are O(1), unlike a legacy `LinkedList`-as-queue. Snapshot `queue.size()` before the inner loop so children enqueued this pass land in the next level.
+
+```java
+import java.util.*;
+
+class Solution {
+    public List<List<Integer>> levelOrder(TreeNode root) {
+        List<List<Integer>> res = new ArrayList<>();
+        if (root == null) return res;
+        Deque<TreeNode> queue = new ArrayDeque<>();
+        queue.offer(root);
+        while (!queue.isEmpty()) {
+            int size = queue.size();
+            List<Integer> level = new ArrayList<>();
+            for (int i = 0; i < size; i++) {
+                TreeNode node = queue.poll();
+                level.add(node.val);
+                if (node.left != null) queue.offer(node.left);
+                if (node.right != null) queue.offer(node.right);
+            }
+            res.add(level);
+        }
+        return res;
+    }
+}
 ```
 
 #### Rust
@@ -5961,6 +7372,35 @@ def rightSideView(root):
     return res
 ```
 
+#### Java
+
+Java scopes the loop variable, so track the level's last value explicitly (or test `i == size - 1`); the rightmost node at each BFS level is the visible one. `ArrayDeque` gives O(1) `poll`/`offer`.
+
+```java
+import java.util.*;
+
+class Solution {
+    public List<Integer> rightSideView(TreeNode root) {
+        List<Integer> res = new ArrayList<>();
+        if (root == null) return res;
+        Deque<TreeNode> queue = new ArrayDeque<>();
+        queue.offer(root);
+        while (!queue.isEmpty()) {
+            int size = queue.size();
+            int last = 0;
+            for (int i = 0; i < size; i++) {
+                TreeNode node = queue.poll();
+                last = node.val;
+                if (node.left != null) queue.offer(node.left);
+                if (node.right != null) queue.offer(node.right);
+            }
+            res.add(last);
+        }
+        return res;
+    }
+}
+```
+
 #### Rust
 
 Track `last` explicitly inside the loop — Rust scopes the iterator variable, no leak. Initial `last = 0` is overwritten on the first iteration since each level has ≥1 node.
@@ -6084,6 +7524,25 @@ def goodNodes(root):
     return dfs(root, root.val)
 ```
 
+#### Java
+
+Thread `maxVal` down as a by-value parameter — no shared mutable state, since each path carries its own running max. The C-style ternary counts the current node.
+
+```java
+class Solution {
+    public int goodNodes(TreeNode root) {
+        return dfs(root, root.val);
+    }
+
+    private int dfs(TreeNode node, int maxVal) {
+        if (node == null) return 0;
+        int good = node.val >= maxVal ? 1 : 0;
+        int m = Math.max(maxVal, node.val);
+        return good + dfs(node.left, m) + dfs(node.right, m);
+    }
+}
+```
+
 #### Rust
 
 Inner `fn dfs` again for the recursion. `if-else` rather than ternary for the `good` count — Rust has no ternary but `if-else` is an expression so it fits inline.
@@ -6187,6 +7646,24 @@ def isValidBST(root):
             return False
         return valid(node.left, lo, node.val) and valid(node.right, node.val, hi)
     return valid(root, float('-inf'), float('inf'))
+```
+
+#### Java
+
+Java has no chained comparison, so test `node.val <= lo || node.val >= hi`. Use `long` bounds (`Long.MIN_VALUE`/`Long.MAX_VALUE`) so a node holding `Integer.MIN_VALUE`/`MAX_VALUE` can't false-fail at the boundary.
+
+```java
+class Solution {
+    public boolean isValidBST(TreeNode root) {
+        return valid(root, Long.MIN_VALUE, Long.MAX_VALUE);
+    }
+
+    private boolean valid(TreeNode node, long lo, long hi) {
+        if (node == null) return true;
+        if (node.val <= lo || node.val >= hi) return false;
+        return valid(node.left, lo, node.val) && valid(node.right, node.val, hi);
+    }
+}
 ```
 
 #### Rust
@@ -6295,6 +7772,31 @@ def kthSmallest(root, k):
         if k == 0:
             return curr.val
         curr = curr.right
+```
+
+#### Java
+
+`ArrayDeque` as an explicit stack (`push`/`pop`) beats the synchronized legacy `Stack`. Classic iterative inorder: drill left, pop, `--k`, and return the moment `k` hits zero — no need to visit the whole tree.
+
+```java
+import java.util.*;
+
+class Solution {
+    public int kthSmallest(TreeNode root, int k) {
+        Deque<TreeNode> stack = new ArrayDeque<>();
+        TreeNode curr = root;
+        while (!stack.isEmpty() || curr != null) {
+            while (curr != null) {
+                stack.push(curr);
+                curr = curr.left;
+            }
+            curr = stack.pop();
+            if (--k == 0) return curr.val;
+            curr = curr.right;
+        }
+        return -1;
+    }
+}
 ```
 
 #### Rust
@@ -6414,6 +7916,35 @@ def buildTree(preorder, inorder):
         root.right = build(mid + 1, r)
         return root
     return build(0, len(inorder) - 1)
+```
+
+#### Java
+
+An instance field `pre` gives the shared, self-advancing preorder cursor that Python fakes with a one-element list — cleaner than threading an `int[]{0}` through every call. `HashMap.get` autoboxes but keeps the inorder lookup O(1), the whole point of the precomputed index.
+
+```java
+import java.util.*;
+
+class Solution {
+    private int pre;
+    private Map<Integer, Integer> idx;
+
+    public TreeNode buildTree(int[] preorder, int[] inorder) {
+        idx = new HashMap<>();
+        for (int i = 0; i < inorder.length; i++) idx.put(inorder[i], i);
+        pre = 0;
+        return build(preorder, 0, inorder.length - 1);
+    }
+
+    private TreeNode build(int[] preorder, int l, int r) {
+        if (l > r) return null;
+        TreeNode root = new TreeNode(preorder[pre++]);
+        int mid = idx.get(root.val);
+        root.left = build(preorder, l, mid - 1);
+        root.right = build(preorder, mid + 1, r);
+        return root;
+    }
+}
 ```
 
 #### Rust
@@ -6559,6 +8090,30 @@ def maxPathSum(root):
     return res[0]
 ```
 
+#### Java
+
+A mutable field `res` replaces Python's `res[0]` boxing trick — Java closures can't capture-by-reference, so an instance field is the idiomatic way to let the recursion accumulate a global maximum. `Math.max(dfs(...), 0)` is the clamp that skips a subtree whose best gain would hurt the total.
+
+```java
+class Solution {
+    private int res;
+
+    public int maxPathSum(TreeNode root) {
+        res = root.val;
+        dfs(root);
+        return res;
+    }
+
+    private int dfs(TreeNode node) {
+        if (node == null) return 0;
+        int l = Math.max(dfs(node.left), 0);
+        int r = Math.max(dfs(node.right), 0);
+        res = Math.max(res, node.val + l + r);
+        return node.val + Math.max(l, r);
+    }
+}
+```
+
 #### Rust
 
 Pattern match with early-return `return 0` inside the `match` binds `n` for the rest of the function. `(*res).max(...)` to update through the mutable reference — the parens make precedence explicit.
@@ -6694,6 +8249,45 @@ def deserialize(data):
         node.right = dfs()
         return node
     return dfs()
+```
+
+#### Java
+
+`StringBuilder` accumulates the preorder tokens without the O(n^2) cost of `+` on immutable `String`. `String.split(",")` drops the trailing empty token by default, so the dangling comma from the last append needs no cleanup; a `Codec` field carries the deserialization cursor.
+
+```java
+import java.util.*;
+
+public class Codec {
+    public String serialize(TreeNode root) {
+        StringBuilder sb = new StringBuilder();
+        dfs(root, sb);
+        return sb.toString();
+    }
+
+    private void dfs(TreeNode node, StringBuilder sb) {
+        if (node == null) { sb.append("N,"); return; }
+        sb.append(node.val).append(',');
+        dfs(node.left, sb);
+        dfs(node.right, sb);
+    }
+
+    private int i;
+
+    public TreeNode deserialize(String data) {
+        String[] vals = data.split(",");
+        i = 0;
+        return build(vals);
+    }
+
+    private TreeNode build(String[] vals) {
+        if (vals[i].equals("N")) { i++; return null; }
+        TreeNode node = new TreeNode(Integer.parseInt(vals[i++]));
+        node.left = build(vals);
+        node.right = build(vals);
+        return node;
+    }
+}
 ```
 
 #### Rust
@@ -6876,6 +8470,46 @@ class Trie:
                 return False
             node = node.children[c]
         return True
+```
+
+#### Java
+
+`computeIfAbsent(c, k -> new Trie())` folds the contains-check and child-creation into one call — the direct analogue of Python's `setdefault`. Each `Trie` is its own node (no separate `TrieNode`), and `search`/`startsWith` share the walk, differing only in the final `end` check.
+
+```java
+import java.util.*;
+
+class Trie {
+    private Map<Character, Trie> children = new HashMap<>();
+    private boolean end = false;
+
+    public Trie() {}
+
+    public void insert(String word) {
+        Trie node = this;
+        for (char c : word.toCharArray())
+            node = node.children.computeIfAbsent(c, k -> new Trie());
+        node.end = true;
+    }
+
+    public boolean search(String word) {
+        Trie node = this;
+        for (char c : word.toCharArray()) {
+            node = node.children.get(c);
+            if (node == null) return false;
+        }
+        return node.end;
+    }
+
+    public boolean startsWith(String prefix) {
+        Trie node = this;
+        for (char c : prefix.toCharArray()) {
+            node = node.children.get(c);
+            if (node == null) return false;
+        }
+        return true;
+    }
+}
 ```
 
 #### Rust
@@ -7066,6 +8700,44 @@ class WordDictionary:
         return node.end
 ```
 
+#### Java
+
+The wildcard `'.'` fans out over `children.values()` — the collection view iterates every child without exposing the backing map. Index-passing `dfs(word, i)` via `charAt` avoids allocating suffix substrings the way Python's `word[i+1:]` slice does.
+
+```java
+import java.util.*;
+
+class WordDictionary {
+    private Map<Character, WordDictionary> children = new HashMap<>();
+    private boolean end = false;
+
+    public WordDictionary() {}
+
+    public void addWord(String word) {
+        WordDictionary node = this;
+        for (char c : word.toCharArray())
+            node = node.children.computeIfAbsent(c, k -> new WordDictionary());
+        node.end = true;
+    }
+
+    public boolean search(String word) {
+        return dfs(word, 0);
+    }
+
+    private boolean dfs(String word, int i) {
+        if (i == word.length()) return end;
+        char c = word.charAt(i);
+        if (c == '.') {
+            for (WordDictionary child : children.values())
+                if (child.dfs(word, i + 1)) return true;
+            return false;
+        }
+        WordDictionary child = children.get(c);
+        return child != null && child.dfs(word, i + 1);
+    }
+}
+```
+
 #### Rust
 
 Pre-collect `word.chars()` to `Vec<char>` once, then pass `&[char]` slices — zero further allocations during recursion. `map_or(false, |child| ...)` is the Option-handling idiom for 'do something only if Some'.
@@ -7243,6 +8915,57 @@ def findWords(board, words):
         for c in range(cols):
             dfs(root, r, c)
     return list(res)
+```
+
+#### Java
+
+A fixed `TrieNode[26]` array beats a `HashMap` for lowercase inputs — index by `c - 'a'`, no hashing per step. Setting `next.word = null` after a hit marks the word consumed (Python's `del node["#"]` trick), so a `List` — not a `Set` — suffices to collect results without duplicates.
+
+```java
+import java.util.*;
+
+class Solution {
+    private static class TrieNode {
+        TrieNode[] children = new TrieNode[26];
+        String word = null;
+    }
+
+    public List<String> findWords(char[][] board, String[] words) {
+        TrieNode root = new TrieNode();
+        for (String w : words) {
+            TrieNode node = root;
+            for (char c : w.toCharArray()) {
+                int i = c - 'a';
+                if (node.children[i] == null) node.children[i] = new TrieNode();
+                node = node.children[i];
+            }
+            node.word = w;
+        }
+        List<String> res = new ArrayList<>();
+        for (int r = 0; r < board.length; r++)
+            for (int c = 0; c < board[0].length; c++)
+                dfs(board, r, c, root, res);
+        return res;
+    }
+
+    private void dfs(char[][] board, int r, int c, TrieNode node, List<String> res) {
+        if (r < 0 || c < 0 || r >= board.length || c >= board[0].length) return;
+        char ch = board[r][c];
+        if (ch == '#') return;
+        TrieNode next = node.children[ch - 'a'];
+        if (next == null) return;
+        if (next.word != null) {
+            res.add(next.word);
+            next.word = null;
+        }
+        board[r][c] = '#';
+        dfs(board, r + 1, c, next, res);
+        dfs(board, r - 1, c, next, res);
+        dfs(board, r, c + 1, next, res);
+        dfs(board, r, c - 1, next, res);
+        board[r][c] = ch;
+    }
+}
 ```
 
 #### Rust
@@ -7450,6 +9173,34 @@ class KthLargest:
         return self.heap[0]
 ```
 
+#### Java
+
+`PriorityQueue` is a min-heap by default, so its head is exactly the k-th largest — no negation gymnastics. Push then `poll` whenever size exceeds `k` to keep the heap trimmed to the top-k window.
+
+```java
+import java.util.*;
+
+class KthLargest {
+    private final int k;
+    private final PriorityQueue<Integer> heap;
+
+    public KthLargest(int k, int[] nums) {
+        this.k = k;
+        heap = new PriorityQueue<>();
+        for (int n : nums) {
+            heap.offer(n);
+            if (heap.size() > k) heap.poll();
+        }
+    }
+
+    public int add(int val) {
+        heap.offer(val);
+        if (heap.size() > k) heap.poll();
+        return heap.peek();
+    }
+}
+```
+
 #### Rust
 
 `BinaryHeap` is a max-heap; `Reverse(n)` inverts the ordering to make it a min-heap. `.peek().unwrap().0` extracts the inner `i32` from the `Reverse` wrapper.
@@ -7576,6 +9327,27 @@ def lastStoneWeight(stones):
     return -heap[0] if heap else 0
 ```
 
+#### Java
+
+Pass `Comparator.reverseOrder()` to turn the default min-heap into a max-heap, so the two heaviest stones are just two `poll`s — no value negation like Python needs. `isEmpty() ? 0 : peek()` handles the all-cancel case.
+
+```java
+import java.util.*;
+
+class Solution {
+    public int lastStoneWeight(int[] stones) {
+        PriorityQueue<Integer> heap = new PriorityQueue<>(Comparator.reverseOrder());
+        for (int s : stones) heap.offer(s);
+        while (heap.size() > 1) {
+            int a = heap.poll();
+            int b = heap.poll();
+            if (a != b) heap.offer(a - b);
+        }
+        return heap.isEmpty() ? 0 : heap.peek();
+    }
+}
+```
+
 #### Rust
 
 `BinaryHeap` is max-heap by default — no `Reverse` wrapper needed. `unwrap_or(0)` handles the empty-stones edge case cleanly without an `if`.
@@ -7671,6 +9443,26 @@ def kClosest(points, k):
         if len(heap) > k:
             heapq.heappop(heap)
     return [[x, y] for _, x, y in heap]
+```
+
+#### Java
+
+A max-heap on squared distance (via a `Comparator` that subtracts b's distance from a's) keeps the k nearest by evicting the farthest each time size passes `k`. Storing the `int[]` point itself means no separate coordinate bookkeeping; `toArray(new int[0][])` rebuilds the result shape.
+
+```java
+import java.util.*;
+
+class Solution {
+    public int[][] kClosest(int[][] points, int k) {
+        PriorityQueue<int[]> heap = new PriorityQueue<>(
+            (a, b) -> (b[0] * b[0] + b[1] * b[1]) - (a[0] * a[0] + a[1] * a[1]));
+        for (int[] p : points) {
+            heap.offer(p);
+            if (heap.size() > k) heap.poll();
+        }
+        return heap.toArray(new int[0][]);
+    }
+}
 ```
 
 #### Rust
@@ -7776,6 +9568,25 @@ def findKthLargest(nums, k):
     return heap[0]
 ```
 
+#### Java
+
+Same size-k min-heap as the streaming variant: the head is always the k-th largest seen so far. `PriorityQueue` gives min-heap for free, so the push-then-prune loop reads without any comparator or negation.
+
+```java
+import java.util.*;
+
+class Solution {
+    public int findKthLargest(int[] nums, int k) {
+        PriorityQueue<Integer> heap = new PriorityQueue<>();
+        for (int n : nums) {
+            heap.offer(n);
+            if (heap.size() > k) heap.poll();
+        }
+        return heap.peek();
+    }
+}
+```
+
 #### Rust
 
 `Reverse(n)` wraps for min-heap behavior. The heap-of-size-k pattern: push then conditionally pop — keeps the heap pruned at every step.
@@ -7878,6 +9689,36 @@ def leastInterval(tasks, n):
         if queue and queue[0][1] == time:
             heapq.heappush(heap, queue.popleft()[0])
     return time
+```
+
+#### Java
+
+`Comparator.reverseOrder()` gives the max-heap that always pops the most frequent task; an `ArrayDeque` is the cooldown FIFO (`offer`/`poll`), preferred over the legacy `Queue` impls. Counts live in a fixed `int[26]` since task labels are uppercase letters.
+
+```java
+import java.util.*;
+
+class Solution {
+    public int leastInterval(char[] tasks, int n) {
+        int[] count = new int[26];
+        for (char t : tasks) count[t - 'A']++;
+        PriorityQueue<Integer> heap = new PriorityQueue<>(Comparator.reverseOrder());
+        for (int c : count) if (c > 0) heap.offer(c);
+        Queue<int[]> queue = new ArrayDeque<>(); // {remaining, availableAt}
+        int time = 0;
+        while (!heap.isEmpty() || !queue.isEmpty()) {
+            time++;
+            if (!heap.isEmpty()) {
+                int cnt = heap.poll() - 1;
+                if (cnt > 0) queue.offer(new int[]{cnt, time + n});
+            }
+            if (!queue.isEmpty() && queue.peek()[1] == time) {
+                heap.offer(queue.poll()[0]);
+            }
+        }
+        return time;
+    }
+}
 ```
 
 #### Rust
@@ -8029,6 +9870,59 @@ class Twitter:
 
     def unfollow(self, followerId, followeeId):
         self.following[followerId].discard(followeeId)
+```
+
+#### Java
+
+A monotonic `time++` counter plus a max-heap comparator (`b[0] - a[0]`) surfaces the newest tweet first without negating anything. Each heap entry is an `int[]{time, tweetId, userId, nextIndex}`, so consuming one tweet re-seeds the next from the same user — a lazy k-way merge capped at 10.
+
+```java
+import java.util.*;
+
+class Twitter {
+    private int time = 0;
+    private final Map<Integer, List<int[]>> tweets = new HashMap<>();      // {time, tweetId}
+    private final Map<Integer, Set<Integer>> following = new HashMap<>();
+
+    public Twitter() {}
+
+    public void postTweet(int userId, int tweetId) {
+        tweets.computeIfAbsent(userId, k -> new ArrayList<>()).add(new int[]{time++, tweetId});
+    }
+
+    public List<Integer> getNewsFeed(int userId) {
+        // {time, tweetId, userId, nextIndex}
+        PriorityQueue<int[]> heap = new PriorityQueue<>((a, b) -> b[0] - a[0]);
+        Set<Integer> users = new HashSet<>(following.getOrDefault(userId, Set.of()));
+        users.add(userId);
+        for (int u : users) {
+            List<int[]> tw = tweets.get(u);
+            if (tw != null && !tw.isEmpty()) {
+                int idx = tw.size() - 1;
+                heap.offer(new int[]{tw.get(idx)[0], tw.get(idx)[1], u, idx - 1});
+            }
+        }
+        List<Integer> res = new ArrayList<>();
+        while (!heap.isEmpty() && res.size() < 10) {
+            int[] e = heap.poll();
+            res.add(e[1]);
+            if (e[3] >= 0) {
+                int[] t = tweets.get(e[2]).get(e[3]);
+                heap.offer(new int[]{t[0], t[1], e[2], e[3] - 1});
+            }
+        }
+        return res;
+    }
+
+    public void follow(int followerId, int followeeId) {
+        following.computeIfAbsent(followerId, k -> new HashSet<>()).add(followeeId);
+    }
+
+    public void unfollow(int followerId, int followeeId) {
+        Set<Integer> s = following.get(followerId);
+        if (s != null) s.remove(followeeId);
+    }
+}
 ```
 
 #### Rust
@@ -8239,6 +10133,41 @@ class MedianFinder:
         return (-self.small[0] + self.large[0]) / 2.0
 ```
 
+#### Java
+
+Two `PriorityQueue`s: `small` with `Comparator.reverseOrder()` for the lower-half max-heap, `large` as the default min-heap for the upper half. The comparator lives in the constructor, so the rebalance body reads plainly — no `Reverse` wrapper or value negation.
+
+```java
+import java.util.*;
+
+class MedianFinder {
+    private final PriorityQueue<Integer> small; // max-heap (lower half)
+    private final PriorityQueue<Integer> large; // min-heap (upper half)
+
+    public MedianFinder() {
+        small = new PriorityQueue<>(Comparator.reverseOrder());
+        large = new PriorityQueue<>();
+    }
+
+    public void addNum(int num) {
+        small.offer(num);
+        if (!small.isEmpty() && !large.isEmpty() && small.peek() > large.peek()) {
+            large.offer(small.poll());
+        }
+        if (small.size() > large.size() + 1) {
+            large.offer(small.poll());
+        } else if (large.size() > small.size()) {
+            small.offer(large.poll());
+        }
+    }
+
+    public double findMedian() {
+        if (small.size() > large.size()) return small.peek();
+        return (small.peek() + large.peek()) / 2.0;
+    }
+}
+```
+
 #### Rust
 
 `BinaryHeap<i32>` is max-heap (for `small`); `BinaryHeap<Reverse<i32>>` is min-heap (for `large`). Destructuring `let Reverse(v) = ...` extracts the inner value.
@@ -8396,6 +10325,33 @@ def subsets(nums):
     return res
 ```
 
+#### Java
+
+`new ArrayList<>(subset)` snapshots the mutated list at each leaf — the required copy, since one `ArrayList` is threaded through the whole recursion. `subset.remove(subset.size() - 1)` is the pop that undoes the include branch before the exclude branch runs.
+
+```java
+import java.util.*;
+
+class Solution {
+    public List<List<Integer>> subsets(int[] nums) {
+        List<List<Integer>> res = new ArrayList<>();
+        bt(nums, 0, new ArrayList<>(), res);
+        return res;
+    }
+
+    private void bt(int[] nums, int i, List<Integer> subset, List<List<Integer>> res) {
+        if (i == nums.length) {
+            res.add(new ArrayList<>(subset));
+            return;
+        }
+        subset.add(nums[i]);
+        bt(nums, i + 1, subset, res);
+        subset.remove(subset.size() - 1);
+        bt(nums, i + 1, subset, res);
+    }
+}
+```
+
 #### Rust
 
 Same include/exclude pattern; `current.clone()` at the leaf. Inner `fn bt` with explicit threading of `nums`, `current`, and `res`.
@@ -8491,6 +10447,35 @@ def combinationSum(candidates, target):
         bt(i + 1, curr, total)
     bt(0, [], 0)
     return res
+```
+
+#### Java
+
+Recurse with the same `i` for the reuse branch, `i + 1` to advance — the index never moving backward is what prevents duplicate multisets. A single shared `ArrayList` with add/remove around the recursive calls keeps allocation to just the `new ArrayList<>(curr)` copy at each hit.
+
+```java
+import java.util.*;
+
+class Solution {
+    public List<List<Integer>> combinationSum(int[] candidates, int target) {
+        List<List<Integer>> res = new ArrayList<>();
+        bt(candidates, 0, new ArrayList<>(), 0, target, res);
+        return res;
+    }
+
+    private void bt(int[] candidates, int i, List<Integer> curr, int total, int target,
+                    List<List<Integer>> res) {
+        if (total == target) {
+            res.add(new ArrayList<>(curr));
+            return;
+        }
+        if (i >= candidates.length || total > target) return;
+        curr.add(candidates[i]);
+        bt(candidates, i, curr, total + candidates[i], target, res);
+        curr.remove(curr.size() - 1);
+        bt(candidates, i + 1, curr, total, target, res);
+    }
+}
 ```
 
 #### Rust
@@ -8594,6 +10579,40 @@ def permute(nums):
     return res
 ```
 
+#### Java
+
+The in-place swap needs a mutable `int[]`; `res.add(...)` at the leaf must copy via a stream or `Arrays.copyOf`-style boxing since `List<List<Integer>>` can't hold a raw `int[]`. Boxing each element into a fresh `ArrayList<Integer>` snapshot is the price for the collection return type.
+
+```java
+import java.util.*;
+
+class Solution {
+    public List<List<Integer>> permute(int[] nums) {
+        List<List<Integer>> res = new ArrayList<>();
+        bt(nums, 0, res);
+        return res;
+    }
+
+    private void bt(int[] nums, int start, List<List<Integer>> res) {
+        if (start == nums.length) {
+            List<Integer> perm = new ArrayList<>(nums.length);
+            for (int n : nums) perm.add(n);
+            res.add(perm);
+            return;
+        }
+        for (int i = start; i < nums.length; i++) {
+            swap(nums, start, i);
+            bt(nums, start + 1, res);
+            swap(nums, start, i);
+        }
+    }
+
+    private void swap(int[] a, int i, int j) {
+        int t = a[i]; a[i] = a[j]; a[j] = t;
+    }
+}
+```
+
 #### Rust
 
 Swap-based approach: `nums.swap(start, i)` then recurse with `start + 1`, then swap back. O(1) per choice, no visited set, no allocation — strictly faster than Python's `in` check.
@@ -8694,6 +10713,33 @@ def subsetsWithDup(nums):
             subset.pop()
     bt(0, [])
     return res
+```
+
+#### Java
+
+`Arrays.sort` on the primitive `int[]` groups duplicates for the `j > i && nums[j] == nums[j-1]` skip. Record on entry by copying `current` into a fresh `ArrayList` before mutating.
+
+```java
+import java.util.*;
+
+class Solution {
+    public List<List<Integer>> subsetsWithDup(int[] nums) {
+        Arrays.sort(nums);
+        List<List<Integer>> res = new ArrayList<>();
+        bt(nums, 0, new ArrayList<>(), res);
+        return res;
+    }
+
+    private void bt(int[] nums, int i, List<Integer> current, List<List<Integer>> res) {
+        res.add(new ArrayList<>(current));
+        for (int j = i; j < nums.length; j++) {
+            if (j > i && nums[j] == nums[j - 1]) continue;
+            current.add(nums[j]);
+            bt(nums, j + 1, current, res);
+            current.remove(current.size() - 1);
+        }
+    }
+}
 ```
 
 #### Rust
@@ -8807,6 +10853,38 @@ def combinationSum2(candidates, target):
     return res
 ```
 
+#### Java
+
+`Arrays.sort` enables both the duplicate `continue` and the early `break` once `total + candidates[j] > target`. `current.remove(current.size() - 1)` is the pop; `ArrayList` gives O(1) removal from the tail.
+
+```java
+import java.util.*;
+
+class Solution {
+    public List<List<Integer>> combinationSum2(int[] candidates, int target) {
+        Arrays.sort(candidates);
+        List<List<Integer>> res = new ArrayList<>();
+        bt(candidates, 0, 0, target, new ArrayList<>(), res);
+        return res;
+    }
+
+    private void bt(int[] candidates, int i, int total, int target,
+                    List<Integer> current, List<List<Integer>> res) {
+        if (total == target) {
+            res.add(new ArrayList<>(current));
+            return;
+        }
+        for (int j = i; j < candidates.length; j++) {
+            if (j > i && candidates[j] == candidates[j - 1]) continue;
+            if (total + candidates[j] > target) break;
+            current.add(candidates[j]);
+            bt(candidates, j + 1, total + candidates[j], target, current, res);
+            current.remove(current.size() - 1);
+        }
+    }
+}
+```
+
 #### Rust
 
 Same two-prune pattern; `break` works on Rust's `for` loop just like Python. The `sort()` is on the owned `Vec<i32>` so it's mutating in place.
@@ -8915,6 +10993,36 @@ def exist(board, word):
         board[r][c] = tmp
         return found
     return any(dfs(r, c, 0) for r in range(rows) for c in range(cols))
+```
+
+#### Java
+
+`word.charAt(i)` compares against the `char[][]` board in place; temporarily overwriting with `'#'` doubles as the visited mark and restores on backtrack. The four-direction `||` chain short-circuits as soon as one path succeeds.
+
+```java
+class Solution {
+    public boolean exist(char[][] board, String word) {
+        int rows = board.length, cols = board[0].length;
+        for (int r = 0; r < rows; r++)
+            for (int c = 0; c < cols; c++)
+                if (dfs(board, word, r, c, 0)) return true;
+        return false;
+    }
+
+    private boolean dfs(char[][] board, String word, int r, int c, int i) {
+        if (i == word.length()) return true;
+        if (r < 0 || c < 0 || r >= board.length || c >= board[0].length
+                || board[r][c] != word.charAt(i)) return false;
+        char tmp = board[r][c];
+        board[r][c] = '#';
+        boolean found = dfs(board, word, r + 1, c, i + 1)
+                || dfs(board, word, r - 1, c, i + 1)
+                || dfs(board, word, r, c + 1, i + 1)
+                || dfs(board, word, r, c - 1, i + 1);
+        board[r][c] = tmp;
+        return found;
+    }
+}
 ```
 
 #### Rust
@@ -9037,6 +11145,43 @@ def partition(s):
                 part.pop()
     bt(0, [])
     return res
+```
+
+#### Java
+
+`s.substring(i, j + 1)` gives the piece (end index exclusive, so `j + 1`). The inline two-pointer `isPalindrome` reads `s.charAt` directly — no allocation until a palindrome is actually recorded.
+
+```java
+import java.util.*;
+
+class Solution {
+    public List<List<String>> partition(String s) {
+        List<List<String>> res = new ArrayList<>();
+        bt(s, 0, new ArrayList<>(), res);
+        return res;
+    }
+
+    private void bt(String s, int i, List<String> current, List<List<String>> res) {
+        if (i == s.length()) {
+            res.add(new ArrayList<>(current));
+            return;
+        }
+        for (int j = i; j < s.length(); j++) {
+            if (isPalindrome(s, i, j)) {
+                current.add(s.substring(i, j + 1));
+                bt(s, j + 1, current, res);
+                current.remove(current.size() - 1);
+            }
+        }
+    }
+
+    private boolean isPalindrome(String s, int l, int r) {
+        while (l < r) {
+            if (s.charAt(l++) != s.charAt(r--)) return false;
+        }
+        return true;
+    }
+}
 ```
 
 #### Rust
@@ -9166,6 +11311,37 @@ def letterCombinations(digits):
     return res
 ```
 
+#### Java
+
+A `String[]` indexed by digit value (slots 0/1 empty) beats a `HashMap` lookup. A shared `StringBuilder` accumulates with `append`/`deleteCharAt` and no per-call allocation; `sb.toString()` snapshots at the leaf. The `isEmpty` guard returns `[]`, not `[""]`.
+
+```java
+import java.util.*;
+
+class Solution {
+    public List<String> letterCombinations(String digits) {
+        List<String> res = new ArrayList<>();
+        if (digits.isEmpty()) return res;
+        String[] phone = {"", "", "abc", "def", "ghi", "jkl",
+                          "mno", "pqrs", "tuv", "wxyz"};
+        bt(digits, 0, new StringBuilder(), phone, res);
+        return res;
+    }
+
+    private void bt(String digits, int i, StringBuilder curr, String[] phone, List<String> res) {
+        if (i == digits.length()) {
+            res.add(curr.toString());
+            return;
+        }
+        for (char c : phone[digits.charAt(i) - '0'].toCharArray()) {
+            curr.append(c);
+            bt(digits, i + 1, curr, phone, res);
+            curr.deleteCharAt(curr.length() - 1);
+        }
+    }
+}
+```
+
 #### Rust
 
 Array of `&str` indexed by digit value (slots 0 and 1 are empty) — faster than a HashMap lookup. `current: &mut Vec<char>` accumulates without per-step allocation; `iter().collect()` at the leaf builds the String.
@@ -9280,6 +11456,46 @@ def solveNQueens(n):
             cols.remove(c); pos_diag.remove(r + c); neg_diag.remove(r - c)
     bt(0)
     return res
+```
+
+#### Java
+
+Boolean arrays beat `HashSet` for the O(1) conflict checks; the `r - c + n` offset shifts the negative diagonal into a non-negative index. Each solved board is snapshotted with `new String(row)` per row.
+
+```java
+import java.util.*;
+
+class Solution {
+    public List<List<String>> solveNQueens(int n) {
+        List<List<String>> res = new ArrayList<>();
+        char[][] board = new char[n][n];
+        for (char[] row : board) Arrays.fill(row, '.');
+        boolean[] cols = new boolean[n];
+        boolean[] pos = new boolean[2 * n]; // r + c
+        boolean[] neg = new boolean[2 * n]; // r - c + n
+        bt(0, n, board, cols, pos, neg, res);
+        return res;
+    }
+
+    private void bt(int r, int n, char[][] board,
+                    boolean[] cols, boolean[] pos, boolean[] neg,
+                    List<List<String>> res) {
+        if (r == n) {
+            List<String> snap = new ArrayList<>(n);
+            for (char[] row : board) snap.add(new String(row));
+            res.add(snap);
+            return;
+        }
+        for (int c = 0; c < n; c++) {
+            if (cols[c] || pos[r + c] || neg[r - c + n]) continue;
+            cols[c] = pos[r + c] = neg[r - c + n] = true;
+            board[r][c] = 'Q';
+            bt(r + 1, n, board, cols, pos, neg, res);
+            board[r][c] = '.';
+            cols[c] = pos[r + c] = neg[r - c + n] = false;
+        }
+    }
+}
 ```
 
 #### Rust
@@ -9414,6 +11630,37 @@ def numIslands(grid):
     return count
 ```
 
+#### Java
+
+In-place `grid[r][c] = '0'` marks visited without a separate structure. The four explicit recursive calls are terser than a direction loop for 4-way DFS.
+
+```java
+class Solution {
+    public int numIslands(char[][] grid) {
+        int rows = grid.length, cols = grid[0].length, count = 0;
+        for (int r = 0; r < rows; r++) {
+            for (int c = 0; c < cols; c++) {
+                if (grid[r][c] == '1') {
+                    dfs(grid, r, c);
+                    count++;
+                }
+            }
+        }
+        return count;
+    }
+
+    private void dfs(char[][] grid, int r, int c) {
+        if (r < 0 || c < 0 || r >= grid.length || c >= grid[0].length
+                || grid[r][c] != '1') return;
+        grid[r][c] = '0';
+        dfs(grid, r + 1, c);
+        dfs(grid, r - 1, c);
+        dfs(grid, r, c + 1);
+        dfs(grid, r, c - 1);
+    }
+}
+```
+
 #### Rust
 
 `Vec<Vec<char>>` mutated in place; `&mut` threaded through the recursion. `i32` for r,c lets the bounds check happen before the `as usize` cast.
@@ -9518,6 +11765,33 @@ def cloneGraph(node):
             copy.neighbors.append(dfs(nb))
         return copy
     return dfs(node)
+```
+
+#### Java
+
+Assumes the standard LeetCode `Node` (an `int val` and `List<Node> neighbors`). A `HashMap<Node, Node>` keyed on object identity is both the visited set and the old-to-new lookup; insert the clone *before* recursing so cycles resolve to the in-progress copy.
+
+```java
+import java.util.*;
+
+class Solution {
+    public Node cloneGraph(Node node) {
+        if (node == null) return null;
+        Map<Node, Node> oldToNew = new HashMap<>();
+        return dfs(node, oldToNew);
+    }
+
+    private Node dfs(Node n, Map<Node, Node> oldToNew) {
+        Node existing = oldToNew.get(n);
+        if (existing != null) return existing;
+        Node copy = new Node(n.val);
+        oldToNew.put(n, copy);
+        for (Node nb : n.neighbors) {
+            copy.neighbors.add(dfs(nb, oldToNew));
+        }
+        return copy;
+    }
+}
 ```
 
 #### Rust
@@ -9637,6 +11911,30 @@ def maxAreaOfIsland(grid):
     return max(dfs(r, c) for r in range(rows) for c in range(cols))
 ```
 
+#### Java
+
+The DFS returns the component size — `1 + dfs(...) + dfs(...) + ...` aggregated inline, with out-of-bounds/water returning 0 so the sum collapses naturally. `Math.max` over every start cell tracks the running best.
+
+```java
+class Solution {
+    public int maxAreaOfIsland(int[][] grid) {
+        int rows = grid.length, cols = grid[0].length, best = 0;
+        for (int r = 0; r < rows; r++)
+            for (int c = 0; c < cols; c++)
+                best = Math.max(best, dfs(grid, r, c));
+        return best;
+    }
+
+    private int dfs(int[][] grid, int r, int c) {
+        if (r < 0 || c < 0 || r >= grid.length || c >= grid[0].length
+                || grid[r][c] == 0) return 0;
+        grid[r][c] = 0;
+        return 1 + dfs(grid, r + 1, c) + dfs(grid, r - 1, c)
+                 + dfs(grid, r, c + 1) + dfs(grid, r, c - 1);
+    }
+}
+```
+
 #### Rust
 
 Same `1 + dfs() + dfs() + dfs() + dfs()` aggregation, but explicit because Rust has no `sum` over inline iterators here without a slice. `i32` indices for bounds-safe arithmetic.
@@ -9745,6 +12043,57 @@ def pacificAtlantic(heights):
     pacific  = bfs([(0, c) for c in range(cols)] + [(r, 0) for r in range(rows)])
     atlantic = bfs([(rows-1, c) for c in range(cols)] + [(r, cols-1) for r in range(rows)])
     return [[r, c] for r, c in pacific & atlantic]
+```
+
+#### Java
+
+Two `boolean[][]` visited grids replace the Python sets — index lookup instead of hashing. `ArrayDeque<int[]>` is the BFS queue (never the legacy `Stack`/`LinkedList`); the intersection sweep collects cells reachable from both oceans.
+
+```java
+import java.util.*;
+
+class Solution {
+    private static final int[][] DIRS = {{0, 1}, {0, -1}, {1, 0}, {-1, 0}};
+
+    public List<List<Integer>> pacificAtlantic(int[][] heights) {
+        int rows = heights.length, cols = heights[0].length;
+        boolean[][] pac = new boolean[rows][cols];
+        boolean[][] atl = new boolean[rows][cols];
+        Deque<int[]> pq = new ArrayDeque<>();
+        Deque<int[]> aq = new ArrayDeque<>();
+        for (int c = 0; c < cols; c++) {
+            pq.add(new int[]{0, c}); pac[0][c] = true;
+            aq.add(new int[]{rows - 1, c}); atl[rows - 1][c] = true;
+        }
+        for (int r = 0; r < rows; r++) {
+            pq.add(new int[]{r, 0}); pac[r][0] = true;
+            aq.add(new int[]{r, cols - 1}); atl[r][cols - 1] = true;
+        }
+        bfs(heights, pq, pac);
+        bfs(heights, aq, atl);
+        List<List<Integer>> res = new ArrayList<>();
+        for (int r = 0; r < rows; r++)
+            for (int c = 0; c < cols; c++)
+                if (pac[r][c] && atl[r][c]) res.add(List.of(r, c));
+        return res;
+    }
+
+    private void bfs(int[][] heights, Deque<int[]> q, boolean[][] vis) {
+        int rows = heights.length, cols = heights[0].length;
+        while (!q.isEmpty()) {
+            int[] cell = q.poll();
+            int r = cell[0], c = cell[1];
+            for (int[] d : DIRS) {
+                int nr = r + d[0], nc = c + d[1];
+                if (nr >= 0 && nc >= 0 && nr < rows && nc < cols
+                        && !vis[nr][nc] && heights[nr][nc] >= heights[r][c]) {
+                    vis[nr][nc] = true;
+                    q.add(new int[]{nr, nc});
+                }
+            }
+        }
+    }
+}
 ```
 
 #### Rust
@@ -9889,6 +12238,35 @@ def solve(board):
             board[r][c] = "O" if board[r][c] == "S" else "X"
 ```
 
+#### Java
+
+Two-pass with `'S'` as the border-safe marker. The ternary in the final sweep (`board[r][c] == 'S' ? 'O' : 'X'`) restores safe cells and captures everything else in one line.
+
+```java
+class Solution {
+    public void solve(char[][] board) {
+        int rows = board.length, cols = board[0].length;
+        for (int r = 0; r < rows; r++)
+            for (int c = 0; c < cols; c++)
+                if (board[r][c] == 'O' && (r == 0 || r == rows - 1 || c == 0 || c == cols - 1))
+                    dfs(board, r, c);
+        for (int r = 0; r < rows; r++)
+            for (int c = 0; c < cols; c++)
+                board[r][c] = board[r][c] == 'S' ? 'O' : 'X';
+    }
+
+    private void dfs(char[][] board, int r, int c) {
+        if (r < 0 || c < 0 || r >= board.length || c >= board[0].length
+                || board[r][c] != 'O') return;
+        board[r][c] = 'S';
+        dfs(board, r + 1, c);
+        dfs(board, r - 1, c);
+        dfs(board, r, c + 1);
+        dfs(board, r, c - 1);
+    }
+}
+```
+
 #### Rust
 
 Same two-pass with `'S'` as the safe marker. Explicit `r==0||r==rows-1||c==0||c==cols-1` border check — Rust has no tuple-membership operator.
@@ -10006,6 +12384,42 @@ def orangesRotting(grid):
                 q.append((nr, nc, t + 1))
                 time = t + 1
     return time if fresh == 0 else -1
+```
+
+#### Java
+
+`ArrayDeque<int[]>` seeds every initially rotten orange with a `{r, c, t}` triple. Tracking a `fresh` counter avoids a final sweep; `poll` returns null-safe FIFO order so `time` climbs monotonically.
+
+```java
+import java.util.*;
+
+class Solution {
+    public int orangesRotting(int[][] grid) {
+        int rows = grid.length, cols = grid[0].length, fresh = 0, time = 0;
+        Deque<int[]> q = new ArrayDeque<>();
+        for (int r = 0; r < rows; r++) {
+            for (int c = 0; c < cols; c++) {
+                if (grid[r][c] == 2) q.add(new int[]{r, c, 0});
+                else if (grid[r][c] == 1) fresh++;
+            }
+        }
+        int[][] dirs = {{0, 1}, {0, -1}, {1, 0}, {-1, 0}};
+        while (!q.isEmpty()) {
+            int[] cell = q.poll();
+            int r = cell[0], c = cell[1], t = cell[2];
+            for (int[] d : dirs) {
+                int nr = r + d[0], nc = c + d[1];
+                if (nr >= 0 && nc >= 0 && nr < rows && nc < cols && grid[nr][nc] == 1) {
+                    grid[nr][nc] = 2;
+                    fresh--;
+                    q.add(new int[]{nr, nc, t + 1});
+                    time = t + 1;
+                }
+            }
+        }
+        return fresh == 0 ? time : -1;
+    }
+}
 ```
 
 #### Rust
@@ -10141,6 +12555,37 @@ def wallsAndGates(rooms):
                 q.append((nr, nc))
 ```
 
+#### Java
+
+`Integer.MAX_VALUE` is the problem's `INF` sentinel; the `rooms[nr][nc] == INF` test doubles as the room-to-fill and not-yet-visited check. `ArrayDeque<int[]>` is the multi-source BFS queue seeded from every gate.
+
+```java
+import java.util.*;
+
+class Solution {
+    public void wallsAndGates(int[][] rooms) {
+        int rows = rooms.length, cols = rooms[0].length;
+        final int INF = Integer.MAX_VALUE;
+        Deque<int[]> q = new ArrayDeque<>();
+        for (int r = 0; r < rows; r++)
+            for (int c = 0; c < cols; c++)
+                if (rooms[r][c] == 0) q.add(new int[]{r, c});
+        int[][] dirs = {{0, 1}, {0, -1}, {1, 0}, {-1, 0}};
+        while (!q.isEmpty()) {
+            int[] cell = q.poll();
+            int r = cell[0], c = cell[1];
+            for (int[] d : dirs) {
+                int nr = r + d[0], nc = c + d[1];
+                if (nr >= 0 && nc >= 0 && nr < rows && nc < cols && rooms[nr][nc] == INF) {
+                    rooms[nr][nc] = rooms[r][c] + 1;
+                    q.add(new int[]{nr, nc});
+                }
+            }
+        }
+    }
+}
+```
+
 #### Rust
 
 `i32::MAX` as the sentinel — exactly the problem's value. The 'visited' check is the INF comparison itself; once filled, it's skipped on later visits.
@@ -10258,6 +12703,36 @@ def canFinish(numCourses, prerequisites):
     return all(dfs(c) for c in range(numCourses))
 ```
 
+#### Java
+
+Three-state coloring via a `byte[]` (0=unvisited, 1=visiting, 2=done) is cleaner than the Python adjacency-clearing hack — hitting a `visiting` node means a back-edge (cycle). Build the adjacency list with `List<Integer>[]` and one pass over the pairs.
+
+```java
+import java.util.*;
+
+class Solution {
+    public boolean canFinish(int numCourses, int[][] prerequisites) {
+        List<List<Integer>> adj = new ArrayList<>();
+        for (int i = 0; i < numCourses; i++) adj.add(new ArrayList<>());
+        for (int[] p : prerequisites) adj.get(p[0]).add(p[1]);
+        byte[] state = new byte[numCourses]; // 0=unvisited, 1=visiting, 2=done
+        for (int c = 0; c < numCourses; c++)
+            if (!dfs(c, adj, state)) return false;
+        return true;
+    }
+
+    private boolean dfs(int c, List<List<Integer>> adj, byte[] state) {
+        if (state[c] == 1) return false;
+        if (state[c] == 2) return true;
+        state[c] = 1;
+        for (int nb : adj.get(c))
+            if (!dfs(nb, adj, state)) return false;
+        state[c] = 2;
+        return true;
+    }
+}
+```
+
 #### Rust
 
 Three-state coloring via `Vec<u8>` (0=unvisited, 1=visiting, 2=done) — cleaner than the Python adj-clearing hack. `(0..n).all(...)` for the outer pass.
@@ -10366,6 +12841,38 @@ def findOrder(numCourses, prerequisites):
             if indegree[nb] == 0:
                 q.append(nb)
     return res if len(res) == numCourses else []
+```
+
+#### Java
+
+`ArrayDeque` is the go-to FIFO queue — `offer`/`poll` beat the synchronized legacy `Stack`/`LinkedList`. Comparing `res.size() == numCourses` distinguishes a complete topological order from an early stop at a cycle.
+
+```java
+import java.util.*;
+
+class Solution {
+    public int[] findOrder(int numCourses, int[][] prerequisites) {
+        List<List<Integer>> adj = new ArrayList<>();
+        for (int i = 0; i < numCourses; i++) adj.add(new ArrayList<>());
+        int[] indegree = new int[numCourses];
+        for (int[] p : prerequisites) {
+            adj.get(p[1]).add(p[0]);
+            indegree[p[0]]++;
+        }
+        Deque<Integer> q = new ArrayDeque<>();
+        for (int c = 0; c < numCourses; c++)
+            if (indegree[c] == 0) q.offer(c);
+        int[] res = new int[numCourses];
+        int idx = 0;
+        while (!q.isEmpty()) {
+            int c = q.poll();
+            res[idx++] = c;
+            for (int nb : adj.get(c))
+                if (--indegree[nb] == 0) q.offer(nb);
+        }
+        return idx == numCourses ? res : new int[0];
+    }
+}
 ```
 
 #### Rust
@@ -10507,6 +13014,41 @@ def findRedundantConnection(edges):
     for u, v in edges:
         if not union(u, v):
             return [u, v]
+```
+
+#### Java
+
+Plain `int[]` for `parent`/`rank` — no boxing overhead. Java has no boolean-as-int coercion, so the rank tie increment is written as an explicit `if`.
+
+```java
+import java.util.*;
+
+class Solution {
+    private int[] parent, rank;
+
+    private int find(int x) {
+        while (parent[x] != x) {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        return x;
+    }
+
+    public int[] findRedundantConnection(int[][] edges) {
+        int n = edges.length + 1;
+        parent = new int[n];
+        rank = new int[n];
+        for (int i = 0; i < n; i++) { parent[i] = i; rank[i] = 1; }
+        for (int[] e : edges) {
+            int pu = find(e[0]), pv = find(e[1]);
+            if (pu == pv) return new int[]{e[0], e[1]};
+            if (rank[pu] < rank[pv]) { int t = pu; pu = pv; pv = t; }
+            parent[pv] = pu;
+            if (rank[pu] == rank[pv]) rank[pu]++;
+        }
+        return new int[0];
+    }
+}
 ```
 
 #### Rust
@@ -10657,6 +13199,43 @@ def countComponents(n, edges):
     return n - sum(union(u, v) for u, v in edges)
 ```
 
+#### Java
+
+`int[]` arrays plus a helper `find` avoid the closure gymnastics the functional languages need. Decrementing `components` per successful merge is clearer than counting merges and subtracting.
+
+```java
+import java.util.*;
+
+class Solution {
+    private int[] parent, rank;
+
+    private int find(int x) {
+        while (parent[x] != x) {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        return x;
+    }
+
+    public int countComponents(int n, int[][] edges) {
+        parent = new int[n];
+        rank = new int[n];
+        for (int i = 0; i < n; i++) { parent[i] = i; rank[i] = 1; }
+        int components = n;
+        for (int[] e : edges) {
+            int pu = find(e[0]), pv = find(e[1]);
+            if (pu != pv) {
+                if (rank[pu] < rank[pv]) { int t = pu; pu = pv; pv = t; }
+                parent[pv] = pu;
+                if (rank[pu] == rank[pv]) rank[pu]++;
+                components--;
+            }
+        }
+        return components;
+    }
+}
+```
+
 #### Rust
 
 Inner `fn find` with `&mut Vec<usize>`. The merge logic spells out the three rank cases explicitly instead of inlining the boolean trick.
@@ -10804,6 +13383,38 @@ def validTree(n, edges):
     return True
 ```
 
+#### Java
+
+The `edges.length != n - 1` short-circuit is the fast fail. With that guard plus the cycle check, plain `parent[pu] = pv` union (no rank) is enough — path halving in `find` keeps it fast.
+
+```java
+import java.util.*;
+
+class Solution {
+    private int[] parent;
+
+    private int find(int x) {
+        while (parent[x] != x) {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        return x;
+    }
+
+    public boolean validTree(int n, int[][] edges) {
+        if (edges.length != n - 1) return false;
+        parent = new int[n];
+        for (int i = 0; i < n; i++) parent[i] = i;
+        for (int[] e : edges) {
+            int pu = find(e[0]), pv = find(e[1]);
+            if (pu == pv) return false;
+            parent[pu] = pv;
+        }
+        return true;
+    }
+}
+```
+
 #### Rust
 
 Same simplified union — no rank tracking. The `if pu == pv` cycle check is the only acceptance criterion beyond edge count.
@@ -10934,6 +13545,48 @@ def ladderLength(beginWord, endWord, wordList):
                     visited.add(next_word)
                     q.append((next_word, steps + 1))
     return 0
+```
+
+#### Java
+
+Mutate a `char[]` in place then restore the original char — avoids the per-candidate String allocation, then `new String(chars)` keys the set lookup. A single `HashSet` doubles as dictionary and visited-set once words are removed on visit.
+
+```java
+import java.util.*;
+
+class Solution {
+    public int ladderLength(String beginWord, String endWord, List<String> wordList) {
+        Set<String> wordSet = new HashSet<>(wordList);
+        if (!wordSet.contains(endWord)) return 0;
+        Deque<String> q = new ArrayDeque<>();
+        q.offer(beginWord);
+        Set<String> visited = new HashSet<>();
+        visited.add(beginWord);
+        int steps = 1;
+        while (!q.isEmpty()) {
+            int size = q.size();
+            for (int s = 0; s < size; s++) {
+                String word = q.poll();
+                if (word.equals(endWord)) return steps;
+                char[] chars = word.toCharArray();
+                for (int i = 0; i < chars.length; i++) {
+                    char orig = chars[i];
+                    for (char c = 'a'; c <= 'z'; c++) {
+                        chars[i] = c;
+                        String next = new String(chars);
+                        if (wordSet.contains(next) && !visited.contains(next)) {
+                            visited.add(next);
+                            q.offer(next);
+                        }
+                    }
+                    chars[i] = orig;
+                }
+            }
+            steps++;
+        }
+        return 0;
+    }
+}
 ```
 
 #### Rust
@@ -11084,6 +13737,35 @@ def findItinerary(tickets):
     return res[::-1]
 ```
 
+#### Java
+
+A `PriorityQueue` per source keeps destinations in lexical order, so `poll()` always pulls the smallest next hop — no pre-sorting pass needed. A node is appended to the result only once its edges are exhausted, then the list is reversed.
+
+```java
+import java.util.*;
+
+class Solution {
+    public List<String> findItinerary(List<List<String>> tickets) {
+        Map<String, PriorityQueue<String>> adj = new HashMap<>();
+        for (List<String> t : tickets)
+            adj.computeIfAbsent(t.get(0), k -> new PriorityQueue<>()).offer(t.get(1));
+        LinkedList<String> res = new LinkedList<>();
+        Deque<String> stack = new ArrayDeque<>();
+        stack.push("JFK");
+        while (!stack.isEmpty()) {
+            String top = stack.peek();
+            PriorityQueue<String> dsts = adj.get(top);
+            if (dsts != null && !dsts.isEmpty()) {
+                stack.push(dsts.poll());
+            } else {
+                res.addFirst(stack.pop());
+            }
+        }
+        return res;
+    }
+}
+```
+
 #### Rust
 
 `BTreeMap` + `BinaryHeap<Reverse<String>>` per node — the heap gives lex-smallest pop. The `stack.last().cloned()` borrow workaround is annoying but avoids holding the borrow during `pop`.
@@ -11219,6 +13901,40 @@ def minCostConnectPoints(points):
                 d = abs(points[i][0] - points[j][0]) + abs(points[i][1] - points[j][1])
                 heapq.heappush(heap, (d, j))
     return cost
+```
+
+#### Java
+
+`PriorityQueue` is a min-heap by default, so `int[]{cost, idx}` entries with a `cost`-keyed `Comparator` pop the cheapest edge first. A `boolean[] inMST` gives the lazy-deletion guard — stale entries are skipped when popped.
+
+```java
+import java.util.*;
+
+class Solution {
+    public int minCostConnectPoints(int[][] points) {
+        int n = points.length;
+        boolean[] inMST = new boolean[n];
+        PriorityQueue<int[]> heap = new PriorityQueue<>((a, b) -> a[0] - b[0]);
+        heap.offer(new int[]{0, 0});
+        int cost = 0, count = 0;
+        while (count < n) {
+            int[] cur = heap.poll();
+            int c = cur[0], i = cur[1];
+            if (inMST[i]) continue;
+            inMST[i] = true;
+            cost += c;
+            count++;
+            for (int j = 0; j < n; j++) {
+                if (!inMST[j]) {
+                    int d = Math.abs(points[i][0] - points[j][0])
+                          + Math.abs(points[i][1] - points[j][1]);
+                    heap.offer(new int[]{d, j});
+                }
+            }
+        }
+        return cost;
+    }
+}
 ```
 
 #### Rust
@@ -11369,6 +14085,39 @@ def networkDelayTime(times, n, k):
     return max(dist.values()) if len(dist) == n else -1
 ```
 
+#### Java
+
+`PriorityQueue<int[]>` with a `dist`-keyed comparator is the min-heap; a `dist` map plus `containsKey` gives lazy deletion. `computeIfAbsent` builds the adjacency lists in one call.
+
+```java
+import java.util.*;
+
+class Solution {
+    public int networkDelayTime(int[][] times, int n, int k) {
+        Map<Integer, List<int[]>> adj = new HashMap<>();
+        for (int[] t : times)
+            adj.computeIfAbsent(t[0], x -> new ArrayList<>()).add(new int[]{t[1], t[2]});
+        Map<Integer, Integer> dist = new HashMap<>();
+        PriorityQueue<int[]> heap = new PriorityQueue<>((a, b) -> a[0] - b[0]);
+        heap.offer(new int[]{0, k});
+        while (!heap.isEmpty()) {
+            int[] cur = heap.poll();
+            int d = cur[0], u = cur[1];
+            if (dist.containsKey(u)) continue;
+            dist.put(u, d);
+            for (int[] e : adj.getOrDefault(u, List.of())) {
+                if (!dist.containsKey(e[0]))
+                    heap.offer(new int[]{d + e[1], e[0]});
+            }
+        }
+        if (dist.size() != n) return -1;
+        int ans = 0;
+        for (int d : dist.values()) ans = Math.max(ans, d);
+        return ans;
+    }
+}
+```
+
 #### Rust
 
 `Reverse((d, u))` for min-heap; lazy deletion via `dist.contains_key`. `dist.values().max().unwrap()` for the final aggregation.
@@ -11513,6 +14262,38 @@ def swimInWater(grid):
             if 0 <= nr < n and 0 <= nc < n and (nr, nc) not in visited:
                 visited.add((nr, nc))
                 heapq.heappush(heap, (max(t, grid[nr][nc]), nr, nc))
+```
+
+#### Java
+
+`PriorityQueue<int[]>` keyed by the bottleneck elevation is the min-heap; the minimax relaxation is `Math.max(t, grid[nr][nc])` instead of a sum. A `boolean[][]` visited grid beats a `HashSet` of coordinates for index-keyed lookup.
+
+```java
+import java.util.*;
+
+class Solution {
+    public int swimInWater(int[][] grid) {
+        int n = grid.length;
+        boolean[][] visited = new boolean[n][n];
+        PriorityQueue<int[]> heap = new PriorityQueue<>((a, b) -> a[0] - b[0]);
+        heap.offer(new int[]{grid[0][0], 0, 0});
+        visited[0][0] = true;
+        int[][] dirs = {{0, 1}, {0, -1}, {1, 0}, {-1, 0}};
+        while (!heap.isEmpty()) {
+            int[] cur = heap.poll();
+            int t = cur[0], r = cur[1], c = cur[2];
+            if (r == n - 1 && c == n - 1) return t;
+            for (int[] dir : dirs) {
+                int nr = r + dir[0], nc = c + dir[1];
+                if (nr >= 0 && nc >= 0 && nr < n && nc < n && !visited[nr][nc]) {
+                    visited[nr][nc] = true;
+                    heap.offer(new int[]{Math.max(t, grid[nr][nc]), nr, nc});
+                }
+            }
+        }
+        return -1;
+    }
+}
 ```
 
 #### Rust
@@ -11668,6 +14449,56 @@ def alienOrder(words):
         if dfs(c):
             return ""
     return "".join(res[::-1])
+```
+
+#### Java
+
+`computeIfAbsent(c, x -> new HashSet<>())` pre-registers every character so isolated chars still get emitted. A `Map<Character,Integer>` holds the three DFS states (0 unseen, 1 in-stack, 2 done); a `StringBuilder.reverse()` produces the final order.
+
+```java
+import java.util.*;
+
+class Solution {
+    private Map<Character, Set<Character>> adj;
+    private Map<Character, Integer> state;
+    private StringBuilder res;
+
+    public String alienOrder(String[] words) {
+        adj = new HashMap<>();
+        for (String w : words)
+            for (char c : w.toCharArray())
+                adj.computeIfAbsent(c, x -> new HashSet<>());
+        for (int i = 0; i < words.length - 1; i++) {
+            String w1 = words[i], w2 = words[i + 1];
+            int minLen = Math.min(w1.length(), w2.length());
+            if (w1.length() > w2.length()
+                    && w1.substring(0, minLen).equals(w2.substring(0, minLen)))
+                return "";
+            for (int j = 0; j < minLen; j++) {
+                if (w1.charAt(j) != w2.charAt(j)) {
+                    adj.get(w1.charAt(j)).add(w2.charAt(j));
+                    break;
+                }
+            }
+        }
+        state = new HashMap<>();
+        res = new StringBuilder();
+        for (char c : adj.keySet())
+            if (dfs(c)) return "";
+        return res.reverse().toString();
+    }
+
+    private boolean dfs(char c) {
+        Integer s = state.get(c);
+        if (s != null) return s == 1;
+        state.put(c, 1);
+        for (char nb : adj.get(c))
+            if (dfs(nb)) return true;
+        state.put(c, 2);
+        res.append(c);
+        return false;
+    }
+}
 ```
 
 #### Rust
@@ -11848,6 +14679,33 @@ def findCheapestPrice(n, flights, src, dst, k):
     return prices[dst] if prices[dst] != float('inf') else -1
 ```
 
+#### Java
+
+`Arrays.copyOf(prices, n)` clones the array each round so a single relaxation only reads distances from the previous round — the Bellman-Ford "one more edge" invariant. `Integer.MAX_VALUE / 2` is the sentinel that avoids overflow on `prices[u] + w`.
+
+```java
+import java.util.*;
+
+class Solution {
+    public int findCheapestPrice(int n, int[][] flights, int src, int dst, int k) {
+        int INF = Integer.MAX_VALUE / 2;
+        int[] prices = new int[n];
+        Arrays.fill(prices, INF);
+        prices[src] = 0;
+        for (int i = 0; i <= k; i++) {
+            int[] tmp = Arrays.copyOf(prices, n);
+            for (int[] f : flights) {
+                int u = f[0], v = f[1], w = f[2];
+                if (prices[u] != INF && prices[u] + w < tmp[v])
+                    tmp[v] = prices[u] + w;
+            }
+            prices = tmp;
+        }
+        return prices[dst] == INF ? -1 : prices[dst];
+    }
+}
+```
+
 #### Rust
 
 `i64::MAX / 2` as sentinel to avoid overflow when adding edge weights. `prices.clone()` per round mirrors the Python slice copy.
@@ -11947,6 +14805,24 @@ def climbStairs(n):
     return b
 ```
 
+#### Java
+
+Java has no tuple-swap, so an explicit `c` temp does the rolling Fibonacci update. Two scalars beat a full DP array for O(1) space.
+
+```java
+class Solution {
+    public int climbStairs(int n) {
+        int a = 1, b = 1;
+        for (int i = 1; i < n; i++) {
+            int c = a + b;
+            a = b;
+            b = c;
+        }
+        return b;
+    }
+}
+```
+
 #### Rust
 
 Explicit temp `c` because Rust can't tuple-swap two `let mut` variables in one expression. `1..n` for `n-1` iterations.
@@ -12014,6 +14890,21 @@ def minCostClimbingStairs(cost):
     for i in range(2, len(cost)):
         cost[i] += min(cost[i - 1], cost[i - 2])
     return min(cost[-1], cost[-2])
+```
+
+#### Java
+
+In-place mutation of `cost` gives O(1) extra space; `Math.min` from `java.lang.Math` needs no import. `cost[n-1]`/`cost[n-2]` stand in for Python's negative indexing.
+
+```java
+class Solution {
+    public int minCostClimbingStairs(int[] cost) {
+        int n = cost.length;
+        for (int i = 2; i < n; i++)
+            cost[i] += Math.min(cost[i - 1], cost[i - 2]);
+        return Math.min(cost[n - 1], cost[n - 2]);
+    }
+}
 ```
 
 #### Rust
@@ -12090,6 +14981,24 @@ def rob(nums):
     for n in nums:
         prev, curr = curr, max(curr, prev + n)
     return curr
+```
+
+#### Java
+
+An explicit `next` temp stands in for Python's tuple swap. `Math.max` folds the skip-vs-rob choice; two rolling scalars keep it O(1) space.
+
+```java
+class Solution {
+    public int rob(int[] nums) {
+        int prev = 0, curr = 0;
+        for (int n : nums) {
+            int next = Math.max(curr, prev + n);
+            prev = curr;
+            curr = next;
+        }
+        return curr;
+    }
+}
 ```
 
 #### Rust
@@ -12170,6 +15079,34 @@ def rob(nums):
             prev, curr = curr, max(curr, prev + n)
         return curr
     return max(nums[0], rob_line(nums[1:]), rob_line(nums[:-1]))
+```
+
+#### Java
+
+`Arrays.copyOfRange` extracts the two linear sub-arrays (exclude first, exclude last) without hand-rolled index math. A private `robLine` helper is reused for both; `Math.max` chains fold in the `n == 1` edge case.
+
+```java
+import java.util.*;
+
+class Solution {
+    private int robLine(int[] houses) {
+        int prev = 0, curr = 0;
+        for (int n : houses) {
+            int next = Math.max(curr, prev + n);
+            prev = curr;
+            curr = next;
+        }
+        return curr;
+    }
+
+    public int rob(int[] nums) {
+        int n = nums.length;
+        if (n == 1) return nums[0];
+        int excludeFirst = robLine(Arrays.copyOfRange(nums, 1, n));
+        int excludeLast = robLine(Arrays.copyOfRange(nums, 0, n - 1));
+        return Math.max(nums[0], Math.max(excludeFirst, excludeLast));
+    }
+}
 ```
 
 #### Rust
@@ -12269,6 +15206,32 @@ def countSubstrings(s):
                 l -= 1
                 r += 1
     return count
+```
+
+#### Java
+
+A private `expand` helper with `charAt` comparisons mirrors the closure/lambda the other languages use; Java's lack of tuple iteration means two explicit calls per center. `count` is a field so the helper can accumulate.
+
+```java
+class Solution {
+    private int count = 0;
+
+    public int countSubstrings(String s) {
+        for (int i = 0; i < s.length(); i++) {
+            expand(s, i, i);
+            expand(s, i, i + 1);
+        }
+        return count;
+    }
+
+    private void expand(String s, int l, int r) {
+        while (l >= 0 && r < s.length() && s.charAt(l) == s.charAt(r)) {
+            count++;
+            l--;
+            r++;
+        }
+    }
+}
 ```
 
 #### Rust
@@ -12377,6 +15340,29 @@ def numDecodings(s):
     return dfs(0)
 ```
 
+#### Java
+
+Bottom-up over an `int[] dp`; `s.charAt(i) - '0'` byte arithmetic builds the two-digit value with no substring allocation. `dp[n] = 1` seeds the empty-suffix base case.
+
+```java
+class Solution {
+    public int numDecodings(String s) {
+        int n = s.length();
+        int[] dp = new int[n + 1];
+        dp[n] = 1;
+        for (int i = n - 1; i >= 0; i--) {
+            if (s.charAt(i) == '0') continue;
+            dp[i] = dp[i + 1];
+            if (i + 1 < n) {
+                int two = (s.charAt(i) - '0') * 10 + (s.charAt(i + 1) - '0');
+                if (two <= 26) dp[i] += dp[i + 2];
+            }
+        }
+        return dp[0];
+    }
+}
+```
+
 #### Rust
 
 Bottom-up DP avoids recursion. Byte arithmetic `(b[i] - b'0') as i32 * 10 + ...` for the two-digit value — no allocation.
@@ -12469,6 +15455,28 @@ def coinChange(coins, amount):
             if a - c >= 0:
                 dp[a] = min(dp[a], dp[a - c] + 1)
     return dp[amount] if dp[amount] != float('inf') else -1
+```
+
+#### Java
+
+`Arrays.fill(dp, amount + 1)` uses a safe sentinel above any real answer (each coin is at least 1), sidestepping `Integer.MAX_VALUE` overflow when adding 1. `Math.min` keeps the inner body one line.
+
+```java
+import java.util.*;
+
+class Solution {
+    public int coinChange(int[] coins, int amount) {
+        int[] dp = new int[amount + 1];
+        Arrays.fill(dp, amount + 1);
+        dp[0] = 0;
+        for (int a = 1; a <= amount; a++) {
+            for (int c : coins) {
+                if (c <= a) dp[a] = Math.min(dp[a], dp[a - c] + 1);
+            }
+        }
+        return dp[amount] > amount ? -1 : dp[amount];
+    }
+}
 ```
 
 #### Rust
@@ -12565,6 +15573,32 @@ def maxProduct(nums):
         cur_min = min(n, tmp, cur_min * n)
         res = max(res, cur_max)
     return res
+```
+
+#### Java
+
+`Math.max` chains for the three-way comparison (no brace-list variadic like C++); `tmp` saves the pre-update `curMax` so the min uses the old value. Seed `res` with a manual scan for the max element.
+
+```java
+class Solution {
+    public int maxProduct(int[] nums) {
+        int res = nums[0];
+        for (int n : nums) res = Math.max(res, n);
+        int curMin = 1, curMax = 1;
+        for (int n : nums) {
+            if (n == 0) {
+                curMin = 1;
+                curMax = 1;
+                continue;
+            }
+            int tmp = curMax * n;
+            curMax = Math.max(n, Math.max(curMax * n, curMin * n));
+            curMin = Math.min(n, Math.min(tmp, curMin * n));
+            res = Math.max(res, curMax);
+        }
+        return res;
+    }
+}
 ```
 
 #### Rust
@@ -12675,6 +15709,32 @@ def wordBreak(s, wordDict):
     return dp[0]
 ```
 
+#### Java
+
+`s.regionMatches(i, w, 0, wn)` compares the window against the word without allocating a substring — cleaner and cheaper than `s.substring(i, i + wn).equals(w)`. Right-to-left fill with early `break`.
+
+```java
+import java.util.*;
+
+class Solution {
+    public boolean wordBreak(String s, List<String> wordDict) {
+        int n = s.length();
+        boolean[] dp = new boolean[n + 1];
+        dp[n] = true;
+        for (int i = n - 1; i >= 0; i--) {
+            for (String w : wordDict) {
+                int wn = w.length();
+                if (i + wn <= n && s.regionMatches(i, w, 0, wn) && dp[i + wn]) {
+                    dp[i] = true;
+                    break;
+                }
+            }
+        }
+        return dp[0];
+    }
+}
+```
+
 #### Rust
 
 Byte-slice comparison `&sb[i..i+wn] == w.as_bytes()` avoids the `String` allocation. `i + wn <= n` guard prevents slice OOB before the comparison.
@@ -12775,6 +15835,28 @@ def lengthOfLIS(nums):
     return len(tails)
 ```
 
+#### Java
+
+`Arrays.binarySearch` returns `-(insertionPoint) - 1` for a miss, so `-(pos) - 1` recovers the leftmost slot — the patience-sorting position. Track `size` manually to reuse a fixed-length `int[]` as the growable `tails`.
+
+```java
+import java.util.*;
+
+class Solution {
+    public int lengthOfLIS(int[] nums) {
+        int[] tails = new int[nums.length];
+        int size = 0;
+        for (int n : nums) {
+            int pos = Arrays.binarySearch(tails, 0, size, n);
+            if (pos < 0) pos = -(pos) - 1;
+            tails[pos] = n;
+            if (pos == size) size++;
+        }
+        return size;
+    }
+}
+```
+
 #### Rust
 
 `partition_point` is the binary search primitive Rust uses for this — returns the index where the predicate flips false→true. `|&x| x < n` gives the equivalent of `bisect_left`.
@@ -12859,6 +15941,29 @@ def canPartition(nums):
     for n in nums:
         dp = {s + n for s in dp} | dp
     return target in dp
+```
+
+#### Java
+
+`boolean[]` DP with the backwards inner loop (`s` from `target` down to `n`) is what keeps each element used at most once — the in-place 0/1 knapsack. Odd total exits early.
+
+```java
+class Solution {
+    public boolean canPartition(int[] nums) {
+        int total = 0;
+        for (int n : nums) total += n;
+        if (total % 2 != 0) return false;
+        int target = total / 2;
+        boolean[] dp = new boolean[target + 1];
+        dp[0] = true;
+        for (int n : nums) {
+            for (int s = target; s >= n; s--) {
+                if (dp[s - n]) dp[s] = true;
+            }
+        }
+        return dp[target];
+    }
+}
 ```
 
 #### Rust
@@ -12951,6 +16056,27 @@ def uniquePaths(m, n):
     return dp[-1]
 ```
 
+#### Java
+
+`Arrays.fill(dp, 1)` seeds the first row in one call. Left-to-right in-place `dp[j] += dp[j - 1]` collapses the grid to a single rolling row.
+
+```java
+import java.util.*;
+
+class Solution {
+    public int uniquePaths(int m, int n) {
+        int[] dp = new int[n];
+        Arrays.fill(dp, 1);
+        for (int i = 1; i < m; i++) {
+            for (int j = 1; j < n; j++) {
+                dp[j] += dp[j - 1];
+            }
+        }
+        return dp[n - 1];
+    }
+}
+```
+
 #### Rust
 
 `vec![1i32; n]` for the initial row. Identical structure to Python — DP collapses to one row because each cell only depends on (above, left).
@@ -13027,6 +16153,29 @@ def longestCommonSubsequence(text1, text2):
             else:
                 dp[i][j] = max(dp[i + 1][j], dp[i][j + 1])
     return dp[0][0]
+```
+
+#### Java
+
+`charAt` comparison drives the suffix DP; a fresh `int[m+1][n+1]` is zero-initialized by the JVM, so the base row/column need no explicit setup. `Math.max` handles the mismatch case.
+
+```java
+class Solution {
+    public int longestCommonSubsequence(String text1, String text2) {
+        int m = text1.length(), n = text2.length();
+        int[][] dp = new int[m + 1][n + 1];
+        for (int i = m - 1; i >= 0; i--) {
+            for (int j = n - 1; j >= 0; j--) {
+                if (text1.charAt(i) == text2.charAt(j)) {
+                    dp[i][j] = 1 + dp[i + 1][j + 1];
+                } else {
+                    dp[i][j] = Math.max(dp[i + 1][j], dp[i][j + 1]);
+                }
+            }
+        }
+        return dp[0][0];
+    }
+}
 ```
 
 #### Rust
@@ -13120,6 +16269,27 @@ def maxProfit(prices):
     return max(sold, rest)
 ```
 
+#### Java
+
+Java has no parallel assignment, so three temps (`nh`, `ns`, `nr`) capture the next state before overwriting — same shape as C++/Rust. `Math.max` for the two transitions that take a best-of.
+
+```java
+class Solution {
+    public int maxProfit(int[] prices) {
+        int hold = -prices[0], sold = 0, rest = 0;
+        for (int i = 1; i < prices.length; i++) {
+            int nh = Math.max(hold, rest - prices[i]);
+            int ns = hold + prices[i];
+            int nr = Math.max(rest, sold);
+            hold = nh;
+            sold = ns;
+            rest = nr;
+        }
+        return Math.max(sold, rest);
+    }
+}
+```
+
 #### Rust
 
 Destructuring `let (new_hold, new_sold, new_rest) = (...)` then individual assignments — Rust has no parallel assignment for `let mut` variables.
@@ -13204,6 +16374,31 @@ def findTargetSumWays(nums, target):
             next_dp[s - n] = next_dp.get(s - n, 0) + count
         dp = next_dp
     return dp.get(target, 0)
+```
+
+#### Java
+
+`HashMap<Integer,Integer>` allows the negative-sum keys a fixed array can't, and `getOrDefault(k, 0)` folds the missing-key default into the read. A fresh `next` map is built each round to model the 0/1 choice.
+
+```java
+import java.util.*;
+
+class Solution {
+    public int findTargetSumWays(int[] nums, int target) {
+        Map<Integer, Integer> dp = new HashMap<>();
+        dp.put(0, 1);
+        for (int n : nums) {
+            Map<Integer, Integer> next = new HashMap<>();
+            for (Map.Entry<Integer, Integer> e : dp.entrySet()) {
+                int s = e.getKey(), cnt = e.getValue();
+                next.put(s + n, next.getOrDefault(s + n, 0) + cnt);
+                next.put(s - n, next.getOrDefault(s - n, 0) + cnt);
+            }
+            dp = next;
+        }
+        return dp.getOrDefault(target, 0);
+    }
+}
 ```
 
 #### Rust
@@ -13300,6 +16495,28 @@ def isInterleave(s1, s2, s3):
             if j < n and s2[j] == s3[i + j] and dp[i][j + 1]:
                 dp[i][j] = True
     return dp[0][0]
+```
+
+#### Java
+
+`charAt` indexing into all three strings drives the suffix DP; the length mismatch is a mandatory early exit. A fresh `boolean[m+1][n+1]` is false-initialized, so only the `dp[m][n]` base case is set explicitly.
+
+```java
+class Solution {
+    public boolean isInterleave(String s1, String s2, String s3) {
+        int m = s1.length(), n = s2.length();
+        if (m + n != s3.length()) return false;
+        boolean[][] dp = new boolean[m + 1][n + 1];
+        dp[m][n] = true;
+        for (int i = m; i >= 0; i--) {
+            for (int j = n; j >= 0; j--) {
+                if (i < m && s1.charAt(i) == s3.charAt(i + j) && dp[i + 1][j]) dp[i][j] = true;
+                if (j < n && s2.charAt(j) == s3.charAt(i + j) && dp[i][j + 1]) dp[i][j] = true;
+            }
+        }
+        return dp[0][0];
+    }
+}
 ```
 
 #### Rust
@@ -13400,6 +16617,43 @@ def longestIncreasingPath(matrix):
         return res
 
     return max(dfs(r, c) for r in range(rows) for c in range(cols))
+```
+
+#### Java
+
+A `memo` field lets a private recursive `dfs` carry state cleanly; `memo[r][c] != 0` is the computed-marker (answers are always ≥1, so 0 is a safe sentinel). The strictly-greater edge rules out cycles, so no visited set is needed.
+
+```java
+class Solution {
+    private int rows, cols;
+    private int[][] memo;
+    private static final int[][] DIRS = {{0, 1}, {0, -1}, {1, 0}, {-1, 0}};
+
+    public int longestIncreasingPath(int[][] matrix) {
+        rows = matrix.length;
+        cols = matrix[0].length;
+        memo = new int[rows][cols];
+        int ans = 0;
+        for (int r = 0; r < rows; r++) {
+            for (int c = 0; c < cols; c++) {
+                ans = Math.max(ans, dfs(matrix, r, c));
+            }
+        }
+        return ans;
+    }
+
+    private int dfs(int[][] matrix, int r, int c) {
+        if (memo[r][c] != 0) return memo[r][c];
+        int res = 1;
+        for (int[] d : DIRS) {
+            int nr = r + d[0], nc = c + d[1];
+            if (nr >= 0 && nc >= 0 && nr < rows && nc < cols && matrix[nr][nc] > matrix[r][c]) {
+                res = Math.max(res, 1 + dfs(matrix, nr, nc));
+            }
+        }
+        return memo[r][c] = res;
+    }
+}
 ```
 
 #### Rust
@@ -13536,6 +16790,27 @@ def numDistinct(s, t):
     return dp[0][0]
 ```
 
+#### Java
+
+`long[][]` guards the additions against overflow before the final cast to `int` (the answer itself fits 32 bits). `charAt` drives the skip-or-match recurrence; the `dp[i][n] = 1` column seeds the empty-`t` base case.
+
+```java
+class Solution {
+    public int numDistinct(String s, String t) {
+        int m = s.length(), n = t.length();
+        long[][] dp = new long[m + 1][n + 1];
+        for (int i = 0; i <= m; i++) dp[i][n] = 1;
+        for (int i = m - 1; i >= 0; i--) {
+            for (int j = n - 1; j >= 0; j--) {
+                dp[i][j] = dp[i + 1][j];
+                if (s.charAt(i) == t.charAt(j)) dp[i][j] += dp[i + 1][j + 1];
+            }
+        }
+        return (int) dp[0][0];
+    }
+}
+```
+
 #### Rust
 
 `u64` for the DP cells to defend against int overflow during the additions (the final cast to `i32` is fine per the problem). Byte slices for fast indexing.
@@ -13626,6 +16901,32 @@ def minDistance(word1, word2):
             else:
                 dp[j] = 1 + min(prev[j], dp[j - 1], prev[j - 1])
     return dp[n]
+```
+
+#### Java
+
+`prev = dp.clone()` snapshots the previous row (a shallow copy is a full copy for `int[]`), and `dp[0] = i` resets the column-0 invariant each row. `Math.min` nesting replaces the brace-list variadic min of C++.
+
+```java
+class Solution {
+    public int minDistance(String word1, String word2) {
+        int m = word1.length(), n = word2.length();
+        int[] dp = new int[n + 1];
+        for (int j = 0; j <= n; j++) dp[j] = j;
+        for (int i = 1; i <= m; i++) {
+            int[] prev = dp.clone();
+            dp[0] = i;
+            for (int j = 1; j <= n; j++) {
+                if (word1.charAt(i - 1) == word2.charAt(j - 1)) {
+                    dp[j] = prev[j - 1];
+                } else {
+                    dp[j] = 1 + Math.min(prev[j], Math.min(dp[j - 1], prev[j - 1]));
+                }
+            }
+        }
+        return dp[n];
+    }
+}
 ```
 
 #### Rust
@@ -13741,6 +17042,42 @@ def maxCoins(nums):
         )
         return dp[(l, r)]
     return dfs(1, n - 2)
+```
+
+#### Java
+
+Java has no closures that capture mutable arrays cleanly for recursion, so hoist `nums` and the `int[][]` memo to instance fields and recurse through a private helper. Initialize the memo to `-1` as the "not computed" sentinel — `Arrays.fill` per row, or `new int[n][n]` and check for a distinct flag.
+
+```java
+import java.util.*;
+
+class Solution {
+    private int[] nums;
+    private int[][] dp;
+
+    public int maxCoins(int[] input) {
+        int n = input.length;
+        nums = new int[n + 2];
+        nums[0] = 1;
+        nums[n + 1] = 1;
+        for (int i = 0; i < n; i++) nums[i + 1] = input[i];
+        int m = nums.length;
+        dp = new int[m][m];
+        for (int[] row : dp) Arrays.fill(row, -1);
+        return dfs(1, m - 2);
+    }
+
+    private int dfs(int l, int r) {
+        if (l > r) return 0;
+        if (dp[l][r] != -1) return dp[l][r];
+        int best = 0;
+        for (int i = l; i <= r; i++) {
+            int coins = nums[l - 1] * nums[i] * nums[r + 1] + dfs(l, i - 1) + dfs(i + 1, r);
+            best = Math.max(best, coins);
+        }
+        return dp[l][r] = best;
+    }
+}
 ```
 
 #### Rust
@@ -13877,6 +17214,39 @@ def isMatch(s, p):
     return dp(0, 0)
 ```
 
+#### Java
+
+Use a boxed `Boolean[][]` memo where `null` means "unvisited" — cleaner than the tri-state `int` with `-1` that C++ needs, since `Boolean` naturally has a third state. Size it `(m+1) x (n+1)` to allow the exhausted-index states `i == m` / `j == n`.
+
+```java
+import java.util.*;
+
+class Solution {
+    private String s, p;
+    private Boolean[][] memo;
+
+    public boolean isMatch(String s, String p) {
+        this.s = s;
+        this.p = p;
+        memo = new Boolean[s.length() + 1][p.length() + 1];
+        return dp(0, 0);
+    }
+
+    private boolean dp(int i, int j) {
+        if (memo[i][j] != null) return memo[i][j];
+        if (j == p.length()) return memo[i][j] = (i == s.length());
+        boolean first = i < s.length() && (p.charAt(j) == '.' || p.charAt(j) == s.charAt(i));
+        boolean res;
+        if (j + 1 < p.length() && p.charAt(j + 1) == '*') {
+            res = dp(i, j + 2) || (first && dp(i + 1, j));
+        } else {
+            res = first && dp(i + 1, j + 1);
+        }
+        return memo[i][j] = res;
+    }
+}
+```
+
 #### Rust
 
 Pre-collect to `Vec<char>` once. `dp(i, j + 2, ...)` is the zero-match-of-star branch; `dp(i + 1, j, ...)` is the consume-one-and-stay branch.
@@ -13993,6 +17363,23 @@ def maxSubArray(nums):
     return res
 ```
 
+#### Java
+
+`Math.max` on two `int`s, no imports needed — pure primitives. Seed both `cur` and `res` from `nums[0]` and iterate from index 1 so the all-negative case returns the largest single element.
+
+```java
+class Solution {
+    public int maxSubArray(int[] nums) {
+        int cur = nums[0], res = nums[0];
+        for (int i = 1; i < nums.length; i++) {
+            cur = Math.max(nums[i], cur + nums[i]);
+            res = Math.max(res, cur);
+        }
+        return res;
+    }
+}
+```
+
 #### Rust
 
 `nums.iter().skip(1)` for the slice from index 1 — borrows the tail without allocation. Method-form `n.max(cur + n)` and `res.max(cur)`.
@@ -14073,6 +17460,22 @@ def canJump(nums):
     return goal == 0
 ```
 
+#### Java
+
+Plain primitive scan, no collections — a classic index-based reverse for-loop. `int` indices never underflow here since we stop at 0, so no cast gymnastics like Rust's `usize`.
+
+```java
+class Solution {
+    public boolean canJump(int[] nums) {
+        int goal = nums.length - 1;
+        for (int i = nums.length - 2; i >= 0; i--) {
+            if (i + nums[i] >= goal) goal = i;
+        }
+        return goal == 0;
+    }
+}
+```
+
 #### Rust
 
 `nums[i] as usize` cast inside the comparison. `(0..nums.len() - 1).rev()` for backwards iteration; range-rev is the idiomatic form.
@@ -14146,6 +17549,26 @@ def jump(nums):
             jumps += 1
             cur_end = cur_far
     return jumps
+```
+
+#### Java
+
+`Math.max` extends `curFar`; primitives throughout, no imports. Loop stops at `length - 1` so arriving at the last index doesn't cost an extra jump.
+
+```java
+class Solution {
+    public int jump(int[] nums) {
+        int jumps = 0, curEnd = 0, curFar = 0;
+        for (int i = 0; i < nums.length - 1; i++) {
+            curFar = Math.max(curFar, i + nums[i]);
+            if (i == curEnd) {
+                jumps++;
+                curEnd = curFar;
+            }
+        }
+        return jumps;
+    }
+}
 ```
 
 #### Rust
@@ -14236,6 +17659,29 @@ def canCompleteCircuit(gas, cost):
             tank = 0
             start = i + 1
     return start
+```
+
+#### Java
+
+No stream needed — a single primitive loop computes the total surplus, and a second does the reset-on-deficit scan. Keeping it to `int` arithmetic avoids any boxing.
+
+```java
+class Solution {
+    public int canCompleteCircuit(int[] gas, int[] cost) {
+        int total = 0;
+        for (int i = 0; i < gas.length; i++) total += gas[i] - cost[i];
+        if (total < 0) return -1;
+        int tank = 0, start = 0;
+        for (int i = 0; i < gas.length; i++) {
+            tank += gas[i] - cost[i];
+            if (tank < 0) {
+                tank = 0;
+                start = i + 1;
+            }
+        }
+        return start;
+    }
+}
 ```
 
 #### Rust
@@ -14338,6 +17784,33 @@ def isNStraightHand(hand, groupSize):
                     return False
                 count[i] -= n
     return True
+```
+
+#### Java
+
+`TreeMap` iterates keys in ascending order for free (red-black tree), mirroring C++'s `std::map` — no separate sort of the key set. `getOrDefault(i, 0)` folds the missing-key check into the read; snapshot `firstKey()`-style iteration is fine here since we only decrement existing/absent entries.
+
+```java
+import java.util.*;
+
+class Solution {
+    public boolean isNStraightHand(int[] hand, int groupSize) {
+        if (hand.length % groupSize != 0) return false;
+        TreeMap<Integer, Integer> count = new TreeMap<>();
+        for (int c : hand) count.merge(c, 1, Integer::sum);
+        while (!count.isEmpty()) {
+            int card = count.firstKey();
+            int n = count.get(card);
+            for (int i = card; i < card + groupSize; i++) {
+                int have = count.getOrDefault(i, 0);
+                if (have < n) return false;
+                if (have == n) count.remove(i);
+                else count.put(i, have - n);
+            }
+        }
+        return true;
+    }
+}
 ```
 
 #### Rust
@@ -14456,6 +17929,26 @@ def mergeTriplets(triplets, target):
     return res == target
 ```
 
+#### Java
+
+Fixed `int[3]` accumulator on the heap (Java arrays are always heap objects, but the pattern is the same). `Math.max` per element; `Arrays.equals` gives the concise final element-wise comparison C++ gets from `==`.
+
+```java
+import java.util.*;
+
+class Solution {
+    public boolean mergeTriplets(int[][] triplets, int[] target) {
+        int[] res = new int[3];
+        for (int[] t : triplets) {
+            if (t[0] <= target[0] && t[1] <= target[1] && t[2] <= target[2]) {
+                for (int i = 0; i < 3; i++) res[i] = Math.max(res[i], t[i]);
+            }
+        }
+        return Arrays.equals(res, target);
+    }
+}
+```
+
 #### Rust
 
 Fixed `[i32; 3]` array on the stack. Method-form `res[i].max(t[i])` for the per-element max.
@@ -14541,6 +18034,31 @@ def partitionLabels(s):
             res.append(end - start + 1)
             start = i + 1
     return res
+```
+
+#### Java
+
+A fixed `int[26]` table for last-occurrence beats a `HashMap` for the constant alphabet — index by `c - 'a'`. `charAt` iterates the string without allocating a char array; `Math.max` extends the partition boundary.
+
+```java
+import java.util.*;
+
+class Solution {
+    public List<Integer> partitionLabels(String s) {
+        int[] last = new int[26];
+        for (int i = 0; i < s.length(); i++) last[s.charAt(i) - 'a'] = i;
+        List<Integer> res = new ArrayList<>();
+        int start = 0, end = 0;
+        for (int i = 0; i < s.length(); i++) {
+            end = Math.max(end, last[s.charAt(i) - 'a']);
+            if (i == end) {
+                res.add(end - start + 1);
+                start = i + 1;
+            }
+        }
+        return res;
+    }
+}
 ```
 
 #### Rust
@@ -14652,6 +18170,27 @@ def checkValidString(s):
     return lo == 0
 ```
 
+#### Java
+
+Pure `int` bookkeeping — no collections. `charAt` reads each character; `Math.max(lo, 0)` clamps the lower bound, the same trick as C++.
+
+```java
+class Solution {
+    public boolean checkValidString(String s) {
+        int lo = 0, hi = 0;
+        for (int idx = 0; idx < s.length(); idx++) {
+            char c = s.charAt(idx);
+            if (c == '(') { lo++; hi++; }
+            else if (c == ')') { lo--; hi--; }
+            else { lo--; hi++; }
+            if (hi < 0) return false;
+            lo = Math.max(lo, 0);
+        }
+        return lo == 0;
+    }
+}
+```
+
 #### Rust
 
 Pattern match on `char` with three arms. The `if lo < 0 { lo = 0 }` clamp is explicit; no method-form `max` for this in-place mutation.
@@ -14749,6 +18288,34 @@ def insert(intervals, newInterval):
             newInterval = [min(newInterval[0], s), max(newInterval[1], e)]
     res.append(newInterval)
     return res
+```
+
+#### Java
+
+`List<int[]>` for the result; there is no slice-append, so copy the suffix with `res.add(intervals[j])` in a loop for the early-exit phase. Return `res.toArray(new int[0][])` to match the `int[][]` signature LeetCode expects.
+
+```java
+import java.util.*;
+
+class Solution {
+    public int[][] insert(int[][] intervals, int[] newInterval) {
+        List<int[]> res = new ArrayList<>();
+        for (int i = 0; i < intervals.length; i++) {
+            int s = intervals[i][0], e = intervals[i][1];
+            if (newInterval[1] < s) {
+                res.add(newInterval);
+                for (int j = i; j < intervals.length; j++) res.add(intervals[j]);
+                return res.toArray(new int[0][]);
+            } else if (newInterval[0] > e) {
+                res.add(new int[]{s, e});
+            } else {
+                newInterval = new int[]{Math.min(newInterval[0], s), Math.max(newInterval[1], e)};
+            }
+        }
+        res.add(newInterval);
+        return res.toArray(new int[0][]);
+    }
+}
 ```
 
 #### Rust
@@ -14854,6 +18421,31 @@ def merge(intervals):
     return res
 ```
 
+#### Java
+
+`Arrays.sort(intervals, Comparator.comparingInt(a -> a[0]))` sorts by start without boxing the key. Keep a `List<int[]>` and mutate `res.get(res.size()-1)[1]` in place to extend the last merged end.
+
+```java
+import java.util.*;
+
+class Solution {
+    public int[][] merge(int[][] intervals) {
+        Arrays.sort(intervals, Comparator.comparingInt(a -> a[0]));
+        List<int[]> res = new ArrayList<>();
+        res.add(intervals[0]);
+        for (int i = 1; i < intervals.length; i++) {
+            int[] last = res.get(res.size() - 1);
+            if (intervals[i][0] <= last[1]) {
+                last[1] = Math.max(last[1], intervals[i][1]);
+            } else {
+                res.add(intervals[i]);
+            }
+        }
+        return res.toArray(new int[0][]);
+    }
+}
+```
+
 #### Rust
 
 `sort_by_key(|iv| iv[0])` is explicit about the sort key. `res.last_mut().unwrap()` to mutate the last interval — borrow checker requires the explicit `.unwrap()`.
@@ -14949,6 +18541,26 @@ def eraseOverlapIntervals(intervals):
     return res
 ```
 
+#### Java
+
+`Comparator.comparingInt(a -> a[1])` sorts by end for the activity-selection greedy. `Integer.MIN_VALUE` is the initial sentinel — safe because we only compare, never do arithmetic that could overflow.
+
+```java
+import java.util.*;
+
+class Solution {
+    public int eraseOverlapIntervals(int[][] intervals) {
+        Arrays.sort(intervals, Comparator.comparingInt(a -> a[1]));
+        int res = 0, end = Integer.MIN_VALUE;
+        for (int[] iv : intervals) {
+            if (iv[0] >= end) end = iv[1];
+            else res++;
+        }
+        return res;
+    }
+}
+```
+
 #### Rust
 
 `sort_by_key(|iv| iv[1])` sorts by end. `i32::MIN` as the initial sentinel; `i32::MIN` won't overflow when compared.
@@ -15039,6 +18651,24 @@ def canAttendMeetings(intervals):
     return True
 ```
 
+#### Java
+
+`Arrays.sort` with `comparingInt(a -> a[0])` orders by start; then a single adjacent-pair scan. The strict `<` (not `<=`) is the load-bearing detail — back-to-back meetings where `end == start` don't conflict.
+
+```java
+import java.util.*;
+
+class Solution {
+    public boolean canAttendMeetings(int[][] intervals) {
+        Arrays.sort(intervals, Comparator.comparingInt(a -> a[0]));
+        for (int i = 1; i < intervals.length; i++) {
+            if (intervals[i][0] < intervals[i - 1][1]) return false;
+        }
+        return true;
+    }
+}
+```
+
 #### Rust
 
 `sort_by_key(|iv| iv[0])` for explicit by-start. Loop with `1..intervals.len()` for the adjacent comparison.
@@ -15120,6 +18750,26 @@ def minMeetingRooms(intervals):
         else:
             heapq.heappush(heap, e)
     return len(heap)
+```
+
+#### Java
+
+`PriorityQueue<Integer>` is a min-heap by default, so `peek()` returns the earliest end time with no `Comparator` needed. There is no atomic `heapreplace`, so express it as `poll()` then `offer()` when the room frees up; the final `size()` is the peak room count.
+
+```java
+import java.util.*;
+
+class Solution {
+    public int minMeetingRooms(int[][] intervals) {
+        Arrays.sort(intervals, Comparator.comparingInt(a -> a[0]));
+        PriorityQueue<Integer> heap = new PriorityQueue<>();
+        for (int[] iv : intervals) {
+            if (!heap.isEmpty() && heap.peek() <= iv[0]) heap.poll();
+            heap.offer(iv[1]);
+        }
+        return heap.size();
+    }
+}
 ```
 
 #### Rust
@@ -15233,6 +18883,37 @@ def minInterval(intervals, queries):
             heapq.heappop(heap)
         res[q] = heap[0][0] if heap else -1
     return [res[q] for q in queries]
+```
+
+#### Java
+
+A `PriorityQueue<int[]>` with `Comparator.comparingInt(a -> a[0])` is the min-heap keyed by size; `peek()` reads the top without popping for the lazy eviction. A `HashMap<Integer,Integer>` reorders answers back to the original query order.
+
+```java
+import java.util.*;
+
+class Solution {
+    public int[] minInterval(int[][] intervals, int[] queries) {
+        Arrays.sort(intervals, Comparator.comparingInt(a -> a[0]));
+        int[] sortedQ = queries.clone();
+        Arrays.sort(sortedQ);
+        PriorityQueue<int[]> heap = new PriorityQueue<>(Comparator.comparingInt(a -> a[0])); // (size, end)
+        Map<Integer, Integer> resMap = new HashMap<>();
+        int i = 0;
+        for (int q : sortedQ) {
+            while (i < intervals.length && intervals[i][0] <= q) {
+                int s = intervals[i][0], e = intervals[i][1];
+                heap.offer(new int[]{e - s + 1, e});
+                i++;
+            }
+            while (!heap.isEmpty() && heap.peek()[1] < q) heap.poll();
+            resMap.put(q, heap.isEmpty() ? -1 : heap.peek()[0]);
+        }
+        int[] out = new int[queries.length];
+        for (int k = 0; k < queries.length; k++) out[k] = resMap.get(queries[k]);
+        return out;
+    }
+}
 ```
 
 #### Rust
@@ -15378,6 +19059,32 @@ def rotate(matrix):
         row.reverse()
 ```
 
+#### Java
+
+Java's lack of tuple assignment means the transpose swap needs an explicit `tmp`; the row reversal is a plain two-pointer loop over each `int[]` row. Pure primitives, no imports needed.
+
+```java
+class Solution {
+    public void rotate(int[][] matrix) {
+        int n = matrix.length;
+        for (int i = 0; i < n; i++) {
+            for (int j = i + 1; j < n; j++) {
+                int tmp = matrix[i][j];
+                matrix[i][j] = matrix[j][i];
+                matrix[j][i] = tmp;
+            }
+        }
+        for (int[] row : matrix) {
+            for (int l = 0, r = n - 1; l < r; l++, r--) {
+                int tmp = row[l];
+                row[l] = row[r];
+                row[r] = tmp;
+            }
+        }
+    }
+}
+```
+
 #### Rust
 
 Explicit `tmp` temp — Rust can't index-swap two `matrix[i][j]` and `matrix[j][i]` via parallel assignment because both borrow `matrix`. `row.reverse()` for the row reversal.
@@ -15471,6 +19178,37 @@ def spiralOrder(matrix):
                 res.append(matrix[r][left])
             left += 1
     return res
+```
+
+#### Java
+
+No slice sugar, so all four ring traversals are explicit indexed loops. Returning an `ArrayList<Integer>` matches the LeetCode `List<Integer>` signature; the inner-guard checks are the correctness anchor.
+
+```java
+import java.util.*;
+
+class Solution {
+    public List<Integer> spiralOrder(int[][] matrix) {
+        List<Integer> res = new ArrayList<>();
+        int top = 0, bottom = matrix.length - 1;
+        int left = 0, right = matrix[0].length - 1;
+        while (top <= bottom && left <= right) {
+            for (int c = left; c <= right; c++) res.add(matrix[top][c]);
+            top++;
+            for (int r = top; r <= bottom; r++) res.add(matrix[r][right]);
+            right--;
+            if (top <= bottom) {
+                for (int c = right; c >= left; c--) res.add(matrix[bottom][c]);
+                bottom--;
+            }
+            if (left <= right) {
+                for (int r = bottom; r >= top; r--) res.add(matrix[r][left]);
+                left++;
+            }
+        }
+        return res;
+    }
+}
 ```
 
 #### Rust
@@ -15593,6 +19331,29 @@ def setZeroes(matrix):
             matrix[r][0] = 0
 ```
 
+#### Java
+
+Two linear scans set the first-row/col flags; the rest is primitive `int[][]` indexing. The three-phase order (flags then interior mark then interior zero then first row/col) is the correctness anchor — no collections needed.
+
+```java
+class Solution {
+    public void setZeroes(int[][] matrix) {
+        int rows = matrix.length, cols = matrix[0].length;
+        boolean firstRow = false, firstCol = false;
+        for (int c = 0; c < cols; c++) if (matrix[0][c] == 0) firstRow = true;
+        for (int r = 0; r < rows; r++) if (matrix[r][0] == 0) firstCol = true;
+        for (int r = 1; r < rows; r++)
+            for (int c = 1; c < cols; c++)
+                if (matrix[r][c] == 0) { matrix[r][0] = 0; matrix[0][c] = 0; }
+        for (int r = 1; r < rows; r++)
+            for (int c = 1; c < cols; c++)
+                if (matrix[r][0] == 0 || matrix[0][c] == 0) matrix[r][c] = 0;
+        if (firstRow) for (int c = 0; c < cols; c++) matrix[0][c] = 0;
+        if (firstCol) for (int r = 0; r < rows; r++) matrix[r][0] = 0;
+    }
+}
+```
+
 #### Rust
 
 `(0..cols).any(|c| matrix[0][c] == 0)` — closure-based any. Same first-row/col-flag pattern; explicit `for` loops for the zeroing phases.
@@ -15698,6 +19459,33 @@ def isHappy(n):
     return fast == 1
 ```
 
+#### Java
+
+A private helper does the integer-arithmetic digit-square sum (`x % 10`, `x /= 10`) — faster than string conversion in a tight loop. Floyd's slow/fast keeps it O(1) space with no `HashSet`.
+
+```java
+class Solution {
+    public boolean isHappy(int n) {
+        int slow = n, fast = nextN(n);
+        while (fast != 1 && slow != fast) {
+            slow = nextN(slow);
+            fast = nextN(nextN(fast));
+        }
+        return fast == 1;
+    }
+
+    private int nextN(int x) {
+        int s = 0;
+        while (x > 0) {
+            int d = x % 10;
+            s += d * d;
+            x /= 10;
+        }
+        return s;
+    }
+}
+```
+
 #### Rust
 
 Pure integer arithmetic for `next_n` — `x % 10` and `x /= 10` extracts digits. Faster than string conversion for tight loops.
@@ -15795,6 +19583,27 @@ def plusOne(digits):
     return [1] + digits
 ```
 
+#### Java
+
+The typical case mutates one digit and returns the input array. Only the all-9s case allocates: a fresh `int[n+1]` whose leading 1 is already the default `0`-initialized array with `res[0] = 1`.
+
+```java
+class Solution {
+    public int[] plusOne(int[] digits) {
+        for (int i = digits.length - 1; i >= 0; i--) {
+            if (digits[i] < 9) {
+                digits[i]++;
+                return digits;
+            }
+            digits[i] = 0;
+        }
+        int[] res = new int[digits.length + 1];
+        res[0] = 1;
+        return res;
+    }
+}
+```
+
 #### Rust
 
 `digits.insert(0, 1)` is O(n) but only happens in the all-9s case. Early return on first non-9 keeps the typical case at O(1) modifications.
@@ -15874,6 +19683,26 @@ def myPow(x, n):
         x *= x
         n //= 2
     return res
+```
+
+#### Java
+
+Widen `n` to a `long` before negating so `n == Integer.MIN_VALUE` doesn't overflow when flipped. Bit ops (`m & 1`, `m >>= 1`) run on the widened value.
+
+```java
+class Solution {
+    public double myPow(double x, int n) {
+        long m = n;
+        if (m < 0) { x = 1.0 / x; m = -m; }
+        double res = 1.0;
+        while (m > 0) {
+            if ((m & 1) == 1) res *= x;
+            x *= x;
+            m >>= 1;
+        }
+        return res;
+    }
+}
 ```
 
 #### Rust
@@ -15976,6 +19805,33 @@ def multiply(num1, num2):
             res[p2] = total % 10
             res[p1] += total // 10
     return "".join(map(str, res)).lstrip("0")
+```
+
+#### Java
+
+`charAt(i) - '0'` converts each digit char to its value. A `StringBuilder` composes the result, and stripping leading zeros is a manual index scan — cheaper than allocating a substring via regex.
+
+```java
+class Solution {
+    public String multiply(String num1, String num2) {
+        if (num1.equals("0") || num2.equals("0")) return "0";
+        int m = num1.length(), n = num2.length();
+        int[] res = new int[m + n];
+        for (int i = m - 1; i >= 0; i--) {
+            for (int j = n - 1; j >= 0; j--) {
+                int mul = (num1.charAt(i) - '0') * (num2.charAt(j) - '0');
+                int total = mul + res[i + j + 1];
+                res[i + j + 1] = total % 10;
+                res[i + j] += total / 10;
+            }
+        }
+        StringBuilder sb = new StringBuilder();
+        int start = 0;
+        while (start < res.length && res[start] == 0) start++;
+        for (int k = start; k < res.length; k++) sb.append((char) ('0' + res[k]));
+        return sb.toString();
+    }
+}
 ```
 
 #### Rust
@@ -16092,6 +19948,41 @@ class DetectSquares:
                 continue
             res += self.pt_counts.get((x, py), 0) * self.pt_counts.get((px, y), 0)
         return res
+```
+
+#### Java
+
+A design problem, so write the named `DetectSquares` class. A `HashMap<Long,Integer>` keyed by a packed `(x<<20)|y` long counts duplicates and doubles as the distinct-point set (iterate `keySet()`), avoiding a separate collection.
+
+```java
+import java.util.*;
+
+class DetectSquares {
+    private final Map<Long, Integer> ptCounts = new HashMap<>();
+
+    public DetectSquares() {}
+
+    public void add(int[] point) {
+        long key = encode(point[0], point[1]);
+        ptCounts.merge(key, 1, Integer::sum);
+    }
+
+    public int count(int[] point) {
+        int px = point[0], py = point[1], res = 0;
+        for (long key : ptCounts.keySet()) {
+            int x = (int) (key >> 20), y = (int) (key & 0xFFFFF);
+            if (Math.abs(py - y) != Math.abs(px - x) || x == px) continue;
+            int c1 = ptCounts.getOrDefault(encode(x, py), 0);
+            int c2 = ptCounts.getOrDefault(encode(px, y), 0);
+            res += ptCounts.get(key) * c1 * c2;
+        }
+        return res;
+    }
+
+    private long encode(int x, int y) {
+        return ((long) x << 20) | y;
+    }
+}
 ```
 
 #### Rust
@@ -16228,6 +20119,20 @@ def singleNumber(nums):
     return res
 ```
 
+#### Java
+
+A plain accumulating XOR loop — the canonical, clearest form. No import needed since it's pure primitives; XOR's self-cancelling property does all the work.
+
+```java
+class Solution {
+    public int singleNumber(int[] nums) {
+        int res = 0;
+        for (int n : nums) res ^= n;
+        return res;
+    }
+}
+```
+
 #### Rust
 
 `nums.iter().fold(0, |acc, &n| acc ^ n)` — fold with XOR is the canonical reduce pattern, one line.
@@ -16291,6 +20196,18 @@ def hammingWeight(n):
     return res
 ```
 
+#### Java
+
+`Integer.bitCount(n)` is the standard-library popcount, compiled to a single `POPCNT` instruction on modern CPUs — the cleanest option. (Brian Kernighan's `n &= n - 1` loop is the manual alternative.)
+
+```java
+class Solution {
+    public int hammingWeight(int n) {
+        return Integer.bitCount(n);
+    }
+}
+```
+
 #### Rust
 
 `n.count_ones()` is the standard library popcount — single instruction on modern hardware. Cleanest of the four.
@@ -16348,6 +20265,22 @@ def countBits(n):
     for i in range(1, n + 1):
         dp[i] = dp[i >> 1] + (i & 1)
     return dp
+```
+
+#### Java
+
+The recurrence `dp[i] = dp[i >> 1] + (i & 1)` fills a primitive `int[]` in one O(n) pass; Java's arrays are zero-initialized so the base case `dp[0] = 0` is free.
+
+```java
+class Solution {
+    public int[] countBits(int n) {
+        int[] dp = new int[n + 1];
+        for (int i = 1; i <= n; i++) {
+            dp[i] = dp[i >> 1] + (i & 1);
+        }
+        return dp;
+    }
+}
 ```
 
 #### Rust
@@ -16418,6 +20351,18 @@ def reverseBits(n):
     return res
 ```
 
+#### Java
+
+`Integer.reverse(n)` is the standard-library bit-reversal intrinsic (`RBIT` on ARM) — one call. The manual shift-and-OR loop is shown only if the intrinsic is disallowed.
+
+```java
+class Solution {
+    public int reverseBits(int n) {
+        return Integer.reverse(n);
+    }
+}
+```
+
 #### Rust
 
 `n.reverse_bits()` is a single CPU instruction (RBIT on ARM, software emulation otherwise). One line.
@@ -16477,6 +20422,22 @@ A sorting approach is O(n log n). A hashset approach is O(n) time but O(n) space
 def missingNumber(nums):
     n = len(nums)
     return n * (n + 1) // 2 - sum(nums)
+```
+
+#### Java
+
+The Gauss formula `n * (n + 1) / 2 - sum` in a single loop; `int` is 32-bit so within LeetCode bounds there's no overflow, matching the C++/Go approach.
+
+```java
+class Solution {
+    public int missingNumber(int[] nums) {
+        int n = nums.length;
+        int expected = n * (n + 1) / 2;
+        int actual = 0;
+        for (int v : nums) actual += v;
+        return expected - actual;
+    }
+}
 ```
 
 #### Rust
@@ -16545,6 +20506,23 @@ def getSum(a, b):
         a ^= b
         b = carry
     return a if b == 0 else a & mask
+```
+
+#### Java
+
+Fixed-width `int` handles the wraparound naturally, so no masking is needed (unlike Python): `a ^ b` is the carry-less sum and `(a & b) << 1` is the carry, looped until the carry is zero.
+
+```java
+class Solution {
+    public int getSum(int a, int b) {
+        while (b != 0) {
+            int carry = (a & b) << 1;
+            a ^= b;
+            b = carry;
+        }
+        return a;
+    }
+}
 ```
 
 #### Rust
