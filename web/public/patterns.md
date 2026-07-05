@@ -74,13 +74,63 @@ is_allowed(identity, endpoint) →
 ```
 
 #### High-Level Design
-```
-Client ──→ API Gateway ──→ [Rate Limit Middleware] ──→ Backend
-                                ↓ check
-                         Shared Counter Store (sharded
-                         in-memory cache, atomic ops)
-                                ↑ rule lookup
-                         Config Service (pub/sub invalidation)
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 330" role="img" aria-label="Rate limiter high-level architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <!-- spine -->
+  <rect class="box" x="150" y="20" width="200" height="46" rx="9"/>
+  <text class="lbl" x="250" y="45">Client</text>
+
+  <rect class="box" x="150" y="100" width="200" height="46" rx="9"/>
+  <text class="lbl" x="250" y="125">API Gateway</text>
+
+  <rect class="box acc" x="150" y="180" width="200" height="46" rx="9"/>
+  <text class="lbl" x="250" y="198">Rate Limiter</text>
+  <text class="sub" x="250" y="215">middleware · at edge</text>
+
+  <rect class="box" x="150" y="260" width="200" height="46" rx="9"/>
+  <text class="lbl" x="250" y="285">Backend</text>
+
+  <!-- shared state (right) -->
+  <ellipse class="store" cx="630" cy="150" rx="75" ry="10"/>
+  <path class="store" d="M555,150 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="630" y="150">Counter Store</text>
+  <text class="edge" x="630" y="205">fail open if unhealthy</text>
+
+  <rect class="box" x="530" y="245" width="200" height="46" rx="9"/>
+  <text class="lbl" x="630" y="263">Config Service</text>
+  <text class="sub" x="630" y="279">rules · pub/sub</text>
+
+  <!-- flows -->
+  <path class="flow" d="M250,66 L250,100"/>
+  <path class="flow" d="M250,146 L250,180"/>
+  <text class="edge" x="262" y="164" text-anchor="start">request</text>
+  <path class="flow acc" d="M250,226 L250,260"/>
+  <text class="edge" x="262" y="244" text-anchor="start">allow</text>
+
+  <path class="flow acc" d="M350,197 L553,166"/>
+  <text class="edge" x="362" y="176" text-anchor="start">check + incr (atomic)</text>
+
+  <path class="flow" d="M540,248 L352,212"/>
+  <text class="edge" x="452" y="222" text-anchor="start">rule lookup</text>
+</svg>
 ```
 
 **How to read the diagram:** the request always hits the rate limiter before it reaches your backend. The limiter itself is intentionally thin: it figures out who the caller is, loads the rule for that caller and endpoint, and asks a shared counter store whether this request should be allowed.
@@ -319,21 +369,70 @@ add_node(server_id) / remove_node(server_id)
 ```
 
 #### High-Level Design
-```
-                       hash(K) = 100
-                              ↓
-                       walk clockwise
-                              ↓
-              ┌───── 0 ──────┐
-        S3@45│              │S1@190
-             │              │
-        S2@130              │
-              └───── 290 ───┘  ← next vnode owns K
-                          ↑
-                  S2 owns K (vnode @ 130)
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 430" role="img" aria-label="Consistent hashing ring with virtual nodes">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
 
-Each physical server has ~200 vnodes scattered around the ring
-to smooth out distribution.
+  <!-- the ring -->
+  <circle class="box" cx="270" cy="255" r="145" fill="none"/>
+  <text class="edge" x="270" y="235">hash space</text>
+  <text class="edge" x="270" y="252">0 … 2^32-1</text>
+  <text class="sub" x="270" y="94">0</text>
+
+  <!-- virtual nodes on the ring -->
+  <circle cx="320" cy="119" r="6" fill="currentColor"/>
+  <text class="sub" x="329" y="93">S1</text>
+  <circle cx="413" cy="230" r="6" fill="currentColor"/>
+  <text class="sub" x="439" y="225">S3</text>
+  <circle cx="342" cy="381" r="6" fill="currentColor"/>
+  <text class="sub" x="356" y="404">S2</text>
+  <circle cx="197" cy="381" r="6" fill="currentColor"/>
+  <text class="sub" x="184" y="404">S1</text>
+  <circle cx="197" cy="129" r="6" fill="currentColor"/>
+  <text class="sub" x="184" y="106">S3</text>
+
+  <!-- owning vnode (accent) -->
+  <circle class="acc" cx="134" cy="205" r="8" fill="none" stroke-width="2"/>
+  <text class="sub" x="106" y="196">S2 · owns K</text>
+
+  <!-- key landing point -->
+  <circle cx="134" cy="305" r="5" fill="none" class="acc" stroke-width="2"/>
+  <path class="flow" d="M100,318 L128,308"/>
+  <text class="edge" x="92" y="332" text-anchor="start">hash(K)=100</text>
+
+  <!-- walk clockwise to owner -->
+  <path class="flow acc" d="M150,299 Q92,255 150,211"/>
+  <text class="edge" x="168" y="255" text-anchor="start">walk clockwise</text>
+
+  <!-- legend -->
+  <rect class="box" x="540" y="70" width="205" height="54" rx="9"/>
+  <text class="lbl" x="642" y="90">Hash ring</text>
+  <text class="sub" x="642" y="110">membership via gossip</text>
+
+  <rect class="box" x="540" y="150" width="205" height="54" rx="9"/>
+  <text class="lbl" x="642" y="170">~200 vnodes / server</text>
+  <text class="sub" x="642" y="190">smooths distribution</text>
+
+  <rect class="box" x="540" y="240" width="205" height="54" rx="9"/>
+  <text class="lbl" x="642" y="260">Lookup</text>
+  <text class="sub" x="642" y="280">clockwise to 1st vnode</text>
+</svg>
 ```
 
 **How to read the diagram:** there is no central owner table here. The ring itself is the lookup mechanism. You hash the key, land on a point on the circle, then walk clockwise to find the first server that owns that position.
@@ -529,16 +628,73 @@ DELETE /kv/{key}
 Returns version vector + value.
 
 #### High-Level Design
-```
-              Coordinator (any node can be one)
-                       │
-        ┌──────────────┼──────────────┐
-        ↓              ↓              ↓
-     Replica 1    Replica 2     Replica 3
-   (LSM store) (LSM store)   (LSM store)
-        │              │              │
-        └──── Gossip + Anti-entropy ──┘
-                 (Merkle trees)
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 400" role="img" aria-label="Dynamo-style distributed key-value store">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box" x="280" y="20" width="200" height="46" rx="9"/>
+  <text class="lbl" x="380" y="45">Client</text>
+
+  <rect class="box" x="265" y="100" width="230" height="46" rx="9"/>
+  <text class="lbl" x="380" y="118">Coordinator</text>
+  <text class="sub" x="380" y="135">any node · no storage needed</text>
+
+  <!-- replica set that gossips -->
+  <rect class="grp" x="40" y="168" width="680" height="200" rx="12"/>
+  <text class="sub" x="380" y="187" font-weight="600">Replica set — gossip + anti-entropy (Merkle trees)</text>
+
+  <rect class="box" x="70" y="200" width="180" height="46" rx="9"/>
+  <text class="lbl" x="160" y="224">Replica 1</text>
+  <rect class="box" x="290" y="200" width="180" height="46" rx="9"/>
+  <text class="lbl" x="380" y="224">Replica 2</text>
+  <rect class="box" x="510" y="200" width="180" height="46" rx="9"/>
+  <text class="lbl" x="600" y="224">Replica 3</text>
+
+  <ellipse class="store" cx="160" cy="300" rx="70" ry="9"/>
+  <path class="store" d="M90,300 v32 a70,9 0 0 0 140,0 v-32"/>
+  <text class="sub" x="160" y="320">LSM store</text>
+  <ellipse class="store" cx="380" cy="300" rx="70" ry="9"/>
+  <path class="store" d="M310,300 v32 a70,9 0 0 0 140,0 v-32"/>
+  <text class="sub" x="380" y="320">LSM store</text>
+  <ellipse class="store" cx="600" cy="300" rx="70" ry="9"/>
+  <path class="store" d="M530,300 v32 a70,9 0 0 0 140,0 v-32"/>
+  <text class="sub" x="600" y="320">LSM store</text>
+
+  <!-- flows -->
+  <path class="flow" d="M380,66 L380,100"/>
+  <text class="edge" x="392" y="84" text-anchor="start">get / put(key)</text>
+
+  <path class="flow acc" d="M360,146 L165,200"/>
+  <path class="flow acc" d="M380,146 L380,200"/>
+  <path class="flow acc" d="M400,146 L595,200"/>
+  <text class="edge" x="380" y="176">fan-out to N=3 · wait for quorum (R/W)</text>
+
+  <path class="flow" d="M160,246 L160,291"/>
+  <path class="flow" d="M380,246 L380,291"/>
+  <path class="flow" d="M600,246 L600,291"/>
+
+  <!-- gossip peer links -->
+  <path class="flow dash" d="M250,217 L290,217"/>
+  <path class="flow dash" d="M290,229 L250,229"/>
+  <path class="flow dash" d="M470,217 L510,217"/>
+  <path class="flow dash" d="M510,229 L470,229"/>
+</svg>
 ```
 
 **How to read the diagram:** any node can receive the client request and act as coordinator. It does not need to store the key itself. Its job is to locate the key's replica set, fan the request out to those replicas, and wait for enough responses to satisfy the read or write quorum.
@@ -771,19 +927,65 @@ next_id() → int64    # in-process call, sub-microsecond
 ```
 
 #### High-Level Design
-```
-Boot:
-  Node ─→ Coordination Service ─→ lease machine_id (0..1023)
-  Node syncs clock (NTP / PTP)
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 390" role="img" aria-label="Snowflake unique ID generator">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
 
-Per-call (in process):
-  ts = now_ms()
-  if ts < last_ts: HALT (clock went backwards)
-  if ts == last_ts: seq = (seq + 1) & 0xFFF
-                    if seq == 0: spin until next ms
-  else: seq = 0
-  last_ts = ts
-  id = (ts << 22) | (machine_id << 12) | seq
+  <!-- boot-time dependencies -->
+  <rect class="box" x="150" y="20" width="220" height="46" rx="9"/>
+  <text class="lbl" x="260" y="38">Coordination Service</text>
+  <text class="sub" x="260" y="54">ZooKeeper / etcd</text>
+
+  <rect class="box" x="420" y="20" width="200" height="46" rx="9"/>
+  <text class="lbl" x="520" y="38">NTP / PTP</text>
+  <text class="sub" x="520" y="54">clock source</text>
+
+  <!-- caller + generator -->
+  <rect class="box" x="40" y="130" width="150" height="46" rx="9"/>
+  <text class="lbl" x="115" y="155">Client</text>
+
+  <rect class="box acc" x="290" y="130" width="240" height="46" rx="9"/>
+  <text class="lbl" x="410" y="148">ID Generator</text>
+  <text class="sub" x="410" y="165">per node · local, no hop</text>
+
+  <!-- bit layout -->
+  <rect class="grp" x="120" y="250" width="520" height="110" rx="12"/>
+  <text class="sub" x="380" y="270" font-weight="600">id = (ts &lt;&lt; 22) | (machine_id &lt;&lt; 12) | seq</text>
+  <rect class="box" x="140" y="295" width="300" height="46" rx="8"/>
+  <text class="sub" x="290" y="318">timestamp · 41b (ms)</text>
+  <rect class="box" x="440" y="295" width="110" height="46" rx="8"/>
+  <text class="sub" x="495" y="318">machine · 10b</text>
+  <rect class="box" x="550" y="295" width="70" height="46" rx="8"/>
+  <text class="sub" x="585" y="318">seq · 12b</text>
+
+  <!-- flows -->
+  <path class="flow dash" d="M395,130 L280,66"/>
+  <text class="edge" x="238" y="100" text-anchor="start">lease machine_id (0..1023) @ boot</text>
+  <path class="flow dash" d="M470,130 L515,66"/>
+  <text class="edge" x="528" y="100" text-anchor="start">sync clock</text>
+
+  <path class="flow acc" d="M190,153 L290,153"/>
+  <text class="edge" x="200" y="140" text-anchor="start">next_id()</text>
+
+  <path class="flow acc" d="M410,176 L410,250"/>
+  <text class="edge" x="422" y="213" text-anchor="start">combine locally · guard clock skew</text>
+</svg>
 ```
 
 **How to read the diagram:** the coordination service is only used when a machine starts up. It hands out a unique machine ID, and from that point onward the server generates IDs locally with no network hop on the hot path.
@@ -980,18 +1182,85 @@ GET /api/{alias}/stats
 ```
 
 #### High-Level Design
-```
-Write path:
-  Client → API → ID Service (Snowflake) → base62 encode → DB write → Cache write
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 480" role="img" aria-label="URL shortener write and read paths">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
 
-Read path:
-  Client → CDN ──hit──→ 301 redirect (cached)
-              │
-              └──miss──→ App Server → KV Cache ──hit──→ 301 redirect
-                                       │
-                                       └──miss──→ Alias Store → cache → 301 redirect
-                                                      ↓
-                                          async: click event → Event Stream → Analytics Warehouse
+  <rect class="box" x="290" y="20" width="180" height="46" rx="9"/>
+  <text class="lbl" x="380" y="45">Client</text>
+
+  <!-- write path (left) -->
+  <rect class="box" x="30" y="120" width="180" height="46" rx="9"/>
+  <text class="lbl" x="120" y="145">Write API</text>
+  <rect class="box" x="30" y="210" width="180" height="46" rx="9"/>
+  <text class="lbl" x="120" y="228">ID Service</text>
+  <text class="sub" x="120" y="245">Snowflake</text>
+
+  <!-- read path (right, hot) -->
+  <rect class="box acc" x="550" y="120" width="180" height="46" rx="9"/>
+  <text class="lbl" x="640" y="145">CDN · edge</text>
+  <rect class="box" x="550" y="210" width="180" height="46" rx="9"/>
+  <text class="lbl" x="640" y="235">App Server</text>
+
+  <!-- shared stores (center) -->
+  <ellipse class="store" cx="380" cy="160" rx="80" ry="10"/>
+  <path class="store" d="M300,160 v34 a80,10 0 0 0 160,0 v-34"/>
+  <text class="sub" x="380" y="182">KV Cache</text>
+
+  <ellipse class="store" cx="380" cy="300" rx="80" ry="10"/>
+  <path class="store" d="M300,300 v34 a80,10 0 0 0 160,0 v-34"/>
+  <text class="sub" x="380" y="322">Alias Store · DB</text>
+
+  <!-- analytics (async) -->
+  <rect class="box" x="550" y="320" width="180" height="46" rx="9"/>
+  <text class="lbl" x="640" y="338">Event Stream</text>
+  <text class="sub" x="640" y="354">Kafka</text>
+  <rect class="box" x="550" y="410" width="180" height="46" rx="9"/>
+  <text class="lbl" x="640" y="435">Analytics Warehouse</text>
+
+  <!-- client fan -->
+  <path class="flow" d="M330,60 L165,120"/>
+  <text class="edge" x="200" y="82" text-anchor="end">shorten</text>
+  <path class="flow acc" d="M430,60 L595,120"/>
+  <text class="edge" x="560" y="82" text-anchor="start">resolve</text>
+
+  <!-- write flows -->
+  <path class="flow" d="M120,166 L120,210"/>
+  <text class="edge" x="132" y="190" text-anchor="start">get id</text>
+  <path class="flow" d="M210,222 L302,182"/>
+  <text class="edge" x="222" y="196" text-anchor="start">cache write</text>
+  <path class="flow" d="M210,240 L300,300"/>
+  <text class="edge" x="222" y="286" text-anchor="start">base62 · DB write</text>
+
+  <!-- read flows -->
+  <path class="flow acc" d="M640,166 L640,210"/>
+  <text class="edge" x="652" y="188" text-anchor="start">miss (hit → 301)</text>
+  <path class="flow acc" d="M550,224 L462,184"/>
+  <text class="edge" x="470" y="200" text-anchor="end">check</text>
+  <path class="flow" d="M550,242 L460,300"/>
+  <text class="edge" x="470" y="288" text-anchor="end">miss → DB</text>
+
+  <!-- analytics async -->
+  <path class="flow dash" d="M640,256 L640,320"/>
+  <text class="edge" x="652" y="290" text-anchor="start">async click</text>
+  <path class="flow dash" d="M640,366 L640,410"/>
+</svg>
 ```
 
 **How to read the diagram:** the write path creates a short alias and stores it. The read path is much more important: ideally a request for an alias is answered by the CDN, otherwise by a cache, and only rarely by the backing store.
@@ -1226,29 +1495,72 @@ get_status(crawl_id) → {pages_done, errors, last_url}
 ```
 
 #### High-Level Design
-```
-        ┌──────────────┐
-        │ URL Frontier │ (priority queues, per-domain)
-        └──────┬───────┘
-               ↓
-       ┌───────────────┐
-       │ Fetcher Pool  │──→ DNS Cache
-       └───────┬───────┘
-               ↓
-       ┌───────────────┐
-       │ HTML Parser   │
-       └───────┬───────┘
-               ↓
-       ┌─────────────────┐       ┌────────────────────────┐
-       │ Content Filter  │──────→│ URL Seen?              │
-       │ (SimHash dedup) │       │ (Bloom + embedded KV)  │
-       └────────┬────────┘       └──────┬─────────────────┘
-                ↓                       │ new URLs
-       ┌───────────────┐                ↓
-       │  Page Archive │          back to Frontier
-       │  (Object      │
-       │   Store)      │
-       └───────────────┘
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 480" role="img" aria-label="Web crawler architecture loop">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <!-- spine -->
+  <rect class="box" x="170" y="20" width="220" height="56" rx="9"/>
+  <text class="lbl" x="280" y="40">URL Frontier</text>
+  <text class="sub" x="280" y="58">priority queues · per-domain</text>
+
+  <rect class="box" x="180" y="130" width="200" height="46" rx="9"/>
+  <text class="lbl" x="280" y="155">Fetcher Pool</text>
+
+  <rect class="box" x="180" y="210" width="200" height="46" rx="9"/>
+  <text class="lbl" x="280" y="235">HTML Parser</text>
+
+  <rect class="box" x="170" y="290" width="220" height="56" rx="9"/>
+  <text class="lbl" x="280" y="310">Content Filter</text>
+  <text class="sub" x="280" y="328">SimHash dedup</text>
+
+  <rect class="box" x="170" y="400" width="220" height="56" rx="9"/>
+  <text class="lbl" x="280" y="420">Page Archive</text>
+  <text class="sub" x="280" y="438">Object Store</text>
+
+  <!-- dedup check (right) -->
+  <rect class="box" x="470" y="290" width="230" height="56" rx="9"/>
+  <text class="lbl" x="585" y="310">URL Seen?</text>
+  <text class="sub" x="585" y="328">Bloom + embedded KV</text>
+
+  <!-- DNS cache (right of fetcher) -->
+  <ellipse class="store" cx="600" cy="130" rx="75" ry="10"/>
+  <path class="store" d="M525,130 v32 a75,10 0 0 0 150,0 v-32"/>
+  <text class="sub" x="600" y="150">DNS Cache</text>
+
+  <!-- flows -->
+  <path class="flow acc" d="M280,76 L280,130"/>
+  <text class="edge" x="292" y="103" text-anchor="start">next URL</text>
+  <path class="flow" d="M380,150 L523,140"/>
+  <text class="edge" x="392" y="132" text-anchor="start">resolve</text>
+  <path class="flow" d="M280,176 L280,210"/>
+  <path class="flow" d="M280,256 L280,290"/>
+  <path class="flow" d="M280,346 L280,400"/>
+  <text class="edge" x="292" y="374" text-anchor="start">store page</text>
+
+  <path class="flow" d="M390,318 L470,318"/>
+  <text class="edge" x="400" y="306" text-anchor="start">extracted links</text>
+
+  <!-- loop back to frontier -->
+  <path class="flow acc" d="M700,318 L730,318 L730,48 L390,48"/>
+  <text class="edge" x="718" y="185" text-anchor="end">new URLs → re-enqueue</text>
+</svg>
 ```
 
 **How to read the diagram:** the crawler is a loop, not a one-shot job. The frontier decides what URL is fetched next, workers download and parse pages, and the newly discovered links are pushed back into the frontier so the crawl can keep expanding.
@@ -1487,22 +1799,88 @@ GET /notifications/{id} → { state, attempts, delivered_at }
 ```
 
 #### High-Level Design
-```
-                                   ┌─────────────┐
-              ┌───────────────────→│ Push Queue  │──→ APNs/FCM Workers
-              │                    └─────────────┘
-   ┌──────────┴──┐                 ┌─────────────┐
-   │  Ingestion  │ ───────────────→│ Email Queue │──→ SES Workers
-   │   Service   │                 └─────────────┘
-   │  (validate, │                 ┌─────────────┐
-   │   dedupe,   │ ───────────────→│  SMS Queue  │──→ Twilio Workers
-   │   route)    │                 └─────────────┘
-   └──────┬──────┘                       │
-          │                              ↓ ack/fail
-          ↓                       ┌─────────────┐
-   Preferences Store              │ Status Store│ ← retries via DLQ
-   Template Store                 └─────────────┘
-   Idempotency Cache (in-memory KV)
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 440" role="img" aria-label="Notification system architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <!-- entry -->
+  <rect class="box" x="30" y="127" width="140" height="46" rx="9"/>
+  <text class="lbl" x="100" y="150">Client</text>
+
+  <rect class="box" x="200" y="115" width="170" height="70" rx="9"/>
+  <text class="lbl" x="285" y="143">Ingestion Service</text>
+  <text class="sub" x="285" y="163">validate · dedupe · route</text>
+
+  <!-- channel queues -->
+  <rect class="box acc" x="410" y="37" width="140" height="46" rx="9"/>
+  <text class="lbl" x="480" y="60">Push Queue</text>
+  <rect class="box" x="410" y="127" width="140" height="46" rx="9"/>
+  <text class="lbl" x="480" y="150">Email Queue</text>
+  <rect class="box" x="410" y="217" width="140" height="46" rx="9"/>
+  <text class="lbl" x="480" y="240">SMS Queue</text>
+
+  <!-- channel workers -->
+  <rect class="box" x="585" y="37" width="150" height="46" rx="9"/>
+  <text class="lbl" x="660" y="60">APNs / FCM</text>
+  <rect class="box" x="585" y="127" width="150" height="46" rx="9"/>
+  <text class="lbl" x="660" y="150">SES Workers</text>
+  <rect class="box" x="585" y="217" width="150" height="46" rx="9"/>
+  <text class="lbl" x="660" y="240">Twilio Workers</text>
+
+  <!-- config + idempotency stores -->
+  <rect class="grp" x="150" y="250" width="250" height="170" rx="12"/>
+  <text class="sub" x="275" y="270" font-weight="600">Config &amp; Idempotency</text>
+  <rect class="box" x="170" y="284" width="210" height="38" rx="8"/>
+  <text class="sub" x="275" y="303">Preferences Store</text>
+  <rect class="box" x="170" y="330" width="210" height="38" rx="8"/>
+  <text class="sub" x="275" y="349">Template Store</text>
+  <rect class="box" x="170" y="376" width="210" height="38" rx="8"/>
+  <text class="sub" x="275" y="395">Idempotency Cache</text>
+
+  <!-- status store -->
+  <ellipse class="store" cx="480" cy="310" rx="75" ry="10"/>
+  <path class="store" d="M405,310 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="480" y="332">Status Store</text>
+  <text class="edge" x="480" y="348">retries via DLQ</text>
+
+  <!-- flows -->
+  <path class="flow" d="M170,150 L200,150"/>
+  <path class="flow acc" d="M370,140 L390,140 L390,60 L410,60"/>
+  <text class="edge" x="394" y="84" text-anchor="start">push</text>
+  <path class="flow" d="M370,150 L410,150"/>
+  <text class="edge" x="392" y="140" text-anchor="start">email</text>
+  <path class="flow" d="M370,160 L390,160 L390,240 L410,240"/>
+  <text class="edge" x="394" y="205" text-anchor="start">SMS</text>
+
+  <path class="flow" d="M550,60 L585,60"/>
+  <path class="flow" d="M550,150 L585,150"/>
+  <path class="flow" d="M550,240 L585,240"/>
+
+  <path class="flow" d="M285,185 L285,250"/>
+  <text class="edge" x="293" y="218" text-anchor="start">read</text>
+
+  <!-- acks converge to status store -->
+  <path class="dash" style="fill:none;stroke:currentColor;stroke-width:1.5" d="M585,60 L567,60 L567,240"/>
+  <path class="dash" style="fill:none;stroke:currentColor;stroke-width:1.5" d="M585,150 L567,150 L567,240"/>
+  <path class="flow dash" d="M585,240 L567,240 L567,300 L480,300 L480,306"/>
+  <text class="edge" x="560" y="277" text-anchor="end">ack / fail</text>
+</svg>
 ```
 
 **How to read the diagram:** one front door accepts notification requests, checks whether they are valid and allowed, then hands them to separate delivery pipelines for push, email, and SMS. Those channel workers operate mostly independently after that point.
@@ -1740,24 +2118,73 @@ GET  /feed?cursor=X  → { posts: [...], next_cursor }
 ```
 
 #### High-Level Design
-```
-WRITE (post):
-  User ─→ Post Service ─→ Posts DB
-                   │
-                   └─→ Fan-out Service ──┬→ if author has < 10k followers:
-                                         │   for each follower:
-                                         │     PUSH to sorted-set cache feed list
-                                         │
-                                         └→ if celebrity (>10k):
-                                             SKIP push; mark for pull
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 400" role="img" aria-label="News feed hybrid fan-out architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
 
-READ (feed):
-  User ─→ Feed Service:
-            1. Fetch pre-computed Redis list (push timeline)
-            2. Pull recent posts from celebrity follows
-            3. Merge + rank (ML scorer)
-            4. Hydrate post details from cache/DB
-            5. Return paginated
+  <text class="sub" x="135" y="12" font-weight="600">WRITE</text>
+  <text class="sub" x="625" y="12" font-weight="600">READ</text>
+
+  <!-- write column -->
+  <rect class="box" x="40" y="20" width="190" height="46" rx="9"/>
+  <text class="lbl" x="135" y="43">Client · writes</text>
+  <rect class="box" x="40" y="110" width="190" height="46" rx="9"/>
+  <text class="lbl" x="135" y="133">Post Service</text>
+  <rect class="box" x="40" y="200" width="190" height="46" rx="9"/>
+  <text class="lbl" x="135" y="223">Fan-out Service</text>
+
+  <!-- read column -->
+  <rect class="box" x="530" y="20" width="190" height="46" rx="9"/>
+  <text class="lbl" x="625" y="43">Client · reads</text>
+  <rect class="box acc" x="530" y="110" width="190" height="46" rx="9"/>
+  <text class="lbl" x="625" y="133">Feed Service</text>
+  <rect class="box" x="530" y="200" width="190" height="46" rx="9"/>
+  <text class="lbl" x="625" y="223">Merge + Rank (ML)</text>
+
+  <!-- shared stores -->
+  <ellipse class="store acc" cx="380" cy="200" rx="75" ry="10"/>
+  <path class="store acc" d="M305,200 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="380" y="221">Timeline Cache</text>
+  <text class="edge" x="380" y="237">Redis sorted sets</text>
+
+  <ellipse class="store" cx="380" cy="320" rx="75" ry="10"/>
+  <path class="store" d="M305,320 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="380" y="342">Posts DB</text>
+
+  <!-- write flows -->
+  <path class="flow" d="M135,66 L135,110"/>
+  <text class="edge" x="143" y="88" text-anchor="start">post</text>
+  <path class="flow" d="M135,156 L135,200"/>
+  <text class="edge" x="143" y="178" text-anchor="start">fan-out</text>
+  <path class="flow" d="M230,133 L268,133 L268,340 L305,340"/>
+  <text class="edge" x="272" y="118" text-anchor="start">write post</text>
+  <path class="flow acc" d="M230,223 L305,220"/>
+  <text class="edge" x="238" y="208" text-anchor="start">push (non-celeb)</text>
+
+  <!-- read flows -->
+  <path class="flow" d="M625,66 L625,110"/>
+  <path class="flow acc" d="M625,156 L625,200"/>
+  <path class="flow acc" d="M530,133 L490,133 L490,217 L455,217"/>
+  <text class="edge" x="484" y="118" text-anchor="end">read timeline</text>
+  <path class="flow" d="M530,223 L492,223 L492,340 L455,340"/>
+  <text class="edge" x="486" y="358" text-anchor="end">hydrate + pull celeb</text>
+</svg>
 ```
 
 **How to read the diagram:** the key split is between posting and reading. On the write side, new posts are pushed into timelines for many followers. On the read side, the app fetches a mostly prebuilt timeline and then enriches or reranks it before returning results.
@@ -1971,26 +2398,85 @@ REST:
 ```
 
 #### High-Level Design
-```
-   User A                                            User B
-     │                                                  │
-     │  WebSocket                          WebSocket    │
-     ↓                                                  ↓
-  ┌──────────┐                                  ┌──────────┐
-  │ Chat Svr │                                  │ Chat Svr │
-  │  (sticky)│                                  │  (sticky)│
-  └────┬─────┘                                  └────┬─────┘
-       │                                             │
-       └─────→ Message Bus (partitioned event stream / pub-sub) ────┘
-                          │
-                          ↓
-                   ┌──────────────┐
-                   │ Persist      │ → wide-column store (history)
-                   │ Service      │ → Push Notif Svc (if offline)
-                   └──────────────┘
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 490" role="img" aria-label="Chat system real-time delivery architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
 
-Service Discovery: coordination service (user_id → chat_server_id)
-Presence: fast in-memory cache (user_id → last_heartbeat, TTL 30s)
+  <!-- clients -->
+  <rect class="box" x="60" y="20" width="180" height="46" rx="9"/>
+  <text class="lbl" x="150" y="43">User A</text>
+  <rect class="box" x="520" y="20" width="180" height="46" rx="9"/>
+  <text class="lbl" x="610" y="43">User B</text>
+
+  <!-- chat servers -->
+  <rect class="box" x="55" y="120" width="190" height="60" rx="9"/>
+  <text class="lbl" x="150" y="143">Chat Server A</text>
+  <text class="sub" x="150" y="163">sticky WS</text>
+  <rect class="box" x="515" y="120" width="190" height="60" rx="9"/>
+  <text class="lbl" x="610" y="143">Chat Server B</text>
+  <text class="sub" x="610" y="163">sticky WS</text>
+
+  <!-- coordination -->
+  <rect class="grp" x="295" y="95" width="170" height="110" rx="12"/>
+  <text class="sub" x="380" y="112" font-weight="600">Coordination</text>
+  <rect class="box" x="310" y="122" width="140" height="36" rx="8"/>
+  <text class="sub" x="380" y="140">Discovery</text>
+  <rect class="box" x="310" y="164" width="140" height="36" rx="8"/>
+  <text class="sub" x="380" y="182">Presence · TTL 30s</text>
+
+  <!-- message bus -->
+  <rect class="box acc" x="190" y="230" width="380" height="54" rx="9"/>
+  <text class="lbl" x="380" y="250">Message Bus</text>
+  <text class="sub" x="380" y="270">partitioned pub / sub</text>
+
+  <!-- persist -->
+  <rect class="box" x="290" y="330" width="180" height="60" rx="9"/>
+  <text class="lbl" x="380" y="353">Persist Service</text>
+  <text class="sub" x="380" y="373">persist then route</text>
+
+  <!-- history + push -->
+  <ellipse class="store" cx="180" cy="420" rx="75" ry="10"/>
+  <path class="store" d="M105,420 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="180" y="442">History Store</text>
+  <rect class="box" x="470" y="410" width="180" height="46" rx="9"/>
+  <text class="lbl" x="560" y="433">Push Notif Svc</text>
+
+  <!-- flows -->
+  <path class="flow" d="M150,66 L150,120"/>
+  <text class="edge" x="158" y="90" text-anchor="start">WebSocket</text>
+  <path class="flow" d="M610,66 L610,120"/>
+  <text class="edge" x="602" y="90" text-anchor="end">WebSocket</text>
+
+  <path class="flow" d="M150,180 L150,243 L190,243"/>
+  <text class="edge" x="122" y="215" text-anchor="start">publish</text>
+  <path class="flow" d="M610,180 L610,243 L570,243"/>
+  <text class="edge" x="602" y="215" text-anchor="end">deliver</text>
+
+  <path class="flow dash" d="M245,150 L295,150"/>
+  <path class="flow dash" d="M515,150 L465,150"/>
+
+  <path class="flow acc" d="M380,284 L380,330"/>
+  <path class="flow" d="M380,390 L380,410 L180,410 L180,420"/>
+  <text class="edge" x="200" y="405" text-anchor="end">history</text>
+  <path class="flow" d="M380,390 L380,410 L560,410"/>
+  <text class="edge" x="470" y="404" text-anchor="start">if offline</text>
+</svg>
 ```
 
 **How to read the diagram:** clients stay connected to chat servers over long-lived sockets. A sender's server accepts the message, persists it, then uses an internal routing layer to reach the server currently holding the recipient's connection.
@@ -2223,16 +2709,87 @@ GET /suggest?q={prefix}&limit=10
 ```
 
 #### High-Level Design
-```
-Build pipeline (offline, hourly):
-  Query logs ─→ partitioned event stream ─→ Aggregator ─→ Top-K builder ─→ Trie ─→ Snapshot to object store
-                                                                    │
-                                                          ┌─────────┴─────────┐
-                                                          ↓                   ↓
-Serve path (online):                                  Trie Shard 1 ...  Trie Shard N
-  Client ─→ CDN (popular prefixes) ─miss→ App ──prefix-route──→  shard
-              │                                                      ↓
-              └─cache────────────────────────────  return top-k from prefix node
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 430" role="img" aria-label="Search autocomplete offline build and serve architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <text class="sub" x="380" y="18" font-weight="600">Build pipeline · offline, hourly</text>
+
+  <!-- build pipeline -->
+  <rect class="box" x="20" y="34" width="128" height="46" rx="9"/>
+  <text class="sub" x="84" y="57">Query Logs</text>
+  <rect class="box" x="170" y="34" width="128" height="46" rx="9"/>
+  <text class="sub" x="234" y="57">Event Stream</text>
+  <rect class="box" x="320" y="34" width="118" height="46" rx="9"/>
+  <text class="sub" x="379" y="57">Aggregator</text>
+  <rect class="box" x="460" y="34" width="128" height="46" rx="9"/>
+  <text class="sub" x="524" y="57">Top-K Builder</text>
+  <rect class="box" x="610" y="34" width="128" height="46" rx="9"/>
+  <text class="sub" x="674" y="57">Trie Builder</text>
+
+  <path class="flow" d="M148,57 L170,57"/>
+  <path class="flow" d="M298,57 L320,57"/>
+  <path class="flow" d="M438,57 L460,57"/>
+  <path class="flow" d="M588,57 L610,57"/>
+
+  <!-- snapshot store -->
+  <ellipse class="store" cx="674" cy="140" rx="75" ry="10"/>
+  <path class="store" d="M599,140 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="674" y="162">Object Store</text>
+  <path class="flow" d="M674,80 L674,140"/>
+  <text class="edge" x="682" y="112" text-anchor="start">snapshot</text>
+
+  <text class="sub" x="380" y="240" font-weight="600">Serve path · online</text>
+
+  <!-- serve path -->
+  <rect class="box" x="20" y="278" width="128" height="46" rx="9"/>
+  <text class="sub" x="84" y="301">Client</text>
+  <rect class="box acc" x="200" y="278" width="150" height="46" rx="9"/>
+  <text class="lbl" x="275" y="298">CDN</text>
+  <text class="sub" x="275" y="316">popular prefixes</text>
+  <rect class="box" x="410" y="278" width="150" height="46" rx="9"/>
+  <text class="lbl" x="485" y="301">App / Router</text>
+
+  <!-- trie shards -->
+  <rect class="grp" x="618" y="248" width="132" height="160" rx="12"/>
+  <text class="sub" x="684" y="266" font-weight="600">Trie Shards</text>
+  <rect class="box" x="634" y="278" width="100" height="34" rx="8"/>
+  <text class="sub" x="684" y="295">Shard 1</text>
+  <rect class="box" x="634" y="320" width="100" height="34" rx="8"/>
+  <text class="sub" x="684" y="337">Shard 2</text>
+  <rect class="box" x="634" y="362" width="100" height="34" rx="8"/>
+  <text class="sub" x="684" y="379">Shard N</text>
+
+  <!-- serve flows -->
+  <path class="flow acc" d="M148,301 L200,301"/>
+  <text class="edge" x="152" y="286" text-anchor="start">prefix</text>
+  <path class="flow dash" d="M350,301 L410,301"/>
+  <text class="edge" x="356" y="286" text-anchor="start">miss</text>
+  <path class="flow" d="M560,301 L618,301"/>
+  <text class="edge" x="566" y="286" text-anchor="start">route by prefix</text>
+  <path class="flow dash" d="M410,315 L410,345 L275,345 L275,324"/>
+  <text class="edge" x="340" y="358">return + cache top-k</text>
+
+  <!-- snapshot load to shards -->
+  <path class="flow" d="M674,184 L674,248"/>
+  <text class="edge" x="682" y="216" text-anchor="start">load</text>
+</svg>
 ```
 
 **How to read the diagram:** almost all the heavy work happens before a user types anything. Batch jobs build an in-memory trie from past query logs, and serving nodes answer a request by walking that trie and returning the precomputed top suggestions for the prefix.
@@ -2454,28 +3011,93 @@ GET  /video/{id}/stream  → HLS chunks (served by CDN)
 ```
 
 #### High-Level Design
-```
-UPLOAD:
-  Client ──chunked upload──→ Edge Origin ──→ object store (raw)
-                                             │
-                                             ↓
-                                     Transcoding DAG
-                                             │
-                ┌────────┬──────────┬────────┼──────────┬─────────┐
-                ↓        ↓          ↓        ↓          ↓         ↓
-              240p     360p       480p     720p      1080p      4K
-                └────────┴──────────┴────┬───┴──────────┴─────────┘
-                                         ↓
-                                   HLS package (manifest + 6s chunks)
-                                         ↓
-                                   object store (encoded) → CDN
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 665" role="img" aria-label="YouTube upload transcode and playback architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
 
-PLAYBACK:
-  Client ─→ CDN ──hit──→ HLS chunks (binary)
-             │
-             └─miss──→ Origin → CDN populate → return
+  <text class="sub" x="165" y="14" font-weight="600">UPLOAD</text>
 
-  Client ABR loop: measure bandwidth → request next chunk at appropriate bitrate
+  <!-- upload spine -->
+  <rect class="box" x="65" y="24" width="200" height="46" rx="9"/>
+  <text class="lbl" x="165" y="47">Client · upload</text>
+  <rect class="box" x="65" y="97" width="200" height="46" rx="9"/>
+  <text class="lbl" x="165" y="120">Edge Origin</text>
+
+  <ellipse class="store" cx="165" cy="190" rx="75" ry="10"/>
+  <path class="store" d="M90,190 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="165" y="212">Object Store · raw</text>
+
+  <rect class="box" x="65" y="262" width="200" height="46" rx="9"/>
+  <text class="lbl" x="165" y="285">Transcoding DAG</text>
+
+  <!-- renditions -->
+  <rect class="grp" x="40" y="340" width="250" height="148" rx="12"/>
+  <text class="sub" x="165" y="358" font-weight="600">Renditions</text>
+  <rect class="box" x="57" y="370" width="100" height="30" rx="8"/>
+  <text class="sub" x="107" y="385">240p</text>
+  <rect class="box" x="175" y="370" width="100" height="30" rx="8"/>
+  <text class="sub" x="225" y="385">360p</text>
+  <rect class="box" x="57" y="408" width="100" height="30" rx="8"/>
+  <text class="sub" x="107" y="423">480p</text>
+  <rect class="box" x="175" y="408" width="100" height="30" rx="8"/>
+  <text class="sub" x="225" y="423">720p</text>
+  <rect class="box" x="57" y="446" width="100" height="30" rx="8"/>
+  <text class="sub" x="107" y="461">1080p</text>
+  <rect class="box" x="175" y="446" width="100" height="30" rx="8"/>
+  <text class="sub" x="225" y="461">4K</text>
+
+  <rect class="box" x="65" y="502" width="200" height="60" rx="9"/>
+  <text class="lbl" x="165" y="525">HLS Package</text>
+  <text class="sub" x="165" y="545">manifest + 6s chunks</text>
+
+  <ellipse class="store" cx="165" cy="600" rx="75" ry="10"/>
+  <path class="store" d="M90,600 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="165" y="622">Object Store · encoded</text>
+
+  <!-- playback -->
+  <text class="sub" x="580" y="474" font-weight="600">PLAYBACK</text>
+  <rect class="box" x="480" y="490" width="200" height="46" rx="9"/>
+  <text class="lbl" x="580" y="513">Client · playback</text>
+  <rect class="box acc" x="480" y="580" width="200" height="46" rx="9"/>
+  <text class="lbl" x="580" y="603">CDN</text>
+
+  <!-- upload flows -->
+  <path class="flow" d="M165,70 L165,97"/>
+  <text class="edge" x="173" y="84" text-anchor="start">chunked upload</text>
+  <path class="flow" d="M165,143 L165,190"/>
+  <path class="flow" d="M165,234 L165,262"/>
+  <path class="flow" d="M165,308 L165,340"/>
+  <path class="flow" d="M165,488 L165,502"/>
+  <path class="flow" d="M165,562 L165,600"/>
+
+  <!-- encoded store to CDN -->
+  <path class="flow acc" d="M240,635 L360,635 L360,603 L480,603"/>
+  <text class="edge" x="365" y="650" text-anchor="start">populate CDN</text>
+
+  <!-- CDN to client (hit) -->
+  <path class="flow acc" d="M580,580 L580,536"/>
+  <text class="edge" x="588" y="558" text-anchor="start">hit · HLS chunks (ABR)</text>
+
+  <!-- miss to origin -->
+  <path class="flow dash" d="M680,603 L740,603 L740,90 L265,90 L265,110"/>
+  <text class="edge" x="500" y="82" text-anchor="middle">miss → origin</text>
+</svg>
 ```
 
 **How to read the diagram:** uploads, processing, and playback are separate stages. A creator uploads one original file, a media pipeline turns it into many streamable variants, and viewers later fetch those prepared assets from caches and CDNs rather than from the upload path.
@@ -2721,25 +3343,67 @@ WS: { event: file_changed, file_id, version }
 ```
 
 #### High-Level Design
-```
-                    Client (sync agent)
-                          │
-                  computes file delta
-                  (which chunks changed)
-                          │
-        ┌─────────────────┼─────────────────┐
-        ↓ metadata        ↓ chunks          ↓ events
-  ┌──────────┐       ┌──────────┐     ┌──────────┐
-  │ Metadata │       │  Block   │     │  Notify  │
-  │ Service  │       │ Service  │     │  Service │
-  │ (txn store)│     │(object   │     │  (WS)    │
-  │          │       │  store)  │     │          │
-  └────┬─────┘       └──────────┘     └──────────┘
-       │
-       ↓
-  Versions, ACLs
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 365" role="img" aria-label="Google Drive metadata and block sync architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
 
-Other devices for same user ←─── Notify Service ─── update !
+  <!-- client -->
+  <rect class="box" x="270" y="17" width="220" height="60" rx="9"/>
+  <text class="lbl" x="380" y="40">Client · sync agent</text>
+  <text class="sub" x="380" y="60">computes file delta</text>
+
+  <!-- services -->
+  <rect class="box" x="45" y="150" width="210" height="60" rx="9"/>
+  <text class="lbl" x="150" y="173">Metadata Service</text>
+  <text class="sub" x="150" y="193">txn store</text>
+  <rect class="box acc" x="280" y="150" width="200" height="60" rx="9"/>
+  <text class="lbl" x="380" y="173">Block Service</text>
+  <text class="sub" x="380" y="193">chunks</text>
+  <rect class="box" x="505" y="150" width="210" height="60" rx="9"/>
+  <text class="lbl" x="610" y="173">Notify Service</text>
+  <text class="sub" x="610" y="193">WebSocket</text>
+
+  <!-- stores + targets -->
+  <ellipse class="store" cx="150" cy="290" rx="75" ry="10"/>
+  <path class="store" d="M75,290 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="150" y="312">Versions · ACLs</text>
+
+  <ellipse class="store" cx="380" cy="290" rx="75" ry="10"/>
+  <path class="store" d="M305,290 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="380" y="312">Object Store · blocks</text>
+
+  <rect class="box" x="505" y="275" width="210" height="50" rx="9"/>
+  <text class="lbl" x="610" y="300">Other devices</text>
+
+  <!-- fan-out flows -->
+  <path class="flow" d="M380,77 L380,100 L150,100 L150,150"/>
+  <text class="edge" x="200" y="115" text-anchor="end">metadata</text>
+  <path class="flow acc" d="M380,77 L380,150"/>
+  <text class="edge" x="388" y="120" text-anchor="start">chunks</text>
+  <path class="flow" d="M380,77 L380,100 L610,100 L610,150"/>
+  <text class="edge" x="560" y="115" text-anchor="start">events</text>
+
+  <path class="flow" d="M150,210 L150,290"/>
+  <path class="flow acc" d="M380,210 L380,290"/>
+  <path class="flow" d="M610,210 L610,275"/>
+  <text class="edge" x="618" y="243" text-anchor="start">update!</text>
+</svg>
 ```
 
 **How to read the diagram:** the system is split between metadata and file contents. Metadata tracks folders, permissions, versions, and change history; the file bytes themselves live in chunk or object storage and are uploaded or downloaded separately.
@@ -2957,19 +3621,65 @@ GET /search
 ```
 
 #### High-Level Design
-```
-Client ─→ API ─→ Geo Index Lookup ─→ Candidate IDs
-                       ↓
-                  ┌────┴────┐
-                  ↓         ↓
-              Geohash     Quadtree
-              (in-memory  (in-memory
-               geo cache)  service)
-                       │
-                       ↓
-                Hydrate (Biz DB) → filter + sort by exact distance → return
-                       ↑
-              Result cache (in-memory: hot queries)
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 440" role="img" aria-label="Proximity service high-level architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box" x="190" y="20" width="200" height="46" rx="9"/>
+  <text class="lbl" x="290" y="45">Client</text>
+
+  <rect class="box" x="190" y="100" width="200" height="46" rx="9"/>
+  <text class="lbl" x="290" y="125">API</text>
+
+  <rect class="grp" x="120" y="180" width="340" height="150" rx="12"/>
+  <text class="sub" x="290" y="201" font-weight="600">Geo Index Lookup</text>
+  <rect class="box" x="140" y="224" width="140" height="44" rx="8"/>
+  <text class="sub" x="210" y="246">Geohash · cache</text>
+  <rect class="box" x="300" y="224" width="140" height="44" rx="8"/>
+  <text class="sub" x="370" y="246">Quadtree</text>
+
+  <rect class="box acc" x="150" y="380" width="280" height="46" rx="9"/>
+  <text class="lbl" x="290" y="397">Hydrate + Rank</text>
+  <text class="sub" x="290" y="414">filter + sort by distance</text>
+
+  <ellipse class="store" cx="620" cy="250" rx="75" ry="10"/>
+  <path class="store" d="M545,250 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="620" y="272">Biz DB</text>
+
+  <ellipse class="store" cx="620" cy="380" rx="75" ry="10"/>
+  <path class="store" d="M545,380 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="620" y="402">Result cache · hot</text>
+
+  <path class="flow" d="M290,66 L290,100"/>
+  <path class="flow" d="M290,146 L290,180"/>
+  <text class="edge" x="298" y="163" text-anchor="start">location query</text>
+  <path class="flow acc" d="M290,330 L290,380"/>
+  <text class="edge" x="298" y="355" text-anchor="start">candidate IDs</text>
+
+  <path class="flow" d="M430,395 L490,395 L490,267 L545,267"/>
+  <text class="edge" x="498" y="330" text-anchor="start">hydrate</text>
+  <path class="flow" d="M545,408 L432,408"/>
+  <text class="edge" x="470" y="396" text-anchor="start">hot queries</text>
+
+  <path class="flow" d="M150,403 L70,403 L70,43 L190,43"/>
+  <text class="edge" x="78" y="220" text-anchor="start">ranked results</text>
+</svg>
 ```
 
 **How to read the diagram:** a location query does not search the whole world. It first maps the user's location to nearby geo cells, fetches the candidate places inside those cells, and only then computes exact distance and ranking.
@@ -3234,29 +3944,66 @@ POST /privacy/share/{user}   body: { enabled: bool }
 ```
 
 #### High-Level Design
-```
-Mobile clients (sample GPS adaptively)
-   │
-   ↓ /location  (every 5–30s based on motion)
-┌─────────────────┐
-│ Location Service│ ─→ fast in-memory cache (latest loc, TTL 5min)
-└────────┬────────┘ ─→ wide-column store (historical, optional)
-         │
-         ↓ publish to user's topic
-┌────────────────────────────┐
-│ Pub-sub (partitioned event │
-│  stream / in-memory bus)   │
-│ topic per user_id          │
-└──────────┬─────────────────┘
-           ↓ subscribers (friends with permission)
-┌─────────────────────────┐
-│ Subscription Service    │
-│ - check ACL             │
-│ - radius filter         │
-│ - fan out to WebSocket  │
-└──────────┬──────────────┘
-           ↓
-   Friend's mobile (WS push)
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 466" role="img" aria-label="Nearby friends high-level architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box" x="180" y="20" width="220" height="46" rx="9"/>
+  <text class="lbl" x="290" y="45">Mobile clients</text>
+
+  <rect class="box" x="180" y="110" width="220" height="46" rx="9"/>
+  <text class="lbl" x="290" y="135">Location Service</text>
+
+  <ellipse class="store" cx="630" cy="95" rx="75" ry="10"/>
+  <path class="store" d="M555,95 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="630" y="117">Latest-loc cache</text>
+
+  <ellipse class="store" cx="630" cy="185" rx="75" ry="10"/>
+  <path class="store" d="M555,185 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="630" y="207">History store</text>
+
+  <rect class="box" x="170" y="200" width="240" height="56" rx="9"/>
+  <text class="lbl" x="290" y="220">Pub / Sub</text>
+  <text class="sub" x="290" y="238">topic per user_id</text>
+
+  <rect class="box" x="160" y="300" width="260" height="56" rx="9"/>
+  <text class="lbl" x="290" y="318">Subscription Service</text>
+  <text class="sub" x="290" y="336">ACL · radius · fan-out</text>
+
+  <rect class="box" x="180" y="400" width="220" height="46" rx="9"/>
+  <text class="lbl" x="290" y="425">Friend's mobile · WS</text>
+
+  <path class="flow" d="M290,66 L290,110"/>
+  <text class="edge" x="298" y="88" text-anchor="start">/location 5-30s</text>
+
+  <path class="flow" d="M400,128 L515,128 L515,108 L555,108"/>
+  <text class="edge" x="420" y="120" text-anchor="start">latest</text>
+  <path class="flow dash" d="M400,140 L490,140 L490,200 L555,200"/>
+  <text class="edge" x="420" y="152" text-anchor="start">historical</text>
+
+  <path class="flow acc" d="M290,156 L290,200"/>
+  <text class="edge" x="298" y="180" text-anchor="start">publish</text>
+  <path class="flow" d="M290,256 L290,300"/>
+  <text class="edge" x="298" y="280" text-anchor="start">subscribers</text>
+  <path class="flow acc" d="M290,356 L290,400"/>
+  <text class="edge" x="298" y="380" text-anchor="start">WS push</text>
+</svg>
 ```
 
 **How to read the diagram:** phones periodically upload their location, the backend stores the latest known position per user, and a proximity evaluator decides whether any of that user's friends are now near enough to matter.
@@ -3484,27 +4231,68 @@ WS /navigate                           ← turn-by-turn updates
 ```
 
 #### High-Level Design
-```
-                                        ┌──────────────┐
-              ┌────────────────────────→│ Tile Server  │ ─→ Object Store → CDN
-              │                         └──────────────┘
-   Client ────┤
-              │      ┌──────────────┐    ┌──────────────────┐
-              ├─────→│   Routing    │ ──→│ Road Network DB  │
-              │      │   Service    │    │ (graph)          │
-              │      └──────────────┘    └──────────────────┘
-              │              ↑
-              │      Live traffic adjusts edge weights
-              │              ↑
-              │      ┌──────────────────────────────┐
-              │      │ Traffic Aggregator           │
-              │      │ (consume anonymized GPS pings│
-              │      │  → segment-level avg speeds) │
-              │      └──────────────────────────────┘
-              │
-              │      ┌──────────────┐
-              └─────→│  Geocoder    │ → Search Index (address)
-                     └──────────────┘
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 426" role="img" aria-label="Google Maps high-level architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box" x="30" y="178" width="150" height="46" rx="9"/>
+  <text class="lbl" x="105" y="203">Client</text>
+
+  <rect class="box" x="230" y="30" width="170" height="46" rx="9"/>
+  <text class="lbl" x="315" y="55">Tile Server</text>
+  <ellipse class="store" cx="520" cy="30" rx="75" ry="10"/>
+  <path class="store" d="M445,30 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="520" y="52">Object Store</text>
+  <rect class="box" x="630" y="30" width="110" height="46" rx="9"/>
+  <text class="lbl" x="685" y="55">CDN</text>
+
+  <rect class="box acc" x="230" y="145" width="170" height="46" rx="9"/>
+  <text class="lbl" x="315" y="170">Routing Service</text>
+  <ellipse class="store" cx="560" cy="145" rx="75" ry="10"/>
+  <path class="store" d="M485,145 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="560" y="167">Road Graph DB</text>
+
+  <rect class="box" x="230" y="260" width="170" height="46" rx="9"/>
+  <text class="lbl" x="315" y="285">Geocoder</text>
+  <ellipse class="store" cx="560" cy="260" rx="75" ry="10"/>
+  <path class="store" d="M485,260 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="560" y="282">Search Index</text>
+
+  <rect class="box" x="500" y="350" width="240" height="56" rx="9"/>
+  <text class="lbl" x="620" y="368">Traffic Aggregator</text>
+  <text class="sub" x="620" y="386">anon GPS → segment speeds</text>
+
+  <path class="flow" d="M180,195 L200,195 L200,53 L230,53"/>
+  <path class="flow acc" d="M180,201 L215,201 L215,168 L230,168"/>
+  <path class="flow" d="M180,207 L200,207 L200,283 L230,283"/>
+
+  <path class="flow" d="M400,53 L445,50"/>
+  <text class="edge" x="410" y="42" text-anchor="start">tiles</text>
+  <path class="flow" d="M595,52 L630,53"/>
+  <path class="flow" d="M400,168 L485,165"/>
+  <text class="edge" x="410" y="157" text-anchor="start">graph</text>
+  <path class="flow" d="M400,283 L485,280"/>
+  <text class="edge" x="410" y="272" text-anchor="start">address</text>
+
+  <path class="flow" d="M700,350 L700,162 L637,162"/>
+  <text class="edge" x="648" y="152" text-anchor="start">live edge weights</text>
+</svg>
 ```
 
 **How to read the diagram:** the map display path and the routing path are related but different. Tiles are static assets prepared ahead of time, while routing queries run over a road graph and then fold in live traffic data before returning a path and ETA.
@@ -3750,26 +4538,65 @@ admin.create_topic(name, partitions, replication_factor)
 ```
 
 #### High-Level Design
-```
-                   ┌───────────────────────────────────────┐
-                   │              Kafka Cluster            │
-                   │                                       │
-   Producers ─────→│  Broker 1     Broker 2    Broker 3    │
-                   │  ┌────────┐  ┌────────┐  ┌────────┐   │
-                   │  │P0 (L)  │  │P0 (R)  │  │P0 (R)  │   │
-                   │  │P1 (R)  │  │P1 (L)  │  │P1 (R)  │   │
-                   │  │P2 (R)  │  │P2 (R)  │  │P2 (L)  │   │
-                   │  └────────┘  └────────┘  └────────┘   │
-                   │                                       │
-                   │  Topic A: 3 partitions, RF=3          │
-                   │  L=Leader, R=Replica (in-sync)        │
-                   └───────────────────────────────────────┘
-                                   ↓
-                       Consumer Group X (3 consumers)
-                       Each consumer owns 1+ partitions
-                       (partition count caps parallelism)
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 470" role="img" aria-label="Distributed message queue Kafka high-level architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
 
-                   ZooKeeper / KRaft: broker registry, leader election
+  <rect class="box" x="220" y="20" width="200" height="46" rx="9"/>
+  <text class="lbl" x="320" y="45">Producers</text>
+
+  <rect class="grp" x="60" y="100" width="540" height="160" rx="12"/>
+  <text class="sub" x="330" y="122" font-weight="600">Kafka Cluster · Topic A · 3 partitions · RF=3</text>
+  <rect class="box" x="80" y="150" width="150" height="90" rx="8"/>
+  <text class="lbl" x="155" y="172">Broker 1</text>
+  <text class="sub" x="155" y="196">P0 · Leader</text>
+  <text class="sub" x="155" y="216">P1,P2 · Replica</text>
+  <rect class="box" x="255" y="150" width="150" height="90" rx="8"/>
+  <text class="lbl" x="330" y="172">Broker 2</text>
+  <text class="sub" x="330" y="196">P1 · Leader</text>
+  <text class="sub" x="330" y="216">P0,P2 · Replica</text>
+  <rect class="box" x="430" y="150" width="150" height="90" rx="8"/>
+  <text class="lbl" x="505" y="172">Broker 3</text>
+  <text class="sub" x="505" y="196">P2 · Leader</text>
+  <text class="sub" x="505" y="216">P0,P1 · Replica</text>
+
+  <rect class="box" x="630" y="150" width="110" height="90" rx="9"/>
+  <text class="lbl" x="685" y="178">KRaft /</text>
+  <text class="sub" x="685" y="198">ZooKeeper</text>
+  <text class="sub" x="685" y="218">leader election</text>
+
+  <rect class="grp" x="120" y="320" width="460" height="130" rx="12"/>
+  <text class="sub" x="350" y="342" font-weight="600">Consumer Group X · each owns 1+ partitions</text>
+  <rect class="box" x="140" y="365" width="120" height="60" rx="8"/>
+  <text class="lbl" x="200" y="395">Consumer 1</text>
+  <rect class="box" x="300" y="365" width="120" height="60" rx="8"/>
+  <text class="lbl" x="360" y="395">Consumer 2</text>
+  <rect class="box" x="460" y="365" width="120" height="60" rx="8"/>
+  <text class="lbl" x="520" y="395">Consumer 3</text>
+
+  <path class="flow acc" d="M320,66 L320,100"/>
+  <text class="edge" x="328" y="83" text-anchor="start">append</text>
+  <path class="flow acc" d="M320,260 L320,320"/>
+  <text class="edge" x="328" y="290" text-anchor="start">read by offset</text>
+  <path class="flow dash" d="M630,195 L600,195"/>
+  <text class="edge" x="596" y="183" text-anchor="end">metadata</text>
+</svg>
 ```
 
 **How to read the diagram:** producers append messages to partitioned logs, brokers replicate those logs, and consumers read by offset. Nothing is removed from the queue in the classic sense; consumers just advance their own position through the log.
@@ -4043,36 +4870,75 @@ POST /alerts/rules    body: { name, query, threshold, for, channels }
 ```
 
 #### High-Level Design
-```
-Services / hosts
-   │
-   ↓ scrape (pull) OR push
-┌─────────────────────┐
-│ Collector / Agent   │  (per host or sidecar)
-└──────────┬──────────┘
-           ↓
-   Event Stream (smoothing buffer)
-           ↓
-┌─────────────────────┐
-│ Write Workers       │ → batch + downsample
-└──────────┬──────────┘
-           ↓
-┌──────────────────────────────────────────┐
-│ TSDB                                     │
-│  - Hot: SSD, 7d full resolution          │
-│  - Warm: HDD, 90d 1min                   │
-│  - Cold: Object Store, 1y 1hr            │
-└────┬─────────────────────────┬───────────┘
-     │                         │
-     ↓                         ↓
-  Query Engine            Alert Evaluator
-  (query language)        (eval every Ns)
-     │                         │
-     ↓                         ↓
-  Dashboard             Alert Router
-                        (group, silence, route)
-                                ↓
-                          Notification System
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 706" role="img" aria-label="Metrics monitoring and alerting high-level architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box" x="150" y="20" width="200" height="46" rx="9"/>
+  <text class="lbl" x="250" y="45">Services / hosts</text>
+
+  <rect class="box" x="150" y="100" width="200" height="46" rx="9"/>
+  <text class="lbl" x="250" y="125">Collector / Agent</text>
+
+  <rect class="box" x="150" y="180" width="200" height="56" rx="9"/>
+  <text class="lbl" x="250" y="198">Event Stream</text>
+  <text class="sub" x="250" y="216">smoothing buffer</text>
+
+  <rect class="box" x="150" y="280" width="200" height="56" rx="9"/>
+  <text class="lbl" x="250" y="298">Write Workers</text>
+  <text class="sub" x="250" y="316">batch + downsample</text>
+
+  <ellipse class="store" cx="250" cy="380" rx="75" ry="10"/>
+  <path class="store" d="M175,380 v60 a75,10 0 0 0 150,0 v-60"/>
+  <text class="lbl" x="250" y="404">TSDB</text>
+  <text class="sub" x="250" y="424">Hot 7d · Warm 90d · Cold 1y</text>
+
+  <rect class="box" x="90" y="480" width="180" height="46" rx="9"/>
+  <text class="lbl" x="180" y="505">Query Engine</text>
+  <rect class="box acc" x="430" y="480" width="180" height="46" rx="9"/>
+  <text class="lbl" x="520" y="505">Alert Evaluator</text>
+
+  <rect class="box" x="90" y="560" width="180" height="46" rx="9"/>
+  <text class="lbl" x="180" y="585">Dashboard</text>
+  <rect class="box" x="430" y="560" width="180" height="56" rx="9"/>
+  <text class="lbl" x="520" y="578">Alert Router</text>
+  <text class="sub" x="520" y="596">group · silence · route</text>
+
+  <rect class="box acc" x="420" y="640" width="200" height="46" rx="9"/>
+  <text class="lbl" x="520" y="665">Notification System</text>
+
+  <path class="flow" d="M250,66 L250,100"/>
+  <text class="edge" x="258" y="83" text-anchor="start">scrape / push</text>
+  <path class="flow" d="M250,146 L250,180"/>
+  <path class="flow" d="M250,236 L250,280"/>
+  <path class="flow acc" d="M250,336 L250,370"/>
+  <text class="edge" x="258" y="356" text-anchor="start">write</text>
+
+  <path class="flow" d="M250,440 L180,440 L180,480"/>
+  <text class="edge" x="188" y="462" text-anchor="start">query</text>
+  <path class="flow acc" d="M250,440 L520,440 L520,480"/>
+  <text class="edge" x="528" y="462" text-anchor="start">eval every Ns</text>
+
+  <path class="flow" d="M180,526 L180,560"/>
+  <path class="flow acc" d="M520,526 L520,560"/>
+  <path class="flow acc" d="M520,616 L520,640"/>
+</svg>
 ```
 
 **How to read the diagram:** metrics are emitted continuously, ingested into a time-series backend, then read back out through dashboards and alert rules. The alert engine is not a side feature; it is its own consumer of the same metric stream.
@@ -4314,27 +5180,89 @@ GET  /topN           params: window, dim (ad/advertiser), n
 ```
 
 #### High-Level Design
-```
-Ad clicks (web, mobile, ad networks)
-       │
-       ↓
-   Click API
-       │
-       ↓
-   Event Stream (partitioned by ad_id)
-       │
-       ├──→ Real-time path ──→ Stream Processor ──→ OLAP Store (columnar)
-       │       (5-min freshness)                          ↓
-       │                                              Dashboards
-       │
-       ├──→ Fraud Detection ──→ Bloom filter / window per IP
-       │       → write fraud flags
-       │
-       └──→ Batch path ─→ Object Store raw ─→ Batch Processor hourly ─→ Authoritative aggregates
-                                                              ↓
-                                                       Reconcile vs streaming
-                                                              ↓
-                                                       Billing system
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 706" role="img" aria-label="Ad click event aggregation high-level architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box" x="280" y="20" width="200" height="46" rx="9"/>
+  <text class="lbl" x="380" y="45">Ad clicks</text>
+
+  <rect class="box" x="280" y="100" width="200" height="46" rx="9"/>
+  <text class="lbl" x="380" y="125">Click API</text>
+
+  <rect class="box acc" x="250" y="180" width="260" height="56" rx="9"/>
+  <text class="lbl" x="380" y="198">Event Stream</text>
+  <text class="sub" x="380" y="216">partitioned by ad_id</text>
+
+  <rect class="box" x="60" y="300" width="180" height="56" rx="9"/>
+  <text class="lbl" x="150" y="318">Stream Processor</text>
+  <text class="sub" x="150" y="336">5-min freshness</text>
+  <ellipse class="store" cx="150" cy="400" rx="75" ry="10"/>
+  <path class="store" d="M75,400 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="150" y="422">OLAP · columnar</text>
+  <rect class="box" x="60" y="480" width="180" height="46" rx="9"/>
+  <text class="lbl" x="150" y="505">Dashboards</text>
+
+  <rect class="box" x="290" y="300" width="180" height="56" rx="9"/>
+  <text class="lbl" x="380" y="318">Fraud Detection</text>
+  <text class="sub" x="380" y="336">Bloom / window per IP</text>
+  <ellipse class="store" cx="380" cy="400" rx="75" ry="10"/>
+  <path class="store" d="M305,400 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="380" y="422">Fraud flags</text>
+
+  <ellipse class="store" cx="610" cy="300" rx="75" ry="10"/>
+  <path class="store" d="M535,300 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="610" y="322">Object Store · raw</text>
+  <rect class="box" x="520" y="380" width="180" height="56" rx="9"/>
+  <text class="lbl" x="610" y="398">Batch Processor</text>
+  <text class="sub" x="610" y="416">hourly</text>
+  <ellipse class="store" cx="610" cy="470" rx="75" ry="10"/>
+  <path class="store" d="M535,470 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="610" y="492">Authoritative aggs</text>
+  <rect class="box" x="520" y="550" width="180" height="56" rx="9"/>
+  <text class="lbl" x="610" y="568">Reconcile</text>
+  <text class="sub" x="610" y="586">vs streaming</text>
+  <rect class="box" x="520" y="640" width="180" height="46" rx="9"/>
+  <text class="lbl" x="610" y="665">Billing system</text>
+
+  <path class="flow" d="M380,66 L380,100"/>
+  <path class="flow" d="M380,146 L380,180"/>
+
+  <path class="flow acc" d="M380,236 L380,270 L150,270 L150,300"/>
+  <text class="edge" x="200" y="262" text-anchor="start">real-time</text>
+  <path class="flow" d="M380,236 L380,300"/>
+  <text class="edge" x="388" y="266" text-anchor="start">per IP</text>
+  <path class="flow" d="M380,236 L380,270 L610,270 L610,296"/>
+  <text class="edge" x="440" y="262" text-anchor="start">batch (raw)</text>
+
+  <path class="flow" d="M150,356 L150,390"/>
+  <text class="edge" x="158" y="374" text-anchor="start">aggregate</text>
+  <path class="flow" d="M150,434 L150,480"/>
+  <path class="flow" d="M380,356 L380,390"/>
+  <text class="edge" x="388" y="374" text-anchor="start">write flags</text>
+
+  <path class="flow" d="M610,334 L610,380"/>
+  <text class="edge" x="618" y="360" text-anchor="start">replay</text>
+  <path class="flow" d="M610,436 L610,460"/>
+  <path class="flow" d="M610,504 L610,550"/>
+  <path class="flow acc" d="M610,606 L610,640"/>
+</svg>
 ```
 
 **How to read the diagram:** click events first land in a durable stream, not directly in a database table. Stream processors then group, window, and aggregate those events for the reporting and billing systems that sit downstream.
@@ -4583,24 +5511,73 @@ DELETE /booking/{id}   → { refund_amount, status: cancelled }
 ```
 
 #### High-Level Design
-```
-                       ┌──────────────────┐
-       Search ────────→│  Search Service  │ ─→ Search Index
-                       │   (read path)    │     (denormalized hotels)
-                       └──────────────────┘            ↑
-                                                       │ CDC
-                                                       │
-                       ┌──────────────────┐    ┌──────────────────┐
-       Book ──────────→│  Booking Service │ ─→ │  Hotel/Inventory │
-                       │   (write path)   │    │     Service      │
-                       │                  │    │  (Transactional  │
-                       │  Saga orchestrate│    │   store, sharded │
-                       └────┬─────────────┘    │   by hotel_id)   │
-                            │                  └──────────────────┘
-            ┌───────────────┼──────────────┐
-            ↓               ↓              ↓
-       Payment Svc      Notification    Loyalty
-                                        Points
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 360" role="img" aria-label="Hotel reservation system architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box" x="290" y="20" width="180" height="46" rx="9"/>
+  <text class="lbl" x="380" y="44">Client</text>
+
+  <rect class="box" x="40" y="110" width="190" height="46" rx="9"/>
+  <text class="lbl" x="135" y="134">Search Service</text>
+
+  <rect class="box acc" x="285" y="110" width="190" height="46" rx="9"/>
+  <text class="lbl" x="380" y="124">Booking Service</text>
+  <text class="sub" x="380" y="142">Saga orchestrator</text>
+
+  <rect class="box" x="530" y="110" width="210" height="46" rx="9"/>
+  <text class="lbl" x="635" y="124">Hotel / Inventory Svc</text>
+  <text class="sub" x="635" y="142">sharded by hotel_id</text>
+
+  <ellipse class="store" cx="135" cy="210" rx="75" ry="10"/>
+  <path class="store" d="M60,210 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="135" y="232">Search Index</text>
+
+  <rect class="box" x="255" y="290" width="130" height="46" rx="9"/>
+  <text class="lbl" x="320" y="314">Payment Svc</text>
+
+  <rect class="box" x="415" y="290" width="130" height="46" rx="9"/>
+  <text class="lbl" x="480" y="314">Notification</text>
+
+  <rect class="box" x="575" y="290" width="130" height="46" rx="9"/>
+  <text class="lbl" x="640" y="308">Loyalty</text>
+  <text class="sub" x="640" y="325">points</text>
+
+  <path class="flow" d="M380,66 L380,90 L135,90 L135,110"/>
+  <text class="edge" x="144" y="82" text-anchor="start">search</text>
+  <path class="flow acc" d="M380,66 L380,110"/>
+  <text class="edge" x="388" y="86" text-anchor="start">book</text>
+
+  <path class="flow" d="M135,156 L135,200"/>
+  <text class="edge" x="144" y="178" text-anchor="start">read path</text>
+
+  <path class="flow acc" d="M475,133 L530,133"/>
+  <text class="edge" x="483" y="124" text-anchor="start">reserve</text>
+
+  <path class="flow dash" d="M635,156 L635,225 L210,225"/>
+  <text class="edge" x="440" y="217" text-anchor="start">CDC · denormalize</text>
+
+  <path class="flow" d="M380,156 L380,265 L320,265 L320,290"/>
+  <path class="flow" d="M380,156 L380,265 L480,265 L480,290"/>
+  <path class="flow" d="M380,156 L380,265 L640,265 L640,290"/>
+  <text class="edge" x="388" y="196" text-anchor="start">saga side-effects</text>
+</svg>
 ```
 
 **How to read the diagram:** the search flow helps users discover hotels and possible inventory, while the booking flow is the critical path that actually reserves room-nights. Those are intentionally different because discovery can be broad and eventually consistent, but reservation cannot.
@@ -4848,25 +5825,95 @@ Webmail REST:
 ```
 
 #### High-Level Design
-```
-INBOUND (someone sends to you@gmail.com):
-  External SMTP → MX server → Spam Filter → Routing → Mailbox Storage
-                                                          ↓
-                                                    Index for Search
-                                                          ↓
-                                                    Push notif (mobile)
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 600" role="img" aria-label="Distributed email service architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
 
-OUTBOUND (you send):
-  Webmail/IMAP → SMTP Relay → Outbound Queue → MX Lookup → Send
-                                  ↓
-                            Retry with backoff if fail
+  <rect class="box" x="40" y="20" width="190" height="46" rx="9"/>
+  <text class="lbl" x="135" y="44">External SMTP</text>
 
-STORAGE per user (sharded by user_id):
-  Headers + metadata → Wide-column Store (indexed)
-  Body + attachments → Object Store, content-addressed (dedup)
+  <rect class="box" x="530" y="20" width="190" height="46" rx="9"/>
+  <text class="lbl" x="625" y="44">Webmail / IMAP</text>
 
-SEARCH:
-  Per-user inverted index in Search Index Store (sharded by user)
+  <rect class="box" x="40" y="100" width="190" height="46" rx="9"/>
+  <text class="lbl" x="135" y="124">MX Server</text>
+
+  <rect class="box" x="530" y="100" width="190" height="46" rx="9"/>
+  <text class="lbl" x="625" y="124">SMTP Relay</text>
+
+  <rect class="box" x="40" y="180" width="190" height="46" rx="9"/>
+  <text class="lbl" x="135" y="204">Spam Filter</text>
+
+  <ellipse class="store" cx="625" cy="195" rx="75" ry="10"/>
+  <path class="store" d="M550,195 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="625" y="217">Outbound Queue</text>
+
+  <rect class="box" x="40" y="260" width="190" height="46" rx="9"/>
+  <text class="lbl" x="135" y="284">Routing</text>
+
+  <rect class="box" x="530" y="260" width="190" height="46" rx="9"/>
+  <text class="lbl" x="625" y="284">MX Lookup / Send</text>
+
+  <rect class="box acc" x="285" y="340" width="190" height="46" rx="9"/>
+  <text class="lbl" x="380" y="364">Mailbox Storage</text>
+
+  <rect class="box" x="520" y="340" width="200" height="46" rx="9"/>
+  <text class="lbl" x="620" y="364">Push notif (mobile)</text>
+
+  <rect class="grp" x="40" y="430" width="430" height="150" rx="12"/>
+  <text class="sub" x="255" y="452" font-weight="600">Per-user storage · sharded by user_id</text>
+
+  <ellipse class="store" cx="150" cy="490" rx="75" ry="10"/>
+  <path class="store" d="M75,490 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="150" y="510">Wide-column</text>
+  <text class="sub" x="150" y="527">headers · meta</text>
+
+  <ellipse class="store" cx="350" cy="490" rx="75" ry="10"/>
+  <path class="store" d="M275,490 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="350" y="510">Object Store</text>
+  <text class="sub" x="350" y="527">bodies · attach</text>
+
+  <ellipse class="store" cx="600" cy="490" rx="75" ry="10"/>
+  <path class="store" d="M525,490 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="600" y="512">Search Index</text>
+
+  <path class="flow acc" d="M135,66 L135,100"/>
+  <text class="edge" x="144" y="84" text-anchor="start">inbound</text>
+  <path class="flow" d="M135,146 L135,180"/>
+  <path class="flow" d="M135,226 L135,260"/>
+  <path class="flow acc" d="M230,283 L257,283 L257,363 L285,363"/>
+  <text class="edge" x="262" y="322" text-anchor="start">deliver</text>
+
+  <path class="flow" d="M625,66 L625,100"/>
+  <text class="edge" x="634" y="84" text-anchor="start">outbound</text>
+  <path class="flow" d="M625,146 L625,185"/>
+  <path class="flow" d="M625,229 L625,260"/>
+  <path class="flow dash" d="M700,213 L735,213 L735,245 L648,245 L648,224"/>
+  <text class="edge" x="742" y="230" text-anchor="start">retry</text>
+
+  <path class="flow" d="M475,363 L520,363"/>
+  <text class="edge" x="483" y="353" text-anchor="start">push</text>
+  <path class="flow" d="M340,386 L340,430"/>
+  <text class="edge" x="348" y="410" text-anchor="start">persist</text>
+  <path class="flow" d="M430,386 L430,412 L600,412 L600,460"/>
+  <text class="edge" x="610" y="440" text-anchor="start">index</text>
+</svg>
 ```
 
 **How to read the diagram:** sending, receiving, storing, filtering, and searching email are all separate paths that meet in the mailbox. Outbound delivery is queue-driven and retry-heavy, while mailbox reads and search need index-friendly storage.
@@ -5115,25 +6162,67 @@ GET  /{bucket}?prefix=&marker=&max-keys=  → list
 ```
 
 #### High-Level Design
-```
-                          ┌──────────────────┐
-              ┌──────────→│  Bucket Service  │ → Bucket metadata, ACL, policies
-              │           └──────────────────┘
-              │
-              │           ┌──────────────────┐
-   Client ────┼──────────→│ Object Metadata  │ → (bucket, key) → block locations
-              │           │     Service      │   (sharded, replicated)
-              │           └──────────────────┘
-              │
-              │           ┌──────────────────────────────┐
-              └──────────→│ Data Plane: Storage Nodes    │
-                          │  ┌──┐ ┌──┐ ┌──┐ ┌──┐ ┌──┐    │
-                          │  │D1│ │D2│ │D3│ │D4│ │D5│    │ Erasure-coded
-                          │  └──┘ └──┘ └──┘ └──┘ └──┘    │ across racks/AZs
-                          │  (e.g. 6+3 Reed-Solomon)     │
-                          └──────────────────────────────┘
-                                       ↑
-                         Background: GC, Repair, Scrub
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 500" role="img" aria-label="S3 distributed object storage architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box" x="40" y="150" width="160" height="46" rx="9"/>
+  <text class="lbl" x="120" y="174">Client</text>
+
+  <rect class="box" x="300" y="30" width="230" height="46" rx="9"/>
+  <text class="lbl" x="415" y="54">Bucket Service</text>
+
+  <rect class="box" x="300" y="140" width="230" height="46" rx="9"/>
+  <text class="lbl" x="415" y="156">Object Metadata Svc</text>
+  <text class="sub" x="415" y="174">sharded · replicated</text>
+
+  <rect class="grp" x="280" y="250" width="440" height="150" rx="12"/>
+  <text class="sub" x="500" y="272" font-weight="600">Data Plane · Storage Nodes</text>
+
+  <rect class="box" x="300" y="298" width="66" height="44" rx="8"/>
+  <text class="sub" x="333" y="321">D1</text>
+  <rect class="box" x="378" y="298" width="66" height="44" rx="8"/>
+  <text class="sub" x="411" y="321">D2</text>
+  <rect class="box" x="456" y="298" width="66" height="44" rx="8"/>
+  <text class="sub" x="489" y="321">D3</text>
+  <rect class="box" x="534" y="298" width="66" height="44" rx="8"/>
+  <text class="sub" x="567" y="321">D4</text>
+  <rect class="box" x="612" y="298" width="66" height="44" rx="8"/>
+  <text class="sub" x="645" y="321">D5</text>
+  <text class="sub" x="500" y="372">erasure-coded 6+3 · across racks / AZs</text>
+
+  <rect class="box" x="280" y="430" width="440" height="46" rx="9"/>
+  <text class="lbl" x="500" y="454">Background: GC · Repair · Scrub</text>
+
+  <path class="flow" d="M200,163 L250,163 L250,53 L300,53"/>
+  <text class="edge" x="256" y="100" text-anchor="start">ACL · policies</text>
+  <path class="flow acc" d="M200,170 L250,170 L250,163 L300,163"/>
+  <text class="edge" x="256" y="150" text-anchor="start">(bucket, key)</text>
+  <path class="flow acc" d="M200,183 L250,183 L250,320 L280,320"/>
+  <text class="edge" x="256" y="336" text-anchor="start">object bytes</text>
+
+  <path class="flow acc" d="M415,186 L415,250"/>
+  <text class="edge" x="423" y="220" text-anchor="start">block locations</text>
+
+  <path class="flow dash" d="M500,430 L500,400"/>
+  <text class="edge" x="508" y="416" text-anchor="start">repair</text>
+</svg>
 ```
 
 **How to read the diagram:** the request path looks simple because most of the real work is hidden behind metadata and placement decisions. A write records the object under a key, breaks the bytes into whatever storage layout the system uses, and spreads them across a durable set of storage nodes.
@@ -5398,29 +6487,77 @@ GET  /rank/{lb_id}/{user_id}  → { rank, score, neighbors: [...] }
 ```
 
 #### High-Level Design
-```
-                    ┌────────────────────────────┐
-                    │     Leaderboard Service    │
-                    └────────────┬───────────────┘
-                                 │
-               ┌─────────────────┼─────────────────┐
-               ↓                 ↓                 ↓
-          ┌────────┐        ┌────────┐        ┌────────┐
-          │ ZSET   │        │ ZSET   │        │ ZSET   │
-          │ shard  │        │ shard  │        │ shard  │
-          │(daily) │        │(weekly)│        │(all-tm)│
-          └────┬───┘        └────────┘        └────────┘
-               │
-        Persistence: append-only log + replicas
-        Snapshot to blob store every N min
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 530" role="img" aria-label="Real-time gaming leaderboard architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
 
-        For 100M+ user leaderboards:
-               ↓
-        Score-range sharding:
-          shard 1: scores 0-1k
-          shard 2: scores 1k-10k
-          shard 3: scores 10k+
-        Query each, merge results
+  <rect class="box" x="290" y="20" width="180" height="46" rx="9"/>
+  <text class="lbl" x="380" y="44">Clients</text>
+
+  <rect class="box acc" x="270" y="100" width="220" height="46" rx="9"/>
+  <text class="lbl" x="380" y="124">Leaderboard Service</text>
+
+  <rect class="grp" x="40" y="190" width="480" height="120" rx="12"/>
+  <text class="sub" x="280" y="212" font-weight="600">In-memory ZSETs (Redis)</text>
+
+  <rect class="box" x="70" y="230" width="130" height="46" rx="9"/>
+  <text class="lbl" x="135" y="254">ZSET · daily</text>
+  <rect class="box" x="235" y="230" width="130" height="46" rx="9"/>
+  <text class="lbl" x="300" y="254">ZSET · weekly</text>
+  <rect class="box" x="400" y="230" width="130" height="46" rx="9"/>
+  <text class="lbl" x="465" y="252">ZSET</text>
+  <text class="sub" x="465" y="268">all-time</text>
+
+  <ellipse class="store" cx="640" cy="210" rx="75" ry="10"/>
+  <path class="store" d="M565,210 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="640" y="230">AOF log + replicas</text>
+
+  <ellipse class="store" cx="640" cy="300" rx="75" ry="10"/>
+  <path class="store" d="M565,300 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="640" y="320">Snapshot blob</text>
+
+  <rect class="grp" x="40" y="360" width="680" height="150" rx="12"/>
+  <text class="sub" x="380" y="382" font-weight="600">100M+ users · score-range sharding · query each &amp; merge</text>
+
+  <rect class="box" x="80" y="410" width="180" height="46" rx="9"/>
+  <text class="lbl" x="170" y="434">scores 0–1k</text>
+  <rect class="box" x="300" y="410" width="180" height="46" rx="9"/>
+  <text class="lbl" x="390" y="434">scores 1k–10k</text>
+  <rect class="box" x="520" y="410" width="160" height="46" rx="9"/>
+  <text class="lbl" x="600" y="434">scores 10k+</text>
+
+  <path class="flow acc" d="M380,66 L380,100"/>
+  <text class="edge" x="388" y="84" text-anchor="start">updates / reads</text>
+
+  <path class="flow" d="M380,146 L380,175 L135,175 L135,230"/>
+  <path class="flow" d="M380,146 L380,230"/>
+  <path class="flow" d="M380,146 L380,175 L465,175 L465,230"/>
+  <text class="edge" x="388" y="164" text-anchor="start">shard by window</text>
+
+  <path class="flow" d="M490,123 L640,123 L640,200"/>
+  <text class="edge" x="512" y="115" text-anchor="start">persist</text>
+  <path class="flow dash" d="M640,244 L640,290"/>
+  <text class="edge" x="648" y="270" text-anchor="start">snapshot</text>
+
+  <path class="flow dash" d="M280,310 L280,360"/>
+  <text class="edge" x="288" y="338" text-anchor="start">scale to 100M+</text>
+</svg>
 ```
 
 **How to read the diagram:** score updates enter on one side, an in-memory ordered structure keeps the live ranking, and reads come out as top-N lists or around-me slices. A backing store sits underneath so the board survives cache loss or restarts.
@@ -5651,36 +6788,71 @@ POST /payment_methods      body: { token (from PSP tokenization) }
 ```
 
 #### High-Level Design
-```
-                 ┌──────────────────────────────────┐
-   Client ──────→│       Payment API (HTTP)         │
-                 │  - validate                      │
-                 │  - check idempotency cache       │
-                 │  - look up payment method        │
-                 └──────────────┬───────────────────┘
-                                ↓
-                 ┌──────────────────────────────────┐
-                 │     Payment Orchestrator (Saga)  │
-                 │                                  │
-                 │  1. Risk check                   │
-                 │  2. Authorize via PSP            │
-                 │  3. Update Ledger (debit)        │
-                 │  4. Mark complete                │
-                 │                                  │
-                 │  On any step failure:            │
-                 │   → run compensating txn         │
-                 └──────┬───────────────┬───────────┘
-                        ↓               ↓
-              ┌─────────────────┐  ┌──────────────────┐
-              │ External PSP    │  │ Ledger (event-   │
-              │ (Stripe, Adyen) │  │  sourced log,    │
-              └─────────────────┘  │  double-entry,   │
-                                   │  append-only)    │
-                                   └──────────────────┘
-                                            │
-                                            ↓
-                                  Daily reconciliation
-                                  (your books vs PSP report)
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 500" role="img" aria-label="Payment system architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box" x="290" y="20" width="180" height="46" rx="9"/>
+  <text class="lbl" x="380" y="44">Client</text>
+
+  <rect class="box acc" x="260" y="100" width="240" height="46" rx="9"/>
+  <text class="lbl" x="380" y="118">Payment API (HTTP)</text>
+  <text class="sub" x="380" y="136">validate · idempotency · method</text>
+
+  <ellipse class="store" cx="650" cy="105" rx="75" ry="10"/>
+  <path class="store" d="M575,105 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="650" y="127">Idempotency cache</text>
+
+  <rect class="box acc" x="250" y="190" width="260" height="46" rx="9"/>
+  <text class="lbl" x="380" y="208">Payment Orchestrator</text>
+  <text class="sub" x="380" y="226">Saga · compensate on failure</text>
+
+  <rect class="box" x="110" y="300" width="200" height="46" rx="9"/>
+  <text class="lbl" x="210" y="318">External PSP</text>
+  <text class="sub" x="210" y="336">Stripe · Adyen</text>
+
+  <ellipse class="store" cx="560" cy="300" rx="75" ry="10"/>
+  <path class="store" d="M485,300 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="560" y="320">Ledger</text>
+  <text class="sub" x="560" y="336">double-entry · append-only</text>
+
+  <rect class="box" x="430" y="430" width="260" height="46" rx="9"/>
+  <text class="lbl" x="560" y="448">Daily reconciliation</text>
+  <text class="sub" x="560" y="466">your books vs PSP report</text>
+
+  <path class="flow acc" d="M380,66 L380,100"/>
+  <text class="edge" x="388" y="84" text-anchor="start">charge</text>
+
+  <path class="flow" d="M500,123 L575,123"/>
+  <text class="edge" x="512" y="114" text-anchor="start">check</text>
+
+  <path class="flow acc" d="M380,146 L380,190"/>
+  <text class="edge" x="388" y="170" text-anchor="start">start workflow</text>
+
+  <path class="flow" d="M330,236 L330,270 L210,270 L210,300"/>
+  <text class="edge" x="218" y="285" text-anchor="start">2. authorize</text>
+  <path class="flow acc" d="M430,236 L430,270 L560,270 L560,290"/>
+  <text class="edge" x="468" y="262" text-anchor="start">3. debit</text>
+
+  <path class="flow" d="M560,334 L560,430"/>
+  <text class="edge" x="568" y="386" text-anchor="start">reconcile</text>
+</svg>
 ```
 
 **How to read the diagram:** the user-facing API starts a workflow, but the real center of the design is the orchestrator plus the ledger. External PSP calls happen around that core, not instead of it.
@@ -5953,29 +7125,67 @@ GET  /history/{user_id}?cursor             → [transactions]
 ```
 
 #### High-Level Design
-```
-                    ┌───────────────────────────────┐
-       Client ─────→│      Wallet Service           │
-                    │  (idempotency + validation)   │
-                    └─────────────┬─────────────────┘
-                                  ↓
-                    ┌───────────────────────────────┐
-                    │   Transfer Orchestrator       │
-                    │                               │
-                    │   Same shard? → ACID txn      │
-                    │   Diff shard? → TCC saga      │
-                    └─────┬─────────────────────┬───┘
-                          ↓                     ↓
-                  ┌────────────────┐   ┌────────────────┐
-                  │ Account Shard  │   │ Account Shard  │
-                  │   for User A   │   │   for User B   │
-                  │ (transactional │   │ (transactional │
-                  │   store)       │   │   store)       │
-                  └────────────────┘   └────────────────┘
-                          │                     │
-                          └──── Event Log ──────┘
-                          (partitioned event stream
-                           → audit, fraud, analytics)
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 470" role="img" aria-label="Digital wallet architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box" x="290" y="20" width="180" height="46" rx="9"/>
+  <text class="lbl" x="380" y="44">Client</text>
+
+  <rect class="box acc" x="270" y="100" width="220" height="46" rx="9"/>
+  <text class="lbl" x="380" y="118">Wallet Service</text>
+  <text class="sub" x="380" y="136">idempotency + validation</text>
+
+  <rect class="box acc" x="250" y="190" width="260" height="46" rx="9"/>
+  <text class="lbl" x="380" y="208">Transfer Orchestrator</text>
+  <text class="sub" x="380" y="226">same shard→ACID · diff→TCC saga</text>
+
+  <ellipse class="store" cx="215" cy="300" rx="75" ry="10"/>
+  <path class="store" d="M140,300 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="215" y="320">Account Shard · A</text>
+  <text class="sub" x="215" y="337">transactional</text>
+
+  <ellipse class="store" cx="545" cy="300" rx="75" ry="10"/>
+  <path class="store" d="M470,300 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="545" y="320">Account Shard · B</text>
+  <text class="sub" x="545" y="337">transactional</text>
+
+  <ellipse class="store" cx="380" cy="400" rx="75" ry="10"/>
+  <path class="store" d="M305,400 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="380" y="420">Event Log</text>
+  <text class="sub" x="380" y="437">partitioned · audit · fraud</text>
+
+  <path class="flow acc" d="M380,66 L380,100"/>
+  <text class="edge" x="388" y="84" text-anchor="start">transfer</text>
+
+  <path class="flow acc" d="M380,146 L380,190"/>
+  <text class="edge" x="388" y="170" text-anchor="start">validated</text>
+
+  <path class="flow acc" d="M330,236 L330,270 L215,270 L215,290"/>
+  <text class="edge" x="222" y="262" text-anchor="start">debit A</text>
+  <path class="flow acc" d="M430,236 L430,270 L545,270 L545,290"/>
+  <text class="edge" x="452" y="262" text-anchor="start">credit B</text>
+
+  <path class="flow dash" d="M215,344 L215,380 L380,380 L380,390"/>
+  <path class="flow dash" d="M545,344 L545,380 L380,380 L380,390"/>
+  <text class="edge" x="388" y="372" text-anchor="start">append</text>
+</svg>
 ```
 
 **How to read the diagram:** the wallet is presented as a simple balance to users, but the architecture is built around ledger entries, holds, credits, debits, and reconciliation. The visible balance is really a derived result.
@@ -6236,33 +7446,76 @@ Acks:
 ```
 
 #### High-Level Design
-```
-   Member firms
-        │
-        ↓ low-latency network (microwave, kernel bypass)
-   ┌─────────────────────┐
-   │  Order Gateway      │ → auth, validate, risk
-   └─────────┬───────────┘
-             ↓
-   ┌─────────────────────┐
-   │  Sequencer          │ → assigns global sequence, persists to log
-   │  (single-threaded)  │   (durability before processing)
-   └─────────┬───────────┘
-             ↓
-   ┌─────────────────────────────────────┐
-   │  Matching Engines (one per symbol)  │
-   │  ┌─────────┐  ┌─────────┐  ┌──────┐ │
-   │  │ AAPL    │  │ GOOG    │  │ ...  │ │
-   │  │ (single │  │ (single │  │      │ │
-   │  │  thread)│  │  thread)│  │      │ │
-   │  └────┬────┘  └────┬────┘  └──────┘ │
-   └───────┼────────────┼─────────────────┘
-           ↓            ↓
-       ┌───────────────────────┐
-       │ Market Data Publisher │ → multicast feed to subscribers
-       └───────────────────────┘
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 515" role="img" aria-label="Stock exchange matching engine high-level architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
 
-   Replication: primary + hot standby via deterministic input log replay
+  <rect class="box" x="280" y="20" width="200" height="46" rx="9"/>
+  <text class="lbl" x="380" y="44">Member firms</text>
+
+  <rect class="box" x="250" y="100" width="260" height="46" rx="9"/>
+  <text class="lbl" x="380" y="118">Order Gateway</text>
+  <text class="sub" x="380" y="134">auth · validate · risk</text>
+
+  <rect class="box acc" x="250" y="180" width="260" height="46" rx="9"/>
+  <text class="lbl" x="380" y="198">Sequencer</text>
+  <text class="sub" x="380" y="214">single-thread · global seq</text>
+
+  <ellipse class="store" cx="655" cy="168" rx="75" ry="10"/>
+  <path class="store" d="M580,168 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="655" y="190">Journal / Log</text>
+  <text class="sub" x="655" y="205">durable, replayed</text>
+
+  <rect class="grp" x="180" y="272" width="400" height="132" rx="12"/>
+  <text class="sub" x="380" y="293" font-weight="600">Matching Engines · one thread per symbol</text>
+  <rect class="box acc" x="200" y="316" width="104" height="44" rx="8"/>
+  <text class="sub" x="252" y="339">AAPL</text>
+  <rect class="box acc" x="326" y="316" width="104" height="44" rx="8"/>
+  <text class="sub" x="378" y="339">GOOG</text>
+  <rect class="box" x="452" y="316" width="104" height="44" rx="8"/>
+  <text class="sub" x="504" y="339">…</text>
+
+  <rect class="box" x="260" y="444" width="240" height="46" rx="9"/>
+  <text class="lbl" x="380" y="462">Market Data Publisher</text>
+  <text class="sub" x="380" y="478">multicast feed</text>
+
+  <rect class="box dash" x="560" y="340" width="180" height="46" rx="9"/>
+  <text class="lbl" x="650" y="358">Hot Standby</text>
+  <text class="sub" x="650" y="374">log replay</text>
+
+  <path class="flow" d="M380,66 L380,100"/>
+  <text class="edge" x="392" y="83" text-anchor="start">orders</text>
+
+  <path class="flow acc" d="M380,146 L380,180"/>
+
+  <path class="flow" d="M510,197 L580,178"/>
+  <text class="edge" x="514" y="182" text-anchor="start">persist to log</text>
+
+  <path class="flow acc" d="M380,226 L380,272"/>
+  <text class="edge" x="392" y="250" text-anchor="start">in strict sequence</text>
+
+  <path class="flow" d="M380,404 L380,444"/>
+  <text class="edge" x="392" y="426" text-anchor="start">matched trades</text>
+
+  <path class="flow dash" d="M650,202 L650,340"/>
+  <text class="edge" x="660" y="272" text-anchor="start">replay</text>
+</svg>
 ```
 
 **How to read the diagram:** the outer system receives and validates orders, but the matching engine itself stays narrow and deterministic. For each symbol, orders are processed in a strict sequence so price-time priority remains unambiguous.
@@ -6538,25 +7791,86 @@ GET  /trending?region      → [topics]
 ```
 
 #### High-Level Design
-```
-Write:
-  Client ─→ Tweet Service ─→ Tweets DB (wide-column store)
-                  │
-                  ├─→ Fan-out Service
-                  │     ├─→ if author <10k followers: PUSH to follower timelines (in-memory cache)
-                  │     └─→ if celeb: skip; mark tweet for PULL on read
-                  │
-                  ├─→ Search Indexer (event stream → search index)
-                  │
-                  └─→ Trending Pipeline (event stream → stream processor → top-K topics)
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 475" role="img" aria-label="Twitter fan-out and timeline high-level architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
 
-Read (home timeline):
-  Client → Timeline Service:
-       fetch from in-memory cache (push-built)
-     + pull recent celebrity tweets (separate fetch)
-     + merge + ML rank
-     + hydrate from cache/DB
-     → return paginated
+  <rect class="box" x="290" y="20" width="180" height="46" rx="9"/>
+  <text class="lbl" x="380" y="44">Client</text>
+
+  <rect class="box acc" x="70" y="104" width="200" height="46" rx="9"/>
+  <text class="lbl" x="170" y="128">Tweet Service</text>
+
+  <rect class="box acc" x="490" y="104" width="200" height="46" rx="9"/>
+  <text class="lbl" x="590" y="128">Timeline Service</text>
+
+  <rect class="grp" x="30" y="185" width="250" height="255" rx="12"/>
+  <text class="sub" x="155" y="205" font-weight="600">Async pipelines · event stream</text>
+  <rect class="box" x="45" y="220" width="210" height="44" rx="8"/>
+  <text class="sub" x="150" y="242">Fan-out Service</text>
+  <rect class="box" x="45" y="300" width="210" height="44" rx="8"/>
+  <text class="sub" x="150" y="322">Search Indexer</text>
+  <rect class="box" x="45" y="380" width="210" height="44" rx="8"/>
+  <text class="sub" x="150" y="402">Trending Pipeline</text>
+
+  <ellipse class="store" cx="380" cy="220" rx="75" ry="10"/>
+  <path class="store" d="M305,220 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="380" y="240">Timeline cache</text>
+  <text class="sub" x="380" y="255">in-memory push</text>
+
+  <ellipse class="store" cx="380" cy="312" rx="75" ry="10"/>
+  <path class="store" d="M305,312 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="380" y="334">Search index</text>
+
+  <ellipse class="store" cx="380" cy="394" rx="75" ry="10"/>
+  <path class="store" d="M305,394 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="380" y="416">Top-K topics</text>
+
+  <ellipse class="store" cx="620" cy="222" rx="75" ry="10"/>
+  <path class="store" d="M545,222 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="620" y="244">Tweets DB</text>
+  <text class="sub" x="620" y="259">wide-column</text>
+
+  <path class="flow" d="M350,66 L350,86 L170,86 L170,104"/>
+  <text class="edge" x="200" y="80" text-anchor="end">write</text>
+
+  <path class="flow" d="M410,66 L410,86 L590,86 L590,104"/>
+  <text class="edge" x="560" y="80" text-anchor="start">read</text>
+
+  <path class="flow acc" d="M155,150 L155,185"/>
+  <text class="edge" x="164" y="170" text-anchor="start">events</text>
+
+  <path class="flow" d="M255,242 L305,242"/>
+  <text class="edge" x="262" y="232" text-anchor="start">push</text>
+
+  <path class="flow" d="M255,322 L305,322"/>
+  <path class="flow" d="M255,402 L305,402"/>
+
+  <path class="flow" d="M255,133 L545,236"/>
+  <text class="edge" x="300" y="150" text-anchor="start">store tweet</text>
+
+  <path class="flow" d="M490,138 L465,138 L465,232 L400,232"/>
+  <text class="edge" x="440" y="150" text-anchor="end">read cache</text>
+
+  <path class="flow" d="M590,150 L590,222"/>
+  <text class="edge" x="600" y="188" text-anchor="start">hydrate + celeb pull</text>
+</svg>
 ```
 
 **How to read the diagram:** this is mostly a feed distribution system. Tweets are stored durably, then copied or pulled into timelines depending on follower count, and finally enriched through ranking and cache layers before the user sees them.
@@ -6769,24 +8083,86 @@ GET  /stories/feed          → ranked by recency × relevance
 ```
 
 #### High-Level Design
-```
-UPLOAD:
-  Client ─→ Pre-signed object-store URL ─→ Object Store (raw) ─→ Event trigger
-                                                                       ↓
-                                                  ┌──── Image Processor ────┐
-                                                  ↓        ↓        ↓        ↓
-                                              thumbnail  small   medium    full
-                                                  └─── push to object store + CDN ──┘
-                                                                       ↓
-                                                       Notify Post Service →
-                                                         metadata DB +
-                                                         fan-out to followers
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 470" role="img" aria-label="Instagram media pipeline and feed high-level architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
 
-FEED (photo-heavy):
-  Client → Feed Service (hybrid push/pull, see #8)
-             → metadata DB
-             → CDN URLs (multiple resolutions)
-             → return → client picks resolution by viewport
+  <rect class="box" x="50" y="20" width="180" height="46" rx="9"/>
+  <text class="lbl" x="140" y="44">Client · upload</text>
+
+  <rect class="box" x="540" y="20" width="180" height="46" rx="9"/>
+  <text class="lbl" x="630" y="44">Client · feed</text>
+
+  <ellipse class="store" cx="140" cy="118" rx="75" ry="10"/>
+  <path class="store" d="M65,118 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="140" y="140">Object Store</text>
+  <text class="sub" x="140" y="155">raw</text>
+
+  <rect class="box acc" x="50" y="190" width="180" height="46" rx="9"/>
+  <text class="lbl" x="140" y="208">Image Processor</text>
+  <text class="sub" x="140" y="224">thumb·sm·md·full</text>
+
+  <rect class="box" x="50" y="300" width="180" height="46" rx="9"/>
+  <text class="lbl" x="140" y="324">Post Service</text>
+
+  <rect class="box" x="50" y="390" width="180" height="46" rx="9"/>
+  <text class="lbl" x="140" y="408">Fan-out Service</text>
+
+  <rect class="box acc" x="540" y="190" width="180" height="46" rx="9"/>
+  <text class="lbl" x="630" y="208">Feed Service</text>
+  <text class="sub" x="630" y="224">hybrid push/pull</text>
+
+  <ellipse class="store acc" cx="380" cy="238" rx="75" ry="10"/>
+  <path class="store acc" d="M305,238 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="380" y="260">CDN</text>
+  <text class="sub" x="380" y="275">multi-res edge</text>
+
+  <ellipse class="store" cx="380" cy="360" rx="75" ry="10"/>
+  <path class="store" d="M305,360 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="380" y="382">Metadata DB</text>
+
+  <path class="flow" d="M140,66 L140,108"/>
+  <text class="edge" x="150" y="88" text-anchor="start">pre-signed PUT</text>
+
+  <path class="flow" d="M140,152 L140,190"/>
+  <text class="edge" x="150" y="172" text-anchor="start">event trigger</text>
+
+  <path class="flow acc" d="M230,208 L305,240"/>
+  <text class="edge" x="242" y="218" text-anchor="start">renditions</text>
+
+  <path class="flow" d="M140,236 L140,300"/>
+  <text class="edge" x="150" y="270" text-anchor="start">notify</text>
+
+  <path class="flow" d="M230,318 L305,362"/>
+  <text class="edge" x="238" y="330" text-anchor="start">metadata</text>
+
+  <path class="flow" d="M140,346 L140,390"/>
+  <text class="edge" x="150" y="370" text-anchor="start">fan-out to followers</text>
+
+  <path class="flow" d="M630,66 L630,190"/>
+
+  <path class="flow acc" d="M540,208 L455,244"/>
+  <text class="edge" x="470" y="216" text-anchor="end">image URLs</text>
+
+  <path class="flow" d="M560,236 L560,360 L455,360"/>
+  <text class="edge" x="550" y="330" text-anchor="end">read feed</text>
+</svg>
 ```
 
 **How to read the diagram:** the system combines a social feed architecture with a media pipeline. User posts first become durable media assets, then those assets and their metadata flow into feeds, stories, notifications, and discovery surfaces.
@@ -7012,26 +8388,95 @@ GET  /search?q=...        → results across users, sounds, hashtags
 ```
 
 #### High-Level Design
-```
-UPLOAD:
-  Client → Upload Edge → Object Store (raw) → Transcoding (240p, 480p, 720p) + Thumbnail
-                                                  ↓
-                                  HLS/MP4 manifests → CDN
-                                                  ↓
-                                       Metadata DB + Search Indexer
-                                                  ↓
-                                       Candidate Pool (eligible for recs)
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 490" role="img" aria-label="TikTok upload pipeline and recommendation feed high-level architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
 
-FEED (For You):
-  Client → Feed Service:
-            1. Recommendation Service returns ~50 candidate video_ids
-                   ↑
-              Two-tower model retrieves (user embed × video embed)
-                   ↑
-              Ranking model scores (predicts watch_pct, like, share)
-            2. Hydrate metadata + CDN URLs
-            3. Client preloads next 2-3 videos
-            4. Send watch events back → train ranker
+  <rect class="box" x="290" y="20" width="180" height="46" rx="9"/>
+  <text class="lbl" x="380" y="44">Client</text>
+
+  <rect class="box" x="60" y="110" width="180" height="46" rx="9"/>
+  <text class="lbl" x="150" y="134">Upload Edge</text>
+
+  <rect class="box acc" x="530" y="110" width="200" height="46" rx="9"/>
+  <text class="lbl" x="630" y="134">Feed Service</text>
+
+  <ellipse class="store" cx="150" cy="195" rx="75" ry="10"/>
+  <path class="store" d="M75,195 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="150" y="217">Object Store · raw</text>
+
+  <rect class="box" x="60" y="250" width="180" height="46" rx="9"/>
+  <text class="lbl" x="150" y="268">Transcoding</text>
+  <text class="sub" x="150" y="284">240p·480p·720p</text>
+
+  <rect class="box" x="60" y="420" width="180" height="46" rx="9"/>
+  <text class="lbl" x="150" y="444">Candidate Pool</text>
+
+  <ellipse class="store acc" cx="380" cy="245" rx="75" ry="10"/>
+  <path class="store acc" d="M305,245 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="380" y="267">CDN · HLS/MP4</text>
+
+  <ellipse class="store" cx="380" cy="360" rx="75" ry="10"/>
+  <path class="store" d="M305,360 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="380" y="382">Metadata DB</text>
+
+  <rect class="grp" x="470" y="240" width="270" height="190" rx="12"/>
+  <text class="sub" x="605" y="260" font-weight="600">Recommendation Service</text>
+  <rect class="box" x="490" y="275" width="230" height="44" rx="8"/>
+  <text class="sub" x="605" y="291">Two-tower Retrieval</text>
+  <text class="sub" x="605" y="306">user × video embed</text>
+  <rect class="box acc" x="490" y="355" width="230" height="44" rx="8"/>
+  <text class="sub" x="605" y="371">Ranking Model</text>
+  <text class="sub" x="605" y="386">watch·like·share</text>
+
+  <path class="flow" d="M340,66 L340,88 L150,88 L150,110"/>
+  <text class="edge" x="200" y="82" text-anchor="end">upload</text>
+
+  <path class="flow acc" d="M420,66 L420,88 L630,88 L630,110"/>
+  <text class="edge" x="560" y="82" text-anchor="start">For You feed</text>
+
+  <path class="flow" d="M150,156 L150,185"/>
+  <text class="edge" x="160" y="172" text-anchor="start">raw</text>
+
+  <path class="flow" d="M150,229 L150,250"/>
+
+  <path class="flow acc" d="M240,268 L305,250"/>
+  <text class="edge" x="248" y="252" text-anchor="start">HLS/MP4</text>
+
+  <path class="flow" d="M225,296 L305,355"/>
+  <text class="edge" x="232" y="330" text-anchor="start">metadata + index</text>
+
+  <path class="flow" d="M330,388 L150,388 L150,420"/>
+  <text class="edge" x="245" y="382" text-anchor="middle">eligible</text>
+
+  <path class="flow" d="M240,443 L462,443 L462,297 L490,297"/>
+  <text class="edge" x="300" y="437" text-anchor="start">candidates</text>
+
+  <path class="flow acc" d="M630,156 L630,240"/>
+  <text class="edge" x="640" y="200" text-anchor="start">retrieve + rank</text>
+
+  <path class="flow" d="M540,140 L392,140 L392,235"/>
+  <text class="edge" x="470" y="134" text-anchor="end">hydrate meta + CDN</text>
+
+  <path class="flow dash" d="M665,150 L725,150 L725,377 L720,377"/>
+  <text class="edge" x="732" y="270" text-anchor="start">watch events → train</text>
+</svg>
 ```
 
 **How to read the diagram:** there are two loops running together. One loop uploads, processes, and serves video. The other loop observes watch behavior and feeds those signals into recommendation systems that decide what the next swipe should show.
@@ -7272,36 +8717,93 @@ WS   /driver/jobs      ← push job offers
 ```
 
 #### High-Level Design
-```
-                 ┌──────────────────────────┐
-   Drivers ─────→│  Location Ingest (WS)    │
-   (loc/4s)      │  → Redis Geo (current)   │
-                 │  → Kafka (history)       │
-                 └──────────────────────────┘
-                              ↑
-                 ┌──────────────────────────┐
-   Rider req ───→│   Matching Service       │
-                 │  1. Geo query "drivers   │
-                 │     within 2km, free"    │
-                 │  2. Score (ETA, rating,  │
-                 │     pool eligibility)    │
-                 │  3. Offer to top driver  │
-                 │     via WS               │
-                 │  4. On accept → trip svc │
-                 │     On reject → next     │
-                 └──────────────────────────┘
-                              ↓
-                 ┌──────────────────────────┐
-                 │   Trip Service (FSM)     │
-                 │   states: requested →    │
-                 │   matched → enroute →    │
-                 │   on_trip → completed    │
-                 └─┬──────────────────────┬─┘
-                   ↓                      ↓
-              Routing Svc            Pricing Svc
-              (Maps API)             (surge multiplier)
-                                          ↓
-                                     Payment Svc
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 550" role="img" aria-label="Ride hailing dispatch and trip lifecycle high-level architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box" x="40" y="20" width="160" height="46" rx="9"/>
+  <text class="lbl" x="120" y="44">Drivers</text>
+
+  <rect class="box" x="40" y="164" width="160" height="46" rx="9"/>
+  <text class="lbl" x="120" y="188">Riders</text>
+
+  <rect class="box" x="250" y="20" width="210" height="46" rx="9"/>
+  <text class="lbl" x="355" y="38">Location Ingest</text>
+  <text class="sub" x="355" y="54">WebSocket</text>
+
+  <rect class="box acc" x="250" y="150" width="210" height="66" rx="9"/>
+  <text class="lbl" x="355" y="170">Matching Service</text>
+  <text class="sub" x="355" y="188">geo query · score</text>
+  <text class="sub" x="355" y="203">offer to top driver</text>
+
+  <rect class="box" x="250" y="290" width="210" height="66" rx="9"/>
+  <text class="lbl" x="355" y="310">Trip Service · FSM</text>
+  <text class="sub" x="355" y="328">requested → matched</text>
+  <text class="sub" x="355" y="343">→ on_trip → completed</text>
+
+  <ellipse class="store" cx="640" cy="40" rx="75" ry="10"/>
+  <path class="store" d="M565,40 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="640" y="62">Redis Geo · current</text>
+
+  <ellipse class="store" cx="640" cy="150" rx="75" ry="10"/>
+  <path class="store" d="M565,150 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="640" y="172">Kafka · loc history</text>
+
+  <rect class="box" x="150" y="410" width="170" height="46" rx="9"/>
+  <text class="lbl" x="235" y="434">Routing Svc</text>
+
+  <rect class="box" x="430" y="410" width="170" height="46" rx="9"/>
+  <text class="lbl" x="515" y="434">Pricing Svc</text>
+
+  <rect class="box" x="430" y="490" width="170" height="46" rx="9"/>
+  <text class="lbl" x="515" y="514">Payment Svc</text>
+
+  <path class="flow" d="M200,43 L250,43"/>
+  <text class="edge" x="205" y="33" text-anchor="start">loc / 4s</text>
+
+  <path class="flow" d="M460,40 L565,40"/>
+  <text class="edge" x="470" y="30" text-anchor="start">current</text>
+
+  <path class="flow dash" d="M400,66 L400,150 L565,150"/>
+  <text class="edge" x="470" y="140" text-anchor="start">history</text>
+
+  <path class="flow acc" d="M200,187 L250,183"/>
+  <text class="edge" x="205" y="177" text-anchor="start">ride req</text>
+
+  <path class="flow" d="M460,168 L520,168 L520,45 L565,45"/>
+  <text class="edge" x="470" y="160" text-anchor="start">drivers within 2km</text>
+
+  <path class="flow dash acc" d="M250,200 L20,200 L20,50 L40,50"/>
+  <text class="edge" x="30" y="130" text-anchor="start">offer via WS</text>
+
+  <path class="flow acc" d="M355,216 L355,290"/>
+  <text class="edge" x="365" y="253" text-anchor="start">on accept</text>
+
+  <path class="flow" d="M300,356 L235,410"/>
+  <text class="edge" x="240" y="382" text-anchor="end">route</text>
+
+  <path class="flow" d="M410,356 L515,410"/>
+  <text class="edge" x="475" y="382" text-anchor="start">surge</text>
+
+  <path class="flow" d="M515,456 L515,490"/>
+  <text class="edge" x="525" y="473" text-anchor="start">charge</text>
+</svg>
 ```
 
 **How to read the diagram:** live location flows in from riders and drivers, a dispatch layer matches them, and a trip state machine tracks what happens next. Search, pricing, and notifications all hang off that moving state.
@@ -7536,30 +9038,88 @@ POST /review           body: { booking_id, rating, text }
 ```
 
 #### High-Level Design
-```
-                                ┌──────────────────────┐
-       Search ──────────────→  │   Search Service     │ → Search index
-                                │   (geo + filters)    │   (denormalized)
-                                └──────────────────────┘            ↑
-                                                                    │ CDC
-                                ┌──────────────────────┐    ┌──────────────────┐
-       Browse listing ───────→ │  Listing Service     │ → │ Listings DB     │
-                                └──────────────────────┘    │ (transactional) │
-                                                            └──────────────────┘
-                                ┌──────────────────────┐    ┌──────────────────┐
-       Book ────────────────→ │  Booking Orchestrator│ → │ Calendar Service  │
-                                │  (Saga)              │    │ (per-listing,    │
-                                └────┬─────────────────┘    │  per-night row)  │
-                                     │                      └──────────────────┘
-                                     ↓
-                              ┌──────────────┐
-                              │ Payment Svc  │ (escrow: hold until check-in)
-                              └──────────────┘
-                                     ↓
-                              ┌──────────────┐
-                              │ Notify (host │
-                              │  + guest)    │
-                              └──────────────┘
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 520" role="img" aria-label="Airbnb search discovery and booking reservation high-level architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box" x="30" y="140" width="150" height="80" rx="9"/>
+  <text class="lbl" x="105" y="180">Client</text>
+
+  <rect class="box" x="230" y="40" width="240" height="46" rx="9"/>
+  <text class="lbl" x="350" y="58">Search Service</text>
+  <text class="sub" x="350" y="74">geo + filters</text>
+
+  <rect class="box" x="230" y="150" width="240" height="46" rx="9"/>
+  <text class="lbl" x="350" y="174">Listing Service</text>
+
+  <rect class="box acc" x="230" y="260" width="240" height="56" rx="9"/>
+  <text class="lbl" x="350" y="280">Booking Orchestrator</text>
+  <text class="sub" x="350" y="298">Saga</text>
+
+  <ellipse class="store" cx="650" cy="45" rx="75" ry="10"/>
+  <path class="store" d="M575,45 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="650" y="65">Search index</text>
+  <text class="sub" x="650" y="80">denormalized</text>
+
+  <ellipse class="store" cx="650" cy="155" rx="75" ry="10"/>
+  <path class="store" d="M575,155 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="650" y="175">Listings DB</text>
+  <text class="sub" x="650" y="190">transactional</text>
+
+  <rect class="box" x="560" y="255" width="180" height="56" rx="9"/>
+  <text class="lbl" x="650" y="275">Calendar Service</text>
+  <text class="sub" x="650" y="293">per-night rows</text>
+
+  <rect class="box" x="230" y="370" width="200" height="56" rx="9"/>
+  <text class="lbl" x="330" y="390">Payment Svc</text>
+  <text class="sub" x="330" y="408">escrow · hold</text>
+
+  <rect class="box" x="230" y="460" width="200" height="46" rx="9"/>
+  <text class="lbl" x="330" y="484">Notify · host + guest</text>
+
+  <path class="flow" d="M180,160 L205,160 L205,63 L230,63"/>
+  <text class="edge" x="212" y="120" text-anchor="start">search</text>
+
+  <path class="flow" d="M180,173 L230,173"/>
+  <text class="edge" x="188" y="164" text-anchor="start">browse</text>
+
+  <path class="flow acc" d="M180,200 L205,200 L205,285 L230,285"/>
+  <text class="edge" x="212" y="245" text-anchor="start">book</text>
+
+  <path class="flow" d="M470,63 L575,52"/>
+  <text class="edge" x="480" y="50" text-anchor="start">query</text>
+
+  <path class="flow" d="M470,173 L575,162"/>
+  <text class="edge" x="480" y="160" text-anchor="start">read / write</text>
+
+  <path class="flow dash" d="M650,145 L650,89"/>
+  <text class="edge" x="660" y="117" text-anchor="start">CDC</text>
+
+  <path class="flow acc" d="M470,285 L560,283"/>
+  <text class="edge" x="478" y="275" text-anchor="start">hold nights</text>
+
+  <path class="flow acc" d="M330,316 L330,370"/>
+  <text class="edge" x="340" y="343" text-anchor="start">escrow</text>
+
+  <path class="flow" d="M330,426 L330,460"/>
+  <text class="edge" x="340" y="443" text-anchor="start">on confirm</text>
+</svg>
 ```
 
 **How to read the diagram:** there is a discovery side and a reservation side. Search helps users find listings they might like, but booking flows through a tighter inventory path that deals with actual night-by-night availability and holds.
@@ -7780,26 +9340,69 @@ POST /heartbeat       body: { title_id, position_sec, profile_id }
 ```
 
 #### High-Level Design
-```
-                     ┌───────────────────────────────┐
-                     │   Control Plane (cloud)       │
-                     │  - User / billing             │
-                     │  - Catalog metadata           │
-                     │  - Recommendations            │
-                     │  - Playback session start     │
-                     └──────────────┬────────────────┘
-                                    │ start session →
-                                    │ returns manifest + token + CDN URLs
-                                    ↓
-   Client ←─── streaming chunks ─── ┌───────────────────────┐
-                                    │  Open Connect (CDN)   │
-                                    │  - Custom appliances  │
-                                    │    co-located in ISPs │
-                                    │  - Pre-positioned     │
-                                    │    popular content    │
-                                    │    (push during off-  │
-                                    │    peak)              │
-                                    └───────────────────────┘
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 390" role="img" aria-label="Netflix video streaming high-level architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <!-- boxes -->
+  <rect class="box" x="290" y="20" width="180" height="46" rx="9"/>
+  <text class="lbl" x="380" y="45">Client</text>
+
+  <rect class="box" x="265" y="110" width="230" height="46" rx="9"/>
+  <text class="lbl" x="380" y="127">Control Plane</text>
+  <text class="sub" x="380" y="145">session start · catalog · recs</text>
+
+  <rect class="box" x="40" y="110" width="180" height="46" rx="9"/>
+  <text class="lbl" x="130" y="127">Encode / Package</text>
+  <text class="sub" x="130" y="145">bitrate ladder · chunks</text>
+
+  <rect class="box" x="265" y="320" width="230" height="46" rx="9"/>
+  <text class="lbl" x="380" y="337">Open Connect · CDN</text>
+  <text class="sub" x="380" y="355">ISP appliances · pre-positioned</text>
+
+  <!-- stores -->
+  <ellipse class="store" cx="130" cy="215" rx="75" ry="10"/>
+  <path class="store" d="M55,215 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="130" y="237">Origin Store</text>
+
+  <ellipse class="store" cx="650" cy="118" rx="75" ry="10"/>
+  <path class="store" d="M575,118 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="650" y="140">Catalog · Users</text>
+
+  <!-- flows -->
+  <path class="flow" d="M373,66 L373,110"/>
+  <text class="edge" x="367" y="88" text-anchor="end">start session</text>
+  <path class="flow" d="M387,110 L387,66"/>
+  <text class="edge" x="393" y="88" text-anchor="start">manifest + CDN URLs</text>
+
+  <path class="flow" d="M495,130 L575,130"/>
+  <text class="edge" x="505" y="120" text-anchor="start">read metadata</text>
+
+  <path class="flow acc" d="M495,343 L560,343 L560,43 L470,43"/>
+  <text class="edge" x="572" y="200" text-anchor="start">streaming chunks</text>
+
+  <path class="flow" d="M130,156 L130,205"/>
+  <text class="edge" x="140" y="182" text-anchor="start">encode offline</text>
+
+  <path class="flow dash" d="M130,249 L130,343 L265,343"/>
+  <text class="edge" x="140" y="300" text-anchor="start">pre-position (off-peak)</text>
+</svg>
 ```
 
 **How to read the diagram:** ingestion and playback are separate. Content is prepared offline into many encodings and chunks, then manifests and CDNs make playback mostly a data-delivery problem rather than an on-demand transcoding problem.
@@ -8008,25 +9611,84 @@ REST:
 ```
 
 #### High-Level Design
-```
-   Client                                Client
-     │                                     │
-     │ WebSocket                  WebSocket │
-     ↓                                     ↓
-  ┌──────────┐                       ┌──────────┐
-  │ MS Server│                       │ MS Server│   (per-workspace
-  │ (workspace│                       │  sticky) │    sharding)
-  │  sticky) │                       │          │
-  └────┬─────┘                       └────┬─────┘
-       │                                  │
-       └────→ Pub/Sub bus per workspace ←──┘
-              (channel topics)
-                    ↓
-       ┌──────────────────────────────┐
-       │ Persist Service              │ → Wide-column store (channel partition)
-       │                              │ → Search indexer
-       │                              │ → Notif Service (push if offline)
-       └──────────────────────────────┘
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 470" role="img" aria-label="Slack workplace messaging high-level architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <!-- clients -->
+  <rect class="box" x="60" y="20" width="180" height="46" rx="9"/>
+  <text class="lbl" x="150" y="45">Client</text>
+  <rect class="box" x="520" y="20" width="180" height="46" rx="9"/>
+  <text class="lbl" x="610" y="45">Client</text>
+
+  <!-- message servers -->
+  <rect class="box" x="60" y="110" width="180" height="46" rx="9"/>
+  <text class="lbl" x="150" y="127">MS Server</text>
+  <text class="sub" x="150" y="145">workspace-sticky</text>
+  <rect class="box" x="520" y="110" width="180" height="46" rx="9"/>
+  <text class="lbl" x="610" y="127">MS Server</text>
+  <text class="sub" x="610" y="145">workspace-sticky</text>
+
+  <!-- pub/sub bus -->
+  <rect class="box" x="120" y="200" width="520" height="46" rx="9"/>
+  <text class="lbl" x="380" y="217">Pub/Sub Bus</text>
+  <text class="sub" x="380" y="235">per-workspace channel topics</text>
+
+  <!-- persist -->
+  <rect class="box" x="280" y="300" width="200" height="46" rx="9"/>
+  <text class="lbl" x="380" y="325">Persist Service</text>
+
+  <!-- fan-out stores/services -->
+  <ellipse class="store" cx="140" cy="410" rx="75" ry="10"/>
+  <path class="store" d="M65,410 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="140" y="432">Messages · channel</text>
+
+  <rect class="box" x="280" y="400" width="200" height="46" rx="9"/>
+  <text class="lbl" x="380" y="425">Search Indexer</text>
+
+  <rect class="box" x="560" y="400" width="180" height="46" rx="9"/>
+  <text class="lbl" x="650" y="418">Notif Service</text>
+  <text class="sub" x="650" y="436">push if offline</text>
+
+  <!-- flows -->
+  <path class="flow" d="M150,66 L150,110"/>
+  <text class="edge" x="158" y="88" text-anchor="start">WebSocket</text>
+  <path class="flow" d="M610,66 L610,110"/>
+  <text class="edge" x="618" y="88" text-anchor="start">WebSocket</text>
+
+  <path class="flow" d="M145,156 L145,200"/>
+  <text class="edge" x="138" y="178" text-anchor="end">publish</text>
+  <path class="flow dash" d="M165,200 L165,156"/>
+  <path class="flow" d="M600,156 L600,200"/>
+  <path class="flow dash" d="M620,200 L620,156"/>
+  <text class="edge" x="632" y="178" text-anchor="start">fan-out</text>
+
+  <path class="flow acc" d="M380,246 L380,300"/>
+  <text class="edge" x="388" y="273" text-anchor="start">persist</text>
+
+  <path class="flow" d="M320,346 L320,378 L140,378 L140,400"/>
+  <text class="edge" x="250" y="370" text-anchor="start">append</text>
+  <path class="flow" d="M380,346 L380,400"/>
+  <text class="edge" x="388" y="373" text-anchor="start">index</text>
+  <path class="flow" d="M450,346 L450,378 L650,378 L650,400"/>
+  <text class="edge" x="500" y="370" text-anchor="start">push if offline</text>
+</svg>
 ```
 
 **How to read the diagram:** the architecture has a live side and a history side. WebSocket connections make channels and DMs feel instant, while durable storage and indexing make those same messages searchable and recoverable later.
@@ -8231,34 +9893,62 @@ WebRTC: media plane (UDP)      ← actual audio/video frames
 ```
 
 #### High-Level Design
-```
-   Participants
-        │ each opens WebRTC connection
-        ↓
-   ┌───────────────────────────────────────┐
-   │   SFU (Selective Forwarding Unit)     │
-   │                                       │
-   │   - Each participant uploads 1 stream │
-   │   - SFU forwards to all others        │
-   │   - No transcoding (cheap)            │
-   │                                       │
-   │   N participants → N×(N-1) downlinks  │
-   │   (scales to ~50 participants well)   │
-   └─────────────┬─────────────────────────┘
-                 ↓ for very large meetings
-   ┌───────────────────────────────────────┐
-   │   MCU (Mixing Conference Unit)        │
-   │                                       │
-   │   - Composes single grid stream       │
-   │   - High CPU cost                     │
-   │   - Each participant gets 1 stream    │
-   │   - Scales to webinars (1→thousands)  │
-   └───────────────────────────────────────┘
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 340" role="img" aria-label="Zoom video conferencing high-level architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
 
-Signaling: WebSocket to control plane (join, mute, raise hand)
-Media:     WebRTC over UDP (with DTLS-SRTP encryption)
+  <!-- participants -->
+  <rect class="box" x="280" y="20" width="200" height="46" rx="9"/>
+  <text class="lbl" x="380" y="45">Participants</text>
 
-Geographically-distributed SFU clusters; pick nearest to median participant
+  <!-- signaling / control plane -->
+  <rect class="box" x="40" y="140" width="200" height="46" rx="9"/>
+  <text class="lbl" x="140" y="157">Signaling</text>
+  <text class="sub" x="140" y="175">join · mute · hand (WS)</text>
+
+  <!-- SFU cluster group -->
+  <rect class="grp" x="290" y="118" width="430" height="110" rx="12"/>
+  <text class="sub" x="505" y="138" font-weight="600">SFU · geo-distributed (nearest)</text>
+  <rect class="box" x="310" y="155" width="180" height="44" rx="8"/>
+  <text class="sub" x="400" y="170">SFU · Region A</text>
+  <text class="sub" x="400" y="187">no transcode</text>
+  <rect class="box" x="510" y="155" width="190" height="44" rx="8"/>
+  <text class="sub" x="605" y="177">SFU · Region B</text>
+
+  <!-- MCU -->
+  <rect class="box" x="290" y="270" width="200" height="46" rx="9"/>
+  <text class="lbl" x="390" y="287">MCU</text>
+  <text class="sub" x="390" y="305">mix grid · webinars</text>
+
+  <!-- flows -->
+  <path class="flow dash" d="M280,50 L140,50 L140,140"/>
+  <text class="edge" x="145" y="100" text-anchor="start">signaling (WS)</text>
+
+  <path class="flow acc" d="M400,66 L400,155"/>
+  <text class="edge" x="408" y="110" text-anchor="start">media (WebRTC/UDP)</text>
+
+  <path class="flow" d="M490,177 L510,177"/>
+  <text class="edge" x="500" y="150" text-anchor="start">inter-region</text>
+
+  <path class="flow dash" d="M390,228 L390,270"/>
+  <text class="edge" x="398" y="250" text-anchor="start">large meetings</text>
+</svg>
 ```
 
 **How to read the diagram:** signaling helps clients discover and join the meeting, but the real weight sits in the media path. Clients send audio and video to media relays, which decide what to forward to whom and at what quality.
@@ -8467,21 +10157,73 @@ INCR / DECR / EXPIRE     (Redis)
 ```
 
 #### High-Level Design
-```
-                              ┌─────────────────────┐
-                              │   Cache Client      │
-                              │  (in-process lib)   │
-                              └──────────┬──────────┘
-                                         │
-                                         │ consistent hash key → node
-                                         ↓
-   ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────┐
-   │  Node 1    │  │  Node 2    │  │  Node 3    │  │  Node N    │
-   │  (RAM)     │  │  (RAM)     │  │  (RAM)     │  │  (RAM)     │
-   └────────────┘  └────────────┘  └────────────┘  └────────────┘
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 414" role="img" aria-label="Distributed cache high-level architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
 
-Optional: replicas per shard for HA (Redis Cluster)
-Optional: client-side cache (cache the cache) for ultra-hot keys
+  <!-- cache client -->
+  <rect class="box" x="280" y="20" width="200" height="46" rx="9"/>
+  <text class="lbl" x="380" y="37">Cache Client</text>
+  <text class="sub" x="380" y="55">in-process lib · client cache</text>
+
+  <!-- cache cluster -->
+  <rect class="grp" x="40" y="150" width="680" height="150" rx="12"/>
+  <text class="sub" x="380" y="170" font-weight="600">Cache cluster · consistent hashing</text>
+
+  <rect class="box" x="60" y="185" width="140" height="44" rx="8"/>
+  <text class="sub" x="130" y="207">Node 1 · RAM</text>
+  <rect class="box" x="225" y="185" width="140" height="44" rx="8"/>
+  <text class="sub" x="295" y="207">Node 2 · RAM</text>
+  <rect class="box" x="390" y="185" width="140" height="44" rx="8"/>
+  <text class="sub" x="460" y="207">Node 3 · RAM</text>
+  <rect class="box" x="555" y="185" width="140" height="44" rx="8"/>
+  <text class="sub" x="625" y="207">Node N · RAM</text>
+
+  <rect class="box" x="60" y="245" width="140" height="40" rx="8"/>
+  <text class="sub" x="130" y="265">replica</text>
+  <rect class="box" x="225" y="245" width="140" height="40" rx="8"/>
+  <text class="sub" x="295" y="265">replica</text>
+  <rect class="box" x="390" y="245" width="140" height="40" rx="8"/>
+  <text class="sub" x="460" y="265">replica</text>
+  <rect class="box" x="555" y="245" width="140" height="40" rx="8"/>
+  <text class="sub" x="625" y="265">replica</text>
+
+  <!-- backing db -->
+  <ellipse class="store" cx="380" cy="360" rx="75" ry="10"/>
+  <path class="store" d="M305,360 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="380" y="382">Backing DB / origin</text>
+
+  <!-- flows -->
+  <path class="flow acc" d="M380,66 L380,150"/>
+  <text class="edge" x="388" y="108" text-anchor="start">hash(key) → node</text>
+
+  <path class="flow dash" d="M130,229 L130,245"/>
+  <text class="edge" x="138" y="237" text-anchor="start">replicate</text>
+  <path class="flow dash" d="M295,229 L295,245"/>
+  <path class="flow dash" d="M460,229 L460,245"/>
+  <path class="flow dash" d="M625,229 L625,245"/>
+
+  <path class="flow dash" d="M365,300 L365,360"/>
+  <text class="edge" x="358" y="330" text-anchor="end">miss → load</text>
+  <path class="flow dash" d="M395,360 L395,300"/>
+  <text class="edge" x="402" y="330" text-anchor="start">repopulate</text>
+</svg>
 ```
 
 **How to read the diagram:** requests always try the cache before the database. On a hit, the request is cheap. On a miss, the application loads the value from the backing store and repopulates the cache for the future.
@@ -8705,14 +10447,63 @@ renew(key, fence_token, ttl_ms)
 #### High-Level Design
 
 **Option A: ZooKeeper / etcd ephemeral nodes**
-```
-Acquire:
-  Try create ephemeral sequential znode under /locks/{key}/
-  If your seq is lowest → you have the lock
-  Else: watch znode just before yours → wait
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 376" role="img" aria-label="Distributed lock high-level architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
 
-Auto-release on session loss (ephemeral znode dies)
-Strong safety guarantees from ZAB consensus
+  <!-- clients -->
+  <rect class="box" x="60" y="20" width="180" height="46" rx="9"/>
+  <text class="lbl" x="150" y="45">Client A</text>
+  <rect class="box" x="520" y="20" width="180" height="46" rx="9"/>
+  <text class="lbl" x="610" y="45">Client B</text>
+
+  <!-- lock service ensemble -->
+  <rect class="grp" x="250" y="120" width="260" height="150" rx="12"/>
+  <text class="sub" x="380" y="140" font-weight="600">Lock Service · ZK / etcd (ZAB)</text>
+  <rect class="box" x="270" y="155" width="68" height="44" rx="8"/>
+  <text class="sub" x="304" y="177">ZK 1</text>
+  <rect class="box" x="346" y="155" width="68" height="44" rx="8"/>
+  <text class="sub" x="380" y="177">ZK 2</text>
+  <rect class="box" x="422" y="155" width="68" height="44" rx="8"/>
+  <text class="sub" x="456" y="177">ZK 3</text>
+  <text class="sub" x="380" y="240">/locks/{key} · ephemeral seq znodes</text>
+
+  <!-- protected resource -->
+  <rect class="box" x="280" y="310" width="200" height="46" rx="9"/>
+  <text class="lbl" x="380" y="327">Protected Resource</text>
+  <text class="sub" x="380" y="345">validates fencing token</text>
+
+  <!-- flows -->
+  <path class="flow acc" d="M150,66 L150,175 L250,175"/>
+  <text class="edge" x="158" y="120" text-anchor="start">acquire</text>
+  <path class="flow dash" d="M250,205 L165,205 L165,66"/>
+  <text class="edge" x="175" y="197" text-anchor="start">lease + token 42</text>
+
+  <path class="flow dash" d="M610,66 L610,175 L510,175"/>
+  <text class="edge" x="602" y="120" text-anchor="end">acquire (waits)</text>
+
+  <path class="flow acc" d="M60,50 L40,50 L40,333 L280,333"/>
+  <text class="edge" x="48" y="300" text-anchor="start">write · token 42</text>
+
+  <path class="flow dash" d="M700,50 L720,50 L720,333 L480,333"/>
+  <text class="edge" x="712" y="300" text-anchor="end">stale token 41 → rejected</text>
+</svg>
 ```
 
 **How to read the diagram:** the lock service is only part of the story. It grants a lease, but the protected resource must also check the fencing token that comes with that lease before accepting writes.
@@ -8912,33 +10703,85 @@ POST /jobs/{id}/run  (manual trigger)
 ```
 
 #### High-Level Design
-```
-                         ┌────────────────────────┐
-                         │  Scheduler Service     │
-                         │                        │
-                         │  - reads jobs store    │
-                         │  - ticks every N sec   │
-                         │  - finds due jobs      │
-                         │  - puts on queue       │
-                         │                        │
-                         │  HA via leader election│
-                         │  (coordination service)│
-                         └─────────┬──────────────┘
-                                   ↓
-                          Durable Job Queue
-                                   ↓
-                         ┌────────────────────────┐
-                         │  Worker Pool           │
-                         │  - pull job            │
-                         │  - acquire job lock    │
-                         │  - execute             │
-                         │  - update status       │
-                         │  - commit / retry      │
-                         └────────────────────────┘
-                                   ↓
-                         Status / History Store
-                                   ↓
-                         Notifications / Alerts on failure
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 456" role="img" aria-label="Distributed job scheduler high-level architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <!-- scheduler -->
+  <rect class="box" x="270" y="20" width="220" height="46" rx="9"/>
+  <text class="lbl" x="380" y="37">Scheduler Service</text>
+  <text class="sub" x="380" y="55">tick · find due · enqueue</text>
+
+  <!-- jobs store -->
+  <ellipse class="store" cx="120" cy="30" rx="65" ry="10"/>
+  <path class="store" d="M55,30 v34 a65,10 0 0 0 130,0 v-34"/>
+  <text class="sub" x="120" y="52">Jobs Store</text>
+
+  <!-- coordination -->
+  <rect class="box" x="560" y="20" width="170" height="46" rx="9"/>
+  <text class="lbl" x="645" y="37">Coordination</text>
+  <text class="sub" x="645" y="55">leader election</text>
+
+  <!-- durable queue -->
+  <ellipse class="store" cx="380" cy="120" rx="90" ry="10"/>
+  <path class="store" d="M290,120 v34 a90,10 0 0 0 180,0 v-34"/>
+  <text class="sub" x="380" y="142">Durable Job Queue</text>
+
+  <!-- worker pool -->
+  <rect class="grp" x="230" y="210" width="300" height="130" rx="12"/>
+  <text class="sub" x="380" y="230" font-weight="600">Worker Pool</text>
+  <rect class="box" x="250" y="250" width="80" height="44" rx="8"/>
+  <text class="sub" x="290" y="272">W1</text>
+  <rect class="box" x="345" y="250" width="80" height="44" rx="8"/>
+  <text class="sub" x="385" y="272">W2</text>
+  <rect class="box" x="440" y="250" width="80" height="44" rx="8"/>
+  <text class="sub" x="480" y="272">W3</text>
+  <text class="sub" x="380" y="320">pull · lock · execute · commit/retry</text>
+
+  <!-- status store -->
+  <ellipse class="store" cx="650" cy="250" rx="75" ry="10"/>
+  <path class="store" d="M575,250 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="650" y="272">Status · History</text>
+
+  <!-- notifications -->
+  <rect class="box" x="280" y="390" width="200" height="46" rx="9"/>
+  <text class="lbl" x="380" y="407">Notifications</text>
+  <text class="sub" x="380" y="425">alerts on failure</text>
+
+  <!-- flows -->
+  <path class="flow" d="M270,42 L188,42"/>
+  <text class="edge" x="262" y="32" text-anchor="end">read due</text>
+  <path class="flow dash" d="M490,43 L560,43"/>
+  <text class="edge" x="498" y="33" text-anchor="start">elect leader</text>
+
+  <path class="flow acc" d="M380,66 L380,120"/>
+  <text class="edge" x="388" y="92" text-anchor="start">enqueue due runs</text>
+
+  <path class="flow acc" d="M380,154 L380,210"/>
+  <text class="edge" x="388" y="182" text-anchor="start">pull (lease)</text>
+
+  <path class="flow" d="M530,272 L575,272"/>
+  <text class="edge" x="535" y="262" text-anchor="start">update status</text>
+
+  <path class="flow dash" d="M380,340 L380,390"/>
+  <text class="edge" x="388" y="365" text-anchor="start">on failure</text>
+</svg>
 ```
 
 **How to read the diagram:** the scheduler is responsible for deciding when a run should happen, but workers are responsible for actually doing the work. A durable queue sits in the middle so the system can survive crashes and scale execution separately from timing.
@@ -9146,27 +10989,59 @@ REST:
 ```
 
 #### High-Level Design
-```
-   Client A                     Client B
-      │                            │
-      │ ops + rev                  │ ops + rev
-      ↓                            ↓
-   ┌──────────────────────────────────┐
-   │    Collaboration Server          │
-   │                                  │
-   │   - Per-doc actor / single thread│
-   │   - Receives ops                 │
-   │   - Transforms (OT) or merges    │
-   │     (CRDT)                       │
-   │   - Broadcasts to all clients    │
-   │   - Persists to storage          │
-   └─────────────┬────────────────────┘
-                 ↓
-        Persistent Document Store
-        (snapshots + op log)
-                 ↓
-        Snapshot Service
-        (periodic compaction)
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 410" role="img" aria-label="Google Docs real-time collaboration architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box" x="120" y="20" width="200" height="46" rx="9"/>
+  <text class="lbl" x="220" y="44">Client A</text>
+  <rect class="box" x="440" y="20" width="200" height="46" rx="9"/>
+  <text class="lbl" x="540" y="44">Client B</text>
+
+  <rect class="box" x="200" y="140" width="360" height="64" rx="9"/>
+  <text class="lbl" x="380" y="162">Collaboration Server</text>
+  <text class="sub" x="380" y="185">per-doc actor · OT / CRDT · broadcast</text>
+
+  <ellipse class="store" cx="380" cy="250" rx="75" ry="10"/>
+  <path class="store" d="M305,250 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="380" y="272">Document Store</text>
+  <text class="sub" x="380" y="288">snapshots + op log</text>
+
+  <rect class="box" x="240" y="340" width="280" height="46" rx="9"/>
+  <text class="lbl" x="380" y="360">Snapshot Service</text>
+  <text class="sub" x="380" y="378" opacity="0.72">periodic compaction</text>
+
+  <path class="flow" d="M220,66 L220,103 L300,103 L300,140"/>
+  <text class="edge" x="226" y="90" text-anchor="start">ops + rev</text>
+  <path class="flow" d="M540,66 L540,103 L460,103 L460,140"/>
+  <text class="edge" x="534" y="90" text-anchor="end">ops + rev</text>
+
+  <path class="flow dash" d="M200,175 L90,175 L90,50 L120,50"/>
+  <text class="edge" x="150" y="167" text-anchor="middle">broadcast</text>
+  <path class="flow dash" d="M560,175 L670,175 L670,50 L640,50"/>
+  <text class="edge" x="610" y="167" text-anchor="middle">broadcast</text>
+
+  <path class="flow" d="M380,204 L380,240"/>
+  <text class="edge" x="392" y="224" text-anchor="start">persist</text>
+  <path class="flow" d="M380,294 L380,340"/>
+  <text class="edge" x="392" y="318" text-anchor="start">compact</text>
+</svg>
 ```
 
 **How to read the diagram:** clients do not send whole documents back and forth. They send small edit operations, and a collaboration service orders or transforms those operations before broadcasting them back out.
@@ -9411,30 +11286,62 @@ WS   /chat/{match_id}  ← messages (like #9)
 ```
 
 #### High-Level Design
-```
-                   ┌─────────────────────────────┐
-       Client ────→│  Feed Service               │
-                   │                             │
-                   │  1. Geo query (within Xkm)  │
-                   │  2. Filter by preferences   │
-                   │     (age, gender, etc.)     │
-                   │  3. Exclude already-swiped  │
-                   │     (Bloom filter)          │
-                   │  4. ML rank (compatibility) │
-                   │  5. Return ~20 candidates   │
-                   └──────────┬──────────────────┘
-                              ↓
-                              ↓ swipe
-                   ┌─────────────────────────────┐
-                   │  Swipe Service              │
-                   │  - record swipe             │
-                   │  - check if reciprocal      │
-                   │     (target swiped this user)│
-                   │  - if yes → create match    │
-                   │  - notify both              │
-                   └──────────┬──────────────────┘
-                              ↓
-                       Match Service ─→ Chat Service (#9)
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 448" role="img" aria-label="Tinder feed and swipe/match architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box" x="280" y="20" width="200" height="46" rx="9"/>
+  <text class="lbl" x="380" y="44">Client</text>
+
+  <rect class="box" x="200" y="120" width="360" height="84" rx="9"/>
+  <text class="lbl" x="380" y="144">Feed Service</text>
+  <text class="sub" x="380" y="166">geo query · filter prefs · exclude swiped</text>
+  <text class="sub" x="380" y="186">ML rank → ~20 candidates</text>
+
+  <rect class="box" x="200" y="250" width="360" height="80" rx="9"/>
+  <text class="lbl" x="380" y="272">Swipe Service</text>
+  <text class="sub" x="380" y="293">record swipe · reciprocal check</text>
+  <text class="sub" x="380" y="312">if mutual → create match · notify</text>
+
+  <ellipse class="store" cx="670" cy="250" rx="70" ry="10"/>
+  <path class="store" d="M600,250 v34 a70,10 0 0 0 140,0 v-34"/>
+  <text class="sub" x="670" y="272">Swipes</text>
+  <text class="sub" x="670" y="288">Bloom filter</text>
+
+  <rect class="box" x="140" y="380" width="220" height="46" rx="9"/>
+  <text class="lbl" x="250" y="404">Match Service</text>
+  <rect class="box" x="400" y="380" width="220" height="46" rx="9"/>
+  <text class="lbl" x="510" y="404">Chat Service</text>
+
+  <path class="flow" d="M380,66 L380,120"/>
+  <path class="flow" d="M380,204 L380,250"/>
+  <text class="edge" x="392" y="227" text-anchor="start">swipe</text>
+
+  <path class="flow" d="M560,267 L600,267"/>
+  <text class="edge" x="562" y="256" text-anchor="start">record swipe</text>
+  <path class="flow dash" d="M670,250 L670,180 L560,180"/>
+  <text class="edge" x="664" y="200" text-anchor="end">exclude swiped (Bloom)</text>
+
+  <path class="flow" d="M300,330 L300,357 L250,357 L250,380"/>
+  <path class="flow" d="M360,403 L400,403"/>
+  <text class="edge" x="380" y="393" text-anchor="middle">match</text>
+</svg>
 ```
 
 **How to read the diagram:** one path builds the candidate feed and another path records swipes and detects mutual interest. The feed path narrows and ranks possible matches, while the swipe path performs the actual did-this-become-a-match decision.
@@ -9641,28 +11548,63 @@ WebHooks                                       (push, PR, etc.)
 ```
 
 #### High-Level Design
-```
-                   ┌─────────────────────────────────────┐
-                   │   Frontend (web UI + REST + GQL)    │
-                   └──────────────────┬──────────────────┘
-                                      │
-        ┌──────────────────────┬──────┴──────┬──────────────────────┐
-        ↓                      ↓             ↓                      ↓
-┌──────────────┐    ┌──────────────────┐  ┌────────────┐    ┌──────────────┐
-│  Auth /      │    │  Git Storage     │  │ Search     │    │  PR / Issues │
-│  Permissions │    │  (sharded git    │  │ (trigram   │    │  Service     │
-│              │    │   on many file   │  │  index)    │    │              │
-└──────────────┘    │   servers, repls)│  └────────────┘    └──────────────┘
-                    └──────────────────┘
-                                      │
-                            ┌──────────────────┐
-                            │ Git Proxy        │  (routes git ops to right shard)
-                            └──────────────────┘
-                                      ↓
-                       ┌──────────────────────────────┐
-                       │ CI / Actions Runner Pool     │
-                       │ (containerized; per-job VMs) │
-                       └──────────────────────────────┘
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 422" role="img" aria-label="GitHub source code hosting architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box" x="180" y="20" width="400" height="46" rx="9"/>
+  <text class="lbl" x="380" y="44">Frontend · web UI · REST · GraphQL</text>
+
+  <rect class="box" x="20" y="130" width="166" height="60" rx="9"/>
+  <text class="lbl" x="103" y="152">Auth /</text>
+  <text class="sub" x="103" y="171">Permissions</text>
+
+  <rect class="box" x="204" y="130" width="166" height="60" rx="9"/>
+  <text class="lbl" x="287" y="152">Git Storage</text>
+  <text class="sub" x="287" y="171">sharded · file servers</text>
+
+  <rect class="box" x="388" y="130" width="166" height="60" rx="9"/>
+  <text class="lbl" x="471" y="152">Search</text>
+  <text class="sub" x="471" y="171">trigram index</text>
+
+  <rect class="box" x="572" y="130" width="166" height="60" rx="9"/>
+  <text class="lbl" x="655" y="152">PR / Issues</text>
+  <text class="sub" x="655" y="171">Service</text>
+
+  <rect class="box" x="190" y="250" width="194" height="46" rx="9"/>
+  <text class="lbl" x="287" y="270">Git Proxy</text>
+  <text class="sub" x="287" y="287" opacity="0.72">routes to shard</text>
+
+  <rect class="box" x="140" y="340" width="300" height="60" rx="9"/>
+  <text class="lbl" x="290" y="362">CI / Actions Runner Pool</text>
+  <text class="sub" x="290" y="382">containerized · per-job VMs</text>
+
+  <path class="flow" d="M380,66 L380,100 L103,100 L103,130"/>
+  <path class="flow" d="M380,66 L380,100 L287,100 L287,130"/>
+  <path class="flow" d="M380,66 L380,100 L471,100 L471,130"/>
+  <path class="flow" d="M380,66 L380,100 L655,100 L655,130"/>
+
+  <path class="flow" d="M287,190 L287,250"/>
+  <text class="edge" x="299" y="222" text-anchor="start">git ops</text>
+  <path class="flow" d="M288,296 L289,340"/>
+  <text class="edge" x="301" y="320" text-anchor="start">dispatch jobs</text>
+</svg>
 ```
 
 **How to read the diagram:** repository storage, pull-request metadata, code search, and CI are separate subsystems connected by repo identity and git refs. A clone or push mostly cares about repo shards; a PR page mostly cares about metadata and indexes.
@@ -9879,24 +11821,59 @@ POST /play_event                  body: { track_id, ts, duration_played }
 ```
 
 #### High-Level Design
-```
-                                     ┌────────────────────┐
-                                     │  Catalog Service   │
-                                     │  (metadata)        │
-                                     └────────────────────┘
-                                                ↑
-                ┌───────────────────────────────┼───────────────────────────────┐
-                ↓                               ↓                               ↓
-   ┌──────────────────────┐    ┌──────────────────────┐         ┌──────────────────────┐
-   │ Audio Storage / CDN  │    │ Recommendation       │         │  Royalty Pipeline    │
-   │ (Ogg/Vorbis, AAC)    │    │ Service              │         │  (per-stream events) │
-   │ Multiple bitrates    │    │ - Weekly playlist    │         │  → Aggregator        │
-   │ DRM (Widevine)       │    │ - Daily Mixes        │         │  → Royalty Calc      │
-   └──────────────────────┘    │ - Radio              │         │  → Pay rights holders│
-                               └──────────────────────┘         └──────────────────────┘
-                                          ↑
-                            User behavior events (partitioned event stream)
-                            train collaborative filtering + audio embedding models offline
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 366" role="img" aria-label="Spotify streaming, recommendation and royalty architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box" x="280" y="20" width="200" height="60" rx="9"/>
+  <text class="lbl" x="380" y="42">Catalog Service</text>
+  <text class="sub" x="380" y="62">metadata</text>
+
+  <rect class="box" x="20" y="150" width="225" height="76" rx="9"/>
+  <text class="lbl" x="132" y="172">Audio Storage / CDN</text>
+  <text class="sub" x="132" y="192">Ogg/AAC · bitrates</text>
+  <text class="sub" x="132" y="210">DRM (Widevine)</text>
+
+  <rect class="box" x="268" y="150" width="224" height="76" rx="9"/>
+  <text class="lbl" x="380" y="172">Recommendation</text>
+  <text class="sub" x="380" y="192">Weekly / Daily Mixes</text>
+  <text class="sub" x="380" y="210">Radio</text>
+
+  <rect class="box" x="515" y="150" width="225" height="76" rx="9"/>
+  <text class="lbl" x="627" y="172">Royalty Pipeline</text>
+  <text class="sub" x="627" y="192">per-stream events</text>
+  <text class="sub" x="627" y="210">aggregate → pay</text>
+
+  <rect class="box" x="210" y="290" width="340" height="56" rx="9"/>
+  <text class="lbl" x="380" y="310">User Behavior Events</text>
+  <text class="sub" x="380" y="330">partitioned stream → offline training</text>
+
+  <path class="flow" d="M380,80 L380,120 L132,120 L132,150"/>
+  <path class="flow" d="M380,80 L380,150"/>
+  <path class="flow" d="M380,80 L380,120 L627,120 L627,150"/>
+  <text class="edge" x="392" y="104" text-anchor="start">metadata</text>
+
+  <path class="flow" d="M380,290 L380,226"/>
+  <text class="edge" x="392" y="258" text-anchor="start">train models (offline)</text>
+  <path class="flow" d="M550,318 L627,318 L627,226"/>
+  <text class="edge" x="560" y="308" text-anchor="start">per-stream events</text>
+</svg>
 ```
 
 **How to read the diagram:** there are three big paths: playback, recommendation, and royalty accounting. They all share catalog metadata and user behavior events, but they use those inputs for very different purposes.
@@ -10140,36 +12117,72 @@ Internal event: alerts.fired
 
 #### High-Level Design
 
-```
-Exchanges / Market Data Vendors
-      │
-      ↓ market data feeds
-┌─────────────────────┐
-│  Market Data        │  normalise, dedupe vendor feeds,
-│  Gateway            │  stamp ingest_ts
-└──────────┬──────────┘
-           ↓  partitioned tick stream (key = instrument_id)
-┌─────────────────────────────────┐          ┌────────────────────┐
-│ Rule Evaluator                  │←─ CDC ──│ Subscriptions Store│
-│  - keyed by instrument_id       │  stream  │  source of truth   │
-│  - local state: subs index +    │          └────────────────────┘
-│    last_price + armed flags     │
-│  - on tick: eval all subs for   │
-│    that instrument → emit fires │
-└──────────────┬──────────────────┘
-               ↓  fired-alerts stream
-       ┌───────────────┐
-       │ Alert         │  - look up user prefs / quiet hours
-       │ Dispatcher    │  - idempotency check
-       │               │  - update alert state (armed → fired)
-       └───────┬───────┘
-               ↓
-       ┌───────────────┐
-       │ Notification  │  (existing service)
-       │ System        │   push / email / SMS fan-out
-       └───────────────┘
-               ↓
-       Audit log (object store, fed by stream sink)
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 680" role="img" aria-label="Stock price notification system architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box" x="270" y="20" width="220" height="46" rx="9"/>
+  <text class="lbl" x="380" y="44">Exchanges / Vendors</text>
+
+  <rect class="box" x="240" y="115" width="280" height="64" rx="9"/>
+  <text class="lbl" x="380" y="137">Market Data Gateway</text>
+  <text class="sub" x="380" y="159">normalise · dedupe · stamp ts</text>
+
+  <rect class="box acc" x="200" y="232" width="360" height="96" rx="9"/>
+  <text class="lbl" x="380" y="252">Rule Evaluator</text>
+  <text class="sub" x="380" y="274">keyed by instrument · local state</text>
+  <text class="sub" x="380" y="292">subs + last_price + armed flags</text>
+  <text class="sub" x="380" y="310">on tick → eval subs → emit fires</text>
+
+  <ellipse class="store" cx="670" cy="250" rx="75" ry="10"/>
+  <path class="store" d="M595,250 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="670" y="272">Subscriptions</text>
+  <text class="sub" x="670" y="288">source of truth</text>
+
+  <rect class="box" x="230" y="380" width="300" height="76" rx="9"/>
+  <text class="lbl" x="380" y="402">Alert Dispatcher</text>
+  <text class="sub" x="380" y="422">prefs · quiet hours · idempotency</text>
+  <text class="sub" x="380" y="440">armed → fired</text>
+
+  <rect class="box" x="250" y="505" width="260" height="60" rx="9"/>
+  <text class="lbl" x="380" y="527">Notification System</text>
+  <text class="sub" x="380" y="547">push · email · SMS fan-out</text>
+
+  <ellipse class="store" cx="380" cy="610" rx="75" ry="10"/>
+  <path class="store" d="M305,610 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="380" y="632">Audit Log</text>
+  <text class="sub" x="380" y="648">object store</text>
+
+  <path class="flow" d="M380,66 L380,115"/>
+  <text class="edge" x="392" y="90" text-anchor="start">market data feeds</text>
+  <path class="flow acc" d="M380,179 L380,232"/>
+  <text class="edge" x="392" y="205" text-anchor="start">partitioned tick stream (key = instrument)</text>
+
+  <path class="flow dash" d="M595,268 L560,268"/>
+  <text class="edge" x="588" y="240" text-anchor="end">CDC stream</text>
+
+  <path class="flow" d="M380,328 L380,380"/>
+  <text class="edge" x="392" y="354" text-anchor="start">fired-alerts stream</text>
+  <path class="flow" d="M380,456 L380,505"/>
+  <path class="flow" d="M380,565 L380,600"/>
+  <text class="edge" x="392" y="583" text-anchor="start">stream sink</text>
+</svg>
 ```
 
 **How to read the diagram:** ticks come in on one side, rules and last-known prices live in local processor state, and fired alerts go out through a delivery pipeline on the other side. The center of the system is the stateful evaluator, not the notifier.
@@ -10820,29 +12833,100 @@ Event {
 ```
 
 #### High-Level Design
-```
-   feed A (FIX)      feed B (ITCH bin)     feed C (proprietary)
-      |                   |                      |
-      v                   v                      v
-[ Feed Handler ]    [ Feed Handler ]      [ Feed Handler ]   <- thin, drain socket only
-      |                   |                      |
-      +---------> [ Normaliser: decode -> canonical struct ] <-+
-                              |
-                              v
-                  [ Sequencer (single writer) ]  fan-in: assign seq
-                              |
-                              v
-                  [ Ordered log / ring buffer ]  --> [ Journal / snapshot ]
-                              |
-                  partition by hash(instrumentId)  fan-out
-              +---------------+----------------+
-              v               v                v
-        [ shard 0 ]     [ shard 1 ]      [ shard N ]
-        consumer +      consumer +       consumer +
-        conflation      conflation       conflation
-              |               |                |
-              v               v                v
-         Matching core   Matching core    Matching core   (question 42)
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 700" role="img" aria-label="High-throughput market data ingest pipeline">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box" x="40" y="20" width="200" height="46" rx="9"/>
+  <text class="lbl" x="140" y="44">feed A · FIX</text>
+  <rect class="box" x="280" y="20" width="200" height="46" rx="9"/>
+  <text class="lbl" x="380" y="44">feed B · ITCH bin</text>
+  <rect class="box" x="520" y="20" width="200" height="46" rx="9"/>
+  <text class="lbl" x="620" y="44">feed C · proprietary</text>
+
+  <rect class="grp" x="20" y="94" width="720" height="84" rx="12"/>
+  <text class="sub" x="380" y="110" font-weight="600">Feed Handlers · thin, drain socket only</text>
+  <rect class="box" x="40" y="122" width="200" height="44" rx="8"/>
+  <text class="sub" x="140" y="144">Feed Handler</text>
+  <rect class="box" x="280" y="122" width="200" height="44" rx="8"/>
+  <text class="sub" x="380" y="144">Feed Handler</text>
+  <rect class="box" x="520" y="122" width="200" height="44" rx="8"/>
+  <text class="sub" x="620" y="144">Feed Handler</text>
+
+  <rect class="box" x="250" y="210" width="260" height="56" rx="9"/>
+  <text class="lbl" x="380" y="230">Normaliser</text>
+  <text class="sub" x="380" y="250">decode → canonical struct</text>
+
+  <rect class="box acc" x="260" y="300" width="240" height="56" rx="9"/>
+  <text class="lbl" x="380" y="320">Sequencer</text>
+  <text class="sub" x="380" y="340">single writer · assign seq</text>
+
+  <ellipse class="store" cx="380" cy="390" rx="75" ry="10"/>
+  <path class="store" d="M305,390 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="380" y="412">Ordered log</text>
+  <text class="sub" x="380" y="428">ring buffer</text>
+
+  <ellipse class="store" cx="650" cy="390" rx="75" ry="10"/>
+  <path class="store" d="M575,390 v34 a75,10 0 0 0 150,0 v-34"/>
+  <text class="sub" x="650" y="412">Journal</text>
+  <text class="sub" x="650" y="428">snapshot</text>
+
+  <rect class="grp" x="40" y="480" width="680" height="112" rx="12"/>
+  <text class="sub" x="56" y="500" font-weight="600" text-anchor="start">Shards · partition by hash(instrumentId)</text>
+  <rect class="box" x="70" y="515" width="180" height="60" rx="8"/>
+  <text class="lbl" x="160" y="536">shard 0</text>
+  <text class="sub" x="160" y="556">consumer · conflation</text>
+  <rect class="box" x="290" y="515" width="180" height="60" rx="8"/>
+  <text class="lbl" x="380" y="536">shard 1</text>
+  <text class="sub" x="380" y="556">consumer · conflation</text>
+  <rect class="box" x="510" y="515" width="180" height="60" rx="8"/>
+  <text class="lbl" x="600" y="536">shard N</text>
+  <text class="sub" x="600" y="556">consumer · conflation</text>
+
+  <rect class="box" x="70" y="630" width="620" height="50" rx="9"/>
+  <text class="lbl" x="380" y="655">Matching cores · one per shard  (Q42)</text>
+
+  <path class="flow" d="M140,66 L140,122"/>
+  <path class="flow" d="M380,66 L380,122"/>
+  <path class="flow" d="M620,66 L620,122"/>
+
+  <path class="flow" d="M140,166 L140,190 L310,190 L310,210"/>
+  <path class="flow" d="M380,178 L380,210"/>
+  <path class="flow" d="M620,166 L620,190 L450,190 L450,210"/>
+  <text class="edge" x="392" y="196" text-anchor="start">fan-in</text>
+
+  <path class="flow acc" d="M380,266 L380,300"/>
+  <path class="flow acc" d="M380,356 L380,380"/>
+  <text class="edge" x="392" y="370" text-anchor="start">assign seq</text>
+
+  <path class="flow" d="M455,405 L575,405"/>
+  <text class="edge" x="515" y="395" text-anchor="middle">persist</text>
+
+  <path class="flow" d="M380,424 L380,460 L160,460 L160,515"/>
+  <path class="flow" d="M380,460 L380,515"/>
+  <path class="flow" d="M380,460 L600,460 L600,515"/>
+  <text class="edge" x="392" y="450" text-anchor="start">fan-out by hash(instrumentId)</text>
+
+  <path class="flow" d="M160,575 L160,630"/>
+  <path class="flow" d="M380,575 L380,630"/>
+  <path class="flow" d="M600,575 L600,630"/>
+</svg>
 ```
 
 **How to read the diagram:** messages flow one way, from many independent feeds on the left, through thin feed handlers that only drain sockets, into one normaliser and one sequencer where many streams fan in to a single ordered log, then fan out by instrument to per-shard consumers that hand off to the matching cores of question 42.
