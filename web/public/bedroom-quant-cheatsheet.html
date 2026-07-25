@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Bedroom Quant Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt; --fs-mono: 6.6pt; --fs-h3: 7.8pt; --gap: 5px; --pad: 3px;
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:12.5pt; margin:0; letter-spacing:.4px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.3pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>Bedroom Quant Cheat Sheet</h1><span class="meta">retail algo trading · strategies · edges · risk · paper-trade first · drilly</span></div>
+
+<section class="card legend"><h3>Read this first</h3>
+<ul>
+<li><span class="warn">!</span> footgun / classic retail trap &nbsp; <code>&#9744;</code> checklist step</li>
+<li><b>Educational only, paper-trade only.</b> Not financial advice. Most retail loses; edges decay; costs dominate at small size.</li>
+<li>The two real enemies are <b>overfitting</b> (fake backtest) and <b>costs</b> (fees + slippage). Beat those before chasing returns.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+</ul></section>
+
+<section class="card"><h3>The Retail Reality</h3>
+<ul>
+<li>You lose on speed, data, capital, fees. You win on <b>size</b> (too small to matter to funds), <b>patience</b> (no mandate), and <b>reach</b> (illiquid/neglected corners).</li>
+<li><span class="warn">!</span> Latency arb, HFT market-making, news-speed: not your game. Don't try.</li>
+<li>Realistic: a real retail edge is small, capacity-limited, and decays. Paper-trade months before risking a cent.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Edges That Survive for Retail</h3>
+<table><thead><tr><th>Edge</th><th>Why retail can hold it</th></tr></thead><tbody>
+<tr><td>Capacity-constrained</td><td>micro/small-cap, tiny crypto pairs — too small for funds</td></tr>
+<tr><td>Funding-rate carry</td><td>delta-neutral perp basis; most accessible real crypto edge</td></tr>
+<tr><td>Behavioural/calendar</td><td>momentum, overnight, turn-of-month, post-earnings drift</td></tr>
+<tr><td>Speed-agnostic</td><td>theses over days-to-weeks; you never race HFTs</td></tr>
+<tr><td>Own-boss</td><td>sit in cash, hold drawdown, wait for fat pitches</td></tr>
+</tbody></table>
+<p class="cap"><span class="warn">!</span> Every edge persists for a reason — find it or assume it's fake. All have capacity ceilings.</p>
+</section>
+
+<section class="card"><h3>Strategy Families</h3>
+<table><thead><tr><th>Strategy</th><th>Works when</th><th>Dies when</th></tr></thead><tbody>
+<tr><td>Trend / momentum</td><td>persistent trends</td><td>chop / whipsaw</td></tr>
+<tr><td>Mean reversion</td><td>range-bound</td><td>strong trend</td></tr>
+<tr><td>Pairs / stat-arb</td><td>stable relationship</td><td>regime break</td></tr>
+<tr><td>Market making</td><td>calm, wide spread</td><td>toxic flow / trend</td></tr>
+<tr><td>Breakout / vol</td><td>vol expansion</td><td>false breakouts</td></tr>
+<tr><td>Funding carry</td><td>positive funding</td><td>funding flips / deleverage</td></tr>
+</tbody></table>
+</section>
+
+<section class="card"><h3>Signals (ASCII maths)</h3>
+<pre><code>SMA cross: fast MA &gt; slow MA -&gt; long
+z-score:   z = (price - ma) / sd
+           z &lt; -2 buy, z &gt; +2 sell (revert)
+RSI:       &lt;30 oversold, &gt;70 overbought
+ATR:       avg true range = vol proxy
+momentum:  ret_N = price/price[-N] - 1</code></pre>
+<p><span class="warn">!</span> Indicator soup = overfit. Fewer, simpler signals generalise better.</p>
+</section>
+
+<section class="card"><h3>Backtesting: Don't Fool Yourself</h3>
+<ul>
+<li><span class="warn">!</span> <b>Look-ahead bias</b>: using data you wouldn't have had in real time.</li>
+<li><span class="warn">!</span> <b>Survivorship</b>: testing only names that still exist.</li>
+<li>Model fees + slippage + spread, or the result is fiction.</li>
+<li><b>Out-of-sample</b> + <b>walk-forward</b>; in-sample results prove nothing.</li>
+<li>Event-driven &gt; vectorised for realism (fills, partials).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Overfitting Red Flags</h3>
+<ul>
+<li>Equity curve too smooth / Sharpe &gt; 3 on daily data. <span class="warn">!</span></li>
+<li>Many parameters, each finely tuned.</li>
+<li>Great in-sample, falls apart out-of-sample.</li>
+<li>You tried 200 variants and kept the best (multiple-testing).</li>
+<li>Fix: fewer params, deflated Sharpe, walk-forward, hold-out you never touch.</li>
+</ul>
+<p class="cap">"If it looks amazing, it's wrong" — assume fake until it survives OOS.</p>
+</section>
+
+<section class="card"><h3>Risk &amp; Sizing (stay alive)</h3>
+<pre><code>vol target: w = target_vol / asset_vol
+Kelly:      f* = edge / odds  (use 1/4 Kelly)
+stop:       exit if loss &gt; R per trade
+risk/ruin:  small bets survive variance
+max DD:     size so worst case != game over</code></pre>
+<p><span class="warn">!</span> Position sizing keeps you alive far more than signal quality. Never bet the account.</p>
+</section>
+
+<section class="card"><h3>Fees &amp; Slippage Math</h3>
+<pre><code>round trip cost = 2*(fee + half_spread) + slippage
+edge_after = edge_gross - round_trip_cost
+break-even win needs edge &gt; costs</code></pre>
+<ul>
+<li>Maker (post) rebate/low fee vs taker (cross) high fee — prefer limit orders.</li>
+<li><span class="warn">!</span> High-turnover strategies die on costs at retail size. Trade less, hold longer.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Crypto: Funding &amp; Basis</h3>
+<pre><code>perp funding paid every ~8h:
+  fund_pnl = notional * funding_rate
+delta-neutral carry:
+  long spot + short perp (or vice versa)
+  collect funding, hedge price</code></pre>
+<ul>
+<li>Positive funding -&gt; shorts pay longs (and vice versa).</li>
+<li><span class="warn">!</span> Liquidation + leverage kills; keep margin buffer huge.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Arbitrage: What's Reachable</h3>
+<table><thead><tr><th>Type</th><th>Retail?</th></tr></thead><tbody>
+<tr><td>Cross-exchange crypto</td><td>hard (transfer/latency/limits)</td></tr>
+<tr><td>Triangular</td><td>bots own it; rarely worth it</td></tr>
+<tr><td>Funding-rate / basis</td><td>yes — most accessible</td></tr>
+<tr><td>Cash-and-carry</td><td>yes, if you manage margin</td></tr>
+</tbody></table>
+<p class="cap"><span class="warn">!</span> Pure latency arb is a fantasy from a bedroom.</p>
+</section>
+
+<section class="card"><h3>DEX / MEV Reality</h3>
+<ul>
+<li>AMM LP earns fees but risks <b>impermanent loss</b>.</li>
+<li><span class="warn">!</span> On-chain, <b>you are the prey</b>: sandwich/MEV bots front-run naive swaps.</li>
+<li>Gas + slippage make small on-chain trades uneconomic.</li>
+</ul>
+</section>
+
+<section class="card"><h3>ML: Low Ceiling</h3>
+<ul>
+<li>Signal-to-noise in returns is tiny; leakage is everywhere. <span class="warn">!</span></li>
+<li>Non-stationary: yesterday's pattern dies.</li>
+<li>Use ML to <b>combine</b> a few sane features, not to find magic.</li>
+<li>Simple rules usually beat a fancy model at retail scale.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Which Strategy for You?</h3>
+<table><thead><tr><th>You have</th><th>Try</th></tr></thead><tbody>
+<tr><td>small capital, little time</td><td>slow momentum / trend on a few assets</td></tr>
+<tr><td>crypto account</td><td>funding carry (delta-neutral)</td></tr>
+<tr><td>coding + patience</td><td>pairs / stat-arb, small-cap</td></tr>
+<tr><td>always-on bot</td><td>grid / MM on small pairs (careful)</td></tr>
+<tr><td>just learning</td><td>paper-trade one simple rule end-to-end</td></tr>
+</tbody></table>
+</section>
+
+<section class="card"><h3>Bedroom Infra</h3>
+<ul>
+<li>Cheap VPS for an always-on bot; cron for daily strategies.</li>
+<li>Log everything; alert on errors + fills; monitor open positions.</li>
+<li><span class="warn">!</span> Handle reconnects/outages — a dropped socket mid-position is real money.</li>
+<li>Secrets in env vars, never in code. Keep it boringly reliable.</li>
+</ul>
+</section>
+
+<section class="card"><h3>&#9744; Paper-Trading Playbook</h3>
+<ul>
+<li>&#9744; Pick ONE simple strategy that fits your capital + time.</li>
+<li>&#9744; Backtest honestly: OOS, walk-forward, real costs.</li>
+<li>&#9744; Reject it if it only shines in-sample.</li>
+<li>&#9744; Paper-trade it live for weeks/months; compare to backtest.</li>
+<li>&#9744; Size for survival (vol target, fractional Kelly, stops).</li>
+<li>&#9744; Track every fill; measure slippage vs assumptions.</li>
+<li>&#9744; Expect small, decaying edges — and that most ideas fail.</li>
+<li>&#9744; Keep it educational; never risk money you can't lose.</li>
+</ul>
+</section>
+
+</div>
+</body>
+</html>

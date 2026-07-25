@@ -827,6 +827,22 @@
       "sectionOrder": [],
       "cheatSheetUrl": "/cpp-finance-cheatsheet.html",
       "itemCount": 21
+    },
+    {
+      "id": "bedroom-quant",
+      "file": "/bedroom-quant-interview-primer.md",
+      "title": "Bedroom Quant",
+      "category": "Computational Finance",
+      "itemLabel": "Topic",
+      "itemsPlural": "trading topics",
+      "storagePrefix": "ip:bedroom-quant",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": [],
+      "cheatSheetUrl": "/bedroom-quant-cheatsheet.html",
+      "itemCount": 22
     }
   ]
 }
