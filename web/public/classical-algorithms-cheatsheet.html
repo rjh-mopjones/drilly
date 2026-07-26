@@ -3,10 +3,14 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Classical Algorithms Cheat Sheet</title>
+<title>Classical ML Algorithms Cheat Sheet</title>
 <style>
 :root{
-  --fs: 7.2pt; --fs-mono: 6.6pt; --fs-h3: 7.8pt; --gap: 5px; --pad: 3px;
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
   --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
 }
 *{box-sizing:border-box;}
@@ -14,10 +18,12 @@ html,body{margin:0;padding:0;}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
   font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
 .sheet{background:#fff;}
+/* spanning title bar */
 .titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
   margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
-.titlebar h1{font-size:12.5pt; margin:0; letter-spacing:.4px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
 .titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
 .sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
   column-fill:balance; padding:5px;}
 .card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
@@ -25,6 +31,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Ar
   overflow:hidden;}
 .card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
   background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
 .card:nth-of-type(8n+1) h3{background:#34495e;}
 .card:nth-of-type(8n+2) h3{background:#2c6e9b;}
 .card:nth-of-type(8n+3) h3{background:#1f7a5a;}
@@ -58,164 +65,322 @@ pre code{background:none; padding:0; font-size:1em;}
 @page{ size:A4; margin:5mm; }
 @media print{
   body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
   .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
 }
 </style>
 </head>
 <body>
 <div class="sheet">
-<div class="titlebar"><h1>Classical Algorithms Cheat Sheet</h1><span class="meta">linear · trees · boosting · SVM · k-means · PCA · drilly</span></div>
+<div class="titlebar"><h1>Classical ML Algorithms Cheat Sheet</h1><span class="meta">linear · trees · boosting · SVM · clustering · PCA · generic examples · drilly</span></div>
 <section class="card legend"><h3>How to read &amp; print</h3>
 <ul>
-<li><span class="warn">!</span> footgun / classic trap &nbsp; <code>&#9744;</code> reasoning step</li>
-<li>One algorithm per card: objective → how it's fit → key knob → tradeoff.</li>
-<li>Cross-cutting concepts (bias-variance, metrics, CV) are on the ML Fundamentals sheet.</li>
-<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+<li><span class="warn">!</span> footgun / classic trap &nbsp; <code>&#9744;</code> review / whiteboard checklist item</li>
+<li>One card per algorithm: <b>objective → how it's fit → key knob → complexity → tradeoff</b>. Say all five in an interview.</li>
+<li>Cross-cutting theory (bias-variance, CV, metrics, leakage) lives on the <b>ML Fundamentals</b> sheet — this sheet is the algorithm zoo.</li>
+<li>Last 3 cards = <b>algorithm-selection table</b> + derivations you must be able to reproduce + a spot-the-bug table.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
 </ul></section>
 
 <section class="card"><h3>Linear Regression</h3>
-<pre><code>yhat = w·x + b   min MSE
-normal eq: w = (X^T X)^-1 X^T y   (O(p^3))
-or gradient descent for big/sparse</code></pre>
-<p>Assumes linearity/homoscedasticity/independence. <span class="warn">!</span> Multicollinearity → unstable coefficients.</p>
+<pre><code>yhat = w·x + b     minimise MSE = ||Xw - y||^2
+normal eq:  w = (XᵀX)⁻¹ Xᵀ y      (convex, global min)
+gradient descent:  w -= η·Xᵀ(Xw - y)/n</code></pre>
+<table><thead><tr><th></th><th>Cost</th><th>Use when</th></tr></thead><tbody>
+<tr><td>Normal eq</td><td>O(p³ + np²)</td><td>p small (&lt; ~10⁴), exact</td></tr>
+<tr><td>GD / SGD</td><td>O(np) per step</td><td>big n, sparse, streaming</td></tr>
+</tbody></table>
+<h4>Gauss-Markov assumptions</h4>
+<ul>
+<li>Linearity, independent errors, <b>homoscedasticity</b> (constant variance), no perfect multicollinearity → OLS is BLUE.</li>
+<li><span class="warn">!</span> <b>Multicollinearity</b>: XᵀX near-singular → coefficients huge/unstable, signs flip. Fix with Ridge or drop/​combine features.</li>
+<li><span class="warn">!</span> Sensitive to outliers (squared loss); can predict outside sane range. Standardise for GD (not needed for normal eq).</li>
+</ul>
+<p>High-bias / low-variance. Interpret coef = Δy per unit x, others held fixed. R² = fraction of variance explained but rises with any added feature → use <b>adjusted R²</b>.</p>
 </section>
 
-<section class="card"><h3>Regularized Linear</h3>
+<section class="card"><h3>Ridge / Lasso / Elastic Net</h3>
+<pre><code>Ridge (L2):  min ||Xw-y||² + λ·Σwⱼ²   → w=(XᵀX+λI)⁻¹Xᵀy
+Lasso (L1):  min ||Xw-y||² + λ·Σ|wⱼ|   (no closed form)
+Elastic:     α·L1 + (1-α)·L2</code></pre>
 <table><thead><tr><th></th><th>Penalty</th><th>Effect</th></tr></thead><tbody>
-<tr><td>Ridge L2</td><td>sum(w^2)</td><td>shrink, keep all</td></tr>
-<tr><td>Lasso L1</td><td>sum(|w|)</td><td><b>sparse</b> (select)</td></tr>
-<tr><td>ElasticNet</td><td>both</td><td>grouped</td></tr>
+<tr><td>Ridge</td><td>Σw²</td><td>shrink all, keep all; handles collinearity</td></tr>
+<tr><td>Lasso</td><td>Σ|w|</td><td><b>sparse</b> → feature selection</td></tr>
+<tr><td>Elastic</td><td>both</td><td>sparse + groups correlated features</td></tr>
 </tbody></table>
-<p><span class="warn">!</span> Standardize first; pick lambda by CV.</p>
+<ul>
+<li><b>Why L1 is sparse:</b> its diamond constraint has corners on the axes → optimum lands at wⱼ=0; L2's sphere has none. Soft-thresholding zeroes small coefs.</li>
+<li>Ridge closed form always invertible (λI regularises the singular XᵀX — that's the fix for OLS's failure mode).</li>
+<li>Bayesian view: Ridge = Gaussian prior on w, Lasso = Laplace prior.</li>
+<li><span class="warn">!</span> <b>Standardise first</b> — penalty is scale-dependent. <span class="warn">!</span> <b>Don't penalise the intercept.</b> Pick λ by CV; larger λ = more bias, less variance.</li>
+</ul>
 </section>
 
 <section class="card"><h3>Logistic Regression</h3>
-<pre><code>p = sigmoid(w·x + b),  log(p/(1-p)) = w·x + b
-min log-loss (convex);  grad = X^T (p - y)</code></pre>
+<pre><code>p = σ(w·x+b) = 1/(1+e^-(w·x+b))
+logit: log(p/(1-p)) = w·x+b   (linear boundary)
+loss = -Σ[y·log p + (1-y)·log(1-p)]   (convex)
+grad = Xᵀ(p - y)   ← same shape as linear reg!</code></pre>
 <ul>
-<li>Classification, linear boundary; multiclass via softmax/OvR.</li>
-<li>Interpret via odds ratios; the honest baseline.</li>
+<li>Discriminative classifier; models P(y|x) directly. Fit by GD or <b>Newton/IRLS</b> (2nd-order, few iters).</li>
+<li><span class="warn">!</span> <b>Not MSE</b> — with the sigmoid, MSE is non-convex; log-loss (cross-entropy) is convex and is the MLE.</li>
+<li>Multiclass: <b>softmax</b> (multinomial) or one-vs-rest. Coef → <b>odds ratio</b> e^wⱼ.</li>
+<li>Naturally <b>calibrated</b> (outputs are probabilities). Regularise with L2/L1 exactly as linear.</li>
+<li><span class="warn">!</span> <b>Perfect separation</b> → weights diverge to ±∞; regularisation prevents it. The honest linear baseline for any classification task.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Naive Bayes / kNN</h3>
+<section class="card"><h3>Naive Bayes</h3>
+<pre><code>argmax_y  P(y)·∏ᵢ P(xᵢ|y)          (Bayes rule, ∝)
+work in LOG space:  log P(y) + Σ log P(xᵢ|y)</code></pre>
+<table><thead><tr><th>Variant</th><th>Feature type</th></tr></thead><tbody>
+<tr><td>Gaussian</td><td>continuous (per-class μ,σ)</td></tr>
+<tr><td>Multinomial</td><td>counts — <b>text</b>, TF</td></tr>
+<tr><td>Bernoulli</td><td>binary presence/absence</td></tr>
+</tbody></table>
 <ul>
-<li><b>NB</b>: P(y|x) ∝ P(y)·prod P(x_i|y); naive independence; Laplace smoothing; text/spam. <span class="warn">!</span> Log-space.</li>
-<li><b>kNN</b>: lazy, vote of k nearest; k = bias/variance. <span class="warn">!</span> MUST scale; curse of dimensionality.</li>
+<li><b>"Naive"</b> = features conditionally independent given y (usually false, still works — decision boundary robust even when probabilities are miscalibrated).</li>
+<li><span class="warn">!</span> <b>Laplace smoothing</b> (+1): an unseen feature-class pair gives P=0 → whole product 0. Mandatory for text.</li>
+<li><span class="warn">!</span> <b>Log-space</b> or 100s of tiny probs underflow to 0.</li>
+<li>Generative; O(np) train, one pass, streaming-friendly. Strong high-bias baseline for spam/text; no scaling needed.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Decision Trees</h3>
-<pre><code>split to cut impurity: Gini = 1 - sum(p_k^2)
-(or entropy);  regression -> variance/MSE</code></pre>
+<section class="card"><h3>k-Nearest Neighbors</h3>
+<pre><code>predict: find k nearest by distance
+  classify → majority vote   regress → mean
+NO training — "lazy": just stores the data</code></pre>
 <ul>
-<li>No scaling, mixed types, interpretable.</li>
-<li><span class="warn">!</span> High variance → prune / max_depth / min_leaf. Unstable.</li>
+<li><b>k = bias/variance knob:</b> k=1 → zero train error, high variance (noisy boundary); large k → smoother, higher bias. Odd k breaks ties; tune by CV.</li>
+<li><span class="warn">!</span> <b>Must scale features</b> — distance is dominated by large-range features otherwise.</li>
+<li><span class="warn">!</span> <b>Curse of dimensionality</b>: in high-d all points are ~equidistant → "nearest" is meaningless. Reduce dims first.</li>
+<li>Predict cost O(nd) per query (brute force); KD-/ball-trees help in low-d, use <b>approximate NN</b> (HNSW) at scale.</li>
+<li>Non-parametric; distance-weighted voting (1/d) helps. kNN ≠ k-means (supervised lookup vs unsupervised clustering).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Decision Trees (CART)</h3>
+<pre><code>greedy recursive split; pick (feature,threshold)
+that maximises impurity DROP (information gain)
+Gini = 1 - Σpₖ²      entropy = -Σpₖ log pₖ
+regression → minimise variance / MSE of leaves</code></pre>
+<ul>
+<li>Gini vs entropy: nearly identical splits; Gini is cheaper (no log). Leaf predicts majority class / mean.</li>
+<li><b>No scaling</b>, handles mixed types &amp; non-linear interactions, interpretable (white box).</li>
+<li><span class="warn">!</span> <b>High variance / overfits</b> — a deep tree memorises. Control with <code>max_depth</code>, <code>min_samples_leaf</code>, <code>min_samples_split</code> (pre-pruning) or <b>cost-complexity pruning</b> (α·|leaves|, post).</li>
+<li><span class="warn">!</span> <b>Unstable</b>: small data change → different tree. Motivates ensembles. Can't extrapolate beyond training range.</li>
+<li>Build cost O(n·p·log n). Rarely used alone → RF / boosting.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Bagging &amp; Ensembles</h3>
+<table><thead><tr><th></th><th>Trains</th><th>Fights</th><th>Example</th></tr></thead><tbody>
+<tr><td>Bagging</td><td>parallel</td><td><b>variance</b></td><td>Random Forest</td></tr>
+<tr><td>Boosting</td><td>sequential</td><td><b>bias</b></td><td>GBM/XGB</td></tr>
+<tr><td>Stacking</td><td>meta-model</td><td>both</td><td>blend diverse</td></tr>
+<tr><td>Voting</td><td>parallel</td><td>—</td><td>hard/soft</td></tr>
+</tbody></table>
+<ul>
+<li>Error = <b>bias² + variance + noise</b>. Bagging averages many low-bias/high-variance models on bootstrap samples → variance falls, bias unchanged.</li>
+<li><b>Bootstrap</b>: sample n with replacement → each bag covers ~<b>63.2%</b> of rows (1-1/e); the rest are <b>out-of-bag</b>.</li>
+<li><b>Diversity is the whole game</b> — if base models make the same errors, averaging does nothing.</li>
+<li><span class="warn">!</span> Stacking leaks unless the meta-model trains on <b>out-of-fold</b> predictions. Soft voting (avg probs) &gt; hard when models are calibrated.</li>
 </ul>
 </section>
 
 <section class="card"><h3>Random Forest</h3>
+<pre><code>bagged trees + random FEATURE subset per split
+classify → majority vote   regress → average
+predict variance ≈ ρσ² + (1-ρ)/B · σ²  → ↓ρ helps</code></pre>
 <ul>
-<li><b>Bagging</b> (bootstrap) + <b>random feature subset per split</b> → decorrelate → average → <b>less variance</b>.</li>
-<li><b>OOB error</b> = free validation. Parallel, robust, low tuning.</li>
-<li>Knobs: n_estimators, max_features, max_depth. <span class="warn">!</span> Can't extrapolate.</li>
+<li>Two randomness sources: <b>bootstrap rows</b> + <b>random features</b> (<code>max_features</code> ≈ √p classif, p/3 regress). Feature subsetting <b>decorrelates</b> trees (drops ρ) — that's the extra variance cut over plain bagging.</li>
+<li><b>OOB error</b> = free validation from the ~37% of rows each tree didn't see; no separate CV needed.</li>
+<li>Knobs: <code>n_estimators</code> (more = better, never overfits — plateaus), <code>max_features</code>, <code>max_depth</code>. Parallel, robust, low-tuning.</li>
+<li><span class="warn">!</span> <b>Can't extrapolate</b> (predictions bounded by training leaves). <span class="warn">!</span> Impurity importance is <b>biased toward high-cardinality</b> features → prefer <b>permutation importance</b>.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Bagging vs Boosting</h3>
-<table><thead><tr><th></th><th>Bagging</th><th>Boosting</th></tr></thead><tbody>
-<tr><td>trees</td><td>parallel</td><td>sequential</td></tr>
-<tr><td>fights</td><td>variance</td><td>bias</td></tr>
-<tr><td>example</td><td>Random Forest</td><td>GBM/XGB</td></tr>
+<section class="card"><h3>Gradient Boosting (GBM)</h3>
+<pre><code>Fₘ(x) = Fₘ₋₁(x) + η·hₘ(x)
+hₘ fits the NEGATIVE GRADIENT of the loss
+  (= residuals y-F for squared error)
+start F₀ = mean / log-odds</code></pre>
+<ul>
+<li>Sequential — each shallow tree (<b>depth 3–8</b> = interaction order) corrects the current ensemble's errors → drives down <b>bias</b>.</li>
+<li>Gradient descent in <b>function space</b>: any differentiable loss (MSE, log-loss, quantile) via its gradient.</li>
+<li><b>η (learning rate / shrinkage)</b> trades off vs <code>n_estimators</code> — small η + more trees generalises better. Standard: η≈0.01–0.1.</li>
+<li><span class="warn">!</span> <b>Overfits</b> if over-trained (opposite of RF). Regularise: <b>early stopping</b> on a val set, <b>subsample</b> (&lt;1, "stochastic GB"), column subsample, tree depth/leaf caps.</li>
+</ul>
+</section>
+
+<section class="card"><h3>XGBoost</h3>
+<pre><code>obj = Σ loss + Σ Ω(fₜ),  Ω = γT + ½λ||w||²
+2nd-order Taylor: uses gradient gᵢ AND hessian hᵢ
+leaf weight w*ⱼ = -Σgᵢ / (Σhᵢ + λ)</code></pre>
+<ul>
+<li>Regularised GBM: explicit <b>L2 (λ) on leaf weights</b> + <b>γ</b> penalty per leaf (min split gain). This built-in regularisation is why it beat vanilla GBM.</li>
+<li><b>Second-order</b> (Newton) split gain uses Hessian → better steps. <b>Sparsity-aware</b> default direction for missing values.</li>
+<li>Engineering: pre-sorted/​histogram splits, column blocks, cache-aware, parallel <i>within</i> a tree.</li>
+<li>Key knobs: <code>eta</code>, <code>max_depth</code>, <code>min_child_weight</code>, <code>subsample</code>, <code>colsample_bytree</code>, <code>lambda/gamma</code>, <code>n_estimators</code>+early stop.</li>
+<li><span class="warn">!</span> Tune with early stopping or you'll over-boost. The tabular workhorse.</li>
+</ul>
+</section>
+
+<section class="card"><h3>LightGBM vs CatBoost</h3>
+<table><thead><tr><th></th><th>Signature trick</th></tr></thead><tbody>
+<tr><td>XGBoost</td><td>level-wise, 2nd-order, sparsity-aware</td></tr>
+<tr><td>LightGBM</td><td>histogram, <b>leaf-wise</b> growth, GOSS + EFB</td></tr>
+<tr><td>CatBoost</td><td><b>ordered boosting</b>, native categoricals</td></tr>
 </tbody></table>
-<p>Also: stacking (meta-learner), voting (hard/soft).</p>
-</section>
-
-<section class="card"><h3>Gradient Boosting</h3>
-<pre><code>F_m = F_{m-1} + eta * h_m
-h_m fits the NEGATIVE GRADIENT of the loss
-(= residuals for MSE)</code></pre>
 <ul>
-<li><b>eta</b> (shrinkage) vs n_estimators; depth = interaction order.</li>
-<li>Low bias, overfits → early stopping / subsample. <span class="warn">!</span></li>
+<li><b>LightGBM</b>: histogram binning + <b>leaf-wise</b> (grows the highest-loss leaf) → fastest on big data. <b>GOSS</b> keeps large-gradient rows; <b>EFB</b> bundles sparse features.</li>
+<li><span class="warn">!</span> Leaf-wise <b>overfits small data</b> → cap <code>num_leaves</code> and set <code>min_data_in_leaf</code>. num_leaves ≤ 2^max_depth.</li>
+<li><b>CatBoost</b>: <b>ordered target statistics</b> avoid target-leakage on categoricals; strong defaults, best when many category columns.</li>
+<li>All three &gt; deep nets on typical <b>tabular</b> data. Pick LightGBM for speed, CatBoost for categoricals, XGBoost for maturity.</li>
 </ul>
 </section>
 
-<section class="card"><h3>XGBoost vs LightGBM vs CatBoost</h3>
-<table><thead><tr><th></th><th>Trick</th></tr></thead><tbody>
-<tr><td>XGBoost</td><td>reg. objective, 2nd-order (Hessian), sparsity-aware</td></tr>
-<tr><td>LightGBM</td><td>histogram, <b>leaf-wise</b>, GOSS+EFB → fast</td></tr>
-<tr><td>CatBoost</td><td>ordered boosting, native categoricals</td></tr>
+<section class="card"><h3>Support Vector Machines</h3>
+<pre><code>hard margin:  min ½||w||²  s.t. yᵢ(w·xᵢ+b) ≥ 1
+soft margin:  min ½||w||² + C·Σξᵢ  (slack ξᵢ≥0)
+margin width = 2/||w||;  SVs are points on/inside</code></pre>
+<ul>
+<li>Maximises the margin → good generalisation. Only <b>support vectors</b> (points on/violating the margin) define the boundary; rest irrelevant.</li>
+<li><b>C = regularisation:</b> large C → hard fit, narrow margin, low bias/high variance; small C → wide margin, more slack, higher bias.</li>
+<li>Hinge loss; solved via the dual QP → exposes the kernel. Decision = sign(w·x+b).</li>
+<li><span class="warn">!</span> <b>Scale features.</b> <span class="warn">!</span> Training is <b>O(n²)–O(n³)</b> → poor past ~10⁵ rows (use LinearSVC/SGD for linear + big n). No native probabilities (Platt scaling adds them).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Kernels &amp; the Kernel Trick</h3>
+<pre><code>K(x,x') = φ(x)·φ(x')   — inner product in a
+lifted space, computed WITHOUT building φ
+decision uses only dot products → swap in K</code></pre>
+<table><thead><tr><th>Kernel</th><th>K(x,x')</th></tr></thead><tbody>
+<tr><td>Linear</td><td>x·x'</td></tr>
+<tr><td>Polynomial</td><td>(x·x' + c)^d</td></tr>
+<tr><td>RBF/Gaussian</td><td>exp(-γ·||x-x'||²)</td></tr>
 </tbody></table>
-<p><span class="warn">!</span> LightGBM leaf-wise overfits → cap num_leaves. Tabular default = GBTs.</p>
-</section>
-
-<section class="card"><h3>SVM &amp; Kernels</h3>
-<pre><code>max margin = min 0.5*||w||^2 (+ C*slack)
-support vectors define the boundary</code></pre>
 <ul>
-<li><b>C</b>: large = hard fit, small = wide margin.</li>
-<li><b>Kernel trick</b>: K(x,x') = implicit high-dim dot product → non-linear.</li>
-<li>RBF `exp(-gamma·||x-x'||^2)`; gamma = reach. <span class="warn">!</span> Scale; O(n^2)-O(n^3).</li>
+<li><b>Trick</b>: non-linear boundaries at linear cost — never materialise the (possibly ∞-dim) feature map. Needs a PSD (Mercer) kernel.</li>
+<li><b>RBF γ</b> = reach of one point: large γ → tight, wiggly, overfits; small γ → smooth. Tune (C, γ) jointly by grid CV.</li>
+<li><span class="warn">!</span> Default to <b>RBF</b>; try <b>linear</b> first when p ≫ n (text) — often already separable and far cheaper.</li>
 </ul>
 </section>
 
-<section class="card"><h3>k-Means</h3>
-<pre><code>min within-cluster SS (inertia)
-Lloyd: assign nearest centroid -> recompute -> repeat
-init: k-means++</code></pre>
+<section class="card"><h3>k-Means Clustering</h3>
+<pre><code>minimise inertia = Σ ||x - μ_c(x)||²  (WCSS)
+Lloyd: assign nearest centroid → recompute means
+       → repeat to convergence
+init: k-means++  (spread-out seeds)</code></pre>
 <ul>
-<li>Local min (restart); choose k by elbow/silhouette.</li>
-<li><span class="warn">!</span> Assumes spherical/equal clusters; scale; sensitive to outliers.</li>
+<li>Unsupervised, hard assignment. Converges to a <b>local</b> min → run multiple restarts (<code>n_init</code>), keep best inertia.</li>
+<li>Choose k by <b>elbow</b> (inertia vs k) or <b>silhouette</b> score; there's no "true" k.</li>
+<li><span class="warn">!</span> Assumes <b>spherical, equal-size, equal-density</b> clusters (Euclidean) — fails on elongated/​nested shapes.</li>
+<li><span class="warn">!</span> <b>Scale features</b>; sensitive to outliers (means shift) → k-medoids is robust. Complexity O(n·k·d·iters).</li>
 </ul>
 </section>
 
-<section class="card"><h3>Hierarchical / DBSCAN / GMM</h3>
+<section class="card"><h3>Hierarchical / DBSCAN</h3>
 <ul>
-<li><b>Hierarchical</b>: linkage (Ward), dendrogram, cut for k, O(n^2).</li>
-<li><b>DBSCAN</b>: density (eps, min_samples), arbitrary shapes + <b>noise</b>, no k. <span class="warn">!</span> Varying density.</li>
-<li><b>GMM + EM</b>: soft, elliptical clusters; k-means = GMM special case.</li>
+<li><b>Hierarchical (agglomerative)</b>: merge closest clusters bottom-up → <b>dendrogram</b>; cut at a height for k. Linkage: single (chaining), complete, average, <b>Ward</b> (min variance, default). O(n²log n), no k upfront.</li>
+<li><b>DBSCAN</b>: density-based via (<code>eps</code>, <code>min_samples</code>). Finds <b>arbitrary shapes</b>, labels <b>noise/outliers</b>, needs no k.</li>
+<li>Core point = ≥ min_samples within eps; clusters grow through core points; unreachable points = noise.</li>
+<li><span class="warn">!</span> DBSCAN struggles with <b>varying density</b> and is eps-sensitive (use a k-distance plot). HDBSCAN handles variable density.</li>
+</ul>
+</section>
+
+<section class="card"><h3>GMM &amp; EM</h3>
+<pre><code>p(x) = Σₖ πₖ · N(x | μₖ, Σₖ)   (soft clusters)
+EM:  E-step → responsibilities γᵢₖ = P(k|xᵢ)
+     M-step → update πₖ,μₖ,Σₖ from weighted pts
+maximise log-likelihood; monotone ↑, local optimum</code></pre>
+<ul>
+<li><b>Soft</b> assignment + <b>elliptical</b> clusters (full covariance) — strictly more flexible than k-means.</li>
+<li><b>k-means = GMM special case</b>: spherical equal Σ, hard assignment (γ → 0/1).</li>
+<li>Pick k by <b>BIC/AIC</b>. Restart (local optima). Covariance types: full / diag / tied / spherical trade flexibility vs params.</li>
+<li><span class="warn">!</span> A component can <b>collapse</b> onto one point (Σ→0, likelihood→∞) — regularise covariance / floor variance.</li>
 </ul>
 </section>
 
 <section class="card"><h3>PCA</h3>
-<pre><code>directions of max variance =
-eigenvectors of Cov = (1/n) X^T X
-(compute via SVD of centered X)</code></pre>
+<pre><code>center X → directions of max variance =
+top eigenvectors of covariance C=(1/n)XᵀX
+compute via SVD: X = UΣVᵀ  (V = components)
+project: Z = X·V_k   (keep k components)</code></pre>
 <ul>
-<li>Rank by explained variance; pick #comp by cumulative %.</li>
-<li><span class="warn">!</span> Standardize; linear + unsupervised; = min reconstruction error.</li>
+<li>Unsupervised <b>linear</b> reduction: new orthogonal axes ranked by <b>explained variance</b> (eigenvalues). Equivalent to minimising reconstruction error.</li>
+<li>Pick k by <b>cumulative explained variance</b> (e.g. 95%) or scree elbow.</li>
+<li><span class="warn">!</span> <b>Standardise first</b> — else the largest-scale feature dominates the top PC.</li>
+<li><span class="warn">!</span> Components are <b>not interpretable</b> features, and PCA is <b>unsupervised</b> — the max-variance axis needn't be the most predictive (see PLS/LDA for supervised).</li>
 </ul>
 </section>
 
 <section class="card"><h3>t-SNE / UMAP / LDA</h3>
+<table><thead><tr><th></th><th>Use</th><th>Note</th></tr></thead><tbody>
+<tr><td>t-SNE</td><td>2-D <b>viz</b></td><td>local structure, non-linear</td></tr>
+<tr><td>UMAP</td><td>viz + preproc</td><td>faster, more global</td></tr>
+<tr><td>LDA</td><td><b>supervised</b></td><td>max class separation</td></tr>
+</tbody></table>
 <ul>
-<li><b>t-SNE</b>: local structure, VIZ only. <span class="warn">!</span> Don't cluster on it / read distances.</li>
-<li><b>UMAP</b>: faster, more global; general-purpose.</li>
-<li><b>LDA</b>: SUPERVISED, max between/within-class variance (≤ C-1 dims).</li>
+<li><span class="warn">!</span> <b>t-SNE is for pictures only</b> — cluster sizes &amp; between-cluster distances are <b>meaningless</b>; don't run downstream models on its output. <code>perplexity</code> is the key knob; non-deterministic.</li>
+<li><b>UMAP</b>: preserves more global structure, faster, embeds new points.</li>
+<li><b>LDA</b> (Fisher): supervised — maximises between-class / within-class scatter; yields ≤ <b>C-1</b> dims. It's also a classifier.</li>
 </ul>
 </section>
 
-<section class="card"><h3>&#9744; Which Algorithm? / Interview</h3>
+<section class="card"><h3>Which Algorithm? — Selection</h3>
+<table><thead><tr><th>Situation</th><th>Reach for</th></tr></thead><tbody>
+<tr><td>Tabular, want accuracy</td><td><b>Gradient-boosted trees</b> (XGB/LGBM)</td></tr>
+<tr><td>Need interpretable baseline</td><td>Linear / logistic regression</td></tr>
+<tr><td>Low tuning, robust</td><td>Random Forest</td></tr>
+<tr><td>Small-n, high-dim, clean margin</td><td>SVM (RBF/linear)</td></tr>
+<tr><td>Text / spam</td><td>Naive Bayes, linear</td></tr>
+<tr><td>Few features, non-linear, simple</td><td>kNN (scale!)</td></tr>
+<tr><td>Cluster: round blobs</td><td>k-Means</td></tr>
+<tr><td>Cluster: shapes + noise</td><td>DBSCAN</td></tr>
+<tr><td>Cluster: soft / elliptical</td><td>GMM</td></tr>
+<tr><td>Reduce dims (linear)</td><td>PCA</td></tr>
+<tr><td>Visualise clusters</td><td>t-SNE / UMAP</td></tr>
+<tr><td>Images / sequences / huge data</td><td>Deep nets (not this sheet)</td></tr>
+</tbody></table>
+<p>Axes that decide: n vs p, linear vs non-linear, interpretability need, tuning budget, extrapolation need.</p>
+</section>
+
+<section class="card"><h3>&#9733; Derivations to Nail</h3>
 <ul>
-<li>&#9744; <b>Tabular → gradient-boosted trees</b> (XGB/LGBM) by default.</li>
-<li>&#9744; Need interpretability/baseline → linear/logistic.</li>
-<li>&#9744; Small-medium, high-dim → SVM; text → Naive Bayes; simple → kNN (scale!).</li>
-<li>&#9744; Cluster: spherical→k-means, shapes+noise→DBSCAN, soft→GMM.</li>
-<li>&#9744; Reduce dims: linear/decorrelate→PCA, viz→t-SNE/UMAP, supervised→LDA.</li>
-<li>&#9744; Derive: logistic grad = X^T(p-y); RF cuts variance via decorrelation; GBM fits neg-gradient; PCA = eigen/SVD of covariance.</li>
-<li>&#9744; State the objective, the fit, the key knob, the complexity, the tradeoff.</li>
+<li>&#9744; <b>Normal equation</b>: ∂/∂w ||Xw-y||² = 2Xᵀ(Xw-y)=0 → w=(XᵀX)⁻¹Xᵀy.</li>
+<li>&#9744; <b>Ridge</b>: add λ||w||² → w=(XᵀX+λI)⁻¹Xᵀy (always invertible).</li>
+<li>&#9744; <b>Logistic gradient</b>: ∇ = Xᵀ(σ(Xw)-y) — same form as linear.</li>
+<li>&#9744; <b>Why L1 sparse</b>: diamond corners lie on axes; L2 sphere doesn't.</li>
+<li>&#9744; <b>Gini</b> = 1-Σpₖ²; split maximises weighted impurity drop.</li>
+<li>&#9744; <b>RF variance</b>: ρσ² + (1-ρ)σ²/B — decorrelation (↓ρ) cuts it.</li>
+<li>&#9744; <b>Boosting</b>: hₘ fits −gradient of loss (residuals for MSE).</li>
+<li>&#9744; <b>SVM margin</b> = 2/||w|| → minimise ½||w||².</li>
+<li>&#9744; <b>Kernel trick</b>: replace x·x' with K(x,x'); no explicit φ.</li>
+<li>&#9744; <b>k-means / EM</b>: alternate assign ↔ update; monotone ↓ inertia / ↑ likelihood.</li>
+<li>&#9744; <b>PCA</b>: eigenvectors of covariance = SVD of centered X.</li>
+<li>&#9744; State every model as <b>objective · fit · knob · complexity · tradeoff</b>.</li>
 </ul>
+</section>
+
+<section class="card"><h3>Symptom → Cause</h3>
+<table><thead><tr><th>Symptom</th><th>Likely cause</th></tr></thead><tbody>
+<tr><td>Linear coefs huge / signs flip</td><td>multicollinearity → Ridge <span class="warn">!</span></td></tr>
+<tr><td>Lasso zeroed a feature you need</td><td>correlated group → Elastic Net</td></tr>
+<tr><td>Model ignores a feature entirely</td><td>forgot to <b>standardise</b> (kNN/SVM/PCA/reg) <span class="warn">!</span></td></tr>
+<tr><td>NB predicts one class always</td><td>no Laplace smoothing / not log-space <span class="warn">!</span></td></tr>
+<tr><td>Tree/GBM perfect train, awful test</td><td>overfit → depth/​leaf caps, early stop <span class="warn">!</span></td></tr>
+<tr><td>RF barely better than one tree</td><td>trees correlated → lower <code>max_features</code></td></tr>
+<tr><td>LightGBM overfits small data</td><td>leaf-wise → cap <code>num_leaves</code> <span class="warn">!</span></td></tr>
+<tr><td>SVM trains forever</td><td>O(n²) kernel on big n → linear/SGD <span class="warn">!</span></td></tr>
+<tr><td>k-means: weird/​empty clusters</td><td>bad init or non-spherical → k-means++, DBSCAN</td></tr>
+<tr><td>Clusters read off t-SNE plot</td><td>distances meaningless — viz only <span class="warn">!</span></td></tr>
+<tr><td>PCA dominated by one feature</td><td>unscaled data <span class="warn">!</span></td></tr>
+<tr><td>Model can't predict above max seen</td><td>trees/RF/GBM can't extrapolate <span class="warn">!</span></td></tr>
+</tbody></table>
 </section>
 
 </div>
-<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
-<script>
-  try {
-    mermaid.initialize({ startOnLoad: true, theme: "neutral",
-      flowchart: { useMaxWidth: true, htmlLabels: true, nodeSpacing: 18, rankSpacing: 18 },
-      themeVariables: { fontSize: "9px" } });
-  } catch (e) { /* offline / blocked CDN: diagrams degrade to source text, rest of sheet is fine */ }
-</script>
 </body>
 </html>

@@ -6,7 +6,11 @@
 <title>MLOps Cheat Sheet</title>
 <style>
 :root{
-  --fs: 7.2pt; --fs-mono: 6.6pt; --fs-h3: 7.8pt; --gap: 5px; --pad: 3px;
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
   --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
 }
 *{box-sizing:border-box;}
@@ -14,10 +18,12 @@ html,body{margin:0;padding:0;}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
   font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
 .sheet{background:#fff;}
+/* spanning title bar */
 .titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
   margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
 .titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
 .titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
 .sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
   column-fill:balance; padding:5px;}
 .card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
@@ -25,6 +31,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Ar
   overflow:hidden;}
 .card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
   background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
 .card:nth-of-type(8n+1) h3{background:#34495e;}
 .card:nth-of-type(8n+2) h3{background:#2c6e9b;}
 .card:nth-of-type(8n+3) h3{background:#1f7a5a;}
@@ -58,142 +65,377 @@ pre code{background:none; padding:0; font-size:1em;}
 @page{ size:A4; margin:5mm; }
 @media print{
   body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
   .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
 }
 </style>
 </head>
 <body>
 <div class="sheet">
-<div class="titlebar"><h1>MLOps Cheat Sheet</h1><span class="meta">pipelines · feature store · registry · serving · drift · A/B · drilly</span></div>
+<div class="titlebar"><h1>MLOps Cheat Sheet</h1><span class="meta">lifecycle · versioning · feature store · registry · serving · drift · A/B · LLMOps · drilly</span></div>
+
 <section class="card legend"><h3>How to read &amp; print</h3>
 <ul>
-<li><span class="warn">!</span> footgun / classic trap &nbsp; <code>&#9744;</code> reasoning step</li>
-<li>DevOps for ML — reliability, latency, cost, reproducibility of models in prod.</li>
-<li>Central law: an ML system is <b>code + data + model</b> — all drift, all versioned/tested/monitored.</li>
-<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+<li><span class="warn">!</span> footgun / silent-failure trap &nbsp; <code>&#9744;</code> review / design checklist item</li>
+<li>Central law: an ML system is <b>code + data + model</b> — all three drift, so all three get <b>versioned, tested, monitored</b>. DevOps only ever versioned code.</li>
+<li>Governing SLA: models fail <b>silently</b> — they keep returning well-formed, confidently wrong numbers while ops dashboards stay green.</li>
+<li>Focus: the operate-in-prod bar — reproducibility, latency/cost, drift, safe rollout. Last 2 cards = design playbook + symptom→cause.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
 </ul></section>
 
-<section class="card diagram"><h3>The ML Lifecycle</h3>
+<section class="card diagram"><h3>The ML Lifecycle &amp; Maturity</h3>
 <div class="mermaid">
 flowchart LR
-  D["data"] --> F["feature store"]
-  F --> T["train pipeline"]
-  T --> R["model registry"]
+  D["data<br/>+version"] --> F["feature<br/>store"]
+  F --> T["train<br/>pipeline"]
+  T --> R["model<br/>registry"]
   R --> S["serve"]
   S --> M["monitor"]
-  M -->|drift/decay| T
+  M -.->|"drift / decay"| T
 </div>
-<p>Maturity: 0 manual → 1 automated pipeline → 2 CI/CD/CT. <span class="warn">!</span> Models fail SILENTLY.</p>
+<p class="cap">A loop, not a line — deployment is the middle, not the end. Every arrow is a versioned, testable artifact.</p>
+<table><thead><tr><th>Lvl</th><th>State</th></tr></thead><tbody>
+<tr><td>0</td><td>manual: notebooks, hand-deploy, no monitoring</td></tr>
+<tr><td>1</td><td>automated <b>training pipeline</b>, reproducible, CT-triggerable</td></tr>
+<tr><td>2</td><td>full <b>CI/CD/CT</b>: pipeline itself is built/tested/shipped automatically</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> Don't jump to level 2 — invest in the seam that's bleeding (usually reproducibility or monitoring).</p>
 </section>
 
-<section class="card"><h3>Version Everything</h3>
+<section class="card"><h3>Foundations: why ML ≠ DevOps</h3>
 <ul>
-<li><b>Data</b> (DVC/lakeFS/Delta) + <b>code</b> (git) + <b>model</b> (registry) + config + env.</li>
-<li>Reproducible = answer "which data+code+params made this model?"</li>
-<li><b>Experiment tracking</b> (MLflow/W&B): params, metrics, artifacts per run → registry.</li>
+<li>DevOps ships <b>code</b>; MLOps ships <b>code + data + model</b>, and behaviour depends on data seen at <b>train time</b> — no amount of code review shows it.</li>
+<li><b>Train/serve skew</b> <span class="warn">!</span> — the #1 silent bug: features computed one way in the batch training job, a different way in the serving path (different code, freshness, or units). Model sees a distribution it never trained on. Fix: <b>one</b> feature definition for both (feature store).</li>
+<li><b>Reproducible</b> = you can answer "which <b>data + code + params + env</b> produced this exact model?" Miss any axis → can't rebuild it.</li>
+<li>Roles &amp; seams: DS (notebook) → ML eng (pipeline) → SRE (serving). Failures cluster at the <b>handoffs</b> — "works in my notebook" is a handoff smell.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Version Everything (4 axes)</h3>
+<table><thead><tr><th>Axis</th><th>Tool</th></tr></thead><tbody>
+<tr><td>code</td><td>git</td></tr>
+<tr><td>data</td><td>DVC / lakeFS / Delta Lake</td></tr>
+<tr><td>model</td><td>model registry (MLflow…)</td></tr>
+<tr><td>config+env</td><td>params file + pinned container</td></tr>
+</tbody></table>
+<h4>Data-version tools</h4>
+<ul>
+<li><b>DVC</b> = "git for data": commits <b>pointers/hashes</b>, blobs live in S3/GCS. Small repo, big storage elsewhere.</li>
+<li><b>lakeFS</b> = git-like <b>branches/commits over an object store</b> (branch a 50 TB lake, merge).</li>
+<li><b>Delta Lake</b> = ACID + <b>time-travel</b> (<code>VERSION AS OF</code>) on a table.</li>
+</ul>
+<ul>
+<li><b>Point-in-time correctness</b> <span class="warn">!</span> — join labels to feature values <i>as they were at event time</i>, never "latest". Latest-value joins <b>leak the future</b> into training.</li>
+<li>GDPR delete: version <b>pointers</b>, purge underlying PII — don't rely on immutable blobs holding a deleted user forever.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Experiment Tracking</h3>
+<p>Log every run so a result is <b>reproducible science</b>, not a lucky notebook. MLflow (open, self-host) · W&amp;B (best UI/sweeps) · Neptune.</p>
+<h4>Log per run</h4>
+<ul>
+<li><b>Params</b> (hyperparams, feature set), <b>metrics</b> (train/val, per-slice), <b>artifacts</b> (model, plots), <b>code git-SHA</b> + <b>data version</b> + env.</li>
+<li>Tag the run → the winner gets <b>registered</b> to the model registry (run → registry handoff carries lineage).</li>
+</ul>
+<pre><code>with mlflow.start_run():
+  mlflow.log_params(cfg)
+  mlflow.log_metric("val_auc", auc)
+  mlflow.set_tag("git_sha", sha)
+  mlflow.log_artifact("model.onnx")</code></pre>
+<ul>
+<li><b>Don't</b> log raw datasets or every epoch's weights — log the <i>version reference</i>, not the bytes.</li>
+<li>Tracking ≠ registry: tracking is the <b>lab notebook</b> (all runs); registry is the <b>release shelf</b> (chosen versions + stages).</li>
 </ul>
 </section>
 
 <section class="card"><h3>Feature Store</h3>
 <ul>
-<li>Solves <b>train/serve skew</b> + feature reuse.</li>
-<li><b>Offline</b> (batch, point-in-time-correct → no leakage) + <b>online</b> (low-latency KV for serving).</li>
-<li>Same definition computes both → consistency. <span class="warn">!</span> Point-in-time (as-of) joins.</li>
-<li>Feast / Tecton. Skip if you don't need real-time features.</li>
+<li>Solves two problems: <b>train/serve skew</b> (one definition, both paths) and <b>feature reuse</b> across teams.</li>
 </ul>
-</section>
-
-<section class="card"><h3>Pipelines &amp; CT</h3>
-<ul>
-<li>DAG: ingest→validate→featurize→train→eval→register (Kubeflow/Airflow/Flyte).</li>
-<li>Reproducible, parameterized, <b>cached</b> steps.</li>
-<li><b>Continuous Training</b>: trigger on schedule / <b>drift</b> / decay → retrain → validate → canary → promote. <span class="warn">!</span> Guardrails so a bad retrain can't ship.</li>
-</ul>
-</section>
-
-<section class="card"><h3>Registry &amp; Packaging</h3>
-<ul>
-<li>Registry = source of truth: versions + <b>stages</b> (Staging/Prod/Archived), lineage, model cards.</li>
-<li><b>Rollback</b> = re-point prod to a prior version.</li>
-<li>Package: <b>ONNX</b>/TorchScript/SavedModel (avoid raw pickle), containerize, pin deps. <span class="warn">!</span> Reproducibility crisis.</li>
-</ul>
-</section>
-
-<section class="card"><h3>CI/CD/CT for ML</h3>
-<ul>
-<li>Test <b>code</b> (unit) + <b>data</b> (schema/distribution — GE/TFDV) + <b>model</b> (metric gates, <b>no-regression vs prod</b>, slice + fairness).</li>
-<li>Integration-test the serving artifact; GitOps.</li>
-<li>The pipeline is code that's tested.</li>
-</ul>
-</section>
-
-<section class="card"><h3>Deployment Patterns</h3>
-<table><thead><tr><th></th><th>What</th></tr></thead><tbody>
-<tr><td>blue-green</td><td>instant switch + rollback</td></tr>
-<tr><td>canary</td><td>gradual % + metric checks</td></tr>
-<tr><td>shadow</td><td>real traffic, no return, compare</td></tr>
+<table><thead><tr><th>Store</th><th>Role</th></tr></thead><tbody>
+<tr><td><b>offline</b></td><td>batch, big, <b>point-in-time joins</b> → training/backfill (warehouse/parquet)</td></tr>
+<tr><td><b>online</b></td><td>low-latency <b>KV</b> (Redis/Dynamo) → serving reads by entity key, single-digit ms</td></tr>
 </tbody></table>
-<p>Serve mode: <b>batch</b> vs <b>online</b> vs <b>streaming</b>. Feature-flag models.</p>
-</section>
-
-<section class="card"><h3>Serving Infra</h3>
 <ul>
-<li>REST/gRPC service; TF Serving / TorchServe / <b>Triton</b> / KServe / BentoML.</li>
-<li>Autoscale (HPA, scale-to-zero), GPU serving, multi-model.</li>
-<li>In-app lib vs sidecar vs central microservice — latency vs coupling.</li>
+<li>Same transform materialises both → consistency by construction.</li>
+<li><b>Freshness↔latency↔cost</b> tradeoff: streaming features are fresh but expensive; batch-nightly is cheap but stale.</li>
+<li><b>Feature registry</b> = discover/own/version feature <i>definitions</i> (not just values).</li>
+<li>Feast (open, bring-your-own infra) · Tecton (managed, streaming). <span class="warn">!</span> <b>Overkill</b> if you have no real-time features — a nightly table + shared transform lib is enough.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Serving at Scale</h3>
+<section class="card"><h3>Training Pipelines &amp; Orchestration</h3>
+<p>Not a notebook — a <b>DAG</b> of steps: ingest → validate → featurize → train → eval → register. Parameterized, cached, idempotent.</p>
+<table><thead><tr><th>Tool</th><th>Sweet spot</th></tr></thead><tbody>
+<tr><td>Airflow</td><td>generic scheduling / ETL-shaped</td></tr>
+<tr><td>Kubeflow</td><td>K8s-native, container-per-step, ML-first</td></tr>
+<tr><td>Metaflow</td><td>DS-ergonomic, Python-first</td></tr>
+<tr><td>Flyte</td><td>strongly-typed, cached, reproducible</td></tr>
+</tbody></table>
 <ul>
-<li><b>Dynamic batching</b> (latency↑ a bit, throughput↑↑ on GPU).</li>
-<li>Cache; optimize model: <b>quantize / distill / prune</b> (ONNX/TensorRT).</li>
-<li>Budget p50/p99; CPU vs GPU; cost per 1k preds. <span class="warn">!</span> Throughput vs latency tradeoff.</li>
+<li><b>Step caching</b> — skip a step if inputs+code unchanged (hash). Turns a 3h rerun into minutes.</li>
+<li><b>Idempotent</b> <span class="warn">!</span> — re-running a step yields the same result, no dup writes; required for safe retries.</li>
+<li>Artifacts pass between steps by <b>reference</b> (URI), not in-memory globals.</li>
+<li>Test it: unit-test transforms; run the pipeline on a <b>tiny fixture</b> in CI (smoke).</li>
 </ul>
 </section>
 
-<section class="card"><h3>Monitoring (2 layers)</h3>
+<section class="card"><h3>Continuous Training (CT)</h3>
+<p>CI/CD ships <b>code</b>; <b>CT</b> ships a <b>re-fit model</b>. Loop: trigger → retrain → validate → canary → promote.</p>
+<table><thead><tr><th>Trigger</th><th>When</th></tr></thead><tbody>
+<tr><td>schedule</td><td>predictable decay, simple</td></tr>
+<tr><td><b>drift</b></td><td>react to real distribution change</td></tr>
+<tr><td>perf decay</td><td>labels show metric drop</td></tr>
+<tr><td>new data vol</td><td>enough fresh labels landed</td></tr>
+</tbody></table>
+<h4>Guardrails <span class="warn">!</span> (a bad retrain must not ship)</h4>
 <ul>
-<li><b>Operational</b>: latency, throughput, errors, saturation (SRE).</li>
-<li><b>ML</b>: prediction &amp; feature distributions, quality when labels arrive, business KPIs.</li>
-<li><span class="warn">!</span> "Model is down" (ops) vs "model is wrong" (silent). Log inputs+preds. Ground-truth is delayed.</li>
+<li>Validate new data (schema/distribution) <b>before</b> training — garbage in, garbage model.</li>
+<li><b>No-regression gate</b> vs current prod model, on a frozen eval set + slices.</li>
+<li><b>Canary</b> the challenger on a traffic slice; auto-rollback on guardrail breach.</li>
+<li><span class="warn">!</span> "Retrain on schedule and auto-deploy" with no gates = an automated way to ship a broken model on a bad-data day.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Drift</h3>
-<pre><code>PSI = sum (actual% - expected%) * ln(actual%/expected%)
- <0.1 ok | 0.1-0.25 watch | >0.25 shift</code></pre>
+<section class="card"><h3>Model Registry &amp; Versioning</h3>
 <ul>
-<li><b>Data</b> P(x) shift · <b>concept</b> P(y|x) shift · <b>label</b> P(y) shift.</li>
-<li>Detect: KS / chi-square / PSI / embedding drift. <span class="warn">!</span> Drift != a proven perf drop.</li>
+<li>Source of truth: <b>versions</b> + <b>stages/aliases</b> (Staging / Production / Archived), <b>lineage</b>, model cards, approvals.</li>
+<li><b>Decouples</b> training from deployment: training <i>registers</i>; deployment <i>reads</i> "the Production alias" — retrain without touching serving code.</li>
+<li><b>Rollback</b> = re-point the Prod alias to a prior version. <b>Seconds</b>, no rebuild. <span class="warn">!</span> Fails if the new model changed the <b>feature schema</b> — the old model needs the old features; keep both feature versions live during rollout.</li>
+<li><b>Lineage</b>: version → run → data version → git SHA → dataset. Answers "what made this model?" and "who approved Prod?".</li>
+<li>Governance: RBAC on <b>who can promote to Production</b>; promotion = reviewed, gated, audited event.</li>
+<li><span class="warn">!</span> Timestamped pickles in S3 = no stages, no lineage, no rollback, no approvals — the anti-pattern a registry replaces.</li>
 </ul>
 </section>
 
-<section class="card"><h3>A/B &amp; Feedback</h3>
+<section class="card"><h3>Packaging &amp; Reproducibility</h3>
+<table><thead><tr><th>Format</th><th>Note</th></tr></thead><tbody>
+<tr><td><b>pickle</b></td><td>arbitrary-code exec on load <span class="warn">!</span>, version-fragile; avoid in prod</td></tr>
+<tr><td><b>ONNX</b></td><td>portable, framework-neutral, fast runtimes; conversion can drift ops <span class="warn">!</span></td></tr>
+<tr><td>SavedModel</td><td>TF native, serving-ready</td></tr>
+<tr><td>TorchScript</td><td>PyTorch, no-Python inference</td></tr>
+</tbody></table>
 <ul>
-<li>Online experiment beats offline metrics (the <b>offline-online gap</b>).</li>
-<li>A/B: primary + <b>guardrail</b> metrics, significance, power; bandits; shadow.</li>
-<li><span class="warn">!</span> Peeking, novelty, Simpson's paradox; feedback loops reinforce the model.</li>
+<li>The artifact is <b>preprocessing + weights + post-processing together</b> <span class="warn">!</span> — split preprocessing = train/serve skew.</li>
+<li><code>requirements.txt</code> pins alone are <b>not</b> reproducible — pin the <b>container</b> (base image, CUDA, OS libs, seeds).</li>
+<li>Non-determinism sources: RNG seeds, GPU non-determinism, data-loader order, lib versions. Control what you can; log the rest.</li>
+<li>Separate <b>train env</b> (heavy, GPU) from <b>serve env</b> (lean, CPU-often); the model bridges them.</li>
+</ul>
+<pre><code>FROM python:3.11-slim
+COPY model.onnx requirements.txt ./
+RUN pip install --no-cache -r requirements.txt
+CMD ["python","serve.py"]  # pin base + deps</code></pre>
+</section>
+
+<section class="card"><h3>CI/CD/CT for ML — test 3 things</h3>
+<table><thead><tr><th>Test</th><th>Checks</th></tr></thead><tbody>
+<tr><td><b>code</b></td><td>unit-test transforms/features (pure fns)</td></tr>
+<tr><td><b>data</b></td><td>schema, ranges, nulls, distribution — GE / TFDV / pandera</td></tr>
+<tr><td><b>model</b></td><td>metric gates: min AUC, <b>no-regression vs prod</b>, per-slice + fairness</td></tr>
+</tbody></table>
+<ul>
+<li><b>No-regression vs prod</b> is essential <span class="warn">!</span> — an absolute "AUC &gt; 0.8" passes a model worse than what's live. Compare to the champion.</li>
+<li><b>Per-slice</b> not just aggregate: overall up while a key segment collapses is a shipped bug hidden by averaging.</li>
+<li><b>Integration-test the serving artifact</b> (container answers a real request correctly), not just the model object.</li>
+<li>No live labels at pipeline time → gate on proxies: prediction-distribution sanity, invariants, golden inputs.</li>
+<li><b>GitOps</b>: pipeline defs, configs, thresholds live in git; deploy = a reviewed PR.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Infra, Governance, LLMOps</h3>
+<section class="card"><h3>Deployment Modes &amp; Rollout</h3>
+<table><thead><tr><th>Mode</th><th>Use</th></tr></thead><tbody>
+<tr><td><b>batch</b></td><td>score offline on a schedule (recs, scoring); simplest, no SLA</td></tr>
+<tr><td><b>online</b></td><td>sync request/response, low-latency SLA</td></tr>
+<tr><td><b>streaming</b></td><td>react to events continuously (fraud, IoT)</td></tr>
+</tbody></table>
+<h4>Rollout patterns</h4>
+<table><thead><tr><th>Pattern</th><th>What / when</th></tr></thead><tbody>
+<tr><td>blue-green</td><td>instant 100% switch + instant rollback</td></tr>
+<tr><td>canary</td><td>gradual % with metric gates — default for risky</td></tr>
+<tr><td>shadow</td><td>real traffic, output <b>not served</b>; validate safely, zero user risk</td></tr>
+</tbody></table>
 <ul>
-<li>Infra: GPU/TPU on K8s, <b>spot + checkpoint</b>, autoscale, cost-optimize.</li>
-<li>Governance: audit, lineage, model cards, bias/PII/security, regulation.</li>
-<li><b>LLMOps</b>: often no retrain → version <b>prompts / RAG / eval sets</b>; eval-in-CI; cost/latency. (See AI Engineering.)</li>
+<li><b>Feature-flag</b> the model version → flip/rollback without redeploy.</li>
+<li><span class="warn">!</span> Shadow validates <b>latency/stability + prediction sanity</b>, NOT business lift — outputs aren't acted on. That needs an A/B.</li>
+<li>Embedded lib (lowest latency, coupled, must redeploy app) vs microservice (independent scale/deploy, network hop).</li>
 </ul>
 </section>
 
-<section class="card"><h3>&#9744; "Model dropped in prod" / Design</h3>
+<section class="card"><h3>Serving Infrastructure</h3>
 <ul>
-<li>&#9744; Diagnose decay: data-pipeline break? drift? <b>train/serve skew</b>? upstream schema change? label delay? feedback loop?</li>
-<li>&#9744; Rollback fast (registry → prior version); canary the fix.</li>
-<li>&#9744; Design a platform: data→feature store→pipelines→registry→serving→monitoring→CT.</li>
-<li>&#9744; Real-time serving: online features + low-latency model + fallback + monitoring.</li>
-<li>&#9744; Retraining: drift/decay-triggered CT with validation gates + canary.</li>
-<li>&#9744; Prove a new model wins with an A/B + guardrails, not offline metrics.</li>
+<li>Request path: client → gateway → (feature fetch) → model server → response. <b>REST</b> (simple, human-debuggable) vs <b>gRPC</b> (binary, streaming, lower latency — internal high-QPS).</li>
 </ul>
+<table><thead><tr><th>Server</th><th>Pick when</th></tr></thead><tbody>
+<tr><td><b>Triton</b></td><td>GPU, multi-framework, dynamic batching</td></tr>
+<tr><td>TF Serving</td><td>pure TF SavedModel</td></tr>
+<tr><td>TorchServe</td><td>pure PyTorch</td></tr>
+<tr><td>KServe</td><td>K8s-native, scale-to-zero, standard CRD</td></tr>
+<tr><td>BentoML</td><td>Python packaging + serve, DX-first</td></tr>
+<tr><td>Ray Serve</td><td>Python, model composition/pipelines</td></tr>
+</tbody></table>
+<ul>
+<li><b>Autoscale</b> on QPS/latency (HPA); <b>scale-to-zero</b> for spiky/rare models (cold-start cost).</li>
+<li><b>Multi-model serving</b> packs many small models per box → big cost win.</li>
+<li><span class="warn">!</span> Flask/FastAPI + <code>pickle</code> is a <b>demo</b>, not prod — no batching, no health/readiness, no versioning, GIL-bound. Expose <code>/healthz</code> + <code>/ready</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Serving at Scale: latency · throughput · cost</h3>
+<pre><code>cost per 1k preds = (instance $/hr) / (preds/hr) * 1000
+budget: 10k QPS @ p99 &lt; 50ms, cheaply</code></pre>
+<ul>
+<li><b>p99, not p50</b> <span class="warn">!</span> — SLOs and users live in the tail; batching inflates the tail specifically.</li>
+<li><b>Dynamic/adaptive batching</b> = the #1 GPU throughput lever: coalesce concurrent requests, wait a few ms to fill. Costs tail latency, wins throughput. Tune batch/wait against p99, not p50.</li>
+<li>Do <b>less work</b>: request/feature <b>cache</b>; optimize the model — <b>quantize</b> (FP32→FP16/INT8), <b>distill</b> (small student mimics teacher), <b>prune</b>; compile via ONNX Runtime / TensorRT.</li>
+<li>Right-size hardware: <b>CPU for small models</b>, GPU for big/high-QPS. <span class="warn">!</span> An underfed A100 is pure waste — a quantized model on CPU may hit SLO at 1/10 the cost.</li>
+<li>Replicas raise <b>capacity, not single-request latency</b> — a slow model is slow no matter how many copies.</li>
+<li>Split the budget: feature-fetch + inference + network. The bottleneck is often <b>feature-fetch</b>, not the model.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Online / Real-Time / Streaming Inference</h3>
+<ul>
+<li>Online path = feature lookup (online store) + model call, under a hard SLA; <b>fallback</b> required <span class="warn">!</span> — feature store miss/timeout → serve a default/cached/simpler-model prediction, never error the user.</li>
+<li><b>Streaming</b> features: compute on the event stream (Flink/Kafka) so the online store is always fresh; watch for late/out-of-order events.</li>
+<li><b>Log sampled inputs+predictions</b> on this path <span class="warn">!</span> — it's the raw material for monitoring, drift, and the next retrain. If you don't log it, you can't debug or improve it.</li>
+<li>Latency budget dominated by the <b>feature fetch</b> often, not inference — cache hot keys, precompute.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Monitoring — two layers</h3>
+<p>A model can be <b>100% up and completely wrong</b>. Two monitors on two clocks:</p>
+<table><thead><tr><th>Layer</th><th>Watch</th></tr></thead><tbody>
+<tr><td><b>operational</b> (fast clock)</td><td>latency p50/p99, QPS, errors, saturation — SRE, pages at 3am</td></tr>
+<tr><td><b>ML</b> (slow/stopped clock)</td><td>prediction dist, feature dist, quality (when labels land), business KPI — opens a ticket</td></tr>
+</tbody></table>
+<ul>
+<li><b>Silent failure</b> <span class="warn">!</span> — a broken web service throws 500s; a broken model returns well-formed, confidently wrong numbers. Ops stays green.</li>
+<li><b>Ground-truth / label delay</b> <span class="warn">!</span> — accuracy is knowable only when labels arrive (days later, or never). So monitor <b>proxies</b> you can see now: prediction shift, feature health, drift.</li>
+<li>Feature monitoring (nulls/ranges/cardinality) is the <b>earliest</b> signal of an upstream pipeline break.</li>
+<li><b>Sampled logging</b> feeds analysis + retraining; don't log 100% at scale.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Drift Detection</h3>
+<pre><code>P(x,y) = P(y|x) * P(x)
+PSI = &Sigma;_bins (actual% - expected%) * ln(actual%/expected%)
+  &lt;0.1 ok | 0.1–0.25 watch | &gt;0.25 shift</code></pre>
+<table><thead><tr><th>Type</th><th>Shift / detect</th></tr></thead><tbody>
+<tr><td><b>data/covariate</b></td><td>P(x) — inputs move; <b>no labels needed</b></td></tr>
+<tr><td><b>concept</b></td><td>P(y|x) — rule changed; needs labels; <b>most harmful</b></td></tr>
+<tr><td><b>label/prior</b></td><td>P(y) — base rate moves (fraud 1%→5%)</td></tr>
+<tr><td><b>prediction</b></td><td>output dist moves — instant proxy</td></tr>
+</tbody></table>
+<ul>
+<li>Tests: <b>KS</b> (continuous, CDF distance) · <b>chi-square</b> (categorical) · <b>PSI</b> (binned index) · KL/JS/Wasserstein · <b>embedding drift</b> (text/images).</li>
+<li><span class="warn">!</span> <b>Drift ≠ a proven performance drop.</b> Inputs can shift with accuracy intact; accuracy can fall with no input drift. Drift = "investigate," not "degraded" or "retrain now."</li>
+<li><span class="warn">!</span> At scale, tiny meaningless shifts test as significant — use <b>effect-size bands</b> (PSI) + business impact, not raw p-values.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Performance Monitoring &amp; Feedback Loops</h3>
+<ul>
+<li>True quality lands only with <b>labels</b>; until then track the proxy chain: feature health → prediction dist → drift → business KPI.</li>
+<li><b>Delayed labels</b>: join predictions to outcomes when they arrive; compute accuracy/AUC on a rolling window per slice.</li>
+<li><b>Feedback loop</b> <span class="warn">!</span> — the model's own predictions shape future data (a recommender only sees clicks on what it showed). Training on that data reinforces itself and hides degradation. Mitigate with <b>randomized exploration / holdout</b> traffic that the model doesn't control.</li>
+<li><b>Offline-online gap</b>: offline metric up ≠ live metric up. The online experiment is the judge.</li>
+</ul>
+</section>
+
+<section class="card"><h3>A/B Testing &amp; Online Experiments</h3>
+<p>The <b>final judge</b> — a randomized live test, not offline AUC. Split by <b>stable hash(user)</b> so the model is the only systematic difference.</p>
+<ul>
+<li><b>Primary metric (OEC)</b>: one, chosen upfront, test powered to move it. <b>Guardrails</b>: metrics that must not get worse (latency, error, revenue, complaints).</li>
+<li><b>Power / MDE</b> → sets sample size &amp; duration; run <b>full business cycles</b> (≥1 week for weekly patterns).</li>
+<li>Discipline: <b>fix design → collect → decide once.</b></li>
+</ul>
+<h4>Invalidators <span class="warn">!</span></h4>
+<ul>
+<li><b>Peeking</b> — checking repeatedly &amp; stopping at first "win" inflates false positives. Use sequential/fixed-horizon tests.</li>
+<li><b>Novelty/primacy</b> — temporary lift because it's new, not better.</li>
+<li><b>Network effects</b> — one unit's treatment affects another (breaks independence).</li>
+<li><b>Simpson's paradox</b> — aggregate reverses within segments.</li>
+</ul>
+<ul>
+<li>Alt designs: <b>bandits</b> (minimize regret, adaptive) · <b>interleaving</b> (sensitive, ranking) · <b>shadow</b> (validate before A/B). <b>Champion/challenger</b> = the standing loop.</li>
+</ul>
+</section>
+
+<section class="card"><h3>ML Infra &amp; Compute</h3>
+<ul>
+<li>GPU/TPU on <b>K8s</b>; queue + schedule training jobs; bin-pack for utilization.</li>
+<li><b>Spot/preemptible + checkpointing</b> <span class="warn">!</span> — cheap compute, but must checkpoint often or a preemption wastes hours. Save + resume state.</li>
+<li>Cost levers: autoscale to load, scale-to-zero idle, right-size GPUs, share clusters, quota per team.</li>
+<li>Separate <b>train</b> (bursty, GPU-heavy) from <b>serve</b> (steady, often CPU) capacity — different scaling shapes.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Governance, Security &amp; Responsible ML</h3>
+<ul>
+<li><b>Lineage + audit</b>: reconstruct which data/code/params/approver produced any prod prediction (regulated domains demand it).</li>
+<li><b>Model cards</b>: intended use, training data, metrics per slice, limitations, owner.</li>
+<li><b>Bias/fairness</b> gates in CI + per-slice monitoring; document mitigations.</li>
+<li><b>PII/security</b> <span class="warn">!</span> — encrypt features/artifacts, RBAC on registry &amp; data, scan for leaked PII in logs, watch for adversarial/poisoning inputs.</li>
+<li><b>Right-to-be-forgotten</b> collides with immutable data versions — plan deletion of underlying PII while keeping version pointers.</li>
+</ul>
+</section>
+
+<section class="card"><h3>LLMOps — what changes</h3>
+<ul>
+<li>Often <b>no fine-tune/retrain</b> → the artifacts to version are <b>prompts, RAG corpus/index, and eval sets</b>, plus model/provider + params.</li>
+<li><b>Eval-in-CI</b> <span class="warn">!</span> — no single accuracy number; use an eval suite (LLM-as-judge, golden Q&amp;A, rubric scores). Regression = a scored eval drop, gated like a metric.</li>
+<li>Monitor <b>cost/token, latency, refusal/hallucination rate</b>; cache; route small→big models by difficulty.</li>
+<li>RAG "drift" = the <b>knowledge base</b> going stale, not weights — re-index on a schedule.</li>
+<li>Guardrails: prompt-injection filtering, output validation, PII redaction. (See AI Engineering primer.)</li>
+</ul>
+</section>
+
+<section class="card"><h3>&#9733; Design &amp; Review Checklist</h3>
+<h4>Reproducibility</h4>
+<ul>
+<li>&#9744; Data + code + params + env all versioned; run reconstructs the exact model.</li>
+<li>&#9744; No <code>pickle</code> in prod; preprocessing packaged <b>with</b> weights; container pinned, not just <code>requirements.txt</code>.</li>
+</ul>
+<h4>Train/serve consistency</h4>
+<ul>
+<li>&#9744; One feature definition for train &amp; serve (no skew); point-in-time joins in training (no leakage) <span class="warn">!</span></li>
+</ul>
+<h4>Rollout &amp; rollback</h4>
+<ul>
+<li>&#9744; Registry stages/aliases; rollback = re-point alias (seconds); prior feature schema kept live during migration <span class="warn">!</span></li>
+<li>&#9744; Canary/shadow with metric gates + auto-rollback; model behind a feature flag.</li>
+</ul>
+<h4>Validation gates</h4>
+<ul>
+<li>&#9744; Data validated before training; <b>no-regression vs prod</b>; per-slice + fairness, not just aggregate.</li>
+<li>&#9744; CT has guardrails — a bad-data day can't auto-ship a broken model <span class="warn">!</span></li>
+</ul>
+<h4>Monitoring</h4>
+<ul>
+<li>&#9744; Both layers: ops (latency/errors) AND ML (feature/prediction dist, quality, KPI).</li>
+<li>&#9744; Inputs+preds logged (sampled); drift thresholds set; label-delay path to compute true quality.</li>
+</ul>
+<h4>Decisioning</h4>
+<ul>
+<li>&#9744; New model proven by an <b>A/B with guardrails</b>, powered, full cycle, no peeking — not offline metrics <span class="warn">!</span></li>
+<li>&#9744; Feedback loop broken with randomized/holdout traffic.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Symptom → Cause</h3>
+<table><thead><tr><th>Symptom</th><th>Likely cause</th></tr></thead><tbody>
+<tr><td>great offline, bad in prod</td><td><b>train/serve skew</b> or feature leakage (non-PIT join) <span class="warn">!</span></td></tr>
+<tr><td>accuracy silently decays</td><td>concept drift P(y|x); no ML monitoring <span class="warn">!</span></td></tr>
+<tr><td>ops green but business down</td><td>silent failure — model wrong, not down</td></tr>
+<tr><td>can't reproduce last month's model</td><td>unversioned data/params/env</td></tr>
+<tr><td>diff preds, same weights</td><td>preprocessing/env/lib mismatch train vs serve</td></tr>
+<tr><td>p99 spikes under load</td><td>batching/queue tail; underfed or oversized GPU</td></tr>
+<tr><td>features suddenly null/odd</td><td>upstream pipeline/schema break — feature monitoring catches it</td></tr>
+<tr><td>A/B "won" then faded</td><td>novelty effect / peeking <span class="warn">!</span></td></tr>
+<tr><td>rollback broke serving</td><td>new model changed feature schema; old features gone <span class="warn">!</span></td></tr>
+<tr><td>model reinforces its own bias</td><td>feedback loop; no exploration traffic</td></tr>
+<tr><td>bad model auto-shipped</td><td>CT with no validation guardrails <span class="warn">!</span></td></tr>
+</tbody></table>
 </section>
 
 </div>

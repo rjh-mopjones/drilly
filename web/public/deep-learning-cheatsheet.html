@@ -6,7 +6,11 @@
 <title>Deep Learning Cheat Sheet</title>
 <style>
 :root{
-  --fs: 7.2pt; --fs-mono: 6.6pt; --fs-h3: 7.8pt; --gap: 5px; --pad: 3px;
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
   --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
 }
 *{box-sizing:border-box;}
@@ -14,10 +18,12 @@ html,body{margin:0;padding:0;}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
   font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
 .sheet{background:#fff;}
+/* spanning title bar */
 .titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
   margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
 .titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
 .titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
 .sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
   column-fill:balance; padding:5px;}
 .card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
@@ -25,6 +31,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Ar
   overflow:hidden;}
 .card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
   background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
 .card:nth-of-type(8n+1) h3{background:#34495e;}
 .card:nth-of-type(8n+2) h3{background:#2c6e9b;}
 .card:nth-of-type(8n+3) h3{background:#1f7a5a;}
@@ -58,153 +65,321 @@ pre code{background:none; padding:0; font-size:1em;}
 @page{ size:A4; margin:5mm; }
 @media print{
   body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
   .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
 }
 </style>
 </head>
 <body>
 <div class="sheet">
-<div class="titlebar"><h1>Deep Learning Cheat Sheet</h1><span class="meta">backprop · CNN · RNN/LSTM · transformers · optimizers · norm · drilly</span></div>
+<div class="titlebar"><h1>Deep Learning Cheat Sheet</h1><span class="meta">backprop · CNN · RNN/LSTM · transformers · optimizers · norm · regularization · drilly</span></div>
 <section class="card legend"><h3>How to read &amp; print</h3>
 <ul>
-<li><span class="warn">!</span> footgun / classic trap &nbsp; <code>&#9744;</code> reasoning step</li>
-<li>Neural-net toolkit &amp; training mechanics (transformer INTERNALS = the Large Language Models sheet).</li>
-<li>Themes: <b>depth learns representations</b>; <b>gradients must flow</b>; <b>normalize + regularize</b>.</li>
-<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+<li><span class="warn">!</span> footgun / classic trap &nbsp; <code>&#9744;</code> review / reasoning-step marker &nbsp; <span class="pg">math</span> derivation &nbsp; <span class="ansi">rule</span> heuristic.</li>
+<li>Scope: the <b>neural-net toolkit &amp; training mechanics</b>. Transformer/GPT internals (KV-cache, tokenization, pretraining) live on the <b>Large Language Models</b> sheet — this one stops at "attention is a layer, here is the block".</li>
+<li>Three load-bearing themes: <b>depth learns representations</b>; <b>gradients must flow</b> (init · norm · residuals · gating); <b>normalize + regularize</b> to train fast and generalize.</li>
+<li>Last 3 cards = <b>interview playbook</b> + symptom→cause bug table + a training-diagnosis flow.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps the colour header bars). 4 columns built-in.</li>
 </ul></section>
 
-<section class="card"><h3>Building Blocks</h3>
-<pre><code>neuron: y = act(w·x + b)
-layer:  Y = act(X @ W + b)
-net = stack of (linear + non-linearity)</code></pre>
-<p>Depth → hierarchical features learned end-to-end. Params = weights+biases; activations cached for backprop.</p>
+<section class="card"><h3>Building Blocks (MLP)</h3>
+<pre><code>neuron: y = act(w·x + b)         # dot + bias + nonlin
+layer:  H = act(X @ W + b)       # X:[N,d_in] W:[d_in,d_out]
+net   = stack of (linear + nonlinearity)</code></pre>
+<ul>
+<li>Depth builds a <b>hierarchy of features</b> learned end-to-end: early layers = edges/n-grams, late layers = objects/semantics. Width = features per layer; depth = composition.</li>
+<li><b>Universal approximation</b>: one hidden layer can fit any continuous function — but may need exponential width. Depth buys the same expressiveness far more cheaply. Approximation is a possibility theorem, <b>not</b> a guarantee SGD finds the weights.</li>
+<li>Params = weights + biases. <b>Activations are cached</b> on the forward pass for backprop → memory scales with depth × activation size <span class="warn">!</span></li>
+<li>Without a nonlinearity, a stack of linear layers collapses to a <b>single</b> linear map <span class="warn">!</span> — no benefit from depth.</li>
+</ul>
 </section>
 
-<section class="card"><h3>Activations</h3>
-<table><thead><tr><th></th><th>Note</th></tr></thead><tbody>
-<tr><td>sigmoid/tanh</td><td>saturate → vanish</td></tr>
-<tr><td><b>ReLU</b> max(0,x)</td><td>default; dying-ReLU <span class="warn">!</span></td></tr>
-<tr><td>Leaky/GELU</td><td>fix dying ReLU</td></tr>
-<tr><td>softmax</td><td>output probs</td></tr>
+<section class="card"><h3>Activation Functions</h3>
+<table><thead><tr><th>Fn</th><th>Range · note</th></tr></thead><tbody>
+<tr><td>sigmoid <code>1/(1+e⁻ˣ)</code></td><td>(0,1); saturates → <b>vanishing grad</b> <span class="warn">!</span>; not zero-centred</td></tr>
+<tr><td>tanh</td><td>(-1,1); zero-centred but still saturates</td></tr>
+<tr><td><b>ReLU</b> <code>max(0,x)</code></td><td>default; cheap, sparse, no saturation for x&gt;0; <b>dying ReLU</b> (stuck ≤0) <span class="warn">!</span></td></tr>
+<tr><td>LeakyReLU / PReLU</td><td>small slope for x&lt;0 → fixes dying units</td></tr>
+<tr><td>GELU / SiLU</td><td>smooth; transformer/CNN default now</td></tr>
+<tr><td>softmax</td><td>vector → prob simplex (output layer)</td></tr>
 </tbody></table>
-<p>Non-linearity is essential — without it a deep net = 1 linear layer.</p>
+<ul>
+<li><span class="ansi">rule</span> Hidden layers: start <b>ReLU</b> (or GELU). Reserve sigmoid/tanh for gates (LSTM) and binary output — never deep hidden stacks.</li>
+<li>Dying ReLU cause: large negative bias / too-high LR pushes pre-activation permanently ≤0 → zero gradient forever. Fix: LeakyReLU, lower LR, better init.</li>
+</ul>
 </section>
 
-<section class="card"><h3>Losses</h3>
-<pre><code>MSE  = mean((y-yhat)^2)            # regression
-CE   = -sum y_i * log(p_i)         # classification
-softmax+CE grad = p - y            # clean!</code></pre>
-<p><span class="warn">!</span> Use cross-entropy (not MSE) for classification — better gradients, matches MLE.</p>
+<section class="card"><h3>Loss Functions</h3>
+<pre><code>MSE = mean((y - ŷ)²)              # regression
+MAE = mean|y - ŷ|                 # robust to outliers
+BCE = -[y·log p + (1-y)·log(1-p)] # binary
+CE  = -Σ yᵢ·log pᵢ                # multiclass (1-hot)</code></pre>
+<ul>
+<li><span class="warn">!</span> Use <b>cross-entropy, not MSE</b>, for classification: MSE + sigmoid gives a near-flat gradient when badly wrong (saturation); CE's gradient stays strong. CE also = maximum-likelihood under a categorical model.</li>
+<li><b>The clean identity</b>: softmax + cross-entropy ⇒ <span class="pg">dL/dz = p − y</span> (predicted minus one-hot). Elegant, numerically stable — always fuse them (<code>CrossEntropyLoss</code> takes logits, not probs) <span class="warn">!</span></li>
+<li>Regression outliers: MAE/Huber over MSE (MSE squares errors → dominated by tails).</li>
+</ul>
 </section>
 
 <section class="card"><h3>Backpropagation</h3>
-<pre><code>chain rule, BACKWARD through the graph:
-dL/dW = dL/dy · x^T      (linear)
-ReLU: gradient passes only where x>0
-forward caches acts; backward reuses them</code></pre>
-<p>= reverse-mode autodiff. Feeds the optimizer.</p>
+<p>= <b>reverse-mode autodiff</b> over the computational graph. Computes <code>dL/dw</code> for <b>every</b> weight in ~one extra forward pass. Backprop <b>only computes gradients</b> — the optimizer is a separate step <span class="warn">!</span></p>
+<pre><code>forward: cache activations left→right
+backward: seed dL/dL = 1, chain rule right→left
+  dL/dx = dL/dy · dy/dx        (local × upstream)</code></pre>
+<h4>Canonical local gradients</h4>
+<pre><code>Linear y = xW:  dL/dW = xᵀ·(dL/dy)
+                dL/dx = (dL/dy)·Wᵀ
+ReLU:           dL/dx = dL/dy · 1[x>0]   # mask
+Add:            copies gradient to both inputs
+Fork (reused x): gradients from all paths SUM</code></pre>
+<ul>
+<li><b>Backward, not forward</b>, because one scalar loss vs millions of params: reverse mode computes each shared <code>dL/d(layer)</code> <b>once</b> → O(1) forward passes, not O(#params).</li>
+<li>Backward <b>reuses</b> cached activations (doesn't recompute) → memory cost; <b>gradient checkpointing</b> trades compute to shrink it.</li>
+<li><span class="warn">!</span> <code>detach()</code>/<code>.data</code>, in-place ops, or a non-differentiable step silently cut the graph → zero/None grads.</li>
+</ul>
 </section>
 
 <section class="card"><h3>Optimizers</h3>
-<table><thead><tr><th></th><th>Idea</th></tr></thead><tbody>
-<tr><td>SGD</td><td>w -= lr*grad</td></tr>
-<tr><td>+momentum</td><td>velocity, accelerate</td></tr>
-<tr><td>RMSProp</td><td>per-param adaptive LR</td></tr>
-<tr><td><b>Adam/AdamW</b></td><td>momentum+RMSProp; decoupled decay</td></tr>
+<table><thead><tr><th>Method</th><th>Update idea</th></tr></thead><tbody>
+<tr><td>SGD</td><td><code>w -= lr·g</code></td></tr>
+<tr><td>+ momentum</td><td><code>v=βv+g; w-=lr·v</code> — accelerate, damp oscillation</td></tr>
+<tr><td>Nesterov</td><td>look-ahead momentum</td></tr>
+<tr><td>AdaGrad</td><td>÷√Σg² — LR decays, dies on long runs <span class="warn">!</span></td></tr>
+<tr><td>RMSProp</td><td>EMA of g² → per-param adaptive LR</td></tr>
+<tr><td><b>Adam</b></td><td>momentum (m) + RMSProp (v) + bias-correct</td></tr>
+<tr><td><b>AdamW</b></td><td>Adam with <b>decoupled</b> weight decay ✓ default</td></tr>
 </tbody></table>
-<p><span class="warn">!</span> LR is THE knob. Warmup + cosine decay. SGD may generalize better; Adam is robust default.</p>
+<pre><code>Adam: m=β₁m+(1-β₁)g;  v=β₂v+(1-β₂)g²
+      ŵ -= lr·m̂/(√v̂+ε)   # β₁=.9 β₂=.999</code></pre>
+<ul>
+<li><span class="warn">!</span> <b>AdamW ≠ Adam+L2</b>: in Adam the L2 penalty gets scaled by the adaptive <code>v</code> and mis-applied; AdamW adds <code>-lr·λ·w</code> outside the adaptive step. Use AdamW.</li>
+<li>LR is <b>the</b> knob. Schedule: <b>warmup</b> (linear ramp, essential for transformers/large batch) → <b>cosine decay</b>. SGD+momentum can generalize better on vision; Adam is the robust default.</li>
+</ul>
 </section>
 
-<section class="card"><h3>Init &amp; Gradient Flow</h3>
+<section class="card"><h3>Weight Init &amp; Gradient Flow</h3>
 <ul>
-<li><b>He</b> init for ReLU, <b>Xavier</b> for tanh/sigmoid. All-zeros breaks symmetry. <span class="warn">!</span></li>
-<li><b>Vanishing/exploding</b> gradients (deep + saturating + repeated ·W).</li>
-<li>Fixes: ReLU, good init, <b>norm</b>, <b>residuals</b>, LSTM gates, grad clipping (RNN).</li>
+<li><span class="warn">!</span> <b>All-zeros init</b> → every neuron identical, identical gradients, never differentiate (symmetry never breaks). Init must be <b>random</b>.</li>
+<li><b>Xavier/Glorot</b> <code>Var=1/n</code> for tanh/sigmoid; <b>He/Kaiming</b> <code>Var=2/n</code> for ReLU (accounts for the half killed by max(0,·)). Goal: keep activation &amp; gradient variance ~constant across depth.</li>
+</ul>
+<h4>Vanishing / exploding gradients <span class="warn">!</span></h4>
+<pre><code>backprop multiplies many Jacobians:
+ |∂| < 1 repeatedly → VANISH (early layers freeze)
+ |∂| > 1 repeatedly → EXPLODE (NaN loss)</code></pre>
+<ul>
+<li>Vanish cause: depth × saturating activations × repeated ·W. Symptom: early layers stop learning, loss plateaus.</li>
+<li><b>Fix stack</b>: ReLU-family · good init · <b>normalization</b> · <b>residual connections</b> · LSTM/GRU gates (sequences) · <b>gradient clipping</b> (RNN explosion).</li>
 </ul>
 </section>
 
 <section class="card"><h3>Normalization</h3>
-<pre><code>BN: normalize feature over the BATCH,
-    then learnable scale+shift (gamma,beta)</code></pre>
+<pre><code>for a feature over the chosen axis:
+ μ=mean  σ²=var  x̂=(x-μ)/√(σ²+ε)
+ y = γ·x̂ + β        # learnable scale+shift</code></pre>
+<p>γ/β let the layer <b>undo</b> normalization → zero loss of expressiveness. β subsumes the preceding bias.</p>
+<table><thead><tr><th>Variant</th><th>Normalize over</th></tr></thead><tbody>
+<tr><td><b>BatchNorm</b></td><td>the <b>batch</b> (per feature) — CNNs</td></tr>
+<tr><td><b>LayerNorm</b></td><td><b>features</b> of one example — transformers/RNN</td></tr>
+<tr><td>GroupNorm</td><td>channel groups/example — small-batch vision</td></tr>
+<tr><td>InstanceNorm</td><td>per channel/example — style transfer</td></tr>
+</tbody></table>
 <ul>
-<li>Faster/stabler training, higher LR, mild regularization.</li>
-<li><span class="warn">!</span> Train uses batch stats; <b>inference uses running stats</b> (classic bug).</li>
-<li><b>LayerNorm</b> (per example) → transformers/RNNs.</li>
+<li><span class="warn">!</span> <b>BN train vs inference differ</b>: train uses batch stats; inference uses stored <b>running (EMA) stats</b>. Forget <code>model.eval()</code> → garbage at test / batch-size-1 crash. THE classic bug.</li>
+<li>BN benefits: higher LR, faster/stabler, mild regularization (from batch noise). Breaks at tiny batch → use GroupNorm/LayerNorm. LayerNorm is batch-independent → works at batch=1 &amp; variable-length seqs (why transformers use it).</li>
 </ul>
 </section>
 
 <section class="card"><h3>Regularization</h3>
 <ul>
-<li><b>Dropout</b> p: zero units in training (an implicit ensemble); off at inference. <span class="warn">!</span></li>
-<li>Weight decay (AdamW), early stopping.</li>
-<li><b>Data augmentation</b> = biggest lever for vision; label smoothing, mixup.</li>
+<li><b>Dropout(p)</b>: randomly zero units each step (implicit ensemble of subnetworks). <span class="warn">!</span> <b>Off at inference</b>; inverted dropout scales by <code>1/(1-p)</code> at train so activations match. <code>model.eval()</code> disables it (same switch as BN).</li>
+<li><b>Weight decay / L2</b>: penalize <code>‖w‖²</code> → smaller weights, smoother function. Use <b>AdamW</b> for correct decoupling. L1 → sparsity.</li>
+<li><b>Early stopping</b>: halt when val loss turns up — cheap, always-on.</li>
+<li><b>Data augmentation</b> = biggest lever in vision (flip/crop/colour; <b>mixup</b>, cutmix). <b>Label smoothing</b> (target 0.9 not 1.0) curbs overconfidence.</li>
+<li>More data &gt; every regularizer. BN also mildly regularizes (redundant with heavy dropout).</li>
 </ul>
 </section>
 
-<section class="card"><h3>CNNs</h3>
-<pre><code>feature map = conv(input, filter) + b
-out = (n + 2p - k)/s + 1</code></pre>
+<section class="card"><h3>Overfitting, Capacity &amp; Generalization</h3>
+<table><thead><tr><th>Symptom</th><th>Diagnosis → fix</th></tr></thead><tbody>
+<tr><td>train↓ val↑ (gap)</td><td><b>overfit</b> → regularize / more data / smaller model</td></tr>
+<tr><td>train &amp; val both high</td><td><b>underfit</b> → bigger model / train longer / lower reg</td></tr>
+<tr><td>train≈0 val high</td><td>memorizing → augment, dropout, weight decay</td></tr>
+</tbody></table>
 <ul>
-<li><b>Parameter sharing</b> + local receptive fields → translation equivariance, few params.</li>
-<li>Pooling / stride downsample; 1x1 conv mixes channels.</li>
-<li>LeNet→AlexNet→VGG→Inception→ResNet.</li>
+<li><b>Bias–variance</b>: underfit = high bias; overfit = high variance. The gap between train and val <b>is</b> the variance.</li>
+<li><span class="warn">!</span> Deep nets defy classic U-curve — <b>double descent</b>: past the interpolation threshold, more params can <i>improve</i> test error. Overparameterized + regularized is normal.</li>
+<li>Always split <b>train/val/test</b>; tune on val, touch test once. Watch the <b>val</b> curve, not train.</li>
 </ul>
 </section>
 
-<section class="card"><h3>ResNets</h3>
-<pre><code>y = F(x) + x     # skip / residual</code></pre>
+<section class="card"><h3>CNN Fundamentals</h3>
+<pre><code>feature map = conv(input, kernel) + b
+out = ⌊(n + 2p − k)/s⌋ + 1     # per spatial dim
+params(conv) = (k·k·C_in + 1)·C_out   # size-independent!</code></pre>
 <ul>
-<li>Fixes the <b>degradation</b> problem (deep plain nets train worse). <span class="warn">!</span></li>
-<li>Identity path = gradient highway → 100+ layers.</li>
-<li>One of DL's most important ideas (reappears in transformers).</li>
+<li><b>Parameter sharing</b> (one kernel slid everywhere) + <b>local receptive fields</b> → translation <b>equivariance</b>, far fewer params than dense, works at any input size.</li>
+<li>Levers: <b>padding</b> p ('same' keeps size), <b>stride</b> s (downsample), <b>dilation</b> (grow receptive field cheaply).</li>
+<li><b>Receptive field</b> grows with depth/stride — deep layers "see" more of the image. This is why depth matters for vision.</li>
+<li><b>Pooling</b> (max/avg) downsamples + adds small translation invariance; increasingly replaced by strided conv.</li>
 </ul>
 </section>
 
-<section class="card"><h3>RNN / LSTM / GRU</h3>
-<pre><code>RNN: h_t = tanh(W_x x_t + W_h h_{t-1})
-train by BPTT; grads vanish over long seq !</code></pre>
+<section class="card"><h3>CNN Architectures &amp; Components</h3>
 <ul>
-<li><b>LSTM</b>: cell state + forget/input/output gates → gradients flow far.</li>
-<li><b>GRU</b>: reset+update gates (fewer params).</li>
-<li>Sequential (no time-parallelism) → transformers won.</li>
+<li><b>1×1 conv</b>: mixes/projects <b>channels</b>, no spatial mixing → cheap dimensionality change ("bottleneck", network-in-network) <span class="warn">!</span> underrated.</li>
+<li><b>Depthwise-separable</b> (MobileNet): depthwise (per-channel spatial) + 1×1 pointwise → ~⅑ the compute.</li>
+<li><b>Global average pooling</b> replaces giant FC head → fewer params, any input size.</li>
+<li>Lineage: <b>LeNet</b>→<b>AlexNet</b> (ReLU+dropout+GPU)→<b>VGG</b> (stacked 3×3)→<b>Inception</b> (multi-scale, 1×1)→<b>ResNet</b> (skips)→<b>EfficientNet</b> (compound scaling).</li>
+<li>Conv block idiom: <code>Conv → Norm → Act</code> (often <code>→ Conv → Norm → +skip → Act</code>).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Residual Networks (ResNet)</h3>
+<pre><code>y = F(x) + x        # skip / identity shortcut</code></pre>
+<ul>
+<li>Solves the <b>degradation</b> problem: plain nets past ~20 layers train <i>worse</i> — not overfitting, an <b>optimization</b> failure <span class="warn">!</span> A deep plain net can't even learn identity mappings.</li>
+<li>The block learns a <b>residual</b> F(x)=H(x)−x; if identity is optimal, drive F→0 (easy). The <code>+x</code> path is a <b>gradient highway</b>: backprop gets <code>1 + ∂F</code> → gradient never vanishes to 0.</li>
+<li>Enabled 100–1000+ layers. <b>One of DL's most important ideas</b> — reappears in every transformer block. Pair with BN/LayerNorm.</li>
+<li>Bottleneck block: 1×1 (reduce) → 3×3 → 1×1 (restore) for depth-efficiency.</li>
+</ul>
+</section>
+
+<section class="card"><h3>RNNs &amp; BPTT</h3>
+<pre><code>h_t = tanh(W_x·x_t + W_h·h_{t-1} + b)
+y_t = W_y·h_t          # weights SHARED across time</code></pre>
+<ul>
+<li>Process sequences by carrying a <b>hidden state</b>. Trained by <b>BPTT</b> — unroll the loop, backprop through every timestep.</li>
+<li><span class="warn">!</span> Long sequences → repeated <code>·W_h</code> ⇒ <b>vanishing</b> (can't learn long-range deps) or <b>exploding</b> (NaN) gradients. Exploding fix: <b>gradient clipping</b>. Vanishing fix: gating (LSTM/GRU).</li>
+<li>Variants: many-to-one (classify), many-to-many (tag/translate), bidirectional (see both directions — offline only).</li>
+<li>Fundamental limit: <b>sequential</b>, no time-parallelism → slow to train. Transformers won on this.</li>
+</ul>
+</section>
+
+<section class="card"><h3>LSTM &amp; GRU</h3>
+<pre><code>LSTM gates (σ = 0..1):
+ f=σ(...) forget   i=σ(...) input   o=σ(...) output
+ C_t = f⊙C_{t-1} + i⊙C̃_t       # cell state
+ h_t = o⊙tanh(C_t)</code></pre>
+<ul>
+<li><b>Cell state C</b> is a near-linear conveyor belt: the forget gate's <b>additive</b> update lets gradients flow across long ranges → beats vanishing gradients <span class="warn">!</span></li>
+<li>Gates <b>learn</b> what to keep / write / expose — solves long-term dependencies RNNs can't.</li>
+<li><b>GRU</b>: merges to <b>reset + update</b> gates, no separate cell → fewer params, often ~as good, faster. Try GRU first.</li>
+<li>Both still sequential — largely superseded by transformers for long-range tasks, but strong on small data / streaming / low-latency.</li>
 </ul>
 </section>
 
 <section class="card"><h3>Attention &amp; Transformers</h3>
-<pre><code>Attn = softmax(Q K^T / sqrt(d_k)) V</code></pre>
+<pre><code>Attention(Q,K,V) = softmax(Q·Kᵀ / √d_k)·V</code></pre>
 <ul>
-<li>Every position attends to every other → <b>parallel</b> + long-range (O(1) path).</li>
-<li>Replaced RNNs; encoder/decoder; positional encoding; ViT = image patches.</li>
-<li>O(n^2). <span class="warn">!</span> Internals (GPT/KV-cache/pretraining) → Large Language Models sheet.</li>
+<li>Each output = <b>content-based weighted average of values</b>; weights = query·key similarity. Position 5 reads position 500 in <b>one hop</b> (O(1) path length) vs O(n) for an RNN.</li>
+<li><span class="warn">!</span> <b>÷√d_k</b>: without it, dot products grow with dimension → softmax saturates → tiny gradients.</li>
+<li><b>Multi-head</b>: split d into h subspaces, attend in parallel, concat → learns several relation types; compute ≈ one big head.</li>
+<li><b>Self</b>-attn (Q,K,V same seq) vs <b>cross</b>-attn (Q from decoder, K/V from encoder). <b>Causal mask</b> hides future tokens in a decoder.</li>
+<li><span class="warn">!</span> Permutation-invariant → needs <b>positional encoding</b> for order. Cost is <b>O(n²)</b> in sequence length. <b>ViT</b> = image split into patch tokens.</li>
+<li>Block = <code>Attn → +skip → LayerNorm → FFN → +skip → LayerNorm</code>. GPT/KV-cache/pretraining → <b>LLM sheet</b>.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Transfer Learning</h3>
+<section class="card diagram"><h3>Gradient Highways (why it trains)</h3>
+<div class="mermaid">
+flowchart LR
+  X["x"] --> F["F(x)<br/>conv/attn+FFN"]
+  X -->|"identity skip<br/>∂ = 1"| ADD(("+"))
+  F --> ADD
+  ADD --> Y["y = F(x)+x"]
+</div>
+<p class="cap">Residual + normalization keep the backward Jacobian near 1, so gradients reach early layers un-vanished. The same <code>F(x)+x</code> block powers deep ResNets and every transformer layer — depth is only trainable because signal has a clear path both forward and backward.</p>
+</section>
+
+<section class="card"><h3>seq2seq &amp; the Attention Origin</h3>
 <ul>
-<li>Reuse a pretrained backbone; early layers = general features.</li>
-<li><b>Feature extraction</b> (freeze + new head) vs <b>fine-tune</b> (unfreeze, low LR).</li>
-<li>Small+similar → freeze most; large+different → fine-tune more.</li>
+<li><b>Encoder–decoder</b>: encoder reads input → context; decoder generates output token-by-token (translation, summarization).</li>
+<li><span class="warn">!</span> The <b>bottleneck</b>: a fixed-size context vector can't hold a long sentence → quality collapses with length. <b>Attention was invented to fix exactly this</b> — let the decoder look back at all encoder states.</li>
+<li><b>Teacher forcing</b>: feed ground-truth prev token at train (fast, parallel) → <b>exposure bias</b> at inference (model sees its own errors) <span class="warn">!</span></li>
+<li>Decoding: greedy vs <b>beam search</b> (keep top-k hypotheses).</li>
 </ul>
 </section>
 
-<section class="card"><h3>Train in Practice + Zoo</h3>
+<section class="card"><h3>Training in Practice</h3>
 <ul>
-<li>Batch size (memory vs noise vs generalization); mixed precision; grad accumulation.</li>
-<li>NaN loss → clip/lower LR; flat loss → LR/init/data bug; gap → regularize.</li>
-<li>Zoo: autoencoder, VAE, GAN, embeddings, GNN, diffusion.</li>
+<li><b>Batch size</b>: large = stable, hardware-efficient, less gradient noise (may generalize <i>worse</i>, needs warmup + LR scaling); small = noisy, regularizing. <b>Grad accumulation</b> simulates a big batch on small memory.</li>
+<li><b>Mixed precision</b> (fp16/bf16): ~2× speed &amp; half memory; fp16 needs <b>loss scaling</b> to stop grad underflow (bf16 usually doesn't) <span class="warn">!</span></li>
+<li>Pipeline: overfit a <b>single batch</b> first (sanity), then scale. Monitor grad norms, LR, train+val loss.</li>
+<li><b>Reproducibility</b>: seed everything; some GPU ops still nondeterministic <span class="warn">!</span></li>
+<li>Checkpoint best-on-val; log with TensorBoard/W&amp;B.</li>
 </ul>
 </section>
 
-<section class="card"><h3>&#9744; Interview Playbook</h3>
+<section class="card"><h3>Transfer Learning &amp; Fine-Tuning</h3>
 <ul>
-<li>&#9744; Derive backprop (chain rule backward; linear = dL/dy·x^T; ReLU gates x>0).</li>
-<li>&#9744; Vanishing grads + every fix (ReLU/init/norm/residual/LSTM/clip).</li>
-<li>&#9744; SGD vs Adam; LR is the key knob.</li>
-<li>&#9744; Batch norm: how + why + inference gotcha.</li>
-<li>&#9744; CNN (images) vs RNN/LSTM (sequences) vs transformer (parallel, long-range).</li>
-<li>&#9744; Dropout = ensemble; residual = gradient highway.</li>
-<li>&#9744; Diagnose training: NaN / flat / overfit → the matching fix.</li>
+<li>Reuse a pretrained backbone: early layers = <b>general</b> features (edges, syntax), late layers = <b>task-specific</b>.</li>
+<li><b>Feature extraction</b>: freeze backbone, train a new head (small/similar data, fast, low overfit risk). <b>Fine-tuning</b>: unfreeze some/all, train at a <b>low LR</b> so you don't wreck pretrained weights <span class="warn">!</span></li>
+<li>Decision: small+similar → freeze most; large+different → fine-tune more/all. Discriminative LRs (lower for early layers) help.</li>
+<li><b>PEFT</b> (LoRA, adapters): train tiny added params, freeze the rest → cheap fine-tuning of huge models.</li>
 </ul>
+</section>
+
+<section class="card"><h3>Architecture Zoo</h3>
+<table><thead><tr><th>Model</th><th>Core idea</th></tr></thead><tbody>
+<tr><td>Autoencoder</td><td>compress→reconstruct; bottleneck = code</td></tr>
+<tr><td><b>VAE</b></td><td>probabilistic latent; reconstruction + <b>KL</b>; sample new data</td></tr>
+<tr><td><b>GAN</b></td><td>generator vs discriminator minimax; <b>mode collapse</b> <span class="warn">!</span></td></tr>
+<tr><td><b>Diffusion</b></td><td>learn to denoise; SOTA image gen; slow sampling</td></tr>
+<tr><td>Embeddings</td><td>learned dense vectors; similarity = distance</td></tr>
+<tr><td>GNN</td><td>message passing over graph nodes/edges</td></tr>
+</tbody></table>
+<ul>
+<li>Generative spectrum: GAN (sharp, unstable) → VAE (stable, blurry) → Diffusion (best quality, expensive).</li>
+<li><b>Self-supervised</b> (contrastive, masked prediction) learns from unlabeled data — the pretraining engine behind modern DL.</li>
+</ul>
+</section>
+
+<section class="card"><h3>&#9733; Interview Playbook</h3>
+<h4>Must be able to derive / state cold</h4>
+<ul>
+<li>&#9744; <b>Backprop</b> from scratch: chain rule backward; linear <code>dL/dW = xᵀ(dL/dy)</code>; ReLU gates where <code>x&gt;0</code>; forks <b>sum</b>; why backward (O(1) fwd passes).</li>
+<li>&#9744; Softmax+CE gradient = <code>p − y</code>; why CE over MSE for classification.</li>
+<li>&#9744; <b>Vanishing/exploding</b> gradients + the <i>full</i> fix stack (ReLU/init/norm/residual/gating/clip).</li>
+<li>&#9744; He vs Xavier init; why never all-zeros.</li>
+</ul>
+<h4>Tradeoffs to argue</h4>
+<ul>
+<li>&#9744; SGD+momentum vs Adam/AdamW; LR schedule (warmup→cosine); AdamW ≠ Adam+L2.</li>
+<li>&#9744; BatchNorm: 4 steps + γ/β + <b>train/inference</b> gotcha; BN vs LayerNorm axis (why transformers use LN).</li>
+<li>&#9744; Dropout = ensemble, off at inference; residual = gradient highway + degradation fix.</li>
+<li>&#9744; CNN (images, param-share/locality) vs RNN/LSTM (sequences, sequential) vs Transformer (parallel, O(1) path, O(n²) cost).</li>
+<li>&#9744; Attention <code>softmax(QKᵀ/√d_k)V</code>: role of each matrix, the √d_k scaling, why positional encoding.</li>
+<li>&#9744; Overfit vs underfit from train/val curves → the matching lever.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Symptom → Cause (Spot-the-Bug)</h3>
+<table><thead><tr><th>Symptom</th><th>Likely cause / fix</th></tr></thead><tbody>
+<tr><td><b>Loss = NaN</b></td><td>exploding grads / LR too high / fp16 no loss-scale → clip, lower LR <span class="warn">!</span></td></tr>
+<tr><td>Loss flat from step 0</td><td>LR too low, bad init, dead ReLUs, or data/label bug</td></tr>
+<tr><td>Train↓ but val↑</td><td>overfitting → augment / dropout / weight decay / more data</td></tr>
+<tr><td>Great train, awful test</td><td>forgot <code>model.eval()</code> (BN/Dropout still in train mode) <span class="warn">!</span></td></tr>
+<tr><td>Grads = 0 / None</td><td><code>detach()</code>, in-place op, or non-diff step cut the graph <span class="warn">!</span></td></tr>
+<tr><td>Early layers never learn</td><td>vanishing grads → residuals/norm/ReLU/better init</td></tr>
+<tr><td>Loss ↑ then diverges</td><td>LR too high → lower / add warmup</td></tr>
+<tr><td>GAN outputs identical</td><td>mode collapse <span class="warn">!</span></td></tr>
+<tr><td>Acc stuck at 1/#classes</td><td>label/shape mismatch, all-zero init, softmax on wrong axis</td></tr>
+<tr><td>OOM on long sequence</td><td>attention O(n²) mem → shorter ctx / checkpointing / flash-attn</td></tr>
+</tbody></table>
+</section>
+
+<section class="card diagram"><h3>Training Diagnosis Flow</h3>
+<div class="mermaid">
+flowchart TD
+  A{"Loss NaN?"} -->|yes| B["clip grads · ↓LR · loss-scale"]
+  A -->|no| C{"Train loss<br/>dropping?"}
+  C -->|no| D["↑LR · fix init/data · overfit 1 batch"]
+  C -->|yes| E{"Val ≈ train?"}
+  E -->|"gap"| F["regularize:<br/>augment·dropout·decay·more data"]
+  E -->|"yes, both high"| G["underfit:<br/>bigger model·train longer"]
+  E -->|"yes, both low"| H["ship it"]
+</div>
+<p class="cap">Order of attack: first make loss finite, then make it go down on a tiny sample (proves the graph + data are wired right), then close the train/val gap. Never tune regularization before the model can overfit a single batch.</p>
 </section>
 
 </div>

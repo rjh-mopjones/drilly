@@ -3,10 +3,14 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Large Language Models Cheat Sheet</title>
+<title>How LLMs Work Cheat Sheet</title>
 <style>
 :root{
-  --fs: 7.2pt; --fs-mono: 6.6pt; --fs-h3: 7.8pt; --gap: 5px; --pad: 3px;
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
   --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
 }
 *{box-sizing:border-box;}
@@ -14,10 +18,12 @@ html,body{margin:0;padding:0;}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
   font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
 .sheet{background:#fff;}
+/* spanning title bar */
 .titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
   margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
-.titlebar h1{font-size:12.5pt; margin:0; letter-spacing:.4px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
 .titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
 .sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
   column-fill:balance; padding:5px;}
 .card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
@@ -25,6 +31,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Ar
   overflow:hidden;}
 .card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
   background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
 .card:nth-of-type(8n+1) h3{background:#34495e;}
 .card:nth-of-type(8n+2) h3{background:#2c6e9b;}
 .card:nth-of-type(8n+3) h3{background:#1f7a5a;}
@@ -58,167 +65,350 @@ pre code{background:none; padding:0; font-size:1em;}
 @page{ size:A4; margin:5mm; }
 @media print{
   body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
   .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
 }
 </style>
 </head>
 <body>
 <div class="sheet">
-<div class="titlebar"><h1>Large Language Models Cheat Sheet</h1><span class="meta">from scratch: tokens · attention · transformer · training · drilly</span></div>
+<div class="titlebar"><h1>How LLMs Work Cheat Sheet</h1><span class="meta">decoder-only GPT internals · tokens → attention → training → inference · generic examples · drilly</span></div>
 <section class="card legend"><h3>How to read &amp; print</h3>
 <ul>
-<li><span class="warn">!</span> footgun / classic trap &nbsp; <code>&#9744;</code> reasoning step</li>
-<li>The <b>internals</b> — what computes inside a GPT (the AI Engineering sheet is the applied layer).</li>
-<li>One idea: an LLM is a <b>next-token predictor</b>: p(next | previous), sampled in a loop.</li>
-<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+<li><span class="warn">!</span> footgun / classic interview trap &nbsp; <code>&#9744;</code> review / reasoning checklist item</li>
+<li><b>The internals</b> — what actually computes inside a GPT. One idea: an LLM is a <b>next-token predictor</b> <code>p(next | prev)</code>, sampled in a loop. Everything else is plumbing.</li>
+<li>Shapes: <code>B</code>=batch, <code>T</code>=seq len, <code>D</code>=d_model (width), <code>N</code>=layers (depth), <code>h</code>=heads, <code>V</code>=vocab.</li>
+<li>Last 3 cards = <b>interview playbook</b> + common traps + debugging symptoms.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
 </ul></section>
 
 <section class="card"><h3>The Big Picture</h3>
 <ul>
-<li>Trained to predict the next token; that's the whole objective.</li>
-<li>Transformer (2017) replaced RNNs — parallel + attention.</li>
-<li><b>Decoder-only (GPT)</b> = generation; encoder-only (BERT) = understanding.</li>
-<li>Everything is matrices + attention + a next-token loop.</li>
+<li>Single objective: <b>predict the next token</b>. That's the whole thing — reasoning, code, translation all emerge from it.</li>
+<li>Transformer (2017) replaced RNN/LSTM: <b>parallel</b> over the sequence + <b>attention</b> for long-range dependency (no recurrent bottleneck, no vanishing state).</li>
+<li><b>Decoder-only (GPT)</b> = generation (causal); encoder-only (BERT) = understanding (bidirectional); encoder-decoder (T5) = seq2seq.</li>
+<li>Knowledge lives in the <b>weights</b> (mostly FFN); there's no database. Hence <b>hallucination</b> <span class="warn">!</span> — it interpolates plausible text, not retrieves facts.</li>
+<li>Pipeline: <code>text → tokens → embed+pos → N blocks → logits → sample</code>.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Tokenization</h3>
+<section class="card"><h3>Tokenization (BPE)</h3>
 <ul>
-<li>Text → integer IDs via subword vocab (<b>BPE</b> / SentencePiece), ~30k-130k.</li>
-<li><span class="warn">!</span> <b>Tokens != words</b>: " apple" vs "apple" vs "App" differ.</li>
-<li><span class="warn">!</span> <b>Strawberry</b>: the model sees token IDs, not letters → can't count the r's.</li>
-<li>Tokens = the unit of cost &amp; context.</li>
+<li>Text → integer IDs via a <b>subword</b> vocab (byte-level BPE / SentencePiece), <b>V ≈ 30k–130k</b>.</li>
+<li><b>BPE build</b>: start from bytes/chars, repeatedly merge the most frequent adjacent pair into a new token until vocab full. Greedy, frequency-driven.</li>
+<li><b>Byte-level</b> → no OOV ever: worst case falls back to raw bytes.</li>
+<li>Not part of the neural net — a deterministic pre/post-processing step.</li>
+</ul>
+<table><thead><tr><th>Scheme</th><th>Used by</th></tr></thead><tbody>
+<tr><td>BPE (byte-level)</td><td>GPT-2/3/4</td></tr>
+<tr><td>WordPiece</td><td>BERT</td></tr>
+<tr><td>SentencePiece (unigram)</td><td>LLaMA, T5</td></tr>
+</tbody></table>
+<ul>
+<li><span class="warn">!</span> <b>Tokens ≠ words</b>: <code>" apple"</code>, <code>"apple"</code>, <code>"App"</code> are distinct IDs (leading space matters).</li>
+<li><span class="warn">!</span> <b>"strawberry"</b>: model sees token IDs, not letters → can't count the r's. Same reason arithmetic is fragile (numbers split oddly).</li>
+<li><span class="warn">!</span> A trailing space/newline changes the token stream → can change output. Code &amp; non-English burn more tokens (less merged).</li>
+<li>Tokens are the unit of <b>cost and context</b>, not chars/words.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Embeddings &amp; Position</h3>
-<pre><code>emb: (vocab, d_model) lookup by token id
-meaning = geometry (nearby vectors ~ similar)</code></pre>
+<section class="card"><h3>Embeddings &amp; Unembedding</h3>
+<pre><code>E: (V, D) lookup by token id → (T, D)
+meaning = geometry: nearby vectors ≈ similar use</code></pre>
 <ul>
-<li>Attention is <b>order-agnostic</b> (a set op) → must inject position. <span class="warn">!</span></li>
-<li><b>RoPE</b> (rotary, relative, extrapolates) dominates; also sinusoidal / learned / ALiBi.</li>
+<li>Embeddings are <b>learned</b> (random init, trained by backprop), not hand-designed. Turning discrete IDs into continuous vectors is what makes the whole thing differentiable.</li>
+<li>Input embedding is <b>static/context-free</b>; the transformer produces <b>contextual</b> representations. <span class="warn">!</span> The row for "apple" does <b>not</b> yet know fruit-vs-company — attention disambiguates.</li>
+<li><b>LM head / unembedding</b>: <code>(D, V)</code>, maps final vector → one logit per vocab token.</li>
+<li><b>Weight tying</b>: reuse <code>E</code> (transposed) as the LM head → saves <code>V·D</code> params, often helps.</li>
+<li>Compare embeddings with <b>cosine similarity</b> (direction, scale-invariant), not Euclidean.</li>
+<li>Embedding params = <code>V·D</code>: dominant in small models, a rounding error in large ones.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Positional Encodings</h3>
+<ul>
+<li>Attention is a <b>set op</b> (permutation-invariant) — without position, "dog bites man" = "man bites dog". <span class="warn">!</span> Must inject order.</li>
+</ul>
+<table><thead><tr><th>Scheme</th><th>Idea / note</th></tr></thead><tbody>
+<tr><td>Sinusoidal</td><td>fixed sin/cos of position; extrapolates, no params (orig. 2017)</td></tr>
+<tr><td>Learned absolute</td><td>a position table; <span class="warn">!</span> can't exceed trained length</td></tr>
+<tr><td><b>RoPE</b> (rotary)</td><td>rotate Q,K by angle ∝ position → dot product encodes <b>relative</b> distance; dominant</td></tr>
+<tr><td>ALiBi</td><td>add a linear distance bias to scores; cheap long-context</td></tr>
+</tbody></table>
+<ul>
+<li><b>RoPE</b> is applied to <b>Q and K inside attention</b>, not added to embeddings — that's what makes it <i>relative</i> and KV-cache-friendly.</li>
+<li><b>Extend context</b>: RoPE interpolation/scaling — compress position frequencies so a short-trained model handles longer sequences.</li>
+<li><span class="warn">!</span> Causal mask does <b>not</b> encode position — it only blocks the future; a permutation of past tokens is still indistinguishable without pos enc.</li>
 </ul>
 </section>
 
 <section class="card diagram"><h3>Attention (QKV)</h3>
-<pre><code>Q=x@Wq  K=x@Wk  V=x@Wv
-Attn = softmax(Q @ K^T / sqrt(d_k)) @ V</code></pre>
+<pre><code>Q = x·Wq   K = x·Wk   V = x·Wv
+Attn = softmax(Q·Kᵀ / √d_k) · V</code></pre>
 <div class="mermaid">
 flowchart LR
   X["token x"] --> Q & K & V
-  Q --> S["scores Q·K^T"]
+  Q --> S["scores Q·Kᵀ"]
   K --> S
   S --> W["softmax weights"]
-  W --> O["weighted sum of V"]
+  W --> O["Σ weight·V"]
   V --> O
 </div>
-<p>Q asks, K advertises, dot = relevance, softmax = weights, out = weighted avg of V. <span class="warn">!</span> /sqrt(d_k) keeps softmax from saturating.</p>
-</section>
-
-<section class="card"><h3>Masking &amp; Heads</h3>
 <ul>
-<li><b>Causal mask</b>: set future scores to <b>-inf before softmax</b> → a token can't see the future. <span class="warn">!</span></li>
-<li>Self-attn (same seq) vs cross-attn (Q from decoder, K/V from encoder).</li>
-<li><b>Multi-head</b>: h heads of dim d_k=d_model/h, each learns different relations; concat + W_o.</li>
+<li><b>Q</b> asks, <b>K</b> advertises, dot = relevance, softmax = weights, out = weighted average of <b>V</b> (soft dictionary lookup).</li>
+<li><span class="warn">!</span> <b>/√d_k</b>: dot products grow with d_k; without scaling, softmax saturates → near-zero gradients (one-hot).</li>
+<li><span class="warn">!</span> In <b>self</b>-attention Q,K,V are three projections of the <b>same</b> input, not separate inputs.</li>
+<li>Project to Q/K/V (not raw dots) so the model learns <i>what</i> to match on. Remove softmax → just a linear map, no selectivity.</li>
 </ul>
 </section>
 
-<section class="card diagram"><h3>Transformer Block &amp; Stack</h3>
-<pre><code>x = x + MHA(LN(x))     # attention sublayer
-x = x + FFN(LN(x))     # feed-forward sublayer
-# (pre-LN); stack N identical blocks</code></pre>
+<section class="card"><h3>Masking: causal · cross · padding</h3>
+<ul>
+<li><b>Self-attn</b>: Q,K,V from one sequence. <b>Cross-attn</b>: Q from decoder, K/V from encoder (seq2seq only).</li>
+<li><b>Causal mask</b>: set future scores to <b>−∞ before softmax</b> so token <code>t</code> can't see <code>&gt;t</code>. <span class="warn">!</span> Enables training on all positions at once (each predicts its next).</li>
+</ul>
+<pre><code>scores = Q·Kᵀ/√d_k
+scores = scores.masked_fill(future, -inf)
+w = softmax(scores)   # future → exp(-inf)=0</code></pre>
+<ul>
+<li>Mask <b>before</b> softmax, not after: zeroing after softmax breaks normalization (rows wouldn't sum to 1). <span class="warn">!</span></li>
+<li>Use large negative (<code>-1e9</code>) ≈ −∞ in practice (fp-safe).</li>
+<li><b>Padding mask</b> hides batch pad tokens (data-dependent); orthogonal to the causal mask — both get OR'd into scores.</li>
+<li><span class="warn">!</span> <b>Bug</b>: loss → ~0 almost instantly = label leakage, mask off-by-one letting a token see its own target.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Multi-Head Attention</h3>
+<pre><code>d_k = D / h
+per head: Q,K,V are (T, d_k)
+concat h heads → (T, D), then · W_o</code></pre>
+<ul>
+<li><b>h heads</b> of dim <code>d_k = D/h</code> run in parallel; each learns a different relation (syntax, coreference, position…), then concat + output projection <b>W_o</b> mixes them.</li>
+<li>Same FLOPs as one big head but <b>multiple representation subspaces</b> → strictly more expressive.</li>
+<li>Computed as one batched matmul (reshape to <code>(B, h, T, d_k)</code>), not a Python loop.</li>
+<li><span class="warn">!</span> W_o is not optional — without it the concatenated heads are never combined.</li>
+<li>Attention params ≈ <b>4·D²</b> (Wq,Wk,Wv,Wo each D×D).</li>
+<li>e.g. <code>D=512, h=8 → d_k=64</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>The Transformer Block (pre-LN)</h3>
+<pre><code>x = x + MHA(LN(x))    # sublayer 1: mix tokens
+x = x + FFN(LN(x))    # sublayer 2: think per-token</code></pre>
+<ul>
+<li>Two sublayers, each wrapped in <b>norm + residual</b>. Shape <code>(B,T,D)</code> in = out → <b>N identical blocks stack</b>.</li>
+<li><b>Attention moves info between tokens; FFN computes on each token.</b> Order matters — gather context, then process it.</li>
+<li>Blocks share <b>shape</b>, not <b>weights</b> — each has its own params (early=syntax, late=semantics).</li>
+<li><span class="warn">!</span> Residual is <code>x + Sub(x)</code> — it <b>adds</b>, never overwrites. The residual stream is a running accumulator.</li>
+</ul>
+</section>
+
+<section class="card"><h3>FFN &amp; Activations</h3>
+<pre><code>FFN(x) = W2 · act(W1·x + b1) + b2
+d_ff = 4·D   (W1: D→4D,  W2: 4D→D)</code></pre>
+<ul>
+<li><b>Position-wise</b>: same weights per token, <b>no cross-token mixing</b> — that's attention's job.</li>
+<li><span class="warn">!</span> <b>Most params live here</b>: FFN ≈ <b>8·D²</b>/layer vs attention 4·D² — roughly 2/3 of non-embedding weights.</li>
+<li>Interpreted as <b>key-value memory</b>: W1 rows detect patterns (keys), W2 rows emit stored features (values) — where "facts" sit.</li>
+<li><b>Activation</b>: ReLU → <b>GELU</b> (GPT/BERT) → <b>SwiGLU</b> (LLaMA/PaLM, gated, extra matrix, ~8/3·D hidden to match params).</li>
+<li>Target of <b>MoE</b>: swap the one dense FFN for many experts.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Normalization &amp; Residuals</h3>
+<pre><code>LayerNorm: γ·(x−μ)/√(σ²+ε) + β   # over D features
+RMSNorm:   γ· x /√(mean(x²)+ε)   # no mean/bias</code></pre>
+<ul>
+<li><b>LayerNorm</b> normalizes each token across its <b>D features</b> — independent of batch/seq. <span class="warn">!</span> Not BatchNorm (which couples examples).</li>
+<li><b>RMSNorm</b> drops mean-centering + bias → cheaper, ~same quality; modern default (LLaMA).</li>
+<li><b>pre-LN</b> <code>x+Sub(LN(x))</code> keeps a clean identity highway → trains deep &amp; stable, tolerates higher LR. <b>post-LN</b> (orig.) needs warmup, fragile at depth. <span class="warn">!</span></li>
+<li>Residual grad = <code>1 + dSub/dx</code>: the <b>1</b> is the gradient highway that stops vanishing/exploding across N layers.</li>
+<li>Pre-LN never normalizes the main path → stream magnitude grows → a <b>final LayerNorm</b> before the LM head. Count = <b>2N+1</b> norms.</li>
+</ul>
+</section>
+
+<section class="card diagram"><h3>Full Architecture &amp; Param Count</h3>
 <div class="mermaid">
 flowchart TB
-  E["embed + pos"] --> B["block x N"]
-  B --> N["final norm"]
-  N --> H["LM head (unembed)"]
-  H --> L["logits (seq, vocab)"]
+  E["embed + pos (B,T,D)"] --> B["block × N"]
+  B --> F["final norm"]
+  F --> H["LM head (D,V)"]
+  H --> L["logits (B,T,V)"]
 </div>
-</section>
-
-<section class="card"><h3>FFN, Norm &amp; Residuals</h3>
+<pre><code>params ≈ V·D            # embedding (+ tied head)
+      + N·(4·D² + 8·D²) # attn + FFN per block
+      = V·D + 12·N·D²</code></pre>
 <ul>
-<li><b>FFN</b>: W2·act(W1·x), hidden = 4·d_model, GELU/SwiGLU — <b>most params live here</b> (the "facts").</li>
-<li><b>Residual</b> x+f(x) = gradient highway → deep nets train. <span class="warn">!</span></li>
-<li><b>RMSNorm</b> (modern) / LayerNorm; <b>pre-LN</b> is stabler than post-LN.</li>
+<li>FFN (8D²) dominates each layer; embeddings dominate only small models / huge vocab.</li>
+<li>Output is <b>logits</b> <code>(B,T,V)</code> — raw scores, <b>not</b> probabilities. <span class="warn">!</span></li>
+<li><b>Depth (N) vs width (D)</b>: both help with diminishing returns; taller = more sequential compute, wider = more parallel.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Forward Pass (shapes)</h3>
-<pre><code>ids (B, T)
-  -> embed (B, T, d_model)
-  -> N blocks (shape preserved)
-  -> norm -> LM head
-  -> logits (B, T, vocab)
-gen: take last position -> logits (vocab,)</code></pre>
-<p><span class="warn">!</span> Logits are raw scores, <b>not probabilities</b> — softmax comes at sampling.</p>
+<section class="card"><h3>The Forward Pass (shapes)</h3>
+<pre><code>ids            (B, T)
+ → embed+pos   (B, T, D)
+ → N blocks    (B, T, D)   # shape preserved
+ → final norm  (B, T, D)
+ → LM head     (B, T, V)   # logits
+generation: take LAST position → (V,)</code></pre>
+<ul>
+<li>At training, all T positions are scored in one pass (causal mask) — one forward = T next-token predictions.</li>
+<li>At generation, only the <b>last</b> position's logits matter; earlier ones already committed.</li>
+<li>Inference cost ≈ <b>2·N_params FLOPs per token</b> (fwd only; training ≈ 6·N_params, adds backward).</li>
+</ul>
 </section>
 
 <section class="card"><h3>Sampling &amp; Decoding</h3>
-<pre><code>p = softmax(logits / temperature)
-top-k: keep k highest
-top-p: smallest set with cumsum(p) >= p</code></pre>
+<pre><code>p = softmax(logits / T)     # T = temperature
+top-k: keep k highest, renorm
+top-p: smallest set with Σp ≥ p (nucleus)
+min-p: keep p_i ≥ p·max(p)</code></pre>
 <ul>
-<li>T→0 ≈ greedy; T&gt;1 more random.</li>
-<li>Sampling → <b>same prompt, different answers</b>. <span class="warn">!</span> Even T=0 can vary (float/batch/MoE).</li>
+<li>Two stages: <b>shape</b> the distribution (temp, truncate) then <b>pick</b> (argmax = greedy, or random draw = sampling).</li>
+<li><b>T→0</b> ≈ greedy (deterministic); <b>T=1</b> honest distribution; <b>T&gt;1</b> flatter/wilder. Temperature only <i>reshapes</i>; randomness is in the draw.</li>
+<li><b>top-k</b> = fixed count; <b>top-p</b> = adaptive count (1 token on a peaked dist, many on a flat one). Truncation clips the garbage tail before rolling.</li>
+<li><b>Repetition/frequency penalty</b>: subtract from logits of seen tokens to break loops.</li>
+<li><span class="warn">!</span> Same prompt → different answers = <b>sampling</b>, not the weights. Even <b>T=0 isn't fully deterministic</b>: GPU reduction order, batch composition, MoE routing flip near-tie argmaxes.</li>
+<li>Beam search maximizes <i>sequence</i> likelihood — good for translation, bland/degenerate for open chat.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Autoregressive + KV Cache</h3>
-<pre><code>loop: forward -> sample next -> append -> repeat</code></pre>
+<section class="card"><h3>Autoregressive Gen &amp; KV Cache</h3>
+<pre><code>loop: forward → last logits → sample
+      → append token → repeat until EOS/max</code></pre>
 <ul>
-<li>Naive = re-encode the whole prefix each step (wasteful).</li>
-<li><b>KV cache</b>: store past K,V per layer → new token attends over cache, ~<b>O(1)/token</b>. <span class="warn">!</span></li>
-<li><b>Prefill</b> (prompt, parallel, compute-bound) vs <b>decode</b> (1/token, memory-bound).</li>
+<li>Naive: re-encode the whole prefix each step → recomputes unchanged K,V → <b>O(n²)</b> waste.</li>
+<li><b>KV cache</b>: a token's K,V depend only on itself (+pos) and never change → store per layer, reuse. New step computes Q/K/V for <b>one</b> token, attends over the cache. <span class="warn">!</span> Pure speedup, identical output.</li>
+<li><span class="warn">!</span> Cache stores <b>K,V tensors</b> (not text/logits). Q is never cached — a past Q is never reused.</li>
+<li>Cache size = <code>2 · N · T · n_kv_heads · d_head · bytes</code> → grows <b>linearly</b>; long chats are memory-bound. <span class="warn">!</span> It <b>spends</b> memory to save compute.</li>
 </ul>
+<table><thead><tr><th>Phase</th><th>Chars</th></tr></thead><tbody>
+<tr><td><b>Prefill</b> (prompt)</td><td>parallel, compute-bound → TTFT ∝ prompt len</td></tr>
+<tr><td><b>Decode</b> (per token)</td><td>1/step, memory-bandwidth-bound → flat TPOT</td></tr>
+</tbody></table>
 </section>
 
 <section class="card"><h3>Pretraining</h3>
 <pre><code>objective: predict next token
-loss = -log( p_model(true next token) )   # cross-entropy
-self-supervised (text is its own label)</code></pre>
-<p>Trillions of tokens → a <b>base model</b> (a text-completer, not yet an assistant).</p>
-</section>
-
-<section class="card"><h3>Training &amp; Scaling</h3>
+loss = −log p_model(true next)   # cross-entropy
+      averaged over all positions</code></pre>
 <ul>
-<li><b>Backprop</b> gets grads; <b>gradient descent</b> updates the <b>weights</b> (not activations/data). <span class="warn">!</span></li>
-<li><b>AdamW</b>, LR warmup+decay, grad accumulation, bf16.</li>
-<li><b>Chinchilla</b>: ~20 tokens/param compute-optimal; <b>FLOPs ~ 6·N·D</b>.</li>
+<li><b>Self-supervised</b>: the text is its own label (next token = target). No human annotation needed → scales to trillions of tokens.</li>
+<li>Produces a <b>base model</b>: a fluent text-completer, <span class="warn">!</span> <b>not</b> an assistant. Ask it a question and it may continue with more questions.</li>
+<li>Loss floor = <b>irreducible entropy of language</b>; you approach it, never hit 0.</li>
+<li>Data: web + code + books, heavily filtered/deduped. Roughly &lt;1 epoch (each token seen ~once).</li>
 </ul>
 </section>
 
-<section class="card"><h3>Post-Training</h3>
+<section class="card"><h3>Training Mechanics</h3>
 <ul>
-<li><span class="warn">!</span> <b>Base != chat.</b></li>
-<li><b>SFT</b>: fine-tune on (instruction, response) demos + chat template.</li>
-<li><b>RLHF</b>: reward model on human prefs → PPO with KL penalty.</li>
-<li><b>DPO</b>: preference optimization directly, no reward model / RL loop.</li>
-<li>Alignment = helpful/honest/harmless (+ alignment tax, sycophancy).</li>
+<li>One step = <b>forward</b> (compute loss) → <b>backward</b> (backprop: chain rule, reuse cached activations, one <code>dL/dW</code> per weight) → <b>optimizer update</b>.</li>
+<li><span class="warn">!</span> Gradient descent updates the <b>weight matrices</b> (E, Wq/k/v/o, FFN, norms) — <b>not</b> activations, <b>not</b> the data. Classic gotcha.</li>
+<li>Backprop doesn't "send data backward"; it propagates gradients. Adam consumes backprop's output, doesn't replace it.</li>
+</ul>
+<pre><code>W = W − lr · dL/dW           # SGD
+AdamW: per-param adaptive step + decoupled decay</code></pre>
+<ul>
+<li><b>AdamW</b> not SGD: adaptive per-param steps handle the ill-conditioned transformer loss surface.</li>
+<li><b>LR</b>: warmup (ramp from ~0) then cosine/linear decay. <b>Grad accumulation</b> fakes a huge batch on limited VRAM. <b>bf16</b> mixed precision.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Modern Efficiency</h3>
-<table><thead><tr><th></th><th>Fixes</th></tr></thead><tbody>
-<tr><td>FlashAttention</td><td>exact, no n×n in HBM</td></tr>
-<tr><td>GQA / MQA</td><td>shrink KV cache</td></tr>
-<tr><td>MoE</td><td>more params, same FLOPs/token</td></tr>
-<tr><td>RoPE scaling</td><td>longer context</td></tr>
+<section class="card"><h3>Scaling Laws &amp; Compute</h3>
+<pre><code>loss ~ N^-a  (smooth power law in N, D, C)
+FLOPs_train ≈ 6 · N · D      # params × tokens
+FLOPs_infer ≈ 2 · N / token</code></pre>
+<ul>
+<li>Loss falls as a straight line on log-log vs params <b>N</b>, data <b>D</b>, compute <b>C</b> → fit small, <b>extrapolate</b> big before spending.</li>
+<li><b>Chinchilla</b>: for a fixed C, scale N and D <b>together</b> — <b>~20 tokens/param</b> is compute-optimal. <span class="warn">!</span> GPT-3-era models were <b>under-trained</b> (too big, too little data).</li>
+<li><span class="warn">!</span> Returns <b>diminish but don't vanish</b> — irreducible floor, never 0.</li>
+<li><b>Emergent abilities</b>: appear sharply above scale — but many vanish under smoother metrics (possible measurement artifact, treat with skepticism).</li>
+<li>Training compute = one-time, enormous; inference = recurring, per-request.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Post-Training: SFT</h3>
+<ul>
+<li><span class="warn">!</span> <b>Base ≠ chat.</b> Post-training reshapes the base distribution toward preferred behavior.</li>
+<li><b>SFT (supervised fine-tuning)</b>: next-token training on curated <b>(instruction, response)</b> demos + a <b>chat template</b> (role tokens like <code>&lt;|user|&gt;</code>/<code>&lt;|assistant|&gt;</code>).</li>
+<li>Teaches "when I see a user turn, produce an assistant turn." Coarse alignment move.</li>
+<li>Limitation: demos only show <b>good</b> behavior, never what's bad — and humans find it easier to <b>compare</b> two answers than write the ideal one → motivates preference tuning next.</li>
+<li>Refusals/safety are largely <b>learned behavior</b> installed here + in preference tuning, not just data filtering.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Post-Training: RLHF / DPO</h3>
+<ul>
+<li><b>Preference data</b>: (prompt, chosen, rejected) — humans rank two model outputs.</li>
+<li><b>RLHF</b>: train a <b>reward model</b> (LLM + scalar head) on prefs → optimize policy with <b>PPO</b> to maximize reward − <b>KL penalty</b>.</li>
+<li><span class="warn">!</span> <b>KL penalty</b> job = stop <b>reward hacking</b>/collapse: keep policy near the frozen SFT reference so it stays fluent.</li>
+<li><b>DPO</b>: closed-form classification loss straight on pairs — <b>no reward model, no RL loop</b>. Simpler, popular. Not RL.</li>
+</ul>
+<table><thead><tr><th></th><th>RLHF</th><th>DPO</th></tr></thead><tbody>
+<tr><td>Reward model</td><td>yes</td><td>no</td></tr>
+<tr><td>RL rollouts</td><td>yes (PPO)</td><td>no</td></tr>
+<tr><td>Data</td><td>online</td><td>static pairs</td></tr>
 </tbody></table>
-<p>All fight attention's <b>O(n^2)</b> + KV-cache memory.</p>
+<ul>
+<li><b>Alignment</b> = helpful/honest/harmless. Side effects: <b>alignment tax</b> (capability dip, over-refusal), <b>sycophancy</b> (agreeing to please). <span class="warn">!</span> The RM is discarded at inference — deployed model is the tuned policy.</li>
+</ul>
 </section>
 
-<section class="card"><h3>&#9744; Interview Playbook</h3>
+<section class="card"><h3>Efficiency &amp; Modern Architecture</h3>
+<p>Everything fights two costs: attention <b>O(n²)</b> compute + <b>KV cache</b> memory.</p>
+<table><thead><tr><th>Trick</th><th>Fixes</th></tr></thead><tbody>
+<tr><td><b>FlashAttention</b></td><td><b>exact</b>; tiles + online softmax so n×n never hits slow HBM <span class="warn">!</span></td></tr>
+<tr><td><b>MQA</b></td><td>all Q heads share 1 K/V head → smallest cache</td></tr>
+<tr><td><b>GQA</b></td><td>K/V shared in groups; MHA↔MQA middle ground</td></tr>
+<tr><td><b>MoE</b></td><td>route token to top-k of many expert FFNs</td></tr>
+<tr><td>RoPE scaling</td><td>longer context (extrapolate position)</td></tr>
+<tr><td>Sliding window</td><td>attend a local window → linear</td></tr>
+<tr><td>Quantization</td><td>int8/int4 weights → less memory+bandwidth</td></tr>
+</tbody></table>
 <ul>
-<li>&#9744; Explain attention from scratch (Q asks, K advertises, softmax-weighted V).</li>
-<li>&#9744; Why causal mask: no peeking at the future you must predict.</li>
-<li>&#9744; Walk a token: tokenize → embed+pos → N blocks → logits → sample.</li>
-<li>&#9744; Why strawberry: it sees token IDs, not letters.</li>
-<li>&#9744; Why same prompt varies: sampling (and float/batch even at T=0).</li>
-<li>&#9744; What training updates: the weight matrices, via loss gradient.</li>
-<li>&#9744; Params ≈ vocab·d_model + N·(4+8)·d_model^2; FLOPs ~ 6·N·D.</li>
-<li>&#9744; Base vs chat = pretraining vs SFT+RLHF/DPO.</li>
+<li><span class="warn">!</span> FlashAttn is <b>exact</b>, not an approximation — win is IO, not dropped terms.</li>
+<li><span class="warn">!</span> GQA/MQA main win = <b>smaller KV cache</b> (decode is memory-bound), not FLOPs.</li>
+<li><span class="warn">!</span> MoE = <b>sparse activation</b>: huge <i>total</i> params, few <i>active</i>/token → more params at ~same FLOPs/token.</li>
+<li><span class="warn">!</span> Quantization <b>casts</b> existing weights; it doesn't shrink the param count or retrain.</li>
 </ul>
+</section>
+
+<section class="card"><h3>&#9733; Interview Playbook</h3>
+<h4>Must be able to say cold</h4>
+<ul>
+<li>&#9744; Attention from scratch: Q asks, K advertises, softmax-weighted V; why /√d_k.</li>
+<li>&#9744; Causal mask: −∞ before softmax, no peeking at the token you must predict.</li>
+<li>&#9744; Walk a token: tokenize → embed+pos → N pre-LN blocks → final norm → logits → sample.</li>
+<li>&#9744; Attention mixes tokens; FFN computes per-token &amp; holds most params (8D² vs 4D²).</li>
+<li>&#9744; Residual = gradient highway (adds, never overwrites); pre-LN &gt; post-LN at depth.</li>
+</ul>
+<h4>The classic probes</h4>
+<ul>
+<li>&#9744; "strawberry" → it sees token IDs, not letters.</li>
+<li>&#9744; Same prompt varies → sampling; even T=0 drifts (float/batch/MoE).</li>
+<li>&#9744; What training updates → the weight matrices, via loss gradient (not data/activations).</li>
+<li>&#9744; Base vs chat → pretraining vs SFT + RLHF/DPO.</li>
+<li>&#9744; KV cache → cache K,V (not Q, not text); linear memory; prefill vs decode.</li>
+<li>&#9744; params ≈ V·D + 12·N·D²; train FLOPs ≈ 6ND; Chinchilla ≈ 20 tok/param.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Common Traps — Symptom → Cause</h3>
+<table><thead><tr><th>Claim / symptom</th><th>Correction</th></tr></thead><tbody>
+<tr><td>"logits are probabilities"</td><td>raw scores; softmax makes the distribution <span class="warn">!</span></td></tr>
+<tr><td>loss → 0 instantly in training</td><td>label leakage / off-by-one causal mask <span class="warn">!</span></td></tr>
+<tr><td>"FFN mixes tokens"</td><td>no — position-wise; only attention mixes <span class="warn">!</span></td></tr>
+<tr><td>"most params in attention"</td><td>FFN ~2× attention (8D² vs 4D²) <span class="warn">!</span></td></tr>
+<tr><td>"residual overwrites x"</td><td>it <b>adds</b>: x + Sub(x) <span class="warn">!</span></td></tr>
+<tr><td>"FlashAttention approximates"</td><td>exact; only avoids HBM traffic <span class="warn">!</span></td></tr>
+<tr><td>"GQA/MQA cut FLOPs"</td><td>cut KV cache (memory) mainly <span class="warn">!</span></td></tr>
+<tr><td>"embedding knows word sense"</td><td>static; attention disambiguates in context <span class="warn">!</span></td></tr>
+<tr><td>"temperature adds randomness"</td><td>reshapes only; draw is the randomness <span class="warn">!</span></td></tr>
+<tr><td>"causal mask encodes position"</td><td>no — still needs pos enc <span class="warn">!</span></td></tr>
+<tr><td>"DPO is RL"</td><td>supervised loss on pairs, no RM/rollouts <span class="warn">!</span></td></tr>
+<tr><td>"base model = ChatGPT"</td><td>base completes; chat needs post-training <span class="warn">!</span></td></tr>
+</tbody></table>
 </section>
 
 </div>

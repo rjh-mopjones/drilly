@@ -6,7 +6,11 @@
 <title>ML Fundamentals Cheat Sheet</title>
 <style>
 :root{
-  --fs: 7.2pt; --fs-mono: 6.6pt; --fs-h3: 7.8pt; --gap: 5px; --pad: 3px;
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
   --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
 }
 *{box-sizing:border-box;}
@@ -14,10 +18,12 @@ html,body{margin:0;padding:0;}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
   font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
 .sheet{background:#fff;}
+/* spanning title bar */
 .titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
   margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
 .titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
 .titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
 .sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
   column-fill:balance; padding:5px;}
 .card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
@@ -25,6 +31,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Ar
   overflow:hidden;}
 .card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
   background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
 .card:nth-of-type(8n+1) h3{background:#34495e;}
 .card:nth-of-type(8n+2) h3{background:#2c6e9b;}
 .card:nth-of-type(8n+3) h3{background:#1f7a5a;}
@@ -58,158 +65,335 @@ pre code{background:none; padding:0; font-size:1em;}
 @page{ size:A4; margin:5mm; }
 @media print{
   body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
   .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
 }
 </style>
 </head>
 <body>
 <div class="sheet">
-<div class="titlebar"><h1>ML Fundamentals Cheat Sheet</h1><span class="meta">bias-variance · regularization · CV · metrics · leakage · models · drilly</span></div>
+<div class="titlebar"><h1>ML Fundamentals Cheat Sheet</h1><span class="meta">bias-variance · regularization · CV · metrics · leakage · model zoo · generic examples · drilly</span></div>
+
 <section class="card legend"><h3>How to read &amp; print</h3>
 <ul>
-<li><span class="warn">!</span> footgun / classic trap &nbsp; <code>&#9744;</code> reasoning step</li>
-<li>Classic ML foundations (the LLM/AI-Eng sheets cover deep learning &amp; apps).</li>
-<li>The signal interviewers reward: diagnose overfitting/leakage, pick the metric, know when simple wins.</li>
-<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+<li><span class="warn">!</span> footgun / classic trap &nbsp; <code>&#9744;</code> review / reasoning-step checklist item</li>
+<li>Scope: <b>classical ML fundamentals</b> — the conceptual + math layer interviewers probe. Deep-learning internals &amp; LLM/AI-eng live on their own sheets. Last 2 cards = <b>interview playbook</b> + <b>symptom→cause</b>.</li>
+<li>The signal that gets rewarded: <b>diagnose</b> bias vs variance, spot <b>leakage</b>, pick the <b>metric from the error cost</b>, and know when a rule beats a model.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
 </ul></section>
 
-<section class="card"><h3>The Three Paradigms</h3>
+<section class="card"><h3>Paradigms &amp; Workflow</h3>
 <table><thead><tr><th>Type</th><th>Data</th><th>Goal</th></tr></thead><tbody>
-<tr><td>Supervised</td><td>labeled</td><td>predict y (class/reg)</td></tr>
-<tr><td>Unsupervised</td><td>unlabeled</td><td>structure (cluster/reduce)</td></tr>
-<tr><td>Reinforcement</td><td>reward signal</td><td>policy maximizing reward</td></tr>
+<tr><td>Supervised</td><td>labeled (x,y)</td><td>predict y — classify / regress</td></tr>
+<tr><td>Unsupervised</td><td>unlabeled x</td><td>structure — cluster / reduce dims</td></tr>
+<tr><td>Reinforcement</td><td>reward signal</td><td>policy maximizing return</td></tr>
 </tbody></table>
-<p>Workflow: frame → data → features → model → evaluate → deploy → monitor. Split <b>train / val / test</b>.</p>
+<p><b>Loop:</b> frame problem → collect/clean data → features → pick model → train → evaluate → deploy → <b>monitor</b> → retrain. Real systems mix paradigms (unsupervised embeddings → supervised head; RLHF = supervised + RL).</p>
+<ul>
+<li><b>Parameter</b> = learned from data (weights). <b>Hyperparameter</b> = set by you before training (lr, depth, λ, k) — tuned on <b>validation</b>, never test.</li>
+<li><b>Generalization</b> = performance on <i>unseen</i> data — the only thing that matters. Every model needs an <b>inductive bias</b> (assumptions) to generalize at all.</li>
+<li><span class="warn">!</span> <b>When NOT to use ML:</b> a deterministic rule works, you can't get labels/signal, errors are unacceptable &amp; unexplainable, or data is too scarce/drifting. Always build the <b>dumb baseline first</b>.</li>
+</ul>
 </section>
 
-<section class="card diagram"><h3>Bias-Variance</h3>
-<pre><code>error = bias^2 + variance + irreducible</code></pre>
+<section class="card"><h3>Bias–Variance Tradeoff</h3>
+<pre><code>E[(y - f̂(x))²] = bias² + variance + σ²
+bias  = E[f̂] - f      (systematic, wrong assumptions)
+var   = E[(f̂ - E[f̂])²] (sensitivity to the sample)
+σ²    = irreducible noise (floor, unbeatable)</code></pre>
 <ul>
-<li><b>Bias</b> = too simple → <b>underfit</b> (train &amp; val both bad).</li>
-<li><b>Variance</b> = too complex → <b>overfit</b> (train good, val bad). <span class="warn">!</span></li>
-<li>Diagnose from the <b>train/val gap</b>. More capacity ↓bias ↑variance.</li>
+<li><b>High bias → underfit:</b> train AND val both bad, small gap.</li>
+<li><b>High variance → overfit:</b> train good, val bad, <b>large gap</b>. <span class="warn">!</span></li>
+<li>Same knob (<b>capacity</b>) moves both opposite ways → minimize the <i>sum</i>, not either alone.</li>
 </ul>
+<h4>Diagnose from train/val gap</h4>
+<table><thead><tr><th>Train</th><th>Val</th><th>Verdict → fix</th></tr></thead><tbody>
+<tr><td>2%</td><td>25%</td><td><b>variance</b> → more data, regularize, ↓capacity</td></tr>
+<tr><td>20%</td><td>22%</td><td><b>bias</b> → ↑capacity, better features, train longer</td></tr>
+<tr><td>20%</td><td>40%</td><td>both → fix bias first, then variance</td></tr>
+</tbody></table>
+<ul>
+<li><span class="warn">!</span> Wrong-signed fix is the classic blunder: adding complexity to an <i>overfit</i> model. More data cuts <b>variance</b>, never bias.</li>
+<li><b>Double descent:</b> past the interpolation threshold, huge over-parameterized models see test error <i>fall again</i> — refines, doesn't refute, the U-curve.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Overfitting, Underfitting &amp; Capacity</h3>
+<ul>
+<li><b>Capacity</b> = richness of representable functions: poly degree, tree depth, #params, kernel width, k in kNN (small k = high capacity).</li>
+<li><b>Learning curve (vs data size):</b> curves converge <b>high</b> = underfit (more data won't help); a persistent <b>gap</b> = overfit (more data helps).</li>
+<li><b>Training curve (vs epochs):</b> val loss turns up while train keeps dropping = overfitting onset → <b>early stop</b>.</li>
+</ul>
+<h4>If underfitting (won't help vs will)</h4>
+<ul><li>↑ model capacity, add/engineer features, reduce regularization, train longer. <span class="warn">!</span> More <i>data</i> won't fix bias.</li></ul>
+<h4>If overfitting</h4>
+<ul><li>More data, regularization/dropout, ↓capacity, early stopping, feature selection, augmentation. <span class="warn">!</span> A bigger model won't fix variance.</li></ul>
+<p><span class="warn">!</span> Both low but prod is terrible ⇒ not a capacity problem — <b>leakage</b>, <b>train/serve skew</b>, or <b>drift</b>.</p>
 </section>
 
 <section class="card"><h3>Regularization</h3>
 <table><thead><tr><th></th><th>Penalty</th><th>Effect</th></tr></thead><tbody>
-<tr><td>L2 / Ridge</td><td>sum(w^2)</td><td>shrink, no zeros</td></tr>
-<tr><td>L1 / Lasso</td><td>sum(|w|)</td><td><b>sparse</b> (feature select)</td></tr>
+<tr><td>L2 / Ridge</td><td>λ·Σwᵢ²</td><td>shrinks weights toward 0, none exactly 0; handles collinearity</td></tr>
+<tr><td>L1 / Lasso</td><td>λ·Σ|wᵢ|</td><td><b>sparse</b> — drives weights to exactly 0 → feature selection</td></tr>
+<tr><td>Elastic net</td><td>αL1+(1−α)L2</td><td>sparsity + stability with correlated features</td></tr>
 </tbody></table>
 <ul>
-<li>Also: dropout, early stopping, data augmentation.</li>
-<li>Trades a little bias for less variance; pick strength by CV.</li>
+<li><b>Why L1 is sparse:</b> its diamond constraint has corners on the axes; the loss contour hits a corner → coefficient = 0. L2's circle has no corners.</li>
+<li><b>λ sweep:</b> λ→0 = unregularized (overfit); λ→∞ = all weights→0 (underfit, predicts the mean). Pick λ by <b>CV</b>.</li>
+<li><span class="warn">!</span> <b>Standardize features first</b> — the penalty is scale-sensitive; unscaled features get unequal shrinkage.</li>
+<li><b>Weight decay</b> ≈ L2 (identical for plain SGD; decoupled in AdamW). <b>Dropout</b>, <b>early stopping</b>, <b>data augmentation</b> are all regularizers too.</li>
+<li>Mechanism: trades a little <b>bias</b> for less <b>variance</b> — helps only when variance-limited. Too much → underfit.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Cross-Validation</h3>
+<section class="card"><h3>Cross-Validation &amp; Model Selection</h3>
 <ul>
-<li><b>k-fold</b>: rotate the val fold, average (beats one split).</li>
-<li><b>Stratified</b> (keep class ratios); <b>time-series</b> CV (never train on the future). <span class="warn">!</span></li>
-<li><b>Nested CV</b>: inner tunes, outer estimates.</li>
-<li><span class="warn">!</span> Golden rule: touch the <b>test set once</b>, at the end.</li>
+<li><b>Why 3 splits:</b> train fits params, <b>val</b> tunes hyperparameters/selects models, <b>test</b> gives one honest final estimate.</li>
+<li><b>k-fold</b> (k=5/10): rotate the held-out fold, average — lower-variance estimate than one split; every row is validated once.</li>
+<li><b>Stratified</b> k-fold: preserve class ratios (imbalanced/small data).</li>
+<li><b>LOOCV</b>: k=n — low bias, high variance, costly.</li>
+<li><span class="warn">!</span> <b>Time series:</b> never shuffle — use forward-chaining / expanding window so you never train on the future.</li>
+<li><span class="warn">!</span> <b>Grouped</b> data (same user/patient) → <b>GroupKFold</b> so a group can't span train &amp; val (leakage).</li>
+<li><b>Nested CV:</b> inner loop tunes, outer loop estimates — avoids optimistic bias from tuning on the same folds you report.</li>
 </ul>
+<p><span class="warn">!</span> <b>Golden rule:</b> touch the <b>test set once</b>, at the very end. Fit all preprocessing <b>inside</b> the CV fold, not on the full data.</p>
 </section>
 
 <section class="card"><h3>Classification Metrics</h3>
-<pre><code>precision = TP/(TP+FP)   recall = TP/(TP+FN)
-F1 = 2*P*R/(P+R)</code></pre>
+<pre><code>            pred +   pred −
+actual +     TP       FN
+actual −     FP       TN
+precision = TP/(TP+FP)   recall/TPR = TP/(TP+FN)
+F1 = 2·P·R/(P+R)         FPR = FP/(FP+TN)
+accuracy = (TP+TN)/N     specificity = TN/(TN+FP)</code></pre>
 <ul>
-<li><span class="warn">!</span> Accuracy lies under <b>imbalance</b> (99% by predicting majority).</li>
-<li>Threshold trades precision vs recall; <b>ROC-AUC</b> (balanced) vs <b>PR-AUC</b> (rare positives).</li>
-<li>Cost of FP vs FN picks the metric (fraud/cancer → recall).</li>
+<li><span class="warn">!</span> <b>Accuracy lies under imbalance:</b> 99% by always predicting the majority. Use precision/recall/F1/PR-AUC.</li>
+<li><b>Precision</b> = cost of a <b>false positive</b>; <b>recall</b> = cost of a <b>false negative</b>. Anchor to the denominator, not the name.</li>
+<li><b>Threshold</b> (default 0.5 is arbitrary): lower → ↑recall ↓precision. Set it from business cost.</li>
+<li><b>ROC-AUC</b> = ranking quality (TPR vs FPR), threshold-free but <span class="warn">!</span> <b>optimistic under heavy imbalance</b>. <b>PR-AUC</b> for rare positives.</li>
+<li><b>Log loss</b> penalizes confident-wrong probabilities; high AUC ≠ calibrated. </li>
 </ul>
+<p>Fraud/cancer → <b>recall</b> (a miss is catastrophic). Spam-to-inbox → <b>precision</b> (deleting a real email hurts).</p>
 </section>
 
-<section class="card"><h3>Regression Metrics</h3>
-<pre><code>RMSE = sqrt(mean((y-yhat)^2))   # outlier-sensitive
-MAE  = mean(|y-yhat|)           # robust
-R2   = 1 - SS_res/SS_tot</code></pre>
-<p>Rank (search/recsys): NDCG, MAP, MRR. Match metric to the objective.</p>
+<section class="card"><h3>Regression &amp; Ranking Metrics</h3>
+<pre><code>MSE  = mean((y−ŷ)²)          # penalizes big errors²
+RMSE = √MSE                   # same units as y
+MAE  = mean(|y−ŷ|)            # robust to outliers
+MAPE = mean(|y−ŷ|/|y|)        # % error, ! blows up near y=0
+R²   = 1 − SS_res/SS_tot      # frac. variance explained</code></pre>
+<ul>
+<li><b>RMSE vs MAE:</b> RMSE is outlier-sensitive (squares); MAE robust. Big outliers &amp; you care → RMSE, else MAE.</li>
+<li><span class="warn">!</span> <b>R² can go negative</b> (worse than predicting the mean); it inflates with more features → use <b>adjusted R²</b>.</li>
+<li>Optimize a <b>Huber</b> loss for outlier-robust yet smooth gradients.</li>
+</ul>
+<h4>Ranking / recsys</h4>
+<ul>
+<li><b>NDCG</b> (graded, position-discounted), <b>MAP</b>, <b>MRR</b> (rank of first hit), Precision@k / Recall@k. Match the metric to what the user actually sees (top-k order).</li>
+</ul>
 </section>
 
 <section class="card"><h3>Feature Engineering</h3>
 <ul>
-<li>Categoricals: one-hot (low card) / target-encode (high card, <span class="warn">!</span> leakage).</li>
-<li><b>Scale</b> for distance/gradient models (kNN, SVM, linear, NN); trees don't care.</li>
-<li>Interactions, text (TF-IDF), date/geo features.</li>
-<li>Select: filter (corr/MI) / wrapper (RFE) / embedded (L1, tree). Features &gt; model.</li>
+<li><b>Categoricals:</b> one-hot (low cardinality) · ordinal (ordered) · <b>target/mean encoding</b> (high cardinality — <span class="warn">!</span> leakage-prone, fit inside CV folds with smoothing) · hashing (huge cardinality).</li>
+<li><b>Scaling:</b> standardize (z-score) or min-max for <b>distance/gradient</b> models (kNN, SVM, linear, NN, PCA, k-means). <b>Trees don't need scaling</b> — they split on thresholds.</li>
+<li><b>Numeric:</b> log/Box-Cox for skew, binning, polynomial &amp; interaction terms.</li>
+<li><b>Dates:</b> decompose to day/hour/is_weekend + cyclical sin/cos. <b>Text:</b> TF-IDF / embeddings. <b>Geo:</b> distances, clusters.</li>
+<li><b>Selection:</b> filter (correlation/MI) · wrapper (RFE) · embedded (L1, tree importance).</li>
 </ul>
+<p><b>Features &gt; model:</b> a good feature beats a fancier algorithm on the same data. This is where domain knowledge pays.</p>
 </section>
 
-<section class="card"><h3>Data Leakage</h3>
-<ul>
-<li><span class="warn">!</span> Model sees at train what it won't at predict → great offline, dead in prod.</li>
-<li><b>Target</b> leak (feature encodes/follows the label), <b>temporal</b> (future info), preprocessing on full data, group leak.</li>
-<li>Tell: <b>too-good metrics</b>. Fix: split first, fit preprocessing <b>inside</b> CV folds; ask "known at predict time?".</li>
-</ul>
-</section>
-
-<section class="card"><h3>Imbalanced Data</h3>
-<ul>
-<li>Resample (SMOTE / under), <b>class weights</b>, tune threshold.</li>
-<li>Use F1 / PR-AUC, not accuracy.</li>
-<li>Missing: impute + indicator; outliers: clip/robust.</li>
-</ul>
-</section>
-
-<section class="card"><h3>Model Quick-Pick</h3>
-<table><thead><tr><th>Model</th><th>Use</th></tr></thead><tbody>
-<tr><td>Linear / Logistic</td><td>baseline, interpretable</td></tr>
-<tr><td>GBM (XGB/LGBM)</td><td><b>tabular workhorse</b></td></tr>
-<tr><td>Random Forest</td><td>robust, low tuning</td></tr>
-<tr><td>kNN / SVM</td><td>small data (scale first!)</td></tr>
-<tr><td>Naive Bayes</td><td>text/spam, fast</td></tr>
-<tr><td>Neural net</td><td>image/text/audio, huge data</td></tr>
+<section class="card"><h3>Data Leakage <span class="warn">!</span></h3>
+<p>Model sees at train what it won't have at predict time → <b>brilliant offline, dead in prod</b>. The #1 cause of "too-good-to-be-true" metrics.</p>
+<table><thead><tr><th>Type</th><th>Example</th></tr></thead><tbody>
+<tr><td>Target leak</td><td>feature is a proxy/consequence of y (e.g. "account_closed" predicting churn)</td></tr>
+<tr><td>Temporal</td><td>using future info; not respecting event time</td></tr>
+<tr><td>Preprocessing</td><td>scaler/imputer/encoder fit on <b>full</b> data before split</td></tr>
+<tr><td>Group / dup</td><td>same entity in train &amp; test; leaked duplicates</td></tr>
+<tr><td>Train/serve skew</td><td>feature computed differently offline vs online</td></tr>
 </tbody></table>
+<ul>
+<li><b>Tell:</b> suspiciously high metric, one feature dominating importance.</li>
+<li><b>Fix:</b> split <b>first</b>; wrap all preprocessing in a <code>Pipeline</code> fit inside CV; ask of every feature <b>"is this known at prediction time?"</b></li>
+</ul>
 </section>
 
-<section class="card"><h3>Trees: Bagging vs Boosting</h3>
+<section class="card"><h3>Data Prep &amp; Imbalanced Data</h3>
+<h4>Missing values</h4>
+<ul>
+<li>Delete (if MCAR &amp; few) · impute (mean/median/mode, KNN, model) · <b>+ missingness indicator</b> (the fact it's missing can be signal). <span class="warn">!</span> Fit imputer on train only.</li>
+</ul>
+<h4>Outliers</h4>
+<ul><li>Detect (z&gt;3, IQR, isolation forest); clip/winsorize or use robust models/losses. Don't blindly delete — could be the signal.</li></ul>
+<h4>Class imbalance</h4>
+<ul>
+<li><b>Resample:</b> oversample minority (<b>SMOTE</b> — synthesize, <span class="warn">!</span> only on train), undersample majority.</li>
+<li><b>Class weights</b> / cost-sensitive loss (no data churn — often first choice).</li>
+<li><b>Tune the threshold</b>; evaluate with <b>PR-AUC / F1</b>, never accuracy.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Linear Models</h3>
+<pre><code>linreg:  ŷ = wᵀx + b,  loss = MSE  (convex, closed-form OLS)
+logreg:  p = σ(wᵀx + b),  loss = log-loss / BCE
+σ(z) = 1/(1+e⁻ᶻ)</code></pre>
+<ul>
+<li><span class="warn">!</span> <b>Logistic regression is CLASSIFICATION</b> — "regression" refers to modeling log-odds, not a continuous output.</li>
+<li>Coefficients interpretable: logreg weight = change in <b>log-odds</b> per unit feature; e^w = odds ratio.</li>
+<li><b>High bias / low variance</b> family: strong linear inductive bias. Add polynomial/interaction features for nonlinearity.</li>
+<li><b>Assumptions:</b> roughly linear relationship, low multicollinearity (→ ridge), independent errors.</li>
+<li>Great <b>baseline</b>: fast, calibratable, scales to millions of sparse features (text). Regularize (L1/L2) when p is large.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Tree Ensembles: Bagging vs Boosting</h3>
 <table><thead><tr><th></th><th>Bagging (RF)</th><th>Boosting (GBM)</th></tr></thead><tbody>
-<tr><td>trees</td><td>parallel, independent</td><td>sequential, on residuals</td></tr>
-<tr><td>fights</td><td>variance</td><td>bias</td></tr>
+<tr><td>Trees</td><td>deep, parallel, independent</td><td>shallow, sequential on residuals</td></tr>
+<tr><td>Attacks</td><td><b>variance</b></td><td><b>bias</b></td></tr>
+<tr><td>Overfit risk</td><td>low (more trees safe)</td><td>higher (more trees can overfit) <span class="warn">!</span></td></tr>
+<tr><td>Key knobs</td><td>#trees, max_features</td><td>lr, depth, #trees, subsample</td></tr>
 </tbody></table>
-<p><span class="warn">!</span> Impurity importance is biased to high-cardinality → use permutation/SHAP.</p>
-</section>
-
-<section class="card"><h3>Gradient Descent</h3>
-<pre><code>w := w - lr * grad(loss)</code></pre>
 <ul>
-<li><b>Batch</b> (stable/slow) / <b>SGD</b> (noisy/fast) / <b>mini-batch</b> (default).</li>
-<li><span class="warn">!</span> LR too big → diverge; too small → crawl. Momentum / <b>Adam</b>.</li>
-<li>Convex (linear/logistic) vs non-convex (NN: local minima, saddles).</li>
+<li><b>Single tree:</b> greedy splits on Gini/entropy (class) or variance (reg); zero-bias if grown deep → high variance → prune / limit depth.</li>
+<li><b>GBM (XGBoost / LightGBM / CatBoost)</b> = the <b>tabular workhorse</b>. Lower lr + more trees + early stopping.</li>
+<li>No scaling needed; handles mixed types &amp; nonlinearity/interactions natively.</li>
+<li><span class="warn">!</span> <b>Impurity (Gini) importance is biased</b> toward high-cardinality/continuous features → use <b>permutation importance</b> or <b>SHAP</b>.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Interpretability &amp; Practice</h3>
+<section class="card"><h3>Distance &amp; Margin Models</h3>
+<h4>kNN</h4>
 <ul>
-<li>Global vs local; coefficients, permutation importance, <b>SHAP</b> / LIME, PDP.</li>
-<li><span class="warn">!</span> <b>Baseline first</b>; simplest model that works.</li>
-<li>Watch <b>train/serve skew</b> &amp; <b>drift</b> → monitor + retrain.</li>
-<li>80% of ML is data; reproducibility (seed + version).</li>
+<li>Lazy: no training; predict = majority/mean of k nearest. Small k = high variance, large k = high bias.</li>
+<li><span class="warn">!</span> Must <b>scale features</b>; dies in high dimensions (<b>curse of dimensionality</b> — distances concentrate); slow at predict.</li>
+</ul>
+<h4>SVM</h4>
+<ul>
+<li>Maximizes the <b>margin</b> to the nearest points (<b>support vectors</b>). Soft margin C trades margin width vs violations.</li>
+<li><b>Kernel trick</b> (RBF/poly) = nonlinear boundaries without explicit feature map. <span class="warn">!</span> Scale first; O(n²–n³) → not for huge n.</li>
+<li>Strong on small/medium, high-dim (text) data with clear margins.</li>
 </ul>
 </section>
 
-<section class="card"><h3>&#9744; Interview Playbook</h3>
+<section class="card"><h3>Optimization &amp; Gradient Descent</h3>
+<pre><code>w ← w − η·∇L(w)          # η = learning rate</code></pre>
+<table><thead><tr><th>Variant</th><th>Trait</th></tr></thead><tbody>
+<tr><td>Batch GD</td><td>full data/step — stable, slow, memory-heavy</td></tr>
+<tr><td>SGD</td><td>1 sample — noisy, fast, escapes shallow minima</td></tr>
+<tr><td>Mini-batch</td><td>32–512 — the default sweet spot</td></tr>
+</tbody></table>
 <ul>
-<li>&#9744; Frame: task, data, baseline, metric, validation, deploy/monitor.</li>
-<li>&#9744; "Train 99% / val 70%" → overfit → more data / regularize / less capacity.</li>
-<li>&#9744; "99% accuracy, useless" → imbalance → precision/recall/PR-AUC.</li>
-<li>&#9744; "Great offline, bad in prod" → leakage / train-serve skew / drift.</li>
-<li>&#9744; Pick metric from FP-vs-FN cost.</li>
-<li>&#9744; Spot leakage: is every feature known at prediction time?</li>
-<li>&#9744; Tabular? try GBM. Scale for kNN/SVM. Try the linear baseline first.</li>
+<li><b>Momentum</b> accumulates velocity; <b>Adam</b> = momentum + per-param adaptive lr (robust default). <b>AdamW</b> decouples weight decay.</li>
+<li><span class="warn">!</span> <b>LR is the #1 hyperparameter:</b> too high → diverge/oscillate; too low → crawls/stuck. Use warmup + decay/schedules.</li>
+<li><b>Convex</b> (linear/logistic/SVM) → one global min. <b>Non-convex</b> (NN) → local minima &amp; saddles; init &amp; normalization matter.</li>
+<li>Always <b>standardize inputs</b> — skewed scales make ill-conditioned, slow-converging loss surfaces.</li>
 </ul>
+</section>
+
+<section class="card"><h3>Neural Network Fundamentals</h3>
+<ul>
+<li><b>Neuron:</b> a = φ(wᵀx + b). Stacked layers + nonlinearity = universal approximator. <span class="warn">!</span> Without a nonlinear activation, any depth collapses to one linear layer.</li>
+<li><b>Activations:</b> <b>ReLU</b> default (cheap, no vanishing for x&gt;0, <span class="warn">!</span> dying-ReLU → LeakyReLU/GELU); sigmoid/tanh saturate; <b>softmax</b> for multiclass output.</li>
+<li><b>Backprop</b> = chain rule caching gradients layer by layer. <span class="warn">!</span> <b>Vanishing/exploding gradients</b> in deep nets → ReLU, residual connections, normalization, gradient clipping.</li>
+<li><b>Regularize:</b> dropout, weight decay, early stopping, batch/layer norm, augmentation.</li>
+<li>Needs lots of data &amp; compute; wins on <b>unstructured</b> data (image/text/audio). For <b>tabular</b>, GBMs usually still beat NNs.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Unsupervised: Clustering &amp; Dim-Reduction</h3>
+<h4>Clustering</h4>
+<table><thead><tr><th>Method</th><th>Note</th></tr></thead><tbody>
+<tr><td><b>k-means</b></td><td>pick k up front; assumes round, equal-size blobs; <span class="warn">!</span> scale first, sensitive to init (k-means++) &amp; outliers</td></tr>
+<tr><td><b>DBSCAN</b></td><td>density-based; finds arbitrary shapes + outliers; no k, but ε/minPts tuning</td></tr>
+<tr><td>Hierarchical</td><td>dendrogram; cut to choose #clusters</td></tr>
+</tbody></table>
+<ul><li>Choose k: <b>elbow</b> (inertia), <b>silhouette</b>. No labels → validate with silhouette + business meaning; beware clustering random noise.</li></ul>
+<h4>Dimensionality reduction</h4>
+<ul>
+<li><b>PCA:</b> orthogonal axes of max variance (eigenvectors of covariance); keep components to ~90–95% cumulative variance. <span class="warn">!</span> Standardize first; linear only.</li>
+<li><b>t-SNE / UMAP:</b> nonlinear <b>visualization</b> — <span class="warn">!</span> distances/cluster sizes between blobs aren't meaningful; don't feed downstream blindly.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Reinforcement Learning Basics</h3>
+<ul>
+<li>Agent takes <b>actions</b> in an <b>environment</b> (state), gets <b>reward</b>, learns a <b>policy</b> π(a|s) maximizing expected discounted return.</li>
+<li><b>MDP</b> = (S, A, P, R, γ); Markov = next state depends only on current state+action.</li>
+<li><b>γ</b> (discount, 0–1): low = myopic, high = far-sighted (but harder credit assignment).</li>
+<li><b>Explore vs exploit:</b> ε-greedy takes a random action w.p. ε, else the greedy one.</li>
+<li><b>Value-based</b> (Q-learning: Q(s,a)=expected return, off-policy) vs <b>policy-based</b> (optimize π directly, better for continuous actions).</li>
+</ul>
+<ul>
+<li><span class="warn">!</span> <b>Reward hacking:</b> agent games a misspecified reward. <b>Credit assignment</b> over long horizons is the core difficulty.</li>
+<li>Looks-like-RL-but-isn't → if you have labeled optimal actions, use <b>supervised</b>. <b>Contextual bandits</b> = 1-step RL. <b>RLHF</b> aligns LLMs.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Interpretability &amp; Explainability</h3>
+<table><thead><tr><th>Scope</th><th>Tools</th></tr></thead><tbody>
+<tr><td>Global</td><td>linear coefficients, tree structure, permutation importance, PDP</td></tr>
+<tr><td>Local</td><td><b>SHAP</b> (Shapley, additive, consistent), LIME (local surrogate), ICE</td></tr>
+</tbody></table>
+<ul>
+<li><b>Intrinsic</b> (linear, shallow tree, GAM) vs <b>post-hoc</b> (SHAP/LIME on a black box). Prefer intrinsic when stakes/regulation demand it.</li>
+<li><span class="warn">!</span> Correlation, not causation — importance ≠ a lever you can pull. Explanations can mislead if features are correlated.</li>
+<li>Interpretability is a real objective in regulated domains (credit, health): sometimes worth trading a few points of accuracy.</li>
+</ul>
+</section>
+
+<section class="card"><h3>ML in Practice — Pitfalls</h3>
+<ul>
+<li><span class="warn">!</span> <b>Baseline first</b>, then the simplest model that clears it. Complexity is a cost you must justify.</li>
+<li><b>~80% of ML is data</b> — cleaning, labeling, features. Modeling is the small, glamorous part.</li>
+<li><span class="warn">!</span> <b>Train/serve skew:</b> the feature pipeline differs offline vs online → same code path both sides (feature store).</li>
+<li><b>Drift:</b> data/concept distribution shifts post-deploy → monitor inputs &amp; metrics, alert, retrain. A model that tested great decays.</li>
+<li><b>Reproducibility:</b> fix seeds, version data + code + model, log experiments.</li>
+<li>Optimize the <b>business metric</b>, not just the offline loss — validate with an A/B test, not just backtest.</li>
+</ul>
+</section>
+
+<section class="card"><h3>&#9733; Interview Playbook / Checklist</h3>
+<h4>Frame any problem</h4>
+<ul>
+<li>&#9744; State the task, label source, <b>baseline</b>, <b>metric</b> (from FP-vs-FN cost), validation scheme, deploy + monitor plan.</li>
+<li>&#9744; Confirm ML is even warranted — could a rule do it?</li>
+</ul>
+<h4>Diagnose scenarios</h4>
+<ul>
+<li>&#9744; "Train 99% / val 70%" → <b>overfit/variance</b> → data, regularize, ↓capacity, early stop.</li>
+<li>&#9744; "Train &amp; val both 75%" → <b>underfit/bias</b> → capacity, features, train longer.</li>
+<li>&#9744; "99% accuracy, useless" → <b>imbalance</b> → precision/recall/PR-AUC + threshold.</li>
+<li>&#9744; "Great offline, dead in prod" → <b>leakage</b> / train-serve skew / drift.</li>
+<li>&#9744; "Val loss turns up mid-training" → early stop / regularize.</li>
+</ul>
+<h4>Don't get caught</h4>
+<ul>
+<li>&#9744; Every feature <b>known at prediction time</b>? (leakage guard)</li>
+<li>&#9744; Preprocessing fit <b>inside</b> CV folds; test touched once.</li>
+<li>&#9744; <b>Scaled</b> for kNN/SVM/linear/NN; not needed for trees.</li>
+<li>&#9744; Tabular → try <b>GBM</b>; huge unstructured → NN; interpretable/fast → linear.</li>
+<li>&#9744; Time series / grouped data → the right CV split.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Symptom → Cause</h3>
+<table><thead><tr><th>Symptom</th><th>Likely cause</th></tr></thead><tbody>
+<tr><td>Train &lt;&lt; val error, big gap</td><td>overfitting / high variance <span class="warn">!</span></td></tr>
+<tr><td>Train &amp; val both high</td><td>underfitting / high bias</td></tr>
+<tr><td>Metric too good to be true</td><td>data leakage <span class="warn">!</span></td></tr>
+<tr><td>Great offline, bad live</td><td>leakage / train-serve skew / drift <span class="warn">!</span></td></tr>
+<tr><td>99% acc but misses positives</td><td>class imbalance + wrong metric <span class="warn">!</span></td></tr>
+<tr><td>Model decays over weeks</td><td>data / concept drift → retrain</td></tr>
+<tr><td>Loss = NaN / diverges</td><td>LR too high / unscaled inputs / bad init <span class="warn">!</span></td></tr>
+<tr><td>Loss stuck, won't drop</td><td>LR too low / vanishing grad / dead ReLUs</td></tr>
+<tr><td>kNN/SVM/k-means garbage</td><td>forgot to scale features <span class="warn">!</span></td></tr>
+<tr><td>One feature dominates SHAP</td><td>leakage or target proxy <span class="warn">!</span></td></tr>
+<tr><td>CV score ≫ test score</td><td>tuned on the test / leaked folds</td></tr>
+<tr><td>R² negative</td><td>model worse than the mean predictor</td></tr>
+</tbody></table>
 </section>
 
 </div>
-<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
-<script>
-  try {
-    mermaid.initialize({ startOnLoad: true, theme: "neutral",
-      flowchart: { useMaxWidth: true, htmlLabels: true, nodeSpacing: 18, rankSpacing: 18 },
-      themeVariables: { fontSize: "9px" } });
-  } catch (e) { /* offline / blocked CDN: diagrams degrade to source text, rest of sheet is fine */ }
-</script>
 </body>
 </html>

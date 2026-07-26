@@ -6,7 +6,11 @@
 <title>Data Engineering for ML Cheat Sheet</title>
 <style>
 :root{
-  --fs: 7.2pt; --fs-mono: 6.6pt; --fs-h3: 7.8pt; --gap: 5px; --pad: 3px;
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
   --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
 }
 *{box-sizing:border-box;}
@@ -14,10 +18,12 @@ html,body{margin:0;padding:0;}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
   font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
 .sheet{background:#fff;}
+/* spanning title bar */
 .titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
   margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
-.titlebar h1{font-size:12pt; margin:0; letter-spacing:.3px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
 .titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
 .sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
   column-fill:balance; padding:5px;}
 .card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
@@ -25,6 +31,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Ar
   overflow:hidden;}
 .card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
   background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
 .card:nth-of-type(8n+1) h3{background:#34495e;}
 .card:nth-of-type(8n+2) h3{background:#2c6e9b;}
 .card:nth-of-type(8n+3) h3{background:#1f7a5a;}
@@ -58,140 +65,367 @@ pre code{background:none; padding:0; font-size:1em;}
 @page{ size:A4; margin:5mm; }
 @media print{
   body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
   .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
 }
 </style>
 </head>
 <body>
 <div class="sheet">
-<div class="titlebar"><h1>Data Engineering for ML Cheat Sheet</h1><span class="meta">feature pipelines · PIT joins · validation · labelling · versioning · drilly</span></div>
+<div class="titlebar"><h1>Data Engineering for ML Cheat Sheet</h1><span class="meta">feature pipelines · feature stores · PIT joins · validation · skew · labelling · versioning · drilly</span></div>
+
 <section class="card legend"><h3>How to read &amp; print</h3>
 <ul>
-<li><span class="warn">!</span> footgun / classic trap &nbsp; <code>&#9744;</code> reasoning step</li>
-<li>The DATA layer that feeds ML (serving side = MLOps; Spark/Kafka internals = Data Engineering).</li>
-<li>Law: <b>most ML failures are data failures</b> — and they're silent.</li>
-<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+<li><span class="warn">!</span> footgun / silent-skew trap &nbsp; <code>&#9744;</code> review/design checklist item</li>
+<li>Scope: the <b>data layer</b> that feeds ML. Serving mechanics = <b>MLOps</b> primer; Spark/Kafka/Flink internals = <b>Data Engineering</b> primer. This is the plumbing that makes features <i>correct</i>.</li>
+<li><b>The law:</b> most ML failures are <b>data</b> failures, and they are <b>silent</b> — the job goes green, values are wrong, the metric decays over weeks. Turn silent into loud, early, specific.</li>
+<li>Central invariant: a feature is computed the <b>same way</b> offline (train) and online (serve). Everything here defends that.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
 </ul></section>
 
 <section class="card diagram"><h3>The Data-for-ML Flow</h3>
 <div class="mermaid">
-flowchart LR
-  R["raw (CDC/events)"] --> V["validate"]
-  V --> F["features (batch+stream)"]
-  F --> L["+ labels"]
-  L --> T["training set (PIT)"]
-  F --> O["online store -> inference"]
+flowchart TD
+  R["raw: CDC + events"] --> V["validate (gate)"]
+  V --> B["batch features<br/>Spark/dbt"]
+  V --> S["stream features<br/>Flink/Kafka"]
+  B --> OFF["offline store<br/>(history)"]
+  S --> ON["online store<br/>(latest KV)"]
+  OFF -->|"materialize latest"| ON
+  OFF --> PIT["PIT join + labels"]
+  PIT --> TR["training set"]
+  ON --> INF["inference"]
 </div>
-<p>A <b>feature</b> = named, owned, versioned artifact keyed by entity + timestamp.</p>
+<p class="cap">One feature, two stores, one definition. Offline keeps full history for point-in-time training; online keeps the latest value for ms serving. The online store is <b>materialized from</b> the offline computation, never a second independent write — that is how you dodge skew at the storage layer.</p></section>
+
+<section class="card"><h3>Feature = First-Class Artifact</h3>
+<p>A feature is not a column — it is a <b>named, owned, versioned</b> artifact keyed by <b>entity + timestamp</b>, with a definition, an owner, docs, and lineage.</p>
+<ul>
+<li><b>entity + timestamp key</b> <span class="warn">!</span> — "value of <code>txns_7d</code> for <code>user=42</code> <i>as of</i> T". The timestamp is what makes point-in-time joins and reproducibility possible; entity-only keys leak the future.</li>
+<li><b>Definition vs materialised values</b>: the transform logic is versioned separately from the rows it produced. A model pins a <b>definition version</b>.</li>
+<li><b>Ownership</b>: a feature has an on-call owner, freshness SLA, and a contract — orphaned features rot silently.</li>
+<li><b>Feature group / view</b>: features sharing an entity + source, materialised together (one join, one freshness).</li>
+</ul>
+<h4>Lifecycle</h4>
+<p>idea → define → backfill history → register (discoverable) → serve online+offline → monitor → <b>version</b> on change → <b>retire</b> (models rebind or stay pinned).</p>
+<p><span class="warn">!</span> Every team re-deriving the same feature = N subtly different definitions = N skew sources. Register &amp; reuse.</p>
 </section>
 
-<section class="card"><h3>Batch vs Streaming Features</h3>
+<section class="card"><h3>Batch Feature Pipelines</h3>
+<p>Scheduled Spark/SQL/dbt job over bounded partitions → <b>materialise</b> feature rows to the store. Freshness hours–days; cheap; the <b>source of truth</b> that streaming must match.</p>
+<h4>Non-negotiables</h4>
+<ul>
+<li><b>Idempotent</b> <span class="warn">!</span> — re-running a date must overwrite, not append. Use <code>partitionOverwrite</code> / <code>MERGE</code> on <code>(entity, feature_date)</code>, never blind <code>INSERT</code> (double-counts on retry).</li>
+<li><b>Partition by date</b> — prune scans, enable clean backfills, isolate a bad day.</li>
+<li><b>Backfill = same transform</b> over history, point-in-time correct. One deterministic function drives daily runs <b>and</b> backfills — two code paths = skew.</li>
+<li><b>Full vs incremental refresh</b>: incremental (only new partitions) for append-only; full recompute when the definition or upstream history changes.</li>
+</ul>
+<pre><code># ONE transform, reused for daily + backfill
+feats = transform(events)            # deterministic
+feats.write.mode("overwrite") \
+  .option("partitionOverwriteMode","dynamic") \
+  .partitionBy("feature_date").save() # idempotent per day</code></pre>
+<p><span class="warn">!</span> Job succeeded but model degraded → suspect schema change, null spike, or upstream late data, not the code.</p>
+</section>
+
+<section class="card"><h3>Streaming Feature Pipelines</h3>
+<p>Standing query over an unbounded log. Kafka topic keyed by entity → stateful processor (RocksDB state) → upsert latest value into online KV. Freshness = <b>seconds</b>.</p>
 <table><thead><tr><th></th><th>Batch</th><th>Streaming</th></tr></thead><tbody>
-<tr><td>engine</td><td>Spark/SQL/dbt</td><td>Flink/Kafka</td></tr>
-<tr><td>freshness</td><td>hours/days</td><td>seconds</td></tr>
-<tr><td>cost</td><td>cheap</td><td>pricier</td></tr>
+<tr><td>input</td><td>bounded partition</td><td>unbounded log</td></tr>
+<tr><td>engine</td><td>Spark/dbt/SQL</td><td>Flink / Spark SS / Kafka Streams</td></tr>
+<tr><td>time</td><td>partition "complete"</td><td>event-time + watermark</td></tr>
+<tr><td>cost</td><td>cheap, periodic</td><td>always-on, pricier</td></tr>
+<tr><td>use</td><td>daily aggregates, training</td><td>fraud, real-time recs, pricing</td></tr>
 </tbody></table>
-<p><span class="warn">!</span> Keep the streaming feature IDENTICAL to the batch one (same logic) or you get skew.</p>
+<h4>Decision rule</h4>
+<p>Start <b>every</b> feature as batch. Promote to streaming <b>only with evidence</b> (offline experiment shows fresher features lift the metric). Streaming ~triples ops surface + adds a skew path. Need it when the signal is recent-behaviour-dependent (<code>txns_5m</code>), the decision is real-time high-stakes, or session cold-start.</p>
+<pre><code># count txns in trailing 5m, per user
+stream.keyBy(user)
+  .window(Sliding(5m, 1m))   # event-time
+  .aggregate(count)          # -> upsert online KV</code></pre>
+<p><span class="warn">!</span> Engine choice: <b>Flink</b> for true event-time + low-latency stateful; <b>Spark SS</b> if already on Spark (micro-batch); <b>Kafka Streams</b> for a library, no cluster.</p>
+</section>
+
+<section class="card"><h3>Windows, Event-Time &amp; Watermarks</h3>
+<h4>Event-time vs processing-time <span class="warn">!</span></h4>
+<ul>
+<li><b>Event-time</b> = when it happened (payload ts). <b>Processing-time</b> = when the engine saw it (wall clock).</li>
+<li>Default <b>event-time</b> for anything trained on or replayed. Processing-time is nondeterministic → replays give different numbers → backfills &amp; PIT correctness break → instant skew vs batch.</li>
+</ul>
+<h4>Windows</h4>
+<table><thead><tr><th>Type</th><th>Shape / use</th></tr></thead><tbody>
+<tr><td>Tumbling</td><td>fixed, non-overlapping; each event in one (5-min blocks)</td></tr>
+<tr><td>Sliding</td><td>fixed size, smaller step, overlapping (last 5m every 1m)</td></tr>
+<tr><td>Session</td><td>gap-bounded (ends after 30m idle) — user sessions</td></tr>
+</tbody></table>
+<h4>Watermark</h4>
+<p>Moving assertion "no events older than T still expected." Decides when to close a window and how long to hold for late data. <span class="warn">!</span> It does <b>not</b> stop lateness — it bounds your patience, trading completeness for latency. Wider watermark = more complete, higher latency + memory.</p>
+</section>
+
+<section class="card"><h3>Feature Stores (Data Angle)</h3>
+<p>Solves: reuse across teams + train/serve consistency + point-in-time serving of history.</p>
+<table><thead><tr><th></th><th>Offline store</th><th>Online store</th></tr></thead><tbody>
+<tr><td>holds</td><td>full history</td><td>latest value only</td></tr>
+<tr><td>tech</td><td>lake / warehouse (Parquet)</td><td>KV: Redis / DynamoDB</td></tr>
+<tr><td>latency</td><td>batch (training)</td><td>single-digit ms</td></tr>
+<tr><td>use</td><td>PIT training sets</td><td>inference reads</td></tr>
+</tbody></table>
+<h4>Dual-write problem <span class="warn">!</span></h4>
+<p>Computing the feature <b>independently</b> into each store lets them diverge (one write fails, different code, different time) = storage-layer skew. Fixes:</p>
+<ul>
+<li><b>Compute once, materialise online FROM offline</b> — online is a subset of offline by construction.</li>
+<li><b>One definition, two runners</b> — same DSL/code drives both engines.</li>
+<li><b>Reconciliation monitor</b> — diff a sample of online vs offline, alert on delta.</li>
+</ul>
+<p><b>TTL / freshness</b>: online rows expire; a stale online value with a fine offline value ⇒ materialisation job lagging. Online can't keep full history (cost/latency) — it holds current, offline holds the timeline.</p>
 </section>
 
 <section class="card"><h3>Point-in-Time Correctness</h3>
-<pre><code>-- join label to features AS OF the label time
-SELECT l.*, f.val
-FROM labels l ASOF JOIN features f
-  ON f.entity = l.entity
- AND f.ts <= l.ts      -- NOT the latest value !</code></pre>
-<p>Using latest feature values leaks the FUTURE into training. Time-travel (Delta/Iceberg) makes it reproducible.</p>
-</section>
-
-<section class="card"><h3>Train/Serve Skew (#1 bug)</h3>
+<p>Join each label to the feature value <b>known as of the label's timestamp</b> — never the latest. Using latest values leaks post-decision information (the churn <i>is</i> the login collapse you joined).</p>
+<pre><code>-- labels(entity_id, label_time, y)
+-- feature_history(entity_id, event_time, value)
+SELECT l.entity_id, l.label_time, l.y, f.value
+FROM labels l
+LEFT JOIN LATERAL (
+  SELECT fh.value
+  FROM feature_history fh
+  WHERE fh.entity_id = l.entity_id
+    AND fh.event_time &lt;= l.label_time   -- no peeking !
+  ORDER BY fh.event_time DESC
+  LIMIT 1                              -- latest known then
+) f ON true;</code></pre>
 <ul>
-<li>Features computed differently in train (batch/notebook) vs serve (online) → model silently wrong. <span class="warn">!</span></li>
-<li>Causes: two code paths, two data sources, time misalignment, diff missing-value handling.</li>
-<li>Fix: <b>one shared transform</b> / feature store; <b>log served features</b> &amp; train on them.</li>
+<li>Correctness lives in two clauses: <code>event_time &lt;= label_time</code> and <code>ORDER BY event_time DESC LIMIT 1</code>.</li>
+<li>Add a lower bound <code>event_time &gt;= label_time - 30d</code> to also match serving's max staleness.</li>
+<li><b>Time-travel</b> (Delta/Iceberg <code>VERSION AS OF</code>) regenerates the exact table state; a <b>PIT/as-of join</b> aligns per-row timestamps. Use both.</li>
 </ul>
+<p><span class="warn">!</span> 0.98 AUC offline, dies in prod = classic leakage from a latest-value join.</p>
 </section>
 
-<section class="card"><h3>Data Validation</h3>
+<section class="card"><h3>Train/Serve Skew — the #1 Bug</h3>
+<p>The feature is computed <b>differently</b> in training vs serving, so the model scores on a distribution it never trained on. No error thrown; quality quietly drops.</p>
+<h4>Sources</h4>
 <ul>
-<li>Validate BEFORE training/serving: <b>schema</b> (types/ranges), <b>distribution</b> vs reference, missing-rate, cardinality.</li>
-<li>Tools: Great Expectations / TFDV / Pandera / dbt tests.</li>
-<li><b>Data contracts</b> producer↔ML; validation as a <b>gate</b> (block/quarantine). <span class="warn">!</span></li>
+<li>Two code paths (notebook pandas vs online service) <span class="warn">!</span></li>
+<li>Two data sources / different freshness (batch table vs live event)</li>
+<li>Time misalignment (latest value in train, trailing window at serve)</li>
+<li>Different missing-value handling in each path</li>
 </ul>
-</section>
-
-<section class="card"><h3>Data Quality</h3>
+<h4>Fixes (best last)</h4>
 <ul>
-<li>Dimensions: completeness, accuracy, consistency, <b>timeliness</b>, uniqueness, validity.</li>
-<li>Unit-test transforms (input rows → expected feature).</li>
-<li><span class="warn">!</span> <b>Silent bad data</b> (pipeline succeeds, values wrong) is worse than a crash.</li>
+<li><b>One shared transform</b> / feature store definition — physically the same code.</li>
+<li><b>Log-and-wait</b> <span class="ansi">gold</span> — log the <i>exact</i> feature values served online, wait for labels, train on the logged values. Training then matches serving by construction, whatever the offline path does.</li>
 </ul>
+<h4>Detect (it throws no error)</h4>
+<p>Compare serving-input stats to training stats (TFDV skew detection); reconcile online vs offline samples; watch feature distributions at the pipeline, not just model metrics.</p>
 </section>
 
-<section class="card"><h3>Missing / Late / Dup</h3>
-<ul>
-<li>Missing: impute OR flag — <b>identically in train &amp; serve</b>. <span class="warn">!</span></li>
-<li>Late/out-of-order: watermarks, reprocessing windows.</li>
-<li>Dedup: idempotency keys / exactly-once. Backfills must be idempotent.</li>
-</ul>
-</section>
-
-<section class="card"><h3>Labelling: Getting Labels</h3>
-<table><thead><tr><th>Source</th><th>Trade</th></tr></thead><tbody>
-<tr><td>manual/vendor</td><td>quality, slow/$</td></tr>
-<tr><td>implicit (clicks)</td><td>cheap, biased <span class="warn">!</span></td></tr>
-<tr><td>weak sup (Snorkel)</td><td>scale, noisy</td></tr>
-<tr><td>active learning</td><td>label the informative ones</td></tr>
+<section class="card"><h3>Data Validation for ML</h3>
+<p>Treat incoming data as <b>untrusted</b>; gate it <b>before</b> training and <b>before</b> serving. Moves detection upstream (named failed expectation) vs downstream (diffuse metric drop weeks later).</p>
+<h4>Four check categories</h4>
+<table><thead><tr><th>Kind</th><th>Example</th></tr></thead><tbody>
+<tr><td>Schema</td><td><code>age</code> int, present, in [0,120]; no extra cols</td></tr>
+<tr><td>Missing / cardinality</td><td><code>email</code> null-rate &lt;1%; <code>id</code> unique; ~50 categories not 1 or 5M</td></tr>
+<tr><td>Distribution vs ref</td><td><code>amount</code> mean/quantiles within X% of baseline — catches $→¢ unit flip <span class="warn">!</span></td></tr>
+<tr><td>Cross-field</td><td><code>end &gt;= start</code>; <code>total == sum(items)</code></td></tr>
 </tbody></table>
+<ul>
+<li><b>Tools</b>: Great Expectations (suites), TFDV (ML schema + skew/drift), Pandera (typed dataframes), dbt tests (SQL models).</li>
+<li><b>Gate</b> = pass / <b>block</b> / <b>quarantine</b> + alert — not a warning nobody reads <span class="warn">!</span></li>
+<li><b>Data contract</b>: enforced schema+semantics agreed with the upstream producer.</li>
+</ul>
+<p><span class="warn">!</span> "Loads without error" ≠ valid — the worst data loads fine and is subtly wrong.</p>
 </section>
 
-<section class="card"><h3>Label Quality</h3>
+<section class="card"><h3>Data Quality &amp; Testing</h3>
+<h4>Quality dimensions</h4>
+<table><thead><tr><th>Dim</th><th>Question</th></tr></thead><tbody>
+<tr><td>Completeness</td><td>expected rows/fields present?</td></tr>
+<tr><td>Accuracy</td><td>values reflect reality?</td></tr>
+<tr><td>Consistency</td><td>agree across tables/systems?</td></tr>
+<tr><td>Timeliness</td><td>fresh enough for the use?</td></tr>
+<tr><td>Uniqueness</td><td>no unintended dups?</td></tr>
+<tr><td>Validity</td><td>conforms to types/rules?</td></tr>
+</tbody></table>
 <ul>
-<li><b>Inter-annotator agreement</b> (Cohen/Fleiss kappa); consensus/adjudication.</li>
-<li><b>Gold sets</b> to score annotators; clear guidelines (ambiguity = enemy).</li>
-<li><b>Version labels</b> (definitions change); audit; watch label leakage.</li>
+<li><b>Unit-test transforms</b>: fixed input rows → asserted feature output. A feature transform is code — test it like code.</li>
+<li>Validation = quality checks wired as a <b>runtime gate</b>; this topic = the dimensions + tests behind it.</li>
+<li><span class="warn">!</span> <b>Silent bad data</b> (pipeline green, values wrong) is worse than a crash — a crash you notice. Assert on the <i>values</i>, not just that rows arrived.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Versioning &amp; Lineage</h3>
+<section class="card"><h3>Missing, Late &amp; Duplicate Data</h3>
+<h4>Golden rule <span class="warn">!</span></h4>
+<p>Whatever you do to a missing value — impute, flag, drop — do it <b>identically in train and serve</b>. This is the most-violated rule in production ML.</p>
 <ul>
-<li>Version data (<b>DVC / Delta / Iceberg / Hudi</b> — ACID + <b>time travel</b>) + feature defs + training snapshot.</li>
-<li>Reproducible = code + data + features + labels + config.</li>
-<li><b>Lineage</b>: feature→source, model→exact training data (audit/impact).</li>
+<li>Compute imputation stats (mean/median/mode) on the <b>training set only</b>, <b>persist</b> them, reuse the exact constants at serve. Per-batch means leak/skew.</li>
+<li>Add a <b>missingness indicator</b> (<code>was_null</code>) so the model learns from absence, not just the fill.</li>
+<li>Implement in <b>one shared transform</b>, not two copies.</li>
+</ul>
+<h4>Late / out-of-order</h4>
+<p>Key on <b>event-time</b>; watermark + reprocessing window (allowed lateness) to re-emit updates. Late data systematically <b>undercounts the freshest windows</b> — the ones the model leans on <span class="warn">!</span></p>
+<h4>Duplicates</h4>
+<p>At-least-once delivery duplicates. Dedup by <b>idempotency key</b> (<code>event_id</code>) so a replay is a no-op. Exactly-once = effect applied once, not delivered once.</p>
+</section>
+
+<section class="card"><h3>Data Labelling: Getting Labels</h3>
+<p>Labels are usually the bottleneck. Match sourcing to volume, cost, and quality needs.</p>
+<table><thead><tr><th>Source</th><th>Trade-off</th></tr></thead><tbody>
+<tr><td>Manual / vendor</td><td>high quality; slow, $$, hard to scale</td></tr>
+<tr><td>Implicit (clicks, buys)</td><td>free &amp; huge; <b>biased</b> + feedback loops <span class="warn">!</span></td></tr>
+<tr><td>Weak supervision (Snorkel)</td><td>labelling functions → scale; noisy, needs denoising</td></tr>
+<tr><td>Semi-supervised</td><td>small labelled + large unlabelled</td></tr>
+<tr><td>Active learning</td><td>label only the most <i>informative</i> points — cut cost</td></tr>
+<tr><td>Programmatic / heuristic</td><td>rules as labels; cheap, brittle</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> Implicit labels are cheap but encode the current system's behaviour → self-reinforcing bias; the model narrows its own world while dashboards look fine.</p>
+</section>
+
+<section class="card"><h3>Label Quality &amp; Management</h3>
+<ul>
+<li><b>Label noise</b>: <i>random</i> dilutes (needs more data, lower ceiling); <i>systematic</i> (a class/slice consistently wrong) <b>biases</b> — no data volume fixes it <span class="warn">!</span></li>
+<li><b>IAA, not % agreement</b> <span class="warn">!</span> — at 95% prevalence two raters agree ~90% by chance. Use <b>Cohen's kappa</b> (2 raters) / <b>Fleiss' kappa</b> (many), chance-corrected.</li>
+<li>Low agreement usually = <b>ambiguous task</b>, fix the <b>guidelines</b>, don't blame annotators. Ambiguity is the enemy.</li>
+<li><b>Reconcile</b>: consensus / majority vote, then <b>adjudication</b> (expert resolves disagreements).</li>
+<li><b>Gold set</b>: expert-verified items to score annotators + measure noise. Noise in test labels <b>blinds your metrics</b>.</li>
+<li><b>Version labels</b> — definitions drift ("spam" 2024 ≠ 2026); pin the label version a model trained on.</li>
+<li><b>Label leakage</b>: target or a post-outcome proxy sneaks into features → fake accuracy, prod collapse.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Big Data &amp; DL Pipelines</h3>
+<section class="card"><h3>Data &amp; Feature Versioning</h3>
+<p>Version the <b>inputs</b> so a run is reproducible months later. Three distinct things (confusing them is a classic fail):</p>
 <ul>
-<li>Spark for feature eng at scale (watch the <b>shuffle</b> &amp; join skew). Parquet; sample for dev.</li>
-<li>DL: <b>DataLoader/tf.data</b>, augment (train-only), shard (TFRecord/WebDataset), prefetch. <span class="warn">!</span> Keep the GPU fed — input pipeline is often the bottleneck.</li>
+<li><b>Data</b> — the bytes/tables.</li>
+<li><b>Feature definitions</b> — the transform logic.</li>
+<li><b>Training-set snapshot</b> — the exact (features + labels) rows a model saw.</li>
+</ul>
+<p><b>Reproducible = code SHA + data version + feature-def version + label version + config</b>, pinned together.</p>
+<table><thead><tr><th></th><th>Pointer (DVC/lakeFS)</th><th>Table format</th></tr></thead><tbody>
+<tr><td>what</td><td>git holds a hash, bytes in object store</td><td>immutable Parquet + txn log</td></tr>
+<tr><td>gives</td><td>data follows code commits</td><td>ACID, time travel, schema evolution</td></tr>
+<tr><td>tools</td><td>DVC, lakeFS</td><td>Delta, Iceberg, Hudi</td></tr>
+</tbody></table>
+<ul>
+<li><b>Time travel</b> ≠ backups (queryable history, different retention). <code>SELECT ... VERSION AS OF 42</code> regenerates an exact training set.</li>
+<li><b>Schema evolution</b>: additive is safe; dropping/narrowing a column a feature reads silently breaks it <span class="warn">!</span></li>
 </ul>
 </section>
 
-<section class="card"><h3>Reliability &amp; Cost</h3>
+<section class="card"><h3>Lineage &amp; Reproducibility</h3>
 <ul>
-<li><span class="warn">!</span> A <b>stale feature</b> = silent model decay. Monitor freshness + feature distributions at the pipeline.</li>
-<li>Alert on broken/late/null-spiking features; safe backfills.</li>
-<li>Cost triangle: <b>freshness vs latency vs $</b>. Materialize vs compute-on-read; batch beats streaming when hourly is fine.</li>
+<li><b>Lineage</b> traces <i>how</i> a dataset was produced and <i>which</i> model consumed it: feature → source columns, model → exact training snapshot.</li>
+<li>Versioning answers "what data"; lineage answers "how &amp; who" — together: "rebuild exactly what model v7 saw."</li>
+<li>Uses: <b>impact analysis</b> (this upstream column changed — which features/models break?), <b>audit</b>, <b>debugging</b> a bad model back to its inputs, <b>compliance</b> (GDPR: where did this PII flow?).</li>
+<li><span class="warn">!</span> Versioning the <b>model artifact</b> alone is not reproducible — without the data + feature logic that produced it, you cannot rebuild or explain it.</li>
+<li>Model registry / experiment runs (MLflow) = <b>MLOps</b> primer; this side owns the data provenance.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Privacy / PII</h3>
+<section class="card"><h3>Big-Data &amp; Deep-Learning Data</h3>
+<h4>Feature engineering at scale (Spark)</h4>
 <ul>
-<li><span class="warn">!</span> A model can <b>memorize PII</b> — deleting the row doesn't untrain it (right-to-erasure problem).</li>
-<li>Anonymize / hash / tokenize; consent &amp; retention; access control on features. (See Security.)</li>
+<li>Wide transforms trigger a <b>shuffle</b> — the cost centre. Watch <b>join/key skew</b> (one hot key → one straggler task) <span class="warn">!</span>; salt or broadcast-join small sides.</li>
+<li>Columnar <b>Parquet</b>; partition + predicate pushdown; sample for dev iteration.</li>
+</ul>
+<h4>DL input pipelines</h4>
+<ul>
+<li><code>tf.data</code> / PyTorch <code>DataLoader</code>: parallel load, <b>prefetch</b>, cache, <code>num_workers</code>.</li>
+<li>Shard to sequential formats (<b>TFRecord / WebDataset</b>) — millions of tiny files kill throughput.</li>
+<li><b>Augment train-only</b> — never on val/test <span class="warn">!</span></li>
+<li><span class="warn">!</span> The input pipeline is often the bottleneck: a starved GPU sits idle. Profile and <b>keep the GPU fed</b>.</li>
 </ul>
 </section>
 
-<section class="card"><h3>&#9744; "Features wrong in prod" / Design</h3>
+<section class="card"><h3>Ingestion &amp; Integration</h3>
 <ul>
-<li>&#9744; Diagnose stale/wrong features: upstream break? <b>schema change</b>? backfill bug? <b>stream-vs-batch skew</b>? late data? null spike?</li>
-<li>&#9744; Design a feature pipeline serving IDENTICAL batch + online features (prove no skew).</li>
-<li>&#9744; Training-data gen: point-in-time joins, no future leakage, reproducible.</li>
-<li>&#9744; Labelling: weak supervision + active learning + gold-set QA + versioning.</li>
-<li>&#9744; Validation gate blocks bad data before it trains/serves.</li>
-<li>&#9744; DL data: keep GPUs fed (shard/prefetch/parallel-load).</li>
-<li>&#9744; Version data+features+labels; lineage for audit.</li>
+<li><b>CDC</b> (Debezium → Kafka) streams DB row changes without hammering the source — the clean way to get operational data into the lake.</li>
+<li><b>Batch ingest</b> (nightly extract) vs <b>streaming ingest</b> (events/CDC): match to the feature's freshness need.</li>
+<li><b>Medallion</b>: <b>bronze</b> raw → <b>silver</b> cleaned/validated → <b>gold</b> features. Validate at the bronze→silver boundary (the ingest contract) <span class="warn">!</span></li>
+<li><b>Schema-on-read</b> flexibility vs <b>schema-on-write</b> guarantees — ML wants a contract, so enforce schema early.</li>
+<li>Idempotent, replayable ingestion; capture <b>ingest timestamp</b> separately from event-time for lineage &amp; debugging.</li>
 </ul>
+</section>
+
+<section class="card"><h3>Governance, Privacy &amp; PII</h3>
+<ul>
+<li><span class="warn">!</span> A model can <b>memorise PII</b> — deleting the source row does <b>not</b> untrain it. Right-to-erasure (GDPR/CCPA) is a real design constraint, not a delete query.</li>
+<li><b>Minimise / anonymise / hash / tokenize</b> before features; pseudonymise identifiers.</li>
+<li><b>Consent &amp; retention</b>: track lawful basis + purpose; expire data on schedule.</li>
+<li><b>Access control on features</b> — sensitive features (income, health) gated; audit reads.</li>
+<li>Lineage answers "where did this subject's data flow" for a deletion/audit request.</li>
+<li>Differential privacy / aggregation where individual rows are too sensitive to expose.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Pipeline Reliability &amp; Monitoring</h3>
+<ul>
+<li><span class="warn">!</span> A <b>stale feature</b> = silent model decay. Monitor <b>freshness</b> (age of newest value) with an SLA + alert, not just job success.</li>
+<li>Monitor at the <b>pipeline</b>, upstream of model metrics: null-rate spikes, distribution shift, row-count anomalies, cardinality collapse/explosion.</li>
+<li>Alert on <b>late / failed / null-spiking</b> features; page the feature owner.</li>
+<li><b>Safe backfills</b>: idempotent, partition-isolated, PIT-correct — a re-run must not double-count or leak future.</li>
+<li>"Job succeeded" ≠ "data correct" — SLAs on <b>data</b>, not just on the DAG being green.</li>
+<li>Reconciliation: periodic offline↔online diff to catch materialisation drift.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Cost, Scale &amp; Storage</h3>
+<h4>The triangle</h4>
+<p><b>freshness ⟷ latency ⟷ $</b> — you pick a corner per feature.</p>
+<ul>
+<li><b>Materialise</b> (precompute, store) for hot/reused features: fast reads, storage + staleness cost.</li>
+<li><b>Compute-on-read</b> for rarely-used features: always fresh, slow, no storage — but risks train/serve skew if the two paths differ.</li>
+<li><b>Batch beats streaming</b> whenever hourly/daily is fine — streaming ~triples ops cost. Only pay for freshness that moves the metric.</li>
+</ul>
+<h4>Storage</h4>
+<ul>
+<li><b>Offline</b>: columnar Parquet on object store, partitioned, tiered to cold. Table format for ACID + time travel.</li>
+<li><b>Online</b>: KV (Redis/DynamoDB), latest value only + TTL — history there is unaffordable and unneeded.</li>
+<li>Compression + partition pruning + retention tiers are the main levers <span class="warn">!</span> unbounded feature history quietly dominates the bill.</li>
+</ul>
+</section>
+
+<section class="card"><h3>&#9733; Design &amp; Review Checklist</h3>
+<h4>Consistency / skew</h4>
+<ul>
+<li>&#9744; One transform (or one feature-store definition) feeds train <b>and</b> serve; no second independent write to the online store <span class="warn">!</span></li>
+<li>&#9744; Missing-value / imputation policy identical offline &amp; online, stats frozen from training.</li>
+<li>&#9744; Log served features and train on them where skew risk is high (log-and-wait).</li>
+</ul>
+<h4>Time correctness</h4>
+<ul>
+<li>&#9744; Training join is <b>point-in-time</b> (<code>event_time &lt;= label_time</code>), never latest-value.</li>
+<li>&#9744; Streaming features key on <b>event-time</b> with a watermark; windows match the batch definition.</li>
+</ul>
+<h4>Pipeline hygiene</h4>
+<ul>
+<li>&#9744; Batch jobs idempotent (overwrite/merge per partition); backfills can't double-count or leak future.</li>
+<li>&#9744; Dedup by idempotency key; late-data / reprocessing window defined.</li>
+</ul>
+<h4>Gate &amp; provenance</h4>
+<ul>
+<li>&#9744; Validation gate (schema + distribution + missing/cardinality) blocks/quarantines before train &amp; serve.</li>
+<li>&#9744; Data + feature-def + label versions pinned; lineage lets you rebuild exactly what the model saw.</li>
+<li>&#9744; Freshness SLA + distribution monitoring at the pipeline, alerting the owner.</li>
+<li>&#9744; Labels: guidelines + gold set + kappa threshold + adjudication + versioning; no label leakage.</li>
+<li>&#9744; PII minimised/anonymised; erasure &amp; retention path exists.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Common Bugs — Symptom → Cause</h3>
+<table><thead><tr><th>Symptom</th><th>Likely cause</th></tr></thead><tbody>
+<tr><td>0.98 AUC offline, poor in prod</td><td>leakage — latest-value join, not PIT <span class="warn">!</span></td></tr>
+<tr><td>Good offline metrics, bad online quality</td><td>train/serve skew — two feature code paths <span class="warn">!</span></td></tr>
+<tr><td>Model decays slowly, no error</td><td>stale feature — materialisation job lagging</td></tr>
+<tr><td>Recent-window counts too low</td><td>late data undercounting freshest windows <span class="warn">!</span></td></tr>
+<tr><td>Counts inflated ~2×</td><td>duplicates (at-least-once, no dedup key)</td></tr>
+<tr><td>Feature mean doubled overnight</td><td>upstream unit change ($→¢); schema check passed, distribution check would've caught it <span class="warn">!</span></td></tr>
+<tr><td>Backfill doubled values</td><td>append instead of partition-overwrite (non-idempotent)</td></tr>
+<tr><td>Online stale, offline fine</td><td>dual-write divergence / materialisation drift</td></tr>
+<tr><td>Can't reproduce a model's training data</td><td>upstream table mutated in place; no versioning/time-travel <span class="warn">!</span></td></tr>
+<tr><td>Great accuracy, collapses on deploy</td><td>label leakage (target proxy in features)</td></tr>
+<tr><td>Streaming diverges from batch</td><td>processing-time windows or different windowing logic</td></tr>
+</tbody></table>
 </section>
 
 </div>
