@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Python Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+/* spanning title bar */
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>Python Cheat Sheet</h1><span class="meta">CPython 3.12/3.13 · senior/backend focus · generic examples · drilly</span></div>
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="warn">!</span> footgun / gotcha &nbsp; <code>&#9744;</code> review checklist item</li>
+<li>Baseline: <b>CPython 3.12</b>; version-gated features tagged inline (e.g. "(3.11)", "(3.13)"). Semantics assume <b>CPython</b> — the GIL, refcounting &amp; small-int cache are implementation details, not language guarantees <span class="warn">!</span></li>
+<li>Senior focus: the data model · mutability &amp; binding · the GIL/async concurrency model · the classic footguns. Last 2 cards = <b>code review checklist</b> + common bugs.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
+</ul></section>
+
+<section class="card"><h3>Data Model &amp; Dunders</h3>
+<p><b>Everything is an object</b> — ints, functions, classes, modules all have a type, id, and refcount. Behaviour is protocol-driven: built-in syntax dispatches to <code>__dunder__</code> methods on the <b>type</b>, not the instance.</p>
+<table><thead><tr><th>Syntax</th><th>Calls</th></tr></thead><tbody>
+<tr><td><code>len(x)</code></td><td><code>type(x).__len__</code></td></tr>
+<tr><td><code>x[k]</code> / <code>x[k]=v</code></td><td><code>__getitem__</code> / <code>__setitem__</code></td></tr>
+<tr><td><code>for _ in x</code></td><td><code>__iter__</code> → <code>__next__</code></td></tr>
+<tr><td><code>x == y</code> / <code>x &lt; y</code></td><td><code>__eq__</code> / <code>__lt__</code></td></tr>
+<tr><td><code>x + y</code></td><td><code>__add__</code> (then <code>__radd__</code>)</td></tr>
+<tr><td><code>x()</code></td><td><code>__call__</code></td></tr>
+<tr><td><code>with x</code></td><td><code>__enter__</code>/<code>__exit__</code></td></tr>
+<tr><td><code>repr(x)</code>/<code>str(x)</code></td><td><code>__repr__</code>/<code>__str__</code></td></tr>
+</tbody></table>
+<ul>
+<li>Implement the protocol → your object plugs into the language ("duck typing"). Don't subclass a base just to get syntax.</li>
+<li>Special methods are looked up on the <b>type</b>, bypassing <code>__getattr__</code> and the instance dict <span class="warn">!</span> — a per-instance <code>obj.__len__</code> won't be used by <code>len()</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Names, Binding &amp; <code>is</code> vs <code>==</code></h3>
+<ul>
+<li>Python has <b>names</b>, not variables. <code>x = obj</code> <b>binds</b> a name to an object; <code>a = b</code> makes two names for the <b>same</b> object (aliasing) — no copy.</li>
+<li><code>==</code> → value equality (<code>__eq__</code>). <code>is</code> → identity (same <code>id()</code>). Use <code>is</code> only for singletons: <code>is None</code>, <code>is True/False</code>.</li>
+</ul>
+<h4>Identity surprises <span class="warn">!</span></h4>
+<pre><code>a = 256; b = 256; a is b   # True  (small-int cache -5..256)
+a = 257; b = 257; a is b   # False (usually)
+x = "hi"; y = "hi"; x is y # True  (interned literal)
+</code></pre>
+<ul>
+<li>Small-int cache &amp; string interning are <b>CPython optimisations</b> — never write logic that depends on them <span class="warn">!</span></li>
+<li>Strong + dynamic typing: types checked at runtime, never implicitly coerced. <code>1 + "2"</code> → <code>TypeError</code> (no JS-style concat).</li>
+<li>Truthiness: <code>if x:</code> calls <code>__bool__</code>, else <code>__len__</code> (empty = falsy), else True. Falsy: <code>0 0.0 "" [] {} () set() None</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Mutable vs Immutable · Copies</h3>
+<table><thead><tr><th>Mutable</th><th>Immutable</th></tr></thead><tbody>
+<tr><td>list, dict, set</td><td>int, float, bool, str, bytes</td></tr>
+<tr><td>bytearray, most objects</td><td>tuple, frozenset, None</td></tr>
+</tbody></table>
+<ul>
+<li>Only <b>hashable</b> (⇒ effectively immutable) objects can be dict keys / set members. <code>tuple</code> ok; <code>list</code> ⇒ <code>TypeError: unhashable</code> <span class="warn">!</span></li>
+<li>A tuple is immutable but <b>not deeply frozen</b>: <code>t = ([1],)</code>; <code>t[0].append(2)</code> mutates it <span class="warn">!</span></li>
+</ul>
+<h4>Pass-by-object-reference</h4>
+<pre><code>def f(lst, n):
+    lst.append(1)   # caller SEES this (mutation)
+    n += 1          # rebinds local only — caller unaffected
+</code></pre>
+<h4>Shallow vs deep <span class="warn">!</span></h4>
+<pre><code>import copy
+a = [[1,2],[3,4]]
+b = a[:]                 # shallow: b[0] IS a[0]
+b[0].append(9)           # also mutates a[0] !
+c = copy.deepcopy(a)     # fully independent
+</code></pre>
+<p>Slicing, <code>list()</code>, <code>dict()</code>, <code>copy.copy</code> all copy <b>one level</b>. Nested mutables are still shared.</p>
+</section>
+
+<section class="card"><h3>Mutable Default Args &amp; Late Binding</h3>
+<h4>The <code>def f(x, acc=[])</code> bug <span class="warn">!</span></h4>
+<pre><code>def add(x, acc=[]):      # default made ONCE at def time
+    acc.append(x); return acc
+add(1)  # [1]
+add(2)  # [1, 2]  ← same list persists!
+</code></pre>
+<p>Defaults are evaluated <b>once</b>, when the <code>def</code> executes, and stored on the function object (<code>f.__defaults__</code>). <b>Fix:</b> sentinel default.</p>
+<pre><code>def add(x, acc=None):
+    if acc is None: acc = []
+    acc.append(x); return acc
+</code></pre>
+<h4>Late-binding closure <span class="warn">!</span></h4>
+<pre><code>fs = [lambda: i for i in range(3)]
+[f() for f in fs]        # [2, 2, 2] — i looked up at CALL
+# Fix: bind now via default arg
+fs = [lambda i=i: i for i in range(3)]  # [0,1,2]
+</code></pre>
+<p>Closures capture the <b>variable</b>, not its value at creation. Loop var is read when the lambda runs, by which point the loop finished.</p>
+</section>
+
+<section class="card"><h3>Built-in Data Structures</h3>
+<table><thead><tr><th>Type</th><th>Ordered</th><th>Key ops (avg)</th></tr></thead><tbody>
+<tr><td>list</td><td>yes</td><td>idx/append O(1); insert/pop(0)/<code>in</code> O(n)</td></tr>
+<tr><td>tuple</td><td>yes</td><td>immutable list; hashable if items are</td></tr>
+<tr><td>dict</td><td>insertion (3.7+)</td><td>get/set/del O(1); <code>in</code> O(1)</td></tr>
+<tr><td>set</td><td>no</td><td>add/<code>in</code>/del O(1); union/inter</td></tr>
+<tr><td>frozenset</td><td>no</td><td>immutable set; hashable</td></tr>
+<tr><td>deque</td><td>yes</td><td>append/pop <b>both ends</b> O(1)</td></tr>
+</tbody></table>
+<ul>
+<li><code>list.pop(0)</code> / <code>list.insert(0, x)</code> are <b>O(n)</b> — shift everything. Queue ⇒ <code>collections.deque</code> <span class="warn">!</span></li>
+<li>Membership: <code>x in list</code> O(n) vs <code>x in set</code> O(1) — convert to a set for repeated lookups.</li>
+<li>tuple over list for a fixed record / dict key / slight speed &amp; intent ("this won't change").</li>
+</ul>
+</section>
+
+<section class="card"><h3>dict Internals &amp; <code>collections</code></h3>
+<ul>
+<li>Hash table, <b>open addressing</b>. Key must be hashable: consistent <code>__hash__</code> + <code>__eq__</code>. Equal objects <b>must</b> hash equal <span class="warn">!</span></li>
+<li><b>Insertion-ordered since 3.7</b> (language guarantee, not just CPython). Compact layout also shrank memory.</li>
+<li>Mutating a key's hash/equality after insertion corrupts lookups — never use a mutable key.</li>
+<li><b>Don't add/remove keys while iterating</b> → <code>RuntimeError: dict changed size</code> <span class="warn">!</span> Iterate over <code>list(d)</code>.</li>
+</ul>
+<h4>collections module</h4>
+<table><thead><tr><th>Tool</th><th>Use</th></tr></thead><tbody>
+<tr><td><code>defaultdict(list)</code></td><td>auto-init missing keys (grouping)</td></tr>
+<tr><td><code>Counter(seq)</code></td><td>tallies; <code>.most_common(n)</code></td></tr>
+<tr><td><code>deque(maxlen=)</code></td><td>O(1) ends; ring buffer</td></tr>
+<tr><td><code>namedtuple</code></td><td>lightweight immutable record</td></tr>
+<tr><td><code>OrderedDict</code></td><td>now niche; <code>move_to_end</code>, order-sensitive <code>==</code></td></tr>
+</tbody></table>
+</section>
+
+<section class="card"><h3>Scope: LEGB · global · nonlocal</h3>
+<p>Name lookup order: <b>L</b>ocal → <b>E</b>nclosing → <b>G</b>lobal → <b>B</b>uilt-in. Assignment anywhere in a function makes the name <b>local for the whole function</b> <span class="warn">!</span></p>
+<pre><code>x = 10
+def outer():
+    x = 20               # enclosing
+    def inner():
+        nonlocal x       # rebind enclosing x
+        x += 1
+    inner(); return x    # 21
+</code></pre>
+<ul>
+<li><code>global n</code> → rebind a module-level name. <code>nonlocal n</code> → rebind the nearest enclosing function's name.</li>
+<li>Reading a global is fine without <code>global</code>; <b>assigning</b> to it needs the declaration or you get <code>UnboundLocalError</code> <span class="warn">!</span></li>
+</ul>
+<h4>Counter closure (needs nonlocal)</h4>
+<pre><code>def make_counter():
+    n = 0
+    def inc():
+        nonlocal n; n += 1; return n
+    return inc
+</code></pre>
+</section>
+
+<section class="card"><h3>Functions &amp; functools</h3>
+<h4>Signature design</h4>
+<pre><code>def f(a, b, /, c, *args, d, **kwargs): ...
+#     |pos-only| normal |*| kw-only |
+</code></pre>
+<ul>
+<li><code>/</code> → params before it are <b>positional-only</b>. <code>*</code> (or <code>*args</code>) → params after are <b>keyword-only</b>.</li>
+<li><code>*args</code> collects extra positionals (tuple); <code>**kwargs</code> extra keywords (dict).</li>
+</ul>
+<h4>functools</h4>
+<table><thead><tr><th>Tool</th><th>Use</th></tr></thead><tbody>
+<tr><td><code>partial(f, x)</code></td><td>freeze leading args</td></tr>
+<tr><td><code>reduce(f, seq)</code></td><td>fold; prefer <code>sum</code>/loop when clearer</td></tr>
+<tr><td><code>@lru_cache(maxsize=)</code></td><td>memoise pure fn</td></tr>
+<tr><td><code>@cache</code> (3.9)</td><td>unbounded lru_cache</td></tr>
+<tr><td><code>@wraps</code></td><td>preserve metadata in decorators</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> <code>lru_cache</code> keeps refs to args/results forever (memory leak on unbounded/large keys), and needs <b>hashable</b> args. Never cache a method on a long-lived instance — it pins <code>self</code>.</p>
+</section>
+
+<section class="card"><h3>Decorators</h3>
+<p>A decorator is a callable taking a function and returning a replacement. <code>@dec</code> is pure sugar:</p>
+<pre><code>@dec
+def f(): ...
+# ≡ f = dec(f)
+</code></pre>
+<h4>Preserve identity <span class="warn">!</span></h4>
+<pre><code>from functools import wraps
+def log(fn):
+    @wraps(fn)                 # keeps __name__, __doc__, sig
+    def wrapper(*a, **kw):
+        print("call", fn.__name__)
+        return fn(*a, **kw)
+    return wrapper
+</code></pre>
+<p>Without <code>@wraps</code>, the function's name becomes <code>wrapper</code>, docstring &amp; signature are lost, and tooling/introspection breaks.</p>
+<h4>Decorator with args = 3 layers</h4>
+<pre><code>def retry(n):                  # 1: takes args
+    def deco(fn):              # 2: takes fn
+        @wraps(fn)
+        def inner(*a, **kw):   # 3: the call
+            for i in range(n):
+                try: return fn(*a, **kw)
+                except Exception:
+                    if i == n-1: raise
+        return inner
+    return deco
+@retry(3)
+def flaky(): ...
+</code></pre>
+<p>Stacked decorators apply <b>bottom-up</b>: <code>@a @b def f</code> ≡ <code>a(b(f))</code>. Put <code>@staticmethod</code>/<code>@classmethod</code> <b>outermost</b>.</p>
+</section>
+
+<section class="card"><h3>Generators &amp; Iterators</h3>
+<ul>
+<li><b>Iterable</b>: has <code>__iter__</code> (can be looped). <b>Iterator</b>: has <code>__next__</code> + returns self from <code>__iter__</code>; stateful, exhausts once.</li>
+<li><code>next()</code> past the end raises <code>StopIteration</code> (the loop's stop signal).</li>
+</ul>
+<h4>yield = lazy</h4>
+<pre><code>def read_big(path):
+    with open(path) as fh:
+        for line in fh:     # O(1) memory
+            yield line.strip()
+</code></pre>
+<p>Calling a generator fn returns a generator (runs nothing yet); each <code>next()</code> resumes to the next <code>yield</code>. State (locals, position) is preserved between resumes.</p>
+<h4>genexpr vs list-comp</h4>
+<pre><code>sum(x*x for x in big)   # streams, no list built
+squares = [x*x for x in big]  # materialises all
+</code></pre>
+<p><span class="warn">!</span> A generator is <b>consumed once</b> — a second loop yields nothing. <code>yield from sub</code> delegates; <code>send/throw/close</code> drive coroutine-style generators. <code>itertools</code>: <code>chain islice groupby count cycle tee</code>.</p>
+</section>
+
+<section class="card"><h3>Comprehensions &amp; Functional</h3>
+<pre><code>[x*2 for x in xs if x&gt;0]          # list
+{k: v for k, v in pairs}          # dict
+{x % 3 for x in xs}               # set
+(x*2 for x in xs)                 # generator (lazy)
+</code></pre>
+<h4>Nested &amp; conditional</h4>
+<pre><code>flat = [x for row in matrix for x in row]   # outer-to-inner
+labels = [a if c else b for c in flags]     # ternary in expr
+</code></pre>
+<ul>
+<li>Read nested loops left-to-right, same order as written <code>for</code>s. Beyond 2 levels ⇒ use a real loop for readability <span class="warn">!</span></li>
+<li>Comprehensions have their <b>own scope</b> (3.x) — the loop var does not leak. Faster than an append loop (specialised bytecode).</li>
+<li>Prefer comprehensions over <code>map</code>/<code>filter</code> + <code>lambda</code>; <code>map</code> only wins with an existing named fn.</li>
+</ul>
+<h4>Walrus <code>:=</code></h4>
+<pre><code>while (line := f.readline()):
+    process(line)
+[y for x in data if (y := f(x)) &gt; 0]   # reuse computed y
+</code></pre>
+</section>
+
+<section class="card"><h3>Classes &amp; OOP</h3>
+<table><thead><tr><th>Method</th><th>Role</th></tr></thead><tbody>
+<tr><td><code>__new__(cls)</code></td><td>allocates/returns the instance (rare; immutables, singletons)</td></tr>
+<tr><td><code>__init__(self)</code></td><td>initialises the already-made instance</td></tr>
+</tbody></table>
+<pre><code>class C:
+    def m(self): ...              # instance
+    @classmethod
+    def from_str(cls, s):        # alt constructor
+        return cls(...)
+    @staticmethod
+    def util(x): ...             # no self/cls
+</code></pre>
+<ul>
+<li><code>@classmethod</code> → alternative constructors; gets <code>cls</code> so it respects subclasses. <code>@staticmethod</code> → namespaced helper, no state.</li>
+<li><code>__repr__</code> unambiguous (devs); <code>__str__</code> readable (falls back to repr).</li>
+<li>Define <code>__eq__</code> ⇒ you <b>must</b> define <code>__hash__</code> or the class becomes <b>unhashable</b> <span class="warn">!</span></li>
+</ul>
+<h4>property = descriptor</h4>
+<pre><code>class Temp:
+    @property
+    def celsius(self): return self._c
+    @celsius.setter
+    def celsius(self, v):
+        if v &lt; -273.15: raise ValueError
+        self._c = v
+</code></pre>
+<p>A <code>property</code> is a <b>descriptor</b> (<code>__get__/__set__/__delete__</code>) — attribute access runs code. Write a custom descriptor to reuse validation across attributes.</p>
+<h4>__slots__</h4>
+<pre><code>class Point:
+    __slots__ = ("x", "y")   # no per-instance __dict__
+</code></pre>
+<p>Saves memory (no dict) + blocks stray attributes; costs: no dynamic attrs, weakref/multiple-inheritance caveats. Worth it for millions of small objects.</p>
+<h4>@dataclass</h4>
+<pre><code>from dataclasses import dataclass, field
+@dataclass(frozen=True, slots=True)
+class User:
+    name: str
+    tags: list = field(default_factory=list)  # not []!
+</code></pre>
+<p>Generates <code>__init__/__repr__/__eq__</code>. <code>frozen=True</code> ⇒ immutable + hashable. Mutable defaults ⇒ <code>default_factory</code> <span class="warn">!</span></p>
+</section>
+
+<section class="card"><h3>Inheritance, MRO &amp; super()</h3>
+<ul>
+<li>Method resolution uses <b>C3 linearization</b> → a single deterministic order in <code>Cls.__mro__</code>. Solves the diamond by visiting each base once, children before parents.</li>
+<li><code>super()</code> follows the <b>MRO</b>, not "the parent" — in multiple inheritance it can dispatch to a sibling. Every cooperating class must call <code>super().__init__(...)</code> and accept <code>**kwargs</code>.</li>
+</ul>
+<pre><code>class A:  ...
+class B(A): ...
+class C(A): ...
+class D(B, C): ...
+D.__mro__  # D, B, C, A, object
+</code></pre>
+<h4>Lightweight hooks over metaclasses</h4>
+<ul>
+<li><code>abc.ABC</code> + <code>@abstractmethod</code> → enforce an interface (can't instantiate until implemented).</li>
+<li>Metaclass (<code>type</code> subclass) → customise <b>class creation</b> (registration, validation). Powerful but heavy.</li>
+<li><code>__init_subclass__</code> (per-subclass hook) &amp; <code>__set_name__</code> (descriptor learns its attr name) replace most metaclass needs <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Typing &amp; Type Hints</h3>
+<ul>
+<li>Hints are <b>not enforced at runtime</b> — they're for <code>mypy</code>/<code>pyright</code>, IDEs, and docs. CPython ignores them (beyond storing <code>__annotations__</code>).</li>
+</ul>
+<pre><code>def f(x: int, s: str = "") -&gt; bool: ...
+name: str | None = None          # 3.10 union (was Optional[str])
+items: list[dict[str, int]] = []  # builtin generics (3.9+)
+</code></pre>
+<h4>Generics (3.12 syntax)</h4>
+<pre><code>def first[T](xs: list[T]) -&gt; T:
+    return xs[0]
+class Box[T]:
+    def __init__(self, v: T): self.v = v
+</code></pre>
+<h4>Protocol vs ABC</h4>
+<pre><code>from typing import Protocol
+class Sized(Protocol):
+    def __len__(self) -&gt; int: ...
+# structural: ANY class with __len__ matches, no subclassing
+</code></pre>
+<p><code>Protocol</code> = static duck typing (nominal <i>not</i> required); ABC = nominal (must subclass). <code>Optional[X]</code> ≡ <code>X | None</code>; forgetting the <code>None</code> branch is the classic bug <span class="warn">!</span></p>
+<h4>match / case (3.10+)</h4>
+<pre><code>match command.split():
+    case ["go", ("n"|"s"|"e"|"w") as d]:
+        move(d)
+    case ["drop", *items]:      # capture rest
+        drop(items)
+    case Point(x=0, y=y):       # class pattern
+        on_axis(y)
+    case {"type": t, **rest}:   # mapping pattern
+        handle(t, rest)
+    case _:                     # wildcard (default)
+        unknown()
+</code></pre>
+<ul>
+<li><b>Structural</b> matching — deconstructs by shape/type, binds names. Not a C switch (no fallthrough).</li>
+<li><code>case x:</code> (bare name) always matches and <b>binds</b> — use a dotted constant (<code>case Color.RED</code>) to compare by value <span class="warn">!</span></li>
+<li>Class patterns need <code>__match_args__</code> (dataclasses/namedtuples get it free) for positional matching.</li>
+</ul>
+</section>
+
+<section class="card"><h3>The GIL, Threads &amp; Processes</h3>
+<p>The <b>GIL</b> is a CPython mutex: only one thread executes bytecode at a time. It exists to make refcounting thread-safe cheaply. It's released around blocking <b>I/O</b> and by C extensions (numpy).</p>
+<table><thead><tr><th>Workload</th><th>Use</th></tr></thead><tbody>
+<tr><td>I/O-bound (net, disk, db)</td><td>threads or asyncio — GIL released during waits</td></tr>
+<tr><td>CPU-bound (crunching)</td><td><b>multiprocessing</b> — real parallel cores</td></tr>
+<tr><td>either, pooled</td><td><code>concurrent.futures</code> executors</td></tr>
+</tbody></table>
+<ul>
+<li>Threads share memory (cheap, but need locks); processes = separate memory ⇒ IPC/pickling cost, no shared-state races.</li>
+<li><span class="warn">!</span> <code>x += 1</code> on a shared int is <b>not atomic</b> (load/add/store — can lose updates). <code>list.append</code> happens to be atomic in CPython, but don't rely on it — use a <code>Lock</code>.</li>
+<li>3.12 per-interpreter GIL (subinterpreters); <b>3.13 free-threaded build</b> (PEP 703) can disable the GIL — future of real threading.</li>
+</ul>
+</section>
+
+<section class="card"><h3>asyncio</h3>
+<p>Single-threaded <b>cooperative</b> concurrency. One event loop runs many coroutines; <code>await</code> <b>yields control</b> back to the loop at an I/O point so another task runs. No preemption — a coroutine holds the loop until it awaits.</p>
+<pre><code>import asyncio
+async def fetch(u): ...
+async def main():
+    async with asyncio.TaskGroup() as tg:   # 3.11
+        tg.create_task(fetch(a))
+        tg.create_task(fetch(b))
+asyncio.run(main())
+</code></pre>
+<table><thead><tr><th>Primitive</th><th>Behaviour</th></tr></thead><tbody>
+<tr><td><code>gather(*aws)</code></td><td>run all; one fail → others keep running</td></tr>
+<tr><td><code>TaskGroup</code> (3.11)</td><td>structured; one fail → cancels siblings, raises group</td></tr>
+<tr><td><code>create_task</code></td><td>schedule &amp; return a Task handle</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> A blocking/CPU call inside a coroutine <b>freezes the whole loop</b>. Offload: <code>await asyncio.to_thread(fn)</code> (I/O) or a <code>ProcessPoolExecutor</code> (CPU). Async ≠ faster; it's for <b>many concurrent I/O waits</b>.</p>
+</section>
+
+<section class="card"><h3>Memory Management &amp; GC</h3>
+<ul>
+<li>Primary mechanism = <b>reference counting</b>. Each binding/arg/container-slot increments; going out of scope / <code>del</code> / rebinding decrements. Refcount 0 ⇒ freed <b>immediately</b> (deterministic).</li>
+<li>Refcounting can't free <b>reference cycles</b> (a↔b). A separate <b>generational cyclic GC</b> (gen 0/1/2) periodically finds and collects them. Newly-created objects are gen 0, collected most often.</li>
+</ul>
+<h4>weakref &amp; __del__ <span class="warn">!</span></h4>
+<pre><code>import weakref
+cache = weakref.WeakValueDictionary()  # entry drops
+                                        # when value unref'd
+</code></pre>
+<ul>
+<li><code>__del__</code> is a footgun: non-deterministic timing, can resurrect objects, exceptions are swallowed, and it can <b>break cyclic collection</b>. Prefer context managers / <code>weakref.finalize</code>.</li>
+<li>Leaks in a long service: global caches/lists that only grow, unbroken cycles with <code>__del__</code>, C-ext leaks. Diagnose with <code>tracemalloc</code> (snapshots/diffs), <code>gc</code>, <code>objgraph</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Exceptions &amp; Context Managers</h3>
+<ul>
+<li>Hierarchy: <code>BaseException</code> ⊃ <code>Exception</code>. Catch <code>Exception</code>, <b>not</b> <code>BaseException</code> — the latter swallows <code>KeyboardInterrupt</code>/<code>SystemExit</code> <span class="warn">!</span> Never bare <code>except:</code>.</li>
+</ul>
+<pre><code>try:      risky()
+except ValueError as e:
+    handle(e)
+else:     ...      # ran only if NO exception
+finally:  cleanup() # always
+</code></pre>
+<h4>Chaining</h4>
+<pre><code>raise RuntimeError("load failed") from err  # preserve cause
+raise                                        # re-raise, keep tb
+</code></pre>
+<p>Bare <code>raise</code> inside <code>except</code> re-raises with the original traceback. <code>from err</code> sets <code>__cause__</code>. <b>ExceptionGroup</b> + <code>except*</code> (3.11) handle concurrent failures from a TaskGroup.</p>
+<h4>Context managers · EAFP</h4>
+<pre><code>from contextlib import contextmanager
+@contextmanager
+def tx(conn):
+    conn.begin()
+    try: yield conn; conn.commit()
+    except: conn.rollback(); raise
+</code></pre>
+<p><code>__exit__</code> returning truthy <b>suppresses</b> the exception. EAFP ("try, catch") &gt; LBYL ("check first") — idiomatic &amp; race-free.</p>
+</section>
+
+<section class="card"><h3>Strings, Bytes &amp; Encoding</h3>
+<ul>
+<li><code>str</code> = Unicode code points; <code>bytes</code> = raw octets. Boundary: <code>str.encode(enc)</code> → bytes, <code>bytes.decode(enc)</code> → str. <b>Decode on the way in, encode on the way out.</b></li>
+<li><code>"café".encode("utf-8")</code> is <b>5 bytes</b> for a 4-char string — non-ASCII takes multiple bytes; <code>len(str) ≠ len(bytes)</code> <span class="warn">!</span></li>
+<li>Strings are <b>immutable</b>: <code>s += x</code> in a loop is O(n²) (new object each time). Build a list and <code>"".join(parts)</code> — O(n).</li>
+</ul>
+<h4>f-strings</h4>
+<pre><code>f"{x:.2f}"      # 2 decimals
+f"{n:,}"        # thousands sep
+f"{x:&gt;8}"       # right-align width 8
+f"{val=}"       # 3.8 debug: "val=42"
+</code></pre>
+<p><span class="warn">!</span> At I/O boundaries always pass <code>encoding="utf-8"</code> to <code>open()</code> — the platform default (e.g. cp1252 on Windows) causes <code>UnicodeDecodeError</code>. <code>errors="replace"</code> for lossy tolerance.</p>
+</section>
+
+<section class="card"><h3>Imports, Packaging &amp; Perf</h3>
+<ul>
+<li>Module = a <code>.py</code>; package = a dir. <code>if __name__ == "__main__":</code> guards script-only code (module name is <code>"__main__"</code> only when run directly).</li>
+<li>Modules run <b>once</b> then cache in <code>sys.modules</code> — import side effects fire once. <b>Circular imports</b> break at module top-level; fix by importing inside a function or restructuring <span class="warn">!</span></li>
+<li>Modern packaging: <code>pyproject.toml</code> + a build backend; wheels (built) over sdist. Replaced <code>setup.py</code>/distutils.</li>
+<li>Isolate deps in a venv; pin/lock with <code>uv</code>/<code>poetry</code>. Reproducible installs.</li>
+</ul>
+<h4>Performance model</h4>
+<ul>
+<li>Interpreted bytecode + C builtins. Slow = Python-level loops/attribute lookups; fast = pushing work into C (builtins, <code>numpy</code>, comprehensions, <code>str.join</code>).</li>
+<li><b>Profile, don't guess</b>: <code>cProfile</code> (which fn), <code>line_profiler</code> (which line), <code>tracemalloc</code>/<code>memray</code> (allocs). Bind hot-loop lookups to locals.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Testing &amp; Tooling</h3>
+<pre><code>import pytest
+@pytest.fixture
+def db():
+    d = connect(); yield d; d.close()   # setup/teardown
+
+@pytest.mark.parametrize("n,want", [(2,4),(3,9)])
+def test_sq(n, want):
+    assert sq(n) == want
+</code></pre>
+<ul>
+<li>pytest &gt; unittest: plain <code>assert</code> (rich introspection), fixtures over setUp, <code>parametrize</code>, plugins.</li>
+</ul>
+<h4>Mocking — patch where it's LOOKED UP <span class="warn">!</span></h4>
+<pre><code>from unittest.mock import patch
+# patch the name in the MODULE UNDER TEST, not where defined
+@patch("myapp.service.requests.get")
+def test_x(mock_get): ...
+</code></pre>
+<ul>
+<li><code>Mock</code> (bare), <code>MagicMock</code> (supports dunders), <code>AsyncMock</code> (awaitable).</li>
+<li>Async tests: <code>pytest-asyncio</code> / <code>@pytest.mark.asyncio</code>. High <b>coverage ≠ correctness</b> — it shows lines ran, not that assertions are meaningful.</li>
+<li>Stack: <code>ruff</code>/<code>black</code> (lint+format), <code>mypy</code>/<code>pyright</code> (types), <code>pre-commit</code> (gate on commit).</li>
+</ul>
+</section>
+
+<section class="card"><h3>&#9733; Code Review Checklist</h3>
+<h4>Mutability &amp; defaults</h4>
+<ul>
+<li>&#9744; No mutable default arg (<code>[]</code>/<code>{}</code>) — sentinel <code>None</code> or <code>default_factory</code> <span class="warn">!</span></li>
+<li>&#9744; Function that mutates a passed list/dict is intended &amp; documented (caller sees it).</li>
+<li>&#9744; Shallow copy where a deep copy is needed (nested mutables shared).</li>
+</ul>
+<h4>Names &amp; scope</h4>
+<ul>
+<li>&#9744; No closure/loop late-binding bug (bind via default arg or factory).</li>
+<li>&#9744; <code>is</code> only for <code>None</code>/singletons, never for value equality of ints/strings.</li>
+</ul>
+<h4>Data model</h4>
+<ul>
+<li>&#9744; Custom <code>__eq__</code> ⇒ matching <code>__hash__</code> (or intentionally unhashable).</li>
+<li>&#9744; No dict resize while iterating; hashable keys only.</li>
+</ul>
+<h4>Concurrency</h4>
+<ul>
+<li>&#9744; CPU-bound work uses processes, not threads; shared mutable state is locked (don't trust GIL atomicity) <span class="warn">!</span></li>
+<li>&#9744; No blocking/CPU call inside a coroutine (<code>to_thread</code>/executor).</li>
+</ul>
+<h4>Errors &amp; resources</h4>
+<ul>
+<li>&#9744; No bare/over-broad <code>except</code>; exceptions chained with <code>from</code>; re-raise via bare <code>raise</code>.</li>
+<li>&#9744; Files/locks/conns via <code>with</code>; <code>encoding="utf-8"</code> on I/O.</li>
+<li>&#9744; Type hints present on public APIs; <code>Optional</code> None-branch handled; mypy/ruff clean.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Common Bugs — Spot-the-Bug</h3>
+<table><thead><tr><th>Symptom</th><th>Cause</th></tr></thead><tbody>
+<tr><td>default list "remembers" old values</td><td>mutable default arg, made once <span class="warn">!</span></td></tr>
+<tr><td>all closures return the last value</td><td>late-binding loop capture <span class="warn">!</span></td></tr>
+<tr><td>mutating one copy changes another</td><td>shallow copy of nested data <span class="warn">!</span></td></tr>
+<tr><td><code>UnboundLocalError</code></td><td>assigned a name that's also global → local <span class="warn">!</span></td></tr>
+<tr><td><code>TypeError: unhashable type</code></td><td>list/dict used as dict key / set item</td></tr>
+<tr><td>object won't go in a set</td><td><code>__eq__</code> without <code>__hash__</code> <span class="warn">!</span></td></tr>
+<tr><td>threads don't speed up CPU work</td><td>GIL — need multiprocessing <span class="warn">!</span></td></tr>
+<tr><td>async app hangs / stalls</td><td>blocking call in a coroutine <span class="warn">!</span></td></tr>
+<tr><td>generator empty on 2nd loop</td><td>iterator already consumed <span class="warn">!</span></td></tr>
+<tr><td><code>UnicodeDecodeError</code> on read</td><td>wrong/absent <code>encoding</code> at open <span class="warn">!</span></td></tr>
+<tr><td>mock not taking effect</td><td>patched at definition, not use site <span class="warn">!</span></td></tr>
+<tr><td><code>RuntimeError: dict changed size</code></td><td>mutating a dict while iterating <span class="warn">!</span></td></tr>
+<tr><td>slow string build in a loop</td><td><code>+=</code> on str (O(n²)); use <code>join</code></td></tr>
+<tr><td>memory grows unbounded</td><td>global cache / <code>lru_cache</code> pinning refs <span class="warn">!</span></td></tr>
+</tbody></table>
+</section>
+
+</div>
+</body>
+</html>

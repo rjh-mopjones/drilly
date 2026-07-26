@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Database Theory Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+/* spanning title bar */
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>Database Theory Cheat Sheet</h1><span class="meta">relational · transactions · storage · concurrency · generic examples · drilly</span></div>
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="warn">!</span> footgun / gotcha &nbsp; <code>&#9744;</code> design/review checklist item &nbsp; <span class="pg">SQL</span> standard behaviour &nbsp; <span class="ansi">PG</span> PostgreSQL-specific</li>
+<li>Baseline: <b>ANSI SQL semantics</b>; engine-specific behaviour tagged inline (Postgres, MySQL/InnoDB, Oracle, SQL Server). Isolation-level names are ANSI; real engines map them differently <span class="warn">!</span></li>
+<li>Focus: relational model &amp; normalization · ACID &amp; isolation · MVCC &amp; locking · indexing &amp; storage · query planning · CAP. Last 2 cards = <b>design checklist</b> + symptom→cause.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
+</ul></section>
+
+<section class="card"><h3>Relational Model &amp; Keys</h3>
+<ul>
+<li>A <b>relation</b> is a set of <b>tuples</b> over named <b>attributes</b>, each drawn from a <b>domain</b>. "Set" ⇒ no duplicate tuples, <b>no row order</b>, no column order — a table is a physical, ordered, duplicate-allowing approximation <span class="warn">!</span></li>
+<li>Every value is atomic w.r.t. the relational operators (1NF). The model is <b>value-based</b>: rows are identified by data (keys), never by physical address or insertion order.</li>
+</ul>
+<h4>Key taxonomy</h4>
+<table><thead><tr><th>Key</th><th>Meaning</th></tr></thead><tbody>
+<tr><td>super key</td><td>any attribute set that uniquely identifies a tuple</td></tr>
+<tr><td>candidate key</td><td>minimal super key (no removable attr)</td></tr>
+<tr><td>primary key</td><td>chosen candidate key; <b>NOT NULL</b> + unique</td></tr>
+<tr><td>composite</td><td>candidate key spanning &gt;1 column</td></tr>
+<tr><td>foreign key</td><td>attr referencing another relation's candidate key</td></tr>
+</tbody></table>
+<h4>Surrogate vs natural <span class="warn">!</span></h4>
+<ul>
+<li><b>Surrogate</b> (auto-int / UUID): stable, opaque, no business meaning — safe PK default. <b>Natural</b> (email, ISBN): meaningful but mutable ⇒ cascading updates.</li>
+<li>Random UUIDv4 as a clustered PK <b>fragments B-tree inserts</b> <span class="warn">!</span> — prefer bigint identity or UUIDv7/ULID (time-ordered).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Relational Algebra → SQL</h3>
+<table><thead><tr><th>Algebra</th><th>SQL</th></tr></thead><tbody>
+<tr><td>σ (select rows)</td><td><code>WHERE</code></td></tr>
+<tr><td>π (project cols)</td><td><code>SELECT a,b</code></td></tr>
+<tr><td>⋈ (join)</td><td><code>JOIN … ON</code></td></tr>
+<tr><td>× (product)</td><td><code>CROSS JOIN</code></td></tr>
+<tr><td>ρ (rename)</td><td><code>AS</code></td></tr>
+<tr><td>∪ ∩ − (set ops)</td><td><code>UNION</code>/<code>INTERSECT</code>/<code>EXCEPT</code></td></tr>
+<tr><td>γ (group/agg)</td><td><code>GROUP BY</code></td></tr>
+</tbody></table>
+<ul>
+<li>Algebra is <b>closed</b>: every operator takes relations and returns a relation ⇒ composable, and the basis for the optimizer's rewrite rules (join reorder, predicate pushdown).</li>
+<li>SQL is <b>bag (multiset)</b>-based, not set-based: <code>SELECT</code> keeps duplicates unless <code>DISTINCT</code>; <code>UNION</code> dedupes but <code>UNION ALL</code> doesn't. <code>ORDER BY</code> adds ordering the model doesn't have. So SQL is only "mostly" relational <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>NULL &amp; Three-Valued Logic</h3>
+<ul>
+<li>NULL = "unknown/absent", not a value. Any arithmetic or comparison with NULL yields <b>UNKNOWN</b>, which behaves like false in a <code>WHERE</code> (rows kept only on TRUE).</li>
+</ul>
+<pre><code>NULL = NULL   -&gt; UNKNOWN   (not TRUE!)
+NULL &lt;&gt; 5     -&gt; UNKNOWN
+x IN (1,NULL) -&gt; TRUE or UNKNOWN, never FALSE
+NOT IN (subq with a NULL) -&gt; drops ALL rows !</code></pre>
+<table><thead><tr><th>Op</th><th>T</th><th>F</th><th>U</th></tr></thead><tbody>
+<tr><td>AND</td><td>—</td><td>F wins</td><td>U</td></tr>
+<tr><td>OR</td><td>T wins</td><td>—</td><td>U</td></tr>
+</tbody></table>
+<ul>
+<li>Test with <code>IS NULL</code> / <code>IS DISTINCT FROM</code>, never <code>= NULL</code> <span class="warn">!</span></li>
+<li>Aggregates <b>skip</b> NULLs: <code>COUNT(col)</code> ignores them, <code>COUNT(*)</code> doesn't; <code>AVG</code> divides by non-null count.</li>
+<li><code>UNIQUE</code> allows multiple NULLs (they're "not equal"). Use <code>NOT NULL</code> + defaults to sidestep the whole hazard where you can.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Functional Dependencies</h3>
+<ul>
+<li><b>X → Y</b>: X determines Y — any two tuples agreeing on X must agree on Y. FDs encode business rules and <b>drive normalization</b>.</li>
+<li><b>Partial</b> dependency: a non-key attr depends on <i>part</i> of a composite key ⇒ breaks 2NF. <b>Transitive</b>: non-key → non-key ⇒ breaks 3NF.</li>
+</ul>
+<h4>Armstrong's axioms</h4>
+<table><thead><tr><th>Rule</th><th>Meaning</th></tr></thead><tbody>
+<tr><td>reflexivity</td><td>Y⊆X ⇒ X→Y</td></tr>
+<tr><td>augmentation</td><td>X→Y ⇒ XZ→YZ</td></tr>
+<tr><td>transitivity</td><td>X→Y, Y→Z ⇒ X→Z</td></tr>
+</tbody></table>
+<ul>
+<li><b>Closure X⁺</b> = all attrs derivable from X. If X⁺ = all attributes, X is a super key. This is how you <i>find</i> candidate keys.</li>
+<li>A determinant is any left side of an FD; <b>BCNF requires every determinant be a super key.</b></li>
+</ul>
+</section>
+
+<section class="card"><h3>Normal Forms (1NF → BCNF)</h3>
+<table><thead><tr><th>NF</th><th>Requires (given prior NF)</th></tr></thead><tbody>
+<tr><td><b>1NF</b></td><td>atomic values; no repeating groups / arrays-as-columns</td></tr>
+<tr><td><b>2NF</b></td><td>no <b>partial</b> dep — non-key attrs depend on the <i>whole</i> key</td></tr>
+<tr><td><b>3NF</b></td><td>no <b>transitive</b> dep — non-key attrs depend on <i>nothing but</i> the key</td></tr>
+<tr><td><b>BCNF</b></td><td>every determinant is a super key (stricter 3NF)</td></tr>
+<tr><td>4NF</td><td>no non-trivial multivalued dep</td></tr>
+<tr><td>5NF</td><td>no non-trivial join dep</td></tr>
+</tbody></table>
+<p><i>Mnemonic:</i> "the key, the whole key, and nothing but the key — so help me Codd." 3NF ≈ the target for OLTP.</p>
+<ul>
+<li>Decomposition must be <b>lossless-join</b> (natural join reconstructs the original) and ideally <b>dependency-preserving</b>. BCNF can force giving up dependency preservation <span class="warn">!</span> — 3NF always preserves both.</li>
+<li>4NF/5NF matter only with independent multi-valued facts in one table (rare, often a modeling smell).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Anomalies &amp; Denormalization</h3>
+<h4>What normalization prevents</h4>
+<table><thead><tr><th>Anomaly</th><th>Symptom</th></tr></thead><tbody>
+<tr><td>insert</td><td>can't add a fact without an unrelated one (need a course to store an instructor)</td></tr>
+<tr><td>update</td><td>a fact stored N times ⇒ update misses some ⇒ contradiction <span class="warn">!</span></td></tr>
+<tr><td>delete</td><td>deleting a row destroys an unrelated fact</td></tr>
+</tbody></table>
+<p>Root cause = <b>one relation storing two independent facts</b>. Split them.</p>
+<h4>Denormalize deliberately</h4>
+<ul>
+<li>Trade write-cost + redundancy for read speed: precomputed aggregates, duplicated hot columns, materialized joins. Justified when reads ≫ writes and joins are the bottleneck.</li>
+<li>You now own consistency: keep copies in sync via triggers, app logic, or <b>materialized views</b> — and accept staleness <span class="warn">!</span> Normalize first, denormalize with evidence.</li>
+</ul>
+</section>
+
+<section class="card"><h3>ACID — property → mechanism</h3>
+<table><thead><tr><th>Prop</th><th>Guarantee</th><th>Mechanism</th></tr></thead><tbody>
+<tr><td><b>A</b>tomicity</td><td>all-or-nothing</td><td>undo log / WAL rollback</td></tr>
+<tr><td><b>C</b>onsistency</td><td>constraints hold before→after</td><td>PK/FK/CHECK + <i>app</i></td></tr>
+<tr><td><b>I</b>solation</td><td>concurrent = some serial order</td><td>locks / MVCC</td></tr>
+<tr><td><b>D</b>urability</td><td>committed survives crash</td><td>WAL + <code>fsync</code></td></tr>
+</tbody></table>
+<ul>
+<li><b>C is the odd one out</b> <span class="warn">!</span>: it's not a DB algorithm, it's <i>your</i> invariants (balances ≥ 0). The DB enforces declared constraints; the rest is on you.</li>
+<li>ACID's C ≠ CAP's C. ACID-C = integrity constraints; CAP-C = a single up-to-date value across nodes (linearizability). Same letter, unrelated concepts <span class="warn">!</span></li>
+<li><b>BASE</b> (Basically Available, Soft state, Eventual consistency) trades I/C for availability + scale — accept temporary disagreement, converge later. Right when writes must never block and stale reads are tolerable.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Transaction Lifecycle &amp; Durability</h3>
+<pre><code>BEGIN;
+  UPDATE acct SET bal=bal-100 WHERE id=1;
+  SAVEPOINT s1;
+  UPDATE acct SET bal=bal+100 WHERE id=2;
+  -- ROLLBACK TO s1;   -- partial undo
+COMMIT;   -- durable point</code></pre>
+<ul>
+<li><b>Atomic on crash mid-commit:</b> the commit is decided by a single durable act — the WAL commit record hitting disk. Before it → recovery <b>undoes</b> (rolls back); after → recovery <b>redoes</b>. No half-states survive.</li>
+</ul>
+<h4>Durability = WAL + fsync</h4>
+<ul>
+<li><b>Write-ahead rule:</b> the log record is flushed <i>before</i> the data page. Sequential log writes are cheap; random page writes lazily follow.</li>
+<li>"Committed" only means as durable as the flush: <code>fsync</code> + battery-backed cache. <code>synchronous_commit=off</code> / group commit trades a few ms of data loss for throughput <span class="warn">!</span></li>
+<li><b>Checkpoint</b> flushes dirty pages + records a log position ⇒ bounds redo work (recovery time) at the cost of I/O spikes.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Isolation Levels × Anomalies</h3>
+<table><thead><tr><th>Level</th><th>Dirty</th><th>NonRep</th><th>Phantom</th><th>Skew</th></tr></thead><tbody>
+<tr><td>READ UNCOMMITTED</td><td>maybe</td><td>Y</td><td>Y</td><td>Y</td></tr>
+<tr><td>READ COMMITTED</td><td>—</td><td>Y</td><td>Y</td><td>Y</td></tr>
+<tr><td>REPEATABLE READ</td><td>—</td><td>—</td><td>Y*</td><td>Y</td></tr>
+<tr><td>SNAPSHOT (SI)</td><td>—</td><td>—</td><td>—</td><td><b>Y</b> <span class="warn">!</span></td></tr>
+<tr><td>SERIALIZABLE</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+</tbody></table>
+<p class="cap">* ANSI permits phantoms at RR; InnoDB RR blocks them via next-key locks; PG RR = snapshot isolation (no phantoms, but write skew remains).</p>
+<h4>Read phenomena</h4>
+<ul>
+<li><b>Dirty read:</b> see another txn's <i>uncommitted</i> write.</li>
+<li><b>Non-repeatable read:</b> re-read a <i>row</i>, value changed (committed update).</li>
+<li><b>Phantom:</b> re-run a <i>range</i> query, new rows appear (committed insert).</li>
+<li><b>Write skew:</b> two txns read an overlapping set, each writes a disjoint part; both valid alone, together break an invariant.</li>
+</ul>
+<p><span class="warn">!</span> Engine names lie: Oracle/PG "SERIALIZABLE" was historically SI. Know the <i>guarantee</i>, not the label.</p>
+</section>
+
+<section class="card"><h3>Snapshot Isolation &amp; Its Hole</h3>
+<ul>
+<li><b>SI:</b> each txn reads a consistent snapshot as of its start; writers don't block readers. First-committer-wins on write-write conflicts ⇒ no lost update on the <i>same</i> row.</li>
+<li>SI stops dirty/non-repeatable/phantom but <b>allows write skew</b> — the classic SI gap <span class="warn">!</span></li>
+</ul>
+<h4>Write skew — on-call doctors</h4>
+<pre><code>-- invariant: >=1 doctor on call
+-- T1 &amp; T2 each read count=2, each think
+-- "safe to go off", each remove self:
+UPDATE oncall SET on=false WHERE me;
+-- both commit -> 0 on call. Broken !</code></pre>
+<h4>Fixes</h4>
+<ul>
+<li>Materialize the conflict: <code>SELECT … FOR UPDATE</code> on the read set, or a guard row both must lock.</li>
+<li><b>SERIALIZABLE</b> (SSI in PG) — detects rw-dependency cycles and aborts one; retry on serialization failure.</li>
+<li>Push the invariant into a constraint the DB can enforce (exclusion/CHECK).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Lost Update &amp; How to Stop It</h3>
+<pre><code>-- read-modify-write race:
+x = SELECT qty FROM inv WHERE id=1; -- 10
+-- (other txn does the same, writes 9)
+UPDATE inv SET qty = x-1 WHERE id=1; -- writes 9, lost !</code></pre>
+<table><thead><tr><th>Fix</th><th>How</th></tr></thead><tbody>
+<tr><td>atomic write</td><td><code>SET qty = qty-1</code> — let the DB do the arithmetic</td></tr>
+<tr><td>pessimistic</td><td><code>SELECT … FOR UPDATE</code> locks the row for the txn</td></tr>
+<tr><td>optimistic</td><td><code>WHERE version = :v</code>; 0 rows ⇒ retry (CAS)</td></tr>
+</tbody></table>
+<ul>
+<li><b>Optimistic</b> wins under low contention (no lock held across think-time); <b>pessimistic</b> wins under high contention / long critical sections.</li>
+<li>App-side "read then write" without one of these is a bug at RC/RR <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Locking &amp; 2PL</h3>
+<ul>
+<li><b>2PL:</b> a <i>growing</i> phase acquires locks, then a <i>shrinking</i> phase releases — never acquire after releasing. Guarantees serializability. <b>Strict 2PL</b> holds all X-locks to commit ⇒ prevents cascading aborts (standard).</li>
+</ul>
+<h4>Lock modes</h4>
+<table><thead><tr><th>Mode</th><th>Compatible with</th></tr></thead><tbody>
+<tr><td>S (shared/read)</td><td>other S</td></tr>
+<tr><td>X (exclusive/write)</td><td>nothing</td></tr>
+<tr><td>intent (IS/IX)</td><td>coarse marker for hierarchy</td></tr>
+<tr><td>gap / next-key</td><td>locks a <i>range</i> ⇒ blocks phantoms</td></tr>
+</tbody></table>
+<h4>Granularity &amp; escalation</h4>
+<ul>
+<li>row → page → table: finer = more concurrency but more lock overhead. Engines <b>escalate</b> to coarser locks under many-row txns — a latent concurrency cliff <span class="warn">!</span></li>
+<li>MVCC engines (PG) don't take read locks at all; <b>writers still lock rows</b>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>MVCC</h3>
+<ul>
+<li><b>Multi-Version Concurrency Control:</b> each write creates a new row <i>version</i> stamped with txn id; a reader sees the newest version committed as of its snapshot. <b>Readers never block writers, writers never block readers.</b></li>
+<li>Visibility = "which versions can this snapshot see" (xmin/xmax vs snapshot's active-txn list).</li>
+</ul>
+<h4>The costs <span class="warn">!</span></h4>
+<ul>
+<li><b>Version bloat:</b> dead tuples accumulate; need garbage collection — Postgres <code>VACUUM</code> (and autovacuum). A long-running or idle-in-transaction txn <b>holds back the GC horizon</b> ⇒ tables bloat, indexes slow.</li>
+<li>Update-heavy tables ⇒ index write amplification (each version indexed; mitigated by HOT updates).</li>
+<li>Contrast with <b>2PL</b>: MVCC pays storage + GC to buy lock-free reads; 2PL pays blocking to avoid versions.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Deadlocks</h3>
+<pre><code>T1: lock A ... wants B
+T2: lock B ... wants A   -&gt; cycle</code></pre>
+<table><thead><tr><th>Strategy</th><th>How</th></tr></thead><tbody>
+<tr><td>detect</td><td>wait-for graph; find cycle, abort a victim (cheapest/youngest)</td></tr>
+<tr><td>timeout</td><td>abort if a lock wait exceeds <code>lock_timeout</code> (blunt)</td></tr>
+<tr><td>prevent</td><td>ordered locking; <b>wait-die</b> / <b>wound-wait</b> by txn age</td></tr>
+</tbody></table>
+<ul>
+<li><b>Cheapest real fix:</b> always acquire locks in a <b>consistent global order</b> (e.g. ascending PK) ⇒ no cycle possible <span class="warn">!</span></li>
+<li>Deadlocks are normal under contention — the app must <b>catch the serialization/deadlock error and retry</b> the whole txn.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Indexing — B-tree &amp; friends</h3>
+<ul>
+<li><b>B+tree</b> is the default: balanced, high fan-out ⇒ height 3–4 for millions–billions of rows ⇒ point lookup in ~3–4 page reads. Leaves are linked ⇒ <b>range scans are sequential &amp; cheap</b>. Keeps data <b>sorted</b> ⇒ serves <code>ORDER BY</code>, <code>&lt; &gt; BETWEEN</code>, prefix <code>LIKE 'ab%'</code>.</li>
+</ul>
+<h4>Composite &amp; leftmost prefix <span class="warn">!</span></h4>
+<pre><code>INDEX (a, b, c) serves:
+  WHERE a=?              yes
+  WHERE a=? AND b=?      yes
+  WHERE a=? ORDER BY b   yes
+  WHERE b=?              NO  (skips a)
+  WHERE a=? AND c=?      partial (a only)</code></pre>
+<ul>
+<li>Column order = access pattern. Put <b>equality columns first</b>, range/sort last.</li>
+<li><b>Covering index</b> (<code>INCLUDE</code> extra cols): query answered from the index alone — no heap/table fetch (index-only scan).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Index Types &amp; Selectivity</h3>
+<table><thead><tr><th>Type</th><th>Good at / limit</th></tr></thead><tbody>
+<tr><td>B-tree</td><td>ranges, sort, equality — the default</td></tr>
+<tr><td>hash</td><td>O(1) equality only; <b>no range/sort</b> <span class="warn">!</span></td></tr>
+<tr><td>bitmap</td><td>low-cardinality cols, AND/OR of predicates (warehouse)</td></tr>
+<tr><td>GIN/inverted</td><td>arrays, JSONB, full-text (multi-value)</td></tr>
+<tr><td>LSM</td><td>write-optimized; see below</td></tr>
+</tbody></table>
+<h4>Selectivity / cardinality</h4>
+<ul>
+<li><b>Selectivity</b> = fraction of rows a predicate keeps. Low selectivity (few rows) ⇒ index wins; matching a large fraction ⇒ a <b>full scan is cheaper</b> (random I/O per row beats one sequential pass) <span class="warn">!</span></li>
+<li>Rule of thumb: index helps below ~5–10% of the table. Low-cardinality columns (boolean, status) rarely benefit from a plain B-tree.</li>
+</ul>
+<h4>Clustered vs secondary</h4>
+<ul>
+<li><b>Clustered / index-organized</b>: table rows <i>are</i> the B-tree leaves (InnoDB PK, SQL Server). One per table; PK order = physical order.</li>
+<li><b>Secondary</b> index stores the key + a row locator ⇒ a lookup pays a second hop (bookmark lookup) to the heap/clustered index.</li>
+</ul>
+</section>
+
+<section class="card"><h3>B-tree vs LSM-tree</h3>
+<table><thead><tr><th></th><th>B-tree</th><th>LSM-tree</th></tr></thead><tbody>
+<tr><td>writes</td><td>in-place, random</td><td>append memtable → flush SSTables</td></tr>
+<tr><td>write amp</td><td>lower</td><td>higher (compaction)</td></tr>
+<tr><td>read amp</td><td>lower (1 tree)</td><td>higher (many levels + bloom)</td></tr>
+<tr><td>space</td><td>fragmentation</td><td>better (compressed, sorted)</td></tr>
+</tbody></table>
+<ul>
+<li><b>LSM</b> (RocksDB, Cassandra): sequential writes ⇒ high write throughput; reads check memtable + levels, using <b>bloom filters</b> to skip SSTables. Compaction is background write-amp + a latency-jitter source <span class="warn">!</span></li>
+<li><b>B-tree</b> favors read-heavy / mixed OLTP; <b>LSM</b> favors write-heavy, high-ingest, time-series.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Storage &amp; Physical Layout</h3>
+<ul>
+<li>The DB reads/writes fixed-size <b>pages</b> (4–16KB), not rows. The <b>buffer pool / page cache</b> holds hot pages in RAM; a cache miss = disk I/O — the unit that dominates cost estimation.</li>
+<li><b>Heap</b>-organized: rows wherever they fit; PK is just another index. <b>Index-organized</b>: rows live in PK order (fast PK range, slower secondary).</li>
+</ul>
+<h4>Row vs column</h4>
+<table><thead><tr><th>Row store</th><th>Column store</th></tr></thead><tbody>
+<tr><td>whole-row fetch (OLTP)</td><td>few cols over many rows (OLAP)</td></tr>
+<tr><td>fast point writes</td><td>huge compression (RLE, dictionary)</td></tr>
+<tr><td>indexes for filters</td><td>vectorized/SIMD scans; skip cols</td></tr>
+</tbody></table>
+<h4>Crash recovery (ARIES)</h4>
+<ul>
+<li><b>Analysis</b> (find dirty pages + active txns from last checkpoint) → <b>Redo</b> (replay <i>all</i> logged changes, repeat history) → <b>Undo</b> (roll back losers). WAL LSNs make redo idempotent.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Query Processing &amp; Optimization</h3>
+<ul>
+<li><b>Pipeline:</b> parse (AST) → bind/rewrite (resolve names, view expansion, simplify) → <b>optimize</b> (choose plan by cost) → execute (operator tree / iterators). The optimizer's output is a <b>physical plan</b>.</li>
+</ul>
+<h4>Join algorithms</h4>
+<table><thead><tr><th>Join</th><th>Best when</th></tr></thead><tbody>
+<tr><td>nested loop</td><td>small outer + indexed inner</td></tr>
+<tr><td>hash join</td><td>big unsorted equi-join; build side fits RAM</td></tr>
+<tr><td>merge join</td><td>both inputs already sorted on the key</td></tr>
+</tbody></table>
+<h4>Cost-based optimizer</h4>
+<ul>
+<li>Enumerates plans, costs each from <b>statistics</b>: table size, column histograms, distinct counts, index clustering. Picks the cheapest estimated I/O+CPU.</li>
+<li><b>Cardinality estimation</b> is the hard part — errors compound multiplicatively across joins. Correlated columns + stale stats ⇒ wildly wrong row counts ⇒ bad plan <span class="warn">!</span> Keep stats fresh (<code>ANALYZE</code>).</li>
+<li>Rewrites: predicate pushdown, join reordering, subquery flattening, constant folding — all safe because algebra is closed.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Reading a Plan — Red Flags</h3>
+<pre><code>EXPLAIN (ANALYZE, BUFFERS) SELECT …;
+-- compare estimated rows vs actual rows</code></pre>
+<table><thead><tr><th>Sign</th><th>Likely cause</th></tr></thead><tbody>
+<tr><td>Seq Scan on big table</td><td>missing/unusable index, or predicate not sargable <span class="warn">!</span></td></tr>
+<tr><td>est rows ≪ actual</td><td>stale/absent stats, correlation</td></tr>
+<tr><td>Nested Loop over large set</td><td>bad estimate chose loop vs hash</td></tr>
+<tr><td>Sort / Hash spills to disk</td><td><code>work_mem</code> too small</td></tr>
+<tr><td>Bitmap Heap + Recheck</td><td>medium-selectivity path</td></tr>
+</tbody></table>
+<h4>Sargability <span class="warn">!</span></h4>
+<ul>
+<li>Wrapping the indexed column kills the index: <code>WHERE date(ts)=…</code>, <code>WHERE col+0=…</code>, leading-wildcard <code>LIKE '%x'</code>. Rewrite as a <b>range on the raw column</b>, or add a functional/expression index.</li>
+<li>Implicit type casts (string vs int column) silently disable an index too.</li>
+</ul>
+</section>
+
+<section class="card"><h3>CAP &amp; PACELC</h3>
+<ul>
+<li><b>CAP:</b> under a network <b>P</b>artition you must choose <b>C</b> (linearizable reads) <i>or</i> <b>A</b> (every node answers). "Pick two" is misleading — <b>P is not optional</b> in a real distributed system, so the live choice is <b>C vs A during a partition</b>.</li>
+</ul>
+<table><thead><tr><th>Partition</th><th>CP does</th><th>AP does</th></tr></thead><tbody>
+<tr><td>client write</td><td>reject / block (no quorum)</td><td>accept, reconcile later</td></tr>
+<tr><td>guarantee</td><td>correct or unavailable</td><td>available but maybe stale</td></tr>
+</tbody></table>
+<h4>PACELC — the fuller picture</h4>
+<ul>
+<li>If <b>P</b>artition → <b>A</b> or <b>C</b>; <b>E</b>lse (normal ops) → <b>L</b>atency or <b>C</b>onsistency. Most single-node ACID DBs are <b>PC/EC</b>; Dynamo/Cassandra are <b>PA/EL</b>; Spanner ≈ <b>PC/EC</b> (pays latency for consistency).</li>
+<li>Even with no partition you trade sync-replication latency for consistency <span class="warn">!</span> — CAP alone hides this.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Replication &amp; Consistency (quick)</h3>
+<ul>
+<li><b>Leader-follower:</b> writes to leader, replicated to followers; reads can fan out. <b>Sync</b> replication ⇒ no data loss on failover but higher latency; <b>async</b> ⇒ fast but a failover can lose the tail <span class="warn">!</span></li>
+<li><b>Replication lag</b> breaks <i>read-your-writes</i> and <i>monotonic reads</i> — user writes to leader, reads a stale follower. Fix: read-from-leader-after-write, sticky routing, or version tokens.</li>
+<li><b>Quorum</b> (Dynamo): <code>R + W &gt; N</code> guarantees read/write sets overlap ⇒ latest value seen. Sloppy quorum + hinted handoff trade consistency for availability.</li>
+</ul>
+<h4>Consistency spectrum</h4>
+<p><b>linearizable</b> &gt; sequential &gt; <b>causal</b> &gt; read-your-writes/monotonic &gt; <b>eventual</b>. Moving up costs latency/availability. Causal is the strongest model an <i>always-available</i> system can provide.</p>
+</section>
+
+<section class="card"><h3>&#9733; Design &amp; Review Checklist</h3>
+<h4>Schema</h4>
+<ul>
+<li>&#9744; PK on every table; surrogate unless a stable natural key exists; FK constraints declared (not just app-enforced).</li>
+<li>&#9744; Normalized to 3NF/BCNF by default; each denormalization has a documented reason + a sync mechanism.</li>
+<li>&#9744; NULLable columns intended; no <code>=NULL</code>, no <code>NOT IN</code> over a nullable subquery <span class="warn">!</span></li>
+</ul>
+<h4>Transactions</h4>
+<ul>
+<li>&#9744; Isolation level matches the invariant; read-modify-write uses atomic update / <code>FOR UPDATE</code> / version CAS — not bare read-then-write.</li>
+<li>&#9744; Write-skew invariants protected (SERIALIZABLE, guard row, or constraint).</li>
+<li>&#9744; Locks acquired in a consistent order; app retries serialization/deadlock errors.</li>
+<li>&#9744; No long-running / idle-in-transaction txns (locks + MVCC bloat) <span class="warn">!</span></li>
+</ul>
+<h4>Indexing &amp; queries</h4>
+<ul>
+<li>&#9744; Composite index column order = equality-then-range/sort; covering where hot.</li>
+<li>&#9744; Predicates are sargable (no function on the column, no leading wildcard, no implicit cast).</li>
+<li>&#9744; Plan checked with <code>EXPLAIN ANALYZE</code>; est vs actual rows sane; stats fresh.</li>
+<li>&#9744; No unbounded result sets; pagination keyset-based, not <code>OFFSET</code> on deep pages.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Symptom → Cause</h3>
+<table><thead><tr><th>Symptom</th><th>Likely cause</th></tr></thead><tbody>
+<tr><td>query slow, big Seq Scan</td><td>non-sargable predicate / missing index <span class="warn">!</span></td></tr>
+<tr><td>plan flips, sudden slowdown</td><td>stale stats ⇒ bad cardinality estimate</td></tr>
+<tr><td>row vanishes from filtered set</td><td><code>NOT IN</code> hit a NULL (3-valued logic) <span class="warn">!</span></td></tr>
+<tr><td>counter/balance loses updates</td><td>lost update — read-then-write race</td></tr>
+<tr><td>invariant broken, each txn "looked safe"</td><td>write skew under snapshot isolation <span class="warn">!</span></td></tr>
+<tr><td>intermittent txn aborts under load</td><td>deadlock / serialization conflict — add retry</td></tr>
+<tr><td>table + indexes keep growing, autovacuum can't keep up</td><td>MVCC bloat from a long-lived txn <span class="warn">!</span></td></tr>
+<tr><td>replica returns old data after write</td><td>replication lag — read-your-writes broken</td></tr>
+<tr><td>update applied to some copies only</td><td>update anomaly — denormalized data not synced</td></tr>
+<tr><td>random-UUID PK, slow inserts + bloat</td><td>non-sequential clustered key fragments B-tree <span class="warn">!</span></td></tr>
+</tbody></table>
+</section>
+
+</div>
+</body>
+</html>

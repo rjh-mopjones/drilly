@@ -316,6 +316,7 @@
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
       "sectionOrder": [],
+      "cheatSheetUrl": "/rust-cheatsheet.html",
       "itemCount": 18
     },
     {
@@ -331,6 +332,7 @@
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
       "sectionOrder": [],
+      "cheatSheetUrl": "/python-cheatsheet.html",
       "itemCount": 18
     },
     {
@@ -346,6 +348,7 @@
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
       "sectionOrder": [],
+      "cheatSheetUrl": "/kotlin-cheatsheet.html",
       "itemCount": 15
     },
     {
@@ -377,6 +380,7 @@
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
       "sectionOrder": [],
+      "cheatSheetUrl": "/db-theory-cheatsheet.html",
       "itemCount": 16
     },
     {
@@ -392,6 +396,7 @@
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
       "sectionOrder": [],
+      "cheatSheetUrl": "/sql-patterns-cheatsheet.html",
       "itemCount": 26
     },
     {
@@ -666,6 +671,7 @@
       "sectionHeadingLevel": 3,
       "autoNumberItems": true,
       "sectionOrder": [],
+      "cheatSheetUrl": "/ai-engineering-cheatsheet.html",
       "itemCount": 21
     },
     {

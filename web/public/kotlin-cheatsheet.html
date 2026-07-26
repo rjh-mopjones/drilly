@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Kotlin Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+/* spanning title bar */
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>Kotlin Cheat Sheet</h1><span class="meta">Kotlin 2.x · backend/Android · generic examples · drilly</span></div>
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="warn">!</span> footgun / gotcha &nbsp; <code>&#9744;</code> review checklist item &nbsp; <span class="pg">JVM</span> bytecode/runtime note</li>
+<li>Baseline: <b>Kotlin 2.x</b> (K2 compiler), JVM target. Coroutines = <code>kotlinx-coroutines</code>. Most idioms are stable since 1.5.</li>
+<li>Senior focus: null safety · coroutines &amp; structured concurrency · variance · delegation · Java interop. Last 2 cards = <b>review checklist</b> + spot-the-bug.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
+</ul></section>
+
+<section class="card"><h3>val / var, Properties, Defaults</h3>
+<ul>
+<li><code>val</code> = immutable <b>binding</b> (not deep immutability); <code>var</code> = reassignable. <code>val xs = mutableListOf(); xs.add(1)</code> is legal <span class="warn">!</span></li>
+<li>Kotlin <b>inverts Java defaults</b>: <code>val</code>&gt;<code>var</code>, <code>final</code>&gt;<code>open</code>, non-null&gt;nullable, <code>public</code> but <code>internal</code> available. Defaults encode a design opinion, not just terseness.</li>
+<li><b>Everything is an expression</b>: <code>if</code>/<code>when</code>/<code>try</code> return values — no ternary operator.</li>
+</ul>
+<pre><code>val x = if (cond) a else b       // if is expr
+var age: Int = 0
+  get() = field                  // backing field
+  set(v) { field = maxOf(0, v) } // custom setter
+class C { private set }          // property w/ private setter</code></pre>
+<ul>
+<li>Property = getter (+ setter for <code>var</code>) + optional backing <code>field</code>. Not a bare Java field. <span class="pg">JVM</span> <code>val name</code> → <code>getName()</code>.</li>
+<li><code>const val</code> = compile-time constant (top-level or in <code>companion</code>), primitives/String only.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Null Safety</h3>
+<p><b>Nullability is part of the type.</b> <code>String</code> and <code>String?</code> are distinct types; most NPEs become compile errors.</p>
+<table><thead><tr><th>Op</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>?.</code></td><td>safe call — short-circuits to null: <code>a?.b?.c</code></td></tr>
+<tr><td><code>?:</code></td><td>Elvis — fallback: <code>x ?: default</code>; RHS can <code>return</code>/<code>throw</code></td></tr>
+<tr><td><code>!!</code></td><td>assert non-null; throws NPE if null <span class="warn">!</span></td></tr>
+<tr><td><code>?.let{}</code></td><td>run block only if non-null</td></tr>
+</tbody></table>
+<pre><code>val len = name?.length ?: 0
+val u = user ?: throw NotFound()   // guard via Elvis
+obj?.let { use(it) }               // null-guarded</code></pre>
+<h4>lateinit &amp; platform types <span class="warn">!</span></h4>
+<ul>
+<li><code>lateinit var x: String</code> — non-null, non-primitive, <code>var</code> only. Access before init → <code>UninitializedPropertyAccessException</code>. Check <code>::x.isInitialized</code>.</li>
+<li>Java call → <b>platform type</b> <code>String!</code>: compiler accepts as <code>String</code> OR <code>String?</code> with no warning. NPE at runtime if wrong. Wrap Java APIs at the boundary with explicit <code>T?</code>.</li>
+<li>Every <code>!!</code> is you overriding the type checker — treat as a future bug report. Prefer <code>requireNotNull(x)</code>/<code>checkNotNull</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Data &amp; Sealed Classes</h3>
+<pre><code>data class User(val id: Int, val name: String)
+// generates equals/hashCode/toString/copy/componentN
+val (id, name) = user             // destructuring
+val u2 = user.copy(name = "bob")  // non-destructive update</code></pre>
+<ul>
+<li>Data class: value objects/DTOs. ≥1 primary-ctor param; can't be <code>abstract</code>/<code>open</code>. <b>Use <code>val</code> props</b> — <code>var</code> in a data class + <code>Set</code>/<code>Map</code> key mutates the hash → lost element <span class="warn">!</span></li>
+<li><code>equals</code>/<code>hashCode</code> use <b>only primary-ctor</b> props — body props are ignored <span class="warn">!</span></li>
+</ul>
+<h4>Sealed = closed hierarchy</h4>
+<pre><code>sealed interface Result&lt;out T&gt;
+data class Ok&lt;T&gt;(val v: T) : Result&lt;T&gt;
+data class Err(val e: Throwable) : Result&lt;Nothing&gt;
+
+val msg = when (r) {              // exhaustive: no else
+  is Ok  -&gt; r.v.toString()
+  is Err -&gt; r.e.message
+}</code></pre>
+<ul>
+<li>Sealed enumerates <b>subtypes</b> (each carries own state); enum enumerates <b>instances</b>. <code>when</code> over a sealed type is compiler-checked exhaustive → drop <code>else</code> so a new subtype is a compile error.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Extension Functions</h3>
+<pre><code>fun String.isEmail() = contains("@")
+"a@b.com".isEmail()               // reads like a member
+fun &lt;T&gt; List&lt;T&gt;.second() = this[1]</code></pre>
+<ul>
+<li>Add methods without subclassing. <span class="pg">JVM</span> compiles to a <b>static</b> method with receiver as first arg — no runtime cost, no reflection.</li>
+<li><b>Resolved statically</b> on the <i>declared</i> type, not the runtime type — no virtual dispatch <span class="warn">!</span></li>
+<li><b>Members win</b>: if a member with the same signature exists, the extension is shadowed and never called <span class="warn">!</span></li>
+<li>Extension on nullable receiver is valid: <code>fun String?.orEmpty()</code>.</li>
+<li>Also: extension properties (no backing field — getter only), and member extensions (scoped to a class).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Scope Functions</h3>
+<table><thead><tr><th>Fn</th><th>Recv</th><th>Returns</th><th>Use</th></tr></thead><tbody>
+<tr><td><code>let</code></td><td><code>it</code></td><td>block</td><td>null-guard, transform</td></tr>
+<tr><td><code>run</code></td><td><code>this</code></td><td>block</td><td>config + compute</td></tr>
+<tr><td><code>with</code></td><td><code>this</code></td><td>block</td><td>operate on one obj (non-ext)</td></tr>
+<tr><td><code>apply</code></td><td><code>this</code></td><td>receiver</td><td>builder / configure</td></tr>
+<tr><td><code>also</code></td><td><code>it</code></td><td>receiver</td><td>side effect / log</td></tr>
+</tbody></table>
+<pre><code>val f = File(p).apply { setReadable(true) }   // returns File
+user?.let { send(it) }                         // null-safe
+val n = with(cfg) { host + ":" + port }        // block result
+obj.also { log(it) }                           // tap, return obj</code></pre>
+<ul>
+<li>Two axes: want the <b>receiver back</b> (<code>apply</code>/<code>also</code>) or the <b>block result</b> (<code>let</code>/<code>run</code>/<code>with</code>); and <code>this</code> (config) vs <code>it</code> (chained transform). Not interchangeable <span class="warn">!</span></li>
+<li>All are <code>inline</code> → zero lambda allocation.</li>
+</ul>
+</section>
+
+<section class="card"><h3>when, Smart Casts, Destructuring</h3>
+<pre><code>when (x) {
+  is String -&gt; x.length          // smart-cast to String
+  in 1..10  -&gt; "small"
+  0, 1      -&gt; "bit"
+  else      -&gt; "other"
+}
+when {                            // no subject = if/else chain
+  a &gt; b -&gt; hi()
+  else  -&gt; lo()
+}</code></pre>
+<ul>
+<li>Smart cast: after <code>is</code>/<code>!= null</code>, the compiler narrows the type inside the branch — no explicit cast. Blocked on <code>var</code> that could change between check and use (esp. mutable props / other threads) <span class="warn">!</span> — copy to a <code>val</code> first.</li>
+<li>Destructuring uses <code>componentN()</code>: data classes, <code>Pair</code>/<code>Triple</code>, <code>Map.Entry</code>. <code>for ((k, v) in map)</code>. Positional, not by name <span class="warn">!</span> — reorder props → silent bug.</li>
+<li><code>as?</code> = safe cast → null on mismatch; <code>as</code> = throws <code>ClassCastException</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Coroutines — Builders &amp; Dispatchers</h3>
+<p><code>suspend</code> is a <b>compile-time transform</b>: each suspend fn is rewritten into a state machine taking a hidden <code>Continuation</code>. No green threads — just callbacks that read sequentially. Thousands per thread.</p>
+<table><thead><tr><th>Builder</th><th>Returns</th><th>Use</th></tr></thead><tbody>
+<tr><td><code>launch</code></td><td><code>Job</code></td><td>fire-and-forget</td></tr>
+<tr><td><code>async</code></td><td><code>Deferred&lt;T&gt;</code></td><td>parallel result, <code>.await()</code></td></tr>
+<tr><td><code>withContext(d)</code></td><td><code>T</code></td><td>switch dispatcher, get value</td></tr>
+<tr><td><code>runBlocking</code></td><td><code>T</code></td><td>block thread — <b>main/tests only</b> <span class="warn">!</span></td></tr>
+</tbody></table>
+<pre><code>val a = async { fetchA() }        // both run
+val b = async { fetchB() }        // concurrently
+val sum = a.await() + b.await()
+val data = withContext(Dispatchers.IO) { db.load() }</code></pre>
+<ul>
+<li>Dispatchers: <code>Main</code> (UI), <code>IO</code> (large pool, blocking-friendly), <code>Default</code> (CPU, sized to cores), <code>Unconfined</code> (avoid).</li>
+<li>Coroutine may resume on a <b>different thread</b> — thread-locals are a footgun <span class="warn">!</span> Use context, not <code>ThreadLocal</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Structured Concurrency &amp; Cancellation</h3>
+<ul>
+<li>Every coroutine is a <b>child of a scope's <code>Job</code></b> → jobs form a tree. Cancel scope ⇒ cancel all descendants. Child failure cancels siblings (unless <code>SupervisorJob</code>). Leaks nearly impossible if you avoid <code>GlobalScope</code> <span class="warn">!</span></li>
+<li>Scopes tied to lifetime: <code>viewModelScope</code>, <code>lifecycleScope</code>, or <code>CoroutineScope(Job()+Dispatchers.IO)</code>.</li>
+</ul>
+<h4>Cancellation is cooperative <span class="warn">!</span></h4>
+<pre><code>while (isActive) { work(); yield() }   // checks cancel
+try { doWork() }
+finally { cleanup() }                  // runs on cancel too</code></pre>
+<ul>
+<li>Suspend fns (<code>delay</code>, <code>withTimeout</code>) throw <code>CancellationException</code> at suspension points. A tight CPU loop with <b>no</b> suspension point can't be cancelled — call <code>yield()</code>/<code>ensureActive()</code>.</li>
+<li><b>Don't swallow <code>CancellationException</code></b> in a broad <code>catch (e: Exception)</code> — rethrow it, or cancellation silently breaks <span class="warn">!</span></li>
+<li><code>withTimeout(ms){}</code> throws; <code>withTimeoutOrNull</code> returns null.</li>
+<li><code>async</code> exceptions surface on <code>await()</code>, not when thrown; <code>CoroutineExceptionHandler</code> only catches <code>launch</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Flow, StateFlow, SharedFlow, Channel</h3>
+<ul>
+<li><b>Cold <code>Flow</code></b>: runs its block once per collector, pull-based, lazy — like a suspend <code>Sequence</code>. Nothing runs until a terminal <code>collect</code>.</li>
+<li><b>Hot <code>StateFlow</code>/<code>SharedFlow</code></b>: run once, broadcast to N collectors, push-based.</li>
+</ul>
+<pre><code>flow { emit(1); emit(2) }
+  .map { it * 2 }.filter { it &gt; 2 }
+  .flowOn(Dispatchers.IO)          // upstream dispatcher
+  .collect { println(it) }         // terminal, suspends
+
+val state = MutableStateFlow(0)    // always has a value
+state.value = 1                    // conflated, replay(1)
+val events = MutableSharedFlow&lt;E&gt;(replay = 0)
+scope.launch { flow.collect {} }   // or flow.launchIn(scope)</code></pre>
+<ul>
+<li><code>flatMapLatest</code> cancels the previous inner flow on each new upstream value — search-as-you-type.</li>
+<li><code>StateFlow</code> is conflated + always replay(1); equal consecutive values are <b>not</b> re-emitted <span class="warn">!</span></li>
+<li><code>Channel</code> = coroutine-safe queue (<code>send</code>/<code>receive</code>) for actor/pipeline; capacities <code>RENDEZVOUS</code>/buffered/<code>CONFLATED</code>/<code>UNLIMITED</code> (unbounded = OOM risk <span class="warn">!</span>). Backpressure: cold Flow is naturally back-pressured.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Collections — Read-only vs Mutable</h3>
+<ul>
+<li><code>List&lt;T&gt;</code> is <b>read-only</b> (type-level), not immutable. <span class="pg">JVM</span> usually the same <code>ArrayList</code> — exposed to Java as fully mutable <span class="warn">!</span> Defensive-copy at the boundary or use <code>kotlinx.collections.immutable</code>.</li>
+<li><code>MutableList</code> adds <code>add/remove/clear</code>. Keep mutable types local / behind private fields.</li>
+</ul>
+<pre><code>listOf(1,2,3); mutableListOf(); buildList { add(1) }
+mapOf("a" to 1); mutableMapOf(); linkedMapOf(); sortedMapOf()
+users.groupBy { it.team }
+  .mapValues { (_, us) -&gt; us.sumOf { it.score } }
+val (ok, bad) = items.partition { it.valid }   // one pass</code></pre>
+<table><thead><tr><th>Pair</th><th>Difference</th></tr></thead><tbody>
+<tr><td><code>find</code> / <code>first</code></td><td>null on miss / throws <code>NoSuchElementException</code></td></tr>
+<tr><td><code>fold</code> / <code>reduce</code></td><td>seed + empty-safe / first elem, <b>throws on empty</b> <span class="warn">!</span></td></tr>
+<tr><td><code>any</code> / <code>all</code> (empty)</td><td>false / true (vacuous)</td></tr>
+<tr><td><code>map</code> / <code>forEach</code></td><td>returns new list / returns <code>Unit</code> (side effect)</td></tr>
+</tbody></table>
+</section>
+
+<section class="card"><h3>Sequences vs List</h3>
+<ul>
+<li><b>List = eager</b>: <code>xs.map{}.filter{}</code> allocates an intermediate list after <code>map</code>, iterates twice.</li>
+<li><b>Sequence = lazy</b>: fuses into one pass, one element at a time; <code>asSequence()</code>, <code>sequenceOf</code>, <code>generateSequence</code>, <code>sequence { yield(x) }</code>.</li>
+</ul>
+<pre><code>xs.asSequence()
+  .map { f(it) }.filter { p(it) }
+  .first()                         // short-circuits — stops early
+</code></pre>
+<ul>
+<li>Reach for sequences on: <b>long chains</b> (3+ ops), <b>large/unbounded</b> inputs, and short-circuiting terminals (<code>first</code>/<code>take</code>).</li>
+<li>Lists win on short chains / small inputs — per-element wrapper overhead of a Sequence loses <span class="warn">!</span> Benchmark; don't cargo-cult.</li>
+<li>Terminal ops (<code>toList</code>, <code>count</code>, <code>sum</code>) materialise; a Sequence is single-shot — collect once.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Generics &amp; Variance</h3>
+<table><thead><tr><th>Kind</th><th>Rule</th></tr></thead><tbody>
+<tr><td>invariant (default)</td><td><code>MutableList&lt;Int&gt;</code> ≠ <code>MutableList&lt;Number&gt;</code></td></tr>
+<tr><td><code>out T</code> covariant</td><td>producer — values come <b>out</b>; <code>List&lt;out Number&gt;</code> accepts <code>List&lt;Int&gt;</code></td></tr>
+<tr><td><code>in T</code> contravariant</td><td>consumer — values go <b>in</b>; <code>Comparator&lt;in Number&gt;</code> compares <code>Int</code></td></tr>
+</tbody></table>
+<pre><code>interface Producer&lt;out T&gt; { fun get(): T }   // declaration-site
+fun copy(dst: MutableList&lt;in T&gt;, src: List&lt;out T&gt;)  // use-site</code></pre>
+<ul>
+<li>PECS: <b>P</b>roducer <b>E</b>xtends (<code>out</code>), <b>C</b>onsumer <b>S</b>uper (<code>in</code>). <code>MutableList&lt;T&gt;</code> is invariant because it both produces and consumes.</li>
+<li>Variance (how the param behaves in subtyping) ≠ bounds (<code>&lt;T : Number&gt;</code>, what <code>T</code> can be) — orthogonal.</li>
+<li><b>Erasure</b> <span class="pg">JVM</span>: <code>List&lt;Int&gt;</code> ≡ <code>List&lt;String&gt;</code> at runtime → can't <code>x is List&lt;String&gt;</code>, only <code>is List&lt;*&gt;</code>. Star projection <code>&lt;*&gt;</code> ≈ read-<code>Any?</code>, write-blocked.</li>
+<li><code>reified</code> (inline only) restores the type at the call site: <code>inline fun &lt;reified T&gt; parse(s) = gson.fromJson(s, T::class.java)</code>.</li>
+<li><code>Nothing</code> = bottom type, no instances; return type of <code>throw</code>/<code>TODO()</code>; subtype of all. Not <code>Unit</code> ("returns nothing meaningful") — it <i>never returns</i>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Delegation — class &amp; property</h3>
+<pre><code>class LoggedList&lt;T&gt;(private val b: MutableList&lt;T&gt;)
+  : MutableList&lt;T&gt; by b {          // forwards every method to b
+  override fun add(e: T): Boolean { log(e); return b.add(e) }
+}</code></pre>
+<ul>
+<li>Class delegation <code>by</code> = decorator with no boilerplate. It does <b>not</b> extend the interface — no <code>super.method()</code>, and overrides in the delegate are not seen by forwarded calls <span class="warn">!</span></li>
+</ul>
+<h4>Property delegation</h4>
+<pre><code>val cfg by lazy { load() }                     // once, cached, sync
+var name by Delegates.observable("") { _, o, n -&gt; log("$o→$n") }
+var age  by Delegates.vetoable(0) { _, _, n -&gt; n &gt;= 0 }
+val port by map                                // Delegates from Map</code></pre>
+<ul>
+<li>Delegate implements <code>getValue</code>/<code>setValue</code> (or <code>ReadOnlyProperty</code>/<code>ReadWriteProperty</code>).</li>
+<li><code>by lazy</code>: default <code>SYNCHRONIZED</code>; <code>PUBLICATION</code>/<code>NONE</code> drop the lock. Each delegated prop emits a <code>KProperty</code> + delegate object — negligible once, adds up over thousands of instances <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Operators &amp; invoke</h3>
+<pre><code>data class V2(val x: Int, val y: Int) {
+  operator fun plus(o: V2) = V2(x+o.x, y+o.y)  // a + b
+  operator fun get(i: Int) = if (i==0) x else y // a[i]
+}
+class Scale(val k: Int) { operator fun invoke(n: Int) = k*n }
+Scale(3)(5)                        // 15 — obj() = obj.invoke()</code></pre>
+<table><thead><tr><th>Syntax</th><th>Function</th></tr></thead><tbody>
+<tr><td><code>a + b</code> / <code>a * b</code></td><td><code>plus</code> / <code>times</code> (also <code>minus div rem</code>)</td></tr>
+<tr><td><code>a[i]</code> / <code>a[i]=v</code></td><td><code>get</code> / <code>set</code></td></tr>
+<tr><td><code>a()</code></td><td><code>invoke</code></td></tr>
+<tr><td><code>a..b</code> / <code>a in b</code></td><td><code>rangeTo</code> / <code>contains</code></td></tr>
+<tr><td><code>a == b</code></td><td><code>equals</code> (null-safe; <code>===</code> = identity)</td></tr>
+</tbody></table>
+<ul>
+<li>Operator set is <b>fixed</b> and convention-named — can't invent <code>**</code>. Overload only when the meaning is obvious (<code>+</code> = addition-like) <span class="warn">!</span></li>
+<li>Companion <code>operator fun invoke(...)</code> = factory that reads like a constructor: <code>MyType(x)</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>inline / crossinline / noinline / tailrec</h3>
+<pre><code>inline fun &lt;T&gt; measure(block: () -&gt; T): T {
+  val t = System.nanoTime(); val r = block()
+  log(System.nanoTime()-t); return r
+}
+tailrec fun fib(n: Int, a: Long=0, b: Long=1): Long =
+  if (n == 0) a else fib(n-1, b, a+b)   // rewritten to a loop</code></pre>
+<ul>
+<li><code>inline</code>: copies fn + lambda bodies into each call site → <b>no <code>Function1</code> allocation</b>, enables non-local <code>return</code> from the lambda and <code>reified</code>. Why the stdlib marks nearly every collection op inline.</li>
+<li><b>Not free</b>: duplicates bytecode per call site; overuse on big fns bloats class files and can defeat JIT inlining <span class="warn">!</span> Inline is for lambda-taking fns, not everything.</li>
+<li><code>crossinline</code>: lambda called from another context (thread, nested lambda) — forbids non-local return.</li>
+<li><code>noinline</code>: this lambda param must <b>not</b> be inlined — you store/pass it by reference.</li>
+<li><code>tailrec</code>: needs the recursive call as the <b>literal last</b> expression. <code>n * f(n-1)</code> is not tail-rec; accumulator form is. <code>inline</code> + recursion = bytecode explosion <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Java Interoperability</h3>
+<ul>
+<li>Java return <code>String</code> → platform type <code>String!</code> (accepts as <code>String</code>/<code>String?</code>, no warning). Kotlin reads <code>@Nullable</code>/<code>@NotNull</code> to recover real types. Wrap at the boundary <span class="warn">!</span></li>
+<li>Kotlin has <b>no checked exceptions</b> — Java <code>throws IOException</code> callable with no <code>try</code>; still propagates. Add <code>@Throws</code> so Java callers can catch.</li>
+<li>SAM conversion: Kotlin lambda → Java single-abstract-method interface (<code>Runnable</code>, <code>Comparator</code>). Kotlin's own needs <code>fun interface</code>.</li>
+<li><code>Unit</code>↔<code>void</code> automatic. <code>List&lt;T&gt;</code> is mutable from Java even if read-only in Kotlin <span class="warn">!</span></li>
+</ul>
+<table><thead><tr><th>Annotation</th><th>Emits for Java</th></tr></thead><tbody>
+<tr><td><code>@JvmStatic</code></td><td>real static (else <code>Foo.Companion.bar()</code>)</td></tr>
+<tr><td><code>@JvmField</code></td><td>public field, no getter/setter</td></tr>
+<tr><td><code>@JvmOverloads</code></td><td>overloads for default args (else Java passes all) <span class="warn">!</span></td></tr>
+<tr><td><code>@JvmName("x")</code></td><td>rename fn/prop/file (top-level → <code>FooKt</code>)</td></tr>
+</tbody></table>
+</section>
+
+<section class="card"><h3>Value Classes, typealias &amp; Cost</h3>
+<pre><code>@JvmInline value class UserId(val id: Int)  // type-safe, 0-alloc
+typealias Handler = (String) -&gt; Unit        // pure rename, no safety</code></pre>
+<ul>
+<li>Value class: single-prop wrapper, <span class="pg">JVM</span> erases to the underlying value at runtime — full compile-time type distinction, zero allocation. Boxes only when used as a generic/nullable/interface. For IDs, units, money.</li>
+<li><code>typealias</code>: compile-time alias only — <code>UserId</code> and <code>Int</code> are interchangeable, <b>no</b> type-safety boundary. Value class is a real type; typealias is not.</li>
+<li><b>Boxing</b> <span class="warn">!</span>: <code>List&lt;Int&gt;</code> boxes every <code>Int</code>→<code>Integer</code>. Hot numeric paths → <code>IntArray</code>/<code>LongArray</code>/<code>DoubleArray</code> (flat <code>int[]</code>), not <code>Array&lt;Int&gt;</code> (<code>Integer[]</code>).</li>
+<li>Every non-inlined lambda = a <code>Function1</code> allocation per call. GC pressure = high allocation rate → frequent GC; usual cause is intermediate collections + lambdas in hot loops. Measure (JFR/async-profiler) before optimising.</li>
+<li><code>==</code> calls <code>equals</code>; <code>===</code> is identity — rarely what you want (string interning makes <code>===</code> unreliable).</li>
+</ul>
+</section>
+
+<section class="card"><h3>&#9733; Code Review Checklist</h3>
+<h4>Null safety</h4>
+<ul>
+<li>&#9744; No unjustified <code>!!</code> — use <code>?.</code>/<code>?:</code>/<code>requireNotNull</code>. Java results wrapped as explicit <code>T?</code> at the boundary <span class="warn">!</span></li>
+<li>&#9744; <code>lateinit</code> only where init truly precedes use; guarded with <code>::x.isInitialized</code> if uncertain.</li>
+</ul>
+<h4>Immutability &amp; data</h4>
+<ul>
+<li>&#9744; <code>val</code> by default; <code>MutableList</code>/<code>var</code> confined to local/private scope.</li>
+<li>&#9744; No <code>var</code> in a data class used as a <code>Set</code>/<code>Map</code> key; API returns <code>List&lt;T&gt;</code> not <code>MutableList&lt;T&gt;</code>.</li>
+</ul>
+<h4>Coroutines</h4>
+<ul>
+<li>&#9744; No <code>GlobalScope</code>; scope tied to a lifetime. No <code>runBlocking</code> in async/server paths.</li>
+<li>&#9744; Cooperative cancellation (<code>isActive</code>/<code>yield</code>) in CPU loops; <code>CancellationException</code> rethrown, not swallowed <span class="warn">!</span></li>
+<li>&#9744; Blocking IO inside <code>withContext(Dispatchers.IO)</code>; shared mutable state guarded (<code>Mutex</code>/atomics/actor).</li>
+</ul>
+<h4>Types &amp; interop</h4>
+<ul>
+<li>&#9744; <code>when</code> over sealed type has no <code>else</code> (exhaustive → new subtype breaks build).</li>
+<li>&#9744; Variance correct (<code>out</code> producer / <code>in</code> consumer); no member shadowing an extension.</li>
+<li>&#9744; <code>@JvmStatic</code>/<code>@JvmOverloads</code>/<code>@Throws</code> present on Kotlin APIs consumed from Java.</li>
+</ul>
+<h4>Cost</h4>
+<ul>
+<li>&#9744; Long/large chains use <code>asSequence()</code>; primitive-heavy hot paths use primitive arrays; <code>inline</code> reserved for lambda-taking fns.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Common Bugs — Spot-the-Bug</h3>
+<table><thead><tr><th>Symptom</th><th>Cause</th></tr></thead><tbody>
+<tr><td><code>UninitializedPropertyAccessException</code></td><td><code>lateinit</code> read before init <span class="warn">!</span></td></tr>
+<tr><td>NPE from a Java call</td><td>platform type treated as non-null <span class="warn">!</span></td></tr>
+<tr><td>element vanishes from a <code>Set</code></td><td><code>var</code> in data class mutated → hash changed <span class="warn">!</span></td></tr>
+<tr><td>extension never runs</td><td>member with same signature wins <span class="warn">!</span></td></tr>
+<tr><td>lost updates on shared counter</td><td>race — <code>Dispatchers.IO</code> concurrent, no lock <span class="warn">!</span></td></tr>
+<tr><td>coroutine won't cancel</td><td>tight CPU loop, no suspension point/<code>yield</code> <span class="warn">!</span></td></tr>
+<tr><td>work keeps running after screen closes</td><td><code>GlobalScope.launch</code> — no structured parent <span class="warn">!</span></td></tr>
+<tr><td><code>reified</code> won't compile</td><td>function is not <code>inline</code> <span class="warn">!</span></td></tr>
+<tr><td><code>NoSuchElementException</code></td><td><code>first()</code>/<code>reduce()</code> on empty — use <code>*OrNull</code>/<code>fold</code> <span class="warn">!</span></td></tr>
+<tr><td>StackOverflow in recursion</td><td>not tail position, or missing <code>tailrec</code> <span class="warn">!</span></td></tr>
+<tr><td>Java mutates a Kotlin <code>List</code></td><td>read-only is type-level only; runtime <code>ArrayList</code> <span class="warn">!</span></td></tr>
+<tr><td>silent cancel / hidden failure</td><td><code>CancellationException</code> caught by broad <code>catch</code> <span class="warn">!</span></td></tr>
+</tbody></table>
+</section>
+
+</div>
+</body>
+</html>

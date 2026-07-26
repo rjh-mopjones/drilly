@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AI Engineering Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+/* spanning title bar */
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>AI Engineering Cheat Sheet</h1><span class="meta">applied LLM systems · prompting · RAG · agents · evals · generic examples · drilly</span></div>
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="warn">!</span> footgun / gotcha &nbsp; <code>&#9744;</code> review checklist item</li>
+<li>Focus: <b>building applications on top of LLMs</b> (API consumer, not model trainer). Senior signals throughout: eval-driven, treat the model as an untrusted probabilistic component, know when a lever <i>doesn't</i> pay.</li>
+<li>The spine: <b>prompt → RAG → tools → fine-tune</b> is a ladder you climb by <i>cost &amp; failure type</i>, not a menu of rivals. Last 2 cards = <b>design/review checklist</b> + symptom→cause.</li>
+<li>The one law: an LLM call is a <b>stateless function of the tokens you place in front of it</b>. "Memory", "agency", "it remembers" are things <i>you</i> construct in the harness.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
+</ul></section>
+
+<section class="card"><h3>LLM Fundamentals &amp; Decode Knobs</h3>
+<ul>
+<li><b>Autoregressive</b>: one forward pass per <i>output</i> token; input read in parallel (prefill). So output is the <b>slow &amp; expensive</b> part <span class="warn">!</span></li>
+<li>Output is a <b>probability distribution</b> over the vocab; decoding samples from it. You bias the distribution, never command it.</li>
+<li>Bounded compute per token → hard multi-step problems need <b>more tokens to think across</b> (why CoT works).</li>
+</ul>
+<table><thead><tr><th>Knob</th><th>Effect</th></tr></thead><tbody>
+<tr><td><code>temperature</code></td><td>0 = greediest/most deterministic-ish; higher = more diverse. Use ~0 for extraction/classification.</td></tr>
+<tr><td><code>top_p</code></td><td>nucleus: sample from smallest set summing to p. Tune one of temp/top_p, not both.</td></tr>
+<tr><td><code>max_tokens</code></td><td>output cap — the cheapest cost+latency lever.</td></tr>
+<tr><td><code>seed</code></td><td>best-effort repeatability; <b>not</b> a guarantee <span class="warn">!</span></td></tr>
+</tbody></table>
+<p><span class="warn">!</span> temp 0 is <b>not</b> deterministic across calls/versions — kernels, batching, and backend changes still vary output.</p>
+</section>
+
+<section class="card"><h3>Prompt Engineering</h3>
+<p>A prompt is a program in NL, run by a probabilistic interpreter. Treat it as <b>versioned code</b> with an eval harness — not a magic string.</p>
+<table><thead><tr><th>Lever</th><th>When</th></tr></thead><tbody>
+<tr><td><b>System</b> vs <b>user</b></td><td>system = <i>how to behave</i> (durable); user = <i>what to do now</i>. Don't put per-request data in system <span class="warn">!</span></td></tr>
+<tr><td><b>Few-shot</b> (ICL)</td><td>fixes format/edge-cases; show the <i>hard</i> case; use fewest that work.</td></tr>
+<tr><td><b>CoT</b></td><td>genuinely multi-step tasks only; wasted/harmful on lookup/classify &amp; on reasoning-by-default models <span class="warn">!</span></td></tr>
+<tr><td><b>Delimiters</b></td><td>fence untrusted data (<code>&lt;doc&gt;…&lt;/doc&gt;</code>); refer to it by name.</td></tr>
+<tr><td><b>Decompose</b></td><td>split mega-task into a chain of focused prompts.</td></tr>
+</tbody></table>
+<p><b>Order:</b> role → rules → format → examples → data → restated key ask. Beginning &amp; end get best attention (<i>lost in the middle</i>).</p>
+<p><span class="warn">!</span> System prompt is the <b>strongest steering, not a security boundary</b> — user input can override it. <span class="warn">!</span> "Improved it" only means <b>metric went up on a held-out eval set</b>, never one lucky sample.</p>
+</section>
+
+<section class="card"><h3>Structured Output &amp; Constrained Decode</h3>
+<p><b>Two independent axes</b> — conflating them is the classic error:</p>
+<ul>
+<li><b>Syntactic validity</b> (parses &amp; matches schema shape/types) — constrained decoding solves this <i>completely</i>.</li>
+<li><b>Semantic correctness</b> (values are actually right) — constrained decoding does <b>nothing</b> for this <span class="warn">!</span></li>
+</ul>
+<table><thead><tr><th>Technique</th><th>Guarantees</th></tr></thead><tbody>
+<tr><td>prompt-and-hope</td><td>nothing → must validate+repair</td></tr>
+<tr><td>JSON mode</td><td>valid JSON, <i>any</i> shape</td></tr>
+<tr><td>schema-constrained</td><td>structure+field names+types+enums</td></tr>
+<tr><td>fn-call-as-extraction</td><td>= constrained (via tool iface)</td></tr>
+</tbody></table>
+<p><b>Mechanism:</b> a grammar/state-machine <b>masks illegal next-tokens to -inf</b> each step, so invalid chars <i>cannot</i> be emitted. Define schema once in <b>Pydantic/zod</b> (type + JSON-Schema + validator + error msgs for repair).</p>
+<p><span class="warn">!</span> A <code>required</code> non-nullable field <b>forces fabrication</b> when the answer is "absent". Give an explicit <code>null</code>/<code>"unknown"</code>/refusal branch. Always validate at the boundary even when constrained.</p>
+</section>
+
+<section class="card"><h3>Function &amp; Tool Calling</h3>
+<p><b>The model never runs your code.</b> It emits structured text (<code>name</code> + JSON <code>args</code>); <i>your</i> runtime executes and feeds the result back. You own the loop and the trust boundary.</p>
+<pre><code>1 send: messages + tool schemas (+ tool_choice)
+2 model → {id, name:"get_wx", args:{city}}   (finish=tool_calls)
+3 YOU run get_wx(city) → "14C"
+4 append assistant tool-call + tool-result{tool_call_id:id}
+5 re-invoke with extended history
+6 another call → 3, else text (finish=stop) → done</code></pre>
+<ul>
+<li>It's a <b>loop, not one hop</b>; the <code>id</code> glues results to calls (enables parallel calls).</li>
+<li><code>tool_choice</code>: <code>auto</code> / <code>required</code> / named / <code>none</code>.</li>
+<li>Design: <b>few, orthogonal, well-described</b> tools beat an API dump — too many degrades selection <span class="warn">!</span></li>
+</ul>
+<p><span class="warn">!</span> Always <b>cap iterations + token budget</b> (model drives the loop → can spin). <span class="warn">!</span> Tool <i>code</i> is yours; tool <i>output</i> is untrusted (web page, doc, DB row).</p>
+</section>
+
+<section class="card"><h3>Agentic Systems (ReAct)</h3>
+<p>An agent is a <b>control loop wrapped around a stateless model</b>. Model proposes; the <b>harness disposes</b> — auth, gating, idempotency, audit, rate limits all live in the harness.</p>
+<pre><code>loop:
+  reason  "need plan tier before quoting"
+  act     get_account(user_id)
+  observe {"tier":"enterprise"}   → into context
+  reason  "enterprise → volume pricing"
+  act     get_rate_card("enterprise") …
+  → no more calls → done</code></pre>
+<p><b>Interleaving</b> (see obs N before act N+1) beats a single-shot plan: real envs surprise you (empty search, 404), and the agent can recover/branch.</p>
+<ul>
+<li>Terminate on: goal met / no tool call / error / <b>budget cap</b> (steps, tokens, wall-clock).</li>
+<li>Multi-agent only for genuinely parallel or context-isolated sub-tasks — else it's latency+token+coordination overhead <span class="warn">!</span></li>
+</ul>
+<p><span class="warn">!</span> "Done" is the one thing the model can lie about — never rely on it alone. <span class="warn">!</span> <code>temperature:0</code> does <b>not</b> make control flow deterministic.</p>
+</section>
+
+<section class="card"><h3>RAG — Pipeline &amp; Failure Map</h3>
+<p>RAG is an <b>IR problem with an LLM on the end</b>, not a model problem with search bolted on. Garbage in → fluent garbage out. Every stage is <b>lossy</b>.</p>
+<table><thead><tr><th>Stage</th><th>Dominant failure</th></tr></thead><tbody>
+<tr><td>Ingest</td><td>mangled PDF/OCR, lost structure</td></tr>
+<tr><td>Chunk</td><td>split mid-thought; answer spans 2 chunks</td></tr>
+<tr><td>Embed</td><td>domain mismatch; jargon collapses</td></tr>
+<tr><td>Store/ANN</td><td>stale index, recall loss</td></tr>
+<tr><td>Retrieve</td><td>low recall (missed) / low precision (noise)</td></tr>
+<tr><td>Augment</td><td>overflow, bad order, no citations</td></tr>
+<tr><td>Generate</td><td>ignores ctx / trusts wrong chunk</td></tr>
+</tbody></table>
+<p><b>Two halves:</b> indexing (offline batch) vs serving (per-query). Most wins are at <b>ingest+chunk</b>, not a bigger model. Serving latency is dominated by <b>generation (seconds)</b>, not retrieval (tens of ms).</p>
+</section>
+
+<section class="card"><h3>Chunking Strategies</h3>
+<p><b>Core trade-off:</b> small chunks retrieve <i>precisely</i> but answer <i>incompletely</i>; large chunks carry context but embed <i>fuzzily</i> &amp; burn tokens.</p>
+<table><thead><tr><th>Strategy</th><th>Note</th></tr></thead><tbody>
+<tr><td>fixed-size + overlap</td><td>trivial, structure-blind; splits mid-sentence. Baseline only.</td></tr>
+<tr><td>recursive / structural</td><td>split on headings→paras→sentences. Sensible default; needs real structure.</td></tr>
+<tr><td>semantic</td><td>cut where embedding sim drops; costs embeds, fragile thresholds.</td></tr>
+<tr><td>sentence-window</td><td>index sentences, return sentence+neighbours.</td></tr>
+<tr><td>parent-document</td><td>index child chunks, return parent section.</td></tr>
+</tbody></table>
+<p><b>Key insight:</b> decouple the <b>retrieval unit</b> from the <b>generation unit</b> — retrieve small &amp; focused, then expand to surrounding context. Tables/code: chunk by <b>logical unit</b> (whole table/function), optionally embed a generated summary.</p>
+</section>
+
+<section class="card"><h3>Retrieval: Sparse · Dense · Hybrid · Rerank</h3>
+<table><thead><tr><th>Method</th><th>Strength / weakness</th></tr></thead><tbody>
+<tr><td><b>BM25</b> (sparse)</td><td>exact lexical overlap; cheap, no GPU. <b>No synonyms.</b></td></tr>
+<tr><td><b>Dense</b> (embed)</td><td>meaning/paraphrase; lossy on exact tokens <span class="warn">!</span></td></tr>
+<tr><td><b>Hybrid</b></td><td>fuse via RRF; production default.</td></tr>
+</tbody></table>
+<pre><code>RRF(d) = Σ 1 / (k + rank_of_d)   # k≈60, fuse ranks not scores</code></pre>
+<p><b>BM25 still wins</b> on exact-match: SKUs, part/error codes, API names, ticket IDs, legal citations, rare proper nouns — and any corpus your embed model never trained on. Naming this unprompted is a senior tell.</p>
+<h4>Two-stage funnel</h4>
+<pre><code>query → bi-encoder ANN → top ~150   (cheap, recall)
+      → cross-encoder  → top ~5-10  (expensive, precision)</code></pre>
+<p><b>Bi-encoder</b>: embeds q &amp; d independently → precompute corpus, ms search. <b>Cross-encoder</b>: reads <code>[q][SEP][d]</code> together → far more accurate, but per-pair at query time.</p>
+<p><span class="warn">!</span> Rerank is a <b>precision</b> tool — it can only reorder what stage-1 recall surfaced. If the chunk isn't in top-150, nothing saves you.</p>
+</section>
+
+<section class="card"><h3>Embeddings · ANN · Distance Metrics</h3>
+<p>Exact NN is linear → hopeless at millions/query. <b>ANN</b> trades a tunable slice of recall for sub-linear search.</p>
+<table><thead><tr><th>Index</th><th>Note</th></tr></thead><tbody>
+<tr><td><b>HNSW</b></td><td>multi-layer proximity graph; best recall/latency, memory-hungry, awkward to update. Params: <code>M</code>, <code>efSearch</code>.</td></tr>
+<tr><td><b>IVF</b></td><td>cluster + probe <code>nprobe</code> nearest; memory-lean, shardable, drift-sensitive.</td></tr>
+<tr><td><b>PQ</b></td><td>quantize/compress vectors — more recall traded for big memory cut.</td></tr>
+</tbody></table>
+<pre><code>cosine = dot(a,b)/(|a||b|)   # angle only
+dot    = dot(a,b)             # angle AND magnitude
+L2     = |a-b|</code></pre>
+<p><b>On unit-normalized vectors, cosine/dot/L2 give the same ranking.</b> <span class="warn">!</span> Raw dot on <b>un-normalized</b> embeds → magnitude leaks, long docs rank spuriously high. Match the <b>index metric to the model's training metric</b> or recall silently degrades.</p>
+</section>
+
+<section class="card"><h3>Vector DBs &amp; Index Choice</h3>
+<ul>
+<li><b>pgvector</b>: reuse Postgres — transactions, joins, metadata filters, ACLs in one place. Great default until scale/latency forces a specialist.</li>
+<li><b>Dedicated</b> (FAISS-lib, HNSW-based services): scale &amp; latency, but a separate system to sync/operate.</li>
+<li><b>Metadata filtering</b> is first-class: enforce <b>access control at retrieval</b> (pre/post-ANN), never in the prompt — a leaked chunk in context is a data breach <span class="warn">!</span></li>
+</ul>
+<h4>Freshness &amp; churn</h4>
+<ul>
+<li><b>Incremental index</b>: content-hash/CDC → re-embed only changed docs. Re-embedding the whole corpus daily is the first thing to blow up on cost <span class="warn">!</span></li>
+<li><b>Tombstone superseded chunks</b> — old chunks must be <i>deleted</i>, not just supplemented, or retrieval surfaces stale/legally-wrong text <span class="warn">!</span></li>
+<li>Heavy churn hurts HNSW updates → periodic rebuild or IVF.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Context Engineering &amp; Memory</h3>
+<p>The window is a <b>small expensive desk</b>. The model is <b>stateless</b> — "memory" is you re-placing history each turn. Budget is <b>zero-sum</b>.</p>
+<pre><code>usable_input = ctx_window − reserved_output − margin
+fit: system + history + retrieved ≤ usable_input</code></pre>
+<p><span class="warn">!</span> <b>Reserve output space</b> — window is shared input+output; pack it full and the answer truncates mid-sentence. <span class="warn">!</span> <b>Lost in the middle</b>: put the critical fact at start or end.</p>
+<table><thead><tr><th>Memory</th><th>Trade</th></tr></thead><tbody>
+<tr><td>buffer (last N turns)</td><td>exact, bounded, forgets old</td></tr>
+<tr><td>summary / compaction</td><td>keeps gist, <b>lossy</b> — a one-off figure can vanish <span class="warn">!</span></td></tr>
+<tr><td>vector-backed</td><td>RAG over past turns; recall on demand</td></tr>
+</tbody></table>
+<p>Context (this call) ≠ memory (persistent store you draw from). More tokens ≠ better: they dilute attention, cost more, slow TTFT.</p>
+</section>
+
+<section class="card"><h3>Caching (LLM-specific)</h3>
+<table><thead><tr><th>Type</th><th>What it does</th></tr></thead><tbody>
+<tr><td><b>Prompt caching</b></td><td>reuse provider-side compute for a repeated <b>static prefix</b> → cuts input cost &amp; TTFT on the cached portion.</td></tr>
+<tr><td><b>Semantic caching</b></td><td>return a stored answer for a <b>semantically similar</b> past query → skips the model call entirely.</td></tr>
+</tbody></table>
+<ul>
+<li>Prompt cache: put the <b>stable stuff first</b> (system prompt, tool schemas, few-shot, long doc); dynamic tail last. Order the prefix to maximise hits.</li>
+<li>Semantic cache: set a <b>similarity threshold</b> — too loose returns a wrong-but-close answer <span class="warn">!</span>; scope keys per user/tenant to avoid leakage.</li>
+<li>Neither is an HTTP/CDN cache, and prompt caching is <b>not</b> cross-call memory.</li>
+</ul>
+<p>Also cache: embeddings for unchanged docs, and full answers for hot repeated queries.</p>
+</section>
+
+<section class="card"><h3>Cost &amp; Latency Engineering</h3>
+<p><b>Output tokens are the expensive AND slow part</b> (autoregressive). Input is parallel &amp; cheap. Cost ≈ tokens × price × <b>call-count</b> — the sneaky multiplier is call-count.</p>
+<p><b>Latency shape:</b> TTFT (fixed-ish prefill) + generation (tokens ÷ tok/s) + tool/network round-trips.</p>
+<table><thead><tr><th>Problem</th><th>Lever</th></tr></thead><tbody>
+<tr><td>both cost+latency</td><td><b>generate fewer output tokens</b> (concise, <code>max_tokens</code>, enums)</td></tr>
+<tr><td>repeated prefix</td><td>prompt caching</td></tr>
+<tr><td>skewed difficulty</td><td>cascade/route: cheap model first, escalate</td></tr>
+<tr><td>perceived latency</td><td>stream (TTFT sooner; total unchanged)</td></tr>
+<tr><td>independent calls</td><td>parallelise</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> Shrinking the <i>prompt</i> barely moves latency — attack <b>output length &amp; model choice</b>. <span class="warn">!</span> Agent loops are <b>5–20 calls/action</b> — cost multiplies by loop length. <span class="warn">!</span> "Cheaper model" is only a win if it <b>still passes your eval</b>.</p>
+</section>
+
+<section class="card"><h3>Model Selection &amp; Routing</h3>
+<ul>
+<li>Model sets your <b>token prices, TTFT, ceiling capability, context size</b>. Pick per-task, measured on <i>your</i> eval — not a leaderboard <span class="warn">!</span> (benchmarks measure their task &amp; are contaminated).</li>
+<li><b>Closed (API)</b>: best quality, fastest to ship, no infra; lock-in, data-egress, price/deprecation risk.</li>
+<li><b>Open (self-host)</b>: control, privacy, no per-token bill at scale; you own serving, GPUs, quantization.</li>
+</ul>
+<h4>Cascade / routing</h4>
+<pre><code>cheap/small model  → confident? → return
+        ↓ hard/low-confidence
+strong/frontier model → return</code></pre>
+<p>Primary cost lever when difficulty is skewed (most queries are easy). Route by a classifier, heuristic, or self-reported confidence. Validate the router itself — a bad route sends easy queries to the pricey model or hard ones to the weak one.</p>
+</section>
+
+<section class="card"><h3>Adaptation: Prompt vs RAG vs Fine-tune</h3>
+<p>They change <b>different things</b> — match lever to need, cheapest first.</p>
+<table><thead><tr><th>Lever</th><th>Changes</th><th>Use for</th></tr></thead><tbody>
+<tr><td>Prompt</td><td>instructions @ runtime</td><td>task/format/tone. Try first, always.</td></tr>
+<tr><td>RAG</td><td>knowledge @ runtime</td><td>private/current/large <b>facts</b>. Fresh, citable, deletable, ACL.</td></tr>
+<tr><td>Fine-tune</td><td>the <b>weights</b></td><td><b>behaviour</b>: rigid format, house voice, small model matching a big one, prompt-compression.</td></tr>
+</tbody></table>
+<p><b>The rule:</b> fine-tune for <b>behaviour</b>, retrieve for <b>knowledge</b>. <span class="warn">!</span> Fine-tuning to inject <b>facts</b> is the canonical error — lossy, un-citable, stale day one, un-editable.</p>
+<ul>
+<li><b>LoRA/QLoRA</b>: train &lt;1% params, freeze base, swappable adapters. Full fine-tune rarely needed &amp; risks <b>catastrophic forgetting</b>.</li>
+<li><b>Data + eval dominate</b>, not the training run. A fine-tune is a static artifact that drifts from the improving base — maintenance debt.</li>
+<li>Often the answer is <b>both</b>: RAG for facts + light fine-tune for format.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Evaluation</h3>
+<p>No compiler, no deterministic oracle — "correct-looking" is the trap. Build a <b>layered instrument</b> and distrust it like the system under test.</p>
+<ul>
+<li><b>L1 deterministic</b>: parses? schema-valid? citation real? PII absent?</li>
+<li><b>L2 reference</b>: metrics on a <b>versioned golden set</b> → CI <b>regression gate</b>.</li>
+<li><b>L3 judgement</b>: LLM-as-judge / human for open-ended.</li>
+</ul>
+<h4>RAG metrics — 2 stages</h4>
+<table><thead><tr><th>Metric</th><th>Catches</th></tr></thead><tbody>
+<tr><td><b>Faithfulness</b></td><td>gen: answer supported by ctx → <b>hallucination</b></td></tr>
+<tr><td>Answer relevancy</td><td>gen: addresses the question</td></tr>
+<tr><td>Context precision</td><td>retr: signal/noise of chunks</td></tr>
+<tr><td><b>Context recall</b></td><td>retr: needed info surfaced → <b>retrieval gap</b></td></tr>
+</tbody></table>
+<p><span class="warn">!</span> LLM-judge has <b>position, verbosity, self-preference bias</b> — validate it. <span class="warn">!</span> Offline win = the <b>proxy</b> moved; confirm online. Good retrieval metrics ≠ good answers (found ≠ used correctly).</p>
+</section>
+
+<section class="card"><h3>Guardrails &amp; Safety</h3>
+<p>Input validation + output sanitisation for a component you can't trust. <b>Defence in depth</b> — don't rely on the model to police itself.</p>
+<pre><code>system prompt = "please behave"  → request, best-effort
+guardrail     = code that blocks → control, enforced</code></pre>
+<p>Two axes: <b>input</b> (topic/PII/injection/schema — before you spend tokens) vs <b>output</b> (moderation/PII/groundedness — before user sees it); <b>deterministic</b> (regex/schema/denylist — cheap, brittle) vs <b>model-based</b> (classifier/judge — flexible, adds latency/cost/error). Layer cheap-first.</p>
+<ul>
+<li>Moderation = <b>per-category scores vs tunable thresholds</b>, not one yes/no. Threshold per context.</li>
+<li>PII detect/redact on input &amp; output; keep the bot on-topic without lobotomising it.</li>
+</ul>
+<p><span class="warn">!</span> A system prompt is <b>not</b> a guardrail (inside the trust boundary). <span class="warn">!</span> <b>Fail-open vs fail-closed</b> is a deliberate per-check call — open keeps product usable but may leak harm; closed is safer but a flaky guardrail = outage.</p>
+</section>
+
+<section class="card"><h3>Prompt Injection &amp; LLM Security</h3>
+<p><b>Root cause is architectural:</b> the LLM mixes <b>instructions &amp; data in one channel</b> (the context window) with no reliable boundary. Any text it reads can act as a command.</p>
+<pre><code>program: code (trusted) | input (data, never run)  ← boundary
+LLM:     system + user + retrieved doc + tool out  ← one stream</code></pre>
+<ul>
+<li><b>Direct</b>: user jailbreaks their own input. <b>Indirect</b>: instructions hidden in third-party content the model ingests (web page, doc, email, RAG chunk) — the more dangerous form; needs no user malice.</li>
+<li>Model = <b>confused deputy</b>: acts with <i>your</i> privileges on the <i>attacker's</i> instructions.</li>
+</ul>
+<h4>Lethal trifecta <span class="warn">!</span></h4>
+<p>private-data access <b>+</b> exposure to untrusted content <b>+</b> an exfil channel (tool call, markdown-image URL, outbound link) = data-leak vector. Break any one leg.</p>
+<p><span class="warn">!</span> You <b>cannot prompt your way out</b> — injection rides the same channel as your defence. Constrain what the model can <b>do</b>: least privilege, sandboxing, human-in-the-loop for consequential actions, output/URL filtering. <span class="warn">!</span> Never treat model output as a trusted command (shell/SQL/eval/browser). Mitigate, never "solved".</p>
+</section>
+
+<section class="card"><h3>Streaming &amp; Real-Time</h3>
+<ul>
+<li>SSE token stream cuts <b>perceived</b> latency (first token sooner) — not total time or cost.</li>
+<li>You must <b>buffer a tool call</b> before executing it — you can't act on half a JSON args blob.</li>
+<li><span class="warn">!</span> Can't <code>JSON.parse</code> a stream: <code>{"name":"Ali</code> is a syntax error, not a partial object. Use a <b>tolerant/partial parser</b> for live field-by-field UIs, or just wait-and-parse for small machine-consumed objects.</li>
+<li><span class="warn">!</span> A partial value is <b>provisional</b> — never fire a side-effect until the object is complete &amp; validated (stream can error mid-way).</li>
+<li>Handle mid-stream errors &amp; client disconnects; you still pay for tokens already generated.</li>
+</ul>
+</section>
+
+<section class="card"><h3>&#9733; Design / Review Checklist</h3>
+<h4>Reliability of the probabilistic component</h4>
+<ul>
+<li>&#9744; Structured output <b>schema-constrained</b> where machine-consumed, and <b>still validated</b> at the boundary.</li>
+<li>&#9744; Nullable / <code>"unknown"</code> / refusal branch so honesty is representable — no forced fabrication <span class="warn">!</span></li>
+<li>&#9744; Bounded validate→repair loop (1–2 tries) with the <i>specific</i> error fed back; failure routes to review, not an infinite spin.</li>
+</ul>
+<h4>RAG</h4>
+<ul>
+<li>&#9744; Hybrid retrieval (BM25+dense) — exact-identifier queries covered.</li>
+<li>&#9744; Re-ranker on stage-1 candidates; index metric matches embed model; vectors normalized.</li>
+<li>&#9744; Incremental re-index + tombstoning of superseded chunks; ACL enforced at retrieval, not prompt <span class="warn">!</span></li>
+<li>&#9744; "Answer only from sources; if absent, say so" + citations.</li>
+</ul>
+<h4>Agents / tools</h4>
+<ul>
+<li>&#9744; Loop has step + token + wall-clock cap; not trusting model's "done".</li>
+<li>&#9744; Least-privilege tools; consequential writes gated (human-in-the-loop) + idempotency key.</li>
+<li>&#9744; Tool output treated as untrusted; no trifecta (private data + untrusted content + exfil).</li>
+</ul>
+<h4>Cost / latency / eval</h4>
+<ul>
+<li>&#9744; <code>max_tokens</code> capped; prompt cache on static prefix; cascade for skewed difficulty; stream to the user.</li>
+<li>&#9744; Prompts versioned + gated by a golden-set regression check in CI; LLM-judge validated.</li>
+<li>&#9744; Guardrails as an independent layer; fail-open/closed chosen deliberately per check.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Symptom &rarr; Cause</h3>
+<table><thead><tr><th>Symptom</th><th>Likely cause</th></tr></thead><tbody>
+<tr><td>confident but wrong RAG answer</td><td>semantic-neighbour chunk retrieved; add hybrid + rerank <span class="warn">!</span></td></tr>
+<tr><td>dense retrieval misses a part/error code</td><td>no BM25/hybrid — exact tokens smeared <span class="warn">!</span></td></tr>
+<tr><td>right chunk exists but not retrieved</td><td>embedding/domain mismatch or recall (raise k / hybrid)</td></tr>
+<tr><td>retrieved &amp; ranked but answer wrong</td><td>prompt/gen: weak grounding, lost-in-the-middle, overflow</td></tr>
+<tr><td>answer truncates mid-sentence</td><td>no reserved output space in budget <span class="warn">!</span></td></tr>
+<tr><td>schema-valid but fabricated field</td><td>required non-nullable forced a value <span class="warn">!</span></td></tr>
+<tr><td>agent loops forever / huge bill</td><td>no budget cap; N-call multiplier <span class="warn">!</span></td></tr>
+<tr><td>data leak after browsing a page</td><td>indirect injection + lethal trifecta <span class="warn">!</span></td></tr>
+<tr><td>fine-tune "knows" stale facts</td><td>used FT for knowledge — should be RAG <span class="warn">!</span></td></tr>
+<tr><td>offline eval up, users unhappy</td><td>proxy moved, not the outcome; confirm online</td></tr>
+<tr><td>ranking looks random</td><td>metric ≠ embed training metric / un-normalized dot <span class="warn">!</span></td></tr>
+<tr><td>"it got better" after a prompt tweak</td><td>one lucky sample — no eval set <span class="warn">!</span></td></tr>
+</tbody></table>
+</section>
+
+</div>
+</body>
+</html>

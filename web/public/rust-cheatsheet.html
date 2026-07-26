@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Rust Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+/* spanning title bar */
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>Rust Cheat Sheet</h1><span class="meta">Rust 2021/2024 edition · senior/backend focus · generic examples · drilly</span></div>
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="warn">!</span> footgun / gotcha &nbsp; <code>&#9744;</code> review checklist item</li>
+<li>Baseline: <b>stable Rust, 2021 edition</b>; 2024-edition / version-gated behaviour tagged inline (e.g. "(2024)"). Edition set by <code>edition</code> in <code>Cargo.toml</code>, not the toolchain <span class="warn">!</span></li>
+<li>Senior focus: ownership/borrowck · <code>Send</code>/<code>Sync</code> · async state machines · the <code>unsafe</code> soundness boundary. Last 2 cards = <b>review checklist</b> + spot-the-bug.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
+</ul></section>
+
+<section class="card"><h3>Ownership &amp; Moves</h3>
+<ul>
+<li>Three rules: every value has <b>one owner</b>; one owner at a time; when the owner leaves scope the value is <b>dropped</b> (freed deterministically).</li>
+<li>Assignment / passing / returning <b>move</b> by default (non-<code>Copy</code>). The source binding is <b>statically dead</b> — reuse = <code>E0382</code>. This is what makes double-free impossible: always exactly one drop.</li>
+</ul>
+<pre><code>let s = String::from("hi");
+let t = s;          // ownership MOVES to t
+// println!("{s}"); // E0382: borrow of moved value
+println!("{t}");    // ok</code></pre>
+<ul>
+<li>No GC: the compiler inserts <code>drop</code> at scope exit. "Memory management" is a <b>type-system</b> concern resolved at compile time, zero runtime tracing.</li>
+<li>A move is a <b>static ownership transfer</b>, not necessarily a byte copy — optimiser elides it <span class="warn">!</span></li>
+<li>Cost vs GC: no pauses, tight footprint; you pay in borrow-checker friction, slow builds, awkward cyclic/graph data.</li>
+</ul></section>
+
+<section class="card"><h3>Copy vs Clone vs Move</h3>
+<table><thead><tr><th>Kind</th><th>When</th></tr></thead><tbody>
+<tr><td><b>Move</b></td><td>default for non-<code>Copy</code>; source invalidated</td></tr>
+<tr><td><b>Copy</b></td><td>implicit bit-dup; both bindings stay live</td></tr>
+<tr><td><b>Clone</b></td><td>explicit <code>.clone()</code>; whatever the type defines</td></tr>
+</tbody></table>
+<ul>
+<li><code>Copy</code> = duplicating bits yields a valid independent value: <code>i32</code>,<code>bool</code>,<code>char</code>,<code>f64</code>,<code>&T</code>, tuples/arrays of <code>Copy</code>. <b>Not</b> <code>String</code>/<code>Vec</code>/<code>Box</code> (own a heap ptr).</li>
+<li><b>Hard rule:</b> <code>Copy</code> requires <code>Clone</code>, and <code>Copy</code> is <b>mutually exclusive with <code>Drop</code></b> <span class="warn">!</span> — a destructor + implicit copy = double free.</li>
+<li><code>.clone()</code> ≠ "expensive" universally: <code>Rc::clone</code>/<code>Arc::clone</code> only bump a refcount; <code>Vec::clone</code> deep-copies.</li>
+<li>Reflexive <code>.clone()</code> to silence the borrow checker is a smell <span class="warn">!</span> — usually you wanted a borrow (<code>&T</code>).</li>
+</ul></section>
+
+<section class="card"><h3>Drop &amp; RAII</h3>
+<ul>
+<li><code>Drop::drop(&amp;mut self)</code> runs automatically at scope exit — heap, files, sockets, <code>MutexGuard</code> released here. No manual cleanup on early-return paths; runs on <b>panic-unwind</b> too.</li>
+<li>Order: locals drop in <b>reverse declaration</b> (LIFO); struct fields in <b>declaration order</b>.</li>
+</ul>
+<pre><code>struct Noisy(&amp;'static str);
+impl Drop for Noisy {
+    fn drop(&amp;mut self){ println!("drop {}", self.0); }
+}
+let _a = Noisy("a");
+let _b = Noisy("b");   // drops b, then a</code></pre>
+<ul>
+<li>Early release: <code>std::mem::drop(guard)</code> (takes by value). Shrinks a critical section.</li>
+<li><code>value.drop()</code> is a <b>compile error</b> <span class="warn">!</span> (would double-drop). Go through <code>mem::drop</code>.</li>
+<li><code>mem::forget</code> / <code>ManuallyDrop</code> <b>suppress</b> drop (FFI hand-off) — leaks by design.</li>
+</ul></section>
+
+<section class="card"><h3>Borrowing &amp; Aliasing-XOR-Mutability</h3>
+<ul>
+<li><code>&amp;T</code> shared/read pass — <code>Copy</code>, many live at once. <code>&amp;mut T</code> exclusive/write pass — while it lives, <b>no other</b> ref (not even <code>&amp;T</code>) to that data.</li>
+<li><b>The rule:</b> at any point, data has either many readers <b>xor</b> one writer — never both.</li>
+</ul>
+<pre><code>let mut v = vec![1,2,3];
+let r = &amp;v[0];   // shared borrow live...
+v.push(4);       // E0502: needs &amp;mut while r alive !
+println!("{r}"); // r's last use extends the borrow</code></pre>
+<ul>
+<li>Why it's real: <code>push</code> can reallocate → <code>r</code> dangles. Same bug as C++ iterator invalidation.</li>
+<li><b>NLL (2018):</b> a borrow ends at <b>last use</b>, not the closing brace. Reordering often fixes the error.</li>
+<li>Disjoint <code>&amp;mut</code> the checker can't prove: <code>split_at_mut</code>, <code>iter_mut</code>, destructuring.</li>
+<li>Fix a borrow error by <b>redesigning</b> (narrow scope, copy out, store an index) — not by reaching for <code>RefCell</code>/<code>.clone()</code>.</li>
+</ul></section>
+
+<section class="card"><h3>Lifetimes &amp; Elision</h3>
+<ul>
+<li>A lifetime <code>'a</code> is the compile-time region a reference is valid. <b>Compile-time only</b>, erased before codegen, zero runtime cost. It asserts a <b>relationship</b>, never lengthens how long data lives <span class="warn">!</span></li>
+</ul>
+<pre><code>fn longest&lt;'a&gt;(x: &amp;'a str, y: &amp;'a str) -&gt; &amp;'a str {
+    if x.len() &gt;= y.len() { x } else { y }
+}   // 'a = intersection (shorter) of the two inputs</code></pre>
+<h4>Elision rules (why you rarely annotate)</h4>
+<ul>
+<li>1. each input ref gets its own lifetime; 2. one input lifetime → assigned to all outputs; 3. method with <code>&amp;self</code> → <code>self</code>'s lifetime to outputs.</li>
+<li>Two-<code>&amp;str</code>-in, one-out fails elision (2 inputs, no <code>self</code>) → you must annotate.</li>
+</ul>
+<h4><code>'static</code> — two meanings, don't conflate <span class="warn">!</span></h4>
+<ul>
+<li><code>&amp;'static T</code>: data lives the whole program (literals, <code>const</code>, <code>Box::leak</code>).</li>
+<li><code>T: 'static</code> bound: type holds <b>no shorter borrows</b> — every owned <code>String</code>/<code>i32</code> qualifies. This is what <code>thread::spawn</code>/<code>tokio::spawn</code> demand.</li>
+</ul></section>
+
+<section class="card"><h3>Enums, Structs &amp; Pattern Matching</h3>
+<ul>
+<li>Enum = true <b>sum type</b> (tagged union), each variant carries its own data — not a C named integer. Struct = <b>product type</b>. Model state machines as enums: the type <i>is</i> the invariant.</li>
+<li><code>match</code> is <b>exhaustive</b> — miss a case and it won't compile; adding a variant flags every site to update.</li>
+</ul>
+<pre><code>enum Shape { Circle(f64), Rect{ w:f64, h:f64 } }
+let area = match s {
+    Shape::Circle(r)       =&gt; PI*r*r,
+    Shape::Rect{ w, h }    =&gt; w*h,
+};
+if let Some(x) = opt { use(x); }        // one-arm
+let Some(x) = opt else { return; };     // let-else (1.65)</code></pre>
+<ul>
+<li>Guards (<code>if cond</code>), binding (<code>n @ 1..=9</code>), <code>_</code> wildcard. Arm order matters — <code>_</code> swallows everything after <span class="warn">!</span></li>
+<li><b>Newtype</b> <code>struct UserId(u64)</code>: zero-cost type safety so <code>UserId</code>/<code>OrderId</code> can't be swapped.</li>
+</ul></section>
+
+<section class="card"><h3>Option &amp; Result</h3>
+<ul>
+<li><code>Option&lt;T&gt;</code> = <code>Some(T)</code>|<code>None</code> — Rust's null. <code>Option&lt;&amp;T&gt;</code>/<code>Option&lt;Box&lt;T&gt;&gt;</code> are pointer-sized via <b>niche optimisation</b> (null = <code>None</code>) — zero overhead.</li>
+<li><code>Result&lt;T,E&gt;</code> = <code>Ok(T)</code>|<code>Err(E)</code> — recoverable errors as values.</li>
+</ul>
+<table><thead><tr><th>Combinator</th><th>Does</th></tr></thead><tbody>
+<tr><td><code>map</code>/<code>map_err</code></td><td>transform the <code>Ok</code>/<code>Err</code></td></tr>
+<tr><td><code>and_then</code></td><td>chain a fallible step (flatMap)</td></tr>
+<tr><td><code>ok_or(e)</code></td><td><code>Option</code> → <code>Result</code></td></tr>
+<tr><td><code>unwrap_or(_else/_default)</code></td><td>supply a fallback, no panic</td></tr>
+<tr><td><code>?</code></td><td>early-return the <code>Err</code>/<code>None</code></td></tr>
+</tbody></table>
+<ul>
+<li><b>Don't</b> <code>if x.is_some() { x.unwrap() }</code> — <code>match</code>/<code>if let</code>/combinators. <code>unwrap()</code> in libraries on fallible I/O is a latent panic <span class="warn">!</span> — prefer <code>expect("invariant: …")</code> documenting why it can't fail.</li>
+<li><code>#[must_use]</code> on <code>Result</code> warns if you drop it unhandled.</li>
+</ul></section>
+
+<section class="card"><h3>Traits &amp; the Orphan Rule</h3>
+<ul>
+<li>Trait = a contract (method sigs + default bodies + associated types/consts). No fields, no state inheritance — composition only.</li>
+<li><b>Associated type</b> (<code>type Item;</code>) is a per-impl <i>output</i> → one <code>Iterator::Item</code> per type, so inference works. A generic <code>Iterator&lt;T&gt;</code> would be ambiguous.</li>
+</ul>
+<pre><code>trait Greet {
+    fn name(&amp;self) -&gt; String;
+    fn greet(&amp;self) -&gt; String {          // default method
+        format!("Hi, {}", self.name())
+    }
+}</code></pre>
+<ul>
+<li><b>Orphan / coherence rule</b> <span class="warn">!</span>: to <code>impl Trait for Type</code>, you must own the <b>trait or the type</b>. Can't <code>impl Display for Vec&lt;T&gt;</code> (both foreign). Guarantees ≤1 impl per (trait,type) globally.</li>
+<li>Workaround = <b>newtype</b>: <code>struct MyVec(Vec&lt;T&gt;)</code> is local, so you may impl foreign traits.</li>
+<li><b>Blanket impl</b>: <code>impl&lt;T: A&gt; B for T</code>. Marker traits (<code>Send</code>,<code>Sync</code>,<code>Copy</code>) = no methods, used as bounds.</li>
+</ul></section>
+
+<section class="card"><h3>Generics &amp; Dispatch — static vs dynamic</h3>
+<pre><code>fn f&lt;T: Display&gt;(x: T) { .. }            // static / monomorphized
+fn g(x: &amp;dyn Display) { .. }            // dynamic / vtable
+let v: Vec&lt;Box&lt;dyn Animal&gt;&gt; = ..;        // heterogeneous</code></pre>
+<table><thead><tr><th></th><th>generic <code>T:Trait</code> / <code>impl Trait</code></th><th><code>dyn Trait</code></th></tr></thead><tbody>
+<tr><td>Dispatch</td><td>compile time, inlinable</td><td>runtime vtable indirection</td></tr>
+<tr><td>Codegen</td><td>one copy per type (bloat, slow build)</td><td>one copy, type-erased</td></tr>
+<tr><td>Collections</td><td>one concrete type only</td><td>mix types in one <code>Vec</code></td></tr>
+</tbody></table>
+<ul>
+<li><code>impl Trait</code> is <b>static</b> dispatch (one anonymous concrete type), not dynamic <span class="warn">!</span></li>
+<li><b>Object safety</b>: a trait is <code>dyn</code>-usable only if no method returns <code>Self</code> / has generic params. That's why <code>Vec&lt;dyn Animal&gt;</code> fails (unsized) but <code>Vec&lt;Box&lt;dyn Animal&gt;&gt;</code> works.</li>
+<li><code>where T: Debug + Hash + Eq</code> for long bounds. Prefer <code>From</code>/<code>Into</code> for conversions (<code>?</code> relies on it).</li>
+</ul></section>
+
+<section class="card"><h3>Error Handling — ? / thiserror / anyhow</h3>
+<ul>
+<li><code>x?</code> desugars to: <code>Err(e) =&gt; return Err(From::from(e))</code>; else unwrap <code>Ok</code>. The <b><code>From</code> conversion</b> is load-bearing — <code>?</code> changes the error type <span class="warn">!</span></li>
+</ul>
+<pre><code>#[derive(thiserror::Error, Debug)]
+enum MyErr {
+    #[error("io")]      Io(#[from] std::io::Error),
+    #[error("bad {0}")] Parse(String),
+}
+fn load() -&gt; Result&lt;Cfg, MyErr&gt; {
+    let s = std::fs::read_to_string(p)?;  // io::Error -&gt; MyErr via From
+    Ok(parse(&amp;s)?)
+}</code></pre>
+<table><thead><tr><th>Layer</th><th>Use</th></tr></thead><tbody>
+<tr><td><b>thiserror</b> enum</td><td><b>libraries</b> — callers can <code>match</code>/recover</td></tr>
+<tr><td><b>anyhow</b> (<code>Error</code> + <code>.context()</code>)</td><td><b>apps</b> — log &amp; bail, type-erased</td></tr>
+<tr><td><code>Box&lt;dyn Error&gt;</code></td><td>std-only anyhow equivalent</td></tr>
+</tbody></table>
+<ul>
+<li>Libraries returning <code>anyhow</code> = anti-pattern <span class="warn">!</span> (erases the type). <code>panic!</code> is for <b>bugs/broken invariants</b>, not expected failure — it unwinds, runs <code>Drop</code>, crosses the recoverable line. <code>.context()</code> wraps, original stays in <code>source()</code>.</li>
+</ul></section>
+
+<section class="card"><h3>Iterators &amp; Collections</h3>
+<ul>
+<li>Iterators are <b>lazy &amp; zero-cost</b> — adapters build a struct; nothing runs until a consumer (<code>collect</code>, <code>sum</code>, <code>for</code>, <code>find</code>). Compiles to a hand-loop.</li>
+</ul>
+<pre><code>let evens: Vec&lt;i32&gt; = v.iter()
+    .filter(|&amp;&amp;x| x % 2 == 0)
+    .map(|&amp;x| x * 10)
+    .collect();
+let total: i32 = v.iter().sum();</code></pre>
+<ul>
+<li>Three flavours: <code>iter()</code>→<code>&amp;T</code>, <code>iter_mut()</code>→<code>&amp;mut T</code>, <code>into_iter()</code>→<code>T</code> (consumes) <span class="warn">!</span></li>
+<li><code>collect::&lt;Result&lt;Vec&lt;_&gt;,E&gt;&gt;()</code> short-circuits on first <code>Err</code>. <code>?</code> works inside a <code>for</code>.</li>
+</ul>
+<table><thead><tr><th>Type</th><th>Note</th></tr></thead><tbody>
+<tr><td><code>Vec&lt;T&gt;</code></td><td>growable array; pre-size <code>with_capacity</code></td></tr>
+<tr><td><code>HashMap</code>/<code>Set</code></td><td>random iteration order; <code>entry()</code> API</td></tr>
+<tr><td><code>BTreeMap</code></td><td>sorted; range queries</td></tr>
+<tr><td><code>VecDeque</code></td><td>ring buffer; O(1) both ends</td></tr>
+</tbody></table></section>
+
+<section class="card"><h3>Smart Pointers — Box / Rc / Arc</h3>
+<table><thead><tr><th>Type</th><th>Gives</th></tr></thead><tbody>
+<tr><td><code>Box&lt;T&gt;</code></td><td>unique heap ownership; bare ptr, only cost = the alloc. Enables recursive types &amp; <code>dyn Trait</code>.</td></tr>
+<tr><td><code>Rc&lt;T&gt;</code></td><td>shared ownership, <b>single-thread</b>, non-atomic count</td></tr>
+<tr><td><code>Arc&lt;T&gt;</code></td><td>shared ownership, <b>thread-safe</b>, atomic count</td></tr>
+<tr><td><code>Weak&lt;T&gt;</code></td><td>non-owning; <code>upgrade()</code>→<code>Option</code>; breaks cycles</td></tr>
+</tbody></table>
+<ul>
+<li><code>Rc</code>/<code>Arc</code> give shared <b>immutable</b> (<code>&amp;T</code>) access only <span class="warn">!</span> — to mutate you compose with interior mutability.</li>
+<li><code>Rc</code>/<code>Arc</code> leak on <b>reference cycles</b> (parent↔child) — Rust has no GC to collect them. Break the back-edge with <code>Weak</code>.</li>
+<li><code>Arc::clone</code> is an atomic RMW — cheap but <b>not free</b> under contention; <code>Rc</code> wins single-threaded. <code>Deref</code> coercion makes them act like <code>&amp;T</code>.</li>
+</ul></section>
+
+<section class="card"><h3>Interior Mutability</h3>
+<ul>
+<li>Mutating through a <b>shared <code>&amp;</code></b>, soundly, by moving the borrow check inward. The aliasing rule isn't broken — enforcement moves to runtime/hardware.</li>
+</ul>
+<table><thead><tr><th>Type</th><th>Check</th></tr></thead><tbody>
+<tr><td><code>Cell&lt;T&gt;</code></td><td>get/set by <b>value</b>, no refs out; single-thread</td></tr>
+<tr><td><code>RefCell&lt;T&gt;</code></td><td><b>runtime</b> borrow flag; <code>borrow()</code>/<code>borrow_mut()</code></td></tr>
+<tr><td><code>Mutex&lt;T&gt;</code></td><td>lock across threads; blocks</td></tr>
+<tr><td><code>RwLock&lt;T&gt;</code></td><td>many readers xor one writer</td></tr>
+<tr><td><code>Atomic*</code></td><td>lock-free counters/flags, hardware</td></tr>
+</tbody></table>
+<ul>
+<li><code>RefCell</code>: two live <code>borrow_mut()</code> = <b>runtime <code>panic!</code></b> (<code>already borrowed: BorrowMutError</code>), not a compile error <span class="warn">!</span></li>
+<li>Compose: <code>Rc&lt;RefCell&lt;T&gt;&gt;</code> single-thread; <code>Arc&lt;Mutex&lt;T&gt;&gt;</code> cross-thread. <code>Send</code>/<code>Sync</code> police which is sound.</li>
+</ul></section>
+
+<section class="card"><h3>Concurrency — Send / Sync</h3>
+<ul>
+<li><code>Send</code> = safe to <b>move</b> to another thread. <code>Sync</code> = safe to <b>share <code>&amp;T</code></b> across threads (<code>T: Sync</code> iff <code>&amp;T: Send</code>). <b>Auto traits</b> — derived structurally from fields.</li>
+<li><code>Rc</code> is <code>!Send</code> <span class="warn">!</span>: non-atomic refcount would tear under concurrent clone/drop → use-after-free. <code>Arc</code> uses atomics → <code>Send+Sync</code> when <code>T: Send+Sync</code>.</li>
+<li><code>RefCell</code> is <code>Send</code> but <code>!Sync</code> (non-atomic borrow flag). <code>Mutex&lt;T&gt;: Sync</code> needs only <code>T: Send</code> — the lock provides the sync.</li>
+</ul>
+<pre><code>let data = Arc::new(Mutex::new(0));
+let d = Arc::clone(&amp;data);
+thread::spawn(move || { *d.lock().unwrap() += 1; });</code></pre>
+<ul>
+<li>Rust kills <b>data races</b> (UB); <b>deadlocks &amp; lost updates are still yours</b>. std <code>Mutex</code> <b>poisons</b> on a holder panic — <code>.lock().unwrap()</code> propagating is often correct.</li>
+<li><code>thread::scope</code> lets threads borrow non-<code>'static</code> stack data. <code>rayon</code> <code>par_iter()</code> for data parallelism — wins only past a size threshold <span class="warn">!</span></li>
+</ul></section>
+
+<section class="card"><h3>Async / Await &amp; Futures</h3>
+<ul>
+<li>An <code>async fn</code> compiles to a <b>state machine</b> implementing <code>Future</code>. Calling it runs <b>zero</b> body — futures are <b>lazy</b> until an <b>executor</b> (tokio) polls them <span class="warn">!</span> (unlike JS/Python eager promises).</li>
+<li>Each <code>.await</code> = a cooperative suspension point; <code>Poll::Pending</code> yields, a <code>Waker</code> re-schedules. <b>No preemption</b> — a future that never awaits monopolises its thread.</li>
+</ul>
+<pre><code>async fn fetch() -&gt; u32 { /* inert until polled */ 0 }
+#[tokio::main] async fn main() { let n = fetch().await; }</code></pre>
+<ul>
+<li><b>Blocking a runtime thread</b> (<code>std::fs::read</code>, big CPU loop, <code>thread::sleep</code>) stalls <b>all</b> tasks on it <span class="warn">!</span> → use <code>spawn_blocking</code> / async I/O.</li>
+<li>Holding a <code>std::sync::MutexGuard</code> across <code>.await</code> = latent deadlock <span class="warn">!</span> — drop it first, or use <code>tokio::Mutex</code> (slower, only for this).</li>
+<li>A future is <code>Send</code> iff <b>every value held across an <code>.await</code></b> is <code>Send</code> — the #1 "won't <code>tokio::spawn</code>" error (an <code>Rc</code>/guard is live). <code>Pin</code> restricts <b>moving</b>, not mutation.</li>
+</ul></section>
+
+<section class="card"><h3>Closures — Fn / FnMut / FnOnce</h3>
+<table><thead><tr><th>Trait</th><th>Body does</th><th>Callable</th></tr></thead><tbody>
+<tr><td><code>FnOnce</code></td><td><b>consumes</b> a captured var</td><td>once</td></tr>
+<tr><td><code>FnMut</code></td><td><b>mutates</b> a capture</td><td>repeatedly, needs <code>&amp;mut</code></td></tr>
+<tr><td><code>Fn</code></td><td>only <b>reads</b> captures</td><td>repeatedly, via <code>&amp;</code></td></tr>
+</tbody></table>
+<ul>
+<li>Hierarchy: <code>Fn</code> ⊂ <code>FnMut</code> ⊂ <code>FnOnce</code>. Compiler picks the <b>least restrictive</b> automatically from what the body does.</li>
+<li><code>move</code> forces captures <b>by value</b> — required to send a closure to a thread / <code>tokio::spawn</code> (needs <code>'static</code>) <span class="warn">!</span></li>
+</ul>
+<pre><code>let mut n = 0;
+let mut inc = || { n += 1; };   // FnMut
+let add = move |x| x + base;    // moves `base` in
+fn apply(f: impl Fn(i32)-&gt;i32) -&gt; i32 { f(1) }</code></pre>
+<ul>
+<li>Store closures as <code>impl Fn(..)</code> (static) or <code>Box&lt;dyn Fn(..)&gt;</code> (heterogeneous). Each closure is its own anonymous type.</li>
+</ul></section>
+
+<section class="card"><h3>Strings &amp; Text</h3>
+<ul>
+<li><code>String</code> = owned, growable, heap, UTF-8. <code>&amp;str</code> = borrowed view (ptr+len). Take <code>&amp;str</code> at APIs, return <code>String</code> when you create.</li>
+<li>Bytes ≠ chars ≠ graphemes <span class="warn">!</span> — UTF-8 is variable width. <b>You cannot index <code>s[0]</code></b> — that byte may split a codepoint.</li>
+</ul>
+<pre><code>for c in s.chars() { .. }     // Unicode scalars
+for b in s.bytes() { .. }     // raw u8
+let n = s.chars().count();    // O(n), not s.len()
+let slice = &amp;s[0..4];         // byte range — panics mid-char !</code></pre>
+<ul>
+<li><code>s.len()</code> is <b>bytes</b>, not chars. Slicing on a non-boundary <b>panics</b> at runtime.</li>
+<li>Build with <code>String::push_str</code>/<code>write!</code>/<code>format!</code>; <code>+</code> takes <code>String + &amp;str</code> and moves the LHS.</li>
+<li><code>Cow&lt;'a, str&gt;</code> = borrow when possible, allocate only on modify.</li>
+</ul></section>
+
+<section class="card"><h3>Memory, Layout &amp; Performance</h3>
+<ul>
+<li>Default <code>repr(Rust)</code> layout is <b>unspecified</b> — the compiler reorders fields to minimise padding. Use <code>#[repr(C)]</code> only for FFI/stable layout <span class="warn">!</span></li>
+<li>Enum size = largest variant + discriminant tag; <b>niche optimisation</b> makes <code>Option&lt;&amp;T&gt;</code> pointer-sized.</li>
+<li>Zero-cost abstractions: generics <b>monomorphize</b> (one specialised copy per type) — fast at runtime, but a <b>binary-size &amp; compile-time</b> cost.</li>
+</ul>
+<h4>Integer overflow — debug vs release <span class="warn">!</span></h4>
+<ul>
+<li><code>dev</code>: <code>overflow-checks=true</code> → <b>panics</b>. <code>release</code>: off → <b>wraps silently</b> (2's-complement). "Works in tests, corrupts in prod." Never UB (unlike C).</li>
+<li>Explicit families: <code>checked_*</code>→<code>Option</code>, <code>saturating_*</code>→clamp, <code>wrapping_*</code>→modular, <code>overflowing_*</code>→<code>(T,bool)</code>.</li>
+</ul>
+<p>Levers: pre-size <code>Vec</code>/<code>HashMap</code>, borrow instead of clone, <code>Box::leak</code>/arenas, measure with <code>cargo flamegraph</code> + <code>criterion</code> before optimising.</p></section>
+
+<section class="card"><h3>Unsafe &amp; FFI</h3>
+<ul>
+<li><code>unsafe</code> is <b>not</b> "turn off the borrow checker" <span class="warn">!</span> — borrowck/typeck/lifetimes still fully apply. It's a promise <b>you</b> uphold invariants the compiler can't verify.</li>
+<li><b>5 superpowers:</b> deref a raw ptr; call an <code>unsafe fn</code>; access/mutate a <code>static mut</code> (hard-deprecated 2024 — use <code>OnceLock</code>/<code>Atomic</code>); impl an <code>unsafe trait</code> (<code>Send</code>/<code>Sync</code>); read a <code>union</code> field.</li>
+<li><b>UB = licence to miscompile</b>, not "a crash" — may "work" until the optimiser changes <span class="warn">!</span></li>
+</ul>
+<pre><code>let (a, b) = slice.split_at_mut(mid);   // unsafe inside, SAFE api
+extern "C" { fn c_fn(p: *const u8, n: usize) -&gt; i32; }
+#[no_mangle] pub extern "C" fn rs_fn() {}</code></pre>
+<ul>
+<li><b>Soundness lives at the module boundary</b>, not the block: a sound API is one no safe caller can misuse into UB. Every <code>unsafe fn</code> needs a <code>// Safety:</code> contract.</li>
+<li>FFI needs <code>extern "C"</code> + <code>#[repr(C)]</code> types + <b>don't unwind across the boundary</b>. Verify with <b>Miri</b>.</li>
+</ul></section>
+
+<section class="card"><h3>Macros, Cargo &amp; Tooling</h3>
+<ul>
+<li><code>macro_rules!</code> = declarative, pattern-matching on token trees, hygienic. Proc macros (<code>#[derive]</code>, attribute, function-like) run at compile time on a <code>TokenStream</code> — power the <code>serde</code>/<code>thiserror</code>/<code>tokio</code> ergonomics.</li>
+<li>Macros expand <b>before</b> type-checking; errors point into expansion — <code>cargo expand</code> to debug <span class="warn">!</span></li>
+</ul>
+<table><thead><tr><th>Command</th><th>Use</th></tr></thead><tbody>
+<tr><td><code>cargo build --release</code></td><td>optimised build</td></tr>
+<tr><td><code>cargo clippy</code></td><td>lints — run in CI</td></tr>
+<tr><td><code>cargo fmt</code></td><td>rustfmt formatting</td></tr>
+<tr><td><code>cargo test</code> / <code>--doc</code></td><td>unit+integration / doctests</td></tr>
+<tr><td><code>cargo add</code> / <code>update</code></td><td>deps &amp; <code>Cargo.lock</code></td></tr>
+</tbody></table>
+<ul>
+<li><code>Cargo.toml</code> = manifest; <code>Cargo.lock</code> = pinned versions (commit for bins). SemVer resolution; <b>features</b> are additive — a dep enabled anywhere is on everywhere <span class="warn">!</span></li>
+<li>Workspaces share one lockfile + <code>target/</code>. <code>edition</code> (2015/18/21/24) is per-crate, opt-in.</li>
+</ul></section>
+
+<section class="card"><h3>Testing</h3>
+<ul>
+<li><b>Unit</b> tests live in-module behind <code>#[cfg(test)] mod tests</code> — can reach private items. <b>Integration</b> tests in <code>tests/</code> see only the public API. <b>Doctests</b> in <code>///</code> run on <code>cargo test</code>.</li>
+</ul>
+<pre><code>#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn adds() { assert_eq!(add(2,2), 4); }
+    #[test]
+    #[should_panic(expected = "overflow")]
+    fn overflows() { add(u8::MAX, 1); }
+}</code></pre>
+<ul>
+<li><code>assert_eq!</code>/<code>assert!</code>; a <code>#[test] fn</code> returning <code>Result</code> lets you use <code>?</code>. <code>#[ignore]</code> for slow tests (<code>--ignored</code> to run).</li>
+<li>Tests run in <b>parallel threads</b> by default — no shared mutable global without sync <span class="warn">!</span>; <code>--test-threads=1</code> to serialise.</li>
+<li><code>#[bench]</code>/<code>criterion</code> for benchmarks; <code>proptest</code> for property tests; <code>cargo test -- --nocapture</code> to see <code>println!</code>.</li>
+</ul></section>
+
+<section class="card"><h3>&#9733; Code Review Checklist</h3>
+<h4>Ownership / borrows</h4>
+<ul>
+<li>&#9744; <code>.clone()</code> used to decide ownership, not to silence <code>E0502</code>/<code>E0382</code> — could it be a <code>&amp;T</code> borrow or an index? <span class="warn">!</span></li>
+<li>&#9744; API takes <code>&amp;str</code>/<code>&amp;T</code> to read, <code>String</code>/<code>T</code> only to store/consume.</li>
+<li>&#9744; Returned reference's lifetime doesn't over-constrain the caller.</li>
+</ul>
+<h4>Errors / panics</h4>
+<ul>
+<li>&#9744; No <code>unwrap()</code>/<code>expect()</code> on fallible I/O in library code; <code>panic!</code> only for broken invariants.</li>
+<li>&#9744; Libraries expose a <code>thiserror</code> enum (not <code>anyhow</code>); <code>?</code>'s <code>From</code> impls present.</li>
+<li>&#9744; No dropped <code>Result</code> (heed <code>#[must_use]</code>).</li>
+</ul>
+<h4>Concurrency / async</h4>
+<ul>
+<li>&#9744; No <code>std::sync::MutexGuard</code> / <code>Rc</code> / <code>RefCell</code> held across an <code>.await</code> <span class="warn">!</span></li>
+<li>&#9744; No blocking call (<code>std::fs</code>, sleep, CPU loop) on a runtime thread — use <code>spawn_blocking</code>.</li>
+<li>&#9744; Shared state is <code>Arc&lt;Mutex/RwLock&gt;</code> or atomics; lock scope minimal; no lock-order inversions.</li>
+</ul>
+<h4>Correctness</h4>
+<ul>
+<li>&#9744; Integer arithmetic uses <code>checked/saturating/wrapping</code> where release-wrap would corrupt <span class="warn">!</span></li>
+<li>&#9744; No <code>String</code> byte-indexing / mid-codepoint slicing.</li>
+<li>&#9744; <code>Rc</code>/<code>Arc</code> cycles broken with <code>Weak</code>; no reflexive <code>RefCell</code> that could double-<code>borrow_mut</code>.</li>
+</ul>
+<h4>Unsafe</h4>
+<ul>
+<li>&#9744; Every <code>unsafe</code> block has a <code>// Safety:</code> note; the <b>safe wrapper</b> guarantees the contract; Miri-clean.</li>
+<li>&#9744; FFI is <code>extern "C"</code> + <code>#[repr(C)]</code> and never unwinds across the boundary.</li>
+</ul></section>
+
+<section class="card"><h3>Common Bugs — Spot-the-Bug</h3>
+<table><thead><tr><th>Symptom</th><th>Cause</th></tr></thead><tbody>
+<tr><td><code>E0382</code> use of moved value</td><td>passed by value where a borrow was meant <span class="warn">!</span></td></tr>
+<tr><td><code>E0502</code> can't borrow as mutable</td><td>a <code>&amp;</code> into the collection is still live (NLL last-use) <span class="warn">!</span></td></tr>
+<tr><td>panic: <code>BorrowMutError</code></td><td>double <code>borrow_mut()</code> on a <code>RefCell</code> <span class="warn">!</span></td></tr>
+<tr><td>"attempt to add with overflow" only in debug</td><td>release build wraps silently <span class="warn">!</span></td></tr>
+<tr><td>memory grows, never freed</td><td><code>Rc</code>/<code>Arc</code> reference cycle — needs <code>Weak</code> <span class="warn">!</span></td></tr>
+<tr><td><code>Rc&lt;i32&gt; cannot be sent</code></td><td><code>Rc</code> is <code>!Send</code> — use <code>Arc</code> <span class="warn">!</span></td></tr>
+<tr><td>future not <code>Send</code>, won't <code>spawn</code></td><td>non-<code>Send</code> value (guard/<code>Rc</code>) held across <code>.await</code> <span class="warn">!</span></td></tr>
+<tr><td>whole server hangs under load</td><td>blocking call or lock held across <code>.await</code> <span class="warn">!</span></td></tr>
+<tr><td>panic: byte index not a char boundary</td><td>sliced UTF-8 mid-codepoint <span class="warn">!</span></td></tr>
+<tr><td>silent miscompile after <code>-O</code></td><td>UB in an <code>unsafe</code> block (aliasing/uninit) <span class="warn">!</span></td></tr>
+</tbody></table></section>
+
+</div>
+</body>
+</html>

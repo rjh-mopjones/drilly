@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SQL Patterns Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+/* spanning title bar */
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>SQL Patterns Cheat Sheet</h1><span class="meta">Postgres 17/18 · pattern-recognition focus · generic examples · drilly</span></div>
+
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="warn">!</span> footgun / gotcha &nbsp; <code>&#9744;</code> review checklist item &nbsp; <span class="pg">PG</span> Postgres-only &nbsp; <span class="ansi">STD</span> standard SQL</li>
+<li>Baseline: <b>Postgres 17/18</b>. Version-gated features tagged inline (<code>MERGE</code> PG15, <code>CYCLE</code> PG14, <code>JSON_TABLE</code> PG17). Uses <code>DISTINCT ON</code>, <code>FILTER</code>, <code>LATERAL</code>, <code>PERCENTILE_CONT</code> freely.</li>
+<li>Discipline: read a prompt, walk <b>input shape → output cardinality → output type → constraint clue</b>, name the pattern in &lt;30s. Card 2 is the keyword lookup. Last 2 cards = <b>review checklist</b> + symptom→cause.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
+</ul></section>
+
+<section class="card"><h3>Pattern Recognition — keyword → move</h3>
+<table><thead><tr><th>Prompt says</th><th>Reach for</th></tr></thead><tbody>
+<tr><td>"consecutive", "in a row", "streak"</td><td>Gaps &amp; Islands</td></tr>
+<tr><td>"running", "cumulative", "rolling N-day"</td><td>window fn + frame</td></tr>
+<tr><td>"top-N / first / most-recent per group"</td><td><code>DISTINCT ON</code> / <code>ROW_NUMBER()=1</code></td></tr>
+<tr><td>"median", "p95", "p99"</td><td><code>PERCENTILE_CONT</code></td></tr>
+<tr><td>"previous / next by group"</td><td><code>LAG</code> / <code>LEAD</code></td></tr>
+<tr><td>"transitive", "reachable", "ancestors"</td><td>recursive CTE</td></tr>
+<tr><td>"as-of", "point in time", "snapshot"</td><td>range overlap / <code>LATERAL</code></td></tr>
+<tr><td>"pivot", "rows to columns"</td><td><code>FILTER</code> agg / crosstab</td></tr>
+<tr><td>"cohort", "retention", "funnel"</td><td><code>generate_series</code> + <code>LEFT JOIN</code></td></tr>
+<tr><td>"find pairs where"</td><td>self-join, <code>a.id&lt;b.id</code></td></tr>
+<tr><td>"in A not in B", "but not"</td><td>anti-join (<code>NOT EXISTS</code>)</td></tr>
+<tr><td>"subtotals + grand total"</td><td><code>ROLLUP</code> / <code>GROUPING SETS</code></td></tr>
+<tr><td>"upsert", "idempotent insert"</td><td><code>ON CONFLICT</code> / <code>MERGE</code></td></tr>
+</tbody></table>
+<h4>Return shape → pattern</h4>
+<ul>
+<li>single scalar → aggregate, no <code>GROUP BY</code></li>
+<li>row-per-input + computed col → <b>window fn</b> (never <code>GROUP BY</code>)</li>
+<li>row-per-group → <code>GROUP BY</code></li>
+<li>one representative row per group → <code>DISTINCT ON</code></li>
+<li>matrix (rows × categories) → <code>FILTER</code> pivot</li>
+<li>tree → recursive CTE</li>
+</ul>
+</section>
+
+<section class="card"><h3>JOIN types &amp; ON vs WHERE</h3>
+<table><thead><tr><th>Join</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>INNER</code></td><td>both sides match (default)</td></tr>
+<tr><td><code>LEFT</code></td><td>every left row, NULLs if no right</td></tr>
+<tr><td><code>FULL OUTER</code></td><td>every row either side; set XOR</td></tr>
+<tr><td><code>CROSS</code></td><td>cartesian; pair with <code>generate_series</code></td></tr>
+</tbody></table>
+<p><span class="warn">!</span> <b>The <code>ON</code> vs <code>WHERE</code> trap:</b> a right-side filter in <code>WHERE</code> silently turns a <code>LEFT</code> join into an <code>INNER</code> one — unmatched left rows have <code>NULL</code> there and fail the predicate.</p>
+<pre><code>-- WRONG: drops customers with no 2024 orders
+LEFT JOIN orders o ON o.cust_id = c.id
+WHERE o.created_at &gt;= '2024-01-01';
+-- RIGHT: filter inside the join
+LEFT JOIN orders o ON o.cust_id = c.id
+     AND o.created_at &gt;= '2024-01-01';</code></pre>
+<ul>
+<li>Rule: right-side predicate + you want non-matches to survive → put it in <code>ON</code>, never <code>WHERE</code>.</li>
+<li>Rewrite <code>RIGHT</code> as <code>LEFT</code> with sides flipped for readability.</li>
+<li><code>USING(col)</code> = <code>ON a.col=b.col</code> and folds the column to one output col.</li>
+<li>Anti-join = <code>LEFT JOIN ... WHERE r.key IS NULL</code>. Semi-join = <code>EXISTS</code> (no row duplication).</li>
+</ul>
+</section>
+
+<section class="card"><h3>LATERAL &amp; Self-Joins</h3>
+<h4>LATERAL — top-N per group, cleanly</h4>
+<pre><code>SELECT c.name, o.*
+FROM customers c
+CROSS JOIN LATERAL (
+  SELECT * FROM orders o
+  WHERE o.cust_id = c.id
+  ORDER BY o.created_at DESC
+  LIMIT 3            -- 3 latest per customer
+) o;</code></pre>
+<ul>
+<li>Right side is <b>correlated</b> — evaluated per left row, may return a set.</li>
+<li>Beats a window fn when there's an index on <code>(cust_id, created_at DESC)</code> and N is small vs group size: each per-group query is an early-stopping index scan. Window fn sorts the whole table once — steadier without the index. Check <code>EXPLAIN ANALYZE</code>.</li>
+<li>Use <code>LEFT JOIN LATERAL ... ON true</code> to keep left rows with an empty right set.</li>
+</ul>
+<h4>Self-join — pairs &amp; one-level hierarchy</h4>
+<pre><code>-- unordered pairs, each once
+FROM logins a JOIN logins b
+  ON a.day = b.day AND a.user_id &lt; b.user_id;
+-- earns more than manager
+FROM emp e JOIN emp m ON m.id = e.mgr_id
+WHERE e.salary &gt; m.salary;</code></pre>
+<ul><li><code>a.id &lt; b.id</code> dedupes (alice,bob)/(bob,alice). <span class="warn">!</span> alias both sides or the planner picks the wrong reference.</li></ul>
+</section>
+
+<section class="card"><h3>GROUP BY · HAVING · FILTER</h3>
+<ul>
+<li>Eval order: <code>FROM → WHERE → GROUP BY → HAVING → SELECT → ORDER BY → LIMIT</code>. So aggregate aliases are invisible to <code>WHERE</code>, visible to <code>ORDER BY</code> <span class="warn">!</span></li>
+<li><code>WHERE</code> filters <b>rows</b> (before grouping, cheaper); <code>HAVING</code> filters <b>groups</b> (needs an aggregate). Predicate on a row → <code>WHERE</code>; on a group → <code>HAVING</code>.</li>
+<li>Every <code>SELECT</code> col must be in <code>GROUP BY</code> or wrapped in an aggregate.</li>
+</ul>
+<h4>Conditional aggregation — many counts, one scan</h4>
+<pre><code>SELECT region,
+  COUNT(*) FILTER (WHERE status='paid')    AS paid,
+  COUNT(*) FILTER (WHERE status='pending') AS pending,
+  SUM(amount) FILTER (WHERE status='paid') AS rev
+FROM orders GROUP BY region;</code></pre>
+<ul>
+<li><code>FILTER (WHERE ...)</code> <span class="ansi">STD</span> = same plan as <code>SUM(CASE WHEN..THEN 1 END)</code>, cleaner. Also the pivot template.</li>
+<li><span class="warn">!</span> <code>COUNT(*)</code> counts NULL rows; <code>COUNT(col)</code> skips NULLs; <code>COUNT(*) FILTER (WHERE x IS NULL)</code> counts them — opposite of <code>COUNT(x)</code>.</li>
+<li><code>COUNT(DISTINCT col)</code> needs a hash/sort — pricier. On a <code>LEFT JOIN</code>, <code>COUNT(*)</code> overcounts NULL-padded rows; use <code>COUNT(r.id)</code>.</li>
+<li><code>STRING_AGG(name, ', ' ORDER BY name)</code> <span class="ansi">STD</span> replaces MySQL <code>GROUP_CONCAT</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>GROUPING SETS · ROLLUP · CUBE</h3>
+<pre><code>-- per (region,cat), per region, grand total: 1 scan
+SELECT region, category, SUM(revenue) AS total
+FROM sales
+GROUP BY ROLLUP(region, category);</code></pre>
+<table><thead><tr><th>Form</th><th>Produces</th></tr></thead><tbody>
+<tr><td><code>ROLLUP(a,b)</code></td><td><code>(a,b),(a),()</code> — hierarchy subtotals</td></tr>
+<tr><td><code>CUBE(a,b)</code></td><td><code>(a,b),(a),(b),()</code> — every combo</td></tr>
+<tr><td><code>GROUPING SETS(...)</code></td><td>exactly the groupings you list</td></tr>
+</tbody></table>
+<ul>
+<li>Subtotal rows carry <code>NULL</code> in the rolled-up column. <code>GROUPING(category)=1</code> flags a subtotal row so you can label it (distinguishes real NULLs from subtotal NULLs) <span class="warn">!</span></li>
+<li>Recognition: "with subtotals" → <code>ROLLUP</code>; "every combination" → <code>CUBE</code>; "these specific groupings" → <code>GROUPING SETS</code>. Beats 4 queries <code>UNION</code>'d that re-scan the data.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Window Functions — Ranking &amp; Ties</h3>
+<pre><code>&lt;fn&gt; OVER (PARTITION BY k ORDER BY x [frame])</code></pre>
+<table><thead><tr><th>Fn</th><th>Ties (1,1,?)</th></tr></thead><tbody>
+<tr><td><code>ROW_NUMBER()</code></td><td>1,2,3 — arbitrary tiebreak <span class="warn">!</span></td></tr>
+<tr><td><code>RANK()</code></td><td>1,1,3 — gaps after ties</td></tr>
+<tr><td><code>DENSE_RANK()</code></td><td>1,1,2 — no gaps</td></tr>
+<tr><td><code>NTILE(4)</code></td><td>quartile bucket per row</td></tr>
+</tbody></table>
+<ul>
+<li>Windows <b>keep the row count</b> and add a per-row column — not <code>GROUP BY</code>.</li>
+<li>Can't filter a window in the same <code>SELECT</code> (runs after <code>WHERE</code>) — wrap in a CTE/subquery and filter there <span class="warn">!</span></li>
+</ul>
+<pre><code>-- 2nd-highest salary per dept (distinct value)
+WITH r AS (
+  SELECT *, DENSE_RANK() OVER (
+    PARTITION BY dept ORDER BY salary DESC) rk
+  FROM emp)
+SELECT * FROM r WHERE rk = 2;</code></pre>
+<ul><li><code>DENSE_RANK=2</code> = 2nd distinct salary; <code>ROW_NUMBER=2</code> = literally the 2nd row (wrong if tie semantics matter). The prompt's tie rule decides.</li></ul>
+</section>
+
+<section class="card"><h3>Window Functions — Analytics</h3>
+<table><thead><tr><th>Fn</th><th>Returns</th></tr></thead><tbody>
+<tr><td><code>LAG(x[,n[,dflt]])</code></td><td>value n rows back in partition</td></tr>
+<tr><td><code>LEAD(x)</code></td><td>value from following row</td></tr>
+<tr><td><code>FIRST_VALUE / LAST_VALUE</code></td><td>frame endpoints <span class="warn">!</span></td></tr>
+<tr><td><code>NTH_VALUE(x,n)</code></td><td>nth in frame</td></tr>
+</tbody></table>
+<pre><code>-- day-over-day delta per customer
+SELECT ts, amount - LAG(amount) OVER (
+  PARTITION BY cust_id ORDER BY ts) AS delta
+FROM txns;</code></pre>
+<ul>
+<li>"previous/next by group" → <code>LAG</code>/<code>LEAD</code> reflexively. O(N log N) sort vs O(N²) self-join.</li>
+<li><span class="warn">!</span> <code>LAST_VALUE</code> with the default frame returns the <b>current row</b>, not the partition end — default frame is <code>RANGE UNBOUNDED PRECEDING → CURRENT ROW</code>. Fix: add <code>ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING</code>.</li>
+<li><code>COUNT(DISTINCT ...) OVER (...)</code> is <b>not supported</b> <span class="warn">!</span> — reformulate via first-appearance (see Gaps &amp; Islands neighbours).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Window Frames — ROWS / RANGE / GROUPS</h3>
+<pre><code>-- 7-day rolling avg (row-based): 6 PRECEDING = 7 rows
+AVG(rev) OVER (ORDER BY day
+  ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)
+-- 7 calendar days regardless of row count
+AVG(rev) OVER (ORDER BY day
+  RANGE BETWEEN INTERVAL '6 days' PRECEDING
+            AND CURRENT ROW)</code></pre>
+<table><thead><tr><th>Mode</th><th>"N preceding" =</th></tr></thead><tbody>
+<tr><td><code>ROWS</code></td><td>N physical rows back</td></tr>
+<tr><td><code>RANGE</code></td><td>rows within N of the ORDER BY value</td></tr>
+<tr><td><code>GROUPS</code></td><td>N peer-groups (ties) back</td></tr>
+</tbody></table>
+<ul>
+<li><span class="warn">!</span> Off-by-one: <code>6 PRECEDING AND CURRENT ROW</code> = 7 rows. Writing <code>7 PRECEDING</code> gives 8.</li>
+<li><span class="warn">!</span> Default frame is <code>RANGE</code>, not <code>ROWS</code> — differs when ties exist on the ORDER BY key. Pick explicitly.</li>
+<li><code>ROWS</code> is integer-count only; interval windows need <code>RANGE BETWEEN INTERVAL</code> <span class="pg">PG</span>. Missing days don't shrink a <code>RANGE</code> window (right for "rolling N calendar days"); <code>ROWS</code> would.</li>
+<li>Ranking fns (<code>ROW_NUMBER/RANK</code>) <b>ignore the frame</b> — always whole partition.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Subqueries vs CTEs vs Windows</h3>
+<ul>
+<li><b>Scalar subquery</b> in <code>SELECT</code>/<code>WHERE</code>: returns one value. <b>Correlated</b> subquery re-evaluates per outer row — usually a perf smell <span class="warn">!</span></li>
+<li><b>Derived table</b>: subquery in <code>FROM</code>. <b>CTE</b>: <code>WITH x AS (...)</code>, named, referenceable multiple times, reads top-down.</li>
+<li><span class="warn">!</span> Pre-PG12 a CTE was an <b>optimisation fence</b> (always materialised). PG12+ <b>inlines</b> CTEs used once — add <code>AS MATERIALIZED</code> to force the old fence, <code>NOT MATERIALIZED</code> to force inlining.</li>
+</ul>
+<pre><code>WITH recent AS MATERIALIZED (   -- force one eval
+  SELECT * FROM big WHERE ts &gt; now() - '1d'::interval
+)
+SELECT ... FROM recent a JOIN recent b ON ...;</code></pre>
+<ul>
+<li>Reach for a <b>window fn</b> when you need a per-row aggregate without collapsing rows; a <b>CTE</b> to name/reuse an intermediate; a <b>correlated subquery</b> only when small and index-backed.</li>
+<li><code>EXISTS</code> vs <code>IN</code>: modern planner treats both as semi-joins — pick by readability. But <b>never <code>NOT IN</code></b> over a nullable column <span class="warn">!</span> (one NULL → zero rows).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Recursive CTEs (graph / hierarchy)</h3>
+<pre><code>WITH RECURSIVE descent AS (
+  SELECT id, parent_id, 1 AS lvl       -- base/anchor
+  FROM categories WHERE id = :root
+  UNION ALL
+  SELECT c.id, c.parent_id, d.lvl + 1  -- recursive
+  FROM categories c
+  JOIN descent d ON c.parent_id = d.id
+)
+SELECT * FROM descent;</code></pre>
+<ul>
+<li>Anchor runs once; recursive member joins the CTE's own prior output; stops when it yields 0 rows. This is <b>BFS</b> — each iteration is a level.</li>
+<li>Ascent (ancestors): flip to <code>JOIN a ON c.id = a.parent_id</code>.</li>
+<li><span class="warn">!</span> <code>UNION ALL</code> not <code>UNION</code> — <code>UNION</code> dedupes each iteration, compounding cost.</li>
+<li><span class="warn">!</span> Cycles loop forever on dirty data. PG14+: <code>... CYCLE id SET is_cycle USING path</code> then <code>WHERE NOT is_cycle</code>. Pre-14: carry a <code>path</code> array, <code>WHERE NOT id = ANY(path)</code>.</li>
+<li>Bound runaways with <code>WHERE lvl &lt; 100</code>; deep recursion hits <code>max_stack_depth</code>.</li>
+<li>Wrong tool for weighted shortest path (Dijkstra), TSP, heavy per-node work — no heap, repeats work. Use app code.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Gaps &amp; Islands</h3>
+<p>Detect consecutive runs. The trick: for qualifying rows, <code>value - ROW_NUMBER()</code> is <b>constant within a run</b> (rows 1,2,3 on dates d,d+1,d+2 → all d-1). Group by that difference.</p>
+<pre><code>WITH q AS (                       -- FILTER FIRST !
+  SELECT day FROM daily_rev WHERE rev &gt; 100000
+), g AS (
+  SELECT day,
+    day - (ROW_NUMBER() OVER (ORDER BY day))::int AS grp
+  FROM q
+)
+SELECT MIN(day) start, MAX(day) fin, COUNT(*) len
+FROM g GROUP BY grp
+HAVING COUNT(*) &gt;= 3;             -- streaks of 3+</code></pre>
+<ul>
+<li><span class="warn">!</span> Filter to qualifying rows <b>before</b> numbering — numbering the full table breaks the alignment.</li>
+<li>Per-group streaks: <code>PARTITION BY user_id</code> in the <code>ROW_NUMBER</code>.</li>
+<li>Generalises to any length K (self-join only does fixed K). <code>LAG</code>-variant: flag boundaries, <code>SUM(flag) OVER (ORDER BY ts)</code> = island id — more flexible for "new island when X changes".</li>
+</ul>
+</section>
+
+<section class="card"><h3>Sessionization &amp; Event Sequences</h3>
+<p>Gaps &amp; islands on time with an inactivity boundary (e.g. 30-min gap = new session).</p>
+<pre><code>WITH marked AS (
+  SELECT user_id, ts,
+    CASE WHEN ts - LAG(ts) OVER (PARTITION BY user_id
+         ORDER BY ts) &gt; INTERVAL '30 min'
+         OR LAG(ts) OVER (PARTITION BY user_id
+         ORDER BY ts) IS NULL
+    THEN 1 ELSE 0 END AS new_sess
+  FROM events
+)
+SELECT user_id, ts,
+  SUM(new_sess) OVER (PARTITION BY user_id ORDER BY ts)
+    AS session_id
+FROM marked;</code></pre>
+<ul>
+<li>Boundary flag + running sum = stable session id. First row of a partition is always a boundary (<code>LAG</code> is NULL) <span class="warn">!</span></li>
+<li>Then <code>GROUP BY user_id, session_id</code> for session length / event count / duration.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Top-N per Group</h3>
+<pre><code>-- most recent order per customer (PG, shortest)
+SELECT DISTINCT ON (cust_id) *
+FROM orders
+ORDER BY cust_id, created_at DESC;</code></pre>
+<table><thead><tr><th>Pattern</th><th>Use when</th></tr></thead><tbody>
+<tr><td><code>DISTINCT ON</code> <span class="pg">PG</span></td><td>N=1, shortest, index-friendly</td></tr>
+<tr><td><code>ROW_NUMBER()&lt;=N</code></td><td>any N, portable</td></tr>
+<tr><td><code>LATERAL ... LIMIT N</code></td><td>N small + good index</td></tr>
+</tbody></table>
+<ul>
+<li><span class="warn">!</span> <code>DISTINCT ON</code>'s leading <code>ORDER BY</code> cols must match the <code>ON</code> list, then the tiebreak (<code>created_at DESC</code>) picks the kept row.</li>
+<li>Portable form for N&gt;1:</li>
+</ul>
+<pre><code>WITH r AS (SELECT *, ROW_NUMBER() OVER (
+  PARTITION BY cust_id ORDER BY created_at DESC) rn
+  FROM orders)
+SELECT * FROM r WHERE rn &lt;= 3;</code></pre>
+<ul><li>Avoid <code>WHERE created_at = (SELECT MAX(...) WHERE cust_id=o.cust_id)</code> — correlated, re-evaluates per row.</li></ul>
+</section>
+
+<section class="card"><h3>Pivot &amp; Unpivot</h3>
+<h4>Pivot — rows → columns (FILTER)</h4>
+<pre><code>SELECT cust_id,
+  SUM(rev) FILTER (WHERE month=1) AS jan,
+  SUM(rev) FILTER (WHERE month=2) AS feb
+FROM revenue GROUP BY cust_id;</code></pre>
+<ul>
+<li>Column list must be known at query time <span class="warn">!</span> — SQL can't return a variable-shape result. Truly dynamic pivot → generate the SQL in app code.</li>
+<li><code>tablefunc.crosstab</code> <span class="pg">PG</span> (<code>CREATE EXTENSION tablefunc</code>) is shorter but has the same static-column constraint — usually not worth the dependency.</li>
+</ul>
+<h4>Unpivot — columns → rows</h4>
+<pre><code>SELECT id, k, v
+FROM wide,
+LATERAL (VALUES ('jan',jan),('feb',feb),('mar',mar))
+  AS u(k, v);</code></pre>
+<ul><li><code>LATERAL (VALUES ...)</code> or <code>UNNEST</code> turns N columns into N rows per input row.</li></ul>
+</section>
+
+<section class="card"><h3>Set Ops &amp; Anti-Joins</h3>
+<table><thead><tr><th>Op</th><th>Note</th></tr></thead><tbody>
+<tr><td><code>UNION</code></td><td>dedupes (sort/hash) <span class="warn">!</span></td></tr>
+<tr><td><code>UNION ALL</code></td><td>keeps dups — prefer when disjoint</td></tr>
+<tr><td><code>INTERSECT</code></td><td>rows in both (distinct)</td></tr>
+<tr><td><code>EXCEPT</code></td><td>in A not B (distinct)</td></tr>
+</tbody></table>
+<p>Set ops need matching column count &amp; compatible types; <code>ORDER BY</code> goes once, at the end.</p>
+<h4>"in A not in B" — three forms</h4>
+<pre><code>-- 1. NOT EXISTS  (planner favourite, NULL-safe)
+WHERE NOT EXISTS (SELECT 1 FROM b WHERE b.uid = a.uid);
+-- 2. LEFT JOIN ... IS NULL
+LEFT JOIN b ON b.uid = a.uid WHERE b.uid IS NULL;
+-- 3. EXCEPT  (returns DISTINCT rows)</code></pre>
+<ul>
+<li><span class="warn">!</span> <b>Never <code>NOT IN (subquery)</code></b> over a nullable column — a single NULL makes the whole predicate UNKNOWN and you get <b>zero rows</b>. <code>NOT EXISTS</code> is immune.</li>
+<li>Semi-join (<code>EXISTS</code>/<code>IN</code>) = "has ≥1 match", no duplication. Anti-join = the negation.</li>
+</ul>
+</section>
+
+<section class="card"><h3>NULL &amp; Three-Valued Logic</h3>
+<ul>
+<li>NULL = absence of value → comparisons yield <b>UNKNOWN</b>, treated as FALSE in <code>WHERE</code>. So <code>= NULL</code>, <code>!= NULL</code> are always wrong — use <code>IS NULL</code> / <code>IS NOT NULL</code> <span class="warn">!</span></li>
+<li><code>NULL = NULL</code> → UNKNOWN. NULL-safe equality: <code>a IS NOT DISTINCT FROM b</code> (both-NULL = TRUE). Inequality: <code>IS DISTINCT FROM</code>.</li>
+<li>Aggregates skip NULLs: <code>SUM/AVG/MIN/MAX/COUNT(col)</code> ignore them; <code>COUNT(*)</code> counts the rows.</li>
+<li><span class="warn">!</span> <code>SUM</code> over zero rows is <b>NULL</b>, not 0 → <code>COALESCE(SUM(x),0)</code> when no-rows means zero.</li>
+<li><span class="warn">!</span> <code>AVG(x)</code> ignores NULLs (mean of non-NULLs); if NULL should count as 0 use <code>AVG(COALESCE(x,0))</code> — different answer.</li>
+</ul>
+<pre><code>-- sentinel → real NULL
+NULLIF(qty_text, 'N/A')
+-- NULLs last regardless of engine default
+ORDER BY signup_date ASC NULLS LAST;</code></pre>
+<ul><li><code>COALESCE(a,b,c)</code> = first non-NULL. <code>NULLIF(a,b)</code> = NULL if <code>a=b</code>.</li></ul>
+</section>
+
+<section class="card"><h3>Dedup &amp; Messy Data</h3>
+<p>Order is the whole game: <b>normalise → coerce types → null-out sentinels → dedup → key</b>. Stage as a CTE chain, one transform each, so you can reconcile counts.</p>
+<pre><code>WITH norm AS (           -- 1. normalise text keys
+  SELECT *, lower(btrim(ticker)) AS tk FROM raw
+), typed AS (            -- 2. safe cast + 3. sentinel→NULL
+  SELECT *, NULLIF(amt_text,'N/A')::numeric AS amt
+  FROM norm
+), deduped AS (          -- 4. keep one per business key
+  SELECT DISTINCT ON (tk, trade_date) *
+  FROM typed ORDER BY tk, trade_date, ctid
+)
+SELECT md5(tk||trade_date::text) AS id, *  -- 5. stable key
+FROM deduped;</code></pre>
+<ul>
+<li><span class="warn">!</span> <code>SELECT DISTINCT</code> only kills byte-identical rows — <code>" AAPL "</code> ≠ <code>AAPL</code> until normalised.</li>
+<li><span class="warn">!</span> <code>''</code> is a real value in Postgres, not NULL — <code>NULLIF(x,'')</code> it.</li>
+<li><span class="warn">!</span> A blanket <code>::date</code> aborts the whole query on one bad row — guard with <code>pg_input_is_valid(v,'date')</code> (PG16+) or a regex <code>CASE</code>.</li>
+<li><code>ROW_NUMBER()</code> needs a <b>stable tiebreaker</b> (<code>ctid</code>, load ts) or reruns key differently. Prefer a content hash over <code>gen_random_uuid()</code>. Quarantine bad rows — don't silently drop.</li>
+</ul>
+</section>
+
+<section class="card"><h3>UPSERT · ON CONFLICT · MERGE</h3>
+<pre><code>-- idempotent insert (retry-safe)
+INSERT INTO events (external_id, payload)
+VALUES (:x, :p)
+ON CONFLICT (external_id) DO NOTHING;
+
+-- upsert; EXCLUDED = would-be-inserted row
+INSERT INTO customers (email, name, last_seen)
+VALUES (:e, :n, now())
+ON CONFLICT (email) DO UPDATE
+  SET name = EXCLUDED.name,
+      last_seen = EXCLUDED.last_seen
+  WHERE customers.last_seen &lt; EXCLUDED.last_seen  -- LWW
+RETURNING id, (xmax = 0) AS was_inserted;</code></pre>
+<ul>
+<li><span class="warn">!</span> Idempotency needs a <b>UNIQUE constraint</b> on the conflict target — without it there's nothing to detect and concurrent inserts both succeed.</li>
+<li><code>EXCLUDED</code> is a pseudo-table, only in <code>DO UPDATE</code>. <code>xmax=0</code> ⇒ row was inserted (not updated). <code>WHERE</code> on <code>DO UPDATE</code> gates the update (last-write-wins).</li>
+<li><code>RETURNING</code> <span class="pg">PG</span> avoids the insert-then-select round-trip (SQL Server: <code>OUTPUT</code>).</li>
+</ul>
+<pre><code>MERGE INTO customers c USING staging s ON c.email=s.email
+WHEN MATCHED AND s.is_deleted THEN DELETE
+WHEN MATCHED THEN UPDATE SET name=s.name
+WHEN NOT MATCHED THEN INSERT (email,name) VALUES (s.email,s.name);</code></pre>
+<ul><li><code>MERGE</code> <span class="ansi">STD</span> (PG15+): multi-action bulk ETL with a DELETE branch. Use <code>ON CONFLICT</code> for simple single-row upserts.</li></ul>
+</section>
+
+<section class="card"><h3>JSON &amp; JSONB</h3>
+<table><thead><tr><th>Op</th><th>Returns</th></tr></thead><tbody>
+<tr><td><code>-&gt;</code></td><td>JSONB (chain further)</td></tr>
+<tr><td><code>-&gt;&gt;</code></td><td>text (final value)</td></tr>
+<tr><td><code>#&gt;</code> / <code>#&gt;&gt;</code></td><td>deep path → JSONB / text</td></tr>
+<tr><td><code>@&gt;</code></td><td>containment (GIN-indexed)</td></tr>
+<tr><td><code>?</code> <code>?|</code> <code>?&amp;</code></td><td>key exists / any / all</td></tr>
+</tbody></table>
+<pre><code>-- containment + GIN index = fast
+CREATE INDEX ON docs USING gin (data);
+SELECT * FROM docs WHERE data @&gt; '{"status":"paid"}';
+-- explode array to rows (PG17+, standard)
+SELECT * FROM JSON_TABLE(data, '$.items[*]'
+  COLUMNS (sku text PATH '$.sku', qty int PATH '$.qty'));</code></pre>
+<ul>
+<li><span class="warn">!</span> <code>-&gt;</code> vs <code>-&gt;&gt;</code>: <code>data-&gt;'x' = '5'</code> compares JSONB to text and fails silently; use <code>data-&gt;&gt;'x' = '5'</code>.</li>
+<li>Update: <code>jsonb_set(data,'{a,b}',to_jsonb(v))</code>; merge <code>||</code>; delete key <code>data - 'k'</code>.</li>
+<li>Pre-PG17: <code>jsonb_array_elements()</code> / <code>jsonb_path_query()</code>. Use JSONB for genuinely flexible schema; normalise stable path-accessed data — JSONB pays a parse cost per access.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Indexing for Queries &amp; Plan Reading</h3>
+<h4>Which index</h4>
+<table><thead><tr><th>Query shape</th><th>Index</th></tr></thead><tbody>
+<tr><td><code>col = ?</code>, range, <code>ORDER BY</code></td><td>B-tree</td></tr>
+<tr><td><code>WHERE a=? AND b=?</code> / top-N per group</td><td>composite <code>(a,b DESC)</code></td></tr>
+<tr><td>JSONB <code>@&gt;</code>, array, FTS</td><td>GIN</td></tr>
+<tr><td>only some rows queried</td><td>partial <code>WHERE active</code></td></tr>
+<tr><td>index-only scan</td><td>covering <code>INCLUDE (...)</code></td></tr>
+</tbody></table>
+<ul>
+<li><b>Leftmost-prefix rule</b>: a <code>(a,b,c)</code> index serves <code>a</code>, <code>a,b</code>, <code>a,b,c</code> — not <code>b</code> alone <span class="warn">!</span></li>
+<li><span class="warn">!</span> A function/cast on the column kills index use: <code>WHERE lower(email)=?</code> needs an <b>expression index</b> <code>ON (lower(email))</code>. Same for <code>col::date</code>, <code>col + 0</code>, leading-wildcard <code>LIKE '%x'</code>.</li>
+<li>A composite index matching <code>(partition, order DESC)</code> lets top-N-per-group / <code>DISTINCT ON</code> skip the sort.</li>
+</ul>
+<h4>Reading EXPLAIN (ANALYZE)</h4>
+<ul>
+<li>Seq Scan on a big filtered table → missing index. Nested Loop with high row count → bad estimate (<code>ANALYZE</code> stale stats). Big gap estimated vs actual rows → re-stat.</li>
+<li><code>EXPLAIN (ANALYZE, BUFFERS)</code> shows real time + I/O. Sort spilling to disk → raise <code>work_mem</code> or add an ordering index.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Anti-patterns &amp; Smells</h3>
+<ul>
+<li><span class="warn">!</span> <code>NOT IN (subquery)</code> on nullable col → zero rows. Use <code>NOT EXISTS</code>.</li>
+<li><span class="warn">!</span> <code>SELECT *</code> in production / views — breaks on schema change, defeats index-only scans, ships extra bytes.</li>
+<li><span class="warn">!</span> Right-side filter in <code>WHERE</code> on a <code>LEFT JOIN</code> → accidental inner join.</li>
+<li><span class="warn">!</span> Correlated subquery in <code>SELECT</code> where a window fn or join does it in one pass (N+1 in SQL).</li>
+<li><span class="warn">!</span> Function on an indexed column in <code>WHERE</code> → full scan.</li>
+<li><span class="warn">!</span> <code>GROUP BY 1</code> (ordinal) in stored SQL — breaks silently when columns reorder.</li>
+<li><span class="warn">!</span> <code>OFFSET</code> pagination on deep pages — O(offset). Use keyset/seek: <code>WHERE (ts,id) &lt; (:ts,:id) ORDER BY ts DESC,id DESC LIMIT n</code>.</li>
+<li><span class="warn">!</span> Implicit cross join from <code>FROM a, b</code> with the join predicate forgotten.</li>
+<li><span class="warn">!</span> <code>DISTINCT</code> sprinkled to hide a fan-out from a bad join — fix the join.</li>
+<li><span class="warn">!</span> <code>COUNT(*)</code> after <code>LEFT JOIN</code> overcounts NULL-padded rows.</li>
+</ul>
+</section>
+
+<section class="card"><h3>&#9733; SQL Review Checklist</h3>
+<h4>Correctness</h4>
+<ul>
+<li>&#9744; No <code>NOT IN</code> over a nullable subquery; anti-joins use <code>NOT EXISTS</code> <span class="warn">!</span></li>
+<li>&#9744; <code>LEFT JOIN</code> right-side filters live in <code>ON</code>, not <code>WHERE</code>.</li>
+<li>&#9744; NULL checks use <code>IS [NOT] NULL</code>; no <code>= NULL</code>.</li>
+<li>&#9744; Aggregates over nullable cols have an explicit "NULL means what?" decision (<code>COALESCE</code>).</li>
+</ul>
+<h4>Windows &amp; grouping</h4>
+<ul>
+<li>&#9744; Window frame explicit where ties/time matter; off-by-one on <code>N PRECEDING</code> checked.</li>
+<li>&#9744; Row-per-input output uses a window fn, not <code>GROUP BY</code>; row-per-group uses <code>GROUP BY</code>.</li>
+<li>&#9744; Ranking fn matches tie semantics (<code>RANK</code>/<code>DENSE_RANK</code>/<code>ROW_NUMBER</code>).</li>
+<li>&#9744; <code>WHERE</code> vs <code>HAVING</code>: row predicates in <code>WHERE</code>.</li>
+</ul>
+<h4>Recursion &amp; cleaning</h4>
+<ul>
+<li>&#9744; Recursive CTE has a cycle guard (<code>CYCLE</code> / visited array) and depth bound.</li>
+<li>&#9744; Cleaning pipeline: normalise → type → sentinel-null → dedup → key; stable tiebreaker on <code>ROW_NUMBER</code>.</li>
+</ul>
+<h4>Writes &amp; performance</h4>
+<ul>
+<li>&#9744; <code>ON CONFLICT</code> backed by a matching <code>UNIQUE</code> constraint.</li>
+<li>&#9744; Predicate columns are SARGable (no function/cast on the indexed side); composite index respects leftmost-prefix.</li>
+<li>&#9744; <code>EXPLAIN ANALYZE</code> checked for seq scans / estimate-vs-actual gaps on hot queries.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Common Bugs — Symptom → Cause</h3>
+<table><thead><tr><th>Symptom</th><th>Cause</th></tr></thead><tbody>
+<tr><td><code>NOT IN</code> returns zero rows</td><td>NULL in subquery → UNKNOWN <span class="warn">!</span></td></tr>
+<tr><td><code>LEFT JOIN</code> dropped unmatched rows</td><td>right-side filter in <code>WHERE</code> <span class="warn">!</span></td></tr>
+<tr><td>region shows <code>NULL</code> total not 0</td><td><code>SUM</code> of no rows is NULL <span class="warn">!</span></td></tr>
+<tr><td>duplicate rows after join</td><td>fan-out on a one-to-many join <span class="warn">!</span></td></tr>
+<tr><td>rolling avg off by one row</td><td><code>N PRECEDING</code> = N+1 rows <span class="warn">!</span></td></tr>
+<tr><td><code>LAST_VALUE</code> = current row</td><td>default <code>RANGE</code> frame <span class="warn">!</span></td></tr>
+<tr><td>consecutive-run query wrong</td><td>numbered before filtering <span class="warn">!</span></td></tr>
+<tr><td>recursive CTE never ends / OOM</td><td>cycle, no guard <span class="warn">!</span></td></tr>
+<tr><td>slow query, seq scan</td><td>function/cast on indexed col <span class="warn">!</span></td></tr>
+<tr><td>upsert still duplicates</td><td>no <code>UNIQUE</code> on conflict target <span class="warn">!</span></td></tr>
+<tr><td>dedup left <code>" AAPL "</code> + <code>AAPL</code></td><td><code>DISTINCT</code> before normalising <span class="warn">!</span></td></tr>
+<tr><td>JSON filter matches nothing</td><td><code>-&gt;</code> (JSONB) vs <code>-&gt;&gt;</code> (text) <span class="warn">!</span></td></tr>
+</tbody></table>
+</section>
+
+</div>
+</body>
+</html>
