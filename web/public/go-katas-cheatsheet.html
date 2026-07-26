@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Go Katas Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+/* spanning title bar */
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>Go Katas Cheat Sheet</h1><span class="meta">Go concurrency katas · test-first with -race · trading-platform theme · drilly</span></div>
+
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="warn">!</span> footgun / gotcha &nbsp; <code>&#9744;</code> pre-code checklist item</li>
+<li>Scope: 14 open-ended <b>Go concurrency katas</b> + the aggregator drill, framed as a low-latency sports-betting trading platform. Every kata hides one trap; you <b>prove</b> the fix with a test.</li>
+<li>The whole sheet runs on one idea: at every shared value ask <b>"what establishes happens-before here?"</b> and at every <code>go</code> ask <b>"how does this end?"</b></li>
+<li>The command that is the point: <code>go test -race -count=N ./pkg/</code>. One green run is <b>not</b> proof <span class="warn">!</span></li>
+<li>Last 2 cards = <b>★ pre-code checklist</b> + common mistakes. Middle cards = the sync menu, the stress harness, then per-kata quick-reference.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
+</ul></section>
+
+<section class="card"><h3>Attack plan — the loop</h3>
+<p>Turn an open prompt ("many handlers read the latest price", "drain the server without loss") into correct, tested code. Same five steps every time:</p>
+<ul>
+<li><b>1. Find the shared state + the lifecycle.</b> What memory is touched by &gt;1 goroutine, who writes/reads it? For every <code>go</code> you start, how does it end — closed chan, cancelled ctx, finite loop? State these out loud; each answer becomes a test.</li>
+<li><b>2. Design the API &amp; pick synchronisation.</b> Write the exported signatures first; committing to <i>how</i> you synchronise <b>is</b> the design (next card).</li>
+<li><b>3. Write the tests FIRST</b> — in this order: <b>contract</b> (single-goroutine happy path) → <b>core</b> (the kata's real job) → <b>edges</b> (nil/closed chan, empty, ctx cancelled mid-flight, slow consumer) → <b>-race stress</b> (many goroutines, assert an invariant).</li>
+<li><b>4. Implement to green.</b> Prefer the simplest primitive that removes the race.</li>
+<li><b>5. Repeat under load.</b> <code>go test -race -count=5 ./pkg/</code>; <code>go vet ./...</code> (copylocks, loopclosure, printf). A single green run proves nothing <span class="warn">!</span></li>
+</ul>
+<p class="cap">The skill tested is not "do you know channels" but "can you reason about N goroutines hitting this at once, and write the test that <i>proves</i> it".</p>
+</section>
+
+<section class="card"><h3>Synchronisation decision</h3>
+<p>Choosing among these <b>is</b> the design. Pick the simplest that removes the race.</p>
+<table><thead><tr><th>Primitive</th><th>Use when</th></tr></thead><tbody>
+<tr><td><code>sync.Mutex</code></td><td>shared mutable struct; hold across the <b>whole</b> read-modify-write. Not reentrant <span class="warn">!</span></td></tr>
+<tr><td><code>sync.RWMutex</code></td><td>reads ≫ writes <b>and reads don't mutate</b>. An LRU/LFU <code>Get</code> mutates recency → <code>RLock</code> corrupts it, use <code>Mutex</code> <span class="warn">!</span></td></tr>
+<tr><td><b>channel</b></td><td>transfer <b>ownership</b> (share by communicating) or serialise via a single-writer loop. No lock guards the owned state.</td></tr>
+<tr><td><code>context.Context</code></td><td>thread cancellation/deadline to every downstream call; check <code>ctx.Done()</code> / <code>ctx.Err()</code>.</td></tr>
+<tr><td><code>atomic.Pointer[T]</code></td><td>lock-free swap of a single immutable snapshot (whole-map replace, config).</td></tr>
+<tr><td><code>WaitGroup</code>+1 closer</td><td>fan-in: count finishers, then <b>one</b> goroutine closes the output.</td></tr>
+</tbody></table>
+<ul>
+<li><b>"Add a mutex to be safe"</b> — a lock held across a downstream/blocking call serialises everything and can deadlock; scope it tight <span class="warn">!</span></li>
+<li><b>"Channels are always the answer"</b> — a plain mutex-guarded struct is often simpler and faster than a channel dance.</li>
+</ul>
+</section>
+
+<section class="card"><h3>The -race stress harness</h3>
+<p>The one test that catches the bug: many goroutines, a start-gate, mixed read/write, assert an <b>invariant</b> a race would break.</p>
+<pre><code>func TestX_RaceStress(t *testing.T) {
+  if testing.Short() { t.Skip("stress") }
+  l := New(); l.Open("a",1000); l.Open("b",1000)
+  const G, N = 64, 5000
+  var wg sync.WaitGroup
+  start := make(chan struct{})   // gate: max contention
+  for g := 0; g &lt; G; g++ {
+    wg.Add(1)
+    go func(){ defer wg.Done(); &lt;-start
+      for i:=0;i&lt;N;i++{ l.Transfer("a","b",1)
+                        l.Transfer("b","a",1) }
+    }()
+  }
+  close(start); wg.Wait()
+  if l.Bal("a")+l.Bal("b") != 2000 {  // INVARIANT
+    t.Fatalf("money not conserved")
+  }
+}</code></pre>
+<ul>
+<li>Run <code>go test -race -count=5 ./pkg/</code>. Fails an unsynchronised RMW; passes a correct lock <b>every</b> time.</li>
+<li>Assert the invariant — <b>conservation</b> / <b>exactly-once</b> / <b>no-leak</b> — never an exact interleaving <span class="warn">!</span></li>
+<li>Detector is sound (no false positives) but only flags races it <i>observes</i> — the stress test's job is to <i>force</i> the path.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Leak &amp; deadlock checks</h3>
+<p>A green functional test hides both. Add these two shapes.</p>
+<h4>Goroutine-leak — count returns to baseline</h4>
+<pre><code>base := runtime.NumGoroutine()
+f := NewFeed(); f.Start()
+f.Close()                    // must unblock EVERY worker
+time.Sleep(20*time.Millisecond) // let them unwind
+if n := runtime.NumGoroutine(); n &gt; base {
+  t.Fatalf("leaked %d", n-base)
+}</code></pre>
+<h4>Deadlock / deadline — hang fails loudly</h4>
+<pre><code>ctx,cancel := context.WithTimeout(ctx,10*time.Millisecond)
+defer cancel()
+err := Settle(ctx, bet)
+if !errors.Is(err, context.DeadlineExceeded) {
+  t.Fatalf("ctx not propagated: %v", err)
+}</code></pre>
+<ul>
+<li>Wrap any op that <i>could</i> hang in a timeout so a deadlock fails the test, not the suite.</li>
+<li><code>t.Cleanup(cancel)</code> / <code>t.Cleanup(server.Close)</code> — teardown runs even on failure.</li>
+<li><b>No <code>time.Sleep</code> to synchronise</b> the test logic <span class="warn">!</span> — gate with channels/WaitGroup; inject a clock for timeouts.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Channel discipline</h3>
+<table><thead><tr><th>Op</th><th>Behaviour</th></tr></thead><tbody>
+<tr><td>send on closed</td><td><b>panic</b> <span class="warn">!</span></td></tr>
+<tr><td>close of closed</td><td><b>panic</b> <span class="warn">!</span></td></tr>
+<tr><td>recv on closed</td><td>zero value, <code>ok==false</code> (drains buffer first)</td></tr>
+<tr><td><code>nil</code> channel</td><td>send &amp; recv block <b>forever</b> — use to disable a <code>select</code> case <span class="warn">!</span></td></tr>
+</tbody></table>
+<ul>
+<li><b>The sender closes, exactly once. Receivers never close.</b> Many senders → close from a dedicated goroutine after <code>wg.Wait()</code>, or fence with <code>sync.Once</code>.</li>
+<li><code>for v := range ch</code> exits on close; <code>v, ok := &lt;-ch</code> tests it.</li>
+</ul>
+<pre><code>select {
+case v := &lt;-in:        use(v)
+case &lt;-ctx.Done():      return ctx.Err()  // cancel
+case out &lt;- x:          // SEND must also race ctx !
+default:                return ErrQueueFull // backpressure
+}</code></pre>
+<p><span class="warn">!</span> Guard <b>both</b> directions against <code>ctx.Done()</code>: a bare <code>out &lt;- x</code> on a full buffer whose consumer left parks the sender forever → leak + a <code>wg.Wait()</code> that never returns → the output never closes.</p>
+</section>
+
+<section class="card"><h3>Katas — feeds &amp; prices</h3>
+<table><thead><tr><th>Kata</th><th>Trap → fix</th><th>Key test / invariant</th></tr></thead><tbody>
+<tr><td><b>pricecache</b></td><td>bare map read+write = data race <span class="warn">!</span> → <code>RWMutex</code> (read-only get) or <code>atomic.Pointer</code> swap</td><td>race stress mixed Get/Set; snapshot consistency</td></tr>
+<tr><td><b>priceladder</b></td><td>relative adjust is read-modify-write; split lock = lost update <span class="warn">!</span> → one critical section over the whole RMW</td><td>N goroutines +1/−1; final sum <b>conserved</b></td></tr>
+<tr><td><b>oddsfeed</b></td><td>consumer goroutine leaks <span class="warn">!</span> → exit on <b>ctx.Done()</b> <b>and</b> input-channel close</td><td><code>NumGoroutine()</code> returns to baseline after Close</td></tr>
+<tr><td><b>feedchannel</b></td><td>send-on-closed panic / nil-chan hang <span class="warn">!</span> → close once (sender), <code>select</code>+<code>default</code> for backpressure</td><td>publish-after-close errors, not panics; no drop under load</td></tr>
+</tbody></table>
+</section>
+
+<section class="card"><h3>Katas — lifecycle &amp; shutdown</h3>
+<table><thead><tr><th>Kata</th><th>Trap → fix</th><th>Key test / invariant</th></tr></thead><tbody>
+<tr><td><b>betmachine</b></td><td>illegal transition / double-payout under duplicate events <span class="warn">!</span> → guarded, <b>idempotent</b> transition under one lock</td><td>table: legal/illegal moves; concurrent dup events → paid once</td></tr>
+<tr><td><b>shutdown</b></td><td>drain loses jobs / send-on-closed / deadlock <span class="warn">!</span> → <b>fence-then-drain</b>: <code>close(done)</code> under Once, then <code>close(jobs)</code> under write-lock; ctx-deadline wrap</td><td>no lost job, no panic, no hang; <code>Shutdown(ctx)</code> honours deadline</td></tr>
+</tbody></table>
+<p class="cap">shutdown: <code>Submit</code> holds <code>RLock</code>+re-checks <code>done</code>; <code>Shutdown</code> takes <code>Lock</code> (granted only when no send in flight) → closing <code>jobs</code> is safe. Workers <code>for j := range jobs</code> drain the buffer then exit; <code>wg.Wait()</code> IS the drain, wrapped against <code>ctx.Done()</code>.</p>
+</section>
+
+<section class="card"><h3>Katas — coordination &amp; fan-in</h3>
+<table><thead><tr><th>Kata</th><th>Trap → fix</th><th>Key test / invariant</th></tr></thead><tbody>
+<tr><td><b>venuefanin</b></td><td>drop/dup or close-from-forwarder panic <span class="warn">!</span> → <b>WaitGroup-then-close</b>, single closer; guard send on ctx</td><td>merged multiset == union, each item <b>once</b></td></tr>
+<tr><td><b>settlement</b></td><td><code>payout(context.Background(), …)</code> severs cancel <span class="warn">!</span> → thread received <code>ctx</code> unchanged into every downstream call, check <code>ctx.Err()</code> per iteration</td><td>deadline test: <code>errors.Is(err, DeadlineExceeded)</code>; ≤1 in-flight overrun</td></tr>
+<tr><td><b>aggregator</b> (drill)</td><td>subscribe/unsubscribe double-close on a shared out-chan <span class="warn">!</span> → close-once per subscription (<code>sync.Once</code>)</td><td>bug only caught by <code>-race -count</code> subscribe/unsub churn</td></tr>
+</tbody></table>
+</section>
+
+<section class="card"><h3>Katas — bigger staged builds</h3>
+<table><thead><tr><th>Kata</th><th>Trap → fix</th><th>Key test / invariant</th></tr></thead><tbody>
+<tr><td><b>matchingengine</b></td><td>shared book race <span class="warn">!</span> → <b>single-writer loop</b> owns the book (no lock); price-time priority</td><td>quantity <b>conservation</b> under mixed sides; demand≫liquidity → exactly N filled</td></tr>
+<tr><td><b>messagebus</b></td><td>lost/duplicate delivery <span class="warn">!</span> → <b>idempotent consumers</b> (dedupe on <code>Message.ID</code>), ack/nack+redelivery, prefetch, dead-letter, close-once</td><td>every msg processed ≥once, effect once; poison → dead-letter after <code>maxRetries</code></td></tr>
+<tr><td><b>ledger</b></td><td>lost update + deadlock <span class="warn">!</span> → per-account <code>Mutex</code> across RMW; <b>sorted lock order</b>; idempotency keys on the account</td><td>total <b>conserved</b> under A↔B; double-entry nets to zero</td></tr>
+<tr><td><b>settlepipeline</b></td><td>unbounded stages / no cancel <span class="warn">!</span> → bounded per-stage <code>Stage</code>, ctx cancel, <b>first-error short-circuit</b>, drain</td><td>first error cancels all; no leak; bounded memory</td></tr>
+<tr><td><b>cache</b></td><td>TTL sweep race, LRU "read is a write" <span class="warn">!</span> → <code>Mutex</code> not <code>RWMutex</code>; lazy+sweeper TTL; LFU freq-buckets; singleflight</td><td>cap&lt;keyspace eviction churn; value encodes key → detect torn write</td></tr>
+<tr><td><b>betgateway</b></td><td>double-submit TOCTOU over HTTP <span class="warn">!</span> → <b>single-flight per Idempotency-Key</b>, never lock across downstream <code>Place</code></td><td><code>httptest</code> + gated identical requests → placed <b>once</b>; 201/200/502</td></tr>
+</tbody></table>
+</section>
+
+<section class="card"><h3>Pattern — single-writer loop</h3>
+<p>One goroutine is the <b>only</b> thing that touches the state, so the state needs <b>no lock</b>. Callers hand off requests + a buffered reply chan (matchingengine).</p>
+<pre><code>func (e *Engine) Start() {
+  go func() {
+    defer close(e.stopped)
+    for {
+      select {
+      case &lt;-e.done: return
+      case req := &lt;-e.submit:
+        req.reply &lt;- e.book.Submit(req.order) // reply buffered(1)
+      }
+    }
+  }()
+}
+func (e *Engine) Submit(ctx context.Context, o Order) ([]Trade, error) {
+  req := submitReq{o, make(chan []Trade, 1)} // size 1: loop never blocks
+  select {                       // hand off
+  case e.submit &lt;- req:
+  case &lt;-e.done:    return nil, ErrEngineClosed // no send-on-closed
+  case &lt;-ctx.Done(): return nil, ctx.Err()
+  }
+  select {                       // await reply
+  case tr := &lt;-req.reply: return tr, nil
+  case &lt;-ctx.Done():     return nil, ctx.Err() // buffered send still ok
+  }
+}</code></pre>
+<ul>
+<li>The <code>submit</code> send/recv <b>is</b> the happens-before edge that orders every book access — non-atomic mutations, no lock, race-clean.</li>
+<li>Reply <b>buffered(1)</b> so the loop's send completes even if the caller gave up on <code>ctx</code> → no leak.</li>
+<li><code>Close</code>: <code>sync.Once</code> → <code>close(done)</code>, then <code>&lt;-e.stopped</code> handshake so it returns only once the loop is truly gone.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Pattern — fan-in (WaitGroup-then-close)</h3>
+<pre><code>func FanIn(ctx context.Context, buf int, srcs ...&lt;-chan Q) &lt;-chan Q {
+  out := make(chan Q, buf)
+  var wg sync.WaitGroup; wg.Add(len(srcs))
+  for _, src := range srcs {
+    go func(src &lt;-chan Q) {
+      defer wg.Done()
+      for {
+        select {
+        case &lt;-ctx.Done(): return
+        case q, ok := &lt;-src:
+          if !ok { return }        // source drained + closed
+          select {                 // send must ALSO race ctx !
+          case &lt;-ctx.Done(): return
+          case out &lt;- q:
+          }
+        }
+      }
+    }(src)
+  }
+  go func(){ wg.Wait(); close(out) }() // single closer, exactly once
+  return out
+}</code></pre>
+<ul>
+<li><b>Why not a mutex:</b> forwarders share no mutable state, they only communicate values; the only coordination is "count the finishers" = <code>WaitGroup</code>.</li>
+<li><code>wg.Wait()</code> happens-after every send → <code>close(out)</code> strictly follows the last value. Each source owned by one forwarder → each value forwarded once.</li>
+<li><b>Don't</b> close from a forwarder (drops siblings' in-flight / double-close panic), and <b>don't</b> spool overflow into a growing slice — blocking IS the backpressure design <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Pattern — graceful shutdown</h3>
+<p>Three primitives: <code>done</code> (closed once = shutting down), <code>mu RWMutex</code> (makes check-then-send atomic vs close), <code>wg</code> (counts workers).</p>
+<pre><code>func (s *Server) Submit(j Job) error {
+  s.mu.RLock(); defer s.mu.RUnlock()
+  select { case &lt;-s.done: return ErrShuttingDown; default: }
+  select {
+  case &lt;-s.done:      return ErrShuttingDown // wakes a parked Submit
+  case s.jobs &lt;- j:   return nil
+  }
+}
+func (s *Server) Shutdown(ctx context.Context) error {
+  s.closeOnce.Do(func(){
+    close(s.done)        // fence: future/blocked Submits bail
+    s.mu.Lock()          // granted only when no Submit mid-send
+    close(s.jobs)        // the ONLY close — exactly once
+    s.mu.Unlock()
+  })
+  fin := make(chan struct{})
+  go func(){ s.wg.Wait(); close(fin) }()
+  select {
+  case &lt;-fin:       return nil
+  case &lt;-ctx.Done(): return ctx.Err() // wedged worker → hand control back
+  }
+}</code></pre>
+<p>Workers: <code>for j := range s.jobs</code> drains the buffer after close, then <code>defer wg.Done()</code>. <code>close(jobs)</code>+<code>wg.Wait()</code> <b>is</b> the drain — never a manual drain or a bare <code>wg.Wait()</code> in a deploy path.</p>
+</section>
+
+<section class="card"><h3>Pattern — single-flight &amp; idempotency</h3>
+<p>Exactly-once HTTP / dedupe: install-or-find one in-flight entry under the lock, <b>release the lock before the downstream call</b>, publish via <code>close(ready)</code> (betgateway).</p>
+<pre><code>g.mu.Lock()
+if e, ok := g.inflight[key]; ok {
+  g.mu.Unlock(); &lt;-e.ready              // waiter blocks on leader
+  return e.bet, false, e.err
+}
+e := &amp;entry{ready: make(chan struct{})}
+g.inflight[key] = e
+g.mu.Unlock()                           // BEFORE the slow call !
+e.bet, e.err = g.placer.Place(ctx, acct, bet) // the single Place
+if e.err != nil {                       // drop on failure → retryable
+  g.mu.Lock(); delete(g.inflight, key); g.mu.Unlock()
+}
+close(e.ready)                          // publish edge for all waiters</code></pre>
+<ul>
+<li>Leader writes fields <b>before</b> <code>close(ready)</code>; waiters read <b>after</b> <code>&lt;-ready</code> — the close is the happens-before edge, no field lock needed.</li>
+<li>Mutex serialises <b>only</b> the map op (closes the TOCTOU window); never wraps I/O <span class="warn">!</span></li>
+<li>Idempotency-key form (ledger/messagebus): dedupe-check + mutation + record-outcome are <b>one</b> critical section; a duplicate replays the stored outcome.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Deadlock-free locking &amp; ledger</h3>
+<ul>
+<li><b>Transfer = two locks.</b> "lock from, then to" deadlocks under A→B racing B→A. Acquire in <b>sorted-id order</b> (lower first) — a total order under which no waits-for cycle can form.</li>
+<li>Reject same-account <i>before</i> locking — double-locking one mutex self-deadlocks <span class="warn">!</span></li>
+</ul>
+<pre><code>first, second := src, dst
+if first.id &gt; second.id { first, second = second, first }
+first.mu.Lock();  defer first.mu.Unlock()
+second.mu.Lock(); defer second.mu.Unlock()
+// dedupe-check + debit + credit + record all here
+src.balance -= amt; dst.balance += amt   // nets to zero = conservation</code></pre>
+<ul>
+<li>Hold the account lock across the <b>entire</b> RMW — half-locked (read xor write) still loses updates.</li>
+<li>Double-entry: a <code>-amt</code>/<code>+amt</code> posting that nets to zero makes conservation <b>structural</b>.</li>
+<li>Money = <b>integer minor units</b> end-to-end; <code>0.1+0.2 != 0.3</code> fails audit <span class="warn">!</span></li>
+<li>DB framing: per-account mutex = <code>SELECT … FOR UPDATE</code>; sorted locks = <code>ORDER BY id</code>; optimistic = <code>version</code>-column CAS.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Context propagation &amp; pipelines</h3>
+<ul>
+<li>Context is one-way: a parent cancel flows <b>down</b> to every derived context. <code>context.Background()</code> is a wall that stops the caller's cancel dead — <b>never</b> pass it downstream <span class="warn">!</span></li>
+<li>Two-sided fix: <b>pass</b> the received <code>ctx</code> unchanged (or narrow with <code>WithTimeout</code>, never replace) <b>into</b> each call; <b>check</b> <code>ctx.Err()</code> at the top of each iteration before dispatching the next.</li>
+<li>You can't rescue a call that ignores its ctx, but refusing to <b>start</b> further calls bounds overrun to ≤1 in-flight.</li>
+</ul>
+<h4>Bounded staged pipeline (settlepipeline)</h4>
+<ul>
+<li>Reusable <code>Stage</code>: N workers over one <code>in</code>, one <code>out</code>, WaitGroup-then-close. Guard <b>all three</b> channel ops (recv + send-result + send-err) with <code>ctx.Done()</code>.</li>
+<li>Derive <b>one</b> cancellable ctx for feeder + every stage; <b>first error</b> → <code>cancel()</code> short-circuits the lot; then drain.</li>
+<li>Bounded buffers → when a stage lags, backpressure walks upstream to the feeder; memory bounded regardless of an early stage's speed.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Caches — TTL · LRU · LFU</h3>
+<ul>
+<li><b>TTL:</b> lazy expiry on read (treat expired as miss) + a background sweeper goroutine; the sweeper must exit on <code>Close</code> (leak otherwise) <span class="warn">!</span></li>
+<li><b>LRU O(1):</b> <code>map[K]*node</code> + hand-rolled doubly-linked list with sentinel head/tail. Node stores its <code>key</code> so <code>removeTail</code> deletes from the map in O(1).</li>
+<li><b>A read is a write</b> <span class="warn">!</span> — a hit calls <code>moveToFront</code>, reordering the list. So <code>Get</code> takes a full <code>Mutex.Lock()</code>, <b>not</b> <code>RLock</code>; two concurrent <code>RLock</code> gets would splice the same list and corrupt it.</li>
+<li><b>LFU:</b> <code>map[K]*entry</code> + <code>map[freq]*list</code> + <code>minFreq</code>. Touch moves entry <code>f→f+1</code>; if that drained the <code>minFreq</code> bucket, <code>minFreq++</code> — O(1), no scan. <code>Get</code> mutates freq → <code>Mutex</code> too.</li>
+<li><b>Singleflight</b> (GetOrCompute): one leader computes, waiters block on a per-key <code>ready</code> chan — collapses a cache stampede.</li>
+<li>Trade-off: LRU is the cheap default but a sequential scan flushes the hot set; LFU resists scans but a once-hot key squats without decay. Production = TinyLFU (decaying sketch as admission filter).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Testing toolkit</h3>
+<table><thead><tr><th>Tool</th><th>For</th></tr></thead><tbody>
+<tr><td><code>go test -race</code></td><td>the data-race detector — the core tool, always on in CI</td></tr>
+<tr><td><code>-count=N</code></td><td>rerun to shake rare interleavings; green once ≠ correct</td></tr>
+<tr><td><code>-short</code> / <code>testing.Short()</code></td><td>skip heavy stress tests for a fast pass</td></tr>
+<tr><td>table + <code>t.Run</code></td><td>functional behaviour (transitions, legality)</td></tr>
+<tr><td><code>*_RaceStress</code></td><td>safety under contention (invariant, gated)</td></tr>
+<tr><td><code>NumGoroutine()</code></td><td>leak check — returns to baseline</td></tr>
+<tr><td><code>httptest</code></td><td>handler katas (betgateway): concurrent identical reqs</td></tr>
+<tr><td><code>t.Cleanup</code></td><td>cancel/close teardown that runs on failure too</td></tr>
+</tbody></table>
+<ul>
+<li>Two shapes, write both: a <b>functional</b> table test (proves behaviour) and a <b>stress</b> test (proves safety, asserts an invariant).</li>
+<li>Under concurrency assert an invariant (count/sum/set), never an exact sequence — order is nondeterministic <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>&#9733; Pre-code checklist</h3>
+<h4>Shared state &amp; lifecycle</h4>
+<ul>
+<li>&#9744; Named every var touched by &gt;1 goroutine; each is under one lock, an atomic, or owned by a single goroutine.</li>
+<li>&#9744; Every <code>go</code> has a defined exit — closed chan, cancelled ctx, or finite loop. No exit = leak <span class="warn">!</span></li>
+</ul>
+<h4>Synchronisation</h4>
+<ul>
+<li>&#9744; <code>RWMutex</code> only where the read is truly read-only (LRU/LFU <code>Get</code> mutates → <code>Mutex</code>) <span class="warn">!</span></li>
+<li>&#9744; Whole read-modify-write inside <b>one</b> critical section (no split lock = lost update).</li>
+<li>&#9744; Lock scoped tight — <b>never held across a downstream / blocking call</b> <span class="warn">!</span></li>
+<li>&#9744; Multiple locks acquired in a total order (sorted id); same-resource re-lock rejected up front.</li>
+</ul>
+<h4>Channels</h4>
+<ul>
+<li>&#9744; Exactly one closer (a sender), fenced with <code>sync.Once</code> or <code>WaitGroup</code>-then-close.</li>
+<li>&#9744; Every blocking channel op in a cancellable path selects on <code>ctx.Done()</code> — <b>both</b> send and recv.</li>
+<li>&#9744; Bounded buffer / <code>default</code> arm where a fast producer could grow memory unbounded.</li>
+</ul>
+<h4>Context &amp; idempotency</h4>
+<ul>
+<li>&#9744; Received <code>ctx</code> threaded into every downstream call — no <code>context.Background()</code> detach.</li>
+<li>&#9744; Duplicate delivery handled — dedupe on an ID / idempotency key, effect applied once.</li>
+</ul>
+<h4>Proof</h4>
+<ul>
+<li>&#9744; Tests written first: contract → core → edges → <code>-race</code> stress asserting an invariant.</li>
+<li>&#9744; Leak check + deadline-wrapped hang check present.</li>
+<li>&#9744; Run <code>go test -race -count=N</code> + <code>go vet</code>; one green run is not proof <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Common mistakes — Spot-the-Bug</h3>
+<table><thead><tr><th>Symptom</th><th>Cause</th></tr></thead><tbody>
+<tr><td>fatal error: concurrent map read+write</td><td>bare map, no lock (pricecache) <span class="warn">!</span></td></tr>
+<tr><td>list corruption / race on cache Get</td><td><code>RWMutex</code> on a mutating read (LRU) <span class="warn">!</span></td></tr>
+<tr><td>counter/balance drifts, not conserved</td><td>split-lock RMW = lost update (priceladder/ledger) <span class="warn">!</span></td></tr>
+<tr><td>NumGoroutine climbs / memory grows</td><td>goroutine missing a ctx/close exit (oddsfeed) <span class="warn">!</span></td></tr>
+<tr><td>panic: send on closed channel</td><td>receiver closed, or two closers (feedchannel/shutdown) <span class="warn">!</span></td></tr>
+<tr><td>OOM under a slow consumer</td><td>unbounded channel/slice instead of backpressure <span class="warn">!</span></td></tr>
+<tr><td>front-end freezes at peak / deadlock</td><td>lock held across a downstream call (betgateway) <span class="warn">!</span></td></tr>
+<tr><td>two Transfers hang forever</td><td>inconsistent lock order (ledger) <span class="warn">!</span></td></tr>
+<tr><td>downstream call ignores cancel</td><td><code>context.Background()</code> passed instead of <code>ctx</code> (settlement) <span class="warn">!</span></td></tr>
+<tr><td>punter charged twice</td><td>check-then-act TOCTOU, no single-flight (betgateway) <span class="warn">!</span></td></tr>
+<tr><td>passes locally, fails in CI</td><td>trusted one green run — no <code>-race -count</code> <span class="warn">!</span></td></tr>
+</tbody></table>
+</section>
+
+</div>
+</body>
+</html>

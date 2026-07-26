@@ -369,6 +369,22 @@
       "itemCount": 20
     },
     {
+      "id": "go-katas",
+      "file": "/go-katas-primer.md",
+      "title": "Go",
+      "category": "Katas",
+      "itemLabel": "Kata",
+      "itemsPlural": "Go katas",
+      "storagePrefix": "ip:go-katas",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": [],
+      "cheatSheetUrl": "/go-katas-cheatsheet.html",
+      "itemCount": 17
+    },
+    {
       "id": "postgres",
       "file": "/postgres-interview-primer.md",
       "title": "Postgres",
