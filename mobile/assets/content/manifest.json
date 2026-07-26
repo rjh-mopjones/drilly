@@ -850,6 +850,22 @@
       "sectionOrder": [],
       "cheatSheetUrl": "/bedroom-quant-cheatsheet.html",
       "itemCount": 22
+    },
+    {
+      "id": "java-katas",
+      "file": "/java-katas-primer.md",
+      "title": "Java",
+      "category": "Katas",
+      "itemLabel": "Kata",
+      "itemsPlural": "Java katas",
+      "storagePrefix": "ip:java-katas",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": [],
+      "cheatSheetUrl": "/java-katas-cheatsheet.html",
+      "itemCount": 20
     }
   ]
 }

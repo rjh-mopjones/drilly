@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Java Katas Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+/* spanning title bar */
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>Java Katas Cheat Sheet</h1><span class="meta">JDK 21 · LLD/concurrency katas, test-first · generic examples · drilly</span></div>
+
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="warn">!</span> footgun / gotcha &nbsp; <code>&#9744;</code> pre-code checklist item</li>
+<li>Baseline: <b>JDK 21</b> (records, sealed types, pattern switch, virtual threads). Build/run loop: <code>mvn -pl practice test</code> (yours) vs <code>mvn -pl solution test</code> (answer key — diff after).</li>
+<li>These are <b>open-ended</b> katas: no stub. You invent the API <b>and</b> the tests. Drive test-first — the reader primer has 20 topics (2 intros + 18 katas); this compresses them for the whiteboard.</li>
+<li>Layout: attack plan · harness · JUnit toolkit, then one cluster per card. Last 2 cards = <b>pre-code checklist</b> + common mistakes.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
+</ul></section>
+
+<section class="card"><h3>Attack Plan — the loop</h3>
+<p>Open-ended prompt → working tested code in the time box. Three collapsing funnels: <b>ambiguity → spec → API → impl</b>. Never write 50 lines then hope.</p>
+<h4>1 · Clarify (~3 min)</h4>
+<ul>
+<li><b>Bounds</b>: bounded? capacity? at the limit — evict, block, or reject?</li>
+<li><b>Nulls/args</b>: null keys/values? bad args throw or ignore? (decides <code>assertThrows</code> tests)</li>
+<li><b>Concurrency</b>: single- or multi-threaded? Biggest fork — changes data structures (<code>HashMap</code> vs <code>ConcurrentHashMap</code>) and adds a stress group <span class="warn">!</span></li>
+<li><b>Ordering/ties</b>: eviction order? tie-break? (LRU=recency, LFU=freq then recency)</li>
+<li><b>Return shape</b>: miss = <code>Optional.empty()</code> / <code>null</code> / throw? Signature falls out of this.</li>
+</ul>
+<h4>2 · Smallest API (~3 min)</h4>
+<p>Write the interface before logic. Minimal methods; signatures that make invariants expressible.</p>
+<pre><code>interface Cache&lt;K,V&gt; {
+  Optional&lt;V&gt; get(K k);   // miss = empty
+  void put(K k, V v);      // evicts on overflow
+  int size();              // in [0, cap]
+}</code></pre>
+<h4>3 · Tests first, in order</h4>
+<p><b>Contract</b> (happy round-trip) → <b>Core</b> (the thing the kata is about) → <b>Edges</b> (cap 1, empty, dup keys, null/neg → throws) → <b>Concurrency</b> (stress). Make one group green at a time.</p>
+<h4>4 · State complexity out loud</h4>
+<p>Commit time <b>and</b> space Big-O before/after. Interviewers grade the reasoning, not the green bar.</p>
+</section>
+
+<section class="card"><h3>Concurrency Stress Harness</h3>
+<p>The reusable template that makes a real race <b>fail</b>. N threads released together by a start-gate, hammer the SUT, join, assert an invariant a lost update would break.</p>
+<pre><code>int threads=16, iters=10_000;
+var pool  = Executors.newFixedThreadPool(threads);
+var start = new CountDownLatch(1);   // start-gate
+var done  = new CountDownLatch(threads);
+var sut   = new ConcurrentLruCache&lt;Integer,Integer&gt;(64);
+
+for (int t=0; t&lt;threads; t++) pool.submit(() -&gt; {
+  start.await();                     // all block here
+  for (int i=0;i&lt;iters;i++){ sut.put(i%128,i); sut.get(i%128); }
+  done.countDown(); return null;
+});
+start.countDown();                   // release together
+assertTrue(done.await(10, SECONDS)); // no deadlock
+pool.shutdownNow();
+assertTrue(sut.size() &lt;= 64);        // invariant holds</code></pre>
+<ul>
+<li>Start-gate (<code>CountDownLatch(1)</code>) maximises overlap so contention actually happens.</li>
+<li><b>Assert an invariant, not exact values</b> <span class="warn">!</span>: <code>size&lt;=cap</code>, <code>transfers sum to 0</code>, <code>dequeued==enqueued</code>, "ran exactly once".</li>
+<li>Turn up <code>threads × iters</code>; collect <code>Future.get()</code> so a blown-up worker fails the test, not dies silently.</li>
+</ul>
+</section>
+
+<section class="card"><h3>JUnit 5 Toolkit</h3>
+<table><thead><tr><th>Tool</th><th>Use</th></tr></thead><tbody>
+<tr><td><code>assertThrows(Ex.class, ()-&gt;…)</code></td><td>returns the exception → assert on its message (validation edges)</td></tr>
+<tr><td><code>assertTimeoutPreemptively(dur,exec)</code></td><td><b>interrupts</b> on overrun — for code that could hang (async/blocking) <span class="warn">!</span></td></tr>
+<tr><td><code>assertAll(...)</code></td><td>report all failures, not just the first</td></tr>
+<tr><td><code>@ParameterizedTest</code> + <code>@CsvSource</code></td><td>one test × many inputs (change-making, backoff steps)</td></tr>
+<tr><td><code>@BeforeEach / @AfterEach</code></td><td>fresh SUT per test; tear down pools so tests don't leak threads</td></tr>
+</tbody></table>
+<h4>Inject the clock — test time without sleeping <span class="warn">!</span></h4>
+<p>Time-based katas are only deterministic if time is an <b>input</b>, not <code>System.nanoTime()</code> buried inside.</p>
+<pre><code>class TokenBucket {
+  private final LongSupplier nanos;   // inject
+  TokenBucket(int cap,double perSec,LongSupplier nanos){…}
+}
+@Test void refills_after_1s(){
+  long[] now={0};
+  var b=new TokenBucket(10,10,()-&gt;now[0]);
+  drain(b); assertFalse(b.tryAcquire());
+  now[0]=1_000_000_000L;              // advance 1s instantly
+  assertTrue(b.tryAcquire());         // no real waiting
+}</code></pre>
+<ul><li>Same trick tests retry backoff, breaker OPEN→HALF_OPEN, scheduler due-times. A <code>Thread.sleep(1000)</code> in a test = slow, flaky <span class="warn">!</span></li>
+<li>No Mockito needed — a 10-line hand fake (fails twice, then succeeds) is clearer.</li></ul>
+</section>
+
+<section class="card"><h3>Cache — LRU</h3>
+<p><b>DS:</b> <code>HashMap</code> for O(1) lookup + doubly-linked list for O(1) recency reorder. Head = MRU, tail = LRU (evict tail).</p>
+<pre><code>Optional&lt;V&gt; get(K k);   // hit → moveToHead
+void put(K k, V v);      // update+moveToHead, or add;
+                          // if size&gt;cap evict tail
+</code></pre>
+<ul>
+<li>Use a <b>sentinel head/tail</b> node so unlink/insert never null-checks. Store node refs in the map so removal is O(1).</li>
+<li><span class="warn">!</span> <code>LinkedHashMap(cap,0.75f,true)</code> + override <code>removeEldestEntry</code> is the 5-line version — mention it, then build the DLL by hand to show you can.</li>
+</ul>
+<h4>Tests</h4>
+<ul>
+<li><b>contract</b>: put/get round-trip · <b>core</b>: access reorders → LRU evicted first; cap-1 evicts on 2nd put · <b>edge</b>: update existing key doesn't grow size · <b>Big-O</b>: get/put O(1).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Cache — LFU &amp; Concurrent</h3>
+<h4>LFU — frequency buckets</h4>
+<ul>
+<li><code>Map&lt;K,V&gt;</code> + <code>Map&lt;K,int freq&gt;</code> + <code>Map&lt;int, LinkedHashSet&lt;K&gt;&gt;</code> freq→keys, and a <code>minFreq</code> pointer.</li>
+<li>On access: bump freq, move key between buckets. Evict from <code>freq[minFreq]</code>, oldest first (tie-break by recency). Reset <code>minFreq=1</code> on insert.</li>
+<li><span class="warn">!</span> Keep <code>minFreq</code> correct — after evicting the last key at <code>minFreq</code>, next insert resets it to 1. Getting this wrong evicts the wrong entry.</li>
+</ul>
+<h4>ConcurrentLruCache</h4>
+<ul>
+<li>Wrap the whole LRU in a <b>single <code>ReentrantLock</code></b>; lock/<code>try…finally</code> unlock around get <b>and</b> put.</li>
+<li><span class="warn">!</span> A <code>ReadWriteLock</code> is <b>wrong</b> here: <code>get</code> mutates recency (a write), so "readers" contend anyway. One plain lock is simpler and correct.</li>
+<li>Test with the stress harness → assert <code>size&lt;=cap</code> after 16×10k ops.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Bounded Blocking Queue</h3>
+<p><b>DS:</b> ring buffer / <code>ArrayDeque</code> + one <code>ReentrantLock</code> + <b>two</b> <code>Condition</code>s: <code>notFull</code>, <code>notEmpty</code>.</p>
+<pre><code>void put(T x){ lock.lock(); try {
+  while (count==cap) notFull.await();   // WHILE, not if !
+  enqueue(x); count++;
+  notEmpty.signal();
+} finally { lock.unlock(); } }
+
+T take(){ lock.lock(); try {
+  while (count==0) notEmpty.await();
+  T x=dequeue(); count--;
+  notFull.signal(); return x;
+} finally { lock.unlock(); } }</code></pre>
+<ul>
+<li><span class="warn">!</span> Guard the wait with <code>while</code>, never <code>if</code> — spurious wakeups + multiple waiters mean the condition can be false again on wake.</li>
+<li>Signal the <b>opposite</b> condition; <code>await()</code> releases the lock while parked.</li>
+<li><b>Tests:</b> contract FIFO · producer blocks when full, unblocks on take (<code>assertTimeoutPreemptively</code>) · concurrency: N producers + N consumers, assert <code>dequeued==enqueued</code>, none lost.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Rate Limiters</h3>
+<table><thead><tr><th>Algo</th><th>Rule</th></tr></thead><tbody>
+<tr><td><b>Token bucket</b></td><td>refill <code>rate</code>/sec up to <code>cap</code>; each call spends 1. Allows bursts up to cap.</td></tr>
+<tr><td><b>Leaky bucket</b></td><td>queue drains at fixed rate; smooths bursts, adds latency.</td></tr>
+<tr><td><b>Sliding window</b></td><td>count events in trailing window; precise, more state.</td></tr>
+</tbody></table>
+<p><b>Concurrency:</b> hold state (tokens+lastRefill) in one immutable object behind <code>AtomicReference</code>; <code>tryAcquire</code> = compute-new-state + <code>compareAndSet</code> loop (lock-free CAS).</p>
+<pre><code>boolean tryAcquire(){
+  while(true){
+    State s=ref.get();
+    State n=refill(s, nanos.getAsLong());
+    if(n.tokens&lt;1) return false;
+    State a=n.spend(1);
+    if(ref.compareAndSet(s,a)) return true; // retry on race
+  }
+}</code></pre>
+<ul><li><span class="warn">!</span> Inject the clock (<code>LongSupplier nanos</code>) so refill tests advance time instantly. Compute refill from elapsed nanos, don't run a timer thread.</li></ul>
+</section>
+
+<section class="card"><h3>Circuit Breaker</h3>
+<p>States <b>CLOSED → OPEN → HALF_OPEN</b>. Injected clock drives the timeout.</p>
+<table><thead><tr><th>State</th><th>Behaviour</th></tr></thead><tbody>
+<tr><td>CLOSED</td><td>calls pass; count failures. ≥ threshold → <b>OPEN</b>.</td></tr>
+<tr><td>OPEN</td><td>fail-fast (reject) until <code>openTimeout</code> elapsed → <b>HALF_OPEN</b>.</td></tr>
+<tr><td>HALF_OPEN</td><td>allow a trial call: success → CLOSED (reset); failure → OPEN (restart timer).</td></tr>
+</tbody></table>
+<ul>
+<li>Signature <code>&lt;T&gt; T call(Supplier&lt;T&gt; action)</code> — throws / rejects when OPEN.</li>
+<li><span class="warn">!</span> Test the transition table with the injected clock: force N failures → assert OPEN rejects; advance past timeout → assert one trial allowed (HALF_OPEN); trial fails → OPEN again. No sleeping.</li>
+<li>Pairs with <b>retry</b>: breaker stops hammering a dead dep; retry handles transient blips.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Retry — Backoff + Jitter</h3>
+<p>Retry transient failures with <b>exponential backoff</b> (<code>base·2^n</code>) capped at <code>maxDelay</code>, plus <b>jitter</b> to avoid thundering-herd sync.</p>
+<pre><code>&lt;T&gt; T withRetry(Supplier&lt;T&gt; op){
+  for(int n=0;;n++){
+    try { return op.get(); }
+    catch(Exception e){
+      if(n==maxRetries) throw e;      // give up
+      long d=min(base*(1L&lt;&lt;n), maxDelay);
+      sleeper.sleep(d/2 + rnd(d/2));  // full/equal jitter
+    }
+  }
+}</code></pre>
+<ul>
+<li><span class="warn">!</span> Inject the sleeper (<code>LongConsumer</code>/fake) — tests assert the <b>backoff sequence</b> without real waiting, and count attempts (fail-twice-then-succeed fake → 3 calls).</li>
+<li>Only retry <b>idempotent / transient</b> failures; never retry a 4xx or a validation error.</li>
+<li><b>Tests:</b> succeeds first try = 1 call · succeeds on 3rd = 3 calls · exhausts → rethrows last · delays match schedule.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Connection Pool &amp; Idempotency</h3>
+<h4>Connection Pool</h4>
+<ul>
+<li><b>Semaphore(cap)</b> bounds borrowers. <code>borrow()</code> = <code>sem.acquire()</code> then poll a concurrent idle queue (or create). <code>release()</code> = return to queue + <code>sem.release()</code>.</li>
+<li><b>Validate on borrow</b>: if the pooled conn is dead, discard and make a fresh one before handing out.</li>
+<li><span class="warn">!</span> <code>release()</code> exactly once; a leaked permit shrinks the pool forever. <code>acquire</code> with timeout so borrowers don't hang.</li>
+<li>Tests: cap-N pool → (N+1)th borrow blocks until a release; stress → never exceed N live.</li>
+</ul>
+<h4>Idempotent Processor</h4>
+<ul>
+<li><b>Exactly-once</b> dedup keyed by request id. <code>ConcurrentHashMap.computeIfAbsent(id, k -&gt; process())</code> — the map's per-bin lock guarantees the mapping fn runs <b>once</b> even under concurrent dupes.</li>
+<li><span class="warn">!</span> Don't <code>containsKey</code>-then-<code>put</code> (TOCTOU race — two threads both process). <code>computeIfAbsent</code> is the atomic move.</li>
+<li>Test: 16 threads submit the same id → assert the side effect ran <b>once</b> (AtomicInteger==1).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Scatter-Gather Aggregator</h3>
+<p>Fan out to N sources in parallel, gather within a deadline, tolerate partial failure.</p>
+<pre><code>List&lt;CompletableFuture&lt;R&gt;&gt; fs = sources.stream()
+  .map(s -&gt; CompletableFuture
+     .supplyAsync(() -&gt; s.fetch(), pool)
+     .orTimeout(200, MILLISECONDS)
+     .handle((v,e) -&gt; e==null ? v : FALLBACK))  // survive one dead source
+  .toList();
+CompletableFuture.allOf(fs.toArray(new CompletableFuture[0]))
+  .join();
+List&lt;R&gt; out = fs.stream().map(CompletableFuture::join).toList();</code></pre>
+<ul>
+<li><code>allOf</code> waits for all; per-future <code>orTimeout</code> + <code>handle</code> converts a slow/failed source into a fallback instead of sinking the whole batch.</li>
+<li><span class="warn">!</span> Without per-future timeout, one hung source hangs the aggregate. Use <code>assertTimeoutPreemptively</code> to prove the deadline holds.</li>
+<li>Tests: all succeed → merged · one throws → fallback in result · one slow → returns by deadline.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Event Bus &amp; Scheduler</h3>
+<h4>Event Bus (sync pub/sub, Observer)</h4>
+<ul>
+<li><code>Map&lt;Class&lt;?&gt;, CopyOnWriteArrayList&lt;Handler&gt;&gt;</code>. <code>publish(e)</code> dispatches to handlers keyed by <code>e.getClass()</code>.</li>
+<li><b>CopyOnWriteArrayList</b> lets a handler subscribe/unsubscribe <b>during</b> dispatch without <code>ConcurrentModificationException</code> <span class="warn">!</span></li>
+<li>Test: subscribe → publish → handler ran; unsubscribe → not called; two subs both fire.</li>
+</ul>
+<h4>Task Scheduler (delayed exec)</h4>
+<ul>
+<li><code>DelayQueue&lt;Task&gt;</code> (Task implements <code>Delayed</code>, compares by due-time) + one worker thread looping <code>queue.take()</code> (blocks until the head is due).</li>
+<li><span class="warn">!</span> <code>DelayQueue.take()</code> returns only when delay expired — no busy-poll. Injected clock for due-time tests; <code>poll</code> nothing before due, task after.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Bank — Deadlock-Free Transfer</h3>
+<p><b>DS:</b> per-account <code>ReentrantLock</code>, balances in <code>BigDecimal</code> (never <code>double</code> for money <span class="warn">!</span>).</p>
+<pre><code>void transfer(Account a, Account b, BigDecimal amt){
+  Account first  = a.id &lt; b.id ? a : b;   // lock ordering !
+  Account second = a.id &lt; b.id ? b : a;
+  first.lock.lock();
+  try { second.lock.lock();
+    try { a.debit(amt); b.credit(amt); }
+    finally { second.lock.unlock(); }
+  } finally { first.lock.unlock(); }
+}</code></pre>
+<ul>
+<li><span class="warn">!</span> <b>Always acquire in a global order</b> (by account id min→max). Locking in argument order lets <code>A→B</code> and <code>B→A</code> deadlock.</li>
+<li>Reject overdraft / negative amount before mutating.</li>
+<li><b>Killer test:</b> M threads do random transfers among K accounts; after join assert <b>total balance unchanged</b> (money is conserved) — an unsafe impl loses/creates money.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Cinema &amp; Restaurant Booking</h3>
+<h4>Cinema — hold / confirm / TTL</h4>
+<ul>
+<li>Per-<b>screening</b> lock. <code>hold(seats)</code> marks seats HELD with an expiry <code>Instant</code>; <code>confirm(holdId)</code> → BOOKED; expired holds auto-release.</li>
+<li><span class="warn">!</span> Take the <b>caller-supplied <code>Instant</code></b> (inject the clock) so TTL-expiry tests advance time — don't call <code>Instant.now()</code> inside.</li>
+<li>Test: hold blocks re-hold of same seat; confirm within TTL succeeds; after TTL the seat frees and re-holds.</li>
+</ul>
+<h4>Restaurant — time-slot overlap</h4>
+<ul>
+<li>Per-<b>table</b> lock. Book <code>[start,end)</code> — <b>half-open</b> intervals so back-to-back slots (end==next start) don't collide.</li>
+<li>Overlap test: <code>aStart &lt; bEnd &amp;&amp; bStart &lt; aEnd</code>. <span class="warn">!</span> Off-by-one here double-books or blocks adjacent slots.</li>
+<li>Tests: overlapping request rejected; adjacent slot allowed; per-table isolation.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Parking Lot — Sealed Spots · Best-Fit</h3>
+<p><b>DS:</b> <code>sealed interface Spot permits Motorcycle, Compact, Large</code> — model with a <code>sizeRank</code> so any vehicle fits a spot of equal-or-larger rank (LSP: subtypes substitute cleanly).</p>
+<ul>
+<li><b>Best-fit</b> park: choose the <b>smallest</b> free spot whose <code>sizeRank &gt;=</code> vehicle rank (don't waste a Large on a bike).</li>
+<li>Per-<b>spot</b> lock (or a concurrent free-set per size) so parking is fine-grained, not one global lock.</li>
+<li><span class="warn">!</span> On <code>leave()</code>, <b>null out the vacated slot</b> / return it to the free-set — forgetting this leaks capacity and double-assigns.</li>
+<li>Pattern-switch on the sealed type for exhaustive fee/size logic — compiler enforces all cases.</li>
+<li>Tests: bike takes smallest fit; lot full → reject; leave frees the exact spot; concurrent park never double-assigns one spot.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Vending Machine — State + Change</h3>
+<p><b>Two sub-problems:</b> a state machine + a change-making algorithm.</p>
+<h4>State machine</h4>
+<ul>
+<li>States IDLE → COLLECTING (coins in) → DISPENSING. <code>sealed interface DispenseResult permits Ok, InsufficientFunds, SoldOut, NoChange</code> — return it, don't throw for expected outcomes.</li>
+</ul>
+<h4>Change-making (greedy)</h4>
+<ul>
+<li><b>Plan then commit</b>: compute the coin plan greedily (largest-first) <b>against current inventory</b>; only deduct coins if a full plan exists, else refund.</li>
+<li><span class="warn">!</span> Greedy is correct <b>only for canonical coin systems</b> (1/5/10/25). Non-canonical denominations need DP — call this out.</li>
+<li>Tests (<code>@ParameterizedTest</code> amount/paid/coins): exact change, needs change, can't make change → refund + no stock change.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Elevator Controller — LOOK</h3>
+<p><b>Algorithm: LOOK</b> (SCAN without going to the ends). Keep two directional sets of pending stops.</p>
+<ul>
+<li><code>TreeSet&lt;Integer&gt; up</code> and <code>TreeSet&lt;Integer&gt; down</code>. Moving up → serve <code>up.ceiling(cur)…</code> in order; when none above, flip direction and drain <code>down</code>.</li>
+<li><b>Dispatch</b>: assign a request to the car with lowest <b>cost</b> (distance + direction agreement) — a car already heading your way beats a closer idle car going the other way.</li>
+<li><span class="warn">!</span> A naive nearest-floor (SSTF) starves far requests; LOOK sweeps so every request is eventually served.</li>
+<li>Tests: requests served in sweep order (not arrival order); direction flips only when no stop ahead; idle car parks; dispatch picks the cheaper car.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Limit Order Book — Price-Time</h3>
+<p><b>DS:</b> two <code>TreeMap&lt;Price, ArrayDeque&lt;Order&gt;&gt;</code> — bids (desc) &amp; asks (asc). TreeMap orders price levels; the deque holds FIFO time priority within a level.</p>
+<ul>
+<li><b>Match</b>: incoming buy crosses while <code>bestAsk &lt;= limit</code> — fill against the front of the best ask level, walk deque then levels. Partial fills leave a resting remainder.</li>
+<li><b>Price-time priority</b>: best price first, then earliest order (FIFO) at that price. <code>ArrayDeque</code> = O(1) FIFO; <code>TreeMap.firstKey()</code> = O(log n) best price.</li>
+<li><span class="warn">!</span> Remove an emptied price level from the map, and cancel must find the order in its level — keep an id→order/level index.</li>
+<li>Single lock around match (matching must be atomic). Tests: FIFO at a price, price priority across levels, partial fill rests, cancel removes.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Lock-Free Structures</h3>
+<p>CAS-based, no locks. Retry loop on <code>compareAndSet</code>.</p>
+<h4>Treiber stack</h4>
+<pre><code>void push(T v){
+  Node&lt;T&gt; n=new Node&lt;&gt;(v);
+  Node&lt;T&gt; h;
+  do { h=head.get(); n.next=h; }
+  while(!head.compareAndSet(h,n)); // retry on race
+}</code></pre>
+<h4>Michael-Scott queue</h4>
+<ul><li>Lock-free FIFO: separate head/tail <code>AtomicReference</code>s; CAS tail forward, then swing head. Handles the "tail lagging" case by helping advance it.</li></ul>
+<h4>ABA problem <span class="warn">!</span></h4>
+<ul>
+<li>A→B→A between read and CAS: value looks unchanged but the world moved. CAS succeeds wrongly.</li>
+<li><b>Fix:</b> <code>AtomicStampedReference</code> — pair the pointer with a version stamp; CAS checks (ref, stamp) so a reused node is detected.</li>
+<li>Stress-test: N pushers + N poppers → assert count conserved, no lost/duplicated nodes.</li>
+</ul>
+</section>
+
+<section class="card"><h3>&#9733; Pre-Code Checklist</h3>
+<h4>Before you type</h4>
+<ul>
+<li>&#9744; Clarified <b>bounds</b> (capacity, at-limit behaviour), <b>nulls/args</b>, <b>concurrency</b>, <b>ordering/ties</b>, <b>return shape</b>.</li>
+<li>&#9744; Wrote the <b>smallest API</b> (interface + signatures) before any logic.</li>
+<li>&#9744; Stated the <b>complexity budget</b> (time <b>and</b> space) out loud.</li>
+</ul>
+<h4>Tests-first</h4>
+<ul>
+<li>&#9744; Test list in order: <b>contract → core → edges → concurrency</b>; one group green at a time.</li>
+<li>&#9744; Edges: capacity 1, empty, duplicate key, null/negative → <code>assertThrows</code>.</li>
+<li>&#9744; Time-based? <b>Injected clock</b> — no <code>Thread.sleep</code> in tests.</li>
+<li>&#9744; Concurrent? Stress harness that <b>asserts an invariant</b>, not exact values; <code>Future.get()</code> surfaces worker crashes.</li>
+</ul>
+<h4>Concurrency correctness</h4>
+<ul>
+<li>&#9744; Every lock <code>unlock()</code>ed in a <code>finally</code>.</li>
+<li>&#9744; <code>while</code> (not <code>if</code>) around every <code>Condition.await()</code>.</li>
+<li>&#9744; Multi-lock paths acquire in a <b>global order</b> (deadlock-free).</li>
+<li>&#9744; Check-then-act replaced by an atomic (<code>computeIfAbsent</code>, CAS loop).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Common Mistakes</h3>
+<table><thead><tr><th>Mistake</th><th>Fix</th></tr></thead><tbody>
+<tr><td>check-then-act (TOCTOU) — two threads both process/create</td><td>atomic move: <code>computeIfAbsent</code> / CAS loop <span class="warn">!</span></td></tr>
+<tr><td><code>if</code> around <code>await()</code></td><td><code>while</code> — recheck condition on wake <span class="warn">!</span></td></tr>
+<tr><td><code>Thread.sleep</code> in tests</td><td>inject &amp; advance a clock — deterministic <span class="warn">!</span></td></tr>
+<tr><td>ReadWriteLock on an LRU</td><td>plain <code>ReentrantLock</code> — <code>get</code> mutates recency <span class="warn">!</span></td></tr>
+<tr><td>forgot to null out the vacated slot</td><td>return spot to free-set on <code>leave()</code> <span class="warn">!</span></td></tr>
+<tr><td>greedy change on non-canonical coins</td><td>DP for arbitrary denominations <span class="warn">!</span></td></tr>
+<tr><td>lock in argument order → deadlock</td><td>global lock ordering by id min→max <span class="warn">!</span></td></tr>
+<tr><td><code>double</code> for money</td><td><code>BigDecimal</code> <span class="warn">!</span></td></tr>
+<tr><td>one hung source hangs the aggregate</td><td>per-future <code>orTimeout</code> + <code>handle</code> fallback <span class="warn">!</span></td></tr>
+<tr><td>assert exact values after a race</td><td>assert an invariant (sum==0, none lost) <span class="warn">!</span></td></tr>
+</tbody></table>
+</section>
+
+</div>
+</body>
+</html>
