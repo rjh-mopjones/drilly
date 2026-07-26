@@ -72,235 +72,249 @@ pre code{background:none; padding:0; font-size:1em;}
 </head>
 <body>
 <div class="sheet">
-<div class="titlebar"><h1>Observability Cheat Sheet</h1><span class="meta">SRE focus · metrics/logs/traces · SLOs · PromQL · drilly</span></div>
+<div class="titlebar"><h1>Observability Cheat Sheet</h1><span class="meta">metrics · logs · traces · SLOs · Prometheus/OTel focus · drilly</span></div>
+
 <section class="card legend"><h3>How to read &amp; print</h3>
 <ul>
-<li><span class="warn">!</span> footgun / gotcha &nbsp; <code>&#9744;</code> alert/dashboard review item</li>
-<li>Concept-first, vendor-neutral; tools named where they matter (Prometheus, Grafana, Loki, Tempo, OTel).</li>
-<li>Golden rule: <b>observability = infer internal state from external outputs</b> — debug unknown-unknowns, not just watch known dashboards.</li>
+<li><span class="warn">!</span> footgun / gotcha &nbsp; <code>&#9744;</code> review checklist item</li>
+<li>Focus: <b>the three pillars</b> (metrics·logs·traces), the RED/USE methods, and <b>SLO-driven alerting</b> — what senior interviews probe.</li>
+<li>Prometheus/PromQL + OpenTelemetry are the reference stack; vendor tools map onto the same primitives.</li>
 <li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
 </ul></section>
 
 <section class="card"><h3>The Three Pillars</h3>
-<table><thead><tr><th>Pillar</th><th>Good for / cost</th></tr></thead><tbody>
-<tr><td><b>Metrics</b></td><td>trends, alerting, dashboards; cheap, aggregatable; <b>keep cardinality low</b> <span class="warn">!</span></td></tr>
-<tr><td><b>Logs</b></td><td>the "why", forensic detail; expensive at volume; high-cardinality OK</td></tr>
-<tr><td><b>Traces</b></td><td>request flow across services; find the slow span; sampled</td></tr>
+<table><thead><tr><th>Pillar</th><th>Answers</th><th>Cost</th></tr></thead><tbody>
+<tr><td><b>Metrics</b></td><td><i>Is</i> something wrong? (aggregated, numeric)</td><td>cheap, bounded</td></tr>
+<tr><td><b>Logs</b></td><td><i>What</i> happened? (discrete events)</td><td>expensive, high-volume</td></tr>
+<tr><td><b>Traces</b></td><td><i>Where</i> / <i>why</i>? (request across services)</td><td>medium, sampled</td></tr>
 </tbody></table>
-<p><b>Correlate them:</b> metric spike → <b>exemplar</b> → trace → logs (via <code>trace_id</code>). One pillar alone rarely closes an incident.</p>
-</section>
+<ul>
+<li><b>Observability ≠ monitoring.</b> Monitoring = known dashboards/alerts for known failures; observability = ability to ask <b>new</b> questions of your system without shipping new code.</li>
+<li>High <b>cardinality</b> + high <b>dimensionality</b> is what lets you slice by unknown-unknowns. Metrics can't hold it <span class="warn">!</span> — that's what traces/wide-events are for.</li>
+<li>Correlate the pillars: trace_id in logs, <b>exemplars</b> link a histogram bucket → a trace.</li>
+<li>Rule of thumb on which pillar to reach for: metrics answer "is it broken and how badly", traces answer "which hop is slow", logs answer "what exactly did that one request do". Start cheap (metrics) and drill down only as needed <span class="warn">!</span></li>
+</ul></section>
 
-<section class="card"><h3>Metric Types &amp; Methods</h3>
+<section class="card"><h3>Metric Types &amp; RED / USE</h3>
 <table><thead><tr><th>Type</th><th>Use</th></tr></thead><tbody>
-<tr><td>counter</td><td>monotonic ↑ (requests) → <code>rate()</code></td></tr>
-<tr><td>gauge</td><td>up/down (temp, queue depth)</td></tr>
-<tr><td>histogram</td><td>bucketed; server-side quantiles; aggregatable</td></tr>
-<tr><td>summary</td><td>client-side quantiles; <b>can't</b> aggregate <span class="warn">!</span></td></tr>
+<tr><td><b>Counter</b></td><td>monotonic ↑ (requests, errors); always <code>rate()</code> it</td></tr>
+<tr><td><b>Gauge</b></td><td>up/down snapshot (memory, queue depth, temp)</td></tr>
+<tr><td><b>Histogram</b></td><td>bucketed observations → quantiles server-side (latency)</td></tr>
+<tr><td><b>Summary</b></td><td>client-side quantiles; <b>not aggregatable</b> across instances <span class="warn">!</span></td></tr>
 </tbody></table>
 <h4>Which signals?</h4>
 <ul>
-<li><b>RED</b> (services): Rate · Errors · Duration.</li>
-<li><b>USE</b> (resources): Utilization · Saturation · Errors.</li>
-<li><b>4 Golden Signals</b>: Latency · Traffic · Errors · Saturation.</li>
-</ul>
-</section>
+<li><b>RED</b> (request-driven services): <b>R</b>ate · <b>E</b>rrors · <b>D</b>uration.</li>
+<li><b>USE</b> (resources): <b>U</b>tilisation · <b>S</b>aturation · <b>E</b>rrors.</li>
+<li><b>Four Golden Signals</b> (SRE book): latency, traffic, errors, saturation.</li>
+<li>Prefer <b>histogram</b> over summary so you can aggregate and re-derive any quantile. <code>_bucket</code> is cumulative (le).</li>
+</ul></section>
 
 <section class="card"><h3>PromQL Quick-ref</h3>
-<pre><code># per-second request rate (counter needs a range vector)
-sum(rate(http_requests_total[5m])) by (job)
+<pre><code># per-second error rate over 5m
+rate(http_requests_total{code=~"5.."}[5m])
 
-# error ratio
+# error ratio (aggregate, then divide)
 sum(rate(http_requests_total{code=~"5.."}[5m]))
-/ sum(rate(http_requests_total[5m]))
+  / sum(rate(http_requests_total[5m]))
 
 # p99 latency from a histogram
 histogram_quantile(0.99,
-  sum(rate(http_req_duration_seconds_bucket[5m])) by (le))
-
-# recording rule (precompute)
-# job:http_errors:ratio5m</code></pre>
+  sum by (le) (rate(http_latency_bucket[5m])))</code></pre>
 <ul>
-<li><code>rate()</code> = per-sec avg (smooth); <code>irate()</code> = last 2 points (spiky); <code>increase()</code> = total over window.</li>
-<li>Never <code>rate()</code> a gauge; never average percentiles <span class="warn">!</span></li>
-<li><code>absent()</code> to alert on missing data.</li>
-</ul>
-</section>
+<li><code>rate</code> = avg per-sec over range (smoothed, use for alerts); <code>irate</code> = last 2 samples (spiky, graphs only) <span class="warn">!</span></li>
+<li>Range vector <code>[5m]</code> only on counters/gauges before <code>rate/increase</code>; instant vector for math.</li>
+<li><code>sum by(le)</code> <b>before</b> <code>histogram_quantile</code>, never after <span class="warn">!</span></li>
+<li><b>Recording rules</b> pre-compute expensive queries; <b>alerting rules</b> fire on expressions <code>for</code> a duration.</li>
+</ul></section>
 
-<section class="card"><h3>Instrumentation</h3>
+<section class="card"><h3>Prometheus Architecture</h3>
 <ul>
-<li>Instrument every endpoint with RED; every resource with USE.</li>
-<li><b>Labels must be bounded</b> — never <code>user_id</code>, <code>request_id</code>, raw URL/path as a label <span class="warn">!</span> Normalize routes (<code>/users/:id</code>).</li>
-<li>Histograms for latency (pick buckets or use native histograms).</li>
-<li><b>Exporters</b> for things you can't edit: node_exporter (host), blackbox_exporter (probe HTTP/TLS/DNS), *_exporter per system.</li>
-<li>Pushgateway ONLY for short-lived batch jobs — anti-pattern for services <span class="warn">!</span></li>
-<li>Exemplars link a histogram bucket → a trace.</li>
-</ul>
-</section>
+<li><b>Pull</b> model: Prometheus scrapes <code>/metrics</code> targets found via service discovery (k8s, Consul, files).</li>
+<li>Local TSDB (2h blocks → compacted); <b>not</b> clustered/HA for long-term by itself.</li>
+<li><b>Pushgateway</b> only for short-lived batch jobs — not for services <span class="warn">!</span> (breaks up/down semantics, becomes a stale sink).</li>
+<li><code>up==0</code> is your scrape-health signal; <b>staleness</b> markers handle disappeared series.</li>
+<li>Alerts evaluated locally → pushed to <b>Alertmanager</b> (dedupe/route/notify).</li>
+<li><b>Scrape config</b>: <code>scrape_interval</code> (15–60s typical) sets resolution and load; <code>relabel_configs</code> rewrite/drop targets pre-scrape, <code>metric_relabel_configs</code> drop series post-scrape (cardinality control) <span class="warn">!</span></li>
+<li>A missing target just stops producing samples — alert on <code>up == 0</code> and on <code>absent()</code> for metrics that must always exist, or a dead exporter fails silently <span class="warn">!</span></li>
+</ul></section>
 
 <section class="card"><h3>SLI / SLO / Error Budget</h3>
 <ul>
-<li><b>SLI</b> = good events / valid events (a ratio). <b>SLO</b> = target over a window. <b>SLA</b> = SLO + contract/penalty. <b>Error budget</b> = 1 − SLO.</li>
-<li>100% is the wrong target — the budget funds releases; freeze when spent.</li>
+<li><b>SLI</b> = a measured ratio, e.g. good/total requests. <b>SLO</b> = target over a window (99.9% / 30d). <b>SLA</b> = contract + penalty.</li>
+<li><b>Error budget</b> = <code>1 − SLO</code>. 99.9% over 30d ≈ <b>43m 12s</b> of allowed badness.</li>
 </ul>
-<table><thead><tr><th>SLO</th><th>Downtime/30d</th></tr></thead><tbody>
-<tr><td>99%</td><td>~7.2 h</td></tr>
-<tr><td>99.9%</td><td>~43 min</td></tr>
-<tr><td>99.95%</td><td>~22 min</td></tr>
-<tr><td>99.99%</td><td>~4.3 min</td></tr>
+<table><thead><tr><th>SLO</th><th>Downtime / 30d</th></tr></thead><tbody>
+<tr><td>99%</td><td>7h 18m</td></tr>
+<tr><td>99.9%</td><td>43m</td></tr>
+<tr><td>99.95%</td><td>21m</td></tr>
+<tr><td>99.99%</td><td>4m 20s</td></tr>
 </tbody></table>
-<p>Latency SLO = threshold + percentile ("95% &lt; 300ms").</p>
-</section>
+<ul>
+<li>Budget spent → freeze feature launches, prioritise reliability. Budget healthy → ship faster. It aligns dev vs ops incentives.</li>
+<li>Pick <b>user-centric</b> SLIs (did the request succeed fast?) not machine metrics (CPU) <span class="warn">!</span></li>
+</ul></section>
 
 <section class="card"><h3>Alerting &amp; Burn Rate</h3>
 <ul>
-<li><b>Alert on symptoms</b> (user-facing SLO breach), not every cause <span class="warn">!</span></li>
-<li>Every page must be <b>actionable + urgent + human-needed</b> — else delete it.</li>
-<li><b>Burn rate</b> = budget-spend speed. Rate 1 = on pace; rate 14.4 ≈ a month's budget in ~2 days.</li>
-<li><b>Multi-window multi-burn-rate:</b> fast-burn short window → page; slow-burn long window → ticket. Combining windows kills false positives &amp; resets fast.</li>
+<li><b>Alert on symptoms (SLO burn), not causes.</b> Page on "users see errors", not "CPU 90%".</li>
+<li><b>Burn rate</b> = how fast you're spending budget. 1× = exactly on budget for the window; 14.4× burns 30d budget in ~2 days.</li>
 </ul>
-<table><thead><tr><th>Burn</th><th>Window → action</th></tr></thead><tbody>
-<tr><td>14.4×</td><td>1h/5m → page</td></tr>
-<tr><td>6×</td><td>6h/30m → page</td></tr>
-<tr><td>1×</td><td>3d/6h → ticket</td></tr>
+<table><thead><tr><th>Burn</th><th>Window</th><th>Sev</th></tr></thead><tbody>
+<tr><td>14.4×</td><td>1h &amp; 5m</td><td>page</td></tr>
+<tr><td>6×</td><td>6h &amp; 30m</td><td>page</td></tr>
+<tr><td>1×</td><td>3d &amp; 6h</td><td>ticket</td></tr>
 </tbody></table>
-</section>
+<ul>
+<li><b>Multi-window multi-burn-rate</b>: long window = precision, short window = fast reset (stops firing when fixed) <span class="warn">!</span></li>
+<li>Every page must be <b>actionable + urgent</b>. Symptom-based, few, documented. Kill noisy alerts — fatigue is an outage in waiting.</li>
+</ul></section>
 
 <section class="card"><h3>Alertmanager</h3>
 <ul>
-<li>Prometheus <b>fires</b>; Alertmanager <b>routes/dedups/notifies</b>.</li>
-<li><b>Routing tree</b> matches on labels → receivers (PagerDuty/Slack/…).</li>
-<li><b>Grouping</b> (group_by + group_wait/interval) batches related alerts into one notice — stops storms <span class="warn">!</span></li>
-<li><b>Inhibition</b>: a firing high-sev alert suppresses dependent low-sev ones (cluster-down mutes per-service).</li>
-<li><b>Silences</b> for maintenance; dedup across HA Prometheus replicas via gossip.</li>
-<li><b>Dead-man's switch</b>: an always-firing watchdog to detect a broken pipeline.</li>
-</ul>
-</section>
+<li><b>Routing tree</b>: match labels → receiver (PagerDuty/Slack/email). <code>continue: true</code> to hit multiple.</li>
+<li><b>Grouping</b>: collapse related alerts into one notification (<code>group_by</code>, <code>group_wait</code>, <code>group_interval</code>).</li>
+<li><b>Inhibition</b>: a firing "cluster down" suppresses the 100 downstream "pod down" alerts <span class="warn">!</span></li>
+<li><b>Silences</b>: time-boxed mutes during maintenance. <b>Repeat interval</b> re-notifies unacked.</li>
+<li>Alertmanager itself should be <b>HA</b> (gossip-clustered) — dedupes across replicas.</li>
+</ul></section>
 
-<section class="card"><h3>Logging</h3>
+<section class="card"><h3>Logging &amp; Aggregation</h3>
 <ul>
-<li><b>Structured (JSON)</b> logs — queryable, not grep-and-pray.</li>
-<li>Include <code>trace_id</code> + request/correlation IDs to pivot to traces.</li>
-<li>Don't log what should be a metric; sample/drop DEBUG in prod — <b>log volume is the silent bill</b> <span class="warn">!</span></li>
-<li>Never log secrets/PII.</li>
-</ul>
-<h4>Storage models</h4>
-<ul>
-<li><b>Elasticsearch/OpenSearch</b> — full-text index, powerful, pricey.</li>
-<li><b>Loki</b> — indexes labels only, stores compressed lines; cheap. Same low-cardinality label rule as metrics <span class="warn">!</span> Filter content with LogQL.</li>
-<li>Agents: Fluent Bit / Vector / Promtail-Alloy.</li>
-</ul>
-</section>
+<li><b>Structured logs</b> (JSON k/v), not printf strings — queryable, machine-parseable. Include <code>trace_id</code>, <code>service</code>, <code>level</code>.</li>
+<li>Levels: ERROR (actionable) · WARN · INFO (business events) · DEBUG (off in prod). Log at <b>boundaries</b>, not every line.</li>
+<li><b>Sampling</b> high-volume logs; keep 100% of errors. Cardinality/PII hygiene at ingest <span class="warn">!</span></li>
+<li>Pipeline: app → agent (Fluent Bit/Vector) → buffer (Kafka) → store (Loki/Elasticsearch/ClickHouse) → query (Grafana/Kibana).</li>
+<li><b>Loki</b> indexes labels only (cheap); <b>ELK</b> indexes full text (rich, costly). Never index high-cardinality fields as labels <span class="warn">!</span></li>
+</ul></section>
 
-<section class="card"><h3>Tracing</h3>
+<section class="card"><h3>Distributed Tracing</h3>
 <ul>
-<li>Trace = tree of <b>spans</b> (op + duration + parent + attributes). Shows the causal path metrics/logs can't.</li>
-<li><b>Context propagation</b>: W3C <code>traceparent</code> header flows trace_id/span_id across services — a service that drops it <b>breaks the trace</b> <span class="warn">!</span></li>
-<li><b>Sampling</b>: head (decide at start, cheap, may miss rare errors) vs <b>tail</b> (decide after whole trace — keep all errors/slow ones; needs a buffering collector).</li>
-<li>Backends: Jaeger, <b>Grafana Tempo</b> (object storage, cheap), Zipkin.</li>
-<li>Derive RED metrics from spans; find the critical-path slow span.</li>
-</ul>
-</section>
+<li>A <b>trace</b> = tree of <b>spans</b>; each span has trace_id, span_id, parent_id, start/dur, attributes.</li>
+<li><b>Context propagation</b> across services via headers (W3C <code>traceparent</code>) — the one thing that must be threaded everywhere <span class="warn">!</span> (broken propagation = orphan traces).</li>
+<li><b>Sampling</b>: <i>head</i> (decide at start, cheap, may miss rare errors) vs <i>tail</i> (decide after seeing whole trace, keeps all errors, needs a collector buffer).</li>
+<li>Use traces to find the <b>slow span</b> in a p99 request and see cross-service causality; pair with logs via trace_id.</li>
+</ul></section>
 
-<section class="card"><h3>OpenTelemetry</h3>
+<section class="card"><h3>OpenTelemetry (OTel)</h3>
 <ul>
-<li>Vendor-neutral standard for <b>all three signals</b> — instrument once, export anywhere (no re-instrument to switch vendors).</li>
-<li><b>API vs SDK</b>: code against the API; wire SDK/exporter at runtime.</li>
-<li><b>OTLP</b> = the wire protocol.</li>
-<li><b>Collector</b> = receivers → processors → exporters. Agent (DaemonSet) or gateway. Does batching, <b>tail sampling</b>, redaction, format translation.</li>
-<li>Auto-instrumentation (Java/Python/Node agents) vs manual spans; semantic-convention attribute names.</li>
-</ul>
-</section>
+<li>Vendor-neutral standard: <b>signals</b> = traces + metrics + logs + profiles. API + SDK + wire protocol (<b>OTLP</b>).</li>
+<li><b>Auto-instrumentation</b> for common libs; manual spans for business logic.</li>
+<li><b>Collector</b> = receive → process (batch, filter, redact, tail-sample) → export to any backend. Run as agent (per-node) + gateway (central).</li>
+<li>Decouples app from vendor: swap backends without re-instrumenting <span class="warn">!</span> Prefer OTel over proprietary SDKs for portability.</li>
+</ul></section>
 
-<section class="card"><h3>Metrics at Scale</h3>
+<section class="card"><h3>Metrics at Scale &amp; Cost</h3>
 <ul>
-<li>Single Prometheus is bound by <b>active series (cardinality)</b> + local disk + single region <span class="warn">!</span></li>
-<li>Scale out: functional sharding (split targets), federation (aggregate up), <b>remote_write</b> to a backend.</li>
-<li><b>Thanos / Mimir / Cortex</b>: object-storage long-term, global query view, dedup HA replicas, <b>downsampling</b> (raw → 5m → 1h), multi-tenancy.</li>
-<li>Run 2 identical Prometheis for HA (no clustering); dedup at query/Alertmanager.</li>
-<li>Recording rules pre-aggregate to cut query cost.</li>
-</ul>
-</section>
+<li>Single Prometheus doesn't scale infinitely: shard by service, then federate. Long-term/HA via <b>Thanos / Cortex / Mimir</b> (object-store blocks + global query).</li>
+<li><b>Cardinality</b> is the #1 cost/OOM driver: series = ∏(label value counts). Never put user_id/request_id/email in a label <span class="warn">!</span></li>
+<li>Control cost: drop unused metrics at scrape (<code>metric_relabel_configs</code>), downsample old data, tune retention per tier.</li>
+<li>A single runaway label (unbounded values) can 10× your TSDB overnight — cardinality-limit + alert on series growth.</li>
+</ul></section>
 
-<section class="card"><h3>Kubernetes Monitoring</h3>
+<section class="card"><h3>Kubernetes &amp; Cloud-Native</h3>
 <ul>
-<li><b>kube-prometheus-stack</b> + <b>Prometheus Operator</b>: <code>ServiceMonitor</code>/<code>PodMonitor</code> (declarative scrape targets), <code>PrometheusRule</code> (alerts).</li>
-<li>Layers: <b>node-exporter</b> (host), <b>cAdvisor</b> (container CPU/mem, in kubelet), <b>kube-state-metrics</b> (object state: desired vs ready), control-plane metrics.</li>
-<li><b>metrics-server</b> is only for HPA / <code>kubectl top</code> — NOT storage or alerting <span class="warn">!</span></li>
-<li>Pod churn creates new series → a cardinality driver <span class="warn">!</span></li>
-</ul>
-</section>
+<li><b>kube-state-metrics</b> = object state (deployments, replicas, pod phase); <b>cAdvisor/kubelet</b> = container resource usage; <b>node-exporter</b> = node.</li>
+<li>Discovery via Prometheus Operator <b>ServiceMonitor / PodMonitor</b> CRDs.</li>
+<li>Watch: pod restarts/CrashLoopBackOff, OOMKilled, throttling (<code>container_cpu_cfs_throttled</code>), pending pods, PVC saturation.</li>
+<li>Resource requests/limits drive scheduling + QoS; alert on <b>saturation</b> (near limits) not just utilisation <span class="warn">!</span></li>
+</ul></section>
 
-<section class="card"><h3>Frontend &amp; Synthetic</h3>
+<section class="card"><h3>Dashboards, RUM &amp; Profiling</h3>
+<h4>Grafana dashboards</h4>
 <ul>
-<li><b>Black-box</b> (probe like a user) + <b>white-box</b> (internal) — you need both.</li>
-<li><b>Synthetic</b>: scripted uptime/journey checks from many regions; deterministic, pre-launch, catches TLS/cert/DNS. Doesn't reflect real users.</li>
-<li><b>RUM</b>: instrument the real browser/app — geography, devices, network.</li>
-<li><b>Core Web Vitals</b>: <b>LCP</b> (load ≤2.5s), <b>INP</b> (responsiveness ≤200ms, replaced FID), <b>CLS</b> (layout shift ≤0.1).</li>
-<li>JS error tracking (Sentry + source maps); OTel browser → connect to backend traces.</li>
+<li>One RED dashboard per service; template <b>variables</b> for env/instance; link panels to traces via exemplars.</li>
+<li>Show <b>rate/error/latency</b> + SLO burn on the top row; avoid vanity panels.</li>
 </ul>
-</section>
+<h4>Frontend / Synthetic</h4>
+<ul>
+<li><b>RUM</b> = real users (Core Web Vitals: LCP≤2.5s, INP≤200ms, CLS≤0.1, p75 field). <b>Synthetic</b> = scripted probes catch outages before users.</li>
+</ul>
+<h4>Continuous profiling</h4>
+<ul>
+<li>Always-on CPU/heap flamegraphs (pprof/Pyroscope/Parca) — the 4th pillar for "why is this span slow inside the process".</li>
+</ul></section>
 
-<section class="card"><h3>Cardinality &amp; Cost</h3>
+<section class="card"><h3>Incident Response &amp; On-Call</h3>
 <ul>
-<li><b>Cardinality = unique label-value combos = #series.</b> One unbounded label (user_id / request_id / full URL) = millions of series → OOM + huge bill <span class="warn">!</span> The #1 killer.</li>
-<li>Find it: <code>/api/v1/status/tsdb</code>, <code>count by (__name__)({__name__=~".+"})</code>, topk offenders.</li>
-<li>Control: drop/relabel via <code>metric_relabel_configs</code>, normalize routes, bounded labels.</li>
-<li>Logs: sample, drop DEBUG, tiered retention. Traces: tune sampling.</li>
-<li>Retention: raw short-term + downsampled long-term to object storage.</li>
-<li>Managed APM billing traps: per-host, per-GB, custom-metric counts <span class="warn">!</span></li>
-</ul>
-</section>
+<li>Roles: <b>IC</b> (coordinates, doesn't fix), comms lead, ops lead. Declare severity early.</li>
+<li><b>MTTD</b> (detect) · <b>MTTA</b> (ack) · <b>MTTR</b> (resolve) — observability shrinks MTTD/MTTR.</li>
+<li>Mitigate first (rollback/feature-flag/scale), diagnose later. Rollback beats root-cause under fire.</li>
+<li><b>Blameless postmortems</b>: timeline, contributing factors, action items with owners. Culture &gt; individuals.</li>
+<li>Sustainable on-call: sane rotations, actionable pages only, runbooks linked from every alert.</li>
+<li>Track alert quality: page → real-incident ratio, false-positive rate, and toil per rotation. A page that never needs action should be deleted or downgraded to a ticket <span class="warn">!</span></li>
+<li>Escalation policy: ack timeout → escalate to secondary → manager. Every sev has a defined comms cadence and a customer-facing status page for the big ones.</li>
+</ul></section>
 
-<section class="card"><h3>Profiling</h3>
+<section class="card"><h3>TSDB Internals &amp; Retention</h3>
 <ul>
-<li>Answers "WHICH function" burns CPU/allocates — beyond a trace's "which service".</li>
-<li>Profiles: CPU, heap/alloc, goroutine/thread, mutex/block, off-CPU.</li>
-<li><b>Flame graph</b>: width = resource/time; x-axis is NOT time-ordered; find the widest frames.</li>
-<li><code>pprof</code> (Go: <code>/debug/pprof</code>); sampling profilers = low overhead.</li>
-<li><b>Continuous profiling</b> always-on in prod: Pyroscope / Parca / Polar Signals; eBPF = whole-system, no code change / redeploy.</li>
-</ul>
-</section>
+<li>A time series = unique <b>metric name + label set</b>, storing (timestamp, float) samples. Series identity is the label set — change one label value and it's a brand-new series <span class="warn">!</span></li>
+<li>Prometheus TSDB: recent samples in an in-memory <b>head</b> block backed by a <b>WAL</b> (crash recovery); every 2h flushed to an immutable on-disk block; background <b>compaction</b> merges blocks.</li>
+<li>Samples are delta-of-delta + XOR compressed → ~1–2 bytes/sample on average. Cheap to store, expensive to <i>index</i> (the label inverted index is the memory hog).</li>
+<li><b>Retention</b> by time (<code>--storage.tsdb.retention.time</code>) or size. For long-term, remote-write to Thanos/Mimir and downsample (5m/1h rollups) old data.</li>
+<li>Churn (series that appear/disappear constantly — e.g. pod names in labels) bloats the index even if few are active <span class="warn">!</span></li>
+</ul></section>
 
-<section class="card"><h3>&#9733; Incident Playbook</h3>
+<section class="card"><h3>Instrumentation &amp; Exporters</h3>
 <ul>
-<li>Lifecycle: detect → triage → <b>mitigate</b> → resolve → learn. <b>Mitigate before diagnose</b> (rollback/failover/scale) <span class="warn">!</span></li>
-<li>Metrics: MTTD → MTTA → MTTR. Roles: IC · comms · ops · scribe.</li>
-<li>Every page → a <b>runbook</b>. Blameless <b>postmortem</b>: timeline, contributing factors, action items w/ owners. "Human error" is never a root cause.</li>
-</ul>
-<h4>Debug latency spike</h4>
-<ul>
-<li>&#9744; Dashboard (which endpoint?) → trace of a slow request (which span?) → logs for that <code>trace_id</code> → profile if CPU/mem.</li>
-</ul>
-<h4>Paged constantly</h4>
-<ul>
-<li>&#9744; Audit alerts: non-actionable → delete; cause-based → replace with SLO/symptom; add grouping/inhibition.</li>
-</ul>
-</section>
+<li><b>Client libraries</b> (prometheus-client, OTel SDK) expose <code>/metrics</code>; Prometheus scrapes it. Name metrics <code>&lt;namespace&gt;_&lt;unit&gt;_total</code> (e.g. <code>http_requests_total</code>).</li>
+<li><b>Exporters</b> translate third-party systems into metrics: node_exporter (host), blackbox (probe), postgres/redis/kafka exporters.</li>
+<li>Base units + suffixes: seconds not ms, bytes not MB, <code>_total</code> for counters (Prometheus convention) <span class="warn">!</span></li>
+<li>Labels describe dimensions (method, route, code) — keep the set <b>small and bounded</b>; a label is a new time series per value.</li>
+<li><b>Push</b> (StatsD/OTLP) vs <b>pull</b> (Prometheus): pull gives target-health for free (<code>up</code>); push suits short-lived/serverless.</li>
+</ul></section>
 
-<section class="card"><h3>&#9744; Alert / Dashboard Review</h3>
-<h4>Alerts</h4>
+<section class="card"><h3>Correlate the Pillars</h3>
 <ul>
-<li>&#9744; Symptom / SLO-based, not cause-based; actionable + urgent + human-needed.</li>
-<li>&#9744; Multi-window multi-burn-rate; <code>for:</code> to debounce; links a runbook.</li>
-<li>&#9744; Routed/grouped/inhibited sanely; a dead-man's-switch exists.</li>
-<li>&#9744; Alert on missing data (<code>absent()</code>).</li>
-</ul>
-<h4>Metrics &amp; dashboards</h4>
+<li>The power move: jump <b>metric → trace → log</b> for one request. Requires a shared <code>trace_id</code> everywhere.</li>
+<li><b>Exemplars</b>: attach a trace_id to a histogram sample so "click the p99 spike → open the exact slow trace".</li>
+<li><b>Wide/structured events</b> (one fat event per request with dozens of dimensions) let you slice by high-cardinality fields metrics can't hold — the "observability 2.0" idea.</li>
+<li>APM tools stitch this automatically; DIY = propagate context + log trace_id + emit exemplars.</li>
+<li>Debugging loop: alert (metric) → find affected requests (trace) → read the error detail (log) → confirm fix (metric). <span class="warn">!</span> A gap in any pillar breaks the chain.</li>
+</ul></section>
+
+<section class="card"><h3>Querying Logs (LogQL-style)</h3>
+<pre><code># Loki: stream selector + filter + metric
+{app="api",level="error"} |= "timeout"
+  | json | latency_ms > 500
+
+# rate of 5xx from logs over 5m
+sum(rate({app="api"} |= "status=5" [5m]))</code></pre>
 <ul>
-<li>&#9744; No unbounded labels; RED/USE covered; recording rules for heavy queries.</li>
-<li>&#9744; Dashboards: signal-first, right panel type, correct aggregation, deploy annotations, exemplars → traces.</li>
-<li>&#9744; SLIs measured at the user boundary; dashboards-as-code (no click-ops drift).</li>
+<li>Select by <b>labels</b> first (indexed), then filter the line (<code>|=</code> contains, <code>|~</code> regex), then parse (<code>json</code>/<code>logfmt</code>).</li>
+<li>Derive metrics from logs when you lack a metric — but it's slower/costlier than a real counter <span class="warn">!</span></li>
+<li>Retention tiers: hot (searchable days) vs cold/archive (cheap object store). Sample noisy INFO, keep all ERROR.</li>
+</ul></section>
+
+<section class="card"><h3>&#9733; Design / Review Checklist</h3>
+<h4>Signals &amp; SLOs</h4>
+<ul>
+<li>&#9744; Every service emits RED (or USE for resources); histograms not summaries for latency.</li>
+<li>&#9744; SLOs are user-centric with an explicit window + error budget; alerts fire on <b>burn rate</b>, not raw CPU.</li>
 </ul>
-</section>
+<h4>Cardinality &amp; cost</h4>
+<ul>
+<li>&#9744; No unbounded labels (user_id/request_id/email) on metrics <span class="warn">!</span>; high-cardinality lives in traces/logs.</li>
+<li>&#9744; Retention tiered; unused metrics dropped at scrape; series-growth alert in place.</li>
+</ul>
+<h4>Correlation &amp; alerts</h4>
+<ul>
+<li>&#9744; trace_id in logs; exemplars link metrics → traces; context propagation verified end-to-end.</li>
+<li>&#9744; Every page is actionable, urgent, deduped/grouped, and has a linked runbook. No noisy/cause-based pages.</li>
+</ul></section>
+
+<section class="card"><h3>Symptom → Cause</h3>
+<table><thead><tr><th>Symptom</th><th>Likely cause</th></tr></thead><tbody>
+<tr><td>p99 latency wrong / flat</td><td>quantile after aggregation, or missing <code>by(le)</code> <span class="warn">!</span></td></tr>
+<tr><td>metric spiky/noisy</td><td><code>irate</code> used for alerting instead of <code>rate</code> <span class="warn">!</span></td></tr>
+<tr><td>Prometheus OOM / slow</td><td>cardinality explosion — unbounded label <span class="warn">!</span></td></tr>
+<tr><td>batch job metrics never go down</td><td>Pushgateway used for a service, stale series <span class="warn">!</span></td></tr>
+<tr><td>orphan / broken traces</td><td>context not propagated across a hop <span class="warn">!</span></td></tr>
+<tr><td>alert storm on one outage</td><td>no grouping/inhibition in Alertmanager <span class="warn">!</span></td></tr>
+<tr><td>rare errors never sampled</td><td>head sampling; switch to tail sampling</td></tr>
+<tr><td>summary quantiles won't aggregate</td><td>use a histogram instead <span class="warn">!</span></td></tr>
+</tbody></table></section>
 
 </div>
-<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
-<script>
-  try {
-    mermaid.initialize({ startOnLoad: true, theme: "neutral",
-      flowchart: { useMaxWidth: true, htmlLabels: true, nodeSpacing: 18, rankSpacing: 18 },
-      themeVariables: { fontSize: "9px" } });
-  } catch (e) { /* offline / blocked CDN: diagrams degrade to source text, rest of sheet is fine */ }
-</script>
 </body>
 </html>
