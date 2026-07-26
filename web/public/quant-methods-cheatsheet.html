@@ -6,7 +6,11 @@
 <title>Quantitative Methods Cheat Sheet</title>
 <style>
 :root{
-  --fs: 7.2pt; --fs-mono: 6.6pt; --fs-h3: 7.8pt; --gap: 5px; --pad: 3px;
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
   --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
 }
 *{box-sizing:border-box;}
@@ -14,10 +18,12 @@ html,body{margin:0;padding:0;}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
   font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
 .sheet{background:#fff;}
+/* spanning title bar */
 .titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
   margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
 .titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
 .titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
 .sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
   column-fill:balance; padding:5px;}
 .card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
@@ -25,6 +31,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Ar
   overflow:hidden;}
 .card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
   background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
 .card:nth-of-type(8n+1) h3{background:#34495e;}
 .card:nth-of-type(8n+2) h3{background:#2c6e9b;}
 .card:nth-of-type(8n+3) h3{background:#1f7a5a;}
@@ -58,179 +65,393 @@ pre code{background:none; padding:0; font-size:1em;}
 @page{ size:A4; margin:5mm; }
 @media print{
   body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
   .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
 }
 </style>
 </head>
 <body>
 <div class="sheet">
-<div class="titlebar"><h1>Quantitative Methods Cheat Sheet</h1><span class="meta">probability · stochastic calculus · Black-Scholes · Greeks · risk · drilly</span></div>
+<div class="titlebar"><h1>Quantitative Methods Cheat Sheet</h1><span class="meta">quant interview focus · probability → pricing → risk · generic examples · drilly</span></div>
+
 <section class="card legend"><h3>How to read &amp; print</h3>
 <ul>
-<li><span class="warn">!</span> footgun / classic trap &nbsp; <code>&#9744;</code> reasoning step</li>
-<li>The quant maths counterpart to the Finance Domain sheet. Formulas in ASCII.</li>
-<li>Anchors: <b>prices lognormal, returns normal</b>; <b>risk-neutral drift = r</b>; <b>hedge → price</b>.</li>
-<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+<li><span class="warn">!</span> footgun / gotcha &nbsp; <code>&#9744;</code> review checklist item</li>
+<li>Scope: the maths a <b>quant / trading / risk</b> interview is built on — moments &amp; the tower rule, Itô, Black-Scholes, the Greeks, risk-neutral pricing, VaR, factor models, stat-arb. Notation is ASCII: <code>E[.]</code> expectation, <code>N(.)</code> standard-normal CDF, <code>sigma</code> vol, <code>dW</code> Brownian increment.</li>
+<li>Every formula is stated to be <b>rederivable</b>, not memorised — the "why" line is the senior signal. Last 2 cards = <b>review checklist</b> + spot-the-error table.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
 </ul></section>
 
-<section class="card"><h3>Probability Essentials</h3>
-<pre><code>Var(X) = E[X^2] - E[X]^2
-Cov(X,Y) = E[XY] - E[X]E[Y]
-Corr = Cov(X,Y)/(sd_X * sd_Y)
-E[E[X|Y]] = E[X]        (tower rule)
-CLT: mean of n iid -> N(mu, sigma^2/n)</code></pre>
-<p>Bayes: P(A|B) = P(B|A)P(A)/P(B).</p>
-</section>
-
-<section class="card"><h3>Distributions</h3>
+<section class="card"><h3>Probability — Moments &amp; Conditioning</h3>
 <ul>
-<li><b>Prices lognormal, returns normal</b>: if ln(S)~N then S is lognormal. <span class="warn">!</span></li>
-<li><b>Skew</b> (asymmetry), <b>kurtosis</b> (fat tails, excess &gt; 0 for returns).</li>
-<li>Normal underestimates tail risk → Student-t, jumps.</li>
-<li>Stylized facts: fat tails, vol clustering, negative skew, leverage.</li>
+<li><b>Expectation is linear, variance is not:</b> <code>E[aX+bY]=aE[X]+bE[Y]</code> always; but <code>Var(aX)=a^2 Var(X)</code> and <code>Var(X+Y)=Var(X)+Var(Y)+2Cov(X,Y)</code> — the cross-term is where all diversification lives.</li>
+<li><code>Var(X)=E[X^2]-E[X]^2</code>; <code>Cov(X,Y)=E[XY]-E[X]E[Y]</code>; <code>Corr=Cov/(sigma_X sigma_Y) in [-1,1]</code>.</li>
+</ul>
+<h4>Tower rule (most-used identity)</h4>
+<pre><code>E[ E[X|Y] ] = E[X]
+E[X|Y] is a RANDOM VARIABLE (function of Y) !
+Var(X) = E[Var(X|Y)] + Var(E[X|Y])   // law of total var</code></pre>
+<ul>
+<li><b>Bayes:</b> <code>P(A|B)=P(B|A)P(A)/P(B)</code>. Keep base rates straight under pressure.</li>
+<li><span class="warn">!</span> <b>Uncorrelated &ne; independent.</b> <code>Corr=0</code> kills only the <i>linear</i> link; <code>X</code> and <code>X^2</code> can be uncorrelated yet fully dependent. Independence &rArr; Cov=0, not the reverse.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Brownian Motion &amp; GBM</h3>
-<pre><code>W_t: W_0=0, W_t - W_s ~ N(0, t-s),
-     indep increments, continuous,
-     nowhere differentiable
-Martingale: E[X_t | F_s] = X_s
-GBM: dS = mu*S*dt + sigma*S*dW</code></pre>
-<p>Scaling: sd of W over time t is sqrt(t).</p>
-</section>
-
-<section class="card"><h3>Itô's Lemma</h3>
-<pre><code>Rules: (dW)^2 = dt,  dt^2 = 0,  dt*dW = 0
-df = (f_t + mu*S*f_S + 0.5*sigma^2*S^2*f_SS) dt
-     + sigma*S*f_S dW
-f = ln(S):
-  d(ln S) = (mu - sigma^2/2) dt + sigma dW
-  S_T = S_0*exp((mu - sigma^2/2)T + sigma*W_T)</code></pre>
-<p><span class="warn">!</span> The -sigma^2/2 is the Itô correction.</p>
-</section>
-
-<section class="card"><h3>TVM &amp; Bonds</h3>
-<pre><code>PV = FV * exp(-r*T)        (continuous)
-ModDur = -(1/P) dP/dy
-dP/P ~ -ModDur*dy + 0.5*Convexity*dy^2</code></pre>
+<section class="card"><h3>Estimation — LLN, CLT, MLE</h3>
 <ul>
-<li>Duration = rate sensitivity; convexity helps the holder.</li>
-<li>Forward rate from spots by no-arbitrage; bootstrap the curve.</li>
+<li><b>LLN:</b> sample mean <code>Xbar_n -> mu</code>. <b>CLT:</b> <code>sqrt(n)(Xbar_n - mu) -> N(0,sigma^2)</code>; the <i>error</i> shrinks like <code>1/sqrt(n)</code> and is Gaussian <b>regardless of the underlying shape</b> <span class="warn">!</span> (that's the whole point — data need not be Normal).</li>
+<li><b>Standard error</b> of the mean = <code>sigma/sqrt(n)</code>. "How accurate is my estimate?" is almost always a CLT question.</li>
+</ul>
+<h4>MLE &amp; bias</h4>
+<ul>
+<li>MLE = argmax likelihood; maximise <code>log L</code>. Gaussian: <code>mu_hat=Xbar</code>, <code>sigma^2_hat=(1/n)Sum(x-Xbar)^2</code>.</li>
+<li><span class="warn">!</span> That variance MLE <b>divides by n &rarr; biased low</b>. <code>n-1</code> (Bessel) is unbiased. More data shrinks <i>variance</i>, never removes <i>bias</i>.</li>
+<li><code>bias = E[estimator] - true</code>; <code>MSE = bias^2 + variance</code> (bias–variance decomposition).</li>
 </ul>
 </section>
 
-<section class="card"><h3>Portfolio &amp; CAPM</h3>
-<pre><code>var_p = w' Sigma w
-Sharpe = (r_p - r_f)/sigma_p
-CAPM: E[r_i] = r_f + beta*(E[r_m]-r_f)
-beta = Cov(r_i, r_m)/Var(r_m)</code></pre>
-<ul>
-<li>Diversification cuts variance when corr &lt; 1.</li>
-<li>Only <b>systematic</b> risk is priced; idiosyncratic diversifies away.</li>
-</ul>
-</section>
-
-<section class="card"><h3>Options &amp; Parity</h3>
-<pre><code>Call payoff = max(S-K, 0)
-Put  payoff = max(K-S, 0)
-Put-call parity: C - P = S - K*exp(-r*T)
-Forward: F = S*exp((r - q)*T)</code></pre>
-<p>Value = intrinsic + time value; moneyness = ITM/ATM/OTM.</p>
-</section>
-
-<section class="card"><h3>Black-Scholes</h3>
-<pre><code>PDE: V_t + 0.5 sigma^2 S^2 V_SS + r S V_S - r V = 0
-C = S*N(d1) - K*exp(-r*T)*N(d2)
-d1 = (ln(S/K) + (r + sigma^2/2)T)/(sigma*sqrt(T))
-d2 = d1 - sigma*sqrt(T)</code></pre>
-<p><span class="warn">!</span> Derive via a delta-hedged riskless portfolio. N(d2) = risk-neutral P(finish ITM). Constant vol is the big lie → smile.</p>
-</section>
-
-<section class="card"><h3>The Greeks</h3>
-<table><thead><tr><th>Greek</th><th>=</th><th>Note</th></tr></thead><tbody>
-<tr><td>Delta</td><td>dV/dS</td><td>call = N(d1), 0..1</td></tr>
-<tr><td>Gamma</td><td>d2V/dS2</td><td>same call/put, max ATM</td></tr>
-<tr><td>Vega</td><td>dV/dsigma</td><td>vol risk</td></tr>
-<tr><td>Theta</td><td>dV/dt</td><td>time decay</td></tr>
-<tr><td>Rho</td><td>dV/dr</td><td>rate risk</td></tr>
+<section class="card"><h3>Distributions in Finance</h3>
+<table><thead><tr><th>Dist</th><th>Use / note</th></tr></thead><tbody>
+<tr><td>Normal <code>N(mu,sigma^2)</code></td><td>log-returns; 68/95/99.7 rule; sum of Normals is Normal</td></tr>
+<tr><td>Lognormal</td><td>prices under GBM (<code>ln S</code> Normal &rArr; <code>S</code>&ge;0)</td></tr>
+<tr><td>Student-t</td><td><b>fat tails</b> — real return kurtosis &gt; 3 <span class="warn">!</span></td></tr>
+<tr><td>Poisson</td><td>jump / arrival counts (defaults, orders)</td></tr>
+<tr><td>Exponential</td><td>inter-arrival / time-to-default; memoryless</td></tr>
+<tr><td>Bernoulli/Binomial</td><td>up-down moves; binomial tree</td></tr>
+<tr><td>Chi-sq / F / t</td><td>test statistics, variance inference</td></tr>
 </tbody></table>
-<p>Long gamma ~ 0.5*Gamma*(dS)^2, pays theta. <span class="warn">!</span></p>
-</section>
-
-<section class="card"><h3>Risk-Neutral Pricing</h3>
-<pre><code>V_0 = E^Q[ exp(-int_0^T r dt) * payoff ]</code></pre>
 <ul>
-<li>Under <b>Q</b>, discounted prices are martingales.</li>
-<li><b>Girsanov</b>: drift mu -> r (removes risk premium). <span class="warn">!</span></li>
-<li>No-arb ⇔ Q exists; complete ⇔ Q unique (FTAP).</li>
-<li>Works via <b>replication</b> — no view on real drift needed.</li>
+<li><b>Skew</b> (3rd moment) = asymmetry; <b>kurtosis</b> (4th) = tail fatness. Normal kurtosis=3; "excess"=kurt&minus;3.</li>
+<li><span class="warn">!</span> Markets are <b>fat-tailed and left-skewed</b> — Normal VaR understates crash risk. This is the assumption every model card silently leans on.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Volatility</h3>
+<section class="card"><h3>Brownian Motion &amp; Processes</h3>
+<h4>Wiener process W_t — 4 axioms</h4>
+<pre><code>W_0=0
+independent increments
+W_t - W_s ~ N(0, t-s)          // spreads like sqrt(time)
+continuous paths, NOWHERE differentiable !</code></pre>
 <ul>
-<li><b>Implied</b> vol = backed out of the price; <b>realized</b> usually lower (variance risk premium).</li>
-<li><b>Smile/skew</b>: constant-vol BSM is wrong; equities skew down (crash risk). <span class="warn">!</span></li>
-<li>GARCH (clustering), Heston (stoch vol), local vol (Dupire); VIX ~ 30d implied.</li>
+<li><code>E[W_t]=0</code>, <code>Var(W_t)=t</code>, <code>E[W_t^2]=t</code>, <code>Cov(W_s,W_t)=min(s,t)</code>.</li>
+<li><b>Quadratic variation</b> <code>[W]_T = T</code> (not 0!) — squared increments accumulate to real time; first variation (path length) is infinite. This single fact forces a new calculus.</li>
+<li><b>Markov</b> = future depends only on present. <b>Martingale</b> = <code>E[X_t|F_s]=X_s</code> ("fair game", no drift). <code>W_t</code> is both.</li>
+<li><b>GBM:</b> <code>dS=mu S dt + sigma S dW</code> — the workhorse asset model; returns i.i.d., prices lognormal, always &gt;0.</li>
+<li><b>OU / mean-reverting:</b> <code>dX=theta(m-X)dt+sigma dW</code> — rates, spreads, pairs.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Monte Carlo</h3>
-<pre><code>S_{t+dt} = S_t*exp((r - sigma^2/2)dt + sigma*sqrt(dt)*Z)
-price = exp(-r*T) * mean(payoff)
-error ~ O(1/sqrt(N))   # 4x paths -> half error</code></pre>
+<section class="card"><h3>Itô's Lemma &amp; Stochastic Calculus</h3>
+<h4>Multiplication table (keep to order dt)</h4>
+<pre><code>(dW)^2 = dt      dt*dW = 0      dt^2 = 0
+// dW ~ sqrt(dt), so (dW)^2 is FIRST order — not negligible !</code></pre>
+<h4>Itô's lemma (stochastic chain rule)</h4>
+<pre><code>dS = a dt + b dW
+df = (f_t + a f_S + 1/2 b^2 f_SS) dt + b f_S dW
+        ^^^^^^^^^^^ Ito correction, from (dW)^2=dt</code></pre>
+<h4>Canonical: f = ln S, GBM</h4>
+<pre><code>d(ln S) = (mu - sigma^2/2) dt + sigma dW
+S_T = S_0 exp((mu - sigma^2/2)T + sigma W_T)   // lognormal</code></pre>
 <ul>
-<li>Variance reduction: antithetic, control variates.</li>
-<li>Best for path-dependent/high-dim; weak for American (→ LSM). <span class="warn">!</span></li>
+<li><span class="warn">!</span> <b>ln S drifts at <code>mu - sigma^2/2</code>, not mu.</b> Pure calculus, appears under any measure.</li>
+<li><span class="warn">!</span> <code>E[S_T]=S_0 e^(mu T)</code> (Jensen cancels the &minus;&sigma;&sup2;/2); <code>exp((mu-sigma^2/2)T)</code> is the <b>median</b>, not the mean.</li>
+<li>Itô integral uses <b>left-endpoint</b> sums &rarr; non-anticipating &rarr; martingale. Stratonovich (midpoint) obeys the ordinary chain rule but isn't a martingale, so finance uses Itô.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Binomial Tree</h3>
-<pre><code>u, d = 1/u
-p = (exp(r*dt) - d)/(u - d)   # risk-neutral
-value = exp(-r*dt)*(p*V_up + (1-p)*V_down)</code></pre>
-<p>Backward induct; American = max(continuation, intrinsic) per node. Converges to BSM.</p>
-</section>
-
-<section class="card"><h3>VaR &amp; Risk Measures</h3>
-<pre><code>Parametric VaR = z_alpha * sigma * sqrt(h) * V
-ES (CVaR) = E[loss | loss > VaR]</code></pre>
+<section class="card"><h3>Time Value of Money &amp; Rates</h3>
+<table><thead><tr><th>Compounding</th><th>Grow $1 over T</th></tr></thead><tbody>
+<tr><td>annual</td><td><code>(1+r)^T</code></td></tr>
+<tr><td>m-times/yr</td><td><code>(1+r/m)^(mT)</code></td></tr>
+<tr><td>continuous</td><td><code>e^(rT)</code> — quant default</td></tr>
+</tbody></table>
 <ul>
-<li>Methods: historical / parametric / Monte Carlo.</li>
-<li><span class="warn">!</span> <b>VaR is NOT subadditive</b> (can punish diversification); <b>ES is coherent</b>.</li>
-<li>Backtest (Kupiec) + stress test the tails.</li>
+<li><b>Discount factor</b> <code>DF(T)=e^(-rT)</code>; <code>PV = Sum CF_i * DF(t_i)</code>.</li>
+<li><b>Convert</b> discrete&harr;continuous: <code>r_c = m ln(1+r_m/m)</code>.</li>
+<li><b>Perpetuity</b> <code>PV=C/r</code>; <b>growing perp</b> <code>C/(r-g)</code>; <b>annuity</b> <code>C(1-(1+r)^(-n))/r</code>.</li>
+<li><b>Spot vs forward:</b> <code>(1+z_2)^2=(1+z_1)(1+f_{1,2})</code> — forward implied by the curve.</li>
+<li><b>Real vs nominal (Fisher):</b> <code>1+nom=(1+real)(1+infl)</code>.</li>
+<li><span class="warn">!</span> IRR sets NPV=0 but can be <b>multiple or undefined</b> with sign-changing cashflows — rank projects by NPV, not IRR.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Time Series &amp; Stat Arb</h3>
+<section class="card"><h3>Fixed Income — Duration &amp; Convexity</h3>
 <ul>
-<li><b>Stationarity</b> first; AR/MA/ARMA/ARIMA; <b>GARCH</b> = vol clustering.</li>
-<li><b>Cointegration</b> (≠ correlation): I(1) pair with stationary spread → <b>pairs trade</b> the mean reversion.</li>
-<li><b>PCA</b> of the curve = level/slope/curvature; <b>Cholesky</b> Sigma=L L' → correlated draws X=L Z.</li>
-<li>Backtest traps: look-ahead, survivorship, overfitting. <span class="warn">!</span> Judge by out-of-sample Sharpe.</li>
+<li><b>Price = PV of coupons + principal</b> at yield <code>y</code>; price moves inversely with yield.</li>
+<li><b>Macaulay duration</b> = PV-weighted average time to cashflows (years).</li>
+<li><b>Modified duration</b> <code>D_mod = D_mac/(1+y/m)</code> = % price sensitivity: <code>dP/P &asymp; -D_mod * dy</code>.</li>
+<li><b>Convexity</b> C is second-order: <code>dP/P &asymp; -D_mod dy + 1/2 C dy^2</code>.</li>
+</ul>
+<h4>Key relations</h4>
+<ul>
+<li><span class="warn">!</span> Duration alone <b>underestimates</b> price for large yield moves — convexity is a positive correction for vanilla bonds (price–yield curve is convex).</li>
+<li>Higher coupon &rarr; <b>lower</b> duration; zero-coupon duration = maturity.</li>
+<li><b>DV01 / PV01</b> = price change per 1bp = <code>D_mod * P * 0.0001</code> — the desk's hedge unit.</li>
+<li><b>Bootstrapping</b> builds the zero curve from par instruments; <b>YTM</b> assumes flat reinvestment at y <span class="warn">!</span>.</li>
 </ul>
 </section>
 
-<section class="card"><h3>&#9744; Quant Interview Playbook</h3>
+<section class="card"><h3>Portfolio Theory &amp; Optimization</h3>
+<pre><code>Portfolio return  mu_p = w^T mu
+Portfolio var     s_p^2 = w^T Sigma w
+2-asset  s_p^2 = w1^2 s1^2 + w2^2 s2^2 + 2 w1 w2 rho s1 s2</code></pre>
 <ul>
-<li>&#9744; E[flips to HH]=6, E[HT]=4 — know WHY (overlap/Markov chain).</li>
-<li>&#9744; Define variables; use symmetry, recursion, conditioning, martingales.</li>
-<li>&#9744; "Price this": identify payoff → replicate / risk-neutral expectation → discount.</li>
-<li>&#9744; Derive BSM via delta-hedge; recall put-call parity to cross-check.</li>
-<li>&#9744; Sanity-check limits (vol→0, T→0, S&gt;&gt;K) and units.</li>
-<li>&#9744; Reason ALOUD; state assumptions; estimate then refine (Fermi).</li>
+<li><b>Diversification</b> works whenever <code>rho &lt; 1</code>; risk of a large equal-weight book &rarr; <b>average covariance</b>, not average variance (idiosyncratic risk vanishes, systematic remains).</li>
+<li><b>Efficient frontier</b> = min variance per target return (upper half). <b>Min-variance</b> weights &prop; <code>Sigma^-1 1</code>.</li>
+<li><b>Tangency / max-Sharpe:</b> <code>w &prop; Sigma^-1 (mu - r_f 1)</code>. With a risk-free asset everyone holds the <b>same</b> risky tangency portfolio + cash (two-fund / CML).</li>
+<li><b>Sharpe</b> <code>=(mu_p - r_f)/sigma_p</code>; Sortino uses downside dev; Information ratio = active return / tracking error.</li>
 </ul>
+<p><span class="warn">!</span> Markowitz is <b>error-maximising</b>: tiny changes in estimated <code>mu</code>/<code>Sigma</code> swing weights wildly. Shrinkage (Ledoit-Wolf), risk-parity, or Black-Litterman tame it in practice.</p>
+</section>
+
+<section class="card"><h3>CAPM &amp; Factor Models</h3>
+<pre><code>CAPM:  E[R_i] = r_f + beta_i (E[R_m] - r_f)
+beta_i = Cov(R_i, R_m) / Var(R_m)          // regression slope</code></pre>
+<ul>
+<li><b>Total = systematic + idiosyncratic:</b> <code>sigma_i^2 = beta_i^2 sigma_m^2 + sigma_eps^2</code>. Only <b>systematic</b> (beta) risk is priced — idiosyncratic is diversifiable, earns no premium <span class="warn">!</span>.</li>
+<li><b>Alpha</b> = intercept above the CAPM line = skill/mispricing. <b>SML</b> plots E[R] vs beta.</li>
+<li><b>Multifactor (APT):</b> <code>R_i = a + Sum beta_k F_k + eps</code>. <b>Fama-French</b>: market, SMB (size), HML (value); +momentum (Carhart), +RMW/CMA (5-factor).</li>
+<li><b>R^2</b> = variance fraction explained by factors; <code>beta_portfolio = Sum w_i beta_i</code>.</li>
+</ul>
+<p><span class="warn">!</span> CAPM is empirically weak (low-beta anomaly, value/momentum premia) but it's the <b>vocabulary</b> — know its assumptions (one period, homogeneous beliefs, no frictions) and why they fail.</p>
+</section>
+
+<section class="card"><h3>Options — Fundamentals</h3>
+<table><thead><tr><th>Payoff at T</th><th>Value</th></tr></thead><tbody>
+<tr><td>Call</td><td><code>max(S-K, 0)</code></td></tr>
+<tr><td>Put</td><td><code>max(K-S, 0)</code></td></tr>
+</tbody></table>
+<h4>Put-call parity (European, no-arb)</h4>
+<pre><code>C - P = S - K e^(-rT)        (+ PV of divs on the S side)</code></pre>
+<ul>
+<li>Breaks &rArr; arbitrage: synthesise the cheap side, short the rich. <b>Model-free</b> — no vol assumption.</li>
+<li><b>Moneyness:</b> ITM / ATM / OTM. <b>Intrinsic</b> = payoff now; <b>time value</b> = premium &minus; intrinsic, &ge;0, decays to 0 at expiry.</li>
+<li><span class="warn">!</span> <b>American call on a non-dividend stock: never early-exercise</b> (time value + interest on K &gt; 0) — same value as European. American <b>puts</b>, and calls with dividends, can be optimal to exercise early.</li>
+<li>Bounds: <code>max(S-Ke^(-rT),0) &le; C &le; S</code>. Structures: spreads, straddle (long vol), strangle, butterfly, collar.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Black-Scholes-Merton</h3>
+<pre><code>C = S N(d1) - K e^(-rT) N(d2)
+P = K e^(-rT) N(-d2) - S N(-d1)
+d1 = [ln(S/K) + (r + sigma^2/2)T] / (sigma sqrt(T))
+d2 = d1 - sigma sqrt(T)</code></pre>
+<ul>
+<li><b>Derivation:</b> Itô on V(t,S), form a delta-hedged <code>Pi=V-Delta*S</code>; the <code>dW</code> cancels &rarr; riskless &rarr; must earn r &rarr; <b>BSM PDE</b>: <code>V_t + rS V_S + 1/2 sigma^2 S^2 V_SS = rV</code>.</li>
+<li><b>Reading it:</b> <code>N(d2)</code> = risk-neutral P(finish ITM); <code>N(d1)</code> = delta = PV of receiving the stock conditional on exercise.</li>
+<li><span class="warn">!</span> Assumptions that fail in reality: constant &sigma; &amp; r, GBM (no jumps), frictionless continuous hedging, lognormal S. The <b>volatility smile</b> is the market pricing in these violations.</li>
+<li><span class="warn">!</span> <code>mu</code> is <b>absent</b> from the price — the drift is hedged away; only <code>r</code> and <code>sigma</code> enter.</li>
+</ul>
+</section>
+
+<section class="card"><h3>The Greeks &amp; Hedging</h3>
+<table><thead><tr><th>Greek</th><th>&part; of V wrt</th><th>Call sign</th></tr></thead><tbody>
+<tr><td>Delta &Delta;</td><td>S (1st)</td><td><code>N(d1) &isin; (0,1)</code></td></tr>
+<tr><td>Gamma &Gamma;</td><td>S (2nd)</td><td>&gt;0 (long option)</td></tr>
+<tr><td>Vega &nu;</td><td>sigma</td><td>&gt;0</td></tr>
+<tr><td>Theta &Theta;</td><td>time</td><td>&lt;0 (decay)</td></tr>
+<tr><td>Rho &rho;</td><td>r</td><td>&gt;0 call</td></tr>
+</tbody></table>
+<ul>
+<li><b>&Delta;</b> = hedge ratio (shares per option). <b>Delta-hedge</b> to be first-order flat; rebalance as &Delta; moves.</li>
+<li><span class="warn">!</span> <b>&Gamma; and &Theta; trade off:</b> long options = +&Gamma; (convexity, gain on big moves) but &minus;&Theta; (pay time decay). Hedged PnL &asymp; <code>1/2 Gamma (dS)^2 + Theta dt</code> — you win iff <b>realized var &gt; implied var</b>. That is the entire vol-trading game.</li>
+<li><b>Vega</b> is largest ATM and longer-dated; <b>&Gamma;</b> spikes ATM near expiry (pin risk, hard to hedge).</li>
+<li>Gamma-hedge with another option (&Delta; can't touch &Gamma;), then delta-hedge the residual.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Risk-Neutral Pricing &amp; Martingales</h3>
+<pre><code>Price_0 = e^(-rT) E^Q[ payoff(S_T) ]
+Under Q:  dS = r S dt + sigma S dW^Q   // drift replaced by r</code></pre>
+<ul>
+<li><b>Fundamental theorem of asset pricing:</b> no-arbitrage &hArr; &exist; risk-neutral measure Q; <b>market complete</b> &hArr; Q is <b>unique</b>.</li>
+<li>Under Q every <b>discounted</b> tradable <code>S_t e^(-rt)</code> is a <b>martingale</b> — expected discounted future = today's price. Pricing = discounted expectation, no risk premia needed.</li>
+<li><b>Girsanov:</b> a change of measure shifts the <b>drift</b> (mu&rarr;r) and leaves <code>sigma dW</code> unchanged — you can't change volatility by changing measure <span class="warn">!</span>.</li>
+<li><span class="warn">!</span> Q is <b>not</b> real-world probability — it's a pricing device weighting by state prices. Don't forecast with Q; price &amp; hedge with it.</li>
+<li>Feynman-Kac links the PDE and expectation forms — two faces of one value.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Volatility Modeling</h3>
+<ul>
+<li><b>Realized</b> vol = from history (<code>sqrt(252)*std of daily</code>). <b>Implied</b> vol = the &sigma; that reprices a market option via BSM.</li>
+<li><b>Volatility smile/skew:</b> implied vol varies by strike — equities show a <b>downward skew</b> (OTM puts richer: crash fear + leverage effect) <span class="warn">!</span>. A flat smile would mean BSM holds; it never is.</li>
+<li><b>Term structure + smile = vol surface</b> <code>sigma(K,T)</code>, the desk's core object.</li>
+</ul>
+<h4>Vol clustering &rarr; GARCH</h4>
+<pre><code>GARCH(1,1): s_t^2 = omega + alpha e_(t-1)^2 + beta s_(t-1)^2
+persistence = alpha+beta (->1 = long memory)
+long-run var = omega/(1-alpha-beta)</code></pre>
+<ul>
+<li>Captures <b>volatility clustering</b> (big moves cluster) &amp; fat tails; EWMA is the <code>omega=0</code> special case (RiskMetrics &lambda;&asymp;0.94).</li>
+<li><b>Local vol</b> (Dupire) fits the surface deterministically; <b>stochastic vol</b> (Heston) gives vol its own SDE + correlation &rarr; smile dynamics.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Numerical Methods — MC, Trees &amp; PDEs</h3>
+<h4>Monte Carlo</h4>
+<pre><code>Price = e^(-rT) * mean( payoff(S_T^i) )
+GBM step:  S_(t+dt) = S_t exp((r - sigma^2/2)dt + sigma sqrt(dt) Z)
+Z ~ N(0,1) i.i.d.</code></pre>
+<ul>
+<li><span class="warn">!</span> <b>Error ~ O(1/sqrt(N))</b> — 100&times; paths for 10&times; accuracy. Slow but <b>dimension-independent</b>, so it wins for baskets, path-dependent &amp; high-dim payoffs where trees/PDEs explode.</li>
+<li><b>Std error</b> = <code>sample_sd / sqrt(N)</code> — always report it. <b>Variance reduction</b>: <b>antithetic</b> (&plusmn;Z), <b>control variates</b> (subtract a correlated known-price payoff), <b>importance sampling</b> (deep OTM), <b>quasi-MC</b> (Sobol &rarr; ~O(1/N)).</li>
+<li><b>American MC:</b> Longstaff-Schwartz — regress continuation value for the exercise boundary. Reuse the <b>same seed</b> across bumped runs for stable finite-difference Greeks.</li>
+</ul>
+<h4>Binomial tree (CRR)</h4>
+<pre><code>u = e^(sigma sqrt(dt)),  d = 1/u
+q = (e^(r dt) - d)/(u - d)      // risk-neutral prob, NOT real p !
+value = e^(-r dt)(q V_up + (1-q) V_down)   // roll back</code></pre>
+<ul>
+<li>Backward induction from payoffs; at each node <b>American</b> = <code>max(exercise, continuation)</code>. Converges to BSM as steps&rarr;&infin;. <span class="warn">!</span> <code>q</code> is the <b>risk-neutral</b> probability, never the real-world one — common blunder.</li>
+</ul>
+<h4>Finite-difference (solve the BSM PDE)</h4>
+<ul>
+<li><b>Explicit</b>: simple but <b>conditionally unstable</b> (dt limited by dx&sup2;) <span class="warn">!</span>. <b>Implicit</b>: unconditionally stable, solve a tridiagonal system. <b>Crank-Nicolson</b>: 2nd-order accurate + stable — the default.</li>
+<li>Great for 1–2 factors with early exercise / barriers; curse of dimensionality above ~3 factors &rarr; switch to MC.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Interest Rate Models</h3>
+<table><thead><tr><th>Model</th><th>SDE / trait</th></tr></thead><tbody>
+<tr><td>Vasicek</td><td><code>dr=a(b-r)dt+sigma dW</code>; mean-revert, Gaussian, <b>r&lt;0 possible</b> <span class="warn">!</span></td></tr>
+<tr><td>CIR</td><td><code>dr=a(b-r)dt+sigma sqrt(r) dW</code>; r&ge;0</td></tr>
+<tr><td>Ho-Lee / Hull-White</td><td>no-arb, <b>fit today's curve</b> exactly</td></tr>
+<tr><td>HJM</td><td>models whole forward-curve dynamics</td></tr>
+<tr><td>LMM / BGM</td><td>models observable forward rates</td></tr>
+</tbody></table>
+<ul>
+<li><b>Short-rate vs term-structure:</b> equilibrium models (Vasicek/CIR) produce a curve but won't match today's; no-arb models (HW/HJM) are calibrated to it — needed to price consistently <span class="warn">!</span>.</li>
+<li><b>Affine</b> models (Vasicek, CIR) give closed-form bond prices <code>P(t,T)=A e^(-B r)</code>.</li>
+<li>One factor &rArr; perfectly correlated rate moves; add factors for realistic curve twists (level/slope/curvature &asymp; first 3 PCs).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Value at Risk &amp; Risk Measures</h3>
+<ul>
+<li><b>VaR_&alpha;</b> = loss not exceeded with prob &alpha; over a horizon (e.g. 1-day 99% VaR). <b>ES / CVaR</b> = <b>expected</b> loss <i>beyond</i> VaR — the average tail.</li>
+</ul>
+<table><thead><tr><th>Method</th><th>Trait</th></tr></thead><tbody>
+<tr><td>Parametric (Normal)</td><td><code>VaR=z_a sigma sqrt(h) V</code>; fast, <b>thin tails</b> <span class="warn">!</span></td></tr>
+<tr><td>Historical sim</td><td>empirical quantile; no dist assumption; backward-looking</td></tr>
+<tr><td>Monte Carlo</td><td>flexible, slow, model risk</td></tr>
+</tbody></table>
+<ul>
+<li>Normal quantiles: 95%&rarr;1.645&sigma;, 99%&rarr;2.33&sigma;. Scale by <code>sqrt(time)</code> (iid).</li>
+<li><span class="warn">!</span> <b>VaR is not sub-additive</b> — VaR(A+B) can exceed VaR(A)+VaR(B), i.e. it can <b>penalise diversification</b>. <b>ES is coherent</b> (sub-additive) — regulators (FRTB) moved to ES.</li>
+<li><span class="warn">!</span> VaR says nothing about <b>how bad</b> the loss is beyond the threshold; it ignores the tail. Complement with ES + stress tests.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Time Series Analysis</h3>
+<ul>
+<li><b>Stationarity</b> (constant mean/var/autocov) is required by most models — test with <b>ADF</b> (unit root). Difference / take log-returns to induce it <span class="warn">!</span>.</li>
+<li><b>ACF/PACF</b> diagnose order: MA(q) &rarr; ACF cuts at q; AR(p) &rarr; PACF cuts at p.</li>
+</ul>
+<table><thead><tr><th>Model</th><th>Form</th></tr></thead><tbody>
+<tr><td>AR(p)</td><td><code>X_t = c + Sum phi_i X_(t-i) + e</code></td></tr>
+<tr><td>MA(q)</td><td><code>X_t = mu + e_t + Sum th_j e_(t-j)</code></td></tr>
+<tr><td>ARIMA(p,d,q)</td><td>AR+MA on d-differenced series</td></tr>
+<tr><td>GARCH</td><td>models the <b>variance</b>, not the mean</td></tr>
+</tbody></table>
+<ul>
+<li><b>Cointegration</b> (Engle-Granger / Johansen): two I(1) series with a stationary linear combo &rarr; basis of <b>pairs trading</b>. Correlation &ne; cointegration <span class="warn">!</span>.</li>
+<li><span class="warn">!</span> <b>Spurious regression:</b> regressing two independent random walks yields high R&sup2; and "significant" t-stats — nonsense. Check stationarity first.</li>
+<li>Select order by <b>AIC/BIC</b>; validate out-of-sample, never on in-sample fit.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Linear Algebra &amp; Optimization</h3>
+<ul>
+<li><b>Covariance matrix &Sigma;</b> is symmetric <b>PSD</b>; a valid &Sigma; has all eigenvalues &ge;0. Estimated &Sigma; from short samples is <b>ill-conditioned / singular</b> when <code>#assets &gt; #obs</code> <span class="warn">!</span> — shrink/regularise.</li>
+<li><b>PCA</b> = eigendecomposition of &Sigma; (or correlation): eigenvectors = orthogonal factors, eigenvalues = variance explained. Yield-curve PCs &asymp; level/slope/curvature.</li>
+<li><b>SVD</b> <code>A=U S V^T</code> — robust, works for non-square; PCA via SVD of centered data.</li>
+<li><b>Cholesky</b> <code>Sigma=L L^T</code> — correlate Monte Carlo normals: <code>correlated = L z</code>. Needs &Sigma; PSD.</li>
+</ul>
+<h4>Optimization</h4>
+<ul>
+<li><b>Convex</b> problems (QP for mean-variance) have a unique global optimum — <b>Lagrange multipliers</b> for equality constraints, KKT for inequalities.</li>
+<li>Gradient descent / Newton for unconstrained; <b>quadratic programming</b> for constrained portfolios (long-only, budget).</li>
+<li><span class="warn">!</span> Non-convex (cardinality, integer weights) &rarr; local minima; needs heuristics / MIP.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Statistical Arbitrage &amp; Strategies</h3>
+<ul>
+<li><b>Pairs / mean-reversion:</b> find a cointegrated pair, trade the <b>spread</b> when it deviates &gt; k&middot;&sigma;, exit at the mean. Z-score entry/exit; the spread must be <b>stationary</b>, not merely correlated <span class="warn">!</span>.</li>
+<li><b>Signals / alpha:</b> momentum, value, carry, reversal. Combine, neutralise to factors, size by conviction/vol.</li>
+<li><span class="warn">!</span> <b>Backtest hygiene:</b> <b>look-ahead bias</b> (future data), <b>survivorship bias</b> (dead names dropped), <b>overfitting</b> / p-hacking, ignoring <b>transaction costs + slippage + market impact</b>. A backtest without costs is fiction.</li>
+<li><b>Sharpe deflation:</b> multiple testing inflates the best-looking backtest — deflate by number of trials.</li>
+</ul>
+<h4>Execution &amp; microstructure</h4>
+<ul>
+<li>Bid-ask spread, order-book depth, <b>market impact</b> (&asymp; concave in size). VWAP / TWAP / implementation-shortfall algos minimise cost.</li>
+<li><b>Kelly</b> sizing <code>f*=edge/odds</code> maximises log-growth; desks run <b>fractional Kelly</b> (&frac12;) — full Kelly's drawdowns are brutal <span class="warn">!</span>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Brainteasers — Patterns &amp; Tricks</h3>
+<ul>
+<li><b>EV by symmetry / conditioning:</b> set <code>E =</code> recursion, condition on the first step, solve. E.g. expected flips for HH = 6, for HT = 4 (waiting-time asymmetry) <span class="warn">!</span>.</li>
+<li><b>Random walk / gambler's ruin:</b> fair walk from k with barriers 0,N &rarr; P(hit N)=k/N; expected steps = k(N&minus;k).</li>
+<li><b>Linearity of expectation</b> beats casework — sum indicator variables even when dependent (expected fixed points of a random permutation = 1).</li>
+<li><b>Tower rule / states:</b> collapse nested expectations; use absorbing Markov states for "expected time until…".</li>
+<li><b>Bayes updates:</b> disease/test, Monty Hall, two-envelope — write the joint, normalise, keep base rates.</li>
+<li><b>Order statistics:</b> E[max of n U(0,1)] = n/(n+1); expected uniform spacing = 1/(n+1).</li>
+<li><b>Continuous:</b> expected distance, Buffon's needle, min of exponentials (min of exps is exp with summed rate).</li>
+<li><span class="warn">!</span> State assumptions aloud, sanity-check magnitude, and give the <b>method</b> even if arithmetic slips — interviewers grade the approach.</li>
+</ul>
+</section>
+
+<section class="card"><h3>&#9733; Interview Review Checklist</h3>
+<h4>Probability reflexes</h4>
+<ul>
+<li>&#9744; Reached for the <b>tower rule</b> to collapse nested <code>E[E[X|Y]]</code>; treated <code>E[X|Y]</code> as a random variable.</li>
+<li>&#9744; Kept the covariance cross-term in <b>Var of a sum</b>; didn't claim variance is linear.</li>
+<li>&#9744; Said <b>uncorrelated &ne; independent</b>; flagged the <code>n</code> vs <code>n-1</code> variance bias.</li>
+</ul>
+<h4>Stochastic calculus</h4>
+<ul>
+<li>&#9744; Applied <code>(dW)^2=dt</code>; got the <b>+&frac12;&sigma;&sup2;&middot;f_SS</b> Itô term's sign right.</li>
+<li>&#9744; <code>ln S</code> drifts at <code>mu&minus;&sigma;&sup2;/2</code>; <code>E[S_T]=S_0 e^(muT)</code> (not the median).</li>
+</ul>
+<h4>Pricing</h4>
+<ul>
+<li>&#9744; Priced as a <b>discounted risk-neutral expectation</b>; drift = r under Q; <b>&mu; absent</b> from BSM.</li>
+<li>&#9744; Stated put-call parity is <b>model-free</b>; no early exercise for an American call on a non-div stock.</li>
+<li>&#9744; Named BSM's failing assumptions and tied them to the <b>vol smile</b>.</li>
+</ul>
+<h4>Greeks &amp; risk</h4>
+<ul>
+<li>&#9744; Explained the <b>&Gamma;–&Theta;</b> tradeoff (realized vs implied var) as the vol-trading PnL.</li>
+<li>&#9744; ES <b>coherent</b>, VaR <b>not sub-additive</b>; VaR ignores tail depth.</li>
+</ul>
+<h4>Empirical / strategy</h4>
+<ul>
+<li>&#9744; Checked <b>stationarity</b> before regressing; distinguished correlation from <b>cointegration</b>.</li>
+<li>&#9744; Named look-ahead / survivorship / overfitting and included <b>transaction costs</b>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Common Errors — Spot the Bug</h3>
+<table><thead><tr><th>Claim / symptom</th><th>Correct</th></tr></thead><tbody>
+<tr><td>"Var(X+Y)=Var(X)+Var(Y)"</td><td>only if <code>Cov=0</code>; else add <code>2Cov</code> <span class="warn">!</span></td></tr>
+<tr><td>"Corr=0 &rArr; independent"</td><td>false; only no <i>linear</i> link <span class="warn">!</span></td></tr>
+<tr><td>"CLT needs Normal data"</td><td>no — that's the point</td></tr>
+<tr><td>"ln S drifts at mu"</td><td><code>mu&minus;&sigma;&sup2;/2</code> (Itô) <span class="warn">!</span></td></tr>
+<tr><td>"E[S_T]=S_0 e^((mu&minus;&sigma;&sup2;/2)T)"</td><td>that's the median; mean=<code>S_0 e^(muT)</code></td></tr>
+<tr><td>"BSM price needs mu"</td><td>drift hedged away; only r,&sigma; <span class="warn">!</span></td></tr>
+<tr><td>"tree prob q = real p"</td><td>risk-neutral q <span class="warn">!</span></td></tr>
+<tr><td>"Q = real probability"</td><td>pricing measure, not a forecast</td></tr>
+<tr><td>"duration = full price move"</td><td>add convexity for big &Delta;y</td></tr>
+<tr><td>"VaR sub-additive"</td><td>no; use ES for coherence <span class="warn">!</span></td></tr>
+<tr><td>"high R&sup2; &rArr; real relation"</td><td>spurious on non-stationary series <span class="warn">!</span></td></tr>
+<tr><td>"correlation &rArr; pairs trade"</td><td>need cointegration (stationary spread)</td></tr>
+<tr><td>"explicit FD always stable"</td><td>conditionally stable; use CN/implicit <span class="warn">!</span></td></tr>
+<tr><td>"backtest Sharpe = live"</td><td>costs, look-ahead, overfitting deflate it</td></tr>
+</tbody></table>
 </section>
 
 </div>
-<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
-<script>
-  try {
-    mermaid.initialize({ startOnLoad: true, theme: "neutral",
-      flowchart: { useMaxWidth: true, htmlLabels: true, nodeSpacing: 18, rankSpacing: 18 },
-      themeVariables: { fontSize: "9px" } });
-  } catch (e) { /* offline / blocked CDN: diagrams degrade to source text, rest of sheet is fine */ }
-</script>
 </body>
 </html>

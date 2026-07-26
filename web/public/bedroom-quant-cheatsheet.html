@@ -6,7 +6,11 @@
 <title>Bedroom Quant Cheat Sheet</title>
 <style>
 :root{
-  --fs: 7.2pt; --fs-mono: 6.6pt; --fs-h3: 7.8pt; --gap: 5px; --pad: 3px;
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
   --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
 }
 *{box-sizing:border-box;}
@@ -14,10 +18,12 @@ html,body{margin:0;padding:0;}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
   font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
 .sheet{background:#fff;}
+/* spanning title bar */
 .titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
   margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
-.titlebar h1{font-size:12.5pt; margin:0; letter-spacing:.4px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
 .titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
 .sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
   column-fill:balance; padding:5px;}
 .card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
@@ -25,6 +31,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Ar
   overflow:hidden;}
 .card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
   background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
 .card:nth-of-type(8n+1) h3{background:#34495e;}
 .card:nth-of-type(8n+2) h3{background:#2c6e9b;}
 .card:nth-of-type(8n+3) h3{background:#1f7a5a;}
@@ -38,7 +45,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Ar
 .card p{margin:2px 0;}
 .card ul{margin:1.5px 0; padding-left:11px;}
 .card li{margin:.5px 0; line-height:1.2;}
-table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.3pt;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
 th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
 td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
 pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
@@ -50,177 +57,367 @@ pre code{background:none; padding:0; font-size:1em;}
 .pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
   padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
 .pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
 .cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
 .legend li{line-height:1.35;}
 @media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
 @page{ size:A4; margin:5mm; }
 @media print{
   body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
   .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
 }
 </style>
 </head>
 <body>
 <div class="sheet">
-<div class="titlebar"><h1>Bedroom Quant Cheat Sheet</h1><span class="meta">retail algo trading · strategies · edges · risk · paper-trade first · drilly</span></div>
+<div class="titlebar"><h1>Bedroom Quant Cheat Sheet</h1><span class="meta">retail algo trading · crypto-first, paper-trade default · generic examples · drilly</span></div>
 
-<section class="card legend"><h3>Read this first</h3>
+<section class="card legend"><h3>How to read &amp; print</h3>
 <ul>
-<li><span class="warn">!</span> footgun / classic retail trap &nbsp; <code>&#9744;</code> checklist step</li>
-<li><b>Educational only, paper-trade only.</b> Not financial advice. Most retail loses; edges decay; costs dominate at small size.</li>
-<li>The two real enemies are <b>overfitting</b> (fake backtest) and <b>costs</b> (fees + slippage). Beat those before chasing returns.</li>
-<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+<li><span class="warn">!</span> footgun / edge-killer &nbsp; <code>&#9744;</code> pre-live checklist item &nbsp; <span class="pg">bps</span> = basis points (0.01%)</li>
+<li>Framing: <b>trading is negative-sum after costs</b> — you win only with a durable reason the other side lacks, that survives fees. Everything here is educational; the honest default is <b>paper trading</b>.</li>
+<li>Numbers are order-of-magnitude for a small ($2k-$50k) account. A genuinely good retail systematic strategy targets <b>Sharpe ~0.8-1.5</b>; anything backtesting &gt;2.5 is a bug or a fit until proven otherwise <span class="warn">!</span></li>
+<li>Last 2 cards = <b>pre-live checklist</b> + <b>symptom&rarr;cause</b> table. Sharpe uses <code>sqrt(252)</code> for daily equities, <code>sqrt(365)</code> for 24/7 crypto.</li>
+<li><b>Print:</b> Ctrl/&#8984;-P &rarr; A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
 </ul></section>
 
-<section class="card"><h3>The Retail Reality</h3>
+<section class="card"><h3>Retail Reality Check</h3>
+<p>Every trade: <code>EV = win_rate*avg_win &minus; loss_rate*avg_loss &minus; costs</code>. Retail dies on the <b>costs</b> term and on overestimating the first two.</p>
 <ul>
-<li>You lose on speed, data, capital, fees. You win on <b>size</b> (too small to matter to funds), <b>patience</b> (no mandate), and <b>reach</b> (illiquid/neglected corners).</li>
-<li><span class="warn">!</span> Latency arb, HFT market-making, news-speed: not your game. Don't try.</li>
-<li>Realistic: a real retail edge is small, capacity-limited, and decays. Paper-trade months before risking a cent.</li>
+<li><b>70-90% of retail traders lose</b> over any multi-year window; "winners" are often small-sample luck.</li>
+<li>You're not vs "the market" — you're on the other side of <b>faster, richer, better-informed</b> participants. HFT/latency races are off-limits <span class="warn">!</span></li>
+<li>Real retail edges are <b>structural or behavioural</b>, not a magic indicator: patience, no redemptions, tiny illiquid corners funds can't fit into.</li>
+<li>Anyone promising <b>5%/month</b> is selling you something.</li>
+</ul>
+<h4>Capital matters</h4>
+<ul>
+<li>~$2k: fixed costs &amp; min sizes dominate; favour low-turnover.</li>
+<li>~$50k: room to diversify across a few edges.</li>
+</ul>
+<p>Verify an edge: honest backtest &rarr; then paper-trade live for months. If live fills don't match backtest, the "edge" was an artefact.</p>
+</section>
+
+<section class="card"><h3>Brokers, Exchanges &amp; APIs</h3>
+<p>Separate <b>venue</b> (broker/exchange) &middot; <b>transport</b> (REST req/resp, WebSocket streams) &middot; <b>your code</b> (venue = swappable adapter).</p>
+<table><thead><tr><th>Venue</th><th>Note</th></tr></thead><tbody>
+<tr><td>ccxt (crypto)</td><td>unifies 100+ exchanges: <code>fetch_ohlcv</code>, <code>create_order</code> almost identical everywhere</td></tr>
+<tr><td>Binance/Kraken/Bybit</td><td>trade the exchange directly; instant testnet</td></tr>
+<tr><td>Alpaca</td><td>friendliest stock broker, clean REST, free paper</td></tr>
+<tr><td>IBKR</td><td>most powerful, most painful (gateway you must keep running)</td></tr>
+</tbody></table>
+<ul>
+<li>Crypto is <b>far easier to start</b>: testnet, free data, 24/7, ccxt. Stocks are gated (entitlements, market hours, PDT rule).</li>
+<li>API <b>key + secret</b> live in env vars, <b>never in code</b> <span class="warn">!</span> Restrict keys to <b>trade-only, no withdraw</b>.</li>
+<li>Respect <b>rate limits</b> — exceed and you're throttled/banned. "Commission-free" stocks pay via PFOF &amp; worse fills.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Market Data</h3>
+<p>Garbage in, garbage out — most retail backtests secretly run on garbage never inspected.</p>
+<table><thead><tr><th>Shape</th><th>Use</th></tr></thead><tbody>
+<tr><td><b>OHLCV</b> bar</td><td>the standard; enough for nearly every indicator</td></tr>
+<tr><td>Tick</td><td>finest; huge; only for slippage/microstructure</td></tr>
+<tr><td>L2 order book</td><td>depth; needed for MM &amp; real fill estimates</td></tr>
+</tbody></table>
+<ul>
+<li><b>Point-in-time correctness</b>: at bar <code>t</code>, only use data available at/before <code>t</code>. Trading at bar <code>t</code>'s close using that close = look-ahead <span class="warn">!</span></li>
+<li>REST for history (backtest), WebSocket for live.</li>
+<li>Crypto data is a gift — free, deep, 24/7 via ccxt. Clean survivorship-free equity data is a <b>paid</b> product.</li>
+</ul>
+<h4>Silent killers <span class="warn">!</span></h4>
+<ul>
+<li>Unadjusted stock prices — a 2:1 split looks like a &minus;50% crash.</li>
+<li>Survivorship: free equity histories exclude bankrupt names, flattering results.</li>
+<li>Never inspecting raw data for gaps/dupes/bad ticks.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Backtesting Right</h3>
+<table><thead><tr><th>Type</th><th>When</th></tr></thead><tbody>
+<tr><td><b>Vectorised</b> (vectorbt/pandas)</td><td>fast idea-screening, param sweeps; trivially easy to leak the future <span class="warn">!</span></td></tr>
+<tr><td><b>Event-driven</b> (backtrader)</td><td>slower, but structurally can't peek; models fills/limits. Trust before live.</td></tr>
+</tbody></table>
+<p>Screen in vectorbt, validate in backtrader. If they disagree wildly, the vectorised one leaked.</p>
+<pre><code>equity   = (1 + strat_r).cumprod()
+run_max  = equity.cummax()
+drawdown = equity/run_max - 1.0
+max_dd   = drawdown.min()      # worst peak-to-trough
+sharpe   = strat_r.mean()/strat_r.std()*np.sqrt(365)</code></pre>
+<ul>
+<li><b><code>.shift(1)</code> is the whole ballgame</b>: decide at t, get filled at t+1. Miss it and Sharpe goes magical &amp; fake <span class="warn">!</span></li>
+<li>Model costs on <b>every</b> fill; keep a <b>locked OOS</b> set, run once.</li>
+<li>Sharpe 0.7-1.5 after costs = genuinely good. <b>Sharpe 3-4 + smooth curve = a bug</b> (~99% look-ahead) <span class="warn">!</span></li>
+<li>Need multiple regimes + &gt;~100 trades; SE(Sharpe) ~ <code>1/sqrt(N)</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Overfitting &amp; Walk-Forward</h3>
+<p>The quiet reason strategies that "worked on the backtest" lose live: you fitted the <b>noise</b>, and noise doesn't repeat.</p>
+<ul>
+<li>Every parameter/rule/asset/date-range you tuned spends a <b>degree of freedom</b> fitting randomness. Hidden params count too <span class="warn">!</span></li>
+<li>Want <b>dozens of independent trades per parameter</b>. 10 params on 40 trades = guaranteed garbage.</li>
+<li><b>Simpler generalises</b>: a 2-param edge beats ten 8-param "edges".</li>
+</ul>
+<pre><code># walk-forward = rolling OOS
+for train, test in windows:      # train=365 test=90
+    p = optimise(train)          # fit on past only
+    oos.append(run(test, p))     # trade untouched
+equity = stitch(oos)             # honest expectation</code></pre>
+<ul>
+<li><b>Multiple testing</b>: try 200 ideas, one looks great by luck. Expected max Sharpe from N noise trials grows ~<code>sqrt(2&middot;ln N)</code> in SE units.</li>
+<li>Ask "<b>why does this persist &amp; who's on the other side?</b>" before trusting any curve. Rummaged edges don't survive.</li>
+<li>Re-using OOS after seeing it = it's now in-sample, worthless <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Trend Following &amp; Momentum</h3>
+<p>Buy what's rising; hold till the trend breaks. Persists via <b>under-reaction</b> + funds benchmarked out of trends. Positive skew: many small losses, few huge wins.</p>
+<pre><code>fast = close.rolling(20).mean()
+slow = close.rolling(100).mean()
+sig  = (fast &gt; slow).astype(int).shift(1)  # no lookahead
+strat_r = sig * close.pct_change()</code></pre>
+<ul>
+<li><b>TSMOM</b> (absolute): own past return &gt; 0 &rarr; long; goes to cash in bears. <b>XS</b> (relative): rank a universe, long winners/short losers.</li>
+<li><b>Vol-target</b> size (<code>target_vol/asset_vol</code>) matters more than the entry signal.</li>
+<li>Don't hunt one lucky lookback — <b>ensemble 3-5 speeds</b>. If &plusmn;10% on lookback breaks it, it's a fit <span class="warn">!</span></li>
+<li>Reality: diversified managed-futures Sharpe ~<b>0.4-0.7</b>; crypto single-asset shows 100%+ CAGR but 50-70% drawdowns. Failure mode is <b>quitting in the flat stretch</b> before the trend that pays.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Mean Reversion</h3>
+<p>Bet price stretched too far snaps back. <code>z = (price &minus; ma)/sd</code>. Enter long <code>z&lt;&minus;2</code>, short <code>z&gt;+2</code>, exit toward 0. Bollinger = ma &plusmn; 2sd; RSI&lt;30 oversold.</p>
+<ul>
+<li>Wins often, loses rarely but <b>big</b> (negative skew). High win rate (60-70%) hides a fat left tail <span class="warn">!</span></li>
+<li>Home turf: calm, range-bound, liquid. <b>Dies in trends/crashes</b> — "oversold" gets more oversold; every bounce is a knife.</li>
+<li><b>Must</b> have a stop or <b>regime filter</b> — running it in a trend with no filter is the #1 killer <span class="warn">!</span></li>
+<li>Trades a lot &rarr; costs are first-order: a few-bps edge is eaten by 0.1% round-trip. Use limit orders to earn, not pay, the spread.</li>
+<li>"Oversold" &ne; "cheap." In a downtrend oversold is the new normal.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Pairs Trading &amp; Stat Arb</h3>
+<p>Two tethered assets diverge &rarr; long laggard, short leader, market-neutral. A leash between two dogs.</p>
+<pre><code>b = sm.add_constant(price_b)
+hedge = sm.OLS(price_a, b).fit().params[1]
+spread = price_a - hedge*price_b
+adf_stat, pval, *_ = adfuller(spread)   # pval&lt;0.05 = stationary</code></pre>
+<ul>
+<li><b>Correlation &ne; cointegration.</b> Correlation = returns wiggle together; cointegration = price <i>levels</i> stay tethered (the leash). <b>Trade cointegration</b>; correlation is just a pre-filter <span class="warn">!</span></li>
+<li>Spread z-score: short at <code>z&gt;+2</code>, long at <code>z&lt;&minus;2</code>, exit <code>|z|&lt;0.5</code>, hard stop <code>|z|&gt;3-4</code> or time stop.</li>
+<li>Hedge ratio <b>drifts</b> — rolling window or Kalman; don't peek with full-sample fit.</li>
+<li><b>Blowup case</b>: spread keeps widening (relationship broke) — short the winner, long the loser, no leash. Never average down; small size + hard stop.</li>
+<li>Costs <b>double</b> (two legs + borrow/funding). Market-neutral = neutral to market, <b>not</b> to the relationship.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Market Making &amp; Grid</h3>
+<p>Quote both sides, capture the spread, don't bet direction. You rent immediacy; the game is what happens when flow <b>isn't</b> balanced.</p>
+<pre><code>micro = (bid*ask_size + ask*bid_size)/(bid_size+ask_size)
+my_bid = fair - half_spread - skew   # skew leans vs inventory
+my_ask = fair + half_spread - skew</code></pre>
+<ul>
+<li>Realised edge = quoted spread &minus; fees &minus; <b>inventory losses</b> from adverse moves — often a fraction of the headline spread.</li>
+<li><b>Inventory risk dominates</b>: in a trend takers keep hitting one side; you buy the falling knife. <b>Skew</b> quotes against inventory (Avellaneda-Stoikov formalises it).</li>
+<li><b>Adverse selection</b>: you get filled mainly when someone knows something <span class="warn">!</span> On majors you lose the queue to colocated firms.</li>
+<li>Retail angle: <b>illiquid pairs</b> pros ignore, <b>grid trading</b> (fixed ladder), <b>maker rebates</b> as structural edge. Backtested fills are where MM lies.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Breakout &amp; Volatility</h3>
+<p>Markets coil (low vol, range) then release (trend). Be positioned for the release. Vol strategies trade move <i>size</i>, not direction.</p>
+<ul>
+<li><b>Donchian</b>: long when close &gt; prior N-bar high (<code>.shift(1)</code>!), exit on symmetric low. Turtle = 20-day in / 10-day out.</li>
+<li><b>ATR stops</b> (2-3&times;ATR) normalise risk across assets/regimes; trailing exits let winners run.</li>
+<li><b>Low win rate (30-40%), 2.5:1+ payoff</b> — positive skew, you feel wrong constantly. Cutting winners early destroys the edge <span class="warn">!</span></li>
+<li>Only take breakouts from a <b>squeeze</b> (narrow bands/low ATR) — better follow-through than breaks from chop.</li>
+<li>Costs bite: you enter on the noisiest bars (wide spread, slippage). Diversify across many uncorrelated markets to lift a sub-1 Sharpe.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Arbitrage for Retail (mostly carry)</h3>
+<p>Most "arb" retail can reach is really a <b>carry trade with a tail</b>, not risk-free.</p>
+<table><thead><tr><th>Flavour</th><th>Reachable?</th></tr></thead><tbody>
+<tr><td>Cross-exchange (spatial)</td><td><b>Dead</b> — gap closes in ms; transfers take min-hrs + withdrawal limits <span class="warn">!</span></td></tr>
+<tr><td>Triangular (one venue)</td><td>latency race you lose to bots; survivors too small to cover fees</td></tr>
+<tr><td>Funding-rate</td><td><b>Yes</b> — hold a position, collect funding</td></tr>
+<tr><td>Cash-and-carry / basis</td><td><b>Yes</b> — long spot, short premium future; basis&rarr;0 at expiry</td></tr>
+</tbody></table>
+<ul>
+<li>Reachable ones are <b>carry</b> (held hours-months), not races. Real returns high-single-digit to ~20% APR, spiking in frenzies.</li>
+<li>Biggest historic "arb" losses were <b>exchanges failing</b> while you had capital on them — counterparty risk is not zero <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Crypto: Funding, Perps &amp; Basis</h3>
+<p>Perp = future with no expiry, glued to spot by the <b>funding rate</b> (paid every ~8h). Positive funding: longs pay shorts (bullish crowd).</p>
+<p><b>Delta-neutral carry</b>: long 1 BTC spot + short 1 BTC perp. Price cancels; short leg <b>collects funding</b>.</p>
+<pre><code>funding_pnl = notional * funding_rate    # per interval
+# 0.01%/8h  ->  0.03%/day  ~=  11%/yr on notional</code></pre>
+<ul>
+<li>Realistic net <b>5-15% APR</b> normal, 30%+ in euphoria (exactly when exchange/execution risk peaks). Capacity for retail ~unlimited.</li>
+<li>You're paid because leveraged longs overpay for exposure. Funding <b>mean-reverts &amp; flips sign</b> — can pay for weeks in bear/calm.</li>
+<li>Footguns <span class="warn">!</span> leverage on the "neutral" trade &rarr; short leg liquidated on a spike; legs on separate collateral; taker fees (0.02-0.06%/side/leg) eat weeks of funding; chasing illiquid-altcoin funding.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Crypto On-Chain: AMM / DEX / MEV</h3>
+<p>On-chain you are usually the <b>prey</b>. Edge = understanding that well enough not to get skinned.</p>
+<pre><code># constant product x*y=k
+def amm_out(res_in, res_out, amt_in, fee=0.003):
+    af = amt_in*(1-fee)
+    return res_out - (res_in*res_out)/(res_in+af)</code></pre>
+<ul>
+<li>Bigger trade vs pool &rarr; further up the curve &rarr; more <b>slippage</b> (deterministic given reserves).</li>
+<li><b>Impermanent loss</b>: if the price ratio moves, arbers rebalance the pool at your expense; IL often exceeds fees earned unless stable-stable <span class="warn">!</span></li>
+<li><b>Sandwich (MEV)</b>: bot buys before your pending tx, you fill worse, it sells after — pockets your slippage. Use <b>private RPC / MEV-protection</b>, tight slippage tolerance <span class="warn">!</span></li>
+<li>Mainnet gas can make small swaps absurd ($15 gas on a $50 swap = 30% haircut). On-chain data is <b>slow public context</b>, not fast alpha.</li>
 </ul>
 </section>
 
 <section class="card"><h3>Edges That Survive for Retail</h3>
-<table><thead><tr><th>Edge</th><th>Why retail can hold it</th></tr></thead><tbody>
-<tr><td>Capacity-constrained</td><td>micro/small-cap, tiny crypto pairs — too small for funds</td></tr>
-<tr><td>Funding-rate carry</td><td>delta-neutral perp basis; most accessible real crypto edge</td></tr>
-<tr><td>Behavioural/calendar</td><td>momentum, overnight, turn-of-month, post-earnings drift</td></tr>
-<tr><td>Speed-agnostic</td><td>theses over days-to-weeks; you never race HFTs</td></tr>
-<tr><td>Own-boss</td><td>sit in cash, hold drawdown, wait for fat pitches</td></tr>
+<p>You win on edges that exist <b>because</b> of small size. A real edge has a <b>reason it persists</b> — a cost, constraint, or behaviour. Can't name it? Assume it's fake <span class="warn">!</span></p>
+<table><thead><tr><th>Family</th><th>Example</th></tr></thead><tbody>
+<tr><td>Capacity-constrained</td><td>micro-caps, thin crypto pairs too small for funds</td></tr>
+<tr><td>Structural niche</td><td>funding carry, cross-exchange fragmentation, stablecoin depeg reversion</td></tr>
+<tr><td>Behavioural/calendar</td><td>TSMOM, turn-of-month, post-earnings drift</td></tr>
+<tr><td>Speed-agnostic</td><td>anything held days-to-weeks (never race HFT)</td></tr>
 </tbody></table>
-<p class="cap"><span class="warn">!</span> Every edge persists for a reason — find it or assume it's fake. All have capacity ceilings.</p>
+<ul>
+<li><b>Capacity ceiling</b> is the point &amp; the limit: profit is small in absolute $ and you <b>can't compound past it</b>. 15% on $20k = $3k.</li>
+<li>"Being your own boss" edges: no redemptions, no mandate, no benchmark, no career risk — <b>enablers</b> that let you hold through pain funds can't.</li>
+<li>A <b>risk premium</b> (funding, illiquidity, selling vol) is real return for bearing a bad day — <b>not</b> free money. Over-lever it and the tail wipes you.</li>
+<li><b>Stack</b> a few weakly-correlated real edges; retire one when its one-line thesis stops being true.</li>
+</ul>
 </section>
 
-<section class="card"><h3>Strategy Families</h3>
-<table><thead><tr><th>Strategy</th><th>Works when</th><th>Dies when</th></tr></thead><tbody>
-<tr><td>Trend / momentum</td><td>persistent trends</td><td>chop / whipsaw</td></tr>
-<tr><td>Mean reversion</td><td>range-bound</td><td>strong trend</td></tr>
-<tr><td>Pairs / stat-arb</td><td>stable relationship</td><td>regime break</td></tr>
-<tr><td>Market making</td><td>calm, wide spread</td><td>toxic flow / trend</td></tr>
-<tr><td>Breakout / vol</td><td>vol expansion</td><td>false breakouts</td></tr>
-<tr><td>Funding carry</td><td>positive funding</td><td>funding flips / deleverage</td></tr>
+<section class="card"><h3>Signals &amp; Features</h3>
+<p>A signal is a hypothesis encoded as a number. Nearly every classic indicator is a <b>transform of the same price series</b> — stacking ten adds correlated noise, not evidence <span class="warn">!</span></p>
+<ul>
+<li>MACD = diff of two MAs; Bollinger = MA &plusmn; vol; RSI/stochastics/ROC all measure the same momentum stretch. Check the <b>correlation matrix</b> — 0.8+ everywhere = one signal, not ten.</li>
+<li>Good feature: <b>stationary</b> (use returns/z-scores, not raw price), <b>economically motivated</b>, <b>not already priced in</b>.</li>
+<li>Combine a few weakly-correlated, individually-justified features (trend + mean-reversion + regime filter), not indicator soup.</li>
+<li>Reality: on liquid markets most indicator edges are ~zero after costs (public data). A good signal might yield <b>Sharpe 0.5-1.0</b> before it decays.</li>
+</ul>
+</section>
+
+<section class="card"><h3>The ML Angle (and its traps)</h3>
+<p>ML is a <b>magnifying glass, not a divining rod</b>. It sharpens a faint real edge; with no edge it hallucinates one that evaporates live.</p>
+<ul>
+<li>Build X (features/bar) &amp; y (e.g. sign of next return). Split <b>chronologically</b>, walk-forward. Simple first: logistic &rarr; gradient-boosted trees (XGBoost/LightGBM). DL rarely beats trees on tabular financial data at retail scale.</li>
+<li><b>Classification</b> (up/flat/down with a dead-zone) &gt; regression — magnitude is un-fittable noise. 53% directional can pay; 51% is overfit noise once costs bite.</li>
+<li>Evaluate on <b>net PnL vs buy-and-hold</b>, not accuracy.</li>
+<li>Killers <span class="warn">!</span> random splits (shuffle leaks time), whole-dataset normalisation (leaks future stats), close of bar <code>t</code> predicting bar <code>t</code>, testing 200 combos and reporting the best.</li>
+<li>Ceiling is low: best case Sharpe 0.8&rarr;1.0. Retail use = <b>filter/sizer</b> on a rule you can explain in one sentence. Expect live ~half of backtest.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Risk &amp; Position Sizing</h3>
+<p>The topic that keeps you alive. Most losers had an edge — they <b>sized too big</b> and a normal losing streak ruined them.</p>
+<pre><code>risk_amt = equity * 0.01              # 1% default
+stop_dist = abs(entry - stop)
+size = risk_amt / stop_dist           # units
+# widen stop_dist for slippage or you lose &gt;1%</code></pre>
+<h4>Kelly &amp; vol-target</h4>
+<pre><code>kelly_f = p - (1-p)/b       # p=win prob, b=payoff ratio
+# 55% & b=1 -> 0.10 ; use 1/4-1/2 Kelly, never full
+weight = target_vol / asset_vol       # 0.15/0.60 = 0.25x</code></pre>
+<ul>
+<li><b>Risk 0.5-2% per trade</b> (1% default): a 10-loss streak costs ~10%, survivable. Full Kelly = 40-50% drawdowns &amp; assumes you know your edge <span class="warn">!</span></li>
+<li>Stop where the <b>thesis is wrong</b> (ATR-based), not a round number crowds cluster at (stop-hunted).</li>
+<li>Hard drawdown limit (&minus;20-30%) forces a pause, not revenge trading. Never average down. A 50% DD needs a 100% gain back.</li>
+<li>"Diversified" altcoins = <b>one</b> crypto-beta bet; correlations &rarr;1 in a crash. Size for the crash.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Execution, Fees &amp; Slippage</h3>
+<p>Quietly decides whether a winning backtest is a losing strategy. Round-trip &approx; fees + spread + slippage.</p>
+<pre><code>annual_cost ~= turnover * round_trip_cost
+# 0.15% RT, daily (252x) -> ~38%/yr hurdle
+# weekly (52x) -> ~8% ; monthly (12x) -> ~2%</code></pre>
+<ul>
+<li><b>Maker</b> (resting limit, low/rebate fee) vs <b>taker</b> (aggressive, higher, crosses spread). Prefer maker where you can wait; taker for stops/exits where certainty wins.</li>
+<li><b>Marketable limit</b> = near-instant fill + worst-case price cap.</li>
+<li>Costs dominate at retail not because you're charged more, but because <b>cheap-to-access edges are thin</b> — pick edges large vs your ~0.15% RT.</li>
+<li>Your <b>stop is your most expensive fill</b> (taker, adverse, fast book) — budget slippage into sizing <span class="warn">!</span></li>
+<li>Model costs on every fill; <b>sensitivity-sweep at 2-3&times;</b>. Survives only at optimistic costs = dead.</li>
+<li>Perp funding held overnight is a recurring cost — include it.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Automation &amp; Bedroom Infra</h3>
+<p>Most blowups aren't a bad signal — they're a script that died at 3am, an order that double-fired, or a leaked key. Keep the plumbing <b>boring</b>.</p>
+<table><thead><tr><th>Arch</th><th>Use</th></tr></thead><tbody>
+<tr><td><b>Cron</b> (fetch&rarr;signal&rarr;trade&rarr;exit)</td><td>daily/hourly; crash recovery free (next run fresh). Default.</td></tr>
+<tr><td><b>Always-on bot</b> (websocket)</td><td>only for MM / tight intraday; you own reconnects &amp; state</td></tr>
 </tbody></table>
-</section>
-
-<section class="card"><h3>Signals (ASCII maths)</h3>
-<pre><code>SMA cross: fast MA &gt; slow MA -&gt; long
-z-score:   z = (price - ma) / sd
-           z &lt; -2 buy, z &gt; +2 sell (revert)
-RSI:       &lt;30 oversold, &gt;70 overbought
-ATR:       avg true range = vol proxy
-momentum:  ret_N = price/price[-N] - 1</code></pre>
-<p><span class="warn">!</span> Indicator soup = overfit. Fewer, simpler signals generalise better.</p>
-</section>
-
-<section class="card"><h3>Backtesting: Don't Fool Yourself</h3>
 <ul>
-<li><span class="warn">!</span> <b>Look-ahead bias</b>: using data you wouldn't have had in real time.</li>
-<li><span class="warn">!</span> <b>Survivorship</b>: testing only names that still exist.</li>
-<li>Model fees + slippage + spread, or the result is fiction.</li>
-<li><b>Out-of-sample</b> + <b>walk-forward</b>; in-sample results prove nothing.</li>
-<li>Event-driven &gt; vectorised for realism (fills, partials).</li>
+<li>Run on a <b>$5-10/mo VPS</b> (Hetzner/DO/Vultr), not a laptop that sleeps. systemd/pm2 restart on crash; SSH keys only.</li>
+<li><b>Idempotency</b>: attach a <b>client order ID</b> so retries don't duplicate orders <span class="warn">!</span></li>
+<li><b>Reconciliation</b>: compare what the bot <i>thinks</i> it holds vs what the exchange reports.</li>
+<li>Secrets in git-ignored <code>.env</code> — bots scrape public repos for keys within <b>minutes</b> <span class="warn">!</span> Restrict keys to trade-only.</li>
+<li><b>Heartbeat/dead-man alert</b> (Telegram) that fires when the bot goes <i>silent</i>, not just on error.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Overfitting Red Flags</h3>
+<section class="card"><h3>Psychology &amp; Taxes</h3>
+<p>Two quiet edge-leaks that can each halve a modest edge.</p>
+<h4>Discipline is mechanical, not heroic</h4>
 <ul>
-<li>Equity curve too smooth / Sharpe &gt; 3 on daily data. <span class="warn">!</span></li>
-<li>Many parameters, each finely tuned.</li>
-<li>Great in-sample, falls apart out-of-sample.</li>
-<li>You tried 200 variants and kept the best (multiple-testing).</li>
-<li>Fix: fewer params, deflated Sharpe, walk-forward, hold-out you never touch.</li>
+<li><b>Automate execution</b> so there's no click to second-guess. Pre-commit rules in writing.</li>
+<li>You override right when it matters most — killing a mean-reversion trade just before it reverts <span class="warn">!</span> Track override P&amp;L separately; your gut usually costs money.</li>
+<li><b>Revenge trading</b> (bigger unplanned bet to win a loss back) is the #1 account-killer — accounts die from the sequence after a loss, not the loss.</li>
+<li>Size <b>down</b> after wins / up after losses? Backwards. Journal every trade in <b>R</b> (units risked).</li>
 </ul>
-<p class="cap">"If it looks amazing, it's wrong" — assume fake until it survives OOS.</p>
-</section>
-
-<section class="card"><h3>Risk &amp; Sizing (stay alive)</h3>
-<pre><code>vol target: w = target_vol / asset_vol
-Kelly:      f* = edge / odds  (use 1/4 Kelly)
-stop:       exit if loss &gt; R per trade
-risk/ruin:  small bets survive variance
-max DD:     size so worst case != game over</code></pre>
-<p><span class="warn">!</span> Position sizing keeps you alive far more than signal quality. Never bet the account.</p>
-</section>
-
-<section class="card"><h3>Fees &amp; Slippage Math</h3>
-<pre><code>round trip cost = 2*(fee + half_spread) + slippage
-edge_after = edge_gross - round_trip_cost
-break-even win needs edge &gt; costs</code></pre>
+<h4>Tax reality</h4>
 <ul>
-<li>Maker (post) rebate/low fee vs taker (cross) high fee — prefer limit orders.</li>
-<li><span class="warn">!</span> High-turnover strategies die on costs at retail size. Trade less, hold longer.</li>
+<li>Every disposal is taxable — <b>crypto-to-crypto swaps included</b> <span class="warn">!</span> Keep cost-basis records from trade one (Koinly/CoinTracker).</li>
+<li>Short-term churn is taxed higher than long holds in many jurisdictions — after-tax return is what you keep. Mind wash-sale rules.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Crypto: Funding &amp; Basis</h3>
-<pre><code>perp funding paid every ~8h:
-  fund_pnl = notional * funding_rate
-delta-neutral carry:
-  long spot + short perp (or vice versa)
-  collect funding, hedge price</code></pre>
+<section class="card"><h3>&#9733; Pre-Live / Paper-Trade Checklist</h3>
+<h4>Backtest honesty</h4>
 <ul>
-<li>Positive funding -&gt; shorts pay longs (and vice versa).</li>
-<li><span class="warn">!</span> Liquidation + leverage kills; keep margin buffer huge.</li>
+<li>&#9744; <code>.shift(1)</code> on every signal; execute next bar, not the signal bar's close.</li>
+<li>&#9744; Costs (fee + spread + slippage) on every fill; sensitivity-swept at 2-3&times;.</li>
+<li>&#9744; Point-in-time universe (delisted names / full historical listing); prices split-adjusted.</li>
+<li>&#9744; Locked OOS run <b>once</b>; walk-forward stitched curve holds up.</li>
+</ul>
+<h4>Edge sanity</h4>
+<ul>
+<li>&#9744; One-line thesis: <b>why does it persist &amp; who's on the other side?</b></li>
+<li>&#9744; Trial count honest; survivor beats the noise-max Sharpe; &le;3 params.</li>
+<li>&#9744; Survives on a different asset / doubled costs; turnover hurdle cleared.</li>
+</ul>
+<h4>Risk &amp; ops</h4>
+<ul>
+<li>&#9744; Fixed 0.5-1% risk/trade; real pre-decided stop (slippage-padded); &plusmn;20-30% kill limit.</li>
+<li>&#9744; Vol-targeted; correlated positions treated as one bet; low/no leverage.</li>
+<li>&#9744; Keys env-only &amp; no-withdraw; client order IDs; reconciliation + heartbeat alert.</li>
+</ul>
+<h4>Forward test</h4>
+<ul>
+<li>&#9744; Paper-traded weeks-to-months across &ge;2 regimes; live &approx; backtest distribution.</li>
+<li>&#9744; No mid-test retuning; kill criteria written before going live.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Arbitrage: What's Reachable</h3>
-<table><thead><tr><th>Type</th><th>Retail?</th></tr></thead><tbody>
-<tr><td>Cross-exchange crypto</td><td>hard (transfer/latency/limits)</td></tr>
-<tr><td>Triangular</td><td>bots own it; rarely worth it</td></tr>
-<tr><td>Funding-rate / basis</td><td>yes — most accessible</td></tr>
-<tr><td>Cash-and-carry</td><td>yes, if you manage margin</td></tr>
+<section class="card"><h3>Symptom &rarr; Cause</h3>
+<table><thead><tr><th>Symptom</th><th>Likely cause</th></tr></thead><tbody>
+<tr><td>Sharpe 3-4, smooth curve</td><td>look-ahead bias (missing <code>.shift(1)</code>, peeking normalisation) <span class="warn">!</span></td></tr>
+<tr><td>Great in-sample, dies OOS</td><td>overfit / fitted the noise <span class="warn">!</span></td></tr>
+<tr><td>Backtest prints, live bleeds</td><td>under-modelled costs; high turnover eating a thin edge <span class="warn">!</span></td></tr>
+<tr><td>"Buy small caps" looks amazing</td><td>survivorship — excluded every rug/delisting <span class="warn">!</span></td></tr>
+<tr><td>Mean-rev gives back months in days</td><td>no regime filter; ran it into a trend <span class="warn">!</span></td></tr>
+<tr><td>Pairs trade: both legs bleed</td><td>relationship decointegrated; no stop <span class="warn">!</span></td></tr>
+<tr><td>"Neutral" perp trade liquidated</td><td>leverage on short leg spiked out <span class="warn">!</span></td></tr>
+<tr><td>DEX swap filled far off quote</td><td>sandwiched (MEV) / slippage tolerance too high <span class="warn">!</span></td></tr>
+<tr><td>Down after a losing streak</td><td>revenge trading / override at the worst moment <span class="warn">!</span></td></tr>
+<tr><td>Order fired twice</td><td>retry without idempotency / client order ID <span class="warn">!</span></td></tr>
+<tr><td>Surprise 5-figure tax bill</td><td>crypto-to-crypto swaps are disposals; no records <span class="warn">!</span></td></tr>
 </tbody></table>
-<p class="cap"><span class="warn">!</span> Pure latency arb is a fantasy from a bedroom.</p>
-</section>
-
-<section class="card"><h3>DEX / MEV Reality</h3>
-<ul>
-<li>AMM LP earns fees but risks <b>impermanent loss</b>.</li>
-<li><span class="warn">!</span> On-chain, <b>you are the prey</b>: sandwich/MEV bots front-run naive swaps.</li>
-<li>Gas + slippage make small on-chain trades uneconomic.</li>
-</ul>
-</section>
-
-<section class="card"><h3>ML: Low Ceiling</h3>
-<ul>
-<li>Signal-to-noise in returns is tiny; leakage is everywhere. <span class="warn">!</span></li>
-<li>Non-stationary: yesterday's pattern dies.</li>
-<li>Use ML to <b>combine</b> a few sane features, not to find magic.</li>
-<li>Simple rules usually beat a fancy model at retail scale.</li>
-</ul>
-</section>
-
-<section class="card"><h3>Which Strategy for You?</h3>
-<table><thead><tr><th>You have</th><th>Try</th></tr></thead><tbody>
-<tr><td>small capital, little time</td><td>slow momentum / trend on a few assets</td></tr>
-<tr><td>crypto account</td><td>funding carry (delta-neutral)</td></tr>
-<tr><td>coding + patience</td><td>pairs / stat-arb, small-cap</td></tr>
-<tr><td>always-on bot</td><td>grid / MM on small pairs (careful)</td></tr>
-<tr><td>just learning</td><td>paper-trade one simple rule end-to-end</td></tr>
-</tbody></table>
-</section>
-
-<section class="card"><h3>Bedroom Infra</h3>
-<ul>
-<li>Cheap VPS for an always-on bot; cron for daily strategies.</li>
-<li>Log everything; alert on errors + fills; monitor open positions.</li>
-<li><span class="warn">!</span> Handle reconnects/outages — a dropped socket mid-position is real money.</li>
-<li>Secrets in env vars, never in code. Keep it boringly reliable.</li>
-</ul>
-</section>
-
-<section class="card"><h3>&#9744; Paper-Trading Playbook</h3>
-<ul>
-<li>&#9744; Pick ONE simple strategy that fits your capital + time.</li>
-<li>&#9744; Backtest honestly: OOS, walk-forward, real costs.</li>
-<li>&#9744; Reject it if it only shines in-sample.</li>
-<li>&#9744; Paper-trade it live for weeks/months; compare to backtest.</li>
-<li>&#9744; Size for survival (vol target, fractional Kelly, stops).</li>
-<li>&#9744; Track every fill; measure slippage vs assumptions.</li>
-<li>&#9744; Expect small, decaying edges — and that most ideas fail.</li>
-<li>&#9744; Keep it educational; never risk money you can't lose.</li>
-</ul>
 </section>
 
 </div>

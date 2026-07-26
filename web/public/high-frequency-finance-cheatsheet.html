@@ -6,7 +6,11 @@
 <title>High-Frequency Finance Cheat Sheet</title>
 <style>
 :root{
-  --fs: 7.2pt; --fs-mono: 6.6pt; --fs-h3: 7.8pt; --gap: 5px; --pad: 3px;
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
   --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
 }
 *{box-sizing:border-box;}
@@ -14,10 +18,12 @@ html,body{margin:0;padding:0;}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
   font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
 .sheet{background:#fff;}
+/* spanning title bar */
 .titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
   margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
 .titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
 .titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
 .sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
   column-fill:balance; padding:5px;}
 .card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
@@ -25,6 +31,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Ar
   overflow:hidden;}
 .card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
   background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
 .card:nth-of-type(8n+1) h3{background:#34495e;}
 .card:nth-of-type(8n+2) h3{background:#2c6e9b;}
 .card:nth-of-type(8n+3) h3{background:#1f7a5a;}
@@ -58,168 +65,373 @@ pre code{background:none; padding:0; font-size:1em;}
 @page{ size:A4; margin:5mm; }
 @media print{
   body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
   .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
 }
 </style>
 </head>
 <body>
 <div class="sheet">
-<div class="titlebar"><h1>High-Frequency Finance Cheat Sheet</h1><span class="meta">microstructure · order book · latency · market making · execution · drilly</span></div>
+<div class="titlebar"><h1>High-Frequency Finance Cheat Sheet</h1><span class="meta">market microstructure · low-latency systems · US equities framing · generic examples · drilly</span></div>
+
 <section class="card legend"><h3>How to read &amp; print</h3>
 <ul>
-<li><span class="warn">!</span> footgun / classic trap &nbsp; <code>&#9744;</code> reasoning step</li>
-<li>Two sides: <b>microstructure/quant</b> + <b>low-latency systems</b>. Formulas in ASCII.</li>
-<li><span class="warn">!</span> Spoofing/layering = <b>illegal manipulation</b>, not a strategy.</li>
-<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+<li><span class="warn">!</span> footgun / gotcha &nbsp; <code>&#9744;</code> review / interview checklist item</li>
+<li>Framing: <b>continuous double auction</b>, US equities (Reg NMS) unless noted. Numbers are order-of-magnitude, not vendor specs. Latency in <b>ns/us/ms</b>.</li>
+<li>Focus: microstructure · order books · latency/networking · market-making · execution · risk. Last 2 cards = <b>interview checklist</b> + spot-the-bug table.</li>
+<li>No investment advice — this is an engineering/interview brief.</li>
+<li><b>Print:</b> Ctrl/&#8984;-P &#8594; A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
 </ul></section>
 
-<section class="card"><h3>Market Structure</h3>
-<ul>
-<li><b>Lit</b> (visible book) vs <b>dark pool</b> (no pre-trade transparency).</li>
-<li><b>Reg NMS / NBBO</b>: best bid/offer across venues; order-protection rule.</li>
-<li><b>Maker-taker</b>: post = rebate, take = fee (drives routing). <span class="warn">!</span></li>
-<li><b>Direct feed</b> (fast) vs <b>SIP</b> (consolidated, slow) → latency arb.</li>
-<li>Fragmentation + co-location.</li>
-</ul>
-</section>
-
-<section class="card diagram"><h3>Limit Order Book</h3>
-<pre><code>       ASKS (sell)
-101.03  x120
-101.02  x200   &lt;- best ask
---------spread--------
-101.00  x150   &lt;- best bid
-100.99  x300
-       BIDS (buy)
-mid = (bid+ask)/2</code></pre>
-<p><b>Price-time priority</b> (FIFO): best price first, then earliest. A market buy lifts the best ask. Data structure: price levels + FIFO queues (O(1) add/cancel).</p>
-</section>
-
-<section class="card"><h3>Order Types</h3>
-<table><tbody>
-<tr><td>market</td><td>take now, any price</td></tr>
-<tr><td>limit</td><td>rest at a price</td></tr>
-<tr><td>IOC</td><td>fill now, cancel rest</td></tr>
-<tr><td>FOK</td><td>all-or-nothing now</td></tr>
-<tr><td>iceberg</td><td>hide size</td></tr>
-<tr><td>post-only</td><td>maker rebate, never take</td></tr>
+<section class="card"><h3>Market Structure &amp; Venues</h3>
+<table><thead><tr><th></th><th>Exchange</th><th>ECN</th><th>Dark pool</th></tr></thead><tbody>
+<tr><td>Pre-trade transp.</td><td>lit</td><td>lit</td><td><b>none</b></td></tr>
+<tr><td>Book shown</td><td>yes</td><td>yes</td><td>hidden; prints after</td></tr>
+<tr><td>Use</td><td>price discovery</td><td>e-matching</td><td>size, less leakage</td></tr>
 </tbody></table>
-<p><span class="warn">!</span> Resting limit = <b>adverse selection</b>: fills when the market moves against you.</p>
-</section>
+<ul>
+<li><b>Fragmentation</b>: same stock on 10+ venues at once. Source of arbitrage <i>and</i> complexity (connect + route to all).</li>
+<li><b>Reg NMS (2005)</b> &#8594; <b>NBBO</b> = best bid/ask across lit venues. <b>Order-protection (trade-through) rule</b>: can't execute at a price inferior to a protected displayed quote <span class="warn">!</span></li>
+<li><b>Maker-taker</b>: venue pays rebate to makers, charges takers. <b>Taker-maker / inverted</b> = reverse. Drives routing, not just price.</li>
+<li><b>SIP</b> (consolidated tape) computes the public NBBO but has an extra aggregation hop &#8594; <b>slower than direct feeds</b> <span class="warn">!</span> — the structural basis of latency arb.</li>
+<li>Dark pools are <b>regulated ATSs</b>, not shady; darkness = no pre-trade transparency only.</li>
+</ul></section>
+
+<section class="card diagram"><h3>The Limit Order Book</h3>
+<div class="mermaid">
+flowchart TD
+  A["ASK 100.04 x500"] --> B["ASK 100.03 x200"]
+  B --> C["ASK 100.02 x300  best ask"]
+  C -. "spread 0.02" .- D["BID 100.00 x400  best bid"]
+  D --> E["BID 99.99 x700"]
+  E --> F["BID 99.98 x250"]
+</div>
+<p class="cap">Two priority queues facing across the spread. Bids stacked high&#8594;low, asks low&#8594;high; best of each = top of book (L1). Depth = resting qty per level. A <b>limit</b> order adds liquidity &amp; waits; a <b>marketable</b> order crosses and takes.</p>
+<ul>
+<li><b>Price-time priority (FIFO)</b>: rank by price, then arrival time. Earliest at a level fills first &#8594; <b>queue position is alpha</b>.</li>
+<li><b>Pro-rata</b>: split incoming across a level proportional to size (rewards being big, not early).</li>
+<li>Big market order <b>walks the book</b> across levels at worse prices — avg fill &#8800; touch <span class="warn">!</span></li>
+<li>Modify (size up / reprice) usually loses time priority &#8594; back of queue <span class="warn">!</span></li>
+</ul></section>
+
+<section class="card"><h3>LOB as a Data Structure</h3>
+<p>Naive single sorted container = O(log n)/op, cache-hostile. Real engines: <b>array/hashmap of price levels</b>, each level a <b>FIFO queue</b>.</p>
+<table><thead><tr><th>Op</th><th>Target</th><th>How</th></tr></thead><tbody>
+<tr><td>add</td><td>O(1)</td><td>push tail of level queue</td></tr>
+<tr><td>cancel</td><td>O(1)</td><td>intrusive linked list, direct node handle</td></tr>
+<tr><td>execute</td><td>O(1) amort</td><td>pop head, decrement</td></tr>
+<tr><td>best bid/ask</td><td>O(1)</td><td>cached ptr / bitmap of active levels</td></tr>
+</tbody></table>
+<ul>
+<li><b>Intrusive doubly-linked list</b>: next/prev live in the order node &#8594; unlink in O(1) given the handle (no search). Cancels dominate flow, so this is the point <span class="warn">!</span></li>
+<li>Prices are discrete (ticks) &#8594; index levels by <code>(price-base)/tick</code> into a flat array; hot levels stay cache-resident.</li>
+<li>Order-id &#8594; node map for cancel/modify lookup.</li>
+</ul></section>
+
+<section class="card"><h3>Order Types &amp; Flow</h3>
+<table><thead><tr><th>Type</th><th>Behaviour</th></tr></thead><tbody>
+<tr><td><b>Market</b></td><td>take now at best available; no price guarantee</td></tr>
+<tr><td><b>Limit</b></td><td>trade at limit or better; rests if not marketable (adds liquidity)</td></tr>
+<tr><td><b>IOC</b></td><td>immediate-or-cancel: fill what you can now, kill rest</td></tr>
+<tr><td><b>FOK</b></td><td>fill-or-kill: all now or nothing</td></tr>
+<tr><td><b>Post-only</b></td><td>reject if it would take (guarantees maker rebate)</td></tr>
+<tr><td><b>Hidden/iceberg</b></td><td>size not (fully) displayed; loses priority to lit at same price</td></tr>
+<tr><td><b>Stop</b></td><td>becomes market/limit when trigger prints</td></tr>
+</tbody></table>
+<ul>
+<li><b>Cancel-to-trade ratio</b> in HFT is huge (often &gt;20:1, quoting churn) <span class="warn">!</span> — the book is mostly adds/cancels, few executes.</li>
+<li><b>TIF</b>: DAY, GTC, IOC, FOK. <b>Peg</b> orders track NBBO/mid automatically.</li>
+</ul></section>
 
 <section class="card"><h3>Spread &amp; Liquidity</h3>
-<pre><code>quoted    = ask - bid
-effective = 2*|trade_price - mid|
-realized  = effective - adverse mid move</code></pre>
-<p>3 spread components: <b>order-processing + inventory + adverse-selection</b>. Realized = what the maker actually keeps.</p>
-</section>
-
-<section class="card"><h3>Microstructure Models</h3>
-<pre><code>Roll:  spread = 2*sqrt(-Cov(dp_t, dp_{t-1}))
-Kyle:  dp = lambda * order_flow   (lambda = impact)
-Glosten-Milgrom: spread from adverse
-       selection alone (informed traders)</code></pre>
-<p>Spread exists even with zero costs, purely from information asymmetry. <span class="warn">!</span></p>
-</section>
-
-<section class="card"><h3>Market Making (Avellaneda-Stoikov)</h3>
-<pre><code>reservation price:
-  r = mid - q*gamma*sigma^2*(T-t)   # q=inventory
-optimal spread ~
-  gamma*sigma^2*(T-t) + (2/gamma)*ln(1+gamma/kappa)</code></pre>
+<p>Quoted spread = ask &#8722; bid. <b>Effective spread</b> = 2&#215;|price &#8722; mid| (what you actually paid). <b>Realized spread</b> = effective minus the price move after &#8594; the MM's true take.</p>
+<h4>Three components of the spread</h4>
+<table><thead><tr><th>Component</th><th>Compensates for</th></tr></thead><tbody>
+<tr><td>Order-processing</td><td>fixed cost of making a market (tech, ops)</td></tr>
+<tr><td>Inventory-holding</td><td>price risk of carrying non-zero position</td></tr>
+<tr><td>Adverse-selection</td><td>losses to informed counterparties <span class="warn">!</span></td></tr>
+</tbody></table>
 <ul>
-<li>Skew quotes to push inventory q → 0.</li>
-<li>Tension: earn spread vs adverse selection + inventory risk. Widen/pull in fast markets.</li>
+<li><b>Liquidity</b> = tightness (spread), depth (size), resiliency (recovery speed). Not one number.</li>
+<li><b>Tick size</b> floors the spread; a large min tick &#8594; wide queues, queue-position games. Sub-penny prohibited (Rule 612) for &#8805;$1.00 stocks.</li>
+</ul></section>
+
+<section class="card"><h3>Price Formation Models</h3>
+<table><thead><tr><th>Model</th><th>Core idea</th></tr></thead><tbody>
+<tr><td><b>Roll (1984)</b></td><td>infer effective spread from negative serial covariance of price changes (bid-ask <b>bounce</b>): <code>s = 2&#8730;(&#8722;cov)</code></td></tr>
+<tr><td><b>Glosten-Milgrom</b></td><td>spread arises <b>purely from adverse selection</b>; bid/ask = conditional expectations of value given a sell/buy</td></tr>
+<tr><td><b>Kyle (1985)</b></td><td>informed trader hides in noise; impact linear in flow, <code>&#916;p = &#955;&#183;q</code>. <b>Kyle's &#955;</b> = illiquidity coefficient</td></tr>
+</tbody></table>
+<ul>
+<li>Key: even with <b>zero</b> inventory &amp; processing cost, a spread must exist to break even against informed flow (Glosten-Milgrom).</li>
+<li>Price is a martingale <b>only</b> conditional on public info; the bounce makes raw prints mean-revert at the tick <span class="warn">!</span> (bounce &#8800; signal).</li>
+<li>Kyle's &#955; is the empirical bridge to the square-root impact law.</li>
+</ul></section>
+
+<section class="card"><h3>Market Making</h3>
+<p>Continuously quote two-sided; earn the spread on the <b>round trip</b>. Spread is <b>compensation</b>, not free margin — it pays for inventory risk + adverse selection.</p>
+<h4>The two costs that eat the spread</h4>
+<ul>
+<li><b>Inventory risk</b>: fills arrive asymmetric &#8594; you carry position <code>q</code>; variance of loss <code>~ &#963;&#178;&#183;time</code>. Ideal end-of-day inventory = 0.</li>
+<li><b>Adverse selection</b>: your resting ask fills <i>exactly</i> when fair value jumps above it &#8594; you sold cheap <span class="warn">!</span> Defense: widen / pull / cancel fast.</li>
 </ul>
+<h4>Two distinct levers <span class="warn">!</span></h4>
+<table><thead><tr><th>Lever</th><th>Moves</th><th>Controls</th></tr></thead><tbody>
+<tr><td><b>Skew</b></td><td>center of quotes</td><td>inventory (long &#8594; shift both down to sell)</td></tr>
+<tr><td><b>Widen</b></td><td>total width</td><td>volatility / toxicity</td></tr>
+</tbody></table>
+<pre><code>Flat  q=0:    bid 99.98 / ask 100.02
+Long  q=+500: bid 99.96 / ask 100.00   (skew DOWN)</code></pre>
+<p>Speed is adverse-selection insurance: cancel a stale quote before informed flow hits it.</p>
 </section>
 
-<section class="card diagram"><h3>Latency: Tick-to-Trade</h3>
+<section class="card"><h3>Avellaneda-Stoikov</h3>
+<p>Center quotes on the inventory-adjusted <b>reservation price</b>, not the mid:</p>
+<pre><code>r = s - q * gamma * sigma^2 * (T - t)
+
+s     mid / fair value       q     signed inventory
+gamma risk aversion          sigma volatility
+(T-t) time to horizon</code></pre>
+<ul>
+<li>Flat (q=0) &#8594; r = mid, symmetric quotes. Long (q&gt;0) &#8594; r <b>below</b> mid &#8594; biased to sell.</li>
+<li>More q, gamma, or &#963;&#178; &#8594; skew harder. (T&#8722;t)&#8594;0 near close &#8594; skew collapses, flatten hard.</li>
+</ul>
+<h4>Optimal total spread</h4>
+<pre><code>spread ~ gamma*sigma^2*(T-t)          # inventory term
+       + (2/gamma)*ln(1 + gamma/kappa) # fill/market term
+quote at  r &#177; spread/2</code></pre>
+<p><span class="warn">!</span> A-S assumes <b>fixed fair value + symmetric flow</b>; real markets have trends, informed flow, queue dynamics it ignores. Know where it breaks.</p>
+</section>
+
+<section class="card diagram"><h3>Tick-to-Trade Pipeline</h3>
 <div class="mermaid">
 flowchart LR
-  MD["market data in"] --> FH["feed handler"]
-  FH --> BK["book build"]
-  BK --> ST["strategy"]
-  ST --> RK["risk"]
-  RK --> GW["order out"]
+  N1["NIC-in"] --> F["feed parse<br/>ITCH"]
+  F --> B["book update"]
+  B --> S["signal/strat"]
+  S --> R["pre-trade risk"]
+  R --> O["order build"]
+  O --> N2["NIC-out"]
 </div>
-<ul>
-<li><b>Kernel bypass</b> (DPDK/Onload), busy-poll, <b>FPGA</b> wire-to-wire (ns).</li>
-<li>Microwave &gt; fiber over land; <b>co-location</b>.</li>
-<li><span class="warn">!</span> Optimize <b>tail latency (p99)</b> &amp; jitter, not the mean.</li>
-</ul>
-</section>
+<p class="cap">Tick-to-trade = photon-in to photon-out, measured at the wire with HW timestamps. Total is a <b>sum</b> — attack the biggest term. Report the <b>distribution</b> (p50/p99/p99.9), not the mean.</p>
+<table><thead><tr><th>Source</th><th>Rough</th><th>Attack with</th></tr></thead><tbody>
+<tr><td>propagation</td><td>~5us/km fiber; 3.3 air</td><td>co-lo, microwave</td></tr>
+<tr><td>serialization</td><td>1500B@10G &#8776;1.2us</td><td>small msgs, fast links</td></tr>
+<tr><td>switching</td><td>per hop</td><td>cut-through, FPGA NIC</td></tr>
+<tr><td>software</td><td>parse/book/signal</td><td>no-alloc C++, FPGA</td></tr>
+<tr><td>OS</td><td>stack/IRQ/sched</td><td>kernel bypass, busy-poll</td></tr>
+</tbody></table></section>
 
-<section class="card"><h3>Systems Hot Path</h3>
-<ul>
-<li>Lock-free SPSC queues; avoid <b>false sharing</b> (cache lines).</li>
-<li>NUMA pin, huge pages, warm caches, <b>no alloc/GC</b> on hot path. <span class="warn">!</span></li>
-<li>Determinism &gt; throughput. (See Concurrency/OS sheets.)</li>
-</ul>
-</section>
-
-<section class="card"><h3>Market Data Feeds</h3>
-<ul>
-<li>L1 top / L2 depth / <b>L3 per-order</b>.</li>
-<li>Reconstruct the book from add/cancel/execute + snapshots.</li>
-<li><b>Sequence numbers</b> + gap recovery; <b>A/B line</b> arbitration; PTP timestamps. <span class="warn">!</span></li>
-</ul>
-</section>
-
-<section class="card"><h3>Execution Algos</h3>
-<table><tbody>
-<tr><td>VWAP</td><td>match volume-weighted price</td></tr>
-<tr><td>TWAP</td><td>even over time</td></tr>
-<tr><td>POV</td><td>% of volume</td></tr>
-<tr><td>IS</td><td>min slippage vs arrival</td></tr>
+<section class="card"><h3>Latency Techniques</h3>
+<table><thead><tr><th>Technique</th><th>Removes / wins</th></tr></thead><tbody>
+<tr><td><b>Co-location</b></td><td>propagation to matching engine only; table stakes, not a strategy <span class="warn">!</span></td></tr>
+<tr><td><b>Kernel bypass</b><br/>DPDK/Onload/RDMA</td><td>OS stack: NIC DMAs into a userspace ring, app polls, zero-copy. Costs a spun core</td></tr>
+<tr><td><b>Busy-poll</b></td><td>lowest + most deterministic wakeup vs IRQ; burns a whole core</td></tr>
+<tr><td><b>FPGA</b></td><td>wire-to-wire parse/risk/quote in ns, deterministic, low jitter; bad at branchy/stateful logic</td></tr>
+<tr><td><b>ASIC</b></td><td>fixed silicon, faster still, non-reconfigurable, $$$</td></tr>
+<tr><td><b>Microwave/laser</b></td><td>~1.5&#215; faster in air + straighter path; low bandwidth, rain-fades</td></tr>
 </tbody></table>
-<p>Passive = rebate + adverse-selection risk; aggressive = pay spread for certainty.</p>
-</section>
+<ul>
+<li><b>Optimize the tail, not the mean</b> <span class="warn">!</span> mean 1us / p99.9 50us loses to a consistent 2us — races decide on busy events.</li>
+<li>Physics floor: can't out-code light. Once colo+bypass+FPGA, diminishing returns (Budish: latency arb is a wasteful tax).</li>
+</ul></section>
 
-<section class="card"><h3>Market Impact</h3>
-<pre><code>square-root law:  impact ~ Y*sigma*sqrt(Q/V)
-Almgren-Chriss:  min E[cost] + risk_av*Var[cost]
-  impact (trade slow) vs timing risk (trade fast)</code></pre>
-<p><b>Temporary</b> impact recovers; <b>permanent</b> = info leakage, stays.</p>
-</section>
+<section class="card"><h3>Systems Hot Path — Kill Jitter</h3>
+<p><b>Determinism over throughput.</b> The enemy is variance, not average. Remove every jitter source on the critical path.</p>
+<table><thead><tr><th>Jitter source</th><th>Fix</th></tr></thead><tbody>
+<tr><td>alloc / GC</td><td>no alloc on hot path; pools; C++/Rust not Java/Py</td></tr>
+<tr><td>page faults</td><td>pre-fault + <code>mlock</code>; huge pages</td></tr>
+<tr><td>cache/TLB miss</td><td>SoA layout, warm cache, huge pages</td></tr>
+<tr><td>NUMA cross-socket</td><td>pin thread <b>and</b> memory to one node</td></tr>
+<tr><td>IRQ / ctx switch</td><td><code>isolcpus</code>, pin, busy-poll, IRQs off core</td></tr>
+<tr><td>C-states / freq scaling</td><td>disable; fixed clock</td></tr>
+</tbody></table>
+<h4>Lock-free SPSC queue between stages</h4>
+<pre><code>// single-producer / single-consumer ring
+struct alignas(64) Slot { T v; };   // pad = no false sharing
+std::atomic&lt;size_t&gt; head, tail;      // separate cache lines
+// no mutex: producer writes tail, consumer reads head</code></pre>
+<ul>
+<li><b>False sharing</b> <span class="warn">!</span> two hot vars on one 64B line &#8594; cores ping-pong the line. Fix: <code>alignas(64)</code> / pad.</li>
+<li>SPSC beats a mutex queue: no syscall, no contention, wait-free.</li>
+</ul></section>
+
+<section class="card"><h3>Market Data &amp; Feeds</h3>
+<p>A feed is a <b>change-log, not a database</b> <span class="warn">!</span> — the exchange sends add/cancel/execute events; <i>you</i> replay them to build the book locally.</p>
+<table><thead><tr><th>Term</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><b>Direct feed</b></td><td>raw per-venue binary multicast (Nasdaq <b>ITCH</b>); fastest, build book yourself</td></tr>
+<tr><td><b>SIP</b></td><td>consolidated public NBBO; complete but slower (extra hop) <span class="warn">!</span></td></tr>
+<tr><td>L1/L2/L3</td><td>top-of-book / aggregated depth / <b>per-order</b> (only L3 gives queue position)</td></tr>
+<tr><td><b>OUCH</b></td><td>Nasdaq order-entry protocol (outbound)</td></tr>
+</tbody></table>
+<ul>
+<li><b>Reconstruction</b>: sync to a <b>snapshot</b>, then apply increments from its sequence number on.</li>
+<li><b>Seq numbers</b> detect gaps (n+2 after n = lost msg &#8594; a dropped log entry corrupts the book forever) <span class="warn">!</span></li>
+<li><b>A/B line arbitration</b>: two identical feeds, take first packet per seq, dedup — UDP multicast has no free retransmit.</li>
+<li><b>PTP (IEEE 1588)</b> HW timestamps, sub-us; NTP (ms) is useless for tick-to-trade <span class="warn">!</span></li>
+</ul></section>
+
+<section class="card"><h3>Execution Algorithms</h3>
+<p>Slice a parent order into children across time &amp; venues. Three-way tension: <b>impact</b> (fast) vs <b>timing risk</b> (slow) vs <b>leakage</b> (predictable).</p>
+<table><thead><tr><th>Algo</th><th>Schedule by</th><th>Best when</th><th>Weakness</th></tr></thead><tbody>
+<tr><td><b>TWAP</b></td><td>even over time</td><td>no volume forecast</td><td>ignores liquidity</td></tr>
+<tr><td><b>VWAP</b></td><td>forecast vol profile (U)</td><td>blend in, benchmarkable</td><td>price-blind in a trend <span class="warn">!</span></td></tr>
+<tr><td><b>POV</b></td><td>% of realized volume</td><td>bound impact to real liq</td><td>completion risk; leaks</td></tr>
+<tr><td><b>IS</b></td><td>react vs arrival price</td><td>alpha-driven order</td><td>timing risk if too slow</td></tr>
+</tbody></table>
+<ul>
+<li>Schedule-following (TWAP/VWAP) = price-insensitive; opportunistic (IS) reacts to book &amp; <b>front-loads</b> to protect arrival price.</li>
+<li><b>Passive vs aggressive</b>: post &#8594; earn rebate but suffer adverse selection &amp; non-fill risk; cross &#8594; certainty, pay spread <span class="warn">!</span></li>
+<li><b>SOR</b> nets price, fee/rebate, fill prob, latency — nominal best price &#8800; best net price.</li>
+</ul></section>
+
+<section class="card"><h3>Market Impact &amp; TCA</h3>
+<p>Impact = the adverse move your own trading causes; for a big order it dwarfs commissions.</p>
+<table><thead><tr><th>Component</th><th>Nature</th></tr></thead><tbody>
+<tr><td><b>Temporary</b></td><td>consumed liquidity; <b>recovers</b> as book refills &#8594; rewards slicing</td></tr>
+<tr><td><b>Permanent</b></td><td>info leakage; level <b>stays</b> shifted &#8594; scales with net size</td></tr>
+</tbody></table>
+<h4>Square-root law</h4>
+<pre><code>impact ~ Y * sigma * sqrt(Q / V)
+Q order size · V volume · Y~O(1) · Q/V participation</code></pre>
+<ul>
+<li><b>Concave, not linear</b> <span class="warn">!</span> 2&#215; size &#8594; &#8730;2&#8776;1.41&#215; impact. Cost/share rises, total grows sub-linearly.</li>
+<li><b>Almgren-Chriss</b>: minimize <code>E[cost] + lambda&#183;Var[cost]</code>. Risk-neutral (&#955;=0) &#8594; trade slow; risk-averse &#8594; front-load. The impact-vs-timing-risk optimum.</li>
+<li><b>TCA</b> grades vs a benchmark: arrival (IS), interval VWAP. Beating VWAP while missing arrival can still be a bad alpha execution <span class="warn">!</span></li>
+</ul></section>
 
 <section class="card"><h3>Order-Flow Signals</h3>
-<pre><code>microprice = (bid*ask_size + ask*bid_size)
+<p>At ms horizons the mid is <b>weakly predictable</b> from book state. Prediction is easy; beating cost is hard.</p>
+<pre><code>imbalance  = bid_size / (bid_size + ask_size)   # &gt;0.5 leans UP
+microprice = (bid*ask_size + ask*bid_size)
              / (bid_size + ask_size)</code></pre>
 <ul>
-<li>Weights toward the side with LESS size → better than mid. <span class="warn">!</span></li>
-<li><b>OFI</b> predicts short-term moves; <b>queue position</b> = fill priority + less adverse selection.</li>
-<li>Alpha decays in micro/ms; must beat fees + spread + impact.</li>
-</ul>
-</section>
+<li><b>OFI</b> (order-flow imbalance): net buy vs sell pressure from book changes; one of the most robust short-horizon predictors.</li>
+<li><b>Microprice</b> weights toward the <b>thin</b> side (cross-weighting) — that's where price is heading. Not the heavy side <span class="warn">!</span></li>
+<li>Big bid = <b>support</b> &#8594; next move up (heavy side wins), <i>not</i> "sellers will hit it".</li>
+<li><b>Queue position</b> is itself alpha: front fills first <b>and</b> is less adversely selected.</li>
+<li><b>Net alpha must beat fees + spread + impact</b> <span class="warn">!</span> a 0.3-tick prediction can't pay a 1-tick spread. Capture cheaply via passive/queue.</li>
+<li><b>Signal decay</b>: edge evaporates in ms — latency to act is part of whether it survives.</li>
+</ul></section>
+
+<section class="card"><h3>Arbitrage Strategies</h3>
+<table><thead><tr><th>Type</th><th>Edge</th></tr></thead><tbody>
+<tr><td><b>Latency arb</b></td><td>see a move on venue/feed A before others (direct vs SIP, microwave A&#8594;B); pure speed, winner-take-all</td></tr>
+<tr><td><b>Cross-venue</b></td><td>same stock momentarily mispriced across fragmented venues; reconcile toward NBBO</td></tr>
+<tr><td><b>Index/ETF arb</b></td><td>ETF price vs NAV of basket; create/redeem or hedge constituents</td></tr>
+<tr><td><b>Triangular FX</b></td><td>A/B &#215; B/C &#215; C/A &#8800; 1 &#8594; risk-free loop</td></tr>
+<tr><td><b>Cash-futures</b></td><td>basis vs cost-of-carry</td></tr>
+</tbody></table>
+<ul>
+<li>Most HFT "arb" is <b>statistical / fleeting</b>, not textbook risk-free — you race decaying dislocations against fees + impact.</li>
+<li>Execution risk: both legs must fill; a one-legged fill turns arb into a naked position <span class="warn">!</span></li>
+</ul></section>
+
+<section class="card"><h3>Statistical Arbitrage (HF)</h3>
+<p>Trade mean-reversion of a spread between related instruments; market-neutral by construction.</p>
+<ul>
+<li><b>Pairs</b>: find two cointegrated names; short the rich, long the cheap; unwind on convergence. <b>Cointegration &#8800; correlation</b> <span class="warn">!</span> (correlation of returns; cointegration = stationary <i>spread</i> of levels).</li>
+<li>Signal: z-score of the spread; enter at &#177;2&#963;, exit near 0. Half-life of reversion sets the holding horizon.</li>
+<li><b>Crowding / correlation breakdown</b> is the killer <span class="warn">!</span> everyone in the same trade &#8594; the "stable" relationship snaps under stress (Aug 2007 quant quake). The spread that "always reverts" can trend to a stop.</li>
+<li>At HF: hundreds of micro-reversions/day; edge per trade tiny, so <b>costs dominate</b> — same net-alpha discipline as signals.</li>
+<li>Basket / factor-neutral variants hedge sector &amp; market betas, not just one pair.</li>
+</ul></section>
 
 <section class="card"><h3>Risk &amp; Controls</h3>
+<p>An automated system is a firehose with no hand on the valve — safety must be automated and sit <b>in front of every order</b>, on the hot path.</p>
+<h4>Mandatory pre-trade checks</h4>
+<table><thead><tr><th>Check</th><th>Prevents</th></tr></thead><tbody>
+<tr><td>fat-finger price/size</td><td>absurd price or qty</td></tr>
+<tr><td>notional / position limits</td><td>oversized exposure</td></tr>
+<tr><td>message/order-rate throttle</td><td>runaway loop</td></tr>
+<tr><td>duplicate detection</td><td>bug/retry double-send</td></tr>
+<tr><td>self-trade prevention (STP)</td><td>wash trades</td></tr>
+</tbody></table>
 <ul>
-<li><b>Rule 15c3-5</b> pre-trade checks: price/size/notional + <b>order-rate</b> limits, self-trade prevention.</li>
-<li><b>Kill switch</b>; position monitoring; circuit breakers / LULD.</li>
-<li><span class="warn">!</span> <b>Knight Capital</b>: stale test code in prod → ~$440M in 45 min → firm dead. Deploy carefully.</li>
+<li><b>SEC Rule 15c3-5 (Market Access Rule)</b>: automated pre-trade controls are <b>legally mandatory</b>; bans naked/unfiltered sponsored access; broker owns the gate.</li>
+<li><b>Kill switch</b> must <b>cancel resting orders + block new</b> atomically — not just kill the process (leaves live orders) <span class="warn">!</span></li>
+<li>Defense in depth: strategy &#8594; risk gate &#8594; firm kill switch &#8594; exchange breakers/LULD. Each assumes the layer above fails.</li>
+<li><b>Knight Capital (2012)</b>: bad deploy reactivated dead test code &#8594; runaway router &#8594; ~$440M in ~45 min, firm dead. A <b>deployment/process</b> failure, not a coding bug <span class="warn">!</span> Faster system &#8594; <i>more</i> essential controls.</li>
+</ul></section>
+
+<section class="card"><h3>Regulation &amp; Market Quality</h3>
+<table><thead><tr><th>Rule / event</th><th>What</th></tr></thead><tbody>
+<tr><td><b>Reg NMS (2005)</b></td><td>NBBO, order-protection, sub-penny ban</td></tr>
+<tr><td><b>Rule 15c3-5</b></td><td>mandatory pre-trade risk (market access)</td></tr>
+<tr><td><b>Reg SCI</b></td><td>systems integrity/resilience for key venues</td></tr>
+<tr><td><b>MiFID II (EU)</b></td><td>algo registration, tick regime, testing, kill-switch, clock sync</td></tr>
+<tr><td><b>Circuit breakers</b></td><td>market-wide halts on big index moves</td></tr>
+<tr><td><b>LULD</b></td><td>per-stock limit up-limit down price bands</td></tr>
+</tbody></table>
+<ul>
+<li><b>Flash Crash (6 May 2010)</b>: ~1000-pt intraday plunge; a large sell algo + liquidity withdrawal + feedback. Spurred LULD + market-wide breakers.</li>
+<li>Structural responses to the speed race: <b>IEX 350us speed bump</b>; <b>frequent batch auctions</b> (discrete intervals) neutralize "first-by-a-ns wins".</li>
+<li>Debate: HFT tightened spreads &amp; cut costs, but adds fragility &amp; a latency-arb tax. Hold both views.</li>
+</ul></section>
+
+<section class="card"><h3>Backtesting HFT — Honesty</h3>
+<p>You are <b>re-simulating an event-driven system you participate in</b>, not sampling a price series. Every shortcut adds false optimism.</p>
+<h4>The cardinal sin</h4>
+<p><span class="warn">!</span> "Price traded through my limit, so I was filled." <b>No</b> — only if the volume <i>ahead of you</i> in the queue was fully consumed. A small print at your price may never reach you.</p>
+<h4>What you must model</h4>
+<ul>
+<li><b>Fill / queue position</b>: track where you sit; front fills first, back may never fill.</li>
+<li><b>Latency</b>: your order arrives 5&#8211;50us late &#8594; reorders you in the queue, can flip a good passive fill into an adverse-selected one <span class="warn">!</span></li>
+<li><b>Your own impact</b>: your order wasn't in the historical data — injecting it changes the queue &amp; can make others fade.</li>
+<li><b>Look-ahead bias</b>: reacting to info in the same packet before you'd have decoded it.</li>
+<li><b>Microstructure noise</b>: high in-sample Sharpe often = fitting bid-ask bounce; won't persist out of sample.</li>
+</ul>
+<p>Use an <b>L3 event-driven LOB simulator</b>; inject your orders as first-class price-time events. The simulator <i>is</i> the product.</p>
+</section>
+
+<section class="card"><h3>&#9733; Interview / Review Checklist</h3>
+<h4>Microstructure</h4>
+<ul>
+<li>&#9744; Walk an aggressive order through the book — priority, partial fills, walking levels.</li>
+<li>&#9744; Spread named as 3 components; adverse selection persists even with zero other costs.</li>
+<li>&#9744; Microprice weights the <b>thin</b> side; imbalance leans toward the <b>heavy</b> side.</li>
+</ul>
+<h4>Market making</h4>
+<ul>
+<li>&#9744; Reservation price shifts with inventory; skew (center) vs widen (width) kept distinct.</li>
+<li>&#9744; A-S limitations stated (fixed fair value, symmetric flow).</li>
+</ul>
+<h4>Latency / systems</h4>
+<ul>
+<li>&#9744; Tick-to-trade decomposed; correct technique mapped to each term.</li>
+<li>&#9744; Optimize <b>tail/jitter</b>, not mean; no alloc/GC on hot path; SPSC, NUMA-pinned, huge pages, no false sharing.</li>
+<li>&#9744; Kernel bypass removes OS stack only; colo removes propagation only.</li>
+</ul>
+<h4>Execution / cost</h4>
+<ul>
+<li>&#9744; Right algo for the goal (IS for alpha, VWAP to blend); impact is &#8730;-law, concave.</li>
+<li>&#9744; Net alpha beats fees + spread + impact before a signal is "tradeable".</li>
+</ul>
+<h4>Risk</h4>
+<ul>
+<li>&#9744; Pre-trade checks in front of every order; kill switch cancels resting + blocks new.</li>
+<li>&#9744; Can narrate Knight and the controls that would have prevented it.</li>
+</ul>
+<h4>Backtest</h4>
+<ul>
+<li>&#9744; No assumed fills; queue position, latency, and own-impact modelled.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Regulation &amp; Quality</h3>
-<ul>
-<li>Reg NMS (US), MiFID II (EU: algo flagging, tick-size, testing).</li>
-<li><b>2010 Flash Crash</b>: big sell algo + HFT liquidity withdrawal.</li>
-<li><span class="warn">!</span> <b>Spoofing/layering = illegal</b> (Dodd-Frank; Sarao, Coscia). Recognize, don't do.</li>
-<li>IEX 350us speed bump; batch-auction debate.</li>
-</ul>
-</section>
-
-<section class="card"><h3>&#9744; Backtesting &amp; Interview Playbook</h3>
-<ul>
-<li>&#9744; <b>Never assume fills</b> — model queue position &amp; latency, or the backtest lies.</li>
-<li>&#9744; No tick-level look-ahead; model your own impact.</li>
-<li>&#9744; Matching engine: price-time priority, O(1) add/cancel/match.</li>
-<li>&#9744; Tick-to-trade design: where do FPGA / kernel-bypass go?</li>
-<li>&#9744; Make a market: quote around fair value, skew by inventory, widen on risk.</li>
-<li>&#9744; Queue/fill probability puzzles; expected wait.</li>
-<li>&#9744; Big order → Almgren-Chriss (impact vs risk); microprice for fair value.</li>
-<li>&#9744; They test CS + probability + microstructure together — reason aloud.</li>
-</ul>
+<section class="card"><h3>Common Bugs — Spot-the-Bug</h3>
+<table><thead><tr><th>Symptom</th><th>Cause</th></tr></thead><tbody>
+<tr><td>backtest amazing, live disappoints</td><td>assumed passive fills / ignored latency &amp; impact <span class="warn">!</span></td></tr>
+<tr><td>corrupt local book after a burst</td><td>dropped multicast pkt, no gap/A-B recovery <span class="warn">!</span></td></tr>
+<tr><td>picked off on fast events, fine when quiet</td><td>bad tail latency (p99.9) / slow cancel <span class="warn">!</span></td></tr>
+<tr><td>random 40us spikes on 800ns path</td><td>alloc/GC, page fault, IRQ, NUMA, C-state <span class="warn">!</span></td></tr>
+<tr><td>two hot counters, cores stall</td><td>false sharing on one cache line <span class="warn">!</span></td></tr>
+<tr><td>"arb" left with a naked position</td><td>one leg filled, the other didn't <span class="warn">!</span></td></tr>
+<tr><td>stat-arb spread trends to the stop</td><td>correlation breakdown / crowding <span class="warn">!</span></td></tr>
+<tr><td>MM bleeds despite "making the spread"</td><td>adverse selection + unmanaged inventory <span class="warn">!</span></td></tr>
+<tr><td>routed to best price, got worse net</td><td>ignored taker fee / rebate / fill prob <span class="warn">!</span></td></tr>
+<tr><td>timestamps meaningless at ns scale</td><td>NTP/software clock, not PTP HW <span class="warn">!</span></td></tr>
+<tr><td>runaway algo, no human caught it</td><td>no rate throttle / kill switch <span class="warn">!</span></td></tr>
+</tbody></table>
 </section>
 
 </div>

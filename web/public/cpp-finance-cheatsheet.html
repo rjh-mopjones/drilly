@@ -6,7 +6,11 @@
 <title>C++ for Financial Math Cheat Sheet</title>
 <style>
 :root{
-  --fs: 7.2pt; --fs-mono: 6.6pt; --fs-h3: 7.8pt; --gap: 5px; --pad: 3px;
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
   --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
 }
 *{box-sizing:border-box;}
@@ -14,10 +18,12 @@ html,body{margin:0;padding:0;}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
   font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
 .sheet{background:#fff;}
+/* spanning title bar */
 .titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
   margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
-.titlebar h1{font-size:12.5pt; margin:0; letter-spacing:.4px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
 .titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
 .sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
   column-fill:balance; padding:5px;}
 .card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
@@ -25,6 +31,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Ar
   overflow:hidden;}
 .card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
   background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
 .card:nth-of-type(8n+1) h3{background:#34495e;}
 .card:nth-of-type(8n+2) h3{background:#2c6e9b;}
 .card:nth-of-type(8n+3) h3{background:#1f7a5a;}
@@ -58,173 +65,414 @@ pre code{background:none; padding:0; font-size:1em;}
 @page{ size:A4; margin:5mm; }
 @media print{
   body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
   .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
 }
 </style>
 </head>
 <body>
 <div class="sheet">
-<div class="titlebar"><h1>C++ for Financial Math Cheat Sheet</h1><span class="meta">pricing libs · templates · Monte Carlo · perf · QuantLib · drilly</span></div>
+<div class="titlebar"><h1>C++ for Financial Math Cheat Sheet</h1><span class="meta">C++17/20/23 · quant-dev / pricing focus · generic examples · drilly</span></div>
+
 <section class="card legend"><h3>How to read &amp; print</h3>
 <ul>
-<li><span class="warn">!</span> footgun / classic trap &nbsp; <code>&#9744;</code> reasoning step</li>
-<li>C++ <b>applied to quant</b> (not a language tutorial). Formulas in ASCII, code in C++.</li>
-<li>Themes: <b>value semantics + RAII</b>, <b>zero-cost abstraction</b>, <b>layout beats FLOPs</b>.</li>
-<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+<li><span class="warn">!</span> footgun / gotcha &nbsp; <code>&#9744;</code> review checklist item</li>
+<li>Baseline: <b>C++17</b> for the core, with <b>C++20/23</b> features tagged inline (e.g. "(20)" = <code>concepts</code>/<code>span</code>/<code>jthread</code>, "(23)" = <code>expected</code>/<code>mdspan</code>). Assume x86-64, IEEE-754 <code>double</code>, <code>-O3 -march=native</code>.</li>
+<li>Lens: <b>pricing / risk / low-latency</b> — numerics, ownership, templates, the hot loop. Last 3 cards = <b>interview checklist</b> + spot-the-bug + build/test.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
 </ul></section>
 
-<section class="card"><h3>Why C++ in Finance</h3>
-<ul>
-<li>Latency + numerical control + legacy pricing libs.</li>
-<li><b>Two-language problem</b>: C++ compute core, Python front (pybind11).</li>
-<li><b>QuantLib</b> = reference open-source library.</li>
-<li>Target C++17/20; use Python for research, C++ for the hot path.</li>
-</ul>
-</section>
-
-<section class="card"><h3>Floating Point</h3>
-<pre><code>bool eq(double a,double b,double eps=1e-9){
-  return std::abs(a-b) &lt;= eps*std::max({1.0,std::abs(a),std::abs(b)});
+<section class="card"><h3>Floating-Point &amp; Numeric Types</h3>
+<table><thead><tr><th>Type</th><th>Bits / digits</th><th>Use</th></tr></thead><tbody>
+<tr><td><code>float</code></td><td>32 / ~7</td><td>bulk storage, SIMD/GPU only</td></tr>
+<tr><td><code>double</code></td><td>64 / ~15-16</td><td><b>the default</b> — prices, rates, vols, grids</td></tr>
+<tr><td><code>long double</code></td><td>80 x86 / ~18</td><td><span class="warn">!</span> = <code>double</code> on ARM/MSVC; non-portable</td></tr>
+</tbody></table>
+<p>Layout: <code>1 sign + 11 exp + 52 mantissa</code>; value = <code>(-1)^s · 1.m · 2^(e-1023)</code>. Only <b>dyadic rationals</b> exact — <code>0.1</code> repeats in binary, so <code>0.1+0.2 != 0.3</code> (prints <code>0.30000000000000004</code>). Well-defined, not UB.</p>
+<h4>Never <code>==</code> two doubles <span class="warn">!</span></h4>
+<pre><code>bool near(double a, double b,
+          double rel=1e-9, double abs_t=1e-12){
+  double d = std::fabs(a-b);
+  if (d &lt;= abs_t) return true;          // near-zero
+  return d &lt;= rel*std::max(std::fabs(a),
+                          std::fabs(b));
 }</code></pre>
 <ul>
-<li><b>double</b> for prices; never <code>==</code> — use epsilon/ULP. <span class="warn">!</span></li>
-<li><b>Money is NOT a double</b> — integer cents / decimal (0.1 is inexact).</li>
-<li>Catastrophic cancellation bites finite-diff Greeks; <code>-ffast-math</code> breaks NaN. <span class="warn">!</span></li>
+<li>Combined <b>abs+rel</b> tol; a lone <code>1e-9</code> is too loose for tiny, too tight for large. ULP compare (bit-cast to <code>int64</code>) for last-bit validation.</li>
+<li><code>numeric_limits&lt;double&gt;::epsilon()</code> ≈ 2.22e-16 (spacing near 1.0). Assume every op injects ~1e-16 relative noise.</li>
 </ul>
 </section>
 
-<section class="card"><h3>RAII &amp; Ownership</h3>
+<section class="card"><h3>Cancellation &amp; Stable Summation</h3>
+<p><b>Catastrophic cancellation</b>: subtracting near-equal values annihilates leading digits; the ~1e-16 <i>absolute</i> noise survives and dominates. This is the precision floor of <b>bump-and-revalue Greeks</b> <span class="warn">!</span></p>
+<pre><code>// noisy: numerator cancels, /2h amplifies !
+delta = (price(S+h) - price(S-h)) / (2*h);</code></pre>
+<p>U-shaped error: big <code>h</code> → truncation bias, tiny <code>h</code> → cancellation. Optimum <code>h ≈ eps^(1/3)·S ≈ 1e-5·S</code> (central, 1st deriv). Real fix: <b>AAD</b> (analytic, no subtraction) or closed form (BS delta = <code>N(d1)</code>).</p>
+<h4>Reformulate, don't add precision</h4>
 <ul>
-<li>RAII = lifetime-bound resources; <b>deterministic dtor</b> (no GC pauses).</li>
-<li><b>Rule of 0</b> (prefer); rule of 3/5 if you write one, consider all.</li>
-<li><code>unique_ptr</code> (owning, zero-cost) &gt; <code>shared_ptr</code> (atomic refcount — off hot path). <span class="warn">!</span></li>
-<li>Never raw <code>new</code>/<code>delete</code>.</li>
+<li><code>log(1+x)</code> small x → <code>std::log1p(x)</code>; <code>exp(x)-1</code> → <code>std::expm1(x)</code>.</li>
+<li><code>1-N(d)</code> tail → complementary <code>N(-d)</code>.</li>
+<li>Quadratic root: use <code>q=-0.5(b+copysign(disc,b))</code>, then <code>r1=q/a, r2=c/q</code>.</li>
 </ul>
+<h4>Summing a P&amp;L vector</h4>
+<pre><code>double kahan(const std::vector&lt;double&gt;&amp; x){
+  double s=0, c=0;               // c = lost bits
+  for(double v:x){ double y=v-c, t=s+y;
+    c=(t-s)-y; s=t; }            // O(1) error
+  return s; }</code></pre>
+<p><code>std::reduce</code> (17) may pairwise-sum (not ordered like <code>accumulate</code>). For MC mean+variance use <b>Welford</b>, not <code>E[x²]-E[x]²</code>.</p>
 </section>
 
-<section class="card"><h3>Templates &amp; CRTP</h3>
-<pre><code>template&lt;class D&gt; struct Engine {
-  double price(){ return static_cast&lt;D*&gt;(this)-&gt;calc(); }
-};  // CRTP: static dispatch, inlinable, no vtable</code></pre>
+<section class="card"><h3>NaN, inf &amp; Money</h3>
 <ul>
-<li>CRTP / templates remove <b>virtual dispatch</b> on the hot path.</li>
-<li><b>Expression templates</b> (Eigen) fuse <code>a=b+c+d</code>, zero temporaries.</li>
-<li>Constrain with <b>concepts</b>: <code>template&lt;std::floating_point T&gt;</code>.</li>
+<li><b>inf</b>: overflow / <code>1.0/0.0</code>, <code>exp(1000)</code>. <b>NaN</b>: <code>0.0/0.0</code>, <code>sqrt(-1)</code>, <code>log(-1)</code>, <code>inf-inf</code>.</li>
+<li>Both <b>propagate</b> — one stray NaN early poisons the whole MC average.</li>
+<li><span class="warn">!</span> <code>NaN == NaN</code> is <b>false</b>; <code>NaN &lt; K</code> and <code>NaN &gt; K</code> both false, so <code>if(price&lt;barrier)</code> silently mis-branches.</li>
 </ul>
-</section>
-
-<section class="card"><h3>Pricing Library OO</h3>
-<pre><code>Instrument  --has--&gt;  Payoff
-Instrument  --uses--&gt; PricingEngine (Strategy)
-  Analytic / Tree / MonteCarlo engines</code></pre>
-<p>Separate <b>what to price</b> (instrument+payoff) from <b>how</b> (engine). Visitor across types; Factory to build; keep market data (curves/vols) separate.</p>
-</section>
-
-<section class="card"><h3>Move &amp; RVO</h3>
+<pre><code>std::isnan(x);   // NOT x==NaN
+std::isinf(y);
+std::isfinite(z);  // not NaN and not inf</code></pre>
+<p>Validate at the boundary: reject <code>T&lt;=0</code>, <code>sigma&lt;0</code>, <code>S&lt;=0</code>; debug <code>assert(std::isfinite(result))</code> to fail fast.</p>
+<h4>Money is never a <code>double</code> <span class="warn">!</span></h4>
+<pre><code>double t=0; for(int i=0;i&lt;10;++i) t+=0.1;
+t == 1.0;    // false (0.9999999999999999)
+int64_t cents = 1050;  // $10.50 exact</code></pre>
 <ul>
-<li><code>std::move</code> is a <b>cast</b>; move ctor steals the buffer O(1) vs O(n) copy.</li>
-<li>Return big objects by value — <b>RVO/NRVO</b> elides the copy.</li>
-<li><span class="warn">!</span> <code>return std::move(local)</code> disables RVO; <code>move</code> on <code>const</code> copies.</li>
+<li><b>Model qty</b> (price, vol, NPV) = <code>double</code>, approximate by nature. <b>Ledger qty</b> (settleable cash) = <code>int64</code> minor units or a decimal type. Confusing them is a hard-fail.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Cache &amp; Layout</h3>
+<section class="card"><h3>RAII &amp; Value Semantics</h3>
+<p><b>RAII</b>: resource lifetime = object lifetime. Acquire in ctor, release in dtor; dtor runs at scope exit <b>including on exception</b> (stack unwinding). Cleanup is unmissable and <b>deterministic</b> — no GC pause at the wrong microsecond.</p>
+<pre><code>{
+  std::lock_guard&lt;std::mutex&gt; g(book_mtx); // acquire
+  update_book();                          // may throw
+}   // g's dtor releases the lock — always</code></pre>
 <ul>
-<li><b>SoA &gt; AoS</b> for bulk pricing (vectorizes, cache-friendly).</li>
-<li>64B cache lines; <b>pad to avoid false sharing</b>. <span class="warn">!</span></li>
-<li>No allocation on the hot path — <code>reserve</code>, reuse buffers, pools/arena.</li>
-<li>Layout, not FLOP count, usually dominates numeric perf.</li>
+<li>RAII covers <b>any</b> resource: locks, files, sockets, DB handles — not just memory.</li>
+<li><b>Value semantics</b>: a variable <i>is</i> its value; copies are independent, no null, no hidden sharing. Default; use refs/pointers only for deliberate sharing/indirection.</li>
+<li>Deterministic destruction is why a desk can trust "lock released / buffer freed" at a precise instant. Manual mgmt leaks under exceptions; RAII makes leaks <b>structurally impossible</b>.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Eigen + Cholesky</h3>
-<pre><code>// correlated normals: X = L * Z, Sigma = L L^T
-Eigen::LLT&lt;MatrixXd&gt; llt(Sigma);
-MatrixXd L = llt.matrixL();
-VectorXd X = L * Z;   // Z ~ iid N(0,1)</code></pre>
-<p>Eigen = expression templates + SIMD; call BLAS/LAPACK/MKL for heavy ops. Cholesky is THE correlated-draw primitive.</p>
+<section class="card"><h3>Ownership: Rule of 0/3/5 &amp; Smart Ptrs</h3>
+<table><thead><tr><th>Type</th><th>Cost / use</th></tr></thead><tbody>
+<tr><td><code>unique_ptr&lt;T&gt;</code></td><td><b>zero</b> overhead; sole owner, move-only — the default</td></tr>
+<tr><td><code>shared_ptr&lt;T&gt;</code></td><td><span class="warn">!</span> <b>atomic</b> refcount + 2nd heap block; only for genuine shared ownership; avoid on hot path</td></tr>
+<tr><td><code>weak_ptr&lt;T&gt;</code></td><td>non-owning observer; breaks cycles; <code>.lock()</code> to use</td></tr>
+</tbody></table>
+<ul>
+<li><b>Rule of 0</b> (the goal): write no special members; let <code>vector</code>/<code>unique_ptr</code> members manage resources.</li>
+<li><b>Rule of 3/5</b>: if you write one of dtor / copy-ctor / copy-assign (/ move-ctor / move-assign), you likely need all — only when hand-owning a raw resource.</li>
+<li>No raw <code>new</code>/<code>delete</code> in modern code. <code>make_unique</code>/<code>make_shared</code>.</li>
+<li><code>shared_ptr</code> cycle = leak <span class="warn">!</span> (refcounts never hit 0) — break with <code>weak_ptr</code>.</li>
+</ul>
 </section>
 
-<section class="card"><h3>RNG (&lt;random&gt;)</h3>
-<pre><code>std::mt19937_64 g(seed);
+<section class="card"><h3>Move Semantics &amp; Forwarding</h3>
+<p><code>vector&lt;double&gt;</code> = small handle (begin,end,cap) over a big heap buffer. <b>Copy</b> = new alloc + O(n) element copy; <b>move</b> = swap 3 pointers, null the source, O(1). The point: return a 100MB matrix by value for the price of pointer swaps.</p>
+<pre><code>auto v = make_path();          // rvalue -&gt; moved in
+auto w = v;                    // lvalue -&gt; COPIED
+auto x = std::move(v);         // v's buffer stolen</code></pre>
+<ul>
+<li><code>std::move</code> <b>moves nothing</b> — it's a <code>static_cast</code> to <code>T&amp;&amp;</code> (xvalue) enabling a move ctor.</li>
+<li><span class="warn">!</span> <code>return std::move(local)</code> <b>disables NRVO</b> — usually slower. Just <code>return local;</code>.</li>
+<li><span class="warn">!</span> <code>std::move</code> on a <code>const</code> object silently <b>copies</b> (move ctor needs non-const <code>T&amp;&amp;</code>).</li>
+<li>Moved-from = valid but unspecified: reassign/destroy, don't read.</li>
+<li>Mark move ctor <code>noexcept</code> or <code>vector</code> growth <b>copies</b> instead of moves <span class="warn">!</span></li>
+</ul>
+<h4>Perfect forwarding</h4>
+<pre><code>template&lt;class T&gt; void wrap(T&amp;&amp; x){       // T deduced =&gt;
+  sink(std::forward&lt;T&gt;(x)); }             // fwd ref</code></pre>
+<p><code>T&amp;&amp;</code> with <b>deduced</b> <code>T</code> = forwarding ref (binds lvalue+rvalue); with a concrete type it's a plain rvalue ref.</p>
+</section>
+
+<section class="card"><h3>Templates, CRTP &amp; Policies</h3>
+<p>A template is a compile-time recipe: <code>mean&lt;double&gt;</code> stamps a <code>double</code>-specific, inlinable, vectorizable version — <b>monomorphisation</b> (unlike Java's erasure-to-Object). Move dispatch from <b>run time to compile time</b>.</p>
+<h4>CRTP — static polymorphism, no vtable</h4>
+<pre><code>template&lt;class D&gt; struct Payoff{
+  double value(double S) const{
+    return static_cast&lt;const D&amp;&gt;(*this).impl(S);
+  }
+};
+struct Call : Payoff&lt;Call&gt;{ double K;
+  double impl(double S) const{return std::max(S-K,0.0);} };</code></pre>
+<ul>
+<li>Call resolves + inlines at compile time; loop vectorizes. Cost: no runtime type choice, no heterogeneous <code>vector&lt;Base*&gt;</code>, code bloat, worse errors.</li>
+<li><b>Policy-based design</b>: inject RNG/payoff/discount as template params, composed at compile time.</li>
+<li><code>if constexpr</code> (17): untaken branch is <b>discarded</b>, need not compile for that type.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Expression Templates &amp; Concepts</h3>
+<p><b>Expression template</b>: <code>operator+</code> returns a tiny node describing the op, not the result; the whole tree evaluates in <b>one fused loop on assignment</b>, zero temporaries. Why <code>Vec d = a+b+c</code> allocates 2 temporaries in a naive lib but <b>none</b> in Eigen.</p>
+<ul>
+<li>Win for elementwise chains only; a single op or matmul still wants BLAS. Adds compile time.</li>
+</ul>
+<h4>Concepts (20) — constrain, readable errors</h4>
+<pre><code>template&lt;std::floating_point T&gt;
+T norm_cdf(T x){ /* clean error if caller passes int */ }
+
+template&lt;class T&gt;
+concept Payoff = requires(T p, double S){
+  { p.value(S) } -&gt; std::convertible_to&lt;double&gt;;
+};</code></pre>
+<ul>
+<li>Purely compile-time: change which overload wins + error quality, never generated code. Replace most <b>SFINAE</b>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>STL for Quant Code</h3>
+<table><thead><tr><th>Container</th><th>Note</th></tr></thead><tbody>
+<tr><td><code>vector&lt;double&gt;</code></td><td>contiguous default — streams, vectorizes; <code>reserve()</code> to kill realloc</td></tr>
+<tr><td><code>array&lt;T,N&gt;</code></td><td>fixed-size, on stack, no heap (a 3-factor state)</td></tr>
+<tr><td><code>map/unordered_map</code></td><td><span class="warn">!</span> node-allocated, cache-hostile to iterate — 10-100x slower to traverse than a vector</td></tr>
+</tbody></table>
+<h4>Algorithms &gt; hand loops</h4>
+<pre><code>// MC payoff aggregation — one pass, parallelizable
+double px = std::transform_reduce(
+  std::execution::par, S.begin(), S.end(), 0.0,
+  std::plus&lt;&gt;{}, [K](double s){return std::max(s-K,0.0);});
+
+double dot = std::inner_product(cf.begin(),cf.end(),df.begin(),0.0);
+std::nth_element(v.begin(), v.begin()+k, v.end()); // VaR pctile O(n)</code></pre>
+<ul>
+<li><code>accumulate</code> (ordered) vs <code>reduce</code> (par, reassociates). <code>ranges</code> views (20) fuse <code>transform|filter</code> lazily, no temporaries.</li>
+<li>Add <code>std::execution::par</code> for near-free parallel reductions on contiguous data.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Memory &amp; Cache Performance</h3>
+<p><b>Memory, not FLOPs, is the bottleneck.</b> L1 ~4cyc, L3 ~40, DRAM ~200. CPU fetches a whole <b>64-byte cache line</b> (8 doubles): use all of it before eviction. Two O(n) loops can differ 10x on layout alone.</p>
+<pre><code>for(double x : payoffs) sum += x;    // vector: 1 miss/8, prefetch
+for(Node* n : ptrs)     sum += n->pv;// scattered: 1 miss/elem !</code></pre>
+<h4>SoA vs AoS</h4>
+<ul>
+<li><b>SoA</b> (parallel <code>vector&lt;double&gt;</code> per field) streams only touched fields + vectorizes — wins for bulk column ops. <b>AoS</b> wins when you touch all fields of one object. Match layout to access.</li>
+<li>Stack by default (bump ptr, RAII); heap only when big/unknown-size/outlives scope — and let <code>vector</code> own it.</li>
+<li><span class="warn">!</span> <b>False sharing</b>: two threads writing different vars on one line → coherence ping-pong. Pad to 64B / per-thread accumulators.</li>
+<li>Arena/pool for O(1) alloc + bulk free on the hot path; no <code>new</code> in the loop.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Low-Latency Hot Path</h3>
+<p>Keep it <b>straight-line, inlinable, branch-predictable, cache-resident, allocation-free</b>. A cache miss ~200cyc, a mispredict ~15-20cyc, a virtual call blocks inlining. <b>Measure, don't guess.</b></p>
+<h4>Kill virtual dispatch</h4>
+<table><thead><tr><th>Approach</th><th>Inline?</th><th>Runtime type?</th></tr></thead><tbody>
+<tr><td>virtual</td><td>No <span class="warn">!</span></td><td>yes (open set)</td></tr>
+<tr><td>CRTP / template</td><td>Yes</td><td>no</td></tr>
+<tr><td><code>variant</code>+<code>visit</code></td><td>Yes</td><td>yes (closed set)</td></tr>
+</tbody></table>
+<pre><code>using AnyPayoff = std::variant&lt;Call,Put,Digital&gt;;
+double v = std::visit([S](auto&amp; p){return p.value(S);}, pf);
+std::vector&lt;AnyPayoff&gt; book;  // inline, cache-friendly</code></pre>
+<ul>
+<li>Real cost of <code>virtual</code> = compiler <b>can't inline</b> the indirect call, so can't vectorize across it (not the pointer load).</li>
+<li><code>[[likely]]/[[unlikely]]</code> (20) aid code <b>layout</b> for lopsided branches; a ~50/50 branch → make it <b>branchless</b> (arithmetic/cmov).</li>
+<li>SIMD: mostly free from auto-vectorization on clean contiguous loops under <code>-O3 -march=native</code>; intrinsics last resort. LTO + PGO for cross-TU inlining + layout.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Modern C++ (11 → 23) Toolkit</h3>
+<table><thead><tr><th>Feature</th><th>Buys numeric code</th></tr></thead><tbody>
+<tr><td><code>auto</code> / lambda</td><td>inline payoff/RNG closures; un-spellable types</td></tr>
+<tr><td><code>constexpr</code>/<code>consteval</code></td><td>fold constants/tables at compile time</td></tr>
+<tr><td>structured binding</td><td><code>auto [px,se] = estimate();</code></td></tr>
+<tr><td>concepts (20)</td><td><code>template&lt;floating_point T&gt;</code> — clean errors</td></tr>
+<tr><td>ranges (20)</td><td>lazy <code>transform|filter</code> pipelines, no temp</td></tr>
+<tr><td><code>span&lt;T&gt;</code> (20)</td><td>non-owning <code>{ptr,size}</code> view — pass paths, no copy</td></tr>
+<tr><td><code>mdspan</code> (23)</td><td><code>m(i,j)</code> multidim view over a 1D grid buffer</td></tr>
+<tr><td><code>optional&lt;T&gt;</code></td><td>solver that may not converge</td></tr>
+<tr><td><code>expected&lt;T,E&gt;</code> (23)</td><td>value-or-error, no exceptions on hot path</td></tr>
+</tbody></table>
+<ul>
+<li><span class="warn">!</span> <code>span</code>/<code>mdspan</code> are <b>non-owning</b> — dangle if the buffer dies first.</li>
+<li>Always <code>&lt;random&gt;</code> not <code>rand()</code>; <code>&lt;chrono&gt;</code> <code>steady_clock</code> for timing.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Random Number Generation</h3>
+<p><b>Engine</b> = deterministic uniform-bit state machine; <b>distribution</b> = stateless transform. Wire: <code>dist(engine)</code>.</p>
+<pre><code>std::mt19937_64 eng(seed);            // default, never rand() !
 std::normal_distribution&lt;double&gt; N(0,1);
-double z = N(g);</code></pre>
+double z = N(eng);</code></pre>
 <ul>
-<li>Never <code>rand()</code>. Fixed seed for reproducibility.</li>
-<li><span class="warn">!</span> Parallel MC: <b>one engine per thread</b>, distinct seeds — never share.</li>
-<li>Sobol (quasi-random) → faster MC convergence.</li>
+<li><code>mt19937_64</code> default; PCG/xoshiro faster small-state. Box-Muller simple, <b>Ziggurat</b> fast.</li>
+<li>Reproducible: same engine+seed+call-sequence — <b>within one stdlib build only</b> <span class="warn">!</span> (distribution impls differ across libstdc++/libc++/MSVC).</li>
+<li><b>Parallel MC cardinal rule</b> <span class="warn">!</span>: one engine <b>per thread</b>, distinct seed / jump-ahead / stream. Sharing one engine = data race <i>and</i> correlated streams (SE becomes a lie). A lock fixes the race but not the correlation.</li>
+<li>Correlated normals: <code>X = L·Z</code>, <code>L</code> = Cholesky of covariance.</li>
+<li>Smooth low-dim payoffs: <b>Sobol</b> (quasi-random) → ~<code>1/N</code> vs pseudo <code>1/sqrt(N)</code>.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Monte Carlo Pricer</h3>
-<pre><code>double sum=0, sum2=0;
-for(int i=0;i&lt;N;i++){
-  double z=Nd(g);
-  double ST=S*exp((r-0.5*sig*sig)*T + sig*sqrt(T)*z);
-  double pay=std::max(ST-K,0.0);
-  sum+=pay; sum2+=pay*pay;
-}
-double price=exp(-r*T)*sum/N;         // stderr ~ 1/sqrt(N)</code></pre>
-<p>Template on payoff+generator to inline; antithetic +z/-z for variance reduction.</p>
+<section class="card"><h3>Linear Algebra (Eigen / BLAS)</h3>
+<p><b>Eigen</b> (header-only, expression templates, SIMD) = quant default; drops to <b>BLAS/LAPACK/MKL</b> kernels for large ops. Layout + temporaries dominate, not FLOP count.</p>
+<pre><code>Eigen::VectorXd x = A.llt().solve(b);   // SPD -&gt; Cholesky
+Eigen::MatrixXd L = Sigma.llt().matrixL();
+Eigen::VectorXd corr = L * z;           // correlated normals</code></pre>
+<table><thead><tr><th>Decomp</th><th>For</th></tr></thead><tbody>
+<tr><td>LU <code>PA=LU</code></td><td>general square solve, det</td></tr>
+<tr><td>QR <code>A=QR</code></td><td>least-squares, calibration</td></tr>
+<tr><td>Cholesky <code>Σ=LLᵀ</code></td><td>SPD — <b>correlated normals</b>, ~2x cheaper than LU</td></tr>
+<tr><td>SVD <code>A=USVᵀ</code></td><td>rank, pseudo-inverse, PCA, ill-conditioned</td></tr>
+</tbody></table>
+<ul>
+<li><span class="warn">!</span> Eigen/BLAS are <b>column-major</b>, C/C++ arrays row-major — mind the transpose.</li>
+<li>High condition number → prefer SVD/QR over LU.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Monte Carlo Engine</h3>
+<p>Pipeline: <b>RNG → PathGenerator → Payoff → Accumulator</b>. Price = sample mean of discounted payoffs; <b>always report <code>price ± SE</code></b>, <code>SE = stdev/sqrt(N)</code>. Error ~<code>1/sqrt(N)</code>: halving error = <b>4x paths</b>.</p>
+<pre><code>template&lt;class Gen, class Payoff&gt;
+Result run(Gen&amp; gen, Payoff pay, size_t N, Rng&amp; rng){
+  Welford acc;                         // mean + variance, 1 pass
+  for(size_t i=0;i&lt;N;++i)
+    acc.add( pay(gen(rng)) );           // all inlined, no vtable
+  return { disc*acc.mean(),
+           disc*acc.stderr() };
+}</code></pre>
+<ul>
+<li><b>Template</b> on Gen+Payoff so the whole loop inlines; a <code>virtual</code>/<code>std::function</code> per path kills it <span class="warn">!</span></li>
+<li>GBM step: <code>S·exp((r-0.5σ²)dt + σ√dt·Z)</code>.</li>
+<li>Variance reduction: <b>antithetic</b> (+Z/-Z, ~free, wins for monotone payoffs), <b>control variate</b> (subtract correlated known-mean term).</li>
+<li>Parallel: per-thread RNG + local accumulator, reduce once. Parallel sum ≠ bit-identical (float non-assoc) — fix order if risk sign-off needs reproducibility.</li>
+</ul>
 </section>
 
 <section class="card"><h3>Numerical Methods</h3>
-<pre><code>// Newton for implied vol: f(sig)=BS(sig)-mkt
-sig -= (bs(sig)-mkt)/vega(sig);   // repeat</code></pre>
+<h4>Root-find / implied vol</h4>
+<pre><code>// Newton: fast but needs derivative (vega) &amp; good guess
+for(int i=0;i&lt;maxit;++i){
+  double f = price(sig)-mkt, v = vega(sig);
+  if(std::fabs(f) &lt; tol) break;
+  sig -= f/v;                          // diverges if vega~0 !
+}
+// Brent: bracket [lo,hi], guaranteed, no derivative — robust default</code></pre>
 <ul>
-<li>Newton (fast, needs derivative) vs bisection (robust) vs Brent (both).</li>
-<li>Trees (backward induction, American), finite-diff PDE (Crank-Nicolson).</li>
-<li>Watch stability &amp; step size.</li>
+<li>Newton quadratic near root but <b>diverges</b> if vega≈0 (deep OTM) or bad seed <span class="warn">!</span> — fall back to bisection/Brent bracketing.</li>
+</ul>
+<h4>Greeks &amp; PDE</h4>
+<ul>
+<li>Central diff <code>(f(x+h)-f(x-h))/2h</code> beats forward; gamma needs 3 points /h². Prefer analytic / AAD (all Greeks in O(1)x one price, no cancellation).</li>
+<li><span class="warn">!</span> Time-step with an <b>int</b> count, derive <code>t=i·dt</code> — never <code>for(double t=0; t!=T; t+=dt)</code> (dt not exact → infinite / off-by-one loop).</li>
 </ul>
 </section>
 
-<section class="card"><h3>Low Latency</h3>
+<section class="card"><h3>Concurrency &amp; Parallelism</h3>
+<table><thead><tr><th>Primitive</th><th>Use</th></tr></thead><tbody>
+<tr><td><code>jthread</code> (20)</td><td>auto-joins (RAII) + <code>stop_token</code>; the default</td></tr>
+<tr><td><code>async</code>/<code>future</code></td><td>value/exception back via <code>.get()</code></td></tr>
+<tr><td><code>thread</code></td><td>raw — must <code>join</code>/<code>detach</code> or <code>terminate</code> <span class="warn">!</span></td></tr>
+</tbody></table>
 <ul>
-<li>Kill <b>virtual dispatch</b> on hot path → CRTP / templates / <code>variant</code>.</li>
-<li><code>[[likely]]</code>, inlining, <b>SIMD</b> (<code>-O3 -march=native</code>), SoA.</li>
-<li>No exceptions/allocation on hot path; <b>PGO</b> + LTO. <span class="warn">!</span> Measure, don't guess.</li>
+<li>Pricing is <b>embarrassingly parallel</b>: fan out independent work, reduce partials.</li>
+<li><span class="warn">!</span> <b>Data race</b> (concurrent access, ≥1 write, no sync) = <b>UB</b>, silent corruption. Not "stale read".</li>
+<li>One shared atomic accumulator serializes on one cache line — use <b>per-thread partials</b>, combine once.</li>
+<li><code>atomic</code> order: <code>relaxed</code> (atomicity only) / <code>acquire-release</code> (pairwise) / <code>seq_cst</code> (default). Don't sprinkle <code>seq_cst</code>; don't use <code>relaxed</code> where you needed release.</li>
+<li><span class="warn">!</span> <code>async</code> default policy may <b>defer</b> (lazy on <code>get()</code>) — pass <code>std::launch::async</code> to force a thread.</li>
+<li><span class="warn">!</span> <code>volatile</code> ≠ thread-safe (it's for MMIO). Use <code>atomic</code>. Prefer <code>reduce(par,…)</code>/OpenMP over hand-rolled threads.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Concurrency</h3>
-<ul>
-<li><code>std::execution::par</code> for easy MC; <code>std::atomic</code> + memory orders.</li>
-<li>Parallel MC: split paths, <b>per-thread RNG</b>, reduce partials. <span class="warn">!</span></li>
-<li>Float non-associativity → results vary by thread count (reproducibility).</li>
-</ul>
-</section>
-
-<section class="card"><h3>Python Bridge &amp; Tooling</h3>
-<pre><code>PYBIND11_MODULE(pricer, m){
-  m.def("bs", &amp;black_scholes);
+<section class="card"><h3>Error Handling &amp; Robustness</h3>
+<p><b>Two-region model.</b> Outside the border (ctors, config, <code>price()</code> entry): validate hard, <b>throw</b> loudly (setup runs once, exception cost is nil). Inside (MC loop, PDE sweep): assume valid, <b>no throw</b>, branch-free arithmetic.</p>
+<pre><code>std::expected&lt;double, CalibError&gt;         // C++23
+implied_vol(double mkt){
+  if(mkt &lt;= 0) return std::unexpected(CalibError::Bad);
+  return solve(mkt);                       // value or error, no unwind
 }</code></pre>
 <ul>
-<li>pybind11 wraps C++; <b>release the GIL</b> around compute; zero-copy NumPy.</li>
-<li>Build: CMake; sanitizers ASan/UBSan/<b>TSan</b>; Google Benchmark (<code>DoNotOptimize</code>).</li>
-<li>Test numerics with tolerances + golden values + parity properties.</li>
+<li><span class="warn">!</span> <code>noexcept</code> is a <b>lever, not a comment</b>: a <code>noexcept</code> move ctor lets <code>vector</code> move (not copy) on growth.</li>
+<li>Exceptions ~zero-cost when <b>not</b> thrown; the hot-path reason to avoid is they defeat inlining/vectorization.</li>
+<li><code>std::fma(a,b,c)</code> = <code>a*b+c</code> single rounding — more accurate + often faster.</li>
+<li>Denormals ~10-100x slower; FTZ trades negligible accuracy for speed on hot kernels.</li>
+<li>NaN detect at the <b>end</b> (<code>isnan(result)</code>), never mid-loop.</li>
 </ul>
 </section>
 
-<section class="card"><h3>&#9744; QuantLib Patterns &amp; Interview</h3>
+<section class="card"><h3>C++ ↔ Python Interfacing</h3>
+<p><b>pybind11</b> (or nanobind) is the standard bridge: expose a fast C++ pricer/engine, drive it from research Python. Numeric arrays cross as NumPy buffers with <b>zero copy</b> where layout matches.</p>
+<pre><code>PYBIND11_MODULE(pricer, m){
+  m.def("bs_call", &amp;bs_call, "S"_a,"K"_a,"r"_a,"sig"_a,"T"_a);
+  py::class_&lt;MonteCarlo&gt;(m,"MonteCarlo")
+    .def(py::init&lt;size_t&gt;())
+    .def("price", &amp;MonteCarlo::price);
+}</code></pre>
 <ul>
-<li>&#9744; <b>Handle/Observer</b>: quote changes → dependents recompute (lazy).</li>
-<li>&#9744; <b>PricingEngine</b> = Strategy; term structures as objects; bootstrap curves.</li>
-<li>&#9744; Date/Calendar/DayCount conventions = bug-prone, handle carefully.</li>
-<li>&#9744; Greeks: bump-and-revalue (N+1, cancellation) vs <b>AAD</b> (all Greeks ~1 pricing).</li>
-<li>&#9744; Interview: implement Black-Scholes; design an MC hierarchy; price a tree.</li>
-<li>&#9744; "What does this print / UB": lifetime, dangling ref, static-init order.</li>
-<li>&#9744; "Optimize this pricer": profile → virtual/alloc/cache → fix, then measure.</li>
+<li>Accept <code>py::array_t&lt;double&gt;</code> for bulk data; request a contiguous buffer to avoid a copy.</li>
+<li><span class="warn">!</span> A thrown C++ exception must be <b>translated</b> to a Python exception (pybind maps <code>std::exception</code>) — never let it leak across the ABI.</li>
+<li><span class="warn">!</span> Release the <b>GIL</b> (<code>py::gil_scoped_release</code>) around long C++ compute or you block all Python threads.</li>
+<li>Ownership across the boundary: return by value (copied into Python) or use holder types; watch dangling views into Python-owned buffers.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Build, Test &amp; Profile</h3>
+<h4>Testing numeric code (no <code>==</code>)</h4>
+<ul>
+<li><b>Tolerance</b> compare (tol from method accuracy). <b>Golden values</b> vs QuantLib/textbook.</li>
+<li><b>Invariants</b>: put-call parity <code>C-P = S-K·e^(-rT)</code>; call ↑ in spot; vega &gt; 0; vol→0 → intrinsic.</li>
+<li><b>Convergence</b>: MC error ~<code>1/sqrt(N)</code>, within a few SE of analytic; PDE halving step drops error at expected order.</li>
+</ul>
+<h4>Sanitizers &amp; flags</h4>
+<table><thead><tr><th>Tool</th><th>Catches</th></tr></thead><tbody>
+<tr><td>ASan</td><td>heap/stack overflow, use-after-free</td></tr>
+<tr><td>UBSan</td><td>signed overflow, bad shifts, misalign</td></tr>
+<tr><td>TSan</td><td>data races</td></tr>
+</tbody></table>
+<ul>
+<li>Profile first: <code>perf</code>/VTune + flamegraph → fix the proven hot spot. <b>PGO</b> + <b>LTO</b> for layout/inlining wins.</li>
+<li><span class="warn">!</span> <code>-ffast-math</code> assumes no NaN/inf and <b>reassociates</b> sums — breaks <code>isnan</code> checks + bit-reproducibility. <b>Banned</b> on pricing code; enable narrow sub-flags on proven kernels only.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Common Bugs — Spot-the-Bug</h3>
+<table><thead><tr><th>Symptom</th><th>Cause</th></tr></thead><tbody>
+<tr><td>Greek noisier as <code>h</code>→0</td><td>catastrophic cancellation in bump <span class="warn">!</span></td></tr>
+<tr><td><code>if(price&lt;barrier)</code> wrong branch</td><td>price is NaN (all compares false) <span class="warn">!</span></td></tr>
+<tr><td>PDE loop hangs / off-by-one</td><td><code>t != T</code> on accumulated float <span class="warn">!</span></td></tr>
+<tr><td>cash drifts by cents</td><td>money stored as <code>double</code> <span class="warn">!</span></td></tr>
+<tr><td>parallel MC "fast" but biased</td><td>shared RNG across threads <span class="warn">!</span></td></tr>
+<tr><td>vector-of-matrix copies on growth</td><td>move ctor not <code>noexcept</code> <span class="warn">!</span></td></tr>
+<tr><td>MC hot loop dominated by call</td><td>virtual / <code>std::function</code> payoff <span class="warn">!</span></td></tr>
+<tr><td>parallel scaling flat</td><td>false sharing / one shared atomic <span class="warn">!</span></td></tr>
+<tr><td>leak despite smart ptrs</td><td><code>shared_ptr</code> reference cycle <span class="warn">!</span></td></tr>
+<tr><td><code>return std::move(x)</code> slower</td><td>disabled NRVO <span class="warn">!</span></td></tr>
+<tr><td>Newton diverges deep OTM</td><td>vega≈0 — needs bracketing <span class="warn">!</span></td></tr>
+<tr><td>results differ across machines</td><td><code>-ffast-math</code> / distribution impl <span class="warn">!</span></td></tr>
+</tbody></table>
+</section>
+
+<section class="card"><h3>&#9733; Interview Review Checklist</h3>
+<h4>Numerics</h4>
+<ul>
+<li>&#9744; No <code>==</code> on doubles — combined abs+rel tolerance.</li>
+<li>&#9744; Subtractions of near-equal values reformulated (<code>log1p</code>/<code>expm1</code>/algebra); Greeks analytic/AAD not bumped where possible.</li>
+<li>&#9744; Money in <code>int64</code> minor units / decimal, never <code>double</code>.</li>
+<li>&#9744; Inputs validated at boundary; no NaN/inf escapes; time-step counts with an int.</li>
+</ul>
+<h4>Ownership / RAII</h4>
+<ul>
+<li>&#9744; Rule of 0 by default; <code>unique_ptr</code> over <code>shared_ptr</code>; no raw <code>new</code>/<code>delete</code>; no <code>shared_ptr</code> cycles.</li>
+<li>&#9744; Move ctor/assign <code>noexcept</code>; no <code>return std::move(local)</code>; no <code>move</code> on a <code>const</code>.</li>
+</ul>
+<h4>Performance</h4>
+<ul>
+<li>&#9744; Hot loop: no virtual dispatch (CRTP/template/<code>variant</code>), no allocation, no exceptions; data contiguous / SoA; <code>reserve</code>d.</li>
+<li>&#9744; Profiled before optimizing; verified each change; <code>-ffast-math</code> not on pricing code.</li>
+</ul>
+<h4>Concurrency</h4>
+<ul>
+<li>&#9744; Per-thread RNG (distinct stream) and per-thread accumulators; reduce once.</li>
+<li>&#9744; Every cross-thread var synchronized (lock/atomic); no false sharing; TSan clean; correct <code>atomic</code> memory order.</li>
+</ul>
+<h4>Correctness</h4>
+<ul>
+<li>&#9744; MC reports <code>price ± SE</code>; invariants (parity, monotonicity, convergence) tested to tolerance.</li>
+<li>&#9744; Errors: throw at setup, <code>expected</code>/<code>optional</code> on hot path; C++ exceptions translated at the Python boundary; GIL released around compute.</li>
 </ul>
 </section>
 
 </div>
-<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
-<script>
-  try {
-    mermaid.initialize({ startOnLoad: true, theme: "neutral",
-      flowchart: { useMaxWidth: true, htmlLabels: true, nodeSpacing: 18, rankSpacing: 18 },
-      themeVariables: { fontSize: "9px" } });
-  } catch (e) { /* offline / blocked CDN: diagrams degrade to source text, rest of sheet is fine */ }
-</script>
 </body>
 </html>
