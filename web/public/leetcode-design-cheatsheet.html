@@ -6,7 +6,11 @@
 <title>LeetCode Design Cheat Sheet</title>
 <style>
 :root{
-  --fs: 7.2pt; --fs-mono: 6.6pt; --fs-h3: 7.8pt; --gap: 5px; --pad: 3px;
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
   --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
 }
 *{box-sizing:border-box;}
@@ -14,10 +18,12 @@ html,body{margin:0;padding:0;}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
   font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
 .sheet{background:#fff;}
+/* spanning title bar */
 .titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
   margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
-.titlebar h1{font-size:12.5pt; margin:0; letter-spacing:.4px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
 .titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
 .sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
   column-fill:balance; padding:5px;}
 .card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
@@ -25,6 +31,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Ar
   overflow:hidden;}
 .card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
   background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
 .card:nth-of-type(8n+1) h3{background:#34495e;}
 .card:nth-of-type(8n+2) h3{background:#2c6e9b;}
 .card:nth-of-type(8n+3) h3{background:#1f7a5a;}
@@ -38,7 +45,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Ar
 .card p{margin:2px 0;}
 .card ul{margin:1.5px 0; padding-left:11px;}
 .card li{margin:.5px 0; line-height:1.2;}
-table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.5pt;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
 th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
 td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
 pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
@@ -50,193 +57,300 @@ pre code{background:none; padding:0; font-size:1em;}
 .pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
   padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
 .pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
 .cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
 .legend li{line-height:1.35;}
 @media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
 @page{ size:A4; margin:5mm; }
 @media print{
   body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
   .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
 }
 </style>
 </head>
 <body>
 <div class="sheet">
-<div class="titlebar"><h1>LeetCode Design Cheat Sheet</h1><span class="meta">72 problems · structure + trick per problem · 5 languages in the app · drilly</span></div>
+<div class="titlebar"><h1>LeetCode Design Cheat Sheet</h1><span class="meta">72 problems · structure · invariant · complexity · trap · generic examples · drilly</span></div>
 
 <section class="card legend"><h3>How to read &amp; print</h3>
 <ul>
 <li><span class="warn">!</span> footgun / classic trap &nbsp; <code>&#9744;</code> checklist step</li>
-<li>Design problems test <b>data-structure choice</b>: given the ops + a complexity target, pick the structure that hits it.</li>
-<li>Each theme card: <b>problem → core structure → the trick</b>. Full solutions (Py/Java/Rust/Go/C++) live in the primer.</li>
+<li>Design problems test <b>data-structure choice</b>: given the ops + a per-op complexity target, pick the structure that hits it, then name the <b>invariant</b> you hold between calls.</li>
+<li>Each card: <b>problem → structure → invariant → ops complexity → template → trap</b>. Full solutions (Py/Java/Rust/Go/C++) live in the primer.</li>
 <li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
 </ul></section>
 
 <section class="card"><h3>The Design Method</h3>
 <ul>
-<li><b>1. Clarify the ops</b> + the required complexity of each (O(1)? O(log n)?). That target dictates the structure.</li>
-<li><b>2. Pick structure</b> from the ops (see quick-pick card).</li>
-<li><b>3. State the invariant</b> the structure maintains between calls.</li>
-<li><b>4. Edge cases</b>: empty, single element, full/capacity, duplicate keys, wraparound.</li>
-<li><span class="warn">!</span> Almost every "O(1)" design = <b>hashmap + a second structure</b> (list / heap / array) kept in sync.</li>
+<li><b>1. Clarify ops + target</b>: write each method's required complexity (O(1)? O(log n)? amortized?). The target dictates the structure — an O(1) requirement usually rules out heaps/BSTs.</li>
+<li><b>2. Pick structure</b> from the quick-pick table. Almost every "all O(1)" design = <b>hashmap + a second structure</b> (DLL / array / bucket list) kept in sync.</li>
+<li><b>3. State the invariant</b> maintained between calls — the sentence you'd say out loud ("list is in MRU→LRU order", "heaps differ by ≤1", "buckets sorted by count").</li>
+<li><b>4. Edge cases</b>: empty, single element, at capacity/full, duplicate keys, wraparound, get-on-missing-key.</li>
+<li><span class="warn">!</span> If two ops each demand O(1) and one is "min/max", you almost never use a heap — reach for <b>bucketed DLL</b> or <b>index tricks</b>.</li>
 </ul>
 </section>
 
 <section class="card"><h3>Quick-Pick: Ops → Structure</h3>
-<table><thead><tr><th>Need</th><th>Use</th></tr></thead><tbody>
-<tr><td>O(1) get/put + evict</td><td>hashmap + doubly linked list</td></tr>
-<tr><td>O(1) insert/remove/random</td><td>array + index map (swap-pop)</td></tr>
-<tr><td>running min/median/top-k</td><td>heap(s)</td></tr>
-<tr><td>prefix / ordered keys</td><td>trie / BST / TreeMap</td></tr>
-<tr><td>range sum + updates</td><td>BIT / segment tree</td></tr>
-<tr><td>overlap / booking</td><td>sorted map / sweep / diff</td></tr>
-<tr><td>FIFO/LIFO with a twist</td><td>deque / two stacks</td></tr>
+<table><thead><tr><th>Need</th><th>Use</th><th>Op</th></tr></thead><tbody>
+<tr><td>get/put + LRU evict</td><td>hashmap + DLL</td><td>O(1)</td></tr>
+<tr><td>get/put + LFU evict</td><td>freq-buckets of DLLs</td><td>O(1)</td></tr>
+<tr><td>insert/remove/random</td><td>array + index map</td><td>O(1)</td></tr>
+<tr><td>min/max + inc/dec keys</td><td>sorted count-bucket DLL</td><td>O(1)</td></tr>
+<tr><td>running median</td><td>two heaps</td><td>O(log n)</td></tr>
+<tr><td>top-k / kth-largest stream</td><td>size-k min-heap</td><td>O(log k)</td></tr>
+<tr><td>prefix / ordered keys</td><td>trie / BST / TreeMap</td><td>O(len/log n)</td></tr>
+<tr><td>range sum + point update</td><td>Fenwick (BIT)</td><td>O(log n)</td></tr>
+<tr><td>range sum, static</td><td>prefix-sum array</td><td>O(1) q</td></tr>
+<tr><td>interval overlap / booking</td><td>TreeMap / diff-sweep</td><td>O(log n)</td></tr>
+<tr><td>FIFO/LIFO with a twist</td><td>deque / two stacks</td><td>amort O(1)</td></tr>
+<tr><td>versioned reads</td><td>per-key sorted (ver,val)</td><td>O(log n)</td></tr>
+<tr><td>ordered set, simple code</td><td>skiplist</td><td>O(log n) exp</td></tr>
 </tbody></table>
 </section>
 
-<section class="card"><h3>A · Stacks &amp; Queues</h3>
+<section class="card"><h3>LRU Cache (#29)</h3>
+<p><b>Structure:</b> hashmap key→node + doubly linked list. <b>Invariant:</b> DLL ordered MRU(head)→LRU(tail); map points into it. <b>get/put O(1).</b></p>
+<pre><code>class Node: key,val,prev,next
+head&lt;-&gt;tail sentinels
+get(k):  if miss -1; move node to front; ret val
+put(k,v):if hit update+move front
+         else add front; map[k]=node
+         if len&gt;cap: evict tail.prev; del map[key]</code></pre>
+<p><span class="warn">!</span> Update recency on <b>get</b> too, not just put. <span class="warn">!</span> Use <b>sentinel</b> head/tail so add/remove never null-check. Stdlib shortcut: Py <code>OrderedDict.move_to_end</code>/<code>popitem(last=False)</code>, Java <code>LinkedHashMap(cap,0.75,true)</code> + override <code>removeEldestEntry</code>.</p>
+</section>
+
+<section class="card"><h3>LFU Cache (#30)</h3>
+<p><b>Structure:</b> key→node, key→freq, and <b>freq→DLL</b> of nodes at that freq, plus <code>minFreq</code>. <b>Invariant:</b> each freq bucket ordered LRU within the freq; ties broken by recency. <b>get/put O(1).</b></p>
+<pre><code>touch(k): f=freq[k]; move node freq[f]-&gt;freq[f+1]
+          if freq[f] empty &amp;&amp; minFreq==f: minFreq++
+put full: evict LRU of freq[minFreq]
+new key:  freq=1; minFreq=1</code></pre>
+<p><span class="warn">!</span> On insert reset <code>minFreq=1</code>. <span class="warn">!</span> Evict the <b>LRU node of the lowest freq</b> — need per-freq ordering, not just per-freq set. Empty a bucket → bump minFreq only if it was the min.</p>
+</section>
+
+<section class="card"><h3>All O(1) — inc/dec/max/min (#24)</h3>
+<p><b>Structure:</b> DLL of count-buckets (each bucket = count + set of keys) + key→bucket map. <b>Invariant:</b> buckets sorted by count → head=min, tail=max, both O(1). Heap is banned (O(log n)).</p>
+<pre><code>inc(k): c=bucket[k].count; move to c+1 bucket
+        (splice new bucket after if neighbor!=c+1)
+dec(k): move to c-1 (remove key if c==1)
+        unlink any bucket that becomes empty
+getMax: tail.prev.anyKey   getMin: head.next.anyKey</code></pre>
+<p><span class="warn">!</span> Always <b>unlink emptied buckets</b> or min/max drift. Check the neighbor bucket's count before splicing a new one.</p>
+</section>
+
+<section class="card"><h3>Insert/Delete/GetRandom O(1) (#22–23)</h3>
+<p><b>Structure:</b> dynamic array <code>vals[]</code> + map <code>val→index</code>. <b>Invariant:</b> array is dense (no gaps) so <code>random</code> = uniform index. All ops O(1).</p>
+<pre><code>insert(v): if v in map ret false
+           map[v]=len; vals.append(v)
+remove(v): i=map[v]; last=vals[-1]
+           vals[i]=last; map[last]=i    # swap-with-last
+           vals.pop(); del map[v]
+getRandom: vals[rand(0,len-1)]</code></pre>
+<p><b>Duplicates variant (#23):</b> map value→<b>set of indices</b>; on remove pick any index, swap-with-last, fix the moved element's index set. <span class="warn">!</span> Swap-with-last is the whole trick — a plain array delete is O(n).</p>
+</section>
+
+<section class="card"><h3>Min / Max Stack (#1–2)</h3>
+<p><b>Min Stack:</b> second stack of running mins (or store <code>(val, curMin)</code> pairs). Every op O(1).</p>
+<pre><code>push(x): st.push(x); mins.push(min(x, mins.top or x))
+pop():   st.pop(); mins.pop()
+getMin():mins.top</code></pre>
+<p><b>Max Stack (#2)</b> also needs <code>popMax()</code>: main stack + a TreeMap/balanced BST value→count → <b>O(log n)</b> popMax (pop-and-repush the values above it). <span class="warn">!</span> Duplicates: store counts, not a set. Don't confuse the O(1) Min Stack with the O(log n) Max Stack.</p>
+</section>
+
+<section class="card"><h3>Stacks &amp; Queues via Each Other</h3>
 <table><tbody>
-<tr><td><b>Min Stack</b></td><td>2nd stack of running mins (or pairs)</td></tr>
-<tr><td><b>Max Stack</b></td><td>stack + TreeMap for O(log n) popMax</td></tr>
-<tr><td><b>Queue via Stacks</b></td><td>in-stack + out-stack, lazy transfer, amortized O(1)</td></tr>
-<tr><td><b>Stack via Queues</b></td><td>rotate queue on push → newest at front</td></tr>
-<tr><td><b>Circular Queue</b></td><td>fixed array + head/tail mod capacity</td></tr>
-<tr><td><b>Circular Deque</b></td><td>array + head/tail, push/pop both ends mod cap</td></tr>
-<tr><td><b>Front-Mid-Back Q</b></td><td>two deques, rebalance to keep sizes even</td></tr>
-<tr><td><b>Stack w/ Increment</b></td><td>stack + lazy increment-delta array</td></tr>
-<tr><td><b>Online Stock Span</b></td><td>monotonic stack of (price, span)</td></tr>
+<tr><td><b>Queue via 2 stacks</b> (#3)</td><td>in-stack + out-stack; pour in→out only when out empty. <b>Amortized O(1)</b>.</td></tr>
+<tr><td><b>Stack via queues</b> (#4)</td><td>on push, enqueue then rotate n-1 → newest at front. push O(n), pop O(1).</td></tr>
+<tr><td><b>Circular Queue/Deque</b> (#5,6)</td><td>fixed array + head/tail mod cap; track size to tell full from empty.</td></tr>
+<tr><td><b>Front-Mid-Back Q</b> (#7)</td><td>two deques, rebalance so <code>left.size</code>∈{right, right+1}.</td></tr>
+<tr><td><b>Stack w/ Increment</b> (#8)</td><td>stack + lazy <code>inc[]</code> delta array; apply on pop.</td></tr>
+<tr><td><b>Online Stock Span</b> (#9)</td><td>monotonic stack of <code>(price, span)</code>; pop ≤ current, sum spans.</td></tr>
 </tbody></table>
-<p class="cap"><span class="warn">!</span> Two-stack queue is O(1) <b>amortized</b>, not worst-case.</p>
+<p><span class="warn">!</span> Two-stack queue is O(1) <b>amortized</b>, not worst-case — say "amortized" aloud. <span class="warn">!</span> Circular buffer: reserve a size counter or one empty slot to disambiguate full vs empty.</p>
 </section>
 
-<section class="card"><h3>B · Lists · Iterators · Editors</h3>
+<section class="card"><h3>Iterators — Lazy Traversal</h3>
+<p><b>Rule:</b> do work in <code>next()</code>/<code>hasNext()</code>, <b>never eager-flatten</b> in the constructor (that's O(n) space and defeats the point).</p>
 <table><tbody>
-<tr><td><b>Design Linked List</b></td><td>sentinel head, walk by index</td></tr>
-<tr><td><b>Browser History</b></td><td>array + cursor (or two stacks)</td></tr>
-<tr><td><b>BST Iterator</b></td><td>controlled inorder via explicit stack, O(h) space</td></tr>
-<tr><td><b>Peeking Iterator</b></td><td>cache one lookahead element</td></tr>
-<tr><td><b>Nested List Iterator</b></td><td>stack of iterators / flatten lazily</td></tr>
-<tr><td><b>Flatten 2D Vector</b></td><td>row + col cursors, skip empties</td></tr>
-<tr><td><b>Zigzag Iterator</b></td><td>queue of active iterators, round-robin</td></tr>
-<tr><td><b>RLE Iterator</b></td><td>index into (count,val) pairs, decrement</td></tr>
-<tr><td><b>Iterator for Combo</b></td><td>bitmask / next-combination in lex order</td></tr>
-<tr><td><b>Text Editor</b></td><td>two stacks split at cursor (gap buffer)</td></tr>
+<tr><td><b>BST Iterator</b> (#12)</td><td>explicit stack, push-left chain; <code>next</code>=pop+push-right's-left. O(h) space, amort O(1).</td></tr>
+<tr><td><b>Peeking Iterator</b> (#13)</td><td>cache one lookahead element + hasPeeked flag.</td></tr>
+<tr><td><b>Nested List</b> (#14)</td><td>stack of iterators; peel integers lazily in hasNext.</td></tr>
+<tr><td><b>Zigzag</b> (#16)</td><td>queue of active sub-iterators, round-robin, drop empties.</td></tr>
+<tr><td><b>Flatten 2D</b> (#15)</td><td>row+col cursors; advance past empty rows in hasNext.</td></tr>
+<tr><td><b>RLE / Compressed</b> (#17,40)</td><td>index into (count,val) pairs, decrement remaining.</td></tr>
+<tr><td><b>Combination</b> (#18)</td><td>bitmask / next-combination in lex order.</td></tr>
 </tbody></table>
-<p class="cap"><span class="warn">!</span> Lazy iterators: do work in <code>next()</code>/<code>hasNext()</code>, not the constructor.</p>
+<p><span class="warn">!</span> BST iterator: the invariant is "stack top = next smallest". <span class="warn">!</span> Put the skip-empties logic in <code>hasNext</code>, and make <code>next</code> call it first.</p>
 </section>
 
-<section class="card"><h3>C · Hashing &amp; O(1)</h3>
+<section class="card"><h3>Linked List · History · Editor</h3>
 <table><tbody>
-<tr><td><b>Design HashMap/Set</b></td><td>array of buckets + chaining, hash = key % size</td></tr>
-<tr><td><b>Insert/Del/Random</b></td><td>list + value→index map; swap-with-last on delete</td></tr>
-<tr><td><b>... Duplicates</b></td><td>same, but map value → set of indices</td></tr>
-<tr><td><b>All O(1)</b></td><td>doubly linked list of count-buckets + key map</td></tr>
-<tr><td><b>Number Container</b></td><td>map idx→num + num→sorted set of idx</td></tr>
-<tr><td><b>Phone Directory</b></td><td>free-set / queue of available slots</td></tr>
-<tr><td><b>Snapshot Array</b></td><td>per-index sorted (snapId → val), binary search</td></tr>
-<tr><td><b>Bitset</b></td><td>bit array + flip-flag for O(1) flipAll</td></tr>
-</tbody></table>
-<p class="cap"><span class="warn">!</span> Random-in-O(1) needs a <b>contiguous array</b>; the map tracks positions.</p>
+<tr><td><b>Design Linked List</b> (#10)</td><td>sentinel head, walk by index; track size for bounds.</td></tr>
+<tr><td><b>Browser History</b> (#11)</td><td>array + cursor; <code>visit</code> truncates forward stack. back/forward clamp by steps.</td></tr>
+<tr><td><b>Text Editor</b> (#19)</td><td><b>two stacks split at cursor</b> (gap buffer): left holds text before cursor, right after. move/insert/delete = shuffle between stacks, all O(moved).</td></tr>
+</table>
+<p><span class="warn">!</span> Browser <code>visit</code> must <b>discard</b> everything after the cursor. <span class="warn">!</span> Editor: cursor moves are O(k) for k chars moved — a StringBuilder gives O(n) deletes, the two-stack gap buffer gives O(1) at the cursor.</p>
 </section>
 
-<section class="card"><h3>D · Caches &amp; Memory</h3>
+<section class="card"><h3>Design HashMap / HashSet (#20–21)</h3>
+<p><b>Structure:</b> fixed array of buckets + <b>separate chaining</b> (linked list / list per bucket). <b>Invariant:</b> a key lives in bucket <code>hash(key) % B</code>. Avg O(1), worst O(n/B).</p>
+<pre><code>put(k,v): b=buckets[k%B]; find node → update else append
+get(k):   scan bucket b for k
+remove(k):unlink from bucket list</code></pre>
+<p>Pick B prime-ish (e.g. 769) to spread hashes. <span class="warn">!</span> Interviewers want the <b>collision strategy</b> stated (chaining vs open addressing) — don't just wrap the language map.</p>
+</section>
+
+<section class="card"><h3>Tries &amp; Prefix Search</h3>
+<p><b>Structure:</b> node = children map (26-array or dict) + <code>isEnd</code>. <b>Invariant:</b> path from root spells the prefix; isEnd marks a full word.</p>
+<pre><code>insert(w): node=root; for c: node=node.child[c] or new; node.isEnd=true
+search(w): walk; return node &amp;&amp; node.isEnd
+startsWith(p): walk; return node!=null</code></pre>
 <table><tbody>
-<tr><td><b>LRU Cache</b></td><td>hashmap + doubly linked list; move-to-front on use</td></tr>
-<tr><td><b>LFU Cache</b></td><td>freq→DLL of nodes + key map + minFreq pointer</td></tr>
-<tr><td><b>MRU Queue</b></td><td>fenwick/sqrt-decomp for O(√n) fetch, or BIT</td></tr>
-<tr><td><b>Memory Allocator</b></td><td>id→intervals; scan/free array of mIDs</td></tr>
+<tr><td><b>Add/Search Words</b> (#34)</td><td>trie + DFS branching on <code>.</code> wildcard.</td></tr>
+<tr><td><b>Magic Dictionary</b> (#35)</td><td>DFS allowing exactly one char mismatch.</td></tr>
+<tr><td><b>Stream of Characters</b> (#36)</td><td>trie of <b>reversed</b> words; match a growing suffix of the stream (keep last L chars).</td></tr>
+<tr><td><b>Autocomplete</b> (#39)</td><td>trie + top-3 by frequency (heap/sort at node).</td></tr>
+<tr><td><b>In-Memory FS</b> (#41)</td><td>trie of dir/file nodes (name→node).</td></tr>
 </tbody></table>
-<p class="cap">LRU: <code>OrderedDict</code> (Py) / <code>LinkedHashMap</code> (Java) collapse the DLL. <span class="warn">!</span> Update recency on <b>get</b> too.</p>
+<p><span class="warn">!</span> Stream-of-chars: reversing words lets you match against the reversed recent stream — otherwise you'd re-scan every prefix.</p>
 </section>
 
-<section class="card"><h3>E · Tries &amp; Strings</h3>
+<section class="card"><h3>Encode/Decode · TinyURL</h3>
+<p><b>Encode Strings (#37):</b> <b>length-prefix</b> each string: <code>len#payload</code>. <b>Invariant:</b> decode reads a number up to <code>#</code>, then exactly that many chars — unambiguous for any payload.</p>
+<pre><code>encode: ''.join(f"{len(s)}#{s}" for s in strs)
+decode: read digits→n, skip '#', take n chars, repeat</code></pre>
+<p><span class="warn">!</span> A plain delimiter (comma/space) <b>breaks</b> when the payload contains it — length-prefix is the correct answer. <b>TinyURL (#38):</b> two maps long↔short + counter or random 6-char base62 code; check collision on random.</p>
+</section>
+
+<section class="card"><h3>Serialize / Deserialize Trees</h3>
 <table><tbody>
-<tr><td><b>Trie</b></td><td>26-way children + isEnd flag</td></tr>
-<tr><td><b>Add/Search Words</b></td><td>trie + DFS on <code>.</code> wildcard</td></tr>
-<tr><td><b>Magic Dictionary</b></td><td>trie + DFS allowing exactly one mismatch</td></tr>
-<tr><td><b>Stream of Characters</b></td><td>trie of <b>reversed</b> words, match suffix of stream</td></tr>
-<tr><td><b>Encode/Decode Strings</b></td><td>length-prefix each: <code>len#payload</code></td></tr>
-<tr><td><b>TinyURL</b></td><td>two maps long↔short, counter or random code</td></tr>
-<tr><td><b>Autocomplete</b></td><td>trie + heap/sort top-3 by frequency</td></tr>
-<tr><td><b>Compressed Str Iter</b></td><td>parse letter+count lazily, decrement</td></tr>
-<tr><td><b>In-Memory FS</b></td><td>trie of dir/file nodes (map name→node)</td></tr>
+<tr><td><b>Binary Tree</b> (#42)</td><td>preorder with <b>null markers</b> ("#"); rebuild by consuming the same order (queue/index).</td></tr>
+<tr><td><b>BST</b> (#43)</td><td>preorder <b>only, no nulls</b> — BST bounds (min,max) reconstruct shape. More compact.</td></tr>
+<tr><td><b>N-ary</b> (#44)</td><td>preorder + <b>child-count</b> per node (or null sentinel after each child list).</td></tr>
 </tbody></table>
-<p class="cap"><span class="warn">!</span> Encode: delimiter-splitting breaks; <b>length-prefix</b> is unambiguous.</p>
+<pre><code># binary tree
+ser(n): "#" if !n else f"{n.val},{ser(L)},{ser(R)}"
+des():  v=next; if v=="#" ret null; node; node.L=des(); node.R=des()</code></pre>
+<p><span class="warn">!</span> BST trick: don't emit nulls — use value bounds while rebuilding. <span class="warn">!</span> Keep a single cursor/queue so left subtree fully consumes before right.</p>
 </section>
 
-<section class="card"><h3>F · Trees · Heaps · Streams</h3>
+<section class="card"><h3>Heaps — Median · Top-K · Streams</h3>
+<p><b>Median from Stream (#45):</b> max-heap <code>low</code> + min-heap <code>high</code>. <b>Invariant:</b> every low ≤ every high, and <code>|low|−|high|∈{0,1}</code>. median = low.top or avg of tops. add O(log n).</p>
+<pre><code>add(x): low.push(x); high.push(low.pop())     # funnel
+        if high&gt;low: low.push(high.pop())     # rebalance</code></pre>
 <table><tbody>
-<tr><td><b>Serialize Binary Tree</b></td><td>preorder + null markers; queue to rebuild</td></tr>
-<tr><td><b>Serialize BST</b></td><td>preorder only; BST bounds reconstruct (no nulls)</td></tr>
-<tr><td><b>Serialize N-ary</b></td><td>preorder + child-count (or null sentinel)</td></tr>
-<tr><td><b>Median from Stream</b></td><td>max-heap (low) + min-heap (high), balanced</td></tr>
-<tr><td><b>Kth Largest Stream</b></td><td>min-heap of size k; top = answer</td></tr>
-<tr><td><b>Stock Price Fluct</b></td><td>map ts→price + two heaps (lazy-delete stale)</td></tr>
-<tr><td><b>Food Rating System</b></td><td>per-cuisine heap/TreeSet by (rating, name)</td></tr>
+<tr><td><b>Kth Largest Stream</b> (#46)</td><td>size-k <b>min-heap</b>; top = kth largest; push+pop if over k.</td></tr>
+<tr><td><b>Stock Price Fluct</b> (#47)</td><td>map ts→price + max-heap + min-heap with <b>lazy deletion</b> of stale entries.</td></tr>
+<tr><td><b>Food Rating</b> (#48)</td><td>per-cuisine heap/TreeSet by (−rating, name); lazy-skip stale.</td></tr>
 </tbody></table>
-<p class="cap"><span class="warn">!</span> Two-heap median: keep sizes within 1; rebalance every insert.</p>
+<p><span class="warn">!</span> Median: rebalance <b>every</b> insert; funnel-through the other heap to keep them ordered. <span class="warn">!</span> Kth-largest wants a <b>min</b>-heap of size k, not a max-heap.</p>
 </section>
 
-<section class="card"><h3>F · (cont.) Graph</h3>
+<section class="card"><h3>Lazy-Delete Heaps &amp; Leaderboards</h3>
+<p><b>Pattern:</b> heaps have no decrease-key/remove. When a value changes, <b>push the new</b> entry and mark the old stale; on <code>top()</code>, discard heap-tops that disagree with the authoritative map. Amortized O(log n).</p>
+<pre><code>top(): while heap.top disagrees with map[key]: pop
+       return heap.top</code></pre>
 <table><tbody>
-<tr><td><b>Leaderboard</b></td><td>map player→score; top(K) = sort/heap the scores</td></tr>
-<tr><td><b>Graph Shortest Path</b></td><td>adjacency + Dijkstra per query (or Floyd-Warshall)</td></tr>
+<tr><td><b>Leaderboard</b> (#49)</td><td>map player→score; top(K)=heapify/sort the K largest scores.</td></tr>
+<tr><td><b>Graph Shortest Path</b> (#50)</td><td>adjacency list + Dijkstra per query (heap), or Floyd-Warshall if dense/many queries.</td></tr>
 </tbody></table>
-<p class="cap">Lazy-delete pattern: push new, discard heap-top if it disagrees with the source-of-truth map.</p>
+<p><span class="warn">!</span> Lazy delete grows the heap with dead entries — fine for amortized bounds, but state it. Keep the <b>map as source of truth</b>.</p>
 </section>
 
-<section class="card"><h3>G · Time · Rate · Calendar</h3>
+<section class="card"><h3>Versioned · Sparse · Bitset</h3>
 <table><tbody>
-<tr><td><b>Logger Rate Limiter</b></td><td>map msg→next-allowed timestamp</td></tr>
-<tr><td><b>Hit Counter</b></td><td>queue of timestamps; evict older than 300s</td></tr>
-<tr><td><b>Moving Average</b></td><td>fixed-size ring buffer + running sum</td></tr>
-<tr><td><b>My Calendar I</b></td><td>TreeMap of intervals; check neighbor overlap</td></tr>
-<tr><td><b>My Calendar II</b></td><td>sweep-line / two lists (booked + overlaps)</td></tr>
-<tr><td><b>My Calendar III</b></td><td>diff map (+1 start, -1 end), max prefix sum</td></tr>
-<tr><td><b>Auth Manager</b></td><td>map token→expiry; renew/lazy-expire</td></tr>
-<tr><td><b>ATM Machine</b></td><td>5 denom counts; greedy largest-first, dry-run</td></tr>
+<tr><td><b>Snapshot Array</b> (#27)</td><td>per-index list of <code>(snapId,val)</code>; <code>get</code>=binary search ≤ snapId. <code>snap()</code> just bumps a counter — O(1). <span class="warn">!</span> don't copy the whole array per snap.</td></tr>
+<tr><td><b>Number Container</b> (#25)</td><td>map idx→num + num→<b>sorted set</b> of idx; find=min idx for that num.</td></tr>
+<tr><td><b>Phone Directory</b> (#26)</td><td>free-set / queue of available slots + released set.</td></tr>
+<tr><td><b>Bitset</b> (#28)</td><td>bit array + a <b>flip flag</b>; <code>flipAll</code> toggles the flag in O(1), reads XOR it.</td></tr>
 </tbody></table>
-<p class="cap"><span class="warn">!</span> Calendar III: the <b>difference array + running max</b> is the clean K-booking pattern.</p>
+<p><span class="warn">!</span> Bitset: track <code>ones</code> count so <code>all</code>/<code>one</code> are O(1); on flipAll, <code>ones = n − ones</code>.</p>
 </section>
 
-<section class="card"><h3>H · OO Systems &amp; Games</h3>
+<section class="card"><h3>Time · Rate Limit · Calendar</h3>
 <table><tbody>
-<tr><td><b>Design Twitter</b></td><td>follow map + per-user tweet list; merge k heaps for feed</td></tr>
-<tr><td><b>Underground System</b></td><td>check-in map + (start,end)→(total,count) averages</td></tr>
-<tr><td><b>Parking System</b></td><td>3 counters by size</td></tr>
-<tr><td><b>Snake Game</b></td><td>deque body + set for O(1) self-collision</td></tr>
-<tr><td><b>Tic-Tac-Toe</b></td><td>row/col/diag counters, +1/-1 per player</td></tr>
-<tr><td><b>Movie Rental</b></td><td>maps + TreeSet/heap per movie (avail) + rented set</td></tr>
-<tr><td><b>Video Platform</b></td><td>id recycler (min-heap) + per-video stats maps</td></tr>
-<tr><td><b>Todo List</b></td><td>per-user tasks; filter by tag, sort by due date</td></tr>
+<tr><td><b>Logger Rate Limiter</b> (#51)</td><td>map msg→next-allowed ts; allow iff <code>t ≥ next</code>.</td></tr>
+<tr><td><b>Hit Counter</b> (#52)</td><td>queue of timestamps; evict &gt; 300s old on each op.</td></tr>
+<tr><td><b>Moving Average</b> (#53)</td><td>fixed ring buffer + running sum; O(1).</td></tr>
+<tr><td><b>Calendar I</b> (#54)</td><td>TreeMap start→end; check floor/ceiling neighbor overlap. O(log n).</td></tr>
+<tr><td><b>Calendar II</b> (#55)</td><td>keep <code>booked</code> + <code>overlaps</code> lists; reject if new hits an overlap.</td></tr>
+<tr><td><b>Calendar III</b> (#56)</td><td><b>difference map</b>: +1 at start, −1 at end; answer = running max of prefix sums.</td></tr>
+<tr><td><b>Auth Manager</b> (#57)</td><td>map token→expiry; renew resets, lazy-expire on read.</td></tr>
+<tr><td><b>ATM</b> (#58)</td><td>5 denom counts; greedy largest-first with a <b>dry-run</b> before committing.</td></tr>
 </tbody></table>
-<p class="cap"><span class="warn">!</span> Twitter feed: don't merge all tweets — <b>heap the k followees' latest</b>.</p>
+<p><span class="warn">!</span> Calendar III: the <b>diff-array + running max</b> is the clean k-booking pattern (a TreeMap of deltas keeps it ordered). <span class="warn">!</span> ATM: dry-run first — never partially dispense then fail.</p>
 </section>
 
-<section class="card"><h3>I · Range Query &amp; Advanced</h3>
+<section class="card"><h3>Range Sum — Prefix vs BIT vs SegTree</h3>
+<p><b>Immutable 1D (#67):</b> prefix array, <code>sum(i,j)=P[j+1]−P[i]</code>, query O(1). <b>Mutable 1D (#68):</b> Fenwick (BIT) — update &amp; query O(log n).</p>
+<pre><code># Fenwick (1-indexed)
+update(i,d): for(;i&lt;=n;i+=i&amp;-i) t[i]+=d
+query(i):    for(s=0;i&gt;0;i-=i&amp;-i) s+=t[i]; ret s
+rangeSum(l,r)=query(r)-query(l-1)</code></pre>
 <table><tbody>
-<tr><td><b>Range Sum (immutable)</b></td><td>prefix-sum array, query = P[j+1]-P[i]</td></tr>
-<tr><td><b>Range Sum (mutable)</b></td><td>Fenwick (BIT) / segment tree, O(log n)</td></tr>
-<tr><td><b>Range Sum 2D immut.</b></td><td>2D prefix sums, inclusion-exclusion</td></tr>
-<tr><td><b>Range Sum 2D mutable</b></td><td>2D BIT, O(log m · log n)</td></tr>
-<tr><td><b>Skiplist</b></td><td>randomized multi-level linked list, O(log n) exp.</td></tr>
-<tr><td><b>Excel Sum Formula</b></td><td>cell graph + topological recompute on set</td></tr>
+<tr><td><b>2D Immutable</b> (#69)</td><td>2D prefix sums, inclusion-exclusion; query O(1).</td></tr>
+<tr><td><b>2D Mutable</b> (#70)</td><td>2D BIT; update &amp; query O(log m·log n).</td></tr>
 </tbody></table>
-<p class="cap">Prefix sums = <b>immutable</b>; BIT/segtree = <b>point-update + range-query</b>.</p>
+<p><span class="warn">!</span> Prefix sums = <b>static</b> only; a single point update forces O(n) rebuild — switch to BIT/segtree once updates appear. BIT indices are <b>1-based</b>.</p>
 </section>
 
-<section class="card"><h3>&#9744; Interview Playbook</h3>
+<section class="card"><h3>Memory Allocator · Skiplist · Excel</h3>
+<table><tbody>
+<tr><td><b>MRU Queue</b> (#31)</td><td>Fenwick / sqrt-decomposition for O(√n) or O(log n) fetch-to-front.</td></tr>
+<tr><td><b>Memory Allocator</b> (#32)</td><td>array of mIDs (0=free); <code>allocate</code> scans for a run of size, <code>free</code> clears an id.</td></tr>
+<tr><td><b>Skiplist</b> (#71)</td><td>randomized multi-level linked list; coin-flip level on insert. search/add/erase O(log n) expected — simpler code than a balanced BST.</td></tr>
+<tr><td><b>Excel Sum Formula</b> (#72)</td><td>cell dependency graph; <code>set</code> clears formula, <code>sum</code> stores deps + topologically recomputes dependents.</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> Skiplist: cap max level (~16); update-pointer array per level on insert/delete. <span class="warn">!</span> Excel: a <code>set</code> on a formula cell must break its old dependencies.</p>
+</section>
+
+<section class="card"><h3>OO Systems &amp; Games</h3>
+<table><tbody>
+<tr><td><b>Design Twitter</b> (#59)</td><td>follow map + per-user tweet list (with global tick); feed = <b>merge k</b> followees' latest via heap, take 10.</td></tr>
+<tr><td><b>Underground System</b> (#60)</td><td>checkIn map id→(station,t) + (start,end)→(totalTime,count) for O(1) average.</td></tr>
+<tr><td><b>Parking System</b> (#61)</td><td>3 size counters, decrement on park.</td></tr>
+<tr><td><b>Snake Game</b> (#62)</td><td>deque body + <b>set</b> for O(1) self-collision; pop tail before checking (unless eating).</td></tr>
+<tr><td><b>Tic-Tac-Toe</b> (#63)</td><td>row/col/diag/anti counters +1/−1 per player; win when |count|==n.</td></tr>
+<tr><td><b>Movie Rental</b> (#64)</td><td>maps + per-movie TreeSet(price,shop) available + global rented TreeSet.</td></tr>
+<tr><td><b>Video Platform</b> (#65)</td><td>id recycler (min-heap of freed ids) + per-video stat maps.</td></tr>
+<tr><td><b>Todo List</b> (#66)</td><td>per-user tasks; filter by tag, sort by due date.</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> Twitter: don't merge <b>all</b> tweets — heap only the k followees' newest. <span class="warn">!</span> Snake: check collision <b>after</b> removing the tail, or a straight follow-the-tail move false-triggers.</p>
+</section>
+
+<section class="card"><h3>Symptom → Cause</h3>
+<table><thead><tr><th>Symptom</th><th>Likely cause</th></tr></thead><tbody>
+<tr><td>LRU evicts wrong item</td><td>get() didn't update recency</td></tr>
+<tr><td>LFU evicts wrong item</td><td>minFreq not reset to 1 on insert; no per-freq LRU order</td></tr>
+<tr><td>getMin/Max drifts</td><td>emptied bucket not unlinked</td></tr>
+<tr><td>random not uniform</td><td>array has gaps — use swap-with-last</td></tr>
+<tr><td>decode wrong</td><td>delimiter in payload — length-prefix it</td></tr>
+<tr><td>median off-by-one</td><td>heaps not rebalanced every insert</td></tr>
+<tr><td>kth-largest wrong</td><td>used max-heap; need size-k min-heap</td></tr>
+<tr><td>circular buffer full==empty</td><td>no size counter / reserved slot</td></tr>
+<tr><td>iterator TLE / OOM</td><td>eager-flattened in constructor</td></tr>
+<tr><td>range update O(n)</td><td>prefix sums where BIT was needed</td></tr>
+<tr><td>stale heap top</td><td>forgot lazy-delete check vs map</td></tr>
+</tbody></table>
+</section>
+
+<section class="card"><h3>&#9733; Interview Playbook</h3>
 <ul>
-<li>&#9744; Restate the ops + each op's target complexity <i>before</i> coding.</li>
-<li>&#9744; Say the structure out loud + <b>why</b> it hits the target.</li>
-<li>&#9744; O(1) get/put/evict → hashmap + DLL (LRU); order-by-freq → freq buckets (LFU).</li>
-<li>&#9744; O(1) random → array + index map, swap-with-last delete.</li>
-<li>&#9744; Running min/median/top-k → heap(s); "top of stream" → size-k min-heap.</li>
+<li>&#9744; Restate the ops + <b>each op's target complexity</b> before coding.</li>
+<li>&#9744; Name the structure out loud + <b>why</b> it hits the target.</li>
+<li>&#9744; O(1) get/put/evict → hashmap + DLL (LRU); order-by-freq → freq-bucket DLLs (LFU).</li>
+<li>&#9744; O(1) insert/delete/random → array + index map, <b>swap-with-last</b>.</li>
+<li>&#9744; O(1) min/max + inc/dec → <b>sorted count-bucket DLL</b>, not a heap.</li>
+<li>&#9744; Running median → two heaps, rebalanced every insert; top-of-stream → size-k min-heap.</li>
 <li>&#9744; Prefix / ordered / bounds → trie or TreeMap/BST.</li>
-<li>&#9744; Range sum + updates → BIT; static → prefix sums.</li>
-<li>&#9744; Overlap/booking → sorted map or difference-array sweep.</li>
-<li>&#9744; State the invariant maintained between calls; then edge cases (empty, full, dup, wraparound).</li>
-<li>&#9744; Mention the stdlib shortcut (<code>OrderedDict</code>, <code>LinkedHashMap</code>, <code>TreeMap</code>, <code>heapq</code>, <code>container/list</code>).</li>
+<li>&#9744; Range sum: static → prefix; with updates → BIT/segtree (1-indexed).</li>
+<li>&#9744; Overlap/booking → TreeMap neighbors or <b>diff-array sweep</b> + running max.</li>
+<li>&#9744; Iterators: lazy — work in next()/hasNext(), never the constructor.</li>
+<li>&#9744; Encode: <b>length-prefix</b>, never a bare delimiter.</li>
+<li>&#9744; State the <b>invariant</b> held between calls; then edges: empty, full, dup, wraparound, missing key.</li>
+<li>&#9744; Mention the stdlib shortcut (<code>OrderedDict</code>, <code>LinkedHashMap</code>, <code>TreeMap</code>, <code>heapq</code>, <code>SortedList</code>) but be ready to hand-roll it.</li>
 </ul>
 </section>
 

@@ -72,13 +72,14 @@ pre code{background:none; padding:0; font-size:1em;}
 </head>
 <body>
 <div class="sheet">
-<div class="titlebar"><h1>CI/CD Cheat Sheet</h1><span class="meta">platform/DevOps focus · pipelines · GH Actions/GitLab · deploy strategies · drilly</span></div>
+<div class="titlebar"><h1>CI/CD Cheat Sheet</h1><span class="meta">platform/DevOps focus · pipelines · GH Actions/GitLab · deploy strategies · supply chain · DORA · drilly</span></div>
 <section class="card legend"><h3>How to read &amp; print</h3>
 <ul>
-<li><span class="warn">!</span> footgun / anti-pattern &nbsp; <code>&#9744;</code> pipeline-review item</li>
-<li>Focus: the pipeline model, GitHub Actions &amp; GitLab CI, deployment strategies, artifacts, and the path to prod.</li>
-<li>Golden rule: <b>build the artifact ONCE, promote the same one</b> dev→prod. Never rebuild per environment.</li>
-<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+<li><span class="warn">!</span> footgun / anti-pattern &nbsp; <code>&#9744;</code> pipeline-review item &nbsp; <span class="pg">GH</span> GitHub Actions &nbsp; <span class="ansi">GL</span> GitLab</li>
+<li>Focus: the pipeline model, CI hygiene, GitHub Actions &amp; GitLab CI at scale, artifacts/caching, deployment strategies, GitOps, secrets &amp; supply-chain, observability/rollback, DORA.</li>
+<li>Golden rule: <b>build the artifact ONCE, promote the same digest</b> dev→staging→prod. Never rebuild per environment <span class="warn">!</span></li>
+<li>Second rule: <b>deploy &ne; release</b>. Ship code dark, release with a flag. Make bad deploys <i>cheap</i> (fast detect + fast rollback), not impossible.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in. Last 2 cards = spot-the-bug table + review checklist.</li>
 </ul></section>
 
 <section class="card diagram"><h3>Commit → Production</h3>
@@ -92,93 +93,206 @@ flowchart LR
   G --> P["deploy prod<br/>rolling/blue-green/canary"]
   P --> O["observe → rollback?"]
 </div>
-<p class="cap">CI = integrate + build + test every change. CD = deliver (human gate) or deploy (auto) that artifact to prod, safely, with rollback.</p>
+<p class="cap">CI = integrate + build + test every change, keep main green. CD = deliver (human gate) or deploy (auto) <b>that same artifact</b> to prod, safely, with a tested rollback. Everything right of the artifact box is a re-point, never a rebuild.</p>
 </section>
 
 <section class="card"><h3>CI vs CD &amp; Pipeline Model</h3>
 <table><thead><tr><th>Term</th><th>Means</th></tr></thead><tbody>
-<tr><td>CI</td><td>merge often + auto build/test; keep main green</td></tr>
-<tr><td>Continuous <b>Delivery</b></td><td>every green build is <b>releasable</b>; human clicks deploy</td></tr>
-<tr><td>Continuous <b>Deployment</b></td><td>every green build <b>auto-ships</b> to prod</td></tr>
+<tr><td>CI</td><td>merge often + auto build/test on every change; keep main green</td></tr>
+<tr><td>Continuous <b>Delivery</b></td><td>every green build is <b>releasable</b>; a human clicks deploy</td></tr>
+<tr><td>Continuous <b>Deployment</b></td><td>every green build <b>auto-ships</b> to prod, no human</td></tr>
 </tbody></table>
 <ul>
-<li>Pipeline = <b>stages → jobs → steps</b>, triggered by events (push/PR/tag/cron/manual).</li>
-<li>Jobs run in parallel; use a <b>DAG</b> (needs/depends_on) for order → faster.</li>
-<li><b>Pipeline-as-code</b> in the repo (reviewed, versioned) &gt; click-configured jobs.</li>
+<li>Pipeline = <b>stages → jobs → steps</b>, fired by events: push / PR / tag / cron / manual / API.</li>
+<li>Jobs in a stage run in <b>parallel</b>; model dependencies as a <b>DAG</b> (<code>needs</code>/<code>depends_on</code>) so a job starts the moment its inputs are ready, not when the whole stage finishes.</li>
+<li><b>Pipeline-as-code</b> lives in the repo — reviewed, versioned, diffable. Beats click-configured jobs you can't audit <span class="warn">!</span></li>
+<li>Runner/executor picks up a job, provisions a clean env (VM/container), runs steps, reports status back to the commit.</li>
 </ul>
 </section>
 
-<section class="card"><h3>CI Practices</h3>
+<section class="card"><h3>CI Practices &amp; Hygiene</h3>
 <ul>
-<li><b>Trunk-based</b>: short-lived branches, merge within a day — no long feature branches / merge hell <span class="warn">!</span></li>
-<li><b>Keep main green</b>: branch protection, required checks, required reviews, no direct pushes.</li>
-<li><b>Merge queue / trains</b>: serialize merges so two individually-green PRs can't break main together.</li>
-<li>Fast feedback (minutes) — parallelize/cache/split; a slow CI kills the practice <span class="warn">!</span></li>
-<li>Feature flags let you <b>merge incomplete work</b> safely (deploy ≠ release).</li>
+<li><b>Trunk-based</b>: short-lived branches, merge to main within a day. Long-lived feature branches → integration/merge hell <span class="warn">!</span></li>
+<li><b>Keep main green</b>: branch protection — required status checks, required reviews, no direct pushes, linear history.</li>
+<li><b>Merge queue / trains</b>: serialise merges and re-test each PR against the <i>updated</i> main, so two individually-green PRs can't combine to break it (semantic merge conflict) <span class="warn">!</span></li>
+<li><b>Fast feedback</b> (single-digit minutes): parallelise, cache deps, shard tests, build only affected packages. A 40-min CI kills the practice — people stop running it <span class="warn">!</span></li>
+<li><b>Feature flags</b> let you merge incomplete work behind an off switch — deploy &ne; release, branches stay short.</li>
+<li>Every push runs the <b>same</b> pipeline; PR pipeline is a subset (no deploy). One source of truth for "is it green."</li>
 </ul>
 </section>
 
-<section class="card"><h3>GitHub Actions</h3>
+<section class="card"><h3><span class="pg">GH</span> GitHub Actions — Fundamentals</h3>
 <pre><code>name: ci
-on: { push: { branches: [main] }, pull_request: {} }
-permissions: { contents: read, id-token: write }  # OIDC
+on:
+  push: { branches: [main] }
+  pull_request: {}
+permissions:
+  contents: read          # least-priv floor
+concurrency:              # cancel superseded runs
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   build:
     runs-on: ubuntu-latest
-    strategy: { matrix: { node: [20, 22] } }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: ${{ matrix.node }} }
+        with: { node-version: 20, cache: npm }
       - run: npm ci &amp;&amp; npm test
       - uses: actions/upload-artifact@v4
-        with: { name: dist, path: dist/ }
-  deploy:
-    needs: build
-    environment: production        # required reviewers gate
-    steps:
-      - uses: aws-actions/configure-aws-credentials@v4
-        with: { role-to-assume: arn:aws:iam::123:role/deploy }</code></pre>
+        with: { name: dist, path: dist/ }</code></pre>
 <ul>
-<li>Pin third-party actions by <b>commit SHA</b>; scope <code>permissions:</code> least-privilege.</li>
-<li>Reusable workflows (<code>workflow_call</code>) &amp; composite actions for DRY; <code>concurrency</code> to cancel dupes.</li>
+<li><b>Hierarchy</b>: workflow → jobs (parallel, own runner) → steps (sequential, share filesystem). Order jobs with <code>needs:</code>.</li>
+<li>Pin third-party actions by <b>commit SHA</b>, not a tag — a tag can be moved to malicious code <span class="warn">!</span></li>
+<li>Contexts: <code>${{ github.sha }}</code>, <code>secrets.*</code>, <code>env.*</code>, <code>needs.x.outputs.*</code>.</li>
 </ul>
 </section>
 
-<section class="card"><h3>GitLab CI</h3>
+<section class="card"><h3><span class="pg">GH</span> Actions at Scale</h3>
+<h4>Matrix — fan one job into N</h4>
+<pre><code>strategy:
+  fail-fast: false        # let every combo finish !
+  max-parallel: 4
+  matrix:
+    node: [18, 20, 22]
+    os: [ubuntu-latest, windows-latest]
+    include: [{ node: 20, os: ubuntu-latest, cov: true }]
+    exclude: [{ node: 18, os: windows-latest }]
+runs-on: ${{ matrix.os }}</code></pre>
+<p><code>fail-fast:true</code> (default) cancels siblings on first fail — you lose the full failure picture.</p>
+<h4>Reusable workflow vs composite action</h4>
+<table><thead><tr><th></th><th>Reusable wf</th><th>Composite</th></tr></thead><tbody>
+<tr><td>reuses</td><td>whole <b>jobs</b></td><td><b>steps</b></td></tr>
+<tr><td>called by</td><td><code>jobs.x.uses</code></td><td><code>steps: -uses</code></td></tr>
+<tr><td>own runner</td><td>yes</td><td>no (caller's)</td></tr>
+<tr><td><code>needs</code>/<code>environment</code>/matrix</td><td>yes</td><td>no</td></tr>
+</tbody></table>
+<p>Pipeline shared across 30 repos → reusable workflow (<code>workflow_call</code>). Repeated setup step-block → composite action.</p>
+</section>
+
+<section class="card"><h3>Cache vs Artifact — not the same tool</h3>
+<table><thead><tr><th></th><th>Artifact</th><th>Cache</th></tr></thead><tbody>
+<tr><td>purpose</td><td>preserve/share <b>outputs</b></td><td>speed via <b>reuse</b></td></tr>
+<tr><td>guaranteed present</td><td>yes (until retention)</td><td><b>no</b> — evictable</td></tr>
+<tr><td>content</td><td>binaries, dist/, reports</td><td><code>node_modules</code>, <code>~/.m2</code></td></tr>
+<tr><td>correctness may depend</td><td>yes</td><td><b>never</b> <span class="warn">!</span></td></tr>
+</tbody></table>
+<pre><code>- uses: actions/cache@v4
+  with:
+    path: ~/.npm
+    key: ${{ runner.os }}-npm-${{ hashFiles('package-lock.json') }}
+    restore-keys: ${{ runner.os }}-npm-</code></pre>
+<ul>
+<li>Exact <code>key</code> hit → restored, not re-saved. Prefix hit via <code>restore-keys</code> → nearest old cache restored, new one saved.</li>
+<li>Put the <b>lockfile hash in the key</b> or you serve stale deps <span class="warn">!</span> Caches are branch-scoped (read base/main, not siblings). Build must survive a <b>cold cache</b>.</li>
+</ul>
+</section>
+
+<section class="card"><h3><span class="pg">GH</span> OIDC &amp; Least-Privilege</h3>
+<p><b>OIDC = the #1 modern CI security upgrade.</b> No long-lived cloud keys stored anywhere: the run requests a short-lived signed identity token; the cloud, trusting GitHub's issuer, exchanges it for temporary role creds (mins).</p>
+<pre><code>permissions:
+  id-token: write     # REQUIRED to mint OIDC token
+  contents: read
+steps:
+  - uses: aws-actions/configure-aws-credentials@v4
+    with:
+      role-to-assume: arn:aws:iam::123:role/gha-deploy
+      aws-region: eu-west-1
+  - run: aws s3 sync ./dist s3://acme-app</code></pre>
+<ul>
+<li>IAM trust policy <b>conditions on the subject claim</b> — e.g. only <code>repo:acme/app:ref:refs/heads/main</code> can assume it.</li>
+<li>No static key to leak from a secret or log; rotation becomes a non-problem (no keys).</li>
+<li><code>permissions:</code> scopes <code>GITHUB_TOKEN</code> — every step incl. third-party actions gets it. Read-only floor, elevate per-job (<code>packages: write</code>) only where needed <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3><span class="pg">GH</span> Fork-PR Secret Leak <span class="warn">!</span></h3>
+<table><thead><tr><th>Trigger</th><th>On fork PR gets…</th></tr></thead><tbody>
+<tr><td><code>pull_request</code></td><td>PR code, <b>read-only</b> token, <b>no secrets</b> — safe</td></tr>
+<tr><td><code>pull_request_target</code></td><td><b>base</b> context, write token, <b>full secrets</b> — but triggered by fork</td></tr>
+</tbody></table>
+<pre><code># VULNERABLE — hands secrets to attacker's code
+on: pull_request_target
+steps:
+  - uses: actions/checkout@v4
+    with: { ref: ${{ github.event.pull_request.head.sha }} }
+  - run: npm ci   # fork's postinstall reads secrets, exfiltrates</code></pre>
+<ul>
+<li>Poisoned-pipeline / secret-exfiltration: a fork's lifecycle script (<code>postinstall</code>) reads <code>secrets</code>/token and POSTs it out.</li>
+<li><b>Fix</b>: run untrusted code under plain <code>pull_request</code> (no secrets). Reserve <code>pull_request_target</code> for tasks that don't check out/run PR code (labelling). Gate privileged follow-ups behind <code>workflow_run</code> or an environment approval after a maintainer reads the diff.</li>
+<li>Masking (<code>***</code>) is a safety net, not a guarantee — it misses transformed/base64'd values and can't stop exfiltration to an attacker's host <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3><span class="ansi">GL</span> GitLab CI/CD</h3>
 <pre><code>stages: [build, test, deploy]
 build:
   stage: build
   image: node:22
   script: [npm ci, npm run build]
-  artifacts: { paths: [dist/] }
+  artifacts: { paths: [dist/], expire_in: 1 week }
 test:
   stage: test
-  needs: [build]          # DAG — start early
+  needs: [build]          # DAG — start before stage done
   script: [npm test]
+  coverage: '/Lines\s*:\s*(\d+.\d+)%/'
 deploy_prod:
   stage: deploy
   environment: { name: production, url: https://acme.com }
-  rules: [{ if: '$CI_COMMIT_BRANCH == "main"', when: manual }]
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual        # click-to-deploy gate
   script: [./deploy.sh]</code></pre>
 <ul>
-<li><code>rules</code> (not only/except) decide when a job runs; <code>needs</code> = DAG.</li>
-<li><b>Review apps</b> = ephemeral env per MR; built-in Container Registry &amp; <code>CI_*</code> vars.</li>
-<li>Protected branches/variables gate prod; <code>include</code> for templates.</li>
+<li><code>rules</code> (modern) &gt; <code>only/except</code>: decide <i>if</i> a job runs; <code>needs</code> = DAG cross-stage.</li>
+<li><b>Review apps</b> = ephemeral env per MR; built-in Container Registry, <code>CI_*</code> vars, <code>include</code> for templates.</li>
+<li>Protected branches/variables gate prod; runners: shared/group/specific; <code>tags</code> to target executors.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Build · Test · Artifacts</h3>
+<section class="card"><h3>Build &amp; Test Stages</h3>
 <ul>
-<li>Build the artifact <b>once</b>; run the <b>test pyramid</b> (fast unit → integration → few e2e), gate merges on the fast layers.</li>
-<li>Speed: cache deps, <b>parallelize/shard</b> tests, affected-only builds in monorepos.</li>
-<li><b>Flaky tests</b> erode trust — quarantine &amp; fix, don't ignore <span class="warn">!</span></li>
+<li><b>Build once</b> up front; every downstream stage consumes that artifact — hermetic, reproducible, pinned toolchain.</li>
+<li><b>Test pyramid</b>: many fast <b>unit</b> → fewer <b>integration</b> → few <b>e2e/smoke</b>. Gate merges on the fast layers; run the slow ones post-merge / pre-deploy.</li>
 </ul>
-<h4>Artifacts</h4>
+<table><thead><tr><th>Layer</th><th>Speed / count</th></tr></thead><tbody>
+<tr><td>static (lint, typecheck, SAST)</td><td>secs — cheapest gate</td></tr>
+<tr><td>unit</td><td>ms each, thousands</td></tr>
+<tr><td>integration</td><td>seconds, hundreds</td></tr>
+<tr><td>e2e / smoke</td><td>minutes, tens</td></tr>
+</tbody></table>
 <ul>
-<li>Immutable, versioned (git-sha/semver/@digest); store in a repo (Artifactory/Nexus/registry/Packages).</li>
-<li><b>Build once → promote the same artifact</b> up the ladder; config injected per env (12-factor) <span class="warn">!</span></li>
-<li>Attach provenance/SBOM; sign it.</li>
+<li>Speed levers: cache deps, <b>shard/parallelise</b> tests, affected-only in monorepos (<code>paths:</code>, Nx/Turbo, <code>dorny/paths-filter</code>).</li>
+<li><b>Flaky tests</b> erode trust in green — quarantine + fix, never blanket-retry into the void <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Artifacts &amp; Registries</h3>
+<ul>
+<li><b>Immutable + versioned</b>: tag by git-SHA / semver / <code>@digest</code>. Store in a repository: Artifactory, Nexus, GitHub/GitLab Packages, a container registry.</li>
+<li><b>Build once → promote the same artifact</b> up the ladder. Config &amp; secrets injected per env at deploy (12-factor) — never baked in <span class="warn">!</span></li>
+<li>The digest (<code>sha256:…</code>) is the true identity; a tag is a mutable pointer. Deploy &amp; roll back <b>by digest</b>.</li>
+<li>Attach <b>provenance + SBOM</b>, sign the artifact; set retention/GC so storage doesn't grow unbounded.</li>
+<li><code>:latest</code> is mutable and races across builds — <b>never deploy <code>:latest</code></b> <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Container Image Pipelines</h3>
+<pre><code># multi-stage: fat build, slim runtime
+FROM node:22 AS build
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci                  # cached layer
+COPY . .
+RUN npm run build
+FROM gcr.io/distroless/nodejs22 AS run
+COPY --from=build /app/dist /app
+CMD ["/app/server.js"]</code></pre>
+<ul>
+<li><b>Layer order = cache hits</b>: copy lockfiles + install <i>before</i> copying source, so code edits don't bust the deps layer.</li>
+<li>Small base (distroless/alpine) → smaller attack surface + faster pulls. Non-root <code>USER</code>. <code>.dockerignore</code> to keep secrets/junk out.</li>
+<li>BuildKit cache mounts + registry cache for CI. Tag <code>image@sha256:…</code>.</li>
+<li>Pipeline: build → <b>scan</b> (Trivy/Grype) → <b>sign</b> (cosign) → push → deploy → verify signature at admission <span class="warn">!</span></li>
 </ul>
 </section>
 
@@ -188,108 +302,165 @@ flowchart LR
   LB["router / LB"] -->|"90%"| S["stable v1"]
   LB -->|"10% → ramp"| C["canary v2"]
 </div>
-<table><thead><tr><th>Strategy</th><th>Trait</th></tr></thead><tbody>
-<tr><td>recreate</td><td>simple; <b>downtime</b> <span class="warn">!</span></td></tr>
-<tr><td>rolling</td><td>gradual, no downtime; mixed versions; slow rollback</td></tr>
-<tr><td>blue-green</td><td>2 envs, flip traffic; instant rollback; 2× cost</td></tr>
-<tr><td>canary</td><td>small % first + watch metrics; safest; needs traffic split</td></tr>
+<table><thead><tr><th>Strategy</th><th>Trait / cost</th></tr></thead><tbody>
+<tr><td>recreate</td><td>stop old, start new; simple; <b>downtime</b> <span class="warn">!</span></td></tr>
+<tr><td>rolling</td><td>replace pods in batches; no downtime; mixed versions in flight; slower rollback</td></tr>
+<tr><td>blue-green</td><td>2 full envs, flip router; <b>instant rollback</b>; ~2× infra cost</td></tr>
+<tr><td>canary</td><td>small % first + watch metrics → ramp; safest; needs traffic-split + observability</td></tr>
 <tr><td>feature flag</td><td>deploy dark, toggle at runtime; kill-switch, no redeploy</td></tr>
 </tbody></table>
-<p>DB migrations: expand/contract, backward-compatible — decouple schema from code deploy <span class="warn">!</span></p>
+<p><b>DB migrations</b>: expand/contract, backward-compatible — decouple schema change from code deploy so both remain rollback-able <span class="warn">!</span></p>
 </section>
 
-<section class="card"><h3>Progressive Delivery</h3>
+<section class="card"><h3>Progressive Delivery &amp; Canary</h3>
 <ul>
-<li>Canary on autopilot: shift traffic in steps + <b>automated analysis</b> (error rate/latency/saturation) → promote or auto-rollback.</li>
-<li><b>Argo Rollouts</b> (K8s Rollout CRD: setWeight → pause → analysis) / <b>Flagger</b> (Flux + mesh).</li>
-<li>Traffic shifting via ingress/service mesh weights; gate on SLOs (needs good observability).</li>
-<li>Ring deployments: internal → early adopters → everyone.</li>
+<li>Canary on autopilot: shift traffic in <b>steps</b> + <b>automated analysis</b> (error rate, p95/p99 latency, saturation) → promote or auto-abort.</li>
+<li><b>Baseline comparison</b>: judge canary vs the stable version running <i>concurrently</i>, not vs yesterday — controls for time-of-day/traffic <span class="warn">!</span></li>
+<li>Controllers: <b>Argo Rollouts</b> (Rollout CRD: setWeight → pause → analysis) / <b>Flagger</b> (Flux + service mesh).</li>
 </ul>
+<pre><code>strategy:
+  canary:
+    steps:
+      - setWeight: 5
+      - pause: { duration: 5m }
+      - analysis: { templates: [{ templateName: error-rate }] } # abort→rollback
+      - setWeight: 25
+      - pause: { duration: 5m }
+      - setWeight: 50</code></pre>
+<p>Traffic shift via ingress / mesh weights. Ring deploys: internal → early adopters → everyone.</p>
 </section>
 
 <section class="card"><h3>Environments &amp; Promotion</h3>
 <ul>
-<li>dev → staging → prod; <b>parity</b> matters (staging mirrors prod) — avoid snowflakes <span class="warn">!</span></li>
-<li><b>Promote the same artifact/digest</b> up the ladder; gate prod with required reviewers / manual approval.</li>
-<li>Config &amp; secrets per env injected at deploy — keep them OUT of the artifact.</li>
-<li><b>Ephemeral preview envs</b> per PR (review apps / per-PR namespace) — tear down on merge.</li>
-<li>Separation of duties: who can deploy to prod.</li>
+<li>dev → staging → prod; <b>parity matters</b> — staging mirrors prod (data shape, config, scale-down). Avoid snowflakes <span class="warn">!</span></li>
+<li><b>Promote the same digest</b> up the ladder; gate prod with required reviewers / manual approval (auditable, records who + when).</li>
+<li><b>Config &amp; secrets per env</b> injected at deploy — kept OUT of the artifact. One binary, many envs.</li>
+<li><b>Ephemeral preview envs</b> per PR (review apps / per-PR namespace) — spin up on open, tear down on merge/close.</li>
+<li><b>Separation of duties</b>: who may deploy to prod, least-privilege deploy identity per env.</li>
+<li><span class="pg">GH</span> <code>environment:</code> adds required reviewers, wait timer, branch policy, scoped secrets, and a Deployments-API timeline.</li>
 </ul>
 </section>
 
-<section class="card"><h3>GitOps (pull-based CD)</h3>
+<section class="card"><h3>GitOps — Pull-based CD</h3>
 <ul>
-<li>Git = single source of truth; an in-cluster agent <b>pulls</b> &amp; reconciles desired state.</li>
-<li><b>Push</b> (CI runs kubectl, needs cluster creds) vs <b>pull</b> (ArgoCD/Flux; no cluster creds in CI) — pull is safer <span class="warn">!</span></li>
-<li><b>ArgoCD</b> Application CRD, sync/health/self-heal, app-of-apps; <b>Flux</b> controllers + image automation.</li>
-<li>Self-heal reverts manual <code>kubectl</code> drift back to Git.</li>
-<li>CI builds+pushes image &amp; bumps the tag in a <b>config repo</b> → GitOps deploys. Rollback = <code>git revert</code>.</li>
-<li>Secrets: sealed-secrets / SOPS / external-secrets (never commit plaintext) <span class="warn">!</span></li>
+<li>Git is the <b>single source of truth</b> for desired state; an in-cluster agent <b>pulls</b> and continuously reconciles.</li>
+<li><b>Push</b> (CI runs <code>kubectl</code>, needs cluster creds in CI) vs <b>pull</b> (ArgoCD/Flux; no cluster creds leave the cluster) — pull is safer <span class="warn">!</span></li>
+<li><b>ArgoCD</b>: Application CRD, sync/health status, self-heal, app-of-apps. <b>Flux</b>: source + kustomize/helm controllers + image automation.</li>
+<li><b>Self-heal</b> reverts manual <code>kubectl</code> drift back to Git — no snowflake clusters.</li>
+<li>Flow: CI builds+pushes image, then bumps the tag/digest in a <b>config repo</b> → GitOps agent deploys. Rollback = <code>git revert</code> (first-class audit trail).</li>
+<li>Secrets: sealed-secrets / SOPS / external-secrets — never commit plaintext <span class="warn">!</span></li>
 </ul>
 </section>
 
-<section class="card"><h3>Versioning &amp; Releases</h3>
+<section class="card"><h3>Release Management &amp; Versioning</h3>
 <ul>
-<li><b>SemVer</b> MAJOR.MINOR.PATCH = breaking / feature / fix.</li>
-<li>Automate: semantic-release / release-please / changesets derive version + changelog from Conventional Commits, tag &amp; publish in CI.</li>
-<li>Monorepo: release only changed packages (changesets/Nx) vs lockstep one-version.</li>
-<li>Hotfix via cherry-pick / release branch; feature flags to deploy without releasing.</li>
-<li>Tag immutably; :latest is mutable — don't deploy it <span class="warn">!</span></li>
+<li><b>SemVer</b> <code>MAJOR.MINOR.PATCH</code> = breaking / backward-compat feature / fix. Pre-release <code>-rc.1</code>, build <code>+meta</code>.</li>
+<li><b>Automate</b>: semantic-release / release-please / changesets derive version + changelog from <b>Conventional Commits</b> (<code>feat:</code>, <code>fix:</code>, <code>feat!:</code>), tag &amp; publish in CI. "Release" becomes "merge the release PR."</li>
+<li><b>Monorepo</b>: release only changed packages (changesets/Nx) vs lockstep single-version.</li>
+<li>Hotfix via cherry-pick onto a release branch; feature flags to deploy without releasing.</li>
+<li>Tag immutably (<code>v1.4.2</code>); <b>npm <code>--provenance</code></b> / signed tags for supply-chain integrity.</li>
 </ul>
+<pre><code># tag-triggered release
+on: { push: { tags: ['v*.*.*'] } }
+permissions: { contents: write, packages: write, id-token: write }</code></pre>
 </section>
 
 <section class="card"><h3>Secrets &amp; Supply Chain</h3>
 <ul>
-<li><b>OIDC → short-lived cloud creds</b> (assume an IAM role) instead of long-lived keys in secrets — the #1 modern practice <span class="warn">!</span></li>
-<li>Least-privilege pipeline identity &amp; <code>GITHUB_TOKEN</code> permissions; secret managers (Vault/cloud), masking.</li>
-<li><b>pull_request_target / PPE</b>: fork PRs must NOT get secrets — poisoned-pipeline exfiltration footgun <span class="warn">!</span></li>
-<li>Pin actions by SHA; scan deps (Dependabot/Snyk); SAST/DAST/secret-scan gates.</li>
-<li><b>SLSA</b> provenance + <b>sign</b> (cosign) + verify at admission; SBOM (syft); ephemeral hardened runners.</li>
-<li>A compromised pipeline = compromised prod — protect the CI system (RBAC, audit) <span class="warn">!</span></li>
+<li><b>OIDC → short-lived cloud creds</b> instead of long-lived keys — the single biggest win <span class="warn">!</span></li>
+<li>Least-privilege pipeline identity &amp; token perms; secret managers (Vault / cloud KMS / SM), masking, scope secrets to environments.</li>
+<li><b>Fork PRs must NOT get secrets</b> (no unsafe <code>pull_request_target</code>) — poisoned-pipeline exfiltration <span class="warn">!</span></li>
+<li><b>Pin actions/images by SHA/digest</b>; scan deps (Dependabot/Renovate/Snyk); SAST + secret-scan + DAST gates.</li>
+<li><b>SLSA</b> provenance (how/where built) + <b>sign</b> (cosign) + <b>verify at admission</b>; SBOM (syft/Trivy) for what's inside.</li>
+<li>Ephemeral, hardened, single-use runners; never attach self-hosted runners to public repos <span class="warn">!</span></li>
+<li>A compromised pipeline = compromised prod. Protect the CI system itself: RBAC, audit logs, protected branches.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Deploy Observability &amp; DORA</h3>
+<section class="card"><h3>Deploy Observability &amp; Rollback</h3>
 <ul>
-<li>Post-deploy: health/readiness gates + smoke tests; watch error rate/latency vs baseline.</li>
-<li><b>Automated rollback</b> on failure criteria (blue-green flip / canary abort / rolling undo / git revert). Fast rollback &gt; slow perfect fix.</li>
-<li>Feature flags cut deploy risk &amp; MTTR (kill-switch without redeploy).</li>
+<li>Deploy = a <b>supervised transition</b>: hypothesis ("≥ as healthy as last") → observation window → decision (promote / roll back), ideally automated.</li>
+<li>Gate on <b>readiness/health probes</b> first (K8s won't route to a failing pod; rolling update pauses), then watch <b>golden signals</b> on the new version vs baseline: error rate, p95/p99 latency, saturation, throughput.</li>
+<li><b>Automated rollback</b> = explicit failure criteria + a re-point mechanism + a watcher. Vague ("looks bad") can't automate <span class="warn">!</span></li>
 </ul>
-<h4>DORA metrics</h4>
-<table><thead><tr><th>Metric</th><th>Elite</th></tr></thead><tbody>
-<tr><td>Deploy frequency</td><td>on-demand / many per day</td></tr>
-<tr><td>Lead time for changes</td><td>&lt; 1 hour</td></tr>
-<tr><td>Change failure rate</td><td>0–15%</td></tr>
-<tr><td>MTTR</td><td>&lt; 1 hour</td></tr>
+<table><thead><tr><th>Strategy</th><th>Rollback / speed</th></tr></thead><tbody>
+<tr><td>recreate</td><td>redeploy old (downtime) — slow</td></tr>
+<tr><td>rolling</td><td><code>kubectl rollout undo</code> — medium</td></tr>
+<tr><td>blue-green</td><td>flip router to blue — instant</td></tr>
+<tr><td>canary</td><td>weight → 0 — instant</td></tr>
+<tr><td>GitOps</td><td><code>git revert</code> → reconcile — fast</td></tr>
 </tbody></table>
-<p>Annotate dashboards with deploys to correlate metric shifts.</p>
+<p><b>Roll back by default</b> (restore service, then diagnose); roll <b>forward</b> only when an irreversible migration/data change makes revert unsafe. Feature-flag kill-switch = release rollback with no redeploy — huge MTTR cut.</p>
 </section>
 
-<section class="card"><h3>&#9733; How Code Reaches Prod</h3>
+<section class="card"><h3>DORA Metrics</h3>
+<p>Four metrics, <b>throughput + stability together</b> — you can trivially game one by sacrificing the other, so balance them.</p>
+<table><thead><tr><th>Metric</th><th>Type</th><th>Elite</th></tr></thead><tbody>
+<tr><td>Deploy frequency</td><td>throughput</td><td>on-demand, many/day</td></tr>
+<tr><td>Lead time for changes</td><td>throughput</td><td>&lt; 1 day (hours)</td></tr>
+<tr><td>Change failure rate</td><td>stability</td><td>0–15%</td></tr>
+<tr><td>Time to restore (MTTR)</td><td>stability</td><td>&lt; 1 hour</td></tr>
+</tbody></table>
 <ul>
-<li>1. Branch → <b>PR</b> → PR pipeline (build, test, lint, SAST, image scan, preview env).</li>
-<li>2. Review + required checks pass → <b>merge to main</b> (merge queue keeps it green).</li>
-<li>3. Main pipeline builds the <b>immutable artifact once</b> (image @git-sha) → push to registry.</li>
-<li>4. Auto-deploy to <b>staging</b> → e2e + smoke tests (+ optional QA).</li>
-<li>5. <b>Promote the same artifact to prod</b> — approval gate (delivery) or automatic (deployment).</li>
-<li>6. Deploy via rolling/blue-green/<b>canary</b>; post-deploy smoke + health.</li>
-<li>7. Observe error rate/latency → <b>auto/manual rollback</b> if unhealthy.</li>
-<li>GitOps variant: CI commits the new tag to a config repo → ArgoCD/Flux deploys.</li>
+<li>Elite performers deploy <b>more</b> <i>and</i> fail <b>less</b> — small batches are safer, not riskier <span class="warn">!</span></li>
+<li>Improve all four with the same levers: small batches, automation, fast rollback, trunk-based dev, good tests.</li>
+<li><b>Deployment markers</b> annotate dashboards so a metric shift ties to a release. <b>Error budget</b> (1 − SLO) governs release pace.</li>
+<li>MTTR = restore service (rollback / flag-kill), not fix the bug. Blameless postmortems target systemic cause.</li>
 </ul>
 </section>
 
-<section class="card"><h3>&#9744; Pipeline Review Checklist</h3>
+<section class="card"><h3>How Code Reaches Prod</h3>
+<ul>
+<li>1. Branch → <b>PR</b> → PR pipeline: build, unit/integration tests, lint, typecheck, SAST, image scan, preview env.</li>
+<li>2. Review + required checks pass → <b>merge to main</b> (merge queue re-tests vs updated main, keeps it green).</li>
+<li>3. Main pipeline builds the <b>immutable artifact once</b> (image @git-sha) → scan → sign → push to registry.</li>
+<li>4. Auto-deploy the artifact to <b>staging</b> → e2e + smoke tests (+ optional manual QA).</li>
+<li>5. <b>Promote the same digest to prod</b> — approval gate (Delivery) or automatic (Deployment).</li>
+<li>6. Deploy via rolling / blue-green / <b>canary</b>; post-deploy smoke + health probes.</li>
+<li>7. Observe error rate / latency vs baseline → <b>auto/manual rollback</b> if unhealthy.</li>
+<li><b>GitOps variant</b>: CI commits the new tag/digest to a config repo → ArgoCD/Flux reconciles it into the cluster.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Common Bugs — Spot-the-Bug</h3>
+<table><thead><tr><th>Symptom</th><th>Cause</th></tr></thead><tbody>
+<tr><td>works in staging, breaks in prod</td><td>rebuilt per env / config baked into artifact <span class="warn">!</span></td></tr>
+<tr><td>secrets leaked from a fork PR</td><td><code>pull_request_target</code> + checkout+run PR code <span class="warn">!</span></td></tr>
+<tr><td>deploy pushed compromised code</td><td>third-party action pinned by tag, not SHA <span class="warn">!</span></td></tr>
+<tr><td>two individually-green PRs break main</td><td>no merge queue (semantic conflict) <span class="warn">!</span></td></tr>
+<tr><td>can't roll back after deploy</td><td>irreversible migration coupled to code <span class="warn">!</span></td></tr>
+<tr><td>flaky red builds ignored</td><td>flaky tests not quarantined → green distrust <span class="warn">!</span></td></tr>
+<tr><td>stale deps in CI build</td><td>lockfile hash not in cache key <span class="warn">!</span></td></tr>
+<tr><td>two prod deploys race</td><td>no <code>concurrency</code> group on deploy <span class="warn">!</span></td></tr>
+<tr><td>build depends on a cache</td><td>cache used for correctness (evictable) <span class="warn">!</span></td></tr>
+<tr><td>deployed <code>:latest</code>, unknown version live</td><td>mutable tag instead of digest <span class="warn">!</span></td></tr>
+</tbody></table>
+</section>
+
+<section class="card"><h3>&#9733; Pipeline Review Checklist</h3>
+<h4>Build &amp; artifacts</h4>
 <ul>
 <li>&#9744; Artifact <b>built once</b>, promoted by digest — not rebuilt per env.</li>
+<li>&#9744; Immutable/versioned tag (git-sha/semver), never deploy <code>:latest</code>.</li>
+<li>&#9744; Config/secrets injected per env at deploy; nothing sensitive baked in or logged.</li>
+</ul>
+<h4>CI hygiene</h4>
+<ul>
 <li>&#9744; Fast tests gate merges; main protected + required checks + merge queue.</li>
+<li>&#9744; Pipeline-as-code, reviewed &amp; versioned; cache keys include lockfile hash; build survives cold cache.</li>
+</ul>
+<h4>Security / supply chain</h4>
+<ul>
 <li>&#9744; <b>OIDC</b> / short-lived creds — no long-lived cloud keys in secrets.</li>
-<li>&#9744; Fork PRs can't reach secrets (no unsafe <code>pull_request_target</code>); actions pinned by SHA.</li>
-<li>&#9744; Image scanned + signed; SBOM/provenance; deps scanned.</li>
-<li>&#9744; Prod behind an approval / protected environment; least-privilege deploy role.</li>
-<li>&#9744; Safe deploy strategy (rolling/blue-green/canary) with a tested <b>rollback</b>.</li>
-<li>&#9744; Post-deploy smoke + health checks; deploy observability + auto-rollback.</li>
-<li>&#9744; Config/secrets per env injected at deploy; no secrets in artifact/logs.</li>
-<li>&#9744; Pipeline-as-code, reviewed &amp; versioned; DORA tracked.</li>
+<li>&#9744; Fork PRs can't reach secrets (no unsafe <code>pull_request_target</code>); actions/images pinned by SHA/digest.</li>
+<li>&#9744; Least-privilege token/deploy identity; image scanned + signed; SBOM/provenance; deps scanned.</li>
+</ul>
+<h4>Deploy &amp; recovery</h4>
+<ul>
+<li>&#9744; Prod behind approval / protected environment; deploys serialised (<code>concurrency</code>).</li>
+<li>&#9744; Safe strategy (rolling/blue-green/canary) with a <b>tested rollback</b>; migrations expand/contract.</li>
+<li>&#9744; Post-deploy smoke + health probes; deploy observability + auto-rollback criteria; feature-flag kill-switch.</li>
+<li>&#9744; DORA tracked (freq, lead time, CFR, MTTR) &amp; balanced; deploy markers on dashboards.</li>
 </ul>
 </section>
 

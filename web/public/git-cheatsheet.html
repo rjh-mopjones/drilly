@@ -72,201 +72,327 @@ pre code{background:none; padding:0; font-size:1em;}
 </head>
 <body>
 <div class="sheet">
-<div class="titlebar"><h1>Git Cheat Sheet</h1><span class="meta">engineer/DevOps focus · object model · branching · undo · recovery · drilly</span></div>
+<div class="titlebar"><h1>Git Cheat Sheet</h1><span class="meta">engineer/DevOps focus · object model · branching · undo · rewrite · recovery · generic examples · drilly</span></div>
 <section class="card legend"><h3>How to read &amp; print</h3>
 <ul>
-<li><span class="warn">!</span> footgun / data-loss &nbsp; <code>&#9744;</code> recovery / review step</li>
-<li>Focus: the mental model + the commands interviews probe — object model, branches, merge/rebase, undo, and recovery.</li>
-<li>Golden rules: a <b>branch is a pointer</b>; Git stores <b>snapshots</b>; <b>never rewrite shared history</b>; the <b>reflog</b> saves you.</li>
-<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+<li><span class="warn">!</span> footgun / data-loss risk &nbsp; <code>&#9744;</code> recovery / review step</li>
+<li>Focus: the mental model + the commands interviews probe — object model, the three trees, branches/merge/rebase, undo, history rewrite, and recovery.</li>
+<li><b>Four golden rules:</b> a branch is a <i>pointer</i> · Git stores <i>snapshots</i>, not diffs · <b>never rewrite shared history</b> · the <b>reflog</b> almost always saves you.</li>
+<li>Local/unpushed → <code>reset</code>/rebase freely. Shared/pushed → <code>revert</code> only. Last 3 cards = recovery playbook + spot-the-bug + safe habits.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
 </ul></section>
 
 <section class="card diagram"><h3>The Three Trees</h3>
 <div class="mermaid">
 flowchart LR
-  W["working dir"] -->|"git add"| I["index / staging"]
-  I -->|"git commit"| H["HEAD (repo)"]
+  W["working dir<br/>(your edits)"] -->|"git add"| I["index /<br/>staging"]
+  I -->|"git commit"| H["HEAD<br/>(repo)"]
   H -->|"restore / checkout"| W
   I -->|"restore --staged"| W
 </div>
-<p class="cap">add: working→index. commit: index→a new commit. HEAD = last commit. diff = working↔index; diff --staged = index↔HEAD.</p>
+<p class="cap">add: working→index. commit: index→a new commit; HEAD moves to it. diff = working↔index; diff --staged = index↔HEAD; diff HEAD = working↔HEAD. reset picks how far back this pipeline unwinds (soft/mixed/hard).</p>
 </section>
 
 <section class="card"><h3>Object Model</h3>
 <ul>
-<li><b>blob</b> = file contents · <b>tree</b> = a directory (→ blobs/trees) · <b>commit</b> = one tree + parent(s) + author/msg · <b>tag</b> object.</li>
-<li>Everything content-addressed by SHA → identical content stored once; changing anything changes the hash &amp; all descendants (immutable history).</li>
-<li><b>Snapshots, not diffs</b> (each commit = full state; deltas only in packfiles at storage time).</li>
-<li>A <b>branch/HEAD/ref</b> = a file holding a commit SHA — a movable pointer.</li>
+<li>Four object types: <b>blob</b> = file bytes (no name) · <b>tree</b> = a directory listing (names → blob/tree SHAs + mode) · <b>commit</b> = one root tree + parent(s) + author/committer + message · <b>tag</b> = annotated-tag object.</li>
+<li>Everything is <b>content-addressed</b>: <code>id = SHA-1(type + size + content)</code>. Identical content is stored once (dedup); change one byte → new hash → every ancestor commit's hash changes too → history is effectively <b>immutable / append-only</b>.</li>
+<li><b>Snapshots, not diffs</b>: each commit references a <i>full</i> tree of the project. Deltas exist only inside <b>packfiles</b> as a storage optimisation, not in the model.</li>
+<li>A <b>ref</b> (branch, tag, HEAD, <code>origin/main</code>) is just a file under <code>.git/refs</code> holding a commit SHA — a cheap, movable pointer.</li>
 </ul>
-<pre><code>git cat-file -p HEAD    git ls-tree HEAD
-git rev-parse HEAD~2</code></pre>
+<pre><code>git cat-file -p HEAD      # pretty-print an object
+git cat-file -t &lt;sha&gt;      # its type
+git ls-tree HEAD          # the root tree
+git hash-object -w file   # store a blob, print its SHA
+git rev-parse HEAD~2      # resolve a ref → full SHA</code></pre>
 </section>
 
-<section class="card"><h3>Basics</h3>
-<pre><code>git status -sb          git add -p          # stage hunks
-git commit -m "msg"     git commit --amend  # fix last (unpushed!)
-git diff                # working vs index
-git diff --staged       # index vs HEAD
-git log --oneline --graph --all
-git show HEAD:path      git blame -L 10,20 file</code></pre>
+<section class="card"><h3>Basics &amp; Refspeak</h3>
+<pre><code>git status -sb            # short + branch/upstream
+git add -p                # stage individual hunks
+git commit -m "msg"       git commit --amend   # fix last (unpushed!)
+git diff                  # working vs index
+git diff --staged         # index vs HEAD (what will commit)
+git log --oneline --graph --all --decorate
+git show HEAD:path        # a file as of a commit
+git blame -L 10,20 file   # who last touched each line</code></pre>
 <ul>
-<li>Refs: <code>HEAD</code>, <code>HEAD~3</code> (ancestor), <code>HEAD^2</code> (2nd merge parent), <code>A..B</code> range.</li>
-<li>Commit msg: imperative subject ≤50, body explains <b>why</b>.</li>
+<li><b>Relative refs:</b> <code>HEAD~3</code> = 3rd first-parent ancestor; <code>HEAD^</code> = 1st parent, <code>HEAD^2</code> = 2nd parent (merge's other side); <code>@</code> = HEAD.</li>
+<li><b>Ranges:</b> <code>A..B</code> = reachable from B but not A (the "what's new" set); <code>A...B</code> = symmetric difference (either side, not both).</li>
+<li>Commit subject imperative, ≤50 chars; blank line; body wraps ~72 and explains <b>why</b>, not what.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Branches &amp; Remotes</h3>
-<pre><code>git switch -c feature/x         # create+switch
-git branch -vv                  # upstream + ahead/behind
-git fetch                       # download, no merge (safe)
-git pull --rebase               # fetch + rebase (linear)
-git push -u origin feature/x
-git push origin --delete old</code></pre>
+<section class="card"><h3>Branches &amp; HEAD</h3>
 <ul>
-<li><code>origin/main</code> = read-only cache of the remote at last <b>fetch</b>.</li>
-<li>"rejected non-fast-forward" = remote has commits you lack → fetch/rebase first, don't blind-force <span class="warn">!</span></li>
-<li><b>Detached HEAD</b>: on a SHA/tag, not a branch — commit there &amp; switch away = "lost" (reflog recovers) <span class="warn">!</span></li>
+<li>A <b>branch</b> is a 40-char file that moves to the new commit each time you commit while it's checked out. Creating one is O(1) — write one small file.</li>
+<li><b>HEAD</b> is a <i>symbolic ref</i> normally pointing at your current branch (<code>ref: refs/heads/main</code>). Commit → branch advances, HEAD follows.</li>
+<li><b>Detached HEAD</b>: HEAD points straight at a SHA/tag, not a branch. Commits there belong to no branch; switch away and they look "lost" (reflog / <code>fsck</code> recovers) <span class="warn">!</span></li>
 </ul>
+<pre><code>git switch -c feature/x     # create + switch
+git switch main             git switch -    # last branch
+git branch -vv              # upstream + ahead/behind
+git branch -d done          git branch -D force
+git branch -m old new       # rename
+git switch --orphan gh-pages  # history-less branch</code></pre>
+<p>Delete a branch = delete a pointer; the commits survive until GC prunes the unreachable ones after the reflog window.</p>
+</section>
+
+<section class="card"><h3>Commits &amp; History</h3>
+<ul>
+<li><b>Author</b> = who wrote the change (preserved across rebase/cherry-pick); <b>committer</b> = who last applied it (updated by those ops) — that's why a rebased commit keeps the author but gets a new committer + <b>new SHA</b>.</li>
+<li>Parent pointers form the <b>commit DAG</b>: 0 parents (root), 1 (normal), 2+ (merge). Traversal of this graph powers <code>log</code>, <code>merge-base</code>, <code>bisect</code>.</li>
+<li><b>Conventional Commits</b>: <code>feat: / fix: / chore:</code>… → drives changelogs + semver bumps (<code>feat</code>→minor, <code>fix</code>→patch, <code>!</code>/BREAKING→major).</li>
+</ul>
+<pre><code>git log -S"funcName"       # pickaxe: commits adding/removing text
+git log -G"regex"          git log -p file    # patch per commit
+git log --oneline v1..HEAD # since a tag
+git show &lt;sha&gt;              git shortlog -sn   # counts by author</code></pre>
+<p><span class="warn">!</span> <code>--amend</code> rewrites the last commit (new SHA) — safe only if unpushed.</p>
 </section>
 
 <section class="card"><h3>Merge vs Rebase</h3>
 <table><thead><tr><th></th><th>merge</th><th>rebase</th></tr></thead><tbody>
 <tr><td>history</td><td>true, with bubbles</td><td>linear, clean</td></tr>
 <tr><td>commits</td><td>preserved + merge commit</td><td>rewritten (new SHAs)</td></tr>
+<tr><td>context</td><td>keeps when/how branches joined</td><td>drops the branch topology</td></tr>
+<tr><td>conflicts</td><td>once, at the tip</td><td>possibly per-commit</td></tr>
 <tr><td>safe on shared?</td><td>yes</td><td><b>NO</b> <span class="warn">!</span></td></tr>
 </tbody></table>
 <ul>
-<li><b>Fast-forward</b>: no divergence → just move the pointer (<code>--no-ff</code> forces a bubble).</li>
-<li><b>3-way merge</b>: combine both tips + merge-base → a 2-parent commit (conflicts if same lines).</li>
-<li><b>Golden rule:</b> never rebase/rewrite commits others have pulled <span class="warn">!</span> Your own PR branch → <code>--force-with-lease</code>.</li>
+<li><b>Fast-forward</b>: target is a direct ancestor → just slide the pointer, no new commit. <code>--no-ff</code> forces a merge bubble (keeps the feature grouping).</li>
+<li><b>3-way merge</b>: combine the two tips + their <b>merge-base</b> → a 2-parent commit; conflicts only when both sides touch the same lines.</li>
+<li><b>Rebase</b> replays your commits one-by-one onto a new base → new SHAs. Great before a PR; never on commits others have.</li>
+<li><b>Golden rule:</b> don't rewrite commits others have pulled <span class="warn">!</span> Your own PR branch → <code>push --force-with-lease</code>.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Undo — reset / revert / restore</h3>
-<table><thead><tr><th>reset</th><th>HEAD·index·wd</th></tr></thead><tbody>
-<tr><td>--soft</td><td>move HEAD only (keep staged)</td></tr>
-<tr><td>--mixed (default)</td><td>+ reset index (keep edits)</td></tr>
-<tr><td>--hard</td><td>+ reset wd → <b>DISCARD</b> <span class="warn">!</span></td></tr>
-</tbody></table>
-<pre><code>git reset --soft HEAD~1     # uncommit, keep staged
-git restore --staged file   # unstage
-git restore file            # discard edits (loss!)
-git revert &lt;sha&gt;             # NEW commit that undoes (shared-safe)
-git reset --hard origin/main</code></pre>
-<p><b>Local/unpushed</b> → reset. <b>Shared/pushed</b> → <b>revert</b> <span class="warn">!</span></p>
-</section>
-
-<section class="card"><h3>Stash &amp; Reflog</h3>
-<pre><code>git stash push -u -m "wip"   git stash list
-git stash pop                # apply + drop
-git stash apply stash@{1}
-git reflog                   # every HEAD move (safety net!)
-git reset --hard HEAD@{1}    # undo a bad reset/rebase
-git checkout -b recover &lt;sha-from-reflog&gt;</code></pre>
+<section class="card"><h3>Rebasing</h3>
+<pre><code>git rebase main             # replay current branch onto main
+git pull --rebase           # fetch + rebase (linear pulls)
+git rebase --onto main old  # move commits after 'old' onto main
+git rebase --continue | --skip | --abort</code></pre>
 <ul>
-<li><b>Reflog</b> records where HEAD/branches have been (~90 days) → recover "lost" commits after reset/rebase/amend/branch-delete <span class="warn">!</span></li>
-<li><code>git fsck --lost-found</code> for dangling commits when reflog won't help.</li>
+<li><code>--onto A B</code> transplants the commits <i>after</i> B onto A — the surgical form for splitting a branch off the wrong base.</li>
+<li>Conflicts pause the rebase per commit: fix, <code>git add</code>, <code>--continue</code>. Same conflict repeatedly? enable <code>rerere</code> to auto-replay resolutions <span class="warn">!</span></li>
+<li><code>--rebase-merges</code> preserves merge topology while rebasing; <code>--autosquash</code> auto-orders <code>fixup!</code>/<code>squash!</code> commits.</li>
+<li>Lost commits after a rebase? <code>git reflog</code> → the pre-rebase SHA is still there. <code>--force-with-lease</code> refuses to clobber a teammate's new pushes <span class="warn">!</span></li>
 </ul>
 </section>
 
 <section class="card"><h3>Interactive Rebase</h3>
 <pre><code>git rebase -i HEAD~5</code></pre>
 <table><thead><tr><th>cmd</th><th>does</th></tr></thead><tbody>
-<tr><td>pick</td><td>keep</td></tr>
-<tr><td>reword</td><td>change message</td></tr>
-<tr><td>edit</td><td>stop to amend/split</td></tr>
-<tr><td>squash / fixup</td><td>fold into prev (keep / drop msg)</td></tr>
-<tr><td>drop</td><td>remove</td></tr>
+<tr><td>pick</td><td>keep as-is</td></tr>
+<tr><td>reword</td><td>keep commit, edit message</td></tr>
+<tr><td>edit</td><td>stop to amend / split it</td></tr>
+<tr><td>squash</td><td>fold into prev, <b>combine</b> messages</td></tr>
+<tr><td>fixup</td><td>fold into prev, <b>drop</b> message</td></tr>
+<tr><td>drop</td><td>delete the commit</td></tr>
+<tr><td>exec</td><td>run a shell cmd (e.g. tests) between</td></tr>
 </tbody></table>
 <ul>
-<li>Reorder by moving lines; <code>exec</code> runs tests between commits.</li>
-<li><code>commit --fixup=&lt;sha&gt;</code> + <code>rebase -i --autosquash</code> to auto-arrange.</li>
-<li>Clean up a messy feature branch before a PR — LOCAL only <span class="warn">!</span></li>
+<li>Reorder commits by moving lines; split one via <code>edit</code> → <code>reset HEAD^</code> → re-stage in pieces.</li>
+<li><code>commit --fixup=&lt;sha&gt;</code> then <code>rebase -i --autosquash</code> to auto-arrange a cleanup.</li>
+<li>Polish a messy feature branch before review — <b>local only</b> <span class="warn">!</span></li>
 </ul>
 </section>
 
-<section class="card"><h3>Conflicts</h3>
+<section class="card"><h3>Undo — reset / revert / restore</h3>
+<p>Three different jobs — don't blur them: <b>reset</b> moves the branch pointer (history) · <b>revert</b> adds a new inverse commit (history-safe) · <b>restore/checkout</b> only touch files (no pointer move).</p>
+<pre><code>git reset --soft HEAD~1     # uncommit, keep staged
+git reset HEAD~1            # (--mixed) uncommit + unstage
+git restore --staged file   # unstage, keep edits
+git restore file            # discard edits (LOSS!) !
+git revert &lt;sha&gt;             # new commit undoing it (shared-safe)
+git revert -m 1 &lt;merge&gt;      # revert a merge (pick mainline parent)
+git reset --hard origin/main  # nuke local → match remote !</code></pre>
+<p><b>Rule:</b> local/unpushed → <code>reset</code>; shared/pushed → <code>revert</code>. <span class="warn">!</span> <code>git clean -fd</code> deletes untracked files/dirs irrecoverably — dry-run <code>-n</code> first.</p>
+</section>
+
+<section class="card"><h3>reset — the three modes</h3>
+<table><thead><tr><th>mode</th><th>HEAD</th><th>index</th><th>wtree</th></tr></thead><tbody>
+<tr><td>--soft</td><td>move</td><td>keep</td><td>keep</td></tr>
+<tr><td>--mixed <i>(default)</i></td><td>move</td><td>reset</td><td>keep</td></tr>
+<tr><td>--hard</td><td>move</td><td>reset</td><td><b>reset</b> <span class="warn">!</span></td></tr>
+</tbody></table>
+<ul>
+<li><b>--soft</b>: changes stay staged → recombine several commits into one (<code>reset --soft HEAD~3</code> then re-commit).</li>
+<li><b>--mixed</b>: unstages too → work back in the working tree, ready to re-stage selectively.</li>
+<li><b>--hard</b>: throws away index <i>and</i> uncommitted edits. The one that loses work <span class="warn">!</span> — anything committed is still in the reflog; uncommitted edits are gone.</li>
+<li>Path form <code>git reset &lt;sha&gt; -- file</code> unstages a path (never moves HEAD).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Stash &amp; Reflog</h3>
+<pre><code>git stash push -u -m "wip"   # -u also stashes untracked
+git stash list               git stash show -p stash@{0}
+git stash pop                # apply + drop (top)
+git stash apply stash@{1}    # apply, keep in list
+git stash branch fix stash@{0}  # pop onto a new branch
+git reflog                   # every HEAD move (safety net!)
+git reset --hard HEAD@{1}    # undo a bad reset/rebase
+git switch -c recover &lt;sha-from-reflog&gt;</code></pre>
+<ul>
+<li>A stash is really a couple of commits on a hidden ref — it survives branch switches. <code>pop</code> can conflict; resolve like any merge.</li>
+<li><b>Reflog</b> logs where HEAD/branches have <i>been</i> (~90 days for reachable, 30 for unreachable) → recover after reset/rebase/amend/branch-delete <span class="warn">!</span></li>
+<li><code>git fsck --lost-found</code> surfaces dangling commits when even the reflog can't help.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Merge Conflicts</h3>
 <pre><code>&lt;&lt;&lt;&lt;&lt;&lt;&lt; HEAD        (ours)
 your change
-||||||| base        (zdiff3 shows ancestor)
+||||||| base        (zdiff3 shows the ancestor)
 =======
 their change
 &gt;&gt;&gt;&gt;&gt;&gt;&gt; branch     (theirs)</code></pre>
 <ul>
-<li>Edit to the intended result, remove all markers, <code>git add</code>, then <code>commit</code>/<code>--continue</code>. Bail: <code>merge/rebase --abort</code>.</li>
-<li>Enable <code>merge.conflictStyle=zdiff3</code> (shows the base) &amp; <code>rerere.enabled</code> (auto-reapply resolutions) <span class="warn">!</span></li>
-<li>In a <b>rebase</b>, "ours" = the branch you rebase ONTO (flips vs merge) <span class="warn">!</span></li>
-<li>A clean text merge can still be semantically broken → run tests.</li>
+<li>Edit to the intended result, delete <b>all</b> markers, <code>git add</code>, then <code>commit</code> / <code>--continue</code>. Bail out: <code>merge --abort</code> or <code>rebase --abort</code>.</li>
+<li>Enable <code>merge.conflictStyle=zdiff3</code> (shows the common ancestor) and <code>rerere.enabled=true</code> (records + replays resolutions) <span class="warn">!</span></li>
+<li>In a <b>rebase</b>, "ours" = the branch you're rebasing <i>onto</i> — the sense flips vs a merge <span class="warn">!</span></li>
+<li><code>git checkout --ours/--theirs file</code> takes one whole side. A clean text merge can still be <b>semantically</b> broken → run tests.</li>
 </ul>
 </section>
 
 <section class="card"><h3>Cherry-pick &amp; Bisect</h3>
-<pre><code>git cherry-pick &lt;sha&gt;        # apply one commit here (new SHA)
-git cherry-pick A..B         # a range
+<pre><code>git cherry-pick &lt;sha&gt;        # replay one commit here (new SHA)
+git cherry-pick A..B         # a range (exclusive of A)
+git cherry-pick -x &lt;sha&gt;      # note origin in the message
+git cherry-pick --continue | --abort
 git bisect start
 git bisect bad; git bisect good v1.0
 git bisect run ./test.sh     # AUTOMATE the search
 git bisect reset</code></pre>
 <ul>
-<li>Cherry-pick to backport a fix to a release branch.</li>
-<li>Bisect = binary search for the commit that broke it (log2 n) — atomic commits make it powerful.</li>
+<li>Cherry-pick to <b>backport</b> a fix onto a release branch, or lift a good commit off a wrong branch.</li>
+<li>Bisect = binary search for the first bad commit — <b>O(log n)</b> checkouts. <code>bisect run</code> drives it via a script's exit code (non-zero = bad, 125 = skip).</li>
+<li>Atomic, self-contained commits make both tools far more effective.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Branching &amp; PRs</h3>
+<section class="card"><h3>Remotes: fetch / pull / push</h3>
+<pre><code>git remote -v               git remote add origin &lt;url&gt;
+git fetch                   # download refs+objects, NO merge (safe)
+git pull                    # fetch + merge (or --rebase)
+git push -u origin feature  # push + set upstream
+git push origin --delete old
+git push origin v1.2.0      # tags aren't pushed by default!</code></pre>
 <ul>
-<li><b>Trunk-based</b> (short branches + feature flags + CI) = modern default; GitHub Flow (main + PRs); GitFlow = heavy, scheduled releases; long branches → merge hell <span class="warn">!</span></li>
-<li>PR merge modes: <b>merge commit</b> (full history) · <b>squash</b> (one clean commit, popular) · <b>rebase</b> (linear, keep commits).</li>
-<li>Branch protection: required review + CI checks, up-to-date branch, CODEOWNERS, no direct push to main.</li>
-<li>Keep a PR current: rebase onto main (then <code>--force-with-lease</code>) or merge main in.</li>
+<li><code>origin/main</code> is a read-only <b>remote-tracking</b> ref: a cache of the remote as of your last <code>fetch</code>. "ahead 2, behind 1" compares your branch to it.</li>
+<li><b>fetch is always safe</b> — it never touches your working tree; <code>pull</code> is fetch + integrate, and can conflict.</li>
+<li>"rejected — non-fast-forward" = the remote has commits you lack → fetch + rebase/merge first; do <b>not</b> blind-force <span class="warn">!</span></li>
+<li><code>git clone</code> = init + add origin + fetch all + checkout default branch.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Tags &amp; Config</h3>
+<section class="card"><h3>Rewriting History &amp; Recovery</h3>
+<pre><code># purge a file/secret from ALL history (preferred tool)
+git filter-repo --path secrets.env --invert-paths
+git filter-repo --replace-text expressions.txt
+# (BFG is the older alternative; filter-branch is deprecated)</code></pre>
+<ul>
+<li>Rewriting <b>every</b> commit changes all SHAs downstream → everyone must re-clone/reset. Coordinate; only do it on shared history for a real reason (leaked secret, huge blob).</li>
+<li><span class="warn">!</span> A committed secret is <b>already compromised</b> — filter it out <b>and rotate the credential</b>. Removal ≠ safety; caches/forks/mirrors keep copies.</li>
+<li>After a rewrite: <code>git push --force-with-lease</code>, expire reflogs, <code>git gc --prune=now</code> to drop the old objects.</li>
+<li>Recover anything "lost" via <code>reflog</code> first, <code>fsck --lost-found</code> second — objects live until GC after the grace window.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Tags &amp; Releases</h3>
 <pre><code>git tag -a v1.2.0 -m "release"   # annotated (preferred)
-git push origin v1.2.0           # tags NOT pushed by default!
+git tag v1.2.0                   # lightweight (bare pointer)
+git tag -s v1.2.0                # GPG-signed release
+git push origin v1.2.0           # or: git push --tags
+git push origin :refs/tags/v1.2  # delete remote tag
 git describe --tags              # v1.2.0-14-gabc123</code></pre>
 <ul>
-<li><b>Annotated</b> (object + tagger/msg/sign) vs <b>lightweight</b> (bare pointer). Sign releases (<code>-s</code>).</li>
+<li><b>Annotated</b> = a real object (tagger, date, message, optional signature) → use for releases. <b>Lightweight</b> = just a ref, for private bookmarks.</li>
+<li>Tags are <b>not</b> pushed by default and don't move — retag only in emergencies (forces re-fetch for everyone) <span class="warn">!</span></li>
+<li><code>git describe</code> gives a human version relative to the nearest tag — handy in build metadata.</li>
 </ul>
-<pre><code>git config --global pull.rebase true
-git config --global merge.conflictStyle zdiff3
-git config --global alias.lg "log --oneline --graph --all"</code></pre>
-<p>Levels: system → global → local. <code>.gitignore</code> can't untrack already-tracked files → <code>git rm --cached</code> <span class="warn">!</span></p>
 </section>
 
-<section class="card"><h3>Internals · Big Repos · Hooks</h3>
+<section class="card"><h3>Internals · Packfiles · Speed</h3>
 <ul>
-<li>Loose objects → <b>packfiles</b> (delta-compressed) via <code>git gc</code>; unreachable objects pruned after the reflog grace window.</li>
-<li>Big repos: <b>shallow clone</b> <code>--depth 1</code> (CI), <b>partial clone</b> <code>--filter=blob:none</code>, <b>sparse-checkout</b>, <b>Git LFS</b> for big binaries (never commit large binaries raw — every clone keeps every version) <span class="warn">!</span></li>
-<li>Submodule = pinned pointer to another repo (extra <code>--init --recursive</code>); subtree = copied-in.</li>
-<li><b>Hooks</b> (pre-commit/commit-msg/pre-push) are local &amp; advisory → CI/branch-protection enforces. Share via pre-commit/Husky/lefthook.</li>
+<li><code>.git/</code>: <code>objects/</code> (the store), <code>refs/</code> (branches, tags), <code>HEAD</code>, <code>config</code>, <code>index</code> (staging), <code>logs/</code> (reflog), <code>hooks/</code>.</li>
+<li>New objects land <b>loose</b> (one zlib file each); <code>git gc</code> rolls them into <b>packfiles</b> — delta-compressed against similar objects + reachability-pruned. Deltas exist <i>only here</i>, not in the model.</li>
+<li>Git is fast because most ops are <b>local</b> and hash-indexed: branch/commit/diff/log touch pointers and trees, not the network. History is a DAG walk, not a server round-trip.</li>
+<li><code>porcelain</code> = user commands (<code>add</code>, <code>commit</code>, <code>log</code>); <code>plumbing</code> = scriptable primitives (<code>cat-file</code>, <code>hash-object</code>, <code>rev-parse</code>, <code>update-ref</code>).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Submodules, Subtrees &amp; Big Repos</h3>
+<ul>
+<li><b>Submodule</b> = a pinned pointer (recorded SHA) to another repo. <code>clone --recurse-submodules</code>, or <code>submodule update --init --recursive</code>. Superproject tracks <i>which commit</i>, not the files → easy to forget to bump/commit the pointer <span class="warn">!</span></li>
+<li><b>Subtree</b> = the other repo's files copied <i>into</i> yours (<code>git subtree add/pull</code>) — no extra clone step, but history merges in.</li>
+<li>Scale big repos: <b>shallow</b> <code>clone --depth 1</code> (CI), <b>partial</b> <code>--filter=blob:none</code>, <b>sparse-checkout</b> (subset of paths), <b>Git LFS</b> for large binaries.</li>
+<li><span class="warn">!</span> Never commit large binaries raw — every clone then carries every version forever. Use LFS or keep them out.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Branching Strategies &amp; PRs</h3>
+<ul>
+<li><b>Trunk-based</b> (short-lived branches off main + feature flags + strong CI) = modern default; <b>GitHub Flow</b> (main + PRs) is the lightweight sibling; <b>GitFlow</b> (develop/release/hotfix) is heavy, for scheduled releases. Long-lived branches → merge hell <span class="warn">!</span></li>
+<li><b>PR merge modes:</b> <i>merge commit</i> (full history + bubble) · <i>squash</i> (one tidy commit per PR — most popular) · <i>rebase</i> (linear, keeps individual commits).</li>
+<li><b>Branch protection:</b> required reviews + green CI, up-to-date branch, CODEOWNERS, no direct push to <code>main</code>, optional signed/linear-history rules.</li>
+<li>Keep a PR current: rebase onto main (then <code>--force-with-lease</code>) for linear, or merge main in when others share the branch.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Config, Hooks &amp; Ignore</h3>
+<pre><code>git config --global user.name "Alice"
+git config --global user.email "alice@…"
+git config --global pull.rebase true
+git config --global merge.conflictStyle zdiff3
+git config --global rerere.enabled true
+git config --global alias.lg "log --oneline --graph --all"</code></pre>
+<ul>
+<li>Precedence: <b>system → global → local</b> (repo <code>.git/config</code> wins). <code>--show-origin</code> tells you where a value came from.</li>
+<li><b>Hooks</b> (<code>pre-commit</code>, <code>commit-msg</code>, <code>pre-push</code>) are local + advisory → real enforcement lives in CI / branch protection. Share via pre-commit / Husky / Lefthook.</li>
+<li><code>.gitignore</code> only stops <b>untracked</b> files; an already-tracked file keeps being tracked → <code>git rm --cached &lt;path&gt;</code> to stop it <span class="warn">!</span></li>
 </ul>
 </section>
 
 <section class="card"><h3>&#9733; Recovery Playbook</h3>
 <ul>
-<li>&#9744; <b>Committed to wrong branch:</b> <code>git branch new; git reset --hard HEAD~1</code> (on the wrong one) — or cherry-pick.</li>
-<li>&#9744; <b>Committed a secret:</b> <code>git filter-repo</code> to purge from ALL history <b>+ ROTATE the secret</b> (it's already leaked) <span class="warn">!</span></li>
+<li>&#9744; <b>Committed to the wrong branch:</b> <code>git switch -c right</code>, then on the wrong one <code>git reset --hard HEAD~1</code> — or cherry-pick across.</li>
 <li>&#9744; <b>Undo last commit, keep work:</b> <code>git reset --soft HEAD~1</code>.</li>
 <li>&#9744; <b>Undo a pushed commit:</b> <code>git revert &lt;sha&gt;</code> (never reset+force on shared).</li>
-<li>&#9744; <b>Lost commits (bad reset/rebase):</b> <code>git reflog</code> → <code>git reset --hard HEAD@{n}</code>.</li>
-<li>&#9744; <b>Force-push clobbered main:</b> recover the old SHA from reflog / a good clone → reset + push.</li>
-<li>&#9744; <b>Bad merge:</b> <code>git revert -m 1 &lt;merge-sha&gt;</code> (mind the re-merge gotcha).</li>
-<li>&#9744; <b>Which commit broke it:</b> <code>git bisect run</code>.</li>
+<li>&#9744; <b>Lost commits (bad reset/rebase/amend):</b> <code>git reflog</code> → <code>git reset --hard HEAD@{n}</code>.</li>
+<li>&#9744; <b>Force-push clobbered main:</b> recover the old SHA from a reflog / a colleague's clone → reset + push.</li>
+<li>&#9744; <b>Bad merge:</b> <code>git revert -m 1 &lt;merge-sha&gt;</code> (mind the re-merge gotcha: revert the revert or rebase to re-land).</li>
+<li>&#9744; <b>Committed a secret:</b> <code>git filter-repo</code> to purge from ALL history <b>+ ROTATE it</b> <span class="warn">!</span></li>
+<li>&#9744; <b>Which commit broke it:</b> <code>git bisect run ./test.sh</code>.</li>
+<li>&#9744; <b>Deleted the wrong file, already committed:</b> <code>git restore --source=HEAD~1 -- path</code>.</li>
 </ul>
+</section>
+
+<section class="card"><h3>Spot-the-Bug — Symptom → Cause</h3>
+<table><thead><tr><th>Symptom</th><th>Cause / fix</th></tr></thead><tbody>
+<tr><td>"rejected — non-fast-forward" on push</td><td>remote ahead → fetch + rebase, don't force <span class="warn">!</span></td></tr>
+<tr><td>my edits vanished after a command</td><td><code>reset --hard</code>/<code>clean</code>/<code>restore</code> — uncommitted = gone <span class="warn">!</span></td></tr>
+<tr><td>committed but can't find it on a branch</td><td>detached HEAD → <code>reflog</code> then branch it <span class="warn">!</span></td></tr>
+<tr><td>teammate's commits disappeared</td><td>someone force-pushed a rebase over shared history <span class="warn">!</span></td></tr>
+<tr><td>tag/release not on the remote</td><td>tags aren't pushed by default → <code>push --tags</code></td></tr>
+<tr><td>ignored file still tracked</td><td>added before ignore → <code>git rm --cached</code></td></tr>
+<tr><td>same conflict every rebase step</td><td>enable <code>rerere</code> to replay resolutions</td></tr>
+<tr><td>huge/slow clone</td><td>big binaries in history → LFS / filter-repo / shallow</td></tr>
+<tr><td>submodule folder empty</td><td>forgot <code>--recurse-submodules</code> / <code>update --init</code></td></tr>
+<tr><td>clean merge, broken build</td><td>semantic conflict — run the tests</td></tr>
+</tbody></table>
 </section>
 
 <section class="card"><h3>&#9744; Safe-Habits Checklist</h3>
 <ul>
 <li>&#9744; Only rewrite <b>local/unpushed</b> history; on shared branches use <code>revert</code>.</li>
-<li>&#9744; <code>--force-with-lease</code>, never bare <code>--force</code>.</li>
-<li>&#9744; <code>fetch</code> &amp; review before you act; <code>pull --rebase</code>/<code>--ff-only</code> for clean history.</li>
-<li>&#9744; Small, atomic commits (better review / bisect / revert); clean the branch before a PR.</li>
-<li>&#9744; Enable <code>zdiff3</code> + <code>rerere</code>; a <code>.gitignore</code> for junk; global identity + signing set up.</li>
-<li>&#9744; Never commit secrets/large binaries; protect <code>main</code> (no force-push, required checks).</li>
-<li>&#9744; When in doubt, it's in the <b>reflog</b> — don't panic.</li>
+<li>&#9744; <code>--force-with-lease</code>, never a bare <code>--force</code>.</li>
+<li>&#9744; <code>fetch</code> &amp; review before you act; <code>pull --rebase</code> or <code>--ff-only</code> for clean history.</li>
+<li>&#9744; Small, atomic commits + imperative messages (better review / bisect / revert); tidy the branch before a PR.</li>
+<li>&#9744; Enable <code>zdiff3</code> + <code>rerere</code>; keep a real <code>.gitignore</code>; set global identity + commit signing.</li>
+<li>&#9744; <code>git clean -n</code> before <code>-f</code>; <code>reset --hard</code> only when you're sure — check <code>status</code> first.</li>
+<li>&#9744; Never commit secrets or large binaries; protect <code>main</code> (no force-push, required CI + review).</li>
+<li>&#9744; When in doubt, it's in the <b>reflog</b> — don't panic, don't re-clone blindly.</li>
 </ul>
 </section>
 

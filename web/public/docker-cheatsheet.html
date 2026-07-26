@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Docker / Containers Cheat Sheet</title>
+<title>Docker Cheat Sheet</title>
 <style>
 :root{
   --fs: 7.2pt;       /* base body */
@@ -72,171 +72,253 @@ pre code{background:none; padding:0; font-size:1em;}
 </head>
 <body>
 <div class="sheet">
-<div class="titlebar"><h1>Docker / Containers Cheat Sheet</h1><span class="meta">DevOps focus · images · layers · Dockerfile · networking · compose · drilly</span></div>
+<div class="titlebar"><h1>Docker Cheat Sheet</h1><span class="meta">DevOps focus · images · layers · Dockerfile · networking · compose · drilly</span></div>
 <section class="card legend"><h3>How to read &amp; print</h3>
 <ul>
-<li><span class="warn">!</span> footgun / anti-pattern &nbsp; <code>&#9744;</code> Dockerfile-review item</li>
-<li>Focus: the five interview pillars — <b>images, layers, Dockerfile, networking, compose</b> — plus builds, security &amp; debugging.</li>
-<li>Mental model: a container = an <b>isolated process</b> (namespaces + cgroups + a union FS), sharing the host kernel — not a VM.</li>
-<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+<li><span class="warn">!</span> footgun / anti-pattern &nbsp; <code>&#9744;</code> Dockerfile-review item &nbsp; <span class="pg">tip</span> pattern to prefer</li>
+<li>Focus: the interview pillars — <b>container model, images, layers, Dockerfile, networking, compose</b> — plus builds, runtime, security &amp; debugging.</li>
+<li>Mental model: a container = an <b>isolated process</b> the kernel has been told to lie to — <b>namespaces</b> (what it sees) + <b>cgroups</b> (what it uses) + a <b>union FS</b> (its root), sharing the host kernel. Not a VM.</li>
+<li>Last 3 cards = <b>Dockerfile review checklist</b> + symptom→cause + troubleshooting playbook.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
 </ul></section>
 
 <section class="card diagram"><h3>Image · Layer · Container</h3>
 <div class="mermaid">
 flowchart TD
-  D["Dockerfile"] -->|build| IMG["Image = read-only layers + config"]
-  IMG --> L1["layer: base"]
+  D["Dockerfile"] -->|build| IMG["Image = read-only layers + config JSON"]
+  IMG --> L1["layer: base rootfs"]
   IMG --> L2["layer: deps"]
   IMG --> L3["layer: app"]
-  IMG -->|run| C["Container<br/>= image + thin writable layer"]
+  IMG -->|run| C["Container<br/>= image + thin R/W layer"]
 </div>
-<p class="cap">Each RUN/COPY/ADD = a cached, content-addressed layer, shared across images. A container adds one writable copy-on-write layer (ephemeral → use volumes for data).</p>
+<p class="cap">Each RUN/COPY/ADD = one cached, content-addressed (sha256) layer, shared across images via overlay2. A container adds a single copy-on-write writable layer — ephemeral, so persist real data in <b>volumes</b>. An image is layers + a config blob (CMD, ENV, ports); a manifest ties them together.</p>
+</section>
+
+<section class="card"><h3>Container = a Process (vs VM)</h3>
+<p>Not a lightweight VM — <b>a normal Linux process on the host kernel</b>, isolated by 3 kernel features:</p>
+<table><thead><tr><th>Feature</th><th>Controls</th></tr></thead><tbody>
+<tr><td><b>namespaces</b></td><td>what it <i>sees</i>: <code>pid</code> (own PID 1), <code>net</code>, <code>mnt</code>, <code>uts</code> (hostname), <code>ipc</code>, <code>user</code></td></tr>
+<tr><td><b>cgroups</b></td><td>what it <i>uses</i>: CPU, memory, block IO, PID count</td></tr>
+<tr><td><b>union FS</b></td><td>its root: overlay2 stacks R/O layers + a R/W layer</td></tr>
+</tbody></table>
+<table><thead><tr><th></th><th>Container</th><th>VM</th></tr></thead><tbody>
+<tr><td>Kernel</td><td>shared (host)</td><td>own guest kernel</td></tr>
+<tr><td>Boot</td><td>ms</td><td>seconds+</td></tr>
+<tr><td>Isolation</td><td>weaker</td><td>hardware-enforced</td></tr>
+</tbody></table>
+<ul>
+<li><code>ps aux</code> on the host shows the container's PIDs as ordinary processes — its PID namespace just hides the rest <span class="warn">!</span></li>
+<li>Shared kernel ⇒ a <b>kernel exploit escapes a container</b>, not a VM. For hard multi-tenancy use gVisor/Kata or a VM boundary <span class="warn">!</span></li>
+<li>No kernel <i>inside</i> ⇒ Linux images can't run on the Mac/Win kernel — Docker Desktop hides a Linux VM.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Architecture: CLI → runc</h3>
+<pre><code>docker CLI --HTTP over /var/run/docker.sock--> dockerd
+dockerd --gRPC--> containerd --> shim --> runc --> your PID 1</code></pre>
+<ul>
+<li><b>dockerd</b> — API server: images, build, networks (bridges + embedded DNS + iptables), volumes. Orchestrates; does <b>not</b> run your process.</li>
+<li><b>containerd</b> — lifecycle + image pull; drivable directly (K8s does — dropped dockershim).</li>
+<li><b>runc</b> — the OCI runtime that actually sets up namespaces/cgroups, sets the root FS, then <code>exec</code>s the entrypoint and exits; the shim keeps stdio + exit status.</li>
+</ul>
+<p><b>OCI</b> (image / runtime / distribution specs) decouples "container" from "Docker" — Podman (daemonless, rootless), nerdctl, CRI-O run the same images.</p>
+<p><span class="warn">!</span> The socket <code>/var/run/docker.sock</code> = <b>root on the host</b>. The <code>docker</code> group is root-equivalent — treat both as crown jewels.</p>
 </section>
 
 <section class="card"><h3>CLI Reference</h3>
-<pre><code>docker build -t app:1.2 .        # build from Dockerfile
+<pre><code>docker build -t app:1.2 .          # build from Dockerfile
 docker run -d --name web -p 8080:80 app:1.2
-docker ps [-a]                   # running / all
-docker exec -it web sh           # shell in a container
+docker ps [-a]                     # running / all
+docker exec -it web sh             # shell into a running ctr
+docker run --rm -it app sh         # throwaway shell
 docker logs -f --tail=100 web
-docker inspect web               # full JSON (.State ...)
-docker stats     docker top web  # live resources
-docker images    docker history app:1.2
-docker system df                 # disk usage
-docker system prune [-a]         # reclaim space !</code></pre>
-<p>Exit codes: <b>137</b>=OOM/SIGKILL · <b>143</b>=SIGTERM · 139=segfault · 125/126/127=docker/exec errors.</p>
+docker inspect web                 # full JSON (.State, .NetworkSettings)
+docker stats      docker top web   # live resources / procs
+docker images     docker history app:1.2   # layers + sizes
+docker cp web:/etc/app.conf .      # copy out of a ctr
+docker system df                   # disk usage
+docker system prune [-a] [--volumes]  # reclaim space !</code></pre>
+<p><b>Exit codes:</b> <b>0</b>=clean · <b>1</b>=app error · <b>137</b>=SIGKILL/OOM (128+9) · <b>143</b>=SIGTERM (128+15) · <b>139</b>=segfault · <b>125</b>=docker run failed · <b>126</b>=cmd not executable · <b>127</b>=cmd not found.</p>
+<p><span class="warn">!</span> <code>prune -a</code> deletes <b>all</b> unused images (not just dangling); <code>--volumes</code> can nuke data.</p>
 </section>
 
 <section class="card"><h3>Dockerfile Instructions</h3>
 <table><thead><tr><th>Instr</th><th>Does</th></tr></thead><tbody>
-<tr><td>FROM</td><td>base image (or stage AS)</td></tr>
+<tr><td>FROM</td><td>base image (or a prior stage <code>AS</code>)</td></tr>
 <tr><td>RUN</td><td>exec at build → a layer</td></tr>
-<tr><td>COPY</td><td>copy context in (prefer over ADD)</td></tr>
-<tr><td>ADD</td><td>COPY + URL/tar-extract <span class="warn">!</span></td></tr>
-<tr><td>WORKDIR</td><td>set/create cwd (not RUN cd)</td></tr>
-<tr><td>ENV / ARG</td><td>runtime env / build-time var</td></tr>
+<tr><td>COPY</td><td>copy build context in (prefer this)</td></tr>
+<tr><td>ADD</td><td>COPY + auto URL fetch / tar-extract <span class="warn">!</span></td></tr>
+<tr><td>WORKDIR</td><td>set+create cwd (never <code>RUN cd</code>)</td></tr>
+<tr><td>ENV</td><td>persistent runtime env var (in image)</td></tr>
+<tr><td>ARG</td><td>build-time only; in <code>history</code> <span class="warn">!</span></td></tr>
 <tr><td>EXPOSE</td><td><b>docs only</b> — does NOT publish <span class="warn">!</span></td></tr>
-<tr><td>USER</td><td>drop from root</td></tr>
-<tr><td>ENTRYPOINT/CMD</td><td>executable / default args</td></tr>
-<tr><td>HEALTHCHECK</td><td>liveness probe</td></tr>
+<tr><td>USER</td><td>drop from root for later steps + runtime</td></tr>
+<tr><td>ENTRYPOINT</td><td>the executable (exec form!)</td></tr>
+<tr><td>CMD</td><td>default args / default command</td></tr>
+<tr><td>HEALTHCHECK</td><td>liveness probe → healthy/unhealthy</td></tr>
+<tr><td>VOLUME</td><td>declares a mount point (anon vol) <span class="warn">!</span></td></tr>
 </tbody></table>
-<p>ARG is visible in history — <b>never a secret</b> <span class="warn">!</span></p>
+<ul>
+<li><code>ARG</code> is visible in <code>docker history</code> — <b>never a secret</b> <span class="warn">!</span></li>
+<li>Only <b>RUN / COPY / ADD</b> create layers; ENV/WORKDIR/etc. only mutate config (near-zero size).</li>
+<li>Prefer <code>COPY</code>; use <code>ADD</code> only for its tar-extract. A stray <code>VOLUME</code> in a base image can silently break caching + leave anon volumes.</li>
+</ul>
 </section>
 
 <section class="card"><h3>Layer Caching Rules</h3>
 <ul>
-<li>Cache invalidates from the <b>first changed instruction to the end</b> → order <b>least→most</b> frequently changing.</li>
-<li><b>Copy deps first, install, THEN copy source</b> — so a code change doesn't bust the deps layer:</li>
+<li>Cache invalidates from the <b>first changed instruction to the end</b> → order steps <b>least → most</b> frequently changing.</li>
+<li><b>Copy deps first, install, THEN copy source</b> — a code edit must not bust the deps layer:</li>
 </ul>
 <pre><code>COPY package.json package-lock.json ./
-RUN npm ci               # cached unless deps change
-COPY . .                 # only this busts on code edit
+RUN npm ci                 # cached unless deps change
+COPY . .                   # only this busts on a code edit
 RUN npm run build</code></pre>
 <ul>
-<li><code>.dockerignore</code> shrinks context &amp; stops <code>.git/node_modules</code> busting cache <span class="warn">!</span></li>
-<li>Clean up in the <b>same</b> RUN (a later delete doesn't shrink the image) <span class="warn">!</span></li>
-<li>Pin base by tag/digest; don't <code>apt upgrade</code> in builds.</li>
+<li>Cache key = instruction text + checksum of copied files + parent layer. Same inputs ⇒ hit.</li>
+<li><code>.dockerignore</code> shrinks context &amp; stops <code>.git/node_modules/*.log</code> from busting COPY cache + leaking secrets <span class="warn">!</span></li>
+<li>Chain + clean in the <b>same</b> RUN — a later <code>rm</code> in a new layer doesn't shrink the image <span class="warn">!</span>:</li>
 </ul>
+<pre><code>RUN apt-get update &amp;&amp; apt-get install -y --no-install-recommends \
+      curl ca-certificates \
+ &amp;&amp; rm -rf /var/lib/apt/lists/*</code></pre>
+<ul><li>Pin base by tag/<b>digest</b>; don't <code>apt upgrade</code> in a build (non-reproducible).</li></ul>
 </section>
 
 <section class="card"><h3>Multi-Stage &amp; Base Images</h3>
-<pre><code># build stage
+<pre><code># --- build stage (has the toolchain) ---
 FROM golang:1.22 AS build
 WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -o /app ./cmd
-# tiny final stage
+# --- tiny final stage (no compiler) ---
 FROM gcr.io/distroless/static
 COPY --from=build /app /app
 USER nonroot
 ENTRYPOINT ["/app"]</code></pre>
-<table><thead><tr><th>Base</th><th>Use</th></tr></thead><tbody>
-<tr><td>scratch</td><td>static binary (Go/Rust)</td></tr>
-<tr><td>distroless</td><td>app+runtime, no shell → small &amp; secure</td></tr>
-<tr><td>alpine (~5MB)</td><td>tiny, musl libc gotchas <span class="warn">!</span></td></tr>
-<tr><td>debian-slim</td><td>glibc, safe default</td></tr>
+<table><thead><tr><th>Base</th><th>Use / trap</th></tr></thead><tbody>
+<tr><td>scratch</td><td>fully static binary (Go/Rust); no shell, no certs</td></tr>
+<tr><td>distroless</td><td>runtime only, no shell → small &amp; low-CVE</td></tr>
+<tr><td>alpine (~5MB)</td><td>tiny; <b>musl</b> libc + DNS quirks <span class="warn">!</span></td></tr>
+<tr><td>debian-slim</td><td>glibc, boring, safe default</td></tr>
 </tbody></table>
+<ul>
+<li>Multi-stage = build tools stay behind; only artifacts land in the shipped image. <span class="pg">tip</span> <code>--target build</code> to stop at a stage; <code>COPY --from=nginx:alpine</code> to steal files from any image.</li>
+<li>No shell (scratch/distroless) ⇒ <code>exec</code>/HEALTHCHECK <code>CMD-SHELL</code> won't work — debug via an <code>-debug</code> tag or ephemeral <code>docker debug</code> <span class="warn">!</span></li>
+</ul>
 </section>
 
-<section class="card"><h3>CMD vs ENTRYPOINT</h3>
+<section class="card"><h3>CMD vs ENTRYPOINT &amp; PID 1</h3>
 <ul>
-<li><b>ENTRYPOINT</b> = the executable; <b>CMD</b> = default args (overridable by <code>docker run img args</code>).</li>
-<li><b>Exec form</b> <code>["nginx","-g","daemon off;"]</code> → your process is <b>PID 1</b>, gets SIGTERM → graceful stop.</li>
-<li><b>Shell form</b> <code>nginx -g ...</code> → wrapped in <code>/bin/sh -c</code>, <b>swallows signals</b> → no graceful shutdown, 10s then SIGKILL <span class="warn">!</span></li>
-<li>PID 1 must reap zombies &amp; handle signals — add <code>--init</code>/tini if your app can't.</li>
-<li>Entrypoint script: do setup then <code>exec "$@"</code> (hand off PID 1) <span class="warn">!</span></li>
+<li><b>ENTRYPOINT</b> = the executable; <b>CMD</b> = default args, overridable by <code>docker run img ARGS</code>. Together: <code>ENTRYPOINT ["nginx"]</code> + <code>CMD ["-g","daemon off;"]</code>.</li>
+<li><b>Exec form</b> <code>["nginx","-g","daemon off;"]</code> → your process is <b>PID 1</b>, receives SIGTERM → graceful stop.</li>
+<li><b>Shell form</b> <code>nginx -g ...</code> → wrapped in <code>/bin/sh -c</code>; the shell is PID 1 and <b>swallows signals</b> → no graceful shutdown, 10s grace then SIGKILL (137) <span class="warn">!</span></li>
+</ul>
+<pre><code># entrypoint.sh: do setup, then HAND OFF PID 1
+#!/bin/sh
+set -e
+migrate_db
+exec "$@"          # exec = replace shell, keep signals !</code></pre>
+<ul>
+<li>PID 1 is special: it must <b>reap zombies</b> and handle signals. If your app can't, add <code>--init</code> (tini) or <code>ENTRYPOINT ["tini","--"]</code> <span class="warn">!</span></li>
+<li><code>docker stop</code> = SIGTERM → wait <code>--time</code> (10s) → SIGKILL. Trap SIGTERM to drain connections.</li>
 </ul>
 </section>
 
 <section class="card"><h3>BuildKit &amp; buildx</h3>
 <pre><code># build secret — NOT baked into any layer
-RUN --mount=type=secret,id=npmrc \
-    npm ci
+RUN --mount=type=secret,id=npmrc npm ci
 docker build --secret id=npmrc,src=$HOME/.npmrc .
 
-# package-manager cache across builds
-RUN --mount=type=cache,target=/root/.cache go build ./...
+# package-manager cache reused across builds
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    go build ./...
 
 # multi-arch + shared CI cache
 docker buildx build --platform linux/amd64,linux/arm64 \
-  --cache-to type=registry,ref=acme/app:cache \
-  --cache-from type=registry,ref=acme/app:cache -t app .</code></pre>
+  --cache-to   type=registry,ref=acme/app:cache,mode=max \
+  --cache-from type=registry,ref=acme/app:cache \
+  -t acme/app:1.2 --push .</code></pre>
 <ul>
-<li>Secrets via <code>ARG</code>/<code>COPY</code> persist in image history forever — use BuildKit <code>--secret</code> <span class="warn">!</span></li>
-<li>CI cache never hits? runners are ephemeral → registry cache (<code>--cache-to/from</code>).</li>
+<li>BuildKit (default since 23.0) = parallel stage builds, better cache, <code>--mount</code> secrets/cache/ssh.</li>
+<li>Secrets via <code>ARG</code>/<code>ENV</code>/<code>COPY</code> persist in image history <b>forever</b> — use <code>--secret</code>; they never hit a layer <span class="warn">!</span></li>
+<li>CI cache "never hits"? Runners are ephemeral → local cache is gone. Use <b>registry cache</b> (<code>--cache-to/from</code>) or gha cache <span class="warn">!</span></li>
 </ul>
 </section>
 
 <section class="card"><h3>Registries &amp; Tags</h3>
 <pre><code>docker tag app:1.2 ghcr.io/acme/app:1.2
 docker push ghcr.io/acme/app:1.2
-docker pull ghcr.io/acme/app@sha256:...   # by digest</code></pre>
+docker pull ghcr.io/acme/app@sha256:ab12...   # by digest</code></pre>
 <ul>
-<li>Ref = <code>registry/namespace/repo:tag</code> (defaults docker.io/library, :latest).</li>
-<li>Tags are <b>mutable pointers</b>; <b>digests</b> (@sha256) are immutable — deploy by digest for reproducibility <span class="warn">!</span></li>
-<li><code>:latest</code> is a trap (surprise upgrades, unclear what's running) <span class="warn">!</span></li>
-<li>Build once → <b>promote the same digest</b> across envs; don't rebuild per env.</li>
-<li>Docker Hub anon pull limits break CI → auth / pull-through mirror.</li>
+<li>Ref = <code>registry/namespace/repo:tag</code> (defaults <code>docker.io/library</code>, <code>:latest</code>).</li>
+<li>Tags are <b>mutable pointers</b>; <b>digests</b> (<code>@sha256:</code>) are immutable — deploy by digest for reproducibility <span class="warn">!</span></li>
+<li><code>:latest</code> is a trap: surprise upgrades, unclear what's actually running, breaks rollbacks <span class="warn">!</span></li>
+<li>Build once → <b>promote the same digest</b> dev→stage→prod; never rebuild per environment.</li>
+<li>A <b>manifest list</b> maps one tag to per-arch images (amd64/arm64) — the daemon pulls the match.</li>
+<li>Docker Hub anon pull limits break CI → authenticate or run a <b>pull-through mirror</b>.</li>
 </ul>
 </section>
 
-<section class="card diagram"><h3>Networking</h3>
+<section class="card diagram"><h3>Networking — the model</h3>
 <div class="mermaid">
 flowchart LR
   H["host :8080"] -->|"-p 8080:80 (DNAT)"| C1["web :80"]
-  C1 -->|"by name (DNS)"| C2["db :5432"]
-  C1 --> NET["user-defined bridge"]
+  C1 -->|"by name (embedded DNS)"| C2["db :5432"]
+  C1 --> NET["user-defined bridge (br-xxxx)"]
   C2 --> NET
+  C1 -.->|"egress (MASQUERADE)"| INET["internet"]
 </div>
 <table><thead><tr><th>Driver</th><th>Use</th></tr></thead><tbody>
-<tr><td>bridge (default)</td><td>private net + NAT; <b>no DNS on default bridge</b> <span class="warn">!</span></td></tr>
+<tr><td>bridge (default)</td><td>private subnet + NAT; <b>no DNS on default <code>docker0</code></b> <span class="warn">!</span></td></tr>
 <tr><td>user-defined bridge</td><td>containers resolve <b>each other by name</b></td></tr>
-<tr><td>host</td><td>share host net, no isolation/mapping</td></tr>
-<tr><td>none / overlay / macvlan</td><td>no net / multi-host / L2 IP</td></tr>
+<tr><td>host</td><td>share host netns — no NAT, no isolation, port clashes <span class="warn">!</span></td></tr>
+<tr><td>none</td><td>loopback only (batch jobs)</td></tr>
+<tr><td>overlay</td><td>multi-host (Swarm), VXLAN tunnels</td></tr>
+<tr><td>macvlan / ipvlan</td><td>own MAC+IP / own IP on the physical LAN</td></tr>
 </tbody></table>
 <ul>
 <li><code>-p host:container</code> publishes; <b>EXPOSE does not</b> <span class="warn">!</span></li>
-<li>Two containers can't talk? default bridge, no DNS → user-defined network / compose. <code>localhost</code> = the container itself; host = <code>host.docker.internal</code>.</li>
+<li><code>localhost</code> inside = the container itself. Reach the host via <code>host.docker.internal</code> (Desktop; on Linux add <code>--add-host=host.docker.internal:host-gateway</code>) <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Networking — under the hood</h3>
+<p>A container is a process in its own <b>net namespace</b>. Docker wires it up with a <b>veth pair</b> (virtual cable): one end is <code>eth0</code> inside, the other attaches to a host <b>bridge</b> (<code>docker0</code> / <code>br-&lt;id&gt;</code>, an L2 switch).</p>
+<table><thead><tr><th>Rule</th><th>Chain</th><th>Does</th></tr></thead><tbody>
+<tr><td>MASQUERADE</td><td>POSTROUTING</td><td>src-NAT ctr IP → host IP (egress)</td></tr>
+<tr><td>DNAT</td><td>PREROUTING</td><td>host:8080 → ctr:80 (published port)</td></tr>
+</tbody></table>
+<ul>
+<li>Same bridge = can talk; <b>different user-defined networks are isolated</b> even by IP — Docker's iptables drops cross-net traffic unless a ctr is attached to both <span class="warn">!</span></li>
+<li><b>Embedded DNS at 127.0.0.11</b> (user-defined nets only) resolves container names + <code>--network-alias</code>. This is why Compose service names "just work".</li>
+<li><b>overlay</b> adds ~50B VXLAN headers → smaller effective MTU → "large requests hang" bugs over VPNs <span class="warn">!</span></li>
+<li>Put custom firewall rules in the <b><code>DOCKER-USER</code></b> chain — Docker won't clobber it.</li>
 </ul>
 </section>
 
 <section class="card"><h3>Volumes &amp; Storage</h3>
 <table><thead><tr><th>Type</th><th>Use</th></tr></thead><tbody>
-<tr><td><b>named volume</b></td><td>Docker-managed persistent data (prod)</td></tr>
-<tr><td><b>bind mount</b></td><td>host path → dev / live source</td></tr>
-<tr><td><b>tmpfs</b></td><td>in-memory, secrets/scratch</td></tr>
+<tr><td><b>named volume</b></td><td>Docker-managed persistent data (prod DBs)</td></tr>
+<tr><td><b>bind mount</b></td><td>host path → dev live-reload; exact host location</td></tr>
+<tr><td><b>tmpfs</b></td><td>in-memory only — secrets / scratch</td></tr>
+<tr><td>anon volume</td><td>from <code>VOLUME</code>/<code>-v /path</code>; dangling churn <span class="warn">!</span></td></tr>
 </tbody></table>
-<pre><code>docker run -v mydata:/var/lib/pg ...        # named
-docker run --mount type=bind,src=$PWD,dst=/app ...
+<pre><code>docker run -v pgdata:/var/lib/postgresql/data pg   # named
+docker run --mount type=bind,src=$PWD,dst=/app app # bind (explicit)
+docker run --tmpfs /run:size=64m app
 docker volume ls | prune</code></pre>
 <ul>
-<li>Writable layer is ephemeral — persist with a volume <span class="warn">!</span></li>
-<li>Volumes aren't removed with the container (dangling volumes eat disk) — <code>run --rm -v</code> / <code>volume prune</code>.</li>
-<li>Root container → files owned by root on the host (UID mismatch pain) <span class="warn">!</span></li>
+<li>The writable layer is <b>ephemeral</b> — dies with the container. Persist via a volume <span class="warn">!</span></li>
+<li>Volumes are <b>not</b> removed with the container (dangling volumes eat disk) — <code>run --rm</code> drops anon vols; <code>volume prune</code> reclaims.</li>
+<li>Root container → files land <b>root-owned on the host</b> (UID mismatch pain on bind mounts) <span class="warn">!</span> Run as a matching UID or <code>chown</code>.</li>
+<li>Bind mount over a populated image dir <b>hides</b> the image's files (e.g. mounting empty <code>node_modules</code>) <span class="warn">!</span></li>
 </ul>
 </section>
 
-<section class="card"><h3>Compose</h3>
+<section class="card"><h3>Compose — basics</h3>
 <pre><code>services:
   web:
     build: .
@@ -250,77 +332,129 @@ docker volume ls | prune</code></pre>
     healthcheck:
       test: ["CMD","pg_isready","-U","postgres"]
       interval: 5s
+      timeout: 3s
       retries: 5
 volumes: { pgdata: {} }</code></pre>
 <pre><code>docker compose up -d --build   |   down [-v]
 docker compose logs -f web     |   exec web sh
-docker compose config          # render merged config</code></pre>
+docker compose ps              |   config   # render merged</code></pre>
 <ul>
-<li>Compose makes a user-defined net → services reach each other <b>by service name</b>.</li>
-<li>Plain <code>depends_on</code> waits for START, not READY — add <code>condition: service_healthy</code> <span class="warn">!</span></li>
-<li>Override files (<code>-f base.yml -f prod.yml</code>) &amp; <code>.env</code> for per-env config.</li>
+<li>Compose auto-creates a user-defined network → services reach each other <b>by service name</b>.</li>
+<li>Plain <code>depends_on</code> waits for <b>START, not READY</b> — add <code>condition: service_healthy</code> <span class="warn">!</span> The app still needs its own connection retry.</li>
 </ul>
 </section>
 
+<section class="card"><h3>Compose — in depth</h3>
+<ul>
+<li><b>Overrides:</b> <code>-f base.yml -f prod.yml</code> deep-merge (later wins); <code>compose.override.yml</code> auto-loads in dev.</li>
+<li><b>Profiles:</b> <code>profiles: [debug]</code> → only start with <code>--profile debug</code> (optional services).</li>
+<li><b>Env interpolation:</b> <code>${DB_PASS:?err}</code> (required), <code>${PORT:-8080}</code> (default). Values from shell + <code>.env</code> in the project dir.</li>
+<li><b>Scale:</b> <code>docker compose up --scale worker=3</code> (drop the fixed <code>container_name</code> first).</li>
+</ul>
+<table><thead><tr><th>restart</th><th>When</th></tr></thead><tbody>
+<tr><td><code>no</code></td><td>never (default)</td></tr>
+<tr><td><code>on-failure[:N]</code></td><td>non-zero exit, up to N tries</td></tr>
+<tr><td><code>unless-stopped</code></td><td>always, unless you stopped it</td></tr>
+<tr><td><code>always</code></td><td>always, even after manual stop+daemon restart</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> Compose is single-host dev/CI tooling. For multi-host prod, that's Kubernetes / Swarm — don't ship <code>compose up</code> as your orchestrator.</p>
+</section>
+
 <section class="card"><h3>Resources &amp; Runtime</h3>
-<pre><code>docker run --memory=512m --cpus=1.5 \
+<pre><code>docker run --memory=512m --memory-swap=512m \
+  --cpus=1.5 --pids-limit=200 \
   --restart=on-failure:3 --init \
+  --read-only --tmpfs /tmp \
   --log-opt max-size=10m --log-opt max-file=3 app</code></pre>
 <ul>
 <li>Over <b>memory</b> limit → <b>OOMKilled (137)</b>; over <b>CPU</b> → <b>throttled</b>, not killed.</li>
-<li>Old JVM/Node saw HOST memory, not the cgroup → OOM; modern runtimes respect cgroups <span class="warn">!</span></li>
-<li>Default <code>json-file</code> logs grow unbounded → set <code>max-size/max-file</code> <span class="warn">!</span></li>
-<li><code>--ulimit nofile</code> fixes "too many open files"; <code>--shm-size</code> for Chrome/Postgres.</li>
+<li><code>--cpus=1.5</code> = cgroup CPU quota; <code>--cpuset-cpus</code> pins to specific cores.</li>
+<li>Old JVM/Node saw <b>host</b> memory, not the cgroup → OOM. Modern runtimes are cgroup-aware; still set <code>-XX:MaxRAMPercentage</code> / verify <span class="warn">!</span></li>
+<li>Default <code>json-file</code> logs grow <b>unbounded</b> → set <code>max-size/max-file</code> or a driver <span class="warn">!</span></li>
+<li><code>--ulimit nofile=…</code> fixes "too many open files"; <code>--shm-size</code> for Chrome/Postgres crashes.</li>
 </ul>
 </section>
 
 <section class="card"><h3>Security</h3>
 <ul>
-<li>Shared kernel → weaker isolation than a VM; defense in depth.</li>
-<li>Run <b>non-root</b> (<code>USER</code>); <code>--cap-drop ALL</code> then add only what's needed; <code>--read-only</code> + tmpfs.</li>
-<li><code>--security-opt no-new-privileges</code>; keep the default <b>seccomp</b>/AppArmor profile.</li>
-<li><b>Never</b> <code>--privileged</code>, <code>--net/--pid=host</code>, or mount <code>/var/run/docker.sock</code> (= root on host) <span class="warn">!</span></li>
-<li>No secrets in image/ENV/ARG (leak in history/inspect) — BuildKit <code>--secret</code> at build, mounted files/secret manager at runtime <span class="warn">!</span></li>
-<li>The <code>docker</code> group = root-equivalent.</li>
+<li>Shared kernel → weaker than a VM; do defense in depth.</li>
+<li>Run <b>non-root</b> (<code>USER</code> in the Dockerfile); <code>--cap-drop ALL</code> then add only what's needed (<code>--cap-add NET_BIND_SERVICE</code>).</li>
+<li><code>--read-only</code> rootfs + <code>--tmpfs</code> for writable paths; <code>--security-opt no-new-privileges</code>; keep the default <b>seccomp</b>/AppArmor profile.</li>
+<li><b>Never</b> <code>--privileged</code>, <code>--net=host</code>/<code>--pid=host</code>, or mount <code>/var/run/docker.sock</code> — each ≈ root on the host <span class="warn">!</span></li>
+<li>No secrets in image / ENV / ARG (leak via <code>history</code>/<code>inspect</code>) — BuildKit <code>--secret</code> at build; mounted files / secret manager / <code>--env-file</code> at runtime <span class="warn">!</span></li>
+<li>Prefer <b>rootless Docker</b> (user namespaces) to shrink blast radius. The <code>docker</code> group = root-equivalent.</li>
 </ul>
 </section>
 
 <section class="card"><h3>Image Supply Chain</h3>
 <ul>
-<li><b>Scan</b> images for CVEs (Trivy / Grype / Docker Scout) in CI &amp; at the registry; fail on criticals.</li>
-<li><b>Patch</b> = rebuild regularly (a pinned base rots) — digests for reproducibility + a rebuild pipeline for security.</li>
-<li>Minimal base = fewer packages = fewer CVEs.</li>
-<li><b>Sign</b> images (cosign/sigstore) &amp; verify in admission; <b>SBOM</b> (syft) to know contents; <b>provenance</b>/SLSA attestations.</li>
-<li>Only run signed+scanned images (Kyverno/OPA/Binary Authorization).</li>
+<li><b>Scan</b> for CVEs (Trivy / Grype / Docker Scout) in CI &amp; at the registry; fail the build on criticals.</li>
+<li><b>Patch = rebuild regularly</b> — a pinned base rots as new CVEs land. Digests for reproducibility <b>plus</b> a scheduled rebuild pipeline for security (not a contradiction).</li>
+<li><b>Minimal base</b> = fewer packages = smaller CVE surface (distroless/slim/scratch).</li>
+<li><b>Sign</b> images (cosign/sigstore) &amp; verify at admission; ship an <b>SBOM</b> (syft) so you know contents; attach <b>provenance</b> (SLSA) attestations.</li>
+<li>Enforce "only signed + scanned images run" via Kyverno / OPA Gatekeeper / Binary Authorization.</li>
 </ul>
+</section>
+
+<section class="card"><h3>Debugging — tools</h3>
+<h4>Symptom → tool</h4>
+<table><thead><tr><th>Symptom</th><th>Reach for</th></tr></thead><tbody>
+<tr><td>why did it exit?</td><td><code>logs</code> + <code>inspect --format '{{.State.ExitCode}} {{.State.OOMKilled}}'</code></td></tr>
+<tr><td>can't get a shell (distroless)</td><td><code>docker debug</code> / ephemeral sidecar sharing netns</td></tr>
+<tr><td>network / DNS</td><td><code>network inspect</code>, <code>exec … nslookup db</code>, <code>getent hosts</code></td></tr>
+<tr><td>image too big / what's in it</td><td><code>history</code>, <code>dive</code>, <code>docker sbom</code></td></tr>
+<tr><td>disk full</td><td><code>system df</code> → <code>system prune</code></td></tr>
+<tr><td>daemon wedged</td><td><code>journalctl -u docker</code>, restart <code>dockerd</code></td></tr>
+</tbody></table>
+<pre><code># attach a debug toolbox to a running ctr's namespaces
+docker run -it --rm --pid=container:web \
+  --net=container:web nicolaka/netshoot</code></pre>
 </section>
 
 <section class="card"><h3>&#9744; Dockerfile Review Checklist</h3>
 <ul>
-<li>&#9744; <b>Multi-stage</b>: no build tools/SDK in the final image.</li>
+<li>&#9744; <b>Multi-stage</b>: no compiler/SDK/build tools in the final image.</li>
 <li>&#9744; <b>Minimal pinned base</b> (distroless/slim + tag or digest, not <code>:latest</code>).</li>
-<li>&#9744; <b>Non-root <code>USER</code></b>; no secrets in ARG/ENV/layers.</li>
-<li>&#9744; <b><code>.dockerignore</code></b> present; deps copied &amp; installed before source (cache).</li>
-<li>&#9744; Cleanup in the same RUN; versions pinned.</li>
-<li>&#9744; <b>Exec-form</b> ENTRYPOINT/CMD (PID 1 signals); <code>--init</code> if needed.</li>
-<li>&#9744; <b>HEALTHCHECK</b> defined; ports published, not just EXPOSEd.</li>
-<li>&#9744; Image scanned; runs read-only + cap-dropped.</li>
+<li>&#9744; <b>Non-root <code>USER</code></b>; no secrets in ARG/ENV/layers (BuildKit <code>--secret</code>).</li>
+<li>&#9744; <b><code>.dockerignore</code></b> present; deps copied &amp; installed <b>before</b> source (cache).</li>
+<li>&#9744; Install + cleanup in the <b>same</b> RUN; package versions pinned; no <code>apt upgrade</code>.</li>
+<li>&#9744; <b>Exec-form</b> ENTRYPOINT/CMD (PID 1 gets signals); <code>--init</code>/tini if the app can't reap.</li>
+<li>&#9744; <code>WORKDIR</code> not <code>RUN cd</code>; <code>COPY</code> not <code>ADD</code> (unless extracting).</li>
+<li>&#9744; <b>HEALTHCHECK</b> defined; ports <b>published</b> (<code>-p</code>), not just <code>EXPOSE</code>d.</li>
+<li>&#9744; Image scanned in CI; runs <code>--read-only</code> + <code>--cap-drop ALL</code> + <code>no-new-privileges</code>.</li>
+<li>&#9744; Log rotation + memory/CPU limits set on <code>run</code>/compose.</li>
 </ul>
 </section>
 
+<section class="card"><h3>Common Bugs — Symptom → Cause</h3>
+<table><thead><tr><th>Symptom</th><th>Cause</th></tr></thead><tbody>
+<tr><td>container exits 137</td><td>OOMKilled (or SIGKILL) — raise <code>--memory</code> / fix leak <span class="warn">!</span></td></tr>
+<tr><td>ignores Ctrl-C / slow to stop</td><td>shell-form CMD swallows SIGTERM; not PID 1 <span class="warn">!</span></td></tr>
+<tr><td>two services can't reach each other</td><td>default bridge (no DNS) or different networks <span class="warn">!</span></td></tr>
+<tr><td>port not reachable from host</td><td>only <code>EXPOSE</code>d, never <code>-p</code> published <span class="warn">!</span></td></tr>
+<tr><td>image is 1.5GB</td><td>no multi-stage / fat base / cleanup in a later layer <span class="warn">!</span></td></tr>
+<tr><td>cache never hits in CI</td><td>ephemeral runner; no registry cache; bad step order <span class="warn">!</span></td></tr>
+<tr><td>secret shows in <code>docker history</code></td><td>passed via ARG/ENV/COPY not <code>--secret</code> <span class="warn">!</span></td></tr>
+<tr><td>data gone after redeploy</td><td>wrote to writable layer, no volume <span class="warn">!</span></td></tr>
+<tr><td>host files owned by root</td><td>container ran as root over a bind mount <span class="warn">!</span></td></tr>
+<tr><td>app connects before DB ready</td><td><code>depends_on</code> waits for start not health <span class="warn">!</span></td></tr>
+<tr><td>large requests hang (overlay/VPN)</td><td>MTU too high for VXLAN headers <span class="warn">!</span></td></tr>
+</tbody></table>
+</section>
+
 <section class="card"><h3>&#9733; Troubleshooting Playbook</h3>
-<h4>Exits immediately (code 0/1)</h4>
-<ul><li>&#9744; <code>logs</code> + exit code; main process ended / wrong CMD → run with a shell / override entrypoint.</li></ul>
+<h4>Exits immediately (0/1)</h4>
+<ul><li>&#9744; <code>logs</code> + exit code; main process ended / wrong CMD → override entrypoint with a shell to poke around.</li></ul>
 <h4>OOMKilled (137)</h4>
-<ul><li>&#9744; <code>inspect .State.OOMKilled</code>; raise <code>--memory</code> or fix leak; check runtime is cgroup-aware.</li></ul>
+<ul><li>&#9744; <code>inspect .State.OOMKilled</code>; raise <code>--memory</code> or fix the leak; confirm the runtime reads the cgroup.</li></ul>
 <h4>Image is huge</h4>
-<ul><li>&#9744; <code>history</code>/dive; multi-stage, smaller base, clean in-layer, <code>.dockerignore</code>.</li></ul>
+<ul><li>&#9744; <code>history</code>/dive; go multi-stage, smaller base, clean in-layer, add <code>.dockerignore</code>.</li></ul>
 <h4>Cache never hits in CI</h4>
-<ul><li>&#9744; ephemeral runners → <code>buildx --cache-to/from</code> registry; fix instruction order &amp; context.</li></ul>
+<ul><li>&#9744; ephemeral runners → <code>buildx --cache-to/from</code> registry; fix instruction order &amp; context size.</li></ul>
 <h4>Containers can't connect</h4>
-<ul><li>&#9744; user-defined network + service name (not localhost); check <code>network inspect</code>, ports.</li></ul>
+<ul><li>&#9744; user-defined network + service name (not <code>localhost</code>); check <code>network inspect</code>, published ports, DNS.</li></ul>
 <h4>Disk full</h4>
-<ul><li>&#9744; <code>system df</code> → <code>system prune</code> (mind <code>-a</code>); rotate logs; prune volumes/build cache.</li></ul>
+<ul><li>&#9744; <code>system df</code> → <code>system prune</code> (mind <code>-a</code>/<code>--volumes</code>); rotate logs; prune build cache.</li></ul>
 </section>
 
 </div>

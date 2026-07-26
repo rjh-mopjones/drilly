@@ -108,8 +108,8 @@ pre code{background:none; padding:0; font-size:1em;}
 </ul>
 <ul>
 <li><b>Roles &gt; long-lived keys</b>: EC2 → instance profile, Lambda → execution role, cross-account → <code>sts:AssumeRole</code>. Never hardcode access keys <span class="warn">!</span></li>
-<li>Identity-based (on principal) vs resource-based (on S3 bucket/SQS/KMS — enables cross-account).</li>
-<li>Least privilege; verify with IAM Access Analyzer. ABAC via tags for scale.</li>
+<li>Identity-based (on principal) vs resource-based (on S3 bucket/SQS/KMS — enables cross-account &amp; needs no role assumption).</li>
+<li>Least privilege; verify with IAM Access Analyzer. ABAC via tags for scale. <code>aws sts get-caller-identity</code> to confirm who you are.</li>
 </ul>
 </section>
 
@@ -123,8 +123,8 @@ pre code{background:none; padding:0; font-size:1em;}
 <ul>
 <li>Families: general (m/t), compute (c), memory (r/x), storage (i/d), accelerated (p/g). <b>Graviton</b> (ARM) = cheaper/greener.</li>
 <li><b>Auto Scaling</b>: target-tracking (easiest) / step / scheduled / predictive. Scale on the right metric, not just CPU.</li>
-<li>T-series are <b>burstable</b> on CPU credits — steady high load exhausts them <span class="warn">!</span></li>
-<li>Enforce <b>IMDSv2</b> (blocks SSRF creds theft) <span class="warn">!</span></li>
+<li>T-series are <b>burstable</b> on CPU credits — steady high load exhausts them <span class="warn">!</span> (or set unlimited mode, which can bill extra).</li>
+<li>Enforce <b>IMDSv2</b> (blocks SSRF creds theft) <span class="warn">!</span> AMIs bake config; user-data runs at first boot.</li>
 </ul>
 </section>
 
@@ -140,7 +140,23 @@ pre code{background:none; padding:0; font-size:1em;}
 <li><b>Cold start</b>: new exec env init. Cut with smaller packages, <b>provisioned concurrency</b>, or <b>SnapStart</b> (Java). VPC-attached cold starts improved (Hyperplane ENIs).</li>
 <li>Billed on <b>GB-seconds + requests</b>. Right-size memory (more memory = more CPU = often cheaper/faster).</li>
 <li>Async invokes retry twice → send failures to a <b>DLQ/destination</b> <span class="warn">!</span></li>
-<li>Design for <b>idempotency</b> (at-least-once). Not for long/steady heavy compute → Fargate/EC2.</li>
+<li>Design for <b>idempotency</b> (at-least-once). Reserve/limit concurrency to protect a downstream DB from a spike <span class="warn">!</span> Not for long/steady heavy compute → Fargate/EC2.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Containers — ECS · Fargate · EKS</h3>
+<p>Two axes: <b>orchestrator</b> (ECS proprietary/simple vs EKS = real k8s) × <b>compute</b> (EC2 nodes you manage vs <b>Fargate</b> serverless). Any combo valid.</p>
+<table><thead><tr><th></th><th>ECS</th><th>EKS</th></tr></thead><tbody>
+<tr><td>API</td><td>AWS-native, simple</td><td>upstream k8s</td></tr>
+<tr><td>portable</td><td>AWS-only</td><td>anywhere k8s runs</td></tr>
+<tr><td>CP cost</td><td>free</td><td>hourly/cluster</td></tr>
+<tr><td>best</td><td>all-in AWS, low ops</td><td>k8s skills / multi-cloud</td></tr>
+</tbody></table>
+<ul>
+<li>ECS terms: <b>task definition</b> (blueprint ≈ pod spec) → <b>task</b> (running) → <b>service</b> (keeps N alive behind LB) → <b>cluster</b>.</li>
+<li><b>Fargate</b> = no nodes, billed per vCPU-s + GB-s; no GPU/host access (ECS Exec, not SSH). EC2 launch type wins on steady high utilisation &amp; GPUs.</li>
+<li><b>Execution role</b> (agent pulls image/writes logs) ≠ <b>task role</b> (your app's AWS perms) <span class="warn">!</span> Mixing them breaks least privilege.</li>
+<li>Default <code>awsvpc</code> networking (per-task ENI + SG). <b>ECR</b> = private registry (scan + lifecycle). Choosing EKS without k8s skills = over-engineering <span class="warn">!</span></li>
 </ul>
 </section>
 
@@ -154,8 +170,8 @@ pre code{background:none; padding:0; font-size:1em;}
 <ul>
 <li>11 nines <b>durability</b>; <b>strong</b> read-after-write consistency (all ops).</li>
 <li>Security: <b>Block Public Access on</b> by default; prefer bucket policy/IAM over ACLs; presigned URLs for temp access <span class="warn">!</span></li>
-<li>Encrypt: SSE-S3 / SSE-KMS (audited, use bucket keys to cut cost) / SSE-C.</li>
-<li>Versioning + lifecycle to tier/expire; replication CRR/SRR for DR.</li>
+<li>Encrypt: SSE-S3 / SSE-KMS (audited, use bucket keys to cut cost) / SSE-C. Enforce TLS + encryption via bucket policy <code>Deny</code> conditions.</li>
+<li>Versioning + lifecycle to tier/expire; replication CRR/SRR for DR; Object Lock (WORM) for compliance.</li>
 <li>Perf: auto-scales per prefix; multipart for &gt;100 MB; watch <b>retrieval + request + egress</b> cost <span class="warn">!</span></li>
 </ul>
 </section>
@@ -170,7 +186,8 @@ pre code{background:none; padding:0; font-size:1em;}
 </tbody></table>
 <ul>
 <li>EBS = one attach (except io1/io2 multi-attach); <b>EFS = shared</b> across instances/AZs.</li>
-<li>Snapshots are incremental → S3; copy cross-region for DR. AWS Backup centralizes.</li>
+<li>Snapshots are incremental → S3; copy cross-region for DR. AWS Backup centralizes policy + retention.</li>
+<li>EBS is AZ-bound — a snapshot is the only way to move a volume across AZ/region <span class="warn">!</span></li>
 </ul>
 </section>
 
@@ -188,7 +205,7 @@ flowchart LR
 <tr><td>rules</td><td>allow only</td><td>allow + deny, ordered</td></tr>
 </tbody></table>
 <ul>
-<li>Public subnet = route to IGW; private = route to <b>NAT GW</b> for egress.</li>
+<li>Public subnet = route to IGW; private = route to <b>NAT GW</b> for egress. SGs can reference other SGs as source (tier-to-tier).</li>
 <li>Gateway endpoints (S3/DynamoDB, free) &amp; interface/<b>PrivateLink</b> keep traffic off the internet.</li>
 <li>Peering is <b>non-transitive</b> → Transit Gateway for hub-and-spoke.</li>
 <li>"Can't reach internet": check IGW/NAT route, SG egress, NACL, public IP <span class="warn">!</span></li>
@@ -239,8 +256,8 @@ flowchart LR
 <h4>Multi-AZ vs Read Replica <span class="warn">!</span></h4>
 <ul>
 <li><b>Multi-AZ</b> = sync standby for <b>HA/failover</b>, not read scaling.</li>
-<li><b>Read replica</b> = async copy for <b>read scaling</b>, not automatic failover.</li>
-<li>Lambda + RDS → use <b>RDS Proxy</b> (connection pooling) <span class="warn">!</span></li>
+<li><b>Read replica</b> = async copy for <b>read scaling</b>, not automatic failover (can promote manually).</li>
+<li>Lambda + RDS → use <b>RDS Proxy</b> (connection pooling; Lambda exhausts DB connections) <span class="warn">!</span></li>
 <li>Aurora Global / DynamoDB Global Tables for cross-region.</li>
 </ul>
 </section>
@@ -253,6 +270,21 @@ flowchart LR
 <li>Capacity: on-demand (spiky/unknown) vs provisioned+autoscale (steady/cheaper). Strong reads cost 2×.</li>
 <li>Item ≤ <b>400 KB</b>; offload big blobs to S3 (store the key).</li>
 <li>Streams → Lambda for CDC; TTL for expiry; transactions &amp; conditional writes (optimistic lock); DAX for µs reads.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Caching — ElastiCache · DAX</h3>
+<p>A cache is a <b>bet the same data is read many times before it changes</b>. Every cache decision is a <b>staleness-tolerance</b> decision — cache measured bottlenecks, not by reflex.</p>
+<table><thead><tr><th>Strategy</th><th>Note</th></tr></thead><tbody>
+<tr><td>cache-aside (lazy)</td><td>app reads cache, on miss loads DB &amp; fills; only hot data cached</td></tr>
+<tr><td>write-through</td><td>write cache+DB together; always warm, slower writes, caches unread data</td></tr>
+<tr><td>write-behind</td><td>write cache, async flush; fast but loss risk <span class="warn">!</span></td></tr>
+</tbody></table>
+<ul>
+<li><b>Redis/Valkey</b> (rich types, replication, multi-AZ, persistence) vs <b>Memcached</b> (multi-threaded pure KV). Default Redis.</li>
+<li><b>ElastiCache ≠ durable</b> — failover can lose writes. Need durable Redis? <b>MemoryDB</b> <span class="warn">!</span></li>
+<li><b>DAX</b> = DynamoDB-only write-through cache (µs); not general purpose.</li>
+<li>TTL bounds staleness; watch <b>cache stampede</b> (many misses on one expired hot key hammer the DB) <span class="warn">!</span> Track hit ratio.</li>
 </ul>
 </section>
 
@@ -291,9 +323,24 @@ flowchart LR
 <h4>Secure</h4>
 <ul>
 <li><b>KMS</b> envelope encryption; key policy + IAM; rotate; multi-region keys for DR.</li>
-<li><b>Secrets Manager</b> (rotation, cost) vs <b>SSM Parameter Store</b> (cheap/simple).</li>
+<li><b>Secrets Manager</b> (auto-rotation, cost) vs <b>SSM Parameter Store</b> (cheap/simple, SecureString).</li>
 <li>Edge: <b>WAF</b> (L7 rules, rate limit) + <b>Shield</b> (DDoS); <b>GuardDuty</b> (threat detection), Macie (PII), Inspector (vulns), Security Hub (aggregate).</li>
 <li><b>Cognito</b>: user pools (authn) vs identity pools (temp AWS creds).</li>
+</ul>
+</section>
+
+<section class="card"><h3>IaC &amp; CI/CD</h3>
+<ul>
+<li><b>CloudFormation</b>: <i>template</i> (desired state) → <i>stack</i> (atomic unit, rolls back on fail). Always create a <b>change set</b> and read "Replacement: True" rows before prod update <span class="warn">!</span> (can destroy an RDS).</li>
+<li><b>Drift</b> = console change diverging from template → template lies. Detect on schedule; lock prod console writes (SCPs) <span class="warn">!</span></li>
+<li><b>CDK</b> synths <i>to</i> CFN — L1 raw / L2 sensible-defaults+<code>.grant*()</code> / L3 patterns. <b>SAM</b> for serverless.</li>
+<li><b>Nested stacks</b> = modularity in one account; <b>StackSets</b> = same baseline to many accounts/regions (landing-zone guardrails).</li>
+<li>CFN vs <b>Terraform</b>: AWS-managed state + native drift vs multi-cloud + self-managed state (S3 + DynamoDB lock).</li>
+</ul>
+<h4>Deploy safely</h4>
+<ul>
+<li><b>Rolling</b> (mutate fleet, rollback = another deploy) vs <b>blue/green</b> (parallel env, instant flip-back) vs <b>canary</b> (small % first, observe).</li>
+<li>CodeDeploy hooks + CloudWatch alarm → <b>auto-rollback</b>. Immutable infra: replace, don't patch. Never bake secrets into images/logs <span class="warn">!</span></li>
 </ul>
 </section>
 
@@ -324,6 +371,25 @@ flowchart LR
 </ul>
 </section>
 
+<section class="card"><h3>Handy CLI &amp; Snippets</h3>
+<h4>Identity &amp; access</h4>
+<pre><code>aws sts get-caller-identity
+aws sts assume-role --role-arn arn:aws:iam::111:role/App \
+  --role-session-name dev
+aws iam simulate-principal-policy \
+  --policy-source-arn ARN --action-names s3:GetObject</code></pre>
+<h4>S3 / EC2 / logs</h4>
+<pre><code>aws s3 cp file s3://bkt/key --sse aws:kms
+aws s3api put-public-access-block --bucket bkt \
+  --public-access-block-configuration BlockPublicAcls=true,...
+aws ec2 describe-instances --filters Name=tag:env,Values=prod
+aws logs tail /aws/lambda/fn --follow</code></pre>
+<ul>
+<li>Assume-role &amp; short creds &gt; static keys; use <code>--profile</code> / SSO, never commit keys <span class="warn">!</span></li>
+<li>Prefer IaC (CFN/CDK/Terraform) for anything durable — CLI for inspection/one-offs.</li>
+</ul>
+</section>
+
 <section class="card"><h3>&#9733; Architecture Review Checklist</h3>
 <h4>Security</h4>
 <ul>
@@ -331,6 +397,7 @@ flowchart LR
 <li>&#9744; S3 Block Public Access on; encryption at rest (KMS) &amp; TLS in transit.</li>
 <li>&#9744; Secrets in Secrets Manager/SSM, not env/plaintext; KMS key policies scoped.</li>
 <li>&#9744; Edge protected (WAF/Shield); security groups least-open; private subnets for data.</li>
+<li>&#9744; Task role ≠ execution role on ECS; IMDSv2 enforced on EC2.</li>
 </ul>
 <h4>Reliability</h4>
 <ul>
@@ -347,8 +414,8 @@ flowchart LR
 </ul>
 <h4>Operations</h4>
 <ul>
-<li>&#9744; IaC (CFN/CDK/Terraform), not click-ops; env/account separation.</li>
-<li>&#9744; Metrics + logs + traces + alarms; CloudTrail on; runbooks.</li>
+<li>&#9744; IaC (CFN/CDK/Terraform), not click-ops; change sets reviewed; env/account separation.</li>
+<li>&#9744; Metrics + logs + traces + alarms; CloudTrail on; auto-rollback on alarm; runbooks.</li>
 </ul>
 </section>
 
@@ -358,9 +425,12 @@ flowchart LR
 <tr><td>public S3 bucket</td><td>Block Public Access + OAC/presigned <span class="warn">!</span></td></tr>
 <tr><td>single-AZ RDS in prod</td><td>Multi-AZ <span class="warn">!</span></td></tr>
 <tr><td>Lambda in VPC hitting S3/DDB via NAT</td><td>gateway VPC endpoint (free) <span class="warn">!</span></td></tr>
+<tr><td>Lambda exhausting RDS connections</td><td>RDS Proxy pool <span class="warn">!</span></td></tr>
 <tr><td>DynamoDB Scan on hot path</td><td>redesign keys / GSI, use Query <span class="warn">!</span></td></tr>
 <tr><td>no DLQ on async/SQS</td><td>add DLQ + alarm <span class="warn">!</span></td></tr>
 <tr><td>IAM <code>"Action":"*"</code></td><td>least privilege <span class="warn">!</span></td></tr>
+<tr><td>blind prod CFN update</td><td>change set, read Replacement rows <span class="warn">!</span></td></tr>
+<tr><td>ECS task role = execution role</td><td>split the two roles <span class="warn">!</span></td></tr>
 <tr><td>state stored in Lambda /tmp</td><td>externalize to S3/Dynamo <span class="warn">!</span></td></tr>
 <tr><td>chatty cross-AZ / big NAT bill</td><td>endpoints, co-locate, cache <span class="warn">!</span></td></tr>
 </tbody></table>

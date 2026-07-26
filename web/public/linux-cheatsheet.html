@@ -72,87 +72,159 @@ pre code{background:none; padding:0; font-size:1em;}
 </head>
 <body>
 <div class="sheet">
-<div class="titlebar"><h1>Linux Cheat Sheet</h1><span class="meta">DevOps/SRE focus · systemd baseline · Debian &amp; RHEL · drilly</span></div>
+<div class="titlebar"><h1>Linux Cheat Sheet</h1><span class="meta">DevOps/SRE focus · systemd baseline · Debian &amp; RHEL · generic examples · drilly</span></div>
 <section class="card legend"><h3>How to read &amp; print</h3>
 <ul>
 <li><span class="warn">!</span> footgun / dangerous command &nbsp; <code>&#9744;</code> review / safety checklist item</li>
-<li>Focus: the commands, flags, and kernel behaviour interviewers actually probe + a <b>troubleshooting playbook</b>. Prefer modern tools (<code>ss</code>, <code>ip</code>, <code>journalctl</code>); legacy noted.</li>
-<li>Distro notes: <b>apt/dpkg</b> (Debian/Ubuntu) vs <b>dnf/rpm</b> (RHEL/Fedora).</li>
+<li>Focus: the commands, flags, and kernel behaviour interviewers actually probe + a <b>troubleshooting playbook</b>. Prefer modern tools (<code>ss</code>, <code>ip</code>, <code>journalctl</code>); legacy noted inline.</li>
+<li>Distro notes: <b>apt/dpkg</b> (Debian/Ubuntu) vs <b>dnf/rpm</b> (RHEL/Fedora). Baseline init = <b>systemd</b>; SysV noted where it differs.</li>
+<li>Last 3 cards = <b>playbook</b> + symptom&#8594;cause + safety checklist.</li>
 <li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
 </ul></section>
+
+<section class="card"><h3>Kernel, User Space &amp; Boot</h3>
+<ul>
+<li><b>Three layers</b>: <b>kernel</b> (Linus' ~30M-line core, scheduling/memory/drivers/FS/net) + <b>GNU userland</b> (bash, coreutils, glibc) + <b>distro</b> (kernel+userland+pkg mgr+defaults). "Linux" strictly = the kernel <span class="warn">!</span></li>
+<li><b>Ring 0 (kernel space)</b> touches hardware; <b>ring 3 (user space)</b> is sandboxed. Only bridge = <b>syscall</b> (<code>open read write fork execve mmap</code>) — traps into the kernel. Kernel panic is fatal (nothing above it).</li>
+<li>Blast radius of a CVE: kernel &#8594; patch+<b>reboot</b>; glibc &#8594; patch+<b>restart</b> everything linking it.</li>
+</ul>
+<h4>Boot chain (power &#8594; login)</h4>
+<pre><code>Firmware(BIOS/UEFI) &#8594; GRUB2 (loads vmlinuz
+ +initramfs from /boot) &#8594; kernel decompress
+ &#8594; initramfs (drivers to mount real root)
+ &#8594; pivot root, exec /sbin/init = PID 1
+ &#8594; systemd &#8594; default.target &#8594; getty</code></pre>
+<ul>
+<li>Most "won't boot" bugs = bad GRUB, kernel upgrade that didn't rebuild initramfs, or broken <code>/etc/fstab</code> stalling systemd <span class="warn">!</span></li>
+<li>Monolithic <b>but modular</b>: <code>lsmod</code>, <code>modprobe nvme</code>, <code>modinfo</code>. <code>uname -r</code> kernel ver, <code>-m</code> arch.</li>
+</ul>
+</section>
 
 <section class="card"><h3>Filesystem &amp; FHS</h3>
 <table><thead><tr><th>Path</th><th>Holds</th></tr></thead><tbody>
 <tr><td><code>/etc</code></td><td>config</td></tr>
 <tr><td><code>/var</code></td><td>logs, spool, variable data</td></tr>
 <tr><td><code>/usr</code></td><td>read-only programs/libs</td></tr>
-<tr><td><code>/proc</code> <code>/sys</code></td><td>kernel interfaces (virtual)</td></tr>
+<tr><td><code>/proc</code> <code>/sys</code></td><td>kernel interfaces (virtual, 0 disk)</td></tr>
 <tr><td><code>/dev</code></td><td>device files</td></tr>
-<tr><td><code>/tmp</code> <code>/run</code></td><td>temp (often tmpfs)</td></tr>
+<tr><td><code>/boot</code></td><td>kernel, initramfs, GRUB</td></tr>
+<tr><td><code>/tmp</code> <code>/run</code></td><td>temp (often tmpfs, volatile)</td></tr>
 </tbody></table>
 <ul>
-<li><b>Inode</b> = metadata (perms, owner, size, block ptrs) — <i>not</i> the name. <code>ls -i</code>.</li>
-<li><b>Hard link</b> = another name for the same inode (same FS, not dirs). <b>Symlink</b> = a path pointer (can cross FS, can dangle) <span class="warn">!</span></li>
-<li>Everything is a file (devices, sockets, pipes). First <code>ls -l</code> char: <code>-</code>file <code>d</code>dir <code>l</code>link <code>b/c</code>device <code>p</code>fifo <code>s</code>socket.</li>
+<li><b>Inode</b> = metadata (perms, owner, size, block ptrs, link count) — <i>not</i> the name (name lives in the dir entry). <code>ls -i</code>, <code>stat f</code>.</li>
+<li><b>Hard link</b> = another name for the same inode (same FS, not dirs); file dies when link count <b>and</b> open fds hit 0. <b>Symlink</b> = a path pointer (crosses FS, can dangle) <span class="warn">!</span></li>
+<li>Everything is a file: devices, FIFOs, sockets. First <code>ls -l</code> char: <code>-</code>file <code>d</code>dir <code>l</code>link <code>b/c</code>device <code>p</code>fifo <code>s</code>socket.</li>
+<li>Single unified tree; other FS grafted on via <code>mount</code>. <code>/proc/&lt;pid&gt;/</code> is live process state as files.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Permissions</h3>
+<section class="card"><h3>Permissions &amp; Ownership</h3>
 <pre><code>-rwxr-x---  user group
  └┬┘└┬┘└┬┘
   u   g   o     r=4 w=2 x=1
 chmod 750 f     chmod u+x,g-w f
-chown alice:web f</code></pre>
+chown alice:web f   chgrp web f</code></pre>
 <ul>
-<li>On a <b>dir</b>: <code>x</code>=traverse/enter, <code>r</code>=list names, <code>w</code>=create/delete entries <span class="warn">!</span></li>
-<li><b>umask</b> masks default perms (022 → new files 644, dirs 755).</li>
+<li>Kernel checks the file mode against your <b>effective UID</b> then group set: owner &#8594; group &#8594; other, <b>first match wins</b> (no additive fallthrough) <span class="warn">!</span></li>
+<li>On a <b>dir</b>: <code>x</code>=traverse/enter, <code>r</code>=list names, <code>w</code>=create/delete entries (delete needs dir-w, not file-w) <span class="warn">!</span></li>
+<li><b>umask</b> masks default perms (022 &#8594; files 644, dirs 755).</li>
 </ul>
 <table><thead><tr><th>Bit</th><th>Meaning</th></tr></thead><tbody>
 <tr><td>SUID (4xxx)</td><td>run as file owner (e.g. <code>passwd</code>) — root SUID is risky <span class="warn">!</span></td></tr>
-<tr><td>SGID (2xxx)</td><td>run as group / dir: inherit group</td></tr>
+<tr><td>SGID (2xxx)</td><td>run as group / on dir: children inherit group</td></tr>
 <tr><td>sticky (1xxx)</td><td>on <code>/tmp</code>: only owner deletes own files</td></tr>
 </tbody></table>
-<p>Modern alt to SUID: <b>capabilities</b> (<code>setcap cap_net_bind_service+ep</code>).</p>
+<ul>
+<li>Fine-grained: <b>ACLs</b> <code>getfacl</code>/<code>setfacl -m u:bob:rw f</code>.</li>
+<li>Modern alt to root SUID: <b>capabilities</b> <code>setcap cap_net_bind_service+ep ./svc</code> (bind :80 without root).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Users, Groups &amp; Auth</h3>
+<pre><code>id alice   groups   whoami
+useradd -m -s /bin/bash -G web alice
+usermod -aG docker alice   # -a APPENDS !
+passwd alice   chage -l alice  # aging
+getent passwd alice  # respects nsswitch</code></pre>
+<table><thead><tr><th>File</th><th>Holds</th></tr></thead><tbody>
+<tr><td><code>/etc/passwd</code></td><td><code>name:x:UID:GID:gecos:home:shell</code> (world-read)</td></tr>
+<tr><td><code>/etc/shadow</code></td><td>hashes (<code>$6$</code>=SHA-512) + aging, root-only</td></tr>
+<tr><td><code>/etc/group</code></td><td>supplementary membership</td></tr>
+<tr><td><code>/etc/sudoers</code></td><td>escalation policy — edit via <code>visudo</code></td></tr>
+</tbody></table>
+<ul>
+<li>UID 0 = root; privilege is literally <code>uid==0</code>. Names are labels the kernel resolves for display.</li>
+<li><b>Group add doesn't apply to live sessions</b> — supplementary groups baked at login; re-login or <code>newgrp</code> <span class="warn">!</span></li>
+<li><code>sudo</code> authenticates <b>you</b> + audits; <code>su</code> needs <b>target's</b> password. Service accts get <code>nologin</code>/<code>/bin/false</code> shell.</li>
+<li><b>PAM</b> decides <i>how</i> auth happens (<code>/etc/pam.d/</code>); <b>NSS</b>/<code>nsswitch.conf</code> decides <i>where</i> names resolve (files/ldap/sss).</li>
+</ul>
 </section>
 
 <section class="card"><h3>Processes &amp; Signals</h3>
 <pre><code>ps aux | grep nginx     pgrep -a nginx
-top    htop    pidstat 1
+ps -eo pid,ppid,state,rss,cmd --sort=-rss
+top   htop   pidstat 1
 kill -TERM &lt;pid&gt;   # 15 polite (default)
 kill -KILL &lt;pid&gt;   # 9  last resort !
-kill -HUP  &lt;pid&gt;   # reload config</code></pre>
+kill -HUP  &lt;pid&gt;   # 1  reload config
+pkill -f 'python app'   nohup cmd &amp;</code></pre>
+<ul>
+<li>New process = <code>fork()</code> (clone parent) then <code>execve()</code> (replace image). <code>init</code>/systemd (PID 1) reaps orphans.</li>
+</ul>
 <table><thead><tr><th>State</th><th>Means</th></tr></thead><tbody>
 <tr><td>R</td><td>running/runnable</td></tr>
-<tr><td>S / D</td><td>sleep / <b>uninterruptible</b> (I/O) — can't kill <span class="warn">!</span></td></tr>
-<tr><td>Z</td><td>zombie (dead, unreaped by parent)</td></tr>
-<tr><td>T</td><td>stopped</td></tr>
+<tr><td>S / D</td><td>sleep / <b>uninterruptible</b> (in a syscall, usu. I/O) — can't kill <span class="warn">!</span></td></tr>
+<tr><td>Z</td><td>zombie (dead, parent didn't <code>wait()</code>)</td></tr>
+<tr><td>T</td><td>stopped (SIGSTOP / Ctrl-Z)</td></tr>
 </tbody></table>
 <ul>
-<li>SIGKILL/SIGSTOP can't be caught. Prefer TERM → let it clean up, then KILL.</li>
-<li>Zombies = parent didn't <code>wait()</code>; fix the parent, not the zombie.</li>
-<li><code>nice -n 10 cmd</code> / <code>renice</code>: lower priority (−20 high … 19 low).</li>
+<li>SIGKILL(9)/SIGSTOP(19) can't be caught/ignored. Prefer TERM &#8594; cleanup &#8594; then KILL.</li>
+<li>Zombies = fix the <b>parent</b> (or reparent to PID 1 when it dies); killing the zombie does nothing.</li>
+<li><code>nice -n 10 cmd</code> / <code>renice</code>: priority &minus;20 (high) … 19 (low). <code>ionice</code> for I/O class.</li>
 </ul>
 </section>
 
-<section class="card"><h3>systemd</h3>
+<section class="card"><h3>Job Scheduling — cron &amp; timers</h3>
+<pre><code># m h dom mon dow  command
+0 3 * * *  /usr/local/bin/backup.sh
+*/5 * * * * cmd     # every 5 min
+@reboot    cmd      # at boot
+crontab -e   crontab -l   crontab -r !</code></pre>
+<ul>
+<li><b>cron runs in a minimal env</b>: bare <code>PATH</code>, <code>SHELL=/bin/sh</code>, no profile sourced. ~80% of cron bugs. Use <b>absolute paths</b> + redirect output <span class="warn">!</span></li>
+<li><code>/etc/crontab</code> &amp; <code>/etc/cron.d</code> have an <b>extra user field</b>; user crontabs don't.</li>
+<li>Plain cron does <b>not</b> catch up missed jobs (box off at 3am &#8594; skipped). Use <code>anacron</code> or a timer with <code>Persistent=true</code>.</li>
+<li>Prevent overlap: <code>flock -n /tmp/job.lock cmd</code>.</li>
+</ul>
+<h4>systemd timers (preferred for prod)</h4>
+<pre><code>[Timer]
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+# monotonic: OnBootSec= / OnUnitActiveSec=
+systemctl list-timers --all</code></pre>
+<p>Two files (<code>.timer</code>+<code>.service</code>) but you get journald logging, deps, resource limits, missed-run handling.</p>
+</section>
+
+<section class="card"><h3>systemd &amp; Services</h3>
 <pre><code>systemctl status|start|stop|restart nginx
 systemctl reload nginx        # re-read config
 systemctl enable --now nginx  # boot + start
-systemctl daemon-reload       # after unit edit
+systemctl daemon-reload       # after unit edit !
 systemctl list-units --failed
+systemctl edit nginx          # drop-in override
 journalctl -u nginx -f        # follow logs
 journalctl -b -p err --since "1h ago"
-systemctl edit nginx          # drop-in override
 systemd-analyze blame         # slow boot units</code></pre>
 <ul>
-<li><b>enable</b> ≠ <b>start</b>: enable = at boot; start = now.</li>
-<li>Deps: <code>Requires=</code> (hard) vs <code>Wants=</code> (soft) vs <code>After=</code> (order only).</li>
-<li><code>Restart=on-failure</code> + <code>RestartSec=</code> for crash recovery.</li>
-<li>Limits via unit: <code>MemoryMax=</code>, <code>CPUQuota=</code> (cgroups).</li>
+<li><b>enable ≠ start</b>: enable = at boot; start = now. <code>--now</code> does both.</li>
+<li>Deps: <code>Requires=</code> (hard, stops together) vs <code>Wants=</code> (soft) vs <code>After=</code> (order only, <b>not</b> a dependency) <span class="warn">!</span></li>
+<li>Crash recovery: <code>Restart=on-failure</code> + <code>RestartSec=</code>. Targets replace runlevels (<code>multi-user.target</code>≈3, <code>graphical</code>≈5).</li>
+<li>Sandboxing/limits in-unit: <code>MemoryMax=</code>, <code>CPUQuota=</code>, <code>LimitNOFILE=</code>, <code>ProtectSystem=</code> (all cgroup-backed).</li>
+<li>Edit a unit &#8594; <b>always</b> <code>daemon-reload</code> or changes are ignored <span class="warn">!</span></li>
 </ul>
 </section>
 
-<section class="card"><h3>Packages — apt vs dnf</h3>
+<section class="card"><h3>Package Management — apt vs dnf</h3>
 <table><thead><tr><th>Task</th><th>Debian</th><th>RHEL</th></tr></thead><tbody>
 <tr><td>refresh</td><td><code>apt update</code></td><td>(auto)</td></tr>
 <tr><td>install</td><td><code>apt install x</code></td><td><code>dnf install x</code></td></tr>
@@ -160,45 +232,51 @@ systemd-analyze blame         # slow boot units</code></pre>
 <tr><td>remove</td><td><code>apt remove x</code></td><td><code>dnf remove x</code></td></tr>
 <tr><td>search</td><td><code>apt search</code></td><td><code>dnf search</code></td></tr>
 <tr><td>who owns file</td><td><code>dpkg -S /path</code></td><td><code>rpm -qf /path</code></td></tr>
+<tr><td>list files in pkg</td><td><code>dpkg -L pkg</code></td><td><code>rpm -ql pkg</code></td></tr>
 <tr><td>list installed</td><td><code>dpkg -l</code></td><td><code>rpm -qa</code></td></tr>
 </tbody></table>
 <ul>
-<li>Low-level = <code>dpkg</code>/<code>rpm</code>; high-level (deps+repos) = <code>apt</code>/<code>dnf</code>.</li>
-<li>Don't mix <code>make install</code> with the package DB <span class="warn">!</span> Repos are GPG-signed.</li>
+<li>Low-level (single pkg, no deps) = <code>dpkg</code>/<code>rpm</code>; high-level (deps+repos+GPG) = <code>apt</code>/<code>dnf</code>.</li>
+<li>Don't mix <code>make install</code> with the package DB — untracked files break upgrades <span class="warn">!</span> Repos are GPG-signed; pin versions in prod.</li>
 </ul>
 </section>
 
 <section class="card"><h3>Text Processing — one-liners</h3>
 <pre><code>grep -rin "error" /var/log      # recursive, case-i, line#
-grep -c pattern f               # count matches
-sed -i 's/old/new/g' f          # in-place replace
+grep -Ev '^\s*#' cfg            # extended re, invert
+sed -i.bak 's/old/new/g' f      # in-place + backup
+sed -n '10,20p' f               # print line range
 awk '{print $1}' access.log     # first field
-awk -F: '{print $1}' /etc/passwd
-sort | uniq -c | sort -rn       # count + rank
-cut -d, -f2 data.csv
+awk -F: '$3>=1000{print $1}' /etc/passwd
+awk '{s+=$1} END{print s}'       # sum a column
+sort -k2 -n | uniq -c | sort -rn # count + rank
+cut -d, -f2 data.csv   tr -s ' '
 find . -name '*.log' -mtime +7 -delete
 find . -type f -print0 | xargs -0 grep foo</code></pre>
 <p class="cap">Top 10 client IPs in an access log:</p>
 <pre><code>awk '{print $1}' access.log \
  | sort | uniq -c | sort -rn | head</code></pre>
-<ul><li><code>uniq</code> needs sorted input <span class="warn">!</span> Use <code>find -print0 | xargs -0</code> for filenames with spaces.</li></ul>
+<ul><li><code>uniq</code> only de-dupes <b>adjacent</b> lines — <b>sort first</b> <span class="warn">!</span> Use <code>find -print0 | xargs -0</code> for names with spaces. <code>grep</code>=lines, <code>sed</code>=edit stream, <code>awk</code>=columns/math.</li></ul>
 </section>
 
 <section class="card"><h3>Bash Scripting Quick-ref</h3>
 <pre><code>#!/usr/bin/env bash
-set -euo pipefail          # fail fast + safe
-trap 'rm -f "$tmp"' EXIT   # cleanup
+set -euo pipefail          # strict: fail fast + safe
+trap 'rm -f "$tmp"' EXIT   # cleanup on any exit
 
 name="${1:?usage: deploy NAME}"   # required arg
-for f in *.txt; do echo "$f"; done
+host="${2:-localhost}"            # default
+files=(*.txt); echo "${#files[@]}" # array + count
+for f in "${files[@]}"; do echo "$f"; done
 while read -r line; do :; done &lt; file
 if [[ -f "$path" &amp;&amp; -n "$var" ]]; then :; fi
-count=$(( a + b ))</code></pre>
+count=$(( a + b ))   out=$(cmd)   # $? rides apart</code></pre>
 <ul>
-<li><b>Always quote</b> <code>"$var"</code> — unquoted = word-split + glob = the #1 bug <span class="warn">!</span></li>
-<li><code>[[ ]]</code> (bash test) &gt; <code>[ ]</code>; <code>(( ))</code> for arithmetic.</li>
-<li><code>set -e</code> exit on error · <code>-u</code> unset var = error · <code>-o pipefail</code> catch pipe failures.</li>
-<li>Run <b>ShellCheck</b>. Reach for Python when it outgrows bash.</li>
+<li>Bash = macro-expansion: brace&#8594;tilde&#8594;<code>$var</code>&#8594;<code>$(...)</code>&#8594;arith&#8594;<b>word-split</b>&#8594;glob, <i>then</i> exec.</li>
+<li><b>Always quote</b> <code>"$var"</code> / <code>"$@"</code> — unquoted = word-split + glob = the #1 bug <span class="warn">!</span></li>
+<li>Single quotes = literal (no expansion); double = expand but no split. <code>"$@"</code> keeps args separate; <code>"$*"</code> joins.</li>
+<li><code>[[ ]]</code> (safe, <code>=~</code> regex) &gt; <code>[ ]</code>; <code>(( ))</code> arithmetic. Returns via <b>exit code</b>, not value.</li>
+<li><code>set -e</code> has holes (<code>if</code>/<code>||</code>/pipeline w/o pipefail). Run <b>ShellCheck</b>; past ~100 lines reach for Python.</li>
 </ul>
 </section>
 
@@ -209,59 +287,77 @@ count=$(( a + b ))</code></pre>
 <tr><td>2</td><td>stderr</td></tr>
 </tbody></table>
 <pre><code>cmd &gt; out.log 2&gt;&amp;1     # both to file (order matters!)
-cmd 2&gt;&amp;1 &gt; out.log     # stderr → TERMINAL, stdout → file !
+cmd 2&gt;&amp;1 &gt; out.log     # stderr &#8594; TERMINAL, stdout &#8594; file !
 cmd &amp;&gt; all.log          # bash shorthand for both
 cmd 2&gt;/dev/null         # discard errors
+cmd &gt;&gt; log              # append
 a | tee f | b          # tap the pipe
-diff &lt;(sort a) &lt;(sort b)  # process substitution</code></pre>
+diff &lt;(sort a) &lt;(sort b)  # process substitution
+cmd &lt;&lt;'EOF' ... EOF     # here-doc</code></pre>
 <ul>
-<li><code>&gt;file 2&gt;&amp;1</code> ≠ <code>2&gt;&amp;1 &gt;file</code> — redirections apply left-to-right <span class="warn">!</span></li>
-<li><code>cmd | while read</code> runs in a <b>subshell</b> → variable changes don't escape <span class="warn">!</span></li>
+<li><code>&gt;file 2&gt;&amp;1</code> ≠ <code>2&gt;&amp;1 &gt;file</code> — redirections bind <b>left-to-right</b>; <code>2&gt;&amp;1</code> copies wherever 1 points <i>now</i> <span class="warn">!</span></li>
+<li><code>cmd | while read</code> runs the loop in a <b>subshell</b> &#8594; var assignments don't escape <span class="warn">!</span> Use <code>&lt; &lt;(cmd)</code>.</li>
+<li>Pipe = kernel buffer; exit status of a pipeline = <b>last</b> stage unless <code>pipefail</code>.</li>
 </ul>
 </section>
 
 <section class="card"><h3>Memory &amp; Swap</h3>
 <pre><code>free -h        # used / free / buff/cache / available
-vmstat 1       # si/so = swap in/out; r/b = run/block
-cat /proc/meminfo
-dmesg -T | grep -i oom</code></pre>
+vmstat 1       # si/so=swap in/out; r/b=run/block
+cat /proc/meminfo   ps -eo pid,rss,cmd --sort=-rss
+dmesg -T | grep -i oom
+sysctl vm.swappiness   # 0-100 swap eagerness</code></pre>
 <ul>
-<li><b>"free" is low, that's normal</b> — the kernel uses RAM as <b>page cache</b>; look at <b>available</b>, which counts reclaimable cache. Cache ≠ leak <span class="warn">!</span></li>
-<li><b>OOM killer</b> fires on true exhaustion; picks high <code>oom_score</code>. Evidence in <code>dmesg</code>: "Out of memory: Killed process".</li>
-<li>VSZ (virtual, cheap) vs RSS (resident, real RAM).</li>
-<li>In containers, cgroup memory limit → OOM inside the cgroup while host has RAM <span class="warn">!</span></li>
-<li><code>swappiness</code> (0–100) tunes swap eagerness.</li>
+<li><b>"free" is low = normal</b> — the kernel uses spare RAM as <b>page cache</b>; read the <b>available</b> column (counts reclaimable cache). Cache ≠ leak <span class="warn">!</span></li>
+<li><b>OOM killer</b> fires on true exhaustion; picks the highest <code>oom_score</code> (big RSS). Evidence: <code>dmesg</code> "Out of memory: Killed process".</li>
+<li><b>VSZ</b> (virtual, reserved, cheap) vs <b>RSS</b> (resident, real RAM). Compare RSS.</li>
+<li>In containers, the <b>cgroup memory limit</b> triggers OOM inside the cgroup while the host has RAM free <span class="warn">!</span></li>
+<li>Swap = spillover, not "more RAM"; heavy <code>si/so</code> = thrashing &#8594; add RAM / cut footprint.</li>
 </ul>
 </section>
 
-<section class="card"><h3>CPU, Load &amp; Disk</h3>
+<section class="card"><h3>CPU, Load &amp; Scheduling</h3>
 <pre><code>uptime            # load avg 1/5/15 min
 top   # %us %sy %id %wa(iowait) %st(steal!)
-vmstat 1   mpstat -P ALL 1   iostat -xz 1
-df -h     df -i   # bytes vs INODES
-du -sh ./*        # space by dir
-lsblk    lsof +L1 # deleted-but-open files !</code></pre>
+mpstat -P ALL 1   # per-core: one hot or all?
+pidstat 1         # per-process cpu/io/ctxsw
+vmstat 1   nproc  # r column vs core count</code></pre>
 <ul>
-<li><b>Load counts R + D (uninterruptible I/O) tasks</b> — high load with idle CPU = <b>I/O wait or blocked</b>, not CPU <span class="warn">!</span> Compare load to core count.</li>
-<li><code>%st</code> steal = hypervisor starving your VM.</li>
-<li>"No space left" but <code>df</code> shows free? → <b>inodes</b> exhausted (<code>df -i</code>) <span class="warn">!</span></li>
-<li>Disk full after <code>rm</code>? A process holds the deleted file open — <code>lsof +L1</code>, restart it <span class="warn">!</span></li>
-<li>Grow LVM online: <code>lvextend -r -L +10G /dev/vg/lv</code>.</li>
+<li><b>Load = R + D tasks</b> (runnable + uninterruptible I/O), <b>not</b> CPU%. High load + idle CPU = <b>I/O wait or blocked</b>, not CPU <span class="warn">!</span> Compare load to <code>nproc</code>.</li>
+<li><code>%wa</code> iowait = <i>idle</i> CPU waiting on disk — a disk problem in a CPU costume.</li>
+<li><code>%st</code> steal = hypervisor starving your VM (noisy neighbour).</li>
+<li>One core pinned = single-threaded hot loop; all cores = genuinely CPU-bound.</li>
+<li>Idle CPU + idle disk + low throughput = <b>lock contention</b> (<code>futex</code>); confirm with <code>strace -c</code>/<code>perf</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Disk, Filesystems &amp; LVM</h3>
+<pre><code>lsblk   df -h   df -i   # bytes vs INODES
+du -sh ./* | sort -h    # space by dir
+lsof +L1                # deleted-but-open files !
+mount | column -t   cat /etc/fstab
+mkfs.ext4 /dev/vg/lv    xfs_growfs /mnt</code></pre>
+<ul>
+<li>Stack: block dev &#8594; partition (GPT) &#8594; (LVM) &#8594; filesystem (ext4/xfs) &#8594; mount. <code>ext4</code> shrinkable offline; <code>xfs</code> <b>cannot shrink</b> <span class="warn">!</span></li>
+<li>"No space left" but <code>df</code> shows free? &#8594; <b>inodes</b> exhausted (millions of tiny files), <code>df -i</code> <span class="warn">!</span></li>
+<li>Disk full after <code>rm</code>? A process holds the deleted file open — space frees only when the fd closes. <code>lsof +L1</code> &#8594; restart the holder <span class="warn">!</span></li>
+<li><b>LVM</b>: PV &#8594; VG &#8594; LV. Grow online: <code>lvextend -r -L +10G /dev/vg/lv</code> (<code>-r</code> resizes FS too). Snapshots for backups.</li>
+<li>RAID survives <b>disk</b> failure, not <code>rm -rf</code>/corruption — RAID ≠ backup <span class="warn">!</span></li>
 </ul>
 </section>
 
 <section class="card"><h3>Networking</h3>
-<pre><code>ip addr    ip route    ip -s link
+<pre><code>ip addr   ip route   ip -s link
 ss -tlnp             # listening TCP + owning proc
-ss -tan state established
+ss -tan state established | wc -l
 dig +short example.com   dig @1.1.1.1 A host
 getent hosts example.com # respects nsswitch
 resolvectl status        # systemd-resolved</code></pre>
 <ul>
-<li><code>ss</code> &gt; <code>netstat</code>; <code>ip</code> &gt; <code>ifconfig</code>.</li>
-<li>DNS order: <code>/etc/nsswitch.conf</code> → <code>/etc/hosts</code> then DNS (<code>/etc/resolv.conf</code>).</li>
-<li>Lots of <b>TIME_WAIT</b> = normal on the side that closed; tune only if exhausting ports.</li>
-<li><b>Connection refused</b> = reached host, nothing listening / RST. <b>Timeout</b> = firewall drop or unreachable <span class="warn">!</span></li>
+<li>Modern &gt; legacy: <code>ss</code>&gt;<code>netstat</code>, <code>ip</code>&gt;<code>ifconfig</code>, <code>resolvectl</code>&gt;editing resolv.conf.</li>
+<li>DNS order: <code>/etc/nsswitch.conf</code> &#8594; <code>/etc/hosts</code> then DNS (<code>/etc/resolv.conf</code>). App may cache separately.</li>
+<li>Lots of <b>TIME_WAIT</b> on the closing side = normal; only tune if exhausting ephemeral ports.</li>
+<li><b>Connection refused</b> = reached host, nothing listening (RST). <b>Timeout</b> = firewall drop / unreachable — different fixes <span class="warn">!</span></li>
 </ul>
 </section>
 
@@ -269,114 +365,134 @@ resolvectl status        # systemd-resolved</code></pre>
 <pre><code>ping -c3 host          # reachability (ICMP)
 mtr host               # path + loss per hop
 dig +short host        # DNS only
-curl -sv https://host/ # verbose HTTP(S)
+curl -sv https://host/ # verbose: DNS/TCP/TLS/hdrs
 curl -I --resolve h:443:1.2.3.4 https://h/
-nc -zv host 443        # port open?
+nc -zv host 443        # is the port open?
 tcpdump -ni eth0 port 443 and host 1.2.3.4
-openssl s_client -connect host:443</code></pre>
+openssl s_client -connect host:443 -servername h</code></pre>
 <ul>
-<li>Triage in layers: link → IP/route → DNS → firewall → app.</li>
-<li>"Unknown host" = DNS; "100% loss" = reachability/firewall.</li>
-<li><code>curl -v</code> shows DNS, TCP, TLS, and headers in one shot.</li>
+<li>Triage in <b>layers</b>: link &#8594; IP/route &#8594; DNS &#8594; firewall &#8594; app. Isolate before fixing.</li>
+<li>"Unknown host" = DNS; "100% loss" = reachability/firewall; TLS error = cert/SNI.</li>
+<li><code>curl -v</code> shows DNS, TCP, TLS handshake, and headers in one shot — start here.</li>
+<li><code>--resolve</code> bypasses DNS to test a specific backend behind a LB.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Logging</h3>
+<section class="card"><h3>Logging &amp; Monitoring</h3>
 <pre><code>journalctl -u svc -f            # follow a unit
 journalctl -b -1 -p err        # prev boot, errors
 journalctl --since "09:00" --until "09:10"
+journalctl -k                  # kernel messages
 tail -f /var/log/syslog        # Debian
 tail -f /var/log/messages      # RHEL
 dmesg -T | tail                # kernel ring buffer
-logrotate -d /etc/logrotate.conf</code></pre>
+logrotate -d /etc/logrotate.conf  # dry-run</code></pre>
 <ul>
-<li>journald = binary journal; make persistent via <code>/var/log/journal</code>.</li>
-<li>Auth: <code>/var/log/auth.log</code> (Debian) / <code>secure</code> (RHEL).</li>
+<li>journald = binary journal; make persistent with <code>/var/log/journal/</code> (else RAM-only, lost on reboot) <span class="warn">!</span></li>
+<li>Auth log: <code>/var/log/auth.log</code> (Debian) / <code>secure</code> (RHEL).</li>
 <li><b>USE</b> (Utilization/Saturation/Errors) per resource · <b>RED</b> (Rate/Errors/Duration) per service.</li>
-<li><code>logrotate</code> stops runaway logs filling the disk <span class="warn">!</span></li>
+<li><code>logrotate</code> stops runaway logs filling <code>/var</code> and taking the box down <span class="warn">!</span></li>
 </ul>
 </section>
 
 <section class="card"><h3>SSH &amp; Hardening</h3>
 <pre><code>ssh-keygen -t ed25519
 ssh-copy-id alice@web01
+ssh -J bastion alice@internal   # jump host
 # /etc/ssh/sshd_config
 PermitRootLogin no
 PasswordAuthentication no
-# ufw
+# ufw (Debian) / firewalld (RHEL)
 ufw default deny incoming; ufw allow 22/tcp; ufw enable
 getenforce   # SELinux: Enforcing/Permissive</code></pre>
 <ul>
-<li>Key auth only; disable root login &amp; passwords; keep the box patched.</li>
-<li>Firewalls: <code>nftables</code> (successor) / <code>iptables</code>; frontends <code>ufw</code> (Debian), <code>firewalld</code> (RHEL); default-deny.</li>
-<li><b>fail2ban</b> bans brute-force. Key files <code>chmod 600</code>; never commit secrets <span class="warn">!</span></li>
-<li>SELinux denials look like app bugs — check <code>ausearch</code>/<code>audit2allow</code> before disabling.</li>
+<li>Key auth only; disable root login &amp; passwords; keep patched; least privilege in <code>sudoers</code>.</li>
+<li>Firewalls: <code>nftables</code> (successor) / <code>iptables</code>; frontends <code>ufw</code>/<code>firewalld</code>; <b>default-deny</b>.</li>
+<li><b>fail2ban</b> bans brute-force. Private keys <code>chmod 600</code>; never commit secrets <span class="warn">!</span></li>
+<li>SELinux/AppArmor denials look like app bugs — check <code>ausearch</code>/<code>audit2allow</code> before disabling (don't <code>setenforce 0</code> in anger) <span class="warn">!</span></li>
 </ul>
 </section>
 
-<section class="card"><h3>Debugging Tools</h3>
-<pre><code>strace -f -e trace=open,connect -p &lt;pid&gt;
-strace -c cmd            # syscall time summary
-lsof -p &lt;pid&gt;            # open files
-lsof -i :443            # who owns the port
-lsof +L1                # deleted-but-open
-cat /proc/&lt;pid&gt;/limits   # ulimits
-perf top                # live CPU hot funcs</code></pre>
+<section class="card"><h3>Debugging Tools — strace / perf / lsof</h3>
+<pre><code>strace -f -p &lt;pid&gt;       # what syscall is it stuck in?
+strace -c cmd            # syscall time/count summary
+strace -e trace=openat ./app  # what file is missing?
+ltrace -p &lt;pid&gt;          # library calls (malloc…)
+lsof -p &lt;pid&gt;   lsof -i :443   lsof +L1
+cat /proc/&lt;pid&gt;/limits   ls /proc/&lt;pid&gt;/fd
+perf top   perf record -g cmd  # CPU hot path</code></pre>
+<table><thead><tr><th>Tool</th><th>Traces</th><th>Cost</th></tr></thead><tbody>
+<tr><td><code>strace</code></td><td>syscalls (kernel boundary)</td><td>high <span class="warn">!</span></td></tr>
+<tr><td><code>ltrace</code></td><td>library calls</td><td>high</td></tr>
+<tr><td><code>perf</code></td><td>CPU samples (hw counters)</td><td>low, prod-safe</td></tr>
+</tbody></table>
 <ul>
-<li>Process hangs? <code>strace -p</code> shows the syscall it's stuck in (often a <code>read</code>/<code>connect</code>).</li>
-<li>"Too many open files" (EMFILE) → raise <code>ulimit -n</code> / <code>LimitNOFILE=</code> <span class="warn">!</span></li>
-<li>60-sec triage: <code>uptime dmesg vmstat mpstat pidstat iostat free sar top</code>.</li>
+<li>Hung process? <code>strace -p</code>, read the <b>last line</b>: <code>read(3,</code>=blocked on fd (find via <code>lsof</code>); <code>futex(...WAIT</code>=lock contention; <code>connect(</code>=net/DNS.</li>
+<li><code>strace</code> uses <code>ptrace</code>, can slow a process 10–100&times; — never blanket-trace hot prod; use <code>-c</code>/<code>-e</code> or eBPF (<code>execsnoop</code>, <code>opensnoop</code>) <span class="warn">!</span></li>
+<li>"Too many open files" (EMFILE) &#8594; raise <code>ulimit -n</code> / <code>LimitNOFILE=</code>.</li>
 </ul>
 </section>
 
 <section class="card"><h3>Containers &amp; the Kernel</h3>
 <ul>
-<li>Containers are <b>isolated processes</b>, not VMs — built from kernel <b>namespaces</b> + <b>cgroups</b> + an overlay FS.</li>
-<li><b>Namespaces</b> isolate the view: pid, net, mnt, uts, ipc, user.</li>
-<li><b>cgroups</b> limit resources: <code>--memory</code>/<code>--cpus</code> map to cgroup limits (v2). OOM can fire inside a cgroup while the host has RAM <span class="warn">!</span></li>
-<li><b>overlayfs</b>: read-only image layers + a copy-on-write writable layer.</li>
-<li><code>free</code>/<code>top</code> inside a container may report <b>host</b> memory/CPU unless cgroup-aware <span class="warn">!</span></li>
-<li><code>--privileged</code> drops isolation — avoid; drop capabilities, use seccomp.</li>
+<li>Containers are <b>isolated processes</b>, not VMs — built from kernel <b>namespaces</b> + <b>cgroups</b> + an overlay FS. Shared host kernel.</li>
+<li><b>Namespaces</b> isolate the <i>view</i>: pid, net, mnt, uts, ipc, user, cgroup. PID 1 inside ≠ PID 1 on host.</li>
+<li><b>cgroups (v2)</b> limit resources: <code>--memory</code>/<code>--cpus</code> map to cgroup limits. OOM can fire <b>inside</b> a cgroup while the host has RAM <span class="warn">!</span></li>
+<li><b>overlayfs</b>: read-only image layers + a copy-on-write writable layer on top.</li>
+<li><code>free</code>/<code>top</code>/<code>nproc</code> inside a container report <b>host</b> totals unless cgroup-aware — your JVM/Go heap sizing may be wrong <span class="warn">!</span></li>
+<li><code>--privileged</code> drops isolation — avoid; drop capabilities, apply seccomp, run non-root.</li>
 </ul>
 </section>
 
 <section class="card"><h3>&#9733; Troubleshooting Playbook</h3>
-<h4>Server slow</h4>
-<ul><li>&#9744; <code>uptime</code> (load vs cores) → <code>top</code>/<code>vmstat 1</code>: CPU-bound (%us), I/O-bound (%wa), or mem (swap si/so)?</li></ul>
+<h4>Server slow — first 60s</h4>
+<ul><li>&#9744; <code>uptime</code> (load vs <code>nproc</code>) &#8594; <code>dmesg|tail</code> &#8594; <code>vmstat 1</code> / <code>mpstat</code> / <code>pidstat</code> / <code>iostat -xz 1</code> / <code>free -m</code>: CPU-bound (%us), I/O-bound (%wa), or mem (swap si/so)?</li></ul>
 <h4>Disk full (<code>df</code> 100%)</h4>
-<ul><li>&#9744; <code>du -sh /* | sort -h</code> to find it; check <code>df -i</code> for inodes; <code>lsof +L1</code> for deleted-open files → restart the holder.</li></ul>
+<ul><li>&#9744; <code>du -sh /* | sort -h</code> to find it; <code>df -i</code> for inodes; <code>lsof +L1</code> for deleted-open files &#8594; restart the holder.</li></ul>
 <h4>High load, idle CPU</h4>
-<ul><li>&#9744; D-state tasks / iowait — <code>ps -eo state,pid,cmd | grep '^D'</code>, <code>iostat -xz 1</code>; suspect disk/NFS.</li></ul>
+<ul><li>&#9744; D-state / iowait — <code>ps -eo state,pid,cmd | grep '^D'</code>, <code>iostat -xz 1</code>; suspect disk / NFS stall.</li></ul>
 <h4>OOM killed a process</h4>
-<ul><li>&#9744; <code>dmesg -T | grep -i oom</code>; check leak vs cgroup limit; <code>free -h</code>, per-proc RSS.</li></ul>
+<ul><li>&#9744; <code>dmesg -T | grep -i oom</code>; leak vs cgroup limit; <code>free -h</code>, per-proc RSS.</li></ul>
 <h4>Service won't start</h4>
-<ul><li>&#9744; <code>systemctl status svc</code> + <code>journalctl -u svc -e</code>; config test; port conflict.</li></ul>
+<ul><li>&#9744; <code>systemctl status svc</code> + <code>journalctl -u svc -e</code>; config test; port conflict; <code>daemon-reload</code> after edits.</li></ul>
 <h4>Can't SSH</h4>
-<ul><li>&#9744; <code>ping</code> → <code>nc -zv host 22</code> (refused vs timeout) → firewall/sshd/key/host-key.</li></ul>
+<ul><li>&#9744; <code>ping</code> &#8594; <code>nc -zv host 22</code> (refused vs timeout) &#8594; firewall / sshd / key perms / host-key.</li></ul>
 <h4>Port already in use</h4>
-<ul><li>&#9744; <code>ss -tlnp | grep :PORT</code> → kill/relocate the holder.</li></ul>
+<ul><li>&#9744; <code>ss -tlnp | grep :PORT</code> &#8594; kill or relocate the holder.</li></ul>
+<h4>Cron job didn't run</h4>
+<ul><li>&#9744; absolute paths? output redirected? <code>grep CRON /var/log/syslog</code> / <code>journalctl -u</code>; env stripped, not your shell.</li></ul>
+</section>
+
+<section class="card"><h3>Symptom &#8594; Cause</h3>
+<table><thead><tr><th>Symptom</th><th>Likely cause</th></tr></thead><tbody>
+<tr><td>load 40, CPU idle</td><td>D-state / iowait — disk/NFS, not CPU <span class="warn">!</span></td></tr>
+<tr><td>"No space left", <code>df</code> free</td><td>inodes exhausted (<code>df -i</code>) <span class="warn">!</span></td></tr>
+<tr><td><code>rm</code>'d a huge log, space unchanged</td><td>proc holds fd open (<code>lsof +L1</code>) <span class="warn">!</span></td></tr>
+<tr><td>works in shell, fails in cron</td><td>stripped env / no absolute path <span class="warn">!</span></td></tr>
+<tr><td>PATH export works SSH, not cron</td><td>login vs non-login shell dotfiles <span class="warn">!</span></td></tr>
+<tr><td>group add "not applied"</td><td>need re-login / <code>newgrp</code> <span class="warn">!</span></td></tr>
+<tr><td>stderr not captured in file</td><td><code>2&gt;&amp;1</code> before <code>&gt;file</code> <span class="warn">!</span></td></tr>
+<tr><td>var lost after <code>cmd | while</code></td><td>subshell scope <span class="warn">!</span></td></tr>
+<tr><td>OOM inside container, host has RAM</td><td>cgroup memory limit <span class="warn">!</span></td></tr>
+<tr><td>unit edit ignored</td><td>no <code>daemon-reload</code> <span class="warn">!</span></td></tr>
+<tr><td><code>free</code> "low", app fine</td><td>page cache, read <b>available</b></td></tr>
+<tr><td>script wipes wrong path</td><td>unquoted <code>$var</code> word-split <span class="warn">!</span></td></tr>
+</tbody></table>
 </section>
 
 <section class="card"><h3>&#9744; Command Safety Checklist</h3>
 <ul>
 <li>&#9744; <code>rm -rf</code> with a variable path — guard <code>"${dir:?}"</code> so an empty var can't wipe <code>/</code> <span class="warn">!</span></li>
-<li>&#9744; Quote every <code>"$var"</code> / <code>"$@"</code>; never parse <code>ls</code>.</li>
-<li>&#9744; Test <code>chmod -R</code>/<code>chown -R</code> targets first — recursive on <code>/</code> is fatal <span class="warn">!</span></li>
-<li>&#9744; <code>dd</code>/<code>mkfs</code>/<code>&gt;</code> on the wrong device destroys data — confirm with <code>lsblk</code> <span class="warn">!</span></li>
-<li>&#9744; <code>kill -9</code> only after TERM; it skips cleanup (corrupt state/locks).</li>
-<li>&#9744; Editing firewall/sshd remotely — keep a session open / use a timeout rollback so you don't lock yourself out <span class="warn">!</span></li>
-<li>&#9744; <code>set -euo pipefail</code> + ShellCheck on every script.</li>
+<li>&#9744; Quote every <code>"$var"</code> / <code>"$@"</code>; never parse <code>ls</code>; use <code>--</code> before user paths.</li>
+<li>&#9744; Test <code>chmod -R</code>/<code>chown -R</code> targets first — recursive on <code>/</code> or <code>$HOME</code> is fatal <span class="warn">!</span></li>
+<li>&#9744; <code>dd</code>/<code>mkfs</code>/<code>&gt;</code> on the wrong device destroys data — confirm with <code>lsblk</code> <b>twice</b> <span class="warn">!</span></li>
+<li>&#9744; <code>kill -9</code> only after TERM; it skips cleanup (corrupt state / stale locks).</li>
+<li>&#9744; Editing firewall/sshd remotely — keep a second session open or a timed rollback so you don't lock yourself out <span class="warn">!</span></li>
+<li>&#9744; <code>set -euo pipefail</code> + ShellCheck on every script; redirect cron output somewhere.</li>
+<li>&#9744; Don't <code>setenforce 0</code> / disable the firewall to "fix" a denial — read the audit log first.</li>
 </ul>
 </section>
 
 </div>
-<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
-<script>
-  try {
-    mermaid.initialize({ startOnLoad: true, theme: "neutral",
-      flowchart: { useMaxWidth: true, htmlLabels: true, nodeSpacing: 18, rankSpacing: 18 },
-      themeVariables: { fontSize: "9px" } });
-  } catch (e) { /* offline / blocked CDN: diagrams degrade to source text, rest of sheet is fine */ }
-</script>
 </body>
 </html>

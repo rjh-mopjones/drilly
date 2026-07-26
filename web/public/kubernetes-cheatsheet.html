@@ -76,9 +76,10 @@ pre code{background:none; padding:0; font-size:1em;}
 <section class="card legend"><h3>How to read &amp; print</h3>
 <ul>
 <li><span class="warn">!</span> footgun / gotcha &nbsp; <code>&#9744;</code> manifest review item</li>
-<li>Focus: the objects, <code>kubectl</code>, and failure modes interviewers probe + a <b>troubleshooting playbook</b>. Cloud-agnostic; EKS/GKE/AKS notes where they matter.</li>
-<li>Mental model: <b>declarative reconciliation</b> — you write desired state, controllers converge actual → desired.</li>
-<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+<li>Focus: the objects, real <code>kubectl</code>/YAML, controller behaviour, and the failure modes interviewers probe — plus a <b>troubleshooting playbook</b>. Cloud-agnostic; EKS/GKE/AKS notes where they matter.</li>
+<li>Baseline: modern Kubernetes (containerd runtime, dockershim gone since 1.24, Pod Security Admission, Gateway API, CSI). Native sidecars = init containers with <code>restartPolicy: Always</code>.</li>
+<li>Mental model: <b>declarative reconciliation</b> — you write desired state (spec) to etcd via the api-server; controllers converge actual (status) → desired, forever. <b>Level-triggered</b>, so it self-heals.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
 </ul></section>
 
 <section class="card diagram"><h3>Architecture</h3>
@@ -92,21 +93,36 @@ flowchart TD
   KUBELET --> CRI["containerd → Pods"]
   KUBELET --> KP["kube-proxy"]
 </div>
-<p class="cap">Control plane = api-server + etcd + scheduler + controller-manager. Node = kubelet + kube-proxy + runtime. Everything goes through the api-server; etcd is the single source of truth.</p>
+<p class="cap">Control plane = api-server + etcd + scheduler + controller-manager (+ cloud-controller-mgr). Node = kubelet + kube-proxy + CRI runtime. Everything funnels through the api-server; only it talks to etcd; etcd is the single source of truth (back it up).</p>
+</section>
+
+<section class="card"><h3>Control Plane &amp; Reconcile</h3>
+<ul>
+<li><b>api-server</b> = only front door + only etcd client. Every request: <b>authn → authz (RBAC) → admission (mutate→validate) → persist</b>.</li>
+<li><b>scheduler</b> binds unscheduled Pods to nodes (writes <code>nodeName</code>) — it does <i>not</i> start them <span class="warn">!</span></li>
+<li><b>controller-manager</b> hosts the built-in loops (Deployment, ReplicaSet, Node, Job, EndpointSlice…).</li>
+<li><b>kubelet</b> runs Pods bound to <i>its</i> node via CRI; reports status.</li>
+</ul>
+<h4>Level- vs edge-triggered <span class="warn">!</span></h4>
+<p>Controllers re-list actual state and diff vs desired <i>every loop</i> — they don't react once to an event. A missed event, crash, or restart still converges. That's <b>why K8s self-heals</b>.</p>
+<h4>apply → running Pod</h4>
+<p>kubectl → api-server (persist Deploy) → Deploy ctrl makes ReplicaSet → RS ctrl makes Pods (unscheduled) → scheduler binds → kubelet pulls image + runs via CRI + CNI wires net → status back. Every arrow crosses the api-server.</p>
 </section>
 
 <section class="card"><h3>Core Objects</h3>
-<table><thead><tr><th>Kind</th><th>Purpose</th></tr></thead><tbody>
-<tr><td>Pod</td><td>smallest unit; 1+ containers share net/IP/vol — ephemeral <span class="warn">!</span></td></tr>
-<tr><td>Deployment</td><td>stateless; → ReplicaSet → Pods; rollouts</td></tr>
-<tr><td>StatefulSet</td><td>stable identity + per-pod PVC (DBs)</td></tr>
-<tr><td>DaemonSet</td><td>one pod per node (agents)</td></tr>
-<tr><td>Job / CronJob</td><td>run-to-completion / scheduled</td></tr>
-<tr><td>Service</td><td>stable VIP+DNS over pods (by label)</td></tr>
-<tr><td>Ingress / Gateway</td><td>L7 HTTP routing</td></tr>
-<tr><td>ConfigMap / Secret</td><td>config / sensitive data</td></tr>
-<tr><td>PVC / PV / SC</td><td>storage claim / volume / class</td></tr>
+<table><thead><tr><th>Kind</th><th>apiVersion</th><th>Purpose</th></tr></thead><tbody>
+<tr><td>Pod</td><td>v1</td><td>smallest unit; 1+ containers share net/IP/vol — ephemeral <span class="warn">!</span></td></tr>
+<tr><td>ReplicaSet</td><td>apps/v1</td><td>keeps N identical Pods (managed by Deploy)</td></tr>
+<tr><td>Deployment</td><td>apps/v1</td><td>stateless; → RS → Pods; rollouts</td></tr>
+<tr><td>StatefulSet</td><td>apps/v1</td><td>stable identity + per-pod PVC (DBs)</td></tr>
+<tr><td>DaemonSet</td><td>apps/v1</td><td>one Pod per node (agents)</td></tr>
+<tr><td>Job / CronJob</td><td>batch/v1</td><td>run-to-completion / scheduled</td></tr>
+<tr><td>Service</td><td>v1</td><td>stable VIP+DNS over Pods (by label)</td></tr>
+<tr><td>Ingress</td><td>networking.k8s.io/v1</td><td>L7 HTTP routing</td></tr>
+<tr><td>ConfigMap / Secret</td><td>v1</td><td>config / sensitive data</td></tr>
+<tr><td>PVC / PV / SC</td><td>v1 / storage.k8s.io/v1</td><td>claim / volume / class</td></tr>
 </tbody></table>
+<p>Every object: <code>apiVersion</code> + <code>kind</code> + <code>metadata</code> + <code>spec</code> (you write, desired) + <code>status</code> (controller writes, observed). Reading <b>spec vs status divergence</b> is the first debugging move.</p>
 </section>
 
 <section class="card"><h3>kubectl Essentials</h3>
@@ -115,29 +131,42 @@ kubectl describe pod &lt;p&gt;      # EVENTS = gold !
 kubectl logs &lt;p&gt; -f --previous -c &lt;ctr&gt;
 kubectl exec -it &lt;p&gt; -- sh
 kubectl apply -f app.yaml     # declarative
+kubectl diff -f app.yaml      # preview change
 kubectl rollout status deploy/app
-kubectl rollout undo deploy/app
+kubectl rollout undo deploy/app --to-revision=2
 kubectl scale deploy/app --replicas=5
 kubectl get events --sort-by=.lastTimestamp
 kubectl top pod / node        # needs metrics-server
-kubectl debug -it &lt;p&gt; --image=busybox  # ephemeral
+kubectl debug -it &lt;p&gt; --image=busybox  # ephemeral ctr
+kubectl auth can-i get secrets --as=system:serviceaccount:ns:sa
 kubectl explain pod.spec.containers</code></pre>
-<p><b>Debug order:</b> describe (events) → logs → exec → node/scheduler <span class="warn">!</span></p>
+<p><b>Debug order:</b> describe (events) → logs (<code>--previous</code> for crashers) → exec → node/scheduler <span class="warn">!</span> Prefer <code>apply</code> over imperative <code>create/run</code> in prod.</p>
 </section>
 
-<section class="card"><h3>Minimal Deployment + Service</h3>
+<section class="card"><h3>Pods: Sharing, Init, Sidecars</h3>
+<p><b>Shared</b> in a Pod: network namespace (one IP, reach each other on <code>localhost</code>, share port space <span class="warn">!</span>), IPC, mounted volumes, node+lifecycle. <b>Not shared:</b> filesystem root, PID (unless <code>shareProcessNamespace</code>), resource accounting. A hidden <b>pause container</b> holds the namespaces so app containers restart without losing the Pod IP.</p>
+<h4>Multi-container patterns</h4>
+<ul>
+<li><b>Sidecar</b> (log shipper, mesh proxy), <b>ambassador</b> (outbound proxy), <b>adapter</b> (reformat output). Only when tightly coupled &amp; must share node/net/vol — else separate Pods.</li>
+<li><b>Init containers</b> run <b>in order, to completion, before</b> app containers (migrations, wait-for-dep). <b>Native sidecar</b> = init container with <code>restartPolicy: Always</code> (starts early, stays running).</li>
+</ul>
+<h4>Phases &amp; states</h4>
+<p>Phase: Pending / Running / Succeeded / Failed / Unknown. Container state: Waiting (<code>ImagePullBackOff</code>, <code>CrashLoopBackOff</code>) / Running / Terminated (<code>Completed</code>, <code>OOMKilled</code>, <code>Error</code>). <b>Never create bare Pods</b> — node dies, nothing recreates it <span class="warn">!</span></p>
+</section>
+
+<section class="card"><h3>Deployment + Service YAML</h3>
 <pre><code>apiVersion: apps/v1
 kind: Deployment
 metadata: { name: web }
 spec:
   replicas: 3
-  selector: { matchLabels: { app: web } }
+  selector: { matchLabels: { app: web } }  # immutable !
   template:
     metadata: { labels: { app: web } }
     spec:
       containers:
       - name: web
-        image: my-registry/web:1.2.3   # never :latest !
+        image: registry/web:1.2.3   # never :latest !
         ports: [{ containerPort: 8080 }]
         resources:
           requests: { cpu: 100m, memory: 128Mi }
@@ -149,32 +178,102 @@ apiVersion: v1
 kind: Service
 metadata: { name: web }
 spec:
-  selector: { app: web }   # must match pod labels !
+  selector: { app: web }   # must match Pod labels !
   ports: [{ port: 80, targetPort: 8080 }]</code></pre>
+<p>Service <code>selector</code> and Deployment <code>spec.selector</code> both target the Pod <b>template labels</b>. Mismatch = no endpoints.</p>
 </section>
 
-<section class="card"><h3>Services &amp; Ingress</h3>
+<section class="card"><h3>Rollouts &amp; Rollback</h3>
+<p>Changing the Pod template makes a <b>new ReplicaSet</b> (0 replicas), then scales new up / old down a few Pods at a time, gated by each new Pod going <b>Ready</b>. Old RS parked at 0 = fast rollback (just scale it back up, no image re-pull).</p>
+<pre><code>strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 25%        # Pods ABOVE desired
+    maxUnavailable: 0    # Pods BELOW desired</code></pre>
+<table><thead><tr><th>Goal</th><th>Setting</th></tr></thead><tbody>
+<tr><td>zero capacity loss</td><td><code>maxUnavailable:0</code>, <code>maxSurge&gt;0</code> (needs spare)</td></tr>
+<tr><td>resource-constrained</td><td><code>maxSurge:0</code>, <code>maxUnavailable:1</code></td></tr>
+<tr><td>can't both be 0</td><td>rollout can't progress <span class="warn">!</span></td></tr>
+</tbody></table>
+<ul>
+<li><b>Recreate</b> strategy = kill all old then start new → downtime; use when two versions can't coexist (schema).</li>
+<li><code>progressDeadlineSeconds</code> exceeded → rollout marked <b>stuck</b> (bad probe/image). <code>rollout pause</code>/<code>resume</code> for baking a canary.</li>
+<li>Zero-downtime needs <b>readiness probes</b> + PDB; old ReplicaSets kept per <code>revisionHistoryLimit</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Workload Types — Pick One</h3>
+<table><thead><tr><th>Use</th><th>Workload</th></tr></thead><tbody>
+<tr><td>stateless replicas, rollouts</td><td><b>Deployment</b></td></tr>
+<tr><td>stable IDs, ordered, per-pod disk</td><td><b>StatefulSet</b></td></tr>
+<tr><td>one pod per node (agent/CNI)</td><td><b>DaemonSet</b></td></tr>
+<tr><td>run once to completion</td><td><b>Job</b></td></tr>
+<tr><td>scheduled (cron)</td><td><b>CronJob</b></td></tr>
+</tbody></table>
+<h4>StatefulSet identity</h4>
+<ul>
+<li>Stable DNS via <b>headless Service</b> (<code>clusterIP: None</code>, <code>serviceName</code>): <code>web-0.nginx.ns.svc.cluster.local</code>.</li>
+<li><b>volumeClaimTemplates</b> → one PVC per pod (<code>data-web-0</code>…); disk follows pod on reschedule. PVCs <b>not deleted</b> on scale-down/delete (default) <span class="warn">!</span></li>
+<li>Ordered by default (<code>OrderedReady</code>): <code>web-0</code> Ready before <code>web-1</code>. <code>web-0</code> stuck ⇒ rest never start <span class="warn">!</span></li>
+<li><b>StatefulSet ≠ HA</b> — it gives identity/ordering/storage; replication + failover live in the <i>app</i> (Patroni, Raft, ISR) <span class="warn">!</span></li>
+</ul>
+<h4>Jobs</h4>
+<p><code>completions</code>×<code>parallelism</code>; <code>backoffLimit</code> retries; <code>restartPolicy: OnFailure|Never</code>; <code>ttlSecondsAfterFinished</code> cleans up. CronJob: <code>concurrencyPolicy</code> Allow/Forbid/Replace, <code>startingDeadlineSeconds</code>.</p>
+</section>
+
+<section class="card"><h3>Services &amp; Types</h3>
 <table><thead><tr><th>Type</th><th>Reaches</th></tr></thead><tbody>
 <tr><td>ClusterIP</td><td>in-cluster only (default)</td></tr>
-<tr><td>NodePort</td><td>node IP : 30000–32767</td></tr>
-<tr><td>LoadBalancer</td><td>cloud LB → external</td></tr>
+<tr><td>NodePort</td><td>every node IP : 30000–32767</td></tr>
+<tr><td>LoadBalancer</td><td>cloud LB → external (via cloud-ctrl-mgr)</td></tr>
+<tr><td>ExternalName</td><td>CNAME to external DNS, no proxy</td></tr>
 <tr><td>headless (None)</td><td>DNS → pod IPs (StatefulSet)</td></tr>
 </tbody></table>
 <ul>
-<li>DNS: <code>svc.ns.svc.cluster.local</code>. Service selects pods by <b>label</b> → EndpointSlices.</li>
-<li><b>No endpoints?</b> selector mismatch or no <b>ready</b> pods <span class="warn">!</span></li>
-<li><b>Ingress</b> = L7 rules; needs an <b>ingress controller</b> installed (the resource alone does nothing) <span class="warn">!</span> Gateway API is the successor.</li>
+<li>DNS: <code>svc.ns.svc.cluster.local</code>. Selector → <b>EndpointSlices</b> (only <b>Ready</b> pods).</li>
+<li><b>port</b> = Service VIP port; <b>targetPort</b> = container port; <b>nodePort</b> = host port.</li>
+<li><code>externalTrafficPolicy: Local</code> preserves client source IP + avoids a hop, but no cross-node balancing (unready node = blackhole) <span class="warn">!</span> <code>Cluster</code> (default) SNATs source IP.</li>
+<li><b>No endpoints?</b> selector mismatch, no ready pods, or wrong <code>targetPort</code> <span class="warn">!</span></li>
 </ul>
+</section>
+
+<section class="card"><h3>Ingress &amp; Gateway API</h3>
+<ul>
+<li><b>Ingress resource</b> = L7 host/path rules; does <b>nothing without an ingress controller</b> installed (nginx, Traefik, cloud ALB) <span class="warn">!</span></li>
+<li><code>pathType</code>: <code>Prefix</code> (usual) vs <code>Exact</code> vs <code>ImplementationSpecific</code>. <b>IngressClass</b> picks the controller.</li>
+<li>TLS termination via a <code>tls</code> secret; automate with <b>cert-manager</b> (ACME/Let's Encrypt).</li>
+<li>Annotations are controller-specific &amp; non-portable (rewrites, timeouts) — the mess Gateway API fixes <span class="warn">!</span></li>
+</ul>
+<h4>Gateway API (successor)</h4>
+<p>Role-split: <b>GatewayClass</b> (infra) → <b>Gateway</b> (listeners, platform team) → <b>HTTPRoute</b> (routing, app team). Portable typed fields for header/weight splits &amp; canaries — no annotation soup. Use for multi-team edge.</p>
+<pre><code># 404 / ADDRESS &lt;none&gt;? →
+kubectl get ingress; kubectl describe ingress
+# check controller pods + IngressClass + svc endpoints</code></pre>
 </section>
 
 <section class="card"><h3>Config &amp; Secrets</h3>
 <pre><code>kubectl create configmap app-cfg --from-file=app.conf
 kubectl create secret generic db --from-literal=pass=s3cr3t</code></pre>
+<table><thead><tr><th>Consume as</th><th>Live update?</th></tr></thead><tbody>
+<tr><td>env / envFrom</td><td><b>No</b> — fixed at pod start <span class="warn">!</span></td></tr>
+<tr><td>mounted volume</td><td>Yes (with kubelet sync lag)</td></tr>
+</tbody></table>
 <ul>
-<li><b>Secret = base64, NOT encryption</b> <span class="warn">!</span> Enable etcd encryption-at-rest / KMS; lock down RBAC.</li>
-<li><b>env vars are fixed at pod start</b> — change a ConfigMap and you must restart pods to pick it up; mounted volumes update (with lag) <span class="warn">!</span></li>
-<li>Roll pods on change via a checksum annotation. Never bake secrets into images.</li>
-<li>External Secrets Operator / Vault / CSI Secrets Store for real secret mgmt.</li>
+<li><b>Secret = base64, NOT encryption</b> <span class="warn">!</span> Enable etcd <b>encryption-at-rest</b>/KMS; lock down RBAC (anyone who can read Secrets in a ns owns them).</li>
+<li>Change a ConfigMap consumed via env ⇒ must <b>restart pods</b>. Force it with a <b>checksum annotation</b> on the template (changes → rolling restart) or <code>kubectl rollout restart</code>.</li>
+<li><b>immutable: true</b> ConfigMaps/Secrets = perf + safety. Never bake secrets into images.</li>
+<li>Real secret mgmt: External Secrets Operator, Vault, CSI Secrets Store, sealed-secrets/SOPS for Git.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Storage: PV / PVC / SC / CSI</h3>
+<ul>
+<li><b>PVC</b> = a pod's claim ("10Gi RWO"); <b>PV</b> = the actual volume; <b>StorageClass</b> = template for <b>dynamic provisioning</b> (PVC → SC → auto-creates PV).</li>
+<li>Access modes: <b>RWO</b> (one node, block/most cloud disks), <b>ROX</b>, <b>RWX</b> (many nodes — needs NFS/CephFS/EFS, <b>not</b> EBS/GCE-PD) <span class="warn">!</span></li>
+<li>Reclaim policy: <b>Delete</b> (default on dynamic — deletes real disk when PVC goes <span class="warn">!</span>) vs <b>Retain</b> (keep data, manual cleanup). Use Retain for prod data.</li>
+<li><code>volumeBindingMode: WaitForFirstConsumer</code> delays binding until scheduling so the disk lands in the pod's zone (topology) <span class="warn">!</span></li>
+<li><b>CSI</b> replaced in-tree drivers; enables snapshots, expansion (<code>allowVolumeExpansion</code>), cloud plugins.</li>
+<li><b>emptyDir</b> = pod-lifetime scratch (gone with pod). <b>hostPath</b> = node path, dangerous (breaks scheduling, security) <span class="warn">!</span></li>
 </ul>
 </section>
 
@@ -185,120 +284,155 @@ kubectl create secret generic db --from-literal=pass=s3cr3t</code></pre>
 <tr><td>startup</td><td>guards slow start; gates the other two</td></tr>
 </tbody></table>
 <ul>
-<li><b>Liveness ≠ readiness.</b> A liveness probe that checks a <i>dependency</i> → cascading restarts <span class="warn">!</span></li>
-<li>Shutdown: SIGTERM → <code>terminationGracePeriodSeconds</code> → SIGKILL. Use a <b>preStop sleep</b> to cover the endpoint-removal race <span class="warn">!</span></li>
-<li><b>PodDisruptionBudget</b> protects availability during drains/upgrades.</li>
+<li><b>Liveness ≠ readiness.</b> A liveness probe that checks a <i>dependency</i> (DB, downstream) → cascading restarts across the fleet <span class="warn">!</span></li>
+<li>Tune <code>initialDelaySeconds</code>/<code>failureThreshold</code> — aggressive liveness on a slow-starting app = CrashLoop. Prefer a <b>startupProbe</b> for slow boots.</li>
+<li>Shutdown: SIGTERM → <code>terminationGracePeriodSeconds</code> (30s default) → SIGKILL. Add a <b>preStop sleep</b> to cover the endpoint-removal race (LB still sending) <span class="warn">!</span></li>
+<li><b>PodDisruptionBudget</b> (<code>minAvailable</code>/<code>maxUnavailable</code>) protects availability during drains/upgrades.</li>
 </ul>
 </section>
 
 <section class="card"><h3>Resources &amp; QoS</h3>
 <ul>
-<li><b>requests</b> = scheduling &amp; reservation; <b>limits</b> = hard cap.</li>
-<li>Over <b>memory</b> limit → <b>OOMKilled (137)</b>. Over <b>CPU</b> limit → <b>throttled</b>, not killed <span class="warn">!</span></li>
+<li><b>requests</b> = what the scheduler reserves (drives placement); <b>limits</b> = hard runtime cap.</li>
+<li>Over <b>memory</b> limit → <b>OOMKilled (137)</b>. Over <b>CPU</b> limit → <b>throttled</b> (CFS), not killed <span class="warn">!</span></li>
+<li>CPU in millicores (<code>500m</code> = ½ core); memory <b>Mi</b>=1024², <b>M</b>=1000² <span class="warn">!</span></li>
 </ul>
-<table><thead><tr><th>QoS</th><th>When</th></tr></thead><tbody>
-<tr><td>Guaranteed</td><td>requests == limits (all ctrs) — evicted last</td></tr>
-<tr><td>Burstable</td><td>requests &lt; limits</td></tr>
-<tr><td>BestEffort</td><td>none set — evicted first <span class="warn">!</span></td></tr>
+<table><thead><tr><th>QoS</th><th>When</th><th>Evicted</th></tr></thead><tbody>
+<tr><td>Guaranteed</td><td>requests==limits (all ctrs)</td><td>last</td></tr>
+<tr><td>Burstable</td><td>requests &lt; limits</td><td>middle</td></tr>
+<tr><td>BestEffort</td><td>none set</td><td>first <span class="warn">!</span></td></tr>
 </tbody></table>
-<ul><li>CPU in millicores (<code>500m</code>); memory <code>Mi</code>. <code>LimitRange</code>/<code>ResourceQuota</code> per namespace.</li></ul>
+<ul>
+<li>Node <b>allocatable</b> &lt; capacity (kubelet/system reserved). Overcommit allowed on requests; memory pressure → eviction by QoS.</li>
+<li><b>LimitRange</b> = per-pod defaults/bounds; <b>ResourceQuota</b> = per-namespace aggregate cap.</li>
+</ul>
 </section>
 
 <section class="card"><h3>Scheduling</h3>
 <ul>
-<li><b>nodeSelector</b> = simple label match. <b>Affinity</b> = required/preferred rules (node &amp; pod).</li>
-<li><b>Taints repel, tolerations allow</b> — control-plane/GPU nodes are tainted; effects NoSchedule/PreferNoSchedule/NoExecute.</li>
-<li><b>Pod anti-affinity</b> spreads replicas; <b>topologySpreadConstraints</b> (maxSkew) balances across zones.</li>
-<li>Priority + preemption evicts lower-priority pods under pressure.</li>
+<li><b>nodeSelector</b> = simple label equality. <b>Node affinity</b> = required (hard) / preferred (soft) expressions.</li>
+<li><b>Taints repel, tolerations allow.</b> Control-plane/GPU/spot nodes are tainted; effects <code>NoSchedule</code> / <code>PreferNoSchedule</code> / <code>NoExecute</code> (evicts running pods).</li>
+<li><b>Pod (anti-)affinity</b> co-locates/spreads by <code>topologyKey</code> (e.g. hostname, zone) — expensive at scale.</li>
+<li><b>topologySpreadConstraints</b> (<code>maxSkew</code>) = the modern way to balance replicas across zones/nodes.</li>
+<li><b>PriorityClass</b> + preemption: high-priority Pending pod evicts lower-priority pods.</li>
 </ul>
 <pre><code>tolerations:
 - key: node-role.kubernetes.io/control-plane
-  effect: NoSchedule</code></pre>
+  effect: NoSchedule
+affinity: { nodeAffinity: { requiredDuringScheduling...:
+  nodeSelectorTerms: [{ matchExpressions:
+  [{ key: disktype, operator: In, values: [ssd] }]}]}}</code></pre>
 </section>
 
 <section class="card"><h3>Autoscaling</h3>
 <table><thead><tr><th>Scaler</th><th>Scales</th></tr></thead><tbody>
 <tr><td>HPA</td><td>pod <b>replicas</b> (CPU/mem/custom)</td></tr>
-<tr><td>VPA</td><td>pod <b>requests/limits</b> (recreates)</td></tr>
-<tr><td>Cluster Autoscaler</td><td><b>nodes</b> (Pending pods)</td></tr>
+<tr><td>VPA</td><td>pod <b>requests/limits</b> (recreates pod)</td></tr>
+<tr><td>Cluster Autoscaler</td><td><b>nodes</b> (on Pending pods)</td></tr>
 <tr><td>Karpenter</td><td>just-in-time right-sized nodes</td></tr>
+<tr><td>KEDA</td><td>event-driven / scale-to-zero</td></tr>
 </tbody></table>
 <ul>
-<li>HPA: <code>ceil(replicas × current/target)</code>; <b>needs requests set</b> + metrics-server <span class="warn">!</span></li>
-<li>HPA + VPA on the same metric conflict. KEDA for event-driven / scale-to-zero.</li>
-<li>Pods with local storage / PDBs can block node scale-down.</li>
+<li>HPA target: <code>desired = ceil(replicas × current/target)</code>; <b>needs requests set</b> + metrics-server or it does nothing <span class="warn">!</span></li>
+<li><b>HPA + VPA on the same metric conflict</b> (both fight over the pod) — split metrics or use VPA in recommend-only <span class="warn">!</span></li>
+<li>Stabilization windows / behavior policies prevent flapping. HPA scales pods → creates Pending → Cluster Autoscaler adds nodes.</li>
+<li>Local storage / restrictive PDBs / no-controller pods block node scale-down <span class="warn">!</span></li>
 </ul>
 </section>
 
 <section class="card"><h3>RBAC &amp; Security</h3>
 <ul>
-<li>Request pipeline: <b>authn → authz (RBAC) → admission</b>.</li>
-<li>Role/RoleBinding = namespaced; ClusterRole/ClusterRoleBinding = cluster-wide. Rules = apiGroups × resources × verbs.</li>
-<li>Pods authenticate via a <b>ServiceAccount</b> token; least-privilege, avoid <code>cluster-admin</code>/wildcards <span class="warn">!</span></li>
-<li><code>kubectl auth can-i --as=…</code> to test.</li>
+<li>Pipeline: <b>authn → authz (RBAC) → admission</b>. K8s has no user DB — trusts external identity (certs, OIDC, cloud IAM, SA tokens).</li>
+<li><b>Role</b>/<b>RoleBinding</b> = namespaced; <b>ClusterRole</b>/<b>ClusterRoleBinding</b> = cluster-wide. Rule = apiGroups × resources × verbs.</li>
+<li>Pods authenticate via a mounted <b>ServiceAccount</b> token. Least-privilege; avoid <code>cluster-admin</code>/wildcard verbs <span class="warn">!</span></li>
+<li>Test: <code>kubectl auth can-i &lt;verb&gt; &lt;res&gt; --as=…</code>. Set <code>automountServiceAccountToken: false</code> if the pod needs no API access.</li>
 </ul>
 <h4>Pod hardening</h4>
 <ul>
-<li>SecurityContext: <code>runAsNonRoot</code>, drop ALL caps, <code>readOnlyRootFilesystem</code>, no <code>privileged</code> <span class="warn">!</span></li>
-<li><b>Pod Security Admission</b> (baseline/restricted). <b>NetworkPolicy</b> = default-allow until a policy selects the pod, then default-deny (needs Calico/Cilium).</li>
+<li>SecurityContext: <code>runAsNonRoot</code>, <code>drop: [ALL]</code> caps, <code>readOnlyRootFilesystem</code>, <code>allowPrivilegeEscalation:false</code>, no <code>privileged</code>/hostNetwork/hostPath <span class="warn">!</span></li>
+<li><b>Pod Security Admission</b> = baseline / restricted profiles per namespace (replaced PodSecurityPolicy).</li>
+<li><b>NetworkPolicy</b>: default is <b>allow-all</b>; once a policy selects a pod it flips to <b>default-deny</b> for that direction. Needs a CNI that enforces it (Calico/Cilium) <span class="warn">!</span></li>
 </ul>
 </section>
 
 <section class="card"><h3>Networking &amp; DNS</h3>
 <ul>
-<li>Model: every pod gets its own IP; pods talk without NAT. <b>CNI</b> wires it (Calico/Cilium/Flannel/AWS-VPC-CNI).</li>
-<li><b>CoreDNS</b> resolves services/pods. Watch <code>ndots:5</code> — unqualified lookups fan out and add latency <span class="warn">!</span> (NodeLocal DNSCache helps).</li>
-<li>kube-proxy programs Service VIPs (iptables/IPVS); Cilium can replace it with eBPF.</li>
+<li>Model: every pod gets a unique routable IP; pods talk pod-IP→pod-IP <b>without NAT</b>. A <b>CNI</b> wires it (Calico/Cilium/Flannel/AWS-VPC-CNI).</li>
+<li><b>kube-proxy</b> programs Service VIPs via <b>iptables</b> (default, O(n) rules) or <b>IPVS</b> (hash, scales better); <b>Cilium/eBPF</b> can replace kube-proxy entirely.</li>
+<li><b>CoreDNS</b> resolves Services/pods. Watch <code>ndots:5</code> — unqualified names fan out into many lookups + latency <span class="warn">!</span> NodeLocal DNSCache helps.</li>
+<li>Cross-namespace: use FQDN <code>svc.other-ns.svc.cluster.local</code>; flat pod network means ns is <b>not</b> a network boundary without NetworkPolicy <span class="warn">!</span></li>
 <li>Service mesh (Istio/Linkerd) = mTLS + traffic mgmt + observability — often more complexity than you need <span class="warn">!</span></li>
 </ul>
 </section>
 
 <section class="card"><h3>Helm · Kustomize · GitOps</h3>
 <ul>
-<li><b>Helm</b>: templated charts + <code>values.yaml</code>; <code>helm install/upgrade/rollback</code>; releases &amp; history. Powerful but YAML-templating is error-prone.</li>
-<li><b>Kustomize</b>: template-free bases + per-env overlays/patches; built into <code>kubectl -k</code>.</li>
-<li><b>GitOps</b> (ArgoCD/Flux): Git is desired state; pull-based reconcile + drift detection — beats <code>kubectl apply</code> from CI.</li>
-<li>Secrets in Git: sealed-secrets / SOPS / external secrets <span class="warn">!</span></li>
+<li><b>Helm</b>: templated charts + <code>values.yaml</code>; <code>helm install/upgrade/rollback</code>, release history. Powerful but string-templating YAML is error-prone.</li>
+<li><b>Kustomize</b>: template-free bases + per-env overlays/patches; built into <code>kubectl -k</code>. Diffs stay readable.</li>
+<li><b>GitOps</b> (Argo CD / Flux): Git = desired state; pull-based reconcile + drift detection + auto-sync — beats <code>kubectl apply</code> from CI (no cluster creds in CI, audit trail).</li>
+<li>Secrets in Git: sealed-secrets / SOPS / External Secrets — never plaintext <span class="warn">!</span></li>
 </ul>
 </section>
 
-<section class="card"><h3>Cluster Ops</h3>
+<section class="card"><h3>Cluster Ops &amp; etcd</h3>
 <ul>
-<li><b>Upgrade order:</b> control plane first, then nodes. Kubelet may lag api-server by a couple minors but never lead; go one minor at a time <span class="warn">!</span></li>
-<li>Node ops: <code>cordon</code> → <code>drain</code> (respects PDBs) → replace → <code>uncordon</code>.</li>
-<li><b>etcd</b>: odd member count for quorum; <code>etcdctl snapshot save</code>; back it up — it's the whole cluster <span class="warn">!</span></li>
-<li>Backups: Velero (PVs + objects). Managed clusters run the control plane/etcd for you.</li>
-<li>Cost: right-size requests, spot node pools, autoscaler/Karpenter, bin-packing.</li>
+<li><b>Upgrade order:</b> control plane first, then nodes. Kubelet may lag api-server by up to 3 minors but <b>never lead</b>; go one minor at a time <span class="warn">!</span></li>
+<li>Node maintenance: <code>cordon</code> (stop new) → <code>drain</code> (evict, respects PDBs) → replace → <code>uncordon</code>.</li>
+<li><b>etcd</b>: odd member count (3/5) for quorum, tolerates <code>(N-1)/2</code> losses; lose quorum → writes stop, cluster read-only <span class="warn">!</span> <code>etcdctl snapshot save</code> is non-negotiable.</li>
+<li>HA control plane: multiple stateless api-servers behind LB; scheduler/controller-mgr use <b>leader election</b> (one active).</li>
+<li>Backups: <b>Velero</b> (objects + PV snapshots). Managed (EKS/GKE/AKS) runs control plane + etcd for you.</li>
+<li>Cost: right-size requests, spot pools, Cluster Autoscaler/Karpenter, bin-packing.</li>
 </ul>
 </section>
 
 <section class="card"><h3>&#9733; Troubleshooting Playbook</h3>
-<h4>Pending</h4>
-<ul><li>&#9744; <code>describe pod</code> events → insufficient cpu/mem, taints, affinity, unbound PVC, quota.</li></ul>
+<h4>Pending / Unschedulable</h4>
+<ul><li>&#9744; <code>describe pod</code> events → insufficient cpu/mem, taints w/o toleration, affinity unsatisfiable, unbound PVC, quota exceeded.</li></ul>
 <h4>CrashLoopBackOff</h4>
-<ul><li>&#9744; <code>logs --previous</code>, exit code, bad config/cmd, failing liveness probe.</li></ul>
+<ul><li>&#9744; <code>logs --previous</code>, exit code, bad config/cmd, missing dep, too-aggressive liveness probe.</li></ul>
 <h4>ImagePullBackOff / ErrImagePull</h4>
-<ul><li>&#9744; image name/tag typo, private registry needs <code>imagePullSecrets</code>, registry/network.</li></ul>
+<ul><li>&#9744; image name/tag typo, private registry needs <code>imagePullSecrets</code>, registry auth/network.</li></ul>
 <h4>OOMKilled (137)</h4>
-<ul><li>&#9744; memory limit too low or leak — raise limit / fix app; check <code>describe</code>.</li></ul>
+<ul><li>&#9744; memory limit too low or a leak — raise limit / fix app; check <code>describe</code> last state.</li></ul>
 <h4>Service returns nothing</h4>
-<ul><li>&#9744; <code>get endpoints svc</code> empty → selector mismatch / no ready pods / wrong port / NetworkPolicy.</li></ul>
+<ul><li>&#9744; <code>get endpoints &lt;svc&gt;</code> empty → selector mismatch / no ready pods / wrong <code>targetPort</code> / NetworkPolicy.</li></ul>
 <h4>DNS failing</h4>
-<ul><li>&#9744; CoreDNS pods/logs, <code>ndots</code>, test with <code>kubectl run -it --rm dnsutils</code>.</li></ul>
+<ul><li>&#9744; CoreDNS pods/logs, <code>ndots</code>, test with <code>kubectl run -it --rm dnsutils -- nslookup svc</code>.</li></ul>
 <h4>Stuck Terminating</h4>
-<ul><li>&#9744; finalizers, node gone, grace period; patch/remove finalizer as last resort <span class="warn">!</span></li></ul>
+<ul><li>&#9744; finalizers, node gone, grace period; remove finalizer only as last resort <span class="warn">!</span></li></ul>
+<h4>Namespace stuck Terminating</h4>
+<ul><li>&#9744; a resource with a finalizer (often a CRD whose controller is gone) — patch out the finalizer.</li></ul>
+</section>
+
+<section class="card"><h3>Common Bugs — Spot-the-Bug</h3>
+<table><thead><tr><th>Symptom</th><th>Cause</th></tr></thead><tbody>
+<tr><td>whole fleet restarts at once</td><td>liveness probe checks a shared dependency <span class="warn">!</span></td></tr>
+<tr><td>Service has no endpoints</td><td>selector ≠ pod labels / no ready pods <span class="warn">!</span></td></tr>
+<tr><td>config change ignored</td><td>consumed via env, pod not restarted <span class="warn">!</span></td></tr>
+<tr><td>StatefulSet stuck at pod-0</td><td>OrderedReady + pod-0 never Ready <span class="warn">!</span></td></tr>
+<tr><td>data gone after delete</td><td>reclaimPolicy: Delete on the SC <span class="warn">!</span></td></tr>
+<tr><td>pod Pending forever</td><td>unbound PVC / taint / insufficient cpu <span class="warn">!</span></td></tr>
+<tr><td>137 exit code</td><td>OOMKilled — mem limit &lt; usage <span class="warn">!</span></td></tr>
+<tr><td>throttled but not killed</td><td>CPU limit hit (CFS) — raise limit</td></tr>
+<tr><td>client IP shows as node IP</td><td>default SNAT; set <code>externalTrafficPolicy: Local</code></td></tr>
+<tr><td>rollout hangs</td><td>new pods fail readiness / bad image <span class="warn">!</span></td></tr>
+<tr><td>Ingress 404 / addr &lt;none&gt;</td><td>no controller / wrong IngressClass <span class="warn">!</span></td></tr>
+<tr><td>bare Pod never comes back</td><td>node died, nothing owns it <span class="warn">!</span></td></tr>
+</tbody></table>
 </section>
 
 <section class="card"><h3>&#9744; Manifest Review Checklist</h3>
 <ul>
-<li>&#9744; <b>resources.requests &amp; limits</b> set (mem limit == request for Guaranteed critical apps).</li>
-<li>&#9744; <b>readiness</b> (and liveness/startup where apt) probes — not checking dependencies in liveness.</li>
-<li>&#9744; Image is a <b>pinned tag/digest</b>, never <code>:latest</code>.</li>
-<li>&#9744; <b>runAsNonRoot</b>, drop ALL caps, read-only rootfs, no <code>privileged</code>/hostPath/hostNetwork.</li>
+<li>&#9744; <b>resources.requests &amp; limits</b> set (mem limit == request → Guaranteed for critical apps).</li>
+<li>&#9744; <b>readiness</b> probe present; liveness/startup where apt; <b>liveness never checks a dependency</b> <span class="warn">!</span></li>
+<li>&#9744; Image is a <b>pinned tag/digest</b>, never <code>:latest</code>; <code>imagePullSecrets</code> if private.</li>
+<li>&#9744; SecurityContext: <b>runAsNonRoot</b>, drop ALL caps, read-only rootfs, no <code>privileged</code>/hostPath/hostNetwork.</li>
 <li>&#9744; Least-privilege ServiceAccount + RBAC; <code>automountServiceAccountToken:false</code> if unused.</li>
-<li>&#9744; Labels match Service/selector; multiple replicas + <b>PodDisruptionBudget</b>.</li>
-<li>&#9744; preStop + terminationGracePeriod for graceful shutdown; NetworkPolicy in place.</li>
-<li>&#9744; No secrets in env plaintext / image; config externalised.</li>
+<li>&#9744; Labels match Service/selector; selector is <b>immutable</b>; multiple replicas + <b>PodDisruptionBudget</b>.</li>
+<li>&#9744; <code>preStop</code> sleep + <code>terminationGracePeriodSeconds</code> for graceful shutdown.</li>
+<li>&#9744; <b>NetworkPolicy</b> restricting ingress/egress; no secrets in env plaintext / baked in image.</li>
+<li>&#9744; StatefulSet: correct <code>storageClassName</code>, reclaim policy, PVC retention understood.</li>
+<li>&#9744; Rollout strategy + <code>maxSurge</code>/<code>maxUnavailable</code> suit capacity; <code>progressDeadlineSeconds</code> set.</li>
 </ul>
 </section>
 

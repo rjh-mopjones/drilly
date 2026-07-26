@@ -72,16 +72,17 @@ pre code{background:none; padding:0; font-size:1em;}
 </head>
 <body>
 <div class="sheet">
-<div class="titlebar"><h1>Cassandra Cheat Sheet</h1><span class="meta">distributed NoSQL · partitioning · consistency · data modeling · drilly</span></div>
+<div class="titlebar"><h1>Cassandra Cheat Sheet</h1><span class="meta">masterless NoSQL · partitioning · tunable consistency · query-first modeling · drilly</span></div>
 <section class="card legend"><h3>How to read &amp; print</h3>
 <ul>
 <li><span class="warn">!</span> footgun / anti-pattern &nbsp; <code>&#9744;</code> data-model review item</li>
-<li>Focus: the architecture &amp; the <b>query-first data modeling</b> that interviews live on — plus storage internals, consistency &amp; ops.</li>
-<li>Golden rule: <b>model around your queries</b>, denormalize, one table per access pattern. Partition key = distribution; clustering = order.</li>
-<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+<li>Baseline: <b>Cassandra 4.x/5.0</b>; 5.0-only features tagged inline (SAI, UCS, Accord, vector/ANN).</li>
+<li>Focus: the architecture &amp; the <b>query-first data modeling</b> interviews live on — plus the LSM storage engine, tunable consistency, and the ops footguns (tombstones, wide partitions, <code>ALLOW FILTERING</code>).</li>
+<li>Golden rule: <b>model around your queries</b>, denormalize, one table per access pattern. Partition key = distribution; clustering = order. Last 3 cards = review checklist + spot-the-bug + playbook.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
 </ul></section>
 
-<section class="card diagram"><h3>Architecture</h3>
+<section class="card diagram"><h3>Architecture — masterless ring</h3>
 <div class="mermaid">
 flowchart LR
   C["client"] --> CO["coordinator (any node)"]
@@ -91,185 +92,298 @@ flowchart LR
   R1 -. gossip .- R2
   R2 -. gossip .- R3
 </div>
-<p class="cap">Masterless peer-to-peer ring — every node equal, no leader/SPOF. Nodes gossip membership. Any node coordinates a request &amp; forwards to the RF replicas. AP in CAP with tunable consistency; write-optimized (LSM).</p>
-</section>
-
-<section class="card"><h3>Partitioning &amp; the Ring</h3>
+<p class="cap">Peer-to-peer ring — every node equal, no leader / no SPOF. Nodes exchange membership + state via <b>gossip</b> (1×/s, ~3 peers). Any node can <b>coordinate</b> a request and forward to the RF replicas that own the token.</p>
 <ul>
-<li>Data placed by <b>consistent hashing</b> on a <b>token ring</b>: <code>hash(partition key)</code> → token → owning node(s) (Murmur3).</li>
-<li><b>Vnodes</b>: each node owns many small token ranges → balance + fast rebuild/streaming.</li>
-<li>The <b>partition key choice = load balance</b>. Low-cardinality / celebrity key → <b>hot partition</b> <span class="warn">!</span></li>
-<li>Adding a node reshuffles only neighbouring ranges (run <code>nodetool cleanup</code> after).</li>
+<li><b>AP in CAP</b> with tunable consistency — favours availability + partition tolerance; you dial correctness per query via CL.</li>
+<li>Write-optimized <b>LSM tree</b>; linear horizontal scale — add nodes for more throughput/storage, no re-sharding downtime.</li>
+<li>Built for <b>multi-DC, always-on, huge write volume</b>. No joins, no ad-hoc queries, eventual consistency by default.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Replication</h3>
+<section class="card"><h3>Partitioning &amp; the Token Ring</h3>
 <ul>
-<li><b>RF</b> = copies per partition (3 typical); replicas = the token owner + next nodes clockwise.</li>
-<li><b>NetworkTopologyStrategy</b> (production): RF <b>per DC</b>, replicas on distinct <b>racks</b>. SimpleStrategy = dev only <span class="warn">!</span></li>
-<li>A <b>snitch</b> tells nodes the DC/rack topology.</li>
+<li>Data placed by <b>consistent hashing</b>: <code>Murmur3(partition key)</code> → 64-bit <b>token</b> → owning node (first replica) + next RF−1 clockwise.</li>
+<li><b>Vnodes</b> (default <code>num_tokens</code> 16): each node owns many small ranges → even balance + parallel, fast streaming on rebuild/bootstrap.</li>
+<li><b>Partition key choice = load balance.</b> Low-cardinality or "celebrity" key (e.g. <code>country</code>, a viral user) → <b>hot partition</b>, one node saturated <span class="warn">!</span></li>
+<li>Consistent hashing means adding/removing a node reshuffles only <b>neighbouring</b> ranges, not the whole dataset. Run <code>nodetool cleanup</code> on old owners after.</li>
+<li>The token is derived from the partition key <b>only</b> — clustering columns never affect placement.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Replication &amp; Snitches</h3>
+<ul>
+<li><b>RF</b> = copies per partition (3 typical). Replicas = token owner + next nodes clockwise, skipping to satisfy topology rules.</li>
+<li><b>NetworkTopologyStrategy</b> (production): RF <b>per DC</b>, places replicas on <b>distinct racks</b> to survive a rack failure. <code>SimpleStrategy</code> = single-DC dev only <span class="warn">!</span></li>
+<li>A <b>snitch</b> (<code>GossipingPropertyFileSnitch</code> standard) tells the cluster each node's DC/rack so replicas + routing are topology-aware.</li>
+<li>RF is a keyspace property; changing it requires a full <b>repair</b> to stream the new copies.</li>
 </ul>
 <pre><code>CREATE KEYSPACE app WITH replication =
- {'class':'NetworkTopologyStrategy','dc1':3,'dc2':3};</code></pre>
+ {'class':'NetworkTopologyStrategy','dc1':3,'dc2':3}
+ AND durable_writes = true;</code></pre>
 </section>
 
-<section class="card"><h3>Tunable Consistency</h3>
+<section class="card"><h3>Tunable Consistency (CL)</h3>
 <table><thead><tr><th>CL</th><th>meaning</th></tr></thead><tbody>
-<tr><td>ONE / LOCAL_ONE</td><td>1 replica (fast, may be stale)</td></tr>
-<tr><td>QUORUM</td><td>majority of ALL replicas</td></tr>
-<tr><td>LOCAL_QUORUM</td><td>majority in local DC (multi-DC workhorse)</td></tr>
-<tr><td>ALL</td><td>every replica (no availability slack)</td></tr>
+<tr><td>ANY</td><td>write only; a <b>hint</b> counts (weakest, may be unreadable) <span class="warn">!</span></td></tr>
+<tr><td>ONE / LOCAL_ONE</td><td>1 replica / 1 in local DC — fast, may be stale</td></tr>
+<tr><td>QUORUM</td><td>majority of <b>all</b> replicas across DCs = ⌊RF/2⌋+1</td></tr>
+<tr><td>LOCAL_QUORUM</td><td>majority in local DC — multi-DC <b>workhorse</b>, no cross-DC latency</td></tr>
+<tr><td>EACH_QUORUM</td><td>quorum in <b>every</b> DC (write only)</td></tr>
+<tr><td>ALL</td><td>every replica — zero availability slack <span class="warn">!</span></td></tr>
+<tr><td>SERIAL / LOCAL_SERIAL</td><td>Paxos read for LWT (linearizable)</td></tr>
 </tbody></table>
 <ul>
-<li><b>Strong (read-your-writes) ⇔ R + W &gt; RF</b> — e.g. RF3, W=QUORUM(2), R=QUORUM(2): 2+2&gt;3 ✓ <span class="warn">!</span></li>
-<li>RF3 + QUORUM tolerates 1 node down. Conflicts = last-write-wins by timestamp (clock skew risk).</li>
+<li><b>Strong / read-your-writes ⇔ R + W &gt; RF.</b> RF3, W=QUORUM(2), R=QUORUM(2): 2+2&gt;3 ✓ <span class="warn">!</span></li>
+<li>RF3 + QUORUM tolerates <b>1 node down</b> and still reads/writes. RF3 + ALL tolerates 0.</li>
+<li>Conflicts resolved by <b>last-write-wins</b> on the cell timestamp → clock skew across nodes can silently drop a "newer" write <span class="warn">!</span> Keep NTP tight.</li>
+<li>CL is <b>per request</b> (set in the driver), not a schema property — different queries can use different CLs.</li>
 </ul>
 </section>
 
-<section class="card"><h3>CQL &amp; Primary Key</h3>
+<section class="card"><h3>CQL &amp; the Primary Key</h3>
 <pre><code>CREATE TABLE users_by_id (
   id uuid PRIMARY KEY, email text, name text);
 
-CREATE TABLE messages_by_conv (
+CREATE TABLE msgs_by_conv (
   conv_id uuid, bucket date, ts timeuuid,
   sender text, body text,
   PRIMARY KEY ((conv_id, bucket), ts)
 ) WITH CLUSTERING ORDER BY (ts DESC);
-SELECT * FROM messages_by_conv
- WHERE conv_id=? AND bucket=? LIMIT 50;</code></pre>
+
+SELECT * FROM msgs_by_conv
+ WHERE conv_id=? AND bucket=? LIMIT 50;   -- fast</code></pre>
 <ul>
-<li><b>PK = partition key + clustering columns.</b> Partition key = WHICH node; clustering = ORDER within the partition. <code>((a,b),c)</code> = composite partition key.</li>
-<li>Query by the WHOLE partition key + clustering columns <b>in order</b>; INSERT is an <b>UPSERT</b> (no existence check) <span class="warn">!</span></li>
-<li><b><code>ALLOW FILTERING</code> = red flag</b> (full scan) — remodel instead <span class="warn">!</span></li>
+<li><b>PK = partition key + clustering columns.</b> First paren group = partition key (WHICH node); the rest = clustering (ORDER + uniqueness within the partition). <code>((a,b),c)</code> = composite partition key.</li>
+<li>Query must supply the <b>whole partition key</b> (equality), then clustering columns <b>left-to-right in order</b>; range allowed only on the last one used.</li>
+<li><code>INSERT</code> is an <b>UPSERT</b> — no existence check, no error on overwrite <span class="warn">!</span> Same PK = last-write-wins.</li>
+<li><code>ALLOW FILTERING</code> = <b>red flag</b>: coordinator scans + filters rows it read, unpredictable + O(cluster). Remodel instead <span class="warn">!</span></li>
 </ul>
 </section>
 
-<section class="card"><h3>Query-First Modeling</h3>
+<section class="card"><h3>Query-First Data Modeling</h3>
 <ul>
-<li>Start from <b>access patterns</b>, not entities. <b>Denormalize</b>; <b>one table per query</b>.</li>
-<li><b>No joins, no ad-hoc queries.</b> Duplicate data across tables; keep in sync on write (batch/app).</li>
-<li>Choose partition key for <b>even distribution</b>, clustering for <b>order/uniqueness</b>.</li>
-<li>Need another lookup (by email)? → a second table <code>users_by_email</code>, not a secondary index <span class="warn">!</span></li>
-<li>Validate partition size BEFORE shipping.</li>
+<li>Start from <b>access patterns</b>, never from entities/ER diagrams. List every query first, then design a table per query.</li>
+<li><b>Denormalize aggressively</b>; <b>one table per query</b>. Disk is cheap, a slow read at scale is not.</li>
+<li><b>No joins, no ad-hoc queries, no GROUP BY at scale.</b> Duplicate data across tables and keep them in sync on write (app logic or a single-partition logged batch).</li>
+<li>Pick the <b>partition key for even distribution</b>; pick <b>clustering columns for the order</b> the query needs (and to make rows unique).</li>
+<li>Need another lookup (by email)? → build <code>users_by_email</code>, <b>not</b> a secondary index <span class="warn">!</span></li>
+<li><b>Estimate partition size before shipping</b>: rows-per-partition × row size. Bound it.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Partition Anti-patterns</h3>
+<section class="card"><h3>Partition Design &amp; Anti-patterns</h3>
 <table><thead><tr><th>Smell</th><th>Fix</th></tr></thead><tbody>
-<tr><td>hot partition (one node hot)</td><td>higher-cardinality / composite key <span class="warn">!</span></td></tr>
+<tr><td>hot partition (one node red-hot)</td><td>higher-cardinality / composite partition key <span class="warn">!</span></td></tr>
 <tr><td>unbounded partition (grows forever)</td><td>add a <b>time/hash bucket</b> to the PK <span class="warn">!</span></td></tr>
-<tr><td>huge partition (&gt;100MB)</td><td>bucket to bound size</td></tr>
-<tr><td>tombstone-heavy partition</td><td>TTL+TWCS, avoid deletes <span class="warn">!</span></td></tr>
+<tr><td>huge partition (&gt;100 MB)</td><td>bucket to bound size; split by day/hour</td></tr>
+<tr><td>tombstone-heavy partition</td><td>TTL + TWCS, avoid deletes / queue pattern <span class="warn">!</span></td></tr>
+<tr><td>tiny partitions (millions)</td><td>coarser bucket — too many hurts too</td></tr>
 </tbody></table>
-<p>Target: partitions ≲100MB / ≲100k rows (2B-cell hard limit). Even spread across the ring.</p>
+<ul>
+<li>Target: partitions <b>≲ 100 MB</b> and <b>≲ 100k rows</b> (hard limit 2 billion cells/partition, but pain starts far earlier).</li>
+<li><b>Bucketing</b> = composite partition key with a time/hash component, e.g. <code>((sensor_id, day), ts)</code> — bounds size + spreads load, at the cost of the client iterating buckets.</li>
+<li>Check with <code>nodetool tablehistograms</code> (partition-size percentiles) + compaction warnings in logs.</li>
+</ul>
 </section>
 
-<section class="card diagram"><h3>Write &amp; Read Paths</h3>
+<section class="card diagram"><h3>Write Path — why writes are fast</h3>
 <div class="mermaid">
 flowchart LR
-  W["write"] --> CL["commit log (durable)"]
-  W --> MT["memtable (RAM)"]
+  W["write"] --> CL["commit log (disk, durable)"]
+  W --> MT["memtable (RAM, sorted)"]
   MT -->|flush| SS["immutable SSTable"]
 </div>
 <ul>
-<li><b>Write</b> = append to commit log + memtable → ACK at CL → later flush to SSTable. Very fast, no read-before-write. Down replica → <b>hinted handoff</b>.</li>
-<li><b>Read</b> merges the memtable + many SSTables (newest cell wins), using <b>bloom filters</b> + partition index + caches; <b>read repair</b> fixes stale replicas. Many SSTables/tombstones → slow reads <span class="warn">!</span></li>
+<li>Per replica, two cheap ops: <b>sequential append to commit log</b> (durability) + <b>in-memory memtable update</b>. ACK once CL replicas confirm. No random IO.</li>
+<li><b>No read-before-write, no in-place update, no locks</b> — that is the whole speed story. An update/delete is just a new timestamped cell.</li>
+<li>Memtable fills → <b>flush</b> to a new immutable SSTable → commit-log segment recycled.</li>
+<li>Down replica → coordinator stores a <b>hinted handoff</b> and replays it when the node returns (up to <code>max_hint_window</code>, default 3h).</li>
+<li><code>commitlog_sync</code>: <b>periodic</b> (batched fsync, default, small data-loss window) vs <b>batch</b> (fsync before ACK, safer, slower) <span class="warn">!</span></li>
 </ul>
 </section>
 
-<section class="card"><h3>SSTables &amp; Compaction</h3>
-<p>LSM tree: immutable SSTables merged in the background to discard overwrites/expired data &amp; cut read count.</p>
-<table><thead><tr><th>Strategy</th><th>Use</th></tr></thead><tbody>
-<tr><td>STCS (default)</td><td>write-heavy; read/space amp; needs 2× disk</td></tr>
-<tr><td>LCS</td><td>read/update-heavy; ~1 SSTable/level; high write amp</td></tr>
-<tr><td>TWCS</td><td><b>time-series + TTL</b> — drop whole windows cheaply</td></tr>
-<tr><td>UCS (5.0)</td><td>unified, tunable STCS↔LCS</td></tr>
+<section class="card"><h3>Read Path — reconstruction</h3>
+<p>A read is a <b>merge</b>, not a lookup: the row's cells may be smeared across the memtable + many SSTables, with tombstones masking deletes. Newest cell (by timestamp) wins.</p>
+<ul>
+<li><b>Bloom filter</b> per SSTable: "might this key be here?" — no false negatives; lets a replica <b>skip</b> SSTables that definitely lack the key.</li>
+<li><b>Key cache</b> → offset for hot keys; <b>partition summary/index</b> → byte offset in the SSTable; <b>row cache</b> = whole rows (great for tiny hot rows, <b>deadly on wide partitions</b> <span class="warn">!</span>).</li>
+<li>Coordinator does 1 full data read + <b>digest reads</b> from others (per CL); mismatch → <b>read repair</b> writes newest back to stale replicas.</li>
+<li><b>Speculative retry</b> sends an extra read to another replica if the first is slow — protects p99.</li>
+<li><b>SSTables-per-read</b> is the #1 read-latency lever; tombstones + too many SSTables turn a cheap read into a timeout <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Storage Engine: SSTables &amp; Compaction</h3>
+<p>LSM tree: memtable flushes → <b>immutable, sorted SSTables</b>; never edited in place. <b>Compaction</b> merges them (keep newest cell, drop shadowed/expired data), cutting SSTables-per-read + reclaiming disk.</p>
+<table><thead><tr><th>Strategy</th><th>Use / trade</th></tr></thead><tbody>
+<tr><td><b>STCS</b> (default)</td><td>write-heavy; merges similar-size SSTables. Read + space amp; needs ~2× table size headroom <span class="warn">!</span></td></tr>
+<tr><td><b>LCS</b></td><td>read/update-heavy; ~1 SSTable per level → bounded reads. High <b>write</b> amp</td></tr>
+<tr><td><b>TWCS</b></td><td><b>time-series + TTL</b> — buckets by time window, drops whole expired windows cheaply. No deletes/updates of old data <span class="warn">!</span></td></tr>
+<tr><td><b>UCS</b> (5.0)</td><td>unified, tunable STCS↔LCS via scaling params</td></tr>
 </tbody></table>
-<p>Throttle compaction so it doesn't starve queries; watch pending compactions.</p>
+<ul>
+<li><b>Amplification trade — pick 2 of 3:</b> write / read / space. STCS optimizes writes; LCS optimizes reads; TWCS optimizes TTL data.</li>
+<li>Don't run manual <b>major compaction</b> on STCS: one giant SSTable that then won't compact and hoards tombstones <span class="warn">!</span></li>
+<li>Watch <b>pending compactions</b> (<code>nodetool compactionstats</code>) — a climbing backlog degrades reads.</li>
+</ul>
 </section>
 
 <section class="card"><h3>Tombstones · Deletes · TTL</h3>
 <ul>
-<li>A <b>delete is a write</b> — it writes a <b>tombstone</b> masking old data until compaction removes it.</li>
-<li><b>gc_grace_seconds</b> (default 10d) keeps tombstones so a repair can propagate the delete to all replicas <span class="warn">!</span></li>
-<li><b>Run repair within gc_grace</b> or deleted data can <b>resurrect (zombies)</b> <span class="warn">!</span></li>
-<li>Too many tombstones → slow reads / <code>TombstoneOverwhelmingException</code> (100k abort). The <b>queue pattern is an anti-pattern</b> <span class="warn">!</span></li>
-<li><b>TTL</b> auto-expires (→ tombstone → compacted). Prefer TTL+TWCS over explicit deletes.</li>
+<li>A <b>delete is a write</b> — it writes a <b>tombstone</b> that masks older cells until compaction physically removes it. Reads must still read past tombstones.</li>
+<li><b>gc_grace_seconds</b> (default <b>10 days</b>) keeps tombstones so a <b>repair</b> can propagate the delete to every replica before it's purged <span class="warn">!</span></li>
+<li><b>Repair within gc_grace or deletes resurrect</b> ("zombie" data): a replica that missed the delete + never got repaired re-propagates the old value <span class="warn">!</span></li>
+<li>Too many tombstones scanned per read → slow reads, then <code>TombstoneOverwhelmingException</code> (aborts at 100k). The <b>queue / delete-then-read pattern is an anti-pattern</b> <span class="warn">!</span></li>
+<li><b>TTL</b> auto-expires cells (→ becomes a tombstone → compacted away). Prefer <b>TTL + TWCS</b> over explicit deletes for anything time-bounded.</li>
+<li>Range/partition/row/cell tombstones exist; a range delete is cheaper than deleting many cells.</li>
 </ul>
 </section>
 
 <section class="card"><h3>Repair &amp; Anti-Entropy</h3>
 <ul>
-<li>Replicas drift → 3 mechanisms fix them: <b>hinted handoff</b> (brief outages), <b>read repair</b> (only read data), <b>nodetool repair</b> (everything).</li>
-<li><code>nodetool repair</code> uses <b>Merkle trees</b> to compare ranges &amp; stream only differences.</li>
-<li><b>Must repair every node within gc_grace_seconds</b> — use <b>Cassandra Reaper</b> to schedule/throttle <span class="warn">!</span></li>
-<li>Full vs incremental; <code>-pr</code> primary-range to avoid redundant work.</li>
+<li>Replicas drift; <b>3 mechanisms</b> reconcile: <b>hinted handoff</b> (brief outages), <b>read repair</b> (only data actually read), <b>nodetool repair</b> (everything — the real backstop).</li>
+<li><code>nodetool repair</code> builds <b>Merkle trees</b> per range, compares them across replicas, and streams only the <b>differing</b> ranges.</li>
+<li><b>Must repair every node within gc_grace_seconds</b> or risk zombies. Use <b>Cassandra Reaper</b> to schedule + throttle so it doesn't crush the cluster <span class="warn">!</span></li>
+<li><b>Full</b> vs <b>incremental</b> (marks repaired SSTables so they're skipped next time); <code>-pr</code> (primary range) run on <b>every</b> node avoids redundant work.</li>
+<li>Hints alone are <b>not</b> a substitute for repair — they expire and can be lost.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Types · Indexing · LWT · Batch</h3>
+<section class="card"><h3>Types · Collections · Indexing</h3>
 <ul>
-<li>Collections (set/map/list — keep small; list has read-before-write) · UDTs · <b>counters</b> (approximate, not exact accounting) · static columns.</li>
-<li><b>Secondary index (2i)</b> = local, scatter-gather across nodes — only for restricted/low-card queries; often a <b>separate table</b> is better <span class="warn">!</span> <b>SAI</b> (5.0) is the modern index (+ vector/ANN).</li>
-<li><b>LWT</b> (IF NOT EXISTS / CAS) = linearizable via Paxos → ~4× latency; use rarely (uniqueness) <span class="warn">!</span></li>
-<li><b>Batch ≠ performance.</b> Logged batch = atomicity across a FEW related tables; a multi-partition batch for bulk load overloads the coordinator &amp; is SLOWER than parallel async writes <span class="warn">!</span></li>
+<li><b>Collections</b> (set / map / list) — keep <b>small</b> (whole collection read at once); <code>list</code> append/prepend can need read-before-write <span class="warn">!</span> <b>Frozen</b> = stored as one blob, immutable.</li>
+<li><b>UDTs</b> group related fields; <b>static columns</b> = one value shared by all rows in a partition.</li>
+<li><b>Counters</b> = special column, distributed increment — <b>approximate</b>, not safe for exact accounting (retries can double-count) <span class="warn">!</span></li>
+<li><b>Secondary index (2i)</b> = local per-node index; a query <b>scatter-gathers all nodes</b> → only for low-cardinality, already-restricted queries; a <b>separate table is usually better</b> <span class="warn">!</span></li>
+<li><b>SAI</b> (Storage-Attached Index, 5.0) = the modern index — multiple columns, range/text, lower overhead; still not a substitute for good partition design. Adds <b>vector/ANN</b> search.</li>
+<li>Old <b>materialized views</b> exist but are flagged experimental — hand-roll a second table + keep it in sync.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Ops &amp; Tuning</h3>
-<pre><code>nodetool status          # UN/DN, ownership, load
-nodetool tablestats ks.tbl   tablehistograms
-nodetool compactionstats     tpstats   # dropped/pending
-nodetool repair -pr          nodetool cleanup
-nodetool snapshot            nodetool decommission</code></pre>
+<section class="card"><h3>LWT &amp; Batches</h3>
+<p>Cassandra has <b>no general multi-row ACID</b> by default — writes are last-write-wins, no locks. Two narrow bolt-ons:</p>
+<pre><code>-- LWT: linearizable compare-and-set (Paxos)
+INSERT INTO users_by_name (username, id)
+VALUES ('alice', ?) IF NOT EXISTS;      -- ~4x latency !
+
+UPDATE accounts SET status='closed'
+WHERE id=? IF status='active';          -- [applied]=true/false</code></pre>
 <ul>
-<li>Add node → bootstraps &amp; streams → <code>cleanup</code> old nodes. Backups = <code>snapshot</code> (SSTable hard-links) + off-node copy.</li>
-<li>JVM heap ~8–16GB, G1GC; long GC pause → node flaps &amp; dropped mutations <span class="warn">!</span></li>
-<li>Watch <b>p99/p999 latency</b>, SSTables/read, tombstones/read, pending compactions, hints. Key cache good; row cache dangerous.</li>
+<li><b>LWT</b> = conditional write via <b>Paxos</b> (SERIAL/LOCAL_SERIAL): ~<b>4× latency</b>, low throughput. Ration it — uniqueness, optimistic concurrency; <b>never</b> as a general lock <span class="warn">!</span></li>
+<li><b>Logged batch</b> = <b>atomicity</b> (all-or-nothing via batchlog), <b>not</b> isolation, <b>not</b> speed. Good use: keep a <b>few same-partition</b> denormalized tables in sync.</li>
+<li><b>Multi-partition batch for bulk = anti-pattern</b>: overloads one coordinator, <b>slower</b> than parallel async token-aware writes <span class="warn">!</span></li>
+<li><b>Accord</b> (5.0) = general leaderless multi-partition transactions — the real "transaction" answer.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Cassandra vs Alternatives</h3>
+<section class="card"><h3>Time-Series &amp; Modeling Patterns</h3>
+<ul>
+<li><b>Time-series</b>: partition by <code>(entity, time_bucket)</code>, cluster by <code>ts DESC</code>, set a <b>TTL</b>, use <b>TWCS</b>. Newest-first reads are a cheap key-order prefix scan.</li>
+<li><b>Bucketing</b> keeps partitions bounded; client walks buckets (today, yesterday…) for a time range.</li>
+<li><b>Latest-N / feed</b>: cluster DESC + <code>LIMIT N</code> — data is pre-sorted on disk, no sort at read.</li>
+<li><b>Lookup by two keys</b> (id and email) → <b>two tables</b> (<code>x_by_id</code>, <code>x_by_email</code>), written together.</li>
+<li><b>Leaderboard / top-N</b> is hard — Cassandra can't sort across partitions; bucket + merge client-side, or use a different store.</li>
+<li>Model the <b>write</b> to be a single-partition upsert whenever possible.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Multi-DC · Availability · Failure</h3>
+<ul>
+<li><b>Multi-DC</b> is a headline feature: <code>NetworkTopologyStrategy</code> with RF per DC gives geo-locality + DR. Apps read/write <b>LOCAL_QUORUM</b> to stay in-region (no cross-DC latency).</li>
+<li>Cross-DC replication is <b>async</b> — a write ACKed at LOCAL_QUORUM propagates to the other DC in the background.</li>
+<li>Node states via <code>nodetool status</code>: <b>UN</b> up/normal, <b>DN</b> down/normal, <b>UJ</b> joining, <b>UL</b> leaving. A DN replica is covered by hints then repair.</li>
+<li>Survives node/rack/whole-DC loss <b>if</b> RF + CL leave a quorum reachable. RF3 per DC + LOCAL_QUORUM survives 1 node/DC down.</li>
+<li>Failure detection is <b>gossip + phi-accrual</b> — a node flapping (long GC pause) gets marked down, dropping mutations <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Cluster Ops — nodetool</h3>
+<pre><code>nodetool status              # UN/DN, ownership, load
+nodetool info                # heap, uptime, caches
+nodetool tablestats ks.tbl   # SSTables, reads, tombstones
+nodetool tablehistograms     # partition-size / latency %iles
+nodetool compactionstats     # pending compactions
+nodetool tpstats             # dropped / pending stages
+nodetool repair -pr          # anti-entropy (per node)
+nodetool cleanup             # drop no-longer-owned data
+nodetool flush / drain       # memtable -> SSTable
+nodetool snapshot            # backup (SSTable hard-links)
+nodetool decommission        # stream data off, remove node</code></pre>
+<ul>
+<li>Add node → auto-bootstrap streams its ranges in → run <code>cleanup</code> on old owners. Backup = <code>snapshot</code> + copy SSTables off-node.</li>
+<li>Replace a dead node with <code>-Dcassandra.replace_address</code>; never just re-add with the same tokens.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Performance &amp; Monitoring</h3>
+<ul>
+<li>Watch <b>p99 / p999</b> read+write latency, <b>SSTables-per-read</b>, <b>tombstones-per-read</b>, <b>pending compactions</b>, <b>dropped mutations</b>, hint counts.</li>
+<li><b>JVM heap</b> ~8–16 GB with <b>G1GC</b>; a long stop-the-world GC pause makes a node flap → dropped writes + read timeouts <span class="warn">!</span></li>
+<li><b>Key cache</b> = generally safe win; <b>row cache</b> = dangerous on wide partitions (caches whole partitions) <span class="warn">!</span></li>
+<li><b>Throttle compaction/streaming</b> so background work doesn't starve live queries; keep &lt;70% disk (STCS needs headroom).</li>
+<li>Use <code>TRACING ON</code> in <code>cqlsh</code> to see exactly which replicas + SSTables a slow query touched.</li>
+<li>Token-aware, DC-aware driver policy so clients hit a replica directly (1 hop, not 2).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Cassandra 5.0 &amp; Alternatives</h3>
 <table><thead><tr><th>Need</th><th>Pick</th></tr></thead><tbody>
 <tr><td>huge writes, always-on, multi-DC</td><td>Cassandra</td></tr>
 <tr><td>same, fully managed on AWS</td><td>DynamoDB</td></tr>
-<tr><td>Cassandra-compatible, faster/node</td><td>ScyllaDB (C++)</td></tr>
-<tr><td>ACID, joins, ad-hoc queries</td><td>Postgres</td></tr>
+<tr><td>Cassandra-compatible, faster/node</td><td>ScyllaDB (C++, no JVM GC)</td></tr>
+<tr><td>ACID, joins, ad-hoc queries</td><td>Postgres / relational</td></tr>
 <tr><td>rich document queries</td><td>MongoDB</td></tr>
 </tbody></table>
 <ul>
-<li>5.0: <b>SAI</b> indexes, <b>Accord/ACC</b> transactions, vector search, UCS.</li>
-<li>Reality check: most apps DON'T need Cassandra — its modeling + ops burden only pays off at real scale/write-volume/availability needs <span class="warn">!</span></li>
+<li><b>5.0 highlights:</b> <b>SAI</b> indexes, <b>Accord</b> general transactions, <b>vector search + ANN</b>, <b>UCS</b> compaction, trie-based memtables/SSTables.</li>
+<li>Reality check: <b>most apps don't need Cassandra</b> — its modeling + ops burden (repair, compaction, denormalization) only pays off at genuine scale / write-volume / always-on needs <span class="warn">!</span></li>
 </ul>
 </section>
 
-<section class="card"><h3>&#9744; Data-Model Review Checklist</h3>
+<section class="card"><h3>&#9733; Data-Model Review Checklist</h3>
 <ul>
-<li>&#9744; Table designed for a <b>specific query</b> (query-first, denormalized).</li>
-<li>&#9744; Partition key gives <b>even distribution</b> (no hot/celebrity key).</li>
-<li>&#9744; Partition size <b>bounded</b> (bucketing) — ≲100MB / ≲100k rows.</li>
-<li>&#9744; Clustering columns give the needed order; queries hit the WHOLE partition key + key-order prefix.</li>
+<li>&#9744; Each table designed for a <b>specific query</b> (query-first, denormalized, one table per pattern).</li>
+<li>&#9744; Partition key gives <b>even distribution</b> — no hot / celebrity / low-cardinality key.</li>
+<li>&#9744; Partition size <b>bounded</b> via bucketing — ≲ 100 MB / ≲ 100k rows.</li>
+<li>&#9744; Queries supply the <b>whole partition key</b> + clustering columns in order; clustering gives the needed sort.</li>
 <li>&#9744; <b>No <code>ALLOW FILTERING</code></b>; extra lookups = extra tables (or SAI), not 2i.</li>
-<li>&#9744; Right consistency (LOCAL_QUORUM default; R+W&gt;RF where you need strong).</li>
-<li>&#9744; Tombstone hygiene (TTL+TWCS, avoid delete-heavy/queue patterns).</li>
+<li>&#9744; Right consistency: <b>LOCAL_QUORUM</b> default; <b>R + W &gt; RF</b> where strong reads are needed.</li>
+<li>&#9744; Tombstone hygiene — TTL + TWCS; no delete-heavy / queue patterns.</li>
 <li>&#9744; No multi-partition batch for bulk; LWT only where truly needed.</li>
-<li>&#9744; Repair scheduled within gc_grace (Reaper).</li>
+<li>&#9744; <b>Repair scheduled within gc_grace</b> (Reaper); NTP tight (LWW depends on clocks).</li>
+<li>&#9744; Counters not used for exact accounting; collections kept small.</li>
 </ul>
 </section>
 
-<section class="card"><h3>&#9733; Troubleshooting Playbook</h3>
+<section class="card"><h3>Common Bugs — Symptom → Cause</h3>
+<table><thead><tr><th>Symptom</th><th>Cause</th></tr></thead><tbody>
+<tr><td>one node overloaded, rest idle</td><td>hot partition — low-cardinality partition key <span class="warn">!</span></td></tr>
+<tr><td>read latency creeps up over time</td><td>partition growing unbounded — needs a bucket <span class="warn">!</span></td></tr>
+<tr><td><code>TombstoneOverwhelmingException</code></td><td>delete-heavy / queue pattern; too many tombstones/read <span class="warn">!</span></td></tr>
+<tr><td>deleted data reappears</td><td>zombie — didn't repair within gc_grace <span class="warn">!</span></td></tr>
+<tr><td>query rejected without <code>ALLOW FILTERING</code></td><td>querying a non-key column — remodel <span class="warn">!</span></td></tr>
+<tr><td>high p99, many SSTables/read</td><td>compaction backlog / wrong strategy <span class="warn">!</span></td></tr>
+<tr><td>bulk load slower than expected</td><td>multi-partition batch on one coordinator <span class="warn">!</span></td></tr>
+<tr><td>stale reads after a write</td><td>R + W ≤ RF — raise CL <span class="warn">!</span></td></tr>
+<tr><td>counter totals drift</td><td>counter retries double-count <span class="warn">!</span></td></tr>
+</tbody></table>
+</section>
+
+<section class="card"><h3>&#9744; Troubleshooting Playbook</h3>
 <h4>One node overloaded</h4>
-<ul><li>&#9744; Hot partition → higher-cardinality/composite partition key or bucket.</li></ul>
+<ul><li>&#9744; Hot partition → higher-cardinality / composite partition key, or add a hash bucket.</li></ul>
 <h4>Reads timing out (tombstones)</h4>
-<ul><li>&#9744; <code>TombstoneOverwhelmingException</code> / delete-heavy → TTL+TWCS, remodel to avoid deletes.</li></ul>
+<ul><li>&#9744; <code>TombstoneOverwhelmingException</code> / delete-heavy → TTL + TWCS, remodel to avoid deletes; check <code>tablestats</code> tombstones/read.</li></ul>
 <h4>High p99 read latency</h4>
-<ul><li>&#9744; Too many SSTables / compaction backlog / wide partition / GC → compaction strategy, partition design, heap.</li></ul>
+<ul><li>&#9744; Too many SSTables / compaction backlog / wide partition / GC pause → fix compaction strategy, partition design, heap; use <code>TRACING</code>.</li></ul>
 <h4>Deleted data came back</h4>
-<ul><li>&#9744; Zombie: didn't repair within gc_grace → run repair; raise CLs (R+W&gt;RF) for stale reads.</li></ul>
+<ul><li>&#9744; Zombie: didn't repair within gc_grace → run repair; ensure Reaper schedule; raise CL (R+W&gt;RF) for stale reads.</li></ul>
 <h4>Query needs ALLOW FILTERING</h4>
-<ul><li>&#9744; Redesign a table around that query (or SAI).</li></ul>
+<ul><li>&#9744; Redesign a table around that exact query (or add SAI) — don't ship the filter.</li></ul>
 <h4>Bulk-load batch slow</h4>
-<ul><li>&#9744; Multi-partition batch → parallel async token-aware writes.</li></ul>
+<ul><li>&#9744; Multi-partition batch → parallel async, token-aware writes; batches only for same-partition atomicity.</li></ul>
+<h4>Node flapping / dropped mutations</h4>
+<ul><li>&#9744; Long GC pause or overload → tune heap/G1GC, throttle compaction, check for wide partitions.</li></ul>
 </section>
 
 </div>

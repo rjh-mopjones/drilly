@@ -3,10 +3,14 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Concurrency &amp; Parallelism Cheat Sheet</title>
+<title>Concurrency Cheat Sheet</title>
 <style>
 :root{
-  --fs: 7.2pt; --fs-mono: 6.6pt; --fs-h3: 7.8pt; --gap: 5px; --pad: 3px;
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
   --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
 }
 *{box-sizing:border-box;}
@@ -14,10 +18,12 @@ html,body{margin:0;padding:0;}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
   font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
 .sheet{background:#fff;}
+/* spanning title bar */
 .titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
   margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
 .titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
 .titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
 .sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
   column-fill:balance; padding:5px;}
 .card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
@@ -25,6 +31,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Ar
   overflow:hidden;}
 .card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
   background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
 .card:nth-of-type(8n+1) h3{background:#34495e;}
 .card:nth-of-type(8n+2) h3{background:#2c6e9b;}
 .card:nth-of-type(8n+3) h3{background:#1f7a5a;}
@@ -58,18 +65,21 @@ pre code{background:none; padding:0; font-size:1em;}
 @page{ size:A4; margin:5mm; }
 @media print{
   body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
   .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
 }
 </style>
 </head>
 <body>
 <div class="sheet">
-<div class="titlebar"><h1>Concurrency &amp; Parallelism Cheat Sheet</h1><span class="meta">threads · locks · memory models · lock-free · async · channels · drilly</span></div>
+<div class="titlebar"><h1>Concurrency Cheat Sheet</h1><span class="meta">threads · locks · memory models · lock-free · async · channels · drilly</span></div>
+
 <section class="card legend"><h3>How to read &amp; print</h3>
 <ul>
-<li><span class="warn">!</span> footgun / classic trap &nbsp; <code>&#9744;</code> reasoning step</li>
-<li>Focus: writing &amp; reasoning about <b>correct concurrent code</b> — the programming angle (kernel mechanism is the OS sheet).</li>
-<li>3 concerns of shared state: <b>atomicity · visibility · ordering</b>. Get all three or it's a bug.</li>
+<li><span class="warn">!</span> footgun / classic trap &nbsp; <code>&#9744;</code> reasoning &amp; review step</li>
+<li>Focus: writing &amp; reasoning about <b>correct concurrent code</b> — the programming angle (kernel scheduling is the OS sheet).</li>
+<li>Three concerns of shared state: <b>atomicity · visibility · ordering</b>. Get all three or it's a bug. A test passing once proves nothing.</li>
+<li>Correctness first, then contention. "Make it right, then make it scale" — a fast wrong answer is worthless.</li>
 <li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
 </ul></section>
 
@@ -77,108 +87,178 @@ pre code{background:none; padding:0; font-size:1em;}
 <table><thead><tr><th></th><th>Concurrency</th><th>Parallelism</th></tr></thead><tbody>
 <tr><td>about</td><td>structure / interleaving</td><td>simultaneous execution</td></tr>
 <tr><td>needs</td><td>1 core is enough</td><td>≥2 cores</td></tr>
-<tr><td>goal</td><td>responsiveness, IO overlap</td><td>throughput / speed</td></tr>
+<tr><td>goal</td><td>responsiveness, IO overlap</td><td>throughput / wall-time</td></tr>
 </tbody></table>
 <ul>
-<li>"Dealing with many things" vs "doing many things." You can have concurrency without parallelism (event loop).</li>
-<li><b>Amdahl</b>: speedup ≤ 1/(s + (1−s)/N); a 5% serial part caps you at 20×. <span class="warn">!</span> Coordination overhead can make more threads <i>slower</i>.</li>
-<li>Two paradigms: <b>shared memory</b> (threads+locks) vs <b>message passing</b> (channels/actors).</li>
+<li>"Dealing with many things" vs "doing many things." Concurrency without parallelism = an event loop; parallelism without concurrency = SIMD/GPU lanes.</li>
+<li><b>Amdahl</b>: speedup ≤ 1/(s + (1−s)/N). A 5% serial part caps you at <b>20×</b> no matter how many cores.</li>
+<li><b>Gustafson</b>: bigger inputs shrink the serial fraction — scaling out often means scaling up the problem.</li>
+<li><span class="warn">!</span> Coordination overhead can make more threads <i>slower</i>. Always benchmark against the serial baseline.</li>
 </ul>
 </section>
 
 <section class="card"><h3>Race Condition vs Data Race</h3>
 <ul>
-<li><b>Data race</b>: 2 threads touch same memory, ≥1 write, no ordering → UB. Fix with sync/atomics.</li>
-<li><b>Race condition</b>: wrong result from timing; can exist even with atomics (check-then-act).</li>
+<li><b>Data race</b>: 2 threads touch same memory, ≥1 write, no ordering → <b>undefined behavior</b> (C/C++/Go). Fix: sync or atomics.</li>
+<li><b>Race condition</b>: wrong result from timing; can exist <i>even with</i> atomics (check-then-act, TOCTOU).</li>
 </ul>
-<pre><code>// count++ is 3 ops, not atomic:
+<pre><code>// count++ is 3 ops, NOT atomic:
 T1: load 0        T2: load 0
 T1: add  1        T2: add  1
-T1: store 1       T2: store 1   // lost update → 1 not 2 !</code></pre>
-<p><span class="warn">!</span> <code>volatile</code>/atomic-read does NOT make <code>x++</code> safe — it's read-modify-write. Use an atomic add or a lock.</p>
+T1: store 1       T2: store 1   // lost update: 1 not 2 !</code></pre>
+<p><span class="warn">!</span> <code>volatile</code> / an atomic <i>read</i> does NOT make <code>x++</code> safe — it's read-modify-write. Use an atomic add (<code>fetch_add</code>) or a lock. Data-race-free is necessary, not sufficient, for correctness.</p>
 </section>
 
-<section class="card"><h3>Locks</h3>
-<table><thead><tr><th>Type</th><th>Use</th></tr></thead><tbody>
-<tr><td>mutex</td><td>1 owner, exclusive</td></tr>
-<tr><td>reentrant</td><td>same thread re-locks</td></tr>
-<tr><td>read-write</td><td>N readers <b>or</b> 1 writer</td></tr>
-<tr><td>spinlock</td><td>busy-wait, very short CS, multicore</td></tr>
+<section class="card"><h3>Atomicity · Visibility · Ordering</h3>
+<table><thead><tr><th>Concern</th><th>Bug if missing</th><th>Fix</th></tr></thead><tbody>
+<tr><td>atomicity</td><td>torn/lost update</td><td>lock, atomic RMW</td></tr>
+<tr><td>visibility</td><td>stale value forever</td><td>volatile, release/acquire</td></tr>
+<tr><td>ordering</td><td>reorder → invariant broken</td><td>fence, happens-before edge</td></tr>
 </tbody></table>
 <ul>
-<li>Always release in <code>finally</code> / RAII / <code>defer</code>. <span class="warn">!</span></li>
-<li>Coarse lock = simple, low concurrency; fine lock = scalable, deadlock-prone.</li>
-<li>Hold locks briefly; never do IO / call unknown code under a lock (lock convoy, deadlock).</li>
+<li>Each is independent. A flag can be visible but its guarded data reordered before it → reader sees flag=true, data=garbage.</li>
+<li><span class="warn">!</span> "I set the field" ≠ another thread sees it. Without a memory barrier a write can sit in a store buffer indefinitely.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Locks &amp; Mutual Exclusion</h3>
+<table><thead><tr><th>Type</th><th>Use</th></tr></thead><tbody>
+<tr><td>mutex</td><td>1 owner, exclusive critical section</td></tr>
+<tr><td>reentrant</td><td>same thread re-locks (recursion)</td></tr>
+<tr><td>read-write</td><td>N readers <b>or</b> 1 writer</td></tr>
+<tr><td>spinlock</td><td>busy-wait, sub-µs CS, multicore</td></tr>
+</tbody></table>
+<pre><code>mu.Lock()
+defer mu.Unlock()   // RAII / finally / defer — always !
+balance += amount</code></pre>
+<ul>
+<li>Coarse lock = simple, low concurrency; fine lock = scalable, deadlock-prone. Start coarse, split under proven contention.</li>
+<li><span class="warn">!</span> Never do IO, sleep, or call unknown/callback code while holding a lock → lock convoy, deadlock, huge tail latency.</li>
+<li>Spinlock only when CS &lt; a context switch; else you burn a core. Adaptive mutexes spin briefly then park.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Read-Write Locks</h3>
+<ul>
+<li><b>RWLock</b>: many concurrent readers, exclusive writer. Wins only when reads dominate <i>and</i> critical sections are non-trivial — otherwise the bookkeeping costs more than a plain mutex.</li>
+<li><span class="warn">!</span> <b>Writer starvation</b>: a steady stream of readers can block writers forever. Prefer a writer-preferring or fair implementation.</li>
+<li><span class="warn">!</span> Don't upgrade read→write lock while holding the read lock — two readers both trying deadlock. Drop then re-acquire (and re-check state).</li>
+<li>Alternatives for read-heavy state: <b>RCU</b>, <b>seqlock</b>, copy-on-write, or an immutable snapshot swapped by one atomic pointer.</li>
 </ul>
 </section>
 
 <section class="card"><h3>Semaphore · Monitor · Condvar</h3>
 <table><thead><tr><th>Primitive</th><th>Semantics</th></tr></thead><tbody>
 <tr><td>mutex</td><td>ownership, binary</td></tr>
-<tr><td>counting semaphore</td><td>N permits, no owner (pools, rate limit)</td></tr>
-<tr><td>monitor</td><td>lock + condition variables</td></tr>
+<tr><td>counting sem</td><td>N permits, no owner (pools, rate limit)</td></tr>
+<tr><td>monitor</td><td>lock + condition variable(s)</td></tr>
 </tbody></table>
 <pre><code>// ALWAYS re-check predicate in a while:
 synchronized(q){
-  while(q.isEmpty())      // not if — spurious wakeups !
+  while(q.isEmpty())   // not if — spurious wakeups !
       q.wait();
   x = q.remove();
-}</code></pre>
-<p><span class="warn">!</span> <code>if(cond) wait()</code> is a bug. <code>notifyAll</code> when multiple predicates share a monitor.</p>
+}
+q.notifyAll();         // wake waiting producers/consumers</code></pre>
+<p><span class="warn">!</span> <code>if(cond) wait()</code> is a bug. Use <code>notifyAll</code> (not <code>notify</code>) when several distinct predicates share one monitor, else a wakeup can be "lost" to the wrong waiter.</p>
+</section>
+
+<section class="card"><h3>Producer–Consumer Pattern</h3>
+<pre><code>// bounded buffer, 2 condvars
+put(x): lock; while(full) notFull.wait();
+        buf.add(x); notEmpty.signal(); unlock
+take(): lock; while(empty) notEmpty.wait();
+        x=buf.remove(); notFull.signal(); unlock; ret x</code></pre>
+<ul>
+<li>The <b>bounded</b> buffer is the whole point: it gives <b>backpressure</b>. An unbounded queue just relocates OOM to the consumer's lag.</li>
+<li>In practice reach for a <code>BlockingQueue</code> / buffered channel instead of hand-rolling condvars.</li>
+<li><span class="warn">!</span> Signal <i>after</i> mutating state, still under the lock. Signalling the wrong condvar → permanent stall.</li>
+</ul>
 </section>
 
 <section class="card"><h3>Memory Model &amp; Happens-Before</h3>
 <ul>
-<li>Compiler &amp; CPU <b>reorder</b> for speed; without a happens-before edge, one thread may never see another's write.</li>
-<li><b>Java</b>: <code>volatile</code> = visibility + ordering (not atomicity); <code>synchronized</code> unlock→lock; <code>final</code> safe publication.</li>
-<li><b>C++ <code>memory_order</code></b>: relaxed &lt; acquire/release &lt; seq_cst. Pair release-store with acquire-load.</li>
+<li>Compiler &amp; CPU <b>reorder</b> aggressively. Without a happens-before edge, one thread may <i>never</i> observe another's write.</li>
+<li><b>Java (JMM)</b>: <code>volatile</code> = visibility + ordering (not atomicity); <code>synchronized</code> unlock→lock; <code>final</code> fields = safe publication.</li>
+<li><b>C++ <code>memory_order</code></b>: relaxed &lt; acquire/release &lt; seq_cst. Pair a release-store with an acquire-load to build the edge.</li>
 </ul>
 <pre><code>// Double-checked locking (Java, correct):
-private volatile Singleton inst;   // volatile is essential !
+private volatile Singleton inst;  // volatile essential !
 Singleton get(){
   if(inst==null) synchronized(this){
-    if(inst==null) inst=new Singleton();
+    if(inst==null) inst = new Singleton();
   }
   return inst;
 }</code></pre>
+<p><span class="warn">!</span> Drop <code>volatile</code> and readers can see a non-null, half-constructed object (fields reordered after the reference publish).</p>
 </section>
 
 <section class="card"><h3>Atomics &amp; Lock-Free</h3>
 <ul>
-<li><b>CAS</b>(addr, expected, new): atomically swap iff unchanged → retry loop.</li>
-<li>Progress: <b>lock-free</b> (some thread advances) &gt; <b>wait-free</b> (all bounded) &gt; blocking.</li>
+<li><b>CAS</b>(addr, expected, new): atomically swap iff unchanged → retry loop. The building block of all lock-free code.</li>
+<li>Progress: <b>wait-free</b> (every thread bounded) &gt; <b>lock-free</b> (some thread advances) &gt; <b>obstruction-free</b> &gt; blocking.</li>
 </ul>
 <pre><code>// CAS push (Treiber stack)
 do { old = top; n.next = old; }
-while(!CAS(&top, old, n));</code></pre>
-<p><span class="warn">!</span> <b>ABA</b>: value goes A→B→A, CAS wrongly succeeds. Fix: tagged pointer / hazard pointers / epoch GC. Lock-free ≠ always faster — under low contention a mutex often wins.</p>
+while(!CAS(&amp;top, old, n));   // retry on contention</code></pre>
+<p><span class="warn">!</span> <b>ABA</b>: value goes A→B→A, CAS wrongly succeeds. Fix: tagged/versioned pointer, hazard pointers, or epoch/RCU reclamation.</p>
+<p><span class="warn">!</span> Lock-free ≠ faster. Under low contention a mutex usually wins; lock-free shines at high contention and for progress guarantees (no thread can stall the rest).</p>
 </section>
 
 <section class="card"><h3>Deadlock &amp; Friends</h3>
-<p>Needs all <b>4 Coffman</b>: mutual excl · hold-and-wait · no preempt · <b>circular wait</b>.</p>
+<p>Needs all <b>4 Coffman</b> conditions: mutual exclusion · hold-and-wait · no preemption · <b>circular wait</b>. Break any one → no deadlock.</p>
 <pre><code>T1: lock A; lock B     // classic
 T2: lock B; lock A     // → deadlock
 // fix: GLOBAL lock ordering (always A before B)</code></pre>
 <ul>
-<li><b>Livelock</b>: threads react, no progress. <b>Starvation</b>: unlucky thread never runs.</li>
-<li><b>Priority inversion</b>: low holds lock high needs → priority inheritance (Mars Pathfinder). <span class="warn">!</span></li>
-<li>Also: try-lock + backoff, lock timeout, single big lock.</li>
+<li><b>Livelock</b>: threads keep reacting, no progress (two people dodging in a hallway). <b>Starvation</b>: an unlucky thread never gets the resource.</li>
+<li><b>Priority inversion</b>: low-priority holder blocks high-priority waiter → priority inheritance (Mars Pathfinder). <span class="warn">!</span></li>
+<li>Avoid: global order, lock hierarchy, <code>tryLock</code>+timeout+backoff, or one coarse lock. Never hold two locks if you can hold one.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Thread Pool Sizing</h3>
-<table><thead><tr><th>Workload</th><th>Threads ≈</th></tr></thead><tbody>
-<tr><td>CPU-bound</td><td>#cores (+1)</td></tr>
-<tr><td>IO-bound</td><td>cores × (1 + wait/compute)</td></tr>
+<section class="card"><h3>Classic Sync Problems</h3>
+<table><thead><tr><th>Problem</th><th>Key trick</th></tr></thead><tbody>
+<tr><td>Producer–consumer</td><td>bounded buffer + 2 condvars</td></tr>
+<tr><td>Readers–writers</td><td>RWLock; watch writer starvation</td></tr>
+<tr><td>Dining philosophers</td><td>resource ordering / arbiter</td></tr>
+<tr><td>Sleeping barber</td><td>counting semaphore for chairs</td></tr>
 </tbody></table>
 <ul>
-<li>Pool avoids per-task thread creation cost. <b>Fork-join</b> = <b>work-stealing</b> deques for recursive splits.</li>
-<li><span class="warn">!</span> Unbounded queue → hides overload → OOM. Bound the queue + a rejection policy.</li>
-<li>Blocking inside a small pool → starvation/deadlock (esp. dependent tasks). Virtual threads (Loom) relax this.</li>
+<li><b>Dining philosophers</b> = deadlock avoidance: number the forks and always pick lower-numbered first (breaks circular wait), or cap diners at N−1.</li>
+<li><span class="warn">!</span> The naive "grab left, then right" is the canonical deadlock — every philosopher holds one fork, waits on the other.</li>
 </ul>
 </section>
 
-<section class="card diagram"><h3>Async / Event Loop</h3>
+<section class="card"><h3>Thread Pools &amp; Executors</h3>
+<table><thead><tr><th>Workload</th><th>Threads ≈</th></tr></thead><tbody>
+<tr><td>CPU-bound</td><td>#cores (+1)</td></tr>
+<tr><td>IO-bound</td><td>N · (1 + W/C)</td></tr>
+</tbody></table>
+<p><b>Formula</b>: threads = N<sub>cores</sub> · U · (1 + W/C), where U=target utilization, W=wait time, C=compute time per task. IO-heavy (W≫C) → many threads; pure CPU → ~cores.</p>
+<ul>
+<li>Pool amortizes thread create/destroy cost. <b>Fork-join</b> = <b>work-stealing</b> deques for recursive divide-and-conquer.</li>
+<li><span class="warn">!</span> Unbounded queue hides overload → OOM. Bound the queue + set a rejection policy (caller-runs, drop, throttle).</li>
+<li><span class="warn">!</span> Blocking on a dependent task in the same fixed pool → thread-starvation deadlock. Isolate pools; virtual threads (Loom) relax this.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Futures, Promises &amp; Async Composition</h3>
+<ul>
+<li><b>Future</b> = read handle for a not-yet value; <b>Promise</b> = the write side that completes it.</li>
+<li>Compose, don't block: <code>thenApply/thenCompose</code> (Java), <code>.then/await</code> (JS), <code>?</code>+<code>join</code> (Rust). Fan-out with <code>allOf</code>/<code>Promise.all</code>, race with <code>anyOf</code>.</li>
+</ul>
+<pre><code>CompletableFuture
+  .supplyAsync(this::fetch, pool)
+  .thenApply(this::parse)
+  .exceptionally(e -&gt; fallback);   // handle failure !</code></pre>
+<ul>
+<li><span class="warn">!</span> <code>future.get()</code> inside async code re-introduces blocking and can deadlock a small pool. Stay in the async chain end-to-end.</li>
+<li><span class="warn">!</span> A swallowed exception in one stage can leave downstream futures hanging forever — always attach an error handler.</li>
+</ul>
+</section>
+
+<section class="card diagram"><h3>Async / Await &amp; Event Loop</h3>
 <div class="mermaid">
 flowchart LR
   Q["task queue"] --> L{"event loop<br/>(1 thread)"}
@@ -187,78 +267,135 @@ flowchart LR
   IO -->|ready| Q
 </div>
 <ul>
-<li>One thread, many tasks; <code>await</code> yields at IO points (cooperative). Great for IO-bound, huge fan-out.</li>
-<li><span class="warn">!</span> <b>Never block the loop</b> — a CPU-heavy or sync-IO call freezes ALL tasks. Offload to a worker/pool.</li>
-<li>Coroutines: stackless (async/await state machine) vs stackful (goroutines). Microtasks (promises) drain before macrotasks.</li>
+<li>One thread, many tasks; <code>await</code> yields at IO points (<b>cooperative</b> scheduling). Ideal for IO-bound, high fan-out (C10k).</li>
+<li><span class="warn">!</span> <b>Never block the loop</b> — a CPU-heavy loop or sync-IO call freezes <i>all</i> tasks. Offload to a worker pool / thread.</li>
+<li>Coroutines: <b>stackless</b> (async/await state machine, e.g. JS/Python/Rust) vs <b>stackful</b> (goroutines). JS drains microtasks (promises) fully before the next macrotask.</li>
 </ul>
 </section>
 
 <section class="card"><h3>Concurrent Data Structures</h3>
 <ul>
-<li><b>ConcurrentHashMap</b>: CAS on bins / lock striping — reads mostly lock-free.</li>
-<li><b>CopyOnWrite</b>: read-heavy, rare writes (listener lists).</li>
-<li><b>BlockingQueue</b>: the backbone of producer-consumer (bounded → backpressure).</li>
-<li><span class="warn">!</span> Thread-safe methods ≠ thread-safe <i>sequences</i>: <code>if(!m.contains(k)) m.put(k,v)</code> still races → use <code>putIfAbsent</code>/<code>compute</code>.</li>
-<li>Immutable / persistent structures sidestep the whole problem.</li>
+<li><b>ConcurrentHashMap</b>: CAS on bins / lock striping — reads are mostly lock-free, writes contend only per-bucket.</li>
+<li><b>CopyOnWrite</b> list/set: read-heavy, rare writes (listener registries). Writes are O(n).</li>
+<li><b>BlockingQueue</b>: backbone of producer-consumer; bounded variant gives backpressure.</li>
+<li><span class="warn">!</span> Thread-safe methods ≠ thread-safe <i>sequences</i>: <code>if(!m.containsKey(k)) m.put(k,v)</code> still races → use <code>putIfAbsent</code> / <code>compute</code> / <code>merge</code>.</li>
+<li>Immutable / persistent structures sidestep the whole problem — no shared mutable state, no sync.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Channels · CSP · Actors</h3>
+<section class="card"><h3>Channels · CSP</h3>
 <pre><code>// Go: share memory BY communicating
 ch := make(chan int, 8)   // buffered → backpressure
 go func(){ for v := range ch { work(v) } }()
-select {                  // multiplex
-case v := &lt;-ch: use(v)
-case &lt;-ctx.Done(): return
-}</code></pre>
+select {                  // multiplex + cancel
+case v := &lt;-ch:        use(v)
+case &lt;-ctx.Done():     return
+}
+close(ch)                 // owner closes; range ends</code></pre>
+<ul>
+<li>Unbuffered = synchronous handoff (rendezvous); buffered = queue of depth N with backpressure at the rim.</li>
+<li><span class="warn">!</span> Send on a closed channel <b>panics</b>; only the sender/owner closes. Unbuffered send with no ready receiver → deadlock.</li>
+<li><span class="warn">!</span> A goroutine blocked forever on a channel is a <b>leak</b> — always give it a <code>ctx.Done()</code> / timeout exit.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Actor Model</h3>
 <table><thead><tr><th></th><th>CSP</th><th>Actors</th></tr></thead><tbody>
-<tr><td>addressing</td><td>anon channels</td><td>named mailbox</td></tr>
+<tr><td>address</td><td>anon channels</td><td>named mailbox / ref</td></tr>
 <tr><td>coupling</td><td>via channel</td><td>via actor ref</td></tr>
 <tr><td>failure</td><td>caller handles</td><td>supervision / let-it-crash</td></tr>
 </tbody></table>
-<p><span class="warn">!</span> Unbuffered channel with no ready receiver → deadlock.</p>
+<ul>
+<li>Actor = private state + mailbox; processes one message at a time → no locks inside an actor. State is reached only by messages.</li>
+<li><b>Supervision trees</b> restart failed actors (Erlang/Akka). Failures are isolated, not propagated by exception.</li>
+<li><span class="warn">!</span> Unbounded mailboxes hide overload; a slow actor becomes a memory sink. Bound + shed. Message ordering only holds per sender→receiver pair.</li>
+</ul>
 </section>
 
-<section class="card"><h3>Language Models</h3>
+<section class="card"><h3>Parallelism Patterns</h3>
+<table><thead><tr><th>Pattern</th><th>Shape</th></tr></thead><tbody>
+<tr><td>data parallel</td><td>same op over partitions (map)</td></tr>
+<tr><td>fork-join</td><td>recursive split + combine</td></tr>
+<tr><td>pipeline</td><td>stages, each its own worker(s)</td></tr>
+<tr><td>map-reduce</td><td>parallel map → parallel reduce</td></tr>
+</tbody></table>
+<ul>
+<li>Reduce must be <b>associative</b> (and ideally commutative) to parallelize safely — order of combine varies.</li>
+<li><span class="warn">!</span> Watch <b>load imbalance</b>: one giant chunk serializes the whole join. Use fine-grained tasks + work-stealing, not equal-sized static splits.</li>
+<li>Parallel streams / Rayon / OpenMP hide the plumbing — but only help when per-element work &gt; scheduling overhead.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Language Concurrency Models</h3>
 <table><thead><tr><th>Lang</th><th>Model / catch</th></tr></thead><tbody>
-<tr><td>Java</td><td>threads + j.u.c, JMM, virtual threads</td></tr>
+<tr><td>Java</td><td>threads + j.u.c, JMM, virtual threads (Loom)</td></tr>
 <tr><td>Go</td><td>goroutines + channels, GMP sched, <code>-race</code></td></tr>
-<tr><td>Rust</td><td><code>Send/Sync</code> → data-race-free at compile time</td></tr>
-<tr><td>Python</td><td><b>GIL</b> → threads don't parallelize CPU <span class="warn">!</span></td></tr>
+<tr><td>Rust</td><td><code>Send</code>/<code>Sync</code> → data-race-free at compile time</td></tr>
+<tr><td>Python</td><td><b>GIL</b>: threads don't parallelize CPU <span class="warn">!</span></td></tr>
 <tr><td>C++</td><td><code>std::thread</code> + <code>std::atomic</code> orders</td></tr>
 <tr><td>JS</td><td>single-thread event loop + web workers</td></tr>
 </tbody></table>
-<p>Python CPU-bound → multiprocessing / native / free-threaded 3.13+.</p>
-</section>
-
-<section class="card"><h3>Scaling &amp; Contention</h3>
 <ul>
-<li><b>False sharing</b>: two vars on one 64B cache line → cores ping-pong ownership. Pad / <code>@Contended</code>. <span class="warn">!</span></li>
-<li><b>MESI</b> coherence + <b>NUMA</b>: remote memory is slow; pin &amp; shard per core.</li>
-<li>Contention collapse: past a point, more threads = more lock waiting = slower.</li>
-<li>Fixes: shard/thread-local aggregate, read-mostly (RCU/seqlock), lock-free, batch. <b>Little's law</b>: L = λ·W to size pools.</li>
+<li>Python CPU-bound → multiprocessing / native ext / free-threaded (no-GIL) 3.13+. Threads are fine for IO.</li>
+<li>Rust's borrow checker turns most data races into compile errors — the strongest static guarantee here.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Distributed Concurrency</h3>
+<section class="card"><h3>False Sharing &amp; Cache Coherence</h3>
+<ul>
+<li><b>False sharing</b>: two hot vars land on one 64-byte cache line → cores ping-pong line ownership even with no logical sharing. <span class="warn">!</span></li>
+<li>Fix: pad to a cache line / <code>@Contended</code> (Java) / <code>#[repr(align(64))]</code>; give each thread its own counter and sum at the end.</li>
+<li><b>MESI</b> coherence: every write invalidates other cores' copies — cost is the coherence traffic, not the instruction.</li>
+<li><b>NUMA</b>: remote-socket memory is far slower; pin threads and shard data per node.</li>
+<li>Symptom: perfect scaling to 4 threads, then it flatlines or regresses — suspect a shared line.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Scaling, Contention &amp; Debugging</h3>
+<ul>
+<li><b>Little's Law</b>: L = λ · W (in-flight = arrival rate × latency) — size pools/queues, don't guess.</li>
+<li><b>USL</b>: throughput rises, then <i>falls</i> as contention + coherence cost dominate. More threads past the knee = slower.</li>
+<li>Fixes: shard / thread-local aggregate, read-mostly (RCU/seqlock), lock-free, batch to amortize sync.</li>
+</ul>
+<p><b>Tooling</b>: <code>go test -race</code> / TSan (data races), <code>-fsanitize=thread</code>, jstack / thread dumps (deadlock), async-profiler &amp; flame graphs (lock contention), stress + fault injection.</p>
+<p><span class="warn">!</span> Concurrency bugs are non-deterministic (Heisenbugs) — reproduce with stress, logging, and sanitizers, not by staring.</p>
+</section>
+
+<section class="card"><h3>Distributed &amp; Async at Scale</h3>
 <ul>
 <li><b>Optimistic</b> (version/CAS, retry on conflict) vs <b>pessimistic</b> (lock upfront). OCC wins under low contention.</li>
-<li><b>Idempotency</b> + at-least-once → dedup keys. <b>Backpressure</b> &amp; load shedding over unbounded buffering.</li>
-<li>Rate limit: token bucket. <span class="warn">!</span> Distributed locks need <b>fencing tokens</b> (a lease can expire mid-op).</li>
-<li><b>Sagas</b> + compensation instead of distributed 2PC.</li>
+<li><b>Idempotency</b> + at-least-once delivery → dedup keys make retries safe.</li>
+<li><b>Backpressure</b> &amp; load shedding beat unbounded buffering every time.</li>
+<li>Rate limit: token bucket. <span class="warn">!</span> Distributed locks need <b>fencing tokens</b> — a lease can expire mid-operation and two holders think they own it.</li>
+<li><b>Sagas</b> + compensation instead of distributed 2PC (which blocks on coordinator failure).</li>
 </ul>
 </section>
 
-<section class="card"><h3>&#9744; Spot-the-Bug &amp; Interview Checklist</h3>
+<section class="card"><h3>Symptom → Cause</h3>
+<table><thead><tr><th>Symptom</th><th>Likely cause</th></tr></thead><tbody>
+<tr><td>hangs, no CPU</td><td>deadlock / lost wakeup / blocked pool</td></tr>
+<tr><td>100% CPU, no work</td><td>livelock / busy spin</td></tr>
+<tr><td>occasional wrong result</td><td>data race / check-then-act</td></tr>
+<tr><td>stale value never updates</td><td>missing volatile / visibility</td></tr>
+<tr><td>works 1 thread, fails N</td><td>unguarded shared state</td></tr>
+<tr><td>scales then regresses</td><td>contention / false sharing</td></tr>
+<tr><td>slow, low CPU</td><td>IO-bound / pool too small / GIL</td></tr>
+<tr><td>memory climbs</td><td>unbounded queue / goroutine leak</td></tr>
+</tbody></table>
+</section>
+
+<section class="card"><h3>&#9733; Review &amp; Spot-the-Bug Checklist</h3>
 <ul>
-<li>&#9744; Find the <b>shared mutable state</b> — that's where races live.</li>
+<li>&#9744; Find the <b>shared mutable state</b> — that's where every race lives.</li>
 <li>&#9744; Compound op (check-then-act / read-modify-write)? Make it atomic or lock it.</li>
-<li>&#9744; Publication safe? (visibility — <code>volatile</code>/final/sync, not just "I set it").</li>
-<li>&#9744; Multiple locks? Impose a global order; hold briefly; no IO under lock.</li>
-<li>&#9744; <code>wait()</code> inside a <code>while</code>, not <code>if</code>.</li>
-<li>&#9744; Slower with more threads? Contention / false sharing / GIL / IO-bound / too-small pool.</li>
+<li>&#9744; Publication safe? Visibility via <code>volatile</code>/<code>final</code>/sync — not just "I assigned it".</li>
+<li>&#9744; Multiple locks? Impose a global order; hold briefly; no IO or callbacks under lock.</li>
+<li>&#9744; <code>wait()</code> inside a <code>while</code>, not an <code>if</code>; signal after mutating; <code>notifyAll</code> if predicates differ.</li>
+<li>&#9744; Queues &amp; mailboxes <b>bounded</b> with a rejection/shed policy?</li>
+<li>&#9744; Every goroutine/task has a cancellation exit (<code>ctx.Done()</code>/timeout)?</li>
+<li>&#9744; Slower with more threads? Contention / false sharing / GIL / IO-bound / pool too small.</li>
 <li>&#9744; Pick the primitive: counter→atomic; pool→semaphore; pipeline→queue/channel; read-heavy→RWLock/COW.</li>
-<li>&#9744; Reason out loud via an explicit T1/T2 interleaving.</li>
+<li>&#9744; Reason out loud via an explicit T1/T2 interleaving before claiming it's correct.</li>
 </ul>
 </section>
 

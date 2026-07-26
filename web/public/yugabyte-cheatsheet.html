@@ -72,183 +72,377 @@ pre code{background:none; padding:0; font-size:1em;}
 </head>
 <body>
 <div class="sheet">
-<div class="titlebar"><h1>YugabyteDB Cheat Sheet</h1><span class="meta">distributed SQL · Postgres-compatible · Raft · geo-distribution · drilly</span></div>
+<div class="titlebar"><h1>YugabyteDB Cheat Sheet</h1><span class="meta">distributed SQL · Postgres-compatible · DocDB · Raft · HLC · geo-distribution · drilly</span></div>
 <section class="card legend"><h3>How to read &amp; print</h3>
 <ul>
 <li><span class="warn">!</span> footgun / anti-pattern &nbsp; <code>&#9744;</code> schema/design review item</li>
-<li>Focus: the distributed-SQL architecture + the <b>PK/sharding data modeling</b> that interviews live on, plus multi-region &amp; consistency.</li>
-<li>Golden rule: the <b>primary key is the sharding key</b> — design it to distribute load &amp; avoid hotspots.</li>
-<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+<li>Focus: the distributed-SQL architecture (YSQL/YCQL, DocDB, tablets), Raft, distributed txns + HLC, and the <b>PK/sharding data modeling</b> interviews live on, plus multi-region &amp; tuning.</li>
+<li>Golden rule: <b>the primary key IS the sharding key</b> — design it to distribute load and avoid hotspots, not just for uniqueness.</li>
+<li>Badges: <span class="pg">PG</span> Postgres-lineage &nbsp; <span class="ansi">CQL</span> Cassandra/YCQL &nbsp; <span class="warn">!</span> gotcha.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
 </ul></section>
 
-<section class="card diagram"><h3>Architecture</h3>
+<section class="card diagram"><h3>Layered Architecture</h3>
 <div class="mermaid">
 flowchart TD
-  C["client (PG / CQL driver)"] --> Q["YSQL / YCQL query layer<br/>(on a YB-TServer)"]
-  Q --> T["tablet leader (Raft)"]
-  T --> D["DocDB (RocksDB/LSM)"]
-  M["YB-Master ×3 (Raft)<br/>metadata · placement · balancer"] -. control .- Q
+  C["client<br/>(PG driver / CQL driver)"] --> Q["YSQL / YCQL query layer<br/>(runs inside each YB-TServer)"]
+  Q --> T["tablet LEADER (Raft group)"]
+  T --> D["DocDB<br/>(per-tablet RocksDB / LSM)"]
+  T -->|replicate WAL| F["2 followers (Raft)"]
+  M["YB-Master &times;3 (Raft)<br/>catalog · placement · load balancer"] -. control plane .- Q
 </div>
-<p class="cap">Distributed SQL: YSQL (Postgres) + YCQL (Cassandra) APIs over <b>DocDB</b>. <b>YB-Master</b> = control plane (not in the data path); <b>YB-TServer</b> = data + query layer. Spanner-inspired, shared-nothing, strongly consistent.</p>
+<p class="cap">Distributed SQL: YSQL (real Postgres query layer) + YCQL (Cassandra API) over one storage engine, <b>DocDB</b>. <b>YB-Master</b> = control plane, NOT in the data path. <b>YB-TServer</b> = data + query execution. Spanner-inspired, shared-nothing, strongly consistent.</p>
+<h4>The one-line answer</h4>
+<p>"A shard of the data is a <b>tablet</b>; each tablet is a <b>Raft group</b> (leader + followers) over its own RocksDB; the query layer on any node routes the request to the right tablet leader. Add nodes → tablets rebalance → linear scale."</p>
 </section>
 
-<section class="card"><h3>Distributed SQL / NewSQL</h3>
+<section class="card"><h3>Distributed SQL / NewSQL &amp; CAP</h3>
 <ul>
-<li>NewSQL = <b>SQL + ACID + horizontal scale + HA</b> (RDBMS guarantees at NoSQL scale).</li>
-<li><b>CP</b> in CAP (strongly consistent, never split-brain). Spanner lineage.</li>
-<li>Scale by adding nodes; no single point of failure; multi-region capable.</li>
-<li>Peers: CockroachDB (closest), Spanner, TiDB, Citus/Vitess (middleware), Aurora (shared-storage, not shared-nothing).</li>
+<li><b>NewSQL</b> = SQL + ACID + horizontal scale + HA — RDBMS guarantees at NoSQL scale. Arc: RDBMS → NoSQL (dropped SQL/ACID for scale) → NewSQL (got both back).</li>
+<li><b>CAP: CP</b> — strongly consistent, never split-brain; a minority partition rejects writes rather than diverge.</li>
+<li><b>PACELC</b>: on Partition → PC (consistency); Else → EC (favours consistency, pays latency). Not a low-latency-first store.</li>
+<li>Lineage = <b>Google Spanner</b> paper (Raft/Paxos + a time authority).</li>
+</ul>
+<table><thead><tr><th>Peer</th><th>How it differs</th></tr></thead><tbody>
+<tr><td>CockroachDB</td><td>closest rival; PG-<i>wire</i> reimpl from scratch (BSL), not the real PG layer</td></tr>
+<tr><td>Spanner</td><td>managed, GCP-only, TrueTime (atomic clocks)</td></tr>
+<tr><td>Aurora</td><td>shared-storage, <b>single writer</b> — not shared-nothing, no write scale-out</td></tr>
+<tr><td>Citus / Vitess</td><td>sharding <b>middleware</b> over PG/MySQL, not a native distributed engine</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> Most apps are fine on Postgres/Aurora until they truly need horizontal <b>write</b> scale, active multi-region, or HA beyond a single primary. Don't reach for distributed SQL by default.</p>
+</section>
+
+<section class="card"><h3>Cluster: YB-Master &amp; YB-TServer</h3>
+<table><thead><tr><th></th><th>YB-Master</th><th>YB-TServer</th></tr></thead><tbody>
+<tr><td>role</td><td>control plane (brain)</td><td>data + query plane</td></tr>
+<tr><td>holds</td><td>catalog, tablet→node map, placement</td><td>tablets (DocDB) + YSQL/YCQL layer</td></tr>
+<tr><td>count</td><td><b>3</b> (Raft, one config)</td><td>many (= data nodes, scale-out)</td></tr>
+<tr><td>in data path?</td><td><b>No</b></td><td>Yes</td></tr>
+</tbody></table>
+<ul>
+<li><b>"Master is the brain, not the gatekeeper"</b> — clients cache tablet locations and talk straight to TServers; reads/writes keep flowing even if all masters are down (until you need metadata changes) <span class="warn">!</span></li>
+<li>3 masters = tolerate 1 master loss (Raft majority). More TServers than masters because they scale <i>data</i>, not metadata.</li>
+<li>Request flow: client → any TServer's query layer → looks up tablet → routes to tablet leader (local or remote) → Raft commit → reply.</li>
+<li><b>Heartbeats</b>: TServers heartbeat masters (~1s); missed beats → under-replication detected → re-replication + leader elections.</li>
+<li>Colocate a master + tserver per node for small clusters; separate on large ones. Web UIs: master :7000, tserver :9000.</li>
+</ul>
+</section>
+
+<section class="card"><h3>DocDB — the Storage Engine</h3>
+<ul>
+<li>DocDB = a <b>distributed document store</b> over a heavily-modified <b>RocksDB (LSM-tree)</b>. One RocksDB instance <b>per tablet</b> (actually two — regular + intents).</li>
+<li><b>Why RocksDB, not PG heap?</b> LSM = append-only, write-optimised, compresses well, natural fit for MVCC versions and sharding.</li>
+<li><b>Write path (LSM):</b> WAL (Raft log) → memtable → flush to immutable SSTables → background <b>compaction</b> merges/drops tombstones. Writes are sequential &amp; fast; read amplification is the tradeoff <span class="warn">!</span></li>
+</ul>
+<h4>Row → key/value encoding</h4>
+<pre><code>// each column is its own KV entry, MVCC-versioned:
+key   = &lt;tablet&gt;, &lt;hash|range of PK&gt;, colId, hybridTime
+value = column value  (or tombstone for delete)</code></pre>
+<ul>
+<li>Multiple versions per column, ordered by <b>hybrid time</b>; read merges them and picks versions ≤ your read point (MVCC → readers never block writers).</li>
+<li>Deletes/TTL write <b>tombstones</b>; space reclaimed at compaction. Reads use <b>bloom filters</b> + block cache to skip SSTables.</li>
+<li>Same engine serves relational YSQL and semi-relational YCQL — both are just documents of KV entries.</li>
 </ul>
 </section>
 
 <section class="card"><h3>Sharding &amp; Tablets</h3>
-<table><thead><tr><th></th><th>HASH (default)</th><th>RANGE (ASC/DESC)</th></tr></thead><tbody>
-<tr><td>distribution</td><td>even</td><td>ordered</td></tr>
-<tr><td>range scans</td><td>no</td><td>yes</td></tr>
-<tr><td>hotspot risk</td><td>low</td><td><b>monotonic PK → hotspot</b> <span class="warn">!</span></td></tr>
+<table><thead><tr><th></th><th>HASH (YSQL default)</th><th>RANGE (ASC/DESC)</th></tr></thead><tbody>
+<tr><td>distribution</td><td>even</td><td>ordered by key</td></tr>
+<tr><td>range scans</td><td>no (scatter)</td><td>yes (contiguous)</td></tr>
+<tr><td>point lookup</td><td>yes</td><td>yes</td></tr>
+<tr><td>hotspot risk</td><td>low</td><td><b>monotonic key → hotspot</b> <span class="warn">!</span></td></tr>
 </tbody></table>
 <ul>
-<li>Rows → <b>tablets</b> (shards) by the PK. Tablets <b>auto-split</b> as they grow; presplit with <code>SPLIT INTO</code>.</li>
-<li><b>Colocation</b>: pack small reference tables into one tablet (local joins, less overhead).</li>
+<li>Rows map to <b>tablets</b> (shards) by the PK. Each tablet = unit of distribution, replication (Raft), and parallelism.</li>
+<li><b>Auto-split</b> when a tablet exceeds a size threshold → two tablets, spreadable to other nodes, no re-sharding.</li>
+<li><b>Presplit</b> for bulk/large tables to skip the cold-start single-tablet bottleneck:
+<pre><code>-- hash: N tablets up front
+... SPLIT INTO 24 TABLETS;
+-- range: explicit boundaries
+... SPLIT AT VALUES ((1000),(2000),(3000));</code></pre></li>
+<li>Tablet count tradeoff: too few = no parallelism; too many = Raft/heartbeat overhead per tablet <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>PK / Sharding Data Modeling</h3>
+<ul>
+<li><b>The PK IS the sharding key</b> — it decides distribution and performance, not just uniqueness. #1 thing interviews test.</li>
+<li><code>((col) HASH)</code> = spread for point lookups. <code>col ASC/DESC</code> = ordered for range scans.</li>
+</ul>
+<pre><code>-- distribute users by id
+CREATE TABLE users (
+  id uuid, email text,
+  PRIMARY KEY ((id) HASH));
+
+-- orders: hash the tenant, range within it
+CREATE TABLE orders (
+  user_id uuid, order_ts timestamptz, amt numeric,
+  PRIMARY KEY ((user_id) HASH, order_ts DESC));</code></pre>
+<ul>
+<li><b>The #1 pitfall — monotonic key on a range shard:</b> <code>SERIAL</code>/timestamp/sequence sends <i>every</i> new write to the last tablet → one hot node no matter the cluster size <span class="warn">!</span></li>
+<li>Fixes: hash-shard the key, random <b>UUIDv4</b>, or a <b>bucket/salt</b> column (<code>(bucket, ts)</code>, bucket = hash % N).</li>
+<li>Composite <code>((tenant_id) HASH, created_at DESC)</code>: spread tenants, keep each tenant's rows ordered &amp; co-located for range reads.</li>
+<li>Global <code>SERIAL</code>/sequences <b>contend</b> at scale → prefer UUIDs or cached sequences (<code>CACHE 1000</code>) <span class="warn">!</span></li>
 </ul>
 </section>
 
 <section class="card diagram"><h3>Replication &amp; Raft</h3>
 <div class="mermaid">
 flowchart LR
-  L["tablet leader"] -->|replicate log| F1["follower"]
-  L -->|replicate log| F2["follower"]
-  L -. commit on majority .- F1
+  L["tablet LEADER"] -->|append WAL| F1["follower 1"]
+  L -->|append WAL| F2["follower 2"]
+  F1 -. ack .-> L
+  L -->|commit on majority| S["state machine (DocDB)"]
 </div>
 <ul>
-<li>Each tablet = a <b>Raft group</b> (RF=3: leader + 2 followers). A write commits once a <b>majority/quorum</b> acks → strong consistency + durability.</li>
-<li><b>RF=N survives ⌊N/2⌋ failures</b> (RF3→1, RF5→2). Leader dies → automatic election (seconds), no SPOF.</li>
-<li>Spread replicas across nodes → zones → regions for zone/region fault tolerance.</li>
+<li>Every tablet is its own <b>Raft group</b>. RF=3 → leader + 2 followers. A write commits once a <b>majority (quorum)</b> persists it → strong consistency + durability.</li>
+<li><b>Write path:</b> client → leader → append to Raft log (WAL) → replicate → quorum ack → apply to DocDB → reply. One WAN-free round-trip for single-shard.</li>
+<li><b>Leader lease:</b> only the lease-holding leader serves linearizable reads without a quorum round-trip; prevents a stale ex-leader answering during a partition <span class="warn">!</span></li>
+<li>Leader dies → <b>election</b> in seconds; a follower with the latest log wins. No SPOF, no manual failover.</li>
+<li><b>Follower reads</b> = read a local follower at bounded staleness (offload leaders, cut latency) — <i>not</i> linearizable.</li>
+<li>Raft <b>log</b> (ordered WAL) vs the DocDB <b>state machine</b> (applied result) are distinct; a cluster runs one Raft group <i>per tablet</i> → thousands.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Consistency &amp; Transactions</h3>
+<section class="card"><h3>Placement &amp; Replication Factor</h3>
 <ul>
-<li>Isolation: <b>Snapshot Isolation</b> (YSQL default) · <b>Serializable</b> (no write-skew, more retries) · Read Committed.</li>
-<li><b>Single-shard</b> ops = fast (one Raft write, linearizable). <b>Multi-shard</b> distributed txns = 2PC-style: <b>provisional records/write intents</b> + a <b>transaction status tablet</b> flips COMMITTED atomically.</li>
-<li>Conflicts → serialization failures (40001) → <b>app must retry</b> <span class="warn">!</span> Keep txns single-shard &amp; short.</li>
-<li>MVCC readers don't block writers.</li>
+<li><b>RF</b> = copies of each tablet. Must be <b>odd</b> (3, 5) so a majority always exists → no split-brain.</li>
+<li><b>Fault math: RF=N survives ⌊N/2⌋ losses.</b> RF3 → survive 1; RF5 → survive 2 (quorum = ⌊N/2⌋+1).</li>
 </ul>
-</section>
-
-<section class="card"><h3>Time: HLC (not TrueTime)</h3>
-<ul>
-<li>Orders events with <b>Hybrid Logical Clocks</b> = physical time (NTP) + a logical counter — no atomic clocks (unlike Spanner's TrueTime + commit-wait).</li>
-<li>Assumes bounded skew: <code>max_clock_skew_usec</code> — keep <b>NTP/chrony tight</b> <span class="warn">!</span></li>
-<li>Clock skew → occasional <b>read restarts</b>; excessive skew can break guarantees.</li>
-</ul>
-</section>
-
-<section class="card"><h3>YSQL — Postgres Compat</h3>
-<pre><code>-- reuses the REAL Postgres query layer over DocDB
-CREATE TABLE users (
-  id   uuid,
-  email text,
-  PRIMARY KEY ((id) HASH)          -- distribute by id
-);
-CREATE TABLE orders (
-  user_id uuid, order_ts timestamptz, amt numeric,
-  PRIMARY KEY ((user_id) HASH, order_ts DESC)  -- hash + range
-);</code></pre>
-<ul>
-<li>Joins, secondary indexes, FKs, triggers, PL/pgSQL, extensions, PG drivers/ORMs — mostly just work (<code>ysqlsh</code>).</li>
-<li>Differences: tracks a PG version, sequence/SERIAL contention at scale, distributed-execution nuances <span class="warn">!</span></li>
-</ul>
-</section>
-
-<section class="card"><h3>PK / Sharding Data Modeling</h3>
-<ul>
-<li><b>The PK IS the sharding key</b> — drives distribution &amp; performance, not just uniqueness.</li>
-<li><code>((col) HASH)</code> = even spread (point lookups). <code>col ASC/DESC</code> = ordered (range scans).</li>
-<li><b>Monotonic PK (SERIAL/timestamp) on range shard = write hotspot</b> → hash-shard, use UUIDv4, or add a bucket/salt <span class="warn">!</span></li>
-<li>Composite: <code>((tenant_id) HASH, created_at DESC)</code> — distribute tenants, order within one. Colocate small tables.</li>
-<li>Global sequences contend → prefer UUIDs / cached sequences.</li>
-</ul>
-</section>
-
-<section class="card"><h3>YCQL vs YSQL</h3>
-<ul>
-<li><b>YSQL</b> = full relational Postgres API (joins, rich SQL) — recommended for new apps.</li>
-<li><b>YCQL</b> = Cassandra-CQL API over the same engine, but <b>strongly consistent, global indexes, distributed txns</b> (unlike Cassandra — no tunable consistency / repair / gc_grace zombies) <span class="warn">!</span></li>
-<li>Use YCQL for Cassandra-style key/wide-row/time-series or migrating off Cassandra. Separate keyspaces (no shared tables).</li>
-</ul>
-</section>
-
-<section class="card"><h3>Indexes &amp; Query Execution</h3>
-<ul>
-<li>Secondary indexes are <b>distributed, global &amp; strongly consistent</b> (not Cassandra's local 2i) — but each write updates the index too (write cost) <span class="warn">!</span></li>
-<li><b>Covering indexes</b> (<code>INCLUDE (cols)</code>) → <b>index-only scans</b> (avoid a second RPC).</li>
-<li><b>Pushdowns</b>: filter/projection/aggregate/LIMIT pushed to DocDB → less data over the network.</li>
-<li><b>Cross-tablet joins</b> shuffle data across nodes → slow; colocate/denormalize/index <span class="warn">!</span></li>
-<li>Tune with <code>EXPLAIN (ANALYZE, DIST)</code> — see RPCs, rows, pushdowns.</li>
-</ul>
-</section>
-
-<section class="card"><h3>Multi-Region</h3>
-<table><thead><tr><th>Option</th><th>Trait</th></tr></thead><tbody>
-<tr><td>sync stretched cluster</td><td>zero-RPO region failover; <b>high write latency</b> (cross-region quorum) <span class="warn">!</span></td></tr>
-<tr><td>geo-partitioning (row-level)</td><td>pin rows to a region (residency + local latency)</td></tr>
-<tr><td>follower reads / read replicas</td><td>local low-latency reads (bounded staleness)</td></tr>
-<tr><td>xCluster</td><td>async replication (DR / active-active; data-loss window)</td></tr>
+<table><thead><tr><th>RF</th><th>Quorum</th><th>Tolerates</th></tr></thead><tbody>
+<tr><td>3</td><td>2</td><td>1 node/zone</td></tr>
+<tr><td>5</td><td>3</td><td>2 nodes/zones</td></tr>
 </tbody></table>
-<p><b>Preferred region</b> pins tablet leaders to keep writes local. Pick by residency / latency / RPO need.</p>
+<ul>
+<li><b>Placement policy</b> spreads the 3 replicas across fault domains (node → zone → region). Fault-tolerance level = the domain you spread across: 3 zones → survive a zone; 3 regions → survive a region <span class="warn">!</span></li>
+<li><b>RF ≠ node count.</b> RF is copies per tablet; you can have RF3 on 12 nodes (tablets scattered, each still 3 copies).</li>
+<li><b>Preferred zones / leader placement:</b> pin tablet <i>leaders</i> to a region so writes stay local.</li>
+<li><b>Read replicas</b> = extra async, read-only, non-voting copies (own RF); don't count toward write quorum — pure read offload/DR.</li>
+<li>Add/remove node → YB-Master <b>load balancer</b> rebalances tablets &amp; leaders; blacklist to drain before decommission.</li>
+</ul>
 </section>
 
-<section class="card"><h3>HA &amp; Ops</h3>
+<section class="card"><h3>Consistency &amp; Isolation</h3>
+<p>Two axes — don't conflate. <b>Linearizability</b> = single-key real-time order (Raft quorum + leader lease). <b>Isolation</b> = how concurrent txns see each other (MVCC over hybrid time).</p>
+<table><thead><tr><th>YSQL level</th><th>= Postgres</th><th>Property</th></tr></thead><tbody>
+<tr><td><b>Snapshot Isolation</b> (default)</td><td>REPEATABLE READ</td><td>txn-wide snapshot; allows <b>write skew</b></td></tr>
+<tr><td><b>Serializable</b></td><td>SERIALIZABLE</td><td>no anomalies; more retries</td></tr>
+<tr><td><b>Read Committed</b></td><td>READ COMMITTED</td><td>per-<b>statement</b> snapshot; fewer client retries</td></tr>
+</tbody></table>
 <ul>
-<li>No SPOF: node/zone/region loss → automatic Raft leader election (seconds) + self-heal re-replication. Rolling upgrades = zero downtime.</li>
-<li>Scale out by adding TServers (auto-rebalance). Pool YSQL connections (heavy per-conn like Postgres) <span class="warn">!</span></li>
+<li><span class="warn">!</span> YSQL default is <b>Snapshot Isolation</b>, NOT Read Committed like stock Postgres. No dirty reads at any level.</li>
+<li><b>Write skew</b> (SI hole): two txns read overlapping rows, each writes a disjoint part, together break an invariant (classic "≥1 doctor on call"). Fix = Serializable or explicit locking.</li>
+<li>MVCC: readers never block writers &amp; vice versa. Real conflicts → one txn <b>aborts</b> (no lock-wait-forever) → <b>40001 serialization failure</b> → app must retry <span class="warn">!</span></li>
 </ul>
-<pre><code>yugabyted start            # quick start
-yb-admin -init_master_addrs ... list_tablets
-ysqlsh / ycqlsh
-# K8s operator/Helm · Anywhere (self-managed) · Managed/Aeon (DBaaS)
-# snapshots + PITR · TLS · RBAC · Voyager (migrate)</code></pre>
+<pre><code>SET default_transaction_isolation = 'serializable';
+-- or per-txn: BEGIN ISOLATION LEVEL SERIALIZABLE;</code></pre>
+<p>Rule: Serializable for correctness-critical invariants; SI/RC for throughput &amp; PG-app compatibility.</p>
+</section>
+
+<section class="card"><h3>Distributed Transactions (2PC)</h3>
+<p>Multi-tablet ACID via a 2-phase-commit-style protocol coordinated through a <b>transaction status record</b>.</p>
+<pre><code>1. WRITE INTENTS: writes go to each tablet's INTENTS store
+   as provisional records, tagged {txn_id, hybridTime}.
+   Tentative — visible only to this txn.
+2. COMMIT: coordinator flips status record to COMMITTED
+   via ONE Raft write to the txn status tablet.  &lt;- ATOMIC
+3. APPLY (async): each tablet resolves its intents into
+   normal committed records at the commit time.</code></pre>
+<ul>
+<li><b>Atomicity</b> across independent Raft groups = the single status flip decides all intents at once. <b>Visibility happens at step 2</b>, not step 4 <span class="warn">!</span></li>
+<li>The status tablet is itself <b>Raft-replicated</b> → no fragile standalone coordinator like classic 2PC.</li>
+<li><b>Reader hits an intent</b> → looks up the owner's status: COMMITTED &amp; commit-time ≤ read point → visible; PENDING → ignore/conflict; ABORTED → dead.</li>
+<li><b>Conflict detection:</b> two intents collide on a key → lower <b>priority</b> txn aborts (40001). Under Serializable, read intents participate too (catches write skew).</li>
+<li><b>Single-shard = fast path:</b> one tablet → one Raft write, no intents, no status tablet. Keep txns single-shard &amp; short <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Hybrid Logical Clocks (HLC)</h3>
+<ul>
+<li>Orders events cluster-wide with <b>HLC = (physical, logical)</b>: physical = NTP wall-clock µs; logical = monotonic Lamport counter to break ties &amp; preserve causality.</li>
+<li>Timestamps track real time (good for snapshots) <i>and</i> give strict happens-before order (good for correctness) — <b>no atomic clocks</b>.</li>
+</ul>
+<table><thead><tr><th></th><th>Spanner TrueTime</th><th>Yugabyte HLC</th></tr></thead><tbody>
+<tr><td>hardware</td><td>GPS + atomic clocks</td><td>commodity NTP/chrony</td></tr>
+<tr><td>uncertainty</td><td><b>measured</b> (ε)</td><td><b>assumed</b> bound</td></tr>
+<tr><td>on commit</td><td>commit-wait (sleep ε)</td><td>no wait; read restarts</td></tr>
+</tbody></table>
+<ul>
+<li><code>max_clock_skew_usec</code> (default <b>500ms</b>) = the assumed skew bound &amp; safety margin. Keep NTP tight — if real skew exceeds it, guarantees can break <span class="warn">!</span></li>
+<li><b>Read restart:</b> a read landing inside the skew ambiguity window retries at a higher timestamp — a <b>correctness mechanism</b>, not a bug. Reduce by tightening clocks, not suppressing.</li>
+<li>Bigger skew bound = safer vs violations but <b>wider ambiguity window</b> → more read restarts + latency. It's a trade, not a free dial.</li>
+</ul>
+</section>
+
+<section class="card"><h3>YSQL — Postgres Compatibility</h3>
+<ul>
+<li><span class="pg">PG</span> Reuses the <b>real PostgreSQL query layer</b> (parser/planner/executor) bolted onto DocDB — not a reimplementation.</li>
+<li>Works mostly unchanged: joins, secondary indexes, FKs, triggers, <code>PL/pgSQL</code>, views, extensions, PG drivers/ORMs. Shell: <code>ysqlsh</code>.</li>
+</ul>
+<pre><code>CREATE TABLE users (
+  id uuid DEFAULT gen_random_uuid(),
+  email text UNIQUE,
+  created_at timestamptz DEFAULT now(),
+  PRIMARY KEY ((id) HASH));
+
+CREATE INDEX ON orders ((user_id) HASH)
+  INCLUDE (status, amt);   -- covering</code></pre>
+<h4>Differences vs stock PG <span class="warn">!</span></h4>
+<ul>
+<li>Tracks a specific PG version (not always latest).</li>
+<li><code>SERIAL</code>/sequence contention at scale (global counter) → prefer UUID / <code>CACHE</code>.</li>
+<li>Default isolation = Snapshot, not Read Committed.</li>
+<li>Distributed-execution nuances: cross-tablet joins shuffle; connections are heavy PG backends → <b>pool them</b>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>YCQL vs YSQL — pick the API</h3>
+<ul>
+<li><span class="pg">PG</span> <b>YSQL</b>: full relational Postgres API — joins, rich SQL, FKs. Default choice for new apps.</li>
+<li><span class="ansi">CQL</span> <b>YCQL</b>: Cassandra-CQL API over the <i>same</i> DocDB engine.</li>
+</ul>
+<table><thead><tr><th>vs Cassandra, YCQL is…</th></tr></thead><tbody>
+<tr><td><b>strongly consistent</b> (Raft), not tunable/eventual</td></tr>
+<tr><td><b>global secondary indexes</b>, not local 2i</td></tr>
+<tr><td>real <b>distributed transactions</b></td></tr>
+<tr><td>no repair / <code>gc_grace</code> / tombstone zombies <span class="warn">!</span></td></tr>
+</tbody></table>
+<ul>
+<li>Use YCQL for Cassandra-style wide-row / time-series / key-value or a Cassandra migration off tunable consistency.</li>
+<li>Keyspaces are separate — YSQL and YCQL do <b>not</b> share tables <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Indexes</h3>
+<ul>
+<li>Secondary indexes are <b>distributed, global &amp; strongly consistent</b> (their own tablets, Raft-replicated) — unlike Cassandra's local 2i.</li>
+<li>Every write to the base table also writes the index → <b>index write cost</b>; don't over-index write-heavy tables <span class="warn">!</span></li>
+<li><b>Covering index</b> (<code>INCLUDE (cols)</code>) → <b>index-only scan</b>: query served entirely from the index, no second RPC to the base table.</li>
+<li>Indexes take their own sharding: <code>CREATE INDEX ... ((col) HASH)</code> — same hotspot rules apply.</li>
+<li>Unique &amp; partial indexes supported (YSQL). Match indexes to <b>access patterns</b>, not "every column."</li>
+</ul>
+<pre><code>CREATE UNIQUE INDEX ON users ((email) HASH);
+CREATE INDEX idx ON orders ((user_id) HASH, order_ts DESC)
+  INCLUDE (amt);            -- index-only for amt lookups
+CREATE INDEX ON t (status) WHERE status='active'; -- partial</code></pre>
+</section>
+
+<section class="card"><h3>Query Execution &amp; Pushdowns</h3>
+<ul>
+<li>Query layer (on one TServer) fans RPCs out to tablet leaders, gathers, finalises. Fewer RPCs / less shuffle = faster.</li>
+<li><b>Pushdowns</b> — sent down to DocDB so less data crosses the network:
+<ul>
+<li>filter (<code>WHERE</code>) predicate pushdown</li>
+<li>projection (only needed columns)</li>
+<li>aggregate &amp; <code>LIMIT</code> pushdown</li>
+</ul></li>
+<li><b>Cross-tablet joins shuffle</b> rows across nodes → slow. Fix: colocate, denormalize, or index the join column <span class="warn">!</span></li>
+<li>Batch/prepare to amortise round-trips; single-shard scans beat scatter-gather.</li>
+</ul>
+<pre><code>EXPLAIN (ANALYZE, DIST, VERBOSE) SELECT ...;
+-- read the DIST section: # RPCs, rows scanned,
+-- rows removed by pushdown. High RPC count = scatter.</code></pre>
+</section>
+
+<section class="card"><h3>Multi-Region &amp; Geo-Distribution</h3>
+<table><thead><tr><th>Topology</th><th>Trait</th></tr></thead><tbody>
+<tr><td>sync stretched cluster</td><td>zero-RPO region failover; <b>high write latency</b> (cross-region quorum) <span class="warn">!</span></td></tr>
+<tr><td>geo-partitioning (row-level)</td><td>pin rows to a region by a partition col (residency + local latency)</td></tr>
+<tr><td>follower reads / read replicas</td><td>local low-latency reads (bounded staleness)</td></tr>
+<tr><td>xCluster</td><td><b>async</b> replication (DR / active-active); non-zero RPO data-loss window</td></tr>
+</tbody></table>
+<ul>
+<li><b>Preferred region</b> pins tablet leaders → writes stay local; other regions pay a WAN hop to that leader.</li>
+<li><b>Geo-partitioning</b>: partition a table by <code>geo</code> column, tablespaces placed per region → GDPR/residency + local reads/writes for local rows.</li>
+<li>Choose by residency law, latency budget, and RPO tolerance. Sync = zero RPO but slow writes; xCluster = fast local but a data-loss window.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Performance Tuning &amp; Scaling</h3>
+<p>Diagnose in order: <b>balance → round-trips → connections.</b></p>
+<ul>
+<li><b>Scale-out is linear only for balanced load.</b> Add TServers → tablets/leaders rebalance → ~2× nodes ≈ 2× throughput. A hotspot pins throughput to one node regardless of cluster size <span class="warn">!</span></li>
+<li><b>Hotspot = #1 killer:</b> monotonic PK on a range shard funnels all writes to the last tablet. Fix: hash-shard / random UUID / salt+bucket / key reversal.</li>
+<li><b>Round-trips:</b> write = Raft quorum hop; distributed txn = 2PC coordination; cross-region = WAN hop. Cut with batching, prepared statements, single-shard txns, index-only scans.</li>
+<li><b>Connections:</b> YSQL = a PG backend <i>process</i> per connection → thousands exhaust memory/CPU. Use the <b>YSQL Connection Manager</b> (server-side pooling) or PgBouncer <span class="warn">!</span></li>
+<li>Follower reads to offload leaders; weakest correct isolation for throughput.</li>
+</ul>
+<pre><code># add capacity: start a tserver at the masters, then
+yb-admin -master_addresses $M get_load_move_completion</code></pre>
+</section>
+
+<section class="card"><h3>High Availability &amp; Failure</h3>
+<ul>
+<li><b>No SPOF.</b> Node/zone/region loss → automatic Raft leader <b>election</b> (seconds) for affected tablets; unaffected tablets untouched.</li>
+<li><b>Self-heal:</b> master detects under-replication (missed heartbeats) → <b>re-replicates</b> lost tablet peers onto surviving nodes to restore RF.</li>
+<li><b>TServer fails:</b> its leaders re-elect elsewhere; brief per-tablet blip, cluster stays up.</li>
+<li><b>Master fails:</b> if it was the master leader, the other 2 elect a new one; data path unaffected (masters aren't in it).</li>
+<li><b>Rolling upgrades = zero downtime</b> — one node at a time, leaders move off first.</li>
+<li>Backups: distributed <b>snapshots</b> + <b>PITR</b> (point-in-time restore). xCluster for cross-region DR.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Operations &amp; Deployment</h3>
+<pre><code>yugabyted start                 # single-node quick start
+yb-master  --master_addresses ...   # control plane
+yb-tserver --tserver_master_addrs ...  # data node
+ysqlsh    # PG shell     ycqlsh   # CQL shell
+
+# inspect
+yb-admin -master_addresses $M list_all_tablet_servers
+yb-admin -master_addresses $M list_tablets ysql.mydb mytable
+yb-admin -master_addresses $M get_universe_config
+# placement / leaders
+yb-admin ... modify_placement_info aws.us-east.1a,... 3
+yb-admin ... set_preferred_zones aws.us-east.1a</code></pre>
+<ul>
+<li><b>Deploy:</b> yugabyted (quick) · K8s operator/Helm · YB Anywhere (self-managed) · YB Aeon/Managed (DBaaS).</li>
+<li><b>Security:</b> TLS in-transit + at-rest, RBAC, row-level security (PG).</li>
+<li><b>Migration:</b> <b>Voyager</b> (assessment + schema + data from PG/Oracle/MySQL).</li>
+<li>Metrics: Prometheus endpoints + master/tserver web UIs (:7000 / :9000).</li>
+</ul>
 </section>
 
 <section class="card"><h3>YugabyteDB vs Alternatives</h3>
 <table><thead><tr><th>Need</th><th>Pick</th></tr></thead><tbody>
-<tr><td>scale-out Postgres, open source, multi-cloud</td><td>YugabyteDB</td></tr>
-<tr><td>same, from-scratch PG reimpl (BSL)</td><td>CockroachDB</td></tr>
-<tr><td>managed global SQL on GCP</td><td>Spanner (TrueTime)</td></tr>
-<tr><td>managed PG, no write scale-out</td><td>Aurora (single-writer)</td></tr>
-<tr><td>single node / small / simple</td><td>Postgres</td></tr>
+<tr><td>scale-out Postgres, open source (Apache 2.0), multi-cloud</td><td><b>YugabyteDB</b></td></tr>
+<tr><td>same, from-scratch PG-wire reimpl (BSL licence)</td><td>CockroachDB</td></tr>
+<tr><td>managed global SQL on GCP, TrueTime</td><td>Spanner</td></tr>
+<tr><td>managed PG, HA, no write scale-out</td><td>Aurora (single-writer)</td></tr>
+<tr><td>Cassandra-style wide-row but consistent</td><td>YugabyteDB / YCQL</td></tr>
+<tr><td>single node / small / simple</td><td>plain Postgres</td></tr>
 </tbody></table>
-<p>Reality check: most apps are fine on Postgres/Aurora until they need horizontal write scale, active multi-region, or beyond-single-primary HA <span class="warn">!</span></p>
+<p><span class="warn">!</span> Reality check: distributed SQL buys write scale-out + active multi-region + beyond-single-primary HA, and costs latency, operational complexity, and modelling discipline (sharding keys). Don't pay it unless you need it.</p>
 </section>
 
 <section class="card"><h3>&#9744; Schema / Design Review Checklist</h3>
 <ul>
-<li>&#9744; Do you actually need distributed SQL (vs Postgres/Aurora)?</li>
-<li>&#9744; PK chosen to <b>distribute load &amp; avoid hotspots</b> — no bare monotonic SERIAL/timestamp on a range shard.</li>
-<li>&#9744; Right sharding (HASH for spread, range only where ordered scans are needed).</li>
-<li>&#9744; Composite PK groups related rows (tenant/user) + orders within.</li>
-<li>&#9744; RF &amp; replica placement give the needed node/zone/region fault tolerance.</li>
-<li>&#9744; Transactions kept single-shard &amp; short; app retries 40001 serialization errors.</li>
-<li>&#9744; Indexes match access patterns (covering/index-only where hot); not over-indexed.</li>
-<li>&#9744; Multi-region topology fits the residency/latency/RPO need; leaders in the preferred region.</li>
-<li>&#9744; Connection pooling; NTP tight; TLS/RBAC on.</li>
+<li>&#9744; Do you actually <b>need</b> distributed SQL (vs Postgres/Aurora)? Justify the write-scale / multi-region / HA driver.</li>
+<li>&#9744; PK chosen to <b>distribute load &amp; avoid hotspots</b> — no bare monotonic <code>SERIAL</code>/timestamp on a range shard.</li>
+<li>&#9744; Right sharding: <b>HASH</b> for spread, RANGE only where ordered scans are truly needed.</li>
+<li>&#9744; Composite PK groups related rows (<code>(tenant) HASH, ts DESC</code>) and orders within.</li>
+<li>&#9744; RF odd (3/5) &amp; replica placement gives the required node/zone/<b>region</b> fault tolerance.</li>
+<li>&#9744; Transactions kept <b>single-shard</b> &amp; short; app <b>retries 40001</b> serialization failures.</li>
+<li>&#9744; Isolation is the weakest that's correct (Serializable only where write skew matters).</li>
+<li>&#9744; Indexes match access patterns; covering/<code>INCLUDE</code> where hot; not over-indexed (write cost).</li>
+<li>&#9744; Multi-region topology fits residency/latency/RPO; leaders in the preferred region.</li>
+<li>&#9744; <b>Connection pooling</b> on (YSQL Connection Mgr / PgBouncer); NTP/chrony tight; TLS + RBAC on.</li>
 </ul>
 </section>
 
-<section class="card"><h3>&#9733; Troubleshooting Playbook</h3>
-<h4>One node hot / writes bottlenecked</h4>
-<ul><li>&#9744; Monotonic PK on range shard → hash-shard, UUIDv4, or bucket/salt.</li></ul>
-<h4>Cross-region write latency 100ms+</h4>
-<ul><li>&#9744; Sync quorum spans regions → preferred-region leaders / geo-partition, or accept for zero-RPO.</li></ul>
-<h4>Slow txn / lots of retries</h4>
-<ul><li>&#9744; Multi-tablet txn or conflicts → colocate, shorten, single-shard, handle 40001.</li></ul>
-<h4>Slow join</h4>
-<ul><li>&#9744; Cross-tablet shuffle → colocation/denormalize/index/index-only scan; check <code>EXPLAIN DIST</code>.</li></ul>
-<h4>Read-restart errors</h4>
-<ul><li>&#9744; Clock skew → tighten NTP / <code>max_clock_skew</code>.</li></ul>
-<h4>Remote-region read latency</h4>
-<ul><li>&#9744; Leader far → follower reads / read replica / geo-partition.</li></ul>
+<section class="card"><h3>&#9733; Common Bugs — Symptom → Cause</h3>
+<table><thead><tr><th>Symptom</th><th>Cause / fix</th></tr></thead><tbody>
+<tr><td>one node hot, writes don't scale on a big cluster</td><td>monotonic PK on range shard <span class="warn">!</span> → hash / UUIDv4 / salt</td></tr>
+<tr><td>cross-region writes 100ms+</td><td>sync quorum spans regions → preferred-region leaders / geo-partition, or accept for zero RPO</td></tr>
+<tr><td><code>ERROR 40001</code> serialization failure</td><td>txn conflict — app must <b>retry</b>; keep single-shard/short</td></tr>
+<tr><td>invariant violated under SI</td><td>write skew → use Serializable</td></tr>
+<tr><td>read restart errors</td><td>clock skew in ambiguity window → tighten NTP <span class="warn">!</span></td></tr>
+<tr><td>slow join</td><td>cross-tablet shuffle → colocate / denormalize / index; check <code>EXPLAIN DIST</code></td></tr>
+<tr><td>out-of-memory / too many backends</td><td>unpooled YSQL connections <span class="warn">!</span> → Connection Mgr / PgBouncer</td></tr>
+<tr><td>slow writes after adding an index</td><td>every write updates the index too → drop unused / use covering</td></tr>
+<tr><td>writes stall on last tablet at load start</td><td>no presplit → <code>SPLIT INTO n</code> before bulk load</td></tr>
+<tr><td>sequence/SERIAL contention</td><td>global counter hot → UUID or <code>CACHE 1000</code></td></tr>
+</tbody></table>
 </section>
 
 </div>

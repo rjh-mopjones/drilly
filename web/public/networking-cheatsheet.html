@@ -72,232 +72,402 @@ pre code{background:none; padding:0; font-size:1em;}
 </head>
 <body>
 <div class="sheet">
-<div class="titlebar"><h1>Networking Cheat Sheet</h1><span class="meta">backend/SRE focus · TCP/IP · HTTP · TLS · load balancing · drilly</span></div>
+<div class="titlebar"><h1>Networking Cheat Sheet</h1><span class="meta">backend/SRE focus · OSI→TCP→DNS→HTTP→TLS→LB→CDN · generic examples · drilly</span></div>
+
 <section class="card legend"><h3>How to read &amp; print</h3>
 <ul>
-<li><span class="warn">!</span> footgun / gotcha &nbsp; <code>&#9744;</code> troubleshooting step</li>
-<li>Focus: the protocols &amp; layers backend/SRE interviews probe — OSI→TCP→DNS→HTTP→TLS→LB→CDN — plus diagnostics.</li>
-<li>Debugging compass: reason <b>layer by layer</b>; <b>connection refused vs timeout</b> tells you a lot.</li>
-<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+<li><span class="warn">!</span> footgun / gotcha &nbsp; <code>&#9744;</code> design/review checklist item</li>
+<li>Focus: the protocols &amp; layers backend/SRE interviews probe — OSI→IP→routing→TCP→DNS→HTTP→TLS→LB/proxy→CDN — plus diagnostics &amp; security.</li>
+<li>Debugging compass: reason <b>layer by layer</b> (link→IP→DNS→TCP→TLS→app). <b>Connection refused vs timeout</b> is your fastest triage signal.</li>
+<li>The mental model that wins interviews: a packet carries a <b>fixed destination IP end-to-end</b>; the L2 framing &amp; MAC change at <b>every hop</b>. No router knows the whole path.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
 </ul></section>
 
 <section class="card"><h3>OSI / TCP-IP Layers</h3>
-<table><thead><tr><th>OSI</th><th>Lives here</th></tr></thead><tbody>
-<tr><td>7 Application</td><td>HTTP, DNS, TLS*, gRPC, SSH</td></tr>
-<tr><td>4 Transport</td><td>TCP, UDP (ports)</td></tr>
-<tr><td>3 Network</td><td>IP, ICMP, routing (router)</td></tr>
-<tr><td>2 Data Link</td><td>Ethernet, MAC, ARP (switch)</td></tr>
-<tr><td>1 Physical</td><td>cables, radio</td></tr>
+<table><thead><tr><th>OSI</th><th>Lives here / device</th></tr></thead><tbody>
+<tr><td>7 Application</td><td>HTTP, DNS, gRPC, SSH, SMTP</td></tr>
+<tr><td>6/5 Present./Sess.</td><td>TLS*, serialization (folded into L7 in TCP/IP)</td></tr>
+<tr><td>4 Transport</td><td>TCP, UDP, QUIC — <b>ports</b></td></tr>
+<tr><td>3 Network</td><td>IP, ICMP, routing — <b>router</b></td></tr>
+<tr><td>2 Data Link</td><td>Ethernet, MAC, ARP, VLAN — <b>switch</b></td></tr>
+<tr><td>1 Physical</td><td>cables, fibre, radio</td></tr>
 </tbody></table>
-<p>Encapsulation: data → <b>segment</b> (L4) → <b>packet</b> (L3) → <b>frame</b> (L2) → bits. Isolate the failing layer to debug.</p>
-</section>
-
-<section class="card"><h3>IP &amp; Subnetting</h3>
+<p><b>Encapsulation</b> (send path): app data → prepend L4 header = <b>segment</b> → prepend L3 header = <b>packet</b> → prepend L2 header/trailer = <b>frame</b> → bits. Each layer adds its own header; the receiver strips them in reverse. TCP/IP collapses OSI to 4 layers (Link · Internet · Transport · Application).</p>
 <ul>
-<li>IPv4 = 32 bits; CIDR <code>/n</code> = network bits. Hosts = 2^(32−n) − 2 (network+broadcast).</li>
-<li>/24 = 256 (254 usable) · /26 = 64 · /30 = 4 (2 usable).</li>
-<li>Private (RFC1918): <code>10.0.0.0/8</code>, <code>172.16.0.0/12</code>, <code>192.168.0.0/16</code>.</li>
-<li>Same subnet → deliver direct; else → <b>default gateway</b> (decided via the mask).</li>
-<li><b>NAT</b>: many private hosts → one public IP (PAT by port) — exists due to IPv4 exhaustion; breaks end-to-end.</li>
-<li>IPv6 = 128 bits, no NAT needed. Loopback 127.0.0.1 / ::1.</li>
+<li>*TLS straddles 5–6; interviewers accept "L7-ish, on top of TCP."</li>
+<li><b>Why it matters:</b> isolate the failing layer. Can't resolve = DNS(L7); resolves but no connect = L3/L4; connects but cert error = TLS. Don't debug up a layer until the one below is proven good <span class="warn">!</span></li>
 </ul>
 </section>
 
-<section class="card"><h3>TCP</h3>
-<pre><code>SYN  →
-     ← SYN-ACK       (3-way handshake = 1 RTT)
-ACK  →   ... data ...
-FIN/ACK ×2           (4-way close)</code></pre>
+<section class="card"><h3>IP Addressing &amp; Subnetting</h3>
 <ul>
-<li>Reliable, ordered, byte-stream. Seq/ACK + retransmit; <b>fast retransmit</b> on 3 dup-ACKs.</li>
-<li><b>Flow control</b> = receiver window (rwnd). <b>Congestion control</b> = cwnd (slow-start, AIMD; CUBIC/BBR).</li>
-<li><b>TIME_WAIT</b> (2·MSL on the closer) — piles up on busy clients/proxies → ephemeral-port exhaustion <span class="warn">!</span></li>
-<li>Lots of <b>CLOSE_WAIT</b> = your app isn't closing sockets <span class="warn">!</span></li>
-<li><b>RST</b> = abortive/refused. Nagle+delayed-ACK → set <code>TCP_NODELAY</code> for latency.</li>
+<li>IPv4 = 32 bits (4 octets). CIDR <code>/n</code> = number of <b>network</b> bits; host bits = 32−n.</li>
+<li>Usable hosts = 2^(32−n) − 2 (subtract network + broadcast). <span class="warn">!</span> exceptions: <code>/31</code> = 2 usable (RFC3021 p2p links), <code>/32</code> = single host.</li>
+</ul>
+<table><thead><tr><th>CIDR</th><th>Mask</th><th>Hosts</th></tr></thead><tbody>
+<tr><td>/8</td><td>255.0.0.0</td><td>16.7M</td></tr>
+<tr><td>/16</td><td>255.255.0.0</td><td>65534</td></tr>
+<tr><td>/24</td><td>255.255.255.0</td><td>254</td></tr>
+<tr><td>/26</td><td>255.255.255.192</td><td>62</td></tr>
+<tr><td>/30</td><td>…252</td><td>2</td></tr>
+</tbody></table>
+<ul>
+<li>Private (RFC1918): <code>10/8</code>, <code>172.16/12</code>, <code>192.168/16</code>. Loopback <code>127/8</code> (<code>::1</code>). Link-local <code>169.254/16</code> (APIPA — "DHCP failed" <span class="warn">!</span>).</li>
+<li>Same subnet? host ANDs dst IP with its mask, compares to its own network → match = deliver <b>direct</b> (ARP); else → <b>default gateway</b>.</li>
+<li>IPv6 = 128 bits, hex, <code>::</code> compresses zeros; SLAAC + no NAT. Dual-stack is the norm.</li>
 </ul>
 </section>
 
-<section class="card"><h3>UDP vs TCP</h3>
+<section class="card"><h3>Link Layer &amp; LAN (L2)</h3>
+<ul>
+<li>Moves a <b>frame</b> between two nodes on the <b>same</b> segment, addressed by 48-bit <b>MAC</b> (flat, burned-in, non-routable).</li>
+<li><b>ARP</b> resolves IP→MAC on the local subnet: broadcast "who has 10.0.0.5?", owner replies with its MAC; cached in the ARP table.</li>
+<li><b>Switch</b> learns MAC→port from source addresses, forwards frames to the right port; floods unknown/broadcast within the <b>broadcast domain</b>.</li>
+<li><b>VLAN</b> = segments one physical switch into isolated L2 domains (802.1Q tag); inter-VLAN needs an L3 router.</li>
+<li><b>MTU</b> = max frame payload, 1500B on Ethernet; jumbo = 9000 in datacentres.</li>
+</ul>
+<h4>Switch vs router</h4>
+<table><thead><tr><th></th><th>Switch (L2)</th><th>Router (L3)</th></tr></thead><tbody>
+<tr><td>address</td><td>MAC</td><td>IP</td></tr>
+<tr><td>scope</td><td>1 LAN segment</td><td>between subnets</td></tr>
+<tr><td>broadcasts</td><td>floods</td><td>stops (segments)</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> <b>ARP spoofing</b> = LAN MITM (attacker answers ARP for the gateway). Same subnet ⇒ no router involved at all.</p>
+</section>
+
+<section class="card"><h3>Routing &amp; the Network Layer (L3)</h3>
+<pre><code>$ ip route
+default via 192.168.1.1 dev eth0     # 0.0.0.0/0 catch-all
+10.0.0.0/8 via 10.0.0.1 dev eth1
+10.0.5.0/24 via 10.0.5.1 dev eth1    # more specific</code></pre>
+<ul>
+<li><b>Hop-by-hop &amp; local:</b> each router reads dst IP, does a <b>longest-prefix match</b>, decrements <b>TTL</b>, rewrites L2 framing, forwards. dst IP never changes; no router knows the full path.</li>
+<li>Longest-prefix wins first; <b>admin distance</b> picks which protocol to trust (connected 0 &lt; static 1 &lt; eBGP 20 &lt; OSPF 110); metric only breaks ties within a protocol.</li>
+<li><b>Routing</b> = build the table (control plane, slow); <b>forwarding</b> = per-packet lookup (data plane, ASIC line-rate). RIB → FIB.</li>
+<li><b>IGP</b> (inside an AS): OSPF/IS-IS (link-state, Dijkstra), RIP (legacy). <b>BGP</b> (between ASes): path-vector, <b>policy-driven</b>, trust-based — "runs the internet." Fat-finger a prefix → global blackhole/hijack (RPKI + prefix filters mitigate) <span class="warn">!</span></li>
+<li><b>ICMP</b>: echo=ping; time-exceeded (TTL=0)=traceroute; frag-needed=PMTUD. Block <b>all</b> ICMP → large packets vanish, conns hang <span class="warn">!</span> (allow types 3 &amp; 11).</li>
+<li><b>ECMP</b>: hash the 5-tuple → same flow, same path (no reorder); spreads flows across links.</li>
+</ul>
+</section>
+
+<section class="card"><h3>TCP — Reliability &amp; Handshake</h3>
+<pre><code>SYN  →                (seq=x)
+     ← SYN-ACK        (seq=y, ack=x+1)   1 RTT
+ACK  →   ...data...   (seq=x+1, ack=y+1)
+FIN/ACK ×2            (4-way close)</code></pre>
+<ul>
+<li>Reliable, <b>ordered</b>, byte-stream, full-duplex. Every byte has a <b>seq</b>; receiver <b>ACK</b>s cumulatively. Loss → retransmit.</li>
+<li><b>Fast retransmit</b>: 3 duplicate ACKs ⇒ resend the missing segment without waiting for RTO. <b>SACK</b> tells the sender exactly which ranges arrived.</li>
+<li><b>MSS</b> = MTU − IP − TCP headers (≈1460 on 1500 MTU); negotiated in SYN. <b>PMTU black hole</b> = large segments silently dropped <span class="warn">!</span></li>
+<li><b>Nagle</b> (coalesce small writes) + <b>delayed ACK</b> can interact → ~40ms stalls; <code>TCP_NODELAY</code> for latency-sensitive/request-response <span class="warn">!</span></li>
+<li><b>RST</b> = abortive reset (port closed / app crashed) — not a graceful FIN.</li>
+</ul>
+</section>
+
+<section class="card"><h3>TCP — Flow &amp; Congestion Control</h3>
+<table><thead><tr><th></th><th>Flow control</th><th>Congestion control</th></tr></thead><tbody>
+<tr><td>protects</td><td>the <b>receiver</b></td><td>the <b>network</b></td></tr>
+<tr><td>signal</td><td>advertised <b>rwnd</b></td><td>inferred loss/delay</td></tr>
+<tr><td>window</td><td>rwnd</td><td>cwnd</td></tr>
+</tbody></table>
+<ul>
+<li>In-flight bytes ≤ <b>min(rwnd, cwnd)</b>. Throughput ≈ window / RTT (<b>bandwidth-delay product</b> — a fat, long pipe needs a big window; scale-window option).</li>
+<li><b>Slow start</b>: cwnd doubles per RTT until <i>ssthresh</i> or loss. Then <b>congestion avoidance</b> — <b>AIMD</b> (additive-increase, multiplicative-decrease): +1 MSS/RTT, halve on loss. Sawtooth.</li>
+<li><b>CUBIC</b> (Linux default) — loss-based, scales to fat pipes. <b>BBR</b> — models bottleneck bw+RTT, ignores loss; better on lossy/wireless links.</li>
+<li>Loss → backoff → <b>throughput collapse</b>; a tiny loss rate murders long-fat-pipe throughput <span class="warn">!</span> Watch <b>p99 tail</b>, not the mean.</li>
+</ul>
+</section>
+
+<section class="card"><h3>TCP Connection States</h3>
+<table><thead><tr><th>State</th><th>Meaning / fix</th></tr></thead><tbody>
+<tr><td>LISTEN</td><td>server bound, awaiting SYN</td></tr>
+<tr><td>SYN_SENT / SYN_RECV</td><td>handshake in flight; many SYN_RECV = <b>SYN flood</b> → SYN cookies <span class="warn">!</span></td></tr>
+<tr><td>ESTABLISHED</td><td>data flowing</td></tr>
+<tr><td>FIN_WAIT / CLOSING</td><td>local side closing</td></tr>
+<tr><td><b>TIME_WAIT</b></td><td>on the <b>closer</b>, 2·MSL (~60s), lets stray packets die. Piles up on busy clients/proxies → ephemeral-port exhaustion <span class="warn">!</span></td></tr>
+<tr><td><b>CLOSE_WAIT</b></td><td>peer sent FIN, <b>your app hasn't called close()</b> — an fd/socket leak in your code <span class="warn">!</span></td></tr>
+</tbody></table>
+<pre><code>ss -tan state time-wait | wc -l   # count
+ss -tan state close-wait          # your bug</code></pre>
+<ul>
+<li>Fixes for TIME_WAIT: connection <b>reuse/pooling</b>, <code>SO_REUSEADDR</code>, widen ephemeral range. Don't blindly enable <code>tcp_tw_recycle</code> (removed; broke NAT) <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>UDP vs TCP &amp; QUIC</h3>
 <table><thead><tr><th></th><th>TCP</th><th>UDP</th></tr></thead><tbody>
-<tr><td>connection</td><td>handshake</td><td>none</td></tr>
+<tr><td>connection</td><td>handshake</td><td>none (fire &amp; forget)</td></tr>
 <tr><td>reliable/ordered</td><td>yes</td><td>no</td></tr>
-<tr><td>congestion ctl</td><td>yes</td><td>no</td></tr>
-<tr><td>overhead/latency</td><td>higher</td><td>low</td></tr>
-<tr><td>use</td><td>web, APIs, files</td><td>DNS, VoIP, games, QUIC</td></tr>
+<tr><td>flow/congestion</td><td>yes</td><td>no (app's job)</td></tr>
+<tr><td>header</td><td>20B+</td><td>8B</td></tr>
+<tr><td>use</td><td>web, APIs, DB, files</td><td>DNS, VoIP, games, video, QUIC</td></tr>
 </tbody></table>
-<p><b>QUIC</b> (HTTP/3) builds reliability+congestion+TLS over UDP → no TCP head-of-line blocking, 0-RTT, connection migration.</p>
+<ul>
+<li>UDP = a thin wrapper over IP: ports + checksum, nothing else. You add reliability only where you want it (custom ACK/FEC).</li>
+<li><b>QUIC</b> (basis of <b>HTTP/3</b>) rebuilds streams + reliability + congestion + <b>TLS 1.3</b> over UDP in user space. Wins: no TCP <b>head-of-line blocking</b> (per-stream loss), <b>0/1-RTT</b> setup, <b>connection migration</b> (survives IP change, e.g. Wi-Fi→cellular) via connection IDs.</li>
+<li><span class="warn">!</span> UDP is the amplification vector for reflection DDoS (DNS/NTP/memcached) — small spoofed request, huge reply.</li>
+</ul>
 </section>
 
 <section class="card"><h3>DNS</h3>
 <pre><code>dig +short example.com A
-dig @1.1.1.1 example.com   dig +trace example.com
-getent hosts example.com   # respects nsswitch</code></pre>
+dig @1.1.1.1 example.com
+dig +trace example.com        # walk root→TLD→auth
+getent hosts example.com      # respects nsswitch/hosts</code></pre>
 <ul>
-<li>Flow: stub → recursive resolver → root → TLD → authoritative → answer (cached for the <b>TTL</b>).</li>
-<li>Records: A/AAAA, <b>CNAME</b> (alias — not at the zone apex <span class="warn">!</span>), MX, TXT (SPF/DKIM), NS, SOA, PTR, SRV, CAA.</li>
-<li>UDP:53, TCP for big/zone-transfer. Local order: <code>/etc/hosts</code> → DNS (<code>resolv.conf</code>), watch <code>ndots</code> <span class="warn">!</span></li>
-<li>Change slow to propagate → lower TTL first. DoH/DoT for privacy. "It's always DNS."</li>
+<li><b>Resolution:</b> stub resolver → recursive resolver (ISP/1.1.1.1) → <b>root</b> → <b>TLD</b> (.com) → <b>authoritative</b> → answer, cached for the <b>TTL</b> at each layer.</li>
+<li>UDP/53 for queries; <b>TCP/53</b> for responses &gt;512B (EDNS) &amp; zone transfers.</li>
+</ul>
+<table><thead><tr><th>Record</th><th>Use</th></tr></thead><tbody>
+<tr><td>A / AAAA</td><td>name → IPv4 / IPv6</td></tr>
+<tr><td>CNAME</td><td>alias → name. <b>Not at zone apex</b> <span class="warn">!</span></td></tr>
+<tr><td>MX / NS / SOA</td><td>mail / nameservers / zone meta</td></tr>
+<tr><td>TXT</td><td>SPF/DKIM/DMARC, verification</td></tr>
+<tr><td>PTR / SRV / CAA</td><td>reverse / service / cert-authority</td></tr>
+</tbody></table>
+<ul>
+<li>Change slow to appear? <b>Lower the TTL first</b>, days ahead. Local order: <code>/etc/hosts</code> → DNS; watch <code>ndots</code> in k8s (search-domain fan-out) <span class="warn">!</span></li>
+<li>DoH/DoT encrypt queries. GeoDNS/latency records power global LB. "It's always DNS."</li>
 </ul>
 </section>
 
 <section class="card"><h3>HTTP</h3>
-<table><thead><tr><th>Code</th><th>Class</th></tr></thead><tbody>
-<tr><td>2xx</td><td>ok (200/201/204)</td></tr>
-<tr><td>3xx</td><td>redirect (301 perm / 302 / 304)</td></tr>
-<tr><td>4xx</td><td>client (400/401/403/404/409/429)</td></tr>
-<tr><td>5xx</td><td>server (500/502/503/504)</td></tr>
+<table><thead><tr><th>Code</th><th>Class / common</th></tr></thead><tbody>
+<tr><td>2xx</td><td>200 OK · 201 Created · 204 No Content</td></tr>
+<tr><td>3xx</td><td>301 perm · 302 temp · 304 Not Modified</td></tr>
+<tr><td>4xx</td><td>400 · 401 auth · 403 forbid · 404 · 409 · 429 rate</td></tr>
+<tr><td>5xx</td><td>500 · 502 bad-gw · 503 unavail · 504 timeout</td></tr>
 </tbody></table>
 <ul>
-<li>Idempotent: GET/PUT/DELETE/HEAD (safe to retry); POST is not <span class="warn">!</span></li>
-<li>From a proxy/LB: <b>502</b> bad-gateway (bad upstream reply) vs <b>504</b> upstream timeout.</li>
-<li><b>H1.1</b> keep-alive, head-of-line blocking → <b>H2</b> multiplex over 1 TCP (still TCP-HOL) → <b>H3</b>/QUIC over UDP (no HOL).</li>
-<li>Cache: Cache-Control/ETag/If-None-Match. Cookies: Secure/HttpOnly/SameSite.</li>
+<li><b>Idempotent</b> (safe to retry): GET, PUT, DELETE, HEAD. <b>POST is not</b> — use an idempotency key <span class="warn">!</span> Safe = read-only: GET/HEAD.</li>
+<li>From a proxy/LB: <b>502</b> = upstream gave a garbage/closed reply; <b>504</b> = upstream didn't answer in time. Different bugs.</li>
+<li><b>Versions:</b> H1.1 keep-alive but text + head-of-line blocking → <b>H2</b> binary, multiplexed streams over 1 TCP + HPACK (still TCP-HOL on loss) → <b>H3</b>/QUIC over UDP, no HOL.</li>
+<li>Stateless: state via <b>cookies</b> (Secure/HttpOnly/SameSite) or tokens. REST verbs map to CRUD.</li>
+</ul>
+</section>
+
+<section class="card"><h3>HTTP Caching &amp; Headers</h3>
+<ul>
+<li><b>Cache-Control</b> drives everything: <code>max-age</code>, <code>no-cache</code> (revalidate), <code>no-store</code> (never), <code>private</code> vs <code>public</code>, <code>s-maxage</code> (shared/CDN), <code>stale-while-revalidate</code>.</li>
+<li><b>Validators</b> (conditional GET → 304, no body): <code>ETag</code> + <code>If-None-Match</code>; <code>Last-Modified</code> + <code>If-Modified-Since</code>.</li>
+<li><b>Content negotiation:</b> <code>Accept</code>, <code>Accept-Encoding</code> (gzip/br), <code>Vary</code> (cache key dimensions — forget it and users get each other's variants <span class="warn">!</span>).</li>
+<li><b>Range</b> requests (206) for resumable/video. <b>Chunked</b> transfer-encoding streams unknown-length bodies.</li>
+<li>Immutable assets: fingerprint the URL (<code>app.9fa3.js</code>) + long <code>max-age, immutable</code> — invalidate by <b>changing the name</b>, never purge <span class="warn">!</span></li>
+<li>CORS: <code>Access-Control-Allow-Origin</code>; preflight <code>OPTIONS</code> for non-simple requests.</li>
 </ul>
 </section>
 
 <section class="card"><h3>HTTPS / TLS</h3>
 <pre><code>openssl s_client -connect host:443 -servername host
-curl -Iv https://host/</code></pre>
+curl -Iv https://host/          # -I head, -v handshake
+echo | openssl s_client -connect host:443 2&gt;/dev/null \
+  | openssl x509 -noout -dates -subject   # expiry</code></pre>
 <ul>
-<li>TLS = confidentiality + integrity + auth. <b>Hybrid</b>: asymmetric for the handshake/key-exchange, symmetric for bulk data.</li>
-<li><b>TLS 1.3</b> = 1-RTT (0-RTT resume), forward secrecy default — much faster than 1.2 <span class="warn">!</span></li>
-<li>Cert validation: <b>chain</b> root→intermediate→leaf, not expired, <b>hostname/SAN match</b>, not revoked.</li>
-<li><b>SNI</b> lets one IP serve many HTTPS sites (ECH hides it). <b>mTLS</b> = client also presents a cert (zero-trust).</li>
-<li>Common errors: expired, name mismatch, untrusted issuer, wrong chain order, clock skew <span class="warn">!</span></li>
+<li>Provides <b>confidentiality + integrity + authentication</b>. <b>Hybrid</b>: asymmetric (RSA/ECDHE) to authenticate + agree a key, symmetric (AES-GCM/ChaCha20) for bulk.</li>
+<li><b>Handshake:</b> ClientHello (ciphers, SNI) → ServerHello + cert → key exchange → Finished. <b>TLS 1.3 = 1-RTT</b> (0-RTT on resume), <b>forward secrecy by default</b>, dropped RSA key-exchange &amp; weak ciphers <span class="warn">!</span></li>
+<li><b>Cert validation:</b> chain leaf→intermediate→root anchored in the trust store, not expired, <b>hostname/SAN match</b>, not revoked (OCSP stapling). Any failure = MITM risk.</li>
+<li><b>SNI</b> = which host (plaintext; ECH hides it) → many sites, one IP. <b>mTLS</b> = client also presents a cert (zero-trust/service mesh).</li>
+<li>Errors: expired · name mismatch · untrusted issuer · <b>wrong chain order</b> (missing intermediate) · <b>clock skew</b> (fix NTP) <span class="warn">!</span></li>
 </ul>
 </section>
 
 <section class="card"><h3>App-Layer Protocols &amp; Ports</h3>
-<table><thead><tr><th>Port</th><th>Proto</th></tr></thead><tbody>
+<table><thead><tr><th>Port</th><th>Protocol</th></tr></thead><tbody>
 <tr><td>22 / 53</td><td>SSH / DNS</td></tr>
-<tr><td>80 / 443</td><td>HTTP / HTTPS</td></tr>
-<tr><td>25 / 587 / 993</td><td>SMTP / submission / IMAPS</td></tr>
+<tr><td>80 / 443</td><td>HTTP / HTTPS(+QUIC UDP/443)</td></tr>
+<tr><td>25 / 587 / 465</td><td>SMTP / submission / SMTPS</td></tr>
+<tr><td>110 / 143 / 993</td><td>POP3 / IMAP / IMAPS</td></tr>
+<tr><td>123 / 161</td><td>NTP / SNMP</td></tr>
 <tr><td>3306 / 5432 / 6379</td><td>MySQL / Postgres / Redis</td></tr>
+<tr><td>27017 / 9092</td><td>MongoDB / Kafka</td></tr>
 </tbody></table>
 <ul>
-<li><b>WebSocket</b> = full-duplex over one TCP (chat/live); <b>SSE</b> = one-way server→client.</li>
-<li><b>gRPC</b> = RPC over HTTP/2 + protobuf (internal services); REST for public.</li>
-<li>SSH tunnels (-L/-R/-D SOCKS); NTP (clock skew breaks TLS/auth <span class="warn">!</span>).</li>
+<li><b>WebSocket</b> (<code>Upgrade:</code> over 80/443) = full-duplex over one TCP for chat/live. <b>SSE</b> = one-way server→client stream over plain HTTP.</li>
+<li><b>gRPC</b> = RPC over HTTP/2 + protobuf, streaming, codegen — internal services; REST/JSON for public/browser.</li>
+<li>SSH tunnels: <code>-L</code> local-fwd, <code>-R</code> remote-fwd, <code>-D</code> SOCKS proxy. <b>NTP</b> matters — clock skew breaks TLS/auth/logs <span class="warn">!</span></li>
 </ul>
 </section>
 
 <section class="card"><h3>Load Balancing</h3>
 <table><thead><tr><th></th><th>L4</th><th>L7</th></tr></thead><tbody>
-<tr><td>sees</td><td>IP:port / conn</td><td>HTTP (path/host/header)</td></tr>
+<tr><td>sees</td><td>IP:port / TCP conn</td><td>HTTP path/host/header/cookie</td></tr>
 <tr><td>routing</td><td>flow hash</td><td>content-based</td></tr>
-<tr><td>speed / features</td><td>fast, simple</td><td>rich (TLS term, path)</td></tr>
+<tr><td>features</td><td>fast, cheap, opaque</td><td>TLS term, path routing, retries, rewrite</td></tr>
 </tbody></table>
 <ul>
-<li>Algorithms: round-robin, least-connections, IP/consistent hash.</li>
-<li><b>Health checks</b> remove bad backends; sticky sessions hurt even spread &amp; failover — prefer stateless + shared store <span class="warn">!</span></li>
-<li>The LB is a SPOF → make it HA (VRRP/floating IP, anycast).</li>
-<li>Preserve client IP via <b>X-Forwarded-For</b> (only trust it from your LB) <span class="warn">!</span></li>
+<li><b>Algorithms:</b> round-robin, weighted, <b>least-connections</b> (uneven request cost), <b>IP/consistent hash</b> (affinity, min reshuffling on scale).</li>
+<li><b>Health checks</b> eject bad backends (active probe vs passive/outlier). Tune interval + threshold or you flap <span class="warn">!</span></li>
+<li><b>Sticky sessions</b> hurt even spread &amp; failover — prefer stateless apps + shared session store (Redis) <span class="warn">!</span></li>
+<li>The LB is a <b>SPOF</b> → make it HA: active-passive VRRP/floating IP, or <b>anycast</b> for geo/scale.</li>
+<li>Preserve client IP via <b>X-Forwarded-For</b> / PROXY protocol — <b>only trust it from your own LB</b>, else spoofable <span class="warn">!</span></li>
 </ul>
 </section>
 
-<section class="card"><h3>Proxies &amp; CDN</h3>
+<section class="card"><h3>Proxies, Reverse Proxies &amp; Gateways</h3>
 <ul>
-<li><b>Forward proxy</b> = client-side (egress/filter). <b>Reverse proxy</b> = server-side (TLS term, LB, cache, routing) — nginx/HAProxy/<b>Envoy</b>.</li>
-<li><b>API gateway</b> = L7 reverse proxy for APIs (authn, rate limit, transform, routing). Service mesh = sidecar proxies (mTLS/retries/observability).</li>
-<li><b>CDN</b>: edge caches near users; <b>anycast</b> routes to the nearest PoP; cache-hit served at edge, miss → origin (shield).</li>
-<li>Invalidate via <b>versioned/fingerprinted URLs</b> &gt; purging <span class="warn">!</span> Edge also absorbs DDoS + WAF.</li>
-<li>Request path: <b>CDN → LB → reverse proxy → app → DB</b>.</li>
+<li><b>Forward proxy</b> = sits in front of <b>clients</b> (egress filter, corporate cache, anonymity). Server sees the proxy's IP.</li>
+<li><b>Reverse proxy</b> = sits in front of <b>servers</b> (TLS termination, LB, cache, compression, routing) — nginx / HAProxy / <b>Envoy</b>. Client sees the proxy; the proxy fans out to backends.</li>
+<li><b>API gateway</b> = L7 reverse proxy specialised for APIs: authn/z, rate-limit, quota, request transform, aggregation, routing, versioning — one edge for many services.</li>
+<li><b>Service mesh</b> = per-pod <b>sidecar</b> proxies (Envoy) giving mTLS, retries, timeouts, circuit-breaking, and traffic-shift/observability <b>without app code</b>. Control plane = Istio/Linkerd; ambient/sidecarless is the trend.</li>
+<li>Canonical request path: <b>CDN → LB → reverse proxy / API gw → app → DB</b>. Each hop can cache, retry, terminate TLS, or add headers <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>CDN &amp; Edge</h3>
+<ul>
+<li><b>CDN</b> = geographically-distributed edge caches near users. <b>Anycast</b> advertises one IP from many PoPs; BGP routes each user to the nearest one.</li>
+<li><b>Cache hit</b> served at the edge (single-digit ms); <b>miss</b> → fetch from origin, optionally via a <b>shield/mid-tier</b> that collapses many misses into one origin request (<i>request coalescing</i>) <span class="warn">!</span></li>
+<li>Cache key = URL + <code>Vary</code> dimensions. Control freshness with <code>s-maxage</code> + <code>stale-while-revalidate</code>/<code>stale-if-error</code> (serve stale during origin outages).</li>
+<li>Invalidate by <b>versioned/fingerprinted URLs</b> ≫ purge (purge is slow &amp; global). Cache static aggressively; be careful caching authenticated/personalised responses <span class="warn">!</span></li>
+<li>The edge also absorbs <b>DDoS</b>, runs the <b>WAF</b>, terminates TLS, and runs <b>edge compute</b> (workers) for A/B, auth, redirects near the user.</li>
 </ul>
 </section>
 
 <section class="card"><h3>NAT &amp; Firewalls</h3>
 <ul>
-<li><b>SNAT/masquerade</b> outbound · <b>DNAT/port-forward</b> inbound · <b>PAT</b> multiplexes by port.</li>
-<li><b>Stateful</b> firewall tracks connections (auto-allows return traffic); default-deny.</li>
-<li>Cloud: <b>security groups</b> (stateful, instance) vs <b>NACLs</b> (stateless, subnet, ordered).</li>
-<li><b>Refused vs timeout</b>: DROP → client <b>times out</b> (firewall); RST/nothing-listening → <b>connection refused</b> <span class="warn">!</span></li>
-<li>Lock down <b>egress</b> too (exfil); don't expose DB/Redis on 0.0.0.0 <span class="warn">!</span> WAF = L7 (SQLi/XSS).</li>
+<li><b>NAT</b> maps private↔public addresses. <b>SNAT/masquerade</b> = outbound (many hosts → 1 public IP, multiplexed by port = <b>PAT</b>). <b>DNAT/port-forward</b> = inbound. Exists for IPv4 exhaustion; breaks end-to-end &amp; inbound P2P (→ STUN/TURN/hole-punching) <span class="warn">!</span></li>
+<li><b>Stateful firewall</b> tracks connections (conntrack) → auto-allows return traffic; policy is <b>default-deny</b>, allow-list. Stateless filters each packet in isolation.</li>
+<li>Cloud: <b>security groups</b> = stateful, per-instance, allow-only. <b>NACLs</b> = stateless, per-subnet, ordered allow+deny, need explicit return rules <span class="warn">!</span></li>
+<li><b>Refused vs timeout</b> (memorise): RST / nothing-listening → <b>connection refused</b> fast; silent <b>DROP</b> → client <b>times out</b> (firewall/blackhole) <span class="warn">!</span></li>
+<li>Lock down <b>egress</b> too (data exfil); never bind DB/Redis to <code>0.0.0.0</code>. <b>WAF</b> = L7 (SQLi/XSS/bot). Asymmetric routing breaks stateful boxes <span class="warn">!</span></li>
 </ul>
 </section>
 
-<section class="card"><h3>Latency vs Bandwidth</h3>
+<section class="card"><h3>Performance: Latency vs Bandwidth</h3>
 <ul>
-<li><b>Bandwidth</b> = pipe width; <b>latency</b> = pipe length (RTT). <b>More bandwidth does NOT fix latency</b> <span class="warn">!</span></li>
-<li>Latency = propagation (speed of light) + transmission + <b>queuing</b> + processing.</li>
-<li>Each round trip costs an RTT (DNS, TCP, TLS, request) → <b>cut round trips</b>: keep-alive/pooling, TLS 1.3, H2/3, CDN, caching.</li>
-<li><b>Bufferbloat</b>: oversized buffers → latency spikes under load (AQM/fq_codel fixes it).</li>
-<li>Loss → TCP backoff → throughput collapse; watch <b>p99 tail</b>, not just the mean.</li>
+<li><b>Bandwidth</b> = pipe width (bits/s); <b>latency/RTT</b> = pipe length (time). <b>More bandwidth does NOT fix latency</b> — the #1 misconception <span class="warn">!</span></li>
+<li>Latency = propagation (speed of light, ~5µs/km fibre) + transmission + <b>queuing</b> + processing. Cross-continent RTT is physics you can't beat — you can only <b>reduce round trips</b>.</li>
+<li>Each RTT-bound step stacks: DNS + TCP + TLS + request. Kill round trips: <b>keep-alive/pooling</b>, TLS 1.3 (1-RTT), H2/3, <b>CDN</b> (shorten distance), caching, 0-RTT resume.</li>
+<li><b>Bufferbloat</b>: oversized router buffers hoard packets → latency spikes under load; fix with AQM (fq_codel/CAKE).</li>
+<li>Throughput ≈ window/RTT and collapses under loss on long-fat pipes. Optimise the <b>p99 tail</b>, not the mean; one slow dependency dominates fan-out latency <span class="warn">!</span></li>
 </ul>
 </section>
 
-<section class="card"><h3>Sockets</h3>
-<pre><code>server: socket→bind→listen→accept→rw→close
-client: socket→connect→rw→close
-ss -tlnp        # listening sockets + owning proc
-ss -tan state established | wc -l</code></pre>
+<section class="card"><h3>Sockets &amp; Network Programming</h3>
+<pre><code>server: socket→bind→listen→accept→read/write→close
+client: socket→connect→write/read→close
+ss -tlnp                 # listening sockets + owning pid
+ss -tan state established | wc -l
+lsof -i :443             # who holds the port</code></pre>
 <ul>
-<li>A connection = 4-tuple (src IP:port, dst IP:port). Sockets are file descriptors → <code>ulimit -n</code>/EMFILE under load <span class="warn">!</span></li>
-<li><b>C10K</b>: one thread + <b>epoll</b>/kqueue handles thousands of conns (reactor/event loop — nginx/Node).</li>
-<li>TCP is a byte stream → <b>frame your own messages</b> (length-prefix/delimiter) <span class="warn">!</span></li>
-<li>Reuse connections (pooling) to skip handshakes; <code>SO_REUSEADDR</code>/<code>SO_REUSEPORT</code>.</li>
+<li>A connection = <b>4-tuple</b> (src IP:port, dst IP:port). One listener serves many clients — each accepted socket is a distinct 4-tuple.</li>
+<li>Sockets are file descriptors → <code>ulimit -n</code> caps them; hit it under load = <b>EMFILE</b> "too many open files" <span class="warn">!</span></li>
+<li><b>C10K:</b> one thread + <b>epoll</b>/kqueue (event loop / reactor) handles thousands of conns — nginx, Node, Netty. Blocking thread-per-conn doesn't scale.</li>
+<li>TCP is a <b>byte stream, not messages</b> — you must <b>frame</b> (length-prefix or delimiter); one <code>read()</code> may return partial/multiple messages <span class="warn">!</span></li>
+<li><code>SO_REUSEADDR</code> (rebind TIME_WAIT), <code>SO_REUSEPORT</code> (kernel load-balances accepts across workers). Reuse conns (pool) to skip handshakes.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Diagnostic Toolkit</h3>
-<pre><code>ping -c3 host              # reachability (ICMP)
-mtr host                   # path + per-hop loss
-dig +short host            # DNS
+<section class="card"><h3>Diagnostic Toolkit (CLI)</h3>
+<pre><code># reachability + path
+ping -c3 host              # ICMP echo / RTT
+mtr host                   # traceroute + per-hop loss %
+traceroute host            # TTL-based path
+
+# DNS
+dig +short host A; dig +trace host
+
+# ports / sockets
+nc -zv host 443            # is the port open?
+ss -tlnp                   # who is listening
+
+# HTTP/TLS timing breakdown
 curl -sv https://host/ -o /dev/null \
   -w 'dns:%{time_namelookup} conn:%{time_connect} \
-tls:%{time_appconnect} ttfb:%{time_starttransfer}\n'
-ss -tlnp                   # who listens
-nc -zv host 443            # port open?
-tcpdump -ni eth0 host 1.2.3.4 and port 443
-openssl s_client -connect host:443</code></pre>
-<p>Triage layer by layer: link → IP/route → DNS → TCP → TLS → app.</p>
+tls:%{time_appconnect} ttfb:%{time_starttransfer} \
+total:%{time_total}\n'
+openssl s_client -connect host:443 -servername host
+
+# packet capture (the ground truth)
+sudo tcpdump -ni eth0 host 1.2.3.4 and port 443
+sudo tcpdump -ni any 'tcp[tcpflags] &amp; tcp-rst != 0'</code></pre>
+<p>Triage bottom-up: link → IP/route (<code>ip a</code>/<code>ip route</code>) → DNS → TCP → TLS → app. <code>curl -w</code> tells you <b>which</b> phase is slow in one shot.</p>
 </section>
 
-<section class="card"><h3>Security &amp; Modern</h3>
+<section class="card"><h3>Cloud &amp; Virtual Networking</h3>
 <ul>
-<li>TLS everywhere; cert validation stops <b>MITM</b> (HSTS stops SSL-strip).</li>
-<li><b>DDoS</b>: volumetric/reflection (UDP DNS/NTP amp), SYN flood (SYN cookies), L7 flood → CDN/rate-limit/anycast.</li>
-<li>ARP/DNS spoofing (LAN/cache MITM); IP spoofing → BCP38.</li>
-<li><b>VPN</b> (WireGuard/IPsec) ≠ <b>zero trust</b> (identity-based, mTLS everywhere, never trust the network).</li>
-<li>Modern: <b>HTTP/3-QUIC</b>, <b>eBPF</b> networking (Cilium replacing kube-proxy), sidecar-less/ambient mesh, DoH/DoT/ECH, IPv6, RDMA/RoCE for AI fabrics.</li>
+<li><b>VPC</b> = your private virtual network; carved into <b>subnets</b> per AZ. <b>Public subnet</b> has a route to an <b>Internet Gateway</b>; <b>private subnet</b> reaches out via a <b>NAT gateway</b> (no inbound) <span class="warn">!</span></li>
+<li><b>Route tables</b> per subnet decide IGW vs NAT vs peering. <b>VPC peering</b> (non-transitive) / <b>Transit Gateway</b> (hub) connect VPCs; <b>PrivateLink</b> exposes a service privately without internet.</li>
+<li>Reach on-prem via <b>VPN</b> (IPsec over internet) or <b>Direct Connect/dedicated</b> (private, low-jitter).</li>
+<li>Overlays: <b>VXLAN</b> tunnels tenant L2 over the physical L3 fabric. K8s: each pod gets a routable IP (CNI); <b>Service</b> = stable virtual IP; kube-proxy iptables/IPVS or <b>eBPF (Cilium)</b> load-balances; NetworkPolicy = L3/4 firewall.</li>
+<li><span class="warn">!</span> Overlapping CIDRs break peering; SG referencing another SG ≫ hardcoded IPs.</li>
 </ul>
 </section>
 
-<section class="card"><h3>&#9733; "Type a URL &amp; hit Enter"</h3>
+<section class="card"><h3>Security &amp; Attacks</h3>
 <ul>
-<li>1. Check <b>cache</b> / <code>/etc/hosts</code>, then <b>DNS</b> recursion → IP.</li>
-<li>2. ARP for the gateway MAC; route out via NAT/BGP across the internet.</li>
-<li>3. <b>TCP handshake</b> (or QUIC) to the server/LB/CDN (1 RTT).</li>
-<li>4. <b>TLS handshake</b> (1-RTT in 1.3) — cert validated, SNI sent.</li>
-<li>5. <b>HTTP request</b> (Host header) → CDN edge / LB → reverse proxy → app → DB.</li>
-<li>6. Response streamed back; browser parses &amp; renders; keep-alive reuses the conn.</li>
+<li>TLS everywhere; cert validation stops <b>MITM</b>; <b>HSTS</b> stops SSL-strip downgrade.</li>
+<li><b>DDoS:</b> volumetric/<b>reflection-amplification</b> (spoofed UDP DNS/NTP/memcached), <b>SYN flood</b> (half-open — SYN cookies), L7 request-flood → absorb with CDN/anycast + rate-limit + WAF.</li>
+<li><b>Spoofing:</b> ARP (LAN MITM), DNS cache poisoning (→ DNSSEC), IP spoofing (→ ingress filtering/BCP38). <b>On-path</b> can read/alter unencrypted traffic.</li>
+<li>Defence-in-depth: default-deny SG/NACL, private subnets, least-privilege egress, mTLS between services.</li>
+<li><b>VPN ≠ zero trust.</b> VPN trusts the network perimeter; zero-trust authenticates <b>every request</b> by identity (mTLS/SSO), never trusts the network — assume breach.</li>
 </ul>
 </section>
 
-<section class="card"><h3>&#9744; Troubleshooting Playbook</h3>
-<h4>Site slow</h4>
-<ul><li>&#9744; <code>curl -w</code> timing: DNS? connect? TLS? TTFB? transfer? → latency vs bandwidth, CDN/round-trips.</li></ul>
-<h4>Refused vs timeout</h4>
-<ul><li>&#9744; <b>Refused</b> = reached host, port closed (RST). <b>Timeout</b> = dropped (firewall/unreachable) <span class="warn">!</span></li></ul>
-<h4>Ping OK, port unreachable</h4>
-<ul><li>&#9744; firewall/SG or nothing listening → <code>ss -tlnp</code> / <code>nc -zv</code>.</li></ul>
-<h4>DNS wrong/intermittent</h4>
-<ul><li>&#9744; TTL/cache/split-horizon/propagation → <code>dig @auth +trace</code>.</li></ul>
-<h4>TLS error</h4>
-<ul><li>&#9744; expired / name mismatch / chain / clock skew → <code>openssl s_client</code>.</li></ul>
-<h4>Large uploads hang</h4>
-<ul><li>&#9744; MTU / path-MTU black hole → <code>ping -M do -s</code>.</li></ul>
-<h4>Packet loss / bad hop</h4>
-<ul><li>&#9744; <code>mtr</code> to find the lossy hop; high p99 → bufferbloat/congestion.</li></ul>
+<section class="card"><h3>Modern Networking</h3>
+<ul>
+<li><b>HTTP/3 + QUIC</b> over UDP: no HOL blocking, faster setup, connection migration — now default at big edges.</li>
+<li><b>eBPF</b>: run sandboxed programs in the kernel for networking/observability — <b>Cilium</b> replaces kube-proxy, XDP does line-rate DDoS drop &amp; LB.</li>
+<li><b>Ambient / sidecar-less mesh</b> cuts the per-pod proxy tax; <b>ECH</b> encrypts SNI; <b>DoH/DoT</b> encrypt DNS; <b>IPv6</b> + dual-stack mainstream.</li>
+<li><b>RDMA / RoCE</b> and lossless fabrics for AI/HPC clusters (GPU-to-GPU, kernel-bypass, µs latency).</li>
+<li><b>SD-WAN</b> &amp; programmable dataplanes (P4); QUIC-based multipath (MPTCP-like) for mobile.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Packet Walk — "Type a URL &amp; hit Enter"</h3>
+<table><thead><tr><th>#</th><th>Step</th></tr></thead><tbody>
+<tr><td>1</td><td>Browser/OS <b>cache</b> → <code>/etc/hosts</code> → <b>DNS</b> recursion (root→TLD→auth) → IP, cached for TTL</td></tr>
+<tr><td>2</td><td><b>ARP</b> for the gateway MAC; off-subnet → default gateway; hop-by-hop routing (BGP/NAT) across the internet</td></tr>
+<tr><td>3</td><td><b>TCP 3-way handshake</b> (or 0/1-RTT QUIC) to server/LB/CDN edge — 1 RTT</td></tr>
+<tr><td>4</td><td><b>TLS handshake</b> (1-RTT in 1.3): SNI sent, cert chain validated, keys agreed</td></tr>
+<tr><td>5</td><td><b>HTTP request</b> (Host header) → CDN edge → LB → reverse proxy → app → DB; response built</td></tr>
+<tr><td>6</td><td>Response streamed back; browser parses HTML, fetches subresources (multiplexed), renders; <b>keep-alive</b> reuses the conn</td></tr>
+</tbody></table>
+<p class="cap">Every arrow that crosses the network costs ≥1 RTT — this is why cutting round trips (keep-alive, TLS 1.3, H2/3, CDN, caching) is the whole performance game.</p>
+</section>
+
+<section class="card"><h3>Symptom → Likely Cause</h3>
+<table><thead><tr><th>Symptom</th><th>Cause</th></tr></thead><tbody>
+<tr><td>connection <b>refused</b> (fast)</td><td>nothing listening / port closed → RST <span class="warn">!</span></td></tr>
+<tr><td>connection <b>times out</b></td><td>firewall DROP / SG / blackhole route <span class="warn">!</span></td></tr>
+<tr><td>ping OK, port dead</td><td>SG/firewall or app not bound → <code>ss -tlnp</code></td></tr>
+<tr><td>works small, hangs on big POST/upload</td><td>PMTU black hole (ICMP frag-needed blocked) <span class="warn">!</span></td></tr>
+<tr><td>intermittent / stale DNS</td><td>TTL cache / split-horizon / slow propagation</td></tr>
+<tr><td>cert error</td><td>expired · name mismatch · missing intermediate · clock skew <span class="warn">!</span></td></tr>
+<tr><td>lots of CLOSE_WAIT</td><td>app not calling <code>close()</code> — fd leak <span class="warn">!</span></td></tr>
+<tr><td>ephemeral-port / TIME_WAIT exhaustion</td><td>no connection pooling on a busy client/proxy <span class="warn">!</span></td></tr>
+<tr><td>502 vs 504 from LB</td><td>bad upstream reply vs upstream timeout</td></tr>
+<tr><td>fast link, low throughput</td><td>small window / high RTT / packet loss (BDP) <span class="warn">!</span></td></tr>
+<tr><td>latency spikes under load</td><td>bufferbloat / queue build-up → AQM</td></tr>
+</tbody></table>
+</section>
+
+<section class="card"><h3>&#9733; Network Design Review Checklist</h3>
+<h4>Naming &amp; discovery</h4>
+<ul>
+<li>&#9744; Sensible DNS TTLs; lowered <b>ahead</b> of any planned cutover.</li>
+<li>&#9744; No CNAME at a zone apex; failover has a defined DNS/health story.</li>
+</ul>
+<h4>Connections &amp; sockets</h4>
+<ul>
+<li>&#9744; Clients <b>pool/reuse</b> connections — no per-request TCP+TLS setup; sockets always <code>close()</code>d (no CLOSE_WAIT leak) <span class="warn">!</span></li>
+<li>&#9744; <code>ulimit -n</code> / fd budget sized for peak concurrency; TIME_WAIT/ephemeral range considered on proxies.</li>
+<li>&#9744; Messages are framed (length-prefix/delimiter) — code never assumes one read = one message <span class="warn">!</span></li>
+</ul>
+<h4>TLS &amp; security</h4>
+<ul>
+<li>&#9744; TLS 1.2+ (prefer 1.3), full cert chain incl. intermediate, auto-renewal + expiry alerts; NTP in sync.</li>
+<li>&#9744; Default-deny SG/NACL; egress locked; DB/Redis not on <code>0.0.0.0</code>; XFF trusted only from own LB <span class="warn">!</span></li>
+</ul>
+<h4>Resilience &amp; performance</h4>
+<ul>
+<li>&#9744; LB is HA (no SPOF); health checks tuned (no flapping); apps stateless or shared session store — no sticky reliance.</li>
+<li>&#9744; Timeouts + bounded retries with backoff + idempotency on POST; circuit breakers on downstreams.</li>
+<li>&#9744; CDN/caching in front of static; round trips minimised (keep-alive, H2/3); p99 tail measured, not just mean.</li>
+<li>&#9744; ICMP types 3 &amp; 11 allowed (PMTUD, error signalling) even if echo is dropped <span class="warn">!</span></li>
+</ul>
 </section>
 
 </div>
-<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
-<script>
-  try {
-    mermaid.initialize({ startOnLoad: true, theme: "neutral",
-      flowchart: { useMaxWidth: true, htmlLabels: true, nodeSpacing: 18, rankSpacing: 18 },
-      themeVariables: { fontSize: "9px" } });
-  } catch (e) { /* offline / blocked CDN: diagrams degrade to source text, rest of sheet is fine */ }
-</script>
 </body>
 </html>

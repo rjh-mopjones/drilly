@@ -72,50 +72,121 @@ pre code{background:none; padding:0; font-size:1em;}
 </head>
 <body>
 <div class="sheet">
-<div class="titlebar"><h1>Operating Systems Cheat Sheet</h1><span class="meta">CS fundamentals · processes · scheduling · memory · concurrency · drilly</span></div>
+<div class="titlebar"><h1>Operating Systems Cheat Sheet</h1><span class="meta">CS fundamentals · processes · scheduling · virtual memory · concurrency · I/O · drilly</span></div>
+
 <section class="card legend"><h3>How to read &amp; print</h3>
 <ul>
-<li><span class="warn">!</span> footgun / classic-exam trap &nbsp; <code>&#9744;</code> reasoning step</li>
-<li>Focus: the mechanisms &amp; algorithms interviews probe — how scheduling, paging, deadlock &amp; syscalls actually work (theory, not Linux admin).</li>
-<li>Mental model: the kernel is a <b>resource manager + protection layer</b>; user↔kernel via <b>syscalls (traps)</b>.</li>
-<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+<li><span class="warn">!</span> footgun / classic-exam trap &nbsp; <code>&#9744;</code> reasoning-checklist item</li>
+<li>Focus: the <b>mechanisms &amp; algorithms interviews probe</b> — how scheduling, paging, deadlock &amp; syscalls actually work (theory, not Linux admin). Numbers are order-of-magnitude, not exact.</li>
+<li>Mental model: the kernel is a <b>resource manager + protection layer</b>; user↔kernel crossing is always a <b>syscall / trap</b> (mode switch). Everything expensive is a cache miss or a disk trip.</li>
+<li>Last 3 cards = <b>"what happens when you run a program"</b> + common bugs + reasoning checklist.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
 </ul></section>
 
 <section class="card"><h3>Process vs Thread</h3>
 <table><thead><tr><th></th><th>Process</th><th>Thread</th></tr></thead><tbody>
 <tr><td>address space</td><td>own (isolated)</td><td><b>shared</b></td></tr>
 <tr><td>private</td><td>everything</td><td>stack, regs, PC, TLS</td></tr>
-<tr><td>create/switch</td><td>expensive</td><td>cheap</td></tr>
-<tr><td>comms</td><td>IPC</td><td>shared memory</td></tr>
-<tr><td>a crash</td><td>isolated</td><td>kills the process</td></tr>
+<tr><td>shared</td><td>—</td><td>heap, globals, code, FDs</td></tr>
+<tr><td>create/switch</td><td>expensive (new page tables, TLB flush)</td><td>cheap (same address space)</td></tr>
+<tr><td>comms</td><td>IPC (copy/kernel)</td><td>shared memory (direct)</td></tr>
+<tr><td>a crash / segfault</td><td>isolated to one</td><td>kills the whole process</td></tr>
 </tbody></table>
 <ul>
-<li>Address space: text · data/BSS · <b>heap↑</b> · mmap · <b>↓stack</b>. PCB holds state/regs/PC/page-tables/files.</li>
-<li><code>fork()</code> = COW copy (returns twice); <code>exec()</code> replaces the image. <b>Zombie</b> = unreaped child; <b>orphan</b> → reparented to init.</li>
+<li>Address space layout: <b>text</b> · data/BSS · <b>heap ↑</b> · mmap region · <b>↓ stack</b> · kernel. <b>PCB</b> holds state, regs, PC, page-table ptr, open-file table, priority.</li>
+<li>Threads win on shared-data parallelism &amp; cheap switches; processes win on <b>isolation &amp; fault containment</b> <span class="warn">!</span></li>
 </ul>
 </section>
 
-<section class="card"><h3>CPU Scheduling</h3>
-<table><thead><tr><th>Algo</th><th>Note</th></tr></thead><tbody>
-<tr><td>FCFS</td><td>simple; convoy effect <span class="warn">!</span></td></tr>
-<tr><td>SJF/SRTF</td><td>optimal avg wait; can starve; needs prediction</td></tr>
-<tr><td>Round-Robin</td><td>quantum; fair/responsive</td></tr>
-<tr><td>Priority</td><td>starvation → <b>aging</b></td></tr>
-<tr><td>MLFQ</td><td>approximates SJF, favours interactive</td></tr>
-</tbody></table>
+<section class="card"><h3>Process Lifecycle &amp; fork/exec</h3>
+<h4>States</h4>
+<pre><code>new → ready ⇄ running → terminated
+            running → waiting (block on I/O)
+            waiting → ready  (I/O done)
+            ready ← running  (preempted / quantum)</code></pre>
 <ul>
-<li>Preemptive (timer interrupt) vs non-preemptive. Metrics: turnaround, waiting, response, throughput.</li>
-<li>Quantum too big → FCFS; too small → context-switch overhead <span class="warn">!</span> Linux = CFS (vruntime, RB-tree).</li>
+<li><b>Ready</b> = runnable, waiting for a CPU. <b>Waiting/blocked</b> = waiting for an event (I/O, lock) — the scheduler skips it.</li>
+<li><code>fork()</code> = clone parent via <b>copy-on-write</b>; <b>returns twice</b> (0 in child, child PID in parent) <span class="warn">!</span></li>
+<li><code>exec()</code> = replace the current image with a new program (same PID, fresh address space). Shell = <code>fork</code> then <code>exec</code>.</li>
+<li><code>wait()</code> = parent reaps child's exit status.</li>
+<li><b>Zombie</b> = exited but not yet <code>wait()</code>ed (holds a PCB slot) <span class="warn">!</span>; <b>orphan</b> = parent died first → reparented to init/PID 1, which reaps it.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Synchronization</h3>
+<section class="card"><h3>Threads — user vs kernel</h3>
+<table><thead><tr><th>Model</th><th>Note</th></tr></thead><tbody>
+<tr><td>1:1 (kernel)</td><td>each user thread = a kernel thread; true parallelism, kernel schedules. Linux/Windows.</td></tr>
+<tr><td>N:1 (user)</td><td>many user threads on 1 kernel thread; fast switch but <b>one blocking syscall blocks all</b> &amp; no multicore <span class="warn">!</span></td></tr>
+<tr><td>M:N</td><td>hybrid; complex (Go runtime, old Solaris).</td></tr>
+</tbody></table>
 <ul>
-<li><b>Race condition</b>: concurrent access, ≥1 write, no ordering (<code>count++</code> = load/inc/store — lost update) <span class="warn">!</span></li>
-<li>Critical section needs: <b>mutual exclusion + progress + bounded waiting</b>.</li>
-<li>Primitives: <b>mutex</b> (ownership) · <b>semaphore</b> (counter, no owner; binary≈mutex, counting=N) · <b>monitor/condvar</b> (wait in a loop on the predicate).</li>
-<li>Built on atomics (test-and-set, <b>CAS</b>); <b>spinlock</b> = busy-wait (only short sections, multicore).</li>
-<li>Classics: producer-consumer, readers-writers, dining philosophers.</li>
+<li><b>User threads</b> (green/goroutines): scheduled in userspace, µs-cheap, invisible to kernel.</li>
+<li><b>Kernel threads</b>: kernel-scheduled, can run on separate cores, but switch costs a mode switch.</li>
+<li>Cost order: context switch process &gt; thread &gt; user-thread yield. Too many threads → context-switch &amp; cache thrash, not speedup <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>CPU Scheduling — algorithms</h3>
+<table><thead><tr><th>Algo</th><th>Preempt</th><th>Note</th></tr></thead><tbody>
+<tr><td>FCFS</td><td>no</td><td>simple; <b>convoy effect</b> (short jobs stuck behind long) <span class="warn">!</span></td></tr>
+<tr><td>SJF</td><td>no</td><td>optimal avg wait; needs burst prediction; starves long jobs</td></tr>
+<tr><td>SRTF</td><td>yes</td><td>preemptive SJF</td></tr>
+<tr><td>Round-Robin</td><td>yes</td><td>quantum; fair &amp; responsive; optimises response time</td></tr>
+<tr><td>Priority</td><td>either</td><td>starvation → <b>aging</b> (raise priority while waiting)</td></tr>
+<tr><td>MLFQ</td><td>yes</td><td>demote on CPU use, promote on wait; approximates SJF, favours interactive</td></tr>
+</tbody></table>
+<ul>
+<li><b>Schedulers</b>: long-term (admission, degree of multiprogramming) · short-term (picks next, runs every ms) · medium-term (swap out). <b>Dispatcher</b> = does the switch; its cost = dispatch latency.</li>
+<li>Quantum too big → degrades to FCFS; too small → context-switch overhead dominates <span class="warn">!</span></li>
+<li>Real Linux: <b>CFS</b> (vruntime + RB-tree, pick smallest vruntime), now <b>EEVDF</b>. nice −20 (high) … +19 (low) <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Scheduling — metrics &amp; formulas</h3>
+<table><thead><tr><th>Metric</th><th>Definition</th></tr></thead><tbody>
+<tr><td>turnaround</td><td>completion − arrival (total in system)</td></tr>
+<tr><td>waiting</td><td>turnaround − service (time in ready queue)</td></tr>
+<tr><td>response</td><td>first-run − arrival (latency to first CPU)</td></tr>
+<tr><td>throughput</td><td>jobs completed / time</td></tr>
+<tr><td>utilisation</td><td>fraction of time CPU is busy</td></tr>
+</tbody></table>
+<pre><code>Gantt: procs P1(24) P2(3) P3(3), FCFS order
+ P1[0-24] P2[24-27] P3[27-30]
+ wait = (0 + 24 + 27)/3 = 17
+ SJF order P2,P3,P1: wait=(0+3+6)/3 = 3  ← convoy fixed</code></pre>
+<ul>
+<li><b>Waiting ≠ response</b> <span class="warn">!</span> RR optimises response, not average waiting.</li>
+<li>Favour <b>I/O-bound</b> jobs → overlaps their I/O with others' compute → higher throughput. That's the whole win of preemptive scheduling.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Synchronization — the core</h3>
+<ul>
+<li><b>Race condition</b>: concurrent access, ≥1 write, no ordering. <code>count++</code> = load/inc/store → interleave → <b>lost update</b> <span class="warn">!</span></li>
+<li><b>Critical-section</b> requirements: <b>mutual exclusion + progress + bounded waiting</b>.</li>
+</ul>
+<h4>Primitives</h4>
+<table><thead><tr><th>Type</th><th>Semantics</th></tr></thead><tbody>
+<tr><td><b>mutex</b></td><td>lock with <b>ownership</b>; only the locker unlocks</td></tr>
+<tr><td><b>semaphore</b></td><td>counter, <b>no owner</b>; <code>wait/P</code> (−1, block if 0), <code>signal/V</code> (+1). binary≈mutex, counting=N permits</td></tr>
+<tr><td><b>monitor / condvar</b></td><td>lock + <code>wait/signal</code>; <b>re-check the predicate in a while loop</b> <span class="warn">!</span> (spurious wakeups)</td></tr>
+<tr><td><b>spinlock</b></td><td>busy-wait; only for very short sections on multicore (no blocking)</td></tr>
+</tbody></table>
+<ul>
+<li>Built on hardware atomics: <b>test-and-set</b>, <b>compare-and-swap (CAS)</b>, fetch-and-add. Lock-free = CAS-retry loops.</li>
+<li>Disabling interrupts gives mutual exclusion on a <b>uniprocessor only</b> — useless on multicore <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Classic Sync Problems</h3>
+<pre><code>// Producer-consumer (bounded buffer)
+sem empty = N, full = 0; mutex mtx
+producer: wait(empty); lock(mtx); put(); unlock(mtx); signal(full)
+consumer: wait(full);  lock(mtx); take();unlock(mtx); signal(empty)</code></pre>
+<ul>
+<li>Order matters: take the <b>counting sem before the mutex</b>, else deadlock <span class="warn">!</span></li>
+<li><b>Readers-writers</b>: many readers OR one writer. Reader-priority starves writers; writer-priority starves readers → fair variant.</li>
+<li><b>Dining philosophers</b>: 5 forks, each grabs left then right → all hold one → <b>circular-wait deadlock</b>. Fixes: global fork ordering (one grabs right-first), limit to 4 seated, or waiter/arbitrator.</li>
 </ul>
 </section>
 
@@ -125,128 +196,243 @@ pre code{background:none; padding:0; font-size:1em;}
 <li>&#9744; mutual exclusion · hold-and-wait · no preemption · <b>circular wait</b>.</li>
 </ul>
 <table><thead><tr><th>Strategy</th><th>How</th></tr></thead><tbody>
-<tr><td>prevention</td><td>break one condition (e.g. lock ordering kills circular wait)</td></tr>
-<tr><td>avoidance</td><td>safe states — <b>Banker's algorithm</b></td></tr>
-<tr><td>detection+recovery</td><td>wait-for graph → kill/rollback</td></tr>
-<tr><td>ostrich</td><td>ignore (most OSes)</td></tr>
+<tr><td>prevention</td><td>break one condition (e.g. <b>global lock ordering</b> kills circular wait; request-all-at-once kills hold-and-wait)</td></tr>
+<tr><td>avoidance</td><td>only enter <b>safe states</b> — <b>Banker's algorithm</b> (needs max-claim up front)</td></tr>
+<tr><td>detection+recovery</td><td><b>wait-for graph</b>, find a cycle → kill / rollback / preempt a victim</td></tr>
+<tr><td>ostrich</td><td>ignore — what Linux/Windows do; rare, reboot</td></tr>
 </tbody></table>
-<p>Two threads lock A,B vs B,A → deadlock; fix = <b>global lock ordering</b> <span class="warn">!</span> Livelock/starvation ≠ deadlock.</p>
-</section>
-
-<section class="card"><h3>IPC</h3>
-<table><thead><tr><th>Mechanism</th><th>Use</th></tr></thead><tbody>
-<tr><td>pipe / FIFO</td><td>byte stream (related / named)</td></tr>
-<tr><td>message queue</td><td>discrete messages via kernel</td></tr>
-<tr><td><b>shared memory</b></td><td>fastest; needs a semaphore to sync <span class="warn">!</span></td></tr>
-<tr><td>socket</td><td>bidirectional; works across machines</td></tr>
-<tr><td>signal</td><td>async notify (SIGTERM/KILL/SEGV)</td></tr>
-</tbody></table>
-<p>Shared memory (fast, DIY sync) vs message passing (safe, copy cost). Threads share memory → no IPC needed.</p>
-</section>
-
-<section class="card diagram"><h3>Virtual Memory &amp; Paging</h3>
-<div class="mermaid">
-flowchart LR
-  VA["virtual addr = page# | offset"] --> TLB{"TLB hit?"}
-  TLB -->|hit| PA["frame | offset"]
-  TLB -->|miss| PT["page table walk"]
-  PT -->|present| PA
-  PT -->|not present| PF["page fault → load from disk"]
-</div>
 <ul>
-<li>Fixed <b>pages</b>↔<b>frames</b>; per-process <b>page table</b> (multi-level); <b>TLB</b> caches translations (flushed on context switch <span class="warn">!</span>).</li>
-<li><b>Demand paging</b>; page fault = trap → find on disk → evict a frame → load → restart the instruction. Major fault = disk I/O = slow.</li>
-<li><b>COW</b> makes fork cheap. Internal frag on the last page; no external frag (unlike segmentation).</li>
+<li>Two threads lock A,B vs B,A → deadlock; fix = <b>one global lock order</b> <span class="warn">!</span></li>
+<li><b>Livelock</b> (busy but no progress) &amp; <b>starvation</b> (never scheduled) &amp; <b>priority inversion</b> (low holds lock a high needs → <b>priority inheritance</b>) ≠ deadlock.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Page Replacement &amp; Thrashing</h3>
-<table><thead><tr><th>Algo</th><th>Note</th></tr></thead><tbody>
-<tr><td>OPT</td><td>evict farthest-future use (ideal, unimplementable)</td></tr>
-<tr><td>FIFO</td><td>simple; <b>Belady's anomaly</b> <span class="warn">!</span></td></tr>
-<tr><td>LRU</td><td>evict least-recently-used (good, costly)</td></tr>
-<tr><td>Clock/2nd-chance</td><td>reference bit — cheap LRU approx</td></tr>
+<section class="card"><h3>Inter-Process Communication</h3>
+<table><thead><tr><th>Mechanism</th><th>Use</th></tr></thead><tbody>
+<tr><td>pipe / FIFO</td><td>byte stream, one-way (anon = related procs; named = FIFO)</td></tr>
+<tr><td>message queue</td><td>discrete messages via kernel; decoupled</td></tr>
+<tr><td><b>shared memory</b></td><td><b>fastest</b> (no copy); needs a semaphore to sync <span class="warn">!</span></td></tr>
+<tr><td>socket</td><td>bidirectional; works across machines</td></tr>
+<tr><td>signal</td><td>async notify (SIGTERM/KILL/SEGV); tiny, no payload</td></tr>
+<tr><td>eventfd / futex</td><td>lightweight kernel wait/wake</td></tr>
 </tbody></table>
 <ul>
-<li><b>Thrashing</b>: too few frames for the <b>working set</b> → constant paging, CPU util collapses → reduce multiprogramming / add RAM <span class="warn">!</span></li>
-<li>Locality of reference is why paging works.</li>
+<li><b>Shared memory</b> (fast, DIY sync) vs <b>message passing</b> (safe, copy cost, no shared-state bugs).</li>
+<li>Threads share memory already → no IPC needed; the copy vs sync tradeoff is why threads are cheap and processes are safe.</li>
 </ul>
 </section>
 
 <section class="card"><h3>Memory Management</h3>
 <ul>
-<li>Logical (virtual) → physical via the <b>MMU</b>. Base/limit for relocation + protection.</li>
-<li><b>External frag</b> (free memory scattered — segmentation/contiguous) vs <b>internal frag</b> (slack inside a block — fixed partitions/pages).</li>
-<li>Fit: first / best / worst. <b>Segmentation</b> = variable logical segments (ext frag) vs <b>paging</b> = fixed (no ext frag).</li>
-<li>Allocators: free lists, buddy, slab. Bugs: leak, double-free, dangling.</li>
+<li>Logical (virtual) → physical via the <b>MMU</b>. Base/limit registers give relocation + protection.</li>
+<li><b>External frag</b> = free memory scattered in unusable holes (contiguous / segmentation) — needs compaction. <b>Internal frag</b> = slack inside a fixed block (paging, last page) <span class="warn">!</span></li>
+<li>Contiguous fit: first / best / worst. First-fit fast, best-fit leaves tiny holes.</li>
+<li><b>Segmentation</b> = variable-size logical segments (code/data/stack), external frag. <b>Paging</b> = fixed size, no external frag → won.</li>
+<li>Allocators: free lists, <b>buddy</b> (power-of-2, kernel pages), <b>slab</b> (fixed objects, caches). Bugs: leak, double-free, use-after-free / dangling.</li>
+</ul>
+</section>
+
+<section class="card diagram"><h3>Virtual Memory &amp; Address Translation</h3>
+<div class="mermaid">
+flowchart LR
+  VA["virtual addr<br/>page# | offset"] --> TLB{"TLB hit?"}
+  TLB -->|hit ~99%| PA["frame | offset"]
+  TLB -->|miss| PT["page-table walk<br/>(4 levels x86-64)"]
+  PT -->|present| PA
+  PT -->|valid=0| PF["page fault → kernel"]
+</div>
+<ul>
+<li>VA = <b>page number</b> (indexes table) + <b>offset</b> (passes through unchanged). 4KB page → 12-bit offset.</li>
+<li>Per-process <b>page table</b>; PTE = frame# + <b>valid</b> · R/W/X · <b>dirty</b> · <b>referenced</b>. Context switch reloads CR3.</li>
+<li><b>Multi-level</b> table: paging the page table → allocate only used regions (a flat 48-bit table = 512 GB/proc) <span class="warn">!</span></li>
+<li><b>TLB</b> caches translations (not data). Flushed on context switch → cold TLB stall, unless <b>ASID/PCID</b> tags entries <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Demand Paging &amp; Page Fault Path</h3>
+<pre><code>access page, valid bit = 0 → TRAP
+1. legal addr (in a VMA, perms ok)?
+     no  → SIGSEGV (segfault). done.
+     yes → not resident, continue
+2. locate backing store (swap / file / zero-fill)
+3. free frame? none → replace a victim
+     (dirty victim → write back first)
+4. schedule disk read; process BLOCKS
+5. I/O done → set PTE valid=1, install TLB
+6. RESTART the faulting instruction</code></pre>
+<ul>
+<li><b>Minor (soft) fault</b> = page already in RAM (page cache, COW, zero-fill) → just fix the PTE. µs.</li>
+<li><b>Major (hard) fault</b> = read from disk/swap → ms; blocks. Soaring majflt = thrashing <span class="warn">!</span></li>
+<li>Segfault is not a separate event — it's the fault handler deciding the access was <b>illegal</b>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>EAT &amp; Copy-on-Write</h3>
+<h4>Effective Access Time</h4>
+<pre><code>EAT = (1−p)·ma + p·pf     p = fault probability
+ma=100ns, pf=8ms(8,000,000ns):
+ p=0        → 100 ns
+ p=0.001    → 8,100 ns   (81× slower!)
+ p=1e-7     → 100.8 ns   (&lt;1% hit)</code></pre>
+<ul>
+<li>Disk fault ≈ <b>100,000–1,000,000× slower</b> than RAM → a 1-in-1000 fault rate is already 80× slowdown. Whole design = keep <code>p</code> microscopic via locality <span class="warn">!</span></li>
+</ul>
+<h4>Copy-on-write (why fork is cheap)</h4>
+<ul>
+<li>fork → parent &amp; child <b>share frames read-only</b>. First <b>write</b> → protection fault → kernel copies just that page, marks it writable. If child <code>exec()</code>s immediately, almost nothing is copied.</li>
+<li>Same trick = shared libraries (one physical libc mapped into every process).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Page Replacement</h3>
+<table><thead><tr><th>Algo</th><th>Note</th></tr></thead><tbody>
+<tr><td>OPT / MIN</td><td>evict farthest-future use; minimal faults, <b>unimplementable</b> — the benchmark</td></tr>
+<tr><td>FIFO</td><td>evict oldest-loaded; ignores usage; <b>Belady's anomaly</b> <span class="warn">!</span></td></tr>
+<tr><td>LRU</td><td>evict least-recently-used; strong OPT approx; true LRU needs per-access bookkeeping (costly)</td></tr>
+<tr><td>Clock / 2nd-chance</td><td>circular scan of <b>reference bits</b>; set bit → clear &amp; skip (second chance). Cheap LRU approx — what real kernels ship</td></tr>
+<tr><td>LFU/MFU</td><td>frequency-based; rarely used alone</td></tr>
+</tbody></table>
+<ul>
+<li><b>Belady's anomaly</b>: for FIFO, adding frames can <b>increase</b> faults. Impossible for <b>stack algorithms</b> (LRU/OPT — more frames ⊇ fewer's resident set) <span class="warn">!</span></li>
+<li>Dirty victim = write-back cost; clean victim = drop free. Global (steal any) vs local (only own frames) replacement.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Working Set &amp; Thrashing</h3>
+<ul>
+<li><b>Working set</b> W(t,Δ) = pages referenced in the last Δ accesses. Sum of all WS ≤ frames → low faults; exceed it → <b>thrashing</b>.</li>
+<li><b>Thrashing</b>: too little RAM for the active working sets → every fault steals a frame another process needed → all disk, no compute; <b>CPU utilisation collapses</b> <span class="warn">!</span></li>
+</ul>
+<h4>"Added workers, box got slower, CPU dropped to 5%"</h4>
+<ul>
+<li>= thrashing. Wrong fix: add workers (worse). <b>Right fix: reduce multiprogramming / add RAM / kill a hog.</b></li>
+<li><b>Page-fault-frequency (PFF)</b> control: fault rate too high → give the process more frames; too low → take some away. Admission control suspends processes when overcommitted.</li>
+<li>Locality of reference is why paging (and this whole topic) works at all.</li>
 </ul>
 </section>
 
 <section class="card"><h3>File Systems</h3>
 <ul>
-<li><b>Inode</b> = file metadata + block pointers (the NAME lives in the directory entry, not the inode).</li>
-<li><b>Hard link</b> = another name for the same inode; <b>soft link</b> = a file holding a path (can dangle) <span class="warn">!</span></li>
-<li>Allocation: contiguous (frag) · linked/FAT (bad random access) · <b>indexed</b> (inode direct + single/double/triple indirect → huge files).</li>
-<li><b>Journaling</b> = write-ahead log for crash consistency (ext4/NTFS); vs COW FS (ZFS/btrfs). <b>VFS</b> unifies filesystems.</li>
+<li><b>Inode</b> = file metadata (size, perms, timestamps, owner) + block pointers. The <b>name lives in the directory entry</b>, not the inode <span class="warn">!</span></li>
+<li><b>Hard link</b> = another dir entry → same inode (ref-counted; file gone when count=0). <b>Soft/symlink</b> = a file holding a path — can <b>dangle</b> <span class="warn">!</span></li>
+</ul>
+<table><thead><tr><th>Allocation</th><th>Tradeoff</th></tr></thead><tbody>
+<tr><td>contiguous</td><td>fast seq/random read; external frag, hard to grow</td></tr>
+<tr><td>linked / FAT</td><td>no frag; <b>bad random access</b> (chase pointers)</td></tr>
+<tr><td><b>indexed (inode)</b></td><td>direct + single/double/triple <b>indirect</b> blocks → scales to huge files</td></tr>
+</tbody></table>
+<ul>
+<li><b>Journaling</b> = write-ahead log → crash consistency (ext4, NTFS). vs <b>copy-on-write FS</b> (ZFS, btrfs). <b>VFS</b> = common layer over many filesystems.</li>
+<li><code>fsync</code> forces durability; the page cache buffers writes → data loss window on crash <span class="warn">!</span></li>
 </ul>
 </section>
 
-<section class="card"><h3>Storage &amp; I/O</h3>
+<section class="card"><h3>Storage &amp; Disk I/O</h3>
 <ul>
-<li><b>HDD</b>: seek + rotational latency → slow random. <b>SSD</b>: uniform low latency, erase-before-write, wear/TRIM.</li>
-<li>Disk scheduling: FCFS / SSTF / <b>SCAN(elevator)</b> / C-SCAN (matters on HDD, not SSD).</li>
-<li><b>RAID</b>: 0 stripe · 1 mirror · 5 parity(1 fail) · 6 (2 fail) · 10 mirror+stripe.</li>
-<li>I/O: polling vs <b>interrupts</b> vs <b>DMA</b> (bulk, no CPU). Page/buffer cache; blocking vs async vs epoll (C10K).</li>
+<li><b>HDD</b>: seek (~ms) + rotational latency → <b>slow random</b> access; sequential ~fast. <b>SSD</b>: uniform low latency (µs), no seek, but <b>erase-before-write</b>, wear-levelling, TRIM.</li>
+</ul>
+<table><thead><tr><th>Disk sched</th><th>Note</th></tr></thead><tbody>
+<tr><td>FCFS</td><td>fair; lots of seeking</td></tr>
+<tr><td>SSTF</td><td>shortest seek first; can starve edges</td></tr>
+<tr><td><b>SCAN</b> (elevator)</td><td>sweep in/out; bounded</td></tr>
+<tr><td>C-SCAN</td><td>one direction + reset; uniform wait</td></tr>
+</tbody></table>
+<ul>
+<li>Disk scheduling matters on <b>HDD, not SSD</b> (no seek cost) <span class="warn">!</span></li>
+<li><b>RAID</b>: 0 stripe (speed, no redundancy) · 1 mirror · 5 parity (1-disk fail) · 6 (2-disk) · 10 mirror+stripe.</li>
+</ul>
+</section>
+
+<section class="card"><h3>I/O Systems &amp; Devices</h3>
+<table><thead><tr><th>Method</th><th>Note</th></tr></thead><tbody>
+<tr><td>polling / PIO</td><td>CPU busy-waits on status reg; simple, wastes CPU</td></tr>
+<tr><td><b>interrupt</b></td><td>device signals when ready; CPU does other work meanwhile</td></tr>
+<tr><td><b>DMA</b></td><td>controller moves bulk data RAM↔device with <b>no CPU</b>; interrupt on completion</td></tr>
+</tbody></table>
+<ul>
+<li>I/O models: <b>blocking</b> (thread sleeps) · <b>non-blocking</b> (returns EWOULDBLOCK) · <b>async</b> · <b>multiplexed</b> (<code>select</code>/<code>poll</code>/<b>epoll</b>/kqueue → the <b>C10K</b> answer) <span class="warn">!</span></li>
+<li>Buffer/page cache absorbs I/O; <b>readahead</b> prefetches sequential blocks (spatial locality bet).</li>
+<li>Device stack: syscall → VFS/block layer → driver → controller → hardware.</li>
 </ul>
 </section>
 
 <section class="card"><h3>Interrupts, Traps &amp; Syscalls</h3>
+<table><thead><tr><th>Event</th><th>Kind</th></tr></thead><tbody>
+<tr><td><b>interrupt</b></td><td>async — external device (timer, NIC, disk)</td></tr>
+<tr><td><b>trap / syscall</b></td><td>sync — deliberate (<code>syscall</code> instr)</td></tr>
+<tr><td><b>fault</b></td><td>sync — recoverable (page fault → restart instr)</td></tr>
+<tr><td><b>abort</b></td><td>sync — unrecoverable (double fault)</td></tr>
+</tbody></table>
 <ul>
-<li><b>Interrupt</b> = async (external device). <b>Trap/exception</b> = sync (caused by the instruction): syscall, <b>fault</b> (page fault — restart), abort.</li>
-<li>Handling: save state → kernel mode → <b>vector table</b> → ISR → restore → iret.</li>
-<li><b>System call</b>: put number+args in registers → trap (<code>syscall</code>) → kernel validates &amp; dispatches → result in a register → return. Never trust user pointers <span class="warn">!</span></li>
-<li>The <b>timer interrupt</b> enables preemptive scheduling. Syscalls are costly (mode switch + cache/TLB).</li>
+<li>Handling: save state → switch to <b>kernel mode</b> → <b>interrupt vector table</b> → ISR → restore → <code>iret</code>.</li>
+<li><b>Syscall</b>: put number + args in registers → <code>syscall</code> traps → kernel validates &amp; dispatches → result in a register → return. <b>Never trust user pointers</b> (TOCTOU, copy_from_user) <span class="warn">!</span></li>
+<li>The <b>timer interrupt</b> is what makes preemptive scheduling possible. Syscalls are costly: mode switch + cache/TLB pollution.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Kernel · Protection · Security</h3>
+<section class="card"><h3>Kernel · Protection · Virtualization</h3>
 <ul>
-<li><b>Dual mode</b>: Ring 0 kernel vs Ring 3 user; privileged instructions kernel-only. Per-process page tables → isolation.</li>
-<li><b>Monolithic</b> (Linux — fast, big TCB) vs <b>microkernel</b> (services in user space — robust, IPC cost) vs hybrid (NT, XNU).</li>
-<li>Least privilege; DAC vs MAC (SELinux) vs RBAC. A user crash is isolated; a kernel bug is total.</li>
-<li>Exploit defenses: <b>ASLR</b> (randomize addresses) + <b>DEP/NX</b> (no-exec data) + <b>stack canaries</b> vs buffer overflows; seccomp/sandboxing; Spectre/Meltdown = speculative side channels <span class="warn">!</span></li>
+<li><b>Dual mode</b>: Ring 0 kernel vs Ring 3 user; privileged instructions (I/O, page-table load, halt) are kernel-only. Per-process page tables → isolation.</li>
+<li><b>Monolithic</b> (Linux — fast, big TCB, driver bug = crash) vs <b>microkernel</b> (drivers/FS in user space — robust, but IPC cost) vs <b>hybrid</b> (Windows NT, macOS XNU).</li>
+<li><b>VM</b> (hypervisor, own guest kernel — strong isolation, heavy) vs <b>container</b> (shares host kernel — light, weaker isolation). Containers = <b>namespaces</b> (isolate view: PID/net/mount) + <b>cgroups</b> (limit CPU/mem) <span class="warn">!</span></li>
+<li><b>Boot</b>: firmware (BIOS/UEFI) → POST → bootloader (GRUB) → kernel + initramfs → mount root → <b>init / PID 1</b> (systemd).</li>
 </ul>
 </section>
 
-<section class="card"><h3>Virtualization · Boot · Perf</h3>
+<section class="card"><h3>OS Security &amp; Perf</h3>
 <ul>
-<li><b>VM</b> (hypervisor, own kernel — strong isolation, heavy) vs <b>container</b> (shares host kernel — light, weaker isolation). Containers = <b>namespaces</b> (isolate view) + <b>cgroups</b> (limit resources) <span class="warn">!</span></li>
-<li><b>Boot</b>: firmware (BIOS/UEFI) → POST → bootloader (GRUB) → kernel + initramfs → mount root → <b>init/PID 1</b> (systemd).</li>
-<li><b>Perf latency:</b> cache ns · RAM ~100ns · SSD µs · HDD seek ~ms. Context switch (regs + TLB flush + cold cache) &amp; major page faults are the costs.</li>
-<li>Load avg counts R + D (uninterruptible) tasks → high load + idle CPU = I/O wait <span class="warn">!</span> USE method to find bottlenecks; /proc, perf, eBPF.</li>
+<li>Least privilege; <b>DAC</b> (owner sets perms) vs <b>MAC</b> (policy, SELinux) vs <b>RBAC</b>. A user crash is contained; a kernel bug is total.</li>
+<li>Exploit defences vs buffer overflow: <b>ASLR</b> (randomise addresses) + <b>DEP/NX</b> (no-exec data pages) + <b>stack canaries</b>. Sandboxing: seccomp, capabilities.</li>
+<li><b>Spectre/Meltdown</b> = speculative-execution side channels leaking across the privilege boundary; mitigations (KPTI) force TLB flushes → cost <span class="warn">!</span></li>
+</ul>
+<h4>Latency numbers you must know</h4>
+<pre><code>L1        ~1 ns
+RAM       ~100 ns
+SSD read  ~100 µs   (100,000 ns)
+HDD seek  ~10 ms    (10,000,000 ns)</code></pre>
+<ul>
+<li>Load avg counts R + <b>D (uninterruptible)</b> tasks → high load + idle CPU = <b>I/O wait</b> <span class="warn">!</span> USE method (Utilisation/Saturation/Errors); tools: /proc, perf, eBPF.</li>
 </ul>
 </section>
 
 <section class="card"><h3>&#9733; "What happens when you run a program"</h3>
 <ul>
-<li>1. Shell <code>fork()</code>s a child, then <code>exec()</code>s the binary.</li>
-<li>2. Loader maps the ELF/PE into a fresh <b>address space</b> (text/data/heap/stack); the dynamic linker resolves shared libs.</li>
-<li>3. Jump to <code>_start</code>→<code>main</code>; pages fault in on demand (<b>demand paging</b>).</li>
-<li>4. The scheduler time-slices it onto a CPU (context switches); <b>syscalls</b> (traps) do I/O.</li>
-<li>5. On exit, the parent <code>wait()</code>s &amp; reaps it (else it's a zombie).</li>
+<li>1. Shell <code>fork()</code>s a child, then <code>exec()</code>s the binary (same PID).</li>
+<li>2. Loader maps the ELF/PE into a fresh <b>address space</b> (text/data/heap/stack, all demand-paged); the dynamic linker maps shared libs (COW-shared frames).</li>
+<li>3. Jump to <code>_start</code> → <code>main</code>; each first page touch <b>faults in</b> (demand paging).</li>
+<li>4. The scheduler time-slices it onto a CPU; the <b>timer interrupt</b> preempts; <b>syscalls</b> (traps) do I/O and block it.</li>
+<li>5. Page not resident → <b>page fault</b> → TLB/page-table → disk. Contended lock → sleep on a futex.</li>
+<li>6. On <code>exit()</code>, parent <code>wait()</code>s &amp; reaps it (else zombie); kernel frees frames &amp; FDs.</li>
 </ul>
+</section>
+
+<section class="card"><h3>Common Bugs — Symptom → Cause</h3>
+<table><thead><tr><th>Symptom</th><th>Cause</th></tr></thead><tbody>
+<tr><td>counter off under load</td><td>race on <code>x++</code>, no lock/atomic <span class="warn">!</span></td></tr>
+<tr><td>hang, both threads stuck</td><td>lock-order deadlock (A,B vs B,A) <span class="warn">!</span></td></tr>
+<tr><td>box slow, CPU ~5%</td><td>thrashing — WS &gt; RAM; reduce procs / add RAM <span class="warn">!</span></td></tr>
+<tr><td>high load avg, idle CPU</td><td>I/O wait (D-state tasks) <span class="warn">!</span></td></tr>
+<tr><td>adding threads = slower</td><td>context switches / contention / false sharing / I/O-bound / GIL <span class="warn">!</span></td></tr>
+<tr><td>PID slot leaks</td><td>zombie — parent never <code>wait()</code>ed <span class="warn">!</span></td></tr>
+<tr><td>segfault, sometimes not</td><td>dangling/wild ptr — segv only if outside any VMA <span class="warn">!</span></td></tr>
+<tr><td>condvar wakes, wrong state</td><td><code>if</code> instead of <code>while</code> on predicate <span class="warn">!</span></td></tr>
+<tr><td>more frames, more faults</td><td>Belady's anomaly (FIFO) <span class="warn">!</span></td></tr>
+</tbody></table>
 </section>
 
 <section class="card"><h3>&#9744; Interview Reasoning Checklist</h3>
 <ul>
-<li>&#9744; Process vs thread: what's shared (address space) vs private (stack/regs)?</li>
-<li>&#9744; Concurrency bug? Find the shared state + missing ordering → mutex/CAS/monitor.</li>
-<li>&#9744; Deadlock? Check the 4 conditions; break circular wait via lock ordering.</li>
-<li>&#9744; Memory question? Distinguish virtual vs physical, paging vs segmentation, int vs ext frag.</li>
-<li>&#9744; "Slow"? CPU vs memory vs I/O vs lock-bound (USE); high load+idle CPU = iowait.</li>
-<li>&#9744; "Adding threads slower"? Context switches / contention / false sharing / GIL / I/O-bound.</li>
-<li>&#9744; VM vs container: separate kernel (strong) vs shared kernel (light).</li>
-<li>&#9744; Use real latency numbers; trace the interleaving for spot-the-bug.</li>
+<li>&#9744; Process vs thread: name what's <b>shared</b> (address space, heap, FDs) vs <b>private</b> (stack, regs, PC).</li>
+<li>&#9744; Concurrency bug? Find the <b>shared state + missing ordering</b> → mutex / atomic / monitor (while-loop the predicate).</li>
+<li>&#9744; Deadlock? Check the <b>4 Coffman conditions</b>; break circular wait via <b>global lock ordering</b>.</li>
+<li>&#9744; Scheduling: state preemptive vs not, the metric optimised, and quantum tradeoff; can you do the Gantt arithmetic?</li>
+<li>&#9744; Memory: distinguish <b>virtual vs physical</b>, <b>paging vs segmentation</b>, <b>internal vs external</b> frag.</li>
+<li>&#9744; Translation: split addr → TLB → page-table walk → present bit → fault → disk → <b>restart instruction</b>.</li>
+<li>&#9744; Page fault: legality check first (segv vs demand-page), evict victim (write back if dirty), restart.</li>
+<li>&#9744; Replacement: OPT/LRU/Clock; explain Belady; compute EAT with a fault rate.</li>
+<li>&#9744; "Slow"? CPU vs memory vs I/O vs lock-bound (USE); high load + idle CPU = iowait; low CPU + heavy paging = thrashing.</li>
+<li>&#9744; VM vs container: separate kernel (strong) vs shared kernel + namespaces/cgroups (light).</li>
+<li>&#9744; Use real <b>latency numbers</b> (RAM 100ns, SSD 100µs, HDD 10ms); trace the interleaving for spot-the-bug.</li>
 </ul>
 </section>
 
