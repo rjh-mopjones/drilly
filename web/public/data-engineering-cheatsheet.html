@@ -6,7 +6,11 @@
 <title>Data Engineering Cheat Sheet</title>
 <style>
 :root{
-  --fs: 7.2pt; --fs-mono: 6.6pt; --fs-h3: 7.8pt; --gap: 5px; --pad: 3px;
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
   --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
 }
 *{box-sizing:border-box;}
@@ -14,10 +18,12 @@ html,body{margin:0;padding:0;}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
   font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
 .sheet{background:#fff;}
+/* spanning title bar */
 .titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
   margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
 .titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
 .titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
 .sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
   column-fill:balance; padding:5px;}
 .card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
@@ -25,6 +31,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Ar
   overflow:hidden;}
 .card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
   background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
 .card:nth-of-type(8n+1) h3{background:#34495e;}
 .card:nth-of-type(8n+2) h3{background:#2c6e9b;}
 .card:nth-of-type(8n+3) h3{background:#1f7a5a;}
@@ -58,175 +65,380 @@ pre code{background:none; padding:0; font-size:1em;}
 @page{ size:A4; margin:5mm; }
 @media print{
   body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
   .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
 }
 </style>
 </head>
 <body>
 <div class="sheet">
-<div class="titlebar"><h1>Data Engineering Cheat Sheet</h1><span class="meta">Kafka · Spark · streaming · warehousing · lakehouse · pipelines · drilly</span></div>
+<div class="titlebar"><h1>Data Engineering Cheat Sheet</h1><span class="meta">batch + streaming · warehouse/lake · generic examples · drilly</span></div>
 <section class="card legend"><h3>How to read &amp; print</h3>
 <ul>
-<li><span class="warn">!</span> footgun / classic trap &nbsp; <code>&#9744;</code> reasoning step</li>
-<li>Threads: <b>idempotency + exactly-once</b>, <b>event vs processing time</b>, <b>the shuffle is the cost</b>, <b>columnar + pushdown = cheap</b>.</li>
-<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+<li><span class="warn">!</span> footgun / gotcha &nbsp; <code>&#9744;</code> review checklist item &nbsp; <span class="pg">API</span> config knob &nbsp; <span class="ansi">SQL</span> query pattern</li>
+<li>Scope: analytics data engineering — <b>Spark · Kafka · warehouse/lakehouse · orchestration · CDC · quality</b>. Vendor-neutral; product names (Snowflake, Iceberg, Airflow, Debezium) are examples, not requirements.</li>
+<li>Recurring theme: <b>reduce bytes scanned = reduce cost + time</b>; <b>idempotency</b> is the load-bearing property of every batch/stream job — it <i>will</i> run more than once.</li>
+<li>Last 2 cards = <b>Symptom → Cause</b> table + <b>design review checklist</b>.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
 </ul></section>
 
-<section class="card diagram"><h3>The Data Pipeline</h3>
-<div class="mermaid">
-flowchart LR
-  S["Sources (apps/DBs)"] --> I["Ingest (CDC / Kafka)"]
-  I --> L["Lake / raw (Parquet)"]
-  L --> P["Process (Spark/Flink/dbt)"]
-  P --> W["Warehouse / OLAP"]
-  W --> B["BI / serving"]
-</div>
-<p><b>ETL</b> = transform before load; <b>ELT</b> = load raw, transform in-warehouse (cloud default). Bronze→silver→gold.</p>
-</section>
-
-<section class="card"><h3>OLTP vs OLAP</h3>
+<section class="card"><h3>Fundamentals &amp; Modern Stack</h3>
 <table><thead><tr><th></th><th>OLTP</th><th>OLAP</th></tr></thead><tbody>
-<tr><td>use</td><td>app transactions</td><td>analytics</td></tr>
-<tr><td>store</td><td>row</td><td><b>columnar</b></td></tr>
-<tr><td>writes</td><td>many small</td><td>bulk load</td></tr>
-<tr><td>reads</td><td>few rows by key</td><td>scan/aggregate</td></tr>
+<tr><td>Pattern</td><td>many small txns, point read/write</td><td>few huge scans, aggregate</td></tr>
+<tr><td>Storage</td><td>row-oriented, normalized</td><td>columnar, denormalized</td></tr>
+<tr><td>Ex.</td><td>Postgres, MySQL</td><td>Snowflake, BigQuery, Spark</td></tr>
 </tbody></table>
-</section>
-
-<section class="card"><h3>Dimensional Model</h3>
+<p><span class="warn">!</span> Never run analytics on the prod OLTP DB — table scans lock rows, blow the buffer cache, and starve user traffic. Copy to an OLAP system instead.</p>
+<h4>ETL vs ELT</h4>
 <ul>
-<li><b>Star</b>: one fact + denormalized dimensions (fast, simple). <b>Snowflake</b>: normalized dims (less dup, more joins).</li>
-<li><b>Fact</b> = measures at a <b>grain</b>; <b>dimension</b> = descriptive context.</li>
-<li><b>SCD2</b>: keep history via <code>valid_from/valid_to</code> + <code>is_current</code> (new row per change). SCD1 = overwrite. <span class="warn">!</span></li>
+<li><b>ETL</b>: transform <i>before</i> load (legacy, fixed schema, external compute).</li>
+<li><b>ELT</b>: load raw, transform <i>in</i> the warehouse (SQL/dbt). Won because cloud-warehouse compute is cheap + elastic, raw data is kept for replay, and transforms are versioned SQL. <b>Default to ELT.</b></li>
 </ul>
+<h4>Pipeline stages</h4>
+<p>ingest → store (raw/bronze) → transform (silver/gold) → serve (BI/ML/reverse-ETL). <b>Reverse ETL</b> = push warehouse data back into SaaS tools (CRM, ads).</p>
 </section>
 
-<section class="card"><h3>Spark Model</h3>
-<ul>
-<li><b>Driver</b> plans the DAG; <b>executors</b> run tasks on partitions.</li>
-<li><b>Lazy</b>: transformations build the DAG; an <b>action</b> triggers it.</li>
-<li><b>Narrow</b> (map/filter) = no shuffle; <b>wide</b> (join/groupBy) = <b>shuffle</b> <span class="warn">!</span></li>
-<li>DataFrame &gt; RDD (Catalyst optimizes it).</li>
-</ul>
-</section>
-
-<section class="card"><h3>Spark Optimization</h3>
-<ul>
-<li><b>Shuffle</b> = network + disk + serialize → minimize wide ops.</li>
-<li><b>Broadcast join</b> a small table to skip the shuffle.</li>
-<li><b>Skew</b>: one hot key → straggler → <b>salt</b> the key / enable AQE skew join.</li>
-<li><b>AQE</b> re-optimizes at runtime; <code>cache()</code> reused DFs; watch <b>spill</b> in the UI. <span class="warn">!</span></li>
-</ul>
-</section>
-
-<section class="card diagram"><h3>Kafka</h3>
-<div class="mermaid">
-flowchart LR
-  P["Producer (key→hash)"] --> T
-  subgraph T["Topic"]
-    p0["part 0 (ordered)"]
-    p1["part 1 (ordered)"]
-  end
-  T --> C["Consumer group (1 consumer / partition)"]
-</div>
-<ul>
-<li>Ordering is <b>per partition</b>, not per topic. <span class="warn">!</span></li>
-<li><b>ISR</b> = in-sync replicas; <code>acks=all</code> + <code>min.insync.replicas</code> = durable.</li>
-<li>Max consumer parallelism = # partitions.</li>
-</ul>
-</section>
-
-<section class="card"><h3>Delivery Semantics</h3>
-<table><thead><tr><th>Guarantee</th><th>How</th></tr></thead><tbody>
-<tr><td>at-most-once</td><td>commit offset before processing (may lose)</td></tr>
-<tr><td>at-least-once</td><td>commit after (may dup) — default</td></tr>
-<tr><td>exactly-once</td><td>idempotent producer + txns, or dedup on key</td></tr>
+<section class="card"><h3>Batch vs Streaming — choosing</h3>
+<table><thead><tr><th></th><th>Batch</th><th>Streaming</th></tr></thead><tbody>
+<tr><td>Latency</td><td>minutes–hours</td><td>ms–seconds</td></tr>
+<tr><td>Model</td><td>bounded, reprocess whole window</td><td>unbounded, per-event/micro-batch</td></tr>
+<tr><td>Cost/ops</td><td>cheap, simple, replayable</td><td>expensive, always-on, harder</td></tr>
 </tbody></table>
-<p><span class="warn">!</span> "Exactly-once" in practice = at-least-once + <b>idempotent/dedup writes</b>.</p>
-</section>
-
-<section class="card"><h3>Stream Processing</h3>
 <ul>
-<li><b>Event time</b> (when it happened) vs <b>processing time</b> (when seen) — use event time. <span class="warn">!</span></li>
-<li><b>Watermark</b>: "no events older than T expected" → closes windows, drops late data.</li>
-<li>Windows: <b>tumbling</b> (fixed, no overlap), <b>sliding</b> (overlap), <b>session</b> (gap-based).</li>
-<li>Exactly-once = source offsets + checkpointed state + idempotent sink.</li>
+<li><b>Default to batch.</b> Reach for streaming only when the <i>business</i> needs sub-minute freshness: fraud, alerting, real-time inventory, live dashboards.</li>
+<li><span class="warn">!</span> "We want it real-time" usually means "faster than daily." Micro-batch every 5–15 min often beats true streaming at a fraction of the complexity.</li>
+<li><b>Lambda</b> (batch + speed layers, reconcile) vs <b>Kappa</b> (one stream path, replay from log). Kappa is simpler; Lambda tolerates a mature batch estate.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Engines: Flink vs …</h3>
-<table><thead><tr><th></th><th>Latency</th><th>Model</th></tr></thead><tbody>
-<tr><td>Flink</td><td>ms</td><td>true streaming, rich state</td></tr>
-<tr><td>Kafka Streams</td><td>ms</td><td>library, no cluster</td></tr>
-<tr><td>Spark SS</td><td>sub-sec+</td><td>micro-batch</td></tr>
-</tbody></table>
-<p>Flink for low-latency stateful streaming; Spark to share batch code.</p>
-</section>
-
-<section class="card"><h3>Warehouse</h3>
+<section class="card"><h3>Dimensional Modeling</h3>
 <ul>
-<li><b>Columnar + MPP</b>: scan only needed columns across many nodes.</li>
-<li><b>Separate storage &amp; compute</b> (Snowflake/BigQuery/Redshift RA3) → scale independently.</li>
-<li>Cost = <b>bytes scanned</b> → partition/cluster + select fewer columns. <span class="warn">!</span></li>
-<li><b>dbt</b> = the T in ELT (SQL models, tests, incremental).</li>
+<li><b>Fact</b> = measurements at a grain (numeric, additive), FKs to dims. <b>Dimension</b> = descriptive context (who/what/where/when), wide + textual.</li>
+<li><b>Grain</b> = what one fact row means (e.g. "one order line"). <b>Declare grain first</b> — every other decision follows <span class="warn">!</span> Mixed grain = wrong sums.</li>
+</ul>
+<table><thead><tr><th></th><th>Star</th><th>Snowflake</th></tr></thead><tbody>
+<tr><td>Dims</td><td>denormalized, flat</td><td>normalized into sub-dims</td></tr>
+<tr><td>Query</td><td>fewer joins, fast, simple</td><td>more joins, less redundancy</td></tr>
+</tbody></table>
+<p><b>Prefer star.</b> Storage is cheap; join simplicity and scan speed matter more. Snowflake only for huge, volatile dims.</p>
+<h4>Fact types</h4>
+<ul>
+<li><b>Transaction</b> — one row per event (most common).</li>
+<li><b>Periodic snapshot</b> — state at intervals (daily balance).</li>
+<li><b>Accumulating snapshot</b> — one row per process, updated as it moves (order → ship → deliver).</li>
+<li><b>Additive / semi-additive / non-additive</b>: sum over all dims / some (balances not over time) / none (ratios) <span class="warn">!</span></li>
 </ul>
 </section>
 
-<section class="card"><h3>Lake vs Warehouse vs Lakehouse</h3>
-<table><thead><tr><th></th><th>ACID</th><th>Cost/scale</th></tr></thead><tbody>
-<tr><td>Lake (files)</td><td>no</td><td>cheap, flexible</td></tr>
-<tr><td>Warehouse</td><td>yes</td><td>fast, pricier</td></tr>
-<tr><td>Lakehouse</td><td>yes (table fmt)</td><td>cheap + ACID</td></tr>
+<section class="card"><h3>Slowly Changing Dimensions</h3>
+<table><thead><tr><th>Type</th><th>Behaviour</th></tr></thead><tbody>
+<tr><td><b>0</b></td><td>never changes (birth date)</td></tr>
+<tr><td><b>1</b></td><td>overwrite — no history</td></tr>
+<tr><td><b>2</b></td><td>new row per change — full history <span class="warn">!</span> most asked</td></tr>
+<tr><td><b>3</b></td><td>prev-value column — limited history</td></tr>
 </tbody></table>
-<p><b>Delta / Iceberg / Hudi</b> add ACID, time travel, schema evolution, MERGE over files.</p>
+<h4>SCD2 columns</h4>
+<pre><code>surrogate_key  (PK, meaningless int)
+business_key   (natural id)
+valid_from, valid_to  (or NULL / 9999-12-31)
+is_current     (bool)</code></pre>
+<ul>
+<li><b>Surrogate key</b> = warehouse-generated int PK; decouples from source PKs, enables SCD2 (many rows / one business key), speeds joins, survives source re-keying <span class="warn">!</span> Never join facts on the natural key.</li>
+<li><b>MERGE</b> on business key: if changed → close current (set <code>valid_to</code>, <code>is_current=false</code>) + insert new version. Needs upsert → table-format or warehouse.</li>
+<li><b>Late-arriving dim</b>: fact refers to a dim row not yet loaded → insert a placeholder ("inferred member"), backfill attributes later.</li>
+</ul>
 </section>
 
-<section class="card"><h3>File Formats</h3>
+<section class="card"><h3>Batch Processing &amp; Idempotency</h3>
+<p><b>Idempotent</b> = running a task N times = running it once. The single most important batch property — retries, backfills, manual re-runs all re-execute <span class="warn">!</span></p>
+<table><thead><tr><th>Anti-pattern</th><th>Idempotent fix</th></tr></thead><tbody>
+<tr><td><code>INSERT INTO</code> (blind append)</td><td><b>delete-partition + insert</b> or <code>MERGE</code></td></tr>
+<tr><td>auto-increment key on reload</td><td>deterministic / hash keys</td></tr>
+<tr><td>"process today" (wall clock)</td><td>process the <b>data interval</b></td></tr>
+</tbody></table>
+<ul>
+<li><b>Incremental</b> load via a <b>high-water mark</b>: <code>WHERE updated_at &gt; last_max</code>. Store the mark; advance only on success. Cheap but misses hard deletes (use CDC).</li>
+<li><b>Full</b> load: simple, self-healing, expensive — small / slowly-changing tables only.</li>
+<li><b>Backfill</b>: partition by date, <b>overwrite each partition</b> idempotently so a 2-year replay never double-counts.</li>
+<li><b>Medallion</b>: <b>bronze</b> (raw, immutable) → <b>silver</b> (cleaned, conformed) → <b>gold</b> (aggregated, serving). Immutable raw = replayable pipeline.</li>
+<li><b>DLQ / quarantine</b>: route bad records aside; don't drop (silent loss) or fail the whole batch <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Spark Fundamentals</h3>
+<table><thead><tr><th>API</th><th>Use</th></tr></thead><tbody>
+<tr><td><b>DataFrame</b></td><td>default — Catalyst-optimized, columnar</td></tr>
+<tr><td><b>Dataset</b></td><td>typed (Scala/Java only)</td></tr>
+<tr><td><b>RDD</b></td><td>escape hatch — custom partitioning, no optimizer</td></tr>
+</tbody></table>
+<ul>
+<li><b>Lazy</b>: transformations (<code>select</code>, <code>filter</code>, <code>join</code>) build a DAG; nothing runs until an <b>action</b> (<code>count</code>, <code>write</code>, <code>collect</code>) triggers it — lets Catalyst optimize the whole plan.</li>
+<li><b>Narrow</b> (map, filter) = no shuffle, pipelined. <b>Wide</b> (join, groupBy, distinct) = <b>shuffle</b> → stage boundary.</li>
+<li>Job → <b>stages</b> (split at shuffles) → <b>tasks</b> (one per partition). Partitions = unit of parallelism.</li>
+<li><span class="warn">!</span> <code>collect()</code> pulls all data to the <b>driver</b> — OOMs on big frames. Use <code>write</code> / <code>take(n)</code>.</li>
+<li><span class="warn">!</span> Python <b>UDFs</b> break Catalyst + serialize row-by-row (slow). Prefer built-in SQL functions; use <b>pandas/Arrow UDFs</b> if you must.</li>
+<li>Fault tolerance = <b>lineage</b>: a lost partition is recomputed from the DAG, not replicated.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Spark Internals &amp; Tuning</h3>
+<ul>
+<li><b>Catalyst</b> = query optimizer (predicate pushdown, column pruning, join reorder). <b>Tungsten</b> = off-heap memory + whole-stage codegen.</li>
+<li><b>Shuffle</b> = the expensive op: writes partitioned files to disk, network-transfers by key. Minimize wide ops; every join/groupBy is a shuffle <span class="warn">!</span></li>
+</ul>
+<h4>Joins</h4>
+<table><thead><tr><th>Join</th><th>When</th></tr></thead><tbody>
+<tr><td><b>Broadcast</b></td><td>one side &lt; ~10MB (<code>autoBroadcastJoinThreshold</code>) — ship small side, no shuffle</td></tr>
+<tr><td><b>Sort-merge</b></td><td>both large — shuffle both, sort, merge</td></tr>
+</tbody></table>
+<h4>Data skew <span class="warn">!</span></h4>
+<ul>
+<li>Symptom: 1 task runs 10× longer (one key = huge partition). Fix: <b>salt</b> the key, enable <b>AQE skew join</b>, or broadcast.</li>
+<li><b>AQE</b> (on by default): re-plans at runtime — coalesces shuffle partitions, converts to broadcast, splits skewed partitions.</li>
+<li><b>Spill</b> = shuffle/agg exceeds memory → disk (slow). Raise partitions or memory.</li>
+<li><code>cache()</code> / <code>persist()</code>: only if reused ≥2× and it fits; else it evicts + hurts. <code>persist</code> picks the storage level (MEMORY_AND_DISK).</li>
+<li>Tune <code>spark.sql.shuffle.partitions</code> (default 200) to data size; aim ~128MB / partition.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Spark Structured Streaming</h3>
+<ul>
+<li><b>Micro-batch</b>: unbounded input processed as small batches; same DataFrame API as batch.</li>
+<li><b>Output modes</b>: <b>append</b> (new rows only), <b>update</b> (changed keys), <b>complete</b> (whole result — small aggs only).</li>
+<li><b>Checkpoint</b> = offsets + state on durable storage → exactly-once recovery. <span class="warn">!</span> Never delete/reuse a checkpoint dir across incompatible query changes.</li>
+</ul>
+<pre><code>spark.readStream.format("kafka")…
+  .withWatermark("ts", "10 minutes")
+  .groupBy(window("ts","5 minutes"), $"key")
+  .count()
+  .writeStream.outputMode("update")
+  .option("checkpointLocation", path).start()</code></pre>
+<ul>
+<li><b>Watermark</b> = "drop events later than X behind the max seen" — bounds state so windows close and memory doesn't grow forever <span class="warn">!</span></li>
+<li>Stream-static join OK; <b>stream-stream</b> join needs watermarks on both sides.</li>
+<li>End-to-end exactly-once = replayable source (Kafka offsets) + checkpoint + idempotent sink.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Kafka Fundamentals</h3>
+<ul>
+<li><b>Topic</b> → <b>partitions</b> (ordering + parallelism unit). Order is guaranteed <b>only within a partition</b> <span class="warn">!</span> Key → same partition → per-key order.</li>
+<li><b>Offset</b> = per-partition monotonic message id. Consumers track their own offset; Kafka doesn't delete on read (retention by time/size).</li>
+<li><b>Replication factor</b> = copies across brokers. <b>Leader</b> serves reads/writes; followers replicate. <b>ISR</b> = in-sync replicas caught up to the leader.</li>
+<li><b>Log-structured</b>: append-only, sequential disk I/O + zero-copy = very high throughput. It's a durable, replayable log, not a queue.</li>
+</ul>
+<h4>Producer durability</h4>
+<table><thead><tr><th><code>acks</code></th><th>Guarantee</th></tr></thead><tbody>
+<tr><td><code>0</code></td><td>fire-and-forget — may lose</td></tr>
+<tr><td><code>1</code></td><td>leader ack — loses on failover</td></tr>
+<tr><td><code>all</code></td><td>full ISR ack — durable, slower</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> <code>acks=all</code> means all of the <b>ISR</b>, gated by <code>min.insync.replicas</code> — not all RF copies. Set <code>min.insync.replicas=2</code> with RF=3 for real durability.</p>
+</section>
+
+<section class="card"><h3>Kafka Delivery &amp; Consumers</h3>
+<ul>
+<li><b>Consumer group</b>: partitions split across members, <b>one member per partition</b>. More consumers than partitions ⇒ idle ones <span class="warn">!</span> Partitions cap parallelism.</li>
+<li><b>Rebalance</b> = reassignment on membership/subscription change; pauses consumption. Use <b>cooperative/sticky</b> assignor to avoid stop-the-world thrash.</li>
+</ul>
+<h4>Semantics = where you commit the offset</h4>
+<table><thead><tr><th>Commit</th><th>Semantic</th></tr></thead><tbody>
+<tr><td>before processing</td><td><b>at-most-once</b> (may lose)</td></tr>
+<tr><td>after processing</td><td><b>at-least-once</b> (may dup) — default</td></tr>
+<tr><td>txn / dedup</td><td><b>exactly-once</b></td></tr>
+</tbody></table>
+<ul>
+<li><span class="warn">!</span> True cross-system exactly-once is almost always <b>at-least-once + idempotent write on a business key</b>. Ask "can my sink absorb a duplicate?" — if yes, don't chase EOS.</li>
+<li><b>Idempotent producer</b> dedups <i>retries</i> only. Kafka <b>transactions</b> give read-process-write EOS <i>within</i> Kafka.</li>
+<li><span class="warn">!</span> Auto-commit fires on a timer regardless of processing — subtle loss/dup on crash. Prefer manual commit after work.</li>
+<li><b>Lag</b> = <code>log-end-offset − committed</code>. Almost always a slow/stuck <i>consumer</i>, not the broker — add partitions + consumers or speed up processing.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Kafka Ecosystem</h3>
+<ul>
+<li><b>Kafka Connect</b> = declarative, scalable ingest/egress via connectors (JDBC, Debezium, S3). <b>Source</b> (into Kafka) / <b>Sink</b> (out). No custom code for common systems.</li>
+<li><b>Schema Registry</b> = central store of <b>Avro/Protobuf/JSON</b> schemas; messages carry a schema id. Enforces <b>compatibility</b> so a bad schema change is rejected at produce time, not discovered downstream <span class="warn">!</span></li>
+<li><b>Backward-compatible</b> = new schema reads old data (add optional/defaulted field, drop field). <b>Forward</b> = old schema reads new data. Choose per how producers/consumers deploy.</li>
+<li><b>Kafka Streams / ksqlDB</b> = stream processing on Kafka: joins, windows, aggregations; state in RocksDB + changelog topics. Streams = library (embed in app); ksqlDB = SQL over it.</li>
+<li><b>Compacted topic</b>: keeps the latest value per key (not time-based) — a changelog / materialized-state store (e.g. CDC current state).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Stream Processing Concepts</h3>
+<ul>
+<li><b>Event time</b> (when it happened) vs <b>processing time</b> (when seen). Correctness uses <b>event time</b>; late and out-of-order events are the norm <span class="warn">!</span></li>
+</ul>
+<h4>Windows</h4>
+<table><thead><tr><th>Type</th><th>Shape</th></tr></thead><tbody>
+<tr><td><b>Tumbling</b></td><td>fixed, non-overlapping</td></tr>
+<tr><td><b>Sliding</b></td><td>fixed size, overlapping step</td></tr>
+<tr><td><b>Session</b></td><td>gap-defined, dynamic length</td></tr>
+</tbody></table>
+<ul>
+<li><b>Watermark</b> = heuristic "event time has advanced to T; expect nothing older" → triggers window close + evicts state. Trades <b>latency vs completeness</b> <span class="warn">!</span> too tight drops late data, too loose grows state.</li>
+<li><b>State</b>: keyed, checkpointed to durable store; the reason streaming is hard. Bound it with watermarks + TTL.</li>
+<li><b>Late data</b>: allowed-lateness grace period, side-output, or reprocess in batch (the batch reconcile of Lambda).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Data Warehousing</h3>
+<ul>
+<li><b>Columnar + MPP</b>: store by column (prune + compress), spread work across nodes. <b>Separated storage/compute</b> (Snowflake, BigQuery) = scale each independently, pay per query.</li>
+<li><span class="warn">!</span> Billing ≈ <b>bytes scanned</b> (BigQuery) or compute-seconds (Snowflake warehouse). Optimize by scanning less: partition/cluster, select only needed columns, filter on partition keys.</li>
+</ul>
+<h4>Physical tuning</h4>
+<table><thead><tr><th>Lever</th><th>Effect</th></tr></thead><tbody>
+<tr><td><b>Partitioning</b></td><td>prune whole partitions by date/key</td></tr>
+<tr><td><b>Clustering / sort</b></td><td>co-locate values → tighter min/max skipping</td></tr>
+<tr><td><b>Micro-partitions</b></td><td>Snowflake auto min/max pruning</td></tr>
+</tbody></table>
+<ul>
+<li><span class="warn">!</span> <code>SELECT *</code> defeats columnar pruning — scans every column. <code>WHERE fn(col)=x</code> defeats partition/stat pruning.</li>
+<li><b>dbt</b> = the "T" of ELT: models = <code>SELECT</code>s, DAG from <code>ref()</code>, tests, incremental materializations, docs/lineage. Runs <i>under</i> an orchestrator.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Lakehouse &amp; Table Formats</h3>
+<p><b>Three generations</b>: warehouse (fast, closed, pricey) → <b>lake</b> (cheap object-store files, schema-on-read, <b>no ACID</b> → swamp) → <b>lakehouse</b> (lake files + a transaction/metadata log ⇒ warehouse semantics on lake economics).</p>
+<ul>
+<li>Key idea: the table is <b>"the files the metadata log points to,"</b> not "the files in this directory." Readers see a consistent snapshot; writers commit a new log entry atomically.</li>
+<li>Adds <b>ACID</b>, <b>time travel</b>, <b>schema evolution</b>, <b>MERGE/upsert</b>, <b>compaction</b> onto plain Parquet.</li>
+</ul>
+<table><thead><tr><th></th><th>Delta</th><th>Iceberg</th><th>Hudi</th></tr></thead><tbody>
+<tr><td>Metadata</td><td>JSON log</td><td>manifest tree</td><td>timeline</td></tr>
+<tr><td>Strength</td><td>Spark/Databricks</td><td>engine-neutral</td><td>CDC upserts</td></tr>
+</tbody></table>
+<ul>
+<li><b>COW</b> (copy-on-write) = rewrite files on update, fast reads / slow writes. <b>MOR</b> (merge-on-read) = write deltas, fast writes / merge on read — for high-frequency upserts.</li>
+<li><span class="warn">!</span> Time travel pins old files; you pay storage until <code>VACUUM</code>/expire — which then breaks older reads. Object storage gives durable blobs, <b>not</b> multi-file transactions.</li>
+</ul>
+</section>
+
+<section class="card"><h3>File Formats &amp; Physical Storage</h3>
+<p><b>Columnar = read less + compress more = cheaper scans.</b> OLAP touches few columns of many rows.</p>
 <table><thead><tr><th>Format</th><th>Layout</th><th>Best for</th></tr></thead><tbody>
-<tr><td>Parquet/ORC</td><td>columnar</td><td>analytics scans</td></tr>
-<tr><td>Avro</td><td>row</td><td>streaming/serialize</td></tr>
-<tr><td>JSON/CSV</td><td>text</td><td>interchange only</td></tr>
+<tr><td><b>Parquet</b></td><td>columnar</td><td>analytics / lake tables</td></tr>
+<tr><td><b>ORC</b></td><td>columnar</td><td>Hive/Hadoop</td></tr>
+<tr><td><b>Avro</b></td><td>row</td><td>Kafka / streaming, schema evo</td></tr>
+<tr><td><b>JSON/CSV</b></td><td>row text</td><td>edges only — no stats/typing <span class="warn">!</span></td></tr>
 </tbody></table>
-<p>Columnar → <b>predicate/projection pushdown</b> + compression. <span class="warn">!</span> Watch the <b>small-files problem</b> → compact.</p>
+<ul>
+<li>Parquet hierarchy: <b>file → row groups → column chunks → pages</b>, with min/max/null <b>stats</b> at each level → the engine <b>skips</b> row groups that can't match.</li>
+<li><b>Projection pushdown</b> (read only referenced cols) + <b>predicate pushdown</b> (filter via stats) + <b>partition pruning</b> (skip dirs by path value) = the three savings.</li>
+<li><b>Compression</b>: <b>snappy/zstd</b> (fast decode) beat gzip for scan-heavy work — ratio isn't the goal, total query time is. Encoding (dictionary/RLE) often wins more than the codec.</li>
+<li><span class="warn">!</span> <b>Small-files problem</b>: millions of tiny files wreck planning/throughput. Fix with <b>compaction</b>; over-partitioning creates it.</li>
+</ul>
 </section>
 
 <section class="card"><h3>Ingestion &amp; CDC</h3>
 <ul>
-<li><b>CDC log-based</b> (Debezium reads WAL/binlog): captures inserts/updates/<b>deletes</b>, low DB load. <span class="warn">!</span></li>
-<li>Query-based (timestamp polling) misses deletes &amp; hard-deletes.</li>
-<li>Kafka Connect for no-code source/sink; Schema Registry for evolution.</li>
+<li><b>CDC</b> = capture row-level inserts/updates/<b>deletes</b> from an OLTP DB and stream them to the warehouse. Preferred over batch <code>SELECT</code>: low-latency, low source load, and <b>captures deletes</b> a high-water-mark query misses <span class="warn">!</span></li>
+</ul>
+<table><thead><tr><th>CDC method</th><th>Note</th></tr></thead><tbody>
+<tr><td><b>Log-based</b></td><td>read WAL/binlog (Debezium) — best: no source load, all changes, deletes</td></tr>
+<tr><td>Query-based</td><td><code>updated_at</code> poll — simple, misses deletes + intermediate states</td></tr>
+<tr><td>Trigger-based</td><td>DB triggers — heavy on the source</td></tr>
+</tbody></table>
+<ul>
+<li>Pattern: Debezium → Kafka (compacted topic) → sink → <b>MERGE</b> into a lakehouse/warehouse table (needs upsert support).</li>
+<li><b>Schema drift</b>: source adds/renames/retypes a column. Enforce via Schema Registry (reject) or auto-evolve + alert. <span class="warn">!</span> Silent drift = the classic "dashboard wrong all week, nothing failed."</li>
+<li>Land <b>raw/immutable</b> first (bronze), transform after — so you can always replay.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Orchestration &amp; Quality</h3>
+<section class="card"><h3>Orchestration (Airflow)</h3>
+<p>Orchestrator = reliable, observable <code>cron</code> that understands <b>dependencies + failure</b>. Holds orchestration logic only — heavy transforms go to Spark/SQL/dbt, not a <code>PythonOperator</code> <span class="warn">!</span></p>
 <ul>
-<li><b>Airflow</b> DAGs: deps, retries, backfills — make tasks <b>idempotent</b>. <span class="warn">!</span></li>
-<li><b>dbt</b>: transforms + tests (not_null/unique) + lineage.</li>
-<li>Data quality: contracts, freshness/volume/schema monitoring — catch the <b>silent data bug</b> (green pipeline, wrong numbers).</li>
+<li><b>DAG</b> = acyclic task graph; the scheduler topologically runs tasks whose upstreams succeeded, retries failures, records per-run state.</li>
+<li><span class="warn">!</span> <b><code>execution_date</code> / logical date = the data interval the run represents</b>, not when it fires. The run "for" Jul-01 fires <i>after</i> that day closes and processes <i>that day's</i> data. Get this and backfill/catchup click.</li>
+<li><b>Idempotent tasks</b> are the prerequisite for retries + backfills. Retrying a non-idempotent <code>INSERT</code> doubles the data.</li>
+<li><b>Sensor</b> = wait for a condition; use <b>reschedule/deferrable</b> mode or it holds a worker slot <span class="warn">!</span> <b>XCom</b> = small metadata (a path, a count), never DataFrames.</li>
+<li><b>Executor</b>: Local / Celery (worker pool) / Kubernetes (pod per task).</li>
+<li><b>Dagster/Prefect</b> = asset-aware: schedule on data freshness, not just tasks.</li>
 </ul>
 </section>
 
-<section class="card"><h3>&#9744; Design Playbook</h3>
+<section class="card"><h3>Data Quality &amp; Governance</h3>
+<h4>Check dimensions</h4>
 <ul>
-<li>&#9744; <b>Batch or streaming?</b> latency SLA + freshness need + cost + complexity.</li>
-<li>&#9744; Streaming: Kafka → Flink/Spark → warehouse/OLAP; event time + watermarks.</li>
-<li>&#9744; Warehouse design: pick the fact grain, conformed dims, SCD2 for history.</li>
-<li>&#9744; CDC: Debezium → Kafka → lakehouse MERGE (idempotent upsert).</li>
-<li>&#9744; Real-time analytics: Druid/Pinot/ClickHouse; Lambda vs <b>Kappa</b> (replay).</li>
-<li>&#9744; Reliability: idempotency, exactly-once = at-least-once + dedup, DLQ, replay.</li>
-<li>&#9744; Slow Spark? shuffle/skew/spill — broadcast, salt, repartition, AQE.</li>
-<li>&#9744; Consumer lag? add partitions/consumers, speed the sink, check rebalancing.</li>
+<li><b>Freshness</b> (arrived on time), <b>volume</b> (row count in band), <b>schema</b> (types/columns), <b>distribution</b> (nulls, ranges, cardinality), <b>uniqueness/PK</b>, <b>referential</b> (FKs resolve).</li>
+<li>Place checks at <b>ingest</b> (reject/quarantine) and <b>post-transform</b> (gate before serving). Fail loud, fail early <span class="warn">!</span></li>
+</ul>
+<table><thead><tr><th>Concept</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><b>Data contract</b></td><td>producer-owned schema+SLA; breaks caught at source</td></tr>
+<tr><td><b>Lineage</b></td><td>column/table provenance graph — impact analysis</td></tr>
+<tr><td><b>Observability</b></td><td>track freshness/volume/schema/quality over time</td></tr>
+<tr><td><b>Circuit breaker</b></td><td>stop pipeline on failed check vs ship bad data</td></tr>
+</tbody></table>
+<ul>
+<li>Tools: <b>Great Expectations / dbt tests / Soda</b> for assertions; catalog + lineage for governance.</li>
+<li>PII/governance: classify, mask/tokenize, enforce retention + GDPR delete (needs upsert/MERGE on the lakehouse).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Serving &amp; Distributed Internals</h3>
+<ul>
+<li><b>Real-time OLAP</b> (Druid, ClickHouse, Pinot): pre-aggregated, columnar, sub-second scans for high-QPS dashboards — the serving layer after streaming.</li>
+<li><b>Shuffle / partitioning</b> is the universal distributed cost: hash-partition by key so all rows of a key meet on one node for join/aggregate. Skew = one key too big <span class="warn">!</span></li>
+<li><b>Broadcast</b> the small side to kill a shuffle; <b>co-partition</b> tables on the join key to avoid repeated reshuffles.</li>
+<li><b>Exactly-once end-to-end</b> = replayable source offsets + checkpointed state + idempotent sink. No free lunch; it's engineered per boundary.</li>
+<li><b>Fault tolerance</b>: lineage recompute (Spark) or checkpoint + replay (streaming) — not full replication of intermediate data.</li>
+<li><b>Backpressure</b>: a slow consumer signals upstream to slow down (or buffer to a durable log) rather than drop or OOM.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Symptom → Cause</h3>
+<table><thead><tr><th>Symptom</th><th>Likely cause</th></tr></thead><tbody>
+<tr><td>daily job doubled its rows</td><td>non-idempotent append + a retry/backfill <span class="warn">!</span></td></tr>
+<tr><td>"dashboard wrong all week, nothing failed"</td><td>silent schema drift / no quality checks <span class="warn">!</span></td></tr>
+<tr><td>one Spark task 10× slower</td><td>data skew — one hot key</td></tr>
+<tr><td>driver OOM</td><td><code>collect()</code> on a big frame</td></tr>
+<tr><td>warehouse bill spiking</td><td><code>SELECT *</code> / no partition filter → full scans</td></tr>
+<tr><td>Parquet scan reads whole file</td><td>no partition filter, pushdown defeated by <code>fn(col)</code>, or small files</td></tr>
+<tr><td>consumer lag climbing</td><td>slow consumer, too few partitions, or rebalance thrash</td></tr>
+<tr><td>duplicated events downstream</td><td>at-least-once + non-idempotent sink</td></tr>
+<tr><td>lost events</td><td><code>acks&lt;all</code>, commit-before-process, or a too-tight watermark</td></tr>
+<tr><td>streaming state grows unbounded</td><td>missing / too-loose watermark <span class="warn">!</span></td></tr>
+<tr><td>query planning slow</td><td>small-files problem — compact</td></tr>
+<tr><td>fact sums wrong</td><td>mixed grain or summing a semi-additive fact over time</td></tr>
+</tbody></table>
+</section>
+
+<section class="card"><h3>&#9733; Design Review Checklist</h3>
+<h4>Idempotency &amp; correctness</h4>
+<ul>
+<li>&#9744; Every task safe to re-run: delete-partition+insert or <code>MERGE</code>, not blind <code>INSERT</code> <span class="warn">!</span></li>
+<li>&#9744; Keyed on the data interval, not wall-clock "now"; backfillable per partition.</li>
+<li>&#9744; Fact grain declared; additive vs semi/non-additive handled correctly.</li>
+<li>&#9744; SCD strategy chosen per dimension (2 = surrogate key + valid_from/to + is_current).</li>
+</ul>
+<h4>Storage &amp; cost</h4>
+<ul>
+<li>&#9744; Columnar (Parquet) + partitioned on a real filter column; not over-partitioned (small files).</li>
+<li>&#9744; Queries select needed columns only; filters hit partition/cluster keys (no <code>fn(col)</code> defeating pushdown).</li>
+<li>&#9744; Compaction/OPTIMIZE scheduled; VACUUM retention set vs time-travel needs.</li>
+</ul>
+<h4>Spark</h4>
+<ul>
+<li>&#9744; No <code>collect()</code> on large frames; shuffle partitions sized to data; skew handled (salt/AQE/broadcast).</li>
+<li>&#9744; Broadcast the small join side; cache only if reused and it fits.</li>
+</ul>
+<h4>Streaming / Kafka</h4>
+<ul>
+<li>&#9744; Delivery semantic explicit; sink idempotent on a business key (don't chase EOS blindly).</li>
+<li>&#9744; <code>acks=all</code> + <code>min.insync.replicas=2</code> (RF3) where durability matters; offset committed <i>after</i> processing.</li>
+<li>&#9744; Watermark bounds state; checkpoint location stable; partitions ≥ consumers.</li>
+</ul>
+<h4>Reliability &amp; quality</h4>
+<ul>
+<li>&#9744; Raw/bronze immutable → replayable; DLQ/quarantine for bad records (no silent drop).</li>
+<li>&#9744; Freshness/volume/schema/uniqueness checks gate serving; alerts + lineage in place.</li>
+<li>&#9744; CDC (log-based) where deletes matter; schema drift caught at source (contract/registry).</li>
+<li>&#9744; Orchestrator only orchestrates; heavy transform in Spark/SQL/dbt; retries + SLAs configured.</li>
 </ul>
 </section>
 
 </div>
-<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
-<script>
-  try {
-    mermaid.initialize({ startOnLoad: true, theme: "neutral",
-      flowchart: { useMaxWidth: true, htmlLabels: true, nodeSpacing: 18, rankSpacing: 18 },
-      themeVariables: { fontSize: "9px" } });
-  } catch (e) { /* offline / blocked CDN: diagrams degrade to source text, rest of sheet is fine */ }
-</script>
 </body>
 </html>

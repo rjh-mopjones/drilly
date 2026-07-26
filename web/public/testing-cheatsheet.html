@@ -6,7 +6,11 @@
 <title>Testing &amp; QA Cheat Sheet</title>
 <style>
 :root{
-  --fs: 7.2pt; --fs-mono: 6.6pt; --fs-h3: 7.8pt; --gap: 5px; --pad: 3px;
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
   --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
 }
 *{box-sizing:border-box;}
@@ -14,10 +18,12 @@ html,body{margin:0;padding:0;}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
   font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
 .sheet{background:#fff;}
+/* spanning title bar */
 .titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
   margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
 .titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
 .titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
 .sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
   column-fill:balance; padding:5px;}
 .card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
@@ -25,6 +31,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Ar
   overflow:hidden;}
 .card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
   background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
 .card:nth-of-type(8n+1) h3{background:#34495e;}
 .card:nth-of-type(8n+2) h3{background:#2c6e9b;}
 .card:nth-of-type(8n+3) h3{background:#1f7a5a;}
@@ -58,178 +65,371 @@ pre code{background:none; padding:0; font-size:1em;}
 @page{ size:A4; margin:5mm; }
 @media print{
   body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
   .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
 }
 </style>
 </head>
 <body>
 <div class="sheet">
-<div class="titlebar"><h1>Testing &amp; QA Cheat Sheet</h1><span class="meta">pyramid · doubles · TDD/BDD · coverage · flakiness · strategy · drilly</span></div>
+<div class="titlebar"><h1>Testing &amp; QA Cheat Sheet</h1><span class="meta">automated testing &amp; QA · language-agnostic · generic examples · drilly</span></div>
 <section class="card legend"><h3>How to read &amp; print</h3>
 <ul>
-<li><span class="warn">!</span> footgun / classic trap &nbsp; <code>&#9744;</code> reasoning step</li>
-<li>Golden rule: <b>test behavior, not implementation</b>. A test that breaks on a refactor (same behavior) is a bad test.</li>
-<li>Goal of tests: <b>confidence to change</b> — not proof of correctness.</li>
-<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+<li><span class="warn">!</span> footgun / gotcha &nbsp; <code>&#9744;</code> review checklist item</li>
+<li>Focus: <b>the tradeoffs</b> — pyramid vs trophy, mock vs real, unit vs integration, coverage vs confidence. Code shown in JS/pytest idiom but the rules are language-agnostic.</li>
+<li>The through-line: <b>test behaviour, not implementation.</b> A test that breaks on a refactor that changed no behaviour is a bad test. Last 3 cards = <b>review checklist</b> + flaky-test triage + symptom→cause.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
 </ul></section>
 
+<section class="card"><h3>Why We Test — the Real Value</h3>
+<ul>
+<li>Tests are a <b>change-enablement</b> tool, not a correctness proof. Their value is the <b>confidence to refactor and ship fast</b> — a green suite is permission to change code.</li>
+<li><b>Verification</b> = "did we build it right" (matches spec). <b>Validation</b> = "did we build the right thing" (matches user need). Tests do verification; only users/PMs do validation <span class="warn">!</span></li>
+<li>Passing tests <b>never prove absence of bugs</b> — only presence of the behaviours you asserted. Dijkstra: testing shows the presence, not the absence, of bugs.</li>
+<li><b>Cost-of-a-bug curve</b>: a bug caught at code time costs ~1×; at QA ~10×; in production ~100×+. Fast feedback shifts detection left.</li>
+<li>A <b>regression test</b> locks in a fixed bug so it can't silently return — the compounding asset that makes a suite worth more over time.</li>
+</ul>
+<p><span class="warn">!</span> "No time to write tests, we need to ship" — untested code is the thing that slows shipping <i>next</i> week. Frame tests as speed, not ceremony.</p>
+</section>
+
 <section class="card diagram"><h3>Pyramid vs Trophy</h3>
-<pre><code>  /\      e2e   (few, slow, flaky)
- /  \     integration
-/____\    unit  (many, fast)   ← Pyramid
-
- [====]   integration  (fat)
- [==]     unit
- [=]      e2e
-  __      static       ← Trophy</code></pre>
-<p>More tests lower down = faster + cheaper. <span class="warn">!</span> An ice-cream cone (mostly e2e) = slow &amp; flaky.</p>
+<div class="mermaid">
+flowchart TD
+  E["E2E — few<br/>slow, flaky, high confidence"] --> I["Integration — some<br/>real collaborators"]
+  I --> U["Unit — many<br/>fast, cheap, isolated"]
+  U --> S["Static — types, lint<br/>free, instant"]
+</div>
+<p class="cap">Pyramid (Cohn): mostly unit, fewer integration, fewest e2e. Trophy (Dodds): fattest layer is <b>integration</b> — "write tests that resemble how software is used." Both agree the anti-pattern is the <b>ice-cream cone</b> (mostly e2e/manual). Pick by blast radius: integration tests catch the wiring bugs unit tests can't, at a fraction of e2e cost.</p>
 </section>
 
-<section class="card"><h3>Test Levels</h3>
-<table><thead><tr><th>Level</th><th>Scope</th><th>Speed</th></tr></thead><tbody>
-<tr><td>unit</td><td>one unit, isolated</td><td>ms</td></tr>
-<tr><td>integration</td><td>modules + real deps (DB)</td><td>sec</td></tr>
-<tr><td>e2e</td><td>whole system, UI in</td><td>slow</td></tr>
-<tr><td>acceptance</td><td>meets requirements</td><td>—</td></tr>
+<section class="card"><h3>Test Levels — the Tradeoff</h3>
+<table><thead><tr><th>Level</th><th>Scope</th><th>Speed</th><th>Confidence</th></tr></thead><tbody>
+<tr><td>Unit</td><td>one function/class, no I/O</td><td>ms</td><td>logic only</td></tr>
+<tr><td>Integration</td><td>module + real DB/queue/HTTP</td><td>10–100ms</td><td>wiring, SQL, serialization</td></tr>
+<tr><td>Component</td><td>one service, deps stubbed at edge</td><td>100ms+</td><td>service contract</td></tr>
+<tr><td>E2E</td><td>whole system via UI/API</td><td>seconds</td><td>real user flow</td></tr>
 </tbody></table>
-<p>Smoke = "does it boot"; regression = "old bug stays fixed."</p>
+<h4>Which level catches which bug</h4>
+<ul>
+<li><b>Wrong algorithm / edge case</b> → unit.</li>
+<li><b>Wrong SQL, bad migration, serialization mismatch, N+1</b> → integration <span class="warn">!</span> (unit mocks hide these).</li>
+<li><b>Broken deploy, auth flow, cross-service contract</b> → e2e / smoke.</li>
+</ul>
+<p><b>Rule:</b> push each test to the <b>lowest level that can still catch the bug</b> — cheaper, faster, less flaky.</p>
 </section>
 
-<section class="card"><h3>AAA + FIRST</h3>
-<pre><code>test('adds two numbers', () => {
-  const calc = new Calc();       // Arrange
-  const sum = calc.add(2, 3);    // Act
-  expect(sum).toBe(5);           // Assert
+<section class="card"><h3>Test Types — Vocabulary</h3>
+<table><thead><tr><th>Term</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><b>Smoke</b></td><td>"does it boot / basic happy path" — run first, fail fast</td></tr>
+<tr><td><b>Sanity</b></td><td>narrow check that one fix works after a change</td></tr>
+<tr><td><b>Regression</b></td><td>guards against a reintroduced bug</td></tr>
+<tr><td><b>Functional</b></td><td>does it do what spec says (black-box)</td></tr>
+<tr><td><b>Non-functional</b></td><td>perf, load, security, a11y — <i>how well</i></td></tr>
+<tr><td><b>Acceptance</b></td><td>meets business criteria (often BDD/Given-When-Then)</td></tr>
+<tr><td><b>Contract</b></td><td>consumer↔provider API shape agreement (Pact)</td></tr>
+</tbody></table>
+<h4>Box colour</h4>
+<ul>
+<li><b>Black-box</b>: test via public behaviour only, no internals.</li>
+<li><b>White-box</b>: use code structure to drive coverage of branches/paths.</li>
+<li><b>Gray-box</b>: mix — know the schema/architecture, test through the interface.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Anatomy of a Good Unit Test</h3>
+<h4>AAA / Given-When-Then</h4>
+<pre><code>test("applies 10% discount for gold tier", () =&gt; {
+  const cart = makeCart({ tier: "gold", total: 100 }); // Arrange
+  const out = applyDiscount(cart);                      // Act
+  expect(out.total).toBe(90);                           // Assert
 });</code></pre>
+<h4>FIRST principles</h4>
 <ul>
-<li><b>F</b>ast · <b>I</b>ndependent · <b>R</b>epeatable · <b>S</b>elf-validating · <b>T</b>imely.</li>
-<li>One logical assertion; name = behavior under test. <span class="warn">!</span> No test-order dependence.</li>
+<li><b>F</b>ast · <b>I</b>solated (no shared state/order dependence) · <b>R</b>epeatable (no clock/network/random) · <b>S</b>elf-validating (pass/fail, no eyeballing) · <b>T</b>imely (write near the code).</li>
+</ul>
+<ul>
+<li><b>One logical assertion</b> per test — not literally one <code>expect</code>, but one behaviour. A test asserting three unrelated things hides which broke.</li>
+<li><b>Name = spec</b>: <code>method_condition_expectedResult</code>. The name should read as a sentence when it fails in CI.</li>
+<li>A <b>unit</b> is a unit of <i>behaviour</i>, not necessarily one class — a small cluster of collaborators is fine.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Test Doubles</h3>
-<table><thead><tr><th>Double</th><th>Does</th></tr></thead><tbody>
-<tr><td>dummy</td><td>filler, never used</td></tr>
-<tr><td>stub</td><td>returns canned data</td></tr>
-<tr><td>spy</td><td>stub + records calls</td></tr>
-<tr><td>mock</td><td>pre-set expectations, verifies</td></tr>
-<tr><td>fake</td><td>working light impl (in-mem DB)</td></tr>
+<section class="card"><h3>Test Behaviour, Not Implementation</h3>
+<p>The single most important rule. Assert on <b>observable outputs / effects</b>, never on private internals or call sequences a refactor could change.</p>
+<pre><code>// BAD — coupled to implementation !
+expect(service._cache.size).toBe(1);
+expect(repo.save).toHaveBeenCalledTimes(1);
+
+// GOOD — coupled to behaviour
+expect(await service.get("id")).toEqual(user);
+expect(await repo.find("id")).toEqual(user); // real effect</code></pre>
+<ul>
+<li><b>Litmus test</b>: "if I refactor internals but keep behaviour, does this test still pass?" If no → it tests implementation <span class="warn">!</span></li>
+<li>Over-asserting interactions (mockist over-reach) produces <b>brittle</b> tests that break constantly and get deleted — worse than no test.</li>
+<li>Tests double as <b>documentation</b>: a reader learns the contract from behaviour-level tests, not from <code>_privateHelper</code> assertions.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Test Doubles — the Five</h3>
+<table><thead><tr><th>Double</th><th>What it does</th></tr></thead><tbody>
+<tr><td><b>Dummy</b></td><td>filler passed but never used (satisfy a signature)</td></tr>
+<tr><td><b>Stub</b></td><td>returns canned answers — feeds <i>state</i></td></tr>
+<tr><td><b>Spy</b></td><td>a stub that <i>records</i> how it was called</td></tr>
+<tr><td><b>Mock</b></td><td>pre-set with expectations — verifies <i>interactions</i>, fails if unmet</td></tr>
+<tr><td><b>Fake</b></td><td>working lightweight impl (in-mem DB/repo)</td></tr>
 </tbody></table>
 <ul>
-<li><b>Stub</b> = state; <b>mock</b> = interaction verification.</li>
-<li><span class="warn">!</span> Over-mocking → tests couple to impl &amp; break on refactor. Don't mock what you don't own; mock at boundaries.</li>
+<li><b>Stub vs Mock</b>: stub = <i>state verification</i> (assert the result). Mock = <i>interaction verification</i> (assert the call happened). Prefer state.</li>
+<li><b>Fake</b> when you need real behaviour cheaply (in-memory repo enforcing uniqueness) — best fidelity-to-cost for integration-ish tests.</li>
+<li>Doubles require <b>dependency injection</b>: pass collaborators in, don't <code>new</code> them inside — untestable otherwise.</li>
 </ul>
 </section>
 
-<section class="card"><h3>TDD: Red-Green-Refactor</h3>
-<pre><code>RED    write a failing test
-GREEN  simplest code to pass
-REFACTOR clean up, tests still green
-        ↻ repeat, small steps</code></pre>
+<section class="card"><h3>Mocking — When &amp; How Much</h3>
 <ul>
-<li>Test-first = design pressure + built-in coverage.</li>
-<li><span class="warn">!</span> The <b>refactor</b> step is not optional — that's where design happens.</li>
-<li>TDD isn't slower once counting debug/rework; not mandatory everywhere.</li>
+<li><b>Mock at architectural boundaries</b> you own: DB, payment gateway, clock, network — the slow/nondeterministic edges. Use <b>real objects</b> for your own pure domain logic.</li>
+<li><span class="warn">!</span> <b>Don't mock what you don't own.</b> Mocking a third-party lib bakes in <i>your assumption</i> of its behaviour; the mock stays green while the real lib changes. Wrap it in a thin adapter you own and mock the adapter, or use a fake/contract test.</li>
+<li><b>Over-mocking</b> = every collaborator stubbed → the test asserts your code calls the code you wrote, i.e. it tests the mock wiring, not behaviour. Rewrite to state verification with real collaborators + one edge stubbed.</li>
+</ul>
+<h4>Schools</h4>
+<ul>
+<li><b>London / mockist</b>: mock all collaborators, verify interactions, outside-in.</li>
+<li><b>Detroit-Chicago / classicist</b>: real collaborators, mock only awkward edges, verify state. <b>Default classicist</b> — fewer brittle tests.</li>
 </ul>
 </section>
 
-<section class="card"><h3>BDD (Gherkin)</h3>
-<pre><code>Feature: checkout
-  Scenario: apply valid coupon
-    Given a cart totalling 100
-    When I apply coupon "SAVE10"
-    Then the total should be 90</code></pre>
-<p>BDD = collaboration + living docs (ubiquitous language), <b>not just a tool</b>. Given-When-Then = AAA in prose.</p>
+<section class="card"><h3>Killing Nondeterminism (Time &amp; Random)</h3>
+<p>The two commonest flakiness sources. Never read the wall clock or <code>Math.random()</code> directly in logic under test.</p>
+<pre><code>// Inject the clock / seed — don't reach for globals
+function isExpired(token, now = Date.now) {   // seam
+  return token.exp &lt; now();
+}
+// test: pass a frozen now
+isExpired(t, () =&gt; 1_000);        // deterministic
+
+// libs: jest.useFakeTimers(); jest.setSystemTime(...)
+// seeded RNG for property/data gen
+const rng = seededRandom(42);</code></pre>
+<ul>
+<li>Fake timers also let you <b>advance</b> time to test debounce/retry/timeout without real waiting.</li>
+<li>Same seam for UUIDs, <code>now()</code> in DB defaults, and time-zone-sensitive formatting <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>TDD — Red / Green / Refactor</h3>
+<ol>
+<li><b>Red</b>: write the smallest failing test for the next behaviour. Watch it fail (proves the test can fail).</li>
+<li><b>Green</b>: simplest code to pass — even hardcoding. Fake it till you make it.</li>
+<li><b>Refactor</b>: clean up with the safety net green. <b>Not optional</b> <span class="warn">!</span> — skip it and TDD just produces messy code faster.</li>
+</ol>
+<ul>
+<li><b>Test-first buys</b>: a spec before implementation, guaranteed-testable design (you feel bad seams early), and no "test written to match the bug."</li>
+<li><b>Triangulation</b>: add a 2nd/3rd example to force generalising past a hardcoded return.</li>
+<li><b>Inside-out</b> (Detroit): build domain core first. <b>Outside-in</b> (London): start at the entry point, mock downward, discover collaborators.</li>
+<li><b>TDD a bug fix</b>: write the failing test that reproduces the bug <i>first</i> — it's your regression guard and done-signal.</li>
+</ul>
+<h4>BDD / Specification</h4>
+<ul>
+<li>BDD = TDD in <b>business language</b>: <b>Given-When-Then</b> scenarios non-engineers can read (Gherkin / Cucumber / SpecFlow). Given/When/Then maps 1:1 to Arrange/Act/Assert.</li>
+<li>Value: shared vocab + executable acceptance criteria — the spec <i>is</i> the test. Cost: a step-definition glue layer that rots if scenarios drift <span class="warn">!</span> Use for acceptance flows with real stakeholders; don't force Gherkin onto unit tests.</li>
+</ul>
 </section>
 
 <section class="card"><h3>Test Design Techniques</h3>
-<ul>
-<li><b>Equivalence partitioning</b>: one case per class of input.</li>
-<li><b>Boundary values</b>: test min-1, min, max, max+1 — <span class="warn">!</span> off-by-one lives here.</li>
-<li><b>Decision table</b>: combos of conditions → actions.</li>
-<li><b>State transition</b>: valid + invalid transitions.</li>
-<li><b>Pairwise</b>: cover all pairs, not full cross-product.</li>
-</ul>
-</section>
-
-<section class="card"><h3>Coverage — a Floor, Not a Ceiling</h3>
-<table><thead><tr><th>Type</th><th>Measures</th></tr></thead><tbody>
-<tr><td>line/statement</td><td>lines executed</td></tr>
-<tr><td>branch</td><td>each if/else taken</td></tr>
-<tr><td>path</td><td>combinations of branches</td></tr>
-<tr><td>mutation</td><td><b>test quality</b> (kills mutants)</td></tr>
+<p>How to pick inputs so a handful of cases cover the space.</p>
+<table><thead><tr><th>Technique</th><th>Idea</th></tr></thead><tbody>
+<tr><td><b>Equivalence partitioning</b></td><td>group inputs that behave the same; test one per class</td></tr>
+<tr><td><b>Boundary value analysis</b></td><td>bugs cluster at edges — test min−1, min, max, max+1 <span class="warn">!</span></td></tr>
+<tr><td><b>Decision table</b></td><td>enumerate condition combos → expected action</td></tr>
+<tr><td><b>State transition</b></td><td>test valid + invalid state changes</td></tr>
+<tr><td><b>Pairwise / all-pairs</b></td><td>cover every pair of params, not full cross-product</td></tr>
 </tbody></table>
-<p><span class="warn">!</span> 100% line coverage with no assertions catches nothing. Chase behavior, not the number.</p>
+<h4>Parameterized (table-driven) tests</h4>
+<pre><code>test.each([
+  ["", false], ["a1!Long", true], ["short", false],
+])("validate(%s) -&gt; %s", (pw, ok) =&gt; {
+  expect(isValid(pw)).toBe(ok);
+});</code></pre>
+<p>One test body, many cases — each row reports independently. Boundaries make the best rows.</p>
 </section>
 
-<section class="card"><h3>Property &amp; Fuzz Testing</h3>
-<pre><code>// property: encode∘decode == identity
-forall(s => decode(encode(s)) === s)</code></pre>
-<ul>
-<li>Assert <b>invariants</b> over generated inputs, not fixed examples.</li>
-<li><b>Shrinking</b> finds the minimal failing case.</li>
-<li><b>Fuzzing</b> (AFL/libFuzzer) hammers parsers/security for crashes.</li>
-<li><b>Mutation testing</b>: surviving mutant = a missing assertion.</li>
-</ul>
-</section>
-
-<section class="card"><h3>Performance Testing</h3>
-<table><thead><tr><th>Type</th><th>Finds</th></tr></thead><tbody>
-<tr><td>load</td><td>behavior at expected load</td></tr>
-<tr><td>stress</td><td>the breaking point</td></tr>
-<tr><td>soak</td><td>leaks over time</td></tr>
-<tr><td>spike</td><td>sudden surge handling</td></tr>
+<section class="card"><h3>Coverage — Use &amp; Abuse</h3>
+<table><thead><tr><th>Metric</th><th>What it measures</th></tr></thead><tbody>
+<tr><td>Line/statement</td><td>lines executed — weakest</td></tr>
+<tr><td>Branch</td><td>each if/else side taken — better</td></tr>
+<tr><td>Condition/MC-DC</td><td>each boolean sub-condition — safety-critical</td></tr>
+<tr><td>Path</td><td>combinations of branches — explodes</td></tr>
 </tbody></table>
-<p>Report <b>p95/p99</b>, not averages. <span class="warn">!</span> Watch warmup/JIT/GC &amp; coordinated omission. Baseline in CI.</p>
-</section>
-
-<section class="card"><h3>Testing Async / Concurrent</h3>
 <ul>
-<li><span class="warn">!</span> <b>Never <code>sleep(500)</code></b> — use awaits, fake timers, latches, or poll-with-timeout.</li>
-<li>Fake the clock for time-dependent logic.</li>
-<li>Race bugs: stress-run + <code>-race</code>/TSan; controlled interleavings.</li>
-<li>Make tests order-independent &amp; idempotent.</li>
+<li><span class="warn">!</span> Coverage is a <b>find-the-gaps</b> tool, not a quality target. 100% coverage with zero assertions catches nothing — execution ≠ verification.</li>
+<li><b>Goodhart</b>: mandate a % and people write assertion-free tests to hit it. Use coverage to spot <i>untested branches</i>, then judge whether they matter.</li>
+<li>Reasonable floor ~70–80% <b>branch</b> on core logic; don't chase the last 5% into getters/generated code.</li>
+<li><b>Mutation score</b> tells you what coverage can't (next card).</li>
 </ul>
 </section>
 
-<section class="card"><h3>Flaky Tests</h3>
-<p>Causes: timing/async · order dependence · shared state · network · time/randomness · animations.</p>
+<section class="card"><h3>Property-Based &amp; Fuzz Testing</h3>
+<p>Attack the blind spot of example tests: <b>the inputs you didn't think of.</b> State a rule for <i>all</i> inputs; let the framework hunt counterexamples and <b>shrink</b> them to a minimal repro (fast-check, Hypothesis, QuickCheck, jqwik).</p>
+<pre><code>fc.assert(fc.property(fc.array(fc.integer()), (xs) =&gt; {
+  expect(reverse(reverse(xs))).toEqual(xs);   // round-trip
+}));</code></pre>
+<h4>Property patterns</h4>
 <ul>
-<li><span class="warn">!</span> <b>Fix them, don't just retry</b> — retries hide real bugs and erode trust.</li>
-<li>Quarantine, then make deterministic (fake clock/network, isolate data).</li>
-<li>Smells: fragile, eager, assertion roulette, mystery guest.</li>
+<li><b>Round-trip</b>: <code>decode(encode(x))===x</code> (highest value).</li>
+<li><b>Idempotence</b>: <code>f(f(x))===f(x)</code> (normalise, dedupe).</li>
+<li><b>Oracle/model</b>: fast impl vs slow reference.</li>
+<li><b>Metamorphic</b>: relate inputs when no oracle (<code>sin(x)===sin(x+2π)</code>).</li>
+<li><b>Invariant</b>: <code>sort(xs)</code> is ordered <i>and</i> a permutation of <code>xs</code>.</li>
+</ul>
+<p><b>Fuzzing</b>: coverage-guided random/malformed bytes at parsers &amp; untrusted-input paths (libFuzzer, AFL, <code>go test -fuzz</code>) to find crashes/hangs/UB. <span class="warn">!</span> Shrinking + a saved seed make failures reproducible — not flaky.</p>
+</section>
+
+<section class="card"><h3>Mutation Testing</h3>
+<ul>
+<li>Measures <b>test-suite quality</b>, not code coverage. The tool mutates your source (<code>&gt;</code>→<code>&gt;=</code>, <code>+</code>→<code>-</code>, delete a line, negate a condition) and reruns tests.</li>
+<li><b>Killed mutant</b> = a test failed → good, tests caught the change. <b>Survived mutant</b> = all green despite the bug → a <b>gap</b> your coverage hid <span class="warn">!</span></li>
+<li><b>Mutation score</b> = killed / total. The honest answer to "do my assertions actually assert anything?" — the thing 100% line coverage lies about.</li>
+<li>Tools: Stryker (JS), PIT (Java), mutmut/cosmic-ray (Py). Cost: slow (N× reruns) → run on core modules / nightly CI, not every push.</li>
+<li><b>Equivalent mutants</b> (semantically identical change) can't be killed — the noise floor; don't chase 100%.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Testability &amp; Test Data</h3>
+<section class="card"><h3>Performance &amp; Load Testing</h3>
+<table><thead><tr><th>Type</th><th>Question</th></tr></thead><tbody>
+<tr><td><b>Load</b></td><td>behaviour at expected peak traffic</td></tr>
+<tr><td><b>Stress</b></td><td>where does it break, and how</td></tr>
+<tr><td><b>Spike</b></td><td>sudden surge handling</td></tr>
+<tr><td><b>Soak</b></td><td>hours/days — leaks, resource drift</td></tr>
+<tr><td><b>Scalability</b></td><td>throughput vs added resources</td></tr>
+</tbody></table>
 <ul>
-<li>Hard-to-test = bad design. Fix with <b>DI</b>, pure functions, seams, humble object.</li>
-<li>Avoid statics/singletons/global state/direct time &amp; random. <span class="warn">!</span></li>
-<li><b>Factories/builders</b> for data; each test sets up + tears down its own (transaction rollback / truncate).</li>
-<li>Legacy: characterization tests first, then break dependencies.</li>
+<li>Report <b>percentiles (p95/p99), not averages</b> <span class="warn">!</span> — the mean hides the tail users feel. Track throughput (RPS), latency dist, and error rate together.</li>
+<li>Define <b>SLO/SLA</b> targets first; a load test with no pass/fail threshold is a benchmark, not a test.</li>
+<li>Tools: k6, Gatling, JMeter, Locust. Test against prod-like data volumes — a fast query on 1k rows dies on 10M.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Testing in Production</h3>
+<section class="card"><h3>Testing Async &amp; Concurrent Code</h3>
 <ul>
-<li><b>Canary</b> + <b>feature flags</b> → small blast radius, instant rollback.</li>
-<li><b>Chaos engineering</b>: inject failure on purpose (GameDays).</li>
-<li><b>Synthetic monitoring</b> + smoke-in-prod; <b>shadow traffic</b>; A/B.</li>
-<li>Observability (metrics/logs/traces) = continuous testing.</li>
+<li><span class="warn">!</span> <b>Never <code>sleep(n)</code> to wait</b> — the #1 cause of slow, flaky tests. Sleep is a bet the op finishes in <code>n</code> ms; it loses under CI load.</li>
+<li>Instead <b>await the promise</b>, <b>poll a condition</b> with a timeout (<code>waitFor(() =&gt; cond)</code>), or use an explicit signal/callback.</li>
+<li><b>Fake timers</b> to fast-forward debounce/retry/backoff deterministically.</li>
+<li><b>Race conditions</b>: hard to reproduce by construction. Reduce shared mutable state, inject a controllable scheduler, or run a race detector (<code>go test -race</code>, TSan). A stress loop (run 1000×) surfaces intermittency.</li>
+<li>Assert on <b>final observable state</b>, not on intermediate timing that varies run to run.</li>
 </ul>
 </section>
 
-<section class="card"><h3>&#9744; "How would you test X?" Playbook</h3>
+<section class="card"><h3>Integration Testing — Real Deps</h3>
 <ul>
-<li>&#9744; Clarify the contract: inputs, outputs, side effects, failure modes.</li>
-<li>&#9744; Happy path + <b>boundaries</b> + invalid input + error paths.</li>
-<li>&#9744; Pick the level: pure logic→unit; with DB/API→integration; critical journey→one e2e.</li>
-<li>&#9744; Isolate deps with the right double (stub state, mock interactions).</li>
-<li>&#9744; Name each test by the behavior; one reason to fail.</li>
-<li>&#9744; Deterministic (no sleeps, fake clock/random); independent.</li>
-<li>&#9744; Cover the risk, not the line count; add a property test if invariants exist.</li>
-<li>&#9744; "It's flaky" → reproduce, find nondeterminism, fix the cause, don't retry.</li>
+<li>Catches what unit tests <b>structurally cannot</b>: real SQL/migrations, ORM mapping, serialization, transaction boundaries, connection config, N+1 queries <span class="warn">!</span></li>
+<li><b>Testcontainers</b> &gt; in-memory DB (H2/sqlite): run the <i>real</i> Postgres/Redis/Kafka in a throwaway container. In-mem DBs have subtly different SQL dialects and lull you into false green.</li>
+<li><b>Isolation on a shared DB</b>: wrap each test in a transaction and roll back, or truncate/reset between tests. Never let test order matter.</li>
+<li><b>External 3rd-party APIs</b>: don't hit the live service — record/replay (VCR/WireMock) or run their sandbox; add a <b>contract test</b> to catch real drift.</li>
 </ul>
+<h4>Contract testing (Pact)</h4>
+<ul>
+<li>Microservice integration without a full e2e matrix: consumer writes expectations vs a mock provider → generates a <b>pact</b>; provider replays it in <i>its</i> CI to prove it still satisfies every consumer <b>independently</b> (no shared env, no coordinated deploy).</li>
+<li>Catches breaking API changes (renamed field, changed type) at build time. <b>Consumer-driven</b> — encodes only what consumers use. <span class="warn">!</span> Verifies shape/interaction, not the provider's business logic — pair with the provider's own tests.</li>
+</ul>
+</section>
+
+<section class="card"><h3>E2E / UI Testing</h3>
+<ul>
+<li>Exercises the <b>whole stack via the real UI/API</b> — highest confidence, highest cost. Keep a <b>handful</b> of critical-path journeys (login, checkout), not a full regression suite <span class="warn">!</span></li>
+<li><b>Selectors</b>: use <code>data-testid</code> / roles / accessible text. Never CSS-class or XPath position — they break on any restyle.</li>
+<li><span class="warn">!</span> <b>No hard sleeps</b> — use auto-waiting / retrying assertions (Playwright/Cypress do this natively).</li>
+<li><b>Page Object Model</b>: encapsulate a page's selectors + actions in one class so a UI change is a one-file fix.</li>
+<li><b>Auth</b>: log in once via API and inject the session/token — don't drive the login form in every test.</li>
+</ul>
+<h4>Tools</h4>
+<table><thead><tr><th>Tool</th><th>Note</th></tr></thead><tbody>
+<tr><td>Playwright</td><td>multi-browser, fast, auto-wait, parallel — default pick</td></tr>
+<tr><td>Cypress</td><td>great DX, in-browser; single-tab limits</td></tr>
+<tr><td>Selenium</td><td>legacy, widest lang support, more flake</td></tr>
+</tbody></table>
+</section>
+
+<section class="card"><h3>CI &amp; Test Automation</h3>
+<ul>
+<li><b>Stage by speed</b>: static+unit on every push (seconds); integration on merge; e2e/smoke on deploy (nightly for the slow rest). Fail fast — cheapest tests first.</li>
+<li><b>Every test runs in CI on a clean machine</b> — "passes on my laptop" is not passing. Pin versions; provision deps via containers.</li>
+<li><b>Test data</b>: build objects via <b>factories/builders</b> (Object Mother), not giant shared fixtures. Each test creates and tears down its own data → isolated, parallel-safe.</li>
+<li><b>Quarantine flaky tests</b> (tag + track), don't blanket-retry green — retries mask real races and rot the suite's trust <span class="warn">!</span></li>
+<li>Gate merges on <b>green + coverage-didn't-drop</b>; block on <code>-race</code>/lint where relevant.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Testability &amp; Design for Test</h3>
+<ul>
+<li>Hard-to-test code is a <b>design smell</b>, not a testing problem. If you're fighting to test it, the design is too coupled.</li>
+<li><b>Dependency injection</b>: pass collaborators in → swap for doubles. Reaching for globals/singletons/<code>new</code> inside logic kills testability <span class="warn">!</span></li>
+<li><b>Humble Object</b>: push logic out of hard-to-test shells (UI, framework callbacks) into plain testable functions; leave the shell dumb.</li>
+<li><b>Pure functions</b> are easiest to test — same input, same output, no setup. Push side effects to the edges (functional core, imperative shell).</li>
+<li><b>Seam</b>: a place to substitute behaviour without editing the code under test (a param, interface, env). Design them in deliberately.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Testing in Production &amp; Observability</h3>
+<ul>
+<li>Pre-prod tests can't cover real traffic, data, and scale. Complement (not replace) with prod techniques:</li>
+<li><b>Canary / progressive rollout</b>: ship to 1% → watch metrics → widen. <b>Feature flags</b>: decouple deploy from release, kill-switch on regression.</li>
+<li><b>Synthetic monitoring</b>: scripted critical-path checks running against prod continuously (e2e that never sleeps).</li>
+<li><b>Shadow / dark traffic</b>: mirror real requests to the new version, compare, don't serve.</li>
+<li>Requires <b>observability</b> — logs, metrics, traces, SLOs — so you can <i>detect</i> the regression tests missed. Testing in prod without monitoring is just prod bugs <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>&#9733; Test Review Checklist</h3>
+<h4>Behaviour, not implementation</h4>
+<ul>
+<li>&#9744; Asserts observable output/effect — survives an internals-only refactor <span class="warn">!</span></li>
+<li>&#9744; No assertion on private fields, call counts, or internal call order unless the interaction <i>is</i> the contract.</li>
+</ul>
+<h4>Determinism</h4>
+<ul>
+<li>&#9744; No wall-clock / <code>random</code> / network / filesystem in a unit test — seams injected.</li>
+<li>&#9744; No <code>sleep()</code> — awaits or polls a condition with timeout <span class="warn">!</span></li>
+<li>&#9744; No order- or shared-state dependence; runs isolated &amp; in parallel.</li>
+</ul>
+<h4>Doubles</h4>
+<ul>
+<li>&#9744; Mocks only at owned boundaries; not mocking third-party libs directly <span class="warn">!</span></li>
+<li>&#9744; State verification preferred over interaction; not over-mocked.</li>
+</ul>
+<h4>Shape</h4>
+<ul>
+<li>&#9744; One logical behaviour per test; name reads as a spec on failure.</li>
+<li>&#9744; Clear AAA; no logic/branches/loops in the test body.</li>
+<li>&#9744; Boundary + edge cases covered, not just the happy path.</li>
+<li>&#9744; Test can actually fail — seen red at least once (mutation-check the critical ones).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Flaky-Test Triage</h3>
+<table><thead><tr><th>Cause</th><th>Fix</th></tr></thead><tbody>
+<tr><td>hard <code>sleep</code> / timing bet</td><td>await / poll-until with timeout</td></tr>
+<tr><td>shared state / test order</td><td>isolate, fresh fixtures, reset between</td></tr>
+<tr><td>real clock / timezone</td><td>freeze time, inject clock</td></tr>
+<tr><td>unseeded randomness</td><td>seed the RNG</td></tr>
+<tr><td>async not awaited</td><td>await the promise / assertion</td></tr>
+<tr><td>network / 3rd-party call</td><td>stub at boundary, record/replay</td></tr>
+<tr><td>parallel resource clash</td><td>unique DB schema/port per worker</td></tr>
+<tr><td>animation / dynamic data</td><td>disable anim, control the data/date</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> A flaky test is <b>worse than no test</b> — it trains the team to ignore red. Fix or quarantine immediately; never normalise blanket retries.</p>
+</section>
+
+<section class="card"><h3>Symptom → Cause</h3>
+<table><thead><tr><th>Symptom</th><th>Likely cause</th></tr></thead><tbody>
+<tr><td>green suite, prod still breaks</td><td>testing implementation / mocks lie; missing integration layer <span class="warn">!</span></td></tr>
+<tr><td>test breaks on every refactor</td><td>coupled to internals / over-mocked</td></tr>
+<tr><td>100% coverage, bugs ship</td><td>execution without assertions — check mutation score</td></tr>
+<tr><td>suite too slow to run</td><td>too many e2e (ice-cream cone); push tests down</td></tr>
+<tr><td>passes locally, fails CI</td><td>hidden clock/order/env dependence</td></tr>
+<tr><td>"works on my machine"</td><td>uncontrolled env — containerize deps</td></tr>
+<tr><td>unit green, SQL wrong in prod</td><td>DB mocked away — add Testcontainers integration test</td></tr>
+<tr><td>bug returns after a fix</td><td>no regression test locking the fix</td></tr>
+</tbody></table>
 </section>
 
 </div>

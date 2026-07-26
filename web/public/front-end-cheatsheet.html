@@ -6,7 +6,11 @@
 <title>Front End Cheat Sheet</title>
 <style>
 :root{
-  --fs: 7.2pt; --fs-mono: 6.6pt; --fs-h3: 7.8pt; --gap: 5px; --pad: 3px;
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
   --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
 }
 *{box-sizing:border-box;}
@@ -14,10 +18,12 @@ html,body{margin:0;padding:0;}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
   font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
 .sheet{background:#fff;}
+/* spanning title bar */
 .titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
   margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
 .titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
 .titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
 .sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
   column-fill:balance; padding:5px;}
 .card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
@@ -25,6 +31,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Ar
   overflow:hidden;}
 .card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
   background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
 .card:nth-of-type(8n+1) h3{background:#34495e;}
 .card:nth-of-type(8n+2) h3{background:#2c6e9b;}
 .card:nth-of-type(8n+3) h3{background:#1f7a5a;}
@@ -58,179 +65,430 @@ pre code{background:none; padding:0; font-size:1em;}
 @page{ size:A4; margin:5mm; }
 @media print{
   body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
   .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
 }
 </style>
 </head>
 <body>
 <div class="sheet">
-<div class="titlebar"><h1>Front End Cheat Sheet</h1><span class="meta">browser internals · event loop · cookies · caching · web performance · drilly</span></div>
+<div class="titlebar"><h1>Front End Cheat Sheet</h1><span class="meta">browser · JS/TS · React · CSS · perf/CWV · generic examples · drilly</span></div>
 <section class="card legend"><h3>How to read &amp; print</h3>
 <ul>
-<li><span class="warn">!</span> footgun / classic trap &nbsp; <code>&#9744;</code> reasoning step</li>
-<li>Focus: how the browser works + web performance (not CSS/styling).</li>
-<li>North star: <b>don't block the main thread</b>; measure before you optimize.</li>
-<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+<li><span class="warn">!</span> footgun / gotcha &nbsp; <code>&#9744;</code> review checklist item</li>
+<li>Baseline: modern <b>evergreen</b> browsers (Chromium/V8, WebKit, Gecko), <b>ES2023+</b>, <b>React 18/19</b>. Metric thresholds are Core Web Vitals as of 2024 (INP replaced FID).</li>
+<li>Senior focus: how a page becomes pixels · the main thread &amp; event loop · rendering strategy vs Core Web Vitals · the security/caching footguns. Last 2 cards = <b>review checklist</b> + spot-the-bug.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
 </ul></section>
 
-<section class="card diagram"><h3>Critical Rendering Path</h3>
-<div class="mermaid">
-flowchart LR
-  H["HTML"] --> D["DOM"]
-  C["CSS"] --> O["CSSOM"]
-  D --> R["Render tree"]
-  O --> R
-  R --> L["Layout / reflow"]
-  L --> P["Paint"]
-  P --> X["Composite (GPU)"]
-</div>
+<section class="card"><h3>URL &rarr; Pixels &amp; Browser Architecture</h3>
 <ul>
-<li><b>CSS is render-blocking</b>; a sync <code>&lt;script&gt;</code> is parser-blocking → use <code>defer</code>/<code>async</code>.</li>
-<li>Fewer bytes on the critical path = faster first paint. <span class="warn">!</span></li>
+<li>Type URL &rarr; DNS &rarr; TCP+TLS &rarr; HTTP request &rarr; HTML bytes &rarr; parse to <b>DOM</b> + <b>CSSOM</b> &rarr; render tree &rarr; <b>layout</b> &rarr; <b>paint</b> &rarr; <b>composite</b> &rarr; pixels.</li>
+<li>Chromium is <b>multi-process</b>: browser (UI/privilege), one <b>renderer per site</b> (sandboxed), GPU, network, utility. A crash/exploit in one tab can't read another &mdash; <b>site isolation</b>.</li>
 </ul>
-</section>
-
-<section class="card"><h3>Event Loop</h3>
-<pre><code>console.log(1);
-setTimeout(()=>console.log(4));      // macrotask
-Promise.resolve().then(()=>console.log(3)); // microtask
-console.log(2);
-// → 1 2 3 4</code></pre>
-<ul>
-<li><b>Microtasks</b> (promises, queueMicrotask) drain <b>fully</b> between macrotasks.</li>
-<li><b>Macrotasks</b>: timers, events, I/O.</li>
-<li><code>rAF</code> runs right before paint. <span class="warn">!</span> Long task = frozen UI.</li>
-</ul>
-</section>
-
-<section class="card"><h3>JS Engine (V8)</h3>
-<ul>
-<li>parse → <b>bytecode</b> (Ignition) → <b>JIT</b> (TurboFan) → deopt if shapes change.</li>
-<li><b>Hidden classes</b>: keep object shapes consistent; init all props in one place. <span class="warn">!</span></li>
-<li><b>GC</b>: generational mark-sweep; leaks keep objects reachable (see below).</li>
-</ul>
-</section>
-
-<section class="card"><h3>Cookies &amp; Storage</h3>
-<table><thead><tr><th></th><th>Size</th><th>Sent to server</th><th>Life</th></tr></thead><tbody>
-<tr><td>cookie</td><td>~4KB</td><td>every request <span class="warn">!</span></td><td>Expires/Max-Age</td></tr>
-<tr><td>localStorage</td><td>~5MB</td><td>no</td><td>persistent</td></tr>
-<tr><td>sessionStorage</td><td>~5MB</td><td>no</td><td>per tab</td></tr>
-<tr><td>IndexedDB</td><td>large</td><td>no</td><td>persistent, async</td></tr>
+<h4>Threads inside a renderer</h4>
+<table><thead><tr><th>Thread</th><th>Runs</th></tr></thead><tbody>
+<tr><td><b>Main</b></td><td>JS, DOM, style, layout, paint. Single-threaded &mdash; everything competes here <span class="warn">!</span></td></tr>
+<tr><td><b>Compositor</b></td><td>Layers &rarr; screen; can scroll/animate transforms without the main thread</td></tr>
+<tr><td>Raster / GPU</td><td>Turn paint records into textures on the GPU</td></tr>
+<tr><td>Worker</td><td>Web Worker JS, off the main thread (no DOM)</td></tr>
 </tbody></table>
-<p>Cookie flags: <code>HttpOnly</code> (JS can't read), <code>Secure</code>, <b><code>SameSite</code></b> Lax/Strict/None. <span class="warn">!</span> Tokens in JS-readable storage = XSS-exposed → prefer HttpOnly cookies.</p>
+<p><span class="warn">!</span> A heavy JS task blocks the <b>main thread</b> &rarr; no input, no layout, no paint &mdash; the page freezes. Transform/opacity animations run on the <b>compositor</b> and stay smooth even then.</p>
 </section>
 
-<section class="card"><h3>Browser Security</h3>
-<ul>
-<li><b>SOP</b>: origin = scheme + host + port; cross-origin reads blocked.</li>
-<li><b>CORS</b>: server opts in via <code>Access-Control-Allow-*</code>; non-simple → preflight <code>OPTIONS</code>.</li>
-<li><b>CSP</b>: allowlist sources → mitigates XSS.</li>
-<li><b>SameSite</b> cookies + tokens → mitigate CSRF; <code>frame-ancestors</code> → clickjacking. Cross-ref Security sheet.</li>
-</ul>
-</section>
-
-<section class="card"><h3>HTTP for the Browser</h3>
-<table><thead><tr><th></th><th>Note</th></tr></thead><tbody>
-<tr><td>HTTP/1.1</td><td>HOL blocking, ~6 conns/host</td></tr>
-<tr><td>HTTP/2</td><td>multiplex 1 conn, header compress</td></tr>
-<tr><td>HTTP/3</td><td>QUIC/UDP, no TCP HOL</td></tr>
+<section class="card"><h3>Critical Rendering Path</h3>
+<p>Sequence the browser runs before first pixels. Minimise the bytes that <b>block</b> it.</p>
+<table><thead><tr><th>Stage</th><th>Note</th></tr></thead><tbody>
+<tr><td>DOM</td><td>parse HTML; a sync <code>&lt;script&gt;</code> <b>pauses parsing</b> <span class="warn">!</span></td></tr>
+<tr><td>CSSOM</td><td>CSS is <b>render-blocking</b> &mdash; nothing paints until it's built <span class="warn">!</span></td></tr>
+<tr><td>Render tree</td><td>DOM &cap; CSSOM, minus <code>display:none</code> nodes</td></tr>
+<tr><td>Layout (reflow)</td><td>compute box geometry (position/size)</td></tr>
+<tr><td>Paint</td><td>fill pixels: text, colours, shadows, borders</td></tr>
+<tr><td>Composite</td><td>assemble layers on the GPU</td></tr>
 </tbody></table>
-<p>DNS → TCP → TLS → HTTP. <span class="warn">!</span> Under H2/H3 don't over-bundle. Flatten request waterfalls.</p>
-</section>
-
-<section class="card"><h3>Caching</h3>
-<pre><code>Cache-Control: max-age=31536000, immutable  // hashed assets
-Cache-Control: no-cache        // revalidate via ETag
-→ If-None-Match: "abc" → 304 Not Modified</code></pre>
 <ul>
-<li>Layers: memory → disk → <b>Service Worker</b> → network; plus <b>bfcache</b>.</li>
-<li>Bust cache with content-hash filenames.</li>
-<li>SW strategies: cache-first / network-first / stale-while-revalidate.</li>
+<li><b>Reflow</b> = geometry recompute (expensive). <b>Repaint</b> = visual only, no geometry. <b>Composite</b> = cheapest (transform/opacity).</li>
+<li>CSS also <b>blocks JS</b>: a script waits for pending stylesheets because it may read computed styles <span class="warn">!</span></li>
+<li>Levers: inline critical CSS, defer the rest, <code>defer</code>/<code>async</code> scripts, minimise render-blocking bytes.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Performance — Loading</h3>
-<ul>
-<li>Hints: <code>preconnect</code>, <code>preload</code> (critical), <code>prefetch</code> (next), <code>dns-prefetch</code>.</li>
-<li><b>Code split</b> + route chunks; dynamic <code>import()</code>; <code>loading="lazy"</code>.</li>
-<li>Minify + <b>tree-shake</b> + compress (br/gzip); optimize images (AVIF/WebP, <code>srcset</code>).</li>
-<li>Kill render-blocking CSS/JS; inline critical CSS. <span class="warn">!</span></li>
-</ul>
-</section>
-
-<section class="card"><h3>Performance — Runtime</h3>
-<pre><code>// layout thrash — read/write/read/write
-els.forEach(e=>{ e.style.h = e.offsetHeight+1 }) // !
-// fix: batch reads, then writes
-const hs = els.map(e=>e.offsetHeight);
-els.forEach((e,i)=>e.style.h = hs[i]+1);</code></pre>
-<ul>
-<li><b>reflow</b> (geometry) &gt; <b>repaint</b> (pixels) &gt; <b>composite</b> (transform/opacity, cheap, GPU).</li>
-<li>16.6ms/frame; break long tasks; <b>debounce</b> (wait for idle) vs <b>throttle</b> (rate-limit); virtualize long lists.</li>
-</ul>
-</section>
-
-<section class="card"><h3>Core Web Vitals</h3>
-<table><thead><tr><th>Metric</th><th>Good</th><th>Is</th></tr></thead><tbody>
-<tr><td><b>LCP</b></td><td>≤2.5s</td><td>largest paint (loading)</td></tr>
-<tr><td><b>INP</b></td><td>≤200ms</td><td>interaction latency</td></tr>
-<tr><td><b>CLS</b></td><td>≤0.1</td><td>layout shift</td></tr>
-<tr><td>TTFB</td><td>≤0.8s</td><td>server response</td></tr>
-<tr><td>FCP</td><td>≤1.8s</td><td>first paint</td></tr>
+<section class="card"><h3>Script Loading: defer / async</h3>
+<table><thead><tr><th>Form</th><th>Blocks parse?</th><th>Order</th><th>Executes</th></tr></thead><tbody>
+<tr><td><code>&lt;script&gt;</code></td><td><b>Yes</b> &mdash; download + run <span class="warn">!</span></td><td>document order</td><td>immediately, mid-parse</td></tr>
+<tr><td><code>defer</code></td><td>No (downloads in parallel)</td><td><b>preserved</b></td><td>after DOM parsed, before <code>DOMContentLoaded</code></td></tr>
+<tr><td><code>async</code></td><td>No</td><td><b>whoever lands first</b> <span class="warn">!</span></td><td>as soon as downloaded (may pause parse)</td></tr>
+<tr><td><code>type=module</code></td><td>No (deferred by default)</td><td>preserved</td><td>after parse; own scope, strict mode</td></tr>
 </tbody></table>
-<p>Lab (Lighthouse) ≠ field (RUM). <span class="warn">!</span> Measure with <code>web-vitals</code> + PerformanceObserver first.</p>
+<ul>
+<li><b>Default:</b> <code>defer</code> for app code (order matters, needs DOM). <code>async</code> for independent third-party (analytics).</li>
+<li>The <b>preload scanner</b> races ahead of the parser to fetch <code>&lt;img&gt;</code>/<code>&lt;script&gt;</code>/CSS early &mdash; don't hide critical assets behind JS or it can't see them <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>JS Engine (V8) &amp; Memory</h3>
+<ul>
+<li>JS is <b>JIT-compiled</b>, not "interpreted": parse &rarr; AST &rarr; <b>bytecode</b> (Ignition) &rarr; hot code &rarr; optimised machine code (TurboFan) &rarr; deopt back to bytecode if assumptions break.</li>
+<li><b>Hidden classes / shapes:</b> objects with the <b>same property order</b> share a shape &rarr; fast property access. Add props in a consistent order; avoid <code>delete</code> (forces dictionary mode) <span class="warn">!</span></li>
+<li><b>Inline caches:</b> a call site is <b>monomorphic</b> (1 shape, fastest) &rarr; polymorphic &rarr; <b>megamorphic</b> (slow). Passing many object shapes to one function deopts it.</li>
+</ul>
+<h4>GC &amp; leaks</h4>
+<ul>
+<li>Generational mark-and-sweep: young (scavenge, frequent) + old (mark-sweep-compact). Reachable from a <b>root</b> (globals, stack, closures) = alive.</li>
+<li>Leaks in a GC language: forgotten <b>timers</b>, detached <b>DOM refs</b>, growing <b>closures/caches</b>, listeners never removed <span class="warn">!</span> &mdash; find with DevTools heap snapshots (compare, watch retained size climb).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Event Loop &amp; Async JS</h3>
+<ul>
+<li>Call stack empties &rarr; drain <b>ALL microtasks</b> &rarr; render (if needed) &rarr; run <b>one macrotask</b> &rarr; repeat.</li>
+<li><b>Microtasks:</b> <code>Promise.then</code>, <code>await</code> continuation, <code>queueMicrotask</code>, <code>MutationObserver</code>. <b>Macrotasks:</b> <code>setTimeout</code>, events, I/O, <code>MessageChannel</code>.</li>
+</ul>
+<pre><code>console.log('A');
+setTimeout(() =&gt; console.log('D'), 0);
+Promise.resolve().then(() =&gt; console.log('C'));
+console.log('B');
+// A B C D  (sync, then microtasks, then macrotask)</code></pre>
+<ul>
+<li><code>setTimeout(fn,0)</code> is <b>not</b> 0ms &mdash; clamped to ~4ms when nested, and waits for the current task + all microtasks.</li>
+<li>An infinite <b>microtask</b> loop starves rendering forever (never yields) <span class="warn">!</span>; a chain of <code>setTimeout</code>s yields between each.</li>
+<li><code>requestAnimationFrame</code> runs <b>before paint</b> &mdash; use it for animation and DOM reads/writes, not <code>setTimeout</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>JS Language Internals</h3>
+<ul>
+<li><b>Closure:</b> a function + the scope it captured. Powers data privacy, memoisation, and the classic loop bug <span class="warn">!</span></li>
+</ul>
+<pre><code>for (var i=0;i&lt;3;i++)
+  setTimeout(()=&gt;console.log(i)); // 3 3 3
+// Fix: let i   (per-iteration binding) → 0 1 2</code></pre>
+<table><thead><tr><th>Topic</th><th>Rule</th></tr></thead><tbody>
+<tr><td><code>this</code></td><td>call-site: method&rarr;obj, plain&rarr;undefined(strict), arrow&rarr;<b>lexical</b>, <code>new</code>&rarr;instance, <code>bind/call/apply</code></td></tr>
+<tr><td>hoisting</td><td><code>var</code>&rarr;undefined; <code>let/const</code>&rarr;<b>TDZ</b> (ReferenceError before init) <span class="warn">!</span>; fn decls fully hoisted</td></tr>
+<tr><td><code>==</code></td><td>coerces (<code>0==''</code>, <code>null==undefined</code>) <span class="warn">!</span> &mdash; always use <code>===</code></td></tr>
+<tr><td>prototype</td><td><code>class</code> is sugar over the <code>[[Prototype]]</code> chain; lookup walks up to <code>null</code></td></tr>
+</tbody></table>
+<p>Falsy: <code>false 0 -0 '' null undefined NaN 0n</code>. Everything else truthy (incl <code>'0'</code>, <code>[]</code>, <code>{}</code>) <span class="warn">!</span></p>
+</section>
+
+<section class="card"><h3>TypeScript Essentials</h3>
+<ul>
+<li><b>Structural</b> typing: shape compatibility, not names. Types are <b>erased</b> at build &mdash; no runtime checks <span class="warn">!</span> validate external data (e.g. zod) at boundaries.</li>
+</ul>
+<pre><code>type User = { id: string; name?: string };
+function f(u: User | null) {
+  if (!u) return;          // narrowing
+  u.name?.toUpperCase();   // optional chain
+}
+type Keys = keyof User;    // 'id'|'name'
+type ID = User['id'];      // indexed access</code></pre>
+<table><thead><tr><th>Feature</th><th>Use</th></tr></thead><tbody>
+<tr><td><code>interface</code> vs <code>type</code></td><td>interface = extendable/merges; type = unions/tuples/mapped</td></tr>
+<tr><td><code>unknown</code> vs <code>any</code></td><td>prefer <code>unknown</code> &mdash; forces a check; <code>any</code> disables checking <span class="warn">!</span></td></tr>
+<tr><td>generics</td><td><code>&lt;T&gt;(x:T):T</code> &mdash; preserve the caller's type</td></tr>
+<tr><td><code>as const</code></td><td>literal + readonly narrowing</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> <code>as</code> is an <b>assertion</b>, not a cast &mdash; it silences the checker, it doesn't convert. Turn on <code>strict</code> or it barely helps.</p>
+</section>
+
+<section class="card"><h3>DOM &amp; Manipulation</h3>
+<ul>
+<li><b>DOM</b> = live in-memory object tree (a JS API); <b>HTML</b> = the source text. "View Source" = raw HTML; DevTools = the current DOM.</li>
+<li><b>Attribute</b> (HTML, initial string) &ne; <b>property</b> (DOM, live value) &mdash; <code>input.value</code> tracks typing; <code>getAttribute('value')</code> stays the initial <span class="warn">!</span></li>
+</ul>
+<h4>Layout thrashing <span class="warn">!</span></h4>
+<pre><code>// BAD: read→write→read forces sync reflow each loop
+for (const el of items)
+  el.style.height = el.offsetHeight + 'px';
+// GOOD: batch reads, then writes
+const hs = items.map(el =&gt; el.offsetHeight);
+items.forEach((el,i)=&gt; el.style.height = hs[i]+'px');</code></pre>
+<ul>
+<li>Reading <code>offsetTop/Width</code>, <code>getBoundingClientRect</code>, <code>getComputedStyle</code> after a write <b>forces sync layout</b>.</li>
+<li>Batch inserts with a <code>DocumentFragment</code> (one reflow). <code>textContent</code> is safe; <code>innerHTML</code> with user data = <b>XSS</b> <span class="warn">!</span></li>
+<li>Live collections (<code>getElementsByTagName</code>) update as you mutate &mdash; iterate a static <code>querySelectorAll</code> snapshot instead.</li>
+</ul>
+</section>
+
+<section class="card"><h3>DOM Event Model</h3>
+<ul>
+<li>Three phases: <b>capture</b> (root&rarr;target) &rarr; <b>target</b> &rarr; <b>bubble</b> (target&rarr;root). Listeners bubble by default; <code>{capture:true}</code> for phase 1.</li>
+<li><code>target</code> = element that fired; <code>currentTarget</code> = element the listener is on <span class="warn">!</span></li>
+</ul>
+<table><thead><tr><th>Method</th><th>Effect</th></tr></thead><tbody>
+<tr><td><code>preventDefault()</code></td><td>cancel browser default (submit, link nav) &mdash; still bubbles</td></tr>
+<tr><td><code>stopPropagation()</code></td><td>stop travelling the tree &mdash; default still runs</td></tr>
+<tr><td><code>stopImmediate&shy;Propagation()</code></td><td>+ skip later listeners on the same element</td></tr>
+</tbody></table>
+<h4>Delegation &amp; cleanup</h4>
+<pre><code>list.addEventListener('click', e =&gt; {
+  const li = e.target.closest('li');
+  if (li) select(li.dataset.id);   // one listener, N rows
+});</code></pre>
+<ul>
+<li>Delegation survives re-renders and scales to N children with one listener.</li>
+<li><code>{passive:true}</code> on scroll/touch &rarr; can't <code>preventDefault</code> but never blocks scroll. <code>AbortController</code> removes many listeners at once (<code>{signal}</code>) &mdash; forgotten removal leaks <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>React &mdash; Rendering &amp; Reconciliation</h3>
+<ul>
+<li><b>Render</b> = call components to build a new element tree (pure, no side effects). <b>Commit</b> = React applies the diff to the DOM. Rendering &ne; DOM update.</li>
+<li>A component re-renders when its <b>state/props change</b> or its <b>parent re-renders</b> &mdash; children re-render by default even with identical props <span class="warn">!</span></li>
+</ul>
+<table><thead><tr><th>Tool</th><th>Stops re-render / recompute when&hellip;</th></tr></thead><tbody>
+<tr><td><code>React.memo</code></td><td>props shallow-equal</td></tr>
+<tr><td><code>useMemo</code></td><td>memoise an expensive value / stable object prop</td></tr>
+<tr><td><code>useCallback</code></td><td>stable fn identity for memoised children</td></tr>
+</tbody></table>
+<ul>
+<li><b>Keys:</b> stable &amp; unique per list &mdash; <b>never the array index</b> for reorderable/removable lists (state binds to the wrong row) <span class="warn">!</span></li>
+<li><b>RSC</b> render on the server and ship <b>zero JS</b>; Client Components (<code>'use client'</code>) hydrate. <code>&lt;Suspense&gt;</code> streams a fallback while data loads.</li>
+<li>Don't reach for memo first &mdash; fix structure (lift state down, pass <code>children</code>) before micro-optimising.</li>
+</ul>
+</section>
+
+<section class="card"><h3>React &mdash; Hooks</h3>
+<ul>
+<li><b>Rules:</b> call hooks at the <b>top level</b>, same order every render &mdash; never in conditions/loops <span class="warn">!</span> Only in components/custom hooks.</li>
+</ul>
+<pre><code>useEffect(() =&gt; {
+  const c = new AbortController();
+  fetch(url, {signal:c.signal}).then(setData);
+  return () =&gt; c.abort();   // cleanup on unmount/dep change
+}, [url]);                  // re-run when url changes</code></pre>
+<table><thead><tr><th>Hook</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>useState</code></td><td>local state; setter is <b>async/batched</b> &mdash; use updater <code>s=&gt;s+1</code> <span class="warn">!</span></td></tr>
+<tr><td><code>useEffect</code></td><td><b>synchronise with the outside</b> (subs, fetch); not for derived data</td></tr>
+<tr><td><code>useRef</code></td><td>mutable box / DOM node; changing it <b>doesn't re-render</b></td></tr>
+<tr><td><code>useMemo</code>/<code>useCallback</code></td><td>memoise value / fn identity</td></tr>
+</tbody></table>
+<ul>
+<li><span class="warn">!</span> Stale closure: omit a dep and the effect captures old values. Include every referenced value; use the updater form or a ref to escape.</li>
+<li>Derive during render instead of mirroring props into state (redundant state &rarr; sync bugs).</li>
+</ul>
+</section>
+
+<section class="card"><h3>CSS &mdash; Box Model &amp; Layout</h3>
+<ul>
+<li><b>Always set</b> <code>box-sizing:border-box</code> &mdash; width includes padding+border (default <code>content-box</code> adds them on top) <span class="warn">!</span></li>
+<li><b>Margins collapse</b> vertically between block siblings (max, not sum); flex/grid items and padding don't collapse.</li>
+</ul>
+<table><thead><tr><th>System</th><th>Use for</th></tr></thead><tbody>
+<tr><td><b>Flexbox</b></td><td>1-D rows/columns; distribute along one axis</td></tr>
+<tr><td><b>Grid</b></td><td>2-D layout; explicit rows &times; columns</td></tr>
+<tr><td><code>position</code></td><td>relative / absolute (nearest positioned ancestor) / fixed (viewport) / sticky</td></tr>
+</tbody></table>
+<pre><code>.row { display:flex; gap:1rem;
+  justify-content:space-between; /* main axis */
+  align-items:center; }         /* cross axis */
+.grid { display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(12rem,1fr)); }</code></pre>
+<ul>
+<li><b>Stacking context</b>: created by <code>position</code>+<code>z-index</code>, <code>opacity&lt;1</code>, <code>transform</code>, <code>filter</code>. <code>z-index</code> only compares <b>within</b> a context &mdash; a child can't escape its parent <span class="warn">!</span></li>
+<li>Prefer <code>gap</code> over margins; animate <b>transform/opacity</b> only (compositor, no reflow).</li>
+</ul>
+<h4>Cascade &amp; specificity</h4>
+<p>Winner = origin/importance &rarr; <b>specificity</b> &rarr; source order (last wins).</p>
+<table><thead><tr><th>Selector</th><th>(id, class, type)</th></tr></thead><tbody>
+<tr><td>inline <code>style=</code></td><td>1,0,0,0 (beats selectors)</td></tr>
+<tr><td><code>#id</code></td><td>0,1,0,0</td></tr>
+<tr><td><code>.class</code> <code>[attr]</code> <code>:hover</code></td><td>0,0,1,0</td></tr>
+<tr><td><code>div</code> <code>::before</code></td><td>0,0,0,1</td></tr>
+</tbody></table>
+<ul>
+<li><code>!important</code> overrides everything &mdash; escalation war, avoid <span class="warn">!</span> <code>:where()</code> adds <b>zero</b> specificity for low-priority resets.</li>
+<li>Units: <code>rem</code> (root font) for type/spacing; <code>em</code> compounds; <code>%</code> of parent; <code>vw/vh/dvh</code> viewport; <code>fr</code> grid fraction; <code>ch</code> for line length.</li>
+<li>Modern: custom properties <code>var(--x)</code> (cascade + runtime), <code>clamp(min,pref,max)</code> fluid sizing, <b>container queries</b> <code>@container</code> (size by parent, not viewport), logical properties (<code>inline/block</code>).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Cookies, Storage &amp; Sessions</h3>
+<table><thead><tr><th>Store</th><th>Sent to server?</th><th>Size / notes</th></tr></thead><tbody>
+<tr><td>Cookie</td><td><b>Yes</b>, every request <span class="warn">!</span></td><td>~4KB; auth/session</td></tr>
+<tr><td>localStorage</td><td>No (JS only)</td><td>~5MB, sync, persists</td></tr>
+<tr><td>sessionStorage</td><td>No</td><td>per-tab, cleared on close</td></tr>
+<tr><td>IndexedDB</td><td>No</td><td>large, async, structured</td></tr>
+<tr><td>Cache API</td><td>No</td><td>Request/Response, for SW</td></tr>
+</tbody></table>
+<h4>Cookie attributes</h4>
+<ul>
+<li><code>HttpOnly</code> &mdash; JS can't read it (blunts XSS token theft). <code>Secure</code> &mdash; HTTPS only. <code>SameSite</code>: <b>Strict</b> / <b>Lax</b> (default, top-nav GET) / <b>None</b> (needs Secure) &mdash; CSRF lever.</li>
+<li><b>Auth tokens:</b> prefer an <code>HttpOnly; Secure; SameSite</code> cookie over localStorage &mdash; localStorage is readable by any XSS <span class="warn">!</span></li>
+<li><code>__Host-</code> prefix forces Secure + path=/ + no Domain &mdash; hardening.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Browser Security Model</h3>
+<ul>
+<li><b>Origin</b> = scheme + host + port. <b>Same-origin policy</b> blocks reading cross-origin DOM/responses (requests may still be sent).</li>
+<li><b>CORS</b> relaxes it: server opts in with <code>Access-Control-Allow-Origin</code>. Non-simple requests (custom headers, <code>PUT</code>) trigger a <b>preflight</b> <code>OPTIONS</code>. <code>*</code> + credentials is forbidden <span class="warn">!</span></li>
+</ul>
+<table><thead><tr><th>Attack</th><th>Defence</th></tr></thead><tbody>
+<tr><td><b>XSS</b> (inject script)</td><td>escape output, framework auto-escaping, <b>CSP</b>, no <code>innerHTML</code> of user data</td></tr>
+<tr><td><b>CSRF</b> (ride cookie)</td><td><code>SameSite</code> cookies, CSRF token, check <code>Origin</code></td></tr>
+<tr><td>Clickjacking</td><td><code>X-Frame-Options: DENY</code> / CSP <code>frame-ancestors</code></td></tr>
+<tr><td>Tampered CDN</td><td>Subresource Integrity <code>integrity=sha384-</code></td></tr>
+</tbody></table>
+<ul>
+<li><b>CSP</b>: <code>default-src 'self'</code>; blocks inline/eval script &mdash; the strongest XSS backstop.</li>
+<li><span class="warn">!</span> <code>postMessage</code>: always verify <code>event.origin</code> and set a target origin (never <code>'*'</code> for secrets).</li>
+</ul>
+</section>
+
+<section class="card"><h3>HTTP &amp; Networking</h3>
+<table><thead><tr><th>Version</th><th>Wins / limits</th></tr></thead><tbody>
+<tr><td>HTTP/1.1</td><td>1 request per connection; <b>HoL blocking</b>; needs many connections <span class="warn">!</span></td></tr>
+<tr><td>HTTP/2</td><td><b>multiplexing</b> over 1 TCP conn, header compression; bundling/sharding now hurt</td></tr>
+<tr><td>HTTP/3</td><td>QUIC over UDP; no TCP HoL blocking; faster reconnect</td></tr>
+</tbody></table>
+<ul>
+<li><b>Request waterfall</b>: serialised dependent fetches &mdash; flatten by parallelising, preloading, or moving to the server.</li>
+<li>Status essentials: 200/201/204, 301/302/304, 400/401/403/404/429, 500/502/503.</li>
+<li><b>Resource hints:</b> <code>preconnect</code> (warm DNS+TCP+TLS to a known origin), <code>dns-prefetch</code> (DNS only), <code>preload</code> (this-page critical asset now), <code>prefetch</code> (next-nav, low priority).</li>
+<li>Compress text with <b>brotli/gzip</b>; <b>TTFB</b> = server + network (yes, a front-end concern).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Browser Caching</h3>
+<table><thead><tr><th>Directive</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>max-age=N</code></td><td>fresh for N s &mdash; served with no request</td></tr>
+<tr><td><code>no-cache</code></td><td>store but <b>revalidate</b> every time (ETag)</td></tr>
+<tr><td><code>no-store</code></td><td>never store (sensitive data)</td></tr>
+<tr><td><code>immutable</code></td><td>never revalidate &mdash; for hashed assets</td></tr>
+<tr><td><code>private</code>/<code>public</code></td><td>browser-only vs shared/CDN</td></tr>
+</tbody></table>
+<ul>
+<li><b>Validation:</b> <code>ETag</code>/<code>Last-Modified</code> &rarr; conditional request &rarr; <b>304</b> (no body). Cheaper than a full fetch, still a round trip.</li>
+<li><b>Cache busting:</b> content-hash filenames (<code>app.9f3c.js</code>) + <code>immutable</code>, and short-cached HTML pointing at them &mdash; solves invalidation <span class="warn">!</span></li>
+<li>SW strategies: <b>cache-first</b> (static), <b>network-first</b> (fresh data), <b>stale-while-revalidate</b> (fast + eventually fresh).</li>
+<li><b>bfcache</b>: instant back/forward from a frozen page. <code>unload</code> listeners and <code>no-store</code> disqualify it <span class="warn">!</span></li>
+<li><span class="warn">!</span> <code>Vary</code> splits the cache per header value &mdash; a wide <code>Vary</code> wrecks hit rate.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Web Performance &mdash; Loading &amp; Runtime</h3>
+<h4>Loading &mdash; fewer/smaller bytes, right order</h4>
+<ul>
+<li><b>Code splitting</b> per route (<code>import()</code>); <b>tree-shaking</b> (ESM only) drops dead exports; <b>minify</b>; <b>compress</b>.</li>
+<li><code>loading="lazy"</code> for below-fold images; responsive <code>srcset</code>/<code>sizes</code> + modern formats (AVIF/WebP); dynamic <code>import()</code> for heavy components.</li>
+<li><b>Preload the LCP image</b>; inline critical CSS; defer non-critical JS/CSS.</li>
+</ul>
+<h4>Runtime &mdash; keep the main thread free</h4>
+<ul>
+<li><b>Long task</b> = &gt;50ms &mdash; break work into chunks, yield with <code>scheduler.postTask</code> / <code>setTimeout</code> / <code>await</code> <span class="warn">!</span></li>
+<li>Offload CPU work to a <b>Web Worker</b>; <b>virtualise</b> long lists (render only visible rows); debounce/throttle scroll &amp; input handlers.</li>
+<li>Animate <b>transform/opacity</b> (compositor); avoid animating <code>width/top/left</code> (reflow every frame) <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Core Web Vitals &amp; Measurement</h3>
+<table><thead><tr><th>Metric</th><th>Good p75</th><th>Measures / fix</th></tr></thead><tbody>
+<tr><td><b>LCP</b></td><td>&le; 2.5s</td><td>largest element paint &mdash; TTFB, preload hero, cut render-block</td></tr>
+<tr><td><b>INP</b></td><td>&le; 200ms</td><td>interaction&rarr;paint (replaced FID 2024) &mdash; shorten long tasks</td></tr>
+<tr><td><b>CLS</b></td><td>&le; 0.1</td><td>layout shift &mdash; size images, reserve ad/font space <span class="warn">!</span></td></tr>
+<tr><td>TTFB</td><td>&le; 0.8s</td><td>server+network; feeds LCP</td></tr>
+<tr><td>FCP</td><td>&le; 1.8s</td><td>first paint of any content</td></tr>
+</tbody></table>
+<ul>
+<li><b>Lab</b> (Lighthouse/DevTools, one run &mdash; debug &amp; reproduce) vs <b>Field/RUM</b> (CrUX, <code>web-vitals</code>, real users at <b>p75</b> &mdash; judge success). They disagree; green lab + failing field is the classic trap <span class="warn">!</span></li>
+<li><b>Method:</b> measure &rarr; find the single biggest cost &rarr; fix that &rarr; re-measure. Not a grab-bag of tips.</li>
+<li>APIs: <code>PerformanceObserver</code>, Navigation/Resource Timing, <code>performance.now()</code>.</li>
+</ul>
 </section>
 
 <section class="card"><h3>Rendering Strategies</h3>
-<table><thead><tr><th></th><th>HTML at</th><th>Best for</th></tr></thead><tbody>
-<tr><td>CSR</td><td>client</td><td>app-like SPA</td></tr>
-<tr><td>SSR</td><td>request time</td><td>dynamic + SEO</td></tr>
-<tr><td>SSG</td><td>build time</td><td>static content</td></tr>
-<tr><td>ISR</td><td>build + revalidate</td><td>large mostly-static</td></tr>
+<p>One question: <b>who builds the first HTML, and when?</b> Trades first-paint vs interactivity vs SEO vs server cost. Choose <b>per page</b>.</p>
+<table><thead><tr><th>Strategy</th><th>HTML built</th><th>Notes</th></tr></thead><tbody>
+<tr><td><b>CSR</b></td><td>client at runtime</td><td>blank first paint, cheap server, SEO risk &mdash; dashboards</td></tr>
+<tr><td><b>SSR</b></td><td>server per request</td><td>fast LCP/SEO, then hydrate &mdash; product pages</td></tr>
+<tr><td><b>SSG</b></td><td>build time</td><td>fastest+cheapest, frozen till rebuild &mdash; marketing/docs</td></tr>
+<tr><td><b>ISR</b></td><td>build + revalidate</td><td>SSG that refreshes on a schedule</td></tr>
+<tr><td>Streaming / Islands</td><td>chunks / partial</td><td>cut the hydration tax</td></tr>
 </tbody></table>
-<p><span class="warn">!</span> SSR/SSG still pay a <b>hydration</b> cost — looks interactive before it is. Islands/streaming cut it.</p>
-</section>
-
-<section class="card"><h3>Web APIs</h3>
 <ul>
-<li><b>Web Worker</b>: CPU off main thread (no DOM, postMessage).</li>
-<li><b>Service Worker</b>: network proxy, offline, push.</li>
-<li><b>IntersectionObserver</b>: lazy-load / infinite scroll.</li>
-<li><b>History API</b>: SPA routing (<code>pushState</code>).</li>
-<li>WebSocket/SSE; IndexedDB; <code>AbortController</code> to cancel fetch.</li>
+<li><b>Hydration</b> = client re-runs component code over server HTML to attach listeners. Big tree = <b>long task</b> = poor <b>INP</b> <span class="warn">!</span></li>
+<li><span class="warn">!</span> "Uncanny valley": page <i>looks</i> ready but doesn't respond until hydration finishes. SSR ships HTML <b>and</b> the JS bundle &mdash; often more total work than CSR, in a better order.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Memory Leaks (spot them)</h3>
+<section class="card"><h3>Accessibility &amp; Semantics</h3>
 <ul>
-<li>Detached DOM kept by a JS ref.</li>
-<li>Listeners/timers/intervals never removed. <span class="warn">!</span></li>
-<li>Closures capturing large scopes; growing global/module maps &amp; caches.</li>
-<li>Find: DevTools Memory → heap snapshots, "Detached" nodes, retainers.</li>
+<li><b>Semantic HTML first:</b> <code>&lt;button&gt;</code>, <code>&lt;nav&gt;</code>, <code>&lt;main&gt;</code>, <code>&lt;label&gt;</code> give role + keyboard + focus for free. A <code>&lt;div onClick&gt;</code> is invisible to assistive tech and not keyboard-focusable <span class="warn">!</span></li>
+<li><b>ARIA rule #1:</b> don't use it if a native element exists. ARIA changes semantics, never behaviour &mdash; you still wire keys yourself.</li>
+</ul>
+<table><thead><tr><th>Concern</th><th>Do</th></tr></thead><tbody>
+<tr><td>Keyboard</td><td>all actions via Tab/Enter/Space/Esc; visible <code>:focus</code></td></tr>
+<tr><td>Images</td><td><code>alt</code> text; <code>alt=""</code> for decorative</td></tr>
+<tr><td>Forms</td><td><code>&lt;label for&gt;</code>; announce errors (<code>aria-live</code>)</td></tr>
+<tr><td>Contrast</td><td>&ge; 4.5:1 body text (WCAG AA)</td></tr>
+<tr><td>Structure</td><td>one <code>&lt;h1&gt;</code>, ordered headings, landmarks</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> Never remove focus outlines without a replacement. Don't convey state by colour alone. Test with keyboard-only + a screen reader, not just a plugin score.</p>
+</section>
+
+<section class="card"><h3>Architecture, Build &amp; Testing</h3>
+<ul>
+<li><b>Bundler</b> (Vite/esbuild/webpack): resolve ESM graph &rarr; tree-shake &rarr; split chunks &rarr; minify &rarr; hash. ESM's <b>static</b> <code>import</code> is what makes tree-shaking possible <span class="warn">!</span> (CJS <code>require</code> is dynamic).</li>
+<li>ESM: async, static, top-level <code>await</code>, live bindings. CJS: sync, dynamic, <code>module.exports</code>.</li>
+</ul>
+<h4>Testing trophy</h4>
+<table><thead><tr><th>Layer</th><th>Tool / scope</th></tr></thead><tbody>
+<tr><td>Static</td><td>TS, ESLint &mdash; cheapest</td></tr>
+<tr><td>Unit</td><td>Vitest/Jest &mdash; pure logic</td></tr>
+<tr><td><b>Integration</b></td><td>Testing Library &mdash; best ROI</td></tr>
+<tr><td>E2E</td><td>Playwright/Cypress &mdash; real browser</td></tr>
+</tbody></table>
+<ul>
+<li>Test <b>behaviour, not implementation</b> &mdash; query by role/text (what the user sees), not CSS classes or internal state <span class="warn">!</span></li>
+<li>Debug: DevTools Performance panel (flame chart, long tasks), Network waterfall, heap snapshots, Coverage for dead code.</li>
 </ul>
 </section>
 
-<section class="card"><h3>&#9744; Playbook: slow page / "type a URL"</h3>
+<section class="card"><h3>&#9733; Front-End Review Checklist</h3>
+<h4>Rendering &amp; main thread</h4>
 <ul>
-<li>&#9744; DNS → TLS → HTML → CRP → JS parse/exec → hydrate → interactive.</li>
-<li>&#9744; <b>Measure first</b>: LCP/INP/CLS, the request waterfall, main-thread flame chart.</li>
-<li>&#9744; Loading slow? cut critical bytes, preconnect, split, compress, lazy-load.</li>
-<li>&#9744; Janky? find reflow/thrash/long tasks; debounce; virtualize; move CPU to a worker.</li>
-<li>&#9744; Big bundle? analyze, tree-shake, drop deps, dynamic-import routes.</li>
-<li>&#9744; Leak? snapshot, find detached nodes + retainers, remove listeners.</li>
-<li>&#9744; Pick storage/rendering by the constraint (SEO, offline, size, sent-to-server).</li>
+<li>&#9744; No layout thrashing &mdash; reads batched before writes; no forced sync layout in a loop <span class="warn">!</span></li>
+<li>&#9744; Animations use transform/opacity (compositor), not <code>width/top</code>.</li>
+<li>&#9744; Long tasks split/yielded; heavy CPU work in a Worker; long lists virtualised.</li>
 </ul>
+<h4>React</h4>
+<ul>
+<li>&#9744; Stable, non-index keys on lists; hooks at top level; complete effect dep arrays.</li>
+<li>&#9744; Effect cleanup (abort/unsubscribe); no derived data mirrored into state; setState uses the updater form.</li>
+</ul>
+<h4>Loading &amp; CWV</h4>
+<ul>
+<li>&#9744; LCP image preloaded &amp; sized (no CLS); route-level code splitting; below-fold images lazy.</li>
+<li>&#9744; Scripts <code>defer</code>/<code>async</code>; critical CSS inlined; hashed assets <code>immutable</code>.</li>
+</ul>
+<h4>Security</h4>
+<ul>
+<li>&#9744; No <code>innerHTML</code>/<code>dangerouslySetInnerHTML</code> with unsanitised input; CSP set; external data validated.</li>
+<li>&#9744; Auth token in <code>HttpOnly; Secure; SameSite</code> cookie; CORS not <code>*</code> with credentials <span class="warn">!</span></li>
+</ul>
+<h4>A11y</h4>
+<ul>
+<li>&#9744; Real <code>&lt;button&gt;</code>/<code>&lt;a&gt;</code>, labelled inputs, visible focus, keyboard-operable, AA contrast.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Common Bugs &mdash; Symptom &rarr; Cause</h3>
+<table><thead><tr><th>Symptom</th><th>Cause</th></tr></thead><tbody>
+<tr><td>page freezes / no scroll</td><td>long task blocking the main thread <span class="warn">!</span></td></tr>
+<tr><td>scroll janky, 100+ms input</td><td>non-passive listener / heavy handler; poor INP <span class="warn">!</span></td></tr>
+<tr><td>loop logs final value N times</td><td><code>var</code> captured in closure &mdash; use <code>let</code> <span class="warn">!</span></td></tr>
+<tr><td>list clicks fire twice / stop</td><td>index keys / listener not cleaned up &mdash; delegate <span class="warn">!</span></td></tr>
+<tr><td>content jumps while loading</td><td>unsized image/ad/font &mdash; CLS <span class="warn">!</span></td></tr>
+<tr><td>page looks ready, clicks dead</td><td>hydration not finished (uncanny valley) <span class="warn">!</span></td></tr>
+<tr><td>stale value in effect/handler</td><td>stale closure &mdash; missing dep <span class="warn">!</span></td></tr>
+<tr><td>cookie not sent on API call</td><td><code>SameSite</code>/<code>Secure</code>/domain/path or missing <code>credentials:'include'</code> <span class="warn">!</span></td></tr>
+<tr><td>users stuck on old build</td><td>HTML over-cached / SW serving stale <span class="warn">!</span></td></tr>
+<tr><td>memory climbs over time</td><td>listener/timer/detached-DOM leak <span class="warn">!</span></td></tr>
+</tbody></table>
 </section>
 
 </div>
-<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
-<script>
-  try {
-    mermaid.initialize({ startOnLoad: true, theme: "neutral",
-      flowchart: { useMaxWidth: true, htmlLabels: true, nodeSpacing: 18, rankSpacing: 18 },
-      themeVariables: { fontSize: "9px" } });
-  } catch (e) { /* offline / blocked CDN: diagrams degrade to source text, rest of sheet is fine */ }
-</script>
 </body>
 </html>

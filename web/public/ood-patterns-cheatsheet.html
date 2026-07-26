@@ -6,7 +6,11 @@
 <title>OOD &amp; Design Patterns Cheat Sheet</title>
 <style>
 :root{
-  --fs: 7.2pt; --fs-mono: 6.6pt; --fs-h3: 7.8pt; --gap: 5px; --pad: 3px;
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
   --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
 }
 *{box-sizing:border-box;}
@@ -14,10 +18,12 @@ html,body{margin:0;padding:0;}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
   font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
 .sheet{background:#fff;}
+/* spanning title bar */
 .titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
   margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
 .titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
 .titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
 .sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
   column-fill:balance; padding:5px;}
 .card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
@@ -25,6 +31,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Ar
   overflow:hidden;}
 .card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
   background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
 .card:nth-of-type(8n+1) h3{background:#34495e;}
 .card:nth-of-type(8n+2) h3{background:#2c6e9b;}
 .card:nth-of-type(8n+3) h3{background:#1f7a5a;}
@@ -58,180 +65,344 @@ pre code{background:none; padding:0; font-size:1em;}
 @page{ size:A4; margin:5mm; }
 @media print{
   body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
   .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
 }
 </style>
 </head>
 <body>
 <div class="sheet">
-<div class="titlebar"><h1>OOD &amp; Design Patterns Cheat Sheet</h1><span class="meta">OOP · SOLID · GoF patterns · UML · refactoring · LLD · drilly</span></div>
+<div class="titlebar"><h1>OOD &amp; Design Patterns Cheat Sheet</h1><span class="meta">OOP · SOLID · GoF 23 · UML · refactoring · LLD · generic examples · drilly</span></div>
+
 <section class="card legend"><h3>How to read &amp; print</h3>
 <ul>
-<li><span class="warn">!</span> footgun / classic trap &nbsp; <code>&#9744;</code> LLD-interview step</li>
-<li>Low-level design: the <b>class/object model</b> of one app (distributed/architecture patterns = System Design sheet).</li>
-<li>North star: <b>high cohesion, low coupling</b>; program to interfaces; encapsulate what varies.</li>
-<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+<li><span class="warn">!</span> footgun / classic interview trap &nbsp; <code>&#9744;</code> LLD review checklist item</li>
+<li>Scope: <b>low-level design</b> — the class/object model of one app. Distributed/service topology lives on the System Design sheet.</li>
+<li>North star: <b>high cohesion, low coupling</b> · program to interfaces · <b>encapsulate what varies</b> · compose over inherit.</li>
+<li>Golden rule of patterns: <b>problem → force → pattern</b>, never pattern-shopping. No force = no pattern <span class="warn">!</span></li>
+<li>Last 3 cards = <b>anti-patterns</b> + spot-the-smell table + <b>LLD interview checklist</b>.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
 </ul></section>
 
 <section class="card"><h3>Four Pillars of OOP</h3>
 <ul>
-<li><b>Encapsulation</b>: hide state, expose behavior (invariants stay valid).</li>
-<li><b>Abstraction</b>: model the essential, ignore the rest.</li>
-<li><b>Inheritance</b>: is-a reuse (use sparingly).</li>
-<li><b>Polymorphism</b>: one interface, many impls (dynamic dispatch).</li>
+<li><b>Encapsulation</b> — hide state, expose behaviour; the object protects its own invariants. Not "private fields + getters/setters" (that's an anemic leak) <span class="warn">!</span> — expose <i>operations</i>, not data.</li>
+<li><b>Abstraction</b> — model the essential, drop the rest. Encapsulation hides the <i>how</i>; abstraction chooses the <i>what</i>.</li>
+<li><b>Inheritance</b> — is-a reuse via subclassing. Powerful, over-used; prefer composition <span class="warn">!</span></li>
+<li><b>Polymorphism</b> — one interface, many impls; resolved by <b>dynamic dispatch</b> on the runtime type.</li>
 </ul>
+<h4>Interface vs abstract class</h4>
 <table><thead><tr><th></th><th>Interface</th><th>Abstract class</th></tr></thead><tbody>
-<tr><td>state</td><td>no (usually)</td><td>yes</td></tr>
-<tr><td>multiple</td><td>implement many</td><td>extend one</td></tr>
-<tr><td>use for</td><td>a capability</td><td>shared base + partial impl</td></tr>
+<tr><td>state/fields</td><td>none (constants)</td><td>yes</td></tr>
+<tr><td>inherit</td><td>implement many</td><td>extend <b>one</b></td></tr>
+<tr><td>models</td><td>a <i>capability</i> (role)</td><td>shared base + partial impl</td></tr>
 </tbody></table>
+<p>Default to an interface; reach for an abstract class only when subclasses genuinely share state/impl.</p>
+</section>
+
+<section class="card"><h3>Polymorphism &amp; Dispatch</h3>
+<table><thead><tr><th>Kind</th><th>Bound</th></tr></thead><tbody>
+<tr><td><b>Subtype</b> (override)</td><td>runtime — virtual/dynamic dispatch</td></tr>
+<tr><td><b>Overloading</b> (ad-hoc)</td><td>compile time — by static arg types</td></tr>
+<tr><td><b>Parametric</b> (generics)</td><td>compile time — one code, many types</td></tr>
+<tr><td><b>Coercion</b> (casting)</td><td>implicit/explicit conversion</td></tr>
+</tbody></table>
+<ul>
+<li><b>Override</b> = same signature, subclass replaces base behaviour (runtime). <b>Overload</b> = same name, different params (compile time) <span class="warn">!</span> — don't confuse them.</li>
+<li><b>Identity</b> (<code>a == b</code>, same object) vs <b>equality</b> (<code>a.equals(b)</code>, same value). Override <code>equals</code>+<code>hashCode</code> together <span class="warn">!</span></li>
+<li><b>Duck typing</b> — "if it quacks…"; conformance by shape, not declared type (Python/JS).</li>
+</ul>
 </section>
 
 <section class="card"><h3>UML Relationships</h3>
-<pre><code>Dog  --|>  Animal   inheritance (is-a)
-Car  *---  Engine   composition (owns, dies with)
-Team o---  Player   aggregation (has, outlives)
-Order --   Address  association (uses)
-Foo  ..>   Logger   dependency (transient use)</code></pre>
+<pre><code>Dog  --|&gt;  Animal   inheritance  (is-a)
+Car  --|&gt;  Drivable realization (impl iface, dashed)
+Car  *---  Engine   composition  (owns; dies with)
+Team o---  Player   aggregation  (has; outlives)
+Order ---&gt; Address  association  (holds ref)
+Foo  ..&gt;   Logger   dependency   (transient use)</code></pre>
 <ul>
-<li><b>Composition</b> (filled ◆): part can't outlive whole (House–Room).</li>
-<li><b>Aggregation</b> (hollow ◇): shared, independent lifetime (Team–Player). <span class="warn">!</span> The classic exam distinction.</li>
+<li><b>Composition</b> (filled ◆): part can't outlive the whole — House–Room, Order–LineItem.</li>
+<li><b>Aggregation</b> (hollow ◇): shared, independent lifetime — Team–Player. <span class="warn">!</span> The classic exam distinction; when unsure, call it plain association.</li>
+<li><b>Multiplicity</b> at the arrow end: <code>1</code>, <code>0..1</code>, <code>*</code>, <code>1..*</code>. Many-to-many → introduce a <b>join/association class</b> (Student–Enrolment–Course).</li>
+<li>Arrow points at the <b>dependency</b> (the thing you know about).</li>
 </ul>
 </section>
 
-<section class="card"><h3>SOLID</h3>
-<table><tbody>
-<tr><td><b>S</b></td><td>Single Responsibility — one reason to change</td></tr>
-<tr><td><b>O</b></td><td>Open/Closed — extend, don't modify</td></tr>
-<tr><td><b>L</b></td><td>Liskov — subtypes substitutable for base</td></tr>
-<tr><td><b>I</b></td><td>Interface Segregation — small focused interfaces</td></tr>
-<tr><td><b>D</b></td><td>Dependency Inversion — depend on abstractions</td></tr>
+<section class="card"><h3>SOLID — violation → fix</h3>
+<table><thead><tr><th></th><th>Rule / smell it kills</th></tr></thead><tbody>
+<tr><td><b>S</b></td><td>Single Responsibility — <b>one reason to change</b> (one actor). God class → split by cohesion.</td></tr>
+<tr><td><b>O</b></td><td>Open/Closed — extend by <b>adding</b> a class, not editing a growing <code>switch</code>.</td></tr>
+<tr><td><b>L</b></td><td>Liskov — subtype substitutable for base; no stronger preconditions / weaker postconditions.</td></tr>
+<tr><td><b>I</b></td><td>Interface Segregation — many small role interfaces &gt; one fat one clients must stub.</td></tr>
+<tr><td><b>D</b></td><td>Dependency Inversion — both layers depend on an <b>abstraction</b>; inject concretions.</td></tr>
 </tbody></table>
-<p><span class="warn">!</span> Square-extends-Rectangle breaks <b>L</b>: setWidth surprises callers. Model them separately.</p>
+<p><span class="warn">!</span> <b>Square extends Rectangle</b> breaks L: <code>setWidth</code> silently changes height, surprising code written to the base. is-a in English ≠ behavioural substitutability. Model them separately.</p>
+<p>They interlock — one style: <i>small classes, single responsibility, depending on interfaces, extended not edited.</i> DIP is the principle; <b>DI is just the mechanism</b>.</p>
 </section>
 
-<section class="card"><h3>Core Principles</h3>
+<section class="card"><h3>Core Principles &amp; GRASP</h3>
 <ul>
-<li><b>DRY</b> · <b>KISS</b> · <b>YAGNI</b> — don't repeat, keep simple, don't build ahead.</li>
-<li><b>Composition over inheritance</b> — has-a beats is-a for reuse.</li>
+<li><b>DRY</b> — one authoritative source of <i>knowledge</i>, not "no similar-looking code" <span class="warn">!</span> (accidental duplication ≠ real duplication).</li>
+<li><b>KISS</b> / <b>YAGNI</b> — simplest thing that works; don't build for imagined futures.</li>
+<li><b>Composition over inheritance</b> — has-a is swappable at runtime; is-a is fixed at compile time.</li>
 <li><b>Program to an interface</b>, not an implementation.</li>
-<li><b>Law of Demeter</b> — <code>a.getB().getC().do()</code> is a smell. <span class="warn">!</span></li>
-<li><b>Encapsulate what varies</b>; Tell-Don't-Ask; high cohesion / low coupling.</li>
+<li><b>Encapsulate what varies</b> — the meta-principle behind nearly every pattern.</li>
+<li><b>Law of Demeter</b> — talk to friends: <code>a.getB().getC().go()</code> is a train-wreck <span class="warn">!</span> Tell-Don't-Ask instead.</li>
 </ul>
+<h4>GRASP quick hits</h4>
+<ul>
+<li><b>Information Expert</b> — give a job to whoever holds the data.</li>
+<li><b>Creator</b> · <b>Controller</b> · <b>Low Coupling</b> · <b>High Cohesion</b> — the assignment heuristics.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Coupling, Cohesion &amp; DI</h3>
+<h4>Coupling — worst → best</h4>
+<table><tbody>
+<tr><td>content</td><td>reach into another's internals <span class="warn">!</span></td></tr>
+<tr><td>common/global</td><td>share mutable global state <span class="warn">!</span></td></tr>
+<tr><td>control</td><td>pass a flag that steers callee's logic</td></tr>
+<tr><td>stamp</td><td>pass whole object, use one field</td></tr>
+<tr><td>data</td><td>pass just what's needed — <b>aim here</b></td></tr>
+</tbody></table>
+<p><b>Cohesion</b> (aim high): functional &gt; sequential &gt; communicational &gt; … &gt; coincidental (worst).</p>
+<h4>Dependency Injection — 3 forms</h4>
+<ul>
+<li><b>Constructor</b> (default) — deps mandatory, object always valid, easy to test.</li>
+<li><b>Setter</b> — optional/reconfigurable deps.</li>
+<li><b>Interface/method</b> — per-call collaborators.</li>
+</ul>
+<p><span class="warn">!</span> Prefer constructor injection; a container (Spring/Guice) is optional plumbing, not the principle.</p>
 </section>
 
 <section class="card"><h3>Creational Patterns</h3>
-<table><thead><tr><th>Pattern</th><th>Intent</th></tr></thead><tbody>
-<tr><td>Factory Method</td><td>subclass picks the concrete type</td></tr>
-<tr><td>Abstract Factory</td><td>make a family of related objects</td></tr>
-<tr><td>Builder</td><td>step-by-step complex construction</td></tr>
-<tr><td>Prototype</td><td>clone an existing instance</td></tr>
-<tr><td>Singleton</td><td>one instance, global access <span class="warn">!</span></td></tr>
+<table><thead><tr><th>Pattern</th><th>Intent · when</th></tr></thead><tbody>
+<tr><td><b>Factory Method</b></td><td>subclass decides the concrete type; one product</td></tr>
+<tr><td><b>Abstract Factory</b></td><td>create a <b>family</b> of related products (WinUI vs MacUI)</td></tr>
+<tr><td><b>Builder</b></td><td>step-wise build of a complex/immutable object</td></tr>
+<tr><td><b>Prototype</b></td><td>clone an existing instance (costly to build)</td></tr>
+<tr><td><b>Singleton</b></td><td>one instance, global access <span class="warn">!</span></td></tr>
 </tbody></table>
-<p>Builder kills the telescoping constructor. <span class="warn">!</span> Singleton = global state → hurts testing; prefer DI.</p>
+<ul>
+<li><b>Simple Factory</b> = a static method that switches on a type — an idiom, not a GoF pattern.</li>
+<li><b>Gotcha:</b> a factory with one product and no second in sight is patternitis <span class="warn">!</span> — just call the constructor.</li>
+<li>Make a factory OCP with a <b>registry map</b> (type→supplier) so new products register themselves.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Factory vs Builder</h3>
+<table><thead><tr><th></th><th>Use when</th></tr></thead><tbody>
+<tr><td>Factory Method</td><td><b>which</b> concrete type varies; creation is one call</td></tr>
+<tr><td>Abstract Factory</td><td>a whole <b>family</b> must stay consistent</td></tr>
+<tr><td>Builder</td><td><b>how</b> to assemble is complex; many optional parts</td></tr>
+</tbody></table>
+<h4>Telescoping ctor → fluent Builder</h4>
+<pre><code>// smell: Pizza(size, cheese, pepperoni, olives, ...)
+Pizza p = new Pizza.Builder(LARGE)
+    .cheese().pepperoni()      // optional, readable
+    .build();                  // validate invariants here !</code></pre>
+<ul>
+<li>Builder yields <b>immutable</b> results and named args; a <b>Director</b> (optional) encodes a fixed recipe.</li>
+<li><span class="warn">!</span> Don't reach for Builder with 2–3 params — a constructor or named args is simpler.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Singleton — the careful one</h3>
+<pre><code>// Java: safest = enum
+enum Config { INSTANCE;
+  private final Map&lt;String,String&gt; v = load();
+}
+// or lazy holder (thread-safe, no locks):
+class Cfg { static class H { static final Cfg I = new Cfg(); }
+  static Cfg get(){ return H.I; } }</code></pre>
+<ul>
+<li><span class="warn">!</span> Singleton = <b>global mutable state</b> → hidden coupling, order-dependent init, hard to test (can't swap it). Widely treated as an <b>anti-pattern</b>.</li>
+<li>Prefer a <b>single instance wired via DI</b> — one object, no global access point.</li>
+<li>Naive lazy <code>if(inst==null)</code> is a data race under threads <span class="warn">!</span> — use enum / holder / double-checked <code>volatile</code>.</li>
+<li>Related: <b>Object Pool</b> reuses expensive instances (DB conns, threads).</li>
+</ul>
 </section>
 
 <section class="card"><h3>Structural Patterns</h3>
 <table><thead><tr><th>Pattern</th><th>Intent</th></tr></thead><tbody>
-<tr><td>Adapter</td><td>make incompatible interfaces fit</td></tr>
-<tr><td>Decorator</td><td>add behavior at runtime (wrap)</td></tr>
-<tr><td>Facade</td><td>one simple front to a subsystem</td></tr>
-<tr><td>Composite</td><td>tree; treat leaf &amp; group alike</td></tr>
-<tr><td>Proxy</td><td>stand-in (lazy/remote/guard)</td></tr>
-<tr><td>Bridge</td><td>split abstraction from impl</td></tr>
-<tr><td>Flyweight</td><td>share state, save memory</td></tr>
+<tr><td><b>Adapter</b></td><td>make an incompatible interface fit (translate)</td></tr>
+<tr><td><b>Decorator</b></td><td>add behaviour at runtime by wrapping</td></tr>
+<tr><td><b>Facade</b></td><td>one simple front over a messy subsystem</td></tr>
+<tr><td><b>Composite</b></td><td>tree; treat leaf &amp; group uniformly</td></tr>
+<tr><td><b>Proxy</b></td><td>stand-in controlling access (lazy/remote/guard)</td></tr>
+<tr><td><b>Bridge</b></td><td>split abstraction from impl (2 axes vary)</td></tr>
+<tr><td><b>Flyweight</b></td><td>share intrinsic state to save memory</td></tr>
 </tbody></table>
+<p><b>Bridge</b> pre-plans two independent dimensions (Shape × Renderer); <b>Adapter</b> retrofits after the fact. <span class="warn">!</span></p>
 </section>
 
-<section class="card"><h3>Adapter vs Decorator vs Proxy</h3>
-<table><thead><tr><th>Pattern</th><th>Changes</th></tr></thead><tbody>
-<tr><td>Adapter</td><td>the <b>interface</b> (convert)</td></tr>
-<tr><td>Decorator</td><td>the <b>behavior</b> (add), same interface</td></tr>
-<tr><td>Proxy</td><td>the <b>access</b> (control), same interface</td></tr>
-<tr><td>Facade</td><td>simplifies many into one</td></tr>
+<section class="card"><h3>Adapter · Decorator · Proxy · Facade</h3>
+<table><thead><tr><th>Pattern</th><th>What it changes</th></tr></thead><tbody>
+<tr><td>Adapter</td><td>the <b>interface</b> (convert A→B)</td></tr>
+<tr><td>Decorator</td><td>the <b>behaviour</b> (add), <i>same</i> interface</td></tr>
+<tr><td>Proxy</td><td>the <b>access</b> (control), <i>same</i> interface</td></tr>
+<tr><td>Facade</td><td>the <b>surface</b> (simplify many→one)</td></tr>
 </tbody></table>
-<p>All wrap an object — the intent differs. <span class="warn">!</span></p>
+<p>All four <i>wrap</i> — the <b>intent</b> distinguishes them; the interview trap is naming by structure alone <span class="warn">!</span></p>
+<h4>Decorator — canonical</h4>
+<pre><code>Coffee c = new Milk(new Sugar(new Espresso()));
+c.cost();  // each layer adds to inner.cost()</code></pre>
+<p>Stackable, order-independent responsibilities without a subclass explosion (<code>MilkSugarEspresso</code>…). Java I/O streams are the textbook case.</p>
 </section>
 
 <section class="card"><h3>Behavioral Patterns</h3>
-<table><thead><tr><th>Pattern</th><th>Intent</th></tr></thead><tbody>
-<tr><td>Strategy</td><td>swap algorithms at runtime</td></tr>
-<tr><td>Observer</td><td>one-to-many notify on change</td></tr>
-<tr><td>Command</td><td>request as object (undo/queue)</td></tr>
-<tr><td>State</td><td>behavior varies by internal state</td></tr>
-<tr><td>Template Method</td><td>skeleton in base, steps in subs</td></tr>
-<tr><td>Chain of Resp.</td><td>pass request down handlers</td></tr>
-<tr><td>Iterator</td><td>traverse without exposing guts</td></tr>
-<tr><td>Mediator</td><td>centralize object comms</td></tr>
-<tr><td>Visitor</td><td>add ops without editing classes</td></tr>
-<tr><td>Memento</td><td>capture/restore state</td></tr>
+<table><thead><tr><th>Pattern</th><th>Intent · force</th></tr></thead><tbody>
+<tr><td><b>Strategy</b></td><td>swap an algorithm at runtime</td></tr>
+<tr><td><b>Observer</b></td><td>1→N notify on change; subject blind to who</td></tr>
+<tr><td><b>Command</b></td><td>request as object (undo/queue/log)</td></tr>
+<tr><td><b>State</b></td><td>behaviour varies by internal mode</td></tr>
+<tr><td><b>Template Method</b></td><td>skeleton in base, steps in subclass</td></tr>
+<tr><td><b>Chain of Resp.</b></td><td>pass request along handlers till one acts</td></tr>
+<tr><td><b>Iterator</b></td><td>traverse without exposing structure</td></tr>
+<tr><td><b>Mediator</b></td><td>centralise N↔N object comms</td></tr>
+<tr><td><b>Visitor</b></td><td>add ops without editing element classes</td></tr>
+<tr><td><b>Memento</b></td><td>capture/restore state (undo)</td></tr>
 </tbody></table>
+<p>The interview "big four": <b>Strategy · State · Observer · Command</b>. Know these cold.</p>
 </section>
 
 <section class="card"><h3>Strategy vs State</h3>
 <table><thead><tr><th></th><th>Strategy</th><th>State</th></tr></thead><tbody>
-<tr><td>swaps</td><td>an algorithm</td><td>behavior by state</td></tr>
-<tr><td>who sets it</td><td>the client</td><td>the object itself</td></tr>
-<tr><td>transitions</td><td>none</td><td>states change each other</td></tr>
+<tr><td>swaps</td><td>an algorithm</td><td>behaviour by mode</td></tr>
+<tr><td>who sets it</td><td>the <b>client</b></td><td>the <b>object itself</b></td></tr>
+<tr><td>transitions</td><td>none — independent</td><td>states change each other</td></tr>
 </tbody></table>
-<p>Same UML, different intent. <span class="warn">!</span> State objects often transition to the next state.</p>
-</section>
-
-<section class="card"><h3>Strategy — canonical code</h3>
-<pre><code>interface PayStrategy { void pay(int cents); }
-class Card implements PayStrategy {…}
-class Cash implements PayStrategy {…}
-
+<p>Identical UML, different intent — resolve by <b>who triggers the switch</b> <span class="warn">!</span></p>
+<h4>Strategy — canonical</h4>
+<pre><code>interface Pay { void pay(int cents); }
+class Card implements Pay { ... }
+class Cash implements Pay { ... }
 class Checkout {
-  private PayStrategy s;            // compose, don't extend
-  Checkout(PayStrategy s){this.s=s;}
+  private final Pay s;              // compose, don't extend
+  Checkout(Pay s){ this.s = s; }    // inject
   void charge(int c){ s.pay(c); }   // program to interface
 }</code></pre>
-<p>Add a payment type → new class, zero edits to Checkout (OCP).</p>
+<p>New payment type → new class, <b>zero edits</b> to Checkout (OCP). First-class functions collapse Strategy to a lambda.</p>
 </section>
 
-<section class="card"><h3>Code Smells &amp; Refactoring</h3>
+<section class="card"><h3>Observer · Command · Template · Chain</h3>
 <ul>
-<li>Smells: <b>god class</b>, long method, <b>feature envy</b>, primitive obsession, data clumps, shotgun surgery, message chains.</li>
-<li>Moves: extract method/class, <b>replace conditional with polymorphism</b>, introduce parameter object, replace temp w/ query.</li>
-<li><span class="warn">!</span> A big <code>switch(type)</code> repeated everywhere → subclass + polymorphism.</li>
-<li>Refactor in small safe steps, behind tests (Tidy First).</li>
+<li><b>Observer</b> — subject keeps a list of observers, <code>notify()</code> on change; decouples publisher from subscribers. <span class="warn">!</span> Watch update storms &amp; leaked listeners (unsubscribe!).</li>
+<li><b>Command</b> — encapsulate <i>action + args</i> as an object with <code>execute()</code>/<code>undo()</code>; enables queues, macros, redo.</li>
+<li><b>Template Method</b> — base defines the <i>algorithm skeleton</i>, subclasses fill <code>hook()</code> steps. Inheritance-based; Strategy is its composition cousin.</li>
+<li><b>Chain of Responsibility</b> — each handler either handles or passes on (middleware, event bubbling, approval flows). <span class="warn">!</span> Ensure someone handles it (default tail).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Iterator · Mediator · Visitor · Memento</h3>
+<ul>
+<li><b>Iterator</b> — sequential access without exposing internals; language built-ins (<code>for..of</code>, <code>Iterable</code>) already give it to you.</li>
+<li><b>Mediator</b> — objects talk through a hub instead of N² direct refs (chat room, form-field coordinator). Risk: the mediator becomes a God object <span class="warn">!</span></li>
+<li><b>Visitor</b> — add new <i>operations</i> over a fixed class hierarchy without editing it; uses <b>double dispatch</b>. <span class="warn">!</span> Terrible when the hierarchy (not the ops) is what changes — you edit every visitor.</li>
+<li><b>Memento</b> — snapshot &amp; restore state without breaking encapsulation (undo, save games).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Pattern Selection: force → pattern</h3>
+<table><thead><tr><th>Design force</th><th>Pattern</th></tr></thead><tbody>
+<tr><td>algorithm varies at runtime</td><td>Strategy</td></tr>
+<tr><td>behaviour by mode + transitions</td><td>State</td></tr>
+<tr><td>N react to 1's change, blindly</td><td>Observer</td></tr>
+<tr><td>add per-object responsibilities</td><td>Decorator</td></tr>
+<tr><td>concrete type chosen at runtime</td><td>Factory</td></tr>
+<tr><td>treat item &amp; group alike (tree)</td><td>Composite</td></tr>
+<tr><td>incompatible 3rd-party interface</td><td>Adapter</td></tr>
+<tr><td>undo / queue / log actions</td><td>Command</td></tr>
+</tbody></table>
+<ul>
+<li><b>Refactor to</b> patterns, don't <b>design to</b> them (Kerievsky). Let the second real case reveal the axis.</li>
+<li>Patterns are <b>shared vocabulary</b> — "it's an Observer" tells a reviewer the coupling shape in two words.</li>
+<li>Can't name a force? The answer is <b>no pattern</b> — a plain function/class. Saying so is the senior signal <span class="warn">!</span></li>
 </ul>
 </section>
 
 <section class="card"><h3>Anti-Patterns</h3>
-<ul>
-<li><b>God object</b>: one class does everything → split by responsibility.</li>
-<li><b>Anemic model</b>: data-only classes + logic elsewhere → put behavior with data.</li>
-<li><b>Golden hammer</b>: one pattern for every problem.</li>
-<li><b>Patternitis</b>: patterns where a plain function would do. <span class="warn">!</span></li>
-<li>Premature abstraction > duplication early on (YAGNI).</li>
-</ul>
+<table><thead><tr><th>Name</th><th>Symptom → fix</th></tr></thead><tbody>
+<tr><td><b>God object</b></td><td>one class does everything → split by cohesion</td></tr>
+<tr><td><b>Anemic model</b></td><td>data-only class + logic elsewhere → move behaviour to the data</td></tr>
+<tr><td><b>Golden hammer</b></td><td>one tool for every problem → widen toolkit</td></tr>
+<tr><td><b>Patternitis</b></td><td>1:1 iface:impl, no variation → delete the indirection</td></tr>
+<tr><td><b>Spaghetti</b></td><td>tangled control flow → guard clauses, extract</td></tr>
+<tr><td><b>Lava flow</b></td><td>dead code nobody deletes → test then remove</td></tr>
+<tr><td><b>Poltergeist</b></td><td>class that only shuttles calls → inline it</td></tr>
+<tr><td><b>Yo-yo</b></td><td>too-deep hierarchy → flatten, compose</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> <b>The wrong abstraction costs more than duplication</b> (Metz). Tolerate dup to the rule of three, then extract from the real shape.</p>
 </section>
 
-<section class="card diagram"><h3>LLD: Parking Lot (skeleton)</h3>
+<section class="card"><h3>Code Smells &amp; Refactoring</h3>
+<table><thead><tr><th>Smell</th><th>Move</th></tr></thead><tbody>
+<tr><td>long method</td><td>extract method; guard clauses</td></tr>
+<tr><td>large / god class</td><td>extract class (by cohesion)</td></tr>
+<tr><td>feature envy</td><td>move method to the data it uses</td></tr>
+<tr><td>primitive obsession</td><td>introduce value object</td></tr>
+<tr><td>data clumps</td><td>introduce parameter object</td></tr>
+<tr><td>shotgun surgery</td><td>gather the scattered change (missing OCP seam)</td></tr>
+<tr><td>switch on type (repeated)</td><td><b>replace conditional with polymorphism</b> <span class="warn">!</span></td></tr>
+<tr><td>message chains</td><td>hide delegate (Law of Demeter)</td></tr>
+</tbody></table>
+<p><b>Tidy First</b>: refactor in small, safe, reversible steps behind green tests; keep behaviour changes separate from tidying commits.</p>
+</section>
+
+<section class="card diagram"><h3>LLD skeleton — Parking Lot</h3>
 <div class="mermaid">
 classDiagram
   ParkingLot o-- Level
   Level o-- Spot
-  Spot <|-- Compact
-  Spot <|-- Large
-  Ticket --> Spot
-  ParkingLot --> PricingStrategy
+  Spot &lt;|-- Compact
+  Spot &lt;|-- Large
+  Ticket --&gt; Spot
+  ParkingLot --&gt; PricingStrategy
 </div>
-<p>Patterns: <b>Strategy</b> (pricing), <b>Factory</b> (spot/vehicle), <b>Singleton</b> (the lot, if justified), <b>State</b> (ticket lifecycle).</p>
+<p class="cap">Nouns→classes, verbs→methods. Patterns that earn their keep here: <b>Strategy</b> (pricing), <b>Factory</b> (spot/vehicle creation), <b>State</b> (ticket lifecycle: issued→paid→exited), optional <b>Singleton</b> (the lot — only if justified). Start from the interfaces, add a pattern only when a force appears.</p>
 </section>
 
-<section class="card"><h3>&#9744; LLD Interview Playbook</h3>
+<section class="card"><h3>Symptom → Cause</h3>
+<table><thead><tr><th>In the design</th><th>Likely cause</th></tr></thead><tbody>
+<tr><td>every feature edits one class</td><td>God object / SRP violation <span class="warn">!</span></td></tr>
+<tr><td>one change ripples to many files</td><td>shotgun surgery / high coupling</td></tr>
+<tr><td>subclass throws on a base method</td><td>LSP violation <span class="warn">!</span></td></tr>
+<tr><td>growing <code>switch(type)</code></td><td>missing polymorphism / OCP seam</td></tr>
+<tr><td>impl leaks into callers</td><td>not programming to an interface</td></tr>
+<tr><td>can't unit-test in isolation</td><td>hard-wired deps → inject them</td></tr>
+<tr><td>interface with 1 impl forever</td><td>speculative generality / patternitis <span class="warn">!</span></td></tr>
+<tr><td>square/rectangle "is-a" bug</td><td>English is-a ≠ substitutability <span class="warn">!</span></td></tr>
+</tbody></table>
+</section>
+
+<section class="card"><h3>&#9733; LLD Interview Checklist</h3>
+<h4>Requirements &amp; scope</h4>
 <ul>
-<li>&#9744; Clarify requirements &amp; <b>scope</b> first — don't code yet.</li>
-<li>&#9744; Extract <b>nouns → entities</b>, <b>verbs → methods</b>.</li>
-<li>&#9744; Assign each responsibility to ONE class (SRP, info expert).</li>
-<li>&#9744; Pick relationships (composition vs aggregation vs inheritance).</li>
-<li>&#9744; Define <b>interfaces</b> before implementations.</li>
-<li>&#9744; Apply a pattern only where it earns its keep (Strategy/State/Factory/Observer are the usual four).</li>
-<li>&#9744; Walk an example flow; then edge cases, extensibility, thread-safety.</li>
-<li>&#9744; Narrate tradeoffs out loud — that's the signal.</li>
+<li>&#9744; Clarify functional + non-functional scope <b>before</b> any code; state assumptions aloud.</li>
+<li>&#9744; Extract <b>nouns → entities</b>, <b>verbs → methods</b>; list the core objects first.</li>
+</ul>
+<h4>Responsibilities &amp; structure</h4>
+<ul>
+<li>&#9744; Each responsibility owned by <b>one</b> class (SRP / Information Expert) — no God object.</li>
+<li>&#9744; Relationships chosen deliberately: composition vs aggregation vs inheritance; <b>is-a</b> only when substitutable (LSP) <span class="warn">!</span></li>
+<li>&#9744; Prefer <b>composition</b>; inheritance only for genuine is-a with shared behaviour.</li>
+</ul>
+<h4>Interfaces &amp; extensibility</h4>
+<ul>
+<li>&#9744; Define <b>interfaces before implementations</b>; depend on abstractions (DIP), inject collaborators.</li>
+<li>&#9744; Identify the axis of change and put a seam there (OCP) — new variant = new class, no edits.</li>
+<li>&#9744; Interfaces small &amp; role-focused (ISP); no client stubbing methods it never calls.</li>
+</ul>
+<h4>Patterns &amp; restraint</h4>
+<ul>
+<li>&#9744; Apply a pattern only where a <b>force</b> demands it (usually Strategy / State / Factory / Observer). Name the force <span class="warn">!</span></li>
+<li>&#9744; No patternitis, no speculative generality; simplest design that absorbs the change you can <i>see</i>.</li>
+</ul>
+<h4>Finish</h4>
+<ul>
+<li>&#9744; Walk one concrete flow end-to-end; then edge cases, thread-safety, extensibility.</li>
+<li>&#9744; Narrate trade-offs out loud — that reasoning <i>is</i> the signal.</li>
 </ul>
 </section>
 
