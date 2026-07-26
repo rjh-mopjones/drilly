@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Rust Katas Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+/* spanning title bar */
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>Rust Katas Cheat Sheet</h1><span class="meta">solving open-ended senior Rust katas, test-first · the borrow checker IS the design · drilly</span></div>
+
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="warn">!</span> footgun / gotcha &nbsp; <code>&#9744;</code> pre-code checklist item</li>
+<li>Scope: <b>9 katas</b> from a blank file in interview time. The hard part is rarely the algorithm — it's <b>satisfying the borrow checker</b>: who owns what, move vs borrow, does it even compile in safe Rust.</li>
+<li>Method (every kata): design <b>ownership-first</b> → write inline <code>#[test]</code>s first → implement to compile+pass → note complexity. <b>Making it compile is half the work.</b></li>
+<li>Run one kata: <code>cargo test -p solution &lt;kata&gt;</code>; unsafe capstone adds <code>cargo +nightly miri test</code>. Last 2 cards = pre-code checklist + common mistakes.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
+</ul></section>
+
+<section class="card"><h3>Attack Plan — Ownership First</h3>
+<p>Turn the prompt into an <b>ownership plan before writing logic</b>. The borrow checker is a design partner, not an adversary — a borrow error means two things want the same data; the fix is a design choice.</p>
+<h4>The loop, every kata</h4>
+<ul>
+<li><b>1. Clarify</b> the spec → they're really ownership questions (who keeps the bytes? does a read mutate?).</li>
+<li><b>2. Design the API ownership-first</b> — who owns / move vs <code>&amp;</code>/<code>&amp;mut</code> / lifetime <code>'a</code>? / <code>dyn</code> vs generic? Write signatures + key types; they encode every decision.</li>
+<li><b>3. Write the inline <code>#[test]</code>s first</b> — contract → core → edges → concurrency stress.</li>
+<li><b>4. Implement to compile <i>and</i> pass.</b> The compile is the design proof.</li>
+<li><b>5. State complexity</b> + the one gotcha you dodged.</li>
+</ul>
+<h4>Receiver decides the API <span class="warn">!</span></h4>
+<pre><code>fn get(&amp;mut self, k: &amp;K) -&gt; Option&lt;&amp;V&gt;
+// &amp;mut: a cache hit reorders recency → a read IS a write.
+// Getting the receiver right up front avoids a rewrite.</code></pre>
+<p>Errors: a custom <code>enum Error</code> + <code>Result</code> + <code>?</code>, never panics (panics only for genuine bugs / <code>#[should_panic]</code>).</p>
+</section>
+
+<section class="card"><h3>Ownership Decision Table</h3>
+<table><thead><tr><th>Need</th><th>Reach for</th></tr></thead><tbody>
+<tr><td>read only, many readers</td><td><code>&amp;T</code> (shared borrow)</td></tr>
+<tr><td>mutate, exactly one writer</td><td><code>&amp;mut T</code> (exclusive)</td></tr>
+<tr><td>consume / transfer</td><td><code>self</code> / move</td></tr>
+<tr><td>return ref into input (zero-copy)</td><td>lifetime <code>&amp;'a str</code></td></tr>
+<tr><td>recursive / <code>dyn</code> type (infinite size)</td><td><code>Box&lt;T&gt;</code></td></tr>
+<tr><td><b>linked structure</b> (DLL, graph, tree)</td><td><b>arena</b>: <code>Vec&lt;Node&gt;</code>+<code>usize</code> idx</td></tr>
+<tr><td>single-thread interior mutation</td><td><code>RefCell</code> (runtime borrow check)</td></tr>
+<tr><td>shared mutable across threads</td><td><code>Arc&lt;Mutex&lt;T&gt;&gt;</code></td></tr>
+<tr><td>ints/small POD</td><td><code>Copy</code> (duplicates, no move)</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> The naive DLL wants <b>two owners per node</b> (prev+next) — safe Rust allows one. The idiomatic fix is <b>indices, not pointers</b>:</p>
+<pre><code>slab: Vec&lt;Node&lt;V&gt;&gt;,   // arena owns all nodes
+map:  HashMap&lt;K, usize&gt;, // idx, NOT a reference
+free: Vec&lt;usize&gt;,      // recycle slots on evict</code></pre>
+<p><span class="warn">!</span> <code>Rc&lt;RefCell&lt;Node&gt;&gt;</code> for a linked list <i>compiles</i> — that's the seduction — then <code>borrow_mut()</code> panics at runtime + refcount tax. Prefer the arena.</p>
+</section>
+
+<section class="card"><h3>The Rust Concurrency Twist</h3>
+<p><b>Data races DON'T COMPILE.</b> A bare <code>i64</code> shared across threads fails the borrow checker: <code>&amp;mut</code> can't cross a thread boundary, <code>&amp;</code> can't mutate. Only <code>Sync</code> types share by <code>&amp;</code>; <code>Send</code> types move across threads. So there is <b>no "prove the race" exercise</b> — the compiler deleted that bug class for free.</p>
+<h4>The bugs that survive safe code <span class="warn">!</span></h4>
+<table><thead><tr><th>Bug</th><th>Fix</th></tr></thead><tbody>
+<tr><td><b>Lost update</b> — split read-modify-write across two <code>.lock()</code> calls</td><td>hold the guard <i>across</i> the RMW: <code>*g += q</code></td></tr>
+<tr><td><b>Deadlock</b> — two locks, opposite order</td><td>global lock order (e.g. smaller symbol first)</td></tr>
+<tr><td><b>Channel discipline</b> — lost jobs / no shutdown</td><td>drop sender → <code>recv</code> errs → workers join</td></tr>
+<tr><td><b>UB in <code>unsafe</code></b> — bad ordering / aliasing</td><td>written <code>// SAFETY:</code> + <b>Miri</b></td></tr>
+</tbody></table>
+<p>"Rust is safe" means <b>no data race / UB in safe code</b> — deadlock, lost update, and <code>unsafe</code> UB are still on you. Say that unprompted.</p>
+<p><span class="warn">!</span> <b>Miri is the UB detector</b> (<code>cargo +nightly miri test</code>) — the <code>-race</code>/TSan analogue. A green <code>cargo test</code> proves <b>nothing</b> about <code>unsafe</code> soundness.</p>
+</section>
+
+<section class="card"><h3>Concurrency Test Harness</h3>
+<p>No <code>sleep</code>s (flaky coin-flips). Gate threads with a <code>Barrier</code> inside <code>thread::scope</code>, then assert an <b>invariant</b> — conservation, exactly-once, no-deadlock — never an exact interleaving.</p>
+<pre><code>#[test]
+fn concurrent_transfers_conserve() {
+    let book = PositionBook::new();
+    book.set("a", 1000); book.set("b", 1000);
+    let n = 8;
+    let gate = std::sync::Barrier::new(n);
+    std::thread::scope(|s| {
+        for _ in 0..n {
+            s.spawn(|| {
+                gate.wait();          // release together → max contention
+                for _ in 0..10_000 {
+                    book.transfer("a","b",1);
+                    book.transfer("b","a",1);
+                }
+            });
+        }
+    }); // scope auto-joins → borrow locals, no Arc
+    assert_eq!(book.net("a")+book.net("b"), 2000);
+}</code></pre>
+<ul>
+<li><code>scope</code> joins all threads before returning, so spawned closures <b>borrow locals</b> (<code>&amp;book</code>) — no <code>Arc</code>, no <code>'static</code>.</li>
+<li><code>Barrier::new(n).wait()</code> is the start-gate: every thread blocks until all N arrive.</li>
+<li>A <b>deadlock hangs</b> the test (never returns) — that's the failure signal, not a red assert.</li>
+<li>For <code>unsafe</code>: <code>cargo +nightly miri test</code> proves the ordering/aliasing.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Testing Toolkit</h3>
+<p>No third-party framework — <code>#[test]</code> + <code>cargo test</code>, std-only. Tests live <b>inline</b> in the same file as the code.</p>
+<pre><code>#[cfg(test)]
+mod tests {
+    use super::*;                    // reach the code
+
+    #[test]
+    fn parses() -&gt; Result&lt;(), ParseError&gt; {
+        let cases = [                 // table-driven
+            ("AAPL,101.5,200", ("AAPL",101.5,200)),
+            ("MSFT,42.0,1",    ("MSFT",42.0,1)),
+        ];
+        for (input, want) in cases {
+            let t = parse(input)?;    // ? works: test returns Result
+            assert_eq!((t.sym,t.px,t.qty), want);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rejects() {                    // match a specific Err variant
+        assert!(matches!(parse("AAPL"), Err(ParseError::MissingField)));
+    }
+
+    #[test]
+    #[should_panic(expected = "capacity")]
+    fn zero_cap_panics() { Lru::&lt;u8,u8&gt;::new(0); }
+}</code></pre>
+<ul>
+<li><code>assert_eq!</code> / <code>assert!</code> / <code>assert_ne!</code> — failures print both values.</li>
+<li>Model failure as <code>Result</code> &amp; <b>test the <code>Err</code> variants</b>, not just the happy path — that's the signal.</li>
+<li><code>-- --nocapture</code> to see <code>println!</code>; <code>#[should_panic]</code> for genuine caller-bug preconditions.</li>
+</ul>
+</section>
+
+<section class="card"><h3>tickparser — Lifetimes / Zero-Copy</h3>
+<p><b>Topic:</b> lifetimes &amp; zero-copy borrowing. Parse <code>"LIV-MUN|1.95|2.05|1234"</code> at millions/sec — <b>no alloc</b>. The <code>Quote</code> borrows the symbol straight out of the caller's buffer.</p>
+<pre><code>pub struct Quote&lt;'a&gt; {
+    pub symbol: &amp;'a str,   // borrows input — no String, no alloc
+    pub bid: f64, pub ask: f64, pub seq: u64,
+}
+// signature IS the design: output borrows input, fallible
+pub fn parse(line: &amp;str) -&gt; Result&lt;Quote&lt;'_&gt;, ParseError&gt;;</code></pre>
+<ul>
+<li><b>Move:</b> <code>&amp;'a str</code> not <code>String</code>. <code>str::split('|')</code> yields borrowed slices — lazy, zero-copy. <code>Quote</code> derives <code>Copy</code> only because <code>symbol</code> is <code>&amp;str</code>.</li>
+<li><b>Types as validation:</b> <code>seq: u64</code> makes <code>"-1"</code> fail for free.</li>
+<li><b>Errors:</b> own a <code>ParseError</code> enum; <code>map_err(|_| ParseError::InvalidBid)?</code> — don't leak <code>std</code>'s <code>ParseFloatError</code>.</li>
+<li><b>Test:</b> <code>std::ptr::eq(q.symbol.as_ptr(), line.as_ptr())</code> <i>proves</i> no copy — the load-bearing test.</li>
+</ul>
+<p><span class="warn">!</span> <b>Gotcha:</b> don't <code>.to_owned()</code> "to be safe" — that reintroduces the exact alloc the kata exists to kill.</p>
+</section>
+
+<section class="card"><h3>calc — Enum AST + Box Recursion</h3>
+<p><b>Topic:</b> recursive enum + <code>match</code>. <code>eval("1+2*(3-4)/5")</code> by hand. Precedence is <b>tree shape</b>, not a scanning rule — build the AST, then walk it.</p>
+<pre><code>pub enum Expr {
+    Num(f64),
+    Neg(Box&lt;Expr&gt;),                        // Box: recursive → infinite size otherwise
+    Bin { op: Op, lhs: Box&lt;Expr&gt;, rhs: Box&lt;Expr&gt; },
+}
+// recursive descent, one fn per precedence level:
+// expr(+ -) → term(* /) → factor(- , (), number)</code></pre>
+<ul>
+<li><b>Move:</b> precedence = which fn calls which; <b>left-associativity = a <code>while</code> loop</b> folding <code>lhs</code>, NOT right-recursion.</li>
+<li><b>Eval</b> = exhaustive <code>match</code> recursing into children — no wildcard on <code>Op</code>.</li>
+<li><b>Tests:</b> <code>"10-2-3"==5</code> (left-assoc), <code>"1+2*3"==7</code> (precedence), <code>"1+2)"</code>→<code>TrailingInput</code>, div-by-zero, and assert the <b>AST shape</b>.</li>
+</ul>
+<p><span class="warn">!</span> <b>Gotchas:</b> forget <code>Box</code> → "recursive type has infinite size". Skip the <code>pos != tokens.len()</code> check → <code>1+2)</code> silently returns 3.0.</p>
+</section>
+
+<section class="card"><h3>candles — Iterator by Hand</h3>
+<p><b>Topic:</b> implement <code>Iterator</code> manually — lazy, O(1) space over an unbounded feed. Aggregate ticks into OHLCV candles per time window.</p>
+<pre><code>pub struct Candles&lt;I: Iterator&lt;Item=Tick&gt;&gt; {
+    ticks: I, period: u64,
+    pending: Option&lt;Tick&gt;,   // ONE tick of look-ahead
+    cur: Option&lt;Candle&gt;,     // in-progress candle
+}
+impl&lt;I: Iterator&lt;Item=Tick&gt;&gt; Iterator for Candles&lt;I&gt; {
+    type Item = Candle;
+    fn next(&amp;mut self) -&gt; Option&lt;Candle&gt; { /* state machine */ }
+}</code></pre>
+<ul>
+<li><b>Move:</b> <b>own</b> the upstream iterator (<code>ticks: I</code>); be generic over <code>IntoIterator&lt;Item=Tick&gt;</code>, store <code>I::IntoIter</code> (monomorphized, zero dispatch).</li>
+<li>Iterators are <b>cursors, not lists</b>. Read a next-window tick you can't un-read → <b>stash it in <code>pending</code></b>, emit the finished candle. <code>Option::take</code> is the workhorse.</li>
+<li><b>Tests:</b> window split (boundary tick not lost), <b>end-flush</b> (<code>None =&gt; self.cur.take()</code>), laziness (<code>.next()</code> minimal work).</li>
+</ul>
+<p><span class="warn">!</span> <b>Gotcha:</b> <code>collect</code>+group is the wrong answer — eager, O(n), hangs on infinite feed. And <code>Box&lt;dyn Iterator&gt;</code> is needless alloc/dispatch.</p>
+</section>
+
+<section class="card"><h3>eventbus — Trait Objects (dyn Fn)</h3>
+<p><b>Topic:</b> traits &amp; dispatch. Sync pub/sub; store handlers of <b>wildly different shapes</b> in one <code>Vec</code>. Every closure has a unique anonymous type → <code>Vec&lt;F&gt;</code> is homogeneous → must erase.</p>
+<pre><code>type Handler = Box&lt;dyn Fn(&amp;Event)&gt;;   // type-erased: the enabling choice
+handlers: HashMap&lt;String, Vec&lt;Handler&gt;&gt;,
+pub fn subscribe&lt;F: Fn(&amp;Event) + 'static&gt;(&amp;mut self, topic: &amp;str, h: F);
+pub fn publish(&amp;self, e: &amp;Event);     // Fn: fires repeatedly via &amp;self</code></pre>
+<ul>
+<li><b>Move:</b> <b>generic at the call site</b> (<code>subscribe&lt;F&gt;</code>, inlinable), <b>erase to <code>dyn</code> in storage</b>. <code>Box&lt;dyn Fn&gt;</code> = fat pointer (data, vtable).</li>
+<li><code>Fn</code> not <code>FnMut</code> — <code>FnMut</code> forces <code>publish(&amp;mut self)</code>, serialising all publishes. Observe side-effects via <code>Rc&lt;Cell/RefCell&gt;</code> captures.</li>
+<li><b>Tests:</b> 3 different closures on one topic fire in order (only compiles with <code>dyn</code>); unknown topic = no-op (<code>if let Some</code>).</li>
+</ul>
+<p><span class="warn">!</span> <b>Gotcha:</b> missing <code>+ 'static</code> → boxing a closure that borrows a local won't compile. Vs closed set: <code>enum Handler</code>+<code>match</code> (no heap/vtable).</p>
+</section>
+
+<section class="card"><h3>lru — The DLL Ownership Lesson</h3>
+<p><b>Topic:</b> ownership in a linked structure — <b>THE</b> Rust lesson. O(1) LRU wants a hashmap + doubly-linked list. Pointer DLL needs two owners/node → <b>doesn't port</b>. Answer: an <b>arena of indices</b>.</p>
+<pre><code>map:  HashMap&lt;K, usize&gt;,   // key → slab idx (not a ref)
+slab: Vec&lt;Entry&lt;K,V&gt;&gt;,     // arena owns every node
+free: Vec&lt;usize&gt;,          // recycle slots on evict
+head/tail: Option&lt;usize&gt;,  // prev/next are usize indices
+pub fn get(&amp;mut self, k: &amp;K) -&gt; Option&lt;&amp;V&gt; // &amp;mut: hit reorders recency</code></pre>
+<ul>
+<li><b>Move:</b> arena + <code>usize</code> indices, <b>not</b> <code>Rc&lt;RefCell&gt;</code>, <b>not</b> <code>unsafe</code>. <code>K: Clone</code> so eviction lifts the tail key to delete its map row.</li>
+<li><code>get</code> is <code>&amp;mut self</code> (a hit is a write); <code>peek</code> is the <code>&amp;self</code> read.</li>
+<li><b>Tests:</b> <code>get</code> updates recency so a <i>different</i> key is evicted; update-in-place doesn't grow <code>len</code>; free-list reuses slots.</li>
+</ul>
+<p><span class="warn">!</span> <b>Gotcha:</b> never <code>Vec::remove</code> a slot — it shifts every later element, invalidating all stored indices. Recycle via the free-list.</p>
+</section>
+
+<section class="card"><h3>orderstate — Enums + Exhaustive match</h3>
+<p><b>Topic:</b> enum states + exhaustive transitions. Order lifecycle as an <code>enum</code>; one <code>match (state, event)</code> IS the whole transition table, audited by the compiler.</p>
+<pre><code>pub enum OrderState {
+    New{total:u64}, Accepted{total:u64},
+    PartiallyFilled{filled:u64,total:u64},
+    Filled, Cancelled, Rejected,          // terminal
+}
+pub fn apply(self, e: Event)              // self BY VALUE: old state moves out
+    -&gt; Result&lt;OrderState, TransitionError&gt;;</code></pre>
+<ul>
+<li><b>Move:</b> take <code>self</code> by value → transitioning <b>consumes the old state</b>; a stale handle can't be reused (compile-time "once you leave, it's gone").</li>
+<li>Match each <b>state</b> explicitly; fold only <b>illegal pairs</b> into a trailing <code>(state,event) =&gt; Err</code>. Add a variant → build breaks until handled.</li>
+<li>Custom <code>TransitionError</code> (<code>#[non_exhaustive]</code>) impl <code>Error</code>. <b>Test</b> the 3×4 terminal truth table.</li>
+</ul>
+<p><span class="warn">!</span> <b>Gotcha:</b> a catch-all <code>_</code> on the <i>state</i> axis kills exhaustiveness. <b>Typestate</b> (<code>Order&lt;Filled&gt;</code>) makes illegal calls <i>not compile</i> — but can't hold a runtime-chosen state.</p>
+</section>
+
+<section class="card"><h3>positionbook — Arc&lt;Mutex&gt;: Deadlock &amp; Lost Update</h3>
+<p><b>Topic:</b> shared-state concurrency. Per-symbol net keeper. No data race (won't compile) — the bugs left are <b>deadlock</b> + <b>lost update</b>.</p>
+<pre><code>positions: RwLock&lt;HashMap&lt;String, Arc&lt;Mutex&lt;i64&gt;&gt;&gt;&gt;,
+pub fn apply(&amp;self, f: &amp;Fill);            // &amp;self — shared
+pub fn hedge(&amp;self, from: &amp;str, to: &amp;str, qty: i64);</code></pre>
+<pre><code>// LOST-UPDATE fix: RMW inside ONE lock hold
+let mut pos = slot.lock().unwrap();
+*pos += fill.qty;
+// DEADLOCK fix: sorted lock order, NOT hedge direction
+if from &lt; to { let a=fs.lock()?; let b=ts.lock()?; *a-=q; *b+=q; }
+else         { let b=ts.lock()?; let a=fs.lock()?; *a-=q; *b+=q; }</code></pre>
+<ul>
+<li><b>Move:</b> per-symbol <code>Arc&lt;Mutex&gt;</code> for parallelism (say the tradeoff vs coarse <code>Mutex&lt;HashMap&gt;</code>). Always lock the <b>lexicographically-smaller symbol first</b>, whichever way the hedge goes.</li>
+<li><b>Test:</b> Barrier conservation stress — <code>total == THREADS*ITERS</code> (lost update) + opposite-direction hedges (deadlock hangs).</li>
+</ul>
+<p><span class="warn">!</span> <b>Gotchas:</b> split RMW across two <code>.lock()</code> = lost update. Direction-based lock order = deadlock. Don't hold the registry lock across a per-symbol lock.</p>
+</section>
+
+<section class="card"><h3>threadpool — Channel + Drop Shutdown</h3>
+<p><b>Topic:</b> concurrency ownership. Fixed pool draining one MPSC queue; drop = clean shutdown, no lost jobs, all threads joined.</p>
+<pre><code>type Job = Box&lt;dyn FnOnce() + Send + 'static&gt;;
+sender: Option&lt;Sender&lt;Job&gt;&gt;,          // Option so Drop can take() → close
+workers: Vec&lt;Worker&gt;,                 // each: Option&lt;JoinHandle&gt;
+receiver: Arc&lt;Mutex&lt;Receiver&lt;Job&gt;&gt;&gt;,  // ONE receiver, shared (not Clone)</code></pre>
+<pre><code>// worker: lock → recv → DROP GUARD → run unlocked
+let msg = receiver.lock().unwrap().recv();  // guard dies at ;
+match msg { Ok(job)=&gt;job(), Err(_)=&gt;break } // sender dropped → err
+// Drop: take sender (close), THEN join every handle
+drop(self.sender.take());
+for w in &amp;mut self.workers { w.handle.take().unwrap().join()?; }</code></pre>
+<ul>
+<li><b>Move:</b> <code>recv()</code> errs only when all senders dropped, <i>after</i> draining the buffer → that's your shutdown signal AND no-lost-jobs guarantee. No sentinel/poison message.</li>
+<li><code>Option::take()</code> moves the handle out of <code>&amp;mut self</code> in <code>Drop</code> (<code>join</code> consumes).</li>
+</ul>
+<p><span class="warn">!</span> <b>Gotchas:</b> <code>while let Ok(job)=rx.lock()?.recv(){job()}</code> holds the guard for the whole body → all jobs serialised. <code>Receiver</code> isn't <code>Clone</code>.</p>
+</section>
+
+<section class="card"><h3>spscring — Unsafe Capstone + Miri</h3>
+<p><b>Topic:</b> <code>unsafe</code>, atomics ordering, hand-written <code>Send</code>/<code>Sync</code>. Wait-free SPSC ring — no locks, no per-item alloc.</p>
+<pre><code>struct Ring&lt;T&gt; {
+    buf: Box&lt;[UnsafeCell&lt;MaybeUninit&lt;T&gt;&gt;]&gt;,
+    head: AtomicUsize,  // consumer owns
+    tail: AtomicUsize,  // producer owns
+}
+// SAFETY: producer only writes tail's slot, consumer only reads
+// head's slot, hand-off ordered by release/acquire → never aliases.
+unsafe impl&lt;T: Send&gt; Sync for Ring&lt;T&gt; {}</code></pre>
+<ul>
+<li><b>Ordering:</b> read your <i>own</i> index <code>Relaxed</code>; read the <i>other</i>'s <code>Acquire</code>; publish your own <code>Release</code>. That one release→acquire edge is the entire soundness proof — name it aloud.</li>
+<li>Allocate <b>N+1</b> slots, keep one empty → tell full from empty with no shared counter. <code>PhantomData&lt;Cell&lt;()&gt;&gt;</code> makes handles <code>!Sync</code> (enforces single producer/consumer).</li>
+<li><b>Drop</b> uses <code>get_mut()</code> (single owner, no atomics); drops only <code>[head,tail)</code>.</li>
+</ul>
+<p><span class="warn">!</span> <b>Gotcha:</b> green <code>cargo test</code> proves nothing — run <code>cargo +nightly miri test -p solution spscring</code>. <code>SeqCst</code> everywhere works but hides that you don't know which pair matters.</p>
+</section>
+
+<section class="card"><h3>Dispatch, Errors &amp; Idioms</h3>
+<h4>Static vs dynamic dispatch</h4>
+<table><thead><tr><th>Generic <code>&lt;T: Trait&gt;</code></th><th><code>Box&lt;dyn Trait&gt;</code></th></tr></thead><tbody>
+<tr><td>monomorphized, inlined, zero cost</td><td>vtable indirection + heap</td></tr>
+<tr><td>one concrete type per site</td><td>heterogeneous, stored together</td></tr>
+</tbody></table>
+<p>Rule: <b>generics at the edge, trait objects in the container.</b></p>
+<h4>Error model (every fallible kata)</h4>
+<ul>
+<li>Custom <code>enum Error</code>, one variant per failure mode; impl <code>Display</code> + <code>std::error::Error</code>.</li>
+<li><code>?</code> propagates; <code>map_err(|_| MyError::X)?</code> translates <code>std</code> errors at the boundary — don't leak them.</li>
+<li>Exhaustive <code>match</code> in <code>Display</code> — no wildcard, so a new variant won't compile until handled.</li>
+</ul>
+<h4>Idioms worth knowing</h4>
+<ul>
+<li><code>let-else</code>: <code>let Some(x) = opt else { return };</code> — guard clause.</li>
+<li><code>?</code> on <code>Option</code>: <code>let idx = *self.map.get(k)?;</code></li>
+<li><code>matches!(x, Err(E::Missing))</code> in tests.</li>
+</ul>
+</section>
+
+<section class="card"><h3>&#9733; Pre-Code Checklist</h3>
+<h4>Design (before typing)</h4>
+<ul>
+<li>&#9744; Decided <b>ownership first</b>: who owns each value; move vs <code>&amp;</code> vs <code>&amp;mut</code> per method.</li>
+<li>&#9744; <code>&amp;mut self</code> wherever a "read" actually mutates state (LRU <code>get</code>, order transition).</li>
+<li>&#9744; Static (<code>&lt;T&gt;</code>) vs dynamic (<code>dyn</code>) dispatch chosen deliberately — generics at edge, <code>dyn</code> in storage.</li>
+<li>&#9744; Recursive / <code>dyn</code> type wrapped in <code>Box</code>; lifetime <code>'a</code> added where output borrows input.</li>
+</ul>
+<h4>Data shape</h4>
+<ul>
+<li>&#9744; <b>Arena + <code>usize</code> indices</b> for any linked/graph structure — not <code>Rc&lt;RefCell&gt;</code>, not <code>unsafe</code>.</li>
+<li>&#9744; Types encode invariants (<code>u64</code> rejects negatives; enum makes illegal states unrepresentable).</li>
+</ul>
+<h4>Errors &amp; matching</h4>
+<ul>
+<li>&#9744; Failures modelled as <code>enum</code> + <code>Result</code> + <code>?</code>, never panic (panic only for caller bugs / <code>#[should_panic]</code>).</li>
+<li>&#9744; <code>match</code> exhaustive on the closed axis (states, ops, variants) — no catch-all that hides a missing case.</li>
+</ul>
+<h4>Concurrency</h4>
+<ul>
+<li>&#9744; RMW held inside <b>one</b> lock guard (no lost update).</li>
+<li>&#9744; Multiple locks acquired in a <b>global sorted order</b> (no deadlock); registry lock not held across a per-item lock.</li>
+<li>&#9744; Shutdown by <b>closing the channel</b> (drop sender), then <code>join</code> — no sentinel, no <code>sleep</code>.</li>
+<li>&#9744; <code>unsafe</code>: every block has a checkable <code>// SAFETY:</code>; minimal <code>Acquire</code>/<code>Release</code>; verified with <b>Miri</b>.</li>
+</ul>
+<h4>Tests first</h4>
+<ul>
+<li>&#9744; Inline <code>#[cfg(test)] mod tests</code> written before bodies; <code>Err</code> variants tested, not just happy path.</li>
+<li>&#9744; Concurrency = <code>Barrier</code>-gated <code>thread::scope</code> asserting an invariant.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Common Mistakes — Spot-the-Bug</h3>
+<table><thead><tr><th>Symptom / smell</th><th>Cause</th></tr></thead><tbody>
+<tr><td><code>.clone()</code> everywhere to make it compile</td><td>fighting the borrow checker — wrong ownership shape <span class="warn">!</span></td></tr>
+<tr><td><code>Rc&lt;RefCell&lt;Node&gt;&gt;</code> for a DLL</td><td>compiles but <code>borrow_mut()</code> panics; use an arena <span class="warn">!</span></td></tr>
+<tr><td>runtime <code>already borrowed</code> panic</td><td><code>RefCell</code> aliased at runtime <span class="warn">!</span></td></tr>
+<tr><td>"Rust = no concurrency bugs"</td><td>no <i>data race</i>; deadlock &amp; lost update remain <span class="warn">!</span></td></tr>
+<tr><td>total falls short under contention</td><td>split RMW across two <code>.lock()</code> — lost update <span class="warn">!</span></td></tr>
+<tr><td>concurrent test <b>hangs</b>, never returns</td><td>deadlock — direction-based lock order <span class="warn">!</span></td></tr>
+<tr><td>green <code>cargo test</code> ⇒ "unsafe is sound"</td><td>proves nothing; run <b>Miri</b> <span class="warn">!</span></td></tr>
+<tr><td>"recursive type has infinite size"</td><td>missing <code>Box</code> on the recursive field <span class="warn">!</span></td></tr>
+<tr><td>self-referential struct won't compile</td><td>don't — restructure to indices <span class="warn">!</span></td></tr>
+<tr><td>last candle / leftover jobs dropped</td><td>forgot the end-flush / recv-drains-buffer <span class="warn">!</span></td></tr>
+<tr><td><code>10-2-3 == 11</code></td><td>right-recursed; left-assoc needs a loop <span class="warn">!</span></td></tr>
+<tr><td>reaching for <code>unsafe</code> on the LRU</td><td>red flag — the index design is safe <i>and</i> fast <span class="warn">!</span></td></tr>
+</tbody></table>
+<p>Senior signal in one line: <i>state the ownership shape first, model errors as enums, match exhaustively, and know exactly where the type system's guarantees stop.</i></p>
+</section>
+
+</div>
+</body>
+</html>

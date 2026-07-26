@@ -385,6 +385,22 @@
       "itemCount": 17
     },
     {
+      "id": "rust-katas",
+      "file": "/rust-katas-primer.md",
+      "title": "Rust",
+      "category": "Katas",
+      "itemLabel": "Kata",
+      "itemsPlural": "Rust katas",
+      "storagePrefix": "ip:rust-katas",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": [],
+      "cheatSheetUrl": "/rust-katas-cheatsheet.html",
+      "itemCount": 11
+    },
+    {
       "id": "postgres",
       "file": "/postgres-interview-primer.md",
       "title": "Postgres",
