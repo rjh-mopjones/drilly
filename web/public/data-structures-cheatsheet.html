@@ -6,7 +6,11 @@
 <title>Data Structures Cheat Sheet</title>
 <style>
 :root{
-  --fs: 7.2pt; --fs-mono: 6.6pt; --fs-h3: 7.8pt; --gap: 5px; --pad: 3px;
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
   --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
 }
 *{box-sizing:border-box;}
@@ -14,10 +18,12 @@ html,body{margin:0;padding:0;}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
   font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
 .sheet{background:#fff;}
+/* spanning title bar */
 .titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
   margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
-.titlebar h1{font-size:12.5pt; margin:0; letter-spacing:.4px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
 .titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
 .sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
   column-fill:balance; padding:5px;}
 .card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
@@ -25,6 +31,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Ar
   overflow:hidden;}
 .card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
   background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
 .card:nth-of-type(8n+1) h3{background:#34495e;}
 .card:nth-of-type(8n+2) h3{background:#2c6e9b;}
 .card:nth-of-type(8n+3) h3{background:#1f7a5a;}
@@ -38,7 +45,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Ar
 .card p{margin:2px 0;}
 .card ul{margin:1.5px 0; padding-left:11px;}
 .card li{margin:.5px 0; line-height:1.2;}
-table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.4pt;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
 th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
 td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
 pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
@@ -50,194 +57,489 @@ pre code{background:none; padding:0; font-size:1em;}
 .pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
   padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
 .pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
 .cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
 .legend li{line-height:1.35;}
 @media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
 @page{ size:A4; margin:5mm; }
 @media print{
   body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
   .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
 }
 </style>
 </head>
 <body>
 <div class="sheet">
-<div class="titlebar"><h1>Data Structures Cheat Sheet</h1><span class="meta">Big-O · internals · trade-offs · which-structure-for-which-job · drilly</span></div>
-
+<div class="titlebar"><h1>Data Structures Cheat Sheet</h1><span class="meta">ADT-vs-implementation focus · complexity &amp; trade-offs · generic examples · drilly</span></div>
 <section class="card legend"><h3>How to read &amp; print</h3>
 <ul>
-<li><span class="warn">!</span> footgun / classic trap &nbsp; <code>&#9744;</code> checklist step</li>
-<li>Interviews test <b>structure choice</b>: given the ops + a complexity target, name the structure that hits it and why.</li>
-<li>All bounds are typical; hash/heap are <b>amortized/expected</b>, not worst-case. Constants and cache locality decide real speed.</li>
-<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+<li><span class="warn">!</span> footgun / gotcha &nbsp; <code>&#9744;</code> review checklist item</li>
+<li>Mental model: an <b>ADT</b> (contract — ops + guarantees) vs an <b>implementation</b> (memory layout). "Which structure" = which <i>implementation</i> of which ADT, given the access pattern. Complexities are for the ops you actually run.</li>
+<li>Big-O = asymptotic <i>upper bound</i>, not average, not wall-clock. <b>Amortized</b> = averaged over a sequence (worst-case robust); <b>average</b> = over random inputs (adversary-defeatable). Cache locality (~1ns hit vs ~100ns miss) breaks ties Big-O ignores <span class="warn">!</span></li>
+<li>Senior focus: the trade-off tables, the footguns, and the "what would you use for X" decision drill. Last 2 cards = <b>bug table</b> + <b>review checklist</b>.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
 </ul></section>
 
-<section class="card"><h3>Big-O Master Table</h3>
-<table><thead><tr><th>Structure</th><th>Access</th><th>Search</th><th>Ins</th><th>Del</th></tr></thead><tbody>
-<tr><td>Array (dynamic)</td><td>O(1)</td><td>O(n)</td><td>O(1)*</td><td>O(n)</td></tr>
-<tr><td>Linked list</td><td>O(n)</td><td>O(n)</td><td>O(1)†</td><td>O(1)†</td></tr>
-<tr><td>Stack / Queue</td><td>O(n)</td><td>O(n)</td><td>O(1)</td><td>O(1)</td></tr>
-<tr><td>Hash table</td><td>—</td><td>O(1)~</td><td>O(1)~</td><td>O(1)~</td></tr>
-<tr><td>Balanced BST</td><td>—</td><td>O(log n)</td><td>O(log n)</td><td>O(log n)</td></tr>
-<tr><td>Binary heap</td><td>O(1)‡</td><td>O(n)</td><td>O(log n)</td><td>O(log n)</td></tr>
-<tr><td>Trie</td><td>—</td><td>O(L)</td><td>O(L)</td><td>O(L)</td></tr>
-<tr><td>B-tree</td><td>—</td><td>O(log n)</td><td>O(log n)</td><td>O(log n)</td></tr>
+<section class="card"><h3>Complexity Recall &amp; Foundations</h3>
+<table><thead><tr><th>Class</th><th>Where</th></tr></thead><tbody>
+<tr><td><code>O(1)</code></td><td>hash lookup, array index, heap peek</td></tr>
+<tr><td><code>O(log n)</code></td><td>binary search, balanced-tree / heap op</td></tr>
+<tr><td><code>O(n)</code></td><td>single scan</td></tr>
+<tr><td><code>O(n log n)</code></td><td>comparison sort, heap build+drain</td></tr>
+<tr><td><code>O(n^2)</code></td><td>nested loops, naive pair compare</td></tr>
+<tr><td><code>O(2^n)</code>/<code>O(n!)</code></td><td>subset / permutation enumeration</td></tr>
 </tbody></table>
-<p class="cap">* amortized append &nbsp; † with node ref &nbsp; ‡ peek-min only &nbsp; ~ expected; O(n) worst. L = key length. Space O(n) unless noted.</p>
+<ul>
+<li>Combine phases: <b>add sequential, multiply nested, max dominates</b>. Build map <code>O(n)</code> then n heap ops <code>O(n log n)</code> = <code>O(n log n)</code>.</li>
+<li>Hidden <code>O(n)</code> space: recursion stack (<code>O(depth)</code>), slice/substring copies, output collection, boxing, dedup set <span class="warn">!</span></li>
+<li><b>In-place</b> = <code>O(1)</code> aux space (some defs allow <code>O(log n)</code> stack). Recursion stack counts — a "no extra memory" recursion isn't <code>O(1)</code> space.</li>
+<li>Comparison sort lower bound is <code>&Omega;(n log n)</code>. An <code>O(n)</code> array scan often beats an <code>O(log n)</code> pointer-tree at real n (locality).</li>
+</ul>
 </section>
 
-<section class="card"><h3>Array vs Linked List</h3>
-<table><thead><tr><th></th><th>Array</th><th>List</th></tr></thead><tbody>
-<tr><td>Index i</td><td>O(1)</td><td>O(n)</td></tr>
-<tr><td>Insert/del mid</td><td>O(n) shift</td><td>O(1) splice†</td></tr>
-<tr><td>Append</td><td>O(1) amort.</td><td>O(1)</td></tr>
-<tr><td>Memory</td><td>contiguous</td><td>node+ptr overhead</td></tr>
-<tr><td>Cache</td><td>friendly</td><td>pointer-chasing</td></tr>
+<section class="card"><h3>Arrays &amp; Dynamic Arrays</h3>
+<table><thead><tr><th>Op</th><th>Cost</th></tr></thead><tbody>
+<tr><td>index <code>a[i]</code></td><td><code>O(1)</code> = <code>base+i*sz</code></td></tr>
+<tr><td>append</td><td><code>O(1)</code> <b>amortized</b> (resize <code>O(n)</code>)</td></tr>
+<tr><td>insert/delete middle</td><td><code>O(n)</code> (shift tail)</td></tr>
+<tr><td>search (unsorted)</td><td><code>O(n)</code>; sorted <code>O(log n)</code></td></tr>
 </tbody></table>
-<p><span class="warn">!</span> The list's O(1) insert assumes you <b>already hold the node</b>; finding it is O(n). In practice arrays win by cache locality unless you splice a lot.</p>
-</section>
-
-<section class="card"><h3>Dynamic Array (amortized)</h3>
+<p><b>Invariant:</b> <code>0 &le; size &le; capacity</code>; <code>[0,size)</code> valid, <code>[size,cap)</code> slack. Grow geometrically (2x / 1.5x) — additive growth breaks amortized <code>O(1)</code>. Doubling copies <code>~2n</code> total across all resizes.</p>
+<h4>Use when</h4>
+<ul><li>Index-heavy, append-heavy, iteration-heavy — the default. Random access + cache locality win decisively.</li></ul>
+<h4>Gotchas</h4>
 <ul>
-<li>Full → allocate 2x, copy n, keep going. A single append is O(n), but n appends cost O(n) total → <b>O(1) amortized</b>.</li>
-<li><span class="warn">!</span> Growth factor 2 (or 1.5) matters; growing by +1 makes append O(n).</li>
-<li>Capacity ≥ size; shrink lazily to avoid thrashing.</li>
+<li>Append is amortized, not worst-case <code>O(1)</code> — one append can be <code>O(n)</code> <span class="warn">!</span></li>
+<li>Resize holds old+new = up to <b>3x</b> peak memory <span class="warn">!</span> Pre-size (<code>reserve</code>/<code>ensureCapacity</code>) when target known → n true O(1) writes.</li>
+<li>Never auto-shrinks — a grown-then-shrunk list pins the big backing array (leak) <span class="warn">!</span></li>
+<li><b>Slices share backing memory</b> (Go slice, NumPy view) — mutating one mutates the other; <code>append</code> may alias or copy by cap <span class="warn">!</span></li>
+<li>Unordered <code>O(1)</code> delete: <b>swap-with-last</b> then pop (destroys order).</li>
 </ul>
 </section>
 
-<section class="card"><h3>Hash Table Internals</h3>
+<section class="card"><h3>Strings</h3>
+<p>Length + contiguous array of fixed-size <b>code units</b> → indexing a code unit is <code>O(1)</code>. Usually <b>immutable</b> (Java/C#/Python/JS): edits allocate a new string.</p>
+<table><thead><tr><th>Op</th><th>Cost</th></tr></thead><tbody>
+<tr><td>index / length</td><td><code>O(1)</code></td></tr>
+<tr><td>concat</td><td><code>O(n+m)</code> (copies both)</td></tr>
+<tr><td>substring</td><td><code>O(k)</code> copy; <code>O(1)</code> view (Rust/Go/C++)</td></tr>
+<tr><td>search naive</td><td><code>O(nm)</code>; KMP <code>O(n+m)</code></td></tr>
+</tbody></table>
+<h4>Gotchas</h4>
 <ul>
-<li><b>Bucket = hash(key) mod m.</b> Collisions are inevitable (pigeonhole).</li>
-<li><b>Chaining</b>: bucket → list/tree of entries. Simple; degrades gracefully.</li>
-<li><b>Open addressing</b>: probe (linear/quadratic/double) to next free slot; needs <b>tombstones</b> on delete. <span class="warn">!</span></li>
-<li><b>Load factor</b> alpha = n/m; resize (rehash all) when alpha &gt; ~0.7 → keeps O(1).</li>
-<li><span class="warn">!</span> O(1) is <b>expected</b>; adversarial/bad hash → O(n). Iteration order is unspecified.</li>
+<li><b><code>s += x</code> in a loop is <code>O(n^2)</code></b> <span class="warn">!</span> — each <code>+=</code> copies the whole string. Fix: <code>StringBuilder</code>/<code>strings.Builder</code>/<code>"".join</code> → <code>O(n)</code> (char dynamic array, amortized append).</li>
+<li><code>length</code> &ne; user-visible chars. Levels: <b>byte</b> &lt; <b>code unit</b> &lt; <b>code point</b> &lt; <b>grapheme cluster</b>. <code>"😀".length==2</code> in JS/Java (UTF-16 surrogate pair) <span class="warn">!</span></li>
+<li>Reverse by code units shatters emoji/combining marks — reverse <b>grapheme clusters</b> <span class="warn">!</span></li>
+<li>UTF-8: 1–4 bytes/code point, ASCII-compatible, self-syncing; k-th code point is <code>O(n)</code> (byte-indexed).</li>
+<li>Immutability → cacheable hash, safe sharing, interning, ideal map key.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Trees · BST · Balanced</h3>
+<section class="card"><h3>Linked Lists</h3>
+<table><thead><tr><th>Op</th><th>Cost</th></tr></thead><tbody>
+<tr><td>index / search</td><td><code>O(n)</code> — walk from head</td></tr>
+<tr><td>insert/delete <b>at held node</b></td><td><code>O(1)</code> splice</td></tr>
+<tr><td>insert/delete after search</td><td><code>O(n)</code> (find dominates)</td></tr>
+<tr><td>delete tail (singly)</td><td><code>O(n)</code> (need predecessor)</td></tr>
+</tbody></table>
+<p><b>Singly</b>=next only; <b>doubly</b>=+prev (O(1) delete any held node); <b>circular</b>=tail→head. <b>Sentinel/dummy</b> node kills head/null edge-cases: <code>dummy.next=head; return dummy.next</code>.</p>
+<h4>Use when</h4>
+<ul><li>Frequent O(1) splice at <i>held</i> positions, no random access: LRU recency list, run queue, intrusive kernel lists. Else default to array.</li></ul>
+<h4>Gotchas</h4>
 <ul>
-<li><b>BST invariant</b>: left &lt; node &lt; right. In-order traversal = sorted.</li>
-<li><span class="warn">!</span> Plain BST on sorted input degenerates to a list → O(n). Balancing forces h = O(log n).</li>
-<li><b>AVL</b>: strict height-balance, faster lookups, more rotations.</li>
-<li><b>Red-Black</b>: looser balance, fewer rotations on write → the engine behind Java <code>TreeMap</code> / C++ <code>std::map</code>.</li>
-<li>Rotation = local O(1) re-link restoring balance.</li>
+<li>"insert is O(1)" only <i>at</i> the node — finding it is O(n) <span class="warn">!</span> Pointer overhead + scattered nodes make it 10–100x slower than an array to iterate.</li>
+<li>Reversal: save <code>curr.next</code> before rewiring or you sever the list <span class="warn">!</span></li>
+<li><b>Floyd cycle detect:</b> slow+1, fast+2; meet ⇒ cycle (O(1) space vs hash-set O(n)). Entry: reset one to head, advance both by 1. Middle: fast/slow one pass. Merge sorted lists: O(1) splice, no copy.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Traversals</h3>
-<pre><code>DFS (stack/recursion):
-  pre  : node, L, R
-  in   : L, node, R   # BST -> sorted
-  post : L, R, node
-BFS (queue): level by level</code></pre>
-<p>DFS space O(h); BFS space O(width). Use BFS for shortest path in an unweighted graph.</p>
+<section class="card"><h3>Stacks (LIFO)</h3>
+<p>ADT: <code>push</code>/<code>pop</code>/<code>peek</code>/<code>isEmpty</code> — all <b>O(1)</b>, all touch only the top. Removal order = reverse of insertion.</p>
+<table><thead><tr><th>Backing</th><th>Note</th></tr></thead><tbody>
+<tr><td>dynamic array</td><td>push=append, pop=truncate; O(1) amortized, cache-friendly (default)</td></tr>
+<tr><td>linked list</td><td>push/pop at head; true worst-case O(1), no resize, pointer overhead</td></tr>
+</tbody></table>
+<h4>Monotonic stack</h4>
+<ul>
+<li>Keep increasing/decreasing by popping violators → "next greater/smaller", daily temps, largest rectangle, stock span in <b>O(n)</b> (each elem push+pop once) vs naive O(n²).</li>
+<li><b>Store indices, not values</b> — gives position for distances/widths <span class="warn">!</span></li>
+</ul>
+<h4>Gotchas</h4>
+<ul>
+<li>Data-structure stack &ne; <b>call stack</b> (frames region); deep recursion overflows the latter <span class="warn">!</span></li>
+<li>Guard <b>underflow</b> (pop empty). Min-stack: aux stack of running <code>min</code> → O(1) getMin. Iterative DFS = explicit stack (avoids recursion-depth crash).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Queues &amp; Deques (FIFO)</h3>
+<p><code>enqueue</code> back / <code>dequeue</code> front — <b>O(1)</b>. Deque = both ends O(1) (subsumes stack+queue).</p>
+<h4>Circular (ring) buffer</h4>
+<ul>
+<li>Fixed array + <code>head</code>/<code>tail</code> advanced <code>mod cap</code> — nothing shifts. <b>Naive array queue that shifts on dequeue is O(n)</b> <span class="warn">!</span></li>
+<li>Full-vs-empty both show <code>head==tail</code> <span class="warn">!</span> Fix: explicit <code>count</code>, or leave one slot empty.</li>
+</ul>
+<table><thead><tr><th>Impl</th><th>Trade</th></tr></thead><tbody>
+<tr><td>ring buffer</td><td>cache-friendly, zero alloc, fixed cap → back-pressure</td></tr>
+<tr><td>linked list</td><td>unbounded, no resize pause, pointer overhead</td></tr>
+</tbody></table>
+<h4>Gotchas &amp; uses</h4>
+<ul>
+<li>BFS uses a queue (level-by-level); swap for a stack → DFS. Level-order: record queue size, dequeue exactly that many per level.</li>
+<li><b>Priority queue is NOT FIFO</b> — it's a heap ordered by key <span class="warn">!</span></li>
+<li><b>Sliding-window-max:</b> monotonic <i>decreasing</i> deque of indices → O(n) vs naive O(nk). Bounded queue = back-pressure; unbounded risks OOM.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Hash Tables</h3>
+<table><thead><tr><th>Op</th><th>Cost</th></tr></thead><tbody>
+<tr><td>insert / lookup / delete</td><td><b>O(1) average</b>, <b>O(n) worst</b></td></tr>
+<tr><td>ordered / range / min-max</td><td>unsupported (unordered)</td></tr>
+</tbody></table>
+<p><code>index = hash(key) mod m</code>. Good hash = <b>deterministic, uniform, fast</b> (uniformity matters most). <b>Load factor <code>&alpha;=n/m</code></b> is the master dial. Keep <code>&alpha;&lt;~0.75</code> (open) / <code>~1.0</code> (chained). Resize doubles m + <b>rehashes all n</b> (indices depend on m — can't memcpy) → O(1) amortized insert.</p>
+<h4>Collision resolution</h4>
+<table><thead><tr><th>Strategy</th><th>Note</th></tr></thead><tbody>
+<tr><td>separate chaining</td><td>list/tree per slot; tolerates high &alpha;, simple delete, pointer chase</td></tr>
+<tr><td>linear probing</td><td><code>(h+i)</code>; primary clustering, best locality</td></tr>
+<tr><td>quadratic / double-hash</td><td>spreads probes; double-hash kills clustering, 2nd hash cost</td></tr>
+<tr><td>Robin Hood</td><td>evict "richer" resident; equalizes probe distance</td></tr>
+</tbody></table>
+<h4>Gotchas</h4>
+<ul>
+<li>O(1) <b>average</b>, not guaranteed — all-collide ⇒ O(n). <b>Hash-flooding DoS</b>: seeded/SipHash, or tree-ify buckets (Java &gt;8 → red-black, O(log n)) <span class="warn">!</span></li>
+<li>Open-addr delete needs <b>tombstones</b> — clearing a slot breaks probe chains <span class="warn">!</span></li>
+<li>Must verify key equality after hashing (lossy). <b>equal ⇒ equal hash</b> contract; mutating a key's hash-fields strands the entry <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Sets &amp; Maps (ADT choice)</h3>
+<p>A <b>set</b> = map whose values don't matter (key→present). Same ADT, two dominant impls:</p>
+<table><thead><tr><th>Flavor</th><th>Impl / gets you</th></tr></thead><tbody>
+<tr><td>unordered</td><td>hash — O(1) avg, no order (default)</td></tr>
+<tr><td>sorted</td><td>balanced BST — O(log n), range/floor/ceil/min-max</td></tr>
+<tr><td>insertion-ordered</td><td>hash + linked list (LinkedHashMap, Py dict)</td></tr>
+<tr><td>multiset / bag</td><td>key→count (Counter) — "how many times"</td></tr>
+<tr><td>multimap</td><td>key→collection — one-to-many</td></tr>
+</tbody></table>
+<h4>Set ops</h4>
+<ul><li>union/intersection/diff = O(|A|+|B|); intersect: iterate <b>smaller</b>, probe larger → O(min).</li></ul>
+<h4>Gotchas</h4>
+<ul>
+<li><b>Hash iteration order is unspecified</b> and changes on resize/version — relying on it is a portability bug <span class="warn">!</span></li>
+<li><b>sorted order</b> (tree) &ne; <b>insertion order</b> (linked-hash) — different guarantees.</li>
+<li>Tell: "seen / unique / duplicate" → set; "count of / most frequent" → multiset; "in sorted order / range" → tree map. Any O(n²) that repeatedly <i>searches</i> → replace inner scan with O(1) membership.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Trees &amp; Traversals</h3>
+<p>Connected, acyclic, one root; n nodes = <b>n−1 edges</b>, one path between any two. <b>Depth</b> counts down from root; <b>height</b> counts up from leaves (state edges vs nodes). Balanced ⇒ height O(log n); degenerate ⇒ O(n).</p>
+<table><thead><tr><th>Shape</th><th>Def</th></tr></thead><tbody>
+<tr><td>full</td><td>every node has 0 or 2 children</td></tr>
+<tr><td>complete</td><td>levels filled L→R, last may be partial (heap shape)</td></tr>
+<tr><td>perfect</td><td>all levels full: <code>2^(h+1)−1</code> nodes</td></tr>
+</tbody></table>
+<h4>Traversals — all O(n) time</h4>
+<table><thead><tr><th>Order</th><th>Use / space</th></tr></thead><tbody>
+<tr><td>pre (N,L,R)</td><td>serialize / copy top-down</td></tr>
+<tr><td>in (L,N,R)</td><td><b>sorted output on a BST</b>; k-th smallest</td></tr>
+<tr><td>post (L,R,N)</td><td>height, free/delete, postfix eval</td></tr>
+<tr><td>level (BFS)</td><td>shortest-by-depth, per-level; queue</td></tr>
+</tbody></table>
+<ul>
+<li>DFS space <b>O(h)</b>; BFS space <b>O(w)</b> (balanced last level ~n/2 ⇒ O(n)).</li>
+<li>Array layout: child <code>2i+1/2i+2</code>, parent <code>(i−1)/2</code> — compact, but only for complete trees <span class="warn">!</span> Deep skewed tree overflows recursion → go iterative <span class="warn">!</span></li>
+<li>In-order sorts only a <b>search</b> tree, not any binary tree <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Binary Search Trees</h3>
+<p><b>Invariant:</b> for every node, <i>entire</i> left subtree &lt; node &lt; <i>entire</i> right subtree (recursive, not just children). In-order ⇒ sorted. All ops <b>O(h)</b>.</p>
+<table><thead><tr><th>Op</th><th>Balanced / degenerate</th></tr></thead><tbody>
+<tr><td>search / insert / delete</td><td>O(log n) / O(n)</td></tr>
+<tr><td>min/max</td><td>leftmost / rightmost, O(h)</td></tr>
+<tr><td>k-th smallest</td><td>in-order to k; augment subtree size → O(h)</td></tr>
+</tbody></table>
+<h4>Delete — 3 cases</h4>
+<ul>
+<li>Leaf → unlink. One child → splice child up. <b>Two children → copy in-order successor's key</b> (leftmost of right subtree, ≤1 child), then delete successor <span class="warn">!</span></li>
+</ul>
+<h4>Gotchas</h4>
+<ul>
+<li><b>Not inherently O(log n)</b> — sorted/sequential insert (timestamps, auto-IDs) degenerates to an O(n) chain <span class="warn">!</span> → use a balanced tree.</li>
+<li>Validate by carrying <code>(min,max)</code> range down, NOT comparing only to immediate children <span class="warn">!</span></li>
+<li>BST invariant (horizontal, sorted) &ne; heap invariant (vertical, parent-child only) <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Balanced BSTs (AVL / Red-Black)</h3>
+<p>Enforce height O(log n) via <b>rotations</b> (local O(1) re-link, <i>always</i> preserves in-order order). Turns BST's "avg O(log n)" into "worst-case O(log n)".</p>
+<table><thead><tr><th></th><th>AVL</th><th>Red-Black</th></tr></thead><tbody>
+<tr><td>balance</td><td>bf∈{−1,0,+1}, h≤1.44 log n</td><td>color rules, h≤2 log n</td></tr>
+<tr><td>reads</td><td><b>faster</b> (tighter)</td><td>slightly slower</td></tr>
+<tr><td>writes</td><td>more rotations</td><td><b>fewer</b> (O(1) amort.)</td></tr>
+<tr><td>best for</td><td>read-heavy index</td><td>write/mixed (lib default)</td></tr>
+</tbody></table>
+<h4>RB properties</h4>
+<ul><li>Root black; NIL black; <b>no red-red edge</b>; <b>every root→null path has equal black-height</b>. Together: longest path ≤ 2× shortest ⇒ O(log n).</li>
+<li>AVL fixes: LL/RR single rotate, LR/RL double — ≤2 rotations.</li></ul>
+<h4>Gotchas / uses</h4>
+<ul>
+<li>Rotations never break sort order <span class="warn">!</span> RB is not "perfectly balanced" (up to 2× min height) <span class="warn">!</span></li>
+<li><b>Deletion is much harder than insertion</b> (fix-ups cascade) — why interviewers rarely ask you to code it <span class="warn">!</span></li>
+<li>Java <code>TreeMap</code>/<code>TreeSet</code>, C++ <code>std::map</code>/<code>set</code>, Linux kernel = RB trees. Pointer-scattered → less cache-friendly than a sorted array.</li>
+</ul>
 </section>
 
 <section class="card"><h3>Heaps &amp; Priority Queues</h3>
-<pre><code>array heap: child(i)=2i+1,2i+2
-            parent(i)=(i-1)/2
-push: append + sift-up   O(log n)
-pop : swap root/last + sift-down
-heapify whole array:     O(n)</code></pre>
+<p>Complete binary tree in a <b>flat array</b> (parent <code>(i−1)/2</code>, children <code>2i+1/2i+2</code>). <b>Heap property:</b> parent ≤/≥ children (parent-child only — NOT sorted).</p>
+<table><thead><tr><th>Op</th><th>Cost</th></tr></thead><tbody>
+<tr><td>peek min/max</td><td>O(1)</td></tr>
+<tr><td>insert (sift-up)</td><td>O(log n)</td></tr>
+<tr><td>extract (sift-down)</td><td>O(log n)</td></tr>
+<tr><td><b>build-heap</b></td><td><b>O(n)</b> bottom-up heapify</td></tr>
+<tr><td>find arbitrary elem</td><td>O(n)</td></tr>
+</tbody></table>
+<h4>Gotchas</h4>
 <ul>
-<li>Min-heap = O(1) peek-min; not searchable (O(n)).</li>
-<li>Uses: Dijkstra/Prim, top-k (size-k heap), merge k lists, scheduling, heapsort.</li>
+<li><b>A heap is NOT sorted</b> — in-order is meaningless, only root is extreme <span class="warn">!</span></li>
+<li>Build-heap is <b>O(n)</b>, not O(n log n) — sift-down cost ∝ node height, most nodes shallow <span class="warn">!</span> (n one-by-one inserts <i>is</i> O(n log n)).</li>
+<li>decrease-key needs elem→index map, or use <b>lazy deletion</b> (push new, skip stale on pop) — Dijkstra.</li>
+</ul>
+<h4>Patterns</h4>
+<ul>
+<li><b>k largest in stream:</b> size-k <i>min</i>-heap, pop when &gt;k → O(n log k). <b>Running median:</b> two heaps (max-heap low / min-heap high), O(log n) insert, O(1) query.</li>
+<li>Heapsort: O(n log n) in-place, not stable. Dijkstra/Prim/Huffman/k-way merge/schedulers.</li>
 </ul>
 </section>
 
 <section class="card"><h3>Tries (Prefix Trees)</h3>
+<p>Tree keyed on characters: each node = a prefix, each edge = a char, word = root→node path with <code>isEnd</code> flag. Key distributed across the path — shared prefixes stored once.</p>
+<table><thead><tr><th>Op</th><th>Cost</th></tr></thead><tbody>
+<tr><td>insert / search / startsWith</td><td><b>O(L)</b> (key length, indep. of N)</td></tr>
+<tr><td>autocomplete prefix P</td><td>O(P + matches)</td></tr>
+<tr><td>count words with prefix</td><td>O(P) if nodes cache subtree count</td></tr>
+</tbody></table>
 <ul>
-<li>One node per char; path spells the key. Ops O(L) in key length, independent of n.</li>
-<li>Wins for <b>prefix</b> queries / autocomplete — a hash set can't do "all keys starting with…".</li>
-<li><b>Radix/Patricia</b>: compress single-child chains → less space.</li>
-<li><span class="warn">!</span> Memory-heavy (pointers per node); a hash set is smaller for pure membership.</li>
+<li><code>search</code> checks <code>isEnd</code>; <code>startsWith</code> just checks path exists. Children: fixed array[R] (O(1), wastes null slots) vs hash map (sparse-friendly).</li>
+<li><b>Radix/Patricia trie:</b> collapse single-child chains → edge holds a substring; cuts memory on long non-branching runs.</li>
+</ul>
+<h4>Gotchas</h4>
+<ul>
+<li>Not faster than a hash set for <b>exact</b> lookup (both O(L)) — the win is <b>prefix ops</b> hash can't do <span class="warn">!</span></li>
+<li>Forgetting <code>isEnd</code> ⇒ "ca" wrongly a word when only "cat" inserted <span class="warn">!</span> Ops are O(L), not O(1) <span class="warn">!</span></li>
+<li>Alphabet = any symbol set (bytes, Unicode via map, DNA, <b>bits</b> for XOR/IP-prefix). Longest-prefix match (routing): record last <code>isEnd</code> while descending.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Graph Representations</h3>
-<table><thead><tr><th></th><th>Adj list</th><th>Adj matrix</th></tr></thead><tbody>
-<tr><td>Space</td><td>O(V+E)</td><td>O(V^2)</td></tr>
-<tr><td>Edge exists?</td><td>O(deg)</td><td>O(1)</td></tr>
-<tr><td>Iterate nbrs</td><td>O(deg)</td><td>O(V)</td></tr>
-<tr><td>Best for</td><td>sparse</td><td>dense</td></tr>
+<section class="card"><h3>Graphs — Representations</h3>
+<p>Vertices + edges; may have cycles, be disconnected, directed, weighted. Representation fixes the two hot questions: "who are u's neighbours?" and "is u–v an edge?".</p>
+<table><thead><tr><th>Rep</th><th>Space / edge? / neighbours</th></tr></thead><tbody>
+<tr><td>adjacency list</td><td>O(V+E) / O(deg) / O(deg) — sparse default</td></tr>
+<tr><td>adjacency matrix</td><td>O(V²) / <b>O(1)</b> / O(V) — dense only</td></tr>
+<tr><td>edge list</td><td>O(E) / O(E) / O(E) — edge-centric (Kruskal, Bellman-Ford)</td></tr>
 </tbody></table>
-<p>Most interview graphs are <b>sparse</b> → adjacency list (map/array of lists) is the default.</p>
-</section>
-
-<section class="card"><h3>Union-Find (DSU)</h3>
-<pre><code>find(x): follow parent to root
-         (path compression)
-union(a,b): link smaller root
-            under larger (by rank)</code></pre>
 <ul>
-<li>Both optimizations → near <b>O(1) amortized</b> (inverse Ackermann).</li>
-<li>Uses: Kruskal MST, connectivity/components, dynamic equivalence, cycle detection in undirected graphs.</li>
+<li>Sparse (E≈V): list. Dense (E≈V²) or O(1) edge-check or matrix-algebra: matrix. Need O(1) edge-check on sparse: list with <b>hash-set</b> neighbours.</li>
+<li>V=10^6, E=2·10^6: list ≈ tens of MB; <b>matrix = 10^12 cells (infeasible)</b> <span class="warn">!</span></li>
+</ul>
+<h4>Gotchas</h4>
+<ul>
+<li><b>Undirected edge stored twice</b> in a list; matrix symmetric <span class="warn">!</span> total in-deg = total out-deg = E; deg sum (undirected) = 2E.</li>
+<li>Matrix neighbour iteration O(V) even for degree 1 <span class="warn">!</span> Traverse all components (loop over unvisited starts) or you miss nodes <span class="warn">!</span> <b>DAG</b> ⇒ topological order (scheduling / prereqs).</li>
 </ul>
 </section>
 
-<section class="card"><h3>Segment / Fenwick Trees</h3>
-<table><thead><tr><th>Need</th><th>Use</th></tr></thead><tbody>
-<tr><td>static range sum</td><td>prefix-sum array O(1)</td></tr>
-<tr><td>point-upd + range-q</td><td>Fenwick (BIT) O(log n)</td></tr>
-<tr><td>range-upd + range-q</td><td>segment tree + lazy</td></tr>
-<tr><td>min/max/gcd range</td><td>segment tree</td></tr>
-</tbody></table>
-<p>BIT = smaller/faster but sum-like ops only; segtree = general (any associative op) + lazy propagation.</p>
+<section class="card"><h3>Union-Find (Disjoint Set Union)</h3>
+<p>Dynamic connectivity: <code>find(x)</code> (which set?) + <code>union(x,y)</code> (merge). Forest in a <code>parent[]</code> array; root is its own parent; same set ⇔ same root. Space O(n).</p>
+<pre><code>find(x):  # path compression
+  if parent[x]!=x: parent[x]=find(parent[x])
+  return parent[x]
+union(x,y):
+  rx,ry=find(x),find(y)
+  if rx!=ry: parent[rx]=ry   # +by rank/size</code></pre>
+<ul>
+<li><b>Two optimizations, need BOTH</b> for O(&alpha;(n)):
+  <br>• union by rank/size — hang smaller under larger, height O(log n)
+  <br>• path compression — re-point visited nodes at root.
+  <br>Either alone = O(log n) amortized <span class="warn">!</span></li>
+<li><b>&alpha;(n)</b> (inverse Ackermann) ≤ 4 for any real n → "near-constant".</li>
+</ul>
+<h4>Gotchas / uses</h4>
+<ul>
+<li><b>Union only — no split / undo / delete</b> in vanilla form <span class="warn">!</span> (need rollback DSU / offline reverse). Tells you <i>whether</i> connected, not the path <span class="warn">!</span></li>
+<li>Kruskal MST (cycle test), count components (start n, dec on real merge), undirected cycle detect, accounts-merge, grid percolation. Prefer over BFS/DFS when merges+queries are interleaved &amp; numerous.</li>
+</ul>
 </section>
 
-<section class="card"><h3>Skip Lists &amp; Probabilistic</h3>
+<section class="card"><h3>Segment Trees &amp; Fenwick (BIT)</h3>
+<p>Range query <b>with</b> updates. Prefix-sum array: O(1) query but O(n) update. These buy O(log n) both.</p>
+<table><thead><tr><th>Struct</th><th>Query / update / space</th></tr></thead><tbody>
+<tr><td>prefix-sum</td><td>O(1) / O(n) / n — static only</td></tr>
+<tr><td>Fenwick (BIT)</td><td>O(log n) / O(log n) / n — invertible ops</td></tr>
+<tr><td>segment tree</td><td>O(log n) / O(log n) / ~4n — any assoc op</td></tr>
+</tbody></table>
+<pre><code>prefix(i):          update(i,d):
+ s=0                 while i&lt;=n:
+ while i&gt;0:            tree[i]+=d
+  s+=tree[i]           i+=i&amp;(-i)
+  i-=i&amp;(-i)          # low-bit trick</code></pre>
 <ul>
-<li><b>Skip list</b>: layered linked list, coin-flip levels → O(log n) <b>expected</b>; simpler to write than a balanced BST. Redis sorted sets use it.</li>
-<li><b>Bloom filter</b>: k hashes into a bit array; "possibly present" or "definitely absent" — <b>false positives, never false negatives</b>. <span class="warn">!</span> No delete (use Counting Bloom).</li>
-<li><b>Count-Min Sketch</b>: approx frequencies; <b>HyperLogLog</b>: approx cardinality. Tiny memory, bounded error.</li>
+<li>BIT is <b>1-indexed</b> (low-bit needs i≠0). Range sum = <code>prefix(r)−prefix(l−1)</code>.</li>
+</ul>
+<h4>Gotchas</h4>
+<ul>
+<li><b>Prefix-sum ≠ Fenwick</b> — a plain array can't update cheaply <span class="warn">!</span> BIT can't do <b>min/max</b> (not invertible — can't subtract a prefix) <span class="warn">!</span></li>
+<li>Range update on a seg-tree needs <b>lazy propagation</b> or it's O(n log n) <span class="warn">!</span> Size seg-tree ~4n or it corrupts <span class="warn">!</span> Static + idempotent (min) → sparse table instead.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Skip Lists &amp; Treaps</h3>
+<p>Sorted linked list + probabilistic "express lanes". Node promoted to level k+1 with prob <code>p</code> (≈0.5) → level i has ~n/2^i nodes, ~log n levels. Search: top-left, move right while ≤ target, drop a level on overshoot.</p>
+<table><thead><tr><th>Op</th><th>Cost</th></tr></thead><tbody>
+<tr><td>search / insert / delete</td><td>O(log n) <b>expected</b></td></tr>
+<tr><td>rank / select</td><td>O(log n) via per-pointer <b>span</b></td></tr>
+</tbody></table>
+<ul>
+<li>vs balanced BST: trades <i>guaranteed</i> for <i>expected</i> O(log n), but <b>no rotations/color rules</b> → simpler code + far easier <b>concurrency</b> (local pointer splices).</li>
+<li>~<code>1/(1−p)</code> pointers/node (~2 at p=0.5). <b>Treap</b> = BST + heap on random priorities → expected O(log n), easy split/merge.</li>
+</ul>
+<h4>Gotchas / uses</h4>
+<ul>
+<li>O(log n) <b>expected, not worst</b> — but randomness is internal (no adversarial worst case like hash flooding) <span class="warn">!</span> Less cache-friendly than a B-tree.</li>
+<li>Redis ZSET, LevelDB/RocksDB memtable, Java <code>ConcurrentSkipListMap</code>.</li>
 </ul>
 </section>
 
 <section class="card"><h3>B-Trees &amp; B+ Trees</h3>
+<p>Balanced <b>multiway</b> search trees for block storage (disk/SSD/page): one node = one page, <b>fanout 100–1000+</b>, height O(log_b n) = 3–4 levels. Optimizes <i>block transfers</i>, not comparisons.</p>
+<table><thead><tr><th></th><th>vs red-black (both O(log n))</th></tr></thead><tbody>
+<tr><td>fanout / height</td><td>500 / ~4 vs 2 / ~30</td></tr>
+<tr><td>disk reads/lookup</td><td>3–4 (often 1) vs ~30 seeks</td></tr>
+</tbody></table>
 <ul>
-<li>High fanout (hundreds of keys/node = one disk page) → very shallow → few disk seeks. The DB/filesystem index structure.</li>
-<li><b>B+ tree</b>: values only in leaves, leaves <b>linked</b> → great for range scans + sequential I/O.</li>
-<li><span class="warn">!</span> A binary BST is wrong for disk: h ~ log2(n) seeks vs log_fanout(n).</li>
+<li><b>B+ tree:</b> values only in leaves, internal = key-only routing (higher fanout), <b>leaves linked</b> → range scan = descend once + walk leaf chain, O(log n + k). Nearly all DB indexes.</li>
+<li>Insert splits a full leaf, promotes median up — <b>tree grows at the ROOT</b>, keeps leaves equal-depth. Delete borrows/merges to stay ≥ half full.</li>
+</ul>
+<h4>Gotchas</h4>
+<ul>
+<li>"B" ≠ binary <span class="warn">!</span> Node ~50–70% full (split slack) <span class="warn">!</span> Hash index can't range-scan; B+ keeps order.</li>
+<li>Write amplification (in-place page rewrite) → <b>LSM-tree</b> for write-heavy (sequential appends + compaction, read-amplification trade).</li>
 </ul>
 </section>
 
-<section class="card"><h3>Composite Structures</h3>
-<table><tbody>
-<tr><td><b>LRU cache</b></td><td>hashmap + doubly linked list</td></tr>
-<tr><td><b>LFU cache</b></td><td>freq buckets + key map</td></tr>
-<tr><td><b>Sliding-window max</b></td><td>monotonic deque</td></tr>
-<tr><td><b>Static range-min</b></td><td>sparse table O(1) query</td></tr>
-<tr><td><b>Rank / k-th</b></td><td>order-statistics tree / BIT</td></tr>
+<section class="card"><h3>Probabilistic Structures</h3>
+<p>Trade exactness for tiny space with bounded error. Store a fingerprint, not the elements — can't enumerate back.</p>
+<table><thead><tr><th>Struct</th><th>Answers / error</th></tr></thead><tbody>
+<tr><td>Bloom filter</td><td>membership — <b>false positives, never false negatives</b></td></tr>
+<tr><td>Count-Min Sketch</td><td>frequency — <b>over-counts only</b></td></tr>
+<tr><td>HyperLogLog</td><td>distinct count — ~2% err, ~1.5KB for billions</td></tr>
 </tbody></table>
-<p>Pattern: <b>keep two structures in sync</b> — one for lookup (map), one for order/priority (list/heap/tree).</p>
-</section>
-
-<section class="card"><h3>Which Structure for Which Job</h3>
-<table><thead><tr><th>Need</th><th>Use</th></tr></thead><tbody>
-<tr><td>index / random access</td><td>array</td></tr>
-<tr><td>membership / dedup</td><td>hash set</td></tr>
-<tr><td>key → value, O(1)</td><td>hash map</td></tr>
-<tr><td>sorted / range / floor</td><td>balanced BST (TreeMap)</td></tr>
-<tr><td>min/max repeatedly</td><td>heap</td></tr>
-<tr><td>FIFO / BFS</td><td>queue</td></tr>
-<tr><td>LIFO / DFS / undo</td><td>stack</td></tr>
-<tr><td>prefix / autocomplete</td><td>trie</td></tr>
-<tr><td>connectivity/grouping</td><td>union-find</td></tr>
-<tr><td>range sum + updates</td><td>Fenwick / segtree</td></tr>
-</tbody></table>
-</section>
-
-<section class="card"><h3>&#9744; Interview Playbook</h3>
 <ul>
-<li>&#9744; List the required <b>operations</b> + each op's <b>target complexity</b> before picking anything.</li>
-<li>&#9744; Map ops → structure (see the table) and say <b>why</b> it hits the target.</li>
-<li>&#9744; Name the trade-off you're accepting (memory, ordering, worst-case).</li>
-<li>&#9744; Hash = expected O(1) but no order + O(n) worst; tree = O(log n) but sorted + range.</li>
-<li>&#9744; "Repeatedly need the extreme" → heap. "Need order too" → balanced BST, not a heap.</li>
-<li>&#9744; O(1) get/put/evict → hashmap + DLL. O(1) random → array + index map.</li>
-<li>&#9744; On-disk / huge → B+ tree, not a binary BST.</li>
-<li>&#9744; Recall amortized vs worst-case honestly; mention cache locality when arrays win.</li>
+<li><b>Bloom:</b> m bits + k hashes; insert sets k bits, query = all-k-set? Any 0 ⇒ absent. <code>m=−n·ln&epsilon;/(ln2)²</code>, <code>k=(m/n)ln2</code> ≈ 1.44·log₂(1/&epsilon;) bits/elem.</li>
+<li><b>CMS:</b> d rows × w cols, increment one/row, estimate = <b>min</b> across rows (min cancels collision inflation).</li>
+<li><b>HLL:</b> leading-zero run r ⇒ ~2^r distinct; bucket + harmonic mean.</li>
+</ul>
+<h4>Gotchas</h4>
+<ul>
+<li>Bloom has <b>no</b> false negatives — claiming otherwise is the classic error <span class="warn">!</span> Can't delete from a plain Bloom (shared bits) → <b>Counting Bloom</b> (counters) <span class="warn">!</span></li>
+<li>&epsilon; degrades if filled past design n <span class="warn">!</span> <b>Mergeable</b>: Bloom=OR, HLL=per-bucket max, CMS=add → per-shard then combine.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Composite &amp; Specialized</h3>
+<p><b>Pattern:</b> pair two primitives, each covering the other's weakness, linked by an O(1) <b>back-pointer/index</b>, or <b>augment</b> a BST node with a derived summary.</p>
+<h4>LRU cache — O(1) get &amp; put</h4>
+<ul>
+<li>Hash map <code>key→node</code> + <b>doubly</b> linked list (recency order). get: map locate O(1), splice to head O(1). Evict = pop tail. Doubly (not singly) so you unlink a held node in O(1) <span class="warn">!</span></li>
+<li><b>LFU</b> harder: <code>key→(val,freq)</code> + <code>freq→list</code> + <code>minFreq</code>.</li>
+</ul>
+<h4>Other composites</h4>
+<table><thead><tr><th>Need</th><th>Structure</th></tr></thead><tbody>
+<tr><td>sliding-window min/max</td><td>monotonic deque, O(n) (each elem 1 push/1 pop)</td></tr>
+<tr><td>static range-min/max/gcd</td><td>sparse table, O(1) query (idempotent!)</td></tr>
+<tr><td>rank / select / k-th</td><td>order-stat tree (subtree size)</td></tr>
+<tr><td>interval overlap</td><td>interval tree (max endpoint)</td></tr>
+<tr><td>O(1) insert/del/getRandom</td><td>array + map, swap-with-last delete</td></tr>
+</tbody></table>
+<ul>
+<li>Sparse-table O(1) needs an <b>idempotent</b> op (overlap harmless); sum is not — use prefix-sum/Fenwick <span class="warn">!</span> Forgetting to update the back-pointer on move/delete = classic LRU bug <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Choosing — Decision Drill</h3>
+<p>Pipeline: <b>(1)</b> list ops + frequency → <b>(2)</b> attach target from input size → <b>(3)</b> match structure → <b>(4)</b> check worst-case + memory. Narrate it aloud.</p>
+<h4>Target from n (~10^8 ops/sec)</h4>
+<table><thead><tr><th>n ≤</th><th>acceptable</th></tr></thead><tbody>
+<tr><td>10^8</td><td>O(n) / O(n log n)</td></tr>
+<tr><td>10^5–10^6</td><td>O(n log n), maybe O(n²)</td></tr>
+<tr><td>500–1000</td><td>O(n²)/O(n³)</td></tr>
+<tr><td>~20</td><td>O(2^n)/O(n!)</td></tr>
+</tbody></table>
+<h4>What would you use for…</h4>
+<table><thead><tr><th>Problem</th><th>Structure</th></tr></thead><tbody>
+<tr><td>keyed lookup, no order</td><td>hash table</td></tr>
+<tr><td>ordering / range / floor-ceil</td><td>balanced BST / skip list</td></tr>
+<tr><td>repeated min/max + insert</td><td>heap</td></tr>
+<tr><td>duplicates in stream</td><td>hash set (Bloom if tight)</td></tr>
+<tr><td>autocomplete / prefix</td><td>trie</td></tr>
+<tr><td>running median</td><td>two heaps</td></tr>
+<tr><td>range-sum + point update</td><td>Fenwick (BIT)</td></tr>
+<tr><td>range-min, static</td><td>sparse table</td></tr>
+<tr><td>dynamic connectivity</td><td>union-find</td></tr>
+<tr><td>O(1) get + ordered evict</td><td>hash map + linked list</td></tr>
+<tr><td>disk index, ranges</td><td>B+ tree</td></tr>
+</tbody></table>
+</section>
+
+<section class="card"><h3>Common Bugs — Spot-the-Bug</h3>
+<table><thead><tr><th>Symptom</th><th>Cause</th></tr></thead><tbody>
+<tr><td>string build slow / O(n²)</td><td><code>s+=x</code> in loop — use builder <span class="warn">!</span></td></tr>
+<tr><td>emoji becomes garbage on reverse</td><td>reversed code units, not graphemes <span class="warn">!</span></td></tr>
+<tr><td>caller's slice silently mutated</td><td>slice shares backing array <span class="warn">!</span></td></tr>
+<tr><td>list truncated after reversal</td><td>didn't save <code>curr.next</code> <span class="warn">!</span></td></tr>
+<tr><td>tree ops all O(n)</td><td>plain BST fed sorted input <span class="warn">!</span></td></tr>
+<tr><td>validateBST passes bad tree</td><td>compared only immediate children <span class="warn">!</span></td></tr>
+<tr><td>map lookup fails after insert</td><td>key mutated → hash changed <span class="warn">!</span></td></tr>
+<tr><td>hash lookup after delete misses</td><td>open-addr slot cleared, chain broken (need tombstone) <span class="warn">!</span></td></tr>
+<tr><td>DSU still O(log n)</td><td>only one of compression/rank <span class="warn">!</span></td></tr>
+<tr><td>range-update O(n log n)</td><td>seg-tree without lazy prop <span class="warn">!</span></td></tr>
+<tr><td>ring buffer full read as empty</td><td>both show <code>head==tail</code> <span class="warn">!</span></td></tr>
+<tr><td>traversal misses half the nodes</td><td>graph disconnected, one start <span class="warn">!</span></td></tr>
+<tr><td>build-heap "O(n log n)"</td><td>it's O(n) bottom-up <span class="warn">!</span></td></tr>
+<tr><td>OOM on adjacency matrix</td><td>dense rep on sparse graph <span class="warn">!</span></td></tr>
+<tr><td>list grew then shrank, RAM high</td><td>backing array never auto-shrinks <span class="warn">!</span></td></tr>
+</tbody></table>
+</section>
+
+<section class="card"><h3>&#9733; Structure-Choice Review Checklist</h3>
+<h4>Operation profile</h4>
+<ul>
+<li>&#9744; Enumerated every op + its frequency; optimized the <b>hot-path</b> op, not a rare one.</li>
+<li>&#9744; Complexity target inferred from input size &amp; time budget before picking a tool.</li>
+</ul>
+<h4>Ordering &amp; ranges</h4>
+<ul>
+<li>&#9744; Chose hash only when order/range genuinely unneeded — not paying O(log n) for ordering you never use, nor breaking on required order.</li>
+<li>&#9744; "sorted" vs "insertion" order distinguished; no reliance on hash iteration order <span class="warn">!</span></li>
+</ul>
+<h4>Complexity honesty</h4>
+<ul>
+<li>&#9744; Stated <b>worst case</b>, not just happy path: hash O(1) is <i>average</i> (O(n) adversarial / DoS); append &amp; DSU are <i>amortized</i> (spikes) <span class="warn">!</span></li>
+<li>&#9744; Linked-list insert costed as O(n) unless a node reference is already held.</li>
+</ul>
+<h4>Invariants preserved</h4>
+<ul>
+<li>&#9744; Map/tree keys immutable in their hash/compare fields for their lifetime <span class="warn">!</span></li>
+<li>&#9744; BST validated by range, not neighbours; two-child delete promotes the successor.</li>
+<li>&#9744; Composite back-pointer/index updated on every move &amp; delete <span class="warn">!</span></li>
+<li>&#9744; DSU uses both compression + rank/size; seg-tree range-update uses lazy prop.</li>
+</ul>
+<h4>Memory &amp; hardware</h4>
+<ul>
+<li>&#9744; Fits in memory (matrix O(V²) sanity-checked); resize 3x-peak / pre-size considered.</li>
+<li>&#9744; Cache locality weighed — a contiguous array may beat an asymptotically-equal pointer structure.</li>
+<li>&#9744; Right cost model: block transfers (B+ tree on disk) vs comparisons (red-black in RAM).</li>
 </ul>
 </section>
 

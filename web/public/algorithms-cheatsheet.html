@@ -6,7 +6,11 @@
 <title>Algorithms Cheat Sheet</title>
 <style>
 :root{
-  --fs: 7.2pt; --fs-mono: 6.6pt; --fs-h3: 7.8pt; --gap: 5px; --pad: 3px;
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
   --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
 }
 *{box-sizing:border-box;}
@@ -14,10 +18,12 @@ html,body{margin:0;padding:0;}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
   font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
 .sheet{background:#fff;}
+/* spanning title bar */
 .titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
   margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
-.titlebar h1{font-size:12.5pt; margin:0; letter-spacing:.4px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
 .titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
 .sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
   column-fill:balance; padding:5px;}
 .card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
@@ -25,6 +31,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Ar
   overflow:hidden;}
 .card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
   background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
 .card:nth-of-type(8n+1) h3{background:#34495e;}
 .card:nth-of-type(8n+2) h3{background:#2c6e9b;}
 .card:nth-of-type(8n+3) h3{background:#1f7a5a;}
@@ -38,7 +45,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Ar
 .card p{margin:2px 0;}
 .card ul{margin:1.5px 0; padding-left:11px;}
 .card li{margin:.5px 0; line-height:1.2;}
-table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.4pt;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
 th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
 td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
 pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
@@ -50,196 +57,423 @@ pre code{background:none; padding:0; font-size:1em;}
 .pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
   padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
 .pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
 .cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
 .legend li{line-height:1.35;}
 @media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
 @page{ size:A4; margin:5mm; }
 @media print{
   body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
   .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
 }
 </style>
 </head>
 <body>
 <div class="sheet">
-<div class="titlebar"><h1>Algorithms Cheat Sheet</h1><span class="meta">paradigms · complexity · recurrences · graph picker · DP recipe · drilly</span></div>
-
+<div class="titlebar"><h1>Algorithms Cheat Sheet</h1><span class="meta">core algorithm families · complexity, templates &amp; footguns · generic examples · drilly</span></div>
 <section class="card legend"><h3>How to read &amp; print</h3>
 <ul>
-<li><span class="warn">!</span> footgun / classic trap &nbsp; <code>&#9744;</code> checklist step</li>
-<li>Interviews test <b>which paradigm</b>: from the ops + input size, name the technique and its complexity, then justify.</li>
-<li>Bounds are typical; hash/quicksort are <b>expected</b>. Constants &amp; cache still decide real speed.</li>
-<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
+<li><span class="warn">!</span> footgun / gotcha &nbsp; <code>&#9744;</code> review checklist item</li>
+<li>Focus: how each classic algorithm works, its complexity, and <b>when to reach for it</b>. Concept-first — pseudocode is language-neutral.</li>
+<li>Complexities are worst-case unless tagged <i>avg</i> / <i>amort</i>. Graphs assume <b>adjacency lists</b> (V vertices, E edges) unless noted.</li>
+<li>Last 2 cards = <b>review checklist</b> + <b>symptom→cause</b> bug table. Read the constraint table first — it tells you which family the interviewer wants.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
 </ul></section>
 
-<section class="card"><h3>Sorting Complexity</h3>
-<table><thead><tr><th>Sort</th><th>Best</th><th>Avg</th><th>Worst</th><th>Spc</th><th>Stbl</th></tr></thead><tbody>
-<tr><td>Bubble</td><td>n</td><td>n^2</td><td>n^2</td><td>1</td><td>Y</td></tr>
-<tr><td>Insertion</td><td>n</td><td>n^2</td><td>n^2</td><td>1</td><td>Y</td></tr>
-<tr><td>Selection</td><td>n^2</td><td>n^2</td><td>n^2</td><td>1</td><td>N</td></tr>
-<tr><td>Merge</td><td>n log n</td><td>n log n</td><td>n log n</td><td>n</td><td>Y</td></tr>
-<tr><td>Quick</td><td>n log n</td><td>n log n</td><td>n^2</td><td>log n</td><td>N</td></tr>
-<tr><td>Heap</td><td>n log n</td><td>n log n</td><td>n log n</td><td>1</td><td>N</td></tr>
-<tr><td>Counting</td><td>n+k</td><td>n+k</td><td>n+k</td><td>k</td><td>Y</td></tr>
-<tr><td>Radix</td><td>nd</td><td>nd</td><td>nd</td><td>n+k</td><td>Y</td></tr>
+<section class="card"><h3>Complexity &amp; Big-O</h3>
+<ul>
+<li><b>Big-O</b> upper bound (grows no faster), <b>Ω</b> lower, <b>Θ</b> tight (both). "O(n²)" only claims a ceiling — could be faster. Use Θ when you can prove tightness.</li>
+<li>Formal: T(n)=O(g) if ∃ c,n₀ with T(n)≤c·g(n) ∀ n≥n₀ — that "∀ large n" is why constants &amp; lower terms drop.</li>
+<li><b>Best/avg/worst</b> fixes n, varies <i>which</i> input; independent axis from O/Θ/Ω. Interviewers want worst-case unless you flag an avg-case distribution <span class="warn">!</span></li>
+</ul>
+<h4>Growth ladder (slow→fast growth)</h4>
+<pre><code>O(1) &lt; log n &lt; n &lt; n log n &lt; n² &lt; n³ &lt; 2ⁿ &lt; n!</code></pre>
+<h4>Amortized ≠ average</h4>
+<ul>
+<li><b>Amortized</b> = avg cost over a <i>sequence</i>, holds even vs adversary (dyn-array push = O(1) amort: resizes at 1,2,4,…,n cost &lt;2n total). Doubling is essential — grow-by-constant is O(n²) <span class="warn">!</span></li>
+<li><b>Average</b> = expected over an input <i>distribution</i>; fails if the distribution is violated (hash table O(1) avg).</li>
+<li>Amortized O(1) is a sequence guarantee — does <b>not</b> bound one op's latency (matters for real-time) <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Recurrences &amp; Master Theorem</h3>
+<p>Form T(n) from structure: <b>a</b> subproblems of size <b>n/b</b> plus <b>f(n)</b> non-recursive work. Compare f(n) to the watershed <code>n^(log_b a)</code>.</p>
+<table><thead><tr><th>Case</th><th>Condition</th><th>T(n)</th></tr></thead><tbody>
+<tr><td>1 leaves</td><td>f = O(n^(log_b a−ε))</td><td>Θ(n^(log_b a))</td></tr>
+<tr><td>2 even</td><td>f = Θ(n^(log_b a))</td><td>Θ(n^(log_b a)·log n)</td></tr>
+<tr><td>3 root</td><td>f = Ω(n^(log_b a+ε)) &amp; regular</td><td>Θ(f(n))</td></tr>
 </tbody></table>
-<p class="cap"><span class="warn">!</span> Comparison sorts can't beat Omega(n log n). Counting/radix need bounded keys.</p>
-</section>
-
-<section class="card"><h3>Paradigm Decision Tree</h3>
 <ul>
-<li><b>Brute force</b> first — get correctness + a complexity to beat.</li>
-<li><b>Greedy</b>: a locally-best choice is provably globally optimal (exchange argument). Fast, but prove it.</li>
-<li><b>Divide &amp; conquer</b>: split into independent subproblems, combine (sort, search).</li>
-<li><b>DP</b>: overlapping subproblems + optimal substructure → memoize.</li>
-<li><b>Graph</b>: model as nodes/edges → BFS/DFS/shortest-path/flow.</li>
-<li><span class="warn">!</span> Greedy fails? It usually means DP.</li>
+<li>Merge sort: 2T(n/2)+n, watershed n¹ → Case 2 → <b>Θ(n log n)</b>. Binary search: T(n/2)+O(1) → Θ(log n). Karatsuba 3T(n/2)+n → Θ(n^1.585).</li>
+<li><b>Fails when</b> <span class="warn">!</span>: unequal splits (T(n/3)+T(2n/3) — use recursion tree / Akra-Bazzi), non-constant a/b, f in the gap between cases, Case-3 regularity fails, or <i>subtract</i> not divide (T(n−1)+n = Θ(n²)).</li>
+<li>Recursion-tree fallback: sum work per level × #levels. Geometric series → dominated by root or leaves.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Recurrences &amp; Master Thm</h3>
-<pre><code>T(n) = a T(n/b) + O(n^d)
-compare d vs log_b(a):
-  d >  log_b a : O(n^d)
-  d == log_b a : O(n^d log n)
-  d <  log_b a : O(n^(log_b a))</code></pre>
-<ul>
-<li>Merge sort: 2T(n/2)+O(n) → n log n.</li>
-<li>Binary search: T(n/2)+O(1) → log n.</li>
-<li>Karatsuba: 3T(n/2)+O(n) → n^1.585.</li>
-</ul>
-</section>
-
-<section class="card"><h3>Binary Search on the Answer</h3>
-<pre><code>lo, hi = min, max
-while lo < hi:
-  mid = lo + (hi-lo)/2   # no overflow
-  if feasible(mid): hi = mid
-  else:             lo = mid+1
-return lo               # first feasible</code></pre>
-<p><span class="warn">!</span> Works when feasibility is <b>monotonic</b>. Nail the invariant + which side keeps <code>mid</code>, or you infinite-loop.</p>
-</section>
-
-<section class="card"><h3>DP Recipe</h3>
-<ul>
-<li><b>1. State</b> — what minimal info defines a subproblem? (indices, remaining capacity, mask)</li>
-<li><b>2. Transition</b> — how does a state build from smaller ones?</li>
-<li><b>3. Base case</b> — smallest subproblems.</li>
-<li><b>4. Order</b> — memoize (top-down) or fill in dependency order (bottom-up).</li>
-<li><b>5. Answer</b> — which state(s) hold it. Complexity = #states x transition cost.</li>
-</ul>
-<p class="cap">Classic: knapsack, LCS/edit distance, LIS (n log n w/ patience), coin change, grid, interval, bitmask, tree DP.</p>
-</section>
-
-<section class="card"><h3>Graph Algorithm Picker</h3>
-<table><thead><tr><th>Need</th><th>Use</th><th>Time</th></tr></thead><tbody>
-<tr><td>reach / components</td><td>BFS/DFS</td><td>V+E</td></tr>
-<tr><td>order w/ deps</td><td>topo sort</td><td>V+E</td></tr>
-<tr><td>unweighted SP</td><td>BFS</td><td>V+E</td></tr>
-<tr><td>weighted SP (+)</td><td>Dijkstra</td><td>E log V</td></tr>
-<tr><td>neg edges</td><td>Bellman-Ford</td><td>VE</td></tr>
-<tr><td>all-pairs SP</td><td>Floyd-Warshall</td><td>V^3</td></tr>
-<tr><td>MST</td><td>Kruskal/Prim</td><td>E log V</td></tr>
-<tr><td>max flow</td><td>Dinic</td><td>V^2 E</td></tr>
+<section class="card"><h3>Infer Target from Constraints</h3>
+<p>Read max n, work back from ~10⁸ ops/sec. This tells you the family <b>before</b> writing code.</p>
+<table><thead><tr><th>n ≤</th><th>Target</th><th>Technique</th></tr></thead><tbody>
+<tr><td>≈12</td><td>O(n!) / n²·2ⁿ</td><td>permutations, brute force</td></tr>
+<tr><td>20–24</td><td>O(2ⁿ)</td><td>bitmask subset DP</td></tr>
+<tr><td>500</td><td>O(n³)</td><td>Floyd-Warshall, interval DP</td></tr>
+<tr><td>5000</td><td>O(n²)</td><td>pairwise DP, simple two-loop</td></tr>
+<tr><td>10⁵–10⁶</td><td>O(n log n)</td><td>sort, heap sweep, binary search</td></tr>
+<tr><td>10⁷–10⁸</td><td>O(n)</td><td>linear scan, prefix sums</td></tr>
+<tr><td>10⁹–10¹⁸</td><td>O(log n)/O(1)</td><td>binary search on answer, math, matrix expo</td></tr>
 </tbody></table>
+<p><b>Space</b> = allocated structures + <b>recursion depth</b> (each frame is stack space) <span class="warn">!</span>. Report auxiliary space (extra beyond input). Quicksort O(log n) stack avg, O(n) worst.</p>
 </section>
 
-<section class="card"><h3>Traversal &amp; Backtracking</h3>
-<pre><code>def backtrack(state):
-  if goal(state): record(); return
-  for choice in options(state):
-    if valid(choice):
-      apply(choice)
-      backtrack(state)
-      undo(choice)   # the key step</code></pre>
+<section class="card"><h3>Comparison Sorts</h3>
+<table><thead><tr><th>Sort</th><th>Time</th><th>Space</th><th>Stable</th></tr></thead><tbody>
+<tr><td>Insertion</td><td>n² (n if sorted)</td><td>1</td><td>yes</td></tr>
+<tr><td>Selection</td><td>n² always</td><td>1</td><td>no</td></tr>
+<tr><td>Merge</td><td>n log n <i>always</i></td><td>n</td><td>yes</td></tr>
+<tr><td>Quick</td><td>n log n avg / <b>n² worst</b></td><td>log n</td><td>no</td></tr>
+<tr><td>Heap</td><td>n log n <i>always</i></td><td>1</td><td>no</td></tr>
+</tbody></table>
 <ul>
-<li>Prune early (bounds/constraints) to cut the exponential.</li>
-<li>Subsets 2^n, permutations n!, combinations nCk.</li>
+<li><b>Lower bound Ω(n log n)</b>: n! leaves in the comparison decision tree, height ≥ log₂(n!) = Θ(n log n). No comparison sort escapes it.</li>
+<li><b>Insertion</b> is adaptive (O(n) nearly-sorted), stable, tiny constant → base case of industrial sorts under ~16 elems.</li>
+<li><b>Quicksort</b> fastest in practice (cache-friendly, small constant) but O(n²) on bad pivots &amp; unstable. <b>Merge</b> for a guarantee + stability at O(n) space. <b>Heap</b> for guarantee + in-place but ~2–3× slower (poor locality).</li>
+<li>Stable ⟂ in-place — independent properties <span class="warn">!</span> Selection is <b>not</b> adaptive.</li>
+</ul>
+<h4>Non-comparison sorts (beat n log n)</h4>
+<table><thead><tr><th>Sort</th><th>Time</th><th>Needs</th></tr></thead><tbody>
+<tr><td>Counting</td><td>O(n+k)</td><td>int keys in range k</td></tr>
+<tr><td>Radix (LSD)</td><td>O(d·(n+b))</td><td>fixed-width keys</td></tr>
+<tr><td>Bucket</td><td>O(n) avg</td><td>uniform distribution</td></tr>
+</tbody></table>
+<ul>
+<li>They exploit key <i>values</i> instead of comparing — not general-purpose (need bounded/structured keys). Counting must be <b>stable</b> to drive radix's inner pass (prefix-sum counts, place right-to-left) <span class="warn">!</span></li>
+<li>Radix is O(n) only if d, b constant; if k≈n² counting is O(n²) — no free lunch <span class="warn">!</span></li>
 </ul>
 </section>
 
-<section class="card"><h3>Greedy vs DP</h3>
-<table><thead><tr><th></th><th>Greedy</th><th>DP</th></tr></thead><tbody>
-<tr><td>Choice</td><td>commit now</td><td>try all, keep best</td></tr>
-<tr><td>Needs</td><td>greedy-choice prop.</td><td>overlap + substructure</td></tr>
-<tr><td>Speed</td><td>usually faster</td><td>#states x transition</td></tr>
-<tr><td>Proof</td><td>exchange argument</td><td>induction on states</td></tr>
+<section class="card"><h3>Quicksort &amp; Partition</h3>
+<pre><code>quicksort(a, lo, hi):
+  if lo &gt;= hi: return
+  p = partition(a, lo, hi)    # Lomuto
+  quicksort(a, lo, p-1)
+  quicksort(a, p+1, hi)
+
+partition(a, lo, hi):
+  pivot = a[hi]; i = lo
+  for j in lo..hi-1:
+    if a[j] &lt; pivot: swap(a[i], a[j]); i++
+  swap(a[i], a[hi]); return i</code></pre>
+<ul>
+<li>Worst case O(n²) hits on <b>already-sorted / all-equal</b> input with a fixed end pivot <span class="warn">!</span> Fix: randomized or median-of-three pivot; 3-way partition (Dutch flag) for many duplicates.</li>
+<li>Bound stack: recurse on the <b>smaller</b> partition, loop on the larger → O(log n) stack even worst-case.</li>
+<li><b>Quickselect</b>: same partition, recurse only into the side holding rank k → O(n) avg, O(n²) worst; median-of-medians pivot → O(n) worst.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Binary Search</h3>
+<pre><code># invariant: answer in [lo, hi]
+lo, hi = 0, n-1
+while lo &lt;= hi:
+  mid = lo + (hi-lo)//2      # avoids overflow !
+  if a[mid] == t: return mid
+  elif a[mid] &lt; t: lo = mid+1
+  else: hi = mid-1
+return -1                    # lo = insertion point</code></pre>
+<h4>Binary search on the answer</h4>
+<pre><code># monotone predicate: feasible(x) F..FT..T
+lo, hi = min_ans, max_ans
+while lo &lt; hi:
+  mid = (lo+hi)//2
+  if feasible(mid): hi = mid   # first true
+  else: lo = mid+1
+return lo</code></pre>
+<ul>
+<li>Requires a <b>monotone</b> predicate, not a sorted array literally. Classic for "min capacity / max min / smallest k such that…" <span class="warn">!</span></li>
+<li>Off-by-one is the #1 bug: pick one template (<code>&lt;=</code> with mid±1, or <code>&lt;</code> boundary) and keep the loop invariant explicit. Mind <code>lower_bound</code> vs <code>upper_bound</code> for duplicates.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Greedy Algorithms</h3>
+<p>Build incrementally, take the locally best option, never reconsider. Trivial to code — the work is <b>proving</b> it optimal.</p>
+<ul>
+<li>Needs both: <b>greedy-choice property</b> (some optimum makes the greedy first choice) + <b>optimal substructure</b> (remainder is a smaller same-problem).</li>
+<li>Prove via <b>exchange argument</b>: edit any optimum toward the greedy choice, swap by swap, without worsening it.</li>
+<li>Cost usually dominated by the sort → O(n log n).</li>
+</ul>
+<table><thead><tr><th>Problem</th><th>Greedy key</th></tr></thead><tbody>
+<tr><td>Interval scheduling</td><td><b>earliest finish time</b> (not shortest/earliest start) <span class="warn">!</span></td></tr>
+<tr><td>Fractional knapsack</td><td>value/weight ratio</td></tr>
+<tr><td>Huffman coding</td><td>merge two lowest-freq nodes</td></tr>
+<tr><td>Min platforms / meetings</td><td>sort starts &amp; ends, sweep</td></tr>
 </tbody></table>
-<p><span class="warn">!</span> "It looks greedy" is not a proof. Find a counterexample or prove the exchange.</p>
+<p><b>Greedy FAILS</b> <span class="warn">!</span>: 0/1 knapsack (density looks right, is wrong), coin change with arbitrary denominations ({1,3,4} for 6: greedy 4+1+1=3 coins, optimal 3+3=2). "Passes examples" ≠ proof — if you can't write the exchange argument, fall back to <b>DP</b>.</p>
+</section>
+
+<section class="card"><h3>DP Fundamentals</h3>
+<p>Applies with <b>optimal substructure</b> + <b>overlapping subproblems</b> (both required — merge sort has substructure, no overlap, so not DP).</p>
+<h4>The recipe</h4>
+<ul>
+<li><b>State</b>: minimal params identifying a subproblem (<code>dp[i]</code> = best over first i).</li>
+<li><b>Transition</b>: recurrence to smaller states.</li>
+<li><b>Order</b>: fill so every dependency is ready first.</li>
+<li><b>Base cases</b>: smallest states answered directly.</li>
+</ul>
+<p><b>time = #states × cost/transition; space = table size.</b></p>
+<table><thead><tr><th></th><th>Memoization</th><th>Tabulation</th></tr></thead><tbody>
+<tr><td>Dir</td><td>top-down + cache</td><td>bottom-up loop</td></tr>
+<tr><td>Pro</td><td>literal recurrence; only reachable states</td><td>no stack; tight constants; rolling array</td></tr>
+<tr><td>Con</td><td>recursion overhead / stack overflow</td><td>must nail order; may compute unused</td></tr>
+</tbody></table>
+<ul>
+<li>Same asymptotics — they trade constants/stack, not Big-O <span class="warn">!</span></li>
+<li>Bugs: under-specified state (two subproblems collide), backwards iteration order (reads unfilled cell), over-optimizing space before 2D is correct <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Classic DP Patterns</h3>
+<table><thead><tr><th>Problem</th><th>State / recurrence</th><th>Time</th></tr></thead><tbody>
+<tr><td>0/1 Knapsack</td><td>dp[i][w]=max(skip, val+dp[i-1][w-wt])</td><td>n·W</td></tr>
+<tr><td>Coin change (min)</td><td>dp[a]=min(dp[a-c]+1)</td><td>a·coins</td></tr>
+<tr><td>LIS</td><td>dp[i]=1+max dp[j], a[j]&lt;a[i]; or patience O(n log n)</td><td>n²/n log n</td></tr>
+<tr><td>LCS / edit dist</td><td>dp[i][j] on prefix pair; match→diag+1</td><td>n·m</td></tr>
+<tr><td>Matrix chain</td><td>interval dp[i][j]=min split k</td><td>n³</td></tr>
+<tr><td>Bitmask (TSP)</td><td>dp[mask][i] visited-set + last</td><td>2ⁿ·n²</td></tr>
+</tbody></table>
+<ul>
+<li>Knapsack is <b>pseudo-polynomial</b> — O(nW), exponential in the bit-length of W, not truly poly <span class="warn">!</span></li>
+<li>Rolling array: knapsack drops to O(W) if you iterate w <b>descending</b> for 0/1 (ascending = unbounded knapsack) <span class="warn">!</span></li>
+<li>Reconstruct the choice by storing parent pointers or back-tracing the table.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Graph Traversal: BFS &amp; DFS</h3>
+<p>Both <b>O(V+E)</b> on adjacency lists (each vertex + edge touched once); O(V²) on a matrix. Traversal is cheap — value is what you extract.</p>
+<pre><code>BFS(s):                    # shortest hops, unweighted
+  q=[s]; seen={s}
+  while q: u=q.popleft()
+    for v in adj[u] if v not in seen:
+      seen.add(v); dist[v]=dist[u]+1; q.append(v)
+
+DFS(u):                    # deep: order, cycles, comps
+  seen.add(u)
+  for v in adj[u] if v not in seen: DFS(v)</code></pre>
+<ul>
+<li><b>BFS</b>: shortest path in <i>unweighted</i> graphs, level order; frontier can be O(V) wide. <b>Don't</b> use BFS for weighted shortest paths <span class="warn">!</span></li>
+<li><b>DFS</b>: topo sort, cycle detection, components, edge classification; recursion can overflow on deep graphs → use explicit stack.</li>
+<li>Undirected cycle = edge to a visited <b>non-parent</b>. Bipartite = 2-colour BFS, conflict on same-colour edge.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Topological Sort (DAG)</h3>
+<h4>Kahn (BFS, in-degrees)</h4>
+<pre><code>compute indeg[]; q = all v with indeg 0
+while q: u = q.pop(); out.append(u)
+  for v in adj[u]:
+    if --indeg[v] == 0: q.push(v)
+if len(out) &lt; V: CYCLE   # emitted &lt; V !</code></pre>
+<ul>
+<li><b>DFS variant</b>: push each vertex on finish, then reverse the list.</li>
+<li>Directed cycle detection needs the <b>on-stack (gray)</b> distinction — a cross edge to a <i>finished</i> vertex is <b>not</b> a cycle <span class="warn">!</span> "visited" alone is insufficient.</li>
+<li>Topo order requires a DAG; a cyclic graph has none. Order is generally <b>not unique</b> <span class="warn">!</span> Uses: build order, task scheduling, dependency resolution.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Union-Find (DSU)</h3>
+<pre><code>find(x):                      # path compression
+  while p[x]!=x: p[x]=p[p[x]]; x=p[x]
+  return x
+union(a,b):                   # union by rank/size
+  ra,rb=find(a),find(b)
+  if ra==rb: return False     # already joined
+  if rank[ra]&lt;rank[rb]: ra,rb=rb,ra
+  p[rb]=ra
+  if rank[ra]==rank[rb]: rank[ra]+=1
+  return True</code></pre>
+<ul>
+<li>Both optimizations together → <b>O(α(n))</b> inverse-Ackermann, effectively constant per op.</li>
+<li>Uses: Kruskal cycle check, connected components, dynamic connectivity, "count islands / groups", detect cycle in an <i>undirected</i> graph.</li>
+<li><b>No efficient un-union</b> <span class="warn">!</span> — DSU is for incremental merges; deletions need other structures. Path compression alone (no rank) is still O(log n) amortized.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Shortest Paths — Selector</h3>
+<p>Every algo here just <b>relaxes edges</b> in a different order: <code>if d[u]+w &lt; d[v]: d[v]=d[u]+w</code>.</p>
+<table><thead><tr><th>Situation</th><th>Algorithm</th><th>Time</th></tr></thead><tbody>
+<tr><td>Unweighted</td><td>BFS</td><td>V+E</td></tr>
+<tr><td>Non-neg weights, 1 src</td><td>Dijkstra</td><td>(V+E)log V</td></tr>
+<tr><td>Negative edges</td><td>Bellman-Ford</td><td>V·E</td></tr>
+<tr><td>All pairs, dense</td><td>Floyd-Warshall</td><td>V³</td></tr>
+<tr><td>Goal-directed, grid</td><td>A* (g+h)</td><td>≤ Dijkstra</td></tr>
+</tbody></table>
+<ul>
+<li><b>Cannot</b> add a constant to remove negatives — it penalizes longer paths unequally, changing the answer <span class="warn">!</span></li>
+<li>Dijkstra does <b>not</b> detect negative cycles — silently wrong on negatives <span class="warn">!</span></li>
+<li>Floyd-Warshall: intermediate vertex <code>k</code> must be the <b>outermost</b> loop <span class="warn">!</span> A* optimal only with an admissible (and consistent) heuristic.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Dijkstra &amp; Bellman-Ford</h3>
+<pre><code>Dijkstra(s):
+  d[s]=0; pq=[(0,s)]
+  while pq: (du,u)=pop_min(pq)
+    if du&gt;d[u]: continue     # stale entry, skip !
+    for (v,w) in adj[u]:
+      if d[u]+w &lt; d[v]:
+        d[v]=d[u]+w; push(pq,(d[v],v))</code></pre>
+<ul>
+<li>Invariant: a vertex's distance is <b>final when popped</b> — holds only with non-negative weights. "Settled" (popped) ≠ "visited/pushed" <span class="warn">!</span> Lazy deletion: skip if popped dist &gt; stored.</li>
+<li>Binary heap O((V+E)log V); Fib-heap O(E+V log V) theory, binary wins in practice.</li>
+</ul>
+<h4>Bellman-Ford</h4>
+<pre><code>for i in 1..V-1:               # V-1 rounds
+  for (u,v,w) in edges:
+    if d[u]+w &lt; d[v]: d[v]=d[u]+w
+# V-th round still relaxes ⇒ negative cycle</code></pre>
+<p>Handles negatives + <b>detects negative cycles</b>; shortest simple paths have ≤ V−1 edges, so V−1 rounds suffice.</p>
+</section>
+
+<section class="card"><h3>Minimum Spanning Trees</h3>
+<p>Cheapest V−1 edges connecting all vertices, no cycle. Both algos are greedy, justified by the <b>cut property</b>: the lightest edge crossing any cut is in some MST.</p>
+<table><thead><tr><th>Algo</th><th>How</th><th>Time</th></tr></thead><tbody>
+<tr><td>Kruskal</td><td>sort edges, add if endpoints differ (DSU)</td><td>E log E</td></tr>
+<tr><td>Prim</td><td>grow one tree, heap of crossing edges</td><td>E log V</td></tr>
+</tbody></table>
+<ul>
+<li><b>Kruskal</b> edge-centric, great on sparse / pre-sorted edges, gives a spanning <i>forest</i> if disconnected. <b>Prim</b> vertex-centric, dense-graph O(V²) matrix form beats sorting; only spans its start component.</li>
+<li>MST is <b>not</b> a shortest-path tree <span class="warn">!</span> MST unique only if all weights distinct. Works with negative weights (no path accumulation), unlike Dijkstra.</li>
+<li>Cycle property: the heaviest edge on any cycle is never in the MST. Directed analogue = min arborescence (Edmonds), not Prim/Kruskal.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Backtracking &amp; Constraint Search</h3>
+<pre><code>backtrack(state):
+  if complete(state): record(state); return
+  for choice in candidates(state):
+    if prune(state, choice): continue   # feasibility
+    apply(choice)          # choose
+    backtrack(state)       # explore
+    undo(choice)           # UNCHOOSE !</code></pre>
+<ul>
+<li>DFS over the tree of partial solutions; abandon a partial the instant it can't complete. Space O(depth) — emit &amp; discard solutions.</li>
+<li><b>Forgetting to unchoose</b> corrupts sibling branches (mutated <code>used[]</code>/board) <span class="warn">!</span></li>
+<li>Pruning changes the practical node count, <b>not</b> the exponential worst case <span class="warn">!</span></li>
+</ul>
+<h4>The three shapes</h4>
+<table><thead><tr><th>Type</th><th>Count</th><th>Rule</th></tr></thead><tbody>
+<tr><td>Subsets</td><td>2ⁿ</td><td>include/exclude each</td></tr>
+<tr><td>Permutations</td><td>n!</td><td>order matters, track used</td></tr>
+<tr><td>Combinations</td><td>n choose k</td><td>enforce increasing index</td></tr>
+</tbody></table>
+<p>Dedupe by <b>skipping duplicate choices at the same tree level</b> (sort first), not post-filtering. Branch-and-bound = backtracking + a bound to prune by objective (optimization).</p>
+</section>
+
+<section class="card"><h3>String Algorithms</h3>
+<table><thead><tr><th>Task</th><th>Algo</th><th>Time</th></tr></thead><tbody>
+<tr><td>Single pattern match</td><td>KMP (failure fn)</td><td>O(n+m)</td></tr>
+<tr><td>Multi / rolling match</td><td>Rabin-Karp (hash)</td><td>O(n+m) avg</td></tr>
+<tr><td>Many patterns</td><td>Aho-Corasick</td><td>O(n+Σm+hits)</td></tr>
+<tr><td>Longest pal. substr</td><td>Manacher</td><td>O(n)</td></tr>
+<tr><td>Suffix queries</td><td>suffix array/automaton</td><td>O(n log n)</td></tr>
+</tbody></table>
+<ul>
+<li><b>KMP</b>: precompute the prefix/failure function (longest proper prefix = suffix) so on mismatch you never re-scan text — no backtracking of the text pointer.</li>
+<li><b>Rabin-Karp</b>: rolling polynomial hash; a hash hit needs a full verify (collisions) <span class="warn">!</span> Worst case O(nm) if hashes collide; pick a large prime modulus.</li>
+<li>Naive match is O(nm) — fine for small inputs, but the baseline to beat.</li>
+</ul>
 </section>
 
 <section class="card"><h3>Bit Manipulation</h3>
-<pre><code>x & 1          # odd?
-x & (x-1)      # clear lowest set bit
-x & -x         # isolate lowest set bit
-x >> k, x << k # divide/mult by 2^k
-a ^ b ^ b == a # XOR self-inverse
-popcount(x)    # count set bits
-for s = m; s; s = (s-1)&m  # subsets of m</code></pre>
-<p>Power of two: <code>x &amp;&amp; !(x &amp; (x-1))</code>. Bitmask = set of ≤ ~20 items.</p>
-</section>
-
-<section class="card"><h3>Number Theory</h3>
-<pre><code>gcd(a,b) = gcd(b, a mod b)   # Euclid
-lcm = a / gcd * b
-fast pow: square-and-multiply O(log e)
-sieve of Eratosthenes: O(n log log n)
-Fermat: a^(p-1) == 1 (mod p), p prime
-inverse: a^(p-2) mod p</code></pre>
-<p><span class="warn">!</span> Take mod at every step to avoid overflow; watch negative mod.</p>
-</section>
-
-<section class="card"><h3>Randomized &amp; Selection</h3>
-<ul>
-<li><b>Quickselect</b>: partition around a random pivot → O(n) average k-th smallest; median-of-medians = O(n) worst.</li>
-<li><b>Reservoir sampling</b>: pick k from a stream of unknown length, uniform, O(1) memory.</li>
-<li><b>Fisher-Yates</b>: unbiased shuffle in O(n) — swap i with random j in [i, n).</li>
-<li><b>Monte Carlo</b> (fast, maybe wrong) vs <b>Las Vegas</b> (always right, random time).</li>
-</ul>
-</section>
-
-<section class="card"><h3>Range Techniques</h3>
-<table><thead><tr><th>Need</th><th>Use</th></tr></thead><tbody>
-<tr><td>static range sum</td><td>prefix sum O(1)</td></tr>
-<tr><td>many range adds</td><td>difference array</td></tr>
-<tr><td>2D region sum</td><td>2D prefix + incl-excl</td></tr>
-<tr><td>static min/gcd</td><td>sparse table O(1)</td></tr>
-<tr><td>upd + query</td><td>Fenwick/segtree (DS primer)</td></tr>
+<table><thead><tr><th>Op</th><th>Idiom</th></tr></thead><tbody>
+<tr><td>test bit i</td><td><code>x &amp; (1&lt;&lt;i)</code></td></tr>
+<tr><td>set / clear</td><td><code>x | (1&lt;&lt;i)</code> / <code>x &amp; ~(1&lt;&lt;i)</code></td></tr>
+<tr><td>toggle</td><td><code>x ^ (1&lt;&lt;i)</code></td></tr>
+<tr><td>lowest set bit</td><td><code>x &amp; -x</code></td></tr>
+<tr><td>clear lowest set</td><td><code>x &amp; (x-1)</code></td></tr>
+<tr><td>is power of 2</td><td><code>x&gt;0 &amp;&amp; (x&amp;(x-1))==0</code></td></tr>
+<tr><td>popcount</td><td>Kernighan loop / builtin</td></tr>
 </tbody></table>
+<ul>
+<li>Iterate all submasks of m: <code>for(s=m; s; s=(s-1)&amp;m)</code> — O(3ⁿ) total over all masks.</li>
+<li>XOR tricks: <code>a^a=0</code>, <code>a^0=a</code> → find the single unpaired element; swap without a temp.</li>
+<li>Watch signed shifts &amp; overflow; <code>1&lt;&lt;i</code> overflows a 32-bit int for i≥31 — use <code>1L</code> <span class="warn">!</span></li>
+</ul>
 </section>
 
-<section class="card"><h3>Complexity from Constraints</h3>
-<table><thead><tr><th>n up to</th><th>Target</th></tr></thead><tbody>
-<tr><td>≤ 10-12</td><td>O(n!) / O(2^n) OK</td></tr>
-<tr><td>≤ 20-25</td><td>O(2^n) bitmask</td></tr>
-<tr><td>≤ 500</td><td>O(n^3)</td></tr>
-<tr><td>≤ 5000</td><td>O(n^2)</td></tr>
-<tr><td>≤ 1e5-1e6</td><td>O(n log n) / O(n)</td></tr>
-<tr><td>≥ 1e9</td><td>O(log n) / O(1) math</td></tr>
+<section class="card"><h3>Number Theory, Math &amp; Randomized</h3>
+<ul>
+<li><b>gcd</b> Euclid: <code>gcd(a,b)=gcd(b, a%b)</code>, O(log min). lcm = a/gcd·b (divide first — overflow) <span class="warn">!</span></li>
+<li><b>Sieve of Eratosthenes</b>: primes ≤ n in O(n log log n); mark multiples from i·i.</li>
+<li><b>Fast (binary) expo</b>: aⁿ in O(log n) by squaring; core of matrix expo for linear recurrences (Fibonacci in O(log n)).</li>
+<li><b>Modular</b>: keep products under the modulus; inverse via Fermat <code>a^(p-2) mod p</code> (p prime) or extended Euclid. Overflow kills silently <span class="warn">!</span> — 64-bit, reduce mod early.</li>
+<li><b>Las Vegas</b> (always correct, time random: rand-quicksort) vs <b>Monte Carlo</b> (fixed time, high-prob correct: Miller-Rabin, Karger).</li>
+<li><b>Quickselect</b>: k-th smallest O(n) avg (one-sided partition), O(n²) worst; median-of-medians pivot → O(n) worst.</li>
+<li><b>Reservoir sampling</b>: uniform k from a stream of unknown length, O(1) space. <b>Fisher-Yates</b>: swap i with random j∈[i,n) — the only unbiased in-place shuffle <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Prefix Sums &amp; Range Techniques</h3>
+<ul>
+<li><b>Prefix sum</b> <code>P[i]=P[i-1]+a[i]</code> → range sum <code>P[r]-P[l-1]</code> in O(1) after O(n) build. 2D: inclusion-exclusion with 4 corners.</li>
+<li><b>Difference array</b>: to add v over [l,r], do <code>d[l]+=v; d[r+1]-=v</code>; one prefix-sum pass applies all updates → O(1) per range update, O(n) finalize.</li>
+<li><b>Sliding window</b>: two pointers for subarray/substring on monotone conditions — O(n) instead of O(n²) <span class="warn">!</span></li>
+<li>Prefix sums are <b>immutable</b> — for point updates + range queries use a Fenwick (BIT, O(log n)) or segment tree.</li>
+<li>Prefix-XOR / prefix-count for parity and "subarrays summing to k" (hash the prefix).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Intractability: P, NP &amp; Coping</h3>
+<ul>
+<li><b>P</b>: solvable in poly time. <b>NP</b>: a "yes" has a certificate <i>verifiable</i> in poly time (NP = <b>nondeterministic</b> poly, not "non-polynomial") <span class="warn">!</span> P ⊆ NP; P vs NP is <b>open</b>.</li>
+<li><b>NP-hard</b>: ≥ as hard as all of NP (need not be in NP — halting problem, optimization TSP). <b>NP-complete</b> = in NP <b>and</b> NP-hard (SAT via Cook-Levin, 3-SAT, TSP-decision, subset-sum, vertex cover, clique).</li>
+<li><b>Reduction</b>: poly-transform A→B preserving the answer ⇒ B's difficulty ≥ A's. This is how you argue "my problem is NP-hard."</li>
+</ul>
+<h4>When it's NP-hard — cope</h4>
+<table><thead><tr><th>Route</th><th>Buys / costs</th></tr></thead><tbody>
+<tr><td>Approximation</td><td>provable ratio (2-approx vertex cover); not optimal</td></tr>
+<tr><td>Heuristic</td><td>fast, good in practice; no guarantee</td></tr>
+<tr><td>Exact exp.</td><td>optimal; only small n (Held-Karp 2ⁿ·n²)</td></tr>
 </tbody></table>
-<p class="cap">~1e8 simple ops per second is the rough budget. Read n first, pick the target, then the algorithm.</p>
+<p>A 2-approx = never worse than 2× optimal (not "within 2%") <span class="warn">!</span> Signal: "brute force → can you do better?" → "NP-hard, here's the reduction, so approximate/heuristic/exact-for-small-n."</p>
 </section>
 
-<section class="card"><h3>P, NP &amp; When Stuck</h3>
+<section class="card"><h3>&#9733; Interview Checklist</h3>
+<h4>Before coding</h4>
 <ul>
-<li><b>P</b>: solvable in poly time. <b>NP</b>: a solution is <i>checkable</i> in poly time.</li>
-<li><b>NP-complete</b>: hardest in NP (SAT, TSP-decision, subset-sum, vertex cover). No known poly algorithm.</li>
-<li>Show hardness by <b>reduction</b> from a known NP-hard problem.</li>
-<li>NP-hard in interview → say so, then: <b>approximation</b>, <b>heuristic/greedy</b>, DP over small n, or branch &amp; bound.</li>
+<li>&#9744; Restated problem, clarified constraints &amp; edge cases (empty, single, duplicates, negatives, overflow).</li>
+<li>&#9744; Inferred target complexity from max n <b>before</b> picking an approach <span class="warn">!</span></li>
+<li>&#9744; Named the algorithm family and <i>why</i> (weighted? negatives? all-pairs? monotone?).</li>
+</ul>
+<h4>Correctness</h4>
+<ul>
+<li>&#9744; Greedy has an exchange-argument justification — or fell back to DP.</li>
+<li>&#9744; DP state fully specifies the subproblem; transitions read only already-filled states; base cases covered.</li>
+<li>&#9744; Backtracking undoes every choice; dedup by skipping same-level duplicates.</li>
+<li>&#9744; Dijkstra only on non-negative weights; negatives → Bellman-Ford.</li>
+</ul>
+<h4>Complexity &amp; safety</h4>
+<ul>
+<li>&#9744; Stated time <i>and</i> auxiliary space (incl. recursion depth).</li>
+<li>&#9744; Binary-search bounds &amp; loop invariant explicit — off-by-one checked.</li>
+<li>&#9744; 64-bit for sums/products near 10⁹; mod reduced early.</li>
+<li>&#9744; Directed-cycle detection uses on-stack, not just visited.</li>
 </ul>
 </section>
 
-<section class="card"><h3>&#9744; Interview Playbook</h3>
-<ul>
-<li>&#9744; Read n / constraints → set the complexity target <i>before</i> choosing an algorithm.</li>
-<li>&#9744; Brute force first (state it), then optimize toward the target.</li>
-<li>&#9744; Match the paradigm: sorted/monotonic → binary search; overlap+substructure → DP; provable local → greedy; nodes/edges → graph.</li>
-<li>&#9744; Name the recurrence &amp; solve it (Master Theorem) for D&amp;C.</li>
-<li>&#9744; For DP: state → transition → base → order → answer, out loud.</li>
-<li>&#9744; Pick the graph algorithm from weights/signs (BFS / Dijkstra / Bellman-Ford / Floyd-Warshall).</li>
-<li>&#9744; Prove greedy (exchange argument) or fall back to DP.</li>
-<li>&#9744; Check edge cases: empty, single, duplicates, overflow, negative, disconnected.</li>
-</ul>
+<section class="card"><h3>Symptom → Cause</h3>
+<table><thead><tr><th>Symptom</th><th>Likely cause</th></tr></thead><tbody>
+<tr><td>Sort O(n²) on sorted input</td><td>fixed pivot quicksort — randomize <span class="warn">!</span></td></tr>
+<tr><td>Dijkstra wrong distances</td><td>negative edge present — use Bellman-Ford <span class="warn">!</span></td></tr>
+<tr><td>Topo sort misses vertices</td><td>graph has a cycle (emitted &lt; V) <span class="warn">!</span></td></tr>
+<tr><td>Cycle "detected" on a DAG</td><td>used visited, not on-stack, for directed <span class="warn">!</span></td></tr>
+<tr><td>Backtracking wrong on siblings</td><td>forgot to unchoose / undo state <span class="warn">!</span></td></tr>
+<tr><td>DP off-by-one / stale read</td><td>iteration order violates dependency <span class="warn">!</span></td></tr>
+<tr><td>Knapsack double-counts item</td><td>ascending weight loop in 0/1 rolling array <span class="warn">!</span></td></tr>
+<tr><td>Wrong answer only on big inputs</td><td>32-bit overflow — use 64-bit <span class="warn">!</span></td></tr>
+<tr><td>Greedy passes samples, fails hidden</td><td>no exchange-argument proof <span class="warn">!</span></td></tr>
+<tr><td>Binary search infinite loop</td><td>mid not advancing (<code>lo=mid</code> vs <code>mid+1</code>) <span class="warn">!</span></td></tr>
+<tr><td>Stack overflow, deep recursion</td><td>recursion depth = O(n); go iterative <span class="warn">!</span></td></tr>
+</tbody></table>
 </section>
 
 </div>
