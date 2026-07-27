@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Message Brokers Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+/* spanning title bar */
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>Message Brokers Cheat Sheet</h1><span class="meta">Kafka · RabbitMQ · Redis · NATS · Pulsar · cloud · senior/backend focus · generic examples · drilly</span></div>
+
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="warn">!</span> footgun / gotcha &nbsp; <code>&#9744;</code> review checklist item &nbsp; <span class="pg">tag</span> concept &nbsp; <span class="ansi">cmd</span> API/command</li>
+<li>Scope: broker-agnostic messaging fundamentals + per-broker quick-refs (Kafka deepest). The <b>comparison matrix</b> is card 2 — start there.</li>
+<li>Golden rule: ask <b>"log or queue?"</b> first, then layer replay / ordering / throughput / routing / ops needs. Last 2 cards = <b>Symptom→Cause</b> + <b>choosing &amp; designing checklist</b>.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
+</ul></section>
+
+<section class="card"><h3>Broker comparison matrix</h3>
+<p>The whiteboard table. Throughput = order-of-magnitude, not a benchmark (size/batching/hardware dominate).</p>
+<table>
+<tr><th>Broker</th><th>Model</th><th>Order</th><th>Delivery</th><th>Retention/replay</th><th>Routing</th><th>Tput/lat</th><th>Ops</th></tr>
+<tr><td><b>Kafka</b></td><td>Partitioned log</td><td>Per-partition</td><td>≥once (EOS w/ txns)</td><td>Time/size; full replay</td><td>Low: topic+key</td><td>Millions/s, low-ms</td><td>High</td></tr>
+<tr><td><b>RabbitMQ</b></td><td>Queue / smart broker</td><td>Per-queue</td><td>≥once</td><td>None once acked</td><td>High: direct/topic/fanout/headers</td><td>10s of k/s</td><td>Med</td></tr>
+<tr><td><b>Redis pub/sub</b></td><td>Ephemeral pub/sub</td><td>None</td><td>≤once (drops offline)</td><td>None</td><td>Channel+pattern</td><td>Extreme, sub-ms</td><td>Low</td></tr>
+<tr><td><b>Redis Streams</b></td><td>In-mem log</td><td>Per-stream</td><td>≥once (groups)</td><td>Capped by MAXLEN/RAM</td><td>Consumer groups</td><td>Very high, sub-ms</td><td>Low-med</td></tr>
+<tr><td><b>NATS core</b></td><td>Ephemeral pub/sub</td><td>None</td><td>≤once</td><td>None</td><td>Subject wildcards</td><td>Extreme, sub-ms</td><td>V.low</td></tr>
+<tr><td><b>JetStream</b></td><td>Log (streams)</td><td>Per-stream</td><td>≥once (dedup EOS)</td><td>Time/size/count; replay</td><td>Subject filters</td><td>High, low-ms</td><td>Low-med</td></tr>
+<tr><td><b>Pulsar</b></td><td>Log+queue hybrid</td><td>Per-partition/key</td><td>≥once (eff-once)</td><td>Tiered to obj store; replay</td><td>Topic+sub types</td><td>Very high, low-ms</td><td>High</td></tr>
+<tr><td><b>SQS</b></td><td>Managed queue</td><td>FIFO only</td><td>≥once (EOS FIFO)</td><td>≤14d, no replay</td><td>Minimal</td><td>Unbounded, managed</td><td>~0</td></tr>
+<tr><td><b>SNS</b></td><td>Managed pub/sub</td><td>None (FIFO opt)</td><td>≥once</td><td>None</td><td>Topic+filter</td><td>High, managed</td><td>~0</td></tr>
+<tr><td><b>Kinesis</b></td><td>Managed log</td><td>Per-shard</td><td>≥once</td><td>24h–365d; replay</td><td>Shard by key</td><td>Per-shard capped</td><td>Low</td></tr>
+<tr><td><b>GCP Pub/Sub</b></td><td>Managed pub/sub+</td><td>None (keys opt)</td><td>≥once (EOS opt)</td><td>7d default; seek replay</td><td>Topic+filter</td><td>V.high, autoscale</td><td>~0</td></tr>
+</table>
+<p><span class="warn">!</span> RabbitMQ <b>cannot replay</b> — acked = gone. Redis pub/sub <b>silently drops</b> for offline subs. SNS is fan-out, not a queue (SNS→SQS).</p>
+</section>
+
+<section class="card"><h3>Three families &amp; how to choose</h3>
+<p>80% of the decision is the first question. Everything else is detail.</p>
+<h4>Log-based — Kafka, Pulsar, Kinesis</h4>
+<p>Append-only retained commit log; broker dumb, <b>consumer smart</b> (tracks its own <b>offset</b>). Read ≠ delete; ages out by time/size. Owns: replay, event-sourcing, fan-out to many independent groups, huge throughput.</p>
+<h4>Queue / smart-broker — RabbitMQ, SQS</h4>
+<p>Broker smart (routing, per-msg ack, redelivery, priorities, TTL, DLX); message <b>deleted on ack</b>. Owns: task queues, RPC, work distribution, conditional routing. No replay.</p>
+<h4>Lightweight — Redis pub/sub, core NATS</h4>
+<p>In-memory, sub-ms, fire-and-forget. Signalling, cache invalidation, service chatter. Add JetStream / Redis Streams when you need durability.</p>
+<p><b>Decision:</b> replay / many readers / very high tput → <b>log</b>. Rich routing / priorities / "do once" → <b>queue</b>. Ephemeral signalling → lightweight. <b>"We already run X"</b> is a legit reason — one on-call rota beats a second best-fit system.</p>
+</section>
+
+<section class="card"><h3>Messaging patterns &amp; topologies</h3>
+<ul>
+<li><b>Point-to-point (queue):</b> one message → exactly one consumer. Work distribution.</li>
+<li><b>Pub/sub:</b> one message → every subscriber. Fan-out / broadcast.</li>
+<li><b>Competing consumers:</b> N workers pull from one queue for horizontal scale — <span class="warn">!</span> destroys ordering across workers unless sharded by key.</li>
+<li><b>Fan-out:</b> one event → many independent handlers (SNS→N·SQS; Kafka topic→N groups).</li>
+<li><b>Request-reply (RPC):</b> temp reply-queue + <code>correlation-id</code>; async messaging faking sync call.</li>
+<li><b>Pipes &amp; filters:</b> chain stages, each consumes+produces; topic per stage.</li>
+<li><b>Claim-check:</b> big payload → blob store (S3), send a <b>pointer</b> on the bus. Keeps messages small (Kafka default <code>message.max.bytes</code>≈1MB).</li>
+<li><b>Routing slip / scatter-gather:</b> attach itinerary; fan out then aggregate replies.</li>
+</ul>
+<p>Decouple in <b>time</b> (consumer offline), <b>space</b> (no direct addressing), and <b>volume</b> (buffer bursts).</p>
+</section>
+
+<section class="card"><h3>Delivery semantics</h3>
+<table>
+<tr><th>Guarantee</th><th>Ack timing</th><th>Failure result</th></tr>
+<tr><td><b>At-most-once</b></td><td>ack <i>before</i> processing</td><td>crash → message <b>lost</b></td></tr>
+<tr><td><b>At-least-once</b></td><td>ack <i>after</i> processing</td><td>crash → <b>redelivered</b> (dup)</td></tr>
+<tr><td><b>Exactly-once</b></td><td>atomic process+ack</td><td>hard; broker-scoped only</td></tr>
+</table>
+<p><b>Pragmatic default:</b> <span class="pg">at-least-once + idempotent consumer</span>. You cannot get end-to-end exactly-once across arbitrary side-effects (the two-generals problem) — you get <b>effectively-once</b> by deduping.</p>
+<ul>
+<li>Kafka EOS = idempotent producer + transactions, but only Kafka→Kafka (read-process-write inside the cluster). A DB write or HTTP call breaks it.</li>
+<li>The knob that sets your guarantee is <b>when you ack/commit</b> vs when the side-effect lands.</li>
+<li><span class="warn">!</span> "Exactly-once" in marketing usually means at-least-once + broker dedup, not true EOS across systems.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Ordering &amp; partitioning</h3>
+<p>Ordering is <b>never global</b> — it is scoped to a lane. The scope shapes your design.</p>
+<ul>
+<li>Kafka/Kinesis/Pulsar: ordered <b>per partition/shard</b> only. Route a key to a lane: <code>hash(key) % partitions</code>.</li>
+<li>RabbitMQ: FIFO <b>per queue, single consumer</b>. Consistent-hash exchange to shard by key.</li>
+<li>SQS FIFO: order within a <code>MessageGroupId</code>.</li>
+</ul>
+<p><b>Ordering ⇄ parallelism tradeoff:</b> more partitions = more parallelism but weaker global order. Strict total order = 1 partition = throughput ceiling.</p>
+<p><span class="warn">!</span> <b>Retries reorder.</b> A failed-then-retried record can land after a later one. Fix: <code>enable.idempotence=true</code> (producer tags seq numbers, broker dedups + preserves order) and cap <code>max.in.flight.requests.per.connection</code> ≤5.</p>
+<p><span class="warn">!</span> Adding partitions later re-buckets keys → same key now in two partitions → order breaks. Partition count is near one-way.</p>
+</section>
+
+<section class="card"><h3>Backpressure, flow control &amp; lag</h3>
+<h4>Push vs pull</h4>
+<p><b>Pull</b> (Kafka, SQS, Redis Streams): consumer sets its own pace — natural backpressure, can't be overwhelmed. <b>Push</b> (RabbitMQ, SNS): broker sends; needs <b>prefetch</b> (<code>basic.qos prefetch_count</code>) to bound in-flight and stop a slow worker drowning.</p>
+<h4>Consumer lag</h4>
+<pre><code>lag = log-end-offset − committed-offset</code></pre>
+<p>The #1 health metric for log brokers. Flat/growing lag = consumers can't keep up → scale out (≤ partition count), optimise processing, or shed load.</p>
+<ul>
+<li><span class="warn">!</span> <b>Unbounded queue anti-pattern:</b> a queue with no depth limit + slow consumer = memory blowup → broker OOM (RabbitMQ) or disk fill (Kafka). Cap: TTL, max-length, DLQ overflow, <code>MAXLEN</code>.</li>
+<li>Backpressure must propagate upstream — dropping, buffering to disk, or 429-ing the producer beats silent unbounded growth.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Kafka architecture quick-ref</h3>
+<p>Distributed, replicated, <b>append-only commit log</b> with pub/sub bolted on — <b>not a queue</b>.</p>
+<ul>
+<li><b>Topic</b> = logical stream → N <b>partitions</b>. Partition = ordered immutable log; unit of ordering + parallelism + replication.</li>
+<li><b>Offset</b> = 64-bit permanent address in a partition; consumers commit it.</li>
+<li><b>RF</b> (prod default 3): 1 leader serves reads/writes, followers pull. <b>ISR</b> = replicas caught up within <code>replica.lag.time.max.ms</code>.</li>
+<li><b>Durability contract:</b> <code>acks=all</code> + <code>min.insync.replicas=2</code> + RF=3 → survives 1 broker loss, still writable.</li>
+<li><b>KRaft</b>: built-in Raft metadata quorum, GA + default — <b>ZooKeeper removed</b>.</li>
+<li>Rides OS <b>page cache</b> + <code>sendfile</code> zero-copy; partition is a file appended/read sequentially.</li>
+</ul>
+<p><span class="warn">!</span> <b>Unclean leader election</b> (<code>unclean.leader.election.enable=true</code>) lets an out-of-sync replica become leader → <b>data loss</b> for availability. Keep false for durability.</p>
+</section>
+
+<section class="card"><h3>Kafka producer knobs</h3>
+<pre><code>acks=all                 // 0 fire&amp;forget, 1 leader-only, all=ISR
+enable.idempotence=true  // no dup/reorder on retry (default now)
+max.in.flight...=5       // ok w/ idempotence, else 1 for order
+linger.ms=5              // wait to batch (latency↔throughput)
+batch.size=32768         // bytes per partition batch
+compression.type=lz4     // lz4/zstd/snappy/gzip
+retries=MAX_INT          // + delivery.timeout.ms caps total</code></pre>
+<ul>
+<li><b>acks:</b> <code>0</code>=lose on crash, <code>1</code>=lose if leader dies pre-replication, <code>all</code>=durable (w/ <code>min.insync.replicas</code>).</li>
+<li><b>Batching:</b> <code>linger.ms</code> + <code>batch.size</code> trade a few ms latency for large throughput/compression gains.</li>
+<li>Partition choice: <code>hash(key)%N</code> if keyed, else sticky batching.</li>
+<li><span class="warn">!</span> <code>acks=1</code> is the classic silent-data-loss default — leader acks then dies before a follower copies.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Kafka consumers &amp; groups</h3>
+<ul>
+<li><b>Group</b> = consumers sharing a subscription; broker assigns <b>one partition → one consumer</b> in the group. Parallelism ≤ partition count — <span class="warn">!</span> extra consumers sit idle.</li>
+<li><b>Offsets</b> committed to <code>__consumer_offsets</code>. <b>Auto-commit</b> (<code>enable.auto.commit</code>, every 5s) → dup or loss window; <b>manual commit after processing</b> for at-least-once.</li>
+<li><b>Rebalancing:</b> membership change reassigns partitions. <b>Eager</b> = stop-the-world (all revoke). <b>Cooperative</b> (incremental) only moves what must move — prefer it.</li>
+<li><b>Static membership</b> (<code>group.instance.id</code>) skips rebalance on brief restarts within <code>session.timeout.ms</code>.</li>
+</ul>
+<pre><code>while(true){
+  records = consumer.poll(100ms);
+  process(records);          // do work first
+  consumer.commitSync();     // then commit → ≥once
+}</code></pre>
+<p><span class="warn">!</span> Slow processing &gt; <code>max.poll.interval.ms</code> → broker thinks you died → rebalance storm. Shrink <code>max.poll.records</code> or process async.</p>
+</section>
+
+<section class="card"><h3>Kafka retention, compaction &amp; txns</h3>
+<h4>Retention (delete)</h4>
+<p><code>cleanup.policy=delete</code> (default): drop whole <b>segments</b> older than <code>retention.ms</code> (e.g. 604800000 = 7d) or over <code>retention.bytes</code>. Consumption does <b>not</b> delete.</p>
+<h4>Log compaction</h4>
+<p><code>cleanup.policy=compact</code>: keep the <b>latest value per key</b> forever; older values for that key GC'd. A durable "current state" table (e.g. CDC snapshots). Delete a key = publish a <b>tombstone</b> (key + null value).</p>
+<h4>Transactions / EOS</h4>
+<p><code>transactional.id</code> + <code>initTransaction/beginTransaction/commitTransaction</code>: atomic multi-partition writes + offset commit → read-process-write EOS. Consumers set <code>isolation.level=read_committed</code> to skip aborted records.</p>
+<p><span class="warn">!</span> Compaction ≠ dedup; it keeps last-per-key, not "one copy per message". Tombstones age out after <code>delete.retention.ms</code> — read them before they vanish.</p>
+</section>
+
+<section class="card"><h3>Kafka ecosystem &amp; ops</h3>
+<ul>
+<li><b>Kafka Connect:</b> declarative source/sink connectors (Debezium CDC, S3, JDBC) — no bespoke producer/consumer code. Runs as workers with converters + SMTs.</li>
+<li><b>Kafka Streams:</b> JVM library for stateful stream processing (joins, windows, aggregations); state in RocksDB backed by changelog topics.</li>
+<li><b>ksqlDB:</b> SQL over streams.</li>
+<li><b>Schema Registry:</b> central Avro/Protobuf/JSON schemas + compatibility enforcement (see Schema card).</li>
+<li><b>MirrorMaker 2:</b> cross-cluster/region replication (DR, aggregation). Offsets don't translate 1:1 — <span class="warn">!</span> plan consumer failover.</li>
+</ul>
+<p><b>Key metrics:</b> consumer <b>lag</b>, <b>under-replicated partitions (URP)</b>, ISR shrink/expand, request latency, disk usage, DLQ rate. Partition sizing: enough for target parallelism + headroom, not so many that controller metadata + open files explode.</p>
+</section>
+
+<section class="card"><h3>RabbitMQ: AMQP model &amp; exchanges</h3>
+<p>Producer → <b>exchange</b> → (binding) → <b>queue</b> → consumer. Producers never publish to a queue directly; the exchange + <b>routing key</b> + <b>bindings</b> decide placement.</p>
+<table>
+<tr><th>Exchange</th><th>Routes by</th><th>Use</th></tr>
+<tr><td><b>direct</b></td><td>exact routing-key = binding-key</td><td>point routing, severity</td></tr>
+<tr><td><b>fanout</b></td><td>ignores key → all bound queues</td><td>broadcast</td></tr>
+<tr><td><b>topic</b></td><td>pattern <code>order.*.eu</code> (<code>*</code>=1 word, <code>#</code>=n)</td><td>flexible pub/sub</td></tr>
+<tr><td><b>headers</b></td><td>header attrs (x-match all/any)</td><td>multi-attr routing</td></tr>
+</table>
+<ul>
+<li><b>DLX</b> (<code>x-dead-letter-exchange</code>): rejected/expired/over-length msgs routed aside → retry/parking.</li>
+<li><b>TTL</b> per-message or per-queue; <b>priority queues</b> (<code>x-max-priority</code>).</li>
+<li>Delayed delivery via delayed-message plugin or TTL+DLX trick.</li>
+</ul>
+<p><span class="warn">!</span> A queue with no consumers + no TTL/limit grows until the broker hits its memory/disk alarm and <b>blocks all publishers</b>.</p>
+</section>
+
+<section class="card"><h3>RabbitMQ: reliability &amp; clustering</h3>
+<ul>
+<li><b>Publisher confirms:</b> broker acks the publish once safely enqueued/persisted — the producer-side reliability half. Without them, publishes are fire-and-forget.</li>
+<li><b>Consumer acks:</b> <code>basic.ack</code> after work (manual) → at-least-once; <code>basic.nack</code>/<code>reject</code> requeue or DLX. Auto-ack = at-most-once.</li>
+<li><b>Prefetch</b> (<code>basic.qos prefetch_count=N</code>): bound unacked messages per consumer — fair dispatch + backpressure. Default unlimited is a footgun.</li>
+<li><b>Persistence:</b> durable queue + persistent message + confirms survive restart. Any gap = loss.</li>
+<li><b>Quorum queues</b> (Raft) <b>replaced mirrored/classic HA queues</b> — mirroring is deprecated. Use quorum for replicated, data-safe queues.</li>
+</ul>
+<p><span class="warn">!</span> Durable queue with <b>non</b>-persistent messages still loses data on restart — both flags required.</p>
+</section>
+
+<section class="card"><h3>Redis: pub/sub vs Streams</h3>
+<h4>Pub/Sub — fire-and-forget</h4>
+<pre><code>PUBLISH ch msg
+SUBSCRIBE ch          // PSUBSCRIBE news.*</code></pre>
+<p>At-most-once, no storage, no groups. Offline subscriber <b>misses everything</b>. Good: cache invalidation, presence, ephemeral signals.</p>
+<h4>Streams — durable in-mem log</h4>
+<pre><code>XADD s * k v                 // append, auto-ID
+XADD s MAXLEN ~ 100000 * ...  // cap growth
+XREADGROUP GROUP g c COUNT 10 STREAMS s &gt;
+XACK s g &lt;id&gt;                 // ack processed
+XPENDING s g                 // PEL: unacked/redelivery</code></pre>
+<p>Consumer groups + per-message ack + <b>PEL</b> (pending entries list) → at-least-once, bounded replay. <code>XAUTOCLAIM</code> recovers a dead consumer's pending.</p>
+<p><span class="warn">!</span> Durability is memory-bound + tied to RDB/AOF — a crash loses recent entries. <span class="warn">!</span> No <code>MAXLEN</code> → unbounded RAM.</p>
+</section>
+
+<section class="card"><h3>Reliability patterns</h3>
+<h4>Transactional outbox</h4>
+<p>Fixes the <b>dual-write problem</b> (DB commit + publish can't be atomic → one may fail). Write the event to an <code>outbox</code> table <b>in the same DB txn</b>; a relay/CDC (Debezium) tails it and publishes. No lost/phantom events.</p>
+<h4>Idempotent consumer</h4>
+<p>Dedup by a stable <b>message/business key</b>: store processed IDs (Redis SET / DB unique constraint), skip repeats. Turns at-least-once into effectively-once.</p>
+<ul>
+<li><b>DLQ:</b> after N failed retries, park the message for inspection — never block the main flow.</li>
+<li><b>Retry + backoff:</b> exponential + jitter; separate retry topics/queues so one poison msg doesn't stall the partition.</li>
+<li><b>Poison message:</b> repeatedly fails → cap attempts → DLQ, alert.</li>
+<li><b>Saga:</b> long-running distributed txn as steps + <b>compensating actions</b> (no 2PC).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Schema &amp; evolution</h3>
+<p>Producers and consumers deploy independently → the wire format is a contract. Use a <b>schema registry</b> (Confluent) with <b>Avro/Protobuf</b> (compact, typed, IDs) over raw JSON.</p>
+<table>
+<tr><th>Compat</th><th>Safe change</th><th>Upgrade</th></tr>
+<tr><td><b>Backward</b></td><td>delete field / add optional w/ default</td><td>consumers first</td></tr>
+<tr><td><b>Forward</b></td><td>add field / delete optional</td><td>producers first</td></tr>
+<tr><td><b>Full</b></td><td>both — additive only</td><td>either order</td></tr>
+</table>
+<ul>
+<li><b>Additive, defaulted fields are always safe.</b> Renaming/retyping/removing-required breaks.</li>
+<li>Registry rejects incompatible schemas at publish — fail fast in CI, not at 3am.</li>
+<li><span class="warn">!</span> A required field with no default is a breaking change — old consumers can't read it.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Event-driven architecture</h3>
+<h4>Event styles</h4>
+<ul>
+<li><b>Event notification:</b> thin "it happened" + id; consumer calls back for data. Low coupling, chatty.</li>
+<li><b>Event-carried state transfer:</b> event carries the full payload; consumers keep a local read model. No callback, but data duplication + staleness.</li>
+<li><b>Event sourcing:</b> the event log <b>is</b> the source of truth; state = fold(events). Full audit + replay/rebuild.</li>
+</ul>
+<h4>Coordination</h4>
+<ul>
+<li><b>Choreography:</b> services react to each other's events — decoupled, but flow is emergent/hard to trace.</li>
+<li><b>Orchestration:</b> a central coordinator drives steps — explicit, but a hub.</li>
+<li><b>CQRS:</b> split write model (commands) from read model (projections built off events).</li>
+</ul>
+<p><span class="warn">!</span> Event-carried state = eventual consistency everywhere; design consumers to tolerate stale + out-of-order + duplicate events.</p>
+</section>
+
+<section class="card"><h3>Operations, scaling &amp; security</h3>
+<ul>
+<li><b>Partition/shard sizing:</b> set for peak parallelism + headroom; increasing is disruptive (re-keys), decreasing usually impossible.</li>
+<li><b>Security:</b> <b>TLS</b> in transit, <b>SASL</b> (SCRAM/OAuth/mTLS) authn, <b>ACLs</b> per topic/group authz. Encrypt at rest on the broker disks.</li>
+<li><b>Multi-region:</b> MirrorMaker 2 (Kafka), stream replication (Pulsar geo), cross-region SNS/SQS. Active-active needs conflict handling.</li>
+<li><b>Capacity:</b> retention × ingest = disk; RF multiplies it.</li>
+</ul>
+<h4>Golden signals</h4>
+<p><b>Lag</b> (are we falling behind), <b>URP</b> / ISR shrink (durability at risk), <b>DLQ rate</b> (poison flow), publish/consume latency, disk/memory alarms, rebalance frequency.</p>
+<p><span class="warn">!</span> Alert on <b>lag trend</b>, not absolute lag — a steady 10k is fine; a rising slope is an incident.</p>
+</section>
+
+<section class="card"><h3>Cloud &amp; lightweight brokers</h3>
+<ul>
+<li><b>SQS:</b> managed queue. Standard = ≥once, best-effort order, ~unlimited tput. <b>FIFO</b> = strict order + EOS per <code>MessageGroupId</code>, ~300 msg/s (3000 batched). ≤14d, <b>no replay</b>. DLQ via redrive.</li>
+<li><b>SNS:</b> managed pub/sub fan-out. Canonical durable pattern <b>SNS→N·SQS</b> (each consumer gets its own queue). Filter by message attributes.</li>
+<li><b>Kinesis:</b> managed log; shards (fixed capacity each), per-shard order, 24h–365d + replay. Lower per-shard ceiling than Kafka; you manage shard counts.</li>
+<li><b>GCP Pub/Sub:</b> global auto-scaling; push+pull, 7d default, replay via seek/snapshot, optional ordering keys + EOS.</li>
+<li><b>NATS core:</b> sub-ms subject pub/sub, tiny ops; <b>JetStream</b> adds durable streams + replay + EOS-dedup.</li>
+<li><b>Pulsar:</b> log+queue on BookKeeper; compute/storage split, tiered storage, geo-repl, multi-tenant. Cost: brokers + BookKeeper (+ZK).</li>
+</ul>
+<p><span class="warn">!</span> Managed ≠ free: per-message/shard cost can dominate at volume, plus quotas + lock-in.</p>
+</section>
+
+<section class="card"><h3>Symptom → Cause → Fix</h3>
+<table>
+<tr><th>Symptom</th><th>Likely cause</th><th>Fix</th></tr>
+<tr><td>Duplicate processing</td><td>at-least-once redelivery; commit-after-crash</td><td>idempotent consumer / dedup key</td></tr>
+<tr><td>Lag keeps growing</td><td>consumers &lt; partitions; slow processing</td><td>scale to ≤N partitions; async/batch</td></tr>
+<tr><td>Out-of-order</td><td>retry reorder; multi in-flight; extra consumers</td><td><code>enable.idempotence</code>; key→one lane</td></tr>
+<tr><td>Poison msg stalls partition</td><td>same record fails forever, blocks offset</td><td>retry cap → DLQ; skip &amp; alert</td></tr>
+<tr><td>Message loss</td><td><code>acks=1</code>; auto-commit pre-process; non-persistent</td><td><code>acks=all</code>+minISR; commit after work</td></tr>
+<tr><td>Broker OOM / publishers blocked</td><td>unbounded queue, slow consumer</td><td>TTL/MAXLEN/DLQ; prefetch; backpressure</td></tr>
+<tr><td>Rebalance storms</td><td>slow poll &gt; <code>max.poll.interval.ms</code></td><td>cooperative + static membership; smaller batches</td></tr>
+<tr><td>Lost dual-write event</td><td>DB commit ok, publish failed</td><td>transactional outbox + CDC relay</td></tr>
+</table>
+</section>
+
+<section class="card"><h3>&#9733; Choosing &amp; designing checklist</h3>
+<ul>
+<li><code>&#9744;</code> Asked <b>"log or queue?"</b> first, then layered replay / ordering / routing / throughput / ops.</li>
+<li><code>&#9744;</code> Ordering need mapped to a <b>lane</b> (partition key / message-group / hash exchange); accepted the parallelism cost.</li>
+<li><code>&#9744;</code> Default = <b>at-least-once + idempotent consumer</b> (dedup key). Didn't promise cross-system exactly-once.</li>
+<li><code>&#9744;</code> <b>DLQ + retry/backoff+jitter</b> from day one; poison messages parked, not looping.</li>
+<li><code>&#9744;</code> Dual-write handled by <b>transactional outbox</b>, not best-effort publish.</li>
+<li><code>&#9744;</code> Kafka durability: <code>acks=all</code> + <code>min.insync.replicas=2</code> + RF3; unclean election off.</li>
+<li><code>&#9744;</code> Consumers commit <b>after</b> processing; prefetch/poll bounded.</li>
+<li><code>&#9744;</code> Queues bounded (TTL / MAXLEN / max-length) — no unbounded growth.</li>
+<li><code>&#9744;</code> Schema in a registry; changes additive + compatibility-checked in CI.</li>
+<li><code>&#9744;</code> Monitoring <b>lag trend</b>, URP, DLQ rate; alerting on slope.</li>
+<li><code>&#9744;</code> Security: TLS + SASL + per-topic ACLs.</li>
+<li><code>&#9744;</code> Chose the broker you <b>already run</b> unless the workload truly needs otherwise.</li>
+</ul>
+</section>
+
+</div>
+</body>
+</html>

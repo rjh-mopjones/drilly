@@ -756,6 +756,22 @@
       "itemCount": 21
     },
     {
+      "id": "message-brokers",
+      "file": "/message-brokers-interview-primer.md",
+      "title": "Message Brokers",
+      "category": "DevOps",
+      "itemLabel": "Topic",
+      "itemsPlural": "message broker topics",
+      "storagePrefix": "ip:message-brokers",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": [],
+      "cheatSheetUrl": "/message-brokers-cheatsheet.html",
+      "itemCount": 21
+    },
+    {
       "id": "git",
       "file": "/git-interview-primer.md",
       "title": "Git",
