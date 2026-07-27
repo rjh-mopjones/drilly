@@ -4110,3 +4110,251 @@ The README's trap and the pitfalls around it:
 - **Draining on shutdown "to be safe".** For live odds, abandon in-flight publishes; draining a slow consumer risks a hang. State the drain-vs-abandon trade explicitly — interviewers listen for it.
 
 
+
+## Feed Parser — Streaming, Zero-Copy & Malformed-Line Handling
+
+### Summary
+
+**What this topic covers**
+
+You build the ingest path for a market-data feed: a text stream of two-sided quotes, one record per line, pipe-delimited `SYMBOL|BID|ASK|QTY`. The public surface is small — `Parse(io.Reader, fn)` streams and invokes a callback once per non-skipped line, and `ParseAll(io.Reader) (quotes, errs, scanErr)` is the batch collector built on top of it. The whole kata is about *how* you read: a day's tick feed is gigabytes, so the naive `io.ReadAll` + `strings.Split("\n")` slurps the entire payload into memory and only starts emitting after EOF. You stream instead with a `bufio.Scanner`, keeping footprint bounded to one line. On top of streaming sit three sub-problems: dirty input (truncated records, missing symbols, garbage prices) that must be reported per-line without aborting the good records; 1-based *physical* line numbers that count the blank/comment lines you skip; and the Go-specific detail that `Scanner.Text()` hands you an owned string copy, so the `Symbol` you retain is safe — the zero-copy trap other languages hit doesn't bite here.
+
+**Mental model**
+
+Think of the parser as a pipe, not a bucket. Data flows through one line at a time: pull a line, trim it, decide skip-or-decode, hand the result to the callback, discard the buffer, repeat. `bufio.Scanner` reuses its internal buffer between `Scan()` calls, so memory stays flat no matter how long the feed is, and the consumer can act on early quotes (backpressure, cancellation) before the producer has finished writing. Errors are values that travel *with* the record, not exceptions that unwind the loop: a malformed line yields a `*ParseError` carrying its line number and flows through the same callback as a good `Quote`, so one bad record never stops the stream. Validation is a fixed pipeline — field-count → empty-symbol → bid → ask → qty — so the same dirty line always produces the same first error across every port of this kata. `ParseAll` is just a callback that appends into two slices; the streaming primitive is the foundation and the collector is the convenience, never the reverse.
+
+**Key terms**
+- **streaming vs slurping** — process one line at a time (bounded memory) vs read the whole payload then split (memory grows with input).
+- **`bufio.Scanner`** — stdlib line reader; loop `for scanner.Scan()` then `scanner.Text()`; buffer is reused between calls.
+- **`Scanner.Text()` vs `Scanner.Bytes()`** — `Text()` returns a fresh owned Go string (one alloc/line); `Bytes()` aliases the reused buffer (zero-copy, but invalidated on next `Scan`).
+- **physical line number** — the 1-based number an editor shows, counting *every* line including skipped blanks/comments.
+- **`strconv.ParseFloat` / `ParseUint`** — typed field decoding without regex; `ParseUint(_, 10, 64)` rejects a leading `-` for free.
+- **error-as-value** — a `*ParseError` returned alongside the record, not thrown; lets a bad line be reported and the stream continue.
+- **fixed validation order** — a deterministic check sequence so the *first* failure on a given line is stable across implementations.
+- **`scanner.Err()`** — the terminal check after the loop; surfaces IO failures and over-long lines (a bare `for Scan()` swallows them otherwise).
+
+**Why interviewers ask this**
+
+Parsing a feed looks trivial and quietly sorts candidates by how they handle scale and dirt. A junior writes `io.ReadAll` + `strings.Split`, which passes the toy fixture and dies on the real one, and aborts the whole parse on the first bad line — throwing away every good quote after it. A mid-level streams correctly but loses the physical line number (numbering only the records they emit, so the operator can't find the offending line), or forgets `scanner.Err()` and silently truncates on a long line. A senior streams with `bufio.Scanner`, reports each bad line as a line-numbered value while continuing, fixes the validation order so errors are deterministic, and — the real tell — *names* the `Text()`-vs-`Bytes()` owned-copy distinction unprompted, explaining the one-alloc-per-line cost they're paying for safety and when they'd reach for `Bytes()` instead. Bonus signal: reaching for `ParseUint` to get negative-qty rejection for free rather than special-casing it.
+
+**Common confusions**
+- "Read it all then split on newlines" → that slurps the whole feed into memory and can't start emitting before EOF; the point is to stream.
+- "First bad line should return an error and stop" → then one truncated record discards every good quote after it; report per-line and continue.
+- "Line numbers count only the records I emit" → they must count skipped blanks/comments too, or the number won't match the source file.
+- "`Scanner.Bytes()` is faster so use that" → it aliases a buffer the next `Scan` overwrites; retaining the symbol from it needs a deliberate copy. `Text()` already paid for the copy.
+- "Negative quantity needs its own check" → `strconv.ParseUint` already rejects a leading `-`; it falls out as `InvalidQty`.
+
+**What follows from this topic**
+
+This is the reader-side complement to the channel and fan-in katas: the same "one item at a time, callback or channel, don't materialise everything" shape recurs whenever you consume an unbounded source. The owned-copy insight generalises to every `[]byte`-vs-`string` decision on a hot path, and the error-as-value habit is the same one the settlement and ledger katas lean on. The streaming `Filter` extension is a direct on-ramp to `io.Reader`/`io.Writer` pipelines.
+
+### Clarify & design the API
+
+Before writing logic, pin the questions that shape the contract:
+
+- **Streaming or batch?** Both — but streaming is primary. `Parse` never materialises the input; `ParseAll` is a thin collector on top. Decide this first because it dictates that the core takes a callback, not a return slice.
+- **What does one bad line do?** It's reported, not fatal. Each non-skipped line yields *exactly one* of a valid `Quote` (err nil) or a `*ParseError` (err non-nil, zero quote) — never both, never neither. The stream continues.
+- **What counts as a line for numbering?** Every physical line, including skipped ones. Increment the counter before the skip check so a comment on line 1 still pushes the first record to its real number.
+- **Skip rule?** After trimming surrounding whitespace, a blank line or one starting with `#` is a non-record: no quote, no error, but still counted.
+- **Validation order?** Fixed and documented: field-count → empty-symbol → bid → ask → qty, so a line that fails two checks always reports the first.
+
+Commit to the exact signatures first:
+
+```go
+type Quote struct {
+    Symbol   string
+    Bid, Ask float64
+    Qty      uint64
+}
+
+type ErrKind int
+const (
+    WrongFieldCount ErrKind = iota
+    EmptySymbol
+    InvalidBid
+    InvalidAsk
+    InvalidQty
+)
+
+type ParseError struct {
+    Line int
+    Kind ErrKind
+}
+
+func Parse(r io.Reader, fn func(line int, q Quote, err *ParseError)) error
+func ParseAll(r io.Reader) (quotes []Quote, errs []ParseError, scanErr error)
+```
+
+The return value of `Parse` is reserved for *scanner/IO* errors (an over-long line, an underlying read failure) — never a malformed record. That separation is the whole design: data problems flow through `fn`; plumbing problems come back as the error.
+
+### Write the tests
+
+The practice package ships **no tests on purpose** — designing them is the exercise. Feed everything through `strings.NewReader` to prove the streaming path, and build one canonical fixture that exercises skips, valid records, and each error in order.
+
+**Group 1 — the canonical feed (the contract).** A comment, a genuine blank line, two good records, then one of each error. Assert the exact quotes *and* the exact `(line, kind)` errors — the line numbers are the point:
+
+```go
+const canonicalFeed = `# market data feed
+LIV-MUN|1.95|2.05|1000
+
+ARS-CHE|1.50|1.60|500
+|1.0|2.0|10
+BAD|x|2.0|10
+TOO|1.0|2.0
+NEG|1.0|2.0|-5`
+
+func TestParseAll_CanonicalFeed(t *testing.T) {
+    quotes, errs, scanErr := ParseAll(strings.NewReader(canonicalFeed))
+    if scanErr != nil {
+        t.Fatalf("scanErr = %v, want nil", scanErr)
+    }
+    wantQuotes := []Quote{
+        {"LIV-MUN", 1.95, 2.05, 1000},
+        {"ARS-CHE", 1.50, 1.60, 500},
+    }
+    // ... compare quotes ...
+    wantErrs := []ParseError{
+        {Line: 5, Kind: EmptySymbol},
+        {Line: 6, Kind: InvalidBid},
+        {Line: 7, Kind: WrongFieldCount},
+        {Line: 8, Kind: InvalidQty},
+    }
+    // ... compare errs ...
+}
+```
+
+Why it matters: the comment (line 1) and blank (line 3) are skipped, so `ARS-CHE` is physical line 4 and the errors land on 5–8. An implementation that numbers only emitted records reports the wrong lines and fails here.
+
+**Group 2 — each error variant in isolation (table-driven).** One line, one expected error, zero quotes. Cover both `WrongFieldCount` directions and both `InvalidQty` reasons:
+
+```go
+cases := []struct{ name, feed string; want ParseError }{
+    {"too few fields",  "TOO|1.0|2.0",        {1, WrongFieldCount}},
+    {"too many fields", "A|1.0|2.0|10|extra", {1, WrongFieldCount}},
+    {"empty symbol",    "|1.0|2.0|10",        {1, EmptySymbol}},
+    {"invalid bid",     "BAD|x|2.0|10",       {1, InvalidBid}},
+    {"invalid ask",     "BAD|1.0|y|10",       {1, InvalidAsk}},
+    {"qty non-numeric", "BAD|1.0|2.0|z",      {1, InvalidQty}},
+    {"qty negative",    "NEG|1.0|2.0|-5",     {1, InvalidQty}},
+}
+```
+
+Why it matters: the negative-qty row pins that `ParseUint` rejects `-5` for free — no special case — and the two field-count rows pin that "exactly 4" means both directions.
+
+**Group 3 — validation order and line-number accounting.** Two targeted tests. First, a line that is *both* empty-symbol and bad-bid (`|x|2.0|10`) must report `EmptySymbol` — the earlier check wins. Second, skipped lines before a record must still count:
+
+```go
+func TestParse_ValidationOrderStopsAtFirst(t *testing.T) {
+    _, errs, _ := ParseAll(strings.NewReader("|x|2.0|10"))
+    if errs[0].Kind != EmptySymbol {
+        t.Errorf("kind = %v, want EmptySymbol (should win over InvalidBid)", errs[0].Kind)
+    }
+}
+
+func TestParse_LineNumbersCountSkippedLines(t *testing.T) {
+    feed := "# comment\n\nGOOD|1.0|2.0|5\nBAD|x|2.0|5"
+    _, errs, _ := ParseAll(strings.NewReader(feed))
+    if errs[0].Line != 4 { // comment=1, blank=2, GOOD=3, BAD=4
+        t.Errorf("error line = %d, want 4", errs[0].Line)
+    }
+}
+```
+
+Why it matters: these are the two subtle correctness bugs — order-dependent errors and off-by-N line numbers — that pass a happy-path test and still ship wrong.
+
+**Group 4 — the streaming primitive and the XOR invariant.** Drive `Parse` directly and assert `fn` fires once per non-skipped line, in order, with exactly one of (valid quote, error) each time:
+
+```go
+scanErr := Parse(strings.NewReader(canonicalFeed), func(line int, q Quote, err *ParseError) {
+    if err != nil && q != (Quote{}) {
+        t.Errorf("line %d: error carried non-zero quote %+v", line, q)
+    }
+    if err == nil && q == (Quote{}) {
+        t.Errorf("line %d: nil error carried zero quote", line)
+    }
+    // record line for order assertion: want [2,4,5,6,7,8]
+})
+```
+
+Round it off with the trivial edges — empty input, and a comment/blank-only feed — both yielding zero quotes and zero errors with a nil `scanErr`.
+
+### Implement it
+
+The whole implementation is the loop plus a pure per-line decoder; the discipline is in what you *don't* do (no `ReadAll`, no regex):
+
+```go
+func Parse(r io.Reader, fn func(line int, q Quote, err *ParseError)) error {
+    scanner := bufio.NewScanner(r)
+    line := 0
+    for scanner.Scan() {
+        line++
+        trimmed := strings.TrimSpace(scanner.Text())
+        if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+            continue
+        }
+        q, perr := parseLine(line, trimmed)
+        fn(line, q, perr)
+    }
+    return scanner.Err()
+}
+
+func parseLine(line int, text string) (Quote, *ParseError) {
+    fields := strings.Split(text, "|")
+    if len(fields) != 4 {
+        return Quote{}, &ParseError{Line: line, Kind: WrongFieldCount}
+    }
+    symbol := fields[0]
+    if symbol == "" {
+        return Quote{}, &ParseError{Line: line, Kind: EmptySymbol}
+    }
+    bid, err := strconv.ParseFloat(fields[1], 64)
+    if err != nil {
+        return Quote{}, &ParseError{Line: line, Kind: InvalidBid}
+    }
+    ask, err := strconv.ParseFloat(fields[2], 64)
+    if err != nil {
+        return Quote{}, &ParseError{Line: line, Kind: InvalidAsk}
+    }
+    qty, err := strconv.ParseUint(fields[3], 10, 64)
+    if err != nil {
+        return Quote{}, &ParseError{Line: line, Kind: InvalidQty}
+    }
+    return Quote{Symbol: symbol, Bid: bid, Ask: ask, Qty: qty}, nil
+}
+```
+
+**Increment before you skip.** `line++` runs at the top of every iteration, *before* the blank/comment check, so the counter tracks physical lines and a skipped line still advances it. Reversing that order is the classic off-by-N.
+
+**`scanner.Err()` is not optional.** A bare `for scanner.Scan()` stops on both EOF and error and looks identical. Returning `scanner.Err()` after the loop is what surfaces an over-long line (past `bufio`'s default 64KB token limit) or an IO failure — otherwise the parse silently truncates. That's the one non-obvious line in the function.
+
+**`ParseUint` earns its keep.** `strconv.ParseUint(fields[3], 10, 64)` rejects a leading `-` as part of parsing, so `NEG|...|-5` becomes `InvalidQty` with no special case. Using `ParseInt` and then checking `< 0` is more code and easy to forget.
+
+**`ParseAll` is a callback, nothing more.** It's the proof that the streaming primitive is the foundation:
+
+```go
+func ParseAll(r io.Reader) (quotes []Quote, errs []ParseError, scanErr error) {
+    scanErr = Parse(r, func(_ int, q Quote, perr *ParseError) {
+        if perr != nil {
+            errs = append(errs, *perr)
+            return
+        }
+        quotes = append(quotes, q)
+    })
+    return quotes, errs, scanErr
+}
+```
+
+**Why the symbol is safe to keep.** `scanner.Text()` returns a fresh Go string, so `Quote.Symbol` (a slice of `strings.Split` over that string) stays valid after the scanner reuses its buffer on the next `Scan`. No deliberate copy needed. The cost is one allocation per line — which a zero-copy design using `Scanner.Bytes()` would avoid, at the price of having to copy any retained field yourself. Name that trade; don't hide it.
+
+**Extension (streaming transform).** Add `func Filter(r io.Reader, w io.Writer, keep func(Quote) bool) error` that reads the feed and writes back only the records whose quote passes `keep`, still one line at a time, so a multi-gigabyte feed filters with flat memory. Benchmark it against a slurp-and-filter version — the allocation delta is the whole lesson.
+
+### Common mistakes & senior signal
+
+The README's traps, plus the pitfalls interviewers watch for:
+
+- **Slurping instead of streaming.** `io.ReadAll` + `strings.Split("\n")` is the headline bug: it holds the whole feed resident and can't emit before EOF. Reaching for `bufio.Scanner` unprompted is the entry ticket.
+- **Aborting on the first bad line.** Returning an error from the loop throws away every good quote after a truncated record. A senior reports each bad line as a value and keeps going.
+- **Wrong line numbers.** Numbering only emitted records (or incrementing after the skip check) makes the reported line miss the source by the count of skipped lines — useless to an operator. Count every physical line.
+- **Forgetting `scanner.Err()`.** A bare `for Scan()` swallows a long-line or IO error and silently truncates. Checking it after the loop is the mark of someone who has been burned.
+- **Special-casing negative qty.** `ParseUint` already rejects it; the extra `< 0` branch signals unfamiliarity with the stdlib.
+- **Missing the owned-copy point.** Many fix the parsing and never mention memory. Naming `Text()`-vs-`Bytes()`, the one-alloc-per-line cost, and when `Bytes()` would be worth the manual copy — that's the senior tell.

@@ -405,6 +405,7 @@ The key point: `symbol` is never copied. It's a slice into `line`, and because `
 - **Type-as-validation.** Choosing `u64` for `seq` makes `-1` a parse failure for free — no manual range check. A senior picks the type that encodes the invariant.
 - **Proving zero-copy in a test.** The `std::ptr::eq(q.symbol.as_ptr(), line.as_ptr())` assertion is what separates "I think it borrows" from "I proved it borrows." Without it the test suite can't distinguish a borrow from a hidden allocation.
 - **Knowing when to own instead.** Borrow on the hot path; but a senior names the exception — if the quote must outlive the buffer (queued for later, sent across a channel), you *do* copy into `String` or `Cow<'a, str>`. The skill is choosing per use-site, not dogmatically.
+- **The file-level sibling: `parse_feed`.** `parse` handles one line; the streaming layer `parse_feed(&str) -> impl Iterator<Item = (usize, Result<Quote<'_>, ParseError>)>` folds `.lines().enumerate()` — skipping blank/`#`-comment lines but still counting them for the 1-based physical line number, and reusing `parse` per record. It stays lazy and zero-copy (each yielded `Quote` still borrows the feed). This is the Rust member of the cross-language **feed parser** kata (`bufio.Scanner` in Go, a lazy `Stream` in Java, `ReadOnlySpan<char>` in C#, `string_view` + `from_chars` in C++, a generator in Python) — same behaviour, six different idioms.
 
 
 ## Calculator — The Recursive-Enum AST & Precedence-by-Descent

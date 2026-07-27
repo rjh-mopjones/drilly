@@ -2156,3 +2156,343 @@ The headline trap: **reaching for a flat `dict[path]` because `read`/`write` loo
 
 Extensions that show depth: add `rm`/`rmdir` (and decide whether `rmdir` requires the directory be empty); symbolic links (resolution must now *follow* links and guard against link loops); or an `os.walk`-style `walk()` **generator** that `yield`s `(dirpath, dirnames, filenames)` — the same DFS as `find`, turned into a lazy iterator.
 
+
+## Feed Parser — Streaming, Zero-Copy & Malformed-Line Handling
+
+### Summary
+
+**What this topic covers**
+
+You build the feed handler that sits at the ingest edge of a pricing stack: a market-data gateway
+receives quotes as a text firehose — one pipe-delimited record per line, `SYMBOL|BID|ASK|QTY` (e.g.
+`LIV-MUN|1.95|2.05|1000`) — arriving over a socket, a file tail, or a replay. The stream is peppered
+with `#` comment lines and blank separators, and because it comes off a wire from a dozen venues,
+some lines are malformed: a missing field, an empty symbol, a price that won't parse, a negative
+size. `parse_feed(lines)` turns that text stream into typed `Quote`s **as they arrive**, and it must
+never throw the whole batch away because one line was bad — every reject is reported with the exact
+1-based *physical* line number so an operator can find it in the raw capture. The signature Python
+topic it drills is the **generator**: `yield`, lazy pull-based evaluation, and streaming an unbounded
+input in O(1) memory — plus modelling a reject as a *value* (a frozen dataclass) rather than a raise,
+so one bad line doesn't abort the stream.
+
+**Mental model**
+
+A junior writes `def parse_feed(...)` that appends to a `result` list and returns it. That forces the
+*entire* feed to be read before the first quote comes back — impossible on an unbounded socket stream
+and wasteful on a finite one (the whole capture sits in RAM). A generator inverts control: `parse_feed`
+reads one line, computes one `Parsed`, `yield`s it, and *suspends* until the consumer pulls the next.
+Memory is O(1) in the number of lines — only the current line's fields are alive — and it composes
+with `for`, `itertools`, and an `islice`-style *take* for free; a consumer that wants only the first
+few quotes (`next`, an early `break`) stops the parser mid-feed without touching the rest. The second
+idea is that a malformed line is **data, not control flow**. Rather than `raise` on a bad print — which
+would abort the other 999 good lines — you build a `ParseError` value carrying the line number and the
+`ErrorKind`, wrap it in a `Parsed`, and `yield` it. The stream keeps flowing; the *caller* decides
+whether to log, alert, or halt. The last subtlety is the counter: blanks and comments are skipped but
+still **advance the physical line number** (`enumerate(lines, start=1)`), because an error at record 4
+that's really line 8 of the capture is useless to the operator staring at the raw file.
+
+**Key terms**
+
+- **generator / `yield`** — a function containing `yield` returns an iterator; each `yield` produces
+  one `Parsed` and suspends the frame, resuming on the next `next()`. This is what makes it streaming.
+- **lazy pull-based evaluation** — nothing runs until the consumer pulls; work happens on demand, one
+  line at a time, at minimum latency — never batching to end-of-file.
+- **O(1) memory vs building a list** — the whole game: a `return [...]` buffers every result (and
+  forces reading all lines first); the generator holds only the line it's on.
+- **`Iterable[str]` → `Iterator[Parsed]`** — the input is *any* line iterable (a file object, a
+  socket-line iterator, `splitlines()`); program to the protocol, not the concrete type.
+- **error-as-value** — `ParseError` is a frozen `@dataclass` that *also* subclasses `Exception`, so a
+  caller *may* raise it, but the parser treats it as a value and yields it — one bad line ≠ a dead stream.
+- **physical line number** — 1-based, counts *every* line including skipped comments/blanks, so a
+  reject points at the real line in the capture. Skipping without advancing the counter is the classic bug.
+- **fixed validation order** — field-count → empty-symbol → bid → ask → qty; the first problem wins
+  deterministically, so a short line with a bad price is a `WRONG_FIELD_COUNT`, not an `INVALID_BID`.
+
+**Why interviewers ask this**
+
+It separates people who reach for a list because it "works on my test array" from people who see the
+input is a *stream* and design for it. A junior returns `list`, reads the whole feed, `raise`s on the
+first bad line (killing the batch), and numbers errors by record instead of by physical line. A senior
+states the contract precisely — lazy, pull-based, O(1) memory, one `Parsed` per non-skipped line,
+errors as values — then writes the `enumerate`-driven generator, remembers that comments still advance
+the counter, and *proves laziness with a test* (a generator input that raises if fully consumed,
+asserting `next(parse_feed(...))` returns the first quote without tripping it). It also probes the
+money stakes: this is the ingest edge where every downstream book and fill is priced off these quotes,
+so rejecting a garbage bid or a negative size *at the door* is what stops a bad print from mispricing
+or crashing a strategy.
+
+**Common confusions**
+
+- *"Return a list — it works on my test feed."* — It reads the whole stream before the first quote and
+  can't handle an unbounded source. A generator yields incrementally in O(1) memory.
+- *"A malformed line should raise."* — Then one venue's bad print aborts every other line. Model the
+  reject as a `ParseError` value inside a `Parsed` and `yield` it; the caller decides what to do.
+- *"Number the errors by record."* — Operators read the raw capture; count *physical* lines
+  (`enumerate(lines, start=1)`), advancing over skipped comments and blanks.
+- *"Validation order doesn't matter."* — It's the contract. Stop at the first failure in a fixed order
+  so a line that's both short and has a bad price is deterministically a `WRONG_FIELD_COUNT`.
+- *"`int(qty)` is enough."* — A negative size is nonsense and `int("1.5")` raises; reject both as
+  `INVALID_QTY`, and remember `0` is a *valid* size.
+
+**What follows from this topic**
+
+The lazy-generator + error-as-value pattern generalises to any stream ingest: log parsers, CSV/JSONL
+readers, protocol decoders. The natural extensions turn it into a bigger kata: make the parser
+**resumable across chunks** — feed it successive `recv()` buffers, holding a partial trailing line
+between calls (a real socket never delivers whole lines) — or add a variant that keys quotes by symbol
+and yields a lazily-updated best-bid/best-offer per instrument as the feed streams. Both build on the
+same insight: the generator holds the *minimum* state and emits on demand. The idiom carries straight
+into `itertools` pipelines and the market-data bar aggregator (the next kata), which is the same
+one-item-at-a-time state machine over an unbounded tick stream.
+
+### Clarify & design the API
+
+Questions worth asking out loud: does the parser return a list or *stream* (stream — a lazy generator,
+because the feed is unbounded and downstream wants quotes at low latency)? On a bad line, do we raise
+or keep going (keep going — one malformed venue print must not abort the batch)? Are error line numbers
+record-relative or physical (physical — the operator reads the raw capture, so skipped comments and
+blanks still count)? Is validation order defined (yes, and it's the contract: field-count →
+empty-symbol → bid → ask → qty, first failure wins)? Is `qty` signed, and is `0` valid (non-negative
+int; `0` is fine, a negative size is `INVALID_QTY`)?
+
+The **stream-not-list decision** is the design. `parse_feed` is a generator: it consumes `lines` one
+at a time via `enumerate(lines, start=1)` and `yield`s one `Parsed` per non-skipped line, never
+materialising the input. Each `Parsed` carries the physical line number and *exactly one* of `quote` /
+`error`. The reject is modelled as a value — a frozen `ParseError` (line + `ErrorKind`) — so yielding
+it keeps the stream alive. `parse_all` is the eager collector on top, draining the generator into
+`(quotes, errors)` for tests and batch jobs.
+
+```python
+from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
+from enum import Enum, auto
+
+
+@dataclass(frozen=True)
+class Quote:                      # a two-way price: SYMBOL|BID|ASK|QTY
+    symbol: str
+    bid: float
+    ask: float
+    qty: int
+
+
+class ErrorKind(Enum):            # why a line failed — checked in this order
+    WRONG_FIELD_COUNT = auto()
+    EMPTY_SYMBOL = auto()
+    INVALID_BID = auto()
+    INVALID_ASK = auto()
+    INVALID_QTY = auto()
+
+
+@dataclass(frozen=True)
+class ParseError(Exception):      # a data-carrying reject; yielded as a value, not raised
+    line: int
+    kind: ErrorKind
+
+
+@dataclass(frozen=True)
+class Parsed:                     # one non-skipped line: exactly one of quote / error
+    line: int
+    quote: Quote | None
+    error: ParseError | None
+
+
+def parse_feed(lines: Iterable[str]) -> Iterator[Parsed]:
+    ...   # generator: yield one Parsed per non-skipped line, lazily
+
+def parse_all(lines: Iterable[str]) -> tuple[list[Quote], list[ParseError]]:
+    ...   # eager collector: drain parse_feed into (quotes, errors)
+```
+
+Say the trade-off explicitly: a generator streams an unbounded feed in O(1) memory and stops the
+instant the consumer does, at the cost that you can't index or re-read it — which is exactly right for
+a live wire. Modelling the reject as a *value* rather than raising is the other design choice to
+volunteer: it's what lets the parser keep flowing past a bad line while still handing the caller the
+full failure (line + kind) to act on.
+
+### Write the tests
+
+The README ships **no tests** — designing them is the exercise, and it's where you prove you understand
+the semantics, not just the syntax. Anchor on the **canonical feed** (shared verbatim across every
+language mirror) and assert the exact quotes *and* the exact `(line, kind)` errors — the physical line
+numbers are the whole point. Then cover each error variant, the validation-order tie-breaks, empty and
+comment-only input, and — the test that carries the design — **laziness**: a generator input that
+raises if fully consumed, proving `next()` returns items without draining it.
+
+```python
+import pytest
+from . import ErrorKind, Parsed, ParseError, Quote, parse_all, parse_feed
+
+CANONICAL = [
+    "# market data feed",
+    "LIV-MUN|1.95|2.05|1000",
+    "",
+    "ARS-CHE|1.50|1.60|500",
+    "|1.0|2.0|10",        # line 5: empty symbol
+    "BAD|x|2.0|10",       # line 6: bad bid
+    "TOO|1.0|2.0",        # line 7: 3 fields
+    "NEG|1.0|2.0|-5",     # line 8: negative qty
+]
+
+
+def test_canonical_feed_quotes_and_errors_are_exact():
+    quotes, errors = parse_all(CANONICAL)
+    assert quotes == [
+        Quote("LIV-MUN", 1.95, 2.05, 1000),
+        Quote("ARS-CHE", 1.50, 1.60, 500),
+    ]
+    assert [(e.line, e.kind) for e in errors] == [
+        (5, ErrorKind.EMPTY_SYMBOL),
+        (6, ErrorKind.INVALID_BID),
+        (7, ErrorKind.WRONG_FIELD_COUNT),
+        (8, ErrorKind.INVALID_QTY),
+    ]
+
+
+def test_error_carries_physical_line_number():
+    # comments/blanks are skipped but still advance the physical counter
+    _, errors = parse_all(["#c", "", "|1|2|3"])
+    assert errors == [ParseError(3, ErrorKind.EMPTY_SYMBOL)]
+
+
+def test_validation_order_first_problem_wins():
+    _, e = parse_all(["|x|2.0"])       # 3 fields -> field count beats empty symbol / bad bid
+    assert e == [ParseError(1, ErrorKind.WRONG_FIELD_COUNT)]
+    _, e = parse_all(["|x|2.0|3"])     # empty symbol beats bad bid
+    assert e == [ParseError(1, ErrorKind.EMPTY_SYMBOL)]
+
+
+def test_qty_zero_valid_negative_and_float_rejected():
+    quotes, _ = parse_all(["A|1.0|2.0|0"])
+    assert quotes == [Quote("A", 1.0, 2.0, 0)]                 # 0 is a valid size
+    _, errors = parse_all(["A|1.0|2.0|-1", "A|1.0|2.0|1.5"])
+    assert [e.kind for e in errors] == [ErrorKind.INVALID_QTY, ErrorKind.INVALID_QTY]
+
+
+def test_empty_and_comment_only_feeds_yield_nothing():
+    assert list(parse_feed([])) == []
+    assert list(parse_feed(["# header", "   ", "", "# footer"])) == []
+
+
+def test_is_lazy_consumes_incrementally():
+    def stream():
+        yield "A|1.0|2.0|1"
+        yield "B|3.0|4.0|2"
+        raise AssertionError("generator fully consumed — parsing is not lazy")
+
+    gen = parse_feed(stream())
+    assert next(gen).quote == Quote("A", 1.0, 2.0, 1)
+    assert next(gen).quote == Quote("B", 3.0, 4.0, 2)   # third item never pulled → no raise
+```
+
+Run with `cd python-katas && .venv/bin/pytest practice/feedparser` (or `solution/feedparser` for the
+reference). The laziness test is the one that matters: a list-building implementation would drain
+`stream()`, hit the `AssertionError`, and fail — so the test fails precisely when someone drops the
+generator for a list. The validation-order test pins the tie-breaks that a naive "check everything and
+collect all errors" implementation would get wrong.
+
+### Implement it
+
+The whole parser is one generator loop over `enumerate(lines, start=1)`. Trim each line; `continue`
+past blanks and `#` comments (which still advanced the counter for free). Split on `|`, then run the
+five checks *in order*, `yield`ing an error `Parsed` and `continue`ing at the first failure — so the
+first problem wins. `bid`/`ask` go through `float()` in a `try/except ValueError`; `qty` goes through
+a helper that rejects non-integers and negatives. On a clean line, `yield` a success `Parsed`.
+
+```python
+def parse_feed(lines: Iterable[str]) -> Iterator[Parsed]:
+    for line_no, raw in enumerate(lines, start=1):     # physical, 1-based, counts every line
+        text = raw.strip()
+        if not text or text.startswith("#"):
+            continue                                   # skip — but the counter already moved
+
+        fields = text.split("|")
+        if len(fields) != 4:                           # 1. field count wins over everything
+            yield _error(line_no, ErrorKind.WRONG_FIELD_COUNT)
+            continue
+
+        symbol, bid_s, ask_s, qty_s = fields
+        symbol = symbol.strip()
+        if not symbol:                                 # 2. empty symbol
+            yield _error(line_no, ErrorKind.EMPTY_SYMBOL)
+            continue
+
+        try:                                           # 3. bid must be a float
+            bid = float(bid_s)
+        except ValueError:
+            yield _error(line_no, ErrorKind.INVALID_BID)
+            continue
+
+        try:                                           # 4. ask must be a float
+            ask = float(ask_s)
+        except ValueError:
+            yield _error(line_no, ErrorKind.INVALID_ASK)
+            continue
+
+        qty = _parse_qty(qty_s)                        # 5. qty: non-negative int
+        if qty is None:
+            yield _error(line_no, ErrorKind.INVALID_QTY)
+            continue
+
+        yield Parsed(line_no, Quote(symbol, bid, ask, qty), None)
+
+
+def parse_all(lines: Iterable[str]) -> tuple[list[Quote], list[ParseError]]:
+    quotes: list[Quote] = []
+    errors: list[ParseError] = []
+    for item in parse_feed(lines):                     # drains the generator eagerly
+        if item.quote is not None:
+            quotes.append(item.quote)
+        else:
+            assert item.error is not None
+            errors.append(item.error)
+    return quotes, errors
+
+
+def _error(line_no: int, kind: ErrorKind) -> Parsed:
+    return Parsed(line_no, None, ParseError(line_no, kind))   # reject as a value, never raised
+
+
+def _parse_qty(text: str) -> int | None:
+    try:
+        qty = int(text)                                # int("1.5") raises → INVALID_QTY
+    except ValueError:
+        return None
+    return qty if qty >= 0 else None                   # negative size is nonsense
+```
+
+The headline gotcha is that `yield` (not `return [...]`) is what makes this stream: the loop suspends
+at each `yield` and resumes only when the consumer pulls, so memory is O(1) and a caller that `break`s
+early reads no further — the parser never sees the rest of the feed. The second is that skipped
+comments and blanks `continue` *inside* the `enumerate` loop, so `line_no` keeps climbing past them —
+that's what makes error line numbers physical (an error at index 3 correctly reports line 8 of the
+capture). The third is error-as-value: `_error` builds a `ParseError` and wraps it in a `Parsed` that
+gets `yield`ed like any success, so one bad line is just another item in the stream, not a raise that
+kills it. And the validation `continue`s enforce the fixed order for free — the first check that fires
+yields and skips the rest, so a short line with a bad price is a `WRONG_FIELD_COUNT`, deterministically.
+
+### Common mistakes & senior signal
+
+- **Returning a list instead of a generator.** `return [...]` reads the whole feed before the first
+  quote and can't handle an unbounded stream — the design collapses on a live socket. **Senior
+  signal** — writes a `yield`-per-line generator, states the O(1)-memory / lazy-pull contract, and
+  proves it with a test that raises if the input is fully consumed.
+- **Raising on a malformed line.** A `raise` aborts every other good line in the batch — one bad venue
+  print blacks out the market. **Senior signal** — models the reject as a `ParseError` *value* inside a
+  `Parsed` and yields it, keeping the stream flowing; the caller decides to log, alert, or halt.
+- **Numbering errors by record instead of physical line.** Counting only non-skipped lines means an
+  error points at the wrong place in the raw capture. **Senior signal** — `enumerate(lines, start=1)`
+  and `continue`s past comments/blanks *after* the counter advances, so line numbers are physical.
+- **Getting validation order wrong (or collecting all errors).** Checking bid before field-count, or
+  reporting every failure on a line, breaks the deterministic first-problem-wins contract. **Senior
+  signal** — checks field-count → empty-symbol → bid → ask → qty and `continue`s at the first failure.
+- **Sloppy `qty` parsing.** `int(qty)` alone lets a negative size through and raises on `1.5`. **Senior
+  signal** — rejects non-integers and negatives as `INVALID_QTY` in a helper, and remembers `0` is valid.
+- **Storing mutable / stringly-typed results.** Passing dicts or tuples around loses type safety and
+  invites accidental mutation. **Senior signal** — frozen `@dataclass` `Quote`/`ParseError`/`Parsed`
+  with full type hints, and an `Enum` `ErrorKind` so callers `match` on the failure.
+
+Extensions that show depth: make the parser **resumable across chunks** — feed it successive `recv()`
+buffers, holding a partial trailing line between calls, since a real socket never delivers whole lines;
+or add a variant that keys quotes by symbol and yields a lazily-updated best-bid/best-offer per
+instrument as the feed streams — the same generator, now carrying a little running state.

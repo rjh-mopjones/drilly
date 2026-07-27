@@ -4712,3 +4712,239 @@ Key gotcha: read both values with a single `get(stampHolder)` — two separate c
 - **Testing only single-threaded.** Without a high-contention conservation stress test (no lost/duplicated elements), the implementation is unverified where it matters most.
 
 
+
+## Feed Parser — Streaming, Zero-Copy & Malformed-Line Handling
+
+### Summary
+
+**What this topic covers**
+This kata asks you to turn a streaming market-data feed of pipe-delimited text lines — `SYMBOL|BID|ASK|QTY`, one record per line — into a **lazy** `Stream<ParsedLine>`, where each non-noise line becomes either an `Ok` (a validated, typed `Quote`) or an `Err` (a `ParseError` that says *what* was wrong and *where*). Blank and `#`-comment lines are skipped but still counted, so every error carries a **1-based physical line number**. You implement two static methods on `FeedParser`: `parse(Stream<String>)` (the lazy mapping) and `parseAll(Stream<String>)` (a convenience terminal that drains into `(List<Quote>, List<ParseError>)`). It is the canonical "parse a feed without exceptions and without buffering the whole file" question, and it separates people who reach for `try/catch` around a `readLine` loop from people who model errors as values in a lazy pipeline.
+
+**Mental model**
+A feed parser is a **pure transformation over a stream of lines** with three concerns kept strictly separate: *classification* (is this line noise, a good record, or a bad record?), *coercion* (turn four strings into `String`/`double`/`double`/`long`), and *positioning* (which physical line did this come from?). The trap is that all three want to live in one imperative loop with a mutable counter and a `try/catch` that throws on the first bad tick — which is exactly wrong, because a single fat-fingered line must never abort the stream and lose the thousand good ticks behind it. So you invert it: errors become in-band **values** (a sealed `ParsedLine` with `Ok`/`Err` arms), and the transformation stays **lazy** — an input `Stream<String>` maps to a `Stream<ParsedLine>` element by element, so the terminal operation decides how much to pull (`findFirst`, `limit`, a full drain). The one piece of mutable state you genuinely need is the line counter, and because `Stream` has no element index you thread it yourself with an `AtomicInteger` incremented once per input line — correct only because the pipeline is ordered and sequential.
+
+**Key terms**
+- **Lazy pipeline** — `parse` builds a `Stream<ParsedLine>` that does no work until a terminal op pulls; one line flows through end-to-end at a time, nothing is materialised.
+- **`mapMulti`** — a Java 16+ stream op that emits *zero-or-one* (or many) outputs per input via a `downstream.accept(...)` callback; the clean lazy way to *drop* the skipped noise lines.
+- **Physical line number** — 1-based position in the raw feed, counting *every* line including skipped blanks/comments, so an operator eyeballing the file finds the bad tick.
+- **Result type** — modelling an outcome as a value (`Ok`/`Err`) instead of a return-or-throw; errors are expected, not exceptional.
+- **Sealed interface** — `ParsedLine permits Ok, Err`; the compiler knows the closed set so a `switch` over it is checkably exhaustive.
+- **`split("\\|", -1)`** — split on the (regex-escaped) pipe with a **negative limit** so trailing empty fields are *kept*, not silently discarded.
+- **Short-circuiting validation** — check field-count → symbol → bid → ask → qty and report only the *first* failure.
+- **Non-negative guard** — `qty` must be `>= 0`; a separate explicit check because `Long.parseLong("-5")` happily succeeds.
+
+**Why interviewers ask this**
+Feed parsing looks trivial and is a minefield of exactly the judgement calls a senior makes daily. A junior writes a `BufferedReader` loop that throws on the first malformed line (losing the rest of the feed), forgets that `split` drops trailing empties, and uses the loop index as the "line number" (wrong the moment a comment is skipped). A mid-level returns a `List<ParsedLine>` with errors as values and gets the validation order right. A senior does three more things: keeps the pipeline **lazy** so an unbounded live-socket source or a day's worth of ticks works without buffering, and can say *why* (`findFirst`/`limit` must short-circuit); models the outcome as a **sealed** type and handles it with an exhaustive `switch` so no outcome is ever dropped; and knows the two silent-corruption traps cold — `split`'s trailing-empty discard and `parseLong` accepting negatives. Bonus signal: naming why you must never `parallel()` this stream (the `AtomicInteger` counter assumes encounter order).
+
+**Common confusions**
+- *"A bad line should throw."* No — on a streaming feed, malformed ticks are *expected*. One `Err` value must not tear down the stream; return it in-band.
+- *"`split("\\|")` is fine."* It discards trailing empties: `"TOO|1.0|2.0|".split("\\|")` is length 3, not 4 — a malformed line silently mis-classified. Use limit `-1`.
+- *"The line number is the record index."* No — it's the *physical* line, counting skipped blanks/comments, so line 6 means the sixth line of the raw file.
+- *"`parseLong` rejects negatives."* It returns `-5` happily; the non-negative rule is a separate explicit guard, not a parse failure.
+- *"I'll collect to a `List` first, then process."* That defeats laziness — the feed may be unbounded (a live socket) or huge (a day's ticks). Map stream-to-stream.
+- *"Blank lines can be filtered out and ignored."* They must be *dropped from the output but still counted*, or every later error's line number drifts.
+
+**What follows from this topic**
+The "errors as values, not exceptions" pattern is the gateway to `Optional`, `Either`/`Result` types, and Java's sealed-interface-plus-exhaustive-`switch` idiom that reappears in every state machine and protocol decoder. The lazy stream-to-stream mapping is the same shape as backpressure-aware reactive pipelines (`Flow`, Reactor, RxJava) and log/ETL processing, where materialising the whole input is equally fatal. And the parsing discipline — validate in a fixed order, report the first failure with position, coerce only after validating — is exactly what a production feed handler, a CSV/FIX/JSON decoder, or a compiler front-end does; the difference between this kata and a real market-data adapter is a quoted-field escape rule and a `BufferedReader.lines()` source, both natural extensions.
+
+### Clarify & design the API
+
+Before touching a stream, pin the contract with a few questions:
+
+- **Line format?** Exactly `SYMBOL|BID|ASK|QTY` — split on `|` into **exactly four** fields; anything else is `WRONG_FIELD_COUNT`.
+- **What is noise?** After trimming, a **blank** line or one **starting with `#`** is skipped — neither a record nor an error — but it still **advances the line counter**.
+- **Errors: throw or return?** Return. A malformed line is an `Err` *value*, not an exception; the stream survives.
+- **What position does an error carry?** The **1-based physical** line number, counting every input line including skipped ones.
+- **Validation order?** Field-count → empty-symbol → bid → ask → qty, short-circuiting on the **first** failure (say this out loud — it's directly testable).
+- **Is `qty` signed?** No — non-negative; zero is valid.
+- **Must `parse` be lazy?** Yes — `Stream<String>` → `Stream<ParsedLine>` with no materialisation, so short-circuiting terminals and unbounded sources work. Never `parallel()`.
+
+Commit to a small surface — two static methods over provided domain types:
+
+```java
+public final class FeedParser {
+    public static Stream<ParsedLine> parse(Stream<String> lines);      // the lazy mapping
+    public static ParseSummary parseAll(Stream<String> lines);         // drain → (quotes, errors)
+    public record ParseSummary(List<Quote> quotes, List<ParseError> errors) {}
+}
+
+public record Quote(String symbol, double bid, double ask, long qty) {}
+public record ParseError(int line, ErrorKind kind) {}
+public enum ErrorKind { WRONG_FIELD_COUNT, EMPTY_SYMBOL, INVALID_BID, INVALID_ASK, INVALID_QTY }
+
+public sealed interface ParsedLine permits ParsedLine.Ok, ParsedLine.Err {
+    record Ok(int line, Quote quote) implements ParsedLine {}
+    record Err(ParseError error)     implements ParsedLine {}
+}
+```
+
+The enum's declaration order mirrors the validation order on purpose; the `sealed` interface is what lets the caller handle both arms exhaustively.
+
+### Write the tests
+
+Write these **first**. They pin the spec, grouped like the reference `FeedParserTest`: the canonical feed → each single-error case → validation order → laziness.
+
+**Group 1 — the canonical feed (the whole contract in one fixture).** One shared feed exercises skip-counting, good records, and every error kind with its physical line. Assert quotes and errors *separately* so a failure localises.
+
+```java
+private static Stream<String> canonicalFeed() {
+    return Stream.of(
+        "# market data feed",      // line 1: comment  → skipped
+        "LIV-MUN|1.95|2.05|1000",  // line 2: quote
+        "",                         // line 3: blank    → skipped
+        "ARS-CHE|1.50|1.60|500",   // line 4: quote
+        "|1.0|2.0|10",             // line 5: EMPTY_SYMBOL
+        "BAD|x|2.0|10",            // line 6: INVALID_BID
+        "TOO|1.0|2.0",             // line 7: WRONG_FIELD_COUNT
+        "NEG|1.0|2.0|-5");         // line 8: INVALID_QTY
+}
+
+@Test void canonical_feed_yields_exact_errors_with_physical_line_numbers() {
+    var summary = FeedParser.parseAll(canonicalFeed());
+    assertEquals(List.of(
+            new ParseError(5, ErrorKind.EMPTY_SYMBOL),
+            new ParseError(6, ErrorKind.INVALID_BID),
+            new ParseError(7, ErrorKind.WRONG_FIELD_COUNT),
+            new ParseError(8, ErrorKind.INVALID_QTY)),
+        summary.errors());
+}
+```
+
+This one test is the spine: lines 5–8 prove the counter kept ticking through the skipped comment (line 1) and blank (line 3). A record-index counter would report `(3, EMPTY_SYMBOL)` and fail here.
+
+**Group 2 — one bad field at a time.** A test per `ErrorKind`, each on a one-line feed so the line number is always 1 and the *kind* is what's under test.
+
+```java
+@Test void wrong_field_count_too_many_fields() {
+    // Trailing empty field must be counted (split limit -1) — this is 5 fields, not 4.
+    var summary = FeedParser.parseAll(Stream.of("MANY|1.0|2.0|10|"));
+    assertEquals(List.of(new ParseError(1, ErrorKind.WRONG_FIELD_COUNT)), summary.errors());
+}
+
+@Test void invalid_qty_negative_is_rejected() {
+    var summary = FeedParser.parseAll(Stream.of("SYM|1.0|2.0|-5"));
+    assertEquals(List.of(new ParseError(1, ErrorKind.INVALID_QTY)), summary.errors());
+}
+
+@Test void zero_qty_is_valid() {
+    var summary = FeedParser.parseAll(Stream.of("SYM|1.0|2.0|0"));
+    assertEquals(List.of(new Quote("SYM", 1.0, 2.0, 0)), summary.quotes());
+}
+```
+
+The `too_many_fields` test is the one that fails a naive `split("\\|")` (limit 0 drops the trailing empty → length 4 → mis-parsed). The `negative` and `zero` pair pins the non-negative guard exactly.
+
+**Group 3 — validation order (short-circuit on the first failure).** Feed a line where *every* field is bad and assert only the first check fires.
+
+```java
+@Test void validation_order_reports_only_the_first_failure() {
+    // 4 fields (ok), symbol empty, bid non-numeric, qty negative → empty-symbol wins.
+    var summary = FeedParser.parseAll(Stream.of("|x|y|-5"));
+    assertEquals(List.of(new ParseError(1, ErrorKind.EMPTY_SYMBOL)), summary.errors());
+}
+
+@Test void bid_is_checked_before_ask() {
+    var summary = FeedParser.parseAll(Stream.of("SYM|x|y|10"));   // both non-numeric → bid wins
+    assertEquals(List.of(new ParseError(1, ErrorKind.INVALID_BID)), summary.errors());
+}
+```
+
+**Group 4 — laziness (prove the pipeline short-circuits).** Drive `parse` directly, pin the sealed arms, then prove an *infinite* source terminates under `findFirst`.
+
+```java
+@Test void parse_stream_produces_ok_and_err_arms_with_line_numbers() {
+    List<ParsedLine> parsed = FeedParser.parse(canonicalFeed()).toList();
+    assertEquals(6, parsed.size());  // 2 skipped, 6 emitted
+    assertEquals(new ParsedLine.Ok(2, new Quote("LIV-MUN", 1.95, 2.05, 1000)), parsed.get(0));
+    assertEquals(new ParsedLine.Err(new ParseError(5, ErrorKind.EMPTY_SYMBOL)), parsed.get(2));
+}
+
+@Test void parse_is_lazy_and_supports_short_circuiting() {
+    // An infinite stream of valid records must still terminate — proof the pipeline never buffers.
+    Quote first = FeedParser.parse(Stream.generate(() -> "SYM|1.0|2.0|1"))
+        .map(p -> ((ParsedLine.Ok) p).quote())
+        .findFirst().orElseThrow();
+    assertEquals(new Quote("SYM", 1.0, 2.0, 1), first);
+}
+```
+
+The `Stream.generate(...)` test is the one that hangs forever (or OOMs) if you `collect` internally. If it returns, your `parse` is genuinely lazy. Plus the small cases: `empty_input_yields_no_quotes_and_no_errors`, `comment_and_blank_only_feed_yields_nothing`, and `surrounding_whitespace_on_a_record_line_is_trimmed_before_parsing`.
+
+### Implement it
+
+**`parse` — a lazy `mapMulti` threading an `AtomicInteger`.** The counter increments once per input line *before* the skip test, so skipped lines still advance it. `mapMulti` emits nothing for noise (`return` without `accept`) and exactly one `ParsedLine` for a record — all without materialising the stream.
+
+```java
+public static Stream<ParsedLine> parse(Stream<String> lines) {
+    // One increment per input line, in encounter order. Correct ONLY because the pipeline is
+    // ordered + sequential — do not parallelise this stream.
+    AtomicInteger lineNo = new AtomicInteger(0);
+    return lines.<ParsedLine>mapMulti((raw, downstream) -> {
+        int line = lineNo.incrementAndGet();
+        String trimmed = raw.trim();
+        if (trimmed.isEmpty() || trimmed.startsWith("#")) return;   // skip, but counter advanced
+        downstream.accept(parseLine(trimmed, line));
+    });
+}
+```
+
+`mapMulti` is the clean lazy way to drop noise; a `map` returning `Optional<ParsedLine>` then `.filter(Optional::isPresent).map(Optional::get)` also works but allocates and reads worse.
+
+**`parseLine` — validate in a fixed order, coerce only after validating, short-circuit on the first failure.** Split with limit `-1` so the field count is exact and trailing empties survive.
+
+```java
+private static ParsedLine parseLine(String trimmed, int line) {
+    String[] fields = trimmed.split("\\|", -1);          // -1 keeps trailing empty fields
+    if (fields.length != 4) return err(line, ErrorKind.WRONG_FIELD_COUNT);
+
+    String symbol = fields[0];
+    if (symbol.isEmpty()) return err(line, ErrorKind.EMPTY_SYMBOL);
+
+    double bid;
+    try { bid = Double.parseDouble(fields[1]); }
+    catch (NumberFormatException e) { return err(line, ErrorKind.INVALID_BID); }
+
+    double ask;
+    try { ask = Double.parseDouble(fields[2]); }
+    catch (NumberFormatException e) { return err(line, ErrorKind.INVALID_ASK); }
+
+    long qty;
+    try { qty = Long.parseLong(fields[3]); }
+    catch (NumberFormatException e) { return err(line, ErrorKind.INVALID_QTY); }
+    if (qty < 0) return err(line, ErrorKind.INVALID_QTY);   // parseLong accepts "-5" — guard it
+
+    return new ParsedLine.Ok(line, new Quote(symbol, bid, ask, qty));
+}
+```
+
+The `try/catch` is a local coercion detail, *not* control flow that escapes a line — each `catch` returns an `Err` value. The non-negative check is a separate statement because a successful parse of `"-5"` is the trap.
+
+**`parseAll` — one exhaustive `switch` over the sealed type, built on `parse`.** Reuse the lazy pipeline so there's a single source of truth for the rules; the compiler rejects a missing arm.
+
+```java
+public static ParseSummary parseAll(Stream<String> lines) {
+    List<Quote> quotes = new ArrayList<>();
+    List<ParseError> errors = new ArrayList<>();
+    parse(lines).forEach(parsed -> {
+        switch (parsed) {                                  // exhaustive: no default needed
+            case ParsedLine.Ok ok  -> quotes.add(ok.quote());
+            case ParsedLine.Err er -> errors.add(er.error());
+        }
+    });
+    return new ParseSummary(quotes, errors);
+}
+```
+
+No `default` arm: because `ParsedLine` is `sealed`, adding a third outcome later would break *this* `switch` at compile time — which is the point.
+
+### Common mistakes & senior signal
+
+- **Throwing on a bad line.** A `try/catch` around the whole loop that rethrows loses every good tick after the first malformed one. Errors are *values* (`Err`); the stream must survive them.
+- **`split("\\|")` without the `-1` limit.** The default drops trailing empties, so `"TOO|1.0|2.0|"` becomes length 3 and a malformed line is silently mis-classified. Always pass `-1` — and escape the pipe (`"\\|"`), since a bare `|` is regex alternation.
+- **Using the record index as the line number.** The counter must advance on *every* line, including skipped blanks/comments, or every later error's position drifts. Increment before the skip test.
+- **`parseLong` accepting negatives.** `Long.parseLong("-5")` returns `-5` — a successful parse. The non-negative rule is a separate explicit `if (qty < 0)` guard, not a caught exception.
+- **Materialising the stream.** Collecting to a `List` internally (or calling `.collect(...)` before returning) breaks laziness — `findFirst`/`limit` no longer short-circuit and an unbounded source hangs. Map stream-to-stream.
+- **`parallel()` on the pipeline.** The `AtomicInteger` counter is only correct in encounter order; a parallel stream shuffles increments and scrambles line numbers. Keep it ordered and sequential.
+- **A nullable `Quote` plus a side-channel error list.** Easy to forget an outcome. A `sealed ParsedLine` with an exhaustive `switch` makes the compiler prove every case is handled.
+
+**Senior tells:** reaches for `mapMulti` (or a clearly-justified `map`+`filter`) to stay lazy and can explain *why* laziness matters for a live-socket feed; names the two silent-corruption traps (`split` trailing-empty, `parseLong` negatives) before being prompted; models the outcome as a sealed type for exhaustiveness rather than nulls; notes that `bid`/`ask` are `double` for the kata but a real pricing engine uses `BigDecimal`; and, asked "what would you actually ship?", extends to a quoted/escaped-`|` field rule and a `BufferedReader.lines()` source adapter for a real socket.

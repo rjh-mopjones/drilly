@@ -1439,3 +1439,278 @@ The headline trap: **reaching for a CAS loop or a `mutex` because "lock-free is 
 - **`sleep`-based "stress" tests.** Timing-dependent, prove nothing, and often let the producer finish before the consumer starts. **Senior signal** — a `StartGate` (`std::latch`)-gated producer/consumer run asserting strictly-increasing seq, verified under TSan, that deterministically overlaps the two threads and catches lost/duplicated/reordered events.
 
 Extensions that show depth: generalise to a bounded **MPMC** queue (Vyukov's per-slot sequence number + CAS) and measure what the SPSC specialisation bought you; add a batched `try_push_n`/`try_pop_n` to amortise the release/acquire per element; and benchmark the whole thing against `std::mutex` + `std::queue` to put a number on the lock-free win.
+
+## Feed Parser — Streaming, Zero-Copy & Malformed-Line Handling
+
+### Summary
+
+**What this topic covers**
+
+You build the front door of the whole trading system: the thing that turns a raw text feed into typed quotes the book can consume. The feed is one record per line — `SYMBOL|BID|ASK|QTY` — arriving off a socket or replayed from a multi-gigabyte capture file, millions of lines a second. The hard requirement is that a *single* malformed line — a truncated packet, a vendor bug, a stray comment, a negative quantity — must **not** throw, must not allocate wildly, and must never abort the stream: it is reported with its line number and skipped, and the good lines keep flowing. This drills the signature C++ text-processing idiom: **`std::string_view` for zero-copy field slicing** and **`std::from_chars` for allocation-free, non-throwing, locale-independent number parsing** — the tools that replace the reflexive-but-wrong `stringstream`/`stod` pipeline. It is the exact technique to reach for the moment someone hands you a delimited feed to parse fast.
+
+**Mental model**
+
+The naive parse — `getline` into a string, then `std::stringstream` / `std::stod` per field — is wrong three separate ways, and naming all three *is* the kata. `stod` **throws** (`std::invalid_argument` / `out_of_range`) on bad input, so one malformed field aborts the stream unless every call is wrapped in try/catch, and exceptions on the ingest hot path are exactly what a feed handler exists to avoid. `stringstream` **allocates** and is **locale-sensitive** — under a comma-decimal locale it silently misparses `1.95` and mis-marks the book. And splitting into `std::string` fields **copies** bytes you already hold in the line buffer. The right model is: slice the trimmed line into field *views* (`std::string_view`) that point into the buffer without copying, then parse each view with `std::from_chars`, which never allocates, never throws (it hands back a `std::errc` and a past-the-end pointer), and is locale-independent by construction. The one unavoidable copy is the symbol into `Quote::symbol` — because the getline buffer is *reused* across lines, so every view into it dangles the instant the next line is read. That lifetime caveat is the trap the whole design turns on.
+
+**Key terms**
+
+- **`std::string_view`** — a non-owning `{ptr, len}` window into existing bytes; slicing and trimming it copies nothing, it just narrows the window.
+- **`std::from_chars`** — the C++17 low-level parse: `(first, last, out) -> {ptr, ec}`, no allocation, no throw, no locale; valid only if `ec == std::errc{}` **and** `ptr == last` (whole field consumed).
+- **whole-field validation** — a field is a number only if `from_chars` reached the field's end; `1.0x` leaves `ptr` short, so it is *rejected*, not silently truncated to `1.0`.
+- **unsigned rejects the sign** — `from_chars` into a `std::uint64_t` refuses a leading `-` (`errc::invalid_argument`), so `-5 -> InvalidQty` falls out for free — no special case.
+- **physical line number** — 1-based, incremented for *every* `getline`, including blank/comment lines that are skipped; it tracks the file, not the record index.
+- **fixed validation order** — count -> empty-symbol -> bid -> ask -> qty, stopping at the first failure, so each bad line yields exactly one error.
+- **the lifetime caveat** — the reused getline buffer means field views dangle after the next read; anything outliving the line (the symbol) must be **copied** into an owning `std::string`.
+- **streaming vs collecting** — `parse_feed` invokes a callback per line (constant memory over any feed size); `parse_all` is a thin collector into a `ParseResult`.
+
+**Why interviewers ask this**
+
+Text parsing is where junior and senior C++ diverge most visibly, because the junior tool (`stringstream`/`stod`) *works on the happy path* and hides three defects that only bite in production: it throws on the first bad line, it allocates per field, and it silently reads the wrong number under a foreign locale. A senior reaches for `string_view` + `from_chars` unprompted, and — the real tell — validates the *whole* field (`ptr == last`) rather than trusting `from_chars` to have consumed everything, knows that an unsigned parse rejects the sign for free, and can state the `string_view` lifetime contract precisely: which views dangle, when, and therefore what must be copied. It is also a clean lens on money stakes: a throwing parser lets one corrupt packet freeze the whole book so every strategy trades on stale prices; a locale-sensitive parse mis-marks a price; and line-numbered errors are what let ops pinpoint the offending record in a gigabyte replay.
+
+**Common confusions**
+
+- *"`stod`/`stringstream` is the normal way to parse."* — On a hot feed path it throws, allocates, and is locale-sensitive. `from_chars` does none of those; it is the right default for delimited numeric text.
+- *"If `from_chars` returns no error, the field is valid."* — Not enough. `from_chars("1.0x")` parses `1.0` with *no* error and leaves `ptr` before the `x`. You must also check `ptr == last`, or garbage-suffixed fields slip through.
+- *"I'll special-case negative quantities."* — No need. Parse into an unsigned type and `from_chars` rejects the `-` itself; the special case is a bug waiting to disagree with the rule.
+- *"A `string_view` field is fine to store in the `Quote`."* — It dangles the moment the next `getline` overwrites the buffer — a use-after-free, the same class of bug as returning a pointer to a local. The symbol must be copied.
+- *"Blank and comment lines don't count."* — They are skipped as records but still advance the physical line counter, or every error line number in a file with comments is wrong.
+
+**What follows from this topic**
+
+This is the anchor for every "parse a delimited/binary feed fast" problem you'll meet: the natural extension drops the per-line `getline` copy entirely for a hand-written state machine over a buffered byte stream (what the very hottest handlers use), and a `parse_view(std::string_view whole_feed, ...)` overload that hands back `Quote`s holding `string_view` symbols into the *caller's* buffer — forcing the lifetime contract into the API surface rather than hiding it behind a copy. From there: a strict/lenient mode (lenient clamps a negative qty to 0 instead of erroring), and, on the concurrency side, feeding parsed quotes into the SPSC ring (`feed_pipe`) so the parse thread and the book thread hand off under TSan. The `from_chars` / `string_view` discipline here is the precondition for all of it.
+
+### Clarify & design the API
+
+Clarifying questions worth asking out loud: is the parse streaming or does it materialise the whole feed (streaming — a callback per line, constant memory over a replay of any size; `parse_all` is a convenience collector on top)? What is a "record" versus a line — do blank/comment lines count toward the line number (yes — line numbers are *physical* and 1-based, so ops can find the record in the raw file)? When a field is malformed, do we throw, skip-silently, or report-and-continue (report with a line number and continue — the feed must not stall)? Is validation short-circuit or all-fields (short-circuit in a fixed order, so each bad line yields exactly one error)? And the load-bearing one: what is the lifetime of a parsed field (a `string_view` into a *reused* buffer, valid only while that one line is being parsed — so anything stored must be copied).
+
+The **lifetime and no-throw decisions are the design.** Because the getline buffer is recycled, fields are views for the duration of one line only, and the symbol — which must outlive the line inside a `Quote` — is copied into an owning `std::string`. Because the path must not throw, every field parse routes through `from_chars` (via two tiny `noexcept` helpers) instead of `stod`. The fixture types are provided verbatim in both trees; you design the splitting and the number parsing.
+
+```cpp
+namespace katas {
+
+// Which field was malformed — one error per bad line, at the first failure in the fixed order.
+enum class ErrorKind { WrongFieldCount, EmptySymbol, InvalidBid, InvalidAsk, InvalidQty };
+
+// A parsed quote. `symbol` OWNS its bytes (copied out of the recycled line buffer — which is exactly
+// why it is a std::string and not a string_view). Provided verbatim in both trees.
+struct Quote {
+    std::string symbol;
+    double bid{};
+    double ask{};
+    std::uint64_t qty{};
+    bool operator==(const Quote&) const = default;   // so EXPECT_EQ compares whole quotes
+};
+
+// A malformed line: which failure, at which 1-based physical line number. Provided verbatim.
+struct ParseError {
+    std::size_t line{};
+    ErrorKind kind{};
+    bool operator==(const ParseError&) const = default;
+};
+
+struct ParseResult {                    // the collected outcome of parse_all
+    std::vector<Quote> quotes;
+    std::vector<ParseError> errors;
+};
+
+// Streaming: one callback per non-skipped line, with the 1-based physical line number. Never throws
+// on malformed input; only the symbol is copied.
+void parse_feed(std::istream& in,
+                const std::function<void(std::size_t line, const Quote&)>& on_quote,
+                const std::function<void(const ParseError&)>& on_error);
+
+ParseResult parse_all(std::istream& in);   // collector built on parse_feed
+
+} // namespace katas
+```
+
+Say the tradeoff explicitly: `std::regex` would compile and read cleanly, but it allocates, is slow, and is throw-happy — the opposite of what this path needs. A generated parser (Ragel, or a hand-written byte-stream state machine) is *faster* still and avoids even the per-line getline copy — the extension. This kata is the `string_view` + `from_chars` middle ground: allocation-free field parsing, no exceptions, ~20 lines. Volunteering *why* it beats both extremes is the senior signal.
+
+### Write the tests
+
+The `practice/` tree ships **no tests** — writing them is the exercise. This module uses a hand-rolled header harness (`KATA_TEST` / `EXPECT_*` / `KATA_MAIN`), **not** GoogleTest; include `../../solution/common/harness.hpp` and drive the parser with a `std::istringstream`. The keystone is a single **canonical feed** whose exact quotes-and-errors output is the contract shared across every language port; pin that first, then cover each validation branch in isolation, the whitespace/edge cases, and — the two that catch the subtle bugs — physical line numbers counting skipped lines, and the streaming callback line numbers.
+
+```cpp
+#include "harness.hpp"
+#include "feed_parser.hpp"
+
+#include <sstream>
+#include <string>
+#include <vector>
+
+using katas::ErrorKind;
+using katas::ParseError;
+using katas::ParseResult;
+using katas::Quote;
+using katas::parse_all;
+using katas::parse_feed;
+
+namespace {
+// The canonical sample feed shared by all language ports — its output IS the contract.
+const char* kCanonicalFeed =
+    "# market data feed\n"
+    "LIV-MUN|1.95|2.05|1000\n"
+    "\n"
+    "ARS-CHE|1.50|1.60|500\n"
+    "|1.0|2.0|10\n"          // empty symbol   -> line 5
+    "BAD|x|2.0|10\n"         // bid not a float -> line 6
+    "TOO|1.0|2.0\n"          // 3 fields        -> line 7
+    "NEG|1.0|2.0|-5\n";      // negative qty    -> line 8
+
+ParseResult parse_str(const std::string& feed) {
+    std::istringstream in(feed);
+    return parse_all(in);
+}
+} // namespace
+
+KATA_TEST(canonical_feed_yields_exact_quotes_and_errors) {
+    ParseResult r = parse_str(kCanonicalFeed);
+    std::vector<Quote> expected_quotes{
+        Quote{"LIV-MUN", 1.95, 2.05, 1000},
+        Quote{"ARS-CHE", 1.50, 1.60, 500},
+    };
+    EXPECT_EQ(r.quotes, expected_quotes);
+    std::vector<ParseError> expected_errors{
+        ParseError{5, ErrorKind::EmptySymbol},
+        ParseError{6, ErrorKind::InvalidBid},
+        ParseError{7, ErrorKind::WrongFieldCount},
+        ParseError{8, ErrorKind::InvalidQty},
+    };
+    EXPECT_EQ(r.errors, expected_errors);         // line numbers count the comment + blank
+}
+
+KATA_TEST(comment_and_blank_only_yields_nothing) {
+    ParseResult r = parse_str("# header\n\n   \n#another\n\t\n");
+    EXPECT_TRUE(r.quotes.empty());
+    EXPECT_TRUE(r.errors.empty());                // skipped, not errors
+}
+
+KATA_TEST(final_line_without_trailing_newline_is_parsed) {
+    ParseResult r = parse_str("LIV-MUN|1.95|2.05|1000");   // getline still yields the last line
+    std::vector<Quote> expected{Quote{"LIV-MUN", 1.95, 2.05, 1000}};
+    EXPECT_EQ(r.quotes, expected);
+}
+
+KATA_TEST(negative_qty_is_invalid) {              // unsigned from_chars rejects the '-' for free
+    ParseResult r = parse_str("NEG|1.0|2.0|-5\n");
+    std::vector<ParseError> expected{ParseError{1, ErrorKind::InvalidQty}};
+    EXPECT_EQ(r.errors, expected);
+}
+
+KATA_TEST(non_integer_qty_is_invalid) {           // "1.5" leaves ptr short of end -> rejected
+    ParseResult r = parse_str("FRC|1.0|2.0|1.5\n");
+    std::vector<ParseError> expected{ParseError{1, ErrorKind::InvalidQty}};
+    EXPECT_EQ(r.errors, expected);
+}
+
+KATA_TEST(validation_order_stops_at_first_failure) {
+    ParseResult r = parse_str("|x|y|-1\n");        // every field bad; empty-symbol wins
+    std::vector<ParseError> expected{ParseError{1, ErrorKind::EmptySymbol}};
+    EXPECT_EQ(r.errors, expected);
+}
+
+KATA_TEST(surrounding_whitespace_is_trimmed) {
+    ParseResult r = parse_str("  LIV-MUN | 1.95 | 2.05 | 1000  \n");
+    std::vector<Quote> expected{Quote{"LIV-MUN", 1.95, 2.05, 1000}};
+    EXPECT_EQ(r.quotes, expected);
+}
+
+KATA_TEST(physical_line_numbers_count_skipped_lines) {
+    ParseResult r = parse_str("# a\n# b\n\nTOO|1.0|2.0\n");   // bad record is physical line 4
+    std::vector<ParseError> expected{ParseError{4, ErrorKind::WrongFieldCount}};
+    EXPECT_EQ(r.errors, expected);
+}
+
+KATA_TEST(parse_feed_reports_line_numbers_to_callbacks) {
+    std::istringstream in(kCanonicalFeed);
+    std::vector<std::size_t> quote_lines, error_lines;
+    parse_feed(in,
+        [&](std::size_t line, const Quote&) { quote_lines.push_back(line); },
+        [&](const ParseError& e) { error_lines.push_back(e.line); });
+    EXPECT_EQ(quote_lines, (std::vector<std::size_t>{2, 4}));
+    EXPECT_EQ(error_lines, (std::vector<std::size_t>{5, 6, 7, 8}));
+}
+
+KATA_MAIN()
+```
+
+The load-bearing tests are `physical_line_numbers_count_skipped_lines` (fails the instant you increment the counter only on records, not on every line), `non_integer_qty_is_invalid` (fails if you forgot the `ptr == last` whole-field check — `from_chars` happily parses the `1` of `1.5`), and `negative_qty_is_invalid` (proves the unsigned parse, not a hand-rolled sign check). `KATA_MAIN()` expands to a `main` that runs every registered `KATA_TEST`.
+
+### Implement it
+
+`parse_feed` reads into **one** reused `buffer` and, per line, trims to a `string_view`, splits on `|` into up to five field views (four valid + one overflow sentinel so `n != 4` catches "too many"), then runs the fixed validation order through two `noexcept` `from_chars` helpers. The symbol is copied into the `Quote` at the very end — the only allocation on the good path.
+
+```cpp
+namespace detail {
+// Valid only if the WHOLE view is a number: no error AND ptr reached the end (rejects "1.0x").
+inline bool parse_double(std::string_view s, double& out) noexcept {
+    if (s.empty()) return false;
+    auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), out);
+    return ec == std::errc{} && ptr == s.data() + s.size();
+}
+// Unsigned: from_chars rejects a leading '-' itself, which IS the "no negative qty" rule.
+inline bool parse_u64(std::string_view s, std::uint64_t& out) noexcept {
+    if (s.empty()) return false;
+    auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), out);
+    return ec == std::errc{} && ptr == s.data() + s.size();
+}
+} // namespace detail
+
+inline void parse_feed(std::istream& in,
+                       const std::function<void(std::size_t, const Quote&)>& on_quote,
+                       const std::function<void(const ParseError&)>& on_error) {
+    std::string buffer;
+    std::size_t line_no = 0;
+
+    while (std::getline(in, buffer)) {
+        ++line_no;                                   // 1-based, EVERY line, including skipped ones
+        std::string_view line = detail::trim(buffer);
+        if (line.empty() || line.front() == '#') continue;   // blank / comment: skip, not an error
+
+        std::string_view fields[5];                  // 4 valid + 1 overflow sentinel, no allocation
+        std::size_t n = 0, start = 0;
+        while (n < 5) {
+            std::size_t bar = line.find('|', start);
+            if (bar == std::string_view::npos) { fields[n++] = line.substr(start); break; }
+            fields[n++] = line.substr(start, bar - start);
+            start = bar + 1;
+        }
+
+        if (n != 4) { on_error({line_no, ErrorKind::WrongFieldCount}); continue; }
+
+        std::string_view symbol = detail::trim(fields[0]);
+        if (symbol.empty()) { on_error({line_no, ErrorKind::EmptySymbol}); continue; }
+
+        double bid{};
+        if (!detail::parse_double(detail::trim(fields[1]), bid)) {
+            on_error({line_no, ErrorKind::InvalidBid}); continue; }
+        double ask{};
+        if (!detail::parse_double(detail::trim(fields[2]), ask)) {
+            on_error({line_no, ErrorKind::InvalidAsk}); continue; }
+        std::uint64_t qty{};
+        if (!detail::parse_u64(detail::trim(fields[3]), qty)) {
+            on_error({line_no, ErrorKind::InvalidQty}); continue; }
+
+        // symbol COPIED here — the view dangles the moment the next getline overwrites `buffer`.
+        on_quote(line_no, Quote{std::string(symbol), bid, ask, qty});
+    }
+}
+
+inline ParseResult parse_all(std::istream& in) {
+    ParseResult result;
+    parse_feed(in,
+        [&](std::size_t, const Quote& q) { result.quotes.push_back(q); },
+        [&](const ParseError& e) { result.errors.push_back(e); });
+    return result;
+}
+```
+
+The key gotchas are all about what *doesn't* happen. First, **nothing on this path throws**: every parse is `from_chars` returning a `bool`, so a malformed field is an `on_error` + `continue`, never an exception that unwinds the stream. Second, **validity is `ec == std::errc{}` AND `ptr == last`** — the second half is the one people drop, and without it `1.0x` parses as `1.0` and a corrupt price reaches the book. Third, **`fields[5]` with the overflow slot** turns "too many fields" into the same `n != 4` check as "too few" — one branch, no special case, and no allocation for the split. Fourth, **`line_no` increments before the skip check**, so blank/comment lines still advance it and error line numbers match the physical file. And fifth, the whole reason `Quote::symbol` is a `std::string`: `std::string(symbol)` copies the bytes *now*, because the `string_view` points into `buffer`, which the next `getline` overwrites — hand a caller that view and it is a dangling read.
+
+### Common mistakes & senior signal
+
+- **Reaching for `stringstream` / `stod`.** The reflexive parse throws on the first bad line (aborting the feed), allocates per field, and misreads numbers under a comma-decimal locale. **Senior signal** — reaches for `string_view` + `from_chars` unprompted and names all three defects (throws, allocates, locale-sensitive) as the *reason*, not as an afterthought.
+- **Trusting `from_chars` without the end check.** Accepting a field because `ec == std::errc{}` lets `1.0x` through as `1.0` — a silently-truncated, wrong price. **Senior signal** — validates the *whole* field with `ptr == last`, and can show the exact `1.0x` input that the missing check lets slip.
+- **Special-casing negative quantity.** A hand-rolled `if (field[0] == '-')` is redundant and will eventually disagree with the parser. **Senior signal** — parses `qty` into an unsigned type and states that `from_chars` rejects the sign for free, so `-5 -> InvalidQty` needs no code.
+- **Storing a `string_view` field in the `Quote`.** The view dangles when the reused buffer is overwritten on the next `getline` — a use-after-free that passes every single-line test and corrupts the moment two lines are read. **Senior signal** — copies the symbol into an owning `std::string`, states the lifetime contract precisely (views valid for one line only), and points to the one copy that enforces it.
+- **Counting only records, not physical lines.** Incrementing `line_no` after the blank/comment skip makes every error number in a file with comments off-by-however-many-were-skipped, so ops can't find the record. **Senior signal** — increments before the skip, and has a test with leading comments proving the reported line matches the raw file.
