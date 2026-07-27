@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Computer Architecture Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+/* spanning title bar */
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>Computer Architecture Cheat Sheet</h1><span class="meta">CPU · memory · parallelism · mechanical sympathy · generic examples · drilly</span></div>
+
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="warn">!</span> footgun / gotcha &nbsp; <code>&#9744;</code> review / perf checklist item</li>
+<li>Numbers are <b>order-of-magnitude</b> for a modern ~3 GHz core (<b>1 cycle ≈ 0.3 ns</b>). Real parts vary; the <b>ratios</b> are the point.</li>
+<li>Focus: the machine an interviewer probes — pipeline, caches, coherence/consistency, VM, DRAM, SIMD/NUMA/GPU, ABI. Last 2 cards = <b>perf checklist</b> + symptom→cause.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
+</ul></section>
+
+<section class="card"><h3>Latency Numbers to Know</h3>
+<table><thead><tr><th>Access</th><th>~Time</th><th>~Cyc</th></tr></thead><tbody>
+<tr><td>Register</td><td>~0.3 ns</td><td>1</td></tr>
+<tr><td>L1 hit</td><td>~1 ns</td><td>~4</td></tr>
+<tr><td>L2 hit</td><td>~4 ns</td><td>~12</td></tr>
+<tr><td>L3 / LLC hit</td><td>~13 ns</td><td>~40</td></tr>
+<tr><td>DRAM</td><td>~80–100 ns</td><td>~200–300</td></tr>
+<tr><td>SSD random read</td><td>~16 µs</td><td>~50k</td></tr>
+<tr><td>Datacenter RTT</td><td>~0.5 ms</td><td>~1.5M</td></tr>
+<tr><td>HDD seek</td><td>~5–10 ms</td><td>~30M</td></tr>
+<tr><td>US↔EU RTT</td><td>~150 ms</td><td>~450M</td></tr>
+</tbody></table>
+<ul>
+<li><b>Cache line = 64 B</b> everywhere — the unit of transfer/coherence/false-sharing.</li>
+<li>The cliff: <b>L3 (~40 cyc) → DRAM (~250 cyc)</b>. One DRAM miss ≈ <b>~200–1000 retired-instruction slots</b> lost <span class="warn">!</span></li>
+<li>Reduce <i>misses</i> before reducing <i>instructions</i>: one avoided miss ≈ 100 saved ALU ops.</li>
+</ul></section>
+
+<section class="card"><h3>ISA &amp; the Abstraction Stack</h3>
+<ul>
+<li><b>ISA</b> = HW/SW contract: registers, instructions, addressing modes, memory model, exceptions. The stable interface compilers target.</li>
+<li><b>Architecture</b> (what the programmer sees) vs <b>microarchitecture</b> (how a chip implements it: pipeline depth, caches, OoO). Same ISA, many µarches — Zen vs Golden Cove both run x86-64.</li>
+</ul>
+<table><thead><tr><th>ISA</th><th>Style · notes</th></tr></thead><tbody>
+<tr><td>x86-64</td><td>CISC, var-len 1–15 B, 16 GPR, decodes to µops. Density + legacy.</td></tr>
+<tr><td>AArch64</td><td>RISC-ish, fixed 32-bit, 31 GPR. Easy parallel decode, mobile→server.</td></tr>
+<tr><td>RISC-V</td><td>Open, fixed 32-bit (+C ext), modular. Clean, extensible.</td></tr>
+</tbody></table>
+<ul>
+<li><b>RISC vs CISC</b> blurred: x86 cracks CISC into RISC-like µops; ARM added rich ops. Real distinction is decode complexity, not "few vs many" instructions.</li>
+<li><b>ISA ≠ ABI</b>: ISA lets HW run bytes; ABI (calling convention, struct layout, syscall nums) lets separately-compiled binaries interoperate <span class="warn">!</span></li>
+<li><b>von Neumann</b> (unified mem) vs <b>Harvard</b> (split I/D): real CPUs are "modified Harvard" — split L1I/L1D, unified beyond.</li>
+</ul></section>
+
+<section class="card"><h3>Number Representation</h3>
+<ul>
+<li><b>Two's complement</b>: one zero, add/sub identical to unsigned HW, top bit = sign. Range <code>[-2^(n-1), 2^(n-1)-1]</code>. Negate = invert + 1. Won over sign-mag/1's-comp (no −0, no end-around carry).</li>
+<li><b>Signed overflow = UB in C/C++</b> <span class="warn">!</span> HW sets OF flag; language may assume it never happens. Unsigned wraps (mod 2^n) — defined.</li>
+<li><b>Sign-extend</b> signed widening, <b>zero-extend</b> unsigned. Mixing signed/unsigned compares is a classic bug <span class="warn">!</span></li>
+<li><b>Endianness</b>: x86/ARM little-endian; network byte order big-endian. Bites on raw byte serialization / casts.</li>
+</ul>
+<h4>IEEE 754 single (32b)</h4>
+<pre><code>[ sign 1 | exponent 8 | mantissa 23 ]
+value = (-1)^s × 1.m × 2^(e-127)   // bias 127
+</code></pre>
+<ul>
+<li>double = 1/11/52, bias 1023. <b>exp=all-1s</b>: mantissa 0 → ±Inf; ≠0 → <b>NaN</b>. <b>exp=0</b> → subnormal/±0.</li>
+<li><b>NaN != NaN</b> (always false) <span class="warn">!</span> 0.1 not exact in binary → <code>0.1+0.2 != 0.3</code> <span class="warn">!</span> Never <code>==</code> floats — compare <code>|a-b| &lt; ε</code> (abs+rel).</li>
+<li><b>Catastrophic cancellation</b>: subtracting near-equal values loses significant digits — reformulate.</li>
+</ul></section>
+
+<section class="card"><h3>Pipeline &amp; the Perf Equation</h3>
+<h4>Classic 5-stage (RISC)</h4>
+<table><tbody>
+<tr><td><b>IF</b></td><td>fetch instr from I-cache, PC+4</td></tr>
+<tr><td><b>ID</b></td><td>decode, read regs, sign-extend</td></tr>
+<tr><td><b>EX</b></td><td>ALU op / addr calc / branch resolve</td></tr>
+<tr><td><b>MEM</b></td><td>data-cache load/store</td></tr>
+<tr><td><b>WB</b></td><td>write result to register file</td></tr>
+</tbody></table>
+<ul>
+<li>Pipelining improves <b>throughput</b> (1 instr/cycle ideal), <b>not</b> single-instruction latency. Clock set by the <i>slowest stage</i>, so shorter stages → higher freq.</li>
+<li>Deeper (superpipeline) = higher clock but bigger mispredict/hazard penalty and diminishing returns (latch overhead, clock skew).</li>
+<li>Register file: <b>write in first half</b> of WB, <b>read in second half</b> of ID — same-cycle so a WB feeds a dependent ID.</li>
+</ul>
+<h4>CPU performance equation</h4>
+<pre><code>Time = Instructions × CPI × Clock_period
+     = I × CPI / frequency
+</code></pre>
+<p>Three knobs, and they fight: fewer instrs (ISA/compiler), lower CPI (µarch), faster clock (process/pipeline). Never quote one in isolation <span class="warn">!</span></p>
+</section>
+
+<section class="card"><h3>Hazards &amp; Forwarding</h3>
+<table><thead><tr><th>Class</th><th>Cause · fix</th></tr></thead><tbody>
+<tr><td><b>Structural</b></td><td>two stages want one resource → duplicate (split I/D cache), pipeline the unit</td></tr>
+<tr><td><b>Data</b></td><td>instr needs a not-yet-written result → <b>forwarding</b> + stall</td></tr>
+<tr><td><b>Control</b></td><td>branch outcome unknown → predict + speculate</td></tr>
+</tbody></table>
+<h4>Data-hazard taxonomy</h4>
+<ul>
+<li><b>RAW</b> (true dependency) — the only <i>real</i> data hazard; forwarding hides most.</li>
+<li><b>WAR / WAW</b> — false/name deps; vanish with <b>register renaming</b> in OoO.</li>
+</ul>
+<ul>
+<li><b>Forwarding/bypass</b>: route EX/MEM result straight to a later EX input, skipping WB. Kills most RAW stalls.</li>
+<li><b>Load-use hazard</b>: data isn't ready until MEM, so a dependent next instr <b>must stall 1 cycle</b> — forwarding can't go back in time <span class="warn">!</span> Compiler schedules an independent instr into the slot.</li>
+<li><b>Branch delay slot</b>: old MIPS trick, dropped — exposes µarch, useless once pipelines deepened.</li>
+</ul></section>
+
+<section class="card"><h3>Branch Prediction &amp; Speculation</h3>
+<ul>
+<li>A mispredict flushes the pipeline: <b>~15–20 cycle penalty</b> on a deep OoO core <span class="warn">!</span> At 95% accuracy in a hot loop that's a big chunk of runtime.</li>
+<li><b>1-bit</b> predictor mispredicts <i>twice</i> per loop (entry+exit). <b>2-bit saturating counter</b> (Strong/Weak Taken/NotTaken) needs two wrong in a row to flip — tolerates the loop-exit blip.</li>
+</ul>
+<table><thead><tr><th>Structure</th><th>Answers</th></tr></thead><tbody>
+<tr><td><b>BHT</b></td><td>taken / not-taken (direction)</td></tr>
+<tr><td><b>BTB</b></td><td>target address (where to)</td></tr>
+<tr><td><b>RAS</b></td><td>return-address stack for <code>ret</code></td></tr>
+</tbody></table>
+<ul>
+<li><b>Global history</b> (GHR) captures correlation between branches; <b>tournament</b>/<b>TAGE</b> pick the best predictor per branch — modern accuracy &gt;95–99%.</li>
+<li>Indirect branches (vtables, switch) are hard — need target prediction, not just direction.</li>
+<li><b>Speculation</b>: predicted-path instrs execute but retire only if correct; on mispredict they're squashed. Leaked microarchitectural state → <b>Spectre</b> <span class="warn">!</span></li>
+</ul></section>
+
+<section class="card"><h3>Superscalar &amp; Out-of-Order</h3>
+<ul>
+<li><b>ILP</b> = independent instrs runnable at once; limited by true deps, branches, memory. <b>Superscalar</b> = issue/retire several instrs/cycle (width 4–6 on big cores).</li>
+<li><b>OoO</b> executes ready instrs regardless of program order to <i>hide latency</i> (esp. cache misses) — but <b>retires in order</b> for precise exceptions.</li>
+</ul>
+<h4>Tomasulo / modern OoO parts</h4>
+<table><tbody>
+<tr><td><b>Rename</b></td><td>arch→physical regs; kills WAR/WAW</td></tr>
+<tr><td><b>RS / scheduler</b></td><td>hold instrs till operands ready, wake on broadcast</td></tr>
+<tr><td><b>ROB</b></td><td>track in-flight instrs, retire in order</td></tr>
+<tr><td><b>LSQ</b></td><td>load/store queue, memory disambiguation</td></tr>
+</tbody></table>
+<ul>
+<li><b>Frontend</b> (fetch/decode/rename, in-order) → <b>backend</b> (OoO issue/execute) → in-order retire.</li>
+<li>Real sustained IPC is well below issue width (~1–3) — deps, misses, mispredicts. Wider ≠ proportionally faster <span class="warn">!</span></li>
+<li>Mispredict: squash all ROB entries after the branch, restore rename map, refetch.</li>
+</ul></section>
+
+<section class="card"><h3>Cache Organization</h3>
+<h4>Address split (physical)</h4>
+<pre><code>[  tag  |  index  |  offset  ]
+offset = log2(line=64)   = 6 bits
+index  = log2(#sets)
+tag    = rest (identity check)
+</code></pre>
+<table><thead><tr><th>Mapping</th><th>Note</th></tr></thead><tbody>
+<tr><td>Direct-mapped</td><td>1 way; fast, cheap; conflict misses on aliasing addrs</td></tr>
+<tr><td>N-way set-assoc</td><td>N slots/set; 8-way typical L1/L2 — best balance</td></tr>
+<tr><td>Fully-assoc</td><td>any slot; no conflicts; only tiny (TLB)</td></tr>
+</tbody></table>
+<h4>The 3 C's</h4>
+<ul>
+<li><b>Compulsory</b> (cold) — first touch; fix w/ prefetch, bigger lines.</li>
+<li><b>Capacity</b> — working set &gt; cache; fix w/ blocking/tiling.</li>
+<li><b>Conflict</b> — too many hot addrs map to one set; fix w/ associativity. <b>Power-of-2 stride</b> maps everything to few sets → thrash <span class="warn">!</span></li>
+</ul>
+<ul>
+<li><b>Write-back</b> (dirty bit, write on evict) beats write-through for bandwidth; <b>write-allocate</b> fetches line on write miss. True LRU rare → <b>pseudo-LRU</b>.</li>
+</ul></section>
+
+<section class="card"><h3>Coherence &amp; False Sharing</h3>
+<h4>MESI states (per line, per cache)</h4>
+<table><tbody>
+<tr><td><b>M</b>odified</td><td>dirty, exclusive — only valid copy</td></tr>
+<tr><td><b>E</b>xclusive</td><td>clean, only copy — can write silently</td></tr>
+<tr><td><b>S</b>hared</td><td>clean, other caches may hold it</td></tr>
+<tr><td><b>I</b>nvalid</td><td>not present / stale</td></tr>
+</tbody></table>
+<ul>
+<li>A write to a Shared line must <b>invalidate all other copies</b> (RFO — read-for-ownership) before proceeding.</li>
+<li><b>Snoop</b> (broadcast on bus) is simple but doesn't scale; <b>directory</b>-based tracks sharers per line for many-core/NUMA.</li>
+<li>Invalidation beat update protocols (avoids useless update traffic).</li>
+</ul>
+<h4>False sharing <span class="warn">!</span></h4>
+<ul>
+<li>Two threads write <b>different variables in the same 64 B line</b> → line ping-pongs between cores' caches (RFO each write). No logical sharing, huge slowdown.</li>
+<li>Symptom: parallel code slower than serial; <code>perf</code> shows high coherence/HITM.</li>
+<li><b>Fix</b>: pad/align hot per-thread data to 64 B — <code>alignas(64)</code>, cache-line padding, or per-thread local accumulation merged at the end.</li>
+</ul></section>
+
+<section class="card"><h3>Memory Consistency &amp; Fences</h3>
+<ul>
+<li><b>Coherence</b> = one address, all cores agree on its value order. <b>Consistency</b> = ordering <i>across different</i> addresses. Different problems <span class="warn">!</span></li>
+</ul>
+<table><thead><tr><th>Model</th><th>Reorders</th></tr></thead><tbody>
+<tr><td><b>SC</b> (sequential)</td><td>none — intuitive, expensive</td></tr>
+<tr><td><b>x86-TSO</b></td><td>only <b>store→load</b> (store buffer); loads not reordered w/ loads</td></tr>
+<tr><td><b>ARM/POWER</b> (weak)</td><td>almost anything — need explicit barriers</td></tr>
+</tbody></table>
+<ul>
+<li><b>Store buffer</b> lets a core's store retire before it's globally visible → later loads can pass earlier stores. Root of TSO's one relaxation.</li>
+<li>x86 fences: <code>mfence</code> (full), <code>sfence</code>, <code>lfence</code>. <code>lock</code>-prefixed RMW is a full barrier.</li>
+<li>C++/language model: <b>acquire</b> (loads after stay after), <b>release</b> (stores before stay before), <b>seq_cst</b> default. Pair release-store with acquire-load to publish data safely.</li>
+<li>Compiler reorders too — a lock/atomic/fence, not <code>volatile</code>, gives ordering <span class="warn">!</span></li>
+</ul></section>
+
+<section class="card"><h3>Virtual Memory &amp; TLB</h3>
+<ul>
+<li>Page table maps <b>virtual→physical</b> pages (typ. 4 KB). x86-64 uses a <b>4-level radix tree</b> (PML4→PDPT→PD→PT); a miss = <b>4 dependent memory loads</b> (the page walk) <span class="warn">!</span></li>
+<li><b>TLB</b> caches recent translations (small, fully/highly-assoc). Hit → translate in ~1 cyc; miss → HW page walker.</li>
+</ul>
+<h4>TLB reach</h4>
+<pre><code>reach = entries × page_size
+64 entries × 4 KB = 256 KB
+64 entries × 2 MB = 128 MB   // huge pages
+</code></pre>
+<ul>
+<li>Working set &gt; TLB reach → <b>TLB thrash</b>; huge/large pages (2 MB/1 GB) multiply reach and cut walk depth.</li>
+<li><b>ASID/PCID</b> tags entries by address space → avoid full TLB flush on context switch.</li>
+<li>L1 is usually <b>VIPT</b> (virtually-indexed, physically-tagged): index the set from the untranslated offset bits while the TLB translates the tag — overlap for speed.</li>
+<li>Page fault (not present) traps to OS; distinct from a TLB miss (HW-handled on x86/ARM).</li>
+</ul></section>
+
+<section class="card"><h3>DRAM &amp; Main Memory</h3>
+<ul>
+<li>Cell = <b>1T1C</b> (1 transistor + 1 capacitor) — dense but leaky → <b>refresh every ~64 ms</b> (~32 ms hot). "Dynamic." SRAM (6T) needs no refresh, ~10× faster/bigger per bit → caches.</li>
+<li>Hierarchy: <b>channel → DIMM → rank → bank → row × column</b>. Bank = independent grid w/ its own row buffer = unit of parallelism.</li>
+</ul>
+<h4>Row buffer = the whole game</h4>
+<ul>
+<li><b>ACTIVATE</b> a row → sense amps (row buffer). <b>Row hit</b>: read/write open row, cheap. <b>Row conflict</b>: PRECHARGE old + ACTIVATE new, expensive <span class="warn">!</span></li>
+<li>Timings: <b>tRCD</b> (ACT→CAS), <b>tCAS/CL</b> (CAS→data), <b>tRP</b> (precharge). Row-miss ≈ tRP+tRCD+CL.</li>
+</ul>
+<ul>
+<li><b>Latency ~50–90 ns for years</b> — barely improves. DDR5 / more channels raise <b>bandwidth</b> (tens–100s GB/s), not single-access latency <span class="warn">!</span></li>
+<li>DDR = double data rate (both clock edges) + prefetch, not a faster array.</li>
+<li><b>Little's Law</b>: outstanding requests to saturate BW = BW × latency. Can't keep that many in flight → latency-bound.</li>
+</ul></section>
+
+<section class="card"><h3>SIMD &amp; Data Parallelism</h3>
+<ul>
+<li>One instruction, many lanes. Same op across a vector register in parallel — throughput multiplier for regular data.</li>
+</ul>
+<table><thead><tr><th>ISA</th><th>Width · f32 lanes</th></tr></thead><tbody>
+<tr><td>SSE</td><td>128-bit · 4</td></tr>
+<tr><td>AVX/AVX2</td><td>256-bit · 8</td></tr>
+<tr><td>AVX-512</td><td>512-bit · 16 (+ mask regs)</td></tr>
+<tr><td>ARM NEON</td><td>128-bit · 4 (SVE = scalable)</td></tr>
+</tbody></table>
+<ul>
+<li><b>Auto-vectorization</b>: compiler does it if the loop is countable, no aliasing, unit stride, no cross-iter deps. Check with <code>-fopt-info-vec</code> / disassembly <span class="warn">!</span></li>
+<li>Otherwise <b>intrinsics</b> (<code>_mm256_add_ps</code>) or libraries. <b>SoA beats AoS</b> for vectorization (contiguous lanes).</li>
+<li>Alignment matters: unaligned loads slower / faulting on some ops; align to vector width. Reductions need horizontal ops (extra cost).</li>
+<li>AVX-512 can cause <b>frequency throttling</b> on some parts — measure before assuming a win <span class="warn">!</span></li>
+</ul></section>
+
+<section class="card"><h3>Multicore, SMP &amp; NUMA</h3>
+<ul>
+<li><b>SMT/Hyper-Threading</b>: 2 logical threads share one core's execution resources — hides latency, ~1.2–1.3× not 2×. Contends for L1/L2 and ports.</li>
+<li><b>SMP</b>: symmetric cores, shared coherent LLC + memory, uniform latency (small systems).</li>
+</ul>
+<h4>NUMA</h4>
+<ul>
+<li>Each socket owns local DRAM; remote memory reached over interconnect (UPI/Infinity Fabric). <b>Remote access ~1.5–2× local latency + lower BW</b> <span class="warn">!</span></li>
+<li><b>First-touch</b>: a page is placed in the node of the thread that <i>first writes</i> it — init data in the thread that will use it, not a single setup thread <span class="warn">!</span></li>
+<li>Pin threads (<code>numactl --cpunodebind --membind</code>, affinity) so hot data stays local. Cross-node coherence traffic is expensive.</li>
+<li>LLC often shared per socket; false sharing across sockets is the worst case.</li>
+</ul></section>
+
+<section class="card"><h3>GPUs &amp; Accelerators</h3>
+<ul>
+<li><b>SIMT</b>: threads grouped into <b>warps/wavefronts</b> (32/64) run in lockstep. Massive thread count <b>hides memory latency</b> instead of caching it — swap warps on a stall.</li>
+<li><b>Throughput, not latency</b>: thousands of ALUs, high BW (HBM), weak single-thread. Right for data-parallel, regular work.</li>
+</ul>
+<h4>Footguns</h4>
+<ul>
+<li><b>Warp divergence</b>: <code>if</code> that splits a warp serializes both paths — keep branches uniform within a warp <span class="warn">!</span></li>
+<li><b>Uncoalesced access</b>: threads in a warp should touch <b>contiguous</b> addresses so one memory transaction serves all. Strided/random = many transactions, tanks BW <span class="warn">!</span></li>
+<li>Occupancy = enough resident warps to hide latency; limited by registers/shared memory.</li>
+</ul>
+<ul>
+<li><b>Accelerators</b>: TPU / <b>systolic arrays</b> for matmul (MACs stream data), NPUs, FPGAs. Trade generality for perf/watt on one domain (matrix, ML, crypto).</li>
+</ul></section>
+
+<section class="card"><h3>Storage, I/O, DMA &amp; Interrupts</h3>
+<ul>
+<li><b>MMIO</b>: device registers mapped into physical address space — CPU reads/writes them like memory (uncached).</li>
+<li><b>DMA</b>: device transfers to/from RAM <i>without</i> the CPU copying byte-by-byte; CPU sets up descriptors, device signals completion. Frees the core for real work.</li>
+<li><b>PCIe</b>: serial, point-to-point lanes (x1..x16); NVMe SSDs and GPUs hang off it.</li>
+</ul>
+<h4>Interrupts vs polling</h4>
+<table><thead><tr><th>Mode</th><th>When</th></tr></thead><tbody>
+<tr><td>Interrupt</td><td>low rate / latency — sleep till event; context-switch cost</td></tr>
+<tr><td>Polling</td><td>high rate — busy-check; burns CPU but no IRQ overhead</td></tr>
+</tbody></table>
+<ul>
+<li><b>MSI/MSI-X</b>: message-signaled interrupts (a memory write) replace legacy INTx lines — steer to a specific core, more vectors.</li>
+<li><b>NVMe</b>: many deep parallel submission/completion <b>queues</b> in RAM — exploits SSD parallelism, minimal per-IO CPU. NIC drivers poll (DPDK/NAPI) under load.</li>
+<li>Cache coherence for DMA: modern IOMMU/DMA is coherent, but on some systems drivers must flush/invalidate <span class="warn">!</span></li>
+</ul></section>
+
+<section class="card"><h3>Assembly, ABI &amp; Calling Convention</h3>
+<h4>x86-64 System V (Linux/macOS)</h4>
+<table><thead><tr><th>Role</th><th>Registers</th></tr></thead><tbody>
+<tr><td>Int args 1–6</td><td><code>rdi rsi rdx rcx r8 r9</code></td></tr>
+<tr><td>Return</td><td><code>rax</code> (+<code>rdx</code> for 128b)</td></tr>
+<tr><td>Callee-saved</td><td><code>rbx rbp r12–r15 rsp</code></td></tr>
+<tr><td>Caller-saved</td><td><code>rax rcx rdx rsi rdi r8–r11</code></td></tr>
+<tr><td>FP/SIMD args</td><td><code>xmm0–xmm7</code></td></tr>
+</tbody></table>
+<ul>
+<li><b>Stack grows down</b>; <code>push</code> decrements <code>rsp</code> <span class="warn">!</span> Args 7+ passed on stack.</li>
+<li><b>16-byte stack alignment</b> at a <code>call</code> boundary (SSE/AVX require it — misalign → crash/slow) <span class="warn">!</span></li>
+<li><b>Red zone</b>: 128 B below <code>rsp</code> leaf functions use without adjusting <code>rsp</code> (SysV only; Windows differs — <code>rcx rdx r8 r9</code>, shadow space).</li>
+<li>ABI is <b>convention, not HW-enforced</b> — violate it → silent corruption, not a fault <span class="warn">!</span></li>
+</ul>
+<pre><code>mov rax,[rbx+rcx*8+16]  // base+index*scale+disp
+// scale∈{1,2,4,8}: free array index
+</code></pre>
+<p>AArch64: args <code>x0–x7</code>, ret <code>x0</code>, callee-saved <code>x19–x28</code>, <code>x30</code>=link reg, fixed 32-bit encoding.</p>
+</section>
+
+<section class="card"><h3>Performance Analysis</h3>
+<ul>
+<li>Golden equation: <code>Time = I × CPI × clock_period</code>. To go faster, cut the dominant term — <b>measure which</b> first.</li>
+</ul>
+<h4>Amdahl vs Gustafson</h4>
+<ul>
+<li><b>Amdahl</b> (fixed problem): speedup = <code>1 / (s + p/N)</code>; the serial fraction <code>s</code> caps you — 5% serial ⇒ ≤20× ever <span class="warn">!</span></li>
+<li><b>Gustafson</b> (scale problem with N): near-linear speedup — grow the workload, serial part stays fixed.</li>
+</ul>
+<h4>Roofline</h4>
+<ul>
+<li>Plot GFLOP/s vs <b>arithmetic intensity</b> (FLOP/byte). Left of the ridge = <b>memory-bound</b> (raise intensity / reuse); right = <b>compute-bound</b> (vectorize, more FLOPs).</li>
+</ul>
+<ul>
+<li><b>Perf counters</b> (PMU): IPC, cache-miss rate, branch-mispredict, stalled cycles. <code>perf stat</code>, <code>perf record/report</code>, top-down analysis (frontend/backend/retiring/bad-spec bound).</li>
+<li>Profile before optimizing — intuition about hotspots is usually wrong <span class="warn">!</span></li>
+</ul></section>
+
+<section class="card"><h3>Power, Thermals &amp; Scaling</h3>
+<ul>
+<li><b>Dynamic power</b>: <code>P = α·C·V²·f</code> — voltage dominates (squared). Static power = leakage (grows as transistors shrink).</li>
+<li><b>Dennard scaling</b> (power/area constant as transistors shrink) <b>ended ~2005</b> — couldn't keep dropping V. → the <b>power wall</b>.</li>
+</ul>
+<h4>The chain of consequences</h4>
+<ul>
+<li>Can't raise clock without melting → clocks stalled ~3–5 GHz.</li>
+<li>Moore's Law still gave transistors → spend them on <b>more cores</b> (multicore era), not faster ones.</li>
+<li><b>Dark silicon</b>: can't power all transistors at once → specialized accelerators, aggressive power gating.</li>
+</ul>
+<ul>
+<li><b>DVFS</b>: dynamically scale V/f to workload (turbo up when thermal headroom, throttle when hot). Race-to-idle vs steady-state tradeoffs.</li>
+<li>TDP is a <i>sustained</i> thermal budget, not peak; boost is opportunistic and temperature-limited <span class="warn">!</span></li>
+</ul></section>
+
+<section class="card"><h3>&#9733; Mechanical-Sympathy Checklist</h3>
+<h4>Data layout</h4>
+<ul>
+<li>&#9744; <b>SoA over AoS</b> when you scan one field — 8× fewer lines touched, vectorizable.</li>
+<li>&#9744; Hot fields packed together; cold/rare fields split out so a line carries only useful bytes.</li>
+<li>&#9744; Structs sized/padded to fit lines; avoid straddling a 64 B boundary on hot data.</li>
+</ul>
+<h4>Access pattern</h4>
+<ul>
+<li>&#9744; <b>Sequential, unit-stride</b> access (prefetcher-friendly) over pointer-chasing / random.</li>
+<li>&#9744; Working set fits the target cache level (block/tile large loops).</li>
+<li>&#9744; Avoid power-of-2 strides that alias into one set (conflict thrash) <span class="warn">!</span></li>
+</ul>
+<h4>Concurrency</h4>
+<ul>
+<li>&#9744; No <b>false sharing</b>: per-thread hot data padded/aligned to 64 B; NUMA <b>first-touch</b> + affinity.</li>
+<li>&#9744; Right memory ordering (acquire/release), not <code>volatile</code>; minimize contended atomics.</li>
+</ul>
+<h4>Control flow</h4>
+<ul>
+<li>&#9744; <b>Predictable branches</b> in hot loops; branchless / sort data so predictor learns.</li>
+<li>&#9744; Confirm the compiler <b>vectorized</b> the loop (check disasm), didn't spill.</li>
+</ul>
+<h4>Before optimizing</h4>
+<ul>
+<li>&#9744; Classified the loop: <b>compute- / memory- / latency-bound</b>? (roofline + <code>perf</code>) — fixes differ.</li>
+<li>&#9744; Measured with perf counters, not guessed. One avoided DRAM miss &gt; 100 saved ALU ops.</li>
+</ul></section>
+
+<section class="card"><h3>Common Pitfalls — Symptom → Cause</h3>
+<table><thead><tr><th>Symptom</th><th>Likely cause</th></tr></thead><tbody>
+<tr><td>Parallel slower than serial</td><td><b>false sharing</b> — vars share a 64 B line <span class="warn">!</span></td></tr>
+<tr><td>Same O(n), 20–50× slower</td><td>random/pointer-chase vs sequential — latency-bound <span class="warn">!</span></td></tr>
+<tr><td>Loop won't speed up w/ SIMD</td><td>aliasing / non-unit stride blocks auto-vec <span class="warn">!</span></td></tr>
+<tr><td>Perf cliff at some size</td><td>working set spilled a cache level / TLB reach</td></tr>
+<tr><td>Every Nth access slow</td><td>power-of-2 stride → set conflict thrash <span class="warn">!</span></td></tr>
+<tr><td>Adding cores stops helping</td><td>Amdahl serial fraction / bandwidth wall</td></tr>
+<tr><td>Faster on 1 socket than 2</td><td>NUMA remote memory / cross-socket coherence <span class="warn">!</span></td></tr>
+<tr><td>Hot loop stalls, low IPC</td><td>branch mispredict or cache-miss bound — check PMU</td></tr>
+<tr><td><code>0.1+0.2 != 0.3</code></td><td>binary float can't represent 0.1; use tolerance <span class="warn">!</span></td></tr>
+<tr><td>Crash across FFI/inline-asm</td><td>ABI mismatch: arg regs / stack align / callee-saved <span class="warn">!</span></td></tr>
+<tr><td>Random signed-math bug</td><td>signed overflow UB / signed↔unsigned compare <span class="warn">!</span></td></tr>
+<tr><td>Clock won't go higher</td><td>power wall (V²f) — spend transistors on cores <span class="warn">!</span></td></tr>
+</tbody></table>
+</section>
+
+</div>
+</body>
+</html>

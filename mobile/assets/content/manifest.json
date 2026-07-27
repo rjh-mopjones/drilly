@@ -82,6 +82,22 @@
       "itemCount": 21
     },
     {
+      "id": "computer-architecture",
+      "file": "/computer-architecture-interview-primer.md",
+      "title": "Computer Architecture",
+      "category": "System Fundamentals",
+      "itemLabel": "Topic",
+      "itemsPlural": "computer architecture topics",
+      "storagePrefix": "ip:computer-architecture",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": [],
+      "cheatSheetUrl": "/computer-architecture-cheatsheet.html",
+      "itemCount": 21
+    },
+    {
       "id": "api-design",
       "file": "/api-design-interview-primer.md",
       "title": "API Design",
