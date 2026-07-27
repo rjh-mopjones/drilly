@@ -130,6 +130,22 @@
       "itemCount": 21
     },
     {
+      "id": "functional-programming",
+      "file": "/functional-programming-interview-primer.md",
+      "title": "Functional Programming",
+      "category": "System Fundamentals",
+      "itemLabel": "Topic",
+      "itemsPlural": "functional programming topics",
+      "storagePrefix": "ip:functional-programming",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": [],
+      "cheatSheetUrl": "/functional-programming-cheatsheet.html",
+      "itemCount": 21
+    },
+    {
       "id": "testing",
       "file": "/testing-interview-primer.md",
       "title": "Testing & QA",

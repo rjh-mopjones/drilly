@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Functional Programming Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+/* spanning title bar */
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>Functional Programming Cheat Sheet</h1><span class="meta">multi-paradigm · Kotlin/TS/Java/Python/Rust, Scala/Haskell for rigor · generic examples · drilly</span></div>
+
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="warn">!</span> footgun / gotcha &nbsp; <code>&#9744;</code> review checklist item</li>
+<li>Pragmatic lean: concepts shown through mainstream languages (Kotlin, JS/TS, Java, Python, Rust); Scala/Haskell only where rigor needs it. FP is a <b>style</b>, not a language — the ideas port everywhere.</li>
+<li>Spine: <b>purity → immutability → HOFs → ADTs + Option/Either → the functor/applicative/monad ladder → effects at the edges</b>. Last 2 cards = "think functionally" checklist + pitfalls / when-NOT-to-use.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
+</ul></section>
+
+<section class="card"><h3>Pure Functions &amp; Side Effects</h3>
+<p>A function is <b>pure</b> iff: (1) <b>same input → same output</b> (deterministic), and (2) <b>no observable side effects</b> — no mutating args/globals, no I/O, no clock/random, no throwing for control flow.</p>
+<pre><code>// pure: referentially transparent
+const add = (a, b) =&gt; a + b;
+// impure: reads clock, mutates, does I/O
+let total = 0;
+function charge(x){ total += x; log(now()); }</code></pre>
+<h4>What purity buys</h4>
+<ul>
+<li><b>Referential transparency</b> — replace a call with its result, meaning unchanged. Enables memoization, CSE, reordering.</li>
+<li>Test with <code>assertEquals</code> — no mocks, no setup, no clock.</li>
+<li>Safe to parallelize (no shared mutation → no data races).</li>
+<li>Local reasoning: the signature is the whole contract <span class="pg">core value</span></li>
+</ul>
+<p><span class="warn">!</span> "Returns a value" ≠ pure. <code>getUser(id)</code> hits a DB — impure. Hidden effects (logging, lazy cache fills, ambient config) are the sneaky ones.</p>
+<p><b>You can't make everything pure</b> — a program with zero effects does nothing. FP answer: <b>functional core / imperative shell</b> — pure decisions in the middle, effects at the thin edges (see Effects/IO card).</p>
+</section>
+
+<section class="card"><h3>Immutability &amp; Persistent Structures</h3>
+<p>Don't mutate — produce a <b>new</b> value. Aliases can't surprise you; "who changed this?" bugs vanish; snapshots are free.</p>
+<table><thead><tr><th>Lang</th><th>Immutable binding / data</th></tr></thead><tbody>
+<tr><td>Kotlin</td><td><code>val</code> + <code>data class</code> <code>.copy()</code>; <code>listOf</code></td></tr>
+<tr><td>JS/TS</td><td><code>const</code>, <code>Object.freeze</code>, spread <code>{...o}</code>, <code>readonly</code></td></tr>
+<tr><td>Java</td><td><code>final</code>, <code>record</code>, <code>List.of</code></td></tr>
+<tr><td>Python</td><td><code>tuple</code>, <code>frozenset</code>, <code>@dataclass(frozen=True)</code></td></tr>
+<tr><td>Rust</td><td>immutable by default; <code>mut</code> is opt-in</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> <code>const</code>/<code>val</code> freeze the <b>binding</b>, not the object. <code>const a=[]; a.push(1)</code> works. <code>final</code> ≠ deep-immutable. Freeze the data too.</p>
+<h4>Persistent = structural sharing</h4>
+<ul>
+<li>Naive copy-on-write is O(n). Persistent structures share unchanged subtrees → <b>copy is O(log n)</b>, old + new both valid.</li>
+<li>Backbone is the <b>HAMT</b> (hash array-mapped trie, ~32-way) for maps/sets; RRB-tree for vectors. Clojure, Scala, Immutable.js, Immer.</li>
+<li>Update walks one root-to-leaf path (~log₃₂ n ≈ 6-7 hops for millions), copies only those nodes.</li>
+</ul>
+</section>
+
+<section class="card"><h3>HOF: map / filter / reduce / fold</h3>
+<p>Higher-order function = takes and/or returns a function. The core three replace hand-rolled loops: <b>map</b> (1:1 transform), <b>filter</b> (keep), <b>reduce/fold</b> (collapse to one). Loop mechanics disappear; intent remains.</p>
+<h4>Same op, different names</h4>
+<table><thead><tr><th></th><th>map</th><th>filter</th><th>reduce/fold</th></tr></thead><tbody>
+<tr><td>Java Stream</td><td><code>.map</code></td><td><code>.filter</code></td><td><code>.reduce</code>/<code>.collect</code></td></tr>
+<tr><td>Kotlin</td><td><code>map</code></td><td><code>filter</code></td><td><code>fold</code>/<code>reduce</code></td></tr>
+<tr><td>JS array</td><td><code>map</code></td><td><code>filter</code></td><td><code>reduce</code></td></tr>
+<tr><td>Python</td><td><code>map</code>/compr</td><td><code>filter</code></td><td><code>functools.reduce</code></td></tr>
+<tr><td>Rust iter</td><td><code>map</code></td><td><code>filter</code></td><td><code>fold</code></td></tr>
+</tbody></table>
+<pre><code>orders.filter { it.paid }
+      .map { it.total }
+      .fold(0) { acc, x -&gt; acc + x }</code></pre>
+<p><b>fold is universal</b> — <code>map</code> and <code>filter</code> are both folds. Signature <code>fold(init){acc,x-&gt;acc}</code> threads an accumulator; give it the seed + combine.</p>
+<p><span class="warn">!</span> <code>reduce</code> (no seed) <b>throws on empty</b>; <code>fold</code> takes an initial value → total. Prefer <code>fold</code>. <code>reduce</code>'s type is fixed to the element type.</p>
+</section>
+
+<section class="card"><h3>Closures &amp; the Loop-Var Trap</h3>
+<p>A <b>closure</b> = a function + the environment it <i>captured</i> at definition. It closes over variables by <b>reference to the binding</b> (most langs), not a snapshot of the value.</p>
+<pre><code>function counter(){ let n = 0;
+  return () =&gt; ++n; }   // n lives on past return</code></pre>
+<h4>The classic bug <span class="warn">!</span></h4>
+<pre><code>// JS var: all print 3 — one shared binding
+for (var i=0;i&lt;3;i++) setTimeout(()=&gt;log(i));
+// Fix: let → fresh binding per iteration → 0,1,2
+for (let i=0;i&lt;3;i++) setTimeout(()=&gt;log(i));</code></pre>
+<table><thead><tr><th>Lang</th><th>Loop-capture &amp; fix</th></tr></thead><tbody>
+<tr><td>JS</td><td><code>let</code> per-iter binding (not <code>var</code>)</td></tr>
+<tr><td>Java</td><td>var must be <b>effectively final</b>; copy inside loop</td></tr>
+<tr><td>Python</td><td>late-binding <span class="warn">!</span> — bind via default arg <code>lambda i=i:</code></td></tr>
+<tr><td>Go</td><td>pre-1.22 shared; <b>1.22+</b> per-iter var</td></tr>
+<tr><td>Rust</td><td><code>move</code> closures take ownership; borrow-checked</td></tr>
+</tbody></table>
+<p>Uses: callbacks, partial application, encapsulated private state, memo caches, event handlers.</p>
+</section>
+
+<section class="card"><h3>Recursion &amp; Tail-Call Optimization</h3>
+<p>FP loops via recursion. Naive recursion grows the call stack → <b>StackOverflow</b> on deep inputs <span class="warn">!</span>. Fix: <b>tail recursion</b> — the recursive call is the <i>last</i> action, so the frame can be reused (a jump, O(1) stack).</p>
+<pre><code>// NOT tail: work (`n *`) happens AFTER the call
+fun fac(n)= if(n&lt;=1) 1 else n*fac(n-1)
+// tail: accumulator carries the result
+tailrec fun fac(n, acc=1L): Long =
+  if(n&lt;=1) acc else fac(n-1, n*acc)</code></pre>
+<p>Trick: add an <b>accumulator</b> param to move the pending work before the call.</p>
+<table><thead><tr><th>Runtime</th><th>TCO?</th></tr></thead><tbody>
+<tr><td>Scala <code>@tailrec</code>, Kotlin <code>tailrec</code></td><td><b>Yes</b> (compiler rewrites to loop; verified)</td></tr>
+<tr><td>Haskell</td><td>lazy — uses guarded recursion / accumulators</td></tr>
+<tr><td>JVM (Java), Python, most JS engines</td><td><b>No</b> <span class="warn">!</span> — will overflow</td></tr>
+</tbody></table>
+<p>No TCO → rewrite as an explicit loop/fold, or use a trampoline. <code>tailrec</code>/<code>@tailrec</code> annotations <b>fail to compile</b> if the call isn't actually in tail position — use them as a guarantee.</p>
+</section>
+
+<section class="card"><h3>Currying &amp; Partial Application</h3>
+<p>Two distinct things people conflate:</p>
+<ul>
+<li><b>Currying</b>: turn <code>f(a,b,c)</code> into <code>f(a)(b)(c)</code> — a chain of 1-arg functions. Structural.</li>
+<li><b>Partial application</b>: fix <i>some</i> args now, get a function of the rest. An <i>act</i>, not a shape.</li>
+</ul>
+<pre><code>// partial application
+const add = (a,b)=&gt;a+b;
+const inc = add.bind(null, 1);   // inc(x)=x+1
+const inc2 = (b)=&gt;add(1,b);       // arrow
+
+// curried
+const mul = a =&gt; b =&gt; a*b;
+const double = mul(2);           // double(5)=10</code></pre>
+<table><thead><tr><th>Lang</th><th>Partial application</th></tr></thead><tbody>
+<tr><td>Python</td><td><code>functools.partial(f, a)</code></td></tr>
+<tr><td>JS/TS</td><td><code>f.bind</code>, arrow chains</td></tr>
+<tr><td>Kotlin</td><td>lambda <code>{ b -&gt; f(a, b) }</code></td></tr>
+<tr><td>Haskell</td><td>auto — every fn is curried, apply fewer args</td></tr>
+<tr><td>Rust</td><td>closures capturing the fixed arg</td></tr>
+</tbody></table>
+<p>Why: pre-configure functions for pipelines/HOFs — <code>map(multiplyBy(3))</code>, a logger with the level baked in, dependency injection without a framework.</p>
+</section>
+
+<section class="card"><h3>Composition &amp; Pipe</h3>
+<p>Build big functions from small ones. <code>compose(f,g)(x)=f(g(x))</code> — <b>right-to-left</b> (math order). <code>pipe(f,g)(x)=g(f(x))</code> — <b>left-to-right</b> (reading order, data-flow).</p>
+<pre><code>const compose = (...fs)=&gt;x=&gt;fs.reduceRight((a,f)=&gt;f(a),x);
+const pipe    = (...fs)=&gt;x=&gt;fs.reduce((a,f)=&gt;f(a),x);
+pipe(trim, toLower, slugify)("  Hi There ");</code></pre>
+<table><thead><tr><th>Lang</th><th>Pipe idiom</th></tr></thead><tbody>
+<tr><td>Kotlin</td><td><code>let</code> chains / scope fns</td></tr>
+<tr><td>Elixir/F#</td><td><code>|&gt;</code> native pipe operator</td></tr>
+<tr><td>Haskell</td><td><code>.</code> compose, <code>&amp;</code> pipe</td></tr>
+<tr><td>Rust</td><td>method-chain iterators</td></tr>
+</tbody></table>
+<h4>Point-free (tacit)</h4>
+<p>Define functions without naming args: <code>const clean = pipe(trim, toLower)</code>. <span class="warn">!</span> Over-used it gets <b>unreadable</b> and murders stack traces. Point-free is a tool, not a virtue — name the arg when it's clearer.</p>
+<p>Composition only lines up when types match end-to-end; <code>Option</code>/<code>Either</code> returns need <b>Kleisli</b> composition (compose via <code>flatMap</code>).</p>
+</section>
+
+<section class="card"><h3>ADTs &amp; Pattern Matching</h3>
+<p>Model data by <b>composition</b>: <b>product types</b> (AND — struct/record/tuple: has a name AND an age) and <b>sum types</b> (OR — a value is exactly one of N variants). Sum types are the ones most langs lack good tools for.</p>
+<pre><code>// Rust sum type + exhaustive match
+enum Shape { Circle(f64), Rect(f64,f64) }
+fn area(s: Shape) -&gt; f64 { match s {
+  Shape::Circle(r)  =&gt; PI*r*r,
+  Shape::Rect(w,h)  =&gt; w*h,
+}}  // adding a variant → compile error until handled</code></pre>
+<table><thead><tr><th>Lang</th><th>Sum type / match</th></tr></thead><tbody>
+<tr><td>Rust</td><td><code>enum</code> + <code>match</code></td></tr>
+<tr><td>Kotlin</td><td><code>sealed class/interface</code> + <code>when</code></td></tr>
+<tr><td>Scala</td><td><code>sealed trait</code> + <code>match</code></td></tr>
+<tr><td>Java 21</td><td>sealed + <code>switch</code> pattern</td></tr>
+<tr><td>TS</td><td>discriminated union (<code>kind</code> tag)</td></tr>
+<tr><td>Haskell</td><td><code>data</code> + <code>case</code></td></tr>
+</tbody></table>
+<p><b>The win is EXHAUSTIVENESS</b> <span class="pg">key</span> — the compiler forces you to handle every case; add a variant and every non-total match becomes a compile error. That's a to-do list from the type checker.</p>
+<p><span class="warn">!</span> A <code>default</code>/<code>else</code> branch <b>defeats exhaustiveness</b> — it silently swallows new variants. Match each case explicitly.</p>
+</section>
+
+<section class="card"><h3>Option / Either — Errors as Values</h3>
+<p>Absence and failure are <b>data</b>, not exceptions. <code>Option/Maybe</code> = value or nothing; <code>Either/Result</code> = success or a typed error. The signature tells the truth: <code>parse(s): Result&lt;Int, Err&gt;</code> can't lie about failing.</p>
+<pre><code>fun half(n:Int): Option&lt;Int&gt; =
+  if(n%2==0) Some(n/2) else None
+// chain: map transforms, flatMap sequences fallible steps
+findUser(id)
+  .flatMap { it.primaryAccount() }   // returns Option
+  .map { it.balance }                // returns plain value
+  .getOrElse { ZERO }</code></pre>
+<h4>Railway-oriented</h4>
+<ul>
+<li>Happy path flows straight; the first failure <b>short-circuits</b> to the end. No nested <code>if</code> pyramid.</li>
+<li><code>map</code> when the fn returns a plain value; <code>flatMap</code>/<code>and_then</code> when it returns another wrapper (else you nest <code>Option&lt;Option&gt;</code> <span class="warn">!</span>).</li>
+<li>Extract at the edge: <code>getOrElse</code>, <code>orElse</code>, <code>fold(onErr,onOk)</code>, Rust <code>?</code>.</li>
+</ul>
+<p><b>vs exceptions:</b> exceptions are invisible in the type, unwind the stack, and are for the <i>truly exceptional</i>. Use values for expected failures (parse, lookup, validate); reserve exceptions/panics for bugs &amp; unrecoverable states.</p>
+</section>
+
+<section class="card"><h3>Lazy Evaluation &amp; Streams</h3>
+<p><b>Eager</b> = compute now (default most langs). <b>Lazy</b> = defer until the value is demanded; compute at most once. Lets you express <b>infinite</b> data and only pay for what you consume.</p>
+<pre><code>// infinite + take — only 5 ever computed
+generateSequence(1){ it+1 }        // Kotlin Sequence (lazy)
+  .map { it*it }
+  .take(5).toList()                // [1,4,9,16,25]</code></pre>
+<table><thead><tr><th>Eager (whole list)</th><th>Lazy (element-at-a-time)</th></tr></thead><tbody>
+<tr><td>Kotlin <code>List.map</code></td><td>Kotlin <code>Sequence</code>/<code>asSequence</code></td></tr>
+<tr><td>Java eager collections</td><td>Java <code>Stream</code></td></tr>
+<tr><td>Python <code>list</code></td><td><code>generator</code> / <code>yield</code>, <code>itertools</code></td></tr>
+<tr><td>Rust <code>Vec</code></td><td><code>Iterator</code> (lazy until <code>collect</code>)</td></tr>
+<tr><td>Scala <code>List</code></td><td><code>LazyList</code> / <code>view</code>; Haskell all-lazy</td></tr>
+</tbody></table>
+<ul>
+<li><b>Short-circuit</b>: lazy pipelines fuse — <code>find</code>/<code>any</code>/<code>take</code> stop early, no intermediate collections.</li>
+<li><span class="warn">!</span> Laziness + side effects = surprising ordering / effects that never fire because nothing pulled them. Keep lazy pipelines pure.</li>
+<li><span class="warn">!</span> Haskell space-leak: unforced thunks pile up; force with strictness where needed.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Types &amp; Inference</h3>
+<p><b>Polymorphism</b>: <i>parametric</i> (generics — one impl, any type: <code>List&lt;T&gt;</code>) vs <i>ad-hoc</i> (per-type behaviour via overloading / type classes / traits).</p>
+<table><thead><tr><th>Inference</th><th>Reach</th></tr></thead><tbody>
+<tr><td>Hindley-Milner (Haskell, ML, OCaml)</td><td>global — infers most signatures with no annotations</td></tr>
+<tr><td>Local (Rust, Kotlin, Java <code>var</code>, TS, Scala)</td><td>infers locals; annotate <b>public API boundaries</b></td></tr>
+</tbody></table>
+<pre><code>// make illegal states unrepresentable
+// BAD: bool soup lets contradictions compile
+data class Conn(loading:Bool, data:D?, err:E?)
+// GOOD: ADT — only valid states exist
+sealed interface Conn { object Loading; data class Ok(d:D); data class Err(e:E) }</code></pre>
+<ul>
+<li><b>Make illegal states unrepresentable</b> — encode invariants in types (NonEmptyList, <code>Positive</code>, sum types) so bad states won't compile <span class="pg">core FP move</span></li>
+<li><b>Variance</b>: <code>out T</code>/<code>+T</code> covariant (producer, read-only), <code>in T</code>/<code>-T</code> contravariant (consumer), invariant otherwise. <span class="warn">!</span> mutable containers must be invariant.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Type Classes &amp; Ad-hoc Polymorphism</h3>
+<p>A <b>type class</b> defines behaviour a type can support, declared <b>separately</b> from the type. Rust <code>trait</code>, Scala <code>given</code>/<code>using</code> (implicits), Haskell <code>class</code>, Swift protocol.</p>
+<pre><code>// Rust: add Display to a type you don't own
+trait Summary { fn summary(&amp;self) -&gt; String; }
+impl Summary for Article {
+  fn summary(&amp;self) -&gt; String { self.title.clone() }
+}</code></pre>
+<h4>Key difference from OOP interfaces</h4>
+<ul>
+<li><b>Retroactive extension</b> <span class="pg">the win</span> — implement a type class for a type you <b>don't own</b> (e.g. <code>Ord</code> for a stdlib type), without editing it or subclassing. OOP interfaces must be declared <i>at the class definition</i>.</li>
+<li>Resolved <b>statically</b> by the compiler (dictionary passing), often monomorphized → no vtable cost.</li>
+<li>Enables the Functor/Monad hierarchy as a real, nameable interface (needs higher-kinded types — Haskell/Scala have them; Rust/Kotlin/Java don't).</li>
+</ul>
+<p>This is one answer to the <b>expression problem</b>: type classes make adding new <i>operations</i> over existing types easy (see FP-vs-OOP card).</p>
+</section>
+
+<section class="card"><h3>★ The Functor → Applicative → Monad Ladder</h3>
+<p>Three rungs, each a container/context with more power. You already use all three daily; these are just the names.</p>
+<table><thead><tr><th>Rung</th><th>Op</th><th>Superpower</th></tr></thead><tbody>
+<tr><td><b>Functor</b></td><td><code>map</code></td><td>transform value(s) inside, <b>keep the shape</b></td></tr>
+<tr><td><b>Applicative</b></td><td><code>ap</code>/<code>map2</code></td><td>combine <b>independent</b> wrapped values; <b>accumulate</b> errors</td></tr>
+<tr><td><b>Monad</b></td><td><code>flatMap</code></td><td>chain <b>dependent</b> steps; short-circuit</td></tr>
+</tbody></table>
+<pre><code>functor:     F[A]            + (A=&gt;B)      -&gt; F[B]  // map
+applicative: F[A], F[B]      + ((A,B)=&gt;C)  -&gt; F[C]  // map2
+monad:       F[A]            + (A=&gt;F[B])   -&gt; F[B]  // flatMap</code></pre>
+<ul>
+<li><b>Functor law</b>: <code>map(f).map(g) == map(g∘f)</code> — the permission slip to fuse two passes into one.</li>
+<li><b>Applicative</b> combines values that <i>don't depend on each other</i> → can run all + gather <b>every</b> validation error (Cats <code>Validated</code>, Arrow <code>zipOrAccumulate</code>). A monad's <code>flatMap</code> stops at the first failure.</li>
+<li><b>Monad</b> = applicative + <code>flatMap</code>: the next step can depend on the previous <i>result</i>.</li>
+</ul>
+<p><b>Rule:</b> reach for the <b>weakest tool that works</b> — independent → applicative (parallel, accumulate); dependent → monad (sequence, short-circuit). <code>Functor ⊂ Applicative ⊂ Monad</code>.</p>
+</section>
+
+<section class="card"><h3>Monads — the everyday view</h3>
+<p>Minus the mysticism: <b>a monad is a design pattern for sequencing computations in a context.</b> A functor (<code>map</code>) + <b>wrap</b> (<code>of</code>/<code>return</code>/<code>pure</code>) + <b>chain</b> (<code>flatMap</code>/<code>bind</code>/<code>&gt;&gt;=</code>). <code>flatMap = map then flatten</code> — flattening <code>M&lt;M&lt;B&gt;&gt;</code> to <code>M&lt;B&gt;</code> is the whole point.</p>
+<h4>Everyday monads</h4>
+<ul>
+<li><b>Option</b> (nullability) · <b>Either/Result</b> (typed failure) · <b>List</b> (nondeterminism, cross-product) · <b>Promise/Future</b> (async) · <b>IO/Task</b> (effects) · <b>State/Reader</b>.</li>
+</ul>
+<h4>The 3 laws</h4>
+<ul>
+<li><b>Left identity</b>: <code>of(a).flatMap(f) == f(a)</code></li>
+<li><b>Right identity</b>: <code>m.flatMap(of) == m</code></li>
+<li><b>Associativity</b>: grouping of a chain doesn't matter, only order.</li>
+</ul>
+<p>Laws are what make chains safely refactorable and let do-notation exist.</p>
+<h4>Do-notation = sugar over flatMap</h4>
+<table><tbody>
+<tr><td>Haskell <code>do</code></td><td>Scala <code>for/yield</code></td></tr>
+<tr><td>Rust <code>?</code></td><td>JS <code>async/await</code></td></tr>
+<tr><td>Kotlin Arrow <code>either{}.bind()</code></td><td></td></tr>
+</tbody></table>
+<p><span class="warn">!</span> <b>Promise.then IS flatMap</b> — returning a Promise from the callback auto-flattens. (Also does <code>map</code> for plain returns → overloaded.) <code>return</code>/<code>of</code> means <b>wrap</b>, not imperative return.</p>
+</section>
+
+<section class="card"><h3>Managing Effects &amp; IO</h3>
+<p>Purity forbids effects but programs need them. Answer: <b>don't ban effects — organise where they live.</b></p>
+<h4>Functional core / imperative shell</h4>
+<ul>
+<li>Onion: <b>effects on the skin, decisions in the middle</b>. Shell reads the world (<code>SELECT</code>, <code>fetch</code>, clock) → hands plain data to a pure core → gets a decision/description back → shell performs it.</li>
+<li>Payoff: ~90% of logic is a pure function testable with <code>assertEquals</code> — no DB, no mocks, no clock.</li>
+<li><b>Push effects to the edges</b>; keep the core deterministic and reusable.</li>
+</ul>
+<h4>IO monad = effect as a value</h4>
+<pre><code>// building the description is PURE; nothing runs yet
+val program: IO&lt;Unit&gt; = readLine.flatMap { name -&gt;
+  putLine("hi $name") }
+program.unsafeRunSync()   // run ONCE, at the edge ("end of the world")</code></pre>
+<ul>
+<li><code>IO[A]</code>/<code>Task</code>/<code>() =&gt; Promise</code> represents an effect, stays <b>inert</b> until run. Composing is pure; only running does I/O, in one place.</li>
+<li>Inject effects (clock, rng, repo) as params → swap fakes in tests, no mocking framework.</li>
+<li>Algebraic effects / effect systems (ZIO, Effect-TS, Koka) generalize this.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Immutable State &amp; Data Transformation</h3>
+<p>State without mutation: model change as a <b>pure function of the old state</b>. New state in, old state untouched.</p>
+<pre><code>// reducer: (state, action) -&gt; state
+fun reduce(s: State, a: Action): State = when(a) {
+  is Add    -&gt; s.copy(items = s.items + a.item)
+  is Remove -&gt; s.copy(items = s.items - a.item)
+}</code></pre>
+<ul>
+<li><b>Reducer</b> <code>(state, action) → state</code> — Redux, Elm, TCA, actor state. A pure fold over the action stream.</li>
+<li><b>Event sourcing</b> = the state IS a <b>fold over events</b>: <code>state = events.fold(init, apply)</code>. Store events, replay to rebuild; audit + time-travel for free.</li>
+<li><b>Deep updates</b>: spread/<code>copy</code> for shallow; <b>lenses</b>/optics (Arrow Optics, Immer <code>produce</code>) for nested immutable update without hand-spreading every level.</li>
+</ul>
+<pre><code>// Immer: write "mutation", get immutable copy
+next = produce(state, d =&gt; { d.user.addr.city = "NYC" });</code></pre>
+<p><span class="warn">!</span> Shallow copy shares nested refs — spread one level and mutating a nested object still aliases. Copy the path you change.</p>
+</section>
+
+<section class="card"><h3>FP Concurrency &amp; Parallelism</h3>
+<p>FP's concurrency superpower is a <b>consequence of immutability</b>: no shared mutable state → <b>no data races</b> → values can be shared across threads lock-free.</p>
+<ul>
+<li><b>No locks needed</b> for reads — immutable data is safe to share by reference; nothing can change under you.</li>
+<li><b>Parallel map</b>: pure element transforms have no dependencies → run on N cores (<code>parallelStream</code>, Rayon <code>par_iter</code>, <code>pmap</code>).</li>
+<li><b>Parallel reduce</b> needs an <b>associative</b> combine (and identity = monoid) so the runtime can split &amp; merge in any grouping. <span class="warn">!</span> non-associative reduce → wrong answer under parallelism.</li>
+</ul>
+<h4>Models</h4>
+<table><tbody>
+<tr><td><b>Actors</b></td><td>isolated state, message passing (Erlang, Akka)</td></tr>
+<tr><td><b>STM</b></td><td>transactional memory, retry on conflict (Clojure, Haskell)</td></tr>
+<tr><td><b>CSP</b></td><td>channels + processes (Go, core.async)</td></tr>
+</tbody></table>
+<p>Purity + immutability make all three easier: less shared state to coordinate.</p>
+</section>
+
+<section class="card"><h3>FP vs OOP — Decision Table</h3>
+<p>Not enemies — different <b>default axes of extension</b>. The tension is the <b>expression problem</b>: you want to add both new <i>types</i> and new <i>operations</i> without editing old code. You get one cheaply.</p>
+<table><thead><tr><th></th><th>Easy to add</th><th>Costly</th></tr></thead><tbody>
+<tr><td><b>OOP</b> (classes)</td><td>new <b>types</b> (new subclass implements the interface)</td><td>new <b>operation</b> (touch every class) <span class="warn">!</span></td></tr>
+<tr><td><b>FP</b> (ADT + match)</td><td>new <b>operations</b> (new function over the ADT)</td><td>new <b>variant</b> (touch every match) <span class="warn">!</span></td></tr>
+</tbody></table>
+<p>Choose by which axis churns: many operations over a fixed shape → FP; many types under a fixed protocol → OOP. Type classes / pattern-visitor split the difference.</p>
+<h4>GoF patterns → functions</h4>
+<table><tbody>
+<tr><td>Strategy</td><td>a <b>function</b> param</td></tr>
+<tr><td>Command</td><td>a <b>closure</b></td></tr>
+<tr><td>Observer</td><td>a <b>stream</b> (Rx/Flow)</td></tr>
+<tr><td>Template Method</td><td>a <b>HOF</b> taking the step</td></tr>
+<tr><td>Decorator</td><td>function <b>composition</b></td></tr>
+<tr><td>Factory</td><td>a function returning a function</td></tr>
+</tbody></table>
+<p>Many patterns exist to fake first-class functions in languages that lacked them.</p>
+</section>
+
+<section class="card"><h3>&#9733; "Think Functionally" Checklist</h3>
+<h4>Structure</h4>
+<ul>
+<li>&#9744; Effects pushed to the <b>edges</b>; the decision core is pure &amp; testable without mocks.</li>
+<li>&#9744; Data modelled with <b>ADTs</b> (sum + product); illegal states don't compile.</li>
+<li>&#9744; Absence/failure as <b>Option/Either</b>, not null or thrown exceptions (reserve those for bugs).</li>
+</ul>
+<h4>Transformation</h4>
+<ul>
+<li>&#9744; <code>map</code>/<code>filter</code>/<code>fold</code> over hand-rolled loops where it reads clearer.</li>
+<li>&#9744; <b>Immutable by default</b>; new values not mutation; deep updates via copy/lens.</li>
+<li>&#9744; <code>flatMap</code> when the step returns a wrapper, <code>map</code> when it returns a plain value.</li>
+<li>&#9744; Weakest tool that works: applicative for independent, monad for dependent.</li>
+</ul>
+<h4>Matching</h4>
+<ul>
+<li>&#9744; Pattern matches are <b>exhaustive</b> — no catch-all <code>default</code> hiding new variants <span class="warn">!</span></li>
+<li>&#9744; Recursion is tail-recursive on runtimes without TCO (or use a fold/loop).</li>
+</ul>
+<h4>Don't over-rotate</h4>
+<ul>
+<li>&#9744; Not forcing purity where the language fights it (idiomatic Go/Java beats fake monads).</li>
+<li>&#9744; Point-free only where it stays readable; name the arg otherwise.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Pitfalls &amp; When NOT to Use FP</h3>
+<table><thead><tr><th>Symptom / trap</th><th>Cause &amp; fix</th></tr></thead><tbody>
+<tr><td>Callbacks all see the last loop value</td><td>closure captured a shared binding — <code>let</code>/per-iter/default-arg <span class="warn">!</span></td></tr>
+<tr><td><code>StackOverflow</code> on deep recursion</td><td>no TCO on JVM/Py/JS — accumulator + loop/trampoline <span class="warn">!</span></td></tr>
+<tr><td><code>Option&lt;Option&lt;T&gt;&gt;</code> / nested wrappers</td><td>used <code>map</code> where <code>flatMap</code> was needed <span class="warn">!</span></td></tr>
+<tr><td>Only the first validation error shows</td><td>monadic short-circuit — use accumulating <b>applicative</b></td></tr>
+<tr><td>Nested object still mutated after "copy"</td><td>shallow spread aliases nested refs — copy the path <span class="warn">!</span></td></tr>
+<tr><td>Wrong parallel-reduce result</td><td>combine not associative/no identity <span class="warn">!</span></td></tr>
+<tr><td>Lazy effect never runs / runs out of order</td><td>side effect in a lazy pipeline — keep lazy pure <span class="warn">!</span></td></tr>
+<tr><td>Unreadable tacit chain, useless stack trace</td><td>point-free overdone — name the args</td></tr>
+</tbody></table>
+<h4>When NOT to reach for FP</h4>
+<ul>
+<li><b>Hot inner loops / tight memory</b> — persistent structures &amp; allocation can lose to in-place mutation. Measure.</li>
+<li><b>Idiomatic imperative code</b> — hand-rolling monads in Go where <code>if err != nil</code> is the convention adds friction.</li>
+<li><b>Team unfamiliarity</b> — an Arrow <code>either{}</code> or hand-rolled <code>Validated</code> can cost more reviewer time than it saves. Match the codebase.</li>
+<li><b>Deeply stateful/effectful I/O</b> — keep the effect at the edge; don't ceremony-wrap trivial scripts.</li>
+</ul>
+<p>FP is a set of <b>defaults</b> (purity, immutability, values), not a religion. Use the parts that pay.</p>
+</section>
+
+</div>
+</body>
+</html>
