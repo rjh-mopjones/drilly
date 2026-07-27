@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>C++ Katas Cheat Sheet</title>
+<style>
+:root{
+  --fs: 7.2pt;       /* base body */
+  --fs-mono: 6.6pt;  /* code blocks */
+  --fs-h3: 7.8pt;    /* card header */
+  --gap: 5px;        /* column gap */
+  --pad: 3px;        /* card padding */
+  --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
+.sheet{background:#fff;}
+/* spanning title bar */
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+  margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
+.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
+.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+/* the multicolumn flow */
+.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+  column-fill:balance; padding:5px;}
+.card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
+  border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
+  overflow:hidden;}
+.card h3{font-size:var(--fs-h3); margin:0 calc(-1*var(--pad)) var(--pad); padding:1.5px var(--pad);
+  background:#34495e; color:#fff; letter-spacing:.2px; font-weight:700;}
+/* colour-cycled headers for fast visual scanning */
+.card:nth-of-type(8n+1) h3{background:#34495e;}
+.card:nth-of-type(8n+2) h3{background:#2c6e9b;}
+.card:nth-of-type(8n+3) h3{background:#1f7a5a;}
+.card:nth-of-type(8n+4) h3{background:#8a5a2b;}
+.card:nth-of-type(8n+5) h3{background:#7d4a8c;}
+.card:nth-of-type(8n+6) h3{background:#a23a4e;}
+.card:nth-of-type(8n+7) h3{background:#3a6b35;}
+.card:nth-of-type(8n+8) h3{background:#555e6b;}
+.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+  border-bottom:0.5pt solid var(--rule); font-weight:700;}
+.card p{margin:2px 0;}
+.card ul{margin:1.5px 0; padding-left:11px;}
+.card li{margin:.5px 0; line-height:1.2;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
+  line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
+code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
+  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+pre code{background:none; padding:0; font-size:1em;}
+.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+  padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
+.pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
+.diagram .mermaid{margin:2px 0; text-align:center;}
+.diagram .mermaid svg{max-width:100%; height:auto;}
+.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.legend li{line-height:1.35;}
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+@page{ size:A4; margin:5mm; }
+@media print{
+  body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
+  /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
+  .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="titlebar"><h1>C++ Katas</h1><span class="meta">solving open-ended senior modern-C++ katas, test-first · the compiler proves nothing about lifetime or races · drilly</span></div>
+
+<section class="card legend"><h3>How to read &amp; print</h3>
+<ul>
+<li><span class="warn">!</span> footgun / gotcha &nbsp; <code>&#9744;</code> pre-code checklist item</li>
+<li>Scope: <b>5 katas</b> from a blank file in interview time. The hard part is rarely the algorithm — it's <b>lifetime &amp; layout</b>: who owns what, copy vs move vs view, rule of five vs zero, and — unlike Rust — the compiler will <b>not</b> stop a use-after-free, leak, or data race. That's on you; ASan/TSan prove it.</li>
+<li>Method (every kata): design <b>value-semantics first</b> → write tests first with the tiny hand-rolled harness → implement via RAII so cleanup is automatic + exception-safe → verify races under <b>TSan</b>.</li>
+<li>Run one kata: <code>ctest -R &lt;kata&gt;</code>; concurrency katas add <code>cmake -B build-tsan -DKATAS_SANITIZE=thread</code>. Practice ships <b>no tests</b> — writing them is the exercise.</li>
+<li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
+</ul></section>
+
+<section class="card"><h3>Attack Plan — Ownership First</h3>
+<p>Turn the prompt into a <b>lifetime plan before writing logic</b>. Every C++ decision starts with ownership made explicit: <b>owns a resource</b> → RAII + rule of five; <b>owns nothing</b> → rule of zero, no special members.</p>
+<h4>The first questions</h4>
+<ul>
+<li><b>Owns a resource?</b> yes → release in the dtor (runs on every path: return, early return, throw), reason about all five members. no → write none.</li>
+<li><b>Copy, move, or neither?</b> unique resource = move-only (<code>=delete</code> copies, define moves); value type = copyable; a view owns nothing.</li>
+<li><b>const-correct?</b> read-only methods <code>const</code>; read-only params <code>const&amp;</code>. It's the API contract.</li>
+<li><b>Raw storage?</b> separate <b>allocation</b> (<code>operator new</code>, aligned) from <b>construction</b> (placement <code>new</code>, <code>destroy_at</code>).</li>
+<li><b>Shared across threads?</b> pick the primitive deliberately (mutex / atomics / seqlock / lock-free) + name the memory ordering — the compiler guarantees nothing.</li>
+</ul>
+<p><span class="warn">!</span> A moved-from object must stay <b>valid &amp; destructible</b> (empty-but-safe, like a <code>nullptr</code> <code>unique_ptr</code>) — never broken. Move <i>transfers</i> ownership; it is not a fast copy.</p>
+</section>
+
+<section class="card"><h3>Rule of Five / Zero &amp; Ownership Table</h3>
+<table><thead><tr><th>Need</th><th>Reach for</th></tr></thead><tbody>
+<tr><td>owns a resource</td><td>RAII + <b>rule of five</b> (dtor + 4)</td></tr>
+<tr><td>owns nothing (view/value)</td><td><b>rule of zero</b> — no special members</td></tr>
+<tr><td>unique resource (conn, fd)</td><td>move-only: <code>=delete</code> copy, define move</td></tr>
+<tr><td>transfer ownership</td><td><code>T&amp;&amp;</code> + <code>std::move</code>; null the source</td></tr>
+<tr><td>shared ownership</td><td>refcount (intrusive / <code>shared_ptr</code>)</td></tr>
+<tr><td>raw uninit storage</td><td><code>operator new</code>+<code>align_val_t</code>, placement <code>new</code></td></tr>
+<tr><td>destroy in raw storage</td><td><code>std::destroy_at</code> (no free)</td></tr>
+<tr><td>single-writer / many-reader snapshot</td><td><b>seqlock</b> + atomic payload</td></tr>
+<tr><td>1 producer / 1 consumer</td><td>lock-free <b>SPSC ring</b>, no CAS</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> Declare <i>any</i> of the five (dtor, copy ctor/assign, move ctor/assign) → reason about <b>all five</b>; the compiler's defaults blit raw pointers → double-free / leak.</p>
+<p><span class="warn">!</span> Destructors must be <code>noexcept</code> — throwing while unwinding another exception calls <code>std::terminate</code>.</p>
+</section>
+
+<section class="card"><h3>Testing Toolkit — Harness + StartGate + TSan</h3>
+<p>No GoogleTest/Catch2 — a <b>~100-line hand-rolled header</b> (<code>solution/common/harness.hpp</code>) driven by CTest, keeping the module std-only. Practice ships no tests; writing them is half the exercise.</p>
+<pre><code>#include "harness.hpp"
+KATA_TEST(overwrites_oldest_when_full) {   // auto-registers
+    TickBuffer&lt;int&gt; buf(2);
+    buf.record(1); buf.record(2); buf.record(3);
+    EXPECT_EQ(buf.size(), 2u);
+    EXPECT_EQ(buf.snapshot(), (std::vector&lt;int&gt;{2,3}));
+}
+KATA_TEST(latest_on_empty_throws) {
+    EXPECT_THROWS(TickBuffer&lt;int&gt;(4).latest(), std::out_of_range);
+}
+KATA_MAIN()   // expands to main(); runs all, argv[1] filter</code></pre>
+<ul>
+<li><code>EXPECT_TRUE/EQ/THROWS(expr,Exc)</code> — failures print file:line + values. Test the <b>throw path</b>, not just happy path.</li>
+<li><b>Lifetime katas:</b> a <b>live-instance counter</b> is the instrument — a leak never returns to 0, a double-free goes negative.</li>
+<li><b>Concurrency = two checks:</b> an <b>invariant assertion</b> (self-consistency / FIFO / conserved count) <i>and</i> <b>TSan</b> (a race is UB that often <i>looks</i> fine).</li>
+</ul>
+<pre><code>kata::StartGate gate;               // std::latch: all wait(), open() releases together
+std::vector&lt;std::jthread&gt; ws;        // auto-join at scope end
+// ... gate.wait() in each worker → max overlap → exposes torn/lost value
+gate.open();</code></pre>
+<p><span class="warn">!</span> Never <code>sleep</code> to synchronise (flaky coin-flip); gate with a <code>std::latch</code>, join deterministically, assert an <b>invariant</b> not an interleaving. TSan (<code>-fsanitize=thread</code>) is Go's <code>-race</code> analogue.</p>
+</section>
+
+<section class="card"><h3>exchange_session — Move-Only RAII / Rule of Five</h3>
+<p><b>Topic:</b> RAII + rule of five. A venue connection: ctor <i>connects</i>, dtor <i>disconnects</i> exactly once. Sessions are moved (factory return, <code>emplace_back</code>, reassign). <code>unique_ptr</code> by hand.</p>
+<pre><code>class ExchangeSession {
+  ~ExchangeSession() noexcept;                  // release once
+  ExchangeSession(const ExchangeSession&amp;) = delete;   // one owner
+  ExchangeSession&amp; operator=(const ExchangeSession&amp;) = delete;
+  ExchangeSession(ExchangeSession&amp;&amp;) noexcept;         // steal + null src
+  ExchangeSession&amp; operator=(ExchangeSession&amp;&amp;) noexcept;
+  void send(const Order&amp;);   bool is_open() const noexcept;
+  static int live_count() noexcept;  // leak / double-close detector
+};</code></pre>
+<ul>
+<li><b>Move ctor:</b> steal members, then <code>other.open_ = false</code> — that one line makes the source's dtor a no-op. Forget it → double decrement, <code>live_count()</code> hits <code>-1</code>.</li>
+<li><b>Move-assign:</b> <code>close()</code> what you own <b>first</b> (else leak the old conn), then steal, then null source; guard <code>this != &amp;other</code>.</li>
+<li>Route both release sites through one private <code>close()</code> — <code>noexcept</code> + idempotent (<code>if(open_)</code>), so "release exactly once" lives in one place.</li>
+<li><b>Test:</b> assert <code>live_count()</code> around every scope — no-double-close-after-move (not <code>-1</code>) and move-assign-releases-previous (not <code>2</code>).</li>
+</ul>
+<p><span class="warn">!</span> <b>Gotcha:</b> <code>shared_ptr</code> "to avoid move complexity" models the domain wrong — a venue slot has one owner; move-only is the honest encoding.</p>
+</section>
+
+<section class="card"><h3>tick_buffer — Raw Aligned Storage + Placement New</h3>
+<p><b>Topic:</b> manual object lifetime over raw storage. Fixed-capacity rolling window of last N ticks; overwrite oldest when full; <b>zero heap alloc per tick</b>. Not <code>vector&lt;T&gt;</code> — it default-constructs every slot &amp; may realloc.</p>
+<pre><code>::operator new(sizeof(T)*cap, std::align_val_t(alignof(T)))  // alloc once, raw
+::new (slot) T(tick)                    // placement new: construct, no alloc
+std::destroy_at(slot)                   // destroy, no free
+// ring: head_ = oldest live idx, count_ = live; write = (head_+count_)%cap_</code></pre>
+<ul>
+<li><b>Destroy-before-overwrite:</b> when full, <code>destroy_at(write)</code> <b>before</b> the placement-<code>new</code>, else the overwritten object's dtor never runs (leak).</li>
+<li><b>Dtor destroys exactly the live range:</b> walk <code>count_</code> slots from <code>head_</code> with wrap — never a never-constructed slot; then <code>::operator delete</code> with the <b>matching sized + aligned</b> overload.</li>
+<li><b>Ring math:</b> <code>head_+count_</code> can be <code>2*cap-1</code> → one modulo; <code>latest()</code> is <code>head_+count_-1</code>, not <code>+count_</code>.</li>
+<li><b>Test:</b> a <b>Counted</b> live-instance type — <code>counted_live()&lt;=cap</code> in the loop (leak) and <code>==0</code> after scope (double-destroy).</li>
+</ul>
+<p><span class="warn">!</span> <b>Gotcha:</b> placement <code>new</code> does <b>not</b> allocate — pairing it with plain <code>delete</code>, or under-aligning with plain <code>operator new</code>, is UB.</p>
+</section>
+
+<section class="card"><h3>order_handle — Intrusive Reference Counting</h3>
+<p><b>Topic:</b> rule of five on a <b>shared</b> resource. A pooled <code>Order</code> held at once by price-level queue + id-index + risk engine; alive while any owner references it, back to the pool on the last drop. A hand-rolled <code>intrusive_ptr</code>.</p>
+<pre><code>struct Order { ...; int ref_count{0}; };  // count INSIDE the resource
+// copy bumps · move steals+nulls (count unchanged) · dtor/reset releases
+OrderHandle&amp; operator=(const OrderHandle&amp; o) noexcept {
+    Order* in = o.order_;
+    if (in) ++in-&gt;ref_count;   // claim incoming FIRST
+    release();                // then drop old — safe even if same slot
+    order_ = in; return *this;
+}</code></pre>
+<ul>
+<li><b>The sharpest line:</b> copy-assign <b>bumps before releasing</b>. <code>h = h;</code> (or two handles to one order) would else reclaim the slot then re-point at freed memory — a use-after-free. Bump-first needs no <code>this==&amp;other</code> guard.</li>
+<li><b>Move</b> transfers an owner: steal pointer, null source, count <b>unchanged</b> — only copy adds an owner.</li>
+<li><b>Reclaim exactly once:</b> the 0-transition lives in one <code>release()</code> called by dtor + reset; miss a decrement = leaked slot, double = live order recycled.</li>
+<li>Null-safe accessors: <code>use_count()</code> on null is a defined <code>0</code>.</li>
+</ul>
+<p><span class="warn">!</span> <b>Gotcha:</b> plain <code>int</code> = single-thread only. A shared pool needs <code>atomic&lt;int&gt;</code>, <code>fetch_sub(1,acq_rel)</code> on the decrement-to-zero + a lock-free free-list.</p>
+</section>
+
+<section class="card"><h3>top_of_book — Seqlock (Atomic Payload, TSan)</h3>
+<p><b>Topic:</b> seqlock + the C++ memory model. One writer installs a multi-word <code>Quote</code>; dozens of readers take the latest per tick — <b>wait-free, no lock, no torn read</b> (new bid stitched to stale ask).</p>
+<pre><code>// writer: even → odd(+1) → write payload → even(+2), +2 per publish
+seq_.store(s+1, relaxed); atomic_thread_fence(release);
+/* store each field relaxed */
+atomic_thread_fence(release); seq_.store(s+2, relaxed);
+// reader: snapshot → copy → recheck, return only if unchanged &amp; even
+b = seq_.load(acquire); if (b&amp;1) continue;
+/* relaxed-load fields */ atomic_thread_fence(acquire);
+if (b == seq_.load(relaxed)) return out;</code></pre>
+<ul>
+<li><b>The whole tell:</b> plain-payload copies are a <b>data race → UB</b> under the memory model <i>even though the retry rejects every torn value</i>. TSan flags it (Boehm &amp; Adve).</li>
+<li><b>Fix:</b> each field a <code>std::atomic</code> accessed <code>relaxed</code> — same instruction on x86/ARM, race-free by definition.</li>
+<li>Relaxed gives per-field atomicity, <b>not</b> group consistency — the <b>sequence counter</b> supplies that (else <code>bid</code> from N, <code>ask</code> from N+1).</li>
+<li><b>Single writer only</b> — two drive the odd/even counter and corrupt it; serialise writers with a mutex (readers stay lock-free).</li>
+</ul>
+<p><span class="warn">!</span> <b>Gotcha:</b> a green stress run passes value asserts but is still UB — run under TSan. Extension: double-buffer (2 slots + atomic active-index) → no reader retries.</p>
+</section>
+
+<section class="card"><h3>feed_pipe — Lock-Free SPSC Ring</h3>
+<p><b>Topic:</b> the <code>std::atomic</code> memory model. Feed-handler → strategy hand-off: exactly <b>1 producer, 1 consumer</b>; no lock, no per-event alloc, never lose/dup/reorder. Wait-free SPSC ring.</p>
+<pre><code>// producer owns tail_, consumer owns head_ → single writer/index → NO CAS
+std::optional&lt;T&gt; try_pop() {
+  auto h = head_.load(relaxed);                 // I own head
+  if (h == tail_.load(acquire)) return nullopt; // empty
+  T v = std::move(slots_[h]);                   // plain read
+  head_.store(next(h), release); return v;      // publish
+}
+alignas(64) atomic&lt;size_t&gt; head_, tail_;  // separate cache lines</code></pre>
+<ul>
+<li><b>No CAS:</b> one writer per index → a <code>release</code> store suffices (CAS is only for MPMC).</li>
+<li><b>Plain <code>T</code> slots are race-free:</b> the producer writes slot <i>then</i> release-stores tail; consumer acquire-loads tail <i>before</i> reading slot — the edge <i>synchronizes-with</i>, one accessor per slot at a time. (Opposite of the seqlock, where both touch the payload → atomic.)</li>
+<li><b>One-empty-slot:</b> <code>cap+1</code> slots — <code>head==tail</code> empty, <code>tail+1==head</code> full, no shared size counter.</li>
+<li>Load your <i>own</i> index <code>relaxed</code>; the cross-thread index <code>acquire</code>. <code>alignas(64)</code> kills false sharing.</li>
+</ul>
+<p><span class="warn">!</span> <b>Gotcha:</b> reflexive <code>seq_cst</code> works but costs throughput; atomic slots are needless. Test: <code>StartGate</code>-gated producer/consumer asserting strictly-increasing seq, under TSan.</p>
+</section>
+
+<section class="card"><h3>&#9733; Pre-Code Checklist</h3>
+<h4>Design (before typing)</h4>
+<ul>
+<li>&#9744; Decided <b>ownership first</b>: owns a resource → RAII + rule of five; owns nothing → rule of zero.</li>
+<li>&#9744; Copy / move / neither chosen deliberately; unique resource = move-only (<code>=delete</code> copy).</li>
+<li>&#9744; Read-only methods + params marked <code>const</code>.</li>
+<li>&#9744; Raw storage: allocation (<code>operator new</code>+aligned) separated from construction (placement <code>new</code>).</li>
+</ul>
+<h4>Lifetime</h4>
+<ul>
+<li>&#9744; Moved-from source left <b>valid &amp; inert</b> (nulled) so its dtor is a no-op.</li>
+<li>&#9744; Dtor + release path <code>noexcept</code>; release routed through one idempotent site, fires <b>exactly once</b>.</li>
+<li>&#9744; Every placement <code>new</code> has a matching <code>destroy_at</code>; free with the <b>sized, aligned</b> <code>operator delete</code>.</li>
+</ul>
+<h4>Concurrency</h4>
+<ul>
+<li>&#9744; Memory ordering is <b>minimal + justified</b>: relaxed self-load, acquire cross-load, release publish.</li>
+<li>&#9744; Seqlock payload is per-field <code>atomic</code> (relaxed); sequence supplies group consistency; single writer.</li>
+<li>&#9744; SPSC: no CAS, one-empty-slot full/empty, <code>alignas(64)</code> on head/tail.</li>
+</ul>
+<h4>Tests first</h4>
+<ul>
+<li>&#9744; Hand-rolled harness (no GoogleTest); throw path tested; live-instance counter on lifetime katas.</li>
+<li>&#9744; Concurrency = <code>StartGate</code>-gated <code>jthread</code>s asserting an invariant, verified under <b>TSan</b>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Common Mistakes — Spot-the-Bug</h3>
+<table><thead><tr><th>Symptom / smell</th><th>Cause</th></tr></thead><tbody>
+<tr><td>"it compiles &amp; runs, so it's correct"</td><td>compiler proves nothing about lifetime/races — use ASan/TSan <span class="warn">!</span></td></tr>
+<tr><td>wrote a dtor, defaulted the rest</td><td>rule of five — defaults blit raw ptrs → double-free <span class="warn">!</span></td></tr>
+<tr><td><code>live_count()</code> hits <code>-1</code> after a move</td><td>move ctor didn't null the source <span class="warn">!</span></td></tr>
+<tr><td>old connection leaks on <code>b = move(a)</code></td><td>move-assign stole before <code>close()</code>-ing <span class="warn">!</span></td></tr>
+<tr><td><code>std::terminate</code> during unwinding</td><td>throwing destructor / release path <span class="warn">!</span></td></tr>
+<tr><td>per-tick leak of a string field</td><td>overwrite without <code>destroy_at</code> first <span class="warn">!</span></td></tr>
+<tr><td>crash / garbage price from <code>snapshot</code></td><td>off-by-one ring math, missing modulo <span class="warn">!</span></td></tr>
+<tr><td>use-after-free on <code>h = h;</code></td><td>copy-assign released before bumping incoming <span class="warn">!</span></td></tr>
+<tr><td>refcount drifts high, slot leaks</td><td>move that bumped the count <span class="warn">!</span></td></tr>
+<tr><td>green stress test, TSan screams</td><td>plain (non-atomic) seqlock payload = UB <span class="warn">!</span></td></tr>
+<tr><td>reader sees new bid + stale ask</td><td>dropped the sequence re-check <span class="warn">!</span></td></tr>
+<tr><td>CAS loop / mutex on an SPSC ring</td><td>one writer/index → a release store suffices <span class="warn">!</span></td></tr>
+<tr><td>throughput tanks between cores</td><td>head/tail share a cache line — <code>alignas(64)</code> <span class="warn">!</span></td></tr>
+</tbody></table>
+<p>Senior signal in one line: <i>state ownership &amp; lifetime first, make release structural (RAII, exactly once), reach for raw storage / lock-free only when the constraints demand it, and know exactly where the compiler's guarantees stop — then prove it under the sanitizer.</i></p>
+</section>
+
+</div>
+</body>
+</html>

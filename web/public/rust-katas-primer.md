@@ -1976,6 +1976,998 @@ The load-bearing detail is `let message = receiver.lock()…​.recv();` — the
 Senior close-out: acknowledge the `Arc<Mutex<Receiver>>` dequeue is a throughput ceiling (single mutex, all workers contend) and name the production upgrade — `crossbeam-channel` (clonable MPMC) or `rayon` work-stealing — before the interviewer asks. That framing (correct-by-construction shutdown *plus* an honest scaling limit) is the senior signal.
 
 
+## Connection Pool — RAII Borrow Guard (Drop Returns the Resource)
+
+### Summary
+
+**What this topic covers**
+
+You build a bounded pool of reusable connections: opening a database (or venue) connection is expensive, so a service keeps a fixed number pre-opened. A worker *borrows* one with `acquire`, runs its query, and *returns* it — except returning isn't a method the caller remembers to call, it happens automatically when the borrow guard drops. The pool is bounded: when every connection is out, `acquire` blocks until one comes back and `try_acquire` gives up immediately. Many threads borrow and return at once and no two may ever hold the same connection. The signature Rust topic it drills is **RAII — ownership + `Drop` as resource management**: the guard's `Drop` *is* the return, the same pattern as `MutexGuard`, `File`, and `Box`. Underneath it also drills the blocking-handoff primitives: `Mutex<VecDeque<T>>` for the free list and a `Condvar` for the wait/notify.
+
+**Mental model**
+
+In most languages the pool hands you a connection and *trusts* you to call `release()`. Forget it on any error path — an early `return`, a thrown exception, a `?` — and the pool silently leaks a slot until it's exhausted and everything wedges. Rust deletes that whole class of bug by making the return a consequence of ownership, not of discipline. `acquire` returns a `PooledConn` guard that *owns* the borrowed connection; the connection goes back into the free list in that guard's `Drop`. Dropping happens deterministically at end of scope, on `?`, on panic unwind — so you *cannot* forget to return it. The guard is leak-free by construction. The mechanical twist Rust forces: `Drop` gets `&mut self`, and you can't move a field out of `&mut self`. So the guard holds the connection as `Option<T>` and `Drop` calls `Option::take` to move it out, leaving `None` behind. `Deref`/`DerefMut` then let you use the guard *as if* it were the connection. The blocking side is a textbook `Condvar` handoff: `acquire` locks the deque, `wait`s while it's empty, and a returning guard `notify_one`s a waiter — always re-checking the predicate in a `while` loop because wakeups can be spurious.
+
+**Key terms**
+
+- **`Pool<T>`** — the shared pool: an `Arc<Inner<T>>` inside, so `Clone` is cheap (shares one pool) and it's `Send + Sync` — hand a clone or a `&` to each worker.
+- **`PooledConn<T>`** — the RAII borrow guard `acquire` returns. Owns the connection while borrowed; its `Drop` returns it.
+- **RAII** — Resource Acquisition Is Initialization: tie a resource's lifetime to an owning value so cleanup runs in `Drop`. Leak-free is the *default*, not a checklist.
+- **`Drop`** — the destructor trait. `fn drop(&mut self)` runs deterministically when the value goes out of scope; here it's the return path.
+- **`Deref`/`DerefMut`** — let the guard stand in for the connection (`conn.query(...)`, `c.queries += 1`) by deref coercion.
+- **`Option::take`** — swaps the field to `None` and hands you the owned value; the only way to move `T` out of `&mut self` in `Drop`.
+- **`Condvar` wait/notify** — `wait(guard)` atomically releases the mutex and sleeps; `notify_one` wakes one waiter. The handoff for "block until a connection frees up".
+- **`Mutex<VecDeque<T>>`** — the free list of currently-returned connections; `pop_front` to borrow, `push_back` to return.
+- **`MutexGuard`** — the archetype this kata imitates: a handle whose `Drop` releases the lock. `File`, `Box`, and `PooledConn` are the same shape.
+
+**Why interviewers ask this**
+
+It's the cleanest test of whether someone *thinks in ownership* or is still writing Java in Rust. A junior exposes a `pool.release(conn)` and a matching `acquire`, and now every caller has a leak waiting on an error path — the exact bug RAII exists to kill. A senior reaches for the guard immediately, can name the pattern (`MutexGuard`/`File`), and can explain the two non-obvious mechanics that make it compile: `Option<T>` so `Drop` can move the value out, and `Deref`/`DerefMut` so the guard is ergonomic. It's also a compact concurrency question — `Mutex<VecDeque>` + `Condvar`, with the classic `while`-loop-on-the-predicate detail — and it carries real money stakes: a connection pool that leaks slots on error paths degrades to a wedged service under exactly the load (errors, retries, timeouts) where you need it most.
+
+**Common confusions**
+
+- *"I'll add a `release()` method for the caller to call."* — That reintroduces the leak RAII removes. The return must be `Drop`, not a method.
+- *"Just move the connection out of the field in `Drop`."* — You can't move a field out of `&mut self`. Hold it as `Option<T>` and `take()` it.
+- *"Use `if free.is_empty()` before `wait`."* — Spurious wakeups mean `wait` can return with the deque still empty. It must be a `while` loop.
+- *"`acquire` and `try_acquire` are basically the same."* — `acquire` blocks on the `Condvar`; `try_acquire` does a single `pop_front()?` and never waits. Different contracts.
+- *"The guard needs to check itself back in via a flag."* — No flag. `Drop` pushes the connection back and `notify_one`s; presence in the deque *is* the "returned" state.
+
+**What follows from this topic**
+
+RAII guards are the backbone of every other resource kata: `MutexGuard` in the shared-state work, scope-guarded cleanup, `Drop`-based shutdown in a thread pool. The `Condvar` wait/notify handoff here is the same primitive behind bounded channels and semaphores. The natural extensions push straight into deeper territory: `acquire_timeout(Duration)` via `Condvar::wait_timeout` (bounded blocking, a `Result`/`Option` contract), backing the pool with a counting semaphore, or validating/recycling a connection on return (health checks in `Drop`) — which is exactly what production pools like `r2d2`, `deadpool`, and `bb8` do around this same core idea.
+
+### Clarify & design the API
+
+Clarifying questions worth asking out loud: is the pool fixed-size or can it grow (fixed — `capacity` is the whole point)? What happens when it's exhausted — block, or fail fast (both: `acquire` blocks, `try_acquire` returns `None`)? Is `capacity == 0` legal (no — panic in `new`, an empty pool can only deadlock)? Must the *same* connection be reused with its state intact (yes — it's a pool, not a factory; returning carries state back)? Is the connection type generic or fixed (generic `T`, produced by a `factory` closure)? Do we surface mutex poisoning as `Result`, or `unwrap` (kata: `unwrap`; mention `Result` as the extension)?
+
+The **design decision** is RAII. The pool must *not* expose a `release(conn)` the caller has to remember — that's the leak. Instead `acquire` returns a guard that owns the connection, and the return happens in the guard's `Drop`. That forces two supporting choices: the guard holds `Option<T>` (so `Drop` can move the connection back out of `&mut self`), and it implements `Deref`/`DerefMut` (so callers use it as the connection). `Pool<T>` wraps an `Arc<Inner<T>>` so it's cheaply `Clone`able and `Send + Sync` — every worker gets a clone or a `&`.
+
+```rust
+use std::collections::VecDeque;
+use std::ops::{Deref, DerefMut};
+use std::sync::{Arc, Condvar, Mutex};
+
+struct Inner<T> {
+    free: Mutex<VecDeque<T>>,   // the returned-and-idle connections
+    available: Condvar,         // signalled when a guard returns one
+    capacity: usize,
+}
+
+/// Cheap to clone (shares one pool) and Send + Sync — hand a clone or a & to each worker.
+pub struct Pool<T> {
+    inner: Arc<Inner<T>>,
+}
+
+impl<T> Clone for Pool<T> {
+    fn clone(&self) -> Self { Pool { inner: Arc::clone(&self.inner) } }
+}
+
+impl<T> Pool<T> {
+    pub fn new(capacity: usize, factory: impl FnMut() -> T) -> Self; // panics if capacity == 0
+    pub fn acquire(&self) -> PooledConn<T>;             // blocks until one is free
+    pub fn try_acquire(&self) -> Option<PooledConn<T>>; // never blocks
+    pub fn available(&self) -> usize;                   // free count right now
+    pub fn capacity(&self) -> usize;                    // fixed pool size
+}
+
+/// RAII handle to a borrowed connection. Deref to use it; drop it to return it.
+pub struct PooledConn<T> {
+    conn: Option<T>,       // Option so Drop can move the value back out
+    inner: Arc<Inner<T>>,  // where to return it
+}
+// Deref/DerefMut -> T, plus a Drop that returns the connection. The Drop IS the point.
+```
+
+Say the tradeoff explicitly: a `release()` method is simpler to *write* but leaks on every error path a caller forgets; the guard is marginally more code (`Option`, `Deref`, `Drop`) but leak-free by construction. Choosing the guard and naming it as the `MutexGuard`/`File` pattern *is* the senior signal.
+
+### Write the tests
+
+The README ships **no tests** — writing them is the exercise. Pin the easy contract first (a fresh pool is full, `available()` moves as you borrow and return), then the RAII behaviour that's the whole point (`Drop` returns the connection, and the *same* connection comes back carrying its state), then `try_acquire` exhaustion, then the two concurrency tests. The blocking test proves `acquire` actually waits and a return wakes it; the `Barrier`-gated stress proves the pool never over-hands and every connection comes back — with **no `sleep`s** for synchronisation.
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Barrier;
+    use std::thread;
+
+    #[derive(Debug, Default)]
+    struct Conn { queries: u32 }
+
+    fn int_pool(n: usize) -> Pool<i32> {
+        let mut next = 0;
+        Pool::new(n, move || { next += 1; next })
+    }
+
+    #[test]
+    fn new_pool_is_full() {
+        let pool = int_pool(3);
+        assert_eq!(pool.capacity(), 3);
+        assert_eq!(pool.available(), 3); // all pre-created, none out
+    }
+
+    #[test]
+    fn acquire_borrows_and_drop_returns() {
+        let pool = int_pool(2);
+        {
+            let _a = pool.acquire();
+            assert_eq!(pool.available(), 1);
+            let _b = pool.acquire();
+            assert_eq!(pool.available(), 0); // both out
+        } // both guards drop here — the return path
+        assert_eq!(pool.available(), 2);     // Drop put them back
+    }
+
+    #[test]
+    fn guard_derefs_to_the_connection() {
+        let pool: Pool<Conn> = Pool::new(1, Conn::default);
+        {
+            let mut c = pool.acquire();
+            c.queries += 1;             // DerefMut: use the guard as the Conn
+            assert_eq!(c.queries, 1);
+        }
+        let c = pool.acquire();
+        assert_eq!(c.queries, 1);       // same connection reused, state carried back
+    }
+
+    #[test]
+    fn try_acquire_returns_none_when_exhausted() {
+        let pool = int_pool(1);
+        let held = pool.acquire();
+        assert!(pool.try_acquire().is_none()); // exhausted → None, no block
+        drop(held);
+        assert!(pool.try_acquire().is_some());  // returned → available again
+    }
+
+    // Proves acquire() BLOCKS and a returning guard WAKES it. If blocking or the
+    // Condvar notify were broken, the spawned thread hangs and join never returns.
+    #[test]
+    fn acquire_blocks_until_a_connection_is_returned() {
+        let pool = int_pool(1);
+        let held = pool.acquire(); // pool now empty
+
+        let pool2 = pool.clone();
+        let handle = thread::spawn(move || {
+            let _c = pool2.acquire(); // blocks until main returns its connection
+        });
+
+        drop(held);              // wake the waiter (notify_one in Drop)
+        handle.join().unwrap();  // returns at all → blocking + wakeup worked
+        assert_eq!(pool.available(), 1);
+    }
+
+    // OVER-HAND catcher. 8 threads pound a 4-slot pool, released together by the
+    // Barrier for maximum contention. Track live borrows in an atomic; the pool
+    // must NEVER hand out more than capacity, and everything must come back.
+    #[test]
+    fn never_over_hands_under_contention() {
+        const CAP: usize = 4;
+        const THREADS: usize = 8;
+        const ITERS: usize = 20_000;
+
+        let pool = int_pool(CAP);
+        let in_use = AtomicUsize::new(0);
+        let max_seen = AtomicUsize::new(0);
+        let barrier = Barrier::new(THREADS);
+
+        thread::scope(|s| {
+            for _ in 0..THREADS {
+                let (pool, in_use, max_seen, barrier) =
+                    (&pool, &in_use, &max_seen, &barrier);
+                s.spawn(move || {
+                    barrier.wait(); // all start at once
+                    for _ in 0..ITERS {
+                        let _guard = pool.acquire();
+                        let cur = in_use.fetch_add(1, Ordering::SeqCst) + 1;
+                        max_seen.fetch_max(cur, Ordering::SeqCst);
+                        in_use.fetch_sub(1, Ordering::SeqCst);
+                        // _guard drops here → returned
+                    }
+                });
+            }
+        });
+
+        assert!(max_seen.load(Ordering::SeqCst) <= CAP, "handed out more than capacity");
+        assert_eq!(pool.available(), CAP); // every connection came back
+    }
+}
+```
+
+Run with `cargo test -p solution connpool` (or `-p practice connpool` for your own attempt). Two failure shapes to recognise: a broken blocking/notify path makes `acquire_blocks_until…` **hang** (join never returns), not red-assert; a `Drop` that forgets to return the connection makes `available()` drift down and the stress test's final `assert_eq` fail. `thread::scope` lets the workers borrow `&pool`, `&in_use`, and `&barrier` straight off the stack — no `Arc`/clone in the test — and the scope join is what lets you assert *after* every thread finishes.
+
+### Implement it
+
+`new` pre-fills the deque with `capacity` connections from `factory` (and asserts `capacity > 0`). `acquire` locks the deque and `wait`s in a `while` loop until it's non-empty, then `pop_front`s and wraps the connection in a guard. `try_acquire` is the same minus the wait — a single `pop_front()?`. The guard's `Drop` is the return.
+
+```rust
+impl<T> Pool<T> {
+    pub fn new(capacity: usize, mut factory: impl FnMut() -> T) -> Self {
+        assert!(capacity > 0, "pool capacity must be > 0");
+        let mut free = VecDeque::with_capacity(capacity);
+        for _ in 0..capacity { free.push_back(factory()); }
+        Pool {
+            inner: Arc::new(Inner {
+                free: Mutex::new(free),
+                available: Condvar::new(),
+                capacity,
+            }),
+        }
+    }
+
+    pub fn acquire(&self) -> PooledConn<T> {
+        let mut free = self.inner.free.lock().unwrap();
+        while free.is_empty() {
+            free = self.inner.available.wait(free).unwrap(); // release+sleep, re-lock on wake
+        }
+        let conn = free.pop_front().unwrap();
+        PooledConn { conn: Some(conn), inner: Arc::clone(&self.inner) }
+    }
+
+    pub fn try_acquire(&self) -> Option<PooledConn<T>> {
+        let mut free = self.inner.free.lock().unwrap();
+        let conn = free.pop_front()?;                        // none free → None, no wait
+        Some(PooledConn { conn: Some(conn), inner: Arc::clone(&self.inner) })
+    }
+
+    pub fn available(&self) -> usize { self.inner.free.lock().unwrap().len() }
+    pub fn capacity(&self) -> usize { self.inner.capacity }
+}
+
+impl<T> Deref for PooledConn<T> {
+    type Target = T;
+    fn deref(&self) -> &T { self.conn.as_ref().expect("connection present until drop") }
+}
+impl<T> DerefMut for PooledConn<T> {
+    fn deref_mut(&mut self) -> &mut T { self.conn.as_mut().expect("connection present until drop") }
+}
+
+impl<T> Drop for PooledConn<T> {
+    fn drop(&mut self) {
+        if let Some(conn) = self.conn.take() {            // move it out of &mut self
+            self.inner.free.lock().unwrap().push_back(conn); // return to the pool
+            self.inner.available.notify_one();               // wake one blocked acquirer
+        }
+    }
+}
+```
+
+The gotcha is the whole kata: **the guard's `Drop` *is* the return** — there is no `release()` anywhere, and that's deliberate. Three details make it work. First, the connection is held as `Option<T>` because `Drop` gets `&mut self` and you cannot move a plain field out of a mutable borrow; `self.conn.take()` swaps in `None` and hands you the owned `T` to push back. Second, the `Deref`/`DerefMut` impls `expect` the `Option` is `Some` — it always is until `Drop`, so callers see a clean `&T`/`&mut T`. Third, `acquire`'s wait is a **`while` loop, not an `if`**: `Condvar::wait` can return spuriously (woken with the deque still empty, or another thread grabbed the connection first), so you must re-check the predicate every wake. Note `notify_one` fires while still holding the lock here, which is fine — the woken thread simply blocks on re-acquiring the mutex until `Drop`'s guard scope ends.
+
+### Common mistakes & senior signal
+
+The headline trap: **exposing a `release()` method instead of using `Drop`.** It compiles, it works in the happy path, and it leaks a slot on every early return, `?`, or panic a caller forgets to guard — the precise bug RAII exists to delete. Reach for the guard first and name the pattern.
+
+- **`release()` instead of `Drop` (the leak).** Any manual return path can be skipped. The return must ride on ownership, not on the caller remembering. This is the difference the interviewer is watching for.
+- **Trying to move the field out of `&mut self` in `Drop`.** `fn drop(&mut self)` can't move `self.conn` out. Store it as `Option<T>` and `self.conn.take()` — leaving `None` so nothing double-frees.
+- **`if free.is_empty()` before `wait` (spurious wakeup bug).** A single `if` lets a spuriously-woken thread `pop_front` an empty deque and panic, or two waiters race for one connection. Use `while free.is_empty()` and re-check every wake.
+- **Forgetting `notify_one` in `Drop`.** Without it, a returned connection sits in the deque while blocked `acquire`rs sleep forever — a wedged pool under load. The return must both push back *and* signal.
+- **`sleep`-based "stress" tests.** Timing coin-flips that prove nothing. The signal is the `Barrier`-gated `thread::scope` test that maximises contention and asserts a hard invariant (`max_seen <= capacity`, `available() == capacity` at the end).
+- **Not deduplicating the guard state, or leaking `Arc` cycles.** The guard needs the `Arc<Inner>` to know where to return; clone it, don't stash a back-reference that outlives the pool.
+- **Senior signal** — reaching for the RAII guard unprompted, naming it as the `MutexGuard`/`File`/`Box` pattern, and articulating the two mechanics that make it compile in one breath — `Option<T>` so `Drop` can move the value out, `Deref`/`DerefMut` so the guard is the connection — while pointing out that the `Condvar` wait must be a `while` loop for spurious wakeups. That's someone who thinks in ownership, not in cleanup checklists.
+
+## Circuit Breaker — Three-State Resilience with an Injected Clock
+
+### Summary
+
+**What this topic covers**
+
+You build the resilience wrapper that sits in front of a flaky downstream — a payment gateway, a pricing API, a venue feed — and stops the caller hammering it once it starts failing. `call(f)` runs the wrapped closure while the breaker is healthy; after enough consecutive failures the breaker **trips open** and *fast-fails* every subsequent call (returning immediately without touching the downstream); after a `cooldown` it lets a few probe calls through and either recovers or re-opens. The signature Rust topic it drills is **modelling a finite state machine as an `enum` + `match`**, plus two supporting idioms every senior wraps around it: **thread-safe shared state behind a `Mutex`**, and an **injected clock** (`Fn() -> Instant`) that makes time-dependent logic deterministic to test.
+
+**Mental model**
+
+A circuit breaker is the textbook three-state FSM, and Rust's `enum` is the perfect encoding: `State::{Closed, Open, HalfOpen}`. `Closed` is normal — run the call, count *consecutive* failures, any success resets the count, and the `failure_threshold`-th consecutive failure trips it to `Open` and stamps the time. `Open` is tripped — do *not* run the call, return `CallError::Open` instantly; once `cooldown` has elapsed since it opened, the next observation lazily moves it to `HalfOpen`. `HalfOpen` is probing — run the call, count consecutive successes, and the `success_threshold`-th closes it, while the *first* failure re-opens and restarts the timer. The whole thing lives in one `Mutex<Inner>` so a transition triggered by one thread's call is atomic against every other thread. And "now" is not read from `Instant::now()` in the guts — it is injected, so a test can jump the cooldown forward by hand instead of sleeping. Encode the state as an `enum` and dispatch every transition with `match`, and illegal states — "half-open with a live failure count", "open but no opened-at timestamp" — become unrepresentable rather than a bug you hunt.
+
+**Key terms**
+
+- **`State` enum (`Closed` / `Open` / `HalfOpen`)** — the three FSM states; `#[derive(Clone, Copy, PartialEq, Eq)]` so it's a trivially-copied value the `match` cascades on.
+- **`CallError<E>`: `Open` vs `Inner(E)`** — the two failure outcomes a caller handles *differently*. `Open` means the breaker fast-failed and `f` never ran; `Inner(e)` means `f` ran and returned the real downstream error, preserved.
+- **`failure_threshold`** — consecutive `Err`s in `Closed` that trip the breaker to `Open`.
+- **`success_threshold`** — consecutive `Ok`s in `HalfOpen` that close it back to `Closed`.
+- **`cooldown`** — a `Duration`; how long the breaker stays `Open` before it lets probe calls through (`HalfOpen`).
+- **injected clock `Fn() -> Instant`** — the source of "now", stored as `Box<dyn Fn() -> Instant + Send + Sync>`. `Instant::now` in production, a hand-advanced fake in tests.
+- **`Mutex`-guarded state** — the `State`, both counters, and the `opened_at: Option<Instant>` all live in one `Mutex<Inner>` so every transition is atomic.
+
+**Why interviewers ask this**
+
+It's a compact test of whether you reach for Rust's `enum` where a Java dev reaches for a `boolean isOpen; long openedAt;` flag tangle. A junior writes the flags, then spends the interview chasing the state where `isOpen` and the counters disagree. A senior models `State` as an `enum`, dispatches with `match`, and gets *exhaustiveness* for free — the compiler forces every state to be handled and makes the illegal combinations unrepresentable. It also probes two things seniors are expected to know cold: that shared mutable state across threads *must* be synchronised (and why the closure runs *while holding the lock*, not before), and that time-dependent logic is only testable if the clock is a seam. The money stakes sharpen it: a breaker that trips too eagerly sheds good load; one that never fast-fails lets a dead dependency drag the whole service down at peak; one whose transitions race lets two threads both trip (or both close) and the recovery logic desyncs.
+
+**Common confusions**
+
+- *"`Open` should still call `f`, just log the failure."* — No. The entire point is to *not* touch the downstream: `Open` returns `CallError::Open` without invoking `f`. That's the load it sheds.
+- *"Count total failures."* — It's *consecutive* failures in `Closed`. A single success resets the counter to zero, so a low background error rate never accumulates into a trip.
+- *"Move `Open` → `HalfOpen` on a timer thread."* — There's no timer. The transition is *lazy*: the next `call`/`state()` reads the injected clock and promotes the state if `cooldown` has elapsed. No background thread, no wakeup.
+- *"Run `f` first, then lock to record the result."* — That splits the decision from the transition; two threads can both pass the "is it open?" check and both trip. Run `f` *inside* the lock hold.
+
+**What follows from this topic**
+
+The `enum` + `match` FSM is the backbone pattern for anything with lifecycle states — order state machines, connection pools, retry policies. The injected-clock seam recurs in every time-dependent kata (rate limiters, TTL caches, backoff). And the `Mutex<Inner>`-holds-across-the-effect discipline is the same shape as the `positionbook` lost-update fix, one level up. The natural extension — trip on a **rolling-window failure rate** rather than a consecutive count — leads into ring buffers and windowed metrics; adding a per-call timeout leads into `tokio` and async cancellation.
+
+### Clarify & design the API
+
+Questions worth asking out loud: is it a *consecutive* failure count or a rolling rate (kata: consecutive — simplest, most predictable)? Is the `Open` → `HalfOpen` transition driven by a background timer or lazily on the next call (lazy — no extra thread)? Does `state()` mutate (yes — it applies any pending cooldown expiry, so it needs `&self` + interior mutability, not `&mut self`)? Do we surface `Mutex` poisoning as a `Result` or `unwrap` (kata: `unwrap`, mention `Result` as the extension)? Should the clock be a generic parameter or a boxed `dyn`? A `Box<dyn Fn>` keeps the type non-generic (one `CircuitBreaker`, not `CircuitBreaker<C>`) at the cost of one indirection per read — the right call for a shared, rarely-hot path.
+
+The **state model is the design**. Three states as an `enum`, all mutable state in one `Mutex<Inner>`, the clock as a seam:
+
+```rust
+/// The three states of the breaker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum State { Closed, Open, HalfOpen }
+
+/// The failure outcome of `call`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CallError<E> {
+    Open,       // breaker was open: `f` was NOT invoked
+    Inner(E),   // `f` ran and returned Err(E)
+}
+
+pub struct CircuitBreaker {
+    inner: Mutex<Inner>,                    // State + counters + opened_at, one lock
+    failure_threshold: u32,
+    success_threshold: u32,
+    cooldown: Duration,
+    clock: Box<dyn Fn() -> Instant + Send + Sync>,
+}
+
+impl CircuitBreaker {
+    pub fn new(
+        failure_threshold: u32,
+        success_threshold: u32,
+        cooldown: Duration,
+        clock: impl Fn() -> Instant + Send + Sync + 'static,
+    ) -> Self { /* ... */ }
+
+    pub fn state(&self) -> State;           // &self — shared; applies pending expiry
+    pub fn call<T, E>(&self, f: impl FnOnce() -> Result<T, E>)
+        -> Result<T, CallError<E>>;
+}
+```
+
+Every method takes `&self` — one breaker is shared by every worker, so `&mut self` (which demands exclusive access) would defeat the sharing. The `impl Fn() -> Instant + Send + Sync + 'static` bound on `new` is what lets production pass `Instant::now` and tests pass a closure over a shared `Instant`; boxing it erases the type so the struct stays plain. `CallError<E>` being *generic* over the downstream error is the tell that you thought about the caller: they can `match` on `Open` (shed load) versus `Inner(e)` (handle the real error) without losing `e`.
+
+### Write the tests
+
+The README ships **no tests** — writing them is the exercise, and the whole game is a **fake clock** you advance by hand so there are zero real sleeps. Build it once as a helper: a shared `Arc<Mutex<Instant>>` plus a closure that reads it, and an `advance` that bumps it. Then walk every edge of the transition table.
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    /// A hand-advanced clock: tests move time forward explicitly, no real sleeps.
+    fn fake_clock() -> (Arc<Mutex<Instant>>, impl Fn() -> Instant + Send + Sync + 'static) {
+        let t = Arc::new(Mutex::new(Instant::now()));
+        let clock = { let t = t.clone(); move || *t.lock().unwrap() };
+        (t, clock)
+    }
+    fn advance(t: &Arc<Mutex<Instant>>, d: Duration) { *t.lock().unwrap() += d; }
+
+    const OK: Result<i32, &str> = Ok(1);
+    const BAD: Result<i32, &str> = Err("boom");
+
+    #[test]
+    fn closed_passes_through_and_returns_ok() {
+        let (_t, clock) = fake_clock();
+        let cb = CircuitBreaker::new(3, 2, Duration::from_secs(30), clock);
+        assert_eq!(cb.state(), State::Closed);
+        assert_eq!(cb.call(|| OK), Ok(1));
+        assert_eq!(cb.state(), State::Closed);
+    }
+
+    #[test]
+    fn consecutive_failures_trip_to_open() {
+        let (_t, clock) = fake_clock();
+        let cb = CircuitBreaker::new(3, 2, Duration::from_secs(30), clock);
+        assert_eq!(cb.call(|| BAD), Err(CallError::Inner("boom")));
+        assert_eq!(cb.call(|| BAD), Err(CallError::Inner("boom")));
+        assert_eq!(cb.state(), State::Closed);      // still one below threshold
+        assert_eq!(cb.call(|| BAD), Err(CallError::Inner("boom")));
+        assert_eq!(cb.state(), State::Open);        // third consecutive failure trips it
+    }
+
+    // The load-shedding invariant: Open must NOT run f. Track invocation with a counter.
+    #[test]
+    fn open_does_not_invoke_f_and_fast_fails() {
+        let (_t, clock) = fake_clock();
+        let cb = CircuitBreaker::new(1, 1, Duration::from_secs(30), clock);
+        cb.call(|| BAD).ok();                        // trips immediately (threshold 1)
+        assert_eq!(cb.state(), State::Open);
+
+        let invoked = AtomicUsize::new(0);
+        let res: Result<i32, CallError<&str>> = cb.call(|| {
+            invoked.fetch_add(1, Ordering::SeqCst);
+            OK
+        });
+        assert_eq!(res, Err(CallError::Open));
+        assert_eq!(invoked.load(Ordering::SeqCst), 0, "f must not run while open");
+    }
+
+    #[test]
+    fn cooldown_elapsing_moves_to_half_open() {
+        let (t, clock) = fake_clock();
+        let cb = CircuitBreaker::new(1, 2, Duration::from_secs(30), clock);
+        cb.call(|| BAD).ok();
+        advance(&t, Duration::from_secs(29));
+        assert_eq!(cb.state(), State::Open);         // cooldown not yet elapsed
+        advance(&t, Duration::from_secs(1));
+        assert_eq!(cb.state(), State::HalfOpen);     // exactly at cooldown
+    }
+
+    #[test]
+    fn half_open_reaching_success_threshold_closes() {
+        let (t, clock) = fake_clock();
+        let cb = CircuitBreaker::new(1, 2, Duration::from_secs(30), clock);
+        cb.call(|| BAD).ok();
+        advance(&t, Duration::from_secs(30));
+        assert_eq!(cb.state(), State::HalfOpen);
+        assert_eq!(cb.call(|| OK), Ok(1));
+        assert_eq!(cb.state(), State::HalfOpen);     // one success, need two
+        assert_eq!(cb.call(|| OK), Ok(1));
+        assert_eq!(cb.state(), State::Closed);       // second success closes it
+    }
+
+    #[test]
+    fn failure_in_half_open_reopens_and_restarts_timer() {
+        let (t, clock) = fake_clock();
+        let cb = CircuitBreaker::new(1, 2, Duration::from_secs(30), clock);
+        cb.call(|| BAD).ok();
+        advance(&t, Duration::from_secs(30));
+        assert_eq!(cb.state(), State::HalfOpen);
+        assert_eq!(cb.call(|| BAD), Err(CallError::Inner("boom")));
+        assert_eq!(cb.state(), State::Open);         // one failure while probing re-opens
+        advance(&t, Duration::from_secs(30));
+        assert_eq!(cb.state(), State::HalfOpen);     // timer counts from the RE-open
+    }
+
+    #[test]
+    fn success_in_closed_resets_the_failure_count() {
+        let (_t, clock) = fake_clock();
+        let cb = CircuitBreaker::new(3, 2, Duration::from_secs(30), clock);
+        cb.call(|| BAD).ok();
+        cb.call(|| BAD).ok();
+        assert_eq!(cb.call(|| OK), Ok(1));           // clears the count...
+        cb.call(|| BAD).ok();
+        cb.call(|| BAD).ok();
+        assert_eq!(cb.state(), State::Closed);       // ...so two more don't trip early
+        cb.call(|| BAD).ok();
+        assert_eq!(cb.state(), State::Open);         // now the third consecutive trips it
+    }
+}
+```
+
+Run with `cargo test -p practice circuitbreaker` (or `-p solution` for the reference). Two tests carry the real weight. `open_does_not_invoke_f_and_fast_fails` is the load-shedding proof — a passing `assert_eq!(res, Err(CallError::Open))` alone doesn't prove `f` was skipped, so the `AtomicUsize` counter is what actually pins "the closure never ran". And `success_in_closed_resets_the_failure_count` is the *consecutive*-not-*total* proof: threshold-1 failures, a success, then more failures must not trip early. Without the fake clock none of the cooldown tests could exist without `sleep`, which is exactly the flakiness the injected clock buys you out of.
+
+### Implement it
+
+All mutable state lives in one `Inner` behind the `Mutex`; `call` locks, applies any pending cooldown expiry, fast-fails if `Open`, otherwise runs `f` *under the lock* and `match`es the outcome to a transition helper.
+
+```rust
+struct Inner {
+    state: State,
+    failures: u32,               // consecutive failures in Closed
+    successes: u32,              // consecutive successes in HalfOpen
+    opened_at: Option<Instant>,  // when it last opened — drives cooldown
+}
+
+pub fn state(&self) -> State {
+    let mut inner = self.inner.lock().unwrap();
+    self.maybe_half_open(&mut inner);   // lazy Open -> HalfOpen on read
+    inner.state
+}
+
+pub fn call<T, E>(&self, f: impl FnOnce() -> Result<T, E>) -> Result<T, CallError<E>> {
+    let mut inner = self.inner.lock().unwrap();
+    self.maybe_half_open(&mut inner);
+
+    if inner.state == State::Open {
+        return Err(CallError::Open);    // fast-fail: f is NEVER invoked
+    }
+    // Closed or HalfOpen: run f WHILE HOLDING THE LOCK so the transition
+    // it triggers is atomic against other threads.
+    match f() {
+        Ok(v)  => { self.on_success(&mut inner); Ok(v) }
+        Err(e) => { self.on_failure(&mut inner); Err(CallError::Inner(e)) }
+    }
+}
+
+fn maybe_half_open(&self, inner: &mut Inner) {
+    if inner.state == State::Open {
+        let opened_at = inner.opened_at.expect("Open implies a recorded open time");
+        if (self.clock)().duration_since(opened_at) >= self.cooldown {
+            inner.state = State::HalfOpen;
+            inner.successes = 0;
+        }
+    }
+}
+
+fn on_success(&self, inner: &mut Inner) {
+    match inner.state {
+        State::Closed => inner.failures = 0,               // any success resets
+        State::HalfOpen => {
+            inner.successes += 1;
+            if inner.successes >= self.success_threshold {
+                inner.state = State::Closed;
+                inner.failures = 0; inner.successes = 0; inner.opened_at = None;
+            }
+        }
+        State::Open => {}                                  // unreachable: fast-failed
+    }
+}
+
+fn on_failure(&self, inner: &mut Inner) {
+    match inner.state {
+        State::Closed => {
+            inner.failures += 1;
+            if inner.failures >= self.failure_threshold { self.trip(inner); }
+        }
+        State::HalfOpen => self.trip(inner),               // first probe failure re-opens
+        State::Open => {}
+    }
+}
+
+fn trip(&self, inner: &mut Inner) {
+    inner.state = State::Open;
+    inner.failures = 0; inner.successes = 0;
+    inner.opened_at = Some((self.clock)());                // stamp for cooldown
+}
+```
+
+The gotcha that separates this from a naive breaker: **the transition happens under one lock, and `f` runs inside that hold.** If you drop the lock to run `f` and re-lock to record the result, two threads in `Closed` at "one below threshold" can both fail and both call `trip`, or a probe success and a probe failure can interleave and desync the counters. Holding the guard across `f()` makes "decide, run, record" one atomic step — the same discipline as keeping a read-modify-write inside a single lock. Second: the `Open` → `HalfOpen` move is **lazy, driven by the injected clock**, not a background timer — `maybe_half_open` runs at the top of every `state()`/`call()` and promotes the state only if `(self.clock)()` shows the cooldown elapsed, so there's no thread to manage and no wakeup to miss. Third: **fast-fail means `f` is genuinely never invoked** — the `return Err(CallError::Open)` sits *before* the `match f()`, which is exactly what the `AtomicUsize` test pins. And the reason the clock is a `Box<dyn Fn() -> Instant>` at all is testability: production hands it `Instant::now`, tests hand it a closure over a shared `Instant` they bump by hand — deterministic cooldown expiry with zero real sleeps.
+
+### Common mistakes & senior signal
+
+- **Modelling state as booleans.** `is_open: bool` + `opened_at: Option<Instant>` + counters can represent "open with a live success count" — a state that shouldn't exist. The `enum` makes it unrepresentable and the `match` makes handling it exhaustive. **Senior signal** — reaches for `enum State` + `match` and names "illegal states unrepresentable" as the reason, not just the aesthetics.
+- **Running `f` before locking, then locking to record.** Compiles, passes single-threaded, and races the moment two threads transition at once — double-trips, desynced counters. **Senior signal** — runs the closure *inside* the lock hold and can explain that "decide + run + record" must be one atomic step under `Mutex<Inner>`.
+- **Invoking `f` while `Open`.** Defeats the entire purpose — the breaker exists to *not* touch a dead dependency. **Senior signal** — puts the `return Err(CallError::Open)` before the call and writes the `AtomicUsize` test that proves `f` never ran, rather than trusting the return value alone.
+- **Counting total instead of consecutive failures, or forgetting the success-resets-count rule.** A steady low error rate slowly accumulates into a spurious trip. **Senior signal** — resets `failures` to zero on any `Closed` success and writes the threshold-1-then-success-then-more test to prove it.
+- **Reading `Instant::now()` inside the breaker.** Makes every cooldown test a real `sleep` — slow and flaky. **Senior signal** — injects the clock as a `Fn() -> Instant` seam, hands production `Instant::now`, and drives tests with a hand-advanced fake; also flags the lazy-vs-timer choice for `Open` → `HalfOpen`.
+
+Extensions that show depth: trip on a **rolling-window failure rate** (>50% of the last N calls) via a ring buffer instead of a consecutive count, so a low background error rate never trips; add a **per-call timeout** that counts a slow call as a failure (pulling in async cancellation); expose **metrics** (trip count, time-in-state); or return `Result` from `call` to surface `Mutex` poisoning instead of `unwrap`.
+
+## Parking Lot — Enums, Exhaustive `match` & Best-Fit
+
+### Summary
+
+**What this topic covers**
+
+You build the canonical low-level-design warm-up: a single-level parking lot with spots of three sizes (`Small`, `Medium`, `Large`), vehicles of three kinds (`Motorcycle`, `Car`, `Truck`), *fit* rules that say which sizes each vehicle may use, and **best-fit** allocation — the smallest free spot that fits, so a motorcycle doesn't burn a Large that a truck will need. `park` hands back a `Ticket`; returning the ticket frees the exact spot. This is "the hello-world of low-level design", and the Rust angle that makes it worth drilling is **enums + exhaustive `match` + ownership**: model the closed set of kinds as enums, express the fit rules as a `match` the compiler forces you to keep total, and make the ticket an unforgeable capability that frees exactly one spot.
+
+**Mental model**
+
+The whole design is two closed sets and one lookup table. `VehicleKind` and `SpotKind` are enums because the set of options is fixed and known — there's no open-ended hierarchy to extend at runtime. The fit rules are a pure function `fit_order(kind) -> &[SpotKind]` that returns the spot kinds a vehicle may use **in best-fit order (smallest first)**. Best-fit then isn't a separate algorithm: it's just "walk that slice, take the first size with a free spot". The `Ticket` is the ownership twist — instead of handing a caller a mutable reference into your storage (which the borrow checker would fight you over anyway), you hand back a plain value that *names* the spot (kind, index, plate). `unpark` consumes that value and only succeeds if it still matches an occupied spot, so a spot can be freed once, by whoever holds the receipt, and never double-freed.
+
+**Key terms**
+
+- **`VehicleKind` / `SpotKind` enums** — the two closed sets. `SpotKind` derives `Ord` (`Small < Medium < Large`) so "smallest that fits" has a meaning.
+- **fit rules** — which spot sizes a vehicle may occupy: Motorcycle → any; Car → Medium or Large; Truck → Large only.
+- **best-fit** — allocate the *smallest* free spot that fits, not the first one seen, so large vehicles aren't starved by small ones squatting big spots.
+- **`Ticket` as capability** — a value carrying `{spot_kind, index, plate}`: exactly what's needed to free the spot, and nothing that lets you forge access to another.
+- **`ParkError`** — `Full` (no fitting spot) and `UnknownTicket` (bogus or already-returned ticket).
+- **exhaustive `match`** — matching on `VehicleKind` with no `_` arm; adding a variant won't compile until every `match` handles it.
+
+**Why interviewers ask this**
+
+It's the fastest read on whether someone reaches for the *right* Rust modelling primitive. A junior ports the Java answer verbatim: a `Vehicle` trait, `Spot` trait, `Box<dyn …>` everywhere, a wildcard `_ =>` arm "to be safe". A senior says the set of kinds is *closed*, so enums beat trait objects here (no allocation, no dynamic dispatch, and — the payoff — the compiler enforces the fit rules for you). The tell is what they do with the exhaustive `match`: they lean on it as a design tool ("if I add a `Bus` kind, the build breaks until I place it") rather than defeating it with `_`. It also surfaces ownership taste — modelling the ticket as a value capability that `unpark` *consumes* is the idiomatic Rust way to make double-free unrepresentable, and it maps cleanly to real concerns (you can't return someone else's car).
+
+**Common confusions**
+
+- *"First-fit and best-fit are the same."* — Only when every vehicle uses one size. The instant a motorcycle can spill up, first-fit lets it take a Large and starve trucks; best-fit tries Small → Medium → Large.
+- *"A `_ =>` arm makes the `match` safer."* — It does the opposite: it silences the compiler that would otherwise force you to place a new vehicle kind. Enumerate every arm.
+- *"`unpark` just needs the index."* — Then any stale or invented ticket frees a live spot. Validate the plate too, so the ticket is a real capability, not just a coordinate.
+- *"The ticket should hold a reference into the lot."* — That borrows the lot for the ticket's whole life. A plain owned value decouples the receipt from the storage.
+
+**What follows from this topic**
+
+This is the on-ramp to Rust's data-modelling toolkit — enums, exhaustive matching, `Result`-based error handling — that every later kata leans on. The natural extensions push into new topics: multiple floors (nested storage, a richer `Ticket`), and a **thread-safe** lot (`Mutex<ParkingLot>` with a `Barrier`-gated test where two cars race for the last spot and exactly one wins) — which is the bridge to the shared-state concurrency katas.
+
+### Clarify & design the API
+
+Questions worth asking before writing anything: what exactly are the **fit rules** (which sizes does each vehicle accept)? Is allocation **best-fit or first-fit** — do we take the smallest fitting spot or the first free one we see? What shape is the **ticket** — an opaque handle, or a value the caller can inspect? Does it need to be **thread-safe** (many entrances parking at once), or is single-threaded fine for v1? What happens on a full lot or a bogus ticket — panic, `Option`, or a typed error?
+
+The modelling decision is the whole exercise. The set of vehicle kinds and spot kinds is *closed*, so they're **enums**, not a trait hierarchy. The fit rules become a `match` on `VehicleKind` returning the acceptable spot kinds **in best-fit order** — and because that `match` is exhaustive, best-fit and "the rules stay honest" fall out of the same construct.
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VehicleKind { Motorcycle, Car, Truck }
+
+// Ord derives from declaration order: Small < Medium < Large.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SpotKind { Small, Medium, Large }
+
+#[derive(Debug, Clone)]
+pub struct Vehicle { pub kind: VehicleKind, pub plate: String }
+
+// The receipt: exactly what's needed to free one spot, nothing more.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ticket { pub spot_kind: SpotKind, pub index: usize, pub plate: String }
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ParkError { Full, UnknownTicket }
+
+pub struct ParkingLot { /* you design the storage */ }
+
+impl ParkingLot {
+    pub fn new(small: usize, medium: usize, large: usize) -> Self { todo!() }
+    pub fn park(&mut self, vehicle: Vehicle) -> Result<Ticket, ParkError> { todo!() }
+    pub fn unpark(&mut self, ticket: Ticket) -> Result<(), ParkError> { todo!() }
+    pub fn available(&self, kind: SpotKind) -> usize { todo!() }
+}
+```
+
+Say the modelling call out loud: enums over trait objects because the kinds are fixed (no allocation, exhaustive matching), the fit rules as a `match` returning a best-fit-ordered slice, and the ticket as an owned value capability so `unpark` can consume it and reject anything that doesn't match a live spot.
+
+### Write the tests
+
+The README ships **no tests** — designing them is the exercise. Pin best-fit per vehicle, the spill-up and never-downsize edges, unpark + double-unpark, and availability tracking.
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vehicle(kind: VehicleKind, plate: &str) -> Vehicle {
+        Vehicle { kind, plate: plate.to_string() }
+    }
+
+    #[test]
+    fn best_fit_puts_each_vehicle_in_its_smallest_spot() {
+        let mut lot = ParkingLot::new(1, 1, 1);
+        assert_eq!(lot.park(vehicle(VehicleKind::Motorcycle, "M1")).unwrap().spot_kind, SpotKind::Small);
+        assert_eq!(lot.park(vehicle(VehicleKind::Car, "C1")).unwrap().spot_kind, SpotKind::Medium);
+        assert_eq!(lot.park(vehicle(VehicleKind::Truck, "T1")).unwrap().spot_kind, SpotKind::Large);
+    }
+
+    #[test]
+    fn motorcycle_spills_up_when_small_is_full() {
+        let mut lot = ParkingLot::new(1, 1, 0);
+        assert_eq!(lot.park(vehicle(VehicleKind::Motorcycle, "M1")).unwrap().spot_kind, SpotKind::Small);
+        // Small full → best-fit tries the next size up.
+        assert_eq!(lot.park(vehicle(VehicleKind::Motorcycle, "M2")).unwrap().spot_kind, SpotKind::Medium);
+    }
+
+    #[test]
+    fn car_never_uses_a_small_spot() {
+        let mut lot = ParkingLot::new(5, 0, 0); // only Smalls exist
+        assert_eq!(lot.park(vehicle(VehicleKind::Car, "C1")), Err(ParkError::Full));
+    }
+
+    #[test]
+    fn truck_needs_a_large_spot() {
+        let mut lot = ParkingLot::new(2, 2, 0); // Smalls + Mediums, no Large
+        assert_eq!(lot.park(vehicle(VehicleKind::Truck, "T1")), Err(ParkError::Full));
+    }
+
+    #[test]
+    fn unpark_frees_the_spot_and_double_unpark_is_rejected() {
+        let mut lot = ParkingLot::new(1, 0, 0);
+        let ticket = lot.park(vehicle(VehicleKind::Motorcycle, "M1")).unwrap();
+        assert_eq!(lot.available(SpotKind::Small), 0);
+        lot.unpark(ticket.clone()).unwrap();
+        assert_eq!(lot.available(SpotKind::Small), 1);
+        // The ticket is spent — returning it again is a bogus receipt.
+        assert_eq!(lot.unpark(ticket), Err(ParkError::UnknownTicket));
+    }
+
+    #[test]
+    fn availability_tracks_occupancy() {
+        let mut lot = ParkingLot::new(2, 0, 0);
+        assert_eq!(lot.available(SpotKind::Small), 2);
+        lot.park(vehicle(VehicleKind::Motorcycle, "M1")).unwrap();
+        assert_eq!(lot.available(SpotKind::Small), 1);
+        lot.park(vehicle(VehicleKind::Motorcycle, "M2")).unwrap();
+        assert_eq!(lot.available(SpotKind::Small), 0);
+        assert_eq!(lot.park(vehicle(VehicleKind::Motorcycle, "M3")), Err(ParkError::Full));
+    }
+}
+```
+
+Run with `cargo test -p solution parkinglot` (or `-p practice` for your own attempt). The `car_never_uses_a_small_spot` and `truck_needs_a_large_spot` cases are the ones that actually test your fit rules — a `match` with a stray wildcard arm or a mis-ordered slice sails through best-fit but breaks these.
+
+### Implement it
+
+Storage is three rows of slots, indexed by `SpotKind as usize`; `Some(plate)` means occupied. The fit rules live in one exhaustive `match`, and everything else reads off it.
+
+```rust
+/// The spot kinds a vehicle may use, smallest (best-fit) first.
+fn fit_order(kind: VehicleKind) -> &'static [SpotKind] {
+    match kind {
+        VehicleKind::Motorcycle => &[SpotKind::Small, SpotKind::Medium, SpotKind::Large],
+        VehicleKind::Car => &[SpotKind::Medium, SpotKind::Large],
+        VehicleKind::Truck => &[SpotKind::Large],
+    }
+}
+
+pub struct ParkingLot {
+    // spots[kind as usize][i] == Some(plate) when occupied.
+    spots: [Vec<Option<String>>; 3],
+}
+
+impl ParkingLot {
+    pub fn new(small: usize, medium: usize, large: usize) -> Self {
+        ParkingLot { spots: [vec![None; small], vec![None; medium], vec![None; large]] }
+    }
+
+    pub fn park(&mut self, vehicle: Vehicle) -> Result<Ticket, ParkError> {
+        for &spot_kind in fit_order(vehicle.kind) {          // smallest fitting size first
+            let row = &mut self.spots[spot_kind as usize];
+            if let Some(index) = row.iter().position(Option::is_none) {
+                row[index] = Some(vehicle.plate.clone());
+                return Ok(Ticket { spot_kind, index, plate: vehicle.plate });
+            }
+        }
+        Err(ParkError::Full)                                  // no size fit
+    }
+
+    pub fn unpark(&mut self, ticket: Ticket) -> Result<(), ParkError> {
+        let row = self.spots.get_mut(ticket.spot_kind as usize).ok_or(ParkError::UnknownTicket)?;
+        let slot = row.get_mut(ticket.index).ok_or(ParkError::UnknownTicket)?;
+        if slot.as_deref() == Some(ticket.plate.as_str()) {  // capability check: right car, live spot
+            *slot = None;
+            Ok(())
+        } else {
+            Err(ParkError::UnknownTicket)
+        }
+    }
+
+    pub fn available(&self, kind: SpotKind) -> usize {
+        self.spots[kind as usize].iter().filter(|s| s.is_none()).count()
+    }
+}
+```
+
+The gotcha worth naming: the **exhaustive `match` in `fit_order` is what keeps the fit rules honest** — there's no `_` arm, so the day someone adds `VehicleKind::Bus` the compiler refuses to build until they say where a bus parks. **Best-fit is not a separate algorithm**: because `fit_order` returns sizes in ascending order, `park` scanning that slice and taking the first free spot *is* best-fit. And the **ticket is an unforgeable capability** — `unpark` consumes it by value and only frees the spot if the plate still matches, so a spot is freed exactly once, by the receipt holder; a stale, invented, or already-spent ticket gets `UnknownTicket` instead of silently clobbering a live car.
+
+### Common mistakes & senior signal
+
+- **A wildcard `_ =>` arm in `fit_order`.** It compiles today and silently mis-parks the vehicle kind you add tomorrow. **Senior signal** — enumerating every variant on purpose and citing the compile error as the design's safety net.
+- **First-fit dressed up as best-fit.** Returning sizes largest-first, or scanning all rows and taking any free spot, lets a motorcycle squat a Large and starve trucks. **Senior signal** — deriving best-fit from an ascending `fit_order` slice and having a spill-up test that would catch a regression.
+- **`unpark` trusting the index alone.** Freeing whatever sits at `spot_kind[index]` lets a forged or stale ticket evict a live car. **Senior signal** — treating the ticket as a capability, validating the plate, and consuming it by value so double-free is unrepresentable.
+- **Porting the Java trait hierarchy.** `Box<dyn Vehicle>` and dynamic dispatch for a fixed, three-element set is allocation and indirection with no payoff. **Senior signal** — choosing enums for the closed set and explaining the exhaustiveness and zero-alloc wins.
+- **Modelling errors as panics or bare `Option`.** `park`/`unpark` returning `Result<_, ParkError>` makes "full" and "bad ticket" distinct, testable outcomes. **Senior signal** — a typed error enum the caller can `match` on, not an `unwrap` waiting to abort a busy lot.
+
+Extensions that show depth: add multiple floors (nest the storage, widen the `Ticket`); then make the lot thread-safe with a `Mutex<ParkingLot>` and write a `Barrier`-gated test where two cars race for the last spot and exactly one gets it — the on-ramp to the shared-state concurrency katas.
+
+## Vending Machine — State Machine + Greedy Change-Making
+
+### Summary
+
+**What this topic covers**
+
+You build the canonical vending machine: a punter inserts coins to accumulate a balance, then selects a slot; if the product is in stock and the balance covers its price, the machine dispenses it *and* the correct change from its coin float, then resets — otherwise it returns a precise error (sold out, not enough money, or "exact change only" when it physically cannot make the change). It's the classic **state-machine LLD** interview problem, and the Rust angle is the good part: the machine's state is modelled as data (a running balance + inventory + coin float) rather than an explicit `enum State`, `select` is a `match`/guard **cascade** that fails before mutating anything, failures are a **data-carrying error `enum`**, and the change is made with a **greedy** algorithm whose known blind spot is the whole point of the "exact change only" case.
+
+**Mental model**
+
+Think of the machine as a small transaction processor, not an object with setters. There are three pieces of state: `slots` (what's stocked and its price/qty), `float` (the coins the operator loaded, used to *give* change), and `inserted` (the escrow of coins the current punter has put in — their balance). A `select` is one transition that must be **all-or-nothing**: it validates the whole path — slot exists and has stock, balance ≥ price, the float can actually make `balance - price` in change — and only *then* commits (decrement stock, move the inserted coins into the float, subtract the handed-back change, clear the escrow). If any check fails it returns an `Err` having touched nothing, so a punter who gets `InsufficientFunds` keeps their money and can top up and retry. The change-maker is greedy — largest coin first — which is optimal for canonical `5/10/25` denominations *when supply is unlimited*, but a finite float can make greedy strand itself, and that's exactly the `ExactChangeOnly` failure.
+
+**Key terms**
+
+- **`Coin` enum + `cents()`** — the denominations `Nickel`/`Dime`/`Quarter` as a type, with a `match` mapping each to its value (`5`/`10`/`25`). Modelling money as an enum, not an `i32`, means an invalid coin is unrepresentable.
+- **`VendError` with data-carrying `InsufficientFunds`** — the error `enum`'s variants aren't just tags: `InsufficientFunds { needed, balance }` carries the numbers the caller needs to react (show "insert 15c more"). Errors are values that carry context.
+- **`Dispensed`** — the success payload: `{ product: String, change: Vec<Coin> }`. The happy path returns *what* came out and *which coins* came back, not a bare `bool`.
+- **balance / inventory / coin-float** — the three state buckets: inserted escrow (balance), stocked slots (inventory), and the operator's change reserve (float). Keeping them distinct is the design.
+- **greedy change** — hand back the largest coin that fits, repeatedly, respecting the float's supply. Simple and optimal for canonical denominations with enough coins.
+- **the exact-change problem** — greedy over a *limited* float can grab a quarter and then be unable to make the remaining nickel even though a nickel-heavy solution existed. Real machines punt to `ExactChangeOnly`; the robust fix is coin-change DP.
+- **`match`** — the guard cascade at the heart of `select`; `match self.slots.get(slot) { Some(s) if s.qty > 0 => …, _ => return Err(SoldOut) }` is the Rust idiom for "validate-or-bail".
+
+**Why interviewers ask this**
+
+Vending machine is the "can you model a stateful system cleanly" screen, and Rust sharpens it. A junior mutates state as they go — decrement stock, then discover the float can't make change, and now the machine is corrupted (a sold unit that never dispensed). A senior structures `select` so **every** failure path returns before the first mutation, so the transition is atomic without needing a rollback. The change-maker is a second, quieter tell: candidates who reach for greedy and *say nothing* miss that it's incomplete; candidates who reach for greedy and **name the limited-supply failure** (and offer DP as the fix) show they know the algorithm's boundary. It also exercises core Rust modelling — sum types for coins and errors, `Result` for fallible transitions, borrowing rules that make you decide up-front what to clone (the product name) before you mutate the map.
+
+**Common confusions**
+
+- *"Mutate as you validate."* — Decrementing stock or pulling change before confirming the whole sale can go through leaves the machine inconsistent on the error path. Validate everything, then commit.
+- *"Greedy always works for coins."* — Only with canonical denominations *and* enough supply. A finite float breaks it; that's the `ExactChangeOnly` branch, not a bug.
+- *"`InsufficientFunds` should just be an error tag."* — Then the UI can't tell the punter how much more to insert. The data on the variant is the feature.
+- *"The inserted coins aren't available for change."* — They are: a punter's quarter can be part of the change another gets. The inserted escrow joins the float in the change-making pool before the commit.
+- *"Refund and a failed select are the same."* — `refund` is an explicit punter action returning their coins; a failed `select` leaves the balance intact so they can retry. Different transitions.
+
+**What follows from this topic**
+
+This is the gateway kata for domain modelling with sum types and `Result`, and it sets up two directions. The **typestate** pattern (below) leads into encoding a protocol in the type system so illegal call orders won't compile — the same idea behind builder-must-call-`build` and session types. The **change-making** thread leads into dynamic programming (the coin-change DP that never spuriously reports `ExactChangeOnly`) and, more broadly, into recognising when a greedy heuristic is provably optimal versus merely convenient. And the all-or-nothing `select` is a miniature of transactional thinking you'll reuse anywhere a multi-step operation must commit or abort cleanly.
+
+### Clarify & design the API
+
+Clarifying questions worth asking out loud: what denominations does the machine take, and are they the canonical `5/10/25` (yes — that's what makes greedy viable)? Do we give change from a **float** the operator loads, or assume infinite coins (a real float — that's what creates the exact-change case)? On a failed purchase, do we auto-refund or leave the balance so the punter can top up (leave it — `select` mutates nothing on error, `refund` is the explicit return path)? And when the balance covers the price but the float can't make the difference, do we sell-and-shortchange or refuse (refuse with `ExactChangeOnly` — never shortchange).
+
+The **state model** is the design: three buckets, no explicit state enum. `slots` maps a slot code to its product/price/qty; `float` is a per-coin count of what's available to give as change; `inserted` is the escrow of coins for the current balance. Every method is a transition over these. The domain types (`Coin` with `cents`, `VendError`, `Dispensed`) are provided verbatim — you design the storage behind the API.
+
+```rust
+/// A coin, in cents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Coin { Nickel, Dime, Quarter }
+
+impl Coin {
+    pub fn cents(self) -> u32 {
+        match self { Coin::Nickel => 5, Coin::Dime => 10, Coin::Quarter => 25 }
+    }
+}
+
+/// Why a selection failed — a data-carrying error enum.
+#[derive(Debug, PartialEq, Eq)]
+pub enum VendError {
+    SoldOut,                                        // unknown slot or qty == 0
+    InsufficientFunds { needed: u32, balance: u32 },// carries context for the caller
+    ExactChangeOnly,                                // affordable, but float can't make change
+}
+
+/// A successful sale: the product and the change returned.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Dispensed { pub product: String, pub change: Vec<Coin> }
+
+pub struct VendingMachine { /* slots + float + inserted — you design it */ }
+
+impl VendingMachine {
+    pub fn new() -> Self;
+    pub fn stock(&mut self, slot: &str, product: &str, price_cents: u32, qty: u32);
+    pub fn add_coins(&mut self, coins: &[Coin]);    // operator seeds the change float
+    pub fn insert(&mut self, coin: Coin);           // punter builds balance
+    pub fn balance(&self) -> u32;                    // sum of inserted coins
+    pub fn select(&mut self, slot: &str) -> Result<Dispensed, VendError>;
+    pub fn refund(&mut self) -> Vec<Coin>;          // return inserted coins, reset
+}
+
+impl Default for VendingMachine { fn default() -> Self { Self::new() } }
+```
+
+Say the tradeoff explicitly: `balance()` is derived (sum the inserted escrow) rather than a stored counter, so there's one source of truth and no way for balance and coins to drift apart. `select` returns `Result` because a purchase is fallible in three distinct, caller-relevant ways — and the error variant carries the data (`needed`/`balance`) rather than making the caller re-derive it.
+
+### Write the tests
+
+The README ships **no tests** — writing them is the exercise, and the interesting ones pin the two properties that separate a correct machine from a plausible one: the error paths **don't mutate**, and greedy change is honoured including its limited-float failure. Cover: exact money → empty change; change given (and multi-coin change); insufficient funds leaves the balance intact *and* the slot still buyable; sold out for both an unknown slot and an exhausted qty; `ExactChangeOnly` when the float can't make the difference; and refund returning the inserted coins.
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn buys_a_product_with_exact_money() {
+        let mut m = VendingMachine::new();
+        m.stock("A1", "Cola", 25, 3);
+        m.insert(Coin::Quarter);
+        let d = m.select("A1").unwrap();
+        assert_eq!(d.product, "Cola");
+        assert_eq!(d.change, vec![]);      // exact — no change owed
+        assert_eq!(m.balance(), 0);        // escrow cleared on commit
+    }
+
+    #[test]
+    fn gives_change_greedily() {
+        let mut m = VendingMachine::new();
+        m.stock("A1", "Chips", 10, 1);
+        m.add_coins(&[Coin::Dime, Coin::Nickel]);
+        m.insert(Coin::Quarter);           // balance 25, price 10 → change 15
+        let d = m.select("A1").unwrap();
+        assert_eq!(d.change, vec![Coin::Dime, Coin::Nickel]); // largest-first
+    }
+
+    #[test]
+    fn insufficient_funds_leaves_state_intact_and_does_not_dispense() {
+        let mut m = VendingMachine::new();
+        m.stock("A1", "Cola", 25, 1);
+        m.insert(Coin::Dime);              // 10 < 25
+        assert_eq!(
+            m.select("A1"),
+            Err(VendError::InsufficientFunds { needed: 25, balance: 10 })
+        );
+        assert_eq!(m.balance(), 10);       // money kept — not swallowed
+        m.insert(Coin::Dime);
+        m.insert(Coin::Nickel);
+        assert!(m.select("A1").is_ok());   // slot never got touched — still buyable
+    }
+
+    #[test]
+    fn unknown_and_exhausted_slots_are_sold_out() {
+        let mut m = VendingMachine::new();
+        assert_eq!(m.select("NOPE"), Err(VendError::SoldOut)); // unknown slot
+        m.stock("A1", "Cola", 5, 1);
+        m.insert(Coin::Nickel);
+        assert!(m.select("A1").is_ok());
+        m.insert(Coin::Nickel);
+        assert_eq!(m.select("A1"), Err(VendError::SoldOut));   // qty exhausted
+    }
+
+    #[test]
+    fn exact_change_only_when_float_cannot_make_change() {
+        let mut m = VendingMachine::new();
+        m.stock("A1", "Gum", 20, 1);
+        m.insert(Coin::Quarter);           // change 5 owed, but only a quarter is around
+        assert_eq!(m.select("A1"), Err(VendError::ExactChangeOnly));
+        assert_eq!(m.balance(), 25);       // nothing mutated on the failure path
+    }
+
+    #[test]
+    fn refund_returns_inserted_coins() {
+        let mut m = VendingMachine::new();
+        m.insert(Coin::Quarter);
+        m.insert(Coin::Dime);
+        assert_eq!(m.balance(), 35);
+        assert_eq!(m.refund(), vec![Coin::Quarter, Coin::Dime]);
+        assert_eq!(m.balance(), 0);        // escrow drained
+    }
+}
+```
+
+Run with `cargo test -p practice vending` (or `-p solution` for the reference). The two load-bearing assertions are the ones *after* an error — `balance()` unchanged, slot still buyable — because they're what catch a "mutate as you validate" implementation that a happy-path test would wave through.
+
+### Implement it
+
+The implementation keeps the three buckets (`slots` for inventory, `float` for change supply, `inserted` for the escrow) and makes `select` a validate-then-commit cascade. The key discipline: every `return Err(...)` happens *before* the first mutation, so the error paths are automatically clean — no rollback needed.
+
+```rust
+use std::collections::HashMap;
+
+struct Slot { product: String, price: u32, qty: u32 }
+
+pub struct VendingMachine {
+    slots: HashMap<String, Slot>,
+    float: HashMap<Coin, u32>,   // coins available to give as change
+    inserted: Vec<Coin>,         // the current punter's escrow / balance
+}
+
+impl VendingMachine {
+    pub fn insert(&mut self, coin: Coin) { self.inserted.push(coin); }
+
+    pub fn balance(&self) -> u32 {
+        self.inserted.iter().map(|c| c.cents()).sum()   // derived, single source of truth
+    }
+
+    pub fn select(&mut self, slot: &str) -> Result<Dispensed, VendError> {
+        // 1. slot must exist and be in stock — clone the name out before we ever mutate.
+        let (price, product) = match self.slots.get(slot) {
+            Some(s) if s.qty > 0 => (s.price, s.product.clone()),
+            _ => return Err(VendError::SoldOut),
+        };
+        // 2. balance must cover the price.
+        let balance = self.balance();
+        if balance < price {
+            return Err(VendError::InsufficientFunds { needed: price, balance });
+        }
+        // 3. the float PLUS the inserted coins must be able to make the change.
+        let mut pool = self.float.clone();
+        for &c in &self.inserted { *pool.entry(c).or_insert(0) += 1; }
+        let change = match make_change(balance - price, &pool) {
+            Some(change) => change,
+            None => return Err(VendError::ExactChangeOnly),
+        };
+        // 4. COMMIT — past here nothing can fail.
+        for c in &change { *pool.get_mut(c).unwrap() -= 1; }
+        self.float = pool;               // float keeps everything minus the change handed back
+        self.inserted.clear();
+        self.slots.get_mut(slot).unwrap().qty -= 1;
+        Ok(Dispensed { product, change })
+    }
+
+    pub fn refund(&mut self) -> Vec<Coin> { std::mem::take(&mut self.inserted) }
+}
+
+/// Make exactly `amount` cents from `pool`, greedily largest-first. `None` if impossible.
+fn make_change(mut amount: u32, pool: &HashMap<Coin, u32>) -> Option<Vec<Coin>> {
+    let mut avail = pool.clone();
+    let mut out = Vec::new();
+    for &coin in &[Coin::Quarter, Coin::Dime, Coin::Nickel] {
+        while amount >= coin.cents() && avail.get(&coin).copied().unwrap_or(0) > 0 {
+            amount -= coin.cents();
+            *avail.get_mut(&coin).unwrap() -= 1;
+            out.push(coin);
+        }
+    }
+    (amount == 0).then_some(out)   // strand any remainder → None → ExactChangeOnly
+}
+```
+
+The gotcha to say out loud is the **all-or-nothing transition**: a purchase either fully commits (stock down, escrow folded into the float, change deducted, balance reset) or leaves the machine byte-for-byte untouched. That's why the three checks all run and `return Err` *before* the commit block, and why the change is computed against a *cloned* `pool` — if `make_change` fails, the real `float` was never touched. Second, the **data-carrying error enum** does real work: `InsufficientFunds { needed, balance }` hands the caller exactly what a display needs. Third, **greedy change is optimal for the canonical `5/10/25` denominations with adequate supply** — but a limited float can strand it (take a quarter, then be unable to make the trailing nickel even though a nickel-first solution existed), so `make_change` returns `None` and `select` surfaces `ExactChangeOnly`, exactly as a real machine does. The robust fix is a coin-change **DP** that considers the whole float before committing to any coin — that's the extension.
+
+### Common mistakes & senior signal
+
+- **Mutating state during validation.** Decrementing `qty` or pulling coins from the float before confirming the sale can complete leaves a corrupt machine on the error path (a unit sold but never dispensed). Structure `select` so all `Err` returns precede the first write. **Senior signal** — describing the transition as atomic and pointing to the clone-the-pool trick that makes the failure path cost nothing.
+- **Treating greedy as unconditionally correct.** Greedy is optimal for canonical denominations *with enough supply*; a finite float breaks it. Silently trusting it is the trap. **Senior signal** — naming the limited-supply failure, showing the concrete stranding case (quarter-then-orphaned-nickel), and offering coin-change DP as the fix rather than pretending greedy is complete.
+- **Making `InsufficientFunds` a bare tag.** Dropping the `needed`/`balance` data forces the caller to recompute what the machine already knows. **Senior signal** — errors as values that carry the context the caller acts on.
+- **Storing `balance` as a mutable counter alongside the coins.** Two sources of truth that can drift; a bug leaves balance and escrow disagreeing. **Senior signal** — deriving `balance()` from the inserted coins so it can't desync, and folding the escrow into the float only at commit.
+- **Reaching for a giant explicit `enum State` with hand-written transitions.** Overkill for a machine whose state is naturally the balance + inventory + float; it adds transition-table ceremony without buying safety. **Senior signal** — knowing when the data *is* the state, and naming the **typestate** alternative (encode the phases as distinct types so `select`-before-`insert` becomes a compile error) as the tool for when illegal call *orders* must be made unrepresentable — elegant but rigid, which is why most real machines keep a runtime model for a dynamic UI and persistence.
+
 ## SPSC Ring — The Unsafe Capstone: `UnsafeCell`, Atomics Ordering & Hand-Written `Send`/`Sync`
 
 ### Summary
