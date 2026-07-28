@@ -220,6 +220,11 @@ Argon2id(pwd,salt) # ✅ memory-hard, salted, tunable</code></pre>
 <li><b>Credential stuffing</b> (reused breached creds) beats lockout — defend w/ MFA, breached-pw checks, rate limit, device signals.</li>
 <li>Password reset is often the weakest link — treat the reset token like a credential (single-use, short TTL, no enumeration).</li>
 </ul>
+<h4>Rate limit &amp; lockout</h4>
+<ul>
+<li>Rate-limit auth by <b>account + IP + device</b>, with exponential backoff — pure IP limits miss distributed stuffing; pure account limits let an attacker <b>lock out victims</b> (a DoS) <span class="warn">!</span></li>
+<li>Prefer soft controls (backoff, CAPTCHA on anomaly, MFA, breached-pw check) over hard N-strike lockout, which is itself a DoS lever.</li>
+</ul>
 </section>
 
 <section class="card"><h3>Sessions &amp; Tokens</h3>
@@ -272,6 +277,8 @@ db.query("SELECT * FROM u WHERE name = ?", [n])</code></pre>
 <li>ORMs help but <b>raw/interpolated queries still inject</b> <span class="warn">!</span> — parameterize even in raw mode.</li>
 <li>Can't parameterize a <b>column/table name</b> &#8594; <b>allowlist</b> against known columns, never interpolate.</li>
 <li>Layered: least-priv DB user caps blast radius; input validation is defense-in-depth, <b>not</b> the primary fix.</li>
+<li><b>Blind SQLi</b> (no visible output) still exfiltrates via boolean/time-based inference — "no error shown" is not "not vulnerable" <span class="warn">!</span></li>
+<li>Stored procedures help <b>only if</b> they parameterize internally — dynamic SQL built inside a proc injects just the same.</li>
 </ul>
 </section>
 
@@ -348,6 +355,8 @@ db.query("SELECT * FROM u WHERE name = ?", [n])</code></pre>
 <ul>
 <li><b>Shift left</b> — cheapest to fix at design/code time; combine tools (none is complete). SAST + SCA in CI, DAST in staging.</li>
 <li><b>SSDLC:</b> security in every phase — threat model (design), secure coding + review (build), scan (test), harden (deploy), monitor (run).</li>
+<li><b>Design flaws (business logic, missing authz) evade SAST/DAST</b> — only threat modeling &amp; design review catch them. A passing scan &#8800; secure <span class="warn">!</span></li>
+<li>Gate CI on <b>new</b> high-severity findings only (not the whole backlog) so security doesn't block the team; triage the rest async.</li>
 </ul>
 </section>
 
@@ -398,6 +407,8 @@ db.query("SELECT * FROM u WHERE name = ?", [n])</code></pre>
 <li><b>Never log</b> passwords, tokens, full card numbers, secrets <span class="warn">!</span> — logs leak.</li>
 <li>Alert on anomalies; you can't respond to what you can't see (A09). Write the <b>IR runbook</b> before you need it.</li>
 <li><b>Blameless post-mortem</b> — fix systems &amp; processes, not people.</li>
+<li><b>MTTD/MTTR</b> — time to detect / respond are the metrics that matter; a breach you find in minutes beats one exposed for months.</li>
+<li>Breach-notification clocks are legal, not optional: <b>GDPR ≤72h</b> to the regulator. Have a comms + disclosure plan pre-agreed with legal.</li>
 </ul>
 </section>
 
@@ -412,6 +423,129 @@ db.query("SELECT * FROM u WHERE name = ?", [n])</code></pre>
 <li><b>Data minimization</b> — collect only what you need; you can't leak what you don't hold.</li>
 <li><b>Privacy by design/default</b>; encrypt PII at rest &amp; in transit; define retention &amp; deletion.</li>
 <li>GDPR (rights, breach notice ≤72h), PCI-DSS (cardholder data), HIPAA (PHI). Pseudonymize where possible.</li>
+</ul>
+</section>
+
+<section class="card"><h3>OAuth 2.0, OIDC &amp; Federation</h3>
+<p><b>OAuth 2.0</b> = delegated <b>authorization</b> (grant an app scoped access). <b>OIDC</b> = a thin <b>identity</b> layer on OAuth — adds a signed <b>ID token</b> (a JWT) proving <i>who</i> logged in. Don't use bare OAuth for login <span class="warn">!</span></p>
+<table><thead><tr><th>Param</th><th>Job</th></tr></thead><tbody>
+<tr><td><code>state</code></td><td>OAuth <b>CSRF</b> guard — random, bound to session, verified on callback</td></tr>
+<tr><td><code>nonce</code></td><td>OIDC — echoed inside the ID token, defeats <b>token replay</b></td></tr>
+<tr><td>PKCE</td><td>binds code to the client (<code>S256(verifier)</code>) — stops <b>code interception</b></td></tr>
+</tbody></table>
+<ul>
+<li><b>Auth-code + PKCE</b> is the flow for <b>all</b> clients now (OAuth 2.1); implicit flow is dead. A stolen <code>code</code> is useless without the <code>code_verifier</code> that never left the client.</li>
+<li><b>redirect_uri = exact-match allowlist</b> — no prefix/substring/wildcard. Loose matching &#8594; attacker redirects the code to their server (<code>app.example.com.evil.com</code>) <span class="warn">!</span></li>
+<li>Omitting <code>state</code> &#8594; <b>login CSRF</b> (victim logged into attacker's account).</li>
+</ul>
+<h4>Refresh-token rotation</h4>
+<ul>
+<li>Each use of a refresh token issues a new one &amp; <b>invalidates the old</b> (single-use). Replay of a used token &#8594; treat as theft, <b>revoke the whole family</b>, force re-login.</li>
+<li>Store refresh tokens <b>hashed</b>, device-bound, with an absolute lifetime; access token TTL short (5–15 min).</li>
+</ul>
+<h4>SAML vs OIDC</h4>
+<ul>
+<li><b>SAML</b> = XML signed assertions, enterprise/B2B SSO (Okta/ADFS) — heavier, XML-signature-wrapping bugs. <b>OIDC</b> = JSON/JWT, modern/API/mobile. Both trust <b>signature validation</b> — the SAML analog of the JWT <code>alg</code> trap is accepting an unverified assertion.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Clickjacking, Open Redirect &amp; CORS</h3>
+<h4>Clickjacking (UI redress)</h4>
+<ul>
+<li>Your page framed transparently on an attacker site; victim's click lands on <b>your</b> button with their session. Fix by forbidding framing:</li>
+</ul>
+<pre><code>Content-Security-Policy: frame-ancestors 'none'
+X-Frame-Options: DENY            # legacy fallback</code></pre>
+<p><code>frame-ancestors</code> is the modern control (<code>'none'</code>/<code>'self'</code>/allowlist). Frame-busting JS is bypassable <span class="warn">!</span> Re-auth high-risk actions.</p>
+<h4>Open redirect</h4>
+<ul>
+<li><code>redirect(request.args["next"])</code> &#8594; <code>?next=https://evil.com</code>. Minor alone, a <b>phishing force-multiplier</b> — victim trusts <i>your</i> domain, bypasses OAuth/SSRF/scanner allowlists.</li>
+<li>Fix: redirect to a <b>relative path</b> or server-side map (<code>next=dashboard</code>&#8594;<code>/dashboard</code>). If you must take a URL, parse &amp; compare host — <code>//evil.com</code> and <code>\@you.com</code> defeat prefix checks <span class="warn">!</span></li>
+</ul>
+<h4>CORS &#8800; CSRF defense <span class="warn">!</span></h4>
+<ul>
+<li>CORS <b>grants read</b> access to responses; it never blocks a request being <b>sent</b>. CSRF doesn't read anything, so CORS is irrelevant to it.</li>
+<li>Classic misconfig: <b>reflecting</b> the request <code>Origin</code> back + <code>Allow-Credentials: true</code> &#8594; any site reads the victim's data. Allowlist <b>exact</b> origins; never reflect; <code>*</code> + credentials is browser-rejected.</li>
+</ul>
+</section>
+
+<section class="card"><h3>File &amp; Parser Attacks</h3>
+<h4>Path / directory traversal</h4>
+<ul>
+<li><code>../</code> (or <code>%2e%2e%2f</code>, absolute paths) escapes the base dir. Blocklisting <code>../</code> loses to encoding tricks <span class="warn">!</span></li>
+<li>Fix = <b>canonicalise then verify containment</b>: <code>realpath</code> resolves <code>..</code>+symlinks, then confirm still under base. Best: map an <b>opaque ID</b> to a known file so input never forms a path.</li>
+</ul>
+<h4>Insecure deserialization &#8594; RCE</h4>
+<ul>
+<li>Type-resolving serializers (Java native, Python <code>pickle</code>, PHP <code>unserialize</code>, .NET <code>BinaryFormatter</code>) instantiate arbitrary types &#8594; <b>gadget-chain RCE</b> during reconstruction. Validation <i>after</i> is too late <span class="warn">!</span></li>
+<li>Fix: <b>data-only formats</b> (JSON/Protobuf) bound to one known type; if forced, allow-list types + sign the payload. (OWASP A08.)</li>
+</ul>
+<h4>XXE</h4>
+<ul>
+<li>XML entity <code>&lt;!ENTITY x SYSTEM "file:///etc/passwd"&gt;</code> reads files / SSRF / DoS. It's a <b>parser-config</b> bug — fix = disable DTDs &amp; external entities, not sanitise XML.</li>
+</ul>
+<h4>SSTI</h4>
+<ul>
+<li>User input built <b>into</b> a template &#8594; evaluated as code (<code>{{7*7}}</code>&#8594;<code>49</code>) &#8594; often RCE. Fix: pass input as <b>context data</b> to a static template, never concatenate into template source.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Logic Flaws, Races &amp; Vuln Triage</h3>
+<h4>Business-logic flaws</h4>
+<ul>
+<li>Abuse of functionality <b>working as coded</b>: reuse a single-use coupon, order <b>negative quantity</b> for a refund, skip payment to the confirmation endpoint. Scanners can't find them — no injectable sink <span class="warn">!</span></li>
+<li>Defend at <b>design time</b>: enumerate abuse cases, enforce invariants + a state machine <b>server-side</b>, atomic redemption, rate limits.</li>
+</ul>
+<h4>TOCTOU / race conditions</h4>
+<ul>
+<li>Time-Of-Check &#8800; Time-Of-Use: resource swapped in the gap (symlink swap; double-spend). Fix = <b>eliminate the gap</b> — atomic op on a handle (<code>O_NOFOLLOW</code>), or DB <code>SELECT … FOR UPDATE</code>/atomic conditional update, not read-check-write.</li>
+</ul>
+<h4>Mass assignment</h4>
+<ul>
+<li>Framework auto-binds the whole body &#8594; attacker adds <code>{"isAdmin":true}</code>. Fix: bind an explicit <b>DTO / allow-list</b> of permitted fields, never the raw model <span class="warn">!</span></li>
+</ul>
+<h4>CVE / CVSS triage</h4>
+<ul>
+<li><b>CVE</b> = the identity; <b>CVSS</b> 0–10 (Base/Temporal/Environmental) = severity. Don't sort a scan by <b>Base score</b> and march top-down <span class="warn">!</span></li>
+<li>Rank by <b>reachability</b> (is the path called with attacker input?) + <b>exposure</b> (internet-facing/unauth) + <b>known-exploited</b> (CISA KEV) + blast radius. A 9.8 in dead code &lt; a 6.5 on your auth flow.</li>
+<li><b>Vuln</b> (the weakness) vs <b>exploit</b> (technique using it) vs <b>payload</b> (delivered action). Zero-day = no patch yet.</li>
+</ul>
+</section>
+
+<section class="card"><h3>HTTP Security Headers</h3>
+<table><thead><tr><th>Header</th><th>Protects against</th></tr></thead><tbody>
+<tr><td><b>Strict-Transport-Security</b></td><td>HTTPS downgrade / SSL-strip (pin HTTPS, incl. subdomains, preload)</td></tr>
+<tr><td><b>Content-Security-Policy</b></td><td>XSS, data injection, clickjacking (<code>frame-ancestors</code>)</td></tr>
+<tr><td><b>X-Content-Type-Options</b></td><td>MIME sniffing (<code>nosniff</code>) &#8594; blocks type confusion</td></tr>
+<tr><td><b>Referrer-Policy</b></td><td>URL/token leak in <code>Referer</code> to third parties</td></tr>
+<tr><td><b>Permissions-Policy</b></td><td>abuse of camera/mic/geo by embedded content</td></tr>
+<tr><td><b>Cache-Control</b></td><td>caching sensitive responses (<code>no-store</code>)</td></tr>
+</tbody></table>
+<pre><code>Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
+Content-Security-Policy: default-src 'self'; frame-ancestors 'none';
+                         object-src 'none'; base-uri 'self'
+X-Content-Type-Options: nosniff
+Referrer-Policy: strict-origin-when-cross-origin</code></pre>
+<ul>
+<li><b>CSP is a second layer</b>, not a primary XSS fix — use a <b>nonce/hash</b> for scripts, drop <code>unsafe-inline</code>/<code>unsafe-eval</code>; roll out <code>Content-Security-Policy-Report-Only</code> first <span class="warn">!</span></li>
+<li><b>HSTS</b> only takes effect after the first HTTPS visit; <b>preload</b> closes that gap. Never send HSTS over plain HTTP.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Playbook — Threat-Model &amp; File Upload</h3>
+<p>Vague prompt &#8594; <b>use a framework</b>, don't free-associate. Method: <b>clarify &#8594; draw the data-flow + trust boundaries &#8594; STRIDE sweep &#8594; map each to a control &#8594; layer &amp; prioritise, out loud</b>. Lead with the critical control, flag the rest.</p>
+<h4>File upload via STRIDE</h4>
+<table><thead><tr><th>STRIDE</th><th>Control</th></tr></thead><tbody>
+<tr><td>Spoofing</td><td>authenticate uploader, tie to session</td></tr>
+<tr><td>Tampering</td><td>check <b>magic bytes</b> not extension; server-random filename; re-encode images</td></tr>
+<tr><td>Repudiation</td><td>log who/when/hash</td></tr>
+<tr><td>Info disclosure</td><td>unguessable keys + authz on read; strip EXIF</td></tr>
+<tr><td>DoS</td><td>size cap <b>before</b> full read; dimension limits; rate limit</td></tr>
+<tr><td>Elevation</td><td><b>serve from a separate non-exec origin</b>; lock <code>Content-Type</code>; sandbox the parser</td></tr>
+</tbody></table>
+<ul>
+<li>Two must-haves that kill the RCE/stored-XSS paths: <b>never trust the filename/type</b> (path traversal + polyglots) and <b>serve uploads from a separate, non-executing origin/bucket</b> <span class="warn">!</span></li>
+<li><b>Contain before eradicate</b> in a breach — premature cleanup tips the attacker &amp; destroys evidence.</li>
 </ul>
 </section>
 
@@ -457,6 +591,13 @@ db.query("SELECT * FROM u WHERE name = ?", [n])</code></pre>
 <tr><td>token in <code>localStorage</code></td><td>HttpOnly cookie <span class="warn">!</span></td></tr>
 <tr><td>token compared with <code>==</code></td><td>constant-time compare <span class="warn">!</span></td></tr>
 <tr><td>disabled TLS cert check</td><td>validate chain + hostname <span class="warn">!</span></td></tr>
+<tr><td><code>redirect(req.query.next)</code></td><td>relative path / server-side map <span class="warn">!</span></td></tr>
+<tr><td><code>open(base + userFile)</code></td><td>realpath + verify containment <span class="warn">!</span></td></tr>
+<tr><td><code>readObject()</code> on input</td><td>data-only format + type allow-list <span class="warn">!</span></td></tr>
+<tr><td>XML parser w/ DTDs on</td><td>disable external entities <span class="warn">!</span></td></tr>
+<tr><td><code>User.update(req.body)</code></td><td>bind an allow-list DTO <span class="warn">!</span></td></tr>
+<tr><td>reflected <code>Origin</code> + creds</td><td>exact-origin CORS allowlist <span class="warn">!</span></td></tr>
+<tr><td>page fram-able by any site</td><td><code>frame-ancestors 'none'</code> <span class="warn">!</span></td></tr>
 </tbody></table>
 </section>
 
@@ -473,6 +614,13 @@ db.query("SELECT * FROM u WHERE name = ?", [n])</code></pre>
 <tr><td>JWT accepted with no signature</td><td><code>alg:none</code> / alg confusion <span class="warn">!</span></td></tr>
 <tr><td>creds found in git history</td><td>secret committed — rotate now <span class="warn">!</span></td></tr>
 <tr><td>RCE from an uploaded/serialized blob</td><td>unsafe deserialization / exec <span class="warn">!</span></td></tr>
+<tr><td><code>{{7*7}}</code> renders as <code>49</code></td><td>SSTI — input in template source <span class="warn">!</span></td></tr>
+<tr><td><code>?file=../../etc/passwd</code> works</td><td>path traversal — no containment check <span class="warn">!</span></td></tr>
+<tr><td>coupon reused / negative qty accepted</td><td>business-logic flaw — no server invariant <span class="warn">!</span></td></tr>
+<tr><td>non-admin sets <code>isAdmin</code> via body</td><td>mass assignment — raw model bound <span class="warn">!</span></td></tr>
+<tr><td>evil.com JS reads authed response</td><td>CORS reflects Origin + credentials <span class="warn">!</span></td></tr>
+<tr><td>user still logged in after logout</td><td>client-only logout — session/token not revoked <span class="warn">!</span></td></tr>
+<tr><td>reused refresh token still works</td><td>no rotation / reuse detection <span class="warn">!</span></td></tr>
 </tbody></table>
 </section>
 

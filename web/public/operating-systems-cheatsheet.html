@@ -83,6 +83,16 @@ pre code{background:none; padding:0; font-size:1em;}
 <li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
 </ul></section>
 
+<section class="card"><h3>What an OS Is — kernel &amp; dual mode</h3>
+<ul>
+<li>The kernel is a <b>resource manager</b> (multiplexes CPU, memory, devices among processes) + a <b>protection layer</b> (isolates them from each other and the hardware). It's the trusted arbiter every privileged action goes through.</li>
+<li><b>Dual mode</b>: CPU runs apps in unprivileged <b>user mode</b> (Ring 3); privileged instructions (I/O, load page table, halt, disable interrupts) are <b>kernel-only</b> (Ring 0). To do anything privileged an app must <b>trap</b> into the kernel via a syscall, which <b>validates</b> the request first <span class="warn">!</span></li>
+<li><b>Isolation = 3 mechanisms</b>: (1) virtual memory — the MMU translates each process through <b>its own page table</b>, so a wild pointer resolves to an unmapped page → SIGSEGV, killing only that process; (2) dual-mode — user code can't touch hardware directly; (3) the kernel can preempt (timer) and <b>kill</b> a misbehaving process. A crash is <b>contained</b>.</li>
+<li>The <b>timer interrupt</b> is what makes preemptive multitasking possible — without it a process that never yields would own the CPU forever.</li>
+<li>Everything expensive is a <b>cache miss or a disk trip</b>; the whole OS design fights to keep hot data in the fast tiers (locality).</li>
+</ul>
+</section>
+
 <section class="card"><h3>Process vs Thread</h3>
 <table><thead><tr><th></th><th>Process</th><th>Thread</th></tr></thead><tbody>
 <tr><td>address space</td><td>own (isolated)</td><td><b>shared</b></td></tr>
@@ -123,6 +133,7 @@ pre code{background:none; padding:0; font-size:1em;}
 <li><b>User threads</b> (green/goroutines): scheduled in userspace, µs-cheap, invisible to kernel.</li>
 <li><b>Kernel threads</b>: kernel-scheduled, can run on separate cores, but switch costs a mode switch.</li>
 <li>Cost order: context switch process &gt; thread &gt; user-thread yield. Too many threads → context-switch &amp; cache thrash, not speedup <span class="warn">!</span></li>
+<li><b>Why more threads can be slower</b>: past core count you pay ctx-switch + cold-cache; a hot lock serialises them; <b>false sharing</b> (different vars, same cache line) ping-pongs between cores; if I/O-bound or GIL'd, only one runs anyway. <b>Size the pool to the workload</b> — ~cores for CPU-bound, more only to overlap I/O.</li>
 </ul>
 </section>
 
@@ -153,7 +164,9 @@ pre code{background:none; padding:0; font-size:1em;}
 <pre><code>Gantt: procs P1(24) P2(3) P3(3), FCFS order
  P1[0-24] P2[24-27] P3[27-30]
  wait = (0 + 24 + 27)/3 = 17
- SJF order P2,P3,P1: wait=(0+3+6)/3 = 3  ← convoy fixed</code></pre>
+ SJF order P2,P3,P1: wait=(0+3+6)/3 = 3  ← convoy fixed
+ RR q=4: P1 P2 P3 P1 P1 P1 P1 P1 (short jobs finish fast,
+   better response, worse avg turnaround than SJF)</code></pre>
 <ul>
 <li><b>Waiting ≠ response</b> <span class="warn">!</span> RR optimises response, not average waiting.</li>
 <li>Favour <b>I/O-bound</b> jobs → overlaps their I/O with others' compute → higher throughput. That's the whole win of preemptive scheduling.</li>
@@ -175,6 +188,7 @@ pre code{background:none; padding:0; font-size:1em;}
 <ul>
 <li>Built on hardware atomics: <b>test-and-set</b>, <b>compare-and-swap (CAS)</b>, fetch-and-add. Lock-free = CAS-retry loops.</li>
 <li>Disabling interrupts gives mutual exclusion on a <b>uniprocessor only</b> — useless on multicore <span class="warn">!</span></li>
+<li><b>Atomic</b> (<code>fetch_add</code>/CAS) beats a mutex for a single counter — lock-free, no blocking, no context switch. Reach for a mutex when the critical section spans multiple operations.</li>
 </ul>
 </section>
 
@@ -204,6 +218,7 @@ consumer: wait(full);  lock(mtx); take();unlock(mtx); signal(empty)</code></pre>
 <ul>
 <li>Two threads lock A,B vs B,A → deadlock; fix = <b>one global lock order</b> <span class="warn">!</span></li>
 <li><b>Livelock</b> (busy but no progress) &amp; <b>starvation</b> (never scheduled) &amp; <b>priority inversion</b> (low holds lock a high needs → <b>priority inheritance</b>) ≠ deadlock.</li>
+<li>Other fixes for the A,B/B,A inversion: a single coarser lock (simpler, less concurrency) or <code>trylock</code> + backoff (release and retry). Consistent ordering is the standard <b>zero-overhead</b> fix.</li>
 </ul>
 </section>
 
@@ -219,6 +234,7 @@ consumer: wait(full);  lock(mtx); take();unlock(mtx); signal(empty)</code></pre>
 <ul>
 <li><b>Shared memory</b> (fast, DIY sync) vs <b>message passing</b> (safe, copy cost, no shared-state bugs).</li>
 <li>Threads share memory already → no IPC needed; the copy vs sync tradeoff is why threads are cheap and processes are safe.</li>
+<li><b>mmap</b> a file into two processes → share via the page cache; no explicit copy. Pick by <b>bandwidth</b> (shared mem), <b>structure</b> (message queue), <b>reach</b> (socket = cross-machine).</li>
 </ul>
 </section>
 
@@ -324,6 +340,7 @@ ma=100ns, pf=8ms(8,000,000ns):
 <ul>
 <li><b>Journaling</b> = write-ahead log → crash consistency (ext4, NTFS). vs <b>copy-on-write FS</b> (ZFS, btrfs). <b>VFS</b> = common layer over many filesystems.</li>
 <li><code>fsync</code> forces durability; the page cache buffers writes → data loss window on crash <span class="warn">!</span></li>
+<li>Inode block pointers: ~12 <b>direct</b> + single/double/<b>triple indirect</b> — small files need one lookup, huge files add levels. Deleting a file with open FDs only frees blocks when the <b>last FD closes</b> (unlink drops the name; the inode's link+open count must both hit 0) <span class="warn">!</span></li>
 </ul>
 </section>
 
@@ -340,6 +357,7 @@ ma=100ns, pf=8ms(8,000,000ns):
 <ul>
 <li>Disk scheduling matters on <b>HDD, not SSD</b> (no seek cost) <span class="warn">!</span></li>
 <li><b>RAID</b>: 0 stripe (speed, no redundancy) · 1 mirror · 5 parity (1-disk fail) · 6 (2-disk) · 10 mirror+stripe.</li>
+<li>SSD internals: pages written, whole <b>blocks erased</b> → the FTL does wear-levelling + garbage collection; <b>TRIM</b> tells it which blocks are free so it doesn't preserve dead data. Random ≈ sequential latency, so <b>disk scheduling is moot</b> on SSD <span class="warn">!</span></li>
 </ul>
 </section>
 
@@ -392,6 +410,121 @@ SSD read  ~100 µs   (100,000 ns)
 HDD seek  ~10 ms    (10,000,000 ns)</code></pre>
 <ul>
 <li>Load avg counts R + <b>D (uninterruptible)</b> tasks → high load + idle CPU = <b>I/O wait</b> <span class="warn">!</span> USE method (Utilisation/Saturation/Errors); tools: /proc, perf, eBPF.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Virtualization &amp; Containers</h3>
+<pre><code>VM:        HW → hypervisor → [guest kernel → userspace] × N
+Container: HW → host kernel → [isolated userspace] × N</code></pre>
+<p>One difference — <b>own kernel vs shared kernel</b> — explains everything downstream.</p>
+<table><thead><tr><th></th><th>VM</th><th>Container</th></tr></thead><tbody>
+<tr><td>isolates via</td><td>hypervisor (HW)</td><td>namespaces + cgroups</td></tr>
+<tr><td>runs</td><td>full guest OS</td><td>app+libs, shares host kernel</td></tr>
+<tr><td>boot</td><td>seconds (boots an OS)</td><td>ms (just exec a process)</td></tr>
+<tr><td>overhead</td><td>heavy (GBs)</td><td>light (MBs)</td></tr>
+<tr><td>isolation</td><td><b>strong</b> (HW boundary)</td><td>weaker (shared kernel)</td></tr>
+</tbody></table>
+<ul>
+<li><b>Namespaces</b> isolate what a process can <b>see</b> (pid/net/mnt/uts/ipc/user); <b>cgroups</b> limit &amp; account what it can <b>use</b> (CPU/mem/IO/pids). Need <b>both</b> — a container is just Linux processes with a restricted view <span class="warn">!</span></li>
+<li><b>Type-1</b> hypervisor (ESXi/Xen/KVM) runs on bare metal — no host OS beneath; <b>type-2</b> (VirtualBox) is an app on a host OS. HW assist: <b>VT-x/AMD-V</b> + nested page tables (<b>EPT</b>: guest-virt→guest-phys→host-phys).</li>
+<li>A container is <b>not</b> a lightweight VM and <b>not</b> as isolated — a <b>kernel exploit escapes the container</b>. Clouds run containers <b>inside</b> VMs for density + isolation (microVMs: Firecracker, Kata) <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Boot — Power-On → Login</h3>
+<pre><code>power on → FIRMWARE (BIOS/UEFI): POST, init HW, find boot dev
+  → BOOTLOADER (GRUB): load kernel + initramfs into RAM, jump
+  → KERNEL INIT: decompress, paging on, scheduler, drivers,
+       mount initramfs → pivot to real ROOT fs
+  → INIT (PID 1): systemd starts services, networking
+  → login prompt</code></pre>
+<ul>
+<li><b>Why firmware first</b>: at power-on the CPU starts at a <b>fixed hardwired address</b> — firmware is the only code guaranteed present.</li>
+<li><b>initramfs</b> = temporary in-RAM root holding the drivers needed to mount the <b>real</b> root — breaks the chicken-and-egg (need a disk driver to read the disk that holds the driver) <span class="warn">!</span></li>
+<li><b>PID 1 is special</b>: ancestor of all user-space, <b>reaps orphans</b>, and if it <b>dies the kernel panics</b> <span class="warn">!</span></li>
+</ul>
+<table><thead><tr><th></th><th>BIOS</th><th>UEFI</th></tr></thead><tbody>
+<tr><td>boots from</td><td>512B <b>MBR</b>, sector 0</td><td>EFI app on <b>ESP</b> (FAT)</td></tr>
+<tr><td>partitions</td><td>MBR (4 primary, &le;2TB)</td><td><b>GPT</b> (&gt;2TB, many)</td></tr>
+<tr><td>loader</td><td>multi-stage (446B limit)</td><td>named <code>.efi</code> file</td></tr>
+<tr><td>security</td><td>none</td><td><b>Secure Boot</b> (sig check)</td></tr>
+</tbody></table>
+<ul>
+<li><b>Secure Boot</b> = chain of trust firmware→loader→kernel→modules; each verifies the next's <b>signature</b> before running → blocks bootkits. Integrity, <b>not</b> encryption.</li>
+<li><b>systemd</b> (parallel, declarative units + targets) vs <b>SysV init</b> (sequential scripts, numbered runlevels). Target ↔ runlevel: <code>graphical</code>=5, <code>multi-user</code>=3, <code>rescue</code>=1.</li>
+<li><b>VM</b> runs this whole sequence on virtual HW (seconds); a <b>container reuses the host kernel</b> → skips it entirely (ms) <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Cost Model &amp; Scaling Limits</h3>
+<pre><code>L1 cache            ~1 ns
+branch mispredict   ~3 ns
+mutex lock/unlock   ~15 ns
+RAM reference       ~100 ns   ← the RAM cliff (100×)
+context switch      ~1–10 µs
+SSD random read     ~16 µs
+1MB seq from RAM    ~3 µs
+DC round trip       ~500 µs
+HDD seek            ~10 ms    ← 10^7× an L1 hit
+1MB from HDD        ~20 ms
+CA→NL→CA packet     ~150 ms</code></pre>
+<ul>
+<li><b>Context-switch cost</b> = <b>direct</b> (save/restore regs, reload CR3 → maybe TLB flush) + <b>indirect</b> (new task runs with <b>cold caches/TLB</b> — often the bigger cost) <span class="warn">!</span></li>
+<li><b>Syscall cost</b> = user↔kernel mode switch, ~100ns–1µs + pipeline/cache hit. Cut it via <b>buffering/batching</b>, <b>vDSO</b> (<code>clock_gettime</code> runs in user space, no trap), <b>io_uring</b> (shared rings amortise many I/Os to ~0 syscalls).</li>
+<li><b>Amdahl</b>: <code>Speedup(N) = 1 / ((1−p) + p/N)</code>; serial fraction 10% (p=0.9) caps speedup at <b>10×</b> with infinite cores <span class="warn">!</span> Gustafson: scale the problem with cores instead.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Performance Triage — USE method</h3>
+<p>For <b>every</b> resource check <b>U</b>tilisation · <b>S</b>aturation (queue/wait) · <b>E</b>rrors → find the saturated one before touching anything.</p>
+<table><thead><tr><th>Resource</th><th>Util</th><th>Saturation</th></tr></thead><tbody>
+<tr><td>CPU</td><td><code>top</code> %busy</td><td>run-queue len (load, <code>vmstat r</code>)</td></tr>
+<tr><td>memory</td><td>used vs total</td><td>swap in/out, major faults</td></tr>
+<tr><td>disk</td><td><code>iostat %util</code></td><td>queue depth, iowait</td></tr>
+<tr><td>network</td><td>bandwidth</td><td>retransmits, backlog</td></tr>
+</tbody></table>
+<h4>CPU breakdown (top/mpstat)</h4>
+<ul>
+<li><b>us</b> user code → compute-bound, profile it. <b>sy</b> kernel → too many/expensive syscalls or lock contention. <b>wa</b> iowait → disk-bound (CPU idle waiting on I/O). <b>st</b> steal → hypervisor gave your slot to another tenant (oversubscribed host) <span class="warn">!</span></li>
+<li><b>Load average</b> counts <b>runnable + uninterruptible-sleep (D-state)</b> — NOT pure CPU demand. Load 20 on 4 cores = either 20 CPU-hungry threads <b>or</b> 4 computing + 16 stuck on disk with the <b>CPU near-idle</b> <span class="warn">!</span></li>
+<li><b>Thrashing</b> tell: <code>si</code>/<code>so</code> swap I/O high + rising <b>major faults</b> + iowait high + throughput collapses while CPU idle. Fix: shrink WS / add RAM / OOM-kill a hog — not more workers.</li>
+<li><b>RSS</b> (physical RAM used now) vs <b>VSZ</b> (address space reserved); <code>free</code>'s <b>available</b> is the number that matters — page cache counts as "used" but is reclaimable.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Observability — tools &amp; eBPF</h3>
+<ul>
+<li><b>/proc &amp; /sys</b> = pseudo-filesystems; reading a "file" runs kernel code that materialises live state. Nearly every tool (<code>top</code>, <code>ps</code>, <code>free</code>) is a pretty-printer over them — a <b>sample</b>, not a stream.</li>
+</ul>
+<table><thead><tr><th>Tool</th><th>Measures</th></tr></thead><tbody>
+<tr><td>top / htop</td><td>live per-proc CPU/mem/state — first glance</td></tr>
+<tr><td>vmstat</td><td>run-queue, blocked, swap I/O, CPU split</td></tr>
+<tr><td>iostat -x</td><td>per-disk util, queue, await — disk USE</td></tr>
+<tr><td>pidstat</td><td>per-proc CPU/IO/ctx-switch over time</td></tr>
+<tr><td>strace</td><td>a proc's syscalls (which is slow/looping); heavy</td></tr>
+<tr><td>perf</td><td>CPU profiler + HW counters → flame graphs</td></tr>
+<tr><td><b>eBPF</b> (bpftrace)</td><td>safe JIT'd in-kernel probes, near-zero overhead</td></tr>
+</tbody></table>
+<ul>
+<li><b>eBPF</b>: attach a verified, JIT'd program to almost any event (kprobe/uprobe/tracepoint), aggregate in-kernel. Answers ad-hoc prod questions ("I/O latency histogram per process") with <b>no code change, tiny overhead</b> — the answer to "debug this in production."</li>
+<li><b>Flame graph</b>: sampled stacks; <b>x=proportion of samples</b> (width=on-CPU time, not time order), y=stack depth. Hunt <b>wide plateaus at the top</b> = the hot leaf to optimise <span class="warn">!</span></li>
+<li><b>Tail latency (p99)</b>: averages hide it; a page fanning 100 backend calls hits the slowest tail nearly every time. Causes: GC pause, major fault, lock contention, ctx-switch delay, CPU steal, queueing near 100% util.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Real-World Kernels</h3>
+<table><thead><tr><th></th><th>Linux</th><th>Windows NT</th><th>macOS/XNU</th></tr></thead><tbody>
+<tr><td>arch</td><td>monolithic + modules</td><td>hybrid (Executive+HAL)</td><td>hybrid (Mach+BSD+IOKit)</td></tr>
+<tr><td>API</td><td>POSIX</td><td><b>Win32</b></td><td>POSIX (BSD)</td></tr>
+<tr><td>proc create</td><td>fork+exec</td><td><b>CreateProcess</b> (no fork)</td><td>fork+exec</td></tr>
+<tr><td>abstraction</td><td>everything a <b>file</b></td><td>everything an <b>object</b>+handle</td><td>file (BSD)</td></tr>
+<tr><td>async I/O</td><td>epoll/io_uring</td><td><b>IOCP</b> (completion)</td><td>kqueue</td></tr>
+<tr><td>FS</td><td>ext4/xfs/btrfs</td><td>NTFS</td><td>APFS (COW)</td></tr>
+</tbody></table>
+<ul>
+<li>Linux: everything is a <b>task</b> (<code>task_struct</code>); a thread is just a <code>clone()</code> sharing address space/FDs. <code>fork</code> = clone-nothing + COW. <b>No hard process/thread split</b> in-kernel <span class="warn">!</span></li>
+<li><b>POSIX</b> = a shared API <b>standard</b>, not shared code → <b>source</b> ports across Linux/macOS/BSD, binaries don't. Windows isn't Unix (WSL2 runs a real Linux kernel in a VM).</li>
+<li><b>RTOS</b> (FreeRTOS, QNX, VxWorks) targets <b>bounded worst-case latency</b>, not speed — a late airbag is a failure. Real-time sched: <b>RMS</b> (fixed priority, shorter period→higher) vs <b>EDF</b> (nearest deadline first, higher achievable util). Real-time ≠ fast <span class="warn">!</span></li>
 </ul>
 </section>
 

@@ -185,6 +185,7 @@ Content-Type: application/problem+json
 <li>Return <b>all</b> field errors at once (array), not the first — one round-trip fixes a form.</li>
 <li><b>Never leak stack traces / SQL / internal hosts</b> in 5xx bodies <span class="warn">!</span> — log them server-side with the <code>requestId</code>, return a generic message + id.</li>
 <li>Signal retryability: 5xx / 429 = retry with backoff; add <code>Retry-After</code>. 4xx (except 429) = don't retry unchanged.</li>
+<li>Keep the same error shape on <b>every</b> endpoint so clients write error handling once; carry the <code>request_id</code> both in the body and a response header for support tracing <span class="warn">!</span></li>
 </ul>
 </section>
 
@@ -199,6 +200,8 @@ Content-Type: application/problem+json
 <li>Default to <b>cursor</b> for large/append-heavy feeds; offset only for small, bounded, admin-style lists.</li>
 <li>Cursor = opaque base64 of the last sort key(s) (e.g. <code>(created_at,id)</code>). Never expose it as a raw offset — clients will do math on it <span class="warn">!</span></li>
 <li>Always <b>cap</b> <code>limit</code> (e.g. max 100) and echo it; return <code>next</code>/<code>prev</code> links + optional total (expensive — make it opt-in).</li>
+<li>Cursor must encode the <b>full sort key</b> — sorting by a non-unique column (<code>created_at</code> alone) skips/dupes ties; append <code>id</code> as a tiebreaker so the keyset is strictly ordered <span class="warn">!</span></li>
+<li>Ranked/personalized feeds break naive keyset — snapshot a materialized ordering per user and page over that, or the list reshuffles mid-scroll.</li>
 </ul>
 <pre><code>{ "data":[…],
   "meta":{ "next_cursor":"eyJ…", "has_more":true } }</code></pre>
@@ -226,6 +229,7 @@ Content-Type: application/problem+json
 <li>*Adding an enum value can break clients that exhaustively switch — document that clients must tolerate unknowns.</li>
 <li><b>Deprecation</b>: announce → <code>Deprecation</code>/<code>Sunset</code> headers → dual-run old+new → metrics show ~0 traffic → remove. Never yank a live version <span class="warn">!</span></li>
 <li>Prefer <b>additive evolution + tolerant readers</b> over minting a new major version every quarter.</li>
+<li>Run <b>v1 as an adapter over the new impl</b> where possible — don't maintain two full stacks; retire the old version with <code>410 Gone</code> only after usage metrics trend to ~0 and stragglers are contacted.</li>
 </ul>
 </section>
 
@@ -296,6 +300,8 @@ PUT /orders/9  If-Match: "v3"
 <li><b>BOLA / IDOR</b> (OWASP API #1): every object access must check the caller <i>owns</i> it — <code>GET /orders/{id}</code> must verify <code>order.owner == caller</code>, not just "is logged in" <span class="warn">!</span></li>
 <li><b>BFLA</b>: enforce authz on the <b>server</b>, not by hiding UI buttons — the endpoint is wide open otherwise <span class="warn">!</span></li>
 <li>JWT footguns: verify <code>alg</code> (reject <code>none</code>), check <code>exp</code>/<code>aud</code>/<code>iss</code>; can't revoke early → keep TTL short.</li>
+<li><b>Sessions vs tokens</b>: opaque session id (server-side store, instantly revocable, stateful) vs stateless JWT (no lookup, but revocation needs a short TTL or a denylist). Pick per revocation needs.</li>
+<li><b>Refresh flow</b>: short access token + long refresh token; rotate refresh tokens on use &amp; detect reuse (a replayed old refresh token = theft → revoke the whole chain) <span class="warn">!</span></li>
 </ul>
 </section>
 
@@ -329,6 +335,8 @@ RateLimit-Reset: 30</code></pre>
 <li>Three op types: <b>query</b> (read), <b>mutation</b> (write, run serially), <b>subscription</b> (live over WS/SSE).</li>
 <li><span class="warn">!</span> HTTP status is usually <b>200 even on errors</b> — errors live in the <code>errors[]</code> array. Clients must check the body, not just the code.</li>
 <li><span class="warn">!</span> Footguns: <b>N+1</b> resolvers (fix with DataLoader batching); unbounded <b>query depth/complexity</b> = DoS (add depth limit, cost analysis, persisted queries); HTTP caching is hard (everything's a POST).</li>
+<li><b>Schema evolution</b>: add fields/types freely (additive); to remove, mark <code>@deprecated(reason:)</code> and watch field-usage metrics before deleting. No URL versioning — the schema evolves in place.</li>
+<li><b>Authz</b> must be enforced <b>per-field/per-resolver</b>, not per-endpoint — there's only one endpoint, so a missing field-level check is an instant BOLA <span class="warn">!</span></li>
 <li>Great for varied client shapes (mobile+web) &amp; graph-y data; overkill for simple CRUD.</li>
 </ul>
 </section>
@@ -344,6 +352,7 @@ message Order { string id = 1; int64 amount = 2; }</code></pre>
 <li>4 modes: unary, server-stream, client-stream, bidi-stream. Built-in deadlines, cancellation, flow control, multiplexing.</li>
 <li><b>Wire compat</b>: field <b>numbers</b> are the contract — never reuse/renumber; add new fields with new tags; <code>reserved</code> removed ones <span class="warn">!</span> Names are cosmetic.</li>
 <li>Uses its own <b>status codes</b> (OK, NOT_FOUND, INVALID_ARGUMENT, DEADLINE_EXCEEDED…), not HTTP ones.</li>
+<li><b>Field rules</b>: number 1-15 = 1-byte tag (put hot fields there); everything <code>proto3</code>-optional &amp; defaulted, so absent ≠ error — tolerant by design. Reuse a retired tag and old clients misread the bytes <span class="warn">!</span></li>
 <li>Best for <b>internal service-to-service</b> (low latency, polyglot). Weak in browsers (needs gRPC-Web/proxy) &amp; not human-curl-able.</li>
 </ul>
 </section>
@@ -412,6 +421,153 @@ message Order { string id = 1; int64 amount = 2; }</code></pre>
 </ul>
 </section>
 
+<section class="card"><h3>Content Negotiation &amp; Key Headers</h3>
+<ul>
+<li><b>Negotiation</b>: client's <code>Accept: application/json</code> says what it wants back; <code>Content-Type</code> declares what's in the body. Mismatch → <b>406 Not Acceptable</b> (can't produce) or <b>415 Unsupported Media Type</b> (won't accept the body) <span class="warn">!</span></li>
+<li><code>Location</code> on <b>201</b> = URI of the created resource (client follows it). <code>Content-Location</code> = canonical URI of the returned body.</li>
+<li><code>Accept-Encoding: gzip, br</code> → server compresses; huge win on JSON (5-10×). Pair with <code>Vary: Accept-Encoding</code>.</li>
+<li><code>Vary</code> lists request headers the response depends on so caches key correctly (<code>Accept</code>, <code>Accept-Language</code>, <code>Authorization</code>) <span class="warn">!</span> Miss it → wrong-variant cache poisoning.</li>
+</ul>
+<table><thead><tr><th>Header</th><th>Direction / role</th></tr></thead><tbody>
+<tr><td><code>Authorization</code></td><td>req · bearer/key credential</td></tr>
+<tr><td><code>ETag</code>/<code>If-Match</code></td><td>version tag · concurrency</td></tr>
+<tr><td><code>Idempotency-Key</code></td><td>req · dedup retries</td></tr>
+<tr><td><code>Retry-After</code></td><td>resp · 429/503 backoff hint</td></tr>
+<tr><td><code>Deprecation</code>/<code>Sunset</code></td><td>resp · lifecycle signal</td></tr>
+</tbody></table>
+<li><span class="warn">!</span> The <code>X-</code> prefix for custom headers is deprecated (RFC 6648) — register a plain name. Don't put secrets or PII in headers you log.</li>
+</section>
+
+<section class="card"><h3>Redirects &amp; Resource Lifecycle Codes</h3>
+<table><thead><tr><th>Code</th><th>Meaning · method kept?</th></tr></thead><tbody>
+<tr><td>301 Moved Perm.</td><td>new canonical URI · may switch to GET</td></tr>
+<tr><td>308 Perm. Redirect</td><td>permanent · <b>keeps method+body</b></td></tr>
+<tr><td>302 Found</td><td>temporary · may switch to GET <span class="warn">!</span></td></tr>
+<tr><td>307 Temp. Redirect</td><td>temporary · <b>keeps method+body</b></td></tr>
+<tr><td>410 Gone</td><td>existed, intentionally retired</td></tr>
+<tr><td>428 Precond. Required</td><td>demand <code>If-Match</code> before write</td></tr>
+</tbody></table>
+<ul>
+<li>For APIs prefer <b>307/308</b> — a naked <code>302</code> historically flips a <code>POST</code> to a <code>GET</code>, silently dropping the body on non-safe requests <span class="warn">!</span></li>
+<li><b>410 Gone</b> &gt; <code>404</code> for a sunset endpoint: "stop asking, this is retired" is honest signal; pair with a <code>Sunset</code> date. Bare 404 says "maybe never existed."</li>
+<li>Automated clients don't "see" a redirect like a browser — many HTTP libs auto-follow <code>3xx</code> but <b>drop the <code>Authorization</code> header</b> across hosts. Handle redirects deliberately.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Partial Updates — Merge Patch vs JSON Patch</h3>
+<table><thead><tr><th></th><th>Merge Patch (7386)</th><th>JSON Patch (6902)</th></tr></thead><tbody>
+<tr><td>Media type</td><td><code>merge-patch+json</code></td><td><code>json-patch+json</code></td></tr>
+<tr><td>Shape</td><td>partial object</td><td>op array</td></tr>
+<tr><td>Delete field</td><td><code>null</code></td><td><code>{op:"remove"}</code></td></tr>
+<tr><td>Array edits</td><td>replace whole array <span class="warn">!</span></td><td>per-index ops</td></tr>
+<tr><td>Conditional</td><td>no</td><td><code>test</code> op</td></tr>
+</tbody></table>
+<pre><code># Merge Patch — change only email, leave rest
+PATCH /v1/users/42  Content-Type: application/merge-patch+json
+{ "email": "new@ex.com", "nickname": null }   # null = delete
+
+# JSON Patch — ordered ops, testable
+[ {"op":"test","path":"/version","value":9},
+  {"op":"replace","path":"/status","value":"shipped"} ]</code></pre>
+<ul>
+<li>Merge Patch can't distinguish "set null" from "delete" cleanly, and <b>can't append to an array</b> without resending it — that's where JSON Patch wins <span class="warn">!</span></li>
+<li>Idempotency depends on ops: <code>replace</code> is idempotent; <code>add</code> to an array or an <code>increment</code>-style delta is not. Design retries as if PATCH isn't idempotent.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Async, Long-Running &amp; Bulk Ops</h3>
+<h4>Long-running work</h4>
+<pre><code>POST /v1/exports          → 202 Accepted
+Location: /v1/jobs/j_9
+{ "id":"j_9", "status":"processing" }
+
+GET /v1/jobs/j_9  → 200 { "status":"done",
+  "result_url":"/v1/exports/e_5" }</code></pre>
+<ul>
+<li>Return <b>202 + a job resource</b>; client polls <code>GET /jobs/{id}</code> (<code>processing</code>→<code>done</code>/<code>failed</code>) or you fire a webhook. Never hold the connection open for minutes <span class="warn">!</span></li>
+</ul>
+<h4>Bulk / batch endpoints</h4>
+<ul>
+<li>Accept an array; on mixed outcomes return <b>207 Multi-Status</b> (or 200 + a per-item results array) so one bad row doesn't fail the batch <span class="warn">!</span></li>
+<li>Cap batch size; make the whole batch idempotent (one <code>Idempotency-Key</code>) or dedup per item. Decide up front: all-or-nothing (transactional) vs partial-success.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Design Playbooks — Worked Scenarios</h3>
+<table><thead><tr><th>Prompt</th><th>Load-bearing decision</th></tr></thead><tbody>
+<tr><td>Orders / e-comm</td><td>idempotent create + BOLA on every GET</td></tr>
+<tr><td>Social feed</td><td>cursor (keyset), no total, no offset <span class="warn">!</span></td></tr>
+<tr><td>Payments</td><td>idempotency key + dedup store + in-flight 409</td></tr>
+<tr><td>File upload</td><td>presigned URL — bytes skip your server</td></tr>
+<tr><td>URL shortener</td><td>redirect 301(cache) vs 302(count); alias 409</td></tr>
+<tr><td>Search</td><td>GET+cache vs POST body; allow-list sort</td></tr>
+<tr><td>Ride-share</td><td>REST CRUD + push (WS/SSE) for live state</td></tr>
+</tbody></table>
+<h4>File upload — presigned flow</h4>
+<pre><code>1 POST /v1/uploads {name,size,type} → 201
+    { upload_id, presigned_url, expires_in:900 }
+2 PUT &lt;presigned_url&gt;   # bytes → object store directly
+3 POST /v1/uploads/{id}/complete → 200 { file_id }</code></pre>
+<ul>
+<li>Validate size/type/quota <b>before</b> issuing the URL; scope it tight (one object, short TTL). Large files → multipart/resumable. Async post-processing (scan/transcode) → 202 + status <span class="warn">!</span></li>
+<li>Feed/payment/shortener all reuse earlier primitives — cursor, idempotency key, DTO, per-object authz. The playbook is: pick the primitive the prompt is really testing.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Contracts, Testing &amp; Observability</h3>
+<h4>The machine contract</h4>
+<ul>
+<li><b>OpenAPI</b> (REST), <b>.proto</b> (gRPC), <b>SDL</b> (GraphQL) → codegen clients/servers, mock servers, docs, and contract tests from one source of truth <span class="ansi">DX</span>.</li>
+<li><b>Spec-first</b>: write &amp; review the spec before code; lint it in CI (Spectral) so style rules are enforced, not hoped for.</li>
+<li><b>Contract tests</b> (e.g. consumer-driven / Pact) pin the provider to what consumers actually rely on — impl can't silently drift from the published shape <span class="warn">!</span></li>
+</ul>
+<h4>Observability</h4>
+<ul>
+<li>Propagate a <code>request_id</code> (and W3C <code>traceparent</code>) through every log line and downstream call — one id ties a user report to the exact failing hop <span class="warn">!</span></li>
+<li>Track <b>RED</b> per endpoint: <b>R</b>ate, <b>E</b>rrors, <b>D</b>uration (p50/p95/p99). Alert on error-rate &amp; latency SLO burn, not raw counts.</li>
+<li>Structured JSON logs; never log tokens, full bodies, or PII. Emit deprecation-hit metrics so you know when a version is safe to retire.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Timeouts, Retries &amp; Resilience</h3>
+<ul>
+<li><b>Every remote call gets a timeout</b> — no timeout = a stuck dependency exhausts your thread/connection pool and cascades <span class="warn">!</span></li>
+<li><b>Retry only</b> idempotent ops on 5xx/429/timeout, with <b>exponential backoff + jitter</b>, a capped attempt count, and a <b>retry budget</b> (cap % of traffic that is retries) so you don't DDoS a struggling backend <span class="warn">!</span></li>
+<li><b>Circuit breaker</b>: after N consecutive failures, open (fail fast) for a cooldown, then half-open to probe — stops pile-up on a dead dependency.</li>
+<li><b>Deadline propagation</b>: pass the remaining budget downstream (gRPC deadlines / a deadline header) so nobody works on a request the caller already abandoned.</li>
+<li><b>Connection reuse</b>: keep-alive / HTTP/2 multiplexing avoids per-call TLS handshakes; watch HTTP/1.1 head-of-line blocking on chatty clients. Bound pool size.</li>
+</ul>
+<p><span class="warn">!</span> Retries + no idempotency key = the double-charge bug. Retries and idempotency are two halves of one design.</p>
+</section>
+
+<section class="card"><h3>The Interview Loop — reason out loud</h3>
+<ul>
+<li><b>1 Clarify</b> before drawing anything: public or internal? who authenticates? scale? read- or write-heavy? consistency needs? Juniors dive in on assumptions <span class="warn">!</span></li>
+<li><b>2 Model resources</b> (nouns + relationships) before endpoints — endpoints fall out of a clean model.</li>
+<li><b>3 Happy path</b> with correct methods/codes, narrating each ("POST → 201 + Location").</li>
+<li><b>4 Attack the hard parts unprompted</b> — the ones the prompt is really testing: cursor pagination, idempotency keys, versioning, the <b>object-level auth (BOLA)</b> check, rate limits, a consistent error envelope.</li>
+<li><b>5 State tradeoffs</b>: "cursor over offset because the feed drifts." Owning the tradeoff beats pretending there isn't one.</li>
+<li><b>6 Invite feedback</b>: "deeper on webhook retries or the auth model?"</li>
+</ul>
+<p><span class="ansi">DX</span> A slightly imperfect design narrated with clear reasoning beats a perfect one produced in silence — they're hiring the person who makes these calls on the team.</p>
+<p><b>Review a bad API</b>: prioritise <b>security &amp; correctness → consistency → polish</b>. Lead with BOLA and client-controlled authz (<code>?admin=true</code>), then RPC-verb URLs, data over-exposure, missing version. Leading with the security flaws signals seniority.</p>
+</section>
+
+<section class="card"><h3>Sensible Defaults (numbers to quote)</h3>
+<table><thead><tr><th>Knob</th><th>Reasonable default</th></tr></thead><tbody>
+<tr><td>Page size</td><td>20 default, <b>100 max</b> (cap it)</td></tr>
+<tr><td>Idempotency-Key TTL</td><td>24h</td></tr>
+<tr><td>Access token TTL</td><td>~15 min (refresh token longer)</td></tr>
+<tr><td>Presigned URL TTL</td><td>5-15 min, single object</td></tr>
+<tr><td>Rate limit (free)</td><td>60 req/min, burst 100</td></tr>
+<tr><td>Deprecation window</td><td>public: 12+ months</td></tr>
+<tr><td>Retry schedule</td><td>1s,10s,1m,10m,1h + jitter, capped</td></tr>
+<tr><td>Cache max-age (catalog)</td><td>public, max-age=300</td></tr>
+<tr><td>Max request body</td><td>bounded (e.g. 1-10 MB); large → upload flow</td></tr>
+</tbody></table>
+<p><span class="ansi">DX</span> Quoting concrete numbers in an interview signals you've actually run one of these — vague "some limit" reads junior. Adjust to the domain, but always <b>cap</b> the unbounded ones.</p>
+</section>
+
 <section class="card"><h3>&#9733; API Review Checklist</h3>
 <h4>Contract &amp; naming</h4>
 <ul>
@@ -456,6 +612,11 @@ message Order { string id = 1; int64 amount = 2; }</code></pre>
 <tr><td>slow list query / DoS</td><td>filter/sort on unindexed field <span class="warn">!</span></td></tr>
 <tr><td>duplicate webhook processing</td><td>at-least-once + non-idempotent handler <span class="warn">!</span></td></tr>
 <tr><td>protobuf field reads garbage</td><td>reused/renumbered field tag <span class="warn">!</span></td></tr>
+<tr><td>POST body dropped on redirect</td><td>302 instead of 307/308 <span class="warn">!</span></td></tr>
+<tr><td>retries hammer a dying backend</td><td>no retry budget / circuit breaker <span class="warn">!</span></td></tr>
+<tr><td>one bad row fails whole batch</td><td>no partial-success / 207 handling <span class="warn">!</span></td></tr>
+<tr><td>can't trace a prod failure</td><td>no request_id correlation <span class="warn">!</span></td></tr>
+<tr><td>stuck thread pool, cascade</td><td>missing timeout on remote call <span class="warn">!</span></td></tr>
 </tbody></table>
 </section>
 

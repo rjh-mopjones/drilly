@@ -379,6 +379,133 @@ const rng = seededRandom(42);</code></pre>
 </ul>
 </section>
 
+<section class="card"><h3>Test Data — Fixtures, Factories, Builders</h3>
+<p>Test data is <b>part of the spec</b>, not offscreen setup. The test should read as a sentence: "given a user with an expired sub, when they check out, then…". State <b>only what the assertion depends on</b>; let defaults handle the rest.</p>
+<table><thead><tr><th>Pattern</th><th>Is</th><th>Weakness</th></tr></thead><tbody>
+<tr><td><b>Fixture</b></td><td>static baseline (rows/files/<code>beforeEach</code>)</td><td>rots when shared/large</td></tr>
+<tr><td><b>Object Mother</b></td><td>named exemplars: <code>Mother.premiumUser()</code></td><td>method explosion as variants grow</td></tr>
+<tr><td><b>Factory</b></td><td>generates objects w/ defaults, overridable</td><td>magic defaults hide too much</td></tr>
+<tr><td><b>Builder</b></td><td>fluent chain of only what matters</td><td>verbose per object</td></tr>
+</tbody></table>
+<pre><code>User u = aUser()
+  .withSubscription(expired())  // only what the test cares about
+  .build();                     // everything else = safe default</code></pre>
+<ul>
+<li><b>Default = factory</b> (esp. DB-backed); layer a <b>builder</b> for readable one-offs; keep an <b>Object Mother</b> for a few canonical cases; plain fixtures only for small stable baselines.</li>
+<li><b>Minimal + realistic</b>: set only the fields the behaviour touches, meaningfully. All-<code>"test"</code>/zero data can accidentally satisfy a condition and hide bugs <span class="warn">!</span></li>
+<li><b>Unique defaults</b> (random email/UUID) in the builder prevent inter-test collisions for free — a parallelism win.</li>
+<li>Add a required column → fix <b>one</b> default in the factory, not 400 tests. That indirection is what lets a suite survive years of schema churn.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Test Isolation &amp; Parallelism</h3>
+<p><b>Isolation</b> = a test's result is independent of what else ran, in what order, in parallel or not (the <b>I</b> &amp; <b>R</b> of FIRST). Non-negotiable: it buys <b>trust</b> (a red means <i>that</i> test broke) and <b>parallelism</b> (you can only shard state-free tests).</p>
+<h4>Keeping DB/integration tests isolated</h4>
+<table><thead><tr><th>Strategy</th><th>Note</th></tr></thead><tbody>
+<tr><td><b>Transaction rollback</b></td><td>fastest; begin → test → rollback. Can't test code that commits</td></tr>
+<tr><td><b>Truncate / clean-slate</b></td><td>works when code commits; truncate touched tables in FK order</td></tr>
+<tr><td><b>Unique data per test</b></td><td><code>user-{uuid}</code>, per-test tenant → never collide, high parallelism</td></tr>
+<tr><td><b>Per-worker DB/schema</b></td><td>each shard gets its own DB → no cross-shard contention</td></tr>
+</tbody></table>
+<ul>
+<li><span class="warn">!</span> The canonical bug: <b>"passes alone, fails in the suite"</b> = broken isolation — a mutated singleton, a leftover row, a global cache, a fixed ID that collides.</li>
+<li>Debug it: run in <b>random order</b> (<code>pytest -p randomly</code>, <code>--shuffle</code>) to confirm order dependence, then bisect to find the poisoner, then fix <i>ownership</i> — never "run in this order."</li>
+<li><span class="warn">!</span> <b>Mystery guest</b>: a test asserting on <code>user_42</code> from a distant fixture can't be understood in isolation. Create the relevant data <i>inline</i> so the setup <i>is</i> the spec.</li>
+<li><b>Combine for parallel CI:</b> per-worker DB + rollback-per-test + unique IDs + unique Kafka topic/consumer-group per test.</li>
+</ul>
+</section>
+
+<section class="card"><h3>In-Memory DB vs Containerized (Testcontainers)</h3>
+<table><thead><tr><th></th><th>In-mem (H2/SQLite)</th><th>Container (Testcontainers)</th></tr></thead><tbody>
+<tr><td>Speed</td><td>very fast, no Docker</td><td>slower start, needs Docker</td></tr>
+<tr><td>Fidelity</td><td>diff dialect/types/constraints</td><td><b>exactly prod</b></td></tr>
+<tr><td>Risk</td><td>green tests, prod breaks</td><td>catches real DB behaviour</td></tr>
+</tbody></table>
+<pre><code>@Container static PostgreSQLContainer&lt;?&gt; db =
+  new PostgreSQLContainer&lt;&gt;("postgres:16");
+// real Postgres, ephemeral per run, torn down after</code></pre>
+<ul>
+<li><span class="warn">!</span> H2 "Postgres mode" still diverges on JSON/array types, native queries, sequences, locking, constraint semantics — you get <b>false green</b> and false failures on valid Postgres SQL.</li>
+<li><b>Default: containerize</b> for anything asserting real query behaviour. Reserve in-mem for where speed dominates and you're not exercising DB-specific behaviour.</li>
+<li><b>Ephemeral &gt; shared staging</b>: a throwaway container is both <i>real</i> (unlike a fake) and <i>clean</i> (unlike a shared server nobody dares reset).</li>
+</ul>
+<h4>Secrets &amp; config in tests</h4>
+<ul>
+<li>Container-generated throwaway credentials; inject config (never hardcode); fake keys in a <code>test</code> profile — safe to commit <i>only</i> because they're fake. <span class="warn">!</span> Never point tests at prod or commit a real <code>sk_live_…</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Security Testing — SAST / DAST / SCA</h3>
+<p>Layer <b>cheap+early</b> ("shift left") with <b>deep+late</b> — each tool has an opposite blind spot; stacking narrows the gap but never closes it.</p>
+<table><thead><tr><th>Type</th><th>What / weakness</th></tr></thead><tbody>
+<tr><td><b>SAST</b></td><td>static source scan; sees all code, can't judge reachability → <b>false positives</b></td></tr>
+<tr><td><b>DAST</b></td><td>attacks running app black-box; only tests paths it reaches → <b>false negatives</b></td></tr>
+<tr><td><b>IAST</b></td><td>agent instruments running app → code precision + runtime confirmation</td></tr>
+<tr><td><b>SCA</b></td><td>scans deps vs known CVEs (Dependabot, Snyk, Trivy)</td></tr>
+<tr><td><b>Pentest</b></td><td>skilled humans chain weaknesses; deep but <b>point-in-time</b></td></tr>
+</tbody></table>
+<ul>
+<li><b>SCA is often highest-ROI</b>: most of your code is other people's; attackers scan for known CVEs at scale (Log4Shell). Fully automated, fix = bump the version. Fail CI on high/critical.</li>
+<li><span class="warn">!</span> "We run all four → we're secure" is false: business-logic flaws (refund yourself twice), cloud/IAM misconfig, and every commit since the last scan are unverified surface. Security is a continuous property, not a test you pass.</li>
+</ul>
+<h4>Testing the two dominant API bugs</h4>
+<ul>
+<li><b>Broken access control (IDOR/BOLA)</b> — highest-value API test: user A can't touch B's resource by changing an ID → <b>403</b>, not 200 with B's data. Also test vertical escalation, missing/forged token → 401.</li>
+<li><b>Injection</b> — send <code>'; DROP TABLE users;--</code>; assert it's treated as a literal (parameterised), table survives, no 500. OWASP Top 10 is the checklist.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Specialized Types — Fit &amp; Traps</h3>
+<p>Each is a lens for a failure mode functional tests structurally miss. Senior instinct: match <b>lens to risk</b>, don't cargo-cult all of them.</p>
+<ul>
+<li><b>Accessibility (a11y)</b>: axe-core/Lighthouse in CI catch only <b>~30–40%</b> (alt text, contrast, ARIA, labels) <span class="warn">!</span> The rest — keyboard-only nav, focus order, screen-reader sense, focus traps — needs a human + assistive tech. Automated = a floor, not compliance.</li>
+<li><b>Snapshot</b>: serialize output, diff vs stored file. Asserts <i>"same as last time,"</i> <b>not</b> "correct" <span class="warn">!</span> Trap = reflex <code>jest -u</code> to mass-update until green → enshrines bugs. Keep tiny, human-readable, reviewed as a real diff.</li>
+<li><b>Visual regression</b>: screenshot + diff vs baseline; catches layout/overlap DOM assertions miss. Flaky <i>reputation</i> is a <b>config</b> problem — use a stable container renderer, mask dynamic regions, disable animation, perceptual threshold (not raw-pixel).</li>
+<li><b>Exploratory</b>: structured, unscripted human investigation — time-boxed <b>session-based</b> testing with a written charter, not "clicking around." Finds <b>unknown-unknowns</b> automation never can (automation only re-checks what you already knew). New features deserve an exploratory pass <i>before</i> you know what to automate.</li>
+<li><b>Localization (i18n/l10n)</b>: catches hardcoded strings, <b>text expansion</b> (German ~30–40% longer → overflow), date/decimal/currency formats, RTL mirroring, encoding/mojibake. Test with <b>pseudo-localization</b> (<code>[!!! Ĉħĕĉķŏŭţ !!!]</code>) without real translators.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Risk-Based Strategy — Spend Where It Hurts</h3>
+<p>Testing is <b>risk management under a budget</b>, not a quest for certainty. Inputs are infinite; every strategy is an allocation: where does a test buy the most <b>reduced risk per unit cost</b>? Risk = <b>likelihood × impact</b>.</p>
+<pre><code>        IMPACT
+  high | test solidly   | TEST HARDEST    |
+       | (rare+critical)| (payments,auth) |
+  low  | minimal/smoke  | light checks    |
+       | (static footer)| (cosmetic UI)   |
+       +------------------------------------ LIKELIHOOD
+            low                  high</code></pre>
+<ul>
+<li>The senior signal is using this to justify <b>not</b> testing something: "no E2E for the admin export button — low traffic, a break costs minutes" is a <i>stronger</i> answer than "test everything."</li>
+<li><b>A strategy explicitly decides what NOT to test</b> and why. Coverage % is a floor, not a strategy <span class="warn">!</span></li>
+<li>Push each behaviour to the <b>lowest level that can verify it</b>; reserve slow/flaky E2E for the few money paths. Ask "what's the <i>cheapest</i> test that fails if this breaks?"</li>
+<li>Apply the pyramid/trophy <b>logic</b>, not the shape dogmatically — I/O-bound services weight integration heavier.</li>
+</ul>
+</section>
+
+<section class="card"><h3>"How Would You Test X" — Playbook</h3>
+<p>Interviewers score <b>systematic enumeration</b>, not one exotic case. For any "how would you test X" walk: happy path → boundary/edge → error/failure → security/auth → concurrency → non-functional — and assign each a <b>level</b>.</p>
+<h4>Login / auth</h4>
+<ul>
+<li>Happy: valid creds → session/token. Sad: wrong pw, unknown user — <b>same generic error</b> (no user-enumeration leak) <span class="warn">!</span></li>
+<li>Security = the heart: rate-limit/lockout, token expiry/rotation/invalidate-on-logout, forged token → 401, passwords hashed+salted (verify you <i>can't</i> read plaintext), CSRF, session fixation.</li>
+</ul>
+<h4>Rate limiter</h4>
+<ul>
+<li>Boundary: 100 ok, 101 → 429 (off-by-one). <span class="warn">!</span> <b>Inject a fake clock</b>, never <code>sleep(60s)</code>, to test window rollover.</li>
+<li>Fire N parallel at the boundary → exactly the limit passes (atomic counter). Per-key isolation; shared Redis for distributed.</li>
+</ul>
+<h4>Shopping cart</h4>
+<ul>
+<li>Ops + boundaries (qty 0/neg/max, same item twice → merge), money (tax, coupons valid/expired/stacked, rounding — minor units, never floats).</li>
+<li>Sneaky real bugs: <b>guest cart merges with saved cart on login</b>; price/stock changes <i>between add and checkout</i>. Logic → unit, persistence/merge → integration, one E2E.</li>
+</ul>
+<h4>Payments</h4>
+<ul>
+<li>Idempotency (double-submit ≠ double-charge) + concurrent capture/refund races are the hard part — test hardest &amp; lowest. State machine: reject every illegal transition. Contract test the gateway.</li>
+</ul>
+</section>
+
 <section class="card"><h3>&#9733; Test Review Checklist</h3>
 <h4>Behaviour, not implementation</h4>
 <ul>

@@ -252,6 +252,8 @@ is_current     (bool)</code></pre>
 <li><b>Idempotent producer</b> dedups <i>retries</i> only. Kafka <b>transactions</b> give read-process-write EOS <i>within</i> Kafka.</li>
 <li><span class="warn">!</span> Auto-commit fires on a timer regardless of processing — subtle loss/dup on crash. Prefer manual commit after work.</li>
 <li><b>Lag</b> = <code>log-end-offset − committed</code>. Almost always a slow/stuck <i>consumer</i>, not the broker — add partitions + consumers or speed up processing.</li>
+<li><span class="warn">!</span> <b>Repartitioning breaks key→partition mapping</b>: adding partitions changes <code>hash(key) % n</code>, so existing keys scatter and per-key order is lost from that point. Over-provision partitions up front instead.</li>
+<li><b>Speed a slow consumer</b>: batch sink writes, async/parallel processing within a partition (careful with ordering), cache enrichment lookups, and raise <code>max.poll.records</code> only if downstream can absorb it.</li>
 </ul>
 </section>
 
@@ -292,8 +294,11 @@ is_current     (bool)</code></pre>
 <tr><td><b>Partitioning</b></td><td>prune whole partitions by date/key</td></tr>
 <tr><td><b>Clustering / sort</b></td><td>co-locate values → tighter min/max skipping</td></tr>
 <tr><td><b>Micro-partitions</b></td><td>Snowflake auto min/max pruning</td></tr>
+<tr><td><b>Distribution key</b></td><td>Redshift: co-locate join rows on a node → no redistribution</td></tr>
+<tr><td><b>Sort key</b></td><td>Redshift: zone-map skip blocks by range</td></tr>
 </tbody></table>
 <ul>
+<li><b>Storage/compute separation</b> (Snowflake virtual warehouses, BigQuery slots): scale each independently, pay per query/compute-hour; data sits cheap in object storage.</li>
 <li><span class="warn">!</span> <code>SELECT *</code> defeats columnar pruning — scans every column. <code>WHERE fn(col)=x</code> defeats partition/stat pruning.</li>
 <li><b>dbt</b> = the "T" of ELT: models = <code>SELECT</code>s, DAG from <code>ref()</code>, tests, incremental materializations, docs/lineage. Runs <i>under</i> an orchestrator.</li>
 </ul>
@@ -344,6 +349,8 @@ is_current     (bool)</code></pre>
 <li>Pattern: Debezium → Kafka (compacted topic) → sink → <b>MERGE</b> into a lakehouse/warehouse table (needs upsert support).</li>
 <li><b>Schema drift</b>: source adds/renames/retypes a column. Enforce via Schema Registry (reject) or auto-evolve + alert. <span class="warn">!</span> Silent drift = the classic "dashboard wrong all week, nothing failed."</li>
 <li>Land <b>raw/immutable</b> first (bronze), transform after — so you can always replay.</li>
+<li><b>Snapshot + stream</b>: Debezium first snapshots the whole table (initial load), then switches to streaming the log from the snapshot's LSN — no gap, no double-count. <span class="warn">!</span> A big snapshot can lock/load the source; use incremental (watermark-based) snapshotting for large tables.</li>
+<li><b>Tombstones</b>: a delete emits a record with the key and a null value; a compacted topic then drops the key. Downstream MERGE must translate this to a warehouse delete (or soft-delete flag).</li>
 </ul>
 </section>
 
@@ -355,7 +362,7 @@ is_current     (bool)</code></pre>
 <li><b>Idempotent tasks</b> are the prerequisite for retries + backfills. Retrying a non-idempotent <code>INSERT</code> doubles the data.</li>
 <li><b>Sensor</b> = wait for a condition; use <b>reschedule/deferrable</b> mode or it holds a worker slot <span class="warn">!</span> <b>XCom</b> = small metadata (a path, a count), never DataFrames.</li>
 <li><b>Executor</b>: Local / Celery (worker pool) / Kubernetes (pod per task).</li>
-<li><b>Dagster/Prefect</b> = asset-aware: schedule on data freshness, not just tasks.</li>
+<li><b>Dagster/Prefect</b> = asset-aware: schedule on data freshness and asset lineage, not just task order — a run targets "make this table fresh," and the framework figures the upstream rebuild.</li>
 </ul>
 </section>
 
@@ -374,6 +381,9 @@ is_current     (bool)</code></pre>
 <ul>
 <li>Tools: <b>Great Expectations / dbt tests / Soda</b> for assertions; catalog + lineage for governance.</li>
 <li>PII/governance: classify, mask/tokenize, enforce retention + GDPR delete (needs upsert/MERGE on the lakehouse).</li>
+<li><b>Test placement in dbt</b>: <code>not_null</code>, <code>unique</code>, <code>accepted_values</code>, <code>relationships</code> (FK) as schema tests; custom singular tests for business rules. Run in CI on the DAG before promoting to gold.</li>
+<li><span class="warn">!</span> A check that only alerts (doesn't gate) is theatre — the bad data still ships. Wire the <b>circuit breaker</b> so a failed critical check <i>halts</i> the run, not just logs it.</li>
+<li><b>Anomaly vs assertion</b>: assertions are hard thresholds you know (nulls=0); anomaly detection learns the normal band (row count ±3σ) and catches the drift you didn't predict.</li>
 </ul>
 </section>
 
@@ -385,6 +395,108 @@ is_current     (bool)</code></pre>
 <li><b>Exactly-once end-to-end</b> = replayable source offsets + checkpointed state + idempotent sink. No free lunch; it's engineered per boundary.</li>
 <li><b>Fault tolerance</b>: lineage recompute (Spark) or checkpoint + replay (streaming) — not full replication of intermediate data.</li>
 <li><b>Backpressure</b>: a slow consumer signals upstream to slow down (or buffer to a durable log) rather than drop or OOM.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Schema Evolution &amp; Compatibility</h3>
+<p>Producers and consumers deploy independently, so a schema change must not break the other side. Schema Registry enforces a <b>compatibility mode</b> at produce time — reject the bad change instead of discovering it downstream <span class="warn">!</span></p>
+<table><thead><tr><th>Mode</th><th>Guarantee</th><th>Safe change</th></tr></thead><tbody>
+<tr><td><b>Backward</b></td><td>new schema reads old data</td><td>add optional/defaulted field, drop a field</td></tr>
+<tr><td><b>Forward</b></td><td>old schema reads new data</td><td>add a field, drop optional field</td></tr>
+<tr><td><b>Full</b></td><td>both directions</td><td>add/drop optional fields only</td></tr>
+</tbody></table>
+<ul>
+<li><b>Backward</b> = upgrade <i>consumers first</i> (they can read old + new). <b>Forward</b> = upgrade <i>producers first</i>. Pick per deploy order.</li>
+<li><span class="warn">!</span> <b>Renaming or retyping</b> a required field breaks both — treat as add-new + deprecate-old, never in-place. Type widening (int→long) may be forward-safe; narrowing never is.</li>
+<li><b>Lakehouse schema evolution</b> (Iceberg/Delta): add/rename/reorder columns via metadata, no file rewrite — column identity is by <b>id</b>, not position. <span class="warn">!</span> Plain Parquet-on-directory has none of this: a mismatched file breaks the read.</li>
+<li><b>Data contract</b> = producer-owned schema + SLA; makes drift a <i>rejected change at source</i>, not a silent downstream break.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Real-Time OLAP Serving</h3>
+<p>Reach for a real-time OLAP store only when you need <b>three things at once</b>: <b>sub-second latency</b>, <b>high concurrency</b>, and <b>seconds-fresh</b> data. Drop any one → a warehouse or cache is simpler <span class="warn">!</span></p>
+<table><thead><tr><th></th><th>Druid</th><th>Pinot</th><th>ClickHouse</th></tr></thead><tbody>
+<tr><td>Model</td><td>time-series rollup</td><td>time-series rollup</td><td>general columnar SQL</td></tr>
+<tr><td>Joins</td><td>limited</td><td>limited</td><td>full SQL</td></tr>
+<tr><td>Sweet spot</td><td>ops/event analytics</td><td>user-facing, ultra-low p99</td><td>flexible ad-hoc</td></tr>
+</tbody></table>
+<ul>
+<li>Why sub-second: <b>columnar</b> (read 2 cols not rows) + <b>inverted/bitmap index</b> (filter → row bitmap, no scan) + <b>time-partitioned segments</b> (prune to last hour) + <b>pre-aggregation</b> (sum a few thousand rollup rows, not a billion raw).</li>
+<li>Warehouse breaks on the serving profile: <b>concurrency</b> (virtual warehouses queue) + <b>cold latency</b> (1–5s scan, not 50ms).</li>
+<li><b>Rollup</b>: collapse raw events to (minute, dim, count) at ingest. <span class="warn">!</span> Loses raw grain (a commitment); only additive metrics merge — distinct needs <b>HLL/Theta sketches</b>. Keep raw in the lake for ad-hoc.</li>
+<li><span class="warn">!</span> "Materialized view = cache" — no. MV is a maintained result with defined refresh; a stale MV silently serving old numbers is a classic "dashboard wrong" incident.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Streaming Engines — choosing</h3>
+<p>Two axes: <b>true streaming</b> (record-at-a-time, ms latency) vs <b>micro-batch</b> (batch interval floor); and <b>library</b> (embed in your app) vs <b>cluster/framework</b> (submit jobs).</p>
+<table><thead><tr><th>Engine</th><th>Model</th><th>Deploy</th><th>Best for</th></tr></thead><tbody>
+<tr><td><b>Flink</b></td><td>true, ms</td><td>cluster (Job/TaskMgr)</td><td>low-latency + heavy state + event-time</td></tr>
+<tr><td><b>Kafka Streams</b></td><td>true, ms</td><td><b>library</b> in your JVM app</td><td>Kafka-in/out, no cluster wanted</td></tr>
+<tr><td><b>Spark SS</b></td><td>micro-batch</td><td>cluster (driver/exec)</td><td>reuse Spark skills, high throughput</td></tr>
+<tr><td><b>Storm/Samza</b></td><td>true, ms</td><td>cluster</td><td>legacy — superseded</td></tr>
+</tbody></table>
+<ul>
+<li>Decision rule: <b>latency + heavy state → Flink</b>; <b>Kafka-centric app, avoid a cluster → Kafka Streams</b>; <b>already on Spark, seconds is fine → Structured Streaming</b>.</li>
+<li><span class="warn">!</span> "Flink and Spark are the same" — no. Flink is record-at-a-time (ms); Spark SS is floored by its trigger interval (100s ms–s). Shows up under tight SLAs.</li>
+<li><b>Kafka Streams scales</b> by running more app instances; Kafka rebalances partitions among them. State = local <b>RocksDB</b> backed by a <b>changelog topic</b> (compacted) → replayed to rebuild state on rebalance/crash.</li>
+<li><span class="warn">!</span> More parallelism ≠ more throughput past skew, the shuffle, a slow sink, or the <b>partition ceiling</b> (can't exceed Kafka partitions). Find the backpressured operator first.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Flink State &amp; Fault Tolerance</h3>
+<h4>State backends</h4>
+<table><thead><tr><th></th><th>Heap (HashMap)</th><th>RocksDB</th></tr></thead><tbody>
+<tr><td>Lives</td><td>JVM heap (RAM)</td><td>local disk (LSM), off-heap</td></tr>
+<tr><td>Capacity</td><td>bounded by RAM</td><td>TBs, exceeds RAM</td></tr>
+<tr><td>Checkpoint</td><td>full snapshot</td><td><b>incremental</b> (deltas only)</td></tr>
+</tbody></table>
+<p>Default <b>RocksDB</b> for any non-trivial production state — only option that spills to disk, and a 500 GB state uploads only the delta each checkpoint. Heap is a latency optimization for small state.</p>
+<h4>Checkpoint vs savepoint <span class="warn">!</span></h4>
+<ul>
+<li><b>Checkpoint</b> = engine-triggered, periodic, for <b>fault recovery</b>; auto-managed. Restores state + source offsets on crash → exactly-once <i>state</i>.</li>
+<li><b>Savepoint</b> = operator-triggered, durable, for <b>upgrades/rescaling/migration</b>. Take one, deploy new code (keep operator <b>UIDs</b> stable), restart from it — state carries across. Not knowing savepoints = "ran demos, never upgraded prod."</li>
+</ul>
+<ul>
+<li><b>EOS</b> = replayable source (offsets in checkpoint) + <b>barrier snapshot</b> (Chandy-Lamport; barriers flow with data, snapshot without stopping) + <b>2-phase-commit / idempotent sink</b>. Sink is where EOS is lost.</li>
+<li><b>Backpressure</b> = credit-based flow control slows the source (Kafka) — durable, so no loss; UI shows the stuck operator. <span class="warn">!</span> Failing checkpoints are usually a <i>symptom</i> of backpressure or state size — fix the stall, don't just raise the timeout.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Design Playbook — the four beats</h3>
+<p>Every DE design question is one shape: <b>data comes from somewhere → moved → transformed → stored → served, and must survive failure.</b> Run every answer through the <b>pipeline spine</b>: <code>source → ingest → process → store → serve</code>, reliability threaded underneath.</p>
+<ol style="margin:2px 0;padding-left:14px;">
+<li><b>Restate &amp; scope</b> — play it back, confirm what "done" means. Buys thinking time, catches misunderstanding.</li>
+<li><b>Assumptions</b> — pin the deciding numbers (interviewers withhold them): <b>volume</b> (GB or PB?), <b>velocity</b> (events/sec?), <b>latency SLA</b> (seconds or 9am?), <b>freshness</b>, <b>query pattern</b>, <b>team maturity</b>. 80% of the decision.</li>
+<li><b>Model &amp; flow</b> — draw the spine, name each tool <i>and why</i>, model tables (grain → star → SCD).</li>
+<li><b>Tradeoffs — land here</b> — every choice costs something: batch-vs-stream, cost-vs-latency, normalized-vs-denormalized, and the failure story (idempotent, replayable, keyed).</li>
+</ol>
+<ul>
+<li><span class="warn">!</span> <b>More tools ≠ better.</b> Right-sizing (a nightly script beats Kafka+Flink at small scale) is a stronger signal than maximal architecture.</li>
+<li><span class="warn">!</span> Skipping assumptions is the top failure — you design for the wrong volume/latency. And a diagram isn't the answer; the <b>tradeoffs</b> are.</li>
+<li><b>Batch is the default; streaming is a justified exception</b> (real latency SLA). Reaching for streaming unprompted reads as inexperience.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Worked Designs</h3>
+<h4>CDC: OLTP → warehouse</h4>
+<pre><code>OLTP WAL/binlog → Debezium → Kafka (topic/table)
+  → sink → lake staging → MERGE (upsert PK) → warehouse</code></pre>
+<ul>
+<li>Log-based (reads the WAL the DB already writes): near-zero source load, captures <b>deletes</b> + intermediate states in commit order. Query-based polling misses all three <span class="warn">!</span></li>
+<li>At-least-once → <b>MERGE on PK</b> = exactly-once effect; combine with <b>SCD2</b> in the warehouse to keep the change timeline, not just latest state.</li>
+</ul>
+<h4>Real-time analytics (Kappa)</h4>
+<pre><code>sources → Kafka (retained) → Flink (event-time, EOS)
+  ├─ Druid/Pinot → sub-second live dashboard
+  └─ lake (Iceberg raw) → dbt → audited reports</code></pre>
+<ul>
+<li>One stream path serves live; <b>replay</b> the retained log to reprocess/backfill. Live store is <b>fresh-but-approximate</b>; the batch job over the lake is the source of truth. Kappa (single codebase) beats Lambda's dual-codebase reconciliation trap.</li>
+</ul>
+<h4>Exactly-once into a warehouse</h4>
+<ul>
+<li>Honest version: <b>at-least-once delivery + idempotent write, offsets committed after the write.</b> There's no exactly-once <i>delivery</i>, only exactly-once <i>effect</i>.</li>
+<li>Idempotent producer → checkpointed stream job → <b>MERGE/upsert on <code>event_id</code></b> (the load-bearing dedup key) → warehouse. Kafka txns cover <i>inside</i> Kafka only; the external warehouse write is yours to make idempotent <span class="warn">!</span></li>
 </ul>
 </section>
 

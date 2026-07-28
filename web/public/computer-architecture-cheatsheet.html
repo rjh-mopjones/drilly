@@ -100,6 +100,24 @@ pre code{background:none; padding:0; font-size:1em;}
 <li>Reduce <i>misses</i> before reducing <i>instructions</i>: one avoided miss ≈ 100 saved ALU ops.</li>
 </ul></section>
 
+<section class="card"><h3>The Memory Hierarchy</h3>
+<p>Each level ~10× bigger, ~10× cheaper/byte, ~10× slower than the one above. No single technology is fast + dense + cheap, so you tier it.</p>
+<table><thead><tr><th>Level</th><th>Size</th><th>~Lat</th></tr></thead><tbody>
+<tr><td>Registers</td><td>16–32 × 64b</td><td>&lt;1 cyc</td></tr>
+<tr><td>L1i / L1d</td><td>32–64 KB each/core</td><td>~4 cyc</td></tr>
+<tr><td>L2 (private)</td><td>256 KB–2 MB/core</td><td>~12 cyc</td></tr>
+<tr><td>L3 / LLC (shared)</td><td>8–64 MB</td><td>~40 cyc</td></tr>
+<tr><td>DRAM</td><td>GBs–TBs</td><td>~80 ns</td></tr>
+<tr><td>SSD (flash)</td><td>100s GB–TBs</td><td>~10–100 µs</td></tr>
+<tr><td>Disk / network</td><td>∞</td><td>ms+</td></tr>
+</tbody></table>
+<ul>
+<li><b>SRAM</b> (6T/bit, no refresh) → registers/caches; <b>DRAM</b> (1T1C, refreshed) → main memory. SRAM ~10× faster but far less dense/pricier.</li>
+<li><b>Locality</b> is why it works: <b>temporal</b> (reuse same addr — loop vars) + <b>spatial</b> (neighbours — array walk, whole 64 B line fetched).</li>
+<li><b>AMAT</b> = hit-time + miss-rate × miss-penalty — the summary metric; locality collapses it toward L1 latency at DRAM capacity.</li>
+<li>Why not one giant fast cache? <b>Bigger = slower</b> (longer wires/decode), SRAM is low-density + power-hungry, area-bound <span class="warn">!</span></li>
+</ul></section>
+
 <section class="card"><h3>ISA &amp; the Abstraction Stack</h3>
 <ul>
 <li><b>ISA</b> = HW/SW contract: registers, instructions, addressing modes, memory model, exceptions. The stable interface compilers target.</li>
@@ -130,7 +148,28 @@ value = (-1)^s × 1.m × 2^(e-127)   // bias 127
 <ul>
 <li>double = 1/11/52, bias 1023. <b>exp=all-1s</b>: mantissa 0 → ±Inf; ≠0 → <b>NaN</b>. <b>exp=0</b> → subnormal/±0.</li>
 <li><b>NaN != NaN</b> (always false) <span class="warn">!</span> 0.1 not exact in binary → <code>0.1+0.2 != 0.3</code> <span class="warn">!</span> Never <code>==</code> floats — compare <code>|a-b| &lt; ε</code> (abs+rel).</li>
-<li><b>Catastrophic cancellation</b>: subtracting near-equal values loses significant digits — reformulate.</li>
+<li><b>Catastrophic cancellation</b>: subtracting near-equal values <i>exposes</i> pre-existing rounding error (Sterbenz: the subtract itself is exact). Reformulate — e.g. <code>1−cos θ = 2 sin²(θ/2)</code>.</li>
+</ul>
+<h4>Rounding modes</h4>
+<ul>
+<li><b>RNE</b> (round-to-nearest, ties-to-even) — default; unbiased, avoids drift over many ops. Every basic op (<code>+ − × ÷ √</code>) is <b>correctly rounded</b> (as if infinite-precision then rounded once).</li>
+<li>Toward-zero (trunc, float→int in C), toward +∞ (ceil), toward −∞ (floor). Directed rounding → interval arithmetic / provable bounds.</li>
+</ul>
+<h4>Fixed-point (Q<i>m.n</i>)</h4>
+<ul>
+<li>Integer with an <b>implied binary scale</b>. Q16.16: store <code>x × 2^16</code>. Add/sub = plain int; <b>multiply needs a shift</b> (<code>(a*b)&gt;&gt;16</code>, promote to int64 to avoid overflow) <span class="warn">!</span></li>
+<li>Use for <b>determinism/exactness</b>: money (cents/micro-units, <code>DECIMAL</code>/<code>BigDecimal</code>), FPU-less embedded/DSP, lockstep sim (bit-identical across machines). Cost: limited range, manual scale bookkeeping.</li>
+</ul>
+<h4>Int vs FP cost (x86-64, order-of-mag)</h4>
+<table><thead><tr><th>Op</th><th>Lat cyc</th><th>Thru/cyc</th></tr></thead><tbody>
+<tr><td>int add/bitwise</td><td>1</td><td>3–4</td></tr>
+<tr><td>int mul (64b)</td><td>3–4</td><td>1</td></tr>
+<tr><td>int/FP divide</td><td>20–90 / 10–20+</td><td>very low, not pipelined <span class="warn">!</span></td></tr>
+<tr><td>FP add/mul</td><td>3–5</td><td>2 (pipelined)</td></tr>
+<tr><td>FMA (a·b+c)</td><td>4–5</td><td>2, single rounding</td></tr>
+</tbody></table>
+<ul>
+<li><b>Division is the outlier</b> — compilers turn <code>x/const</code> into multiply-by-reciprocal. FP add/mul: higher latency than int but fully pipelined → high throughput if independent work fills it. FMA + SIMD (×lanes) is the linear-algebra/ML workhorse.</li>
 </ul></section>
 
 <section class="card"><h3>Pipeline &amp; the Perf Equation</h3>
@@ -225,6 +264,15 @@ tag    = rest (identity check)
 </ul>
 <ul>
 <li><b>Write-back</b> (dirty bit, write on evict) beats write-through for bandwidth; <b>write-allocate</b> fetches line on write miss. True LRU rare → <b>pseudo-LRU</b>.</li>
+</ul>
+<h4>Inclusion policy (L1 vs LLC)</h4>
+<table><thead><tr><th>Policy</th><th>Note</th></tr></thead><tbody>
+<tr><td><b>Inclusive</b></td><td>L1 lines ⊆ LLC. LLC = snoop filter (simple coherence) but wastes capacity; evict forces <b>back-invalidate</b>. (older Intel client)</td></tr>
+<tr><td><b>Exclusive</b></td><td>line in exactly one level → max capacity (Σ levels). Complex fills; probe every level. (AMD victim L3)</td></tr>
+<tr><td><b>NINE</b></td><td>no guarantee; needs a separate snoop filter. (Intel server mesh, Skylake-SP+)</td></tr>
+</tbody></table>
+<ul>
+<li><b>VIPT</b> L1 works only if index bits stay within the page offset: 4 KB page (12b) + 64 B line (6b) → 6 index bits → 8-way × 64 sets = <b>exactly 32 KB</b>. That's why L1 stuck near 32 KB; bigger → synonym/aliasing (fix: assoc, page colouring, or 16 KB pages like Apple M).</li>
 </ul></section>
 
 <section class="card"><h3>Coherence &amp; False Sharing</h3>
@@ -245,6 +293,10 @@ tag    = rest (identity check)
 <li>Two threads write <b>different variables in the same 64 B line</b> → line ping-pongs between cores' caches (RFO each write). No logical sharing, huge slowdown.</li>
 <li>Symptom: parallel code slower than serial; <code>perf</code> shows high coherence/HITM.</li>
 <li><b>Fix</b>: pad/align hot per-thread data to 64 B — <code>alignas(64)</code>, cache-line padding, or per-thread local accumulation merged at the end.</li>
+</ul>
+<ul>
+<li><b>MOESI</b> adds <b>O</b>wned (dirty-shared): serve dirty data to others without writing back to memory first. <b>MESIF</b> (Intel) adds <b>F</b>orward: one sharer designated responder so only it replies to a read — cuts redundant snoop responses.</li>
+<li>Cache-to-cache transfer of a Modified line (<b>HITM</b>) costs the inter-core / cross-socket latency (~40–100+ ns) — an atomic counter or mutex line bouncing between cores is a hardware scalability wall, not a code bug <span class="warn">!</span></li>
 </ul></section>
 
 <section class="card"><h3>Memory Consistency &amp; Fences</h3>
@@ -261,6 +313,14 @@ tag    = rest (identity check)
 <li>x86 fences: <code>mfence</code> (full), <code>sfence</code>, <code>lfence</code>. <code>lock</code>-prefixed RMW is a full barrier.</li>
 <li>C++/language model: <b>acquire</b> (loads after stay after), <b>release</b> (stores before stay before), <b>seq_cst</b> default. Pair release-store with acquire-load to publish data safely.</li>
 <li>Compiler reorders too — a lock/atomic/fence, not <code>volatile</code>, gives ordering <span class="warn">!</span></li>
+</ul>
+<h4>Store-buffer litmus (SB)</h4>
+<pre><code>init x=y=0
+T0: x=1; r0=y    T1: y=1; r1=x
+// SC: r0=r1=0 impossible. TSO: possible!
+</code></pre>
+<ul>
+<li>Both stores sit in each core's store buffer while both loads read the old value → <code>r0=r1=0</code>. Fix: <code>mfence</code> (or seq_cst store) between store and load to drain the buffer. A full fence costs ~tens of cycles — it stalls the pipeline until the store buffer flushes <span class="warn">!</span></li>
 </ul></section>
 
 <section class="card"><h3>Virtual Memory &amp; TLB</h3>
@@ -294,6 +354,21 @@ tag    = rest (identity check)
 <li><b>Latency ~50–90 ns for years</b> — barely improves. DDR5 / more channels raise <b>bandwidth</b> (tens–100s GB/s), not single-access latency <span class="warn">!</span></li>
 <li>DDR = double data rate (both clock edges) + prefetch, not a faster array.</li>
 <li><b>Little's Law</b>: outstanding requests to saturate BW = BW × latency. Can't keep that many in flight → latency-bound.</li>
+</ul>
+<h4>Memory controller (on-die)</h4>
+<ul>
+<li>Decodes phys addr → (channel, rank, bank, row, col) with <b>interleaving</b> that spreads consecutive lines across channels/banks. Obeys <code>tRCD tRP tRAS tFAW</code> (≤4 ACTs/window), read/write turnaround.</li>
+<li><b>FR-FCFS</b> scheduling: serve <i>row-buffer hits</i> first (ready, cheap) over older row-conflicting requests → max throughput, needs anti-starvation/QoS. Batches writes (drain in bursts, avoid bus turnaround) <span class="warn">!</span></li>
+</ul>
+<h4>Bank-level parallelism (BLP)</h4>
+<ul>
+<li>One bank is ~serial (mid-ACT/PRE blocks it); a rank has 16–32 <b>independent</b> banks — ACT bank 3 while bank 1 streams while bank 5 precharges. This is how DRAM reaches rated BW despite slow cycle time.</li>
+<li>Only materialises if requests hit <i>different</i> banks/channels — a stride aliasing the bank-map bits hammers one bank → sudden throughput cliff <span class="warn">!</span></li>
+</ul>
+<h4>ECC</h4>
+<ul>
+<li>Server <b>SECDED</b>: 8 extra bits / 64b word (72-bit DIMM) — corrects 1-bit flip, detects 2-bit (machine-check). ~12.5% more chips + cost; mandatory at fleet scale (soft errors from cosmic rays).</li>
+<li>DDR5 <b>on-die ECC</b> ≠ end-to-end link ECC — it just props up yield at tiny cells; the data path is still unprotected without a real ECC stick <span class="warn">!</span> Chipkill/SDDC survive a whole chip failing.</li>
 </ul></section>
 
 <section class="card"><h3>SIMD &amp; Data Parallelism</h3>
@@ -356,6 +431,18 @@ tag    = rest (identity check)
 <li><b>MSI/MSI-X</b>: message-signaled interrupts (a memory write) replace legacy INTx lines — steer to a specific core, more vectors.</li>
 <li><b>NVMe</b>: many deep parallel submission/completion <b>queues</b> in RAM — exploits SSD parallelism, minimal per-IO CPU. NIC drivers poll (DPDK/NAPI) under load.</li>
 <li>Cache coherence for DMA: modern IOMMU/DMA is coherent, but on some systems drivers must flush/invalidate <span class="warn">!</span></li>
+</ul>
+<h4>PCIe (point-to-point serial, tree of switches)</h4>
+<table><thead><tr><th>Gen</th><th>~GB/s per lane</th><th>x16 each way</th></tr></thead><tbody>
+<tr><td>Gen3</td><td>~1 (8 GT/s)</td><td>~16 GB/s</td></tr>
+<tr><td>Gen4</td><td>~2 (16 GT/s)</td><td>~32 GB/s</td></tr>
+<tr><td>Gen5</td><td>~4 (32 GT/s)</td><td>~64 GB/s</td></tr>
+<tr><td>Gen6</td><td>~8 (64 GT/s, PAM4)</td><td>~128 GB/s</td></tr>
+</tbody></table>
+<ul>
+<li>Gen4 x4 NVMe ≈ 8 GB/s (why consumer SSDs top ~7). A read is a <b>split transaction</b> (~100s ns RTT) → you <b>write</b> doorbells + let the device DMA, never CPU-read device mem in a loop <span class="warn">!</span></li>
+<li><b>Coalescing</b> (<code>ethtool -C rx-usecs/rx-frames</code>): 1 IRQ per N completions or T µs — throughput↑ latency↑. Trading box sets <code>0</code> or bypasses (DPDK/busy-poll).</li>
+<li><b>IOMMU</b> (VT-d / AMD-Vi / SMMU) = MMU for devices: translates device IOVA→phys with per-device page tables. Isolation (bad DMA faults not scribbles), VM/GPU passthrough (SR-IOV), scatter-gather. Cost: IOTLB + map/unmap on the DMA path.</li>
 </ul></section>
 
 <section class="card"><h3>Assembly, ABI &amp; Calling Convention</h3>
@@ -410,7 +497,41 @@ tag    = rest (identity check)
 </ul>
 <ul>
 <li><b>DVFS</b>: dynamically scale V/f to workload (turbo up when thermal headroom, throttle when hot). Race-to-idle vs steady-state tradeoffs.</li>
-<li>TDP is a <i>sustained</i> thermal budget, not peak; boost is opportunistic and temperature-limited <span class="warn">!</span></li>
+<li>TDP is a <i>sustained</i> thermal budget (cooler sizing), not peak. Boost exploits thermal headroom: short-term PL2 &gt; sustained PL1≈TDP for a window (tau), then settle. Throttle = safety valve at ~90–100 °C T<sub>j,max</sub> <span class="warn">!</span></li>
+</ul>
+<h4>Two cores &gt; one fast core (same power)</h4>
+<ul>
+<li>Push <b>+40% freq</b>: V↑ ~1.2× → <code>1.2²×1.4 ≈ 2.0× power</code> for 1.4× work — efficiency <i>backwards</i>. <b>Two cores @0.8×</b> freq, ~0.85× V → ~0.58× power each, ~1.16× total, 1.6× throughput. That gap is the whole multicore case (if it parallelizes — Amdahl).</li>
+</ul>
+<h4>Heterogeneous &amp; chiplets</h4>
+<ul>
+<li><b>big.LITTLE / P+E</b>: mix perf + efficiency cores (Apple M, Intel Alder Lake+, Arm DynamIQ). Background threads on little cores at a fraction of power; OS scheduler places them.</li>
+<li><b>Fixed-function accel</b>: GPU, NPU, ISP, video codec, crypto — each 10–100× more efficient/watt than a general core. Where dark-silicon transistors earn their keep.</li>
+<li><b>Chiplets</b> (AMD CCD+IO die, Intel tiles, Apple UltraFusion): small dies co-packaged → better yield (defects scrap one small die not a huge one), mix process nodes (compute on newest, IO on mature), modular core scaling. Cost: die-to-die links burn energy/latency vs on-die wires.</li>
+</ul></section>
+
+<section class="card"><h3>Interview Playbooks — Worked Estimates</h3>
+<p>Answer arc, every time: <b>(1) classify</b> compute- vs memory-bound + access pattern → <b>(2) locate stall</b> → <b>(3) estimate</b> (events × latency table) → <b>(4) fix with a reason</b>. Assume memory until proven otherwise.</p>
+<h4>Sum 1 GB <code>int32</code> array</h4>
+<ul>
+<li>Sequential, prefetchable → <b>bandwidth-bound</b> (adds hide under loads). 1 GB ÷ ~15 GB/s single-thread ≈ <b>~65 ms</b>. Unhidden it'd be 16M lines × 100 ns = 1.6 s — the 20–25× gap is prefetch + MLP. Claim of 5 ms ⇒ ~200 GB/s (HBM/Apple only).</li>
+</ul>
+<h4>Traverse 1M scattered linked-list nodes</h4>
+<ul>
+<li><code>node=node-&gt;next</code> is a <b>dependent load</b> → OoO has nothing to overlap → serialize on latency. ~100 ns/hop × 1M ≈ <b>~100 ms</b>. Same count as an array sum (~1 ms) → <b>~100×</b> slower. <i>The</i> case for <code>vector</code> over <code>list</code>, SoA, arena alloc.</li>
+</ul>
+<h4>Loop 10× slower than expected</h4>
+<ul>
+<li>Classic: column-major walk of a row-major matrix — stride-N → miss on nearly every load + TLB thrash + prefetch defeated. Fix = <b>loop interchange</b>. Same big-O, 10× from layout <span class="warn">!</span></li>
+</ul>
+<h4>Counter won't scale past 1–2 threads</h4>
+<ul>
+<li><b>A: one shared atomic</b> — line ping-pongs Modified between cores, serialized → often below single-thread. Fix: per-thread shards.</li>
+<li><b>B: false sharing</b> — separate counters, same 64 B line. Fix: <code>alignas(64)</code>. Tell apart: padding fixes B, not A. <code>perf</code> HITM.</li>
+</ul>
+<h4>Adding threads made it slower</h4>
+<ul>
+<li>Name the wall with a number: BW saturation (2 threads already hit ~30 GB/s), coherence/false sharing, NUMA remote, or oversubscription — not just Amdahl.</li>
 </ul></section>
 
 <section class="card"><h3>&#9733; Mechanical-Sympathy Checklist</h3>
@@ -456,6 +577,11 @@ tag    = rest (identity check)
 <tr><td>Crash across FFI/inline-asm</td><td>ABI mismatch: arg regs / stack align / callee-saved <span class="warn">!</span></td></tr>
 <tr><td>Random signed-math bug</td><td>signed overflow UB / signed↔unsigned compare <span class="warn">!</span></td></tr>
 <tr><td>Clock won't go higher</td><td>power wall (V²f) — spend transistors on cores <span class="warn">!</span></td></tr>
+<tr><td>Big matrix scan very slow</td><td>column-major on row-major array — loop interchange <span class="warn">!</span></td></tr>
+<tr><td>Throughput cliff at one stride</td><td>stride aliases DRAM bank-map bits — kills BLP <span class="warn">!</span></td></tr>
+<tr><td>Sudden µs stall in hot loop</td><td>major page fault (SSD) — ~100 µs, a million× a mispredict <span class="warn">!</span></td></tr>
+<tr><td>Div-heavy loop won't pipeline</td><td>divide not pipelined — multiply-by-reciprocal <span class="warn">!</span></td></tr>
+<tr><td>NIC saturates a core at 100 GbE</td><td>1 IRQ/packet — enable coalescing / NAPI poll <span class="warn">!</span></td></tr>
 </tbody></table>
 </section>
 

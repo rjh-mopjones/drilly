@@ -168,6 +168,8 @@ tailrec fun fac(n, acc=1L): Long =
 <tr><td>JVM (Java), Python, most JS engines</td><td><b>No</b> <span class="warn">!</span> — will overflow</td></tr>
 </tbody></table>
 <p>No TCO → rewrite as an explicit loop/fold, or use a trampoline. <code>tailrec</code>/<code>@tailrec</code> annotations <b>fail to compile</b> if the call isn't actually in tail position — use them as a guarantee.</p>
+<h4>Trampolining</h4>
+<p>When you can't get tail position (e.g. <b>mutual recursion</b> — <code>isEven</code>/<code>isOdd</code> calling each other), a trampoline moves the loop off the stack: each step <b>returns</b> a thunk describing the next call, and a driver loop runs them one frame at a time. <code>More{()-&gt;next}</code> vs <code>Done(x)</code>; the driver bounces until <code>Done</code>. Trades a small allocation per step for O(1) stack — Scala's <code>TailCalls</code>, Kotlin <code>DeepRecursiveFunction</code>.</p>
 </section>
 
 <section class="card"><h3>Currying &amp; Partial Application</h3>
@@ -357,7 +359,8 @@ program.unsafeRunSync()   // run ONCE, at the edge ("end of the world")</code></
 <ul>
 <li><code>IO[A]</code>/<code>Task</code>/<code>() =&gt; Promise</code> represents an effect, stays <b>inert</b> until run. Composing is pure; only running does I/O, in one place.</li>
 <li>Inject effects (clock, rng, repo) as params → swap fakes in tests, no mocking framework.</li>
-<li>Algebraic effects / effect systems (ZIO, Effect-TS, Koka) generalize this.</li>
+<li>Algebraic effects / effect systems (ZIO, Effect-TS, Koka) generalize this: effects become <b>typed capabilities</b> in the signature, and a <b>handler</b> at the edge interprets them — swap a real handler for a test one without touching the logic.</li>
+<li><b>Pure decision + effectful interpreter</b>: the core returns a <i>description</i> of what to do (a command/event value); a thin interpreter at the edge performs it. Same shape as a reducer returning actions.</li>
 </ul>
 </section>
 
@@ -411,6 +414,118 @@ next = produce(state, d =&gt; { d.user.addr.city = "NYC" });</code></pre>
 <tr><td>Factory</td><td>a function returning a function</td></tr>
 </tbody></table>
 <p>Many patterns exist to fake first-class functions in languages that lacked them.</p>
+</section>
+
+<section class="card"><h3>Semigroups &amp; Monoids — Combinable Things</h3>
+<p>A <b>semigroup</b> is a type with an <b>associative</b> binary combine <code>(a,a)→a</code>. A <b>monoid</b> adds an <b>identity</b> element (a neutral seed). Both are just type classes — the algebra behind <code>fold</code> and parallel reduce.</p>
+<table><thead><tr><th>Type</th><th>combine</th><th>identity</th></tr></thead><tbody>
+<tr><td>Int (+)</td><td><code>a+b</code></td><td><code>0</code></td></tr>
+<tr><td>Int (×)</td><td><code>a*b</code></td><td><code>1</code></td></tr>
+<tr><td>String / List</td><td>concat</td><td><code>""</code> / <code>[]</code></td></tr>
+<tr><td>Boolean (&amp;&amp;)</td><td><code>a&amp;&amp;b</code></td><td><code>true</code></td></tr>
+<tr><td>Max</td><td><code>max(a,b)</code></td><td><code>-∞</code></td></tr>
+<tr><td>Map merge</td><td>merge values</td><td><code>{}</code></td></tr>
+</tbody></table>
+<p><b>Why it matters:</b> a monoid's identity is the perfect <code>fold</code> seed, and its associativity is <i>exactly</i> the property that lets a runtime split work across cores and merge partials in any grouping — <code>foldMap</code>/<code>combineAll</code>, Rust <code>sum()</code>, Spark reducers.</p>
+<pre><code>// foldMap: map each to a monoid, then fold with combine
+words.foldMap { it.length }   // sum of lengths, 0 seed</code></pre>
+<ul>
+<li><span class="warn">!</span> Pick the <b>wrong identity</b> (e.g. <code>0</code> for a product) → every result collapses to it.</li>
+<li><span class="warn">!</span> A non-associative combine (subtraction, average) is <b>not</b> a semigroup → parallel/tree reduction gives wrong answers. Average via a <code>(sum,count)</code> monoid instead.</li>
+<li>Two monoids on the same type (<code>Sum</code> vs <code>Product</code>, <code>Min</code> vs <code>Max</code>) → Haskell/Cats use <b>newtype wrappers</b> to pick which instance.</li>
+</ul>
+</section>
+
+<section class="card"><h3>traverse / sequence — Flip the Layers</h3>
+<p>You have a <b>collection of effects</b> and want <b>one effect of a collection</b>. That flip is <code>sequence</code>; mapping first is <code>traverse</code>.</p>
+<pre><code>sequence: List&lt;F&lt;A&gt;&gt;            -&gt; F&lt;List&lt;A&gt;&gt;
+traverse: List&lt;A&gt;, (A-&gt;F&lt;B&gt;)   -&gt; F&lt;List&lt;B&gt;&gt;  // map+sequence, 1 pass</code></pre>
+<p>You've hand-written this loop a dozen times — these are its named, correct form:</p>
+<pre><code>// Promise.all IS sequence for Promises
+const all: Promise&lt;User[]&gt; = Promise.all(ids.map(fetchUser));
+
+// Rust: Vec&lt;Result&gt; -&gt; Result&lt;Vec&gt; via collect (short-circuits)
+let xs: Result&lt;Vec&lt;i32&gt;,_&gt; = ss.iter().map(|s| s.parse()).collect();
+
+// Arrow: accumulate ALL validation errors (applicative)
+val us: ValidatedNel&lt;Err,List&lt;User&gt;&gt; = forms.traverse { validate(it) }</code></pre>
+<table><thead><tr><th>Effect</th><th>sequence is…</th></tr></thead><tbody>
+<tr><td>Promise</td><td><code>Promise.all</code></td></tr>
+<tr><td>Result / Option</td><td>Rust <code>.collect()</code></td></tr>
+<tr><td>Validated</td><td>Arrow <code>traverse</code> (accumulates)</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> Whether it <b>short-circuits or accumulates</b> depends on the effect's instance: <code>Result</code> (monadic) stops at first error; <code>Validated</code> (applicative) gathers all. Same traversal, different collecting semantics. Reach for it whenever you're threading an <code>Option</code>/<code>Result</code>/<code>Promise</code> through a manual accumulate-into-a-list loop.</p>
+</section>
+
+<section class="card"><h3>Coherence, Orphan Rules &amp; Newtype</h3>
+<p>If two libraries defined "how <code>Int</code> is <code>Ord</code>" differently, a call site couldn't know which to use — and a <code>HashSet&lt;Int&gt;</code> built with one would corrupt under the other. So type-class languages enforce <b>coherence</b>: <b>at most one instance per type, globally</b>.</p>
+<h4>The orphan rule (Rust)</h4>
+<p>You may write <code>impl Trait for Type</code> only if you own the <b>trait</b> <i>or</i> the <b>type</b>. Foreign trait on foreign type is rejected.</p>
+<pre><code>impl Humanize for Duration   // OK: our trait
+impl Display  for Color      // OK: our type
+impl Display  for Duration   // ✗ orphan — both foreign</code></pre>
+<p><b>Workaround = newtype:</b> wrap the foreign type in a struct you own, implement on the wrapper.</p>
+<pre><code>struct MyDur(Duration);      // now MyDur is ours
+impl Display for MyDur { .. }</code></pre>
+<ul>
+<li>Haskell has the same global-uniqueness guarantee.</li>
+<li><span class="warn">!</span> Scala is <b>looser</b> — givens are import-scoped, more flexible but can produce <b>ambiguous-implicit</b> errors.</li>
+<li>Newtypes also carry <b>phantom safety</b> at zero cost: <code>UserId(u64)</code> vs <code>OrderId(u64)</code> won't mix even though both wrap a <code>u64</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Interview Scenario Playbook — the 5 Moves</h3>
+<p>Almost every FP refactor prompt is one of five reshaping moves. <b>Naming which one you're doing out loud is half the signal.</b></p>
+<table><thead><tr><th>Smell in the code</th><th>Move</th></tr></thead><tbody>
+<tr><td>mutable-accumulator loop</td><td><b>loop → pipeline</b> (filter/map/reduce)</td></tr>
+<tr><td>reads clock/DB inline, hard to test</td><td><b>impure → core/shell</b></td></tr>
+<tr><td>status string + nullable fields</td><td><b>illegal states → ADT + Option</b></td></tr>
+<tr><td>nested null / callback / try pyramid</td><td><b>pyramid → flat flatMap chain</b></td></tr>
+<tr><td>in-place mutation, needs undo</td><td><b>mutation → value + event log</b></td></tr>
+</tbody></table>
+<h4>Parse, don't validate</h4>
+<p>Turn unstructured input into a <b>precise type once</b> at the boundary (<code>parse(s): Result&lt;Email,Err&gt;</code>) so downstream code holds an <code>Email</code>, not a <code>String</code> it must re-check. Validation that returns <code>bool</code> throws away the evidence; parsing <b>keeps it in the type</b>.</p>
+<ul>
+<li><b>Railway</b> ≠ <b>accumulating</b>: <code>flatMap</code> stops at first error (auth flow); applicative <code>Validated</code> reports all (a form). Pick per use-site.</li>
+<li>The real tell is <b>restraint</b>: refactor imperative → functional, <i>then</i> say "…but here I'd keep the loop, because" — early break, JVM lacking TCO, purity threading state through 15 signatures for no gain.</li>
+<li><span class="warn">!</span> "Refactor to FP = make everything pure" is wrong — push effects to the <b>edges</b>, keep the <b>core</b> pure. Zero-I/O programs do nothing.</li>
+</ul>
+</section>
+
+<section class="card"><h3>foldLeft vs foldRight</h3>
+<p>Same collapse, opposite direction — and the difference is load-bearing, not cosmetic.</p>
+<pre><code>foldLeft (0){acc,x -&gt; acc - x}  // ((0-1)-2)-3  left-assoc
+foldRight(0){x,acc -&gt; x - acc}  //  1-(2-(3-0)) right-assoc</code></pre>
+<table><thead><tr><th></th><th>foldLeft</th><th>foldRight</th></tr></thead><tbody>
+<tr><td>Grouping</td><td>left-assoc</td><td>right-assoc</td></tr>
+<tr><td>Stack (strict)</td><td><b>tail-rec, O(1)</b></td><td>recurses tail-first → <b>overflow</b> <span class="warn">!</span></td></tr>
+<tr><td>Builds</td><td>reversed structure</td><td>same-order lists/trees</td></tr>
+<tr><td>Lazy lang</td><td>—</td><td>can <b>short-circuit</b> infinite lists</td></tr>
+</tbody></table>
+<ul>
+<li>They agree <b>only</b> when the op is associative <i>and</i> commutative (sum, max). Subtraction, division, list-cons, string-build: they differ.</li>
+<li><b>Strict/mainstream rule:</b> default to <code>foldLeft</code>/<code>reduce</code>; reach for <code>foldRight</code> only for right-associative structure building on a <b>bounded</b> list.</li>
+<li>In lazy Haskell, <code>foldr</code> with a lazy <code>||</code> stops at the first <code>True</code> — works on infinite input because the combiner may ignore its unevaluated second arg.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Expressions vs Statements</h3>
+<p>A <b>statement</b> is executed for its side effect and returns nothing; an <b>expression</b> evaluates to a value. FP prefers expressions — <b>everything returns a value</b>, so everything composes and can be assigned, passed, or substituted.</p>
+<pre><code>// statement style: mutate through a void branch
+String label;
+if (n &gt; 0) label = "pos"; else label = "neg";
+// expression style: if IS a value
+val label = if (n &gt; 0) "pos" else "neg"   // Kotlin/Scala/Rust</code></pre>
+<table><thead><tr><th>Construct</th><th>Expression in…</th></tr></thead><tbody>
+<tr><td><code>if</code>/<code>when</code>/<code>match</code></td><td>Kotlin, Scala, Rust, Haskell</td></tr>
+<tr><td><code>try</code>/blocks</td><td>Scala, Rust (block value)</td></tr>
+<tr><td>ternary only</td><td>Java, C, Go (stmt <code>if</code>)</td></tr>
+</tbody></table>
+<ul>
+<li>Expression orientation removes the <b>uninitialised-then-assigned</b> pattern and its "forgot a branch" bugs — the binding gets its value in one shot.</li>
+<li>Pairs with <b>exhaustive match</b>: an expression <code>when</code> must cover every case to produce a value, so the compiler enforces totality.</li>
+<li><span class="warn">!</span> Statement-oriented languages fake it with early <code>return</code> and mutable temporaries — readable, but not substitutable and not point-free-composable.</li>
+</ul>
 </section>
 
 <section class="card"><h3>&#9733; "Think Functionally" Checklist</h3>

@@ -220,7 +220,8 @@ class Cfg { static class H { static final Cfg I = new Cfg(); }
 <li><span class="warn">!</span> Singleton = <b>global mutable state</b> → hidden coupling, order-dependent init, hard to test (can't swap it). Widely treated as an <b>anti-pattern</b>.</li>
 <li>Prefer a <b>single instance wired via DI</b> — one object, no global access point.</li>
 <li>Naive lazy <code>if(inst==null)</code> is a data race under threads <span class="warn">!</span> — use enum / holder / double-checked <code>volatile</code>.</li>
-<li>Related: <b>Object Pool</b> reuses expensive instances (DB conns, threads).</li>
+<li>Related: <b>Object Pool</b> reuses expensive instances (DB conns, threads). Key decisions: max size, block-vs-fail on exhaustion, validate-on-borrow, idle eviction. <span class="warn">!</span> Pool vs Flyweight — pool reuses <i>mutable</i> instances one-at-a-time; Flyweight <i>shares immutable</i> intrinsic state concurrently.</li>
+<li>Enum defends against reflection &amp; serialization attacks that break a plain-class Singleton (both can forge a second instance) <span class="warn">!</span></li>
 </ul>
 </section>
 
@@ -249,6 +250,11 @@ class Cfg { static class H { static final Cfg I = new Cfg(); }
 <pre><code>Coffee c = new Milk(new Sugar(new Espresso()));
 c.cost();  // each layer adds to inner.cost()</code></pre>
 <p>Stackable, order-independent responsibilities without a subclass explosion (<code>MilkSugarEspresso</code>…). Java I/O streams are the textbook case.</p>
+<ul>
+<li><b>Object adapter</b> (compose + delegate) &gt; <b>class adapter</b> (multiple inheritance) — the former works in single-inheritance languages and adapts subclasses too.</li>
+<li><b>Adapter = the ports-and-adapters (hexagonal)</b> boundary: the domain defines a <i>port</i> interface; each external SDK/DB gets an adapter, keeping third-party types out of the core <span class="warn">!</span></li>
+<li>Deep decorator stacks cost debuggability (long wrap chains) and add per-call indirection — flatten if a fixed combo dominates.</li>
+</ul>
 </section>
 
 <section class="card"><h3>Behavioral Patterns</h3>
@@ -350,6 +356,143 @@ class Checkout {
 <p><b>Tidy First</b>: refactor in small, safe, reversible steps behind green tests; keep behaviour changes separate from tidying commits.</p>
 </section>
 
+<section class="card"><h3>Iterator — internal vs external</h3>
+<p>Access elements sequentially <b>without exposing representation</b>. Collection stores; iterator traverses (SRP split). Buys: multiple simultaneous walks (each holds its own position), swap array→tree with clients unchanged, and lazy/infinite sequences (generators, <code>Stream</code>).</p>
+<table><thead><tr><th></th><th>External</th><th>Internal</th></tr></thead><tbody>
+<tr><td>drives</td><td>client (<code>hasNext/next</code>)</td><td>collection (<code>forEach</code>)</td></tr>
+<tr><td>early exit</td><td>easy (<code>break</code>)</td><td>awkward</td></tr>
+<tr><td>zip 2 colls</td><td>easy</td><td>hard</td></tr>
+<tr><td>hides traversal</td><td>no</td><td>fully</td></tr>
+</tbody></table>
+<p><b>Invalidation</b>: mutate a collection mid-walk and the cached position desyncs. Java is <b>fail-fast</b> (<code>modCount</code> → <code>ConcurrentModificationException</code>); mutate via <code>it.remove()</code> instead <span class="warn">!</span>. Fail-safe/snapshot (<code>CopyOnWriteArrayList</code>) never throws but may miss latest state; C++ invalidation is UB.</p>
+</section>
+
+<section class="card"><h3>Mediator vs Observer</h3>
+<p><b>Mediator</b> turns N↔N mesh into a star: colleagues talk only to a hub that holds the coordination logic. Add an interaction rule = edit <b>one</b> place; colleagues become reusable (no peer refs). <span class="warn">!</span> Risk: the hub swells into a God object — keep it scoped (one per dialog), not global.</p>
+<table><thead><tr><th></th><th>Mediator</th><th>Observer</th></tr></thead><tbody>
+<tr><td>topology</td><td>star (hub)</td><td>1→N broadcast</td></tr>
+<tr><td>direction</td><td>bidirectional</td><td>usually one-way</td></tr>
+<tr><td>knows participants</td><td>yes</td><td>anonymous list</td></tr>
+<tr><td>holds logic</td><td>yes (routes)</td><td>no (just notify)</td></tr>
+</tbody></table>
+<p>Crisp: <b>Observer broadcasts</b> (one source, many blind reactors); <b>Mediator coordinates</b> (many peers, one hub with the rules). Intermediary holds interaction <i>rules</i> → Mediator; merely forwards → Observer/pub-sub.</p>
+</section>
+
+<section class="card"><h3>Visitor &amp; Double Dispatch</h3>
+<p>Add new <b>operations</b> over a stable hierarchy without editing every class. Each op lives in one visitor; each element gets <code>accept(v)</code>. Replaces a scattered, repeated <code>instanceof</code> type-switch.</p>
+<pre><code>interface Shape { &lt;R&gt; R accept(Visitor&lt;R&gt; v); }
+class Circle implements Shape {
+  public &lt;R&gt; R accept(Visitor&lt;R&gt; v){ return v.visitCircle(this); }
+}                       // dispatch 1: on Shape → dispatch 2: on Visitor</code></pre>
+<ul>
+<li><b>Double dispatch</b> = pick a method by the runtime types of <i>two</i> objects (element × visitor). OO gives single dispatch; the two-step <code>accept</code>→<code>visit</code> bounce recovers the second axis <span class="warn">!</span> — no <code>instanceof</code>.</li>
+<li>Applied to a <b>Composite</b> tree (AST, file tree) it's the standard "walk + operate" combo.</li>
+<li>Modern sealed types + exhaustive <code>switch</code>/<code>when</code>/<code>match</code> often obsolete classic Visitor with compile-time exhaustiveness.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Expression Problem</h3>
+<p>Types × operations form a grid; you can make adding <i>rows</i> or <i>columns</i> cheap, not both, without editing existing code.</p>
+<table><thead><tr><th></th><th>+ new type</th><th>+ new op</th></tr></thead><tbody>
+<tr><td>methods on classes (normal OO)</td><td>easy (1 class)</td><td>hard (edit all)</td></tr>
+<tr><td>Visitor</td><td>hard (edit all visitors)</td><td>easy (1 visitor)</td></tr>
+</tbody></table>
+<ul>
+<li>Decision rule: <b>Visitor when types are stable but operations grow</b> — compilers (fixed AST, ever-more passes: type-check, optimise, codegen).</li>
+<li><span class="warn">!</span> Types churning? Visitor is a "touch every visitor" tax — put methods on the classes instead.</li>
+<li>Naming this tradeoff honestly (not "Visitor is always good") is the senior signal.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Memento &amp; Undo/Redo</h3>
+<p>Snapshot private state so it can be restored later — <b>without breaking encapsulation</b>. Three roles: <b>Originator</b> (creates/restores), <b>Memento</b> (opaque snapshot), <b>Caretaker</b> (holds it, can't read it).</p>
+<pre><code>class Editor {                    // Originator
+  private String content;
+  Memento save(){ return new Memento(content); }
+  void restore(Memento m){ content = m.state; }
+  static final class Memento {   // opaque to all but Editor
+    private final String state;
+    private Memento(String s){ state = s; }
+  }
+}</code></pre>
+<ul>
+<li>Java: memento as a <code>static</code> nested class w/ <code>private</code> fields (nested classes see each other's privates). C++: <code>friend</code>. Python/TS: by convention.</li>
+<li><b>Command vs Memento undo</b>: Command stores the <i>inverse op</i> (cheap, needs invertibility); Memento stores <i>state</i> (any op, costs memory). Non-invertible op (sort, auto-format) → Memento <span class="warn">!</span></li>
+<li>Memory: bound the stack, store <b>deltas not full copies</b>, copy-on-write share, spill cold history to disk.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Interpreter (rarely) &amp; the last GoF</h3>
+<ul>
+<li><b>Interpreter</b> — one class per grammar rule; a sentence is a tree (AST), evaluation is a recursive <code>interpret(ctx)</code>. Essentially <b>Composite over a grammar</b>, often walked by a Visitor.</li>
+<li><b>Fits</b>: tiny stable DSLs — boolean rule engine, query filter, arithmetic. <span class="warn">!</span> <b>Avoid</b> for anything non-trivial/perf-sensitive: reach for a real parser (ANTLR) and compile rather than tree-walk. A hand-rolled Interpreter beyond a micro-DSL is a red flag.</li>
+</ul>
+<h4>Undo/redo (multi-pattern LLD)</h4>
+<ul>
+<li><b>Command</b> reifies each action (<code>execute()</code>/<code>undo()</code>); cleanly invertible ops (add/move) need no memento.</li>
+<li><b>Memento</b> for the non-invertible ones (flatten, filter).</li>
+<li><b>Two stacks</b>: execute → push undo + clear redo; undo → pop, run <code>undo()</code>, push redo.</li>
+<li><b>Iterator</b> decouples rendering from storage. Naming which pattern does which job is the senior answer.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Thread-Safety by Design</h3>
+<p>Concurrency safety is mostly an <b>encapsulation</b> problem — you can only guard state you control. Strategies, most-preferred first:</p>
+<table><tbody>
+<tr><td><b>stateless</b></td><td>no mutable state → nothing to race</td></tr>
+<tr><td><b>immutable</b></td><td>fixed at ctor, share freely, safe map key</td></tr>
+<tr><td><b>confine</b></td><td>thread-local / stack / instance — never shared</td></tr>
+<tr><td><b>guard</b></td><td>private state + one lock (Monitor Object)</td></tr>
+</tbody></table>
+<ul>
+<li>Reach for <b>immutability first</b>: all fields <code>final</code>, no mutators (changes return a new instance), class <code>final</code>, no leaked internals. Most "thread-safety bugs" are "we shared a mutable object we shouldn't have".</li>
+<li><b>Monitor Object</b> — object owns its state <i>and</i> the lock; every public method synchronises on one lock (add <code>wait/notify</code> for blocking queues). Coarse → can bottleneck <span class="warn">!</span></li>
+<li><b>Value object</b> (equal by value, immutable) vs <b>entity</b> (equal by id, mutable). Model as many value objects as possible; concentrate concurrency effort on the few mutable entities.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Safe Publication &amp; Escaping Refs</h3>
+<p>Per-method <code>synchronized</code> is <b>not</b> enough: <b>compound actions</b> race. Below, both methods are atomic but the sequence isn't — expose an atomic op (<code>putIfAbsent</code>) instead.</p>
+<pre><code>if (!map.has(k)) map.put(k, v);  // check-then-act: NOT atomic !</code></pre>
+<ul>
+<li><b>Safe publication</b> — a reader can see the <i>reference</i> before the field writes; publish via <code>final</code> field, <code>volatile</code>/<code>Atomic</code>, a lock, a static initialiser, or a concurrent collection. This is why broken DCL Singleton needs <code>volatile</code> <span class="warn">!</span></li>
+<li><b>Escaping reference</b> — returning a live internal collection or leaking <code>this</code> from a ctor bypasses your locking. Fix: return copies/unmodifiable views, defensively copy inputs, never let <code>this</code> escape during construction.</li>
+<li><b>Document the contract</b>: <code>@ThreadSafe</code>/<code>@NotThreadSafe</code>/<code>@Immutable</code>, and <code>@GuardedBy("lock")</code> per field. A clearly not-thread-safe class beats a silently half-safe one.</li>
+</ul>
+</section>
+
+<section class="card"><h3>LLD Interview — 8-step loop</h3>
+<p>Progressive refinement down a ladder; say step names aloud and <b>checkpoint</b> after 1 &amp; 3.</p>
+<table><tbody>
+<tr><td>1</td><td><b>Clarify &amp; scope</b> — functional + non-functional; state assumptions</td></tr>
+<tr><td>2</td><td><b>Nouns → classes</b>, verbs → methods, adjectives → state (CRC cards)</td></tr>
+<tr><td>3</td><td><b>Map relationships</b> — assoc / aggregation / composition / is-a</td></tr>
+<tr><td>4</td><td><b>Interfaces first</b> — signatures before internals (DIP)</td></tr>
+<tr><td>5</td><td><b>Apply patterns</b> only where a force/axis exists</td></tr>
+<tr><td>6</td><td><b>Code the core flow</b> end-to-end; skeletons for the rest</td></tr>
+<tr><td>7</td><td><b>Edge cases &amp; extensions</b> — the "now add X" follow-up</td></tr>
+<tr><td>8</td><td><b>Concurrency</b> — where's shared mutable state, name the race</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> Top failure = jumping to step 6. Steps 1–2 win interviews. They watch <b>how you think</b>, not a memorised canonical answer. Design for the follow-up they <i>will</i> ask — put a polymorphic seam on the axis of variation so "add a payment type" is a new class, not an <code>if</code>.</p>
+</section>
+
+<section class="card"><h3>Nouns → Classes (filter the list)</h3>
+<p>Not every noun is a class. From "a customer parks a vehicle in a spot and gets a ticket":</p>
+<table><thead><tr><th>Move</th><th>Why</th></tr></thead><tbody>
+<tr><td><b>keep</b> Vehicle, Spot, Ticket</td><td>identity + state + behaviour</td></tr>
+<tr><td><b>demote</b> "license plate"</td><td>just a field on Vehicle</td></tr>
+<tr><td><b>merge</b> "slot" = "spot"</td><td>synonyms → one class</td></tr>
+<tr><td><b>promote</b> "price" → <code>Money</code></td><td>value object, not raw <code>double</code></td></tr>
+</tbody></table>
+<pre><code>Class: ParkingLot   resp: find spot, admit, issue ticket
+                    collab: Spot, Ticket, PricingStrategy
+Class: Spot         resp: know size, occupied, hold vehicle
+                    collab: Vehicle</code></pre>
+<p>Interface-first makes the shape legible in ~10 lines and makes "add a payment type" visibly one new impl:</p>
+<pre><code>interface PricingStrategy { Money price(Duration d, Size s); }
+interface ParkingLot { Ticket park(Vehicle v); Receipt exit(Ticket t); }</code></pre>
+</section>
+
 <section class="card diagram"><h3>LLD skeleton — Parking Lot</h3>
 <div class="mermaid">
 classDiagram
@@ -374,6 +517,65 @@ classDiagram
 <tr><td>interface with 1 impl forever</td><td>speculative generality / patternitis <span class="warn">!</span></td></tr>
 <tr><td>square/rectangle "is-a" bug</td><td>English is-a ≠ substitutability <span class="warn">!</span></td></tr>
 </tbody></table>
+</section>
+
+<section class="card"><h3>Bridge, Composite, Proxy, Flyweight — deeper</h3>
+<ul>
+<li><b>Bridge</b> — split an abstraction from its impl so two axes vary independently. <code>Shape × Renderer</code> would be <code>Circle×SVG</code>, <code>Circle×Canvas</code>, <code>Square×SVG</code>… — an M×N class explosion. Bridge makes it M+N: <code>Shape</code> holds a <code>Renderer</code> reference. Pre-planned; <b>Adapter</b> retrofits after the fact <span class="warn">!</span>. Bridge vs Strategy: same composition, but Bridge varies <i>structure/impl</i>, Strategy varies <i>an algorithm</i>.</li>
+<li><b>Composite</b> — one <code>Node</code> interface over leaf &amp; container so clients never branch on type. <b>Transparency vs safety</b>: put <code>add/remove</code> on the base (uniform but leaves must no-op/throw) or only on containers (type-safe but clients type-check) <span class="warn">!</span>.</li>
+<li><b>Proxy</b> flavours: <b>virtual</b> (lazy-load), <b>remote</b> (network stub), <b>protection</b> (permission guard). Same interface as the subject — differs from Decorator by <i>intent</i> (control access vs add behaviour).</li>
+<li><b>Flyweight</b> — share <b>intrinsic</b> (context-free) state; pass <b>extrinsic</b> (per-use) state as args. A million trees = one <code>TreeType</code> (mesh, texture) shared, position passed in. <span class="warn">!</span> Pointless if little state is shared or objects are already few.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Refactoring moves (smell → move)</h3>
+<p>Refactoring = <b>behaviour-preserving</b> structural change. Not a rewrite (that changes behaviour), not a bug fix (smells often work fine). Two hats: refactor <i>or</i> add behaviour, never both in one step <span class="warn">!</span></p>
+<table><thead><tr><th>Smell</th><th>Move</th></tr></thead><tbody>
+<tr><td>long method</td><td>extract method to <b>name a concept</b> (not to hit a line count)</td></tr>
+<tr><td>large / god class</td><td>extract class by cohesion</td></tr>
+<tr><td>feature envy</td><td>move method to the data it uses</td></tr>
+<tr><td>primitive obsession</td><td>introduce value object (<code>Money</code>, <code>PhoneNumber</code>)</td></tr>
+<tr><td>data clump</td><td>introduce parameter object</td></tr>
+<tr><td>divergent change</td><td>split class (SRP — one reason to change)</td></tr>
+<tr><td>message chain</td><td>hide delegate (Demeter)</td></tr>
+<tr><td>repeated <code>switch(type)</code></td><td>replace conditional w/ polymorphism → Strategy/State</td></tr>
+</tbody></table>
+<p>Engine: <b>small, safe, reversible steps</b> behind green tests (Beck's Tidy First). Extraction has a cost too — indirection — so extract to reveal intent, not reflexively.</p>
+</section>
+
+<section class="card"><h3>Domain Modeling — rich vs anemic</h3>
+<ul>
+<li><b>Anemic model</b> <span class="warn">!</span> — data-only classes (getters/setters) with logic in "service" procedures. It's OO in name only; behaviour and the data it guards drift apart. Push behaviour <i>onto the data</i> (Information Expert).</li>
+<li><b>Rich model</b> — objects own the operations on their state and protect their invariants (<code>account.withdraw(amt)</code> validates, not an external <code>AccountService</code>).</li>
+<li><b>Entity</b> = identity, mutable lifecycle, equal by <b>id</b>. <b>Value object</b> = defined by attributes, immutable, equal by <b>value</b> (<code>Money</code>, <code>DateRange</code>, <code>Color</code>).</li>
+<li>Model the domain as <b>as many value objects as possible</b> — immutable, shareable, thread-safe for free — and keep the small set of mutable entities where lifecycle really lives.</li>
+<li><span class="warn">!</span> Money is <b>never a <code>double</code></b> — integer minor units in a value object, or rounding corrupts every ledger.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Not every LLD is a pattern hunt</h3>
+<p>Some prompts are <b>data-structure design</b>, not GoF. Recognising which is senior judgment.</p>
+<h4>LRU cache — O(1) get/put</h4>
+<ul>
+<li><code>HashMap</code> (key → node) + <b>intrusive doubly-linked list</b> (recency order). Get → move node to head; put over capacity → evict tail. Both O(1), no search.</li>
+<li>The <i>eviction policy</i> (LRU / LFU / FIFO) can be a <b>Strategy</b>; the core is pointer manipulation.</li>
+</ul>
+<h4>Board games — rules vs state</h4>
+<ul>
+<li>Split <b>rules</b> (what's a legal move) from <b>state</b> (turn, board, status). Tic-tac-toe → chess share one <code>Game</code>/<code>Board</code>/<code>Move</code> skeleton; only legality differs.</li>
+<li><span class="warn">!</span> Avoid one <code>Board.isValidMove</code> with a giant <code>switch(pieceType)</code> — push <code>canMove()</code> onto each <code>Piece</code> subclass (OCP). Game status via <b>State</b>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Producer/consumer LLD shapes</h3>
+<p>Pub/sub, logging, and notifications all separate "something happened" from "who reacts" — the <b>Observer</b> family. Reusable move: model the <i>event</i> as an object, keep a registry of subscribers/handlers, iterate.</p>
+<table><thead><tr><th>System</th><th>Shape</th></tr></thead><tbody>
+<tr><td>notification / pub-sub</td><td>Observer (+ broker/topic decouples subject from observer)</td></tr>
+<tr><td>logging framework</td><td><b>Chain of Responsibility</b> — level filters + appenders (sinks); reconfigurable at runtime</td></tr>
+<tr><td>middleware / filter chain</td><td>Chain — each handler handles or forwards</td></tr>
+<tr><td>Splitwise split types</td><td>Strategy (equal / exact / percentage) + <code>Money</code> ledger</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> CoR is not an <code>if/else</code> list — each handler <i>independently</i> decides handle-or-pass, and the chain is assembled at runtime. Ensure a default tail handles the unhandled.</p>
 </section>
 
 <section class="card"><h3>&#9733; LLD Interview Checklist</h3>

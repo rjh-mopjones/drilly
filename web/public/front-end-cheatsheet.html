@@ -270,6 +270,75 @@ items.forEach((el,i)=&gt; el.style.height = hs[i]+'px');</code></pre>
 </ul>
 </section>
 
+<section class="card"><h3>State &amp; Data Fetching</h3>
+<p>Data on screen is a <b>cache, not the source of truth</b> &mdash; ask "how fresh is my copy, when do I refetch, what do I show while I wait."</p>
+<table><thead><tr><th></th><th>Client state</th><th>Server state</th></tr></thead><tbody>
+<tr><td>owns</td><td>the UI</td><td>a server (remote)</td></tr>
+<tr><td>read</td><td>sync</td><td>async</td></tr>
+<tr><td>stale?</td><td>never</td><td><b>the moment you fetch</b></td></tr>
+<tr><td>e.g.</td><td>menu open, input, tab</td><td>users, profile, price</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> Anti-pattern: cramming server state into a client store (Redux/<code>useState</code>) then hand-rolling caching, loading flags &amp; refetch &mdash; badly.</p>
+<h4>Naive <code>useEffect</code> + fetch is buggy</h4>
+<pre><code>useEffect(() =&gt; {
+  const c = new AbortController();
+  setStatus('loading');
+  fetch(`/api/users/${id}`, {signal:c.signal})
+    .then(r =&gt; r.json()).then(setUser)
+    .catch(e =&gt; { if(e.name!=='AbortError') setStatus('error'); });
+  return () =&gt; c.abort();   // cancel on id change / unmount
+}, [id]);</code></pre>
+<ul>
+<li><b>Race:</b> a slow old response lands after a new one &amp; overwrites it <span class="warn">!</span> &mdash; abort superseded requests or tag with a request id; only the latest may win.</li>
+<li><b>SWR</b> = serve cached (stale) instantly, refetch in background, swap in fresh. Beats a spinner; opt out for must-be-fresh data (checkout total).</li>
+<li><b>Dedupe:</b> key by URL+params &rarr; identical in-flight requests share one promise. This is why <code>useQuery('user')</code> everywhere stays cheap.</li>
+<li><b>Optimistic update:</b> snapshot &rarr; apply expected value &rarr; reconcile with server response &rarr; <b>roll back</b> on failure <span class="warn">!</span> (forgetting rollback = UI lies).</li>
+<li>After a mutation, <b>invalidate</b> related queries so lists refresh &mdash; juniors forget this and the POST looks like it failed.</li>
+<li>3 stacked spinners = a <b>waterfall</b>: parallelise (<code>Promise.all</code>), prefetch, or hoist the fetch to a route loader / server.</li>
+</ul>
+<h4>Where does state live?</h4>
+<table><thead><tr><th>Home</th><th>For</th></tr></thead><tbody>
+<tr><td><b>URL</b></td><td>bookmark/share/back-button: tab, filters, page, query <span class="warn">!</span> under-used</td></tr>
+<tr><td>memory</td><td>ephemeral: modal open, unsaved input</td></tr>
+<tr><td>Web Storage</td><td>client-only prefs: theme, dismissed banner</td></tr>
+<tr><td>server</td><td>the truth: records, orders</td></tr>
+</tbody></table>
+<p>Design every async view for <b>loading / error / empty</b> separately &mdash; <code>[]</code> is truthy, so <code>if(!data)</code> mistakes "zero results" for "still loading" <span class="warn">!</span></p>
+<h4>Offline-tolerant fetching</h4>
+<ul>
+<li>Layer it: HTTP cache &rarr; in-app SWR cache &rarr; <b>Service Worker</b> proxy &rarr; <b>IndexedDB</b> + mutation queue. Model: <b>reads degrade to last cached value; writes queue and sync later.</b></li>
+<li>Writes are the hard part &mdash; need optimistic UI + a durable queue that survives reload + conflict strategy (last-write-wins / merge / prompt).</li>
+<li><b>Cursor</b> pagination (opaque pointer to last item) is stable under inserts; <b>offset</b> (<code>?page=</code>) double-shows or skips rows when the list mutates <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Web APIs &amp; Platform</h3>
+<p>The browser is an OS; these are its system calls. Key axis: get work <b>off the main thread</b> and pick the right <b>communication shape</b>.</p>
+<table><thead><tr><th></th><th>Web Worker</th><th>Service Worker</th></tr></thead><tbody>
+<tr><td>job</td><td>offload <b>CPU</b></td><td>proxy the <b>network</b> / offline / push</td></tr>
+<tr><td>lifetime</td><td>tied to page</td><td>independent; wakes on events</td></tr>
+<tr><td>DOM</td><td>no</td><td>no</td></tr>
+<tr><td>needs</td><td>&mdash;</td><td><b>HTTPS</b>; install/activate lifecycle <span class="warn">!</span></td></tr>
+</tbody></table>
+<p><span class="warn">!</span> <code>postMessage</code> <b>copies</b> (structured clone), not shares &mdash; unless you <i>transfer</i> an ArrayBuffer (zero-copy, moves ownership). No DOM in either worker.</p>
+<h4>Real-time transport</h4>
+<table><thead><tr><th></th><th>Poll</th><th>SSE</th><th>WebSocket</th></tr></thead><tbody>
+<tr><td>dir</td><td>pull</td><td>server&rarr;client</td><td>full-duplex</td></tr>
+<tr><td>reconnect</td><td>manual</td><td><b>auto</b></td><td>you write it</td></tr>
+<tr><td>data</td><td>any</td><td>text only</td><td>text+binary</td></tr>
+<tr><td>use</td><td>slow data</td><td>feeds, notifs</td><td>chat, collab</td></tr>
+</tbody></table>
+<p>Don't default to WebSockets &mdash; if data only flows down, <b>SSE</b> is simpler, rides HTTP/2, auto-reconnects.</p>
+<h4>Observers &amp; storage</h4>
+<ul>
+<li><code>IntersectionObserver</code> &mdash; element enters/leaves viewport; <b>lazy-load, infinite-scroll sentinel, impressions</b>. Beats a <code>scroll</code> listener (off main thread, batched, no forced reflow) <span class="warn">!</span></li>
+<li><code>ResizeObserver</code> (element size, not just window) · <code>MutationObserver</code> (DOM tree changes).</li>
+<li><b>IndexedDB</b> = async, transactional, GBs, structured objects &mdash; the right home for large/offline data. <code>localStorage</code> is <b>sync</b> (blocks main thread) + ~5MB string-only <span class="warn">!</span></li>
+<li><b>History API</b> (<code>pushState</code>/<code>popstate</code>) is what lets an SPA change the URL with no reload. <code>structuredClone</code> deep-copies; <code>BroadcastChannel</code> = pub/sub across same-origin tabs.</li>
+<li><b>Web Components:</b> custom elements (new tags) + <b>shadow DOM</b> (scoped, encapsulated DOM/CSS) &mdash; the platform's style-isolation answer; unrelated to the virtual DOM <span class="warn">!</span></li>
+</ul>
+</section>
+
 <section class="card"><h3>CSS &mdash; Box Model &amp; Layout</h3>
 <ul>
 <li><b>Always set</b> <code>box-sizing:border-box</code> &mdash; width includes padding+border (default <code>content-box</code> adds them on top) <span class="warn">!</span></li>
@@ -428,6 +497,39 @@ items.forEach((el,i)=&gt; el.style.height = hs[i]+'px');</code></pre>
 <p><span class="warn">!</span> Never remove focus outlines without a replacement. Don't convey state by colour alone. Test with keyboard-only + a screen reader, not just a plugin score.</p>
 </section>
 
+<section class="card"><h3>A11y &mdash; Focus, ARIA &amp; the A11y Tree</h3>
+<p>The browser keeps an <b>accessibility tree</b> in parallel with the DOM &mdash; a tree of <i>role / name / state / value</i> exposed to screen readers via OS APIs. Your job: keep it correct. Native HTML populates it automatically; <code>display:none</code> removes a node from it entirely.</p>
+<p><span class="warn">!</span> <b>ARIA describes, it doesn't behave.</b> <code>role="button"</code> on a <code>&lt;div&gt;</code> makes a reader <i>say</i> "button" but adds no focus, no Enter/Space &mdash; you still wire <code>tabindex="0"</code> + <code>keydown</code>. Every ARIA attribute is a promise you keep in JS. "No ARIA &gt; bad ARIA."</p>
+<h4>Focus management</h4>
+<table><thead><tr><th>Tool</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>tabindex="0"</code></td><td>focusable, natural order</td></tr>
+<tr><td><code>tabindex="-1"</code></td><td>focusable by <b>script only</b>, not Tab</td></tr>
+<tr><td><code>tabindex="1+"</code></td><td>avoid &mdash; breaks tab order <span class="warn">!</span></td></tr>
+</tbody></table>
+<ul>
+<li><b>Modal:</b> on open move focus in &amp; <b>trap</b> Tab inside; on close <b>return focus</b> to the trigger. An SPA route change must move focus too, or screen-reader users are stranded <span class="warn">!</span></li>
+<li><b>Roving tabindex</b> for composite widgets (menu, tabs): one item tabbable, arrow keys move focus among the rest.</li>
+<li><b>Accessible name</b> from <code>&lt;label for&gt;</code>/<code>aria-label</code>/<code>alt</code>/text &mdash; a <b>placeholder is not a label</b> (vanishes on input) <span class="warn">!</span></li>
+<li><b>Live region</b> (<code>aria-live="polite"</code>) announces async loading/error/empty changes without moving focus. Add a <b>skip link</b> to bypass the nav.</li>
+<li>States: <code>aria-expanded</code>, <code>aria-checked</code>, <code>aria-disabled</code>, <code>aria-current</code> &mdash; keep them in sync with the visual state.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Runtime Rendering &mdash; the 16.6ms Frame</h3>
+<p>The main thread gets <b>~16.6ms/frame</b> at 60fps (<code>1000/60</code>) to run JS &rarr; recalc layout &rarr; paint &rarr; composite. Overrun and frames drop.</p>
+<table><thead><tr><th>Stage</th><th>Cost</th><th>Triggered by</th></tr></thead><tbody>
+<tr><td><b>Reflow</b> (layout)</td><td>most</td><td><code>width</code>, <code>top</code>, font, DOM insert</td></tr>
+<tr><td>Repaint</td><td>mid</td><td><code>color</code>, <code>background</code>, <code>visibility</code></td></tr>
+<tr><td><b>Composite</b></td><td>cheapest</td><td><code>transform</code>, <code>opacity</code> (GPU)</td></tr>
+</tbody></table>
+<ul>
+<li>Animate <b>transform/opacity</b> only &mdash; they skip layout+paint. <code>top/left</code> reflow every frame <span class="warn">!</span></li>
+<li><b>Forced sync layout:</b> reading <code>offsetTop</code>/<code>getBoundingClientRect</code> after a write makes the browser reflow <i>now</i> instead of batching &mdash; the layout-thrash trap.</li>
+<li><b>Debounce</b> (fire after activity <i>stops</i> N ms) for inputs/auto-save; <b>throttle</b> (at most once per N ms) for scroll/drag. Not interchangeable <span class="warn">!</span></li>
+<li>Long task (&gt;50ms) blocks input &rarr; poor INP. Split work, <code>rAF</code> for visual updates, Web Worker for CPU. Virtualize lists past a few hundred rows.</li>
+</ul>
+</section>
+
 <section class="card"><h3>Architecture, Build &amp; Testing</h3>
 <ul>
 <li><b>Bundler</b> (Vite/esbuild/webpack): resolve ESM graph &rarr; tree-shake &rarr; split chunks &rarr; minify &rarr; hash. ESM's <b>static</b> <code>import</code> is what makes tree-shaking possible <span class="warn">!</span> (CJS <code>require</code> is dynamic).</li>
@@ -443,6 +545,32 @@ items.forEach((el,i)=&gt; el.style.height = hs[i]+'px');</code></pre>
 <ul>
 <li>Test <b>behaviour, not implementation</b> &mdash; query by role/text (what the user sees), not CSS classes or internal state <span class="warn">!</span></li>
 <li>Debug: DevTools Performance panel (flame chart, long tasks), Network waterfall, heap snapshots, Coverage for dead code.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Interview Playbooks &mdash; how to answer</h3>
+<p>Every open-ended answer follows: <b>clarify &rarr; measure/observe &rarr; hypothesize &rarr; act &rarr; verify &rarr; state tradeoffs.</b> They grade <i>how you think</i>, not the one right answer. Two rules: <b>never optimize blind</b>, and <b>think out loud</b>.</p>
+<h4>"This page is slow"</h4>
+<ul>
+<li><b>Clarify:</b> slow to <i>load</i> (late first paint) or slow to <i>respond</i> (janky)? Different tools <span class="warn">!</span></li>
+<li>Load &rarr; Lighthouse + Network waterfall + LCP attribution. Runtime &rarr; Performance panel long tasks + INP.</li>
+<li>Fix the <b>bottleneck</b>: big TTFB&rarr;cache/CDN · render-block&rarr;inline critical CSS, <code>defer</code>, preload LCP · huge bundle&rarr;split/tree-shake · long tasks&rarr;chunk/Worker/virtualise · CLS&rarr;size images. Verify the metric moved.</li>
+</ul>
+<h4>"Cut the bundle"</h4>
+<ul>
+<li>Analyzer treemap &rarr; cut biggest first: <b>code-split by route</b>, fix import shape (<code>lodash/debounce</code>), swap heavy deps (<code>moment</code>&rarr;<code>date-fns</code>), ensure tree-shaking (ESM). Lock in a <b>CI size budget</b>.</li>
+</ul>
+<h4>"Find the memory leak"</h4>
+<ul>
+<li>Symptom = <b>growth over repeated actions</b>. Heap snapshot A &rarr; repeat action &times;N &rarr; snapshot B &rarr; compare, filter <b>detached nodes</b> &rarr; read Retainers. Cause is usually listener/timer/closure/unbounded-cache/subscription not torn down.</li>
+</ul>
+<h4>"10k rows is janky"</h4>
+<ul>
+<li><b>Virtualize</b> (render ~20 visible rows in a tall spacer) &mdash; the main fix. Then throttle scroll to <code>rAF</code>, <code>passive</code> listeners, memoize rows, batch reads/writes. Verify frames &lt; 16.6ms.</li>
+</ul>
+<h4>Machine-coding (typeahead/tabs/modal)</h4>
+<ul>
+<li>Clarify 30s &rarr; skeleton renders first &rarr; layer features. Typeahead: <b>debounce ~250ms</b> + <b><code>AbortController</code></b> so a slow old response can't overwrite a new one (the race they watch for). Keyboard nav + a11y from the start.</li>
 </ul>
 </section>
 
@@ -486,6 +614,14 @@ items.forEach((el,i)=&gt; el.style.height = hs[i]+'px');</code></pre>
 <tr><td>cookie not sent on API call</td><td><code>SameSite</code>/<code>Secure</code>/domain/path or missing <code>credentials:'include'</code> <span class="warn">!</span></td></tr>
 <tr><td>users stuck on old build</td><td>HTML over-cached / SW serving stale <span class="warn">!</span></td></tr>
 <tr><td>memory climbs over time</td><td>listener/timer/detached-DOM leak <span class="warn">!</span></td></tr>
+<tr><td>search results flicker old/new</td><td>fetch race &mdash; slow old response lands last; abort/tag requests <span class="warn">!</span></td></tr>
+<tr><td>3 spinners stack one by one</td><td>request waterfall &mdash; parallelise / hoist the fetch <span class="warn">!</span></td></tr>
+<tr><td>list page fires 1 req per row</td><td>N+1 &mdash; batch on the server / richer list endpoint <span class="warn">!</span></td></tr>
+<tr><td>POST succeeds, list won't update</td><td>forgot to invalidate the query after mutation <span class="warn">!</span></td></tr>
+<tr><td>"No results" shows a spinner</td><td><code>[]</code> is truthy &mdash; empty state read as loading <span class="warn">!</span></td></tr>
+<tr><td>refresh loses the active filter</td><td>navigational state in <code>useState</code> not the URL <span class="warn">!</span></td></tr>
+<tr><td>custom div "button" ignores keys</td><td>ARIA without <code>tabindex</code>+<code>keydown</code> &mdash; use <code>&lt;button&gt;</code> <span class="warn">!</span></td></tr>
+<tr><td>modal closes, focus lost to <code>body</code></td><td>no focus return to trigger <span class="warn">!</span></td></tr>
 </tbody></table>
 </section>
 

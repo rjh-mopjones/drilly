@@ -97,6 +97,61 @@ pre code{background:none; padding:0; font-size:1em;}
 </ul>
 </section>
 
+<section class="card"><h3>Thread Lifecycle &amp; States</h3>
+<p>A thread = private <b>stack + PC + registers</b>, shared <b>heap + globals + fds</b>. Locals are thread-private (confinement); heap objects are where races live.</p>
+<table><thead><tr><th>State</th><th>Meaning</th></tr></thead><tbody>
+<tr><td>NEW</td><td>object made, no OS thread yet</td></tr>
+<tr><td>RUNNABLE</td><td>running <i>or</i> ready (incl. blocking IO!)</td></tr>
+<tr><td>BLOCKED</td><td>waiting for a monitor lock (involuntary)</td></tr>
+<tr><td>WAITING</td><td><code>wait()</code>/<code>join()</code>/<code>park()</code> — until signalled</td></tr>
+<tr><td>TIMED_WAITING</td><td>same, with a timeout</td></tr>
+<tr><td>TERMINATED</td><td><code>run()</code> returned/threw — cannot restart</td></tr>
+</tbody></table>
+<ul>
+<li><b>BLOCKED vs WAITING</b>: BLOCKED = lock contention; WAITING = signal-driven. Reading a dump: all BLOCKED on each other = deadlock; WAITING with no notifier = lost wakeup.</li>
+<li><code>join()</code> gives <b>completion + happens-before</b> — you see all the joined thread's writes with no extra sync.</li>
+<li><span class="warn">!</span> Java: call <code>start()</code>, not <code>run()</code> — <code>run()</code> executes inline, no new thread.</li>
+<li><b>Daemon</b> thread doesn't keep the process alive; killed abruptly at exit (no <code>finally</code>). <span class="warn">!</span> A forgotten non-daemon pool thread hangs the JVM after <code>main</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>OS · Green · Virtual Threads</h3>
+<table><thead><tr><th></th><th>OS 1:1</th><th>Green N:1</th><th>Virtual M:N</th></tr></thead><tbody>
+<tr><td>scheduled by</td><td>kernel</td><td>runtime</td><td>runtime/carriers</td></tr>
+<tr><td>cost</td><td>~1MB stack</td><td>tiny</td><td>~KB growable</td></tr>
+<tr><td>blocking IO</td><td>blocks kernel thr</td><td>freezes <i>all</i></td><td>parks, frees carrier</td></tr>
+<tr><td>parallel</td><td>yes</td><td>no</td><td>yes</td></tr>
+</tbody></table>
+<ul>
+<li><b>Why not 1M OS threads</b>: 1M × 1MB ≈ <b>1TB</b> RAM, plus the kernel scheduler thrashes. Goroutines/virtual threads use KB growable stacks + user-space scheduling → 1M is routine.</li>
+<li><b>M:N</b> (Go GMP, Java Loom): write straight-line <b>blocking</b> code; runtime turns a block into cheap parking. Best of 1:1 (parallel) + N:1 (cheap).</li>
+<li><span class="warn">!</span> Green threads' fatal flaw: one blocking syscall freezes every task on that carrier. M:N fixes it by unmounting.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Context-Switch Cost</h3>
+<ul>
+<li><b>Direct</b>: save/restore registers + (kernel switch) mode switch + TLB flush ≈ 1–10µs. Small — until millions/sec.</li>
+<li><b>Indirect (the killer)</b>: <b>cache pollution</b>. Incoming thread's working set evicts the outgoing one's lines; both run cold afterwards. Dwarfs the direct cost and hides from "switch = X µs" numbers.</li>
+<li><span class="warn">!</span> <b>Oversubscription</b>: more runnable threads than cores → more switching + cache thrash → CPU-bound work gets <i>slower</i>. Size CPU pools near core count.</li>
+<li>User-space (goroutine/virtual) switches skip the kernel round-trip → far lighter. Blocking costs twice: switch out, later switch back, each with cache cost.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Thread Confinement &amp; Thread-Local</h3>
+<ul>
+<li><b>Confinement</b>: don't share the state at all → no sync needed. Each thread's own copy; the strongest, simplest escape from races.</li>
+<li><b>ThreadLocal</b>: per-thread copy behind a shared name. Right for non-thread-safe scratch objects (<code>SimpleDateFormat</code>, <code>Random</code>, buffers) and implicit context (request/trace IDs, MDC).</li>
+</ul>
+<pre><code>static final ThreadLocal&lt;SimpleDateFormat&gt; FMT =
+  ThreadLocal.withInitial(() -&gt; new SimpleDateFormat("yyyy-MM-dd"));
+// FMT.get() — no lock, never shared</code></pre>
+<ul>
+<li><span class="warn">!</span> <b>Pooled-thread leak</b>: threads are reused, so a value set in one task lingers into the next on that thread → memory leak + cross-request contamination. Always <code>remove()</code> in <code>finally</code>.</li>
+<li><span class="warn">!</span> Doesn't follow work across async/executor hops. Use scoped values (Java 21+) / context-propagation libs.</li>
+</ul>
+</section>
+
 <section class="card"><h3>Race Condition vs Data Race</h3>
 <ul>
 <li><b>Data race</b>: 2 threads touch same memory, ≥1 write, no ordering → <b>undefined behavior</b> (C/C++/Go). Fix: sync or atomics.</li>
@@ -176,6 +231,21 @@ take(): lock; while(empty) notEmpty.wait();
 </ul>
 </section>
 
+<section class="card"><h3>Latches, Barriers &amp; Phasers</h3>
+<table><thead><tr><th>Primitive</th><th>Coordinates</th></tr></thead><tbody>
+<tr><td>CountDownLatch</td><td>one-shot: wait till count hits 0</td></tr>
+<tr><td>CyclicBarrier</td><td>reusable: N parties rendezvous</td></tr>
+<tr><td>Phaser</td><td>dynamic parties, multi-phase</td></tr>
+<tr><td>Semaphore</td><td>N permits (pool / rate limit)</td></tr>
+</tbody></table>
+<ul>
+<li><b>Latch</b> = "wait for others to be ready": start N workers after a gate opens, or main waits for N tasks to finish. <b>One-shot</b> — count only goes down, can't reset.</li>
+<li><b>Barrier</b> = "all threads meet here, then all proceed" — reusable across rounds (iterative/BSP algorithms). Optional barrier action runs once when the last party arrives.</li>
+<li><span class="warn">!</span> Latch signal is <b>sticky</b> (a counter, remembered) unlike a bare condvar <code>notify</code> — no lost-wakeup risk. Semaphore <code>release</code> is likewise counted.</li>
+<li>For one-time coordination or fan-in, prefer these + <code>CompletableFuture.allOf</code> over hand-rolled <code>wait</code>/<code>notify</code>.</li>
+</ul>
+</section>
+
 <section class="card"><h3>Memory Model &amp; Happens-Before</h3>
 <ul>
 <li>Compiler &amp; CPU <b>reorder</b> aggressively. Without a happens-before edge, one thread may <i>never</i> observe another's write.</li>
@@ -203,6 +273,38 @@ do { old = top; n.next = old; }
 while(!CAS(&amp;top, old, n));   // retry on contention</code></pre>
 <p><span class="warn">!</span> <b>ABA</b>: value goes A→B→A, CAS wrongly succeeds. Fix: tagged/versioned pointer, hazard pointers, or epoch/RCU reclamation.</p>
 <p><span class="warn">!</span> Lock-free ≠ faster. Under low contention a mutex usually wins; lock-free shines at high contention and for progress guarantees (no thread can stall the rest).</p>
+<ul>
+<li><b>fetch_add</b> beats a CAS loop for a pure counter — it's one uncontended instruction with no retry, where CAS may spin under contention.</li>
+<li><span class="warn">!</span> A CAS loop under <b>high contention</b> degrades: many threads read the same value, one wins, the rest retry → wasted work + cache-line ping-pong. Back off or shard the counter.</li>
+<li><b>LL/SC</b> (ARM/POWER) sidesteps ABA structurally: the store-conditional fails if the line was written at all, not just if the value differs.</li>
+</ul>
+</section>
+
+<section class="card"><h3>C++ memory_order Quick Ref</h3>
+<table><thead><tr><th>Order</th><th>Guarantee</th></tr></thead><tbody>
+<tr><td>relaxed</td><td>atomicity only, no ordering</td></tr>
+<tr><td>acquire (load)</td><td>later ops can't float above</td></tr>
+<tr><td>release (store)</td><td>earlier ops can't sink below</td></tr>
+<tr><td>acq_rel (RMW)</td><td>both, for read-modify-write</td></tr>
+<tr><td>seq_cst</td><td>single global order (default, costliest)</td></tr>
+</tbody></table>
+<ul>
+<li>Pair a <b>release-store</b> with an <b>acquire-load</b> of the <i>same</i> var → happens-before edge; everything before the release is visible after the acquire.</li>
+<li>Cost ladder: relaxed &lt; acquire/release &lt; seq_cst. The expensive part of seq_cst is the two-way <b>StoreLoad</b> fence.</li>
+<li><b>relaxed</b> is safe only when you need no ordering vs other data — e.g. a statistics counter (<code>fetch_add(relaxed)</code>) whose value isn't a flag guarding other memory.</li>
+<li><span class="warn">!</span> A CAS that <i>publishes</i> data needs release (and acquire to read it) — a relaxed CAS can let readers see the pointer before the pointee's fields.</li>
+<li><span class="warn">!</span> Don't rely on x86 being strongly-ordered — it hides missing barriers that ARM/POWER will expose. Code to the model, not the chip.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Read-Mostly: RCU · Seqlock · COW</h3>
+<ul>
+<li>When reads vastly outnumber writes, avoid making readers pay for locks at all.</li>
+<li><b>RCU</b> (read-copy-update): readers run lock-free on the current version; a writer builds a new copy, swaps one atomic pointer, then waits for a <b>grace period</b> (all pre-existing readers gone) before freeing the old. Readers never block. Backbone of the Linux kernel.</li>
+<li><b>Seqlock</b>: writer bumps a sequence counter odd→even around its write; reader reads seq, reads data, re-reads seq — retries if it changed or was odd. Great for a few small fields (timestamps), <span class="warn">!</span> readers can spin under write bursts and must not follow torn pointers.</li>
+<li><b>COW / immutable snapshot</b>: swap a whole immutable structure by one atomic reference; readers hold a consistent snapshot with zero sync. O(n) writes.</li>
+<li>All three trade cheap/lock-free reads for more expensive writes + a <b>reclamation</b> problem (when is the old version safe to free? → grace periods, hazard pointers, epochs).</li>
+</ul>
 </section>
 
 <section class="card"><h3>Deadlock &amp; Friends</h3>
@@ -215,6 +317,13 @@ T2: lock B; lock A     // → deadlock
 <li><b>Priority inversion</b>: low-priority holder blocks high-priority waiter → priority inheritance (Mars Pathfinder). <span class="warn">!</span></li>
 <li>Avoid: global order, lock hierarchy, <code>tryLock</code>+timeout+backoff, or one coarse lock. Never hold two locks if you can hold one.</li>
 </ul>
+<pre><code>// Deadlock-free bank transfer: order by identity
+void xfer(Acct a, Acct b, long amt){
+  Acct lo = a.id &lt; b.id ? a : b, hi = lo==a ? b : a;
+  synchronized(lo){ synchronized(hi){        // canonical order
+    a.debit(amt); b.credit(amt); }}}
+// tie-break equal ids with a tiebreak lock</code></pre>
+<p><span class="warn">!</span> <b>"Just add a timeout to every lock"</b> is a bad general fix — it converts deadlock into livelock/spurious failures and hides the design flaw. Fix the lock order. Timeouts are a last resort where a static order is impossible.</p>
 </section>
 
 <section class="card"><h3>Classic Sync Problems</h3>
@@ -255,6 +364,35 @@ T2: lock B; lock A     // → deadlock
 <ul>
 <li><span class="warn">!</span> <code>future.get()</code> inside async code re-introduces blocking and can deadlock a small pool. Stay in the async chain end-to-end.</li>
 <li><span class="warn">!</span> A swallowed exception in one stage can leave downstream futures hanging forever — always attach an error handler.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Structured Concurrency</h3>
+<p>Child tasks respect <b>lexical scope</b>: the scope doesn't return until every child completes or is cancelled — concurrency mapped onto the call stack.</p>
+<pre><code>try (var s = new StructuredTaskScope.ShutdownOnFailure()){
+  var u = s.fork(() -&gt; fetchUser(id));
+  var o = s.fork(() -&gt; fetchOrder(id));
+  s.join(); s.throwIfFailed();       // one fails → cancels sibling
+  return new Resp(u.get(), o.get());
+}  // close guarantees both done or cancelled</code></pre>
+<ul>
+<li>Fixes raw-future sins: <b>leaks</b> (orphaned futures), <b>no cancellation propagation</b>, <b>lost errors</b>.</li>
+<li>Same idea: Kotlin coroutine scopes, Swift task groups, Go <code>errgroup</code>. The direction all modern async is heading.</li>
+<li><span class="warn">!</span> <b>Orphaned/fire-and-forget future</b> with no terminal handler <b>swallows its exception</b> — "some charges just don't happen", zero errors logged. Always attach <code>exceptionally</code>/<code>whenComplete</code>; lint <code>no-floating-promises</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Futures Across Languages</h3>
+<table><thead><tr><th>Lang</th><th>Execution / cancel</th></tr></thead><tbody>
+<tr><td>Java CF</td><td>eager, real thread pool (parallel)</td></tr>
+<tr><td>JS Promise</td><td>eager, 1 event loop; <code>AbortController</code></td></tr>
+<tr><td>Python</td><td>eager, 1 loop; <code>cancel()</code> injects error</td></tr>
+<tr><td>Rust</td><td><b>lazy</b> — nothing till polled; drop = cancel</td></tr>
+</tbody></table>
+<ul>
+<li><b>Rust futures are lazy</b>: creating one does nothing; cancellation is just dropping it (runs <code>Drop</code> cleanup). Java is the outlier with true CPU parallelism.</li>
+<li><code>await</code> <b>serializes</b> by default — <code>await a; await b;</code> runs sequentially. For parallelism use <code>Promise.all</code>/<code>allOf</code>/<code>join!</code>. Juniors accidentally serialize independent calls constantly.</li>
+<li>async/await is <b>sugar over futures</b>: compiler splits the fn at each <code>await</code> into a resumable state machine; <code>try/catch</code> maps to <code>.catch</code>. An <code>async</code> fn always returns a future (root of "colored functions").</li>
 </ul>
 </section>
 
@@ -368,6 +506,73 @@ close(ch)                 // owner closes; range ends</code></pre>
 <li><b>Backpressure</b> &amp; load shedding beat unbounded buffering every time.</li>
 <li>Rate limit: token bucket. <span class="warn">!</span> Distributed locks need <b>fencing tokens</b> — a lease can expire mid-operation and two holders think they own it.</li>
 <li><b>Sagas</b> + compensation instead of distributed 2PC (which blocks on coordinator failure).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Concurrent Collections (Java)</h3>
+<table><thead><tr><th>Structure</th><th>Strategy / when</th></tr></thead><tbody>
+<tr><td>ConcurrentHashMap</td><td>CAS/lock per bin; reads lock-free</td></tr>
+<tr><td>synchronizedMap</td><td>one lock, all ops serialize <span class="warn">!</span></td></tr>
+<tr><td>CopyOnWriteArrayList</td><td>read-heavy, O(n) writes</td></tr>
+<tr><td>ArrayBlockingQueue</td><td>bounded, 1 lock, backpressure</td></tr>
+<tr><td>LinkedBlockingQueue</td><td>2-lock (separate put/take)</td></tr>
+<tr><td>ConcurrentLinkedQueue</td><td>lock-free (Michael-Scott)</td></tr>
+<tr><td>StampedLock</td><td>optimistic read, no reader locks</td></tr>
+</tbody></table>
+<ul>
+<li><span class="warn">!</span> <b>Thread-safe methods ≠ safe transactions</b>: <code>get</code>-then-<code>put</code> races. Use <code>putIfAbsent</code>/<code>compute</code>/<code>merge</code> — that's why they exist.</li>
+<li>CHM only locks/CASes a single bin on write; disjoint keys never contend. It does <b>not</b> lock reads.</li>
+<li><span class="warn">!</span> <code>size()</code> is an <b>estimate</b> under concurrent mutation; iterators are <b>weakly consistent</b> (no CME, reflect some writes). Don't build logic on either.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Queues: SPSC → MPMC &amp; Ring Buffers</h3>
+<table><thead><tr><th>Ends</th><th>Cost / algorithm</th></tr></thead><tbody>
+<tr><td>SPSC</td><td>cheapest — plain ring, no CAS on hot path</td></tr>
+<tr><td>MPSC</td><td>CAS on producer side only</td></tr>
+<tr><td>MPMC</td><td>CAS both ends (Michael-Scott)</td></tr>
+</tbody></table>
+<ul>
+<li>Fewer contenders on an end → cheaper algorithm. Know the producer/consumer cardinality <i>before</i> picking a queue.</li>
+<li><b>Ring buffer</b>: fixed circular array + head/tail indices. Basis of the <b>LMAX Disruptor</b> — pre-allocated slots, sequence numbers, mechanical-sympathy (cache-line padded) → millions of msgs/sec, no per-op allocation.</li>
+<li><span class="warn">!</span> Coordination is <b>memory barriers on published sequences</b>, not mutexes — no lock contention, but you must get acquire/release right on the sequence.</li>
+<li>Bounded ring = backpressure for free; unbounded lock-free queue can still OOM under producer overload.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Cancellation, Timeouts &amp; Shutdown</h3>
+<ul>
+<li><b>Cancellation is cooperative</b>: you can't safely yank a thread. The target must <b>poll</b> a flag / interrupt and unwind. Forceful kill (<code>Thread.stop</code>) leaves locks held and invariants broken — deprecated for good reason.</li>
+<li><b>Java interrupt</b>: sets a flag; blocking calls throw <code>InterruptedException</code>. <span class="warn">!</span> Never swallow it — restore with <code>Thread.currentThread().interrupt()</code> or propagate, else cancellation is lost.</li>
+<li><b>Go</b>: pass <code>context.Context</code>; select on <code>ctx.Done()</code>. Every goroutine needs a cancellation exit or it <b>leaks</b>.</li>
+<li><b>Timeouts are essential</b>, not optional: an un-timed <code>future.get()</code> / blocking call can hang forever on a stuck dependency, cascading into thread-pool exhaustion.</li>
+</ul>
+<pre><code>var v = fut.get(500, TimeUnit.MILLISECONDS); // bounded wait
+// graceful pool stop: no lost in-flight work
+pool.shutdown();                       // stop accepting
+if(!pool.awaitTermination(30,SECONDS)) // drain
+    pool.shutdownNow();                // then interrupt</code></pre>
+</section>
+
+<section class="card"><h3>Backpressure &amp; Flow Control</h3>
+<ul>
+<li><b>Backpressure</b> = a slow consumer telling a fast producer to slow down. The alternative — unbounded buffering — just relocates OOM to wherever the lag piles up.</li>
+<li>Mechanisms: <b>bounded</b> queue/channel (producer blocks or is rejected when full), request-N (reactive streams pull), credit-based flow control, TCP windowing.</li>
+<li><b>Load shedding</b>: when you can't slow the source (external traffic), <b>drop</b> — reject early, sample, or degrade. Better a fast 503 than a slow collapse.</li>
+<li><span class="warn">!</span> Unbounded queue = hidden overload: latency climbs (Little's Law: L=λW), memory climbs, then everything dies at once with no warning. Always bound + choose a rejection policy.</li>
+<li>Rate limit at the edge: <b>token bucket</b> (bursty) / leaky bucket (smooth).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Interview Playbook: "Design a concurrent X"</h3>
+<ul>
+<li><b>1. Name the shared mutable state</b> and its invariant — every race lives there.</li>
+<li><b>2. Correctness before contention</b>: start with one coarse lock; prove it right via an explicit T1/T2 interleaving. "Make it right, then make it scale."</li>
+<li><b>3. Identify compound ops</b> (check-then-act, RMW) → atomic primitive or hold the lock across both steps.</li>
+<li><b>4. Publication + visibility</b>: how does another thread <i>see</i> the write? <code>volatile</code>/<code>final</code>/lock — not just assignment.</li>
+<li><b>5. Bound &amp; shed</b>: queues/mailboxes bounded, rejection policy chosen, every task has a cancellation exit.</li>
+<li><b>6. Only then scale</b>: profile, then shard / thread-local aggregate / RWLock / lock-free — and only where contention is proven.</li>
+<li><span class="warn">!</span> Reach for battle-tested primitives (<code>BlockingQueue</code>, <code>Semaphore</code>, <code>j.u.c</code>) over hand-rolled <code>wait</code>/<code>notify</code> in production; hand-roll only to <i>prove</i> understanding in the interview.</li>
 </ul>
 </section>
 
