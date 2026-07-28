@@ -125,6 +125,8 @@ pre code{background:none; padding:0; font-size:1em;}
 <li><b>Auto Scaling</b>: target-tracking (easiest) / step / scheduled / predictive. Scale on the right metric, not just CPU.</li>
 <li>T-series are <b>burstable</b> on CPU credits — steady high load exhausts them <span class="warn">!</span> (or set unlimited mode, which can bill extra).</li>
 <li>Enforce <b>IMDSv2</b> (blocks SSRF creds theft) <span class="warn">!</span> AMIs bake config; user-data runs at first boot.</li>
+<li>Spot for stateless/idempotent/checkpointed only (ASG mixed-instances, Spot Fleet, AWS Batch, EMR) — never a primary DB. Reclaim = re-queued task, no correctness hit.</li>
+<li>Placement groups: <b>cluster</b> (low-latency HPC) · <b>spread</b> (anti-correlated failure) · <b>partition</b> (big distributed stores).</li>
 </ul>
 </section>
 
@@ -173,6 +175,8 @@ pre code{background:none; padding:0; font-size:1em;}
 <li>Encrypt: SSE-S3 / SSE-KMS (audited, use bucket keys to cut cost) / SSE-C. Enforce TLS + encryption via bucket policy <code>Deny</code> conditions.</li>
 <li>Versioning + lifecycle to tier/expire; replication CRR/SRR for DR; Object Lock (WORM) for compliance.</li>
 <li>Perf: auto-scales per prefix; multipart for &gt;100 MB; watch <b>retrieval + request + egress</b> cost <span class="warn">!</span></li>
+<li>Event notifications (→ Lambda/SQS/SNS/EventBridge) make S3 the trigger for pipelines; <b>S3 Select</b> projects columns from one object cheaply.</li>
+<li>Data-lake layout: <code>raw/YYYY/MM/DD/</code> prefixes for lifecycle scoping + Athena partition parallelism; store Parquet to cut scan cost.</li>
 </ul>
 </section>
 
@@ -226,6 +230,8 @@ flowchart LR
 <li><b>CloudFront</b>: edge cache; origins S3 (use <b>OAC</b>, not public bucket) / ALB / custom; invalidations, TTLs, signed URLs.</li>
 <li>CloudFront Functions (light, viewer) vs Lambda@Edge (heavier).</li>
 <li><b>Global Accelerator</b> = anycast IPs, TCP/UDP, non-HTTP, fast failover — vs CloudFront (HTTP caching).</li>
+<li>Cache tuning: set TTLs per path, use cache keys/behaviors, <b>invalidate</b> sparingly (costs after 1000/mo); origin failover + custom error pages for resilience.</li>
+<li><b>Health checks</b> drive failover routing; <code>evaluate-target-health</code> on aliases removes dead endpoints automatically.</li>
 </ul>
 </section>
 
@@ -270,6 +276,8 @@ flowchart LR
 <li>Capacity: on-demand (spiky/unknown) vs provisioned+autoscale (steady/cheaper). Strong reads cost 2×.</li>
 <li>Item ≤ <b>400 KB</b>; offload big blobs to S3 (store the key).</li>
 <li>Streams → Lambda for CDC; TTL for expiry; transactions &amp; conditional writes (optimistic lock); DAX for µs reads.</li>
+<li><b>Single-table design</b>: model multiple entity types in one table around access patterns — you design keys <i>from</i> the queries, not normalize-then-query <span class="warn">!</span></li>
+<li>On-demand capacity tracks a spiky API; provisioned + autoscale is cheaper for steady load. Poison record can block a shard-consumer → set <code>BisectBatchOnFunctionError</code> + max-retry + on-failure destination.</li>
 </ul>
 </section>
 
@@ -319,6 +327,8 @@ flowchart LR
 <ul>
 <li><b>CloudWatch</b> metrics + alarms (static/anomaly/composite) + Logs (Insights, metric filters). Memory/disk need the <b>CloudWatch Agent</b> <span class="warn">!</span></li>
 <li><b>X-Ray</b> = distributed traces/service map. <b>CloudTrail</b> = API <i>audit</i> (who did what) — not monitoring. <b>Config</b> = resource compliance/history.</li>
+<li>Three signals: <b>metrics</b> (CloudWatch alarms) · <b>logs</b> (Logs Insights, metric filters) · <b>traces</b> (X-Ray). An org-trail + Config aggregator in a central audit account covers every member account.</li>
+<li>Alarm on <b>DLQ depth</b>, error rate, p99 latency, and throttles — a non-empty DLQ is an incident, page on it <span class="warn">!</span></li>
 </ul>
 <h4>Secure</h4>
 <ul>
@@ -387,6 +397,165 @@ aws logs tail /aws/lambda/fn --follow</code></pre>
 <ul>
 <li>Assume-role &amp; short creds &gt; static keys; use <code>--profile</code> / SSO, never commit keys <span class="warn">!</span></li>
 <li>Prefer IaC (CFN/CDK/Terraform) for anything durable — CLI for inspection/one-offs.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Networking — Peering · TGW · Hybrid</h3>
+<p>Almost every connectivity bug is a mismatch between <b>route table</b>, <b>security group</b>, <b>NACL</b>, and <b>IP/gateway</b> — check those four, in that order <span class="warn">!</span></p>
+<table><thead><tr><th>Connect</th><th>Tool</th></tr></thead><tbody>
+<tr><td>VPC ↔ VPC (few)</td><td>Peering — simple, <b>non-transitive</b></td></tr>
+<tr><td>VPC ↔ VPC (many)</td><td>Transit Gateway — hub, <b>transitive</b></td></tr>
+<tr><td>VPC → AWS service</td><td>VPC endpoint (Gateway/Interface)</td></tr>
+<tr><td>on-prem, encrypted</td><td>Site-to-Site VPN (over internet)</td></tr>
+<tr><td>on-prem, dedicated</td><td>Direct Connect (private line)</td></tr>
+</tbody></table>
+<ul>
+<li><b>Peering is non-transitive</b>: A↔B and B↔C does <i>not</i> give A↔C. Full mesh = N(N-1)/2 links → move to TGW past a handful <span class="warn">!</span></li>
+<li><b>TGW</b> = regional hub; each VPC attaches once, TGW route tables can keep prod ⊥ dev while sharing an on-prem link.</li>
+<li><b>Endpoints</b>: Gateway (S3/DynamoDB, <b>free</b>) vs Interface/<b>PrivateLink</b> (ENI, hourly + per-GB) — expose one service, not the whole network.</li>
+<li><b>VPN vs DX</b>: VPN = quick/encrypted/variable or as backup; DX = consistent low latency, high throughput, cheaper egress at scale. Prod pattern = <b>DX + VPN failover on a TGW</b>.</li>
+<li><b>Flow Logs</b> capture traffic <i>metadata</i> (not payload) at VPC/subnet/ENI → CloudWatch/S3; each record has 5-tuple + <b>ACCEPT/REJECT</b> — the tool for "why is this blocked".</li>
+<li>Access hosts via <b>SSM Session Manager</b> (no bastion, no open port 22, audited) over classic bastion <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Multi-Account — Organizations · SCP</h3>
+<ul>
+<li><b>Organizations</b> = many accounts under one payer, grouped into <b>OUs</b>; consolidated billing pools volume/commitment discounts.</li>
+<li>Account = the strongest blast-radius boundary — separate <b>prod / dev / audit / PCI</b> into their own accounts, connect only what's needed <span class="warn">!</span></li>
+<li><b>SCP</b> = org guardrail on root/OU/account — sets the <b>max</b> permissions; <b>never grants</b>, only caps. You still need an <code>Allow</code> in an IAM policy <span class="warn">!</span></li>
+<li>Effective perms = <b>SCP ∩ identity policy ∩ permission boundary</b>; applies even to account admins (mgmt account is exempt → don't run workloads there).</li>
+<li>Classic SCP uses: deny regions outside an allow-list (<code>aws:RequestedRegion</code>), deny disabling CloudTrail/deleting log resources (tamper-proof audit).</li>
+<li><b>Permission boundary</b> caps an <i>individual</i> role/user (e.g. let a team self-serve IAM without privilege escalation); SCP caps whole <i>accounts</i>.</li>
+<li><b>Control Tower / Landing Zone</b> = codified guardrails, a central security/audit account other accounts deliver into (org CloudTrail + Config aggregator), <b>StackSets</b> to push a baseline everywhere.</li>
+<li><b>Identity Center (SSO)</b> + temporary STS creds for humans — never long-lived IAM user keys. Root user: MFA, no keys, break-glass only <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Analytics &amp; Data Lake</h3>
+<table><thead><tr><th>Need</th><th>Service</th></tr></thead><tbody>
+<tr><td>SQL over S3, no servers</td><td>Athena (pay per TB scanned)</td></tr>
+<tr><td>catalog / ETL</td><td>Glue (crawler + jobs, Data Catalog)</td></tr>
+<tr><td>Spark/Hadoop clusters</td><td>EMR (big-data, on Spot)</td></tr>
+<tr><td>warehouse / heavy SQL</td><td>Redshift (columnar MPP)</td></tr>
+<tr><td>search / log analytics</td><td>OpenSearch</td></tr>
+<tr><td>deliver stream → store</td><td>Kinesis Data Firehose</td></tr>
+<tr><td>BI dashboards</td><td>QuickSight</td></tr>
+</tbody></table>
+<ul>
+<li><b>Lake layout</b>: separate buckets/prefixes for <b>raw → curated → user</b>; partition by <code>raw/YYYY/MM/DD/</code> for lifecycle + Athena parallelism.</li>
+<li>Store analytics-ready data as <b>compressed columnar</b> (Parquet) — slashes Athena scan cost (you pay per byte scanned) <span class="warn">!</span></li>
+<li><b>Kinesis vs SQS</b>: Kinesis = ordered, replayable, multi-consumer streaming; SQS = decoupled work queue. Don't reach for SQS when you need replay/fan-out analytics <span class="warn">!</span></li>
+<li>Real-time path (Kinesis → Lambda/Flink for windowed aggregates) split from batch path (Firehose → S3 lake) — each optimized for its latency/cost.</li>
+<li><b>S3 Select</b> = single-object projection only; for many objects/joins use Athena.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Reference Architectures</h3>
+<h4>HA 3-tier web (the baseline)</h4>
+<p>Route 53 → CloudFront → ALB → <b>ASG across ≥2 AZs</b> (stateless; sessions in ElastiCache/DynamoDB) → <b>RDS Multi-AZ</b>. Public subnet = ALB; private = app + data; NAT per AZ.</p>
+<h4>Image-upload pipeline</h4>
+<p>Client <b>PUT via presigned URL</b> straight to S3 (binaries never touch compute) → <code>s3:ObjectCreated</code> → SQS → Lambda (light) or Fargate (heavy/&gt;15 min) → thumbnails to S3, metadata to DynamoDB → <b>DLQ</b> on failures → serve via CloudFront+OAC.</p>
+<h4>URL shortener (read-skewed)</h4>
+<p>Write: API GW → Lambda → base62 key → DynamoDB (PK=shortKey). Read (hot): GetItem → 301/302, fronted by CloudFront. 302 to keep click analytics (async to Kinesis); TTL for expiry. DynamoDB not RDS — pure key lookup at scale.</p>
+<h4>Event-driven orders</h4>
+<p>API GW → Lambda → DynamoDB + publish <code>OrderPlaced</code> to <b>EventBridge</b> → fan-out to payment / inventory / fulfillment, each its own queue + DLQ. Multi-step saga with rollback → <b>Step Functions</b> (payment → reserve → ship, compensate on fail). Idempotency keys everywhere (at-least-once).</p>
+</section>
+
+<section class="card"><h3>Multi-Tenant SaaS &amp; Migration</h3>
+<h4>Tenant isolation model</h4>
+<table><thead><tr><th>Model</th><th>Isolation / cost</th></tr></thead><tbody>
+<tr><td>Silo (infra per tenant)</td><td>strongest / high — strict compliance</td></tr>
+<tr><td>Pool (shared, tenant-ID rows)</td><td>weakest / lowest — many small tenants</td></tr>
+<tr><td>Bridge (hybrid)</td><td>medium / medium — mixed sizes</td></tr>
+</tbody></table>
+<ul>
+<li>Pooled: shared API GW+Lambda, tenant ID from JWT (Cognito), DynamoDB single-table with tenant ID as PK prefix.</li>
+<li><b>Always scope every query by tenant ID</b> in a data-access layer — a leak here is a cross-tenant breach <span class="warn">!</span></li>
+<li>Noisy neighbours → per-tenant throttling (usage plans); silo the premium tenants who pay for it.</li>
+</ul>
+<h4>Monolith migration — the 6 R's</h4>
+<ul>
+<li><b>Rehost</b> (lift-and-shift to EC2/containers) → <b>Replatform</b> (self-managed DB→RDS, cache→ElastiCache) → <b>Refactor</b> incrementally via <b>strangler-fig</b> (ALB/API GW peels one capability at a time into Lambda/microservice).</li>
+<li>Big-bang rewrite is the classic failure <span class="warn">!</span> Stay shippable; stop modernizing when ROI flattens. Don't split the DB reflexively.</li>
+</ul>
+</section>
+
+<section class="card"><h3>RDS &amp; Aurora — internals</h3>
+<ul>
+<li><b>Aurora</b> decouples compute from a <b>shared distributed storage</b> layer — 6 copies across <b>3 AZs</b>, auto-grows to 128 TiB; only redo-log records cross the wire (fast, cheap replication).</li>
+<li>Up to <b>15 low-lag read replicas</b> sharing that storage (vs RDS replicas that each copy the volume); failover promotes a replica in ~30s.</li>
+<li><b>Aurora Serverless v2</b> scales ACU in fine steps for bursty/idle; <b>Global Database</b> = &lt;1s cross-region replication for DR + local reads.</li>
+<li>RDS: automated backups + <b>PITR</b> (retention 0–35 days), snapshots (manual, kept until deleted), parameter/option groups, Performance Insights.</li>
+<li>Engine upgrade / storage change / class change may need a maintenance window — some are <b>Replacement</b> ops that cause downtime <span class="warn">!</span></li>
+<li><b>Read replica ≠ Multi-AZ standby</b>: replica is async, for read scaling, manual promote; Multi-AZ standby is sync, for automatic failover — not readable <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>KMS &amp; Encryption</h3>
+<ul>
+<li><b>Envelope encryption</b>: KMS holds the <b>key-encryption key (CMK)</b>; it generates a per-object <b>data key</b>, you encrypt data with the data key and store the wrapped key alongside. KMS never sees your data.</li>
+<li>Access needs <b>both</b> the key policy <i>and</i> IAM (key policy is authoritative — lock yourself out of the key policy and even root can't fix it easily) <span class="warn">!</span></li>
+<li><b>Customer-managed</b> keys (rotation, cross-account, custom policy) vs <b>AWS-managed</b> (<code>aws/service</code>, free, auto-rotate) vs <b>AWS-owned</b> (invisible).</li>
+<li><b>Multi-region keys</b> for cross-region DR of encrypted data; <b>S3 bucket keys</b> cut KMS API calls (and cost) on high-volume SSE-KMS.</li>
+<li>In transit: enforce TLS via a bucket/resource policy <code>Deny</code> when <code>aws:SecureTransport=false</code>.</li>
+<li><b>Secrets Manager</b> (auto-rotation via Lambda, ~$0.40/secret/mo) vs <b>SSM Parameter Store</b> SecureString (free tier, no built-in rotation).</li>
+</ul>
+</section>
+
+<section class="card"><h3>CI/CD on AWS</h3>
+<ul>
+<li><b>CodePipeline</b> orchestrates stages; <b>CodeBuild</b> compiles/tests (buildspec.yml); <b>CodeDeploy</b> ships to EC2/ECS/Lambda; <b>CodeArtifact</b>/ECR for artifacts/images.</li>
+<li><b>Deploy strategies</b>: rolling (mutate fleet) · blue/green (parallel env, instant flip-back) · canary (small % first, observe) · linear (ramp in steps).</li>
+<li>CodeDeploy hooks + a CloudWatch alarm → <b>automatic rollback</b> on error/latency regression.</li>
+<li><b>Immutable infra</b>: replace, don't patch — bake an AMI/image, roll it out, keep the old one for instant rollback.</li>
+<li>Never bake secrets into images, buildspecs, or logs — inject from Secrets Manager/SSM at runtime <span class="warn">!</span></li>
+<li>Gate prod on tests + manual approval + change set review; run IaC (CFN/CDK/Terraform), never click-ops.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Numbers &amp; Limits to Know</h3>
+<table><thead><tr><th>Thing</th><th>Value</th></tr></thead><tbody>
+<tr><td>Lambda timeout / mem</td><td>15 min · 128 MB–10 GB</td></tr>
+<tr><td>Lambda payload</td><td>6 MB sync · 256 KB async</td></tr>
+<tr><td>Lambda concurrency</td><td>1000/acct (soft)</td></tr>
+<tr><td>SQS message / retention</td><td>256 KB · up to 14 days</td></tr>
+<tr><td>SQS FIFO throughput</td><td>~3000 msg/s (batched)</td></tr>
+<tr><td>DynamoDB item</td><td>400 KB max</td></tr>
+<tr><td>S3 object</td><td>5 TB (multipart &gt;100 MB)</td></tr>
+<tr><td>S3 durability</td><td>11 nines</td></tr>
+<tr><td>Kinesis retention</td><td>24 h–365 d</td></tr>
+<tr><td>Aurora storage / replicas</td><td>128 TiB · 15</td></tr>
+<tr><td>RDS backup retention</td><td>0–35 days</td></tr>
+<tr><td>VPC / subnet</td><td>subnet = 1 AZ; /16–/28</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> Quotas are a <b>reliability risk</b> — many are soft (raise via Service Quotas); hitting one mid-incident looks like an outage. Know the ones on your hot path.</p>
+</section>
+
+<section class="card"><h3>Data-Transfer — the silent bill</h3>
+<p>The three bill meters are <b>compute-time</b>, <b>storage-GB</b>, and <b>data-transfer</b> — and transfer is the one that surprises. Rates rarely bite; <b>chatty topology and idle/over-provisioned resources</b> do <span class="warn">!</span></p>
+<ul>
+<li>Internet <b>egress</b> is billed, ingress is free; inter-region and <b>cross-AZ</b> traffic both charge per GB each way.</li>
+<li><b>NAT Gateway</b>: hourly + ~$0.045/GB processed on every byte — route S3/DynamoDB via <b>free gateway endpoints</b> to skip it entirely, and put <b>one NAT per AZ</b> so private subnets don't pay cross-AZ on top <span class="warn">!</span></li>
+<li>Interface/PrivateLink endpoints keep ECR image pulls + Secrets Manager calls off the NAT.</li>
+<li>CloudFront egress is cheaper than raw S3 egress for repeated reads, and NLB charges cross-AZ data (ALB cross-zone is free).</li>
+<li>Co-locate chatty tiers in one AZ where HA allows; cache to cut origin round-trips; question whether a workload needs internet egress at all.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Serverless — event sources &amp; patterns</h3>
+<h4>Invocation models</h4>
+<table><thead><tr><th>Model</th><th>Behaviour</th></tr></thead><tbody>
+<tr><td>sync (API GW, ALB)</td><td>caller waits, eats latency/failure</td></tr>
+<tr><td>async (S3, SNS, EventBridge)</td><td>queued internally, <b>2 retries</b> → DLQ/destination</td></tr>
+<tr><td>stream (Kinesis, DynamoDB)</td><td>polled in batches, ordered per shard</td></tr>
+<tr><td>poll (SQS)</td><td>event-source mapping long-polls</td></tr>
+</tbody></table>
+<ul>
+<li>Async failures vanish after retries unless you set a <b>DLQ/on-failure destination</b> <span class="warn">!</span></li>
+<li>Stream: a poison record <b>blocks the shard</b> until it expires → set <code>BisectBatchOnFunctionError</code>, max-retry-age, and <b>partial-batch-failure</b> reporting.</li>
+<li><b>EventBridge Pipes</b> = point-to-point source→(filter/enrich)→target, no glue Lambda. <b>Scheduler</b> = cron/one-off at scale.</li>
+<li>Reserve concurrency to protect a downstream DB from a spike; provisioned concurrency to kill cold starts on latency-critical routes.</li>
 </ul>
 </section>
 

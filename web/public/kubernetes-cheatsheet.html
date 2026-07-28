@@ -200,6 +200,8 @@ spec:
 <li><code>progressDeadlineSeconds</code> exceeded → rollout marked <b>stuck</b> (bad probe/image). <code>rollout pause</code>/<code>resume</code> for baking a canary.</li>
 <li>Zero-downtime needs <b>readiness probes</b> + PDB; old ReplicaSets kept per <code>revisionHistoryLimit</code>.</li>
 </ul>
+<h4>Canary / blue-green with primitives</h4>
+<p>Native rollout is a coarse <b>rolling</b> update — no metric-gated promotion. <b>Canary</b>: run a second Deployment (few replicas, same Service labels) so a fraction of traffic hits the new version, watch signals, then scale up. <b>Blue-green</b>: two full Deployments, flip the Service <code>selector</code> from <code>blue</code>→<code>green</code> for instant cutover + instant rollback. For weighted/header splits + auto-rollback use <b>Argo Rollouts</b>, <b>Flagger</b>, or the <b>Gateway API</b> <span class="warn">!</span></p>
 </section>
 
 <section class="card"><h3>Workload Types — Pick One</h3>
@@ -273,8 +275,16 @@ kubectl create secret generic db --from-literal=pass=s3cr3t</code></pre>
 <li>Reclaim policy: <b>Delete</b> (default on dynamic — deletes real disk when PVC goes <span class="warn">!</span>) vs <b>Retain</b> (keep data, manual cleanup). Use Retain for prod data.</li>
 <li><code>volumeBindingMode: WaitForFirstConsumer</code> delays binding until scheduling so the disk lands in the pod's zone (topology) <span class="warn">!</span></li>
 <li><b>CSI</b> replaced in-tree drivers; enables snapshots, expansion (<code>allowVolumeExpansion</code>), cloud plugins.</li>
-<li><b>emptyDir</b> = pod-lifetime scratch (gone with pod). <b>hostPath</b> = node path, dangerous (breaks scheduling, security) <span class="warn">!</span></li>
+<li><b>ReadWriteOncePod</b> = exactly one <i>pod</i> (stronger than RWO's one <i>node</i>) — use for leader-only writers.</li>
+<li><b>VolumeSnapshot</b> (CSI) = point-in-time PVC copy → restore or clone. Expand a PVC in place by editing its request (needs <code>allowVolumeExpansion: true</code>).</li>
 </ul>
+<table><thead><tr><th>Volume</th><th>Lifetime / use</th></tr></thead><tbody>
+<tr><td>emptyDir</td><td>pod scratch (opt. tmpfs) <span class="warn">!</span></td></tr>
+<tr><td>hostPath</td><td>node path — dangerous <span class="warn">!</span></td></tr>
+<tr><td>configMap/secret</td><td>projected config files</td></tr>
+<tr><td>PVC (block, RWO)</td><td>EBS/PD/Azure Disk</td></tr>
+<tr><td>PVC (RWX)</td><td>NFS/EFS/CephFS/Filestore</td></tr>
+</tbody></table>
 </section>
 
 <section class="card"><h3>Probes &amp; Lifecycle</h3>
@@ -315,6 +325,7 @@ kubectl create secret generic db --from-literal=pass=s3cr3t</code></pre>
 <li><b>Pod (anti-)affinity</b> co-locates/spreads by <code>topologyKey</code> (e.g. hostname, zone) — expensive at scale.</li>
 <li><b>topologySpreadConstraints</b> (<code>maxSkew</code>) = the modern way to balance replicas across zones/nodes.</li>
 <li><b>PriorityClass</b> + preemption: high-priority Pending pod evicts lower-priority pods.</li>
+<li>Scheduler works in two phases: <b>filter</b> (feasible nodes — fit, taints, affinity) then <b>score</b> (rank — spread, least-allocated) → binds the winner. It never <i>starts</i> the pod; the kubelet does <span class="warn">!</span></li>
 </ul>
 <pre><code>tolerations:
 - key: node-role.kubernetes.io/control-plane
@@ -337,6 +348,8 @@ affinity: { nodeAffinity: { requiredDuringScheduling...:
 <li><b>HPA + VPA on the same metric conflict</b> (both fight over the pod) — split metrics or use VPA in recommend-only <span class="warn">!</span></li>
 <li>Stabilization windows / behavior policies prevent flapping. HPA scales pods → creates Pending → Cluster Autoscaler adds nodes.</li>
 <li>Local storage / restrictive PDBs / no-controller pods block node scale-down <span class="warn">!</span></li>
+<li>Example: 4 pods at 80% CPU, target 50% → <code>ceil(4×80/50)=7</code> pods. Scale-<b>down</b> is deliberately slow (default 5m stabilization) to avoid flapping; scale-up is fast.</li>
+<li><b>Karpenter</b> (vs Cluster Autoscaler) provisions right-sized nodes directly from pending pods — no pre-defined node groups — and consolidates/bin-packs to cut cost. <b>KEDA</b> scales on queue depth, Kafka lag, cron, etc., and to <b>zero</b>.</li>
 </ul>
 </section>
 
@@ -344,9 +357,26 @@ affinity: { nodeAffinity: { requiredDuringScheduling...:
 <ul>
 <li>Pipeline: <b>authn → authz (RBAC) → admission</b>. K8s has no user DB — trusts external identity (certs, OIDC, cloud IAM, SA tokens).</li>
 <li><b>Role</b>/<b>RoleBinding</b> = namespaced; <b>ClusterRole</b>/<b>ClusterRoleBinding</b> = cluster-wide. Rule = apiGroups × resources × verbs.</li>
-<li>Pods authenticate via a mounted <b>ServiceAccount</b> token. Least-privilege; avoid <code>cluster-admin</code>/wildcard verbs <span class="warn">!</span></li>
+<li>Pods authenticate via a mounted <b>ServiceAccount</b> token (short-lived, audience-scoped <b>bound/projected</b> JWT — not the old forever-secret). Least-privilege; avoid <code>cluster-admin</code>/wildcard verbs <span class="warn">!</span></li>
 <li>Test: <code>kubectl auth can-i &lt;verb&gt; &lt;res&gt; --as=…</code>. Set <code>automountServiceAccountToken: false</code> if the pod needs no API access.</li>
 </ul>
+<p><b>No User object</b> — K8s has no user DB; identity is asserted externally. <b>401</b>=authn failed (bad/expired token/cert); <b>403</b>=authenticated but not authorized <span class="warn">!</span> RBAC is <b>allow-only + additive</b> (no deny rules) — effective perms = union of all bindings.</p>
+<table><thead><tr><th>Authn</th><th>Identity from</th></tr></thead><tbody>
+<tr><td>client cert</td><td>CN→user, O→groups</td></tr>
+<tr><td>SA token</td><td>in-cluster pods</td></tr>
+<tr><td>OIDC</td><td>human SSO (Okta/AAD)</td></tr>
+<tr><td>webhook</td><td>cloud IAM (EKS→AWS)</td></tr>
+</tbody></table>
+<pre><code>kind: Role                 # namespaced
+rules:
+- apiGroups: [""]          # core group
+  resources: [pods, pods/log]
+  verbs: [get, list, watch]
+---
+kind: RoleBinding          # binds subject→Role in this ns
+subjects: [{ kind: ServiceAccount, name: app }]
+roleRef: { kind: Role, name: pod-reader }</code></pre>
+<p>Watch the dangerous verbs: <code>escalate</code>, <code>bind</code>, <code>impersonate</code> let a subject grant itself more than it has. Cloud bridges: <b>IRSA</b> (EKS) / <b>Workload Identity</b> (GKE) map a SA→IAM role, no static keys.</p>
 <h4>Pod hardening</h4>
 <ul>
 <li>SecurityContext: <code>runAsNonRoot</code>, <code>drop: [ALL]</code> caps, <code>readOnlyRootFilesystem</code>, <code>allowPrivilegeEscalation:false</code>, no <code>privileged</code>/hostNetwork/hostPath <span class="warn">!</span></li>
@@ -371,6 +401,9 @@ affinity: { nodeAffinity: { requiredDuringScheduling...:
 <li><b>Kustomize</b>: template-free bases + per-env overlays/patches; built into <code>kubectl -k</code>. Diffs stay readable.</li>
 <li><b>GitOps</b> (Argo CD / Flux): Git = desired state; pull-based reconcile + drift detection + auto-sync — beats <code>kubectl apply</code> from CI (no cluster creds in CI, audit trail).</li>
 <li>Secrets in Git: sealed-secrets / SOPS / External Secrets — never plaintext <span class="warn">!</span></li>
+<li>Not either/or: common to run <b>Kustomize over a Helm-rendered base</b>, or Helm for third-party charts + Kustomize for your own apps.</li>
+<li>Kustomize patches: <b>strategic merge</b> (merge YAML by field) vs <b>JSON patch</b> (RFC6902 precise ops). <b>Helm hooks</b> (pre-install/post-upgrade) run migration Jobs.</li>
+<li>Argo <b>sync waves</b> order resource apply; <b>app-of-apps</b> = one Application managing many. Drift detection re-converges the live cluster to Git.</li>
 </ul>
 </section>
 
@@ -383,6 +416,133 @@ affinity: { nodeAffinity: { requiredDuringScheduling...:
 <li>Backups: <b>Velero</b> (objects + PV snapshots). Managed (EKS/GKE/AKS) runs control plane + etcd for you.</li>
 <li>Cost: right-size requests, spot pools, Cluster Autoscaler/Karpenter, bin-packing.</li>
 </ul>
+</section>
+
+<section class="card"><h3>Namespaces &amp; Multi-tenancy</h3>
+<p>A <b>namespace</b> is a virtual cluster: it scopes object <i>names</i> (a Deployment <code>api</code> can exist in both <code>dev</code> and <code>prod</code>) and is the attachment point for <b>RBAC Roles</b>, <b>ResourceQuota</b>, and <b>LimitRange</b>. It is an <b>organisational + policy</b> boundary, <b>not</b> a network or hard-security one <span class="warn">!</span></p>
+<h4>Namespaced vs cluster-scoped</h4>
+<table><thead><tr><th>Namespaced</th><th>Cluster-scoped</th></tr></thead><tbody>
+<tr><td>Pod, Deployment, RS/STS</td><td>Node</td></tr>
+<tr><td>Service, Ingress, Endpoints</td><td>PersistentVolume</td></tr>
+<tr><td>ConfigMap, Secret, <b>PVC</b></td><td>StorageClass</td></tr>
+<tr><td>SA, Role, RoleBinding</td><td>ClusterRole(Binding)</td></tr>
+<tr><td>Job, CronJob</td><td>CRD, PriorityClass, Namespace</td></tr>
+</tbody></table>
+<ul>
+<li>Storage asymmetry: <b>PVC</b> is namespaced (a tenant's claim) but the <b>PV/SC</b> it binds are cluster-wide supply <span class="warn">!</span> Check any kind: <code>kubectl api-resources --namespaced=true</code>.</li>
+<li>Defaults: <code>default</code> (yours), <code>kube-system</code> (control plane — hands off), <code>kube-public</code> (world-readable CA), <code>kube-node-lease</code> (node heartbeats).</li>
+<li>Cross-ns reach: FQDN <code>svc.other-ns.svc.cluster.local</code> — flat pod network means ns is <b>not</b> isolation until a <b>NetworkPolicy</b> restricts it <span class="warn">!</span></li>
+<li>Stuck <b>Terminating</b> ns = a resource inside holds a <b>finalizer</b> whose controller is gone; patch the finalizer out as last resort.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Labels, Selectors &amp; Annotations</h3>
+<p>The load-bearing wiring: nothing is linked by name — everything is a <b>label-driven query</b>. A Service finds pods, a Deployment owns pods, a ReplicaSet counts pods — all via selectors matching labels. Break the selector, silently break the Service <span class="warn">!</span></p>
+<table><thead><tr><th></th><th>Label</th><th>Annotation</th></tr></thead><tbody>
+<tr><td>selectable?</td><td>yes (indexed)</td><td><b>no</b></td></tr>
+<tr><td>size</td><td>small</td><td>large/free-form</td></tr>
+<tr><td>use</td><td>group + select</td><td>tooling/human metadata</td></tr>
+</tbody></table>
+<ul>
+<li><b>Equality</b>: <code>app=web,env!=dev</code>. <b>Set-based</b>: <code>env in (prod,staging)</code>, <code>tier notin (…)</code>, <code>key</code>/<code>!key</code> existence.</li>
+<li><code>kubectl get pods -l 'app=web,env in (prod,staging)' --show-labels</code>.</li>
+<li>Convention: <code>app.kubernetes.io/{name,instance,component,part-of,managed-by}</code> — lets tools reason about your objects uniformly.</li>
+<li>Annotations carry ingress config, template <b>checksums</b> (to force restarts), <code>kubectl.kubernetes.io/last-applied-configuration</code>, "managed-by" hints.</li>
+<li>A Deployment's <code>spec.selector</code> is <b>immutable</b>; a selector that doesn't match its own pod template ⇒ the Deployment can't adopt its pods <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Controllers, CRDs &amp; Operators</h3>
+<p>Kubernetes doesn't <i>do</i> things once, it <b>keeps them true</b>. A <b>controller</b> loops forever: observe desired (<code>spec</code>) → observe actual (world) → diff → take one <b>idempotent</b> step → update <code>status</code> → requeue. Deployment, ReplicaSet, Node, Job are all just built-in controllers.</p>
+<pre><code>for {
+  key := queue.Get()          // needs reconcile
+  desired := spec(key)        // from informer cache
+  actual  := observeWorld(key)
+  if actual != desired { stepToward(desired) } // idempotent
+  updateStatus(key); queue.Done(key)  // or AddRateLimited
+}</code></pre>
+<ul>
+<li><b>Informer</b> = client-side watched cache feeding a rate-limited, deduplicating <b>work queue</b> of object keys — not a hammering poll.</li>
+<li><b>CRD</b> registers a new API kind (OpenAPI schema, printer columns, <code>/status</code> &amp; <code>/scale</code> subresources). A CRD alone is <b>inert data</b> <span class="warn">!</span></li>
+<li><b>Operator</b> = CRD + a controller encoding day-2 ops (backup, failover, upgrade) for a stateful app. Reconcile runs thousands of times → must be idempotent + safe to re-run.</li>
+<li><b>ownerReferences</b> drive cascading GC (delete parent → children collected). <b>Finalizers</b> <i>block</i> deletion for an external-cleanup hook.</li>
+<li><b>Admission webhook</b> = synchronous validate/mutate on write (OPA/Gatekeeper, Kyverno); a controller is asynchronous convergence <b>after</b> the object is stored.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Observability &amp; Telemetry</h3>
+<p>Debugging = comparing <code>spec</code> (asked) to <code>status</code> (achieved) and finding where the loop stalled. Reach for <b>describe first</b>, logs second, shell last <span class="warn">!</span></p>
+<pre><code>kubectl describe pod &lt;p&gt;        # spec+status+EVENTS
+kubectl get events --sort-by=.lastTimestamp
+kubectl top pod / node           # needs metrics-server
+kubectl port-forward &lt;p&gt; 8080:8080  # bypass Service
+kubectl debug -it &lt;p&gt; --image=busybox --target=&lt;c&gt;</code></pre>
+<ul>
+<li>A <code>Pending</code> / <code>ImagePullBackOff</code> pod has <b>no app logs</b> — the answer is in <b>Events</b> (<code>FailedScheduling</code>, <code>FailedMount</code>, <code>Unhealthy</code>) <span class="warn">!</span></li>
+<li>Events are namespaced + <b>expire (~1h)</b>; ship them off-node or they're gone <span class="warn">!</span> Pod logs are node-local and mortal too → aggregate (Fluent Bit → Loki/ES).</li>
+<li>Distroless/scratch = no shell → <code>exec</code> fails, use <code>kubectl debug</code> ephemeral container.</li>
+</ul>
+<table><thead><tr><th>Tool</th><th>Measures</th></tr></thead><tbody>
+<tr><td>metrics-server</td><td><code>top</code>/HPA only — no history <span class="warn">!</span></td></tr>
+<tr><td>Prometheus</td><td>scraped time-series + PromQL alerts</td></tr>
+<tr><td>kube-state-metrics</td><td>object state (replicas, phase)</td></tr>
+<tr><td>node-exporter</td><td>host CPU/mem/disk</td></tr>
+<tr><td>cAdvisor</td><td>per-container usage (in kubelet)</td></tr>
+</tbody></table>
+<p><b>Golden signals</b>: latency, traffic, errors, saturation. <b>USE</b> (Utilization/Saturation/Errors) for resources; <b>RED</b> (Rate/Errors/Duration) for services.</p>
+</section>
+
+<section class="card"><h3>Networking: Packet Path &amp; Policy</h3>
+<p>Key unlock: <b>a Service IP is a rule, not a host</b> — nothing listens on a ClusterIP. kube-proxy (or eBPF) installs a DNAT rule on <b>every node</b> that rewrites the VIP to a real pod IP picked from the Service's <b>EndpointSlices</b> (ready backends only) <span class="warn">!</span></p>
+<table><thead><tr><th>Layer</th><th>Realised by</th></tr></thead><tbody>
+<tr><td>pod IP + routes</td><td>CNI (Calico/Cilium/Flannel)</td></tr>
+<tr><td>name → IP</td><td>CoreDNS</td></tr>
+<tr><td>VIP → pod IP</td><td>kube-proxy iptables/IPVS / eBPF</td></tr>
+<tr><td>segmentation</td><td>NetworkPolicy (policy-aware CNI)</td></tr>
+</tbody></table>
+<ul>
+<li><b>Overlay</b> (VXLAN/IP-in-IP) encapsulates to cross nodes; <b>native routing</b> puts pod IPs in the real routing table — no encap, lower overhead.</li>
+<li>kube-proxy only <i>programs rules</i>; the <b>kernel</b> forwards each packet. Cilium eBPF can replace kube-proxy entirely.</li>
+<li><b>Flannel silently ignores NetworkPolicy</b> — a policy that does nothing is a classic gotcha <span class="warn">!</span> Default is allow-all until a policy selects a pod, then default-deny for that direction.</li>
+</ul>
+<pre><code>kind: NetworkPolicy
+spec:
+  podSelector: { matchLabels: { app: db } }
+  policyTypes: [Ingress]
+  ingress:
+  - from: [{ podSelector: { matchLabels: { app: api }}}]
+    ports: [{ port: 5432 }]   # only api → db:5432</code></pre>
+</section>
+
+<section class="card"><h3>kubectl Output &amp; JSONPath</h3>
+<pre><code>kubectl get pod -o yaml | jsonpath | wide | name
+-o jsonpath='{.items[*].metadata.name}'
+-o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.phase}{"\n"}{end}'
+-o custom-columns=NAME:.metadata.name,NODE:.spec.nodeName
+--sort-by=.status.startTime
+-l app=web --field-selector=status.phase=Running
+kubectl get po -A --field-selector=status.phase!=Running  # find broken
+kubectl get po -o wide --watch     # stream changes
+kubectl get --raw /metrics         # api-server metrics
+kubectl api-resources --namespaced=false   # cluster-scoped kinds
+kubectl explain deploy.spec.strategy --recursive</code></pre>
+<ul>
+<li><b>Label</b> selector (<code>-l</code>) queries metadata labels; <b>field</b> selector filters a few built-in fields (<code>status.phase</code>, <code>spec.nodeName</code>, <code>metadata.namespace</code>) <span class="warn">!</span></li>
+<li><code>-o name</code> pipes cleanly into <code>xargs</code>; <code>custom-columns</code> for readable tables; <code>jsonpath</code> for scripting.</li>
+<li><code>kubectl get events --field-selector=type=Warning</code> surfaces just the bad news.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Scenario Playbooks (worked)</h3>
+<p>Every workload flows through a pipeline: <b>admitted → scheduled → image pulled → started → probes pass → endpoints added → served</b>. A failure is stuck at <i>one</i> stage and K8s names it in plain text. Move outward: pod → controller → node → scheduler → network.</p>
+<h4>Unschedulable despite free capacity</h4>
+<p>Capacity ≠ schedulability: check <b>taints</b> without a toleration, <b>anti-affinity</b>/<b>topologySpread</b> that no node satisfies, an <b>unbound PVC</b> pinned to a zone (<code>WaitForFirstConsumer</code>), or requests that fit no <i>single</i> node. <code>describe pod</code> events name it.</p>
+<h4>Intermittent 5xx during a deploy</h4>
+<p>Almost always the <b>endpoint-removal race</b>: pod gets SIGTERM + is pulled from endpoints, but in-flight LB connections still arrive. Fix = <b>preStop sleep</b> (5–15s) + app drains on SIGTERM + a real <b>readiness</b> probe. Add a <b>PDB</b> so a drain can't take too many at once <span class="warn">!</span></p>
+<h4>NotReady node</h4>
+<p><code>describe node</code> conditions: <code>MemoryPressure</code>/<code>DiskPressure</code>/<code>PIDPressure</code> → kubelet evicts BestEffort/Burstable first. Network/kubelet down → node lease stops → pods marked for eviction after the toleration window (default 5m for <code>node.kubernetes.io/not-ready</code>).</p>
+<h4>api-server / etcd latency</h4>
+<p>Everything crosses the api-server; slow etcd = slow everything. Check etcd disk latency (fsync), object churn (a hot-looping controller), and <code>--raw /metrics</code> request durations. Large Secrets/ConfigMaps and huge <code>list</code> calls hammer etcd <span class="warn">!</span></p>
 </section>
 
 <section class="card"><h3>&#9733; Troubleshooting Playbook</h3>

@@ -126,6 +126,8 @@ gcloud projects add-iam-policy-binding acme-prod \
 <li><b>Live migration</b> keeps VMs up during host maintenance (Spot/GPU excluded).</li>
 <li>Boot from a <b>custom/golden image</b>; use MIG + instance template for immutable fleets.</li>
 <li>Enforce <b>Shielded VM</b>; scope the default SA down or replace it <span class="warn">!</span></li>
+<li>E2 = cheap general/burstable; N-series = balanced; C-series = high per-core perf; M = large in-memory (SAP/DB); T2D/Tau = scale-out price-perf. <b>Custom machine types</b> right-size vCPU:RAM instead of over-buying a preset.</li>
+<li>Spot preempt = <b>30s ACPI G2 notice</b> — checkpoint work; never for a stateful primary. Sole-tenant for per-core BYOL / compliance isolation.</li>
 </ul>
 </section>
 
@@ -156,6 +158,8 @@ gcloud projects add-iam-policy-binding acme-prod \
 <li>VPC-native (alias IPs); <b>private clusters</b> (no public node IPs); Gateway API / container-native LB via <b>NEGs</b>.</li>
 <li>Cost: <b>Spot node pools</b>, cluster autoscaler + node auto-provisioning, Autopilot bin-packing, right-size requests <span class="warn">!</span></li>
 <li><b>Release channels</b> (rapid/regular/stable) for auto-upgrade/repair; Artifact Registry + Binary Authorization for supply chain.</li>
+<li>Prefer <b>Autopilot</b> as the default — Google runs nodes, per-pod billing, security defaults baked in; drop to Standard only for DaemonSets, GPUs, or custom node config.</li>
+<li>Right-size <b>requests/limits</b> (Autopilot bills what you request); HPA on CPU/custom metrics, VPA for recommendations, PodDisruptionBudgets for safe upgrades <span class="warn">!</span></li>
 </ul>
 </section>
 
@@ -272,7 +276,9 @@ TTL caching makes it coarse — LB does fast per-request routing <span class="wa
 <ul>
 <li><b>Pub/Sub</b> = global, serverless topics/subscriptions (≈ SNS+SQS combined). Push or pull; <b>at-least-once</b> → make consumers <b>idempotent</b> <span class="warn">!</span></li>
 <li>Ack deadline; redelivery on nack/timeout; <b>always set a dead-letter topic</b> + retry backoff <span class="warn">!</span></li>
-<li>Ordering keys (per-key order) &amp; optional exactly-once; retention + <b>seek/replay</b> &amp; snapshots.</li>
+<li>Ordering keys (per-key order, opt-in — cuts throughput) &amp; optional exactly-once (pull only); retention (7d, 31d max) + <b>seek/replay</b> to timestamp/snapshot.</li>
+<li>Ack deadline default <b>10s</b> (→600s); missed ack → redeliver. <b>Redelivery storm</b> = processing &gt; deadline → lease-extend (auto) or raise deadline above p99 <span class="warn">!</span></li>
+<li>Sub types: pull/StreamingPull, push, <b>BigQuery sub</b> (direct insert, no code), <b>GCS sub</b> (batch to files). Each sub = independent backlog/ack/filter.</li>
 <li>Fan-out = many subscriptions per topic; schemas (Avro/Protobuf); message filtering cuts downstream cost.</li>
 <li><b>Pub/Sub Lite</b> = cheaper, throughput-provisioned, zonal (less durable / more ops).</li>
 <li><b>Eventarc</b> routes events (Audit Logs / Storage / Pub/Sub) → Cloud Run/Functions/GKE (CloudEvents).</li>
@@ -291,6 +297,19 @@ GROUP BY user_id;</code></pre>
 <li>Streaming (<b>Storage Write API</b>) vs batch loads; external/federated tables (<b>BigLake</b>); materialized views; scheduled queries; <b>BQML</b> in-SQL ML.</li>
 <li>Nested/repeated fields (arrays/structs); authorized views + column/row-level security for governance.</li>
 <li><b>Wrong tool for OLTP / low-latency point lookups</b> <span class="warn">!</span> Pattern: Pub/Sub → Dataflow → BigQuery.</li>
+<li>Partition types: time-unit (<code>_PARTITIONDATE</code>), integer-range, ingestion-time. Cluster on up-to-4 columns you filter/aggregate by. Set <b>partition expiration</b> to auto-prune old data.</li>
+<li><b>Time-travel</b> 7 days (query/restore past state); <b>slot autoscaling</b> reservations smooth spiky spend; <code>--dry_run</code> before any big query <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Cloud Run — tuning &amp; gotchas</h3>
+<ul>
+<li><b>Concurrency</b> (default 80) = requests per instance; raise for I/O-bound to pack more per instance (cheaper), lower for CPU-bound/memory-heavy. Lambda is fixed at 1 <span class="warn">!</span></li>
+<li><b>Cold starts</b>: <code>--min-instances</code> keeps warm capacity; slim image + lazy init cut start time; startup CPU boost for heavy frameworks.</li>
+<li><b>CPU allocation</b>: <i>request-only</i> (billed during requests, default) vs <i>always-allocated</i> (background work/streaming but idles cost money) <span class="warn">!</span></li>
+<li><b>Stateless only</b> — no local state between requests; externalize to GCS/Firestore/Memorystore. Instances recycle without warning.</li>
+<li><b>Revisions</b> are immutable; split traffic for canary/blue-green; roll back by shifting traffic to a prior revision.</li>
+<li>Reach a VPC via <b>Direct VPC egress</b> or a Serverless VPC connector; guard with IAM (<code>--no-allow-unauthenticated</code>) unless truly public.</li>
 </ul>
 </section>
 
@@ -313,6 +332,8 @@ GROUP BY user_id;</code></pre>
 <li><b>IAP</b> = zero-trust / BeyondCorp access to apps/VMs without a VPN. <b>VPC Service Controls</b> = perimeters against data exfiltration.</li>
 <li><b>Security Command Center</b> (CSPM, threat detection, misconfig); <b>Binary Authorization</b> (only attested images run); org policies as guardrails.</li>
 <li>Defense in depth: least-privilege IAM + perimeter + edge WAF + encryption + audit.</li>
+<li><b>Cloud Armor</b> extras: preconfigured OWASP (SQLi/XSS) rules, per-IP <b>rate limiting</b>, adaptive DDoS, geo/IP allow-deny, bot management — all attach to the external App LB.</li>
+<li><b>VPC Service Controls</b> draw a perimeter around APIs (GCS/BigQuery) so a stolen credential can't exfiltrate data out of the perimeter — pairs with least-privilege IAM, not a replacement <span class="warn">!</span></li>
 </ul>
 </section>
 
@@ -344,6 +365,8 @@ GROUP BY user_id;</code></pre>
 <li><b>BigQuery</b>: on-demand bytes-scanned vs slot reservations; partition/cluster; custom quotas; no <code>SELECT *</code>.</li>
 <li><b>Visibility</b>: Budgets + alerts, billing export to BigQuery, <b>labels</b> for allocation, Active Assist / Recommender.</li>
 <li>Anti-patterns: idle external IPs/disks, always-on Cloud Run CPU, un-tiered logs, oversized non-prod, forgotten dev projects.</li>
+<li>Egress specifics: <b>internet</b> and <b>inter-region</b> egress are billed; <b>same-zone private-IP</b> traffic is free — colocate chatty services and pick one region per app <span class="warn">!</span></li>
+<li><b>Recommender / Active Assist</b> surfaces idle-resource, right-size, and CUD recommendations automatically — action them on a cadence.</li>
 </ul>
 </section>
 
@@ -380,6 +403,137 @@ gcloud logging read 'severity&gt;=ERROR' --limit=20</code></pre>
 <li><code>gcloud storage</code> (not legacy <code>gsutil</code>) for buckets/objects.</li>
 <li><code>--impersonate-service-account</code> beats key files for local runs.</li>
 <li><code>gcloud recommender ...</code> surfaces right-size / IAM / cost recs.</li>
+<li><code>gcloud projects get-iam-policy acme-prod</code> audits who has what; <code>--format=json</code> for scripting and diffs.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Choosing a Database — decision flow</h3>
+<table><thead><tr><th>Access pattern</th><th>Pick</th></tr></thead><tbody>
+<tr><td>Relational, single-region, managed</td><td>Cloud SQL (+HA, read replicas)</td></tr>
+<tr><td>Relational PG, HTAP / faster</td><td>AlloyDB</td></tr>
+<tr><td>Relational, global, horizontal, strong</td><td>Spanner</td></tr>
+<tr><td>Document, mobile/real-time, key access</td><td>Firestore</td></tr>
+<tr><td>Wide-column, PB-scale, µs, time-series</td><td>Bigtable</td></tr>
+<tr><td>Analytics / warehouse / ad-hoc SQL</td><td>BigQuery</td></tr>
+<tr><td>Cache / session / leaderboard</td><td>Memorystore</td></tr>
+</tbody></table>
+<ul>
+<li>Ask: <b>relational or not</b> → <b>scale</b> (single-region vs global) → <b>consistency</b> (strong vs eventual) → <b>access</b> (key-lookup vs range-scan vs ad-hoc SQL) → <b>latency</b> (µs vs ms vs analytics).</li>
+<li>Don't default to <b>Spanner</b> — it's priciest; use it only for genuine global strong-consistency + horizontal scale. Cloud SQL HA covers most OLTP <span class="warn">!</span></li>
+<li><b>BigQuery is not OLTP</b> — no low-latency point lookups/updates. Bigtable serves µs; BigQuery serves analytics <span class="warn">!</span></li>
+<li>Firestore = strong consistency + real-time listeners + offline, <b>every query needs an index, no joins</b>. Bigtable = <b>no cross-row txn, no secondary index</b>, row-key is everything.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Hybrid &amp; Private Connectivity</h3>
+<table><thead><tr><th>Option</th><th>Use</th></tr></thead><tbody>
+<tr><td>Cloud VPN (HA)</td><td>encrypted over internet; ≤3Gbps/tunnel</td></tr>
+<tr><td>Dedicated Interconnect</td><td>10/100Gbps private, own the port</td></tr>
+<tr><td>Partner Interconnect</td><td>via a provider; 50Mbps–50Gbps</td></tr>
+<tr><td>Cross-Cloud Interconnect</td><td>direct link to AWS/Azure</td></tr>
+</tbody></table>
+<ul>
+<li><b>Private Google Access</b> — private-IP VMs reach Google APIs over internal routes, no external IP, no internet path.</li>
+<li><b>Private Service Connect (PSC)</b> — consume Google/partner/your-own services via a private endpoint in your VPC; the modern private-access primitive.</li>
+<li><b>VPC peering is non-transitive</b> and shares no transitive routes — A-B and B-C does not give A-C <span class="warn">!</span> Use <b>Shared VPC</b> or an NCC hub for many-VPC topologies.</li>
+<li><b>Network Connectivity Center</b> = hub-and-spoke to wire VPNs/Interconnects/VPCs together. Cloud Router does <b>BGP</b> for dynamic routes.</li>
+<li>Interconnect for steady high bandwidth / lower egress rates; HA VPN (two tunnels, 99.99%) for quick/cheaper hybrid.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Data Processing — Dataflow / Dataproc / Composer</h3>
+<table><thead><tr><th>Engine</th><th>Use when</th></tr></thead><tbody>
+<tr><td>Dataflow (Beam)</td><td>serverless stream+batch ETL, autoscale, exactly-once → BQ</td></tr>
+<tr><td>Dataproc</td><td>existing Spark/Hadoop jobs; Serverless = no standing cluster</td></tr>
+<tr><td>Cloud Composer</td><td>Airflow DAG orchestration across steps/systems</td></tr>
+<tr><td>BQ scheduled query</td><td>transform is pure SQL — skip the cluster entirely</td></tr>
+</tbody></table>
+<ul>
+<li><b>Dataflow</b> = managed Apache Beam; one codebase for <b>batch and streaming</b>, windowing/dedup/enrichment, autoscales workers to throughput. The default GCP data-pipeline engine.</li>
+<li><b>Dataproc Serverless</b> when the team already has <b>Spark/Hadoop</b> — lift jobs without managing a cluster; use <b>Spot</b> workers for batch to cut cost.</li>
+<li><b>Composer</b> orchestrates (schedules/retries/dependencies) — it doesn't crunch data itself; it triggers Dataflow/BQ/etc.</li>
+<li>Canonical stream stack: <b>Pub/Sub → Dataflow → BigQuery</b> (+ BI Engine dashboards). For pure pass-through, a <b>Pub/Sub BigQuery subscription</b> drops Dataflow.</li>
+<li>Batch: make jobs <b>idempotent + checkpointed</b> so a retry or Spot preemption resumes cleanly; never a 24/7 cluster for a nightly job <span class="warn">!</span></li>
+<li><b>Datastream</b> = serverless CDC (source DB → BigQuery/GCS); <b>Data Fusion</b> = visual ETL; <b>Dataplex</b> = data governance/catalog across a lakehouse.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Reference Architectures — memorize these</h3>
+<h4>Image / file upload pipeline</h4>
+<p>client → <b>signed URL</b> upload straight to <b>GCS</b> → object-created event via <b>Eventarc</b>/Pub/Sub → <b>Cloud Run</b> (thumbnail/transcode/moderate) → outputs to GCS, metadata to <b>Firestore</b>. Never proxy large uploads through compute <span class="warn">!</span> DLT for failed objects; lifecycle-tier old originals.</p>
+<h4>Real-time analytics ingest</h4>
+<p>producers → <b>Pub/Sub</b> (buffer) → <b>Dataflow</b> (window/enrich, exactly-once) → <b>BigQuery</b> (partition+cluster) → Looker Studio/BI Engine. Swap BQ→<b>Bigtable</b> if you need sub-second serving.</p>
+<h4>Global low-latency API</h4>
+<p><b>Global External App LB</b> (anycast + Cloud Armor + CDN) → <b>Cloud Run in ≥2 regions</b> → <b>Spanner</b> (global strong consistency) <i>or</i> <b>Firestore multi-region</b> (key/doc access). Name the data-store trade explicitly.</p>
+<h4>Event-driven orders</h4>
+<p>Cloud Run API → <b>Pub/Sub</b> → independent subs for payment / inventory / fulfilment / notify. <b>Idempotency key</b> (at-least-once → no double-charge), <b>DLT</b>, <b>ordering key</b> per customer, <b>saga</b>/Workflows for multi-step (no distributed ACID) <span class="warn">!</span></p>
+</section>
+
+<section class="card"><h3>Design Interview — the 5-step loop</h3>
+<ul>
+<li><b>1. Clarify</b> before drawing: scale (RPS, data vol), latency, consistency, budget, RTO/RPO, compliance/residency, read:write ratio. This alone separates senior from junior.</li>
+<li><b>2. State assumptions</b> — pin the numbers you design to so the interviewer corrects you early.</li>
+<li><b>3. Pick services with reasons</b> — "Cloud Run because it scales to zero and I don't need node control; Firestore because access is key-based."</li>
+<li><b>4. Walk the flow</b> — request → compute → data → response, plus async paths.</li>
+<li><b>5. Cover the pillars</b> — security (least-priv, no public data, no keys), reliability (regional HA, DR), cost (serverless, egress), perf (cache/CDN); name rejected alternatives.</li>
+</ul>
+<p>Defaults-with-reasons: <b>serverless first</b> (Cloud Run) unless you need node control (GKE); <b>managed DB</b> unless a reason not to; <b>async via Pub/Sub</b> to decouple. Over-engineering (Spanner/GKE/multi-region for everything) is as much a red flag as under-engineering <span class="warn">!</span></p>
+</section>
+
+<section class="card"><h3>AWS &#8596; GCP Service Map</h3>
+<table><thead><tr><th>AWS</th><th>GCP</th></tr></thead><tbody>
+<tr><td>EC2</td><td>Compute Engine</td></tr>
+<tr><td>Lambda</td><td>Cloud Functions / Cloud Run</td></tr>
+<tr><td>Fargate / ECS</td><td>Cloud Run</td></tr>
+<tr><td>EKS</td><td>GKE</td></tr>
+<tr><td>S3</td><td>Cloud Storage</td></tr>
+<tr><td>EBS</td><td>Persistent Disk / Hyperdisk</td></tr>
+<tr><td>EFS</td><td>Filestore</td></tr>
+<tr><td>RDS / Aurora</td><td>Cloud SQL / AlloyDB</td></tr>
+<tr><td>DynamoDB</td><td>Firestore / Bigtable</td></tr>
+<tr><td>Redshift</td><td>BigQuery</td></tr>
+<tr><td>ElastiCache</td><td>Memorystore</td></tr>
+<tr><td>SNS+SQS</td><td>Pub/Sub</td></tr>
+<tr><td>Kinesis / EMR</td><td>Dataflow / Dataproc</td></tr>
+<tr><td>Step Functions</td><td>Workflows</td></tr>
+<tr><td>Route 53</td><td>Cloud DNS</td></tr>
+<tr><td>CloudFront</td><td>Cloud CDN / Media CDN</td></tr>
+<tr><td>ALB / NLB</td><td>App LB / Network LB</td></tr>
+<tr><td>WAF+Shield</td><td>Cloud Armor</td></tr>
+<tr><td>CloudTrail</td><td>Cloud Audit Logs</td></tr>
+<tr><td>CloudWatch</td><td>Cloud Monitoring/Logging</td></tr>
+<tr><td>Secrets Manager</td><td>Secret Manager</td></tr>
+<tr><td>KMS</td><td>Cloud KMS</td></tr>
+<tr><td>IAM Roles/STS</td><td>Service Accounts / WIF</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> Not 1:1: GCP <b>VPC is global</b> (AWS regional); GCP <b>LBs are global anycast, no pre-warm</b>; Pub/Sub = SNS <i>and</i> SQS in one.</p>
+</section>
+
+<section class="card"><h3>Migration to GCP — the 6 R's</h3>
+<table><thead><tr><th>R</th><th>Move</th></tr></thead><tbody>
+<tr><td>Rehost</td><td>lift-and-shift VMs → Compute Engine (Migrate to VMs)</td></tr>
+<tr><td>Replatform</td><td>containerize → GKE/Cloud Run; self-MySQL → Cloud SQL</td></tr>
+<tr><td>Refactor</td><td>carve into services (strangler-fig)</td></tr>
+<tr><td>Repurchase</td><td>swap for SaaS</td></tr>
+<tr><td>Retire</td><td>delete dead workloads</td></tr>
+<tr><td>Retain</td><td>leave as-is for now</td></tr>
+</tbody></table>
+<ul>
+<li><b>Rehost first</b> — fastest, lowest risk, gets you off the old DC; often the right <i>first</i> step. Pick the least-effort R that meets the goal.</li>
+<li><b>Strangler-fig</b> for monolith→services: facade (API Gateway/LB) in front, peel off one capability at a time into Cloud Run/GKE, route that path across. <b>Never a big-bang rewrite</b> <span class="warn">!</span></li>
+<li><b>Database Migration Service (DMS)</b> for minimal-downtime Cloud SQL/AlloyDB migrations; <b>Datastream</b> CDC or dual-write for zero-downtime cutover.</li>
+<li>Bridge networks during transition: <b>Cloud VPN / Interconnect</b> to the old environment; stand up <b>CI/CD, IAM, observability</b> before scaling the migration.</li>
+<li>Senior signal: resist "rewrite as microservices"; stage the migration to deliver value early and de-risk.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Org Setup, Quotas &amp; Landing Zone</h3>
+<ul>
+<li><b>Landing zone</b> = the baseline org scaffold: folder-per-env/dept, <b>Shared VPC</b> host project, centralized logging sink, org policies, and a security/audit project — built with Terraform before workloads land.</li>
+<li><b>Org policy constraints</b> are guardrails, not grants: <code>iam.disableServiceAccountKeyCreation</code>, <code>compute.vmExternalIpAccess</code> (deny public IPs), <code>storage.publicAccessPrevention</code>, <code>gcp.resourceLocations</code> (region pinning) <span class="warn">!</span></li>
+<li><b>Quotas</b> (per project/region: CPUs, IPs, API rate) are a <b>reliability risk</b> — an autoscaling event can hit a quota wall mid-incident. Track usage, request increases ahead of launch <span class="warn">!</span></li>
+<li>Separate <b>billing admin</b> from <b>resource admin</b>; grant IAM to <b>groups</b>, use folders for policy inheritance.</li>
+<li><b>Labels</b> everywhere (env, team, cost-center) for cost allocation + billing export to BigQuery. <b>Config Sync</b> reconciles cluster/infra state to Git (corrects drift).</li>
 </ul>
 </section>
 

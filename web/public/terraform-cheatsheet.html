@@ -96,6 +96,22 @@ flowchart LR
 </ul>
 </section>
 
+<section class="card"><h3>IaC Tool Landscape</h3>
+<table><thead><tr><th>Tool</th><th>Scope / model</th></tr></thead><tbody>
+<tr><td><b>Terraform</b></td><td>multi-cloud, declarative HCL, run-based, you own state</td></tr>
+<tr><td>CloudFormation</td><td>AWS-only, JSON/YAML, <b>AWS manages state</b> (stacks), same-day AWS support</td></tr>
+<tr><td>Pulumi / CDK</td><td>real language (TS/Py/Go), loops+tests; CDK synths CFN, Pulumi is TF-like engine</td></tr>
+<tr><td>Crossplane</td><td>K8s CRDs, <b>continuous reconciliation</b>, state in etcd, GitOps-native</td></tr>
+<tr><td>Ansible</td><td>config mgmt <i>inside</i> hosts, procedural, stateless (SSH)</td></tr>
+</tbody></table>
+<ul>
+<li><b>Terraform builds the house; Ansible furnishes the rooms.</b> TF provisions cloud/SaaS; config-mgmt configures software on it — mature stacks use both.</li>
+<li>Run-based (TF: acts only on <code>apply</code>) vs reconcile-loop (Crossplane/K8s: actively re-fixes drift, no apply needed).</li>
+<li>HCL is a <b>deliberately constrained DSL</b> — no arbitrary control flow — so a <code>plan</code> is a low-magic, reviewable preview. Pain with <code>for_each</code>/<code>dynamic</code>/<code>templatefile</code> is the signal to step up to Pulumi/CDK <span class="warn">!</span></li>
+<li>Senior framing: name the <b>provisioning vs configuration</b> boundary and combine tools; don't argue "Terraform for everything."</li>
+</ul>
+</section>
+
 <section class="card"><h3>CLI Reference</h3>
 <pre><code>terraform init [-upgrade] [-migrate-state]
 terraform fmt -recursive
@@ -162,6 +178,28 @@ big = c ? x : y                         # both branches
 </ul>
 </section>
 
+<section class="card"><h3>dynamic blocks &amp; templatefile</h3>
+<pre><code>dynamic "ingress" {          # generate N nested blocks
+  for_each = var.ingress_rules
+  content {
+    from_port   = ingress.value.from
+    to_port     = ingress.value.to
+    cidr_blocks = ingress.value.cidrs
+  }
+}
+user_data = templatefile("${path.module}/init.sh.tftpl", {
+  region = var.region, port = var.port })</code></pre>
+<pre><code># init.sh.tftpl — full expr lang inside
+%{ for p in ports ~}
+open ${p}
+%{ endfor ~}</code></pre>
+<ul>
+<li><code>dynamic</code>: <code>for_each</code> feeds the collection, <code>content</code> is the per-item template, <code>ingress.value</code>/<code>.key</code> = current item. For genuinely variable-length nested blocks only.</li>
+<li>They add indirection — reader can't see concrete blocks. <b>Small &amp; fixed count → write blocks out explicitly</b>; nested <code>dynamic</code> = write-only code <span class="warn">!</span></li>
+<li>Heredoc <code>&lt;&lt;-EOT</code> (the <code>-</code> strips indent) for short inline text; <code>templatefile</code> for substantial/reused content that wants its own file + highlighting. Supports <code>%{ for }</code> / <code>%{ if }</code> directives.</li>
+</ul>
+</section>
+
 <section class="card"><h3>count vs for_each</h3>
 <pre><code># count: conditional single resource
 count = var.enabled ? 1 : 0
@@ -181,7 +219,13 @@ for_each = { for u in var.users : u.name =&gt; u }</code></pre>
 <ul>
 <li><b>Prefer <code>for_each</code></b> for collections of similar resources — index-independent addressing means adding/removing one doesn't churn the rest.</li>
 <li>Keys must be <b>known at plan time</b> — a for_each over a computed value forces <code>-target</code> gymnastics <span class="warn">!</span></li>
+<li><code>count</code> still wins for a <b>pure on/off toggle</b> (<code>count = var.enabled ? 1 : 0</code>) — one resource, no keying needed.</li>
 </ul>
+<h4>count → for_each without destroy</h4>
+<pre><code>moved { from = aws_instance.svc[0]
+        to   = aws_instance.svc["api"] }
+# then: plan must show ONLY address moves, 0 create/destroy</code></pre>
+<p>Swapping the meta-arg alone re-addresses <code>[0]</code>→<code>["api"]</code> and plans a full destroy+recreate. <code>moved</code> blocks (or <code>state mv</code> per instance) tell TF the addresses moved — reviewable &amp; reproducible.</p>
 </section>
 
 <section class="card"><h3>Variables · Outputs · Locals</h3>
@@ -203,7 +247,9 @@ output "id" { value = aws_instance.web.id
 <ul>
 <li>Variables = module <b>inputs</b>; outputs = module <b>outputs</b> (the public API). Locals = internal aliases, not inputs.</li>
 <li><code>sensitive=true</code> redacts CLI/plan output only — <b>value is still plaintext in state</b> <span class="warn">!</span></li>
-<li>Prefer <code>object</code>-typed vars over many loose scalars for a clean module surface.</li>
+<li>Prefer <code>object</code>-typed vars over many loose scalars for a clean module surface — <code>optional(type, default)</code> attrs keep the call site terse.</li>
+<li><code>nullable = false</code> forbids callers passing <code>null</code>; <code>validation</code> (1.9+ can cross-reference other vars) catches bad input at plan time with a clear message.</li>
+<li>Locals compute once and are referenced many times (<code>local.name</code>) — DRY, but they're not inputs and can't be overridden per-call.</li>
 </ul>
 </section>
 
@@ -226,6 +272,8 @@ resource "aws_s3_bucket" "b" { provider = aws.west }</code></pre>
 <li><b>Commit <code>.terraform.lock.hcl</code></b> (pins exact versions + checksums → reproducible plans) <span class="warn">!</span> <code>init -upgrade</code> to re-resolve/bump.</li>
 <li>Pass aliased providers into modules explicitly (<code>providers = { aws = aws.west }</code>); <b>never hardcode a provider inside a reusable module</b>.</li>
 <li>Never hardcode creds — env vars, shared config, OIDC, or assume-role.</li>
+<li>Tiers: <b>official</b> (HashiCorp), <b>partner</b> (vendor-maintained, verified), <b>community</b> — check maintenance before depending on community ones.</li>
+<li><b>Meta-provider chicken-egg</b> <span class="warn">!</span>: a <code>kubernetes</code>/<code>helm</code> provider configured from an <code>aws_eks_cluster</code> you create in the <b>same</b> run can't be configured against infra that doesn't exist yet (provider config evaluates early). <b>Split into two states</b> — one builds the cluster, one manages workloads — wired by <code>terraform_remote_state</code>.</li>
 </ul>
 </section>
 
@@ -242,6 +290,9 @@ data "aws_ami" "al" {          # READ-ONLY lookup, no lifecycle
 <li>Use data sources to reference infra managed elsewhere (another state, ClickOps, a shared AMI/VPC) without importing it.</li>
 <li><b>Computed attributes</b> (IDs, ARNs) are <i>unknown until apply</i> — showing as <code>(known after apply)</code>; you can't use them where a value must be known at plan time (e.g. <code>for_each</code> keys, <code>count</code>) <span class="warn">!</span></li>
 <li><code>terraform_remote_state</code> data source reads another state's outputs (tight coupling); tag/name lookups are looser.</li>
+<li><code>replace_triggered_by = [x.attr]</code> forces a <b>replace</b> when a referenced attr changes; <code>ignore_changes</code> does the opposite (stops updates). Don't confuse them <span class="warn">!</span></li>
+<li><code>external</code> data source shells out to a program returning JSON — an escape hatch for lookups no provider offers; keep it pure/read-only.</li>
+<li>A data source that depends on a not-yet-created resource reads at plan time and fails or returns stale — reference the resource attr (or split the run) instead <span class="warn">!</span></li>
 </ul>
 </section>
 
@@ -251,6 +302,10 @@ data "aws_ami" "al" {          # READ-ONLY lookup, no lifecycle
 <li><b>State holds secrets in PLAINTEXT</b> (DB passwords, keys, tokens) — whoever reads state reads them. Encrypt at rest, lock down access, keep it out of git <span class="warn">!</span></li>
 <li><b>Never hand-edit <code>terraform.tfstate</code></b> — use <code>state</code> subcommands / <code>moved</code> / <code>import</code> <span class="warn">!</span> Hand edits are the fastest way to corrupt it.</li>
 <li>Lose state → Terraform forgets it owns the infra → tries to <b>recreate everything</b> (or leaves orphans) <span class="warn">!</span> Version the backend for recovery.</li>
+<li><b>Config is disposable, state is precious.</b> You can retype <code>resource</code> blocks by hand; you cannot recompute cloud-assigned IDs — the only rebuild path is <code>import</code> per resource.</li>
+<li><code>serial</code> = write counter (optimistic-concurrency / stale-write detection); <code>lineage</code> = unique id fixing a state's ancestry (warns if you point at the wrong/unrelated state). Terraform maintains both — another reason not to hand-edit.</li>
+<li><b>Outputs live in state</b> (top-level <code>outputs</code>) — that's how <code>terraform_remote_state</code> reads another config's values. Sensitive outputs are plaintext there too.</li>
+<li><code>terraform.tfstate.backup</code> = the immediately-prior local state (one-deep undo), <b>not</b> a backup strategy — use versioned remote storage for real recovery.</li>
 </ul>
 <pre><code>terraform state list
 terraform state show aws_instance.web
@@ -274,6 +329,15 @@ terraform state pull &gt; backup.json     # snapshot</code></pre>
 <li><code>force-unlock &lt;ID&gt;</code> <b>only</b> when you're certain no apply is running — force-unlocking a live apply → concurrent writes → corruption <span class="warn">!</span></li>
 <li><b>Isolate state per component + per env</b> → small blast radius, independent lifecycles.</li>
 </ul>
+<table><thead><tr><th>Backend</th><th>Lock · when</th></tr></thead><tbody>
+<tr><td><code>s3</code></td><td>DynamoDB or <code>.tflock</code> · AWS</td></tr>
+<tr><td><code>gcs</code></td><td>built-in (object generation) · GCP</td></tr>
+<tr><td><code>azurerm</code></td><td>blob lease · Azure</td></tr>
+<tr><td><code>remote</code>/TFC</td><td>run queue · managed runs + policy</td></tr>
+<tr><td><code>http</code></td><td>optional LOCK/UNLOCK · GitLab, custom</td></tr>
+<tr><td><code>local</code></td><td>none · throwaway only <span class="warn">!</span></td></tr>
+</tbody></table>
+<p>Match the backend to where infra + identity already live. <b>Version the state bucket</b> — recover a botched <code>state push</code> / partial apply / wrong <code>state rm</code>; the lock table stays ephemeral (don't version it).</p>
 </section>
 
 <section class="card"><h3>State Operations</h3>
@@ -309,6 +373,8 @@ subnet_id = module.vpc.public_subnets[0]</code></pre>
 <li>Don't wrap a single resource for no reason; don't hardcode providers/regions/creds inside reusable modules.</li>
 <li><b>Pin</b> registry &amp; git modules by version/ref — unpinned = surprise breakage on the next <code>init</code> <span class="warn">!</span></li>
 <li>Nested modules are fine; deep nesting hurts readability — keep the tree shallow.</li>
+<li>A child module has <b>no backend</b> — only root modules have state; the same module is reused by many thin per-env roots.</li>
+<li>Publish approved modules via an <b>internal registry</b> (TFC or a git-tag convention) so teams consume versioned, reviewed building blocks.</li>
 </ul>
 </section>
 
@@ -326,6 +392,8 @@ subnet_id = module.vpc.public_subnets[0]</code></pre>
 <li><code>create_before_destroy</code> needs a unique name/<code>name_prefix</code> or the new one collides with the old <span class="warn">!</span></li>
 <li><code>ignore_changes</code> tolerates expected out-of-band drift (autoscaler count, tags) — but it can <b>mask real config drift</b>; scope it narrowly <span class="warn">!</span></li>
 <li><code>prevent_destroy</code> stops <i>this apply</i>, but is bypassable by removing the resource block — not a substitute for IAM/backups.</li>
+<li><code>precondition</code>/<code>postcondition</code> assert invariants at plan/apply (e.g. "AMI is x86_64", "instance got a public IP") — fail fast with a message instead of a confusing downstream error.</li>
+<li>Order of a replace under <code>create_before_destroy</code>: new created → dependents re-pointed → old destroyed. Without it: old destroyed first → <b>downtime window</b> <span class="warn">!</span></li>
 </ul>
 </section>
 
@@ -336,7 +404,12 @@ subnet_id = module.vpc.public_subnets[0]</code></pre>
 <li><code>depends_on = [aws_iam_role_policy.x]</code> only when there's <b>no reference link</b> (e.g. an IAM policy that must exist before an instance uses it). It's coarse — serialises and reduces parallelism <span class="warn">!</span></li>
 <li><b>"Cycle: A → B → A"</b> → break with indirection: split a resource, move one side to a data source, or restructure <code>depends_on</code>. <code>terraform graph | dot</code> to visualise.</li>
 <li>Over-using <code>depends_on</code> for ordering you could express by reference = slower applies + hidden coupling.</li>
+<li>Destroy edges are inferred too: to delete <code>b</code> that <code>a</code> depends on, TF destroys <code>a</code> first. A <code>depends_on</code> that's really data lets you drop it once you wire the reference.</li>
 </ul>
+<pre><code># break a cycle: A needs B's id AND B needs A's id
+# → split one attr onto a separate resource, or use a
+#   data source for one side, or a shared local, so the
+#   reference points one way only.</code></pre>
 </section>
 
 <section class="card"><h3>Provisioners — last resort</h3>
@@ -374,6 +447,8 @@ subnet_id = module.vpc.public_subnets[0]</code></pre>
 <ul>
 <li>Continuous detection: scheduled <code>plan -detailed-exitcode</code> in CI (exit 2 = drift), Terraform Cloud drift detection, driftctl.</li>
 <li><b>Prevent</b> it: least-privilege IAM so humans can't ClickOps prod <span class="warn">!</span></li>
+<li>Ask <i>why</i> drift happened: a recurring console edit is usually missing config or over-broad access, not just noise. Fix the source, not the symptom.</li>
+<li><code>-refresh-only</code> updates state to match reality <b>without changing infra</b> — the safe way to adopt drift you've decided is legitimate.</li>
 </ul>
 </section>
 
@@ -400,6 +475,8 @@ terraform.workspace               # ref in config</code></pre>
 <li><b>Policy-as-code</b>: Sentinel (TFC/Enterprise) or OPA-Conftest (Rego over <code>plan -json</code>) → enforce "no public S3", tag standards, allowed instance types.</li>
 <li>In-config assertions: <code>variable.validation</code>, <code>precondition</code>/<code>postcondition</code>, and standalone <code>check</code> blocks (1.5+) that assert without blocking apply.</li>
 <li><b>Cost</b>: Infracost diff in the PR. Wire the whole ladder into pre-commit + CI.</li>
+<li><code>terraform test</code> spins <b>real</b> resources in a temp state and asserts on plan/apply, then auto-cleans — integration confidence without Go. <code>check</code> blocks assert continuously (post-apply health) <b>without failing</b> the run.</li>
+<li>Where possible test the <b>module in isolation</b> (its own fixtures) so a failure localises to the module, not the whole root.</li>
 </ul>
 </section>
 
@@ -410,6 +487,8 @@ terraform.workspace               # ref in config</code></pre>
 <li><b>OIDC / workload identity</b> for cloud creds — no long-lived static keys in CI <span class="warn">!</span></li>
 <li>Gate apply behind required review + branch protection. Serialise applies per state (locking) so two merges can't race.</li>
 <li><b>No undo</b> — roll <i>forward</i> or revert the commit &amp; apply. There's no automatic rollback.</li>
+<li>Split creds: <b>plan = read-only</b> role, <b>apply = write</b> role — a leaked PR-CI token can't mutate infra. Prod apply behind a manual approval gate.</li>
+<li>Scheduled <code>plan -detailed-exitcode</code> (exit 2 = drift) as a nightly job surfaces out-of-band changes before they bite a real deploy.</li>
 </ul>
 </section>
 
@@ -420,6 +499,38 @@ terraform.workspace               # ref in config</code></pre>
 <li><code>sensitive = true</code> redacts <b>CLI/plan output</b> only — <b>not state</b>, and it propagates to any output derived from it <span class="warn">!</span></li>
 <li>1.10+ <b>ephemeral</b> values/resources/write-only args keep some secrets <b>out of state</b> entirely — prefer where supported.</li>
 <li>Least-privilege the Terraform role; separate plan (read) vs apply (write) creds; scan for exposed secrets (checkov/tfsec) and open SGs in CI.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Terraform at Scale</h3>
+<p>Organising principle = <b>blast radius</b>: how much can one <code>apply</code> break? One giant state hurts four ways:</p>
+<table><thead><tr><th>Problem</th><th>Why</th></tr></thead><tbody>
+<tr><td>slow plans</td><td>every plan refreshes every resource — thousands of API calls</td></tr>
+<tr><td>huge blast radius</td><td>one bad plan can propose destroying unrelated critical infra <span class="warn">!</span></td></tr>
+<tr><td>lock contention</td><td>one lock per state → only one engineer across all teams applies at a time</td></tr>
+<tr><td>coupled lifecycles</td><td>network + app changes review &amp; fail together</td></tr>
+</tbody></table>
+<ul>
+<li>Decompose into <b>layers by rate-of-change</b>: foundation (VPC/DNS/IAM, monthly) → data (DB/buckets/queues) → app (many deploys/day). Each layer gets its <b>own state</b> → independent lock + lifecycle + blast radius.</li>
+<li>Cross the seams deliberately: <code>terraform_remote_state</code> (tight — reads another state's outputs) or data-source/tag lookup (loose — discover by convention). Multiply the grid by env (dev/stage/prod).</li>
+<li>Split <b>state</b>, share <b>modules</b>: many small versioned modules + thin per-env roots — <b>not</b> a god module (as coupled as a god state) <span class="warn">!</span></li>
+<li>DRY tooling: Terragrunt or native <code>for_each</code> over an env map + internal module registry + policy-as-code. Ownership = CODEOWNERS + separate backends.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Scenario Playbooks — safe moves</h3>
+<p>Reason from three anchors, in order: <b>blast radius → state layout → plan/review/apply</b>. Look before you leap, decide intent, make the smallest reversible change.</p>
+<table><thead><tr><th>Scenario</th><th>Safe sequence</th></tr></thead><tbody>
+<tr><td>console change (drift)</td><td><code>plan</code> to see diff → revert (<code>apply</code>) or adopt (<code>-refresh-only</code>) or <code>ignore_changes</code></td></tr>
+<tr><td>plan wants to destroy prod DB</td><td>STOP — is it a <code>-/+</code> replace? guard with <code>prevent_destroy</code> + human</td></tr>
+<tr><td>stuck lock</td><td>confirm nothing running → <code>force-unlock ID</code> <span class="warn">!</span></td></tr>
+<tr><td>rename into a module</td><td><code>moved</code> block (preserves resource, no recreate)</td></tr>
+<tr><td>adopt ClickOps infra</td><td><code>import</code> block → iterate to zero-diff plan</td></tr>
+<tr><td>committed AWS keys</td><td><b>rotate</b> them — deleting from the file leaves them in git history <span class="warn">!</span></td></tr>
+</tbody></table>
+<ul>
+<li>Anti-patterns to flag on sight: hardcoded secrets, no locking, one giant state, unpinned modules, habitual <code>-target</code>, manual state edits, ClickOps.</li>
+<li>An empty-<i>looking</i> plan isn't safe to auto-approve — a one-line change can trigger a fleet replacement or count-shift <span class="warn">!</span></li>
 </ul>
 </section>
 

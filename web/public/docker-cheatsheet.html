@@ -315,7 +315,10 @@ docker volume ls | prune</code></pre>
 <li>Volumes are <b>not</b> removed with the container (dangling volumes eat disk) — <code>run --rm</code> drops anon vols; <code>volume prune</code> reclaims.</li>
 <li>Root container → files land <b>root-owned on the host</b> (UID mismatch pain on bind mounts) <span class="warn">!</span> Run as a matching UID or <code>chown</code>.</li>
 <li>Bind mount over a populated image dir <b>hides</b> the image's files (e.g. mounting empty <code>node_modules</code>) <span class="warn">!</span></li>
+<li><b>Back up a named volume</b>: run a throwaway ctr that mounts it + a host dir, then <code>tar</code> it out:</li>
 </ul>
+<pre><code>docker run --rm -v pgdata:/v -v $PWD:/b alpine \
+  tar czf /b/pgdata.tgz -C /v .</code></pre>
 </section>
 
 <section class="card"><h3>Compose — basics</h3>
@@ -383,6 +386,8 @@ docker compose ps              |   config   # render merged</code></pre>
 <li><b>Never</b> <code>--privileged</code>, <code>--net=host</code>/<code>--pid=host</code>, or mount <code>/var/run/docker.sock</code> — each ≈ root on the host <span class="warn">!</span></li>
 <li>No secrets in image / ENV / ARG (leak via <code>history</code>/<code>inspect</code>) — BuildKit <code>--secret</code> at build; mounted files / secret manager / <code>--env-file</code> at runtime <span class="warn">!</span></li>
 <li>Prefer <b>rootless Docker</b> (user namespaces) to shrink blast radius. The <code>docker</code> group = root-equivalent.</li>
+<li><b>Hard multi-tenancy</b> (untrusted code): a shared kernel isn't enough — reach for <b>gVisor</b> (userspace kernel) or <b>Kata</b> (lightweight VM per container) <span class="warn">!</span></li>
+<li><b>Python slimming:</b> <code>python:3.12-slim</code> + <code>--no-cache-dir</code>; prefer <b>glibc wheels</b> — <code>alpine</code> forces source builds of many C-extension packages (slow, needs a toolchain) <span class="warn">!</span></li>
 </ul>
 </section>
 
@@ -409,6 +414,195 @@ docker compose ps              |   config   # render merged</code></pre>
 <pre><code># attach a debug toolbox to a running ctr's namespaces
 docker run -it --rm --pid=container:web \
   --net=container:web nicolaka/netshoot</code></pre>
+</section>
+
+<section class="card"><h3>Container Lifecycle &amp; States</h3>
+<pre><code>docker create nginx   # created: fs+config ready, NOT running
+docker start &lt;id&gt;      # running: process executing
+docker pause &lt;id&gt;      # paused: frozen via cgroup freezer
+docker unpause &lt;id&gt;    # → running
+docker stop &lt;id&gt;       # SIGTERM → grace(10s) → SIGKILL → exited
+docker kill &lt;id&gt;       # SIGKILL now → exited
+docker rm &lt;id&gt;         # removed: writable layer destroyed
+docker run nginx      # = create + start</code></pre>
+<table><thead><tr><th>State</th><th>Meaning</th></tr></thead><tbody>
+<tr><td>created</td><td>fs + config prepared, no process yet</td></tr>
+<tr><td>running</td><td>PID 1 executing</td></tr>
+<tr><td>paused</td><td>all procs frozen (cgroup freezer), RAM held</td></tr>
+<tr><td>exited</td><td>stopped; logs + fs still inspectable, can <code>start</code> again</td></tr>
+<tr><td>removed</td><td>writable layer gone — unsaved data lost <span class="warn">!</span></td></tr>
+</tbody></table>
+<ul>
+<li>An <b>exited</b> container still exists — <code>docker ps -a</code> lists it; <code>rm</code> is what frees the R/W layer.</li>
+<li><code>stop</code> vs <code>kill</code>: <code>stop</code> is polite (SIGTERM first, drain window); <code>kill</code> is immediate SIGKILL — use only when wedged <span class="warn">!</span></li>
+<li><code>--restart</code> policy re-runs the <b>same</b> container on exit; it does not recreate a fresh one.</li>
+</ul>
+</section>
+
+<section class="card"><h3>overlay2 · CoW · Whiteouts</h3>
+<p>The <b>storage driver</b> implements image layering + the container's copy-on-write root. Default on Linux = <b>overlay2</b> (kernel overlayfs): <code>lowerdir</code> (R/O image layers) + <code>upperdir</code> (R/W) → a <code>merged</code> view.</p>
+<pre><code>docker info | grep "Storage Driver"   # overlay2
+ls /var/lib/docker/overlay2/          # layer data on disk</code></pre>
+<ul>
+<li><b>Copy-on-write:</b> first write to a file from a lower layer <b>copies the whole file up</b> before the write — even to change one byte.</li>
+<li>Write-heavy (DBs, big logs) ⇒ latency spikes + write amplification + no sharing → put hot data in a <b>volume</b> to skip the union FS entirely <span class="warn">!</span></li>
+<li>Page-cache is <b>shared</b>: N containers on one R/O layer share cached pages in RAM.</li>
+<li><b>Whiteout</b> = marker in an upper layer (char device 0/0) that <i>hides</i> a lower-layer file. It hides but <b>does not remove</b> — the bytes still ship. That's why an <code>rm</code>'d secret is still in the image <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Multi-Stage — Node &amp; Java</h3>
+<h4>Node: all deps to build, prod-only to ship</h4>
+<pre><code>FROM node:22-alpine AS build
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci                    # incl. dev deps
+COPY . . &amp;&amp; RUN npm run build  # → /app/dist
+
+FROM node:22-alpine AS runtime
+ENV NODE_ENV=production
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --omit=dev         # prod deps only
+COPY --from=build /app/dist ./dist
+USER node
+CMD ["node","dist/server.js"]</code></pre>
+<h4>Java: JDK+Maven to build, JRE/distroless to ship</h4>
+<pre><code>FROM maven:3.9-eclipse-temurin-21 AS build
+WORKDIR /app
+COPY pom.xml .
+RUN mvn dependency:go-offline   # cache deps first
+COPY src ./src
+RUN mvn -q clean package -DskipTests
+
+FROM gcr.io/distroless/java21-debian12:nonroot
+COPY --from=build /app/target/app.jar /app.jar
+ENTRYPOINT ["java","-jar","/app.jar"]</code></pre>
+<ul>
+<li>Spring Boot ~700MB (JDK+Maven) → ~200MB (JRE only). <code>typescript</code>/test frameworks never reach prod.</li>
+<li>Pure static frontend → final stage <code>nginx:alpine</code> serving <code>dist</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>run flags · exec vs attach</h3>
+<pre><code>docker run -d --name web -p 8080:80 \
+  -e DB_HOST=db --env-file .env \
+  -v pgdata:/data --restart=on-failure:3 \
+  --health-cmd='curl -f localhost/health' app:1.2</code></pre>
+<table><thead><tr><th>Flag</th><th>Does</th></tr></thead><tbody>
+<tr><td><code>-d</code></td><td>detached (background); omit → foreground, streams logs</td></tr>
+<tr><td><code>-i</code></td><td>keep STDIN open (pipe / interactive)</td></tr>
+<tr><td><code>-t</code></td><td>allocate a TTY (prompt, line editing) — pair as <code>-it</code></td></tr>
+<tr><td><code>--rm</code></td><td>auto-remove on exit (+ its anon volumes)</td></tr>
+<tr><td><code>-P</code></td><td>publish every <code>EXPOSE</code>d port to random host ports</td></tr>
+</tbody></table>
+<ul>
+<li><code>exec</code> starts a <b>new</b> process in a running container — <b>skips ENTRYPOINT</b>, needs the ctr up; the tool for shelling in.</li>
+<li><code>attach</code> connects to the <b>existing PID 1</b>'s stdio — Ctrl-C there can kill the container <span class="warn">!</span> Use <code>exec</code> for a throwaway shell.</li>
+<li>"Exits immediately" ⇒ the main process ended (wrong CMD, one-shot task, config crash) — read <code>logs</code>, not the shell.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Image Transfer &amp; Provenance</h3>
+<table><thead><tr><th></th><th>save/load</th><th>export/import</th></tr></thead><tbody>
+<tr><td>operates on</td><td>an <b>image</b></td><td>a <b>container</b> fs</td></tr>
+<tr><td>layers</td><td>kept (full stack)</td><td>flattened to one</td></tr>
+<tr><td>metadata</td><td>kept (CMD/ENV/history)</td><td>lost</td></tr>
+<tr><td>use</td><td>move image offline</td><td>snapshot a ctr fs</td></tr>
+</tbody></table>
+<pre><code>docker save myapp:1.2 -o app.tar    # image + layers + history
+docker load -i app.tar
+docker export ctr -o fs.tar         # flatten ctr fs
+cat fs.tar | docker import - app:flat  # single layer, history lost</code></pre>
+<ul>
+<li><code>save</code>/<code>load</code> = air-gapped installs, CI artifacts. <code>export</code>/<code>import</code> = deliberately flatten (drops history/secrets, loses sharing) <span class="warn">!</span></li>
+<li><b>Labels</b> (config-only, no layer) carry provenance — link an image to its exact commit:</li>
+</ul>
+<pre><code>LABEL org.opencontainers.image.source="https://github.com/acme/app"
+LABEL org.opencontainers.image.revision="abc123"
+docker images --filter "label=team=payments"</code></pre>
+<p><b>Dangling</b> images (untagged <code>&lt;none&gt;</code>, orphaned by a re-tag) → <code>docker image prune</code> (safe: dangling only; <code>-a</code> removes all unused).</p>
+</section>
+
+<section class="card"><h3>Layer Count vs Content (myth)</h3>
+<p>"Fewer layers = faster containers" is <b>wrong</b>. At runtime overlayfs merges all R/O layers into one view <b>once at start</b>; 5 or 25 layers read the same. Startup is dominated by <b>pulling missing layers + starting the process</b>, not layer count.</p>
+<ul>
+<li>Optimize layer <b>content</b>, not count: small base, no toolchain in the final image, clean up in-<code>RUN</code>, multi-stage. That shrinks <b>pulls</b> — the actually-slow thing.</li>
+<li>More <i>well-ordered</i> layers can improve cache reuse — chasing a low count can <b>hurt</b> it <span class="warn">!</span></li>
+<li><b>Squashing</b> collapses to one layer: kills cross-image layer sharing + cache reuse. Rarely worth it — reach for multi-stage instead.</li>
+</ul>
+<h4>Accounting for every byte</h4>
+<pre><code>docker history app:1.2   # size + instruction per layer
+docker inspect app:1.2   # .RootFS.Layers digest list
+dive app:1.2             # interactive per-layer file browser</code></pre>
+</section>
+
+<section class="card"><h3>Signing, Mirrors &amp; Promotion</h3>
+<h4>Signing = who published it + untampered</h4>
+<pre><code>cosign sign   ghcr.io/acme/app@sha256:9f3a...
+cosign verify ghcr.io/acme/app@sha256:9f3a... \
+  --certificate-identity ...</code></pre>
+<ul>
+<li><b>cosign/sigstore</b> = modern (keyless OIDC, signs images + SBOM/attestations). <b>DCT/Notary</b> (<code>DOCKER_CONTENT_TRUST=1</code>) = older TUF-based. You sign the <b>digest</b> → trust bound to immutable content.</li>
+<li>Admission controller refuses unsigned/untrusted images ⇒ "only run what we built &amp; approved."</li>
+</ul>
+<h4>Pull-through mirror</h4>
+<p>Proxy that caches Docker Hub layers on the LAN: first pull fetches upstream, rest served locally. Dodges anon rate limits, cuts bandwidth, survives brief upstream outages. Point <code>registry-mirrors</code> in <code>daemon.json</code>. Distinct from a <b>private registry</b> (stores <i>your</i> images) <span class="warn">!</span></p>
+<h4>Build once → promote the digest</h4>
+<pre><code>crane copy ghcr.io/acme/app@sha256:9f3a... \
+           ghcr.io/acme/app:prod</code></pre>
+<p>Never rebuild per environment — bytes would differ, so "what passed staging" isn't what's in prod. Build one image, test <b>that digest</b>, re-point tags forward. Config comes from env/secrets at runtime, not a rebuild <span class="warn">!</span></p>
+</section>
+
+<section class="card"><h3>Design / Debug — the 5 Axes</h3>
+<p>Any "write a Dockerfile" or "why is this broken" question reduces to five checks. When you <b>write</b>, satisfy all five; when you <b>debug</b>, find which is violated.</p>
+<table><thead><tr><th>Axis</th><th>Ask</th></tr></thead><tbody>
+<tr><td><b>PID 1</b></td><td>foreground, exec-form, gets SIGTERM? <code>--init</code> to reap zombies?</td></tr>
+<tr><td><b>Image</b></td><td>multi-stage, minimal base, non-root, no secrets, pinned?</td></tr>
+<tr><td><b>Data</b></td><td>stateful paths on named volumes (R/W layer is ephemeral)?</td></tr>
+<tr><td><b>Network</b></td><td>user-defined net (DNS by name), ports published, health/depends_on?</td></tr>
+<tr><td><b>Cache</b></td><td>deps before source, <code>.dockerignore</code>, registry cache for CI?</td></tr>
+</tbody></table>
+<p>One frame for the whole topic: <b>PID 1 · image · data · networking · cache.</b></p>
+<h4>DinD: three ways to build in CI</h4>
+<ul>
+<li><b>docker.sock mount</b> — simplest, but = root on the host <span class="warn">!</span></li>
+<li><b>Docker-in-Docker</b> (<code>--privileged</code>) — isolated but privileged.</li>
+<li><b>Kaniko / Buildah</b> — daemonless, rootless, no privileged socket. Safest for shared runners.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Networking — debug playbook</h3>
+<p>Two containers "can't talk" — walk it top-down:</p>
+<ul>
+<li>&#9744; <b>Same network?</b> <code>docker network inspect &lt;net&gt;</code> — both listed? Default bridge has <b>no DNS</b>; you need a user-defined net <span class="warn">!</span></li>
+<li>&#9744; <b>Right target?</b> Use the <b>service/container name</b>, not <code>localhost</code> (that's the caller itself).</li>
+<li>&#9744; <b>DNS resolves?</b> <code>exec … getent hosts db</code> / <code>nslookup db</code> → 127.0.0.11 answers on user-defined nets.</li>
+<li>&#9744; <b>Port right?</b> Talk to the <b>container</b> port, not the published host port; is the server bound to <code>0.0.0.0</code> not <code>127.0.0.1</code>? <span class="warn">!</span></li>
+<li>&#9744; <b>Cross-net isolation:</b> two <i>different</i> user-defined nets are firewalled apart even by IP — attach one ctr to both, or merge nets <span class="warn">!</span></li>
+</ul>
+<table><thead><tr><th>Reach</th><th>Address</th></tr></thead><tbody>
+<tr><td>peer container</td><td>its service/container name</td></tr>
+<tr><td>the host</td><td><code>host.docker.internal</code> (Linux: <code>--add-host …:host-gateway</code>)</td></tr>
+<tr><td>itself</td><td><code>localhost</code> / <code>127.0.0.1</code></td></tr>
+</tbody></table>
+</section>
+
+<section class="card"><h3>HEALTHCHECK &amp; Graceful Shutdown</h3>
+<pre><code>HEALTHCHECK --interval=30s --timeout=3s \
+  --start-period=10s --retries=3 \
+  CMD curl -fsS localhost/health || exit 1</code></pre>
+<ul>
+<li>Sets container health = <b>starting → healthy / unhealthy</b>; drives Compose <code>depends_on: service_healthy</code> and orchestrator restarts.</li>
+<li><code>--start-period</code> = grace for slow boots (failures don't count yet). Keep the probe <b>cheap</b> — it runs forever <span class="warn">!</span></li>
+<li>Distroless/scratch has no shell/<code>curl</code> ⇒ ship a tiny static health binary or use the orchestrator's probe instead <span class="warn">!</span></li>
+</ul>
+<h4>Graceful shutdown</h4>
+<ul>
+<li><code>docker stop</code> → SIGTERM → app should stop accepting work, drain in-flight, close conns → exit before the 10s <code>--time</code> deadline, else SIGKILL (137).</li>
+<li>Trap it: <code>trap 'graceful' TERM</code> (shell) or a signal handler in the app; wrapper scripts must <code>exec "$@"</code> so the app <b>is</b> PID 1 <span class="warn">!</span></li>
+<li><code>STOPSIGNAL</code> changes which signal <code>stop</code> sends (e.g. nginx wants SIGQUIT for graceful).</li>
+</ul>
 </section>
 
 <section class="card"><h3>&#9744; Dockerfile Review Checklist</h3>

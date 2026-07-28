@@ -118,6 +118,7 @@ flowchart LR
 <li><b>Fast feedback</b> (single-digit minutes): parallelise, cache deps, shard tests, build only affected packages. A 40-min CI kills the practice — people stop running it <span class="warn">!</span></li>
 <li><b>Feature flags</b> let you merge incomplete work behind an off switch — deploy &ne; release, branches stay short.</li>
 <li>Every push runs the <b>same</b> pipeline; PR pipeline is a subset (no deploy). One source of truth for "is it green."</li>
+<li><b>Small PRs</b> reinforce the whole practice: faster review, smaller blast radius, easier rollback, fewer conflicts. Batch size is the master variable in delivery risk — small batches are <i>safer</i>, not slower <span class="warn">!</span></li>
 </ul>
 </section>
 
@@ -250,6 +251,38 @@ deploy_prod:
 </ul>
 </section>
 
+<section class="card"><h3>Other CI Systems — the Landscape</h3>
+<table><thead><tr><th>Tool</th><th>Model / niche</th></tr></thead><tbody>
+<tr><td><b>Jenkins</b></td><td>self-hosted server; controller+agents; ~1,800 plugins; Jenkinsfile (Groovy)</td></tr>
+<tr><td><b>CircleCI</b></td><td>SaaS; fast; <b>orbs</b> = reusable config pkgs</td></tr>
+<tr><td><b>Tekton</b></td><td>K8s-native CRDs (Step/Task/Pipeline); a <i>building block</i>, not finished</td></tr>
+<tr><td><b>Argo Workflows</b></td><td>K8s DAG engine, step=pod; ≠ Argo CD (that's GitOps)</td></tr>
+<tr><td><b>Buildkite</b></td><td><b>hybrid</b>: SaaS control plane, <i>your</i> agents — code never leaves your net</td></tr>
+<tr><td><b>Azure/AWS/GCP</b></td><td>vendor CI (Pipelines / CodePipeline+CodeBuild / Cloud Build) — deep IAM, more lock-in</td></tr>
+</tbody></table>
+<ul>
+<li><b>Jenkins controller</b> = single point of failure + top attack target (holds all creds). Run <b>no builds on it</b>; use ephemeral agents (pod-per-build) <span class="warn">!</span></li>
+<li>Plugins are Jenkins' superpower <i>and</i> curse: third-party code in the controller with credential access → steady CVE stream, dependency hell, rot. Minimize, pin, audit; use JCasC for config-as-code.</li>
+<li><b>Shared Libraries</b> (Jenkins) / <b>orbs</b> (CircleCI) / reusable workflows (Actions) all solve the same thing: stop copy-pasting pipeline logic across repos.</li>
+<li><b>Tekton ≠ drop-in CI</b>: no built-in Git-trigger UX/dashboard OOTB. Vendors layer products on top (Jenkins X, OpenShift Pipelines).</li>
+<li><b>Travis CI</b> cautionary tale: OSS default → acquired, layoffs, 2021 secret-leak incident, killed free tier → community fled to Actions. CI is critical infra; SaaS business risk is <i>your</i> risk → favour pipeline-as-code (portable), avoid lock-in.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Choosing a CI System</h3>
+<p>Don't ask "which is best" — reason from constraints. Decision axes:</p>
+<ul>
+<li><b>Managed SaaS vs self-hosted</b> — do you want to run servers? Regulated/air-gapped often <i>must</i> self-host (source can't leave the net).</li>
+<li><b>Substrate</b> — VM vs container-native vs <b>K8s-native</b> (Tekton/Argo). Already on K8s → they're natural; else overhead.</li>
+<li><b>VCS integration</b> — pipeline next to code, one permission model (Actions/GitLab) vs a separate system to wire up (Jenkins).</li>
+<li><b>Ecosystem</b> — actions/orbs/plugins cut boilerplate but add supply-chain surface.</li>
+<li><b>Cost</b> — per-minute SaaS billing vs self-hosted compute <i>plus the humans</i> who maintain it. At scale self-hosted/hybrid often wins.</li>
+<li><b>Lock-in</b> — how portable is the pipeline if you leave?</li>
+</ul>
+<p>Quick map: on GitHub → <b>Actions</b>; on GitLab → <b>GitLab CI</b>; air-gapped → self-managed / Jenkins / <b>Buildkite</b>; all-in K8s → <b>Tekton/Argo + Argo CD</b>; legacy Jenkins → strangler-fig new repos off it, migrate incrementally, never big-bang <span class="warn">!</span></p>
+<p>Non-negotiables regardless of tool: <b>pipeline-as-code</b>, OIDC/least-priv secrets, isolated runners, <b>build-once/promote-the-digest</b>. The tool is swappable; these aren't.</p>
+</section>
+
 <section class="card"><h3>Build &amp; Test Stages</h3>
 <ul>
 <li><b>Build once</b> up front; every downstream stage consumes that artifact — hermetic, reproducible, pinned toolchain.</li>
@@ -293,6 +326,8 @@ CMD ["/app/server.js"]</code></pre>
 <li>Small base (distroless/alpine) → smaller attack surface + faster pulls. Non-root <code>USER</code>. <code>.dockerignore</code> to keep secrets/junk out.</li>
 <li>BuildKit cache mounts + registry cache for CI. Tag <code>image@sha256:…</code>.</li>
 <li>Pipeline: build → <b>scan</b> (Trivy/Grype) → <b>sign</b> (cosign) → push → deploy → verify signature at admission <span class="warn">!</span></li>
+<li>Keyless <b>cosign</b> signs with the runner's OIDC identity (no key to store); an admission policy (Kyverno/Gatekeeper/Connaisseur) rejects unsigned images at deploy.</li>
+<li>Scan noise control: gate only on <b>fixable</b> CRITICAL/HIGH, allow-list accepted CVEs with an expiry, and rescan on a schedule — a wall of unfixable lows trains people to ignore the gate <span class="warn">!</span></li>
 </ul>
 </section>
 
@@ -374,6 +409,8 @@ permissions: { contents: write, packages: write, id-token: write }</code></pre>
 <li><b>SLSA</b> provenance (how/where built) + <b>sign</b> (cosign) + <b>verify at admission</b>; SBOM (syft/Trivy) for what's inside.</li>
 <li>Ephemeral, hardened, single-use runners; never attach self-hosted runners to public repos <span class="warn">!</span></li>
 <li>A compromised pipeline = compromised prod. Protect the CI system itself: RBAC, audit logs, protected branches.</li>
+<li><b>SLSA levels</b> ladder the guarantee: L1 provenance exists → L2 signed by the build service → L3 hardened, non-forgeable, isolated builder. Aim to <i>verify</i> provenance at admission, not just produce it.</li>
+<li><b>Three secret exposures to close</b>: stored long-lived keys (→ OIDC), secrets in logs (→ masking + no <code>echo</code>), secrets reachable by fork PRs (→ no unsafe <code>pull_request_target</code>).</li>
 </ul>
 </section>
 
@@ -406,6 +443,52 @@ permissions: { contents: write, packages: write, id-token: write }</code></pre>
 <li>Improve all four with the same levers: small batches, automation, fast rollback, trunk-based dev, good tests.</li>
 <li><b>Deployment markers</b> annotate dashboards so a metric shift ties to a release. <b>Error budget</b> (1 − SLO) governs release pace.</li>
 <li>MTTR = restore service (rollback / flag-kill), not fix the bug. Blameless postmortems target systemic cause.</li>
+<li>The fifth (2021+) DORA metric is <b>reliability</b> (operational performance vs SLOs) — throughput + stability + does it actually stay up. Don't optimise deploy frequency into an outage.</li>
+<li>Measure from real signals: deploy events (freq), commit→prod time (lead time), % deploys causing incidents (CFR), incident open→restore (MTTR). Instrument the pipeline, don't survey it.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Feature Flags — Deploy ≠ Release</h3>
+<p>A flag decouples <b>shipping code</b> from <b>exposing behaviour</b>. Deploy dark (flag off), release by flipping the flag at runtime — no redeploy. The lever behind trunk-based dev, canary, and instant kill-switches.</p>
+<ul>
+<li><b>Merge incomplete work</b> behind an off flag → branches stay short, no long-lived feature branch → no merge hell.</li>
+<li><b>Runtime kill-switch</b>: a bad <i>released</i> feature flips off in seconds — release-level rollback with <b>no deploy</b>, huge MTTR cut <span class="warn">!</span></li>
+<li><b>Progressive exposure</b>: percentage rollout (1%→100%), targeting (internal → beta → all), ring deploys — orthogonal to the infra-level canary.</li>
+<li>Flag types: <b>release</b> (short-lived, remove after GA), <b>ops</b> (kill-switch/circuit), <b>experiment</b> (A/B), <b>permission</b> (entitlement).</li>
+<li><b>Flag debt</b>: stale flags = dead branches + combinatorial test blowup. Set an expiry/owner; delete release flags after rollout <span class="warn">!</span></li>
+<li>Keep flag state <b>out of the artifact</b> — same image, config-driven per env; evaluate via a flag service (LaunchDarkly/Unleash/Flagsmith) or config.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Pipeline Speed &amp; Cost Levers</h3>
+<p>A 40-minute CI kills the practice — people stop running it and batch changes up (bigger, riskier). Aim single-digit minutes to merge. Levers, biggest first:</p>
+<ul>
+<li><b>Cache dependencies</b> — <code>~/.npm</code>, <code>~/.m2</code>, <code>~/.gradle</code>, layer cache. Biggest single win; key on the lockfile hash <span class="warn">!</span></li>
+<li><b>Parallelise + shard</b> tests across N runners; fan-out on a matrix, fan-in a gate job.</li>
+<li><b>Affected-only</b> in monorepos — Nx/Turbo/Bazel <code>affected</code> or <code>paths:</code> filters so a one-line change doesn't rebuild the world.</li>
+<li><b>Build once</b> — every downstream stage consumes the artifact, not a fresh build.</li>
+<li><b>Ephemeral runners sized right</b> — bigger runners for the critical path; spot/self-hosted for cheap bulk.</li>
+<li><b>Order for fast failure</b> — cheapest, most-likely-to-fail checks first (lint/type before e2e); <code>concurrency</code> to cancel superseded runs.</li>
+</ul>
+<pre><code># shard a suite across 4 runners
+strategy: { matrix: { shard: [1, 2, 3, 4] } }
+steps:
+  - run: npx jest --shard=${{ matrix.shard }}/4</code></pre>
+<p>Watch the <b>cold-cache</b> path stays correct and fast — a cache is an optimisation, never a correctness dependency.</p>
+</section>
+
+<section class="card"><h3>DB Migrations &amp; Zero-Downtime Schema</h3>
+<p>A schema change coupled to a code deploy makes <b>rollback impossible</b> — you can't revert the code once the column's gone. Decouple with <b>expand/contract</b> (a.k.a. parallel change), keeping every step backward-compatible.</p>
+<table><thead><tr><th>Phase</th><th>Action</th></tr></thead><tbody>
+<tr><td><b>Expand</b></td><td>add new column/table, nullable/defaulted; both old &amp; new code work</td></tr>
+<tr><td><b>Migrate</b></td><td>backfill data; app dual-writes old + new</td></tr>
+<tr><td><b>Contract</b></td><td>after new code is fully live &amp; stable, drop the old column — separate later deploy</td></tr>
+</tbody></table>
+<ul>
+<li>Each phase ships in its <b>own</b> deploy, so any single step is rollback-safe — the schema is never ahead of code that can't read it <span class="warn">!</span></li>
+<li>Rename = add-new + dual-write + backfill + switch reads + drop-old. Never an in-place <code>RENAME</code> that a rolling deploy's old pods can't see.</li>
+<li>Big backfills run <b>out-of-band</b> (batched, throttled), not in the migration that blocks the deploy.</li>
+<li>When a change is genuinely irreversible (data already transformed), <b>roll forward</b>, not back — prep a fix-forward path before you ship.</li>
 </ul>
 </section>
 
@@ -419,6 +502,42 @@ permissions: { contents: write, packages: write, id-token: write }</code></pre>
 <li>6. Deploy via rolling / blue-green / <b>canary</b>; post-deploy smoke + health probes.</li>
 <li>7. Observe error rate / latency vs baseline → <b>auto/manual rollback</b> if unhealthy.</li>
 <li><b>GitOps variant</b>: CI commits the new tag/digest to a config repo → ArgoCD/Flux reconciles it into the cluster.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Verification — Where Tests Run</h3>
+<p>Pipeline = increasingly expensive, increasingly realistic filters. Put each check at the <b>earliest stage it can meaningfully run</b>: fast feedback for the common case, high fidelity for the risky case.</p>
+<table><thead><tr><th>Test</th><th>Stage / gates</th><th>Time</th></tr></thead><tbody>
+<tr><td>static / lint / type</td><td>push → merge</td><td>secs</td></tr>
+<tr><td>unit</td><td>push → merge</td><td>secs–1m</td></tr>
+<tr><td>contract</td><td>push → merge</td><td>secs</td></tr>
+<tr><td>integration</td><td>post-build → merge</td><td>1–5m</td></tr>
+<tr><td>e2e / UI</td><td>post-merge → deploy</td><td>5–20m</td></tr>
+<tr><td>smoke</td><td>post-deploy → traffic/rollback</td><td>secs</td></tr>
+<tr><td>load / perf</td><td>nightly / pre-prod</td><td>advisory</td></tr>
+</tbody></table>
+<ul>
+<li><b>Gate the merge on fast layers</b>; run slow/flaky ones (e2e, load) post-merge/nightly so they don't tax every push <span class="warn">!</span></li>
+<li><b>Green build ≠ healthy deploy.</b> Pre-merge proves the <i>code</i> passed a harness; <b>smoke/synthetic</b> checks prove <i>this deploy</i> works against real config, DNS, DB, secrets, downstreams.</li>
+<li><b>Contract testing</b> (Pact, consumer-driven): consumer records expected req→resp; provider replays it in <i>its own</i> CI. Catches schema drift without standing up both services — kills most cross-service e2e (gate deploy on <code>can-i-deploy</code>).</li>
+<li><b>Trophy over pyramid</b> in practice: heavy static + a big integration layer (Testcontainers) + a <i>thin, curated</i> e2e for critical journeys only — e2e is where flake concentrates.</li>
+<li><b>Shared mutable test data = #1 flake source</b> — isolate per test; quarantine+fix flakes, don't blind-retry <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Design Scenarios — the 5-part Spine</h3>
+<p>Every "design a pipeline" answer runs the same spine, adapted to the artifact: <b>(1)</b> what's the artifact (build once, immutable) → <b>(2)</b> how to test → <b>(3)</b> safe delivery (promote same artifact; pick strategy) → <b>(4)</b> rollback → <b>(5)</b> security (OIDC, least-priv, no secrets to forks, sign+scan).</p>
+<table><thead><tr><th>Target</th><th>Artifact + release twist</th></tr></thead><tbody>
+<tr><td><b>K8s web svc</b></td><td>image → GitOps digest bump → Argo Rollouts canary + auto-rollback</td></tr>
+<tr><td><b>Monorepo</b></td><td><b>affected-only</b> (Nx/Turbo/Bazel + path filters); per-pkg release; remote cache</td></tr>
+<tr><td><b>Serverless</b></td><td>zip/image + IaC; Lambda immutable <b>version</b> + alias weighting = built-in canary; rollback = flip alias</td></tr>
+<tr><td><b>Mobile</b></td><td>signed <code>.ipa</code>/<code>.aab</code>; <b>store review gate</b> + staged rollout; no recall → fix-forward + flags</td></tr>
+<tr><td><b>Library</b></td><td>versioned pkg (npm/PyPI/Maven), <b>immutable once published</b>; semver is the contract; matrix-test runtimes; never republish</td></tr>
+</tbody></table>
+<ul>
+<li>Anti-pattern questions: the spine names the violated principle — "rebuilds per env" breaks (1); "site goes down" breaks (3); "long-lived keys" breaks (5).</li>
+<li>Monorepo failure mode: rebuild/redeploy the whole world per commit — wastes minutes, couples release cadence. Fix = affected-only + remote cache + independent releases.</li>
+<li>Mobile/library break "deploy = we own prod": staged rollout + fix-forward + flags <i>replace</i> instant rollback; the release gate is external <span class="warn">!</span></li>
 </ul>
 </section>
 
