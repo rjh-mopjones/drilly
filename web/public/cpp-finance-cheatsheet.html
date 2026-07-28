@@ -443,6 +443,96 @@ implied_vol(double mkt){
 </tbody></table>
 </section>
 
+<section class="card"><h3>OO Design for Pricing Libraries</h3>
+<p>The QuantLib-style split every quant lib converges on — separate <b>what</b> from <b>how</b>:</p>
+<table><thead><tr><th>Role</th><th>Abstraction</th></tr></thead><tbody>
+<tr><td><b>Instrument</b></td><td>the trade (option, swap) — holds terms, delegates pricing</td></tr>
+<tr><td><b>Payoff</b></td><td><code>operator()(spot)</code> — call/put/digital; a functor</td></tr>
+<tr><td><b>Model</b></td><td>dynamics (BSM, Heston, local vol) + params</td></tr>
+<tr><td><b>Engine</b></td><td>numerical method (analytic, tree, MC, PDE) that prices Instrument under Model</td></tr>
+<tr><td><b>Term structure</b></td><td>curves: discount, forward, vol surface</td></tr>
+</tbody></table>
+<ul>
+<li>Same instrument prices under many engines → <b>Strategy pattern</b>; swap analytic ↔ MC without touching the trade <span class="warn">!</span></li>
+<li><b>Observer</b>: instrument observes market quotes/curves; a quote change invalidates cached NPV (lazy recalculation).</li>
+<li>Keep pricing <b>pure</b> (no I/O, no globals) so it's testable and parallelisable.</li>
+</ul></section>
+
+<section class="card"><h3>Design Patterns in Quant C++</h3>
+<table><thead><tr><th>Pattern</th><th>Quant use</th></tr></thead><tbody>
+<tr><td>Strategy</td><td>pluggable pricing engine / RNG / interpolator</td></tr>
+<tr><td>Factory</td><td>build instrument/model from config (calibrated params)</td></tr>
+<tr><td>Template Method</td><td>MC engine skeleton; subclass supplies path generator + payoff</td></tr>
+<tr><td>Visitor</td><td>traverse a portfolio of heterogeneous trades to price / risk / cashflow</td></tr>
+<tr><td>Decorator</td><td>wrap an engine to add greeks (bump-revalue) or caching</td></tr>
+<tr><td>CRTP</td><td>static polymorphism for hot inner loops (no vtable) <span class="warn">!</span></td></tr>
+</tbody></table>
+<ul>
+<li><b>Runtime</b> polymorphism (virtual) at the <i>trade/config</i> boundary; <b>compile-time</b> (templates/CRTP) in the <i>inner numerical loop</i> — mixing them wrong costs 10× <span class="warn">!</span></li>
+</ul></section>
+
+<section class="card"><h3>Greeks: Bump-Revalue vs AAD</h3>
+<ul>
+<li><b>Finite difference (bump-revalue)</b>: price(x+h) − price(x−h) over 2h. Simple, engine-agnostic, but O(N) revaluations for N greeks and noisy for MC <span class="warn">!</span> (use common random numbers to cut variance).</li>
+<li><b>AAD / adjoint algorithmic differentiation</b>: compute <b>all</b> sensitivities in ~4× the price cost, independent of N — the modern standard for XVA/portfolio risk.</li>
+</ul>
+<pre><code>// forward: record ops on a tape
+// reverse: seed dP/dP=1, walk tape
+//   backward accumulating adjoints
+// result: dP/dx_i for every input x_i</code></pre>
+<ul>
+<li>Reverse-mode = cheap for many-inputs→one-output (exactly the greeks shape). Libs: dco/c++, Adept, CoDiPack; or operator-overloading vs source-transform.</li>
+<li>Bump for a handful of greeks / smoke tests; AAD when N is large (curves have hundreds of buckets) <span class="warn">!</span></li>
+</ul></section>
+
+<section class="card"><h3>Curve Building &amp; Calibration</h3>
+<ul>
+<li><b>Bootstrapping</b>: solve a discount curve so market instruments (deposits, FRAs, swaps) reprice to par — sequential root-find per pillar.</li>
+<li><b>Multi-curve</b> post-2008: separate discount (OIS/SOFR) and forecast curves; basis spreads matter <span class="warn">!</span></li>
+<li><b>Calibration</b>: fit model params (Heston, SABR, Hull-White) to market prices by minimising <code>&Sigma;(model − market)&sup2;</code> — Levenberg-Marquardt / global optimiser; watch for local minima and overfitting.</li>
+<li>Interpolation choice (linear on rates vs log-linear on DFs vs monotone cubic) changes forwards &amp; greeks — pick deliberately.</li>
+</ul></section>
+
+<section class="card"><h3>Scenario Playbook</h3>
+<ul>
+<li><b>"Design a Monte Carlo pricer"</b>: Payoff functor + PathGenerator (RNG → correlated GBM via Cholesky) + Engine (Template Method) + variance reduction (antithetic, control variate) + CRN for greeks + parallel over paths (thread pool / <code>par_unseq</code>). State O(1/√N) convergence.</li>
+<li><b>"Make this pricing loop faster"</b>: profile first; SoA layout, remove virtual from inner loop (CRTP), pre-size vectors, cache-friendly path storage, SIMD the payoff, reuse RNG state; state before/after in ns.</li>
+<li><b>"Price a book overnight"</b>: batch by model, share curves, AAD for risk, checkpoint, distribute across cores/boxes.</li>
+</ul></section>
+
+<section class="card"><h3>Real-World Quant Systems</h3>
+<ul>
+<li><b>Risk engine</b>: revalue a whole portfolio under thousands of market scenarios (historical VaR, stress, sensitivities). The dominant cost is repeated pricing, so the wins are: cache curves/vol surfaces once, group trades by model, vectorise across scenarios, and prefer AAD over bump-and-revalue when the sensitivity count is large. Determinism matters — the same inputs must give bit-identical numbers for P&amp;L attribution and audit.</li>
+<li><b>XVA</b> (CVA/DVA/FVA) is the heaviest workload in a bank: a Monte-Carlo simulation of the whole netting set forward in time, with a full pricing at every exposure date — nested valuation. This is why AAD and GPU offload became mainstream in quant C++; a naive bump-revalue XVA is infeasible.</li>
+<li><b>Determinism &amp; reproducibility</b>: seed every RNG explicitly, avoid <code>std::unordered_map</code> iteration order in anything that feeds a number, pin the math library version, and beware fast-math/FMA reordering changing the last ULPs across builds <span class="warn">!</span></li>
+</ul></section>
+
+<section class="card"><h3>Numerical Robustness — Deep</h3>
+<ul>
+<li>Prefer algorithms that are stable by construction: <b>log-space</b> for products of probabilities, <b>Kahan/Neumaier</b> summation for long accumulations, and reformulating <code>1 − e^{-x}</code> as <code>-expm1(-x)</code> to avoid cancellation near zero.</li>
+<li>Root-finders (implied vol from price) need bracketing + a fallback: Newton is fast but can diverge on flat vega, so guard with bisection (Brent) and cap iterations. Always validate the input is arbitrage-free before inverting <span class="warn">!</span></li>
+<li>Watch matrix conditioning: a near-singular covariance breaks Cholesky (correlations of exactly ±1, or more assets than observations) — regularise (shrinkage, nearest-correlation-matrix) rather than ship NaNs downstream.</li>
+<li>Money is never a <code>double</code> for accounting; use scaled integers or a decimal type. <code>double</code> is fine for market prices/greeks where relative error ~1e-15 is acceptable, but never compare two doubles with <code>==</code>.</li>
+</ul></section>
+
+<section class="card"><h3>C++ vs Python / Rust — When</h3>
+<ul>
+<li><b>C++</b> earns its keep on the hot path: pricing kernels, the market-data/order path, and anything measured in microseconds or revalued millions of times. The cost is developer time and footguns, so keep the C++ surface small and well-tested.</li>
+<li><b>Python</b> owns research, glue, and orchestration — pandas/NumPy for exploration, then push the proven kernel into C++ behind pybind11. Most quant desks are "Python outside, C++ inside".</li>
+<li><b>Rust</b> is increasingly used where memory-safety matters as much as speed (new low-latency components); it removes whole classes of UB the C++ hot path is prone to, at the cost of a smaller ecosystem for numerics. In interviews, name the boundary: research vs production, and why you'd cross it.</li>
+</ul></section>
+
+<section class="card"><h3>Testing &amp; Validating Numerical Code</h3>
+<ul>
+<li><b>Analytic anchors</b>: test the Monte-Carlo/tree/PDE price against a closed form where one exists (a vanilla European under Black-Scholes) and assert convergence within the standard error, not exact equality <span class="warn">!</span></li>
+<li><b>Put-call parity</b>, monotonicity (call price rises with spot), and bounds (0 ≤ call ≤ spot) are cheap invariants that catch whole classes of bugs — property-test them across random but valid inputs.</li>
+<li><b>Convergence order</b>: halving the step (or 4× the paths) should shrink the error predictably (O(1/√N) for MC, O(Δt) or O(Δt²) for schemes); a plot that doesn't converge means a bug, not just noise.</li>
+<li><b>Greeks by two methods</b>: bump-revalue vs AAD (or vs analytic) must agree — a mismatch localises the error to one or the other.</li>
+<li>Golden-file regression on a representative portfolio guards against silent drift when you refactor the hot path; combine with sanitiser + valgrind builds in CI so UB and leaks fail the pipeline, not production.</li>
+<li>Benchmark micro-kernels with a proper harness (Google Benchmark) that controls for warm-up, frequency scaling, and the optimiser deleting your unused result; report ns/op and allocations, and pin the CPU to reduce jitter for reproducible numbers.</li>
+<li>For random-driven code, fix the seed in tests so a failure is reproducible; separately run a fuzz/stress pass with many seeds to shake out rare edge cases that a single seed would hide.</li>
+</ul></section>
+
 <section class="card"><h3>&#9733; Interview Review Checklist</h3>
 <h4>Numerics</h4>
 <ul>

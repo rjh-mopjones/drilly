@@ -434,6 +434,173 @@ flowchart TD
 
 </section>
 
+<section class="card"><h3>Equities &amp; Corporate Actions</h3>
+<h4>Basics</h4>
+<table><thead><tr><th>Term</th><th>One line</th></tr></thead><tbody>
+<tr><td><code>share</code></td><td>One unit of ownership; a holding is a signed count</td></tr>
+<tr><td><code>share class</code></td><td>A/B differ in votes/economics — <em>distinct instruments</em></td></tr>
+<tr><td><code>dividend</code></td><td>Cash (or stock) distribution out of profits</td></tr>
+<tr><td><code>corporate action</code></td><td>Issuer event that rewrites holdings/reference data</td></tr>
+</tbody></table>
+<ul>
+<li><span class="warn">!</span> Class A and Class B are <b>separate instruments</b> in the security master, not one company. Model <em>issuer</em> ⟶ many share-class instruments; a position is always in a specific class.</li>
+</ul>
+<h4>The three dates <span class="warn">!</span></h4>
+<table><thead><tr><th>Date</th><th>Governs</th></tr></thead><tbody>
+<tr><td><code>ex-date</code></td><td>Entitlement cutoff + price/position <b>adjusts</b> here</td></tr>
+<tr><td><code>record date</code></td><td>Must be holder-of-record to qualify</td></tr>
+<tr><td><code>pay date</code></td><td>Cash/shares actually move (ledger settle)</td></tr>
+</tbody></table>
+<ul><li>Dividend = accrue a receivable at <b>ex-date</b>, settle it at <b>pay-date</b>. The ex-date price drop is expected — don't flag it as a PnL loss.</li></ul>
+<h4>Splits &amp; the cardinal sin</h4>
+<pre><code>before: 100 sh @ 50, price 50  = 5,000
+apply 2-for-1 (ratio 2)
+after:  200 sh @ 25, price 25  = 5,000  (unchanged)</code></pre>
+<ul>
+<li>Split re-denominates: qty ×N, cost basis &divide;N, <b>total value unchanged</b> — not a gain. Reverse split is the inverse (N⟶1, price ×N).</li>
+<li><span class="warn">!</span> <code>UPDATE positions SET qty = qty*2</code> destroys history: breaks recon, corrupts the return series, no audit, and <b>double-adjusts</b> on feed re-send. Apply as a dated, idempotent event; keep <em>as-reported</em> and <em>adjusted</em> price series both.</li>
+<li>A symbol change is <em>not</em> a string rename — canonical id persists, identifier is effective-dated, so trade/position history isn't orphaned (⟶ security master).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Fixed Income &amp; Money Markets</h3>
+<h4>A bond = a schedule generator, not a row</h4>
+<table><thead><tr><th>Term</th><th>Fixed at issue?</th></tr></thead><tbody>
+<tr><td><code>issuer</code> / <code>par</code> / <code>coupon</code> / <code>maturity</code></td><td><b>Yes</b> — reference data</td></tr>
+<tr><td><code>price</code> / <code>yield</code></td><td>No — float (market data)</td></tr>
+</tbody></table>
+<ul>
+<li>From 5 terms (issuer, par, coupon rate, frequency, maturity) you <b>derive</b> every cash flow: a coupon per date + par at maturity. Don't hand-key coupons.</li>
+<li>Price &amp; yield are inverse views of one instrument — store one authoritative number, derive the other. A 5% coupon bond can yield 6%.</li>
+</ul>
+<h4>Clean vs dirty <span class="warn">!</span></h4>
+<pre><code>settlement amount = clean + accrued = dirty</code></pre>
+<ul>
+<li>Screen shows <b>clean</b>; the buyer pays <b>dirty</b>. Accrued interest = coupon earned-but-unpaid since the last coupon date, paid by buyer to seller.</li>
+<li><span class="warn">!</span> Settling on the clean price underpays the seller by the accrued amount. Keep clean / accrued / dirty as distinct auditable fields.</li>
+</ul>
+<h4>Day-count conventions (silent-bug factory)</h4>
+<table><thead><tr><th>Conv</th><th>Days / year basis</th></tr></thead><tbody>
+<tr><td><code>30/360</code></td><td>Every month = 30 / 360 (lies about the calendar)</td></tr>
+<tr><td><code>ACT/360</code></td><td>Actual days / 360 (money markets)</td></tr>
+<tr><td><code>ACT/ACT</code></td><td>Actual / actual (many govt bonds)</td></tr>
+</tbody></table>
+<ul>
+<li><span class="warn">!</span> Never <code>days/365</code>. The convention is a property of the instrument — store it, thread it into every accrual, use a library, exact decimal. A wrong convention doesn't crash; it pays the wrong amount and surfaces at recon weeks later.</li>
+<li><b>Repo</b> = sell-now-buy-back-later; economically a collateralised loan, not a change of ownership. <b>Money markets</b> = short-dated (&lt;1yr) T-bills/CP/deposits; a T-bill is a discount instrument (issued below par, no coupon).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Derivatives: Margin, CCP &amp; Legs</h3>
+<h4>Future vs forward vs option</h4>
+<table><thead><tr><th>Term</th><th>Events it generates</th></tr></thead><tbody>
+<tr><td><code>future</code></td><td>Exchange-traded; <b>daily margin</b> variation calls</td></tr>
+<tr><td><code>forward</code></td><td>OTC equivalent; bilateral, no daily margin</td></tr>
+<tr><td><code>option</code></td><td>Premium up front; exercise/expiry event; asymmetric payoff</td></tr>
+<tr><td><code>swap</code></td><td>Two <b>legs</b> of cash flows; periodic <b>resets</b> on floating</td></tr>
+</tbody></table>
+<ul>
+<li>Model an option's 4 states: <code>call</code>/<code>put</code> &times; <code>holder</code>(long, right)/<code>writer</code>(short, obligation). Store strike, expiry, exercise style, underlying id.</li>
+<li>A floating-leg <b>reset</b> fixes the next period's rate — model it as a dated <b>event</b>, not a mutated field. A swap = two legs, each its own schedule.</li>
+</ul>
+<h4>Margin &amp; collateral</h4>
+<table><thead><tr><th>Term</th><th>Means</th></tr></thead><tbody>
+<tr><td><code>initial margin</code></td><td>Upfront good-faith deposit</td></tr>
+<tr><td><code>variation margin</code></td><td>Daily mark-to-market top-up/return</td></tr>
+<tr><td><code>collateral</code></td><td>Assets posted to cover exposure</td></tr>
+</tbody></table>
+<ul>
+<li>Your system tracks <b>required vs posted</b> margin and generates margin calls — a daily flow, exact money, per counterparty/CCP.</li>
+<li><span class="warn">!</span> Summing swap <b>notionals</b> and labelling it "portfolio value" is a classic bug — a $10m notional swap can be worth ~$0. Notional drives exposure calc, not value.</li>
+<li>A <b>CCP</b> (central counterparty) novates the trade: it becomes buyer to every seller and vice versa, multilaterally nets, and guarantees — so you now store the CCP as counterparty and its margin schedule (⟶ Clearing).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Orders, Order Types &amp; FIX</h3>
+<h4>Order types</h4>
+<table><thead><tr><th>Type</th><th>Behaviour</th></tr></thead><tbody>
+<tr><td><code>market</code></td><td>Execute now at best available price</td></tr>
+<tr><td><code>limit</code></td><td>Only at price X or better; may rest unfilled</td></tr>
+<tr><td><code>stop</code></td><td>Becomes a market/limit order when price crosses a trigger</td></tr>
+<tr><td><code>IOC / FOK</code></td><td>Immediate-or-cancel / fill-or-kill (no resting)</td></tr>
+</tbody></table>
+<ul><li>A limit order can <b>rest</b> on the book unfilled — so an order is never "one row that flips to FILLED"; it has a life of partial fills.</li></ul>
+<h4>One order ⟶ many fills ⟶ one trade</h4>
+<ul>
+<li>Model <code>orders</code> / <code>executions</code> / <code>fills</code> as separate parent/child rows. Avg exec price = &Sigma;(qty&times;price)&divide;&Sigma;qty over the fills — computed, not stored raw.</li>
+<li><span class="warn">!</span> Storing an order as one row whose <code>status</code> flips PENDING⟶FILLED loses the partial-fill history and the audit trail. Model state as an <b>event stream</b>; amend/cancel are new events, not overwrites.</li>
+</ul>
+<h4>FIX protocol</h4>
+<ul>
+<li><b>FIX</b> = the standard messaging protocol for order entry &amp; execution reports (tag=value fields). Execution reports stream back as an order progresses.</li>
+<li>Ingest execution reports <b>idempotently</b> — dedupe on the exec id (a business key), because the feed is at-least-once and will redeliver.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Clearing, Settlement &amp; DVP</h3>
+<h4>Post-trade stages (distinct, ordered)</h4>
+<table><thead><tr><th>Stage</th><th>Moves money?</th></tr></thead><tbody>
+<tr><td><code>confirmation</code></td><td>No — both agree the economics</td></tr>
+<tr><td><code>clearing</code></td><td>No — CCP nets &amp; guarantees</td></tr>
+<tr><td><code>settlement</code></td><td><b>Yes</b> — cash vs securities (DVP)</td></tr>
+</tbody></table>
+<ul><li>Agree ⟶ de-risk &amp; net ⟶ exchange. Each is an append-only state transition on the immutable trade; a stuck trade's exact stage must be queryable.</li></ul>
+<h4>DVP &amp; netting</h4>
+<ul>
+<li><b>DVP</b> (delivery-versus-payment): the cash leg and securities leg commit <b>together or neither</b> — distributed atomicity in business form. Eliminates <em>principal / Herstatt risk</em> (you pay and don't receive). Not two fire-and-forget writes.</li>
+<li><b>Netting</b>: collapse many gross obligations to one net per counterparty (owe 100, owed 70 ⟶ settle 30). Net is a <b>derived fold</b> over gross — keep gross for audit, net for what settles.</li>
+</ul>
+<h4>FAIL vs BREAK <span class="warn">!</span></h4>
+<table><thead><tr><th>Term</th><th>Is a...</th><th>Goes to</th></tr></thead><tbody>
+<tr><td><code>FAIL</code></td><td>Real-world settlement event (a leg didn't move)</td><td>Settlements/ops</td></tr>
+<tr><td><code>BREAK</code></td><td>Data disagreement between two systems' records</td><td>Recon/data</td></tr>
+</tbody></table>
+<ul>
+<li><span class="warn">!</span> Different entities, different desks. A fail is a <em>status</em> on a trade (settlement state machine); a break is an <em>output of reconciliation</em>. Conflating them misroutes alerts.</li>
+<li><span class="warn">!</span> <code>T+2</code> uses <b>business</b> days — needs a holiday calendar, never <code>+ INTERVAL '2 days'</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Ledgers &amp; Double-Entry</h3>
+<h4>Double-entry as a checksum</h4>
+<pre><code>pay 100 to Broker X:
+  cash account     -100
+  broker payable   +100    (debits == credits)</code></pre>
+<ul>
+<li>Every movement posts a debit + an equal credit; whole-ledger sum is always zero. Money never appears/vanishes — it <b>moves between accounts</b>.</li>
+<li>Gives you a built-in consistency check (debits &ne; credits ⟶ bug), no money leaks, and a natural audit trail with append-only entries.</li>
+<li><span class="warn">!</span> A single-sided <code>UPDATE accounts SET balance = balance - :amt</code> is exactly the anti-pattern double-entry prevents — no counter-entry, no trail, races on concurrent writes. Balance = <b>sum of an account's entries</b>, not a mutable field.</li>
+</ul>
+<h4>Money = (amount, currency, scale)</h4>
+<pre><code>{"amount":1050,"currency":"GBP","scale":2}  // £10.50
+{"amount":1050,"currency":"JPY","scale":0}  // ¥1050 — /100 corrupts it</code></pre>
+<ul>
+<li><span class="warn">!</span> Never <code>float</code>/<code>double</code>: <code>0.10</code> has no exact binary form; errors compound and break nostro recon — and you can't tell a real break from FP drift. Use exact decimal (<code>BigDecimal</code>/<code>decimal</code>/<code>NUMERIC</code>) or integer minor units.</li>
+<li>Currency is a <b>mandatory non-null companion</b> of every amount. Derive scale from ISO 4217 exponent (USD 2, JPY 0, some 3) — never hard-code 2. Define rounding explicitly (e.g. HALF_EVEN).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Payment Rails &amp; Fintech</h3>
+<h4>Rails compared</h4>
+<table><thead><tr><th>Rail</th><th>What / speed</th></tr></thead><tbody>
+<tr><td><code>SWIFT</code></td><td>Interbank <b>messaging</b> — instructions, not money; cross-border</td></tr>
+<tr><td><code>ACH</code></td><td>Domestic <b>batched</b> bulk transfer; slow (1+ day), cheap</td></tr>
+<tr><td><code>wire</code></td><td>High-value, individually processed; (near-)real-time, final</td></tr>
+</tbody></table>
+<ul>
+<li><span class="warn">!</span> <b>SWIFT moves messages, not money</b> — cash actually moves via correspondent/nostro relationships. A payment isn't "done" on message send: <code>instructed ⟶ in-transit ⟶ settled/failed</code>. Confirm settlement, reconcile via <b>nostro recon</b>.</li>
+</ul>
+<h4>Idempotent payments</h4>
+<ul>
+<li>Delivery is at-least-once ⟶ processing the same instruction twice = a duplicate payment (real money out, hard to claw back). Dedupe on an <b>originator-controlled business key</b>, not a transport id.</li>
+<li>Persist seen keys (unique constraint); check-and-execute must be atomic so concurrent retries can't both slip through; on repeat, <b>no-op &amp; return the original result</b>.</li>
+</ul>
+<h4>Nostro / vostro</h4>
+<ul>
+<li><b>Nostro</b> = "our" account held at another bank (per currency); <b>vostro</b> = "your" account we hold for you. Nostro recon matches <em>expected</em> movements vs the bank statement — the recon JOIN+DIFF pattern applied to cash.</li>
+</ul>
+</section>
+
 <section class="card"><h3>Scenario Prompts (drill)</h3>
 <p>Drive each like the <strong>System Design</strong> sheet's method: <em>restate &rarr; assumptions &rarr; diagnose &rarr; simple-first &rarr; flag tradeoffs</em>. Lead with the data model and invariants, not the framework.</p>
 
@@ -500,6 +667,25 @@ flowchart TD
 <li><code>T+2</code> uses <em>business</em> days — needs a holiday calendar, not <code>+ INTERVAL '2 days'</code>.</li>
 </ul>
 </section>
+
+<section class="card"><h3>Fluency Self-Check &#9733;</h3>
+<p>Tick each before an interview &mdash; if you can't say why in one breath, revisit the card.</p>
+<ul>
+<li>&#9744; trade = <b>event</b>, position = <b>derived fold</b>, balance = <b>as-of aggregate</b> &mdash; and why you never store a position as truth.</li>
+<li>&#9744; order &ne; execution &ne; fill &ne; trade; one order ⟶ many fills ⟶ one trade.</li>
+<li>&#9744; notional &ne; market value; a $10m-notional swap can be worth ~$0.</li>
+<li>&#9744; never <code>float</code> for money; Money = (amount, currency, scale); scale from ISO 4217.</li>
+<li>&#9744; ex-date adjusts / pay-date settles; a split is a re-denomination, not a gain.</li>
+<li>&#9744; clean + accrued = dirty; day-count is per-instrument, never <code>days/365</code>.</li>
+<li>&#9744; clearing (net + guarantee) &ne; settlement (cash moves); DVP = both legs or neither.</li>
+<li>&#9744; FAIL (real event) &ne; BREAK (data disagreement) &mdash; different desks.</li>
+<li>&#9744; recon = JOIN + DIFF on imperfect data; idempotent loaders; match keys + tolerances.</li>
+<li>&#9744; double-entry: debits == credits is a checksum; balance = sum of entries, never a mutated field.</li>
+<li>&#9744; corporate actions &amp; corrections = new dated/compensating events; never destroy history.</li>
+<li>&#9744; per-portfolio ordering only; partition the key so throughput scales.</li>
+<li>&#9744; security master: canonical id is the FK; effective-dated mappings; never key on a raw ticker.</li>
+<li>&#9744; reference data vs market data want opposite stores; audit fields (who/when/source) mandatory.</li>
+</ul></section>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
 <script>

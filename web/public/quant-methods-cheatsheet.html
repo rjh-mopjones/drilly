@@ -403,6 +403,57 @@ value = e^(-r dt)(q V_up + (1-q) V_down)   // roll back</code></pre>
 </ul>
 </section>
 
+<section class="card"><h3>Binomial &amp; Trinomial Trees</h3>
+<ul>
+<li>Discretise the underlying into an up/down lattice with risk-neutral probability <code>p = (e^{rΔt} − d)/(u − d)</code>; price by backward induction from payoff at maturity, discounting one step at a time. As steps → ∞ the CRR tree converges to Black-Scholes.</li>
+<li>The tree's real strength is <b>early exercise</b>: at each node take <code>max(continuation, intrinsic)</code>, which closed-form BSM can't do — so trees are the natural tool for American and Bermudan options.</li>
+<li>Convergence is oscillatory in the number of steps; smoothing (averaging N and N+1, or a trinomial/Richardson extrapolation) removes the sawtooth. Trinomial trees add a middle branch, improving stability and mapping cleanly onto explicit finite differences <span class="warn">!</span></li>
+</ul></section>
+
+<section class="card"><h3>Finite-Difference PDE Methods</h3>
+<ul>
+<li>Options satisfy the Black-Scholes PDE; discretise the (spot, time) grid and solve backward from the payoff. <b>Explicit</b> is simple but conditionally stable (a step-size constraint) and can blow up; <b>implicit</b> is unconditionally stable but needs a linear solve per step; <b>Crank-Nicolson</b> (their average) is second-order accurate and the usual default <span class="warn">!</span></li>
+<li>PDE methods shine for 1–2 factors with early exercise or barriers, where you get the whole price surface (and greeks by finite differencing the grid) cheaply. Beyond ~3 dimensions the grid explodes and Monte Carlo wins — the "curse of dimensionality".</li>
+<li>Boundary conditions matter: set far-field behaviour correctly (linear in spot for a call at high S) and handle barriers by placing grid nodes on the barrier to avoid interpolation error.</li>
+</ul></section>
+
+<section class="card"><h3>Copulas &amp; Dependence</h3>
+<ul>
+<li>A copula separates the <b>marginals</b> from the <b>dependence structure</b> — you model each asset's distribution however you like, then glue them with a copula (Sklar's theorem). This decouples "what each does alone" from "how they move together".</li>
+<li><b>Correlation ≠ dependence</b>: Pearson correlation only captures linear co-movement and can be zero for strongly dependent variables. The Gaussian copula has <b>zero tail dependence</b> — it says extreme joint moves are vanishingly rare, which is exactly the assumption that blew up structured-credit (CDO) pricing in 2008 <span class="warn">!</span></li>
+<li>The <b>t-copula</b> (and Clayton/Gumbel) add tail dependence, so crashes cluster — the right default when modelling joint extremes. Rank measures (Kendall's τ, Spearman's ρ) are copula-invariant and more robust than Pearson.</li>
+</ul></section>
+
+<section class="card"><h3>Exotics &amp; Path Dependence</h3>
+<ul>
+<li><b>Barriers</b> (knock-in/out) are cheaper than vanillas and very sensitive to volatility and the barrier level; discrete vs continuous monitoring changes the price materially. <b>Asians</b> (average-rate) are cheaper and less vol-sensitive because averaging damps the terminal distribution.</li>
+<li><b>Lookbacks</b> pay off on the max/min — expensive, strongly path-dependent. <b>Digitals</b> pay a fixed amount if in-the-money and have a spiky delta/gamma near the strike at expiry that is a hedging nightmare <span class="warn">!</span></li>
+<li>Path-dependence forces Monte Carlo (or a PDE with an extra state variable for the running average/extremum). The <b>volatility smile</b> means you can't price these with a single flat vol — you need local or stochastic vol calibrated to the surface.</li>
+</ul></section>
+
+<section class="card"><h3>More Brainteaser Patterns</h3>
+<ul>
+<li><b>Expected value with recursion/symmetry</b>: set up E = (contribution) + (probability × future E) and solve; exploit symmetry to avoid casework (e.g. expected number of coin flips for a pattern).</li>
+<li><b>Optional stopping / martingales</b>: gambler's ruin, the ballot problem, "fair game" arguments — recognise when a process is a martingale so E[end] = start.</li>
+<li><b>Conditioning &amp; Bayes</b>: the classic "two-children", disease-test base-rate, and Monty-Hall traps all reward writing the conditional carefully rather than trusting intuition.</li>
+<li><b>Continuous / geometric probability</b>: "probability two random points…" problems reduce to an area/volume ratio; and expectations like the expected max of n uniforms have clean closed forms (n/(n+1)). State assumptions, then compute — interviewers grade the setup <span class="warn">!</span></li>
+</ul></section>
+
+<section class="card"><h3>Machine Learning in Quant Finance</h3>
+<ul>
+<li>Financial ML is hard because the signal-to-noise ratio is tiny, the data is non-stationary, and the sample is short (a few hundred non-overlapping years-of-data equivalents). Naive cross-validation leaks because observations overlap and are serially correlated — use <b>purged, embargoed walk-forward</b> validation, not random k-fold <span class="warn">!</span></li>
+<li>The bias-variance tradeoff bites harder than in typical ML: a flexible model will fit noise that never repeats, so heavy regularisation, few features, and economic priors beat raw capacity. A backtest Sharpe that looks too good almost always is (multiple-testing / the "deflated Sharpe ratio" correction).</li>
+<li>Common uses: return/vol forecasting, regime detection, execution scheduling, and NLP on news/filings. Tree ensembles and linear models dominate; deep nets help mainly with alternative data (text, images) where structure is rich. Always ask "what would make this stop working, and how fast?".</li>
+</ul></section>
+
+<section class="card"><h3>Physical vs Risk-Neutral Measure</h3>
+<ul>
+<li>Two probability worlds, and confusing them is a classic interview trap. The <b>physical (P)</b> measure is the real world — used for risk, VaR, portfolio choice, and forecasting actual returns (which include the risk premium). The <b>risk-neutral (Q)</b> measure is a pricing device where every asset drifts at the risk-free rate and prices are discounted expectations <span class="warn">!</span></li>
+<li>The fundamental theorems: <b>no arbitrage ⇔ a risk-neutral measure exists</b>; <b>market completeness ⇔ it's unique</b>. Pricing lives under Q (so you never need to know the real drift — it cancels), but risk and Sharpe ratios live under P.</li>
+<li>Girsanov's theorem is the bridge: changing measure shifts the drift but not the volatility, which is why implied vol (a Q object) and realised vol (a P object) can differ persistently — the variance risk premium.</li>
+<li>Practical tell: if a question asks for a <i>price</i>, work under Q and discount the expected payoff at the risk-free rate; if it asks for a <i>probability of an event</i> or an <i>expected return</i>, you're under P and the real drift matters. Stating which measure you're in up front signals you actually understand the machinery, not just the formulas.</li>
+</ul></section>
+
 <section class="card"><h3>&#9733; Interview Review Checklist</h3>
 <h4>Probability reflexes</h4>
 <ul>

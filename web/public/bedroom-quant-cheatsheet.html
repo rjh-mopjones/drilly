@@ -377,6 +377,57 @@ weight = target_vol / asset_vol       # 0.15/0.60 = 0.25x</code></pre>
 </ul>
 </section>
 
+<section class="card"><h3>Paper Trading &amp; Going Live Safely</h3>
+<ul>
+<li>Between backtest and real money sits <b>paper/forward testing</b>: run the strategy live on real-time data with fake fills for weeks. It catches bugs a backtest can't — data feed gaps, API errors, timezone/DST bugs, and the gap between assumed and actual fills <span class="warn">!</span></li>
+<li>Then go live with the <b>smallest size that clears minimums</b>, and compare live fills to what the backtest assumed on the same bars. Reconcile daily: every position and every P&amp;L number should match your system's expectation, or you stop and debug.</li>
+<li>Ship a <b>kill switch</b> and hard limits (max position, max daily loss, max orders/min) before your first live order — not after. Most bedroom blow-ups are a runaway loop or a reconnect storm, not a bad signal.</li>
+<li>Scale up only after the live track record matches paper for long enough to be meaningful; adding capital to a strategy you don't yet trust just converts a small lesson into an expensive one.</li>
+</ul></section>
+
+<section class="card"><h3>Options for Retail</h3>
+<ul>
+<li>The popular income strategies — <b>covered calls</b>, <b>cash-secured puts</b>, the <b>wheel</b> — are short-volatility bets: you collect premium and mostly win, then give it all back in the occasional crash. They're not free money; you're being paid the variance risk premium for taking tail risk <span class="warn">!</span></li>
+<li>Most retail option buying loses because of the <b>vol premium</b> (implied usually &gt; realised) plus wide spreads and theta decay. If you must be long options, you need a real edge on direction or vol timing, not just "it might go up".</li>
+<li>Understand the greeks before trading them: a position can be right on direction and still lose on vega (an IV crush after earnings) or theta. Defined-risk spreads cap the disaster; naked short options can exceed your account.</li>
+</ul></section>
+
+<section class="card"><h3>A Portfolio of Strategies</h3>
+<ul>
+<li>One strategy is fragile; the retail edge is <b>combining several weakly-correlated ones</b> (a trend book, a mean-reversion book, a carry book) so drawdowns don't line up. Uncorrelated return streams raise the portfolio Sharpe roughly by √n for n independent edges — diversification is the only genuine free lunch.</li>
+<li>Allocate capital by risk, not by conviction: volatility-target each strategy to the same risk budget, cap any single one, and rebalance. Beware that correlations spike to 1 in a crisis, so size for the stressed correlation, not the calm one <span class="warn">!</span></li>
+<li>Track each strategy's live vs expected performance separately so you can retire a decaying edge without killing the whole book — most edges fade as they get crowded.</li>
+</ul></section>
+
+<section class="card"><h3>Tools &amp; Bedroom Stack</h3>
+<ul>
+<li><b>Backtesting</b>: vectorbt / backtrader / zipline-reloaded for equities; for crypto, ccxt gives a unified exchange API. Roll your own event-driven engine once you understand why vectorised backtests overstate edge (look-ahead, unrealistic fills).</li>
+<li><b>Data</b>: free/cheap sources (yfinance, Alpha Vantage, exchange REST/websocket) are fine to start but have survivorship bias and gaps; know your data's quirks before trusting a result. Store raw ticks/bars yourself so backtests are reproducible.</li>
+<li><b>Infra</b>: a small always-on VPS beats a home PC (uptime, latency, power cuts); log everything, alert on errors/disconnects, and keep secrets out of git. Idempotent order handling and automatic reconnect are non-negotiable for anything unattended <span class="warn">!</span></li>
+</ul></section>
+
+<section class="card"><h3>Realistic Expectations &amp; Capital</h3>
+<ul>
+<li>Retail is capacity-advantaged (you can trade tiny, illiquid, niche things a fund can't) but resource-disadvantaged (no colo, no cheap data, no team). Your edge is <b>agility and small size</b>, not speed or firepower — fish where the big boats can't go.</li>
+<li>The maths of small accounts is brutal: fixed costs (data, VPS, fees) are a large percentage drag, and a realistic edge on a few thousand of capital is beer money, not a salary. Compounding needs both a real edge <i>and</i> enough capital and time.</li>
+<li>Survivorship colours everything you read: the winners post, the majority who quietly lost don't. Treat the whole endeavour as paid education with an option on a real edge, size so a total loss doesn't hurt, and keep your day job until the live track record earns otherwise.</li>
+</ul></section>
+
+<section class="card"><h3>Putting It Together — Playbook</h3>
+<ul>
+<li>The end-to-end loop: <b>idea</b> (an economic reason it should work) → <b>backtest honestly</b> (out-of-sample, realistic costs/fills, walk-forward) → <b>paper trade</b> → <b>live tiny</b> → <b>monitor &amp; reconcile</b> → <b>scale or retire</b>. Skipping a step is how bedroom quants lose money.</li>
+<li>Prefer <b>simple, explainable</b> strategies with few parameters — they overfit less and you'll actually trust them at 2am in a drawdown. Every added parameter is another way to fool yourself.</li>
+<li>Keep a research journal: what you tried, what worked, what didn't, and why. Most edges decay, so a repeatable <i>process</i> for finding the next one is worth more than any single strategy.</li>
+</ul></section>
+
+<section class="card"><h3>Why Most Retail Backtests Lie</h3>
+<ul>
+<li><b>Look-ahead bias</b>: using a bar's close to decide a trade you'd have taken at the open, or using data (earnings, revisions, index membership) that wasn't known yet. Only ever act on information available strictly before the decision point <span class="warn">!</span></li>
+<li><b>Survivorship bias</b>: backtesting on today's index constituents ignores the delisted losers, flattering every long strategy. Use point-in-time universes.</li>
+<li><b>Unrealistic fills &amp; costs</b>: assuming you got the mid, ignoring spread/slippage/fees, and trading illiquid names at sizes that would move the market. Model costs conservatively — a strategy that only works with zero costs doesn't work.</li>
+<li><b>Overfitting via multiple testing</b>: try 1000 parameter sets and the best one looks amazing by chance. Reserve out-of-sample data you touch once, prefer few parameters, and haircut the backtest Sharpe hard before believing it. If it's not robust to small parameter changes, it's curve-fit.</li>
+</ul></section>
+
 <section class="card"><h3>&#9733; Pre-Live / Paper-Trade Checklist</h3>
 <h4>Backtest honesty</h4>
 <ul>

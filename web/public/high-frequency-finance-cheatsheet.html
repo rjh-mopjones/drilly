@@ -384,6 +384,57 @@ microprice = (bid*ask_size + ask*bid_size)
 <p>Use an <b>L3 event-driven LOB simulator</b>; inject your orders as first-class price-time events. The simulator <i>is</i> the product.</p>
 </section>
 
+<section class="card"><h3>High-Frequency Data &amp; Time Series</h3>
+<ul>
+<li>Tick data is <b>irregularly spaced</b> in time and enormous — one liquid name is millions of events a day. You either work in <b>event time</b> (per trade/quote) or resample to <b>bars</b>; sampling in <i>volume</i> or <i>dollar</i> time (equal activity per bar) gives better statistical properties than clock time <span class="warn">!</span></li>
+<li><b>Microstructure noise</b>: at very high frequency the observed price is the efficient price plus a bid-ask bounce, so naive realised variance <i>explodes</i> as sampling frequency rises. Fixes: sample sparsely (5-min was the classic), or use noise-robust estimators (two-scale / realised kernels).</li>
+<li>High-frequency returns are <b>not</b> iid Gaussian: strong negative first-order autocorrelation from bounce, volatility clustering, fat tails, and intraday seasonality (the U-shaped volume/volatility over the day). Any model or backtest that assumes stationarity across the day is wrong <span class="warn">!</span></li>
+<li>Timestamps are the whole game: exchange vs gateway vs capture time can differ by microseconds, clocks drift, and you must know which one you're using or your "signal" is just clock skew.</li>
+</ul></section>
+
+<section class="card"><h3>Machine Learning &amp; Modern HFT</h3>
+<ul>
+<li>Features come from the book and the tape: order-book imbalance, microprice, queue sizes and their changes, trade sign runs, cancellation rates, and cross-asset lead-lag. The edge is usually in <b>feature engineering</b>, not the model.</li>
+<li><b>Labelling</b> is subtle — predicting the sign of the next mid-move over a short horizon, or whether a fill will be adverse. The triple-barrier method (profit/stop/time) beats fixed-horizon labels for execution problems.</li>
+<li>Overfitting is lethal because signals are weak (an information coefficient of a few percent is good) and non-stationary — regimes change intraday. Use walk-forward validation, purge/embargo around the label horizon to avoid leakage, and prefer simple, regularised models you can reason about.</li>
+<li><b>Latency of inference</b> matters: a model that predicts well but takes 50µs to score is useless on a 1µs path. Linear models and small trees dominate in production; heavy nets live in slower, alpha-research or execution-scheduling layers, not the hot path <span class="warn">!</span></li>
+</ul></section>
+
+<section class="card"><h3>FPGA &amp; Hardware Acceleration</h3>
+<ul>
+<li>The lowest-latency shops move the tick-to-trade path onto an <b>FPGA</b>: the network feed is parsed, the book updated, a simple strategy evaluated, and an order emitted entirely in hardware, in tens of <b>nanoseconds</b> — no CPU, no OS, no cache misses.</li>
+<li>The tradeoff is flexibility and dev cost: FPGA logic (Verilog/VHDL/HLS) is hard to change, so only the simplest, most latency-critical decisions live there; anything complex stays in software with a slower budget. A common design is FPGA for the "fast path" (cancels, obvious quotes) and CPU for the "smart path".</li>
+<li><b>NIC offload</b>: kernel-bypass (Solarflare/Onload, DPDK) removes the OS from the loop for software paths; smart-NICs can do feed parsing and even risk checks. Deterministic (low-jitter) latency often matters more than the mean — a p99.9 spike is what gets you picked off.</li>
+</ul></section>
+
+<section class="card"><h3>Colocation &amp; Connectivity</h3>
+<ul>
+<li><b>Colocation</b>: renting rack space in the exchange's data centre so your server sits metres from the matching engine. Exchanges standardise cable lengths so no colo tenant is closer than another — the remaining edge is inside your box.</li>
+<li>Between venues, <b>propagation delay</b> is physics: fibre is ~5µs/km and light in a straight line (microwave / millimetre-wave towers) beats fibre because it's faster through air and takes a shorter path. The Chicago–New York microwave race shaved the round trip toward the theoretical minimum.</li>
+<li>The full jitter budget is a chain — NIC, kernel bypass, cache residency, branch prediction, GC-free code — and the slowest hop dominates. You optimise the <b>tail</b>, not the average, because adverse selection happens exactly when you're slow.</li>
+</ul></section>
+
+<section class="card"><h3>Scenario Playbook</h3>
+<ul>
+<li><b>"Design a market-making system"</b>: feed handler → book builder → fair-value/microprice signal → quoting engine (Avellaneda-Stoikov style skew by inventory) → risk/position limits (15c3-5 style pre-trade checks) → order gateway, all on a kill-jitter hot path, with a separate slow path for parameters and monitoring. State where the latency budget goes.</li>
+<li><b>"Your strategy's live P&amp;L is worse than backtest"</b>: walk the differences — fill assumptions (did you assume you got the touch?), market impact, latency/queue position, adverse selection, fees/rebates, and survivorship in the data. HFT backtests lie mostly about <i>fills</i> and <i>queue position</i> <span class="warn">!</span></li>
+<li><b>"Diagnose a latency spike"</b>: is it a GC/allocation, a cache miss, a lock, a syscall, NUMA cross-socket traffic, or network? Reproduce, measure with hardware timestamps, and attack the tail.</li>
+</ul></section>
+
+<section class="card"><h3>Queue Position &amp; Adverse Selection</h3>
+<ul>
+<li><b>Queue position</b> is the hidden alpha of passive strategies: at a price level filled FIFO, being near the front means you get filled on the good flow and can cancel before the bad; being at the back means you only fill when the price is about to move against you. Modelling your realistic queue position is the single biggest source of backtest error for a maker <span class="warn">!</span></li>
+<li><b>Adverse selection</b>: your resting order fills precisely because someone with better information (or speed) traded against it — so passive fills are systematically "toxic". A market maker's edge is the spread minus adverse selection minus fees; the whole game is quoting wide/skewed enough that the spread wins on average.</li>
+<li><b>Order-flow toxicity</b> (e.g. VPIN) tries to measure how informed current flow is, so you can widen or pull quotes when toxicity spikes. During the 2010 Flash Crash, toxicity was extreme and liquidity evaporated as makers pulled — a canonical example of why static quoting is dangerous.</li>
+</ul></section>
+
+<section class="card"><h3>Regulation &amp; Market Quality — Deeper</h3>
+<ul>
+<li><b>Reg NMS</b> (US) created the order-protection rule and the NBBO, which is what makes latency arbitrage between venues profitable in the first place — you race to trade a stale quote before it updates. <b>MiFID II</b> (EU) added algo registration, clock-sync (RTS 25), and tighter reporting.</li>
+<li>Market-quality debates: HFT tightens spreads and adds displayed liquidity in normal times, but critics point to fleeting liquidity, quote stuffing, and fragility in stress. Circuit breakers (LULD in the US), minimum resting times, and batch auctions (as IEX's speed bump popularised) are the main policy responses.</li>
+<li>Pre-trade risk (SEC Rule 15c3-5, the "market access rule") legally requires fat-finger and credit checks on the path before an order reaches the exchange — the Knight Capital blow-up ($440M in 45 minutes from a bad deploy) is the standing lesson in why deploys and kill switches are life-or-death here <span class="warn">!</span></li>
+</ul></section>
+
 <section class="card"><h3>&#9733; Interview / Review Checklist</h3>
 <h4>Microstructure</h4>
 <ul>
