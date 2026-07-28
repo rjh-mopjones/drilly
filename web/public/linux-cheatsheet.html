@@ -221,6 +221,8 @@ systemd-analyze blame         # slow boot units</code></pre>
 <li>Crash recovery: <code>Restart=on-failure</code> + <code>RestartSec=</code>. Targets replace runlevels (<code>multi-user.target</code>≈3, <code>graphical</code>≈5).</li>
 <li>Sandboxing/limits in-unit: <code>MemoryMax=</code>, <code>CPUQuota=</code>, <code>LimitNOFILE=</code>, <code>ProtectSystem=</code> (all cgroup-backed).</li>
 <li>Edit a unit &#8594; <b>always</b> <code>daemon-reload</code> or changes are ignored <span class="warn">!</span></li>
+<li><b>mask</b> &gt; disable: <code>systemctl mask</code> symlinks the unit to <code>/dev/null</code> so it <b>cannot</b> start even as a dependency; disable only stops it at boot.</li>
+<li>Flapping service? <code>Restart=on-failure</code> loops fast — check <code>StartLimitIntervalSec</code>/<code>Burst</code>; read <code>journalctl -u svc -e</code> for the real crash, don't just bump the restart count.</li>
 </ul>
 </section>
 
@@ -238,6 +240,9 @@ systemd-analyze blame         # slow boot units</code></pre>
 <ul>
 <li>Low-level (single pkg, no deps) = <code>dpkg</code>/<code>rpm</code>; high-level (deps+repos+GPG) = <code>apt</code>/<code>dnf</code>.</li>
 <li>Don't mix <code>make install</code> with the package DB — untracked files break upgrades <span class="warn">!</span> Repos are GPG-signed; pin versions in prod.</li>
+<li><b>upgrade vs full-upgrade</b>: <code>apt upgrade</code> never removes packages; <code>apt full-upgrade</code>/<code>dist-upgrade</code> may remove to satisfy deps. <b>remove vs purge</b>: purge also deletes config (<code>/etc</code>).</li>
+<li>Pin/hold: <code>apt-mark hold pkg</code> / <code>dnf versionlock</code>. Security-only: <code>unattended-upgrades</code> (Debian) / <code>dnf update --security</code>.</li>
+<li><b>Snap/Flatpak/AppImage</b> = self-contained bundles (own libs, sandboxed) that dodge distro dep-hell — bigger, slower start, but "works everywhere". Fleet upgrades: canary a subset, roll forward, keep rollback.</li>
 </ul>
 </section>
 
@@ -341,8 +346,10 @@ mkfs.ext4 /dev/vg/lv    xfs_growfs /mnt</code></pre>
 <li>Stack: block dev &#8594; partition (GPT) &#8594; (LVM) &#8594; filesystem (ext4/xfs) &#8594; mount. <code>ext4</code> shrinkable offline; <code>xfs</code> <b>cannot shrink</b> <span class="warn">!</span></li>
 <li>"No space left" but <code>df</code> shows free? &#8594; <b>inodes</b> exhausted (millions of tiny files), <code>df -i</code> <span class="warn">!</span></li>
 <li>Disk full after <code>rm</code>? A process holds the deleted file open — space frees only when the fd closes. <code>lsof +L1</code> &#8594; restart the holder <span class="warn">!</span></li>
-<li><b>LVM</b>: PV &#8594; VG &#8594; LV. Grow online: <code>lvextend -r -L +10G /dev/vg/lv</code> (<code>-r</code> resizes FS too). Snapshots for backups.</li>
+<li><b>LVM</b>: PV &#8594; VG &#8594; LV. Grow online: <code>lvextend -r -L +10G /dev/vg/lv</code> (<code>-r</code> resizes FS too). Snapshots for backups (COW, thin-provisioned).</li>
 <li>RAID survives <b>disk</b> failure, not <code>rm -rf</code>/corruption — RAID ≠ backup <span class="warn">!</span></li>
+<li><b>fstab</b> mounts at boot by <code>UUID=</code> (stable) not <code>/dev/sdX</code> (reorders) <span class="warn">!</span> A bad fstab line stalls boot into emergency mode — add <code>nofail</code> for optional mounts. <code>mount -a</code> tests it before rebooting.</li>
+<li><b>ext4</b> = general-purpose, shrinkable offline; <b>xfs</b> = high-throughput, grow-only. <code>tune2fs -l</code> (ext) / <code>xfs_info</code> read FS metadata. <code>fsck</code> only on an <b>unmounted</b> FS.</li>
 </ul>
 </section>
 
@@ -358,6 +365,8 @@ resolvectl status        # systemd-resolved</code></pre>
 <li>DNS order: <code>/etc/nsswitch.conf</code> &#8594; <code>/etc/hosts</code> then DNS (<code>/etc/resolv.conf</code>). App may cache separately.</li>
 <li>Lots of <b>TIME_WAIT</b> on the closing side = normal; only tune if exhausting ephemeral ports.</li>
 <li><b>Connection refused</b> = reached host, nothing listening (RST). <b>Timeout</b> = firewall drop / unreachable — different fixes <span class="warn">!</span></li>
+<li><b>Same subnet</b> (mask matches) &#8594; ARP + deliver direct; else &#8594; <b>default gateway</b>. <code>ip route get 8.8.8.8</code> shows the exact route/iface/src chosen. No default route = "local works, internet doesn't".</li>
+<li><code>ping</code> is ICMP — it can pass while the <b>service</b> port is firewalled; always test the actual TCP port. RFC 1918 (<code>10/8 172.16/12 192.168/16</code>) needs NAT to reach the internet.</li>
 </ul>
 </section>
 
@@ -430,6 +439,9 @@ perf top   perf record -g cmd  # CPU hot path</code></pre>
 <li>Hung process? <code>strace -p</code>, read the <b>last line</b>: <code>read(3,</code>=blocked on fd (find via <code>lsof</code>); <code>futex(...WAIT</code>=lock contention; <code>connect(</code>=net/DNS.</li>
 <li><code>strace</code> uses <code>ptrace</code>, can slow a process 10–100&times; — never blanket-trace hot prod; use <code>-c</code>/<code>-e</code> or eBPF (<code>execsnoop</code>, <code>opensnoop</code>) <span class="warn">!</span></li>
 <li>"Too many open files" (EMFILE) &#8594; raise <code>ulimit -n</code> / <code>LimitNOFILE=</code>.</li>
+<li><code>strace</code> = <i>tracing</i> every event (heavy); <code>perf</code> = <i>sampling</i> at a frequency (light, prod-safe) — different questions: "stuck/erroring on a syscall?" vs "where do CPU cycles go?".</li>
+<li>Find a missing file/config: <code>strace -e trace=openat ./app 2&gt;&amp;1 | grep ENOENT</code>. Permission denied shows as <code>EACCES</code>.</li>
+<li>Modern: <code>ss -ltnp</code> replaces <code>lsof -i</code>/<code>netstat</code> for "who owns the port"; <code>fuser -m /mnt</code> = who's on this mount (before unmount).</li>
 </ul>
 </section>
 
@@ -438,9 +450,106 @@ perf top   perf record -g cmd  # CPU hot path</code></pre>
 <li>Containers are <b>isolated processes</b>, not VMs — built from kernel <b>namespaces</b> + <b>cgroups</b> + an overlay FS. Shared host kernel.</li>
 <li><b>Namespaces</b> isolate the <i>view</i>: pid, net, mnt, uts, ipc, user, cgroup. PID 1 inside ≠ PID 1 on host.</li>
 <li><b>cgroups (v2)</b> limit resources: <code>--memory</code>/<code>--cpus</code> map to cgroup limits. OOM can fire <b>inside</b> a cgroup while the host has RAM <span class="warn">!</span></li>
-<li><b>overlayfs</b>: read-only image layers + a copy-on-write writable layer on top.</li>
+<li><b>overlayfs</b>: read-only image layers + a copy-on-write writable layer on top. <b>Image</b> = immutable layers; <b>container</b> = image + writable top + namespaces/cgroups.</li>
 <li><code>free</code>/<code>top</code>/<code>nproc</code> inside a container report <b>host</b> totals unless cgroup-aware — your JVM/Go heap sizing may be wrong <span class="warn">!</span></li>
-<li><code>--privileged</code> drops isolation — avoid; drop capabilities, apply seccomp, run non-root.</li>
+<li><b>Capabilities</b> = ~40 slices of root's power (<code>CAP_NET_ADMIN</code>, <code>CAP_SYS_ADMIN</code>); containers drop most by default. <b>seccomp</b> filters syscalls (Docker's default blocks ~44). <code>--privileged</code> strips <b>all</b> fencing — nearly host-equivalent; avoid <span class="warn">!</span></li>
+<li><b>Rootless</b>: a <b>user namespace</b> maps container UID 0 to an unprivileged host UID — escape ≠ host root.</li>
+<li>The kernel is <b>shared</b> — a container escape is a kernel exploit; isolation is weaker than a VM. <code>docker run</code> = <code>clone()</code>+cgroups+overlayfs via runc/containerd. Enter one live: <code>nsenter -t &lt;pid&gt; -a</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Performance Triage — USE &amp; the 60s sweep</h3>
+<p><b>Brendan Gregg's 60-second checklist</b> — broad tools first, each rules out one resource class before you go deep:</p>
+<pre><code>uptime            # load 1/5/15 — trending up?
+dmesg -T | tail   # OOM, I/O errors, TCP drops
+vmstat 1          # r/b, si/so, us/sy/wa/id
+mpstat -P ALL 1   # one hot core vs all?
+pidstat 1         # which PROCESS, over time
+iostat -xz 1      # per-disk %util await IOPS
+free -m           # AVAILABLE, swap
+sar -n DEV 1      # net throughput + errors</code></pre>
+<table><thead><tr><th>USE</th><th>CPU</th><th>Disk</th></tr></thead><tbody>
+<tr><td><b>U</b>til</td><td><code>%usr+%sys</code></td><td><code>%util</code></td></tr>
+<tr><td><b>S</b>at</td><td><code>vmstat r</code>&gt;cores</td><td><code>aqu-sz</code>/<code>await</code></td></tr>
+<tr><td><b>E</b>rrors</td><td>—</td><td><code>dmesg</code>, SMART</td></tr>
+</tbody></table>
+<ul>
+<li>Sweep <b>every</b> resource (CPU/mem/disk/net/locks) for U+S+E — you can't stop at "CPU looks fine" and miss a disk throwing errors.</li>
+<li>Read <code>iostat</code>: <code>await</code> (latency) matters more than <code>%util</code> — SSD &lt;1-2ms, spinning ~10ms; hundreds of ms = the bottleneck. High <code>aqu-sz</code> = saturation <span class="warn">!</span></li>
+<li><code>vmstat</code>: <code>r</code>&gt;cores = CPU-bound; <code>b</code>&gt;0 + high <code>wa</code> = I/O; sustained <code>si/so</code> = <b>thrashing</b> (working set &gt; RAM).</li>
+<li><b>Idle CPU + idle disk + low throughput</b> = blocked, not busy — downstream dep, DNS, or lock contention. <code>strace -c -p</code>: time in <code>futex</code> = locks.</li>
+<li>Rule: <b>measure before mutating; never fix two things at once</b>. State a hypothesis, prove it with one command, verify the metric moved.</li>
+</ul>
+</section>
+
+<section class="card"><h3>/proc/&lt;pid&gt; &amp; Resource Limits</h3>
+<pre><code>cat /proc/&lt;pid&gt;/limits   # actual soft/hard limits
+ls /proc/&lt;pid&gt;/fd | wc -l # open fds (leak check)
+cat /proc/&lt;pid&gt;/wchan     # kernel fn it sleeps in
+cat /proc/&lt;pid&gt;/status    # State VmRSS Threads ctxsw
+cat /proc/&lt;pid&gt;/io        # bytes read/written
+ls -l /proc/&lt;pid&gt;/{cwd,exe,root}</code></pre>
+<ul>
+<li><code>/proc/&lt;pid&gt;/</code> is the kernel's live view — the ground truth every tool reads. For a <code>D</code>-state hang, <code>wchan</code> names the blocking syscall (e.g. an NFS fn &#8594; dead mount).</li>
+<li><b>"Too many open files" = EMFILE</b> — hit the fd limit (sockets + pipes count). Diagnose leak vs legit: <code>lsof -p</code> showing thousands of the same socket = app bug, fix the code — raising the limit only delays the crash <span class="warn">!</span></li>
+</ul>
+<table><thead><tr><th>Start method</th><th>Set limits in</th></tr></thead><tbody>
+<tr><td>login shell</td><td><code>/etc/security/limits.conf</code> (PAM)</td></tr>
+<tr><td>systemd svc</td><td><code>LimitNOFILE=</code> in unit</td></tr>
+<tr><td>system-wide</td><td><code>sysctl fs.file-max</code></td></tr>
+</tbody></table>
+<ul>
+<li><b>systemd ignores <code>limits.conf</code></b> for services — editing it does nothing for a daemon; set <code>Limit*=</code> in the unit + <code>daemon-reload</code> <span class="warn">!</span></li>
+<li>Soft limit = current (user raises up to hard); hard = ceiling (root only). <code>ulimit -n</code> affects only that shell + children.</li>
+</ul>
+</section>
+
+<section class="card"><h3>eBPF &amp; bcc — observe without disrupting</h3>
+<ul>
+<li><b>eBPF</b> runs small kernel-verified programs on hooks (syscalls, tracepoints, kprobes) — near-native speed, can't crash the kernel. Traces the <b>whole system</b> cheaply, unlike <code>strace</code> (one process, 10-100&times; slower).</li>
+</ul>
+<table><thead><tr><th>Tool</th><th>Shows</th></tr></thead><tbody>
+<tr><td><code>execsnoop</code></td><td>every new process (catch short-lived / fork storms)</td></tr>
+<tr><td><code>opensnoop</code></td><td>every file open + failures — "what file?"</td></tr>
+<tr><td><code>biolatency</code></td><td>block-I/O latency histogram</td></tr>
+<tr><td><code>tcpconnect</code>/<code>tcpretrans</code></td><td>connections / TCP retransmits live</td></tr>
+<tr><td><code>runqlat</code></td><td>run-queue latency (CPU sat <code>%util</code> hides)</td></tr>
+</tbody></table>
+<p><code>perf record -F 99 -g -p &lt;pid&gt; -- sleep 30</code> then a <b>flame graph</b> (box width = on-CPU time): widest boxes = hot paths. <code>-F 99</code> avoids lock-step with periodic tasks.</p>
+</section>
+
+<section class="card"><h3>TCP State, Ports &amp; Sockets</h3>
+<pre><code>ss -tlnp                 # listening TCP + owning PID
+ss -tan state established | wc -l
+ss -s                    # summary by state
+ss -tn state time-wait | wc -l
+fuser 8080/tcp           # who holds the port
+dmesg | grep -i conntrack  # table full?</code></pre>
+<ul>
+<li>A connection = <b>4-tuple</b> <code>(local IP:port, remote IP:port)</code>. Ports: <b>well-known</b> 0-1023 (root / <code>CAP_NET_BIND_SERVICE</code>), <b>registered</b> 1024-49151, <b>ephemeral</b> ~32768-60999 (client source).</li>
+<li><b>TIME_WAIT</b> on the side that <b>actively closes</b> is normal — the kernel holds the tuple ~2&middot;MSL before reuse. Thousands = a busy proxy/client, not a leak; only tune if exhausting ephemeral ports <span class="warn">!</span></li>
+<li><code>nf_conntrack: table full, dropping packet</code> in <code>dmesg</code> = conntrack table exhausted (NAT/firewall box) &#8594; raise <code>nf_conntrack_max</code>.</li>
+<li>Listen-queue overflow / <code>possible SYN flooding</code> = accept backlog too small under load.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Regex, sed &amp; awk — deeper</h3>
+<table><thead><tr><th>Flavour</th><th>Enable</th><th>Note</th></tr></thead><tbody>
+<tr><td>BRE (basic)</td><td>default</td><td><code>\( \) \{ \}</code> need escaping</td></tr>
+<tr><td>ERE (extended)</td><td><code>grep -E</code></td><td><code>+ ? | () {}</code> literal</td></tr>
+<tr><td>PCRE</td><td><code>grep -P</code></td><td>lookaround, <code>\d</code>, lazy</td></tr>
+</tbody></table>
+<pre><code>sed -n '/START/,/END/p' f     # print between markers
+sed '3d' f       sed '$!N;s/\n/ /'  # del line 3; join pairs
+sed -E 's/([0-9]+)/[\1]/g' f  # backref capture group
+awk 'NR==FNR{a[$1];next} $1 in a' keys data  # join/filter
+awk '/ERROR/{c[$4]++} END{for(k in c)print c[k],k}' log
+awk 'BEGIN{FS=OFS="\t"} {$2=toupper($2)}1' f
+awk '$5>500 && $9=="404"' access.log   # multi-cond</code></pre>
+<ul>
+<li><code>sed -i.bak</code> makes an editable backup; bare <code>sed -i</code> has <b>no undo</b> <span class="warn">!</span> On BSD/macOS <code>-i</code> needs an arg (<code>-i ''</code>).</li>
+<li>awk: <code>NR</code>=total line#, <code>FNR</code>=per-file line#, <code>NF</code>=field count, <code>$NF</code>=last field. Trailing <code>1</code> = "print this line".</li>
+<li>Prefer <code>grep -F</code> (fixed string) when not matching a pattern — faster, no escaping.</li>
 </ul>
 </section>
 

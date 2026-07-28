@@ -126,6 +126,15 @@ histogram_quantile(0.99,
 <li>Range vector <code>[5m]</code> only on counters/gauges before <code>rate/increase</code>; instant vector for math.</li>
 <li><code>sum by(le)</code> <b>before</b> <code>histogram_quantile</code>, never after <span class="warn">!</span></li>
 <li><b>Recording rules</b> pre-compute expensive queries; <b>alerting rules</b> fire on expressions <code>for</code> a duration.</li>
+<li>Make the <code>rate</code> window ≥ <b>4× scrape interval</b> so a missed scrape doesn't produce "no data" <span class="warn">!</span> (a <code>[1m]</code> window on a 30s scrape has ~2 samples).</li>
+<li><code>rate</code> is <b>reset-aware</b> (counter restart → adds pre-reset value, no negative spike) and <b>extrapolates</b> to window edges — so it can return non-integer values for integer counters.</li>
+<li>Don't <code>rate()</code> a <b>gauge</b> — use <code>deriv()</code>/<code>delta()</code>. And never compare a raw counter total (<code>x_total &gt; 100</code>) — it only grows since process start <span class="warn">!</span></li>
+</ul>
+<h4>Regex &amp; matchers</h4>
+<ul>
+<li>Matchers: <code>=</code> <code>!=</code> <code>=~</code> (regex) <code>!~</code>. Regex is <b>fully anchored</b> — <code>=~"api"</code> matches only <code>api</code>, use <code>=~".*api.*"</code> for substring <span class="warn">!</span></li>
+<li><code>{label=""}</code> matches series missing the label or with it empty. Match the name via <code>{__name__=~"node_.*"}</code>.</li>
+<li><b>"No data" debug</b>: strip to bare metric → add matchers one at a time → check regex anchoring → check vector-match label sets → check type (range vector needs a range fn). Bisect.</li>
 </ul></section>
 
 <section class="card"><h3>Prometheus Architecture</h3>
@@ -153,6 +162,9 @@ histogram_quantile(0.99,
 <ul>
 <li>Budget spent → freeze feature launches, prioritise reliability. Budget healthy → ship faster. It aligns dev vs ops incentives.</li>
 <li>Pick <b>user-centric</b> SLIs (did the request succeed fast?) not machine metrics (CPU) <span class="warn">!</span></li>
+<li>SLI = ratio of <b>good / valid</b> events — define "valid" carefully (usually exclude client-fault 4xx from availability; only count what <i>you</i> own).</li>
+<li>Latency SLI is a <b>threshold ratio</b> ("% of requests ≤ 800ms"), not a percentile target — it composes cleanly into a burn-rate budget.</li>
+<li>Window matters: a 99.9%/30d SLO judged over a rolling 28-day window is standard; shorter windows are noisier, longer ones forgive incidents too readily.</li>
 </ul></section>
 
 <section class="card"><h3>Alerting &amp; Burn Rate</h3>
@@ -186,6 +198,9 @@ histogram_quantile(0.99,
 <li><b>Sampling</b> high-volume logs; keep 100% of errors. Cardinality/PII hygiene at ingest <span class="warn">!</span></li>
 <li>Pipeline: app → agent (Fluent Bit/Vector) → buffer (Kafka) → store (Loki/Elasticsearch/ClickHouse) → query (Grafana/Kibana).</li>
 <li><b>Loki</b> indexes labels only (cheap); <b>ELK</b> indexes full text (rich, costly). Never index high-cardinality fields as labels <span class="warn">!</span></li>
+<li><b>Retention tiers</b>: hot (searchable, days) vs cold/archive (object store, cheap). Sample noisy INFO, keep 100% ERROR.</li>
+<li>Deriving metrics from logs (LogQL <code>rate</code>) works when you lack a real metric but is slower/costlier than a counter — reach for it as a stopgap, not a design <span class="warn">!</span></li>
+<li>Redact PII at ingest (in the agent/Collector), not after storage — once it's in the index it's a compliance problem.</li>
 </ul></section>
 
 <section class="card"><h3>Distributed Tracing</h3>
@@ -194,6 +209,10 @@ histogram_quantile(0.99,
 <li><b>Context propagation</b> across services via headers (W3C <code>traceparent</code>) — the one thing that must be threaded everywhere <span class="warn">!</span> (broken propagation = orphan traces).</li>
 <li><b>Sampling</b>: <i>head</i> (decide at start, cheap, may miss rare errors) vs <i>tail</i> (decide after seeing whole trace, keeps all errors, needs a collector buffer).</li>
 <li>Use traces to find the <b>slow span</b> in a p99 request and see cross-service causality; pair with logs via trace_id.</li>
+<li><b>Propagation formats must agree</b> on both ends: W3C <code>traceparent</code> (standardise on this) vs B3 (Zipkin) vs proprietary. A mismatch = disconnected traces <span class="warn">!</span></li>
+<li><b>Async hops</b> (SQS/Kafka/EventBridge) don't carry HTTP headers — inject trace context <i>into the message</i>, extract on the consumer, or producer→consumer linkage breaks.</li>
+<li>Keep the <b>sampling decision consistent</b> across a trace (it must propagate) — otherwise you keep some spans and drop others → incomplete traces.</li>
+<li><b>Clock skew</b> across hosts makes waterfalls look wrong (negative/overlapping spans) even when propagation is fine — check NTP.</li>
 </ul></section>
 
 <section class="card"><h3>OpenTelemetry (OTel)</h3>
@@ -218,6 +237,9 @@ histogram_quantile(0.99,
 <li>Discovery via Prometheus Operator <b>ServiceMonitor / PodMonitor</b> CRDs.</li>
 <li>Watch: pod restarts/CrashLoopBackOff, OOMKilled, throttling (<code>container_cpu_cfs_throttled</code>), pending pods, PVC saturation.</li>
 <li>Resource requests/limits drive scheduling + QoS; alert on <b>saturation</b> (near limits) not just utilisation <span class="warn">!</span></li>
+<li><b>CFS throttling</b> (<code>container_cpu_cfs_throttled_periods_total</code>) bites even below 100% average CPU — a container hitting its limit in bursts is throttled and slow while looking "fine" on a mean gauge <span class="warn">!</span></li>
+<li><b>OOMKilled</b> (exit 137) = memory limit hit; <b>CrashLoopBackOff</b> = repeated restart. Alert on restart rate, not just current phase.</li>
+<li>Pod names/IDs are <b>high-churn</b> labels — don't aggregate <code>by(pod)</code> in recording rules; the index bloats even when few pods are live.</li>
 </ul></section>
 
 <section class="card"><h3>Dashboards, RUM &amp; Profiling</h3>
@@ -284,6 +306,211 @@ sum(rate({app="api"} |= "status=5" [5m]))</code></pre>
 <li>Select by <b>labels</b> first (indexed), then filter the line (<code>|=</code> contains, <code>|~</code> regex), then parse (<code>json</code>/<code>logfmt</code>).</li>
 <li>Derive metrics from logs when you lack a metric — but it's slower/costlier than a real counter <span class="warn">!</span></li>
 <li>Retention tiers: hot (searchable days) vs cold/archive (cheap object store). Sample noisy INFO, keep all ERROR.</li>
+</ul></section>
+
+<section class="card"><h3>PromQL Advanced Patterns</h3>
+<pre><code># join per-pod metric to version metadata
+rate(http_requests_total[5m])
+  * on(pod) group_left(version) kube_pod_info
+
+# hour-over-hour comparison
+rate(x[5m]) / rate(x[5m] offset 1h)
+
+# max 5m-rate seen over last hour (subquery)
+max_over_time( rate(x[5m])[1h:1m] )
+
+# capacity: disk full within 4h?
+predict_linear(node_fs_avail_bytes[6h], 4*3600) &lt; 0</code></pre>
+<ul>
+<li><b>Vector matching</b>: pairs by full label set (1:1). <code>on()</code>/<code>ignoring()</code> pick join keys; <code>group_left</code>/<code>group_right</code> mark the "many" side for many-to-one (the info-metric join above).</li>
+<li>Both sides of a ratio need <b>matching grouping</b> — add <code>by(job)</code> to one, add it to the other or you get "no data" <span class="warn">!</span></li>
+<li><b>Subqueries</b> <code>expr[range:res]</code> are expensive (inner query runs per step) — promote hot ones to recording rules.</li>
+<li><b>Recording-rule naming</b>: <code>level:metric:operations</code> e.g. <code>job:http_errors:rate5m</code>. Prevents re-aggregating an aggregate (double-count).</li>
+<li><code>predict_linear</code> is a <i>linear</i> fit — great for slow-trending gauges (disk/mem/cert runway), bad for bursty/sawtooth signals.</li>
+</ul></section>
+
+<section class="card"><h3>Histograms Deep Dive</h3>
+<ul>
+<li><code>_bucket{le}</code> is <b>cumulative</b> (count ≤ boundary). Accuracy is bounded by your <b>bucket layout</b> — <code>histogram_quantile</code> interpolates <i>linearly within a bucket</i>, so coarse buckets (1s→10s) give a wild p99 <span class="warn">!</span></li>
+<li>p99 landing in the <code>+Inf</code> bucket → you get the last finite boundary back = buckets too small; add higher boundaries.</li>
+<li><b>Never <code>avg(p99)</code> across instances</b> — percentiles aren't linearly combinable. Aggregate <b>buckets</b> (<code>sum by(le)</code>), then quantile once.</li>
+</ul>
+<pre><code># WRONG: averages per-instance quantiles
+avg(histogram_quantile(0.99, rate(d_bucket[5m])))
+# RIGHT: merge distribution first
+histogram_quantile(0.99,
+  sum by(le)(rate(d_bucket[5m])))</code></pre>
+<ul>
+<li><b>Native/exponential histograms</b> (newer Prometheus/OTel): auto-scaling buckets, far cheaper than one series per <code>le</code> — the fix for classic histogram cardinality.</li>
+<li>Ship latency as a <b>histogram not a summary</b> if you ever need fleet-wide or per-route percentiles — summaries can't merge.</li>
+</ul></section>
+
+<section class="card"><h3>Alerting Rules &amp; <code>for:</code></h3>
+<pre><code>- alert: HighErrorRate
+  expr: |
+    sum by(job)(rate(http_requests_total{code=~"5.."}[5m]))
+    / sum by(job)(rate(http_requests_total[5m])) &gt; 0.05
+  for: 10m
+  labels: { severity: page }
+  annotations:
+    summary: "{{ $labels.job }} 5xx &gt; 5% for 10m"</code></pre>
+<ul>
+<li>Expression returns a non-empty vector → each series is an alert instance. <code>pending</code> → <code>firing</code> only after <code>for:</code> holds continuously.</li>
+<li><code>for:</code> is your anti-<b>flapping</b> guard: too short = 3am noise, too long = slow detection. Multi-burn-rate formalises this (short window fast-burn, long window slow-burn).</li>
+<li>Back SLI ratios with <b>recording rules</b> so alert and dashboard use the same cheap, consistent series.</li>
+</ul></section>
+
+<section class="card"><h3>Dead-man's Switch &amp; Coverage Gaps</h3>
+<ul>
+<li>A threshold alert on a series that <b>disappeared</b> never fires — no data, no evaluation. "Green because the exporter was dead" <span class="warn">!</span></li>
+<li><code>absent(up{job="api"})</code> fires when the target's gone; <code>absent_over_time(...[10m])</code> is stricter (needs the whole window missing, ignores one missed scrape).</li>
+<li><b>Dead-man's switch</b> = an always-firing alert routed to a watchdog that pages if it ever <i>stops</i> arriving — catches Prometheus itself being down (which local <code>absent()</code> can't).</li>
+</ul>
+<h4>"No alert fired" — why?</h4>
+<ol>
+<li>No alert exists for this failure mode (most common)</li>
+<li>Threshold/<code>for:</code> too lax</li>
+<li>The signal itself died (stale/absent)</li>
+<li>Alert fired, delivery failed (silence left on, routing broken)</li>
+<li>Wrong SLI — stayed green while users hurt</li>
+</ol>
+<p class="cap">Fix the gap, but prefer <b>symptom/SLO</b> alerts (cover a class of failures) + absence alerts + periodic end-to-end alert-path tests.</p></section>
+
+<section class="card"><h3>Design: Reference Architectures</h3>
+<p>Work <b>outside-in</b>: user experience → SLIs/SLOs → symptom alerts → instrumentation that produces them. Name tools, justify each.</p>
+<table><thead><tr><th>Pillar</th><th>OSS "LGTM" pick</th></tr></thead><tbody>
+<tr><td>Metrics</td><td>Prometheus → <b>Mimir/Thanos</b> (object store, multi-tenant)</td></tr>
+<tr><td>Logs</td><td><b>Loki</b> (label-indexed, cheap)</td></tr>
+<tr><td>Traces</td><td><b>Tempo</b> (object store, no span index)</td></tr>
+<tr><td>Collect</td><td><b>OTel Collector</b> agent+gateway</td></tr>
+<tr><td>View/alert</td><td><b>Grafana</b> + <b>Alertmanager</b></td></tr>
+</tbody></table>
+<ul>
+<li>Everything on <b>object storage</b> (sub-linear cost), OTLP vendor-neutral, Collector gateway is the single <b>sampling/cardinality choke point</b>.</li>
+<li><b>Legacy monolith</b>: black-box first (synthetic probe + LB RED, zero code) → structured logs + request ID → white-box golden signals on hot paths → auto-instrument tracing → 1-2 SLOs.</li>
+<li><b>Serverless</b>: push not scrape (OTLP / CloudWatch EMF), duration + cold-starts + throttles are first-class, Lambda OTel extension ships without blocking, context propagation across async hops is the hard part <span class="warn">!</span></li>
+<li><b>Multi-region</b>: collect+alert <b>locally</b> (survives partition, no global SPOF) → remote_write to Thanos/Mimir → one global Grafana. <code>region</code> is a bounded label; mind egress.</li>
+<li><b>Managed vs self-host</b> = engineering-time vs billing-exposure. Managed meters punish cardinality/per-host/per-GB; self-host wins past the crossover if you have cardinality discipline.</li>
+</ul></section>
+
+<section class="card"><h3>Debug Funnel: symptom → cause</h3>
+<p><b>Metrics locate</b> (what/where) → <b>traces isolate</b> (which hop) → <b>logs explain</b> (why). Never random-walk dashboards.</p>
+<ol>
+<li>Confirm scope + user impact: SLO burning? one service/endpoint or all? p99-only (tail) vs p50-too (everything)?</li>
+<li>Correlate with events — <b>what changed?</b> deploy marker, cron/batch, autoscale, traffic. Check USE (CPU/mem/pool).</li>
+<li>Exemplar → <b>slow trace</b>: waterfall shows the slow hop (DB, downstream, external, lock/queue).</li>
+<li>Pivot trace_id → <b>logs</b> of that span: the actual error/slow query/timeout.</li>
+<li>Confirm with resource metric, mitigate, add alert if none fired.</li>
+</ol>
+<pre><code># which route spiked?
+histogram_quantile(0.99,
+  sum by(le,route)(rate(http_req_dur_bucket[5m])))
+# post-deploy: compare error ratio by version
+sum by(version)(rate(http_requests_total{status=~"5.."}[5m]))
+/ sum by(version)(rate(http_requests_total[5m]))</code></pre>
+<ul>
+<li><b>Deploy-correlated error spike</b>: mitigate first — <b>roll back now</b>, investigate after. Error tracker (Sentry) release-tags the new exception fastest.</li>
+<li>2am + tail-only latency screams <b>scheduled job / backup / batch contention</b> or cold cache / pool exhaustion / GC.</li>
+</ul></section>
+
+<section class="card"><h3>Green Dashboards Lie</h3>
+<p>Green ≠ healthy — often a <b>coverage/measurement gap</b>. Trust the user's report; hunt the ways green hides pain:</p>
+<table><thead><tr><th>Why green lies</th><th>Check</th></tr></thead><tbody>
+<tr><td>Missing instrumentation</td><td>unexplained <b>gap</b> in trace waterfall = uninstrumented work <span class="warn">!</span></td></tr>
+<tr><td>Averages hide the tail</td><td>look at p95/p99, not mean; add RUM for client-observed</td></tr>
+<tr><td>Head sampling dropped it</td><td>switch hot path to <b>tail sampling</b> (keep slow/error)</td></tr>
+<tr><td>Aggregation hides a segment</td><td>slice by route/region/tenant/version</td></tr>
+<tr><td>Wrong vantage point</td><td>CDN/DNS/TLS/client net — add synthetics + RUM</td></tr>
+</tbody></table>
+<p class="cap">Then fix the instrumentation so it can't hide next time.</p></section>
+
+<section class="card"><h3>Sampling &amp; Alert Fatigue</h3>
+<h4>Trace sampling</h4>
+<ul>
+<li><b>Head</b>: decide at trace start — cheap, but statistically drops rare slow/error traces (the ones you want) <span class="warn">!</span></li>
+<li><b>Tail</b>: decide after the whole trace is seen — keeps all errors/slow, needs a Collector buffer holding spans until decision.</li>
+<li>Watch <code>otelcol_exporter_send_failed_spans</code> + receiver/queue metrics for dropped spans (backpressure, export failure, batch timeout).</li>
+</ul>
+<h4>Fixing alert fatigue</h4>
+<ul>
+<li>North star: <b>every page urgent + actionable + needs a human</b>. Measure first — noisy top offenders cause most pain.</li>
+<li>Convert <b>cause-alerts → symptom-alerts</b> (page on SLO burn, not CPU 80%). Downgrade the rest to ticket/dashboard.</li>
+<li>Add <code>for:</code>, grouping/inhibition (one incident = one page), and a runbook per alert. An alert that fired and needed no action gets tuned/deleted in the postmortem.</li>
+<li>Signal-to-noise is safety — <b>alert quantity is not</b>.</li>
+</ul></section>
+
+<section class="card"><h3>MTTD / MTTR Levers</h3>
+<table><thead><tr><th>Lower MTTD (detect)</th><th>Lower MTTR (resolve)</th></tr></thead><tbody>
+<tr><td>Symptom SLO + multi-burn-rate</td><td>Correlation: exemplars, trace↔log, request IDs</td></tr>
+<tr><td>Coverage + dead-man's switches</td><td>Triage-ordered dashboard + runbooks</td></tr>
+<tr><td>Synthetics on critical journeys</td><td>"What changed": deploy markers, per-version, fast rollback</td></tr>
+<tr><td>SLIs measured where the user is (RUM)</td><td>Clean trace propagation → slow hop visible</td></tr>
+</tbody></table>
+<ul>
+<li><b>MTTD is an alerting/coverage problem; MTTR is a correlation/runbook/rollback problem.</b></li>
+<li>Process levers: blameless postmortems producing <i>concrete</i> fixes (the missing alert/span/runbook) + progressive delivery (canary + auto-rollback on SLO burn) to shrink the impact window.</li>
+</ul></section>
+
+<section class="card"><h3>Incident Walkthrough: page → postmortem</h3>
+<ol>
+<li><b>Detect (MTTD):</b> multi-burn-rate SLO alert pages — fired on the <b>symptom</b> (users failing checkout), not a cause. On-call acks; alert links dashboard + runbook.</li>
+<li><b>Triage:</b> dashboard shows SLO burning, RED spiking on <code>POST /checkout</code> for one <b>version</b>, correlated with a deploy marker 10m ago.</li>
+<li><b>Mitigate first:</b> roll back the release now — MTTR beats root-causing live. Budget stops burning.</li>
+<li><b>Diagnose (funnel):</b> exemplar → failing trace → span erroring on payments call → pivot trace_id → logs show a NullPointer from a bad migration. Error tracker confirms, tagged <code>v2.4.0</code>.</li>
+<li><b>Root cause:</b> schema change incompatible with in-flight requests — trace + logs + release tag agree.</li>
+<li><b>Fix forward + verify:</b> corrected migration, watch SLO recover, traces clean.</li>
+<li><b>Blameless postmortem:</b> detect fast enough? catch pre-prod? anything invisible? Action items: canary + auto-rollback on SLO burn, migration-compat test, runbook tweak — feed learnings back so next MTTD/MTTR are lower.</li>
+</ol>
+<p class="cap">Detect on symptom → triage on RED → mitigate by rollback → diagnose exemplar→trace→logs → fix → postmortem that hardens the observability itself.</p></section>
+
+<section class="card"><h3>Cardinality Hunt (OOM / Bill)</h3>
+<p>Prometheus memory tracks <b>active series</b>; the managed bill tracks <b>custom metrics per tag combo</b> — same disease, same hunt.</p>
+<pre><code># 1. is it cardinality, and growing?
+prometheus_tsdb_head_series          # high + climbing = smoking gun
+
+# 2. which metric owns the series?
+topk(10, count by(__name__)({__name__=~".+"}))
+
+# 3. confirm the unbounded label
+count(count by(user_id)(suspect_metric))</code></pre>
+<ul>
+<li>Culprit is almost always an <b>unbounded label</b>: <code>user_id</code>, <code>request_id</code>, <code>session_id</code>, an error-message string, or a raw URL with IDs baked in <span class="warn">!</span></li>
+<li><b>Fix at source</b>: stop emitting it — normalise path to a <b>route template</b>, move the identifier to a trace/log where high cardinality belongs.</li>
+<li><b>Fast mitigate at scrape</b>: <code>metric_relabel_configs</code> <code>labeldrop</code>/<code>drop</code>; set <code>sample_limit</code>/<code>label_limit</code> so a bad target is rejected, not OOMing you.</li>
+<li><b>Guardrail so it can't recur</b>: per-target <code>sample_limit</code>, per-tenant <code>max_global_series_per_user</code> quota (Mimir), + alert on <code>prometheus_tsdb_head_series</code> growth.</li>
+<li>A single runaway label can 10× your TSDB overnight — series count = ∏(label value counts).</li>
+</ul></section>
+
+<section class="card"><h3>RED · USE · Golden Signals</h3>
+<table><thead><tr><th>Method</th><th>Applies to</th><th>Signals</th></tr></thead><tbody>
+<tr><td><b>RED</b></td><td>request-driven services</td><td>Rate · Errors · Duration</td></tr>
+<tr><td><b>USE</b></td><td>resources (host/queue/pool)</td><td>Utilisation · Saturation · Errors</td></tr>
+<tr><td><b>Golden</b></td><td>any user-facing system (SRE book)</td><td>Latency · Traffic · Errors · Saturation</td></tr>
+</tbody></table>
+<ul>
+<li>They overlap by design: RED is the <b>request cut</b>, USE the <b>resource cut</b>; a service dashboard usually shows RED on top, USE below (the "why").</li>
+<li>A request-<b>duration histogram</b> gives you all of RED at once: latency via <code>histogram_quantile</code>, traffic via <code>_count</code> rate, errors via a status-class counter alongside.</li>
+<li><b>Saturation</b> is the early-warning signal — alert on <i>near-limit</i> (pool almost exhausted, queue filling) not just utilisation, because saturation predicts the cliff <span class="warn">!</span></li>
+<li>Split latency percentiles from success and failure — a fast 500 can flatter your p99 while users fail.</li>
+</ul></section>
+
+<section class="card"><h3>Metrics at Scale — Deep</h3>
+<ul>
+<li>Single Prometheus isn't clustered/HA for long-term. Scale path: <b>shard</b> by service → <b>federate</b> → move to <b>Thanos / Cortex / Mimir</b> (object-store blocks + global query + multi-tenant quotas).</li>
+<li><b>Thanos</b>: sidecar per Prometheus uploads blocks to object storage; Querier fans out + <b>dedupes HA pairs</b>; Compactor downsamples (5m/1h rollups) old data.</li>
+<li><b>Remote-write</b> ships samples to a central store (Mimir) — decouples ingest from a single node and gives global query.</li>
+<li>Cost levers: drop unused metrics at scrape, <b>downsample</b> old data, tiered retention per resolution, recording rules for what you actually query then shorten raw retention.</li>
+<li><b>Pull vs push</b>: pull gives target-health for free (<code>up</code>); push (StatsD/OTLP) suits short-lived/serverless. Pushgateway <b>only</b> for batch jobs — never services (stale sink, breaks up/down) <span class="warn">!</span></li>
+</ul></section>
+
+<section class="card"><h3>On-Call Dashboard Layout</h3>
+<p>Ordered like the debug funnel — <b>is the user hurt → where → why → what changed</b>. A triage tool, not a data dump.</p>
+<ul>
+<li><b>Top — "should I care":</b> SLO status + error-budget burn, RED summary (rate, error ratio, p50/p95/p99).</li>
+<li><b>Middle — "where":</b> RED split <b>by route</b> and <b>by version/instance</b> + top errors by type — localises to an endpoint or bad deploy instantly.</li>
+<li><b>Below — "why":</b> USE for dependencies — CPU/mem, <b>connection-pool saturation</b>, queue depth, GC, downstream latency/errors.</li>
+<li><b>Context:</b> deploy markers overlaid, exemplar links to traces, links to logs + runbooks.</li>
+<li>Percentiles not averages, rates not raw counts, a <b>handful</b> of high-signal panels — the 3am on-call shouldn't hunt <span class="warn">!</span></li>
 </ul></section>
 
 <section class="card"><h3>&#9733; Design / Review Checklist</h3>

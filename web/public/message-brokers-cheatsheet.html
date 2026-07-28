@@ -162,6 +162,8 @@ pre code{background:none; padding:0; font-size:1em;}
 <ul>
 <li><span class="warn">!</span> <b>Unbounded queue anti-pattern:</b> a queue with no depth limit + slow consumer = memory blowup → broker OOM (RabbitMQ) or disk fill (Kafka). Cap: TTL, max-length, DLQ overflow, <code>MAXLEN</code>.</li>
 <li>Backpressure must propagate upstream — dropping, buffering to disk, or 429-ing the producer beats silent unbounded growth.</li>
+<li><b>Prefetch tuning:</b> too low (=1) starves fast consumers; too high hoards messages at one slow worker and unbalances the fleet. Start ~10–50 for uniform short tasks, drop toward 1 for long/uneven work.</li>
+<li><span class="warn">!</span> RabbitMQ memory (<code>vm_memory_high_watermark</code>) or disk-free alarm <b>blocks all publishers</b> broker-wide until it clears — not per-queue.</li>
 </ul>
 </section>
 
@@ -191,6 +193,8 @@ retries=MAX_INT          // + delivery.timeout.ms caps total</code></pre>
 <li><b>Batching:</b> <code>linger.ms</code> + <code>batch.size</code> trade a few ms latency for large throughput/compression gains.</li>
 <li>Partition choice: <code>hash(key)%N</code> if keyed, else sticky batching.</li>
 <li><span class="warn">!</span> <code>acks=1</code> is the classic silent-data-loss default — leader acks then dies before a follower copies.</li>
+<li><span class="warn">!</span> Even <code>acks=all</code> loses data if <code>min.insync.replicas=1</code> — "all ISR" can shrink to one replica when followers fall out. Pair with <code>min.insync.replicas=2</code>.</li>
+<li><b>Sync vs async send:</b> <code>send().get()</code> blocks per record (safe, slow); async <code>send(rec, cb)</code> pipelines but you must handle the callback exception or drop failures silently.</li>
 </ul>
 </section>
 
@@ -282,8 +286,9 @@ XPENDING s g                 // PEL: unacked/redelivery</code></pre>
 <li><b>DLQ:</b> after N failed retries, park the message for inspection — never block the main flow.</li>
 <li><b>Retry + backoff:</b> exponential + jitter; separate retry topics/queues so one poison msg doesn't stall the partition.</li>
 <li><b>Poison message:</b> repeatedly fails → cap attempts → DLQ, alert.</li>
-<li><b>Saga:</b> long-running distributed txn as steps + <b>compensating actions</b> (no 2PC).</li>
+<li><b>Saga:</b> long-running distributed txn as steps + <b>compensating actions</b> (no 2PC). <b>Choreography</b> = services react to each other's events (decoupled, emergent flow). <b>Orchestration</b> = a central coordinator drives steps (explicit, but a hub). Compensations undo prior steps on failure (refund, release inventory) since you can't roll back a committed local txn.</li>
 </ul>
+<p><span class="warn">!</span> Ordering + idempotency together: keying for order still lets a redelivered older record re-apply — the idempotent write must be <b>order-independent</b> (condition on state / version), not just dedup by id.</p>
 </section>
 
 <section class="card"><h3>Schema &amp; evolution</h3>
@@ -298,6 +303,7 @@ XPENDING s g                 // PEL: unacked/redelivery</code></pre>
 <li><b>Additive, defaulted fields are always safe.</b> Renaming/retyping/removing-required breaks.</li>
 <li>Registry rejects incompatible schemas at publish — fail fast in CI, not at 3am.</li>
 <li><span class="warn">!</span> A required field with no default is a breaking change — old consumers can't read it.</li>
+<li><b>Avro</b> = compact binary + separate schema (registry ships a schema id in the wire header); <b>Protobuf</b> = compact, field-number-based, great cross-language; <b>JSON</b> = human-readable but bulky, untyped, no enforced evolution. Prefer Avro/Protobuf on high-volume topics.</li>
 </ul>
 </section>
 
@@ -339,6 +345,175 @@ XPENDING s g                 // PEL: unacked/redelivery</code></pre>
 <li><b>Pulsar:</b> log+queue on BookKeeper; compute/storage split, tiered storage, geo-repl, multi-tenant. Cost: brokers + BookKeeper (+ZK).</li>
 </ul>
 <p><span class="warn">!</span> Managed ≠ free: per-message/shard cost can dominate at volume, plus quotas + lock-in.</p>
+</section>
+
+<section class="card"><h3>NATS · JetStream · Pulsar</h3>
+<h4>NATS (core)</h4>
+<p>Tiny Go binary, millions msg/s, sub-ms. Subject addressing (<code>orders.eu.new</code>; wildcards <code>*</code>=1 token, <code>&gt;</code>=rest). <b>At-most-once</b> — no subscriber connected = dropped. Native request/reply + <b>queue groups</b> (competing consumers). Reach for it: ultra-light internal signalling/RPC where loss is tolerable.</p>
+<h4>JetStream</h4>
+<p>Persistence layer inside modern NATS: durable <b>streams</b> (retention-bound), consumers with acks, replay by seq/time, at-least-once with a <b>dedup window</b> → effectively-once. The lightweight Kafka alternative when you want streaming without KRaft-scale ops.</p>
+<h4>Pulsar</h4>
+<p>Kafka-shaped log that <b>splits serving from storage</b>: stateless <b>brokers</b> dispatch, <b>BookKeeper</b> bookies store segments. So brokers add/remove instantly (no data move), storage scales independently. Wins: native <b>multi-tenancy</b> (tenant/namespace/topic), transparent <b>tiered storage</b> (offload to S3/GCS), built-in <b>geo-replication</b>, and one topic consumed as stream <i>or</i> shared queue via subscription type.</p>
+<p><span class="warn">!</span> Pulsar = more moving parts (brokers + bookies + metadata) and smaller ecosystem — Kafka stays default unless you need those specific wins.</p>
+</section>
+
+<section class="card"><h3>MQTT &amp; the edge (IoT)</h3>
+<p>Tiny pub/sub over TCP for constrained devices + flaky links. ~2-byte header (vs HTTP). All clients connect to a <b>broker</b> (Mosquitto, EMQX, HiveMQ, AWS IoT Core); topics <code>home/room/temp</code>, wildcards <code>+</code> (1 level) <code>#</code> (multi).</p>
+<h4>Three QoS levels (per message)</h4>
+<table>
+<tr><th>QoS</th><th>Guarantee</th><th>Mechanics</th></tr>
+<tr><td><b>0</b></td><td>at-most-once</td><td>fire&amp;forget, no ack — high-rate telemetry</td></tr>
+<tr><td><b>1</b></td><td>at-least-once</td><td><code>PUBACK</code>; re-send on miss → dups (idempotent consumer)</td></tr>
+<tr><td><b>2</b></td><td>exactly-once</td><td>4-way <code>PUBLISH/PUBREC/PUBREL/PUBCOMP</code>; costly — commands only</td></tr>
+</table>
+<ul>
+<li>Effective QoS = <b>min</b> of publisher's and subscriber's.</li>
+<li><b>Retained message:</b> broker keeps last-per-topic → a device that just woke gets current state instantly.</li>
+<li><b>Last Will &amp; Testament (LWT):</b> broker auto-publishes on unclean drop → cheap presence/offline detection.</li>
+</ul>
+<p><span class="warn">!</span> Kafka is wrong at the edge (heavy, connection-hungry). Idiom: <b>MQTT at the edge → bridge into Kafka/Kinesis</b> for backend processing.</p>
+</section>
+
+<section class="card"><h3>Wire protocols (vs products)</h3>
+<table>
+<tr><th>Protocol</th><th>Shape</th><th>For</th></tr>
+<tr><td><b>AMQP 0-9-1</b></td><td>binary, rich</td><td>RabbitMQ's exchange/binding model</td></tr>
+<tr><td><b>AMQP 1.0</b></td><td>binary, broker-agnostic std</td><td>Azure Service Bus, Artemis, Qpid</td></tr>
+<tr><td><b>MQTT</b></td><td>minimal pub/sub</td><td>constrained IoT/mobile</td></tr>
+<tr><td><b>STOMP</b></td><td>plain-text, HTTP-like</td><td>browser/WebSocket, scripting</td></tr>
+<tr><td><b>Kafka</b></td><td>custom binary TCP</td><td>batched log I/O; proprietary</td></tr>
+<tr><td><b>JMS</b></td><td>Java <i>API</i>, not a wire proto</td><td>enterprise Java (ActiveMQ/Artemis)</td></tr>
+</table>
+<p><b>Interview point:</b> AMQP/MQTT/STOMP are <b>open</b> — many brokers implement them (Artemis speaks several + translates); Kafka's is <b>proprietary</b>, clients must speak it or use a REST proxy. JMS is an API a compliant app uses against any JMS broker (queues + topics, XA/2PC, message selectors).</p>
+</section>
+
+<section class="card"><h3>Managed cloud: AWS / GCP / Azure map</h3>
+<table>
+<tr><th>Model</th><th>AWS</th><th>GCP</th><th>Azure</th></tr>
+<tr><td><b>Queue</b></td><td>SQS (Std/FIFO)</td><td>Pub/Sub (sub)</td><td>Service Bus</td></tr>
+<tr><td><b>Pub/sub</b></td><td>SNS</td><td>Pub/Sub topic</td><td>Service Bus topics</td></tr>
+<tr><td><b>Log</b></td><td>Kinesis</td><td>Pub/Sub / Lite</td><td>Event Hubs</td></tr>
+</table>
+<ul>
+<li><b>GCP Pub/Sub</b> blends both: one <b>topic</b> + N durable <b>subscriptions</b> = SNS-style fan-out <i>and</i> per-subscriber queues in one service (≥once, ordering keys + EOS opt).</li>
+<li><b>Azure Event Hubs</b> exposes a <b>Kafka endpoint</b> — Kafka clients connect unchanged. Service Bus = AMQP 1.0, sessions (ordering), DLQ, duplicate detection.</li>
+<li>Canonical AWS durable fan-out: <b>SNS → N·SQS</b> (each service its own replayable-once queue).</li>
+</ul>
+<p><span class="warn">!</span> Default to the managed option on your cloud; drop to self-hosted Kafka/Pulsar/RabbitMQ only when cost@scale, latency, a feature, or portability forces it.</p>
+</section>
+
+<section class="card"><h3>Transactional outbox (worked)</h3>
+<p>Fixes the <b>dual-write</b>: DB commit + broker publish can't be atomic, and retry can't save you (crash lands in the gap, ack can be lost on the wire). Write the event into an <code>outbox</code> table <b>in the same DB txn</b> as the state change.</p>
+<pre><code>BEGIN;
+  INSERT INTO orders(id,total,status)
+    VALUES('o-123',4200,'CREATED');
+  INSERT INTO outbox(id,type,payload)   -- same txn
+    VALUES('m-777','OrderCreated','{...}');
+COMMIT;</code></pre>
+<p>A separate <b>relay</b> publishes committed rows, marking them done — safe to run many workers:</p>
+<pre><code>SELECT id,payload FROM outbox
+  WHERE published_at IS NULL
+  ORDER BY created_at
+  FOR UPDATE SKIP LOCKED LIMIT 100;
+-- publish each, then UPDATE published_at=now()</code></pre>
+<ul>
+<li>Relay is <b>at-least-once</b> (crash after publish, before UPDATE → republish) — fine, consumers dedup on the outbox <code>id</code>.</li>
+<li><b>Polling</b> relay = boring &amp; correct (SQL, small latency). <b>CDC</b> (Debezium tails WAL) = low-latency, but <span class="warn">!</span> an un-consumed replication slot <b>pins WAL</b> and can fill disk — monitor slot lag like consumer lag.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Idempotent consumer (worked)</h3>
+<p>At-least-once ⇒ you <b>will</b> see dups (relay republish, redelivery, rebalance). Two strategies:</p>
+<h4>1. Inbox / dedup table</h4>
+<pre><code>BEGIN;
+  INSERT INTO processed(msg_id,consumer)
+    VALUES('m-777','billing')
+    ON CONFLICT DO NOTHING;   -- 0 rows = dup → skip
+  UPDATE accounts SET balance=balance-4200
+    WHERE id='c-9';           -- same txn as dedup
+COMMIT;</code></pre>
+<p>Dedup insert + business write in <b>one txn</b> → crash mid-way rolls back, redelivery retries cleanly.</p>
+<h4>2. Naturally idempotent write</h4>
+<ul>
+<li>Upsert by business key (<code>ON CONFLICT DO UPDATE</code>).</li>
+<li>Set absolute, don't increment: <code>SET status='PAID'</code> not <code>balance-=x</code>.</li>
+<li>Condition it: <code>UPDATE ... WHERE status='PENDING'</code>.</li>
+</ul>
+<p><span class="warn">!</span> Dedup key must be a <b>stable message id</b> (producer/outbox sets it once), not regenerated per delivery. The <b>inbox</b> is the consumer-side mirror of the outbox — outbox+inbox = exactly-once <i>effect</i> over plain at-least-once transport.</p>
+</section>
+
+<section class="card"><h3>Worked: payment pipeline (no double-charge)</h3>
+<p>Classic senior design — "exactly-once effects, no lost charge, no double charge." You cannot buy true EOS delivery; you <b>engineer the effect</b>.</p>
+<ol style="margin:1.5px 0;padding-left:13px;">
+<li><b>Ingress:</b> <code>PaymentRequested</code> carries a client-supplied <b>idempotency key</b> (= message id). Persist via <b>outbox</b> so the request event and order row commit together.</li>
+<li><b>Transport:</b> at-least-once, keyed by <code>accountId</code> so one account's events stay <b>ordered in one partition</b>.</li>
+<li><b>Consumer:</b> dedup on idempotency key in the same txn as the ledger write (inbox). Duplicate delivery → no-op.</li>
+<li><b>External charge:</b> pass the same idempotency key to the payment gateway (Stripe et al. dedup on it) so a retry after a lost response doesn't double-charge.</li>
+<li><b>Failure:</b> retries with backoff+jitter; exhausted → <b>DLQ</b> + alert, never loop.</li>
+</ol>
+<p>Prove it by narrating four failures: broker node dies (<code>acks=all</code>+minISR survives), consumer crashes mid-process (redeliver → inbox dedups), consumer falls behind (lag alert, scale ≤partitions), poison message (retry cap → DLQ).</p>
+</section>
+
+<section class="card"><h3>Kafka replay &amp; offset reset</h3>
+<p>Offsets are just positions in a retained log, so a consumer can reposition anywhere <b>within the retention window</b>.</p>
+<pre><code>consumer.assign(List.of(tp));
+consumer.seekToBeginning(List.of(tp));   // from earliest
+consumer.seek(tp, 42000);                // exact offset
+// by time (epoch ms):
+var o = consumer.offsetsForTimes(Map.of(tp, ts)).get(tp);
+if (o != null) consumer.seek(tp, o.offset());</code></pre>
+<p><code>offsetsForTimes</code> maps a timestamp → first offset at/after it — the "reprocess everything since 09:00 after we fixed the bug" tool. Operationally:</p>
+<pre><code>kafka-consumer-groups --reset-offsets \
+  --to-datetime &lt;ts&gt; --group g --topic t --execute
+  # drop --execute for a dry run</code></pre>
+<ul>
+<li><span class="warn">!</span> <code>auto.offset.reset</code> (<code>earliest</code>/<code>latest</code>/<code>none</code>) only decides where a group with <b>no committed offset</b> starts — a first-run fallback, <b>not</b> a replay mechanism.</li>
+<li>Can't seek beyond <code>retention.ms</code>/<code>retention.bytes</code> — tiered storage extends the reachable window.</li>
+</ul>
+</section>
+
+<section class="card"><h3>RabbitMQ: connections, channels &amp; vhosts</h3>
+<ul>
+<li><b>Connection</b> = one TCP socket (AMQP handshake, auth, heartbeats) — expensive (fds, memory, TLS).</li>
+<li><b>Channel</b> = lightweight virtual connection multiplexed inside it; nearly every op (declare, publish, consume, ack) runs on a channel.</li>
+</ul>
+<p>Idiom: <b>one long-lived connection per process, one channel per thread</b>. Channels are cheap; connections are not.</p>
+<pre><code>conn = BlockingConnection(params)   # once per process
+ch = conn.channel()                 # one per worker thread
+ch.basic_qos(prefetch_count=20)     # cap unacked
+ch.basic_consume('tasks', on_msg)</code></pre>
+<ul>
+<li><span class="warn">!</span> <b>Connection-per-publish</b> is the #1 RabbitMQ scaling mistake — exhausts the broker.</li>
+<li><span class="warn">!</span> Channels are <b>not thread-safe</b> — sharing one across threads corrupts framing.</li>
+<li><b>Virtual hosts</b> = logical namespaces (own exchanges/queues/perms) for multi-tenant isolation on one broker. <code>pause_minority</code> partition handling keeps only the majority side writable.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Need → reach for</h3>
+<table>
+<tr><th>Need</th><th>Reach for</th></tr>
+<tr><td>Blazing internal pub/sub &amp; RPC, loss-ok</td><td>Core NATS</td></tr>
+<tr><td>Same but durable/replayable, light</td><td>NATS JetStream</td></tr>
+<tr><td>High-tput replayable log, big ecosystem</td><td>Kafka</td></tr>
+<tr><td>Log + elastic brokers, multi-tenant, geo, tiered</td><td>Pulsar</td></tr>
+<tr><td>Rich routing / work queues / JMS</td><td>RabbitMQ / Artemis</td></tr>
+<tr><td>Millions of edge IoT/mobile devices</td><td>MQTT broker</td></tr>
+<tr><td>Managed queue, zero ops</td><td>SQS / Service Bus</td></tr>
+<tr><td>Managed fan-out</td><td>SNS / Pub/Sub</td></tr>
+<tr><td>Managed replayable log</td><td>Kinesis / Event Hubs</td></tr>
+</table>
+<p>Meta-rule: classify any broker by <b>"queue or log?"</b> and <b>"managed or self-hosted?"</b>, then pick the simplest managed option meeting delivery + ordering + replay needs.</p>
+</section>
+
+<section class="card"><h3>Structuring a messaging answer</h3>
+<p>Run every messaging / system-design question through <b>one funnel</b> — then let the broker fall out of it, don't lead with a product.</p>
+<ol style="margin:1.5px 0;padding-left:13px;">
+<li><b>Requirements first:</b> throughput, ordering scope, and <b>cost of loss vs cost of a duplicate</b>.</li>
+<li><b>Default contract:</b> at-least-once + idempotent consumer. Exactly-once <i>delivery</i> is a myth; you engineer exactly-once <i>effects</i> (outbox + idempotency + DLQ).</li>
+<li><b>Then pick the broker:</b> Kafka = replayable high-tput log; RabbitMQ = rich routing / work queues; SQS/SNS = managed fan-out; Redis/NATS = lightweight low-latency.</li>
+<li><b>Prove it — narrate four failures:</b> a broker node dies, a consumer crashes mid-process, a consumer falls behind, a poison message arrives.</li>
+</ol>
+<p>If your answer names a tradeoff and survives that failure walk, you're reasoning like someone who has operated messaging in production — the exact signal the question exists to detect.</p>
 </section>
 
 <section class="card"><h3>Symptom → Cause → Fix</h3>

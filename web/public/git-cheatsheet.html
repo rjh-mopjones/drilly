@@ -237,6 +237,8 @@ git switch -c recover &lt;sha-from-reflog&gt;</code></pre>
 <li>A stash is really a couple of commits on a hidden ref — it survives branch switches. <code>pop</code> can conflict; resolve like any merge.</li>
 <li><b>Reflog</b> logs where HEAD/branches have <i>been</i> (~90 days for reachable, 30 for unreachable) → recover after reset/rebase/amend/branch-delete <span class="warn">!</span></li>
 <li><code>git fsck --lost-found</code> surfaces dangling commits when even the reflog can't help.</li>
+<li><code>stash@{0}</code> is the top (most recent); a stash is a stack. A WIP <b>commit</b> on a throwaway branch is often better than a stash — it's named, survives longer, and can't silently conflict on <code>pop</code>.</li>
+<li>Time syntax works too: <code>HEAD@{2.hours.ago}</code>, <code>main@{yesterday}</code> — resolve a ref to where it pointed at a past time.</li>
 </ul>
 </section>
 
@@ -267,7 +269,10 @@ git bisect reset</code></pre>
 <ul>
 <li>Cherry-pick to <b>backport</b> a fix onto a release branch, or lift a good commit off a wrong branch.</li>
 <li>Bisect = binary search for the first bad commit — <b>O(log n)</b> checkouts. <code>bisect run</code> drives it via a script's exit code (non-zero = bad, 125 = skip).</li>
-<li>Atomic, self-contained commits make both tools far more effective.</li>
+<li>Atomic, self-contained commits make both tools far more effective — bisect only works cleanly if every commit builds.</li>
+<li>Cherry-pick options: <code>-n</code> (apply, don't commit — stage only) · <code>-x</code> (record source SHA in the message, good for backports) · a range <code>A..B</code>.</li>
+<li>Bisect <code>skip</code> (exit 125) for commits that can't be tested/built; <code>git bisect reset</code> returns you to your branch when done.</li>
+<li>Downside of cherry-pick vs merge: it <b>duplicates</b> the change as a new commit — later merging both branches can re-introduce or conflict. Prefer merging when you want the histories to converge.</li>
 </ul>
 </section>
 
@@ -308,7 +313,9 @@ git push origin :refs/tags/v1.2  # delete remote tag
 git describe --tags              # v1.2.0-14-gabc123</code></pre>
 <ul>
 <li><b>Annotated</b> = a real object (tagger, date, message, optional signature) → use for releases. <b>Lightweight</b> = just a ref, for private bookmarks.</li>
-<li>Tags are <b>not</b> pushed by default and don't move — retag only in emergencies (forces re-fetch for everyone) <span class="warn">!</span></li>
+<li>Tags are <b>not</b> pushed by default and don't move — retag only in emergencies (forces re-fetch for everyone) <span class="warn">!</span> Never move a <i>published</i> tag: consumers who fetched the old SHA won't update and builds stop being reproducible.</li>
+<li><b>SemVer</b> <code>MAJOR.MINOR.PATCH</code>: breaking→major, feature→minor, fix→patch — drives release automation from Conventional Commits (<code>feat</code>→minor, <code>fix</code>→patch, <code>!</code>/BREAKING→major). Pushing a <code>v*</code> tag typically triggers the release pipeline.</li>
+<li>A Git tag ≠ a <b>GitHub/GitLab Release</b>: the Release wraps a tag with notes + built artifacts. Checking out a tag lands you in <b>detached HEAD</b> — branch off if you need to commit.</li>
 <li><code>git describe</code> gives a human version relative to the nearest tag — handy in build metadata.</li>
 </ul>
 </section>
@@ -327,16 +334,24 @@ git describe --tags              # v1.2.0-14-gabc123</code></pre>
 <li><b>Submodule</b> = a pinned pointer (recorded SHA) to another repo. <code>clone --recurse-submodules</code>, or <code>submodule update --init --recursive</code>. Superproject tracks <i>which commit</i>, not the files → easy to forget to bump/commit the pointer <span class="warn">!</span></li>
 <li><b>Subtree</b> = the other repo's files copied <i>into</i> yours (<code>git subtree add/pull</code>) — no extra clone step, but history merges in.</li>
 <li>Scale big repos: <b>shallow</b> <code>clone --depth 1</code> (CI), <b>partial</b> <code>--filter=blob:none</code>, <b>sparse-checkout</b> (subset of paths), <b>Git LFS</b> for large binaries.</li>
-<li><span class="warn">!</span> Never commit large binaries raw — every clone then carries every version forever. Use LFS or keep them out.</li>
+<li><span class="warn">!</span> Never commit large binaries raw — every clone then carries every version forever. Use LFS or keep them out; to shrink an already-bloated repo, purge the file from all history with <code>filter-repo</code> then <code>gc --prune=now</code>.</li>
+<li>Submodule vs subtree vs <b>package manager</b>: reach for a package manager (npm, Maven, Go modules) for a versioned library dependency; use submodule/subtree only when you genuinely need the source vendored in-tree.</li>
 </ul>
 </section>
 
-<section class="card"><h3>Branching Strategies &amp; PRs</h3>
+<section class="card"><h3>Branching Strategies &amp; Workflows</h3>
+<table><thead><tr><th>model</th><th>shape / fit</th></tr></thead><tbody>
+<tr><td><b>Trunk-based</b></td><td>everyone integrates to <code>main</code>, branches &lt;1 day, flags hide WIP — <i>modern default, DORA elite</i></td></tr>
+<tr><td><b>GitHub Flow</b></td><td>one deployable <code>main</code> + short branches + PRs → deploy on merge</td></tr>
+<tr><td><b>GitLab Flow</b></td><td>+ environment/release branches (main→staging→prod), fixes flow downstream</td></tr>
+<tr><td><b>GitFlow</b></td><td>main+develop+release/*+hotfix/* — heavy, for scheduled/versioned releases</td></tr>
+</tbody></table>
 <ul>
-<li><b>Trunk-based</b> (short-lived branches off main + feature flags + strong CI) = modern default; <b>GitHub Flow</b> (main + PRs) is the lightweight sibling; <b>GitFlow</b> (develop/release/hotfix) is heavy, for scheduled releases. Long-lived branches → merge hell <span class="warn">!</span></li>
-<li><b>PR merge modes:</b> <i>merge commit</i> (full history + bubble) · <i>squash</i> (one tidy commit per PR — most popular) · <i>rebase</i> (linear, keeps individual commits).</li>
-<li><b>Branch protection:</b> required reviews + green CI, up-to-date branch, CODEOWNERS, no direct push to <code>main</code>, optional signed/linear-history rules.</li>
-<li>Keep a PR current: rebase onto main (then <code>--force-with-lease</code>) for linear, or merge main in when others share the branch.</li>
+<li>A strategy is a dial between <b>stability</b> and <b>speed</b> — startup, bank, and OSS want different settings.</li>
+<li><b>Long-lived branches → integration debt / merge hell</b> <span class="warn">!</span> main moves on, the eventual merge is one big risky event. Short branches pay a small constant tax instead.</li>
+<li><b>Feature flags</b> decouple <i>merge</i> from <i>release</i>: merge incomplete code to main "dark", flip the flag later → progressive rollout + instant kill-switch. This is what makes trunk-based scale <span class="warn">!</span> flags are tech debt — remove when fully rolled out.</li>
+<li><b>Hotfix:</b> branch off <code>main</code>, patch, tag, merge back (GitFlow: into main <i>and</i> develop). <b>Release branches</b> + cherry-pick fixes to support old versions.</li>
+<li><b>Naming:</b> <code>feature/</code> · <code>fix/</code> · <code>hotfix/</code> · <code>release/</code> prefixes. In a <b>monorepo</b>, branches still span the whole repo — use path-scoped CI + CODEOWNERS, not per-package branches.</li>
 </ul>
 </section>
 
@@ -351,6 +366,124 @@ git config --global alias.lg "log --oneline --graph --all"</code></pre>
 <li>Precedence: <b>system → global → local</b> (repo <code>.git/config</code> wins). <code>--show-origin</code> tells you where a value came from.</li>
 <li><b>Hooks</b> (<code>pre-commit</code>, <code>commit-msg</code>, <code>pre-push</code>) are local + advisory → real enforcement lives in CI / branch protection. Share via pre-commit / Husky / Lefthook.</li>
 <li><code>.gitignore</code> only stops <b>untracked</b> files; an already-tracked file keeps being tracked → <code>git rm --cached &lt;path&gt;</code> to stop it <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Pull Requests &amp; Review</h3>
+<p>A PR/MR is a <b>host feature</b> (GitHub/GitLab/Bitbucket), not a Git command — "integrate my branch X into Y" wrapped in a diff view, review, and CI checks. Three jobs: <b>quality gate</b>, <b>knowledge sharing</b>, <b>audit trail</b>.</p>
+<h4>Merge modes (the button)</h4>
+<table><thead><tr><th>mode</th><th>history on main</th></tr></thead><tbody>
+<tr><td>merge commit</td><td>every branch commit + a bubble (2 parents)</td></tr>
+<tr><td>squash <i>(popular)</i></td><td>whole PR → one clean commit; WIP commits lost</td></tr>
+<tr><td>rebase</td><td>each commit replayed, linear, new SHAs</td></tr>
+</tbody></table>
+<ul>
+<li><b>Keep a PR current:</b> <code>rebase origin/main</code> + <code>--force-with-lease</code> (solo branch, clean); or <code>merge origin/main</code> in (shared branch, no rewrite) <span class="warn">!</span></li>
+<li><b>Resolve feedback:</b> push new commits (fine if squash-merge), or <code>commit --fixup=&lt;sha&gt;</code> then <code>rebase -i --autosquash</code> for tidy per-commit history.</li>
+<li><b>Stacked PRs:</b> chain of dependent branches (A→B→C), each a small review; merge bottom-up, restack on top.</li>
+<li><b>Merge queue:</b> serialises merges, re-tests each PR against the <i>latest</i> <code>main</code> — kills the "both green apart, red together" race.</li>
+<li><b>Draft PR:</b> early CI + visibility, merge disabled until "ready".</li>
+<li>Review <b>correctness / design / readability</b> — leave style to linters. Small PRs get real review; giant PRs get rubber-stamped.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Branch Protection &amp; CODEOWNERS</h3>
+<p>Host-enforced rules on <code>main</code> — this is what actually <i>enforces</i> your branching strategy (without them "always review, always green" is a hope).</p>
+<ul>
+<li>Require a PR (<b>no direct push</b> to main) · require N approvals · require passing <b>status checks</b> (the binding gate — merge button greys out until green).</li>
+<li>Require branch <b>up to date</b> with base · dismiss stale approvals on new commits · require <b>linear history</b> (forbids merge commits) · require <b>signed commits</b> · block force-push + deletion.</li>
+<li><b>CODEOWNERS</b> (repo root or <code>.github/</code>): maps paths → owners, auto-requests their review and can <i>require</i> it. Later patterns win.</li>
+</ul>
+<pre><code># CODEOWNERS  (path → owners)
+*.tsx        @acme/frontend
+/infra/      @acme/platform
+/payments/   @alice @bob
+*            @acme/maintainers   # fallback</code></pre>
+<p>Link issues from the PR body — <code>Closes #142</code> / <code>Fixes #98</code> — to auto-close on merge and stitch the audit trail (code → PR → issue).</p>
+</section>
+
+<section class="card"><h3>Hooks &amp; Policy Enforcement</h3>
+<p>Scripts in <code>.git/hooks/</code> (or <code>core.hooksPath</code>) fired at lifecycle events; a non-zero <b>pre-</b> hook <b>aborts</b> the op.</p>
+<table><thead><tr><th>hook</th><th>fires / use</th></tr></thead><tbody>
+<tr><td>pre-commit</td><td>before commit — lint/format/fast tests</td></tr>
+<tr><td>commit-msg</td><td>validate message (Conventional, ticket ID)</td></tr>
+<tr><td>pre-push</td><td>before send — run suite, block WIP</td></tr>
+<tr><td>pre-receive</td><td><b>server</b> — the real gate; reject bad pushes</td></tr>
+<tr><td>post-receive</td><td>server — trigger CI/deploy/notify</td></tr>
+</tbody></table>
+<ul>
+<li><b>Client hooks aren't versioned</b> (they live in <code>.git/</code>) and are <b>bypassable</b> with <code>--no-verify</code> <span class="warn">!</span> — share via <b>pre-commit</b> / <b>Husky</b> / <b>lefthook</b>, or <code>git config core.hooksPath .githooks</code>.</li>
+<li><b>Enforcement lives server-side</b>: branch protection + required CI checks, or a <code>pre-receive</code> hook. Mantra: <i>"a check anyone can <code>--no-verify</code> isn't a gate; a required status check is."</i></li>
+</ul>
+</section>
+
+<section class="card"><h3>Line Endings &amp; .gitattributes</h3>
+<p>CRLF (Windows) vs LF (Unix) → spurious whole-file diffs ("Bob changed 400 lines" = just endings). <code>.gitattributes</code> is <b>versioned</b> per-path config → consistent for everyone, unlike per-machine <code>core.autocrlf</code>.</p>
+<pre><code>* text=auto            # LF in repo, native on checkout
+*.sh   text eol=lf     # scripts break with CRLF
+*.bat  text eol=crlf
+*.png  binary          # = -diff -merge -text
+*.psd  filter=lfs diff=lfs merge=lfs -text
+*.min.js linguist-generated=true
+tests/ export-ignore   # drop from git archive</code></pre>
+<ul>
+<li><code>* text=auto</code> is the right answer; fix an already-polluted repo with <code>git add --renormalize .</code>.</li>
+<li>Attributes also drive <b>LFS filters</b>, custom <b>diff/merge drivers</b>, GitHub's <b>language bar</b> (<code>linguist-*</code>), and <code>export-ignore</code>.</li>
+<li><code>core.autocrlf</code>: <code>true</code> (Win), <code>input</code> (Unix), <code>false</code> — but it's local, so one wrong machine repollutes <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Diff Semantics &amp; Ranges</h3>
+<p>The <b>two-dot vs three-dot</b> trap flips between <code>diff</code> and <code>log</code> — worth burning in:</p>
+<table><thead><tr><th></th><th>log</th><th>diff</th></tr></thead><tbody>
+<tr><td><code>A..B</code></td><td>commits in B not A</td><td>plain A→B (endpoints)</td></tr>
+<tr><td><code>A...B</code></td><td>symmetric diff (either)</td><td>from <b>merge-base</b> → B</td></tr>
+</tbody></table>
+<ul>
+<li>For "what did <i>my</i> branch change?" use <b>three-dot</b> <code>diff origin/main...HEAD</code> — measured from where you branched, so it excludes what main did meanwhile. This is the affected-tests / review diff <span class="warn">!</span></li>
+<li><code>merge-base A B</code> = the newest common ancestor; it's what a 3-way merge and the three-dot forms pivot on.</li>
+</ul>
+<pre><code>git diff --stat            # files changed + ins/del summary
+git diff --name-only       # just the paths (feed to scripts)
+git diff --word-diff       # changed WORDS, not whole lines (prose/config)
+git diff --cached          # = --staged: what will commit
+git diff HEAD~3 HEAD -- f  # one file across a range
+git diff --check           # flag whitespace errors / stray markers</code></pre>
+</section>
+
+<section class="card"><h3>Inspection &amp; Archaeology</h3>
+<pre><code>git log -S"funcName" -p     # PICKAXE: commits that add/remove the string
+git log -G"regex"           # commits whose diff matches (mods too)
+git log -L :func:file       # full history of one function (follows moves)
+git log -L 40,60:app.js     # history of a line range
+git log --grep="fix pay"    # search commit MESSAGES (contrast: pickaxe=code)
+git range-diff main old new # what changed between two versions of a branch
+git grep "TODO" v1.2.0      # search tracked tree at any revision
+git shortlog -sn v1..HEAD   # commit counts per author (release notes)
+git describe                # v1.2.0-14-gabc1234 (14 past the tag)
+git notes add -m "..." &lt;sha&gt; # metadata WITHOUT rewriting the commit</code></pre>
+<ul>
+<li><b>Pickaxe</b> <code>-S</code> = when a string's count changed (born/died); <code>-G</code> = any diff matching the regex.</li>
+<li><b>range-diff</b> answers "what did you change since my review?" on a force-pushed PR — ignores the rebase noise.</li>
+<li>Blame polluted by a reformat? <code>blame -w</code> skips whitespace; list the reformat SHAs in <code>.git-blame-ignore-revs</code> (<code>git config blame.ignoreRevsFile</code>; GitHub honours it too) <span class="warn">!</span></li>
+<li><b>notes</b> live in <code>refs/notes/*</code> and don't travel with a normal push — fetch/push them explicitly.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Git in CI/CD &amp; at Scale</h3>
+<p>CI clones <b>shallow, single-branch, detached HEAD</b> — fast, but almost no history, which is the root of most CI-Git bugs.</p>
+<pre><code>git clone --depth 1 --single-branch --branch main &lt;url&gt;
+git checkout &lt;sha&gt;                 # exact triggering commit (reproducible)
+git fetch --unshallow             # get full history back
+git fetch --tags                  # describe/release need tags
+# GitHub Actions: actions/checkout with fetch-depth: 0</code></pre>
+<ul>
+<li><b>Shallow breaks the past:</b> <code>describe</code> (no tag), <code>blame</code> (truncated), rev-list counts, and <code>diff origin/main...HEAD</code> (no merge-base) <span class="warn">!</span> Deepen only jobs that need it.</li>
+<li><b>Affected tests:</b> <code>git diff --name-only origin/main...HEAD</code> — <b>three-dot</b> = merge-base, so exactly <i>your</i> changes; feed to path filters / Nx / Turbo / Bazel.</li>
+<li><b>Tag artifacts by SHA</b> (<code>app:git-&lt;sha&gt;</code>), not <code>:main</code> — branches/tags move, only the SHA is forever → deterministic rollback. Pin actions/submodules by SHA too.</li>
+<li><b>Partial</b> <code>--filter=blob:none</code> keeps full history, lazy blobs (vs shallow = current files, no history); pair with <b>sparse-checkout --cone</b> for monorepos.</li>
+<li><b>LFS</b> → <code>lfs: true</code> / <code>git lfs pull</code> or you build against pointer files. <b>Private submodules</b> need a token that can read them (top private-monorepo CI failure).</li>
+<li>"detected dubious ownership" → <code>git config --global --add safe.directory &lt;path&gt;</code>. Scale tooling: <b>commit-graph</b>, <b>fsmonitor</b>, <code>git maintenance</code>, <b>Scalar</b>.</li>
 </ul>
 </section>
 

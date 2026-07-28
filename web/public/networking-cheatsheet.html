@@ -442,6 +442,98 @@ sudo tcpdump -ni any 'tcp[tcpflags] &amp; tcp-rst != 0'</code></pre>
 </tbody></table>
 </section>
 
+<section class="card"><h3>DHCP &amp; Address Assignment</h3>
+<p><b>DORA</b> — how a host with no IP gets one (all broadcast until it has an address):</p>
+<pre><code>1 DISCOVER  client → 255.255.255.255  "any servers?"
+2 OFFER     server → "take 192.168.1.50/24, gw .1, DNS ..."
+3 REQUEST   client → "I'll take that one"  (locks 1 server)
+4 ACK       server → confirms lease + duration</code></pre>
+<ul>
+<li>Client source is <code>0.0.0.0</code> (no IP yet), dst is the L2 broadcast — a prime reason broadcast exists. Server also hands out mask, <b>gateway</b>, <b>DNS</b>, sometimes NTP/search-domain.</li>
+<li><b>Lease</b> = finite; client renews at ~50% of lifetime (unicast to the same server). No answer at all → falls back to <b>APIPA</b> <code>169.254.x.x</code> — the tell that DHCP is broken <span class="warn">!</span></li>
+<li>Cross-subnet: a <b>DHCP relay</b> (ip-helper) forwards the broadcast to a central server as unicast. Cloud equivalent: the platform auto-assigns ENI/interface IPs from the subnet range.</li>
+<li><span class="warn">!</span> Two DHCP servers on one L2 (a rogue home router plugged in) hand out conflicting leases &amp; gateways — a classic "half the office lost internet."</li>
+</ul>
+</section>
+
+<section class="card"><h3>VLANs, Trunks &amp; L2 Loops</h3>
+<table><thead><tr><th>Port</th><th>Carries</th><th>Faces</th></tr></thead><tbody>
+<tr><td><b>Access</b></td><td>1 VLAN, <b>untagged</b></td><td>end host (edge)</td></tr>
+<tr><td><b>Trunk</b></td><td>many VLANs, <b>802.1Q-tagged</b></td><td>switch↔switch (backbone)</td></tr>
+</tbody></table>
+<ul>
+<li>Trunk mis-set as access ⇒ only one VLAN passes, the rest silently vanish. <b>Native VLAN</b> = the one that rides a trunk untagged; a mismatch leaks traffic between VLANs (VLAN-hopping) <span class="warn">!</span></li>
+<li><b>Collision domain</b> = 1 per switch port (full-duplex killed collisions). <b>Broadcast domain</b> = whole switch/VLAN; only a <b>router or VLAN boundary</b> stops a broadcast. Flat huge L2 ⇒ ARP/DHCP hit everyone.</li>
+<li><b>STP (802.1D)</b> stops L2 loops: Ethernet frames have <b>no TTL</b>, so a looped broadcast circulates forever = <b>broadcast storm</b> (network dead in seconds). Switches elect a <b>root bridge</b> via BPDUs and block redundant ports into a loop-free tree; a link fails → unblock a standby. <b>RSTP (802.1w)</b> converges in seconds vs 30–50s <span class="warn">!</span></li>
+<li><b>Gratuitous ARP</b> = unsolicited "IP X is at my MAC" — after a <b>failover / VIP move / VM migration</b> the new owner blasts it so switches &amp; clients relearn instantly (keepalived/VRRP fast cutover). Same mechanism ARP spoofing abuses.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Subnetting — Worked Examples</h3>
+<p><b>VLSM</b> = size each subnet to need; allocate <b>largest-first</b>. Carve <code>10.0.0.0/24</code>:</p>
+<table><thead><tr><th>Tier</th><th>Need</th><th>Block</th></tr></thead><tbody>
+<tr><td>Web</td><td>100</td><td>10.0.0.0/25 (126)</td></tr>
+<tr><td>App</td><td>50</td><td>10.0.0.128/26 (62)</td></tr>
+<tr><td>P2P links</td><td>2 ea</td><td>…/30 (2) ×3</td></tr>
+</tbody></table>
+<ul>
+<li>Point-to-point router links get a <code>/30</code> (2 usable, exact) — never waste a whole /24. Under-sizing a subnet an autoscaling group later outgrows is a real prod headache <span class="warn">!</span></li>
+<li><b>Supernetting</b> = the inverse: fold contiguous, aligned blocks into a shorter prefix. Four /24s sharing 22 bits → one <code>/22</code>. This is what keeps the global BGP table (and your cloud route tables) from exploding.</li>
+</ul>
+<pre><code>host_bits = 32 − n      usable = 2^host_bits − 2
+/25→126  /26→62  /27→30  /28→14  /29→6  /30→2</code></pre>
+<p>Same-subnet check: <code>dstIP AND mask == myNetwork</code> → deliver direct (ARP), else via gateway.</p>
+</section>
+
+<section class="card"><h3>Playbook — "The site is slow"</h3>
+<p>Don't guess — measure <b>which phase</b> with one shot, then drill only that layer:</p>
+<pre><code>curl -w 'dns:%{time_namelookup} conn:%{time_connect} \
+tls:%{time_appconnect} ttfb:%{time_starttransfer} \
+total:%{time_total}\n' -o /dev/null -s https://host/</code></pre>
+<table><thead><tr><th>Phase high</th><th>Suspect &amp; next step</th></tr></thead><tbody>
+<tr><td>namelookup</td><td>DNS — <code>dig @1.1.1.1</code> vs local, TTLs, CNAME chain</td></tr>
+<tr><td>connect</td><td>TCP/RTT — <code>mtr</code>; user far from region? missing CDN</td></tr>
+<tr><td>appconnect</td><td>TLS — 1.2 vs 1.3 RTTs, big chain, OCSP, CPU</td></tr>
+<tr><td>starttransfer</td><td>TTFB = backend: app compute, slow query, cache miss</td></tr>
+<tr><td>total ≫ ttfb</td><td>transfer: payload size, no gzip/br, bandwidth/loss</td></tr>
+</tbody></table>
+<ul>
+<li>Slow <b>first byte on a small response</b> = latency (RTT/geo/cold conn); slow <b>large download</b> = bandwidth/congestion. Different fixes <span class="warn">!</span></li>
+<li>Check the edge: <code>cache: HIT</code> from a near PoP vs hairpinning to a distant origin. Method scores, not any single fix.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Playbook — p99 spiky, mean fine</h3>
+<p>Healthy mean + bad tail ⇒ <b>most requests fine, a minority hit something expensive</b>. You're debugging <b>variance</b>, not throughput. Usual suspects:</p>
+<ul>
+<li><b>Queueing / bufferbloat</b> — under load packets pile in oversized buffers/accept queues; latency climbs sharply near capacity. Fix: AQM (fq_codel/CAKE), BBR <span class="warn">!</span></li>
+<li><b>HOL blocking</b> — one lost packet stalls all H2-over-TCP streams on that conn (exactly what H3/QUIC fixes); the unlucky conns spike.</li>
+<li><b>Cold-start</b> — fresh conns pay DNS+TCP+TLS + TCP <b>slow-start</b> (small initial cwnd ramping). Poor pooling ⇒ tail requests open cold. Fix: keep-alive/pooling.</li>
+<li><b>GC / stop-the-world</b> — JVM/Go pauses freeze handlers periodically; correlate p99 spikes with GC logs.</li>
+<li><b>Contention</b> — saturated DB pool, lock waits, a downstream at capacity; <b>retries</b> amplify load exactly when struggling.</li>
+</ul>
+<p><span class="warn">!</span> "Add capacity" helps queueing but won't fix cold-start or GC pauses.</p>
+</section>
+
+<section class="card"><h3>Playbook — where is the packet loss?</h3>
+<p><code>ping</code> proves loss exists; <b><code>mtr</code></b> proves <b>where</b>. Reading the per-hop table is the skill:</p>
+<pre><code>mtr -rw -c 100 host    # report, 100 pkts, wide, per-hop loss%</code></pre>
+<ul>
+<li>Loss that <b>starts at hop N and persists to the destination</b> → the real fault is at/after hop N.</li>
+<li>Loss at a <b>middle hop that vanishes by the destination</b> → red herring: that router just <b>rate-limits ICMP to its own control plane</b> while forwarding your traffic fine. Only end-to-end loss is actionable <span class="warn">!</span></li>
+<li>Loss <b>only under load</b> → congestion, not a broken link. Run <code>mtr</code> both directions — routing is often <b>asymmetric</b>, loss may be on the return path.</li>
+<li>Inside your network → fix it; at an ISP/transit hop → open a ticket <b>with the mtr evidence</b>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Email &amp; Messaging Protocols</h3>
+<ul>
+<li><b>Send:</b> client → <b>SMTP</b> submission (587, STARTTLS) → sender's MTA → recipient MX (found via <b>MX</b> record) over 25 → recipient store. <b>Fetch:</b> <b>IMAP</b> (993, server-side folders, multi-device) or legacy <b>POP3</b> (995, download-and-delete).</li>
+<li><b>Anti-spoof trio</b> (all TXT records): <b>SPF</b> = which IPs may send for the domain; <b>DKIM</b> = cryptographic signature on the message; <b>DMARC</b> = policy + reporting tying SPF/DKIM to the visible From, tells receivers what to do on fail <span class="warn">!</span></li>
+<li><b>WebSocket</b> = full-duplex over one upgraded TCP (chat/live); <b>SSE</b> = one-way server→client stream over plain HTTP, auto-reconnect. <b>gRPC</b> = RPC over H2 + protobuf (internal); REST/JSON for public/browser.</li>
+</ul>
+</section>
+
 <section class="card"><h3>&#9733; Network Design Review Checklist</h3>
 <h4>Naming &amp; discovery</h4>
 <ul>

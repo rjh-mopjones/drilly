@@ -131,6 +131,7 @@ TF_LOG=DEBUG TF_LOG_PATH=tf.log terraform plan</code></pre>
 <li><code>-target=ADDR</code> / <code>-replace=ADDR</code> are escape hatches, not habits <span class="warn">!</span> — they apply a partial graph.</li>
 <li><code>plan -detailed-exitcode</code>: <b>0</b>=no changes · <b>1</b>=error · <b>2</b>=changes → wire into CI drift detection.</li>
 <li><code>-parallelism=n</code> (default 10) caps concurrent resource ops. <code>-var</code>/<code>-var-file</code> feed inputs.</li>
+<li><code>fmt -check</code> and <code>validate</code> are cheap CI gates; <code>console</code> lets you test an expression against real state before committing it.</li>
 </ul>
 </section>
 
