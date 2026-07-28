@@ -543,6 +543,114 @@ def test_x(mock_get): ...
 </ul>
 </section>
 
+<section class="card"><h3>Async Context Mgrs &amp; Async Gens</h3>
+<p>Use the <b>async</b> variants whenever setup/teardown itself does I/O. A plain <code>with</code> calls <code>__enter__/__exit__</code> synchronously (fine for a lock/file) — useless for acquiring a pooled DB connection that needs an <code>await</code>. <code>async with</code> → <code>__aenter__/__aexit__</code> (both coroutines); <code>async for</code> → the async generator's awaitable <code>__anext__</code>.</p>
+<pre><code>@contextlib.asynccontextmanager
+async def db_conn(pool):
+    conn = await pool.acquire()   # awaitable setup
+    try:    yield conn
+    finally: await pool.release(conn)  # runs on error+cancel
+
+async def stream(pool):
+    async with db_conn(pool) as c:
+        async for row in c.cursor("SELECT ..."):
+            process(row)
+</code></pre>
+<ul>
+<li>On cancellation the <code>CancelledError</code> is raised at the <code>yield</code>, so it propagates into <code>finally</code> — teardown still runs.</li>
+<li><span class="warn">!</span> Abandoning an async generator mid-iteration can't clean up synchronously in GC (no running loop). <code>asyncio.run()</code> calls <code>loop.shutdown_asyncgens()</code> for you; a hand-driven loop must call it or leak ("async generator ignored GeneratorExit").</li>
+</ul>
+</section>
+
+<section class="card"><h3>itertools Toolkit</h3>
+<p>A C-implemented, lazy iterator algebra — loops run in C, O(1) memory for streaming composition.</p>
+<table><thead><tr><th>Tool</th><th>Does</th><th>Watch</th></tr></thead><tbody>
+<tr><td><code>chain(a,b)</code></td><td>concat lazily</td><td><code>.from_iterable</code> for stream-of-streams</td></tr>
+<tr><td><code>islice(it,a,b)</code></td><td>slice an iterator</td><td>consumes it; no negative idx</td></tr>
+<tr><td><code>groupby(it,key)</code></td><td>group <b>adjacent</b> runs</td><td><b>sort first</b> for global groups <span class="warn">!</span></td></tr>
+<tr><td><code>count(s,step)</code></td><td>infinite counter</td><td>bound with islice/zip</td></tr>
+<tr><td><code>cycle(it)</code></td><td>repeat forever</td><td>buffers whole iterable</td></tr>
+<tr><td><code>tee(it,n)</code></td><td>n independent iters</td><td>buffers the drift <span class="warn">!</span></td></tr>
+</tbody></table>
+<pre><code>flat = itertools.chain.from_iterable(rows)   # lazy flatten
+rows.sort(key=lambda r: r.dept)
+for dept, grp in itertools.groupby(rows, key=lambda r: r.dept):
+    members = list(grp)   # consume NOW; grp dies next step !
+list(itertools.islice(itertools.count(), 5))  # [0,1,2,3,4]
+</code></pre>
+<p><span class="warn">!</span> Never advance the original iterator after <code>tee</code>ing it. For finite in-memory data a plain comprehension is usually clearer — reach for itertools when laziness / infinite sequences are the point.</p>
+</section>
+
+<section class="card"><h3>Numbers: float · Decimal · int</h3>
+<ul>
+<li><code>int</code> is <b>arbitrary precision</b> (no overflow) — <code>2**1000</code> just works. <code>/</code> always yields <code>float</code>; <code>//</code> floor-divides; <code>%</code> follows the divisor's sign (<code>-7 % 3 == 2</code>).</li>
+<li><b>float = IEEE-754 double</b>: <code>0.1 + 0.2 == 0.3</code> is <b>False</b> <span class="warn">!</span> — binary can't represent those exactly. Compare with <code>math.isclose(a, b)</code> (rel+abs tol) or <code>pytest.approx</code>, never <code>==</code> on computed floats.</li>
+</ul>
+<pre><code>from decimal import Decimal, getcontext
+Decimal("0.1") + Decimal("0.2")   # exact 0.3 (base-10)
+Decimal(0.1)                      # 0.1000000000000000055... (from float!)
+getcontext().prec = 28            # significant digits
+from fractions import Fraction
+Fraction(1,3) + Fraction(1,6)     # 1/2 exact
+</code></pre>
+<ul>
+<li><b>Money / accounting ⇒ <code>Decimal</code></b> (base-10, controllable rounding), never binary float. Construct from <b>strings</b> — <code>Decimal(0.1)</code> inherits the float's error <span class="warn">!</span></li>
+<li><code>bool</code> is a subclass of <code>int</code>: <code>True == 1</code>, <code>sum([True,True]) == 2</code>. <code>math.nan != math.nan</code> — test with <code>math.isnan</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>f-strings &amp; Format Spec</h3>
+<p><code>f"{value:spec}"</code> where spec is <code>[[fill]align][sign][#][0][width][,_][.prec][type]</code>. Any expression inside the braces; <code>!r</code>/<code>!s</code>/<code>!a</code> pick repr/str/ascii conversion.</p>
+<table><thead><tr><th>Spec</th><th>Result</th></tr></thead><tbody>
+<tr><td><code>{x:.2f}</code></td><td>fixed 2 decimals</td></tr>
+<tr><td><code>{x:,.1f}</code></td><td>thousands sep, 1 dp</td></tr>
+<tr><td><code>{x:_}</code></td><td>underscore grouping (3.6)</td></tr>
+<tr><td><code>{x:.1%}</code></td><td>percent (×100 + %)</td></tr>
+<tr><td><code>{n:08b}</code>/<code>{n:x}</code></td><td>binary pad / hex</td></tr>
+<tr><td><code>{s:&gt;10}</code>/<code>{s:^10}</code></td><td>right / centre in width 10</td></tr>
+<tr><td><code>{x:+.2e}</code></td><td>signed scientific</td></tr>
+<tr><td><code>{dt:%Y-%m-%d}</code></td><td>date via <code>__format__</code></td></tr>
+</tbody></table>
+<pre><code>f"{val=}"          # 3.8 debug -> "val=42"
+f"{val = :.2f}"    # "val = 3.14" (spec after =)
+w=8; f"{x:.{p}f}"  # nested field: precision from var p
+f"{'a' if c else 'b'}"   # 3.12 reuses outer quotes
+</code></pre>
+<p><span class="warn">!</span> f-strings interpolate <b>eagerly at runtime</b> — never build SQL/shell/log-template strings with them from untrusted input (injection); use parameterised queries and <code>logging</code>'s <code>%s</code> lazy args.</p>
+</section>
+
+<section class="card"><h3>EAFP vs LBYL · Python Idioms</h3>
+<p><b>EAFP</b> ("ask forgiveness") — do it, catch the failure. <b>LBYL</b> ("look before you leap") — check first. Python leans EAFP.</p>
+<pre><code># EAFP — no TOCTOU race, one lookup
+try:    v = d[k]
+except KeyError: v = default
+# LBYL — two lookups, races if shared/concurrent
+if k in d: v = d[k]        # key could vanish before next line !
+</code></pre>
+<ul>
+<li>EAFP is <b>race-free</b>: check-then-act has a window where a file is deleted / key popped by another thread. The try makes op+failure atomic from your view.</li>
+<li>Often <b>faster on the happy path</b>: no pre-check cost when exceptions are rare; exceptions are only expensive when actually raised.</li>
+<li><b>LBYL wins</b> when the check is cheap and failure is common (validating user input), or when the "try" has side effects you can't cleanly undo.</li>
+<li>Idioms that are also fast: <code>"".join(parts)</code>, comprehensions, <code>enumerate</code>/<code>zip</code> over index math, <code>dict.get</code>/<code>setdefault</code>, unpacking (<code>a, *rest = xs</code>), bind hot-loop lookups to locals.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Version Timeline (what landed)</h3>
+<table><thead><tr><th>Ver</th><th>Headline features</th></tr></thead><tbody>
+<tr><td>3.7</td><td>dict insertion order <b>guaranteed</b>; <code>dataclasses</code>; <code>__getattr__</code> on modules</td></tr>
+<tr><td>3.8</td><td>walrus <code>:=</code>; positional-only <code>/</code>; f-string <code>=</code> debug</td></tr>
+<tr><td>3.9</td><td>builtin generics <code>list[int]</code>; dict <code>|</code> merge; <code>@cache</code></td></tr>
+<tr><td>3.10</td><td><code>match/case</code>; <code>X | Y</code> unions; better error messages</td></tr>
+<tr><td>3.11</td><td>10-60% faster (Faster CPython); <code>TaskGroup</code>; <code>ExceptionGroup</code>/<code>except*</code>; <code>tomllib</code></td></tr>
+<tr><td>3.12</td><td>type-param syntax <code>def f[T]</code>; per-interpreter GIL; f-string re-quoting</td></tr>
+<tr><td>3.13</td><td>free-threaded build (PEP 703, no-GIL opt-in); experimental JIT; new REPL</td></tr>
+</tbody></table>
+<ul>
+<li><span class="warn">!</span> Only <b>dict ordering</b> (3.7) is a <b>language guarantee</b>; the GIL, small-int cache and free-threading are CPython specifics.</li>
+<li>Interview move: name the version a feature landed in — shows you track the language, not just "Python".</li>
+</ul>
+</section>
+
 <section class="card"><h3>&#9733; Code Review Checklist</h3>
 <h4>Mutability &amp; defaults</h4>
 <ul>
@@ -589,6 +697,9 @@ def test_x(mock_get): ...
 <tr><td><code>RuntimeError: dict changed size</code></td><td>mutating a dict while iterating <span class="warn">!</span></td></tr>
 <tr><td>slow string build in a loop</td><td><code>+=</code> on str (O(n²)); use <code>join</code></td></tr>
 <tr><td>memory grows unbounded</td><td>global cache / <code>lru_cache</code> pinning refs <span class="warn">!</span></td></tr>
+<tr><td><code>0.1+0.2 != 0.3</code></td><td>binary float; use <code>math.isclose</code> / <code>Decimal</code> <span class="warn">!</span></td></tr>
+<tr><td>baffling <code>TypeError: 'list' not callable</code></td><td>shadowed a builtin (<code>list</code>/<code>id</code>/<code>sum</code>) <span class="warn">!</span></td></tr>
+<tr><td>leaked resource after async gen</td><td>abandoned mid-iteration; needs explicit <code>aclose()</code> <span class="warn">!</span></td></tr>
 </tbody></table>
 </section>
 

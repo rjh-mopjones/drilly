@@ -392,6 +392,89 @@ src.balance -= amt; dst.balance += amt   // nets to zero = conservation</code></
 </ul>
 </section>
 
+<section class="card"><h3>select, timers &amp; loop-var traps</h3>
+<ul>
+<li><b><code>select</code> is uniform-random</b> over ready cases — never assume priority ordering. Need "prefer cancel"? Re-check <code>ctx.Done()</code> in a nested non-blocking <code>select</code> first.</li>
+<li><b>Empty <code>select{}</code></b> blocks forever; a lone <code>default</code> makes any send/recv non-blocking → the backpressure/try-send idiom.</li>
+<li><b>Disable a case with a <code>nil</code> channel</b> — a <code>nil</code> arm blocks forever, so setting a chan var to <code>nil</code> removes it from the <code>select</code> (e.g. stop reading input once drained).</li>
+<li><b><code>time.After</code> in a loop leaks</b> a timer until it fires <span class="warn">!</span> — for a hot loop use a reused <code>time.NewTimer</code>/<code>Ticker</code> and <code>Stop()</code> it. One-shot deadlines are fine.</li>
+<li><b>Loop-variable capture:</b> pre-Go 1.22, <code>for _,v:=range xs { go f(v) }</code> shared one <code>v</code> — pass it as an arg or shadow <code>v:=v</code>. <code>go vet</code>'s <code>loopclosure</code> flags it; 1.22+ gives each iteration a fresh var.</li>
+<li><b>Buffered ≠ unbounded.</b> A buffer of N absorbs bursts up to N then blocks — that block <i>is</i> backpressure. Sizing the buffer is a latency/memory trade, not a correctness fix.</li>
+<li><code>context.WithTimeout</code> always needs its <code>cancel()</code> called (<code>defer</code> / <code>t.Cleanup</code>) or the timer goroutine lingers to the deadline — <code>go vet</code> <code>lostcancel</code> catches the missing one.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Happens-before — the ordering edges</h3>
+<p>Every fix is really "install a happens-before edge so goroutine A's writes are visible to B". Know which primitive gives you one — a bare shared read next to a write has <b>none</b>.</p>
+<table><thead><tr><th>Edge</th><th>Guarantee</th></tr></thead><tbody>
+<tr><td><b>chan send → recv</b></td><td>everything before the send is visible after the matching recv. The workhorse edge.</td></tr>
+<tr><td><b>close(ch) → recv</b></td><td>writes before <code>close</code> visible to a receiver that observes the close (drain / <code>ok==false</code>).</td></tr>
+<tr><td><code>Unlock → Lock</code></td><td>writes under one holder visible to the next acquirer. Same for <code>RUnlock→Lock</code>.</td></tr>
+<tr><td><code>wg.Done → Wait</code></td><td>all workers' writes visible after <code>Wait()</code> returns — why "WaitGroup-then-close" is sound.</td></tr>
+<tr><td><code>Once.Do</code></td><td>the one execution happens-before every other <code>Do</code> return.</td></tr>
+<tr><td><code>atomic</code> store→load</td><td>a released store is visible to an acquiring load; the basis of <code>atomic.Pointer</code> snapshot swap.</td></tr>
+</tbody></table>
+<ul>
+<li>Go's model is <b>DRAG</b>: a program with a data race has <b>undefined behaviour</b> — not "eventually consistent", not "reads a stale value". Torn reads, impossible interleavings, corruption <span class="warn">!</span></li>
+<li>The reason single-writer, buffered-reply, and singleflight all work: the channel/close is the edge that orders otherwise-unlocked state.</li>
+<li>Ask at every shared value: <b>"which of these six edges orders this access?"</b> If the answer is "none", it's a race the detector will find.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Kata — feed parser (streaming ingest)</h3>
+<p>Ingest a gigabytes-per-day tick feed: pipe-delimited <code>SYMBOL|BID|ASK|QTY</code>, one record per line. The trap is <b>slurp vs stream</b> and <b>abort vs report-and-continue</b>.</p>
+<pre><code>func Parse(r io.Reader,
+    fn func(line int, q Quote, e *ParseError)) error {
+  sc := bufio.NewScanner(r); line := 0
+  for sc.Scan() {
+    line++                              // BEFORE skip check !
+    t := strings.TrimSpace(sc.Text())
+    if t=="" || strings.HasPrefix(t,"#") { continue }
+    q, pe := parseLine(line, t)
+    fn(line, q, pe)                     // XOR: quote xor error
+  }
+  return sc.Err()                       // NOT optional !
+}</code></pre>
+<ul>
+<li><b>Stream, don't slurp</b> <span class="warn">!</span> — <code>io.ReadAll</code>+<code>strings.Split</code> pulls the whole feed into RAM and can't emit before EOF. <code>bufio.Scanner</code> reuses one buffer → flat memory, early emit.</li>
+<li><b>Error-as-value:</b> a bad line yields a line-numbered <code>*ParseError</code> through the <b>same</b> callback as a good <code>Quote</code>; one truncated record never discards the good ones after it. <code>Parse</code>'s return is reserved for <b>IO/scanner</b> failures only.</li>
+<li><b><code>line++</code> before the skip</b> → numbers are <b>physical</b> (count blanks/comments) so an operator can find the line. Reversing it is the classic off-by-N.</li>
+<li><b><code>scanner.Err()</code></b> after the loop surfaces an over-long line (past bufio's 64KB token cap) or IO error — a bare <code>for Scan()</code> silently truncates <span class="warn">!</span></li>
+<li><b><code>Text()</code> vs <code>Bytes()</code>:</b> <code>Text()</code> returns a fresh owned string (1 alloc/line) so a retained <code>Symbol</code> stays valid; <code>Bytes()</code> aliases the reused buffer — zero-copy but invalidated next <code>Scan</code>. Name the trade.</li>
+<li><code>ParseUint(f,10,64)</code> rejects a leading <code>-</code> for free → negative qty falls out as <code>InvalidQty</code>, no special case. Fixed check order (fields→symbol→bid→ask→qty) makes the <i>first</i> error deterministic.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Kata deep — message bus (at-least-once)</h3>
+<p>An in-memory broker modelling RabbitMQ: topic routing (exact + trailing <code>markets.*</code>), bounded queues, manual ack/nack, prefetch, ack-timeout, dead-letter. Headline guarantee: <b>at-least-once</b>.</p>
+<table><thead><tr><th>Concept</th><th>Rule</th></tr></thead><tbody>
+<tr><td><b>ack ≠ received</b></td><td>ack means <b>processed</b>; the broker owns the delivery until <code>Ack()</code>. Crash/timeout/<code>Nack(true)</code> → redeliver.</td></tr>
+<tr><td><b>exactly-once</b></td><td>a fantasy over an unreliable channel <span class="warn">!</span> → make the <b>consumer idempotent</b> (dedupe on <code>Message.ID</code>).</td></tr>
+<tr><td><b>prefetch/QoS</b></td><td>cap on unacked deliveries per consumer — <b>backpressure</b>, not a perf knob; without it a slow consumer OOMs.</td></tr>
+<tr><td><b>dead-letter</b></td><td>poison msg past <code>maxRetries</code> or <code>Nack(false)</code> → DLQ, so it can't loop forever.</td></tr>
+<tr><td><b>generation guard</b></td><td>each dispatch bumps <code>gen</code>; a timed-out delivery's late ack is a <b>no-op</b>, not a double-ack.</td></tr>
+</tbody></table>
+<ul>
+<li><b>One dispatcher goroutine per subscription</b> is the <b>only</b> thing that sends on and closes <code>out</code> → close-exactly-once, no send-on-closed. Consumer gets <code>&lt;-chan Delivery</code> (can't close it).</li>
+<li>Queue state (FIFO, inflight set, DLQ) lives behind one <code>Mutex</code>; mutate under lock, then pulse a cap-1 <code>wake</code> chan. <b>No lock held across the channel send.</b></li>
+<li><code>Publish</code> <b>sheds</b> on a full queue (<code>ErrQueueFull</code>) — non-blocking; dispatch to the consumer <i>is</i> paced by prefetch. Deliberate asymmetry.</li>
+<li>Drive ack-timeout off an <b>injected clock</b>, never <code>time.Sleep</code> — deterministic redelivery test. Prove no-loss under <code>-race -count=N</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Kata deep — matching engine (price-time priority)</h3>
+<p>A limit order book matching incoming orders against resting liquidity, wrapped in a lock-free single-writer engine. Real money → <b>deterministic</b> + <b>quantity-conserving</b>.</p>
+<ul>
+<li><b>The data structure IS the policy.</b> Bids sorted high→low, asks low→high; each price level a <b>FIFO queue</b>. Walk best-level-first, drain front-to-back — that walk <i>is</i> price-time priority, no scoring, reproducible from arrival order alone.</li>
+<li><b>maker-price rule</b> <span class="warn">!</span> — a cross fills at the <b>resting (maker)</b> price, not the taker's; the taker gets price improvement.</li>
+<li><b>Integer ticks</b> (<code>int64</code>), never <code>float64</code> — floats drift, equality fails, fills don't reconcile <span class="warn">!</span></li>
+<li><b>Market never rests</b> — only limit remainders rest; a market remainder is discarded. Amend-up / re-price → back of the level (or reject); reduce keeps priority.</li>
+<li><b>Single-writer beats locking.</b> Every op is a RMW of the same book and the <b>order</b> is the result — a mutex just serialises with extra overhead + a forgotten-critical-section risk on money. Funnel all orders through one channel into one goroutine: same serialisation, genuinely lock-free core, determinism free.</li>
+<li>Each match decrements <b>both</b> sides by the same amount → total bought == total sold. The stress invariant is <b>quantity conservation</b>; demand≫liquidity → exactly N filled.</li>
+<li><b>Scale by sharding per instrument</b> (one engine per symbol, a router hashing orders) — not by adding locks. There's no independently-shardable work <i>within</i> one instrument.</li>
+</ul>
+</section>
+
 <section class="card"><h3>&#9733; Pre-code checklist</h3>
 <h4>Shared state &amp; lifecycle</h4>
 <ul>

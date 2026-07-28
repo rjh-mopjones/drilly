@@ -303,6 +303,240 @@ func Sum[T Number](xs []T) T { ... }</code></pre>
 <ul><li>Modules: <code>go.mod</code> <code>go</code> directive sets the <b>language version</b>; <code>GOTOOLCHAIN</code> selects the build toolchain.</li></ul>
 </section>
 
+<section class="card"><h3>Context — Cancellation &amp; Deadlines</h3>
+<ul>
+<li>Carries a <code>Done()</code> chan (closes when to stop) + <code>Err()</code> (<code>Canceled</code> / <code>DeadlineExceeded</code>). Cancellation is <b>cooperative</b> — closing <code>Done()</code> kills nothing; each goroutine must watch it.</li>
+<li>Build a tree from <code>context.Background()</code>. Cancelling a parent cancels all descendants.</li>
+<li>Pass <code>ctx</code> as the <b>first param</b> of any I/O / work-spawning func; never store it in a struct; never pass <code>nil</code> (<code>context.TODO()</code>).</li>
+</ul>
+<pre><code>ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+defer cancel()   // ALWAYS — else timer+node leak till deadline !</code></pre>
+<ul>
+<li><code>WithValue</code> only for request-scoped cross-cutting data (trace/auth IDs) — never optional params <span class="warn">!</span></li>
+<li>Forgetting <code>defer cancel()</code> = the #1 ctx bug; <code>go vet</code> lostcancel flags it.</li>
+<li><b>Detach</b> fire-and-forget work with <code>context.WithoutCancel(ctx)</code> (1.21) — keeps values, severs cancellation — then re-bound with your own <code>WithTimeout</code>.</li>
+</ul></section>
+
+<section class="card"><h3>Concurrency Patterns</h3>
+<h4>Pipeline</h4>
+<p>Stages joined by channels; each ranges its input, sends output, <code>defer close(out)</code> when input drains.</p>
+<h4>Fan-out / fan-in</h4>
+<pre><code>func merge(cs ...&lt;-chan int) &lt;-chan int {
+  out := make(chan int); var wg sync.WaitGroup
+  for _, c := range cs {
+    wg.Add(1)
+    go func(c &lt;-chan int){ defer wg.Done()
+      for v := range c { out &lt;- v } }(c)
+  }
+  go func(){ wg.Wait(); close(out) }() // close AFTER all senders !
+  return out
+}</code></pre>
+<ul>
+<li>Fan-in's <code>close</code> must run <b>once, after <code>wg.Wait</code></b> — per-source close = send on closed chan panic <span class="warn">!</span></li>
+<li><b>Worker pool</b>: fixed N goroutines draining one <code>jobs</code> chan — bounds concurrency, protects DB/FD limits vs one-goroutine-per-job.</li>
+<li><b>Done pattern</b>: thread <code>ctx.Done()</code> into every stage so early consumer exit unwinds the whole pipeline (no leak).</li>
+</ul></section>
+
+<section class="card"><h3>Timers, Tickers &amp; time</h3>
+<ul>
+<li><code>time.Time</code> holds a <b>monotonic</b> reading too — use it for elapsed (<code>time.Since</code>), wall clock for timestamps. Compare with <code>.Equal()</code>, not <code>==</code> <span class="warn">!</span></li>
+<li><code>time.After(d)</code> in a hot <code>select</code> loop <b>leaks</b> a Timer per iteration until it fires <span class="warn">!</span> — use <code>t := time.NewTimer(d)</code>, <code>t.Stop()</code>, reset.</li>
+<li><code>time.Tick</code> can <b>never</b> be stopped — leaks; use <code>time.NewTicker</code> + <code>defer tk.Stop()</code>.</li>
+</ul>
+<pre><code>t := time.NewTimer(timeout)
+defer t.Stop()
+select {
+case &lt;-t.C:            return ErrTimeout
+case r := &lt;-work:      return r
+case &lt;-ctx.Done():     return ctx.Err()
+}</code></pre>
+<ul><li>(1.23) Timers/Tickers are GC'd when unreferenced even if not stopped, and <code>C</code> is unbuffered — but still <code>Stop</code> for clarity/back-compat.</li></ul>
+</section>
+
+<section class="card"><h3>Struct Embedding &amp; Composition</h3>
+<ul>
+<li>Field order affects size (alignment padding) — group by size to shrink hot structs.</li>
+<li><b>Embed</b> = type with no field name ⇒ its fields/methods are <b>promoted</b> to the outer type.</li>
+</ul>
+<pre><code>type Server struct {
+  Logger        // embedded, no name
+  addr string
+}
+s.Log("up")     // == s.Logger.Log("up")</code></pre>
+<ul>
+<li><b>Not inheritance</b> <span class="warn">!</span> — no subtype relation (<code>Server</code> is not a <code>Logger</code>), no virtual dispatch, no <code>super</code>. Pure compile-time name resolution.</li>
+<li>Outer method with same name <b>shadows</b> the promoted one; reach the inner via <code>s.Logger.Log()</code>.</li>
+<li>Embed an interface (or a type implementing one) ⇒ outer satisfies it <b>for free</b> by delegation. Use for shared mechanics, not "is-a" trees.</li>
+</ul></section>
+
+<section class="card"><h3>net/http Server — Timeouts &amp; Shutdown</h3>
+<p><span class="warn">!</span> A zero-value <code>http.Server{}</code> / <code>http.ListenAndServe</code> has <b>no timeouts</b> — a Slowloris client dripping one byte holds a goroutine+FD forever. Always build an explicit server.</p>
+<table><thead><tr><th>Knob</th><th>Phase it bounds</th></tr></thead><tbody>
+<tr><td><code>ReadHeaderTimeout</code></td><td>accept → end of headers (cheapest Slowloris guard)</td></tr>
+<tr><td><code>ReadTimeout</code></td><td>accept → end of body (superset of headers)</td></tr>
+<tr><td><code>WriteTimeout</code></td><td>end of header read → response written</td></tr>
+<tr><td><code>IdleTimeout</code></td><td>keep-alive gap between requests</td></tr>
+</tbody></table>
+<ul>
+<li>Blanket <code>Write/ReadTimeout</code> are set at accept — hostile to SSE/streaming. Use <code>http.NewResponseController</code> (1.20) to reset deadlines <b>per phase</b>.</li>
+<li><b>Graceful shutdown</b>: <code>srv.Shutdown(ctx)</code>, never <code>Close()</code>. Treat <code>http.ErrServerClosed</code> as success. Use a <b>fresh</b> <code>Background()</code> ctx for the drain deadline — reusing the cancelled signal ctx returns instantly <span class="warn">!</span></li>
+<li><code>signal.NotifyContext(ctx, os.Interrupt, SIGTERM)</code> ties SIGTERM to a ctx. Background workers/websockets aren't drained by <code>Shutdown</code> — track separately.</li>
+</ul></section>
+
+<section class="card"><h3>http.Client &amp; Transport</h3>
+<p><span class="warn">!</span> <code>http.DefaultClient</code> / <code>http.Get</code> have <b>no timeout</b> — a hung upstream blocks forever and leaks goroutines+conns under load.</p>
+<pre><code>client := &amp;http.Client{
+  Timeout: 10*time.Second,     // dial+redirects+body
+  Transport: &amp;http.Transport{
+    MaxIdleConns:        100,
+    MaxIdleConnsPerHost: 10,   // default 2 — raise for hot upstreams
+    IdleConnTimeout:     90*time.Second,
+}}</code></pre>
+<ul>
+<li>Reuse <b>one</b> client (the <code>Transport</code> is the pool). New client per request defeats keep-alive → ephemeral-port exhaustion.</li>
+<li>Always <code>defer resp.Body.Close()</code> <b>and drain</b> (<code>io.Copy(io.Discard, resp.Body)</code>) — an unread body can't return the conn to the pool <span class="warn">!</span></li>
+<li>Per-request cancellation: <code>http.NewRequestWithContext</code> — thread <code>r.Context()</code> so a disconnecting client tears down the chain. Cap untrusted bodies with <code>io.LimitReader</code>.</li>
+</ul></section>
+
+<section class="card"><h3>database/sql — Pool, Tx, Scan</h3>
+<ul>
+<li>Import a driver for its side effect: <code>_ "github.com/jackc/pgx/v5/stdlib"</code> registers it; <code>sql.Open</code> finds it by name and <b>does not dial</b> — call <code>PingContext</code> to fail fast.</li>
+<li><b><code>*sql.DB</code> is a connection <i>pool</i>, not a connection</b> — concurrency-safe. Keep <b>one</b> per process; a new DB per request multiplies pools and blows <code>max_connections</code> <span class="warn">!</span></li>
+</ul>
+<table><thead><tr><th>Knob</th><th>Default / trap</th></tr></thead><tbody>
+<tr><td><code>SetMaxOpenConns</code></td><td>0=unlimited — cap it vs DB's limit ÷ instances</td></tr>
+<tr><td><code>SetMaxIdleConns</code></td><td>2 — raise near MaxOpen or churn TCP+TLS+auth</td></tr>
+<tr><td><code>SetConnMaxLifetime</code></td><td>∞ — set ~5m or stale conns after failover/<code>wait_timeout</code> <span class="warn">!</span></td></tr>
+</tbody></table>
+<ul>
+<li>Parameterised queries (<code>$1</code>/<code>?</code>) are prepared server-side ⇒ injection-safe. Never <code>fmt.Sprintf</code> user input into SQL <span class="warn">!</span></li>
+<li>Rows: always <code>defer rows.Close()</code> <b>and</b> check <code>rows.Err()</code> after the loop; NULLs need <code>sql.NullString</code> or pointers. Tx: <code>defer tx.Rollback()</code> (no-op after Commit).</li>
+<li>pgbouncer transaction-pooling breaks <code>database/sql</code> prepared-statement cache — disable stmt cache / use simple protocol <span class="warn">!</span></li>
+</ul></section>
+
+<section class="card"><h3>Retries, Backoff &amp; Jitter</h3>
+<ul>
+<li><b>Precondition</b>: only retry <b>idempotent</b> ops <span class="warn">!</span> — a timed-out <code>POST /charge</code> may have succeeded server-side; a retry double-charges. Add an idempotency key first.</li>
+<li>Only retry <b>retryable</b> errors: timeouts, resets, 429, 502/503/504. Never a 400 or <code>context.Canceled</code>.</li>
+</ul>
+<pre><code>backoff := min(cap, base*(1&lt;&lt;attempt))
+sleep := time.Duration(rand.Int63n(int64(backoff))) // FULL jitter
+select {
+case &lt;-ctx.Done(): return ctx.Err() // respect deadline !
+case &lt;-time.After(sleep):
+}</code></pre>
+<ul>
+<li><b>Full jitter</b> de-correlates clients — without it every client retries at the same instant (thundering herd). <b>Cap</b> the backoff; <b>bound</b> attempts; add a global <b>retry budget</b> (≤10% of traffic).</li>
+<li>HTTP: the request body is consumed on attempt 1 — buffer it + set <code>req.GetBody</code>, or use <code>hashicorp/go-retryablehttp</code>.</li>
+</ul></section>
+
+<section class="card"><h3>Circuit Breaker · Bulkhead · Rate Limit</h3>
+<h4>Breaker (3-state)</h4>
+<table><thead><tr><th>State</th><th>Behaviour</th></tr></thead><tbody>
+<tr><td>Closed</td><td>pass through, count failures</td></tr>
+<tr><td>Open</td><td>fail fast for a cooldown (no downstream hit)</td></tr>
+<tr><td>Half-open</td><td>allow probes; ok→closed, fail→open</td></tr>
+</tbody></table>
+<ul>
+<li>Trip on a <b>ratio over a minimum sample</b>, not raw counts (<code>sony/gobreaker</code>). Pair with a per-call timeout or "open" still waits the full timeout <span class="warn">!</span></li>
+<li><b>Bulkhead</b> = resource isolation: a buffered chan as a semaphore caps concurrency per dependency, so one sick dep can't starve the shared pool.</li>
+</ul>
+<pre><code>sem := make(chan struct{}, 10)
+select {
+case sem &lt;- struct{}{}: defer func(){ &lt;-sem }()
+case &lt;-ctx.Done():      return ctx.Err() // shed, don't queue
+}</code></pre>
+<h4>Rate limit — <code>x/time/rate</code> token bucket</h4>
+<ul>
+<li><code>Allow()</code> reject-if-over (429) · <code>Wait(ctx)</code> throttle outbound · <code>Reserve()</code> inspect delay.</li>
+<li>Per-client: <code>map[key]*Limiter</code> <b>leaks</b> — add a background sweeper evicting idle keys <span class="warn">!</span> Token bucket beats fixed-window (which allows 2× burst across the boundary). Limits are per-process — true global needs Redis/gateway.</li>
+</ul></section>
+
+<section class="card"><h3>Deadline Budget &amp; Load Shedding</h3>
+<ul>
+<li>A 2s client deadline fanning to 4 hops: passing the <b>same</b> ctx everywhere is right for <i>cancellation</i> but wrong for <b>budget</b> — each hop must spend a share, leaving egress reserve for the response trip <span class="warn">!</span></li>
+</ul>
+<pre><code>deadline, _ := ctx.Deadline()
+remaining := time.Until(deadline) - egressReserve
+child, cancel := context.WithTimeout(ctx, remaining/hopsLeft)</code></pre>
+<ul>
+<li>Under overload, <b>more retries make it worse</b>. <b>Load shedding</b> — reject early (429/503) when queue depth / latency exceeds a threshold — beats "add retries": it protects goodput and prevents congestion collapse.</li>
+<li><code>singleflight</code> collapses duplicate cache-miss loads — but watch 3 failure modes: one slow leader stalls all waiters, a bad result is shared to all, and a hot key serialises; use <code>Forget</code> and per-key timeouts.</li>
+</ul></section>
+
+<section class="card"><h3>Security — crypto &amp; untrusted input</h3>
+<ul>
+<li><span class="warn">!</span> <code>crypto/rand</code> not <code>math/rand</code> for anything unpredictable (tokens, salts, nonces, keys) — <code>math/rand</code> is a deterministic PRNG an attacker reproduces.</li>
+<li>Compare secrets with <code>subtle.ConstantTimeCompare</code> / <code>hmac.Equal</code> — <code>==</code>/<code>bytes.Equal</code> short-circuit and leak via timing.</li>
+<li>Passwords: adaptive KDF — <code>bcrypt</code> (default, salts + cost embedded; 72-byte cap) or <code>argon2id</code> (memory-hard). Never plain SHA-256.</li>
+</ul>
+<pre><code>r.Body = http.MaxBytesReader(w, r.Body, 1&lt;&lt;20) // cap BEFORE decode
+dec := json.NewDecoder(r.Body)
+dec.DisallowUnknownFields()   // reject typos / mass-assignment</code></pre>
+<ul>
+<li>Decompression bombs: cap inflated output with <code>io.LimitReader</code>; a few KB gzip → GBs. JSON depth capped at 10000.</li>
+<li>Data race = <b>undefined behaviour</b>, not a stale read — a torn interface/slice write can produce a garbage pointer the runtime derefs → real corruption from pure Go, no <code>unsafe</code> <span class="warn">!</span></li>
+</ul></section>
+
+<section class="card"><h3>Web vulns &amp; Supply chain</h3>
+<ul>
+<li><b>SSRF</b>: user-supplied URLs can hit <code>169.254.169.254</code> (cloud metadata) / internal services. Validate the <b>resolved IP</b> in a custom <code>DialContext</code> (closes DNS-rebind window) and re-check on redirects via <code>CheckRedirect</code>.</li>
+<li><b>Path traversal</b>: <code>filepath.Join</code> cleans but does <b>not</b> contain — <code>Join("/srv", "../etc/passwd")</code> escapes. Prefix-check after clean, or (1.24) <code>os.OpenRoot</code> — traversal-proof by construction.</li>
+<li><b>Templates</b>: <code>html/template</code> auto-escapes (context-aware); <code>text/template</code> does <b>not</b> — same API, trivial to import the wrong one → XSS <span class="warn">!</span> Never wrap untrusted data in <code>template.HTML/JS/URL</code>.</li>
+</ul>
+<h4>Supply chain</h4>
+<ul>
+<li><code>go.sum</code> = per-module hashes (integrity); first sighting verified against <code>GOSUMDB</code> transparency log. Don't disable — scope private repos with <code>GOPRIVATE</code>, never <code>GOSUMDB=off</code> <span class="warn">!</span></li>
+<li><code>govulncheck</code> adds call-graph analysis — reports only vulns you actually <b>reach</b>. Run in CI alongside pinned versions (MVS) + committed <code>go.sum</code>.</li>
+</ul></section>
+
+<section class="card"><h3>Cloud-Native &amp; Observability</h3>
+<ul>
+<li>Minimal image: multi-stage, <code>CGO_ENABLED=0</code> (static binary), <code>-ldflags="-s -w"</code>, land in <code>distroless/static:nonroot</code> (ships CA certs + nonroot user). Forgetting <code>CGO_ENABLED=0</code> → container exits "no such file or directory" <span class="warn">!</span></li>
+<li><b>Container CPU trap</b>: pre-1.25 <code>GOMAXPROCS</code> = host <code>NumCPU</code>, ignoring the cgroup quota → CFS throttling + GC stalls. Fix: <code>go.uber.org/automaxprocs</code> (≤1.24); 1.25 runtime is cgroup-aware natively <span class="warn">!</span> Set <code>GOMEMLIMIT</code> ≈ 90% of the mem limit to dodge the OOM-killer.</li>
+</ul>
+<h4>Three pillars</h4>
+<ul>
+<li><b>Logs</b>: <code>log/slog</code> (1.21) JSON handler to stdout, key-value attrs, <code>logger.With(traceID)</code>.</li>
+<li><b>Metrics</b>: <code>prometheus/client_golang</code>, histograms for p99; watch label <b>cardinality</b> (no user IDs/URLs) <span class="warn">!</span></li>
+<li><b>Traces</b>: OpenTelemetry (<code>otelhttp</code>/<code>otelgrpc</code>). Inject the trace ID into <code>slog</code> records to correlate log↔trace.</li>
+</ul></section>
+
+<section class="card"><h3>Design Idioms</h3>
+<h4>Functional options</h4>
+<pre><code>type Option func(*Server)
+func WithTimeout(d time.Duration) Option {
+  return func(s *Server){ s.timeout = d }
+}
+func NewServer(addr string, opts ...Option) *Server {
+  s := &amp;Server{addr: addr, timeout: 30*time.Second}
+  for _, o := range opts { o(s) }
+  return s
+}</code></pre>
+<ul>
+<li>Beats positional ctors (no overloading) &amp; config structs (can't tell unset from zero). Add options without breaking call sites. Skip it if all fields are required.</li>
+<li><b>Package per capability</b>: name packages by what they <i>do</i> (<code>billing</code>), not by layer. <code>util</code>/<code>common</code>/<code>models</code> = import-cycle magnets <span class="warn">!</span> <code>internal/</code> is a compiler-enforced privacy boundary.</li>
+<li><b>DI</b> = pass deps as args, wire once at <code>main()</code>. "Accept interfaces (defined by the <b>consumer</b>), return structs." Reach for <code>wire</code>/<code>fx</code> only for large graphs, not correctness.</li>
+</ul></section>
+
+<section class="card"><h3>Profiling — pprof profiles</h3>
+<table><thead><tr><th>Profile</th><th>Answers</th></tr></thead><tbody>
+<tr><td>CPU</td><td>where wall/CPU time goes (sampled ~100Hz)</td></tr>
+<tr><td>heap</td><td><code>inuse_space</code> (live) vs <code>alloc_space</code> (cumulative)</td></tr>
+<tr><td>goroutine</td><td>counts + stacks — leak hunting</td></tr>
+<tr><td>block</td><td>time parked on chan/mutex (needs <code>SetBlockProfileRate</code>)</td></tr>
+<tr><td>mutex</td><td>lock contention (needs <code>SetMutexProfileFraction</code>)</td></tr>
+</tbody></table>
+<ul>
+<li><b>Flat</b> = time in the func itself; <b>cumulative</b> = it + callees. Sort by flat to find the real hot leaf.</li>
+<li><code>go tool trace</code> beats pprof for <i>latency</i> stories: scheduler stalls, GC pauses, goroutine-blocking timelines that a sampled profile can't show.</li>
+</ul>
+<pre><code>import _ "net/http/pprof"   // /debug/pprof/*
+go tool pprof -http=: http://host/debug/pprof/profile?seconds=30
+go tool pprof http://host/debug/pprof/heap</code></pre>
+<ul><li>Bench-driven: <code>go test -cpuprofile cpu.out -memprofile mem.out -bench .</code>; always <code>-benchmem</code>. Optimise from data, never from a hunch <span class="warn">!</span></li></ul>
+</section>
+
 <section class="card"><h3>&#9733; Code Review Checklist</h3>
 <h4>Receiver type — value vs pointer</h4>
 <ul>

@@ -96,6 +96,38 @@ pre code{background:none; padding:0; font-size:1em;}
 <p><span class="warn">!</span> A moved-from object must stay <b>valid &amp; destructible</b> (empty-but-safe, like a <code>nullptr</code> <code>unique_ptr</code>) — never broken. Move <i>transfers</i> ownership; it is not a fast copy.</p>
 </section>
 
+<section class="card"><h3>Clarify &amp; Design First — the questions that set up every kata</h3>
+<p>Open with clarifying questions out loud — they show you design before typing, and each answer pins a decision the implementation depends on. The <b>ownership answer <i>is</i> the design</b>.</p>
+<table><thead><tr><th>Ask</th><th>Why it decides the shape</th></tr></thead><tbody>
+<tr><td>single owner or shared?</td><td>single → move-only; shared → refcount</td></tr>
+<tr><td>overwrite-oldest or reject when full?</td><td>rolling window vs bounded queue</td></tr>
+<tr><td>is there a meaningful "empty" value?</td><td>no → raw storage, don't default-construct</td></tr>
+<tr><td>throw or silent no-op on misuse?</td><td>closed <code>send</code> = bug → throw</td></tr>
+<tr><td>exactly one writer? one reader?</td><td>SPSC / seqlock unlock; drops the CAS</td></tr>
+<tr><td>thread-safe now, or note the boundary?</td><td>plain <code>int</code> vs <code>atomic&lt;int&gt;</code></td></tr>
+<tr><td>copyable / movable?</td><td>manual-lifetime container often deletes both</td></tr>
+</tbody></table>
+<ul>
+<li><b>Say the tradeoff you rejected:</b> "<code>shared_ptr</code> would compile, but a venue slot has one owner — move-only is the honest encoding." Volunteering the alternative <i>and</i> why it's wrong is the senior tell.</li>
+<li>Design the <b>class + its special members first</b> — deleting copies and defining moves already encodes "unique, transferable resource" before a single method body exists.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Value Semantics &amp; const-correctness</h3>
+<p>Every type's public surface is a set of promises. Encode them in the signature so the compiler and the reader both see the contract.</p>
+<ul>
+<li><b>Read-only methods <code>const</code>:</b> <code>is_open() const</code>, <code>size() const</code> — a non-<code>const</code> observer is a lie the caller can't <code>const</code>-qualify around.</li>
+<li><b>Read-only params <code>const&amp;</code>:</b> <code>send(const Order&amp;)</code> — no copy, no mutation, callable with a temporary.</li>
+<li><b>Observers are <code>const noexcept</code>:</b> they neither change state nor throw; mark both.</li>
+<li><b>Rule of zero for non-owners:</b> a view / value aggregate owns nothing → write <i>none</i> of the five, let the compiler default them.</li>
+<li><b>Moved-from = valid &amp; unspecified,</b> never broken: destructible, and every method still defined (here <code>send</code> throws, <code>is_open()</code> is <code>false</code>).</li>
+</ul>
+<pre><code>// copy-and-swap: one exception-safe assignment for BOTH copy &amp; move
+void swap(T&amp; o) noexcept { using std::swap; swap(a_,o.a_); swap(b_,o.b_); }
+T&amp; operator=(T o) noexcept { swap(o); return *this; }  // o is the copy/moved temp</code></pre>
+<p><span class="warn">!</span> A <code>swap</code> member + free <code>swap</code> makes <code>std::swap</code> allocation-free and <code>noexcept</code>, and collapses copy/move-assign into one line — the copy-and-swap idiom.</p>
+</section>
+
 <section class="card"><h3>Rule of Five / Zero &amp; Ownership Table</h3>
 <table><thead><tr><th>Need</th><th>Reach for</th></tr></thead><tbody>
 <tr><td>owns a resource</td><td>RAII + <b>rule of five</b> (dtor + 4)</td></tr>
@@ -153,8 +185,11 @@ gate.open();</code></pre>
 <li><b>Move-assign:</b> <code>close()</code> what you own <b>first</b> (else leak the old conn), then steal, then null source; guard <code>this != &amp;other</code>.</li>
 <li>Route both release sites through one private <code>close()</code> — <code>noexcept</code> + idempotent (<code>if(open_)</code>), so "release exactly once" lives in one place.</li>
 <li><b>Test:</b> assert <code>live_count()</code> around every scope — no-double-close-after-move (not <code>-1</code>) and move-assign-releases-previous (not <code>2</code>).</li>
+<li><b>Every observer <code>const noexcept</code>:</b> <code>is_open</code>, <code>venue</code>, <code>sent</code>, <code>live_count</code> — no ownership stake, no throw.</li>
+<li><b>Extension:</b> back it with a real <code>int fd</code> you <code>dup</code>/<code>close</code> so a leak or double-close is a loud <b>ASan</b> report, not a silent counter drift.</li>
 </ul>
 <p><span class="warn">!</span> <b>Gotcha:</b> <code>shared_ptr</code> "to avoid move complexity" models the domain wrong — a venue slot has one owner; move-only is the honest encoding.</p>
+<p><span class="warn">!</span> <b>Gotcha:</b> deleting copy stops double-ownership <i>by copy</i> — the move path must <b>still</b> null the source or you double-close through it.</p>
 </section>
 
 <section class="card"><h3>tick_buffer — Raw Aligned Storage + Placement New</h3>
@@ -168,8 +203,11 @@ std::destroy_at(slot)                   // destroy, no free
 <li><b>Dtor destroys exactly the live range:</b> walk <code>count_</code> slots from <code>head_</code> with wrap — never a never-constructed slot; then <code>::operator delete</code> with the <b>matching sized + aligned</b> overload.</li>
 <li><b>Ring math:</b> <code>head_+count_</code> can be <code>2*cap-1</code> → one modulo; <code>latest()</code> is <code>head_+count_-1</code>, not <code>+count_</code>.</li>
 <li><b>Test:</b> a <b>Counted</b> live-instance type — <code>counted_live()&lt;=cap</code> in the loop (leak) and <code>==0</code> after scope (double-destroy).</li>
+<li><b>Non-copyable, non-movable</b> here (all four <code>=delete</code>): manual lifetime makes correct copy/move fiddly, and the kata is about the storage discipline, not the rule of five.</li>
+<li><b>Extension:</b> make it copyable — placement-<code>new</code> each live element from the source, leave the source's spare slots raw; that turns it into a full manual-lifetime container.</li>
 </ul>
 <p><span class="warn">!</span> <b>Gotcha:</b> placement <code>new</code> does <b>not</b> allocate — pairing it with plain <code>delete</code>, or under-aligning with plain <code>operator new</code>, is UB.</p>
+<p><span class="warn">!</span> <b>Gotcha:</b> <code>vector&lt;T&gt;</code>/<code>new T[]</code> <b>default-construct</b> every slot up front and may realloc — exactly the two costs this hot path forbids.</p>
 </section>
 
 <section class="card"><h3>order_handle — Intrusive Reference Counting</h3>
@@ -186,9 +224,12 @@ OrderHandle&amp; operator=(const OrderHandle&amp; o) noexcept {
 <li><b>The sharpest line:</b> copy-assign <b>bumps before releasing</b>. <code>h = h;</code> (or two handles to one order) would else reclaim the slot then re-point at freed memory — a use-after-free. Bump-first needs no <code>this==&amp;other</code> guard.</li>
 <li><b>Move</b> transfers an owner: steal pointer, null source, count <b>unchanged</b> — only copy adds an owner.</li>
 <li><b>Reclaim exactly once:</b> the 0-transition lives in one <code>release()</code> called by dtor + reset; miss a decrement = leaked slot, double = live order recycled.</li>
-<li>Null-safe accessors: <code>use_count()</code> on null is a defined <code>0</code>.</li>
+<li>Null-safe accessors: <code>use_count()</code> on null is a defined <code>0</code>, not a <code>nullptr</code> deref — the null handle is a first-class state.</li>
+<li><b>Intrusive vs external:</b> <code>shared_ptr</code> puts the count in a separate heap control block (an alloc + indirection); intrusive puts it <i>inside</i> the <code>Order</code> — one cache line, and a raw <code>Order*</code> promotes to a handle with no lookup.</li>
+<li><b>Reclaim = recycle, not delete:</b> the pool is a fixed <code>vector&lt;Order&gt;</code>; <code>ref_count==0</code> just marks a slot free for a later <code>acquire()</code>.</li>
 </ul>
 <p><span class="warn">!</span> <b>Gotcha:</b> plain <code>int</code> = single-thread only. A shared pool needs <code>atomic&lt;int&gt;</code>, <code>fetch_sub(1,acq_rel)</code> on the decrement-to-zero + a lock-free free-list.</p>
+<p><span class="warn">!</span> <b>Gotcha:</b> a slot recycled while it still rests in the book fills a <b>recycled</b> order — phantom fills, wrong price, exposure booked to the wrong account.</p>
 </section>
 
 <section class="card"><h3>top_of_book — Seqlock (Atomic Payload, TSan)</h3>
@@ -206,8 +247,12 @@ if (b == seq_.load(relaxed)) return out;</code></pre>
 <li><b>Fix:</b> each field a <code>std::atomic</code> accessed <code>relaxed</code> — same instruction on x86/ARM, race-free by definition.</li>
 <li>Relaxed gives per-field atomicity, <b>not</b> group consistency — the <b>sequence counter</b> supplies that (else <code>bid</code> from N, <code>ask</code> from N+1).</li>
 <li><b>Single writer only</b> — two drive the odd/even counter and corrupt it; serialise writers with a mutex (readers stay lock-free).</li>
+<li><b>Fences bracket the payload:</b> two <code>release</code> fences pin the field stores strictly between odd and even; the reader's <code>acquire</code> fence pairs so seeing even ⇒ seeing the payload.</li>
+<li><b>Relaxed is free:</b> a relaxed load/store is the <i>same instruction</i> as a plain one on x86/ARM — you pay nothing for definedness.</li>
+<li><b>Wait-free reads:</b> a reader spins only while a publish is <i>genuinely</i> in flight, never on another reader — the odd-check + recheck is the whole protocol.</li>
 </ul>
 <p><span class="warn">!</span> <b>Gotcha:</b> a green stress run passes value asserts but is still UB — run under TSan. Extension: double-buffer (2 slots + atomic active-index) → no reader retries.</p>
+<p><span class="warn">!</span> <b>Gotcha:</b> drop the sequence re-check and relaxed atomics stitch <code>bid</code> from publish N to <code>ask</code> from N+1 — per-field atomicity is <b>not</b> group consistency.</p>
 </section>
 
 <section class="card"><h3>feed_pipe — Lock-Free SPSC Ring</h3>
@@ -225,8 +270,107 @@ alignas(64) atomic&lt;size_t&gt; head_, tail_;  // separate cache lines</code></
 <li><b>Plain <code>T</code> slots are race-free:</b> the producer writes slot <i>then</i> release-stores tail; consumer acquire-loads tail <i>before</i> reading slot — the edge <i>synchronizes-with</i>, one accessor per slot at a time. (Opposite of the seqlock, where both touch the payload → atomic.)</li>
 <li><b>One-empty-slot:</b> <code>cap+1</code> slots — <code>head==tail</code> empty, <code>tail+1==head</code> full, no shared size counter.</li>
 <li>Load your <i>own</i> index <code>relaxed</code>; the cross-thread index <code>acquire</code>. <code>alignas(64)</code> kills false sharing.</li>
+<li><b>Wait-free both ends:</b> single writer per index → each op is a bounded number of steps, no spin, no retry loop (stronger than lock-free).</li>
+<li><b>Support move-only payloads:</b> <code>try_push(const T&amp;)</code> + <code>try_push(T&amp;&amp;)</code>; pop does <code>std::move(slots_[head])</code>.</li>
+<li><b>Money stakes:</b> a dropped event is a missed fill; a duplicated event is a phantom position — the strictly-increasing-seq assert is what catches both.</li>
 </ul>
 <p><span class="warn">!</span> <b>Gotcha:</b> reflexive <code>seq_cst</code> works but costs throughput; atomic slots are needless. Test: <code>StartGate</code>-gated producer/consumer asserting strictly-increasing seq, under TSan.</p>
+<p><span class="warn">!</span> <b>Gotcha:</b> sizing to <code>capacity</code> with a shared size counter re-introduces contention + a CAS — the <code>cap+1</code> one-empty-slot trick avoids the counter entirely.</p>
+</section>
+
+<section class="card"><h3>Sanitizers — ASan / TSan / UBSan (the compiler proves nothing)</h3>
+<p>The whole module's premise: for lifetime and races the compiler is silent, so a green run is the <i>start</i>, not the proof. Sanitizers are how you actually check. They instrument the binary — build a separate tree per sanitizer, they don't compose freely (ASan+TSan can't share one build).</p>
+<table><thead><tr><th>Tool</th><th>Catches</th><th>Kata</th></tr></thead><tbody>
+<tr><td><b>ASan</b> <code>-fsanitize=address</code></td><td>use-after-free, leak, double-free, OOB, bad <code>new/delete</code> pairing</td><td>session (real fd), tick_buffer, order_handle</td></tr>
+<tr><td><b>TSan</b> <code>-fsanitize=thread</code></td><td>data races, bad lock order — the <code>-race</code> analogue</td><td>top_of_book, feed_pipe</td></tr>
+<tr><td><b>UBSan</b> <code>-fsanitize=undefined</code></td><td>signed overflow, misaligned access, bad casts, <code>nullptr</code> deref</td><td>alignment / ring math</td></tr>
+</tbody></table>
+<pre><code>cmake -B build-tsan -DKATAS_SANITIZE=thread &amp;&amp; cmake --build build-tsan
+ctest --test-dir build-tsan -R top_of_book   # and feed_pipe</code></pre>
+<ul>
+<li><b>TSan reports both stacks</b> of a racing write/read — it proves the seqlock's fences and the ring's head/tail hand-off are actually sound, not "green on my machine".</li>
+<li><b>A green stress run under no sanitizer is worthless for races</b> — a data race is UB that usually <i>looks</i> fine; only TSan (or prod, eventually) reveals it.</li>
+<li><b>Portable fallback:</b> a <b>self-consistency invariant</b> (every field derived from one counter) catches torn/lost/dup values even where Apple's arm64 TSan runtime won't launch.</li>
+</ul>
+<p><span class="warn">!</span> ASan/TSan add overhead and change timing — they are for <i>correctness</i> runs, not the latency numbers you quote.</p>
+</section>
+
+<section class="card"><h3>The 5+1 Katas at a Glance</h3>
+<p>Each drills one pillar. Recognise which one the prompt is really asking for, then the design writes itself.</p>
+<table><thead><tr><th>Kata</th><th>Pillar</th><th>The one trap</th></tr></thead><tbody>
+<tr><td>exchange_session</td><td>move-only RAII / rule of five</td><td>null the moved-from source</td></tr>
+<tr><td>tick_buffer</td><td>raw aligned storage + placement <code>new</code></td><td>destroy-before-overwrite</td></tr>
+<tr><td>order_handle</td><td>intrusive refcount / rule of five (shared)</td><td>copy-assign bumps before releasing</td></tr>
+<tr><td>top_of_book</td><td>seqlock + memory model</td><td>plain payload is UB → atomic fields</td></tr>
+<tr><td>feed_pipe</td><td>lock-free SPSC / <code>std::atomic</code></td><td>no CAS; plain slots race-free via edge</td></tr>
+<tr><td>feed_parser</td><td>zero-copy text: <code>string_view</code>+<code>from_chars</code></td><td>copy symbol; <code>ptr==last</code>; physical lines</td></tr>
+</tbody></table>
+<ul>
+<li><b>Owning katas</b> (session, tick_buffer, order_handle) → prove correctness with a <b>live-instance counter</b> + ASan.</li>
+<li><b>Concurrency katas</b> (top_of_book, feed_pipe) → prove with a <b>StartGate</b>-gated invariant under TSan.</li>
+<li><b>Two payload rules that mirror:</b> seqlock payload <b>must</b> be atomic (both touch it); SPSC slots <b>need not</b> be (edge gives one accessor).</li>
+</ul>
+</section>
+
+<section class="card"><h3>feed_parser — Zero-Copy Parse (string_view + from_chars)</h3>
+<p><b>Topic:</b> fast delimited text. One record per line <code>SYM|BID|ASK|QTY</code>, millions/sec. A <b>single</b> malformed line must not throw, not allocate wildly, not abort the stream — report it with its line number and skip. The reflexive <code>stringstream</code>/<code>stod</code> parse is wrong 3 ways.</p>
+<pre><code>// valid only if WHOLE view parsed: no error AND ptr reached the end
+bool parse_u64(std::string_view s, uint64_t&amp; out) noexcept {
+  if (s.empty()) return false;
+  auto [p,ec] = std::from_chars(s.data(), s.data()+s.size(), out);
+  return ec == std::errc{} &amp;&amp; p == s.data()+s.size();
+}
+std::string_view fields[5];   // 4 valid + 1 overflow sentinel → n!=4 catches BOTH too-few/too-many
+// on_quote(line, Quote{ std::string(symbol), bid, ask, qty });  // symbol COPIED — view dangles next getline</code></pre>
+<ul>
+<li><b>Why not <code>stod</code>/<code>stringstream</code>:</b> it <b>throws</b> on bad input (aborts the feed), <b>allocates</b> per field, and is <b>locale-sensitive</b> (comma-decimal misreads <code>1.95</code>). <code>from_chars</code> does none.</li>
+<li><b>Whole-field check:</b> <code>ec==errc{}</code> is not enough — <code>from_chars("1.0x")</code> parses <code>1.0</code> with <b>no error</b>, leaving <code>ptr</code> short. Also require <code>ptr==last</code>, else garbage-suffixed prices slip in.</li>
+<li><b>Unsigned rejects the sign for free:</b> parse <code>qty</code> into <code>uint64_t</code> → <code>-5</code> fails as <code>InvalidQty</code>, no hand-rolled sign check.</li>
+<li><b>Physical line numbers:</b> <code>++line_no</code> <i>before</i> the blank/comment skip, so error lines match the raw file.</li>
+<li><b>Fixed order, short-circuit:</b> count → empty-symbol → bid → ask → qty; one error per bad line.</li>
+<li><b>Streaming, not collecting:</b> <code>parse_feed</code> fires a callback per line (constant memory over a multi-GB replay); <code>parse_all</code> is a thin collector on top.</li>
+</ul>
+<p><span class="warn">!</span> <b>Gotcha:</b> a field <code>string_view</code> points into the <b>reused</b> getline buffer — storing it in the <code>Quote</code> is a use-after-free the moment the next line loads. Anything outliving the line (the symbol) must be <b>copied</b> into an owning <code>std::string</code>.</p>
+</section>
+
+<section class="card"><h3>Memory Ordering — relaxed / acquire / release &amp; synchronizes-with</h3>
+<p>The three orderings you actually use, and the one edge that makes lock-free hand-offs sound. Load your <b>own</b> index <code>relaxed</code>; the <b>cross-thread</b> index <code>acquire</code>; <b>publish</b> with <code>release</code>.</p>
+<table><thead><tr><th>Order</th><th>Use</th></tr></thead><tbody>
+<tr><td><code>relaxed</code></td><td>atomicity only, no ordering — self-owned index, seqlock payload fields</td></tr>
+<tr><td><code>acquire</code></td><td>a load; everything the matching release wrote becomes visible after it</td></tr>
+<tr><td><code>release</code></td><td>a store; everything written <i>before</i> it is visible to the paired acquire</td></tr>
+<tr><td><code>acq_rel</code></td><td>a read-modify-write (refcount <code>fetch_sub</code>-to-zero)</td></tr>
+<tr><td><code>seq_cst</code></td><td>correct default, single global order — but a full barrier; overkill on hot paths</td></tr>
+</tbody></table>
+<p><b>synchronizes-with:</b> a <code>release</code> store that a later <code>acquire</code> load <i>reads</i> creates a happens-before edge — the producer's plain slot write is ordered before the consumer's plain slot read, so it's <b>not</b> a race.</p>
+<h4>The load-bearing contrast</h4>
+<table><thead><tr><th></th><th>SPSC ring</th><th>seqlock</th></tr></thead><tbody>
+<tr><td>who touches payload</td><td><b>one</b> accessor/slot at a time</td><td><b>both</b> concurrently</td></tr>
+<tr><td>payload type</td><td>plain <code>T</code> (edge orders it)</td><td>per-field <code>atomic</code>, relaxed</td></tr>
+<tr><td>reader blocks?</td><td>no (wait-free)</td><td>retries only mid-write</td></tr>
+<tr><td>needs CAS?</td><td>no (1 writer/index)</td><td>no (1 writer)</td></tr>
+</tbody></table>
+<ul>
+<li><b>Relaxed ≠ consistent group:</b> relaxed gives per-field atomicity, never group ordering — the <b>sequence counter</b> (seqlock) or the <b>index edge</b> (ring) supplies that.</li>
+<li><b>False sharing:</b> <code>alignas(64)</code> puts head/tail on separate cache lines — else each op dirties one shared line, bouncing it between cores (or <code>hardware_destructive_interference_size</code>).</li>
+</ul>
+<p><span class="warn">!</span> A plain-payload seqlock is a data race → <b>UB by the memory model even though the retry rejects every torn value</b> (Boehm &amp; Adve). TSan flags it; relaxed atomics fix it at zero cost on x86/ARM.</p>
+</section>
+
+<section class="card"><h3>Extensions — Going Deeper Per Kata</h3>
+<p>Each kata has an obvious "and then?" that shows depth. Name the one your interviewer is fishing for.</p>
+<table><thead><tr><th>Kata</th><th>Extension that shows depth</th></tr></thead><tbody>
+<tr><td>exchange_session</td><td>real owned <code>fd</code> (dup/close) so leaks show under <b>ASan</b>; add <code>swap</code> + copy-and-swap</td></tr>
+<tr><td>tick_buffer</td><td>make it copyable/movable — deep-copy <b>exactly</b> the live range, leave spare slots raw</td></tr>
+<tr><td>order_handle</td><td><code>atomic&lt;int&gt;</code> + <code>fetch_sub(1,acq_rel)</code> + lock-free free-list; aliasing ctor (<code>Order*</code>→handle)</td></tr>
+<tr><td>top_of_book</td><td><b>double-buffer</b> (2 slots + atomic active-index) → wait-free reads, <i>zero</i> retries</td></tr>
+<tr><td>feed_pipe</td><td>bounded <b>MPMC</b> (Vyukov: per-slot seq + CAS); batched <code>try_push_n</code>; vs <code>mutex+queue</code></td></tr>
+<tr><td>feed_parser</td><td>byte-stream state machine (no per-line getline copy); <code>parse_view</code> handing back <code>string_view</code> symbols</td></tr>
+</tbody></table>
+<ul>
+<li><b>Always offer to measure:</b> benchmark the lock-free structure against <code>std::mutex</code> + <code>std::queue</code>, or the double-buffer against the seqlock under write-heavy load — a number beats an assertion.</li>
+<li><b>Prove it physical:</b> the strongest extensions turn a silent bug loud — a real <code>fd</code> under ASan, a race under TSan, a false-sharing regression on a perf counter.</li>
+</ul>
 </section>
 
 <section class="card"><h3>&#9733; Pre-Code Checklist</h3>
@@ -248,6 +392,12 @@ alignas(64) atomic&lt;size_t&gt; head_, tail_;  // separate cache lines</code></
 <li>&#9744; Memory ordering is <b>minimal + justified</b>: relaxed self-load, acquire cross-load, release publish.</li>
 <li>&#9744; Seqlock payload is per-field <code>atomic</code> (relaxed); sequence supplies group consistency; single writer.</li>
 <li>&#9744; SPSC: no CAS, one-empty-slot full/empty, <code>alignas(64)</code> on head/tail.</li>
+<li>&#9744; Ordering picked by role: <code>relaxed</code> self-index, <code>acquire</code> cross-index, <code>release</code> publish — not reflexive <code>seq_cst</code>.</li>
+</ul>
+<h4>Parsing / text</h4>
+<ul>
+<li>&#9744; <code>from_chars</code> not <code>stod</code> (no throw / alloc / locale); field valid only if <code>ec==errc{}</code> <b>and</b> <code>ptr==last</code>.</li>
+<li>&#9744; <code>qty</code> parsed unsigned (rejects <code>-</code>); anything outliving the line <b>copied</b> out of the reused buffer; line numbers physical.</li>
 </ul>
 <h4>Tests first</h4>
 <ul>
@@ -271,6 +421,11 @@ alignas(64) atomic&lt;size_t&gt; head_, tail_;  // separate cache lines</code></
 <tr><td>reader sees new bid + stale ask</td><td>dropped the sequence re-check <span class="warn">!</span></td></tr>
 <tr><td>CAS loop / mutex on an SPSC ring</td><td>one writer/index → a release store suffices <span class="warn">!</span></td></tr>
 <tr><td>throughput tanks between cores</td><td>head/tail share a cache line — <code>alignas(64)</code> <span class="warn">!</span></td></tr>
+<tr><td>one bad feed line aborts the stream</td><td><code>stod</code>/<code>stringstream</code> throws — use <code>from_chars</code> <span class="warn">!</span></td></tr>
+<tr><td><code>1.0x</code> parses as a clean <code>1.0</code></td><td>skipped the <code>ptr==last</code> whole-field check <span class="warn">!</span></td></tr>
+<tr><td>price misread under a foreign locale</td><td><code>stod</code> is locale-sensitive; <code>from_chars</code> isn't <span class="warn">!</span></td></tr>
+<tr><td>garbage symbol after two lines read</td><td>stored a <code>string_view</code> into the reused buffer <span class="warn">!</span></td></tr>
+<tr><td>error line numbers off in a file w/ comments</td><td>counted records, not physical lines <span class="warn">!</span></td></tr>
 </tbody></table>
 <p>Senior signal in one line: <i>state ownership &amp; lifetime first, make release structural (RAII, exactly once), reach for raw storage / lock-free only when the constraints demand it, and know exactly where the compiler's guarantees stop — then prove it under the sanitizer.</i></p>
 </section>

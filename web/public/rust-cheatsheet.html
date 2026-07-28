@@ -420,6 +420,125 @@ mod tests {
 <li><code>#[bench]</code>/<code>criterion</code> for benchmarks; <code>proptest</code> for property tests; <code>cargo test -- --nocapture</code> to see <code>println!</code>.</li>
 </ul></section>
 
+<section class="card"><h3>Channels &amp; Message Passing</h3>
+<ul>
+<li><code>std::sync::mpsc</code> = <b>multi-producer, single-consumer</b>: clone the <code>Sender</code>, only one <code>Receiver</code>. Recent std uses the crossbeam algorithm (landed ~1.67) so it's fast — but still single-consumer. Reach for <code>crossbeam-channel</code> for <b>multi-consumer</b> (work-stealing pool), <code>select!</code>, or a rendezvous channel (<code>bounded(0)</code>).</li>
+</ul>
+<pre><code>let (tx, rx) = mpsc::channel();        // UNBOUNDED
+for id in 0..4 {
+    let tx = tx.clone();
+    thread::spawn(move || tx.send(id).unwrap());
+}
+drop(tx);                 // so rx knows all senders gone !
+for msg in rx { /* ends when channel closes */ }</code></pre>
+<ul>
+<li><b>Bounded vs unbounded</b> <span class="warn">!</span>: <code>channel()</code> never blocks <code>send</code> → a fast producer + slow consumer is an OOM waiting to happen. <code>sync_channel(n)</code> blocks <code>send</code> when full → <b>backpressure</b>. Prefer bounded in any real pipeline.</li>
+<li><b>Closing = the shutdown signal</b>: all <code>Sender</code>s dropped → <code>recv()</code> returns <code>Err</code> and the <code>for</code> loop ends. <code>Receiver</code> dropped → <code>send()</code> returns <code>Err(SendError(value))</code>, handing the value back. No "poison pill" needed — closure <i>is</i> the signal.</li>
+<li>Async analogue: <code>tokio::sync::mpsc</code> (bounded by default). Never feed a blocking std channel from an async task <span class="warn">!</span> — it parks a runtime worker.</li>
+</ul></section>
+
+<section class="card"><h3>Scoped Threads &amp; Rayon</h3>
+<ul>
+<li><code>thread::spawn</code> demands a <code>'static</code> closure — it can't borrow local stack data, forcing <code>Arc</code>/<code>clone</code>. <code>thread::scope</code> (1.63) <b>guarantees all spawned threads join before it returns</b>, so the borrow checker safely lets them borrow non-<code>'static</code> locals by reference.</li>
+</ul>
+<pre><code>let mut data = [1,2,3,4,5,6];
+thread::scope(|s| {
+    let (a, b) = data.split_at_mut(3);   // disjoint &amp;mut
+    s.spawn(|| a.iter_mut().for_each(|x| *x *= 2));
+    s.spawn(|| b.iter_mut().for_each(|x| *x *= 2));
+}); // joined here — zero Arc/Mutex</code></pre>
+<ul>
+<li>Scope joins even on <b>panic-unwind</b>, so the borrows stay sound. Use it for structured fork-join bounded by a function's lifetime; use plain <code>spawn</code>+<code>Arc</code> only for detached/long-lived threads.</li>
+<li><b>Rayon</b> for <i>data</i> parallelism: <code>par_iter()</code> is a near drop-in for <code>iter()</code>, backed by a global work-stealing pool that auto-balances uneven work.</li>
+</ul>
+<pre><code>use rayon::prelude::*;
+let total: u64 = (0..1_000_000u64)
+    .into_par_iter().map(expensive).sum();</code></pre>
+<ul>
+<li>Not free <span class="warn">!</span>: splitting/scheduling overhead loses on small inputs — benchmark. If every iteration locks a shared <code>Mutex</code> you've serialised yourself; prefer <code>map</code>+<code>reduce</code>/thread-local <code>fold</code>. Never put blocking I/O or <code>.await</code> in <code>par_iter</code> — that's tokio's job.</li>
+<li><b>Task</b> parallelism (heterogeneous, communicating units) → threads/channels or tokio. <b>Data</b> parallelism (same op over a big collection) → rayon.</li>
+</ul></section>
+
+<section class="card"><h3>Serde &amp; JSON Boundary</h3>
+<ul>
+<li><code>serde</code> separates <b>your data model</b> from <b>the wire format</b>: derive once, drive <code>serde_json</code>/<code>bincode</code>/<code>toml</code>/<code>rmp</code> — no reflection, no runtime cost beyond the format. That decoupling is why it's everywhere.</li>
+</ul>
+<pre><code>#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct User {
+    id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    email: Option&lt;String&gt;,
+}</code></pre>
+<ul>
+<li>Attributes carry the weight: <code>rename_all</code>, <code>default</code>, <code>flatten</code>, <code>tag="type"</code> (tagged enums), <code>skip_serializing_if</code>. Reach for the right attribute before a hand-written <code>impl Deserialize</code>.</li>
+<li><b>Zero-copy</b>: <code>#[serde(borrow)] kind: &amp;'a str</code> borrows slices out of the input buffer instead of allocating — a real win on hot parse paths, but ties the struct's lifetime to the buffer. Falls back to owning when a string needs unescaping <span class="warn">!</span></li>
+<li><b>The boundary</b>: <code>from_slice::&lt;T&gt;(&amp;bytes)</code> turns untrusted bytes into a validated <code>T</code> or an error with line/col. Parse into a concrete struct, <b>not</b> <code>serde_json::Value</code> — <code>Value</code> defers validation to runtime and allocates heavily. In axum, <code>Json&lt;T&gt;</code> is this boundary (400 on failure).</li>
+</ul></section>
+
+<section class="card"><h3>Axum / Tower Web Service</h3>
+<ul>
+<li>A handler is an <code>async fn</code> whose args are <b>extractors</b> and whose return <code>impl IntoResponse</code>. Any fn whose params implement <code>FromRequestParts</code> (plus one final body-consuming <code>FromRequest</code>) is a <code>Handler</code>.</li>
+</ul>
+<pre><code>async fn get_user(
+    State(s): State&lt;Arc&lt;AppState&gt;&gt;,
+    Path(id): Path&lt;u64&gt;,
+) -&gt; impl IntoResponse { Json(json!({"id": id})) }
+
+let app = Router::new()
+    .route("/users/:id", get(get_user))
+    .with_state(state);
+axum::serve(listener, app).await?;   // 0.7+: no Server builder</code></pre>
+<ul>
+<li>State is <code>with_state</code> + the <code>State</code> extractor; must be <code>Clone</code> (hence <code>Arc</code>). Body-consuming extractors (<code>Json</code>, <code>String</code>) must come <b>last</b> — there's one body <span class="warn">!</span></li>
+<li><b>Tower</b> <code>Service</code> = <code>poll_ready</code> + <code>call(req) -&gt; Future</code>; a <code>Layer</code> wraps one service in another. <code>TraceLayer</code>/<code>TimeoutLayer</code>/<code>ConcurrencyLimitLayer</code>/auth stack via <code>.layer()</code> like an onion — outermost-first on request, innermost-first on response. Declare top-down with <code>ServiceBuilder</code>.</li>
+</ul></section>
+
+<section class="card"><h3>Pools, Shutdown &amp; Backpressure</h3>
+<ul>
+<li><b>Connection pool</b>: build a <code>PgPool</code> once at startup (it's <code>Arc</code> inside — cheap <code>Clone</code>); <code>acquire().await</code> parks the task when exhausted instead of blocking a thread.</li>
+<li>Sizing: more connections ≠ more throughput. Rule of thumb <code>~(2·cores)+spindles</code> → often 10–20, not 200. Cap against the DB's <code>max_connections</code> <b>summed across all app instances</b>; front with PgBouncer when the fleet outgrows the DB <span class="warn">!</span></li>
+<li>Use an <b>async-native</b> driver (<code>sqlx</code>/<code>tokio-postgres</code>); wrap sync <code>diesel</code> in <code>spawn_blocking</code>. Set <code>acquire_timeout</code> so saturation fails fast (503) rather than hanging; never hold a connection across an unrelated <code>.await</code>.</li>
+</ul>
+<h4>Graceful shutdown</h4>
+<ul>
+<li>On SIGTERM: stop accepting, drain in-flight, force-exit past a timeout <b>shorter than</b> k8s <code>terminationGracePeriodSeconds</code>. <code>axum::serve(..).with_graceful_shutdown(fut)</code>; <code>select!</code> <code>ctrl_c</code> <b>and</b> SIGTERM — forgetting SIGTERM = shutdown silently never fires in k8s <span class="warn">!</span> Fan out to workers with a <code>CancellationToken</code>; flush tracing/metrics before exit.</li>
+</ul>
+<h4>Backpressure</h4>
+<ul>
+<li>A slow consumer must throttle a fast producer — a stability property, not an optimisation. <code>tokio::sync::mpsc::channel(cap)</code>: <code>send().await</code> parks when full. <code>unbounded_channel</code> has none → OOMs on a spike <span class="warn">!</span> When you can't slow external traffic, <b>shed load</b> (503 via <code>LoadShedLayer</code>) rather than queue work you'll never catch up on.</li>
+</ul></section>
+
+<section class="card"><h3>Modules, Visibility &amp; Editions</h3>
+<ul>
+<li><code>mod foo;</code> does <b>not</b> import — it declares the module exists and where its source lives (<code>src/foo.rs</code> or <code>src/foo/mod.rs</code>). A file isn't part of the crate until a <code>mod</code> pulls it in. <code>use</code> is a separate, purely ergonomic alias <span class="warn">!</span></li>
+</ul>
+<table><thead><tr><th>Qualifier</th><th>Visible to</th></tr></thead><tbody>
+<tr><td>(none)</td><td>defining module + descendants</td></tr>
+<tr><td><code>pub(crate)</code></td><td>anywhere in this crate</td></tr>
+<tr><td><code>pub(super)</code></td><td>the parent module</td></tr>
+<tr><td><code>pub</code></td><td>anywhere — <b>if the whole path is also public</b></td></tr>
+</tbody></table>
+<ul>
+<li>Private-by-default; a child always reaches ancestors' privates, a parent needs <code>pub</code> to reach in. Default to <code>pub(crate)</code>; reserve bare <code>pub</code> for the deliberate surface. <code>pub use</code> re-exports to flatten a deep tree into a clean facade.</li>
+<li><b>Editions</b> (2015/18/21/24) are a per-crate opt-in, <b>orthogonal to compiler version</b>; different-edition crates interoperate freely. 2024 (rustc 1.85): <code>unsafe extern</code> blocks, RPIT lifetime capture (<code>+ use&lt;&gt;</code> opt-out), trait upcasting. Migrate with <code>cargo fix --edition</code>, then bump.</li>
+</ul></section>
+
+<section class="card"><h3>Self-Referential Structs &amp; Graphs</h3>
+<ul>
+<li>A struct can't hold a reference <b>into itself</b>: Rust values are movable, so a self-<code>&amp;</code> would dangle on move — and the borrow checker can't express a lifetime referring back to its own struct. That's why you're told never to hand-roll a <code>next: &amp;Node</code> linked list <span class="warn">!</span></li>
+</ul>
+<table><thead><tr><th>Approach</th><th>Use / cost</th></tr></thead><tbody>
+<tr><td><b>Index/arena</b> (<code>Vec&lt;Node&gt;</code>, links = <code>usize</code>)</td><td>graphs/trees/ASTs/ECS; no <code>unsafe</code>, cache-friendly; no per-node free</td></tr>
+<tr><td><code>Rc&lt;RefCell&lt;T&gt;&gt;</code></td><td>shared-ownership graph, single-thread; <b>cycles leak</b> → <code>Weak</code></td></tr>
+<tr><td><code>unsafe</code> + raw ptrs</td><td>intrusive lists, perf internals; uphold aliasing by hand, verify with Miri</td></tr>
+</tbody></table>
+<pre><code>struct Graph { nodes: Vec&lt;Node&gt; }
+struct Node { value: i32, edges: Vec&lt;usize&gt; } // indices, not refs</code></pre>
+<ul>
+<li>The arena pattern is what production uses (<code>petgraph</code>, AST crates, ECS) — a <code>usize</code> isn't a borrow, so it sidesteps the checker entirely. True self-referential values (async generators, some FFI) need <code>Pin</code>+<code>unsafe</code> or a crate like <code>ouroboros</code> — reach for that last.</li>
+</ul></section>
+
 <section class="card"><h3>&#9733; Code Review Checklist</h3>
 <h4>Ownership / borrows</h4>
 <ul>

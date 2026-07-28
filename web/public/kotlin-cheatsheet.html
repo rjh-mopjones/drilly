@@ -378,6 +378,227 @@ typealias Handler = (String) -&gt; Unit        // pure rename, no safety</code><
 </ul>
 </section>
 
+<section class="card"><h3>object &amp; companion object</h3>
+<pre><code>object Registry { val items = mutableListOf&lt;String&gt;() } // singleton
+class Logger {
+  companion object Factory {          // one per class
+    const val LEVEL = 2               // compile-time const
+    fun create() = Logger()
+  }
+}
+Logger.create()                       // no instance needed</code></pre>
+<ul>
+<li><code>object</code> = thread-safe lazy singleton; JVM handles init. Replaces the Java singleton pattern (no double-checked locking). Can extend classes / implement interfaces; anonymous form <code>object : Listener { ... }</code>.</li>
+<li>Companion = singleton nested in a class, Kotlin's stand-in for Java <code>static</code> — but has a <b>type</b>, can implement interfaces, and can be named. Only one per class.</li>
+<li><span class="pg">JVM</span> from Java: <code>object Foo</code> → <code>Foo.INSTANCE</code>; companion member → <code>MyClass.Companion.bar()</code> unless <code>@JvmStatic</code> <span class="warn">!</span></li>
+<li><code>companion object { operator fun invoke(...) = ... }</code> = factory that reads like a constructor call.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Higher-Order Functions &amp; Lambdas</h3>
+<pre><code>fun apply(x: Int, op: (Int) -&gt; Int) = op(x)   // takes a fn
+fun adder(n: Int): (Int) -&gt; Int = { it + n }  // returns a fn
+list.map { it * 2 }                            // trailing lambda
+list.map(::transform)                          // fn reference
+val f: (Int, Int) -&gt; Int = { a, b -&gt; a + b }
+val g: String.() -&gt; Int = { length }           // lambda w/ receiver</code></pre>
+<ul>
+<li>Functions are first-class <b>at source level only</b>. <span class="pg">JVM</span> <code>(Int)-&gt;Int</code> compiles to a <code>Function1</code> instance — every non-inlined lambda is one allocation per call <span class="warn">!</span> That's why stdlib collection ops are <code>inline</code>.</li>
+<li>Trailing lambda: last-arg lambda moves outside <code>()</code>; if it's the only arg, drop the parens. Single param = implicit <code>it</code>; two params must be named.</li>
+<li>References: <code>::topFun</code>, <code>String::length</code> (unbound), <code>obj::method</code> (bound). Function type nullable <code>((A)-&gt;B)?</code>, suspending <code>suspend (A)-&gt;B</code>.</li>
+<li><b>Lambda with receiver</b> <code>T.()-&gt;R</code>: inside, <code>this</code> is the <code>T</code> — the DSL/scope-function primitive. Differs from an extension fn (receiver in its <i>type</i>, not signature).</li>
+</ul>
+</section>
+
+<section class="card"><h3>FP: map/flatMap, Composition, Option</h3>
+<table><thead><tr><th>Op</th><th>Does</th></tr></thead><tbody>
+<tr><td><code>map</code></td><td>1→1 transform, new collection</td></tr>
+<tr><td><code>flatMap</code></td><td><code>map</code> then <code>flatten</code>, one pass</td></tr>
+<tr><td><code>flatten</code></td><td>collapse nested only, no transform</td></tr>
+<tr><td><code>forEach</code></td><td>side effect, returns <code>Unit</code> <span class="warn">!</span></td></tr>
+</tbody></table>
+<pre><code>list.flatMap { listOf(it, it*2) }             // [1]→[1,2]
+fun compose(f:(Int)-&gt;Int, g:(Int)-&gt;Int) = { x:Int -&gt; f(g(x)) }
+fun mul(a:Int,b:Int,c:Int)=a*b*c
+val by2 = { b:Int,c:Int -&gt; mul(2,b,c) }        // partial application</code></pre>
+<ul>
+<li>Prefer <b>composition</b> over inheritance: build behaviour from small fns (<code>f(g(x))</code>) — easier to test/parallelise. Kotlin's <code>by</code> delegation is composition with sugar.</li>
+<li>Kotlin is <b>multi-paradigm, not Haskell</b>: no enforced purity, no auto-currying. Currying/partial application are hand-rolled. Nullable types (<code>?.</code>/<code>?:</code>) are a simplified <code>Maybe</code>/<code>Option</code> monad; <code>?.let</code> ≈ <code>flatMap</code>, short-circuiting on null.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Collection Operators — deep</h3>
+<table><thead><tr><th>Op</th><th>Result / note</th></tr></thead><tbody>
+<tr><td><code>groupBy{k}</code></td><td><code>Map&lt;K,List&lt;T&gt;&gt;</code>; pair with <code>mapValues</code></td></tr>
+<tr><td><code>partition{p}</code></td><td><code>Pair&lt;match,rest&gt;</code>, one pass</td></tr>
+<tr><td><code>zip</code>/<code>unzip</code></td><td>pairs to shorter len / splits pairs</td></tr>
+<tr><td><code>take</code>/<code>drop</code>(<code>While</code>)</td><td>first-n / skip-n (+ predicate forms)</td></tr>
+<tr><td><code>distinctBy{s}</code></td><td>dedupe by selector, keep first</td></tr>
+<tr><td><code>withIndex</code></td><td><code>IndexedValue</code>; <code>for((i,v) in …)</code></td></tr>
+<tr><td><code>sumOf</code>/<code>maxByOrNull</code></td><td>aggregate by selector</td></tr>
+</tbody></table>
+<pre><code>users.groupBy { it.team }
+  .mapValues { (_, us) -&gt; us.sumOf { it.score } }
+val (evens, odds) = xs.partition { it % 2 == 0 }
+"abc".zip("xy")               // [(a,x),(b,y)] — truncates <span class="warn">!</span>
+list.drop(page*size).take(size)               // pagination</code></pre>
+<ul>
+<li><code>groupingBy{}</code> is the streaming variant for aggregations (<code>eachCount</code>, <code>fold</code>) without a full intermediate map.</li>
+<li><code>_</code> ignores a destructured component; wrong arity = compile error.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Idiomatic Utilities</h3>
+<table><thead><tr><th>Tool</th><th>Throws / returns</th></tr></thead><tbody>
+<tr><td><code>require(c){}</code></td><td>bad <b>argument</b> → <code>IllegalArgumentException</code></td></tr>
+<tr><td><code>check(c){}</code></td><td>bad <b>state</b> → <code>IllegalStateException</code></td></tr>
+<tr><td><code>requireNotNull(x)</code></td><td>returns non-null <code>x</code> or throws</td></tr>
+<tr><td><code>error(msg)</code></td><td><code>Nothing</code> — always throws</td></tr>
+<tr><td><code>takeIf{p}</code></td><td>receiver if <code>p</code> else <code>null</code></td></tr>
+</tbody></table>
+<pre><code>fun setAge(a: Int) { require(a &gt;= 0) { "neg age" }; age = a }
+val big = str.takeIf { it.length &gt; 5 } ?: "n/a"
+repeat(3) { i -&gt; log(i) }                      // index is it/named
+val msg = "$name has ${list.size} items"       // template
+val sql = """SELECT * FROM t                    // raw string
+             WHERE id = $id"""</code></pre>
+<ul>
+<li><code>require</code> is <b>always</b> enforced; JVM <code>assert</code> is off by default — never use <code>assert</code> for arg validation <span class="warn">!</span></li>
+<li><code>takeIf</code> runs its predicate unconditionally — it doesn't guard against a throwing predicate, only swaps the <i>result</i>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>CoroutineContext, Supervisor &amp; Exceptions</h3>
+<ul>
+<li><code>CoroutineContext</code> = composable bag: <code>Job</code> + <code>Dispatcher</code> + <code>CoroutineExceptionHandler</code> + name. Combine with <code>+</code>: <code>launch(Dispatchers.IO + handler) {}</code>. Children <b>inherit</b> the parent's context, overriding only what you pass.</li>
+</ul>
+<pre><code>val handler = CoroutineExceptionHandler { _, e -&gt; log(e) }
+supervisorScope {
+  launch(handler) { risky() }   // failure here…
+  launch { other() }            // …doesn't cancel this sibling
+}</code></pre>
+<ul>
+<li><b>Default Job</b>: a child failure cancels parent + all siblings. <code>SupervisorJob</code>/<code>supervisorScope</code>: failures stay isolated — for independent parallel work (N network calls).</li>
+<li><code>SupervisorJob</code> does <b>not</b> catch — the exception still surfaces via handler/<code>try</code> <span class="warn">!</span></li>
+<li><code>CoroutineExceptionHandler</code> catches uncaught <code>launch</code> exceptions only. <code>async</code> stores the exception in its <code>Deferred</code>; it surfaces on <code>await()</code>, silent until then <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Mutex, Actors &amp; Backpressure</h3>
+<pre><code>val mutex = Mutex()
+mutex.withLock { shared++ }        // suspends, doesn't block thread
+// actor: state owned by one coroutine, updated via messages
+val counter = scope.actor&lt;Msg&gt; {
+  var n = 0
+  for (m in channel) when (m) {
+    is Inc -&gt; n++
+    is Get -&gt; m.reply.complete(n)
+  }
+}</code></pre>
+<ul>
+<li><code>Mutex.withLock</code> = coroutine mutual exclusion — suspends waiters instead of blocking the OS thread (unlike <code>synchronized</code>/<code>ReentrantLock</code>). Not reentrant <span class="warn">!</span></li>
+<li>Prefer confining shared mutable state to an <b>actor</b> (serial message processing) or atomics over locks.</li>
+<li><b>Backpressure</b>: producer faster than consumer. Cold <code>Flow</code> is naturally back-pressured (nothing emits until <code>collect</code>). <code>Channel</code> capacity picks the strategy: <code>RENDEZVOUS</code> (producer waits), buffered, <code>CONFLATED</code> (keep latest), <code>UNLIMITED</code> (OOM risk <span class="warn">!</span>). Flow operators: <code>buffer</code>, <code>conflate</code>, <code>collectLatest</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Spring on Kotlin</h3>
+<pre><code>@Service
+class UserService(private val repo: UserRepository) { // ctor inject
+  @Transactional
+  fun rename(id: Long, name: String) { ... }
+}
+interface UserRepository : CrudRepository&lt;User, Long&gt;
+fun &lt;T,ID&gt; CrudRepository&lt;T,ID&gt;.findByIdOrNull(id: ID): T? =
+  findById(id).orElse(null)</code></pre>
+<ul>
+<li>Constructor injection is idiomatic — no <code>@Autowired</code> since Spring 4.3 on single-ctor classes. Immutable deps, trivially mockable.</li>
+<li><code>@Component</code>/<code>@Service</code>/<code>@Repository</code> all register beans; <code>@Repository</code> adds exception translation. <code>@Configuration</code> is CGLIB-proxied so inter-<code>@Bean</code> calls return the singleton.</li>
+<li><b>Compiler plugins are mandatory</b> <span class="warn">!</span>: <code>kotlin-spring</code> makes annotated classes <code>open</code> (proxies need to subclass — Kotlin classes are <code>final</code> by default); <code>kotlin-jpa</code> synthesises the no-arg ctor Hibernate needs.</li>
+<li><code>@Transactional</code> is proxy-based: only <b>public</b>, <b>externally-called</b> methods. Self-invocation <code>this.foo()</code> bypasses the proxy <span class="warn">!</span></li>
+<li>Alternatives: <b>Exposed</b> (Kotlin-first typed SQL DSL, no reflection), <b>Ktor</b> (coroutine-native, fast startup, GraalVM-friendly).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Testing in Kotlin</h3>
+<pre><code>@Test fun `renames user`() = runTest {   // virtual time, skips delay
+  val repo = mockk&lt;UserRepo&gt;()
+  coEvery { repo.find(1) } returns User(1, "a")
+  service.rename(1, "b")
+  coVerify { repo.save(any()) }
+}</code></pre>
+<table><thead><tr><th>Double</th><th>Meaning</th></tr></thead><tbody>
+<tr><td>stub</td><td>returns canned data, no verification</td></tr>
+<tr><td>mock</td><td>canned data + records/verifies calls</td></tr>
+<tr><td>spy</td><td>real object, selected methods faked</td></tr>
+</tbody></table>
+<ul>
+<li><b>MockK</b> is Kotlin-first: mocks <code>final</code> classes, <code>coEvery</code>/<code>coVerify</code> for coroutines, extension &amp; top-level fns, <code>object</code>s. Mockito-Kotlin needs <code>mockito-inline</code> for Kotlin's <code>final</code>-by-default classes.</li>
+<li><code>runTest</code> (not <code>runBlocking</code>) for coroutine tests — virtual <code>TestDispatcher</code>, skips real <code>delay()</code> <span class="warn">!</span></li>
+<li>Test <b>behaviour, not internals</b>; data/sealed classes give free structural equality. Over-mocking = over-coupling — prefer real/in-memory fakes. Spring: <code>@WebMvcTest</code> beats heavyweight <code>@SpringBootTest</code> for a controller.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Reflection &amp; Metaprogramming</h3>
+<pre><code>inline fun &lt;reified T&gt; parse(s: String): T =
+  gson.fromJson(s, T::class.java)      // reified needs inline <span class="warn">!</span>
+@Serializable data class User(val name: String)  // codegen, no reflect
+MyClass::class.memberProperties       // needs kotlin-reflect (~3MB)</code></pre>
+<ul>
+<li>Two routes: <b>runtime reflection</b> (<code>KClass</code>/<code>KProperty</code>/<code>KFunction</code>, opt-in <code>kotlin-reflect</code> jar, slow) vs <b>compile-time codegen</b> — modern Kotlin strongly prefers codegen (AOT/GraalVM-friendly).</li>
+<li><code>reified</code> only in <code>inline</code> fns: the type is substituted at each call site, so <code>T::class</code>/<code>is T</code> survive JVM erasure.</li>
+<li><b>kotlinx.serialization</b> generates <code>KSerializer</code>s at compile time (vs reflection-based Jackson/Gson). Bridge to Java: <code>::class.java</code>.</li>
+<li><b>KSP</b> (Kotlin Symbol Processing) supersedes <b>KAPT</b> — no Java stub generation, faster, Kotlin-aware. Plugins: Compose, Parcelize, AllOpen. <code>expect</code>/<code>actual</code> = KMP per-platform impls.</li>
+</ul>
+</section>
+
+<section class="card"><h3>DSL Design</h3>
+<pre><code>@DslMarker annotation class HtmlDsl
+@HtmlDsl class Body { fun h1(b: H1.()-&gt;Unit) { … } }
+html { body { h1 { +"hi" } } }   // nested lambdas-with-receiver
+val s = buildString { append("a"); append("b") }  // scoped builder
+infix fun String.eq(v: String) = Pair(this, v)     // "k" eq "v"</code></pre>
+<ul>
+<li>A DSL is just a <b>tree of lambdas-with-receiver</b> — each block sets its receiver as <code>this</code>. Desugars to ordinary method calls + (unless <code>inline</code>) one lambda alloc per block.</li>
+<li><code>@DslMarker</code> stops nested blocks from implicitly seeing <b>outer</b> receivers — prevents putting a <code>&lt;div&gt;</code> in a <code>&lt;head&gt;</code> <span class="warn">!</span> For a real DSL it's not optional.</li>
+<li><b>infix</b> ≠ operator: infix just drops the dot for a binary fn; operators are a fixed conventional-name set. Restrain both — shallow nesting, obvious names.</li>
+<li>Builders: <code>buildString</code>/<code>buildList</code>/<code>buildMap</code> hand you a mutable receiver, return an immutable result. Type-safe builders = kotlinx.html, Exposed, Gradle KTS, Compose, Ktor routing.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Android &amp; Platform</h3>
+<pre><code>class VM : ViewModel() {
+  private val _state = MutableStateFlow(UiState())
+  val state: StateFlow&lt;UiState&gt; = _state.asStateFlow()
+  fun load() = viewModelScope.launch { _state.value = fetch() }
+}
+@Composable fun Counter() {
+  var n by remember { mutableStateOf(0) }   // survives recompose
+  Button(onClick = { n++ }) { Text("$n") }
+}</code></pre>
+<ul>
+<li><code>viewModelScope</code>/<code>lifecycleScope</code> cancel with their owner — the structured-concurrency fix for the classic leak. <code>GlobalScope.launch</code> in an Activity/VM leaks <span class="warn">!</span></li>
+<li>New code: <code>StateFlow</code> (view state) + <code>SharedFlow</code> (events), collected via <code>repeatOnLifecycle(STARTED)</code>. <code>LiveData</code> is Android-only, lifecycle-aware, being phased out.</li>
+<li>Compose = React-style declarative: <code>@Composable</code> re-runs (recomposes) on state change — <b>many times per frame</b>; keep state in <code>remember</code>, wrap side effects in <code>LaunchedEffect</code>/<code>DisposableEffect</code> <span class="warn">!</span></li>
+<li>Delegates everywhere: <code>by viewModels()</code>, <code>by navArgs()</code>, <code>by viewBinding()</code>. <code>DataStore</code> replaces <code>SharedPreferences</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Performance, Boxing &amp; References</h3>
+<table><thead><tr><th>Ref</th><th>GC behaviour</th></tr></thead><tbody>
+<tr><td>strong (default)</td><td>never collected while reachable</td></tr>
+<tr><td><code>WeakReference</code></td><td>collected at next GC if else-unreachable</td></tr>
+<tr><td><code>SoftReference</code></td><td>kept until memory pressure — caches</td></tr>
+<tr><td><code>WeakHashMap</code></td><td>weak keys — per-instance metadata</td></tr>
+</tbody></table>
+<ul>
+<li><b>Boxing</b> <span class="warn">!</span>: <code>List&lt;Int&gt;</code> boxes each <code>Int</code>→<code>Integer</code>; a nullable/generic slot boxes too. Hot numeric paths → <code>IntArray</code>/<code>LongArray</code>/<code>DoubleArray</code> (flat <code>int[]</code>), not <code>Array&lt;Int&gt;</code> (<code>Integer[]</code>).</li>
+<li><b>GC pressure</b> = sustained high allocation → frequent GC. Usual cause: intermediate collections + non-inlined lambdas in tight loops. <code>asSequence()</code> fuses long chains; <code>inline</code> removes lambda allocs. <b>Measure first</b> (JFR/async-profiler) — most "optimisations" are folklore.</li>
+<li><code>data class</code> <code>equals</code>/<code>hashCode</code> are linear in property count — negligible for small classes, visible only in extreme hot loops.</li>
+<li>Weak refs prevent retention but introduce <code>null</code> — always handle <code>ref.get() == null</code>.</li>
+</ul>
+</section>
+
 <section class="card"><h3>&#9733; Code Review Checklist</h3>
 <h4>Null safety</h4>
 <ul>

@@ -72,149 +72,31 @@ pre code{background:none; padding:0; font-size:1em;}
 </head>
 <body>
 <div class="sheet">
-<div class="titlebar"><h1>Python Katas</h1><span class="meta">8 open-ended senior LLD katas, test-first · pick the idiom the problem is <i>shaped</i> like · drilly</span></div>
+<div class="titlebar"><h1>Python Katas</h1><span class="meta">9 open-ended senior LLD katas, test-first · pick the idiom the problem is <i>shaped</i> like · drilly</span></div>
 
-<section class="card legend"><h3>Method &amp; Testing (pytest, no plugin)</h3>
+<section class="card legend"><h3>Method &amp; What's Being Tested</h3>
 <ul>
-<li><span class="warn">!</span> the load-bearing gotcha for each kata &nbsp; the senior tell is <b>idiom fluency under a real scenario</b>.</li>
-<li>Scope: <b>8 katas</b> from a blank file. The hard part is rarely the algorithm — it's <b>modelling the system with the right Python idiom</b>: data model, generator, context manager, decorator, asyncio, <code>Protocol</code>, or <code>match</code>?</li>
-<li>The prompt's <b>shape</b> picks the tool: container→dunders · stream→generator · acquire/release→context mgr · wrap→decorator · I/O concurrency→asyncio · pluggable→Protocol · states→enum+<code>match</code>.</li>
-<li>Loop: clarify the rules → design the class/fn API (dunders where container/value-shaped) → write <code>pytest</code> tests first → implement. Full type hints (<code>X | None</code>, <code>list[str]</code>) are part of the answer.</li>
-</ul>
-<h4>pytest model</h4>
-<pre><code>def test_x():                 # plain fn, auto-discovered
-    assert got == want        # bare assert; prints both sides
-with pytest.raises(CycleError): ...        # error paths
-@pytest.mark.parametrize("a,b", [...])     # table cases
-</code></pre>
-<ul>
-<li><b>Async, no plugin:</b> a coroutine does nothing till a loop runs it — the test <i>is</i> the loop: <code>def test_x(): asyncio.run(main())</code>. No <code>pytest-asyncio</code>, no <code>async def test_</code>.</li>
-<li><b>Determinism:</b> never <code>time.sleep</code> — inject a <code>FakeClock</code> you <code>advance()</code>; for async drive with <code>asyncio.Event</code> + <code>await asyncio.sleep(0)</code> (bare yield). Assert the <i>invariant</i> (cap held, order preserved), not timing.</li>
-<li>Each kata is a package: <code>from . import Sheet, CycleError</code>. Run one: <code>pytest solution/&lt;kata&gt; -q</code>.</li>
+<li><span class="warn">!</span> the load-bearing gotcha for each kata &nbsp; the senior tell is <b>idiom fluency under a real scenario</b>, not the algorithm.</li>
+<li>Scope: <b>9 katas</b> from a blank file, each a compact <b>LLD scenario</b> (a formula engine, mini-Redis, a middleware pipeline, a file system) with behavioural rules — not "implement a decorator from scratch" drills. The hard part is rarely the algorithm — it's <b>modelling the system with the right Python idiom</b>: data model, generator, context manager, decorator, asyncio, <code>Protocol</code>, or <code>match</code>?</li>
+<li>The prompt's <b>shape</b> picks the tool: container→dunders · stream→generator · acquire/release→context mgr · wrap→decorator · I/O concurrency→asyncio · pluggable→Protocol · states→enum+<code>match</code> · tree→recursion+one resolver.</li>
+<li>Loop: clarify the rules → design the class/fn API (dunders where container/value-shaped) → write <code>pytest</code> tests first → implement to green. Full type hints (<code>X | None</code>, <code>list[str]</code>, <code>Callable</code>) are part of the answer, not decoration.</li>
+<li><b>Why interviewers ask:</b> they want to see you <i>write Python</i>, not Java-in-Python. A junior does <code>sheet.get_cell()</code>; a senior does <code>sheet["A1"]</code> via <code>__getitem__</code> and <i>names the trade-off</i> (lazy vs eager, tree vs flat, Protocol vs ABC) before choosing.</li>
 </ul>
 </section>
 
-<section class="card"><h3>spreadsheet — Data Model + Lazy DFS</h3>
-<p><b>Idiom:</b> data model + lazy recompute + DFS cycle detect. Cells hold a literal or <code>"=A1+B2*3"</code>; <code>sheet["C1"]</code> reads a <b>computed</b> value; empty reads <code>0.0</code>.</p>
-<pre><code>class Sheet:
-    def __setitem__(self, ref, content): ...  # store RAW
-    def __getitem__(self, ref) -> float:  ...  # compute on read
-    def __contains__(self, ref) -> bool:  ...
-class CycleError(Exception): ...</code></pre>
+<section class="card"><h3>Attack Plan — the loop every kata runs</h3>
+<p>Turn the prompt into an <b>idiom + an API</b> before writing any body.</p>
 <ul>
-<li><b>Idiom:</b> store <b>raw content</b>, compute nothing till read → "dependents update on edit" falls out free, <b>no write-time DAG</b>. Say the eager-DAG trade-off, pick lazy.</li>
-<li><b>Cycle guard = DFS <code>visiting</code> set</b> threaded down recursion (a <code>frozenset</code>, <code>visiting | {ref}</code>); a ref already in it is a back-edge → raise <code>CycleError</code>.</li>
-<li>Precedence = structure: two-level <code>expr</code>(+ -)→<code>term</code>(* /)→<code>factor</code> recursive descent. No table.</li>
+<li><b>1 · What's the system &amp; its rules?</b> State them back (a cell holds literal-or-formula; a txn commits whole or rolls back). <i>The rules are your tests.</i></li>
+<li><b>2 · Which idiom does the shape call for?</b> See the picker table below.</li>
+<li><b>3 · What's the API?</b> Name public methods + their types. Prefer dunders where container-/value-shaped. Signatures first — they encode the idiom choice.</li>
+<li><b>4 · Immutable or mutable?</b> Frozen dataclass + <code>replace</code> for state transitions; plain class for stateful services.</li>
+<li><b>5 · Errors?</b> Custom, data-carrying exceptions on rule violations; <code>pytest.raises</code> in tests. Raise loudly — never clamp or return a sentinel.</li>
+<li><b>6 · Tests first, then implement.</b> Rules → edges (empty/missing/error) → concurrency where relevant. Then implement to green.</li>
 </ul>
-<p><span class="warn">!</span> <b>Gotcha:</b> a recursion-depth limit gives <code>RecursionError</code>, not <code>CycleError</code>, and only after wasted work — thread the visiting set. And <code>isinstance(x,int)</code> lets <code>bool</code> through (it's an <code>int</code>): reject it, normalise to <code>float</code>.</p>
-</section>
-
-<section class="card"><h3>kvstore — Context-Manager Transactions + TTL</h3>
-<p><b>Idiom:</b> context managers + unit-of-work. Mini-Redis: <code>set/get/delete</code> over strings, per-key <b>TTL</b>, and a <b>transaction</b> that commits whole or rolls back.</p>
-<pre><code>def set(k, v, ttl=None); def get(k)->v|None
-def delete(k)->bool; __len__; __contains__
-@contextmanager
-def transaction(self): ...   # buffer→commit/rollback</code></pre>
-<ul>
-<li><b>Buffer-then-commit:</b> while open, writes queue in a side dict, live store untouched → a read <i>inside</i> sees <b>committed</b> state (Redis <code>MULTI</code>). Clean exit replays atomically; a raise drops the buffer.</li>
-<li><b>Lazy TTL:</b> stamp an <b>absolute deadline</b> (<code>clock()+ttl</code>); one <code>_live_entry</code> helper prunes on access, shared by <code>get</code>/<code>in</code>/<code>len</code>. No sweeper thread.</li>
-<li>Inject <code>clock: Callable[[],float]=time.monotonic</code>; tests advance a <code>FakeClock</code>.</li>
-</ul>
-<p><span class="warn">!</span> <b>Gotcha:</b> the manager must roll back <i>and re-raise</i> — the generator's <code>except: ...; raise</code> (or <code>__exit__</code> returning falsy). Returning <code>True</code> / not re-raising silently <b>eats the caller's error</b>. Also <code>len</code>/<code>in</code> must filter through liveness, not <code>len(self._data)</code>.</p>
-</section>
-
-<section class="card"><h3>feedstats — Lazy Generators</h3>
-<p><b>Idiom:</b> generator (<code>yield</code>, O(1) memory) over an unbounded feed. Aggregate <code>(ts,price,qty)</code> ticks into fixed-window OHLC + VWAP <b>bars</b>.</p>
-<pre><code>def bars(ticks: Iterable[Tick],
-         period: int) -> Iterator[Bar]:
-    # yield each bar the instant a later-window
-    # tick proves it complete; flush tail at end</code></pre>
-<ul>
-<li><b>Generator not list:</b> a <code>return [...]</code> reads the whole feed first (can't terminate on a live tape). <code>yield</code> is lazy, pull-based, O(1) — only the in-progress bar's running scalars live.</li>
-<li><b>One-tick look-ahead:</b> a bar closes only when the <i>next</i> window's first tick arrives — that same tick flushes the old bar and seeds the new. No tick buffer.</li>
-<li><b>VWAP</b> is qty-weighted: <code>Σ(price·qty)/Σqty</code> (10@2, 20@1 → 40/3, <i>not</i> 15).</li>
-</ul>
-<p><span class="warn">!</span> <b>Gotcha:</b> the <b>tail flush</b> after the loop is mandatory — the last window never sees a later tick. And a generator <b>defers its body</b>: <code>bars(x, 0)</code> never runs the <code>period&lt;=0</code> guard — drive it with <code>next(...)</code>; prove laziness with an input that raises if fully drained.</p>
-</section>
-
-<section class="card"><h3>middleware — Decorators / Closures (Onion)</h3>
-<p><b>Idiom:</b> higher-order fns + closures. <code>compose([m1,m2,m3], handler)</code> stacks layers: request in <code>m1→m2→m3→h</code>, response back out — <code>m1</code> is outermost.</p>
-<pre><code>Handler    = Callable[[Request], Response]
-Middleware = Callable[[Handler], Handler]  # +1 level
-def compose(mws, handler) -> Handler:
-    return functools.reduce(
-        lambda nxt, mw: mw(nxt),
-        reversed(mws), handler)</code></pre>
-<ul>
-<li><b>Type is the insight:</b> a middleware is <b><code>Handler→Handler</code></b> (a closure over <code>next_handler</code>), <i>not</i> <code>Request→Response</code>. Stacking = function composition = a runtime <code>@decorator</code> stack.</li>
-<li><b>Short-circuit</b> = just <code>return Response(401)</code> without calling <code>next_handler</code>; no exceptions/sentinels. Bracket the call to mutate request-in and response-out.</li>
-</ul>
-<p><span class="warn">!</span> <b>Gotcha:</b> fold <code>reversed(mws)</code> so <code>m1</code> ends up <b>outermost</b> — folding forwards silently inverts the onion (auth runs too late). Prove skip with <code>calls == []</code>, not just the status code.</p>
-</section>
-
-<section class="card"><h3>crawler — asyncio Semaphore + gather</h3>
-<p><b>Idiom:</b> asyncio bounded-concurrency fan-out. Fetch N URLs concurrently under a hard cap, retry transients, results <b>in input order</b>.</p>
-<pre><code>async def gather_capped(aws, limit):
-    sem = asyncio.Semaphore(limit)
-    async def run(aw):
-        async with sem: return await aw
-    return list(await asyncio.gather(
-        *(run(a) for a in aws)))   # order kept</code></pre>
-<ul>
-<li><b>Single-threaded cooperative:</b> one loop, one coroutine at a time; every <code>await</code> yields. No data races, no locks — between awaits nothing else touches your state.</li>
-<li><b>Semaphore = the cap</b> (permit pool sized to <code>limit</code>); <b><code>gather</code> preserves input order</b> for free (positional) — no sorting, no <code>as_completed</code>. Plain <code>gather</code> propagates the first error + cancels siblings.</li>
-<li>Retry wrapper: <code>1 + retries</code> attempts; last failure escapes.</li>
-</ul>
-<p><span class="warn">!</span> <b>Gotcha:</b> asyncio gives <b>overlapped I/O, not CPU parallelism</b> — name the GIL (CPU-bound → <code>multiprocessing</code>). Awaiting in a <code>for</code> loop serialises; test order with <code>asyncio.Event</code> released in reverse, not sleeps.</p>
-</section>
-
-<section class="card"><h3>workflow — Enums + match/case</h3>
-<p><b>Idiom:</b> FSM as <code>Enum</code> + structural pattern matching. Order lifecycle; <code>apply(order,event)</code> is a <b>pure</b> fn over <code>(state,event)</code>.</p>
-<pre><code>def apply(order, event) -> Order:
-  match (order.state, event):
-    case (NEW, Accept()):  return replace(...)
-    case (ACCEPTED | PARTIALLY_FILLED, Fill(qty=q)): ...
-    case _: raise IllegalTransition(...)</code></pre>
-<ul>
-<li>State = <code>Enum</code>; order = <code>@dataclass(frozen=True)</code>; one <code>match</code> tuple <i>is</i> the truth table. Class patterns destructure (<code>Fill(qty=q)</code>), OR-patterns merge rows.</li>
-<li><b>Pure:</b> every arm returns <code>replace(order,…)</code> — a new frozen value, input untouched. Distinct <code>Overfill</code> vs <code>IllegalTransition</code>; raise, never clamp.</li>
-</ul>
-<p><span class="warn">!</span> <b>Gotcha:</b> Python's <code>match</code> is <b>not exhaustive</b> — drop the <code>case _</code> and an unhandled pair falls through returning <code>None</code>, silently corrupting state. Also <code>case Fill:</code> is a capture (matches anything) — you need <code>case Fill():</code>.</p>
-</section>
-
-<section class="card"><h3>notifier — Protocols + Observer</h3>
-<p><b>Idiom:</b> structural typing + Observer. Pub/sub: subscribe a <i>channel</i> to a <i>topic</i> (+optional filter); <code>publish</code> fans out in subscription order.</p>
-<pre><code>@runtime_checkable
-class Channel(Protocol):
-    def send(self, event: Event) -> None: ...
-def subscribe(topic, channel, *, predicate=None)
-def publish(event)          # walks per-topic list</code></pre>
-<ul>
-<li><b>Protocol = structural typing:</b> a channel is <i>anything with <code>send</code></i> — any plain class conforms with <b>no base class / no import</b>. Beats an ABC (which forces subclassing, locks out 3rd-party objects).</li>
-<li>Storage: <code>dict[str, list[_Subscription]]</code> (subject holds observers). Filters are first-class <code>Callable[[Event],bool]</code> — pass a lambda, not a subclass.</li>
-<li>Unknown topic = no-op via <code>.get(topic, ())</code>; keep a <code>list</code> for deterministic order.</li>
-</ul>
-<p><span class="warn">!</span> <b>Gotcha:</b> <code>@runtime_checkable</code> only checks a <code>send</code> attr <b>exists</b> — not its signature. The proving test: a bare class (no base) passing <code>isinstance(it, Channel)</code>.</p>
-</section>
-
-<section class="card"><h3>filesystem — Recursion + Dunder</h3>
-<p><b>Idiom:</b> tree data model + recursion. Nodes nest by absolute <code>/</code>-path: <code>mkdir -p</code>, <code>write/read</code>, <code>ls</code>, <code>find</code>, <code>mv</code>.</p>
-<pre><code>@dataclass class File: content: str
-@dataclass class Dir: children: dict[str,Node] = ...
-Node = File | Dir
-def mkdir/write/read/ls/find/mv(...)
-def __contains__(self, path) -> bool   # "/a/b" in fs</code></pre>
-<ul>
-<li><b>Model = tree of nodes</b> (Dir holds name→child dict). Write <code>_resolve</code> (walk path, raise on missing / file-where-dir) <b>once</b>; every op shares it.</li>
-<li><b>Subtree <code>mv</code> is free:</b> a <code>Dir</code> node <i>is</i> its subtree — <code>del</code> from old parent, assign to new, done. No child copying. <code>find</code> = DFS over the whole tree by basename.</li>
-</ul>
-<p><span class="warn">!</span> <b>Gotcha:</b> the flat <code>dict[path]</code> tempts you (easy <code>read</code>/<code>write</code>) but makes <code>ls</code> a prefix scan and <code>mv</code> rewrite every descendant key. Also <code>"/".split("/")==["",""]</code> — filter blanks so <code>"/"</code>→<code>[]</code>. Use <code>__contains__</code>, not <code>exists()</code>.</p>
-</section>
-
-<section class="card"><h3>&#9733; Idiom Picker &amp; Senior Signals</h3>
 <h4>Prompt shape → idiom</h4>
 <table><thead><tr><th>Shape</th><th>Reach for</th></tr></thead><tbody>
-<tr><td>container / grid / mapping</td><td>data model dunders</td></tr>
+<tr><td>container / grid / mapping</td><td>data-model dunders</td></tr>
 <tr><td>stream, no buffering</td><td>generator (<code>yield</code>)</td></tr>
 <tr><td>acquire→commit/rollback</td><td>context manager</td></tr>
 <tr><td>wrap cross-cutting behaviour</td><td>decorator / closure</td></tr>
@@ -223,13 +105,388 @@ def __contains__(self, path) -> bool   # "/a/b" in fs</code></pre>
 <tr><td>any object that can X</td><td><code>Protocol</code> (structural)</td></tr>
 <tr><td>nested tree of nodes</td><td>recursion + one resolver</td></tr>
 </tbody></table>
-<h4>Cross-cutting senior tells</h4>
+<p><span class="warn">!</span> <b>The naming <i>is</i> the signal.</b> "I'd store raw content and compute lazily — the eager DAG is faster to read but more bookkeeping; lazy wins here" scores more than a correct silent solution.</p>
+</section>
+
+<section class="card"><h3>pytest Playbook (no plugin)</h3>
+<p>A test is a plain <code>def test_*()</code> that returns (pass) or raises <code>AssertionError</code> (fail). <code>pytest</code> rewrites <code>assert</code> to print both sides — no <code>assertEqual</code>, no <code>unittest.TestCase</code>.</p>
+<pre><code>def test_x():                 # auto-discovered
+    assert got == want        # bare assert
+with pytest.raises(CycleError): ...   # error paths
+with pytest.raises(ValueError, match="boom"): ...
+@pytest.mark.parametrize("a,b", [     # table cases
+    ("=1+2*3", 7.0), ("=(1+2)*3", 9.0)])
+def test_prec(a, b): ...</code></pre>
+<h4>Deterministic time — inject a clock</h4>
+<pre><code>class FakeClock:
+    def __init__(self, t=0.0): self.t = t
+    def advance(self, dt): self.t += dt
+    def __call__(self): return self.t
+kv = KVStore(clock=FakeClock())   # advance(), never sleep</code></pre>
+<h4>Async with no plugin — the test IS the loop</h4>
+<pre><code>def test_cap():                 # plain def, NOT async def
+    seen = {"cur":0, "max":0}
+    async def fetch(_):
+        seen["cur"]+=1; seen["max"]=max(seen["max"],seen["cur"])
+        await asyncio.sleep(0)  # bare yield, no real delay
+        seen["cur"]-=1
+    asyncio.run(gather_capped([fetch(u) for u in range(8)], 2))
+    assert seen["max"] == 2     # cap saturated</code></pre>
+<ul>
+<li><b>Async:</b> a coroutine does nothing till a loop runs it — call <code>asyncio.run(main())</code> <i>inside</i> a normal test. No <code>pytest-asyncio</code>, no <code>async def test_</code> (it just returns a never-awaited coroutine).</li>
+<li><b>Assert the invariant</b> (cap held, order preserved), never wall-clock timing. Drive order with <code>asyncio.Event</code> + <code>await asyncio.sleep(0)</code>, released in reverse — deterministic.</li>
+<li><b>Prove laziness</b> of a generator with an input that <code>raise</code>s if fully drained; <code>next(gen)</code> must return without tripping it.</li>
+<li>Each kata is a package: <code>from . import Sheet, CycleError</code>. Run one: <code>pytest solution/&lt;kata&gt; -q</code> · filter <code>-k name</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>spreadsheet — Data Model + Lazy DFS</h3>
+<p><b>Idiom:</b> data model + lazy recompute + DFS cycle detect. Cells hold a literal or <code>"=A1+B2*3"</code>; <code>sheet["C1"]</code> reads a <b>computed</b> value; empty reads <code>0.0</code>.</p>
+<pre><code>class Sheet:
+    def __setitem__(self, ref, content): ...  # store RAW
+    def __getitem__(self, ref) -&gt; float:  ...  # compute on read
+    def __contains__(self, ref) -&gt; bool:  ...
+class CycleError(Exception): ...</code></pre>
+<ul>
+<li><b>Store raw content, compute nothing till read</b> → "dependents update on edit" falls out free, <b>no write-time DAG</b>: editing <code>A1</code> replaces its content; any formula naming <code>A1</code> re-reads the new value next pull. Say the eager-DAG trade-off (fast reads, more bookkeeping, write-time cycle check), pick lazy.</li>
+<li><b>Cycle guard = DFS <code>visiting</code> set</b> threaded down recursion as a <code>frozenset</code> (<code>visiting | {ref}</code> for the deeper call, caller's set untouched — clean backtrack, no manual pop); a ref already in it is a back-edge → raise <code>CycleError</code>.</li>
+<li><b>Precedence = structure:</b> two-level recursive descent <code>expr</code>(<code>+ -</code>)→<code>term</code>(<code>* /</code>)→<code>factor</code>(number or recursive cell read). No table, no shunting-yard for four operators.</li>
+</ul>
+<pre><code>def _value(self, ref, visiting):
+    if ref in visiting: raise CycleError(ref)   # back-edge
+    c = self._cells.get(ref)
+    if c is None: return 0.0                     # empty → 0
+    if isinstance(c, float): return c            # literal
+    return self._eval(c[1:], visiting | {ref})   # formula</code></pre>
+<p><span class="warn">!</span> <b>Gotcha:</b> a recursion-depth limit gives <code>RecursionError</code>, not <code>CycleError</code>, and only after wasted work — thread the visiting set. And <code>isinstance(x,int)</code> lets <code>bool</code> through (<code>True</code> is an <code>int</code>): reject it, normalise numbers to <code>float</code> so division never truncates.</p>
+</section>
+
+<section class="card"><h3>kvstore — Context-Manager Txns + TTL</h3>
+<p><b>Idiom:</b> context managers + unit-of-work. Mini-Redis: <code>set/get/delete</code>, per-key <b>TTL</b>, and a <b>transaction</b> that commits whole or rolls back.</p>
+<pre><code>def set(k, v, ttl=None); def get(k)-&gt;v|None
+def delete(k)-&gt;bool; __len__; __contains__
+@contextmanager
+def transaction(self): ...   # buffer→commit/rollback</code></pre>
+<ul>
+<li><b>Buffer-then-commit:</b> while open, writes queue in a side dict, live store untouched → a read <i>inside</i> sees <b>committed</b> state (Redis <code>MULTI</code>). Clean exit replays atomically; a raise drops the buffer. Later writes to the same key overwrite in the buffer; commit is one deterministic replay.</li>
+<li><b>Lazy TTL:</b> stamp an <b>absolute deadline</b> (<code>clock()+ttl</code>, not a duration); one <code>_live_entry</code> helper prunes on access, shared by <code>get</code>/<code>in</code>/<code>len</code>. No sweeper thread — idle keys free, a big unread key lingers till touched.</li>
+<li>Inject <code>clock: Callable[[],float]=time.monotonic</code> (monotonic can't jump back on an NTP step); tests advance a <code>FakeClock</code>.</li>
+</ul>
+<pre><code>@contextmanager
+def transaction(self):
+    if self._pending is not None: raise RuntimeError("nested")
+    self._pending = {}
+    try: yield
+    except BaseException:
+        self._pending = None; raise      # rollback + RE-RAISE
+    else:
+        buf, self._pending = self._pending, None
+        self._commit(buf)                # atomic on clean exit</code></pre>
+<p><span class="warn">!</span> <b>Gotcha:</b> the manager must roll back <i>and re-raise</i> — the generator's <code>except: ...; raise</code> (class form: <code>__exit__</code> returns falsy). Returning <code>True</code> / not re-raising silently <b>eats the caller's error</b>. Also <code>len</code>/<code>in</code> must filter through liveness, not <code>len(self._data)</code> (counts expired-but-unpruned keys).</p>
+</section>
+
+<section class="card"><h3>feedstats — Lazy Generators (OHLC+VWAP)</h3>
+<p><b>Idiom:</b> generator (<code>yield</code>, O(1) memory) over an unbounded feed. Aggregate <code>(ts,price,qty)</code> ticks into fixed-window OHLC + VWAP <b>bars</b>; window <code>= (ts // period) * period</code>.</p>
+<pre><code>def bars(ticks: Iterable[Tick],
+         period: int) -&gt; Iterator[Bar]:
+    # yield each bar the instant a later-window
+    # tick proves it complete; flush tail at end</code></pre>
+<ul>
+<li><b>Generator not list:</b> a <code>return [...]</code> reads the whole feed first (can't terminate on a live tape, buffers the session). <code>yield</code> is lazy, pull-based, O(1) — only the ~7 running scalars of the in-progress bar live.</li>
+<li><b>One-tick look-ahead:</b> a bar closes only when the <i>next</i> window's first tick arrives — that same tick flushes the old bar and seeds the new. No tick buffer.</li>
+<li><b>VWAP</b> is qty-weighted: <code>Σ(price·qty)/Σqty</code> (10@2, 20@1 → 40/3 ≈ 13.3, <i>not</i> 15). Carry two running sums.</li>
+<li><b>OHLC:</b> open=first, high=max, low=min, close=<i>latest</i> print; volume=<code>Σqty</code>.</li>
+</ul>
+<pre><code>for tick in ticks:
+    w = (tick.ts // period) * period
+    if start is None: ...seed...; continue
+    if w != start:                      # boundary
+        yield Bar(start,o,h,l,c,vol,wt/vol)
+        ...re-seed from tick...; continue
+    h=max(h,tick.price); l=min(l,tick.price)
+    c=tick.price; vol+=tick.qty; wt+=tick.price*tick.qty
+if start is not None:
+    yield Bar(...)                      # TAIL FLUSH — mandatory</code></pre>
+<p><span class="warn">!</span> <b>Gotcha:</b> the <b>tail flush</b> after the loop is mandatory — the last window never sees a later tick. And a generator <b>defers its body</b>: <code>bars(x, 0)</code> never runs the <code>period&lt;=0</code> guard — drive it with <code>next(...)</code>; prove laziness with an input that raises if fully drained.</p>
+</section>
+
+<section class="card"><h3>feedparser — Streaming + Error-as-Value</h3>
+<p><b>Idiom:</b> generator + reject-as-data. Ingest edge: parse <code>SYMBOL|BID|ASK|QTY</code> lines from a firehose, skip <code>#</code> comments/blanks, <b>never abort the batch</b> on one bad line — yield each reject with its 1-based <b>physical</b> line number.</p>
+<pre><code>@dataclass(frozen=True)
+class ParseError(Exception):   # a VALUE, not raised
+    line: int; kind: ErrorKind
+@dataclass(frozen=True)
+class Parsed: line:int; quote:Quote|None; error:ParseError|None
+def parse_feed(lines) -&gt; Iterator[Parsed]: ...   # lazy</code></pre>
+<ul>
+<li><b>Error-as-value:</b> a malformed line becomes a <code>ParseError</code> wrapped in a <code>Parsed</code> and <code>yield</code>ed like any success — one bad venue print doesn't black out the market; the <i>caller</i> logs/alerts/halts.</li>
+<li><b>Physical line numbers:</b> <code>enumerate(lines, start=1)</code>; comments/blanks <code>continue</code> <i>after</i> the counter advanced, so an error points at the real line in the raw capture.</li>
+<li><b>Fixed validation order, first failure wins:</b> field-count → empty-symbol → bid → ask → qty. A short line with a bad price is deterministically a <code>WRONG_FIELD_COUNT</code>.</li>
+<li><b>qty:</b> non-negative <code>int</code> — <code>0</code> is valid, negative rejected, <code>int("1.5")</code> raises → <code>INVALID_QTY</code>.</li>
+</ul>
+<pre><code>for line_no, raw in enumerate(lines, start=1):
+    t = raw.strip()
+    if not t or t.startswith("#"): continue   # counter moved
+    f = t.split("|")
+    if len(f) != 4:
+        yield _error(line_no, WRONG_FIELD_COUNT); continue
+    ...checks in order, continue at first fail...
+    yield Parsed(line_no, Quote(...), None)</code></pre>
+<p><span class="warn">!</span> <b>Gotcha:</b> skipping comments <i>without</i> advancing the counter mis-numbers every later reject. And <code>raise</code> on a bad line kills the good 999 — model the reject as a value and keep flowing. Extension: resumable across <code>recv()</code> chunks, holding a partial trailing line.</p>
+</section>
+
+<section class="card"><h3>middleware — Decorators / Closures (Onion)</h3>
+<p><b>Idiom:</b> higher-order fns + closures. <code>compose([m1,m2,m3], handler)</code> stacks layers: request in <code>m1→m2→m3→h</code>, response back out — <code>m1</code> is outermost.</p>
+<pre><code>Handler    = Callable[[Request], Response]
+Middleware = Callable[[Handler], Handler]  # +1 level
+def compose(mws, handler) -&gt; Handler:
+    return functools.reduce(
+        lambda nxt, mw: mw(nxt),
+        reversed(mws), handler)</code></pre>
+<ul>
+<li><b>Type is the insight:</b> a middleware is <b><code>Handler→Handler</code></b> (a closure over <code>next_handler</code>), <i>not</i> <code>Request→Response</code> (that's a handler). Stacking = function composition = a runtime <code>@decorator</code> stack applied to a value, not a name.</li>
+<li><b>Fold direction:</b> to make <code>m1</code> outermost it must be applied <i>last</i> — so fold <code>reversed(mws)</code>: wrap <code>handler</code> in <code>m3</code>, that in <code>m2</code>, that in <code>m1</code>. Fold forwards → onion inside-out (auth runs too late).</li>
+<li><b>Short-circuit</b> = just <code>return Response(401)</code> without calling <code>next_handler</code>; no exceptions/sentinels. Everything "inside" a layer only runs <i>because</i> <code>next</code> was called. Bracket the call to mutate request-in and response-out.</li>
+<li><code>compose([], h) == h</code> — fold of nothing returns the seed. <code>Callable</code> from <code>collections.abc</code>, not deprecated <code>typing</code>.</li>
+</ul>
+<p><span class="warn">!</span> <b>Gotcha:</b> a middleware that calls <code>next_handler(req)</code> but returns <code>None</code> silently drops the result — bracket it: <code>r = next(req); ...; return r</code>. Prove skip with <code>calls == []</code>, not just the status code. Async form is ASGI: <code>await next_app(...)</code>, same fold.</p>
+</section>
+
+<section class="card"><h3>crawler — asyncio Semaphore + gather</h3>
+<p><b>Idiom:</b> asyncio bounded-concurrency fan-out. Fetch N URLs concurrently under a hard cap, retry transients, results <b>in input order</b>.</p>
+<pre><code>async def gather_capped(aws, limit):
+    if limit &lt;= 0: raise ValueError
+    sem = asyncio.Semaphore(limit)
+    async def run(aw):
+        async with sem: return await aw
+    return list(await asyncio.gather(
+        *(run(a) for a in aws)))   # order kept</code></pre>
+<ul>
+<li><b>Single-threaded cooperative:</b> one loop, one coroutine at a time; every <code>await</code> yields. No data races, no locks — between awaits nothing else touches your state.</li>
+<li><b>Semaphore = the cap</b> (permit pool sized to <code>limit</code>); the rest park on <code>acquire()</code>. <b><code>gather</code> preserves input order</b> for free (positional) — no sorting, no <code>as_completed</code>. Plain <code>gather</code> propagates the first error + cancels siblings.</li>
+<li><b>Retry:</b> <code>1 + retries</code> attempts; catch, retry, and let the <i>last</i> failure escape. Test both recover-then-succeed and exhausted-and-propagate.</li>
+<li><code>fetch_all</code> builds one retry-coroutine per url and delegates to <code>gather_capped</code> — inherits cap + order for nothing.</li>
+</ul>
+<p><span class="warn">!</span> <b>Gotcha:</b> asyncio gives <b>overlapped I/O, not CPU parallelism</b> — name the GIL (CPU-bound → <code>multiprocessing</code>). Awaiting in a <code>for</code> loop serialises. A bare <code>gather</code> over 10k urls exhausts FDs — the Semaphore is deliberate backpressure. Test order with <code>asyncio.Event</code> released in reverse, cap with <code>max_seen == limit</code> (not <code>&lt;=</code>).</p>
+</section>
+
+<section class="card"><h3>workflow — Enums + match/case (FSM)</h3>
+<p><b>Idiom:</b> FSM as <code>Enum</code> + structural pattern matching. Order lifecycle; <code>apply(order,event)</code> is a <b>pure</b> fn over <code>(state,event)</code> — rows are the truth table.</p>
+<pre><code>def apply(order, event) -&gt; Order:
+  match (order.state, event):
+    case (NEW, Accept()):  return replace(order, state=ACCEPTED)
+    case (ACCEPTED | PARTIALLY_FILLED, Fill(qty=q)):
+        nf = order.filled + q
+        if nf &gt; order.total: raise Overfill(...)
+        st = FILLED if nf == order.total else PARTIALLY_FILLED
+        return replace(order, state=st, filled=nf)
+    case _: raise IllegalTransition(...)</code></pre>
+<ul>
+<li>State = <code>Enum(auto())</code>; order = <code>@dataclass(frozen=True)</code>; one <code>match</code> tuple <i>is</i> the truth table. Class patterns destructure (<code>Fill(qty=q)</code>), OR-patterns merge rows sharing a rule.</li>
+<li><b>Pure:</b> every arm returns <code>replace(order,…)</code> — a new frozen value, input untouched. Same inputs → same output. Distinct <code>Overfill</code> vs <code>IllegalTransition</code>; raise, never clamp (clamping books a <i>different</i> quantity than the venue reported → real unhedged position).</li>
+<li>Terminal states (<code>FILLED/CANCELLED/REJECTED</code>) are absorbing — every event from them raises.</li>
+</ul>
+<p><span class="warn">!</span> <b>Gotcha:</b> Python's <code>match</code> is <b>not exhaustive</b> — drop the <code>case _</code> and an unhandled pair falls through returning <code>None</code>, silently corrupting state. Also <code>case Fill:</code> is a <i>capture</i> (matches anything, rebinds the name) — you need <code>case Fill():</code>. <code>frozen=True</code> only blocks attribute assignment, not a mutable field.</p>
+</section>
+
+<section class="card"><h3>notifier — Protocols + Observer</h3>
+<p><b>Idiom:</b> structural typing + Observer. Pub/sub: subscribe a <i>channel</i> to a <i>topic</i> (+optional filter); <code>publish</code> fans out in subscription order, publisher oblivious to who listens.</p>
+<pre><code>@runtime_checkable
+class Channel(Protocol):
+    def send(self, event: Event) -&gt; None: ...
+def subscribe(topic, channel, *, predicate=None)
+def publish(event)          # walks per-topic list</code></pre>
+<ul>
+<li><b>Protocol = structural typing:</b> a channel is <i>anything with <code>send</code></i> — any plain class conforms with <b>no base class / no import</b>. Beats an ABC (which forces subclassing, locks out 3rd-party objects you don't own).</li>
+<li>Storage: <code>dict[str, list[_Subscription]]</code> (subject holds observers). Filters are first-class <code>Callable[[Event],bool]</code> — pass a lambda, not a <code>FilterChannel</code> subclass.</li>
+<li>Unknown topic = no-op via <code>.get(topic, ())</code> (not <code>[topic]</code> → <code>KeyError</code>); keep a <code>list</code> for deterministic order, not a <code>set</code>.</li>
+</ul>
+<pre><code>def publish(self, event):
+    for sub in self._subscribers.get(event.topic, ()):
+        if sub.predicate is None or sub.predicate(event):
+            sub.channel.send(event)   # dynamic dispatch, any conformer</code></pre>
+<p><span class="warn">!</span> <b>Gotcha:</b> <code>@runtime_checkable</code> only checks a <code>send</code> attr <b>exists</b> — not its signature. The proving test: a bare class (no base) passing <code>isinstance(it, Channel)</code>. Extensions: unsubscribe handle, async <code>send</code> + <code>gather</code>, per-channel retry.</p>
+</section>
+
+<section class="card"><h3>filesystem — Recursion + Dunder</h3>
+<p><b>Idiom:</b> tree data model + recursion. Nodes nest by absolute <code>/</code>-path: <code>mkdir -p</code>, <code>write/read</code>, <code>ls</code>, <code>find</code>, <code>mv</code>.</p>
+<pre><code>@dataclass class File: content: str
+@dataclass class Dir: children: dict[str,Node] = ...
+Node = File | Dir
+def mkdir/write/read/ls/find/mv(...)
+def __contains__(self, path) -&gt; bool   # "/a/b" in fs</code></pre>
+<ul>
+<li><b>Model = tree of nodes</b> (Dir holds name→child dict). Write <code>_resolve</code> (walk path, raise on missing node / file-where-dir) <b>once</b>; every op shares it, so the failure modes live in one place.</li>
+<li><b>Subtree <code>mv</code> is free:</b> a <code>Dir</code> node <i>is</i> its subtree — <code>del</code> from old parent, assign to new, done. No child copying (O(1) structural, not O(descendants)). <code>find</code> = DFS over the whole tree by basename, sorted.</li>
+<li><b>Flat <code>dict[path]=content</code> alternative</b> tempts you (one-lookup <code>read</code>/<code>write</code>) but makes <code>ls</code> a prefix scan and <code>mv</code> rewrite every descendant key. Tree pays a cheap path-walk on <code>read</code> to make <code>ls</code>/<code>mv</code> structural — name it, pick tree.</li>
+<li><code>mkdir</code> over an existing dir is a no-op (don't clobber children); over a file it raises.</li>
+</ul>
+<p><span class="warn">!</span> <b>Gotcha:</b> <code>"/".split("/")==["",""]</code> — filter blanks so <code>"/"</code>→<code>[]</code> and leading/double slashes don't leak empty components. Use <code>__contains__</code> (try <code>_resolve</code>, except→False), not an <code>exists()</code> method.</p>
+</section>
+
+<section class="card"><h3>Deep-dive: Generators (the streaming idiom)</h3>
+<p>Shared engine of <code>feedstats</code> &amp; <code>feedparser</code>, and the extension of <code>filesystem</code> (<code>walk()</code>).</p>
+<ul>
+<li>A fn containing <code>yield</code> returns an <b>iterator</b>; each <code>yield</code> emits one value and <b>suspends the frame</b>, resuming on the next <code>next()</code>. Control is inverted: the consumer pulls.</li>
+<li><b>O(1) memory</b> — only the current item's state lives; contrast <code>return [...]</code> which buffers everything <i>and</i> must read the whole input first (fatal on an unbounded source).</li>
+<li><b>Lazy = deferred body:</b> nothing runs until the first <code>next()</code>. So a guard like <code>if period&lt;=0: raise</code> at the top does <i>not</i> fire on the bare call — only when driven. Test guards with <code>next(...)</code>.</li>
+<li><b>Composes</b> with <code>for</code>, <code>itertools.islice</code> (take N), <code>groupby</code>, <code>takewhile</code> — all still lazy. An early <code>break</code> stops the producer mid-stream.</li>
+<li><b>State-machine pattern:</b> hold the minimum running state, emit on a boundary, <b>flush the tail</b> after the loop (the last window/record has no successor to trigger it).</li>
+</ul>
+<pre><code>def take(gen, n):                 # first n, lazily
+    return list(itertools.islice(gen, n))
+def proof_of_lazy():
+    def s():
+        yield "a"
+        raise AssertionError("drained — not lazy")
+    assert next(parse_feed(s())).quote is not None</code></pre>
+<p class="cap">Extensions: <code>yield from</code> delegation · async generators over a socket · rolling-VWAP stacked on <code>bars</code>.</p>
+</section>
+
+<section class="card"><h3>Deep-dive: Context Managers</h3>
+<p>Two idioms for <code>with</code>; know both, pick one out loud.</p>
+<table><thead><tr><th></th><th>Generator form</th><th>Class form</th></tr></thead><tbody>
+<tr><td>setup</td><td>before <code>yield</code></td><td><code>__enter__</code></td></tr>
+<tr><td>teardown</td><td><code>try/finally</code> after <code>yield</code></td><td><code>__exit__</code></td></tr>
+<tr><td>propagate exc</td><td>re-<code>raise</code> (or don't catch)</td><td>return <b>falsy</b></td></tr>
+<tr><td>swallow exc</td><td>catch, don't re-raise</td><td>return <code>True</code></td></tr>
+<tr><td>best when</td><td>linear commit/rollback</td><td>carries state / nests</td></tr>
+</tbody></table>
+<pre><code>@contextmanager
+def txn(self):
+    self._pending = {}
+    try: yield
+    except BaseException:
+        self._pending = None; raise   # rollback + propagate
+    else:
+        self._commit(self._pending)   # only on clean exit
+# class form of the propagate rule:
+def __exit__(self, et, e, tb):
+    self._rollback()
+    return False   # falsy → exception keeps propagating</code></pre>
+<ul>
+<li><span class="warn">!</span> Returning <code>True</code> / not re-raising <b>silently eats the caller's error</b> — the classic bug. Rollback and propagation are <i>separate</i> obligations; do both.</li>
+<li>Reach for the <b>class form</b> when the manager must carry per-level state (nested txns / savepoints); the generator is cleaner for linear teardown.</li>
+<li>Same muscle: files, locks, DB sessions, <code>ExitStack</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Deep-dive: asyncio &amp; the GIL</h3>
+<ul>
+<li><b>Cooperative, single-threaded:</b> one event loop runs one coroutine at a time. Concurrency = <b>overlapped waiting</b>, not parallel execution. Two CPU-heavy coroutines run no faster than sequentially.</li>
+<li><b>Every <code>await</code> is a yield point</b> where the loop can run another coroutine. Between awaits you run uninterrupted → no locks needed for plain state. A coroutine that never awaits starves the loop.</li>
+<li><b><code>asyncio.Semaphore(limit)</code></b> = permit pool; <code>async with sem:</code> holds one for the wrapped await's duration → backpressure. Contrast a <code>Queue</code> + fixed worker pool for true producer/consumer backpressure.</li>
+<li><b><code>gather</code></b> returns results <b>positionally</b> (input order) despite out-of-order completion; propagates the first exception and cancels siblings. <code>return_exceptions=True</code> collects per-item instead. Use <code>as_completed</code> only when you want results as they land.</li>
+<li><b>The GIL:</b> CPython runs one thread of bytecode at a time → asyncio/threads help only <b>I/O-bound</b> work. CPU-bound → <code>multiprocessing</code>/<code>ProcessPoolExecutor</code>; blocking libs → <code>run_in_executor</code> (thread pool).</li>
+</ul>
+<pre><code>async with asyncio.timeout(2):   # 3.11+, per-op deadline
+    return await fetch(url)
+async with asyncio.TaskGroup() as tg:   # structured
+    tasks = [tg.create_task(run(a)) for a in aws]</code></pre>
+<p><span class="warn">!</span> The senior tell is reaching the GIL boundary <i>unprompted</i>: "this only helps because fetching is I/O-bound."</p>
+</section>
+
+<section class="card"><h3>Deep-dive: Protocol vs ABC · match traps</h3>
+<h4>Structural (Protocol) vs nominal (ABC)</h4>
+<table><thead><tr><th></th><th><code>Protocol</code></th><th>ABC</th></tr></thead><tbody>
+<tr><td>conforms if</td><td>has the methods</td><td>subclasses it</td></tr>
+<tr><td>3rd-party objs</td><td>fit free</td><td>can't play</td></tr>
+<tr><td>coupling</td><td>none (no import)</td><td>base-class import</td></tr>
+<tr><td>use when</td><td>open plugin set</td><td>shared impl needed</td></tr>
+</tbody></table>
+<ul>
+<li><code>@runtime_checkable</code> makes <code>isinstance</code> work but checks <b>presence only</b>, never the signature — lean on the static checker for that.</li>
+</ul>
+<h4>match/case pitfalls</h4>
+<ul>
+<li><span class="warn">!</span> <b>Not exhaustive</b> — a missing arm returns <code>None</code>, silently. A <code>case _</code> is load-bearing, turning "unhandled" into a loud error.</li>
+<li><code>case Fill:</code> is a <b>capture</b> (matches anything, rebinds <code>Fill</code>). You want <code>case Fill():</code> — parentheses make it a <b>class pattern</b> (a type test).</li>
+<li><code>Fill(qty=q)</code> destructures + binds the payload. <code>A | B</code> OR-pattern collapses rows sharing a rule. <code>match (state, event):</code> matches the <i>tuple</i>.</li>
+</ul>
+<h4>Typestate alternative</h4>
+<p>Give each state its own type (<code>NewOrder.accept()→AcceptedOrder</code>, no <code>fill</code> method) so illegal transitions fail to <i>type-check</i> — statically impossible, but explodes into N classes. Reach for the single-fn <code>match</code> first.</p>
+</section>
+
+<section class="card"><h3>Deep-dive: Data Model &amp; Frozen Values</h3>
+<h4>Container dunders — behave like a built-in</h4>
+<table><thead><tr><th>Dunder</th><th>Enables</th><th>In kata</th></tr></thead><tbody>
+<tr><td><code>__getitem__</code></td><td><code>x[k]</code></td><td>spreadsheet read</td></tr>
+<tr><td><code>__setitem__</code></td><td><code>x[k]=v</code></td><td>spreadsheet write</td></tr>
+<tr><td><code>__contains__</code></td><td><code>k in x</code></td><td>kvstore, fs</td></tr>
+<tr><td><code>__len__</code></td><td><code>len(x)</code></td><td>kvstore live count</td></tr>
+<tr><td><code>__iter__</code></td><td><code>for i in x</code></td><td>any collection</td></tr>
+</tbody></table>
+<p>The idiomatic API is subscript, not <code>get_cell()</code>/<code>set_cell()</code> — the dunders <i>are</i> the design.</p>
+<h4>Frozen dataclasses + replace</h4>
+<pre><code>@dataclass(frozen=True)
+class Order: state: OrderState; total: int; filled: int = 0
+new = replace(order, state=ACCEPTED)   # new value, input untouched</code></pre>
+<ul>
+<li>Frozen → hashable, no field assignment; the functional way to "transition". Pure fns become trivial to test and safe to share/log.</li>
+<li><span class="warn">!</span> <code>frozen=True</code> is <b>shallow</b> — a mutable field (a <code>list</code>) is still mutable. Use <code>field(default_factory=dict)</code> — never a mutable default arg.</li>
+<li>Model closed sets with <code>Enum(auto())</code>: typo-proof, iterable, compare with <code>is</code>. Distinct data-carrying exceptions per rule violation.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Typing You Must Write (senior default)</h3>
+<ul>
+<li><b>Unions:</b> <code>X | None</code> (not <code>Optional[X]</code>), <code>File | Dir</code>. Builtins as generics: <code>list[str]</code>, <code>dict[str, Node]</code>, <code>tuple[int, ...]</code> — not <code>List</code>/<code>Dict</code> from <code>typing</code>.</li>
+<li><b><code>Callable</code>, <code>Iterable</code>, <code>Iterator</code>, <code>Awaitable</code></b> from <code>collections.abc</code> — the <code>typing</code> aliases are <b>deprecated since 3.9</b>.</li>
+<li><b>Program to the protocol:</b> accept <code>Iterable[Tick]</code> (a list, file, socket, another generator), return <code>Iterator[Bar]</code> — not concrete types.</li>
+<li><code>from __future__ import annotations</code> to reference a type before it's defined (forward refs) cheaply.</li>
+<li><code>Callable[[Request], Response]</code>, <code>Callable[[Event], bool]</code> — first-class functions get full signatures.</li>
+</ul>
+<pre><code>from __future__ import annotations
+from collections.abc import Callable, Iterable, Iterator, Awaitable
+Handler = Callable[[Request], Response]
+def bars(ticks: Iterable[Tick], period: int) -&gt; Iterator[Bar]: ...
+def get(self, key: str) -&gt; object | None: ...</code></pre>
+<p><span class="warn">!</span> At senior level hints are part of the design and the review, not decoration — write them throughout.</p>
+</section>
+
+<section class="card"><h3>Common Bugs — symptom → cause → fix</h3>
+<table><thead><tr><th>Symptom</th><th>Cause → fix</th></tr></thead><tbody>
+<tr><td><code>RecursionError</code> not <code>CycleError</code></td><td>no <code>visiting</code> set → thread a DFS frozenset</td></tr>
+<tr><td>caller's exception vanishes</td><td>ctx-mgr returns <code>True</code>/no re-raise → return falsy / <code>raise</code></td></tr>
+<tr><td>reads inside txn see buffer</td><td>writing live store → buffer, commit on exit</td></tr>
+<tr><td><code>len</code> disagrees with <code>get</code></td><td>bypassed liveness → route all through <code>_live_entry</code></td></tr>
+<tr><td>last bar / record missing</td><td>no tail flush → <code>yield</code> after the loop</td></tr>
+<tr><td>guard never fires</td><td>generator body deferred → drive with <code>next()</code></td></tr>
+<tr><td>VWAP wrong</td><td>unweighted → <code>Σ(p·q)/Σq</code></td></tr>
+<tr><td>auth runs too late</td><td>fold forwards → fold <code>reversed(mws)</code></td></tr>
+<tr><td>fetches run serially</td><td><code>await</code> in a loop → build aws, <code>gather</code></td></tr>
+<tr><td>results out of order</td><td>built on <code>as_completed</code> → use <code>gather</code></td></tr>
+<tr><td>state becomes <code>None</code></td><td>no <code>case _</code> → add loud catch-all</td></tr>
+<tr><td>every event looks like Fill</td><td><code>case Fill:</code> capture → <code>case Fill():</code></td></tr>
+<tr><td>bad line kills the batch</td><td><code>raise</code> → yield a <code>ParseError</code> value</td></tr>
+<tr><td>reject on wrong line</td><td>skip w/o counting → <code>enumerate(...,1)</code></td></tr>
+<tr><td><code>bool</code> stored as 1.0</td><td><code>isinstance(x,int)</code> → reject <code>bool</code> first</td></tr>
+<tr><td>subtree <code>mv</code> is slow</td><td>copying children → re-parent the one node</td></tr>
+<tr><td>flaky async test</td><td><code>sleep(0.05)</code> → <code>Event</code> + <code>sleep(0)</code></td></tr>
+</tbody></table>
+</section>
+
+<section class="card"><h3>&#9733; Senior Signals &amp; Pre-flight Checklist</h3>
+<h4>Cross-cutting tells</h4>
 <ul>
 <li><b>Purity/immutability:</b> frozen dataclass + <code>replace</code> for transitions; never mutate the input.</li>
 <li><b>Determinism:</b> inject a clock, advance a <code>FakeClock</code> / drive with <code>asyncio.Event</code> — never <code>time.sleep</code>.</li>
-<li><b>Errors raise loudly:</b> custom, data-carrying exceptions on rule violations; test them with <code>pytest.raises</code>.</li>
-<li><b>Typed throughout:</b> <code>X | None</code>, <code>list[str]</code>, <code>Callable</code> from <code>collections.abc</code> (not deprecated <code>typing</code>).</li>
-<li>Name the trade-off out loud (lazy vs eager, tree vs flat, Protocol vs ABC), then pick — the framing <i>is</i> the signal.</li>
+<li><b>Errors raise loudly:</b> custom, data-carrying exceptions on rule violations; test with <code>pytest.raises</code>. Distinguish kinds (<code>Overfill</code> vs <code>IllegalTransition</code>).</li>
+<li><b>Typed throughout:</b> <code>X | None</code>, <code>list[str]</code>, <code>Callable</code> from <code>collections.abc</code>.</li>
+<li><b>Name the trade-off out loud</b> (lazy vs eager, tree vs flat, Protocol vs ABC, generator vs list), then pick — the framing <i>is</i> the signal.</li>
+</ul>
+<h4>Before you say "done"</h4>
+<ul>
+<li>&#9744; Did I pick the idiom the prompt is <i>shaped</i> like, and say why?</li>
+<li>&#9744; Container-shaped? dunders, not <code>get_x</code>/<code>set_x</code>.</li>
+<li>&#9744; Stream? generator + tail flush + laziness proven by test.</li>
+<li>&#9744; Acquire/release? ctx-mgr that rolls back <i>and</i> re-raises.</li>
+<li>&#9744; <code>match</code>? a <code>case _</code> catch-all; <code>Case()</code> not <code>Case</code>.</li>
+<li>&#9744; Async? <code>asyncio.run</code> in a plain test; assert invariants; GIL named.</li>
+<li>&#9744; Time? absolute deadline from an injected clock.</li>
+<li>&#9744; Errors as typed exceptions (or values, for streams)?</li>
+<li>&#9744; Full type hints from <code>collections.abc</code>?</li>
+<li>&#9744; Edges: empty, missing, boundary, terminal, malformed line.</li>
 </ul>
 </section>
 

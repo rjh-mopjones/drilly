@@ -96,6 +96,9 @@ std::unique_ptr&lt;FILE, decltype(&amp;fclose)&gt;
 <li>Prefer <code>make_unique</code>/<code>make_shared</code> — exception-safe, one allocation.</li>
 <li><b>Cycle = leak</b> <span class="warn">!</span> two <code>shared_ptr</code>s pointing at each other never hit refcount 0 → make one a <code>weak_ptr</code>.</li>
 <li>Pass params by <code>const T&amp;</code>/<code>T*</code>; take <code>unique_ptr</code> by value only to <b>transfer</b> ownership.</li>
+<li><code>shared_ptr</code> control block holds <b>two</b> counts: strong (owns the object) and weak (keeps the block alive). <code>make_shared</code> co-allocates object+block in one chunk — but a live <code>weak_ptr</code> then keeps that whole chunk (object storage included) alive until the last weak dies.</li>
+<li><code>enable_shared_from_this&lt;T&gt;</code> when an object must hand out <code>shared_ptr</code>s to itself — never build a second <code>shared_ptr</code> from a raw <code>this</code> (double free <span class="warn">!</span>).</li>
+<li>Raw pointers/references are fine as <b>non-owning</b> observers — "borrowed, I won't free it." Ownership is the thing smart pointers express.</li>
 </ul>
 </section>
 
@@ -147,7 +150,12 @@ auto v2 = std::move(v1);      // v1 now valid-but-unspecified</code></pre>
 <tr><td><code>const_cast</code></td><td>strip const — writing through it if the object is truly const is UB <span class="warn">!</span></td></tr>
 <tr><td><code>reinterpret_cast</code></td><td>bit reinterpret — aliasing/UB minefield <span class="warn">!</span></td></tr>
 </tbody></table>
-<p>Avoid C-style casts — they silently pick any of the above. Prefer <code>enum class</code> over plain <code>enum</code>.</p>
+<p>Avoid C-style casts — they silently pick any of the above. Prefer <code>enum class</code> over plain <code>enum</code> (scoped, no implicit int conversion, no name leakage).</p>
+<ul>
+<li>Top-level vs low-level <code>const</code>: <code>const int* p</code> = pointer to const (data locked); <code>int* const p</code> = const pointer (rebind locked). Read right-to-left.</li>
+<li>West vs East const is style only (<code>const T</code> ≡ <code>T const</code>); pick one and be consistent.</li>
+<li><code>[[nodiscard]]</code> on a function/type makes ignoring the return a warning — use it on <code>expected</code>-returning and error-code APIs.</li>
+</ul>
 </section>
 
 <section class="card"><h3>STL Containers — pick &amp; cost</h3>
@@ -164,6 +172,9 @@ auto v2 = std::move(v1);      // v1 now valid-but-unspecified</code></pre>
 <li><code>emplace_back(args...)</code> constructs in place; <code>push_back</code> may copy/move.</li>
 <li><code>vector&lt;bool&gt;</code> is a bit-packed <b>proxy</b> — not a real container of <code>bool</code> <span class="warn">!</span></li>
 <li>Views (non-owning): <code>string_view</code>, <code>span&lt;T&gt;</code> — cheap params, but must not outlive the data <span class="warn">!</span></li>
+<li><code>reserve(n)</code> before a known number of <code>push_back</code>s — amortised O(1) growth still reallocates+moves log n times; <code>reserve</code> makes it one allocation.</li>
+<li>Ordered <code>map</code>/<code>set</code> = red-black tree, node-per-element (pointer chasing, cache-unfriendly) but stable iterators + ordered traversal. <code>unordered_*</code> needs a good hash; a bad one degrades to O(n) buckets.</li>
+<li>C++23 <code>flat_map</code>/<code>flat_set</code> = sorted <code>vector</code> under the hood: cache-friendly lookups, slow inserts — great for build-once-query-many.</li>
 </ul>
 </section>
 
@@ -199,9 +210,11 @@ if constexpr (std::is_pointer_v&lt;T&gt;) { ... }  // compile-time branch</code>
 <li>Definitions live in <b>headers</b> — templates instantiate at the call site <span class="warn">!</span></li>
 <li><b>Concepts</b> replace most SFINAE/<code>enable_if</code> — clearer errors, constrained overloads.</li>
 <li><code>if constexpr</code> discards the untaken branch at compile time (no instantiation).</li>
-<li>Variadics + <b>fold expressions</b> (C++17): <code>(... + args)</code>.</li>
-<li>Watch template <b>code bloat</b>: each type combo = a fresh instantiation.</li>
-<li>Need <code>typename</code>/<code>template</code> disambiguators for dependent names.</li>
+<li>Variadics + <b>fold expressions</b> (C++17): <code>(... + args)</code> (unary left), <code>(init + ... + args)</code> (binary) — collapse a pack with no recursion.</li>
+<li>Watch template <b>code bloat</b>: each type combo = a fresh instantiation → binary size + compile time. Factor type-independent logic into a non-template base.</li>
+<li>Need <code>typename</code>/<code>template</code> disambiguators for dependent names (<code>typename T::iterator</code>, <code>obj.template get&lt;0&gt;()</code>).</li>
+<li><b>Full</b> specialisation picks an exact type; <b>partial</b> specialisation matches a shape (<code>Foo&lt;T*&gt;</code>). Function templates can't partially specialise — overload instead.</li>
+<li>CTAD (C++17): <code>std::pair p{1, 2.0};</code> deduces <code>pair&lt;int,double&gt;</code> — add deduction guides for your own class templates.</li>
 </ul>
 </section>
 
@@ -250,6 +263,9 @@ flowchart LR
 <li><code>catch (const std::exception&amp; e)</code> — by const ref, never by value (slicing).</li>
 <li>Zero-cost model: no penalty on the happy path; throwing is expensive — not for control flow.</li>
 <li>Alternatives: <code>std::optional</code> (maybe), <code>std::expected&lt;T,E&gt;</code> (C++23), <code>std::error_code</code>. <code>-fno-exceptions</code> builds exist (embedded).</li>
+<li>Throw by value, catch by <code>const&amp;</code>; derive your types from <code>std::exception</code>. Order <code>catch</code> blocks most-derived first.</li>
+<li>The strong guarantee's canonical recipe = <b>copy-and-swap</b>: do the work on a copy, then <code>swap</code> (a <code>noexcept</code> op) to commit — a throw leaves the original untouched.</li>
+<li>Reserve exceptions for genuinely exceptional, cross-cutting failures; use <code>optional</code>/<code>expected</code> for expected "not found"/"invalid input" outcomes on hot paths.</li>
 </ul>
 </section>
 
@@ -274,6 +290,10 @@ cv.wait(lk, []{ return ready; }); // predicate form — no spurious wakeups</cod
 <li>A <b>data race</b> is UB <span class="warn">!</span> — any concurrent access with ≥1 write and no synchronisation.</li>
 <li>Always lock multiple mutexes in a consistent order (or use <code>scoped_lock</code>) to avoid deadlock.</li>
 <li>Run <b>TSan</b> (<code>-fsanitize=thread</code>) in CI.</li>
+<li>Prefer <b>message-passing</b> / higher-level tools (<code>async</code>, thread pools, queues) over hand-rolled locks; the less shared mutable state, the fewer races.</li>
+<li><code>condition_variable</code>: always wait with a <b>predicate</b> and re-check on wake — spurious wakeups are real, and you must hold the mutex to change the condition then notify.</li>
+<li><code>thread</code> that is neither joined nor detached at destruction calls <code>std::terminate</code> <span class="warn">!</span> — that's why <code>jthread</code> (auto-joins, carries a <code>stop_token</code>) is the C++20 default.</li>
+<li>Guard against <b>false sharing</b>: two atomics on the same cache line ping-pong between cores — pad to <code>hardware_destructive_interference_size</code>.</li>
 </ul>
 </section>
 
@@ -294,7 +314,9 @@ if (flag.load(std::memory_order_acquire)) use(data);</code></pre>
 <ul>
 <li><code>release</code> store <i>synchronizes-with</i> an <code>acquire</code> load of the same var → establishes happens-before.</li>
 <li><code>compare_exchange_weak</code> in a loop (may spuriously fail); watch the <b>ABA</b> problem <span class="warn">!</span></li>
-<li><code>volatile</code> is <b>not</b> atomic and gives no cross-thread ordering <span class="warn">!</span></li>
+<li><code>volatile</code> is <b>not</b> atomic and gives no cross-thread ordering <span class="warn">!</span> (it's for memory-mapped I/O, not threading).</li>
+<li>An atomic op isn't automatically lock-free — check <code>std::atomic&lt;T&gt;::is_lock_free()</code>; large <code>T</code> falls back to a hidden mutex.</li>
+<li>Default to <code>seq_cst</code> and only weaken (acquire/release/relaxed) once a benchmark proves it matters and you can justify the ordering — this is where lock-free code goes subtly wrong.</li>
 </ul>
 </section>
 
@@ -328,6 +350,164 @@ if (flag.load(std::memory_order_acquire)) use(data);</code></pre>
 g++ -std=c++20 -Wall -Wextra -O2 \
     -fsanitize=address,undefined app.cpp</code></pre>
 <p>Speed: forward-declare, PCH, unity builds, C++20 <b>modules</b>.</p>
+</section>
+
+<section class="card"><h3>Object Model, Init &amp; Lifetime</h3>
+<p>A build runs each <code>.cpp</code> independently: <b>preprocess</b> (paste headers/macros → a translation unit) → <b>compile</b> (TU → <code>.o</code> + symbols) → <b>link</b> (resolve every symbol to one definition). No VM, no interpreter — native code.</p>
+<ul>
+<li><b>Value semantics</b>: a variable <i>is</i> the object. <code>Widget b = a;</code> is an independent copy — no hidden handle, no sharing (contrast Java/C# reference semantics). You opt into sharing via pointers/<code>shared_ptr</code>.</li>
+<li><b>Object</b> = a typed region of storage with a lifetime; an <code>int</code> is an object too. Lifetime <b>begins</b> when construction completes, <b>ends</b> at destruction. Touching it outside that window is UB <span class="warn">!</span></li>
+<li><b>Storage duration</b>: automatic (scope) · static (program) · dynamic (<code>new</code>) · thread (<code>thread_local</code>). RAII is just "tie a resource to an automatic object."</li>
+<li><code>struct</code> vs <code>class</code>: <b>only</b> default access differs (public vs private). Both are full class types.</li>
+</ul>
+<table><thead><tr><th>Trait</th><th>Question it answers</th></tr></thead><tbody>
+<tr><td>trivial</td><td>default ctor/copy/dtor are compiler-generated → <code>memcpy</code>-safe</td></tr>
+<tr><td>standard-layout</td><td>C-ABI compatible layout (interop / <code>offsetof</code>)</td></tr>
+<tr><td>POD</td><td>both of the above (split into the two in C++11)</td></tr>
+</tbody></table>
+<ul>
+<li>Automatic <code>int i;</code> is <b>indeterminate</b>, not zero — reading it is UB <span class="warn">!</span> Only static storage zero-inits.</li>
+<li><code>auto</code> strips top-level <code>const</code>/ref — use <code>const auto&amp;</code> when you mean it. Always <code>nullptr</code>, never <code>NULL</code>/<code>0</code> (wrong overload / template breakage).</li>
+<li>Brace-init <code>{}</code> forbids narrowing, but <span class="warn">!</span> <code>vector&lt;int&gt;{3}</code> is <b>one element 3</b>, <code>vector&lt;int&gt;(3)</code> is <b>three zeros</b> — <code>initializer_list</code> hijacks the overload.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Type Traits &amp; TMP</h3>
+<p>TMP = compile-time computation with the template system as interpreter: <b>types are values</b>, a metafunction is a class template exposing <code>::type</code> (a type) or <code>::value</code> (a value). Recursion replaces loops; specialisation replaces branching. Modern code prefers <code>constexpr</code> + concepts.</p>
+<table><thead><tr><th>Trait</th><th>Does</th></tr></thead><tbody>
+<tr><td><code>is_same_v&lt;T,U&gt;</code></td><td>query: same type?</td></tr>
+<tr><td><code>is_integral_v&lt;T&gt;</code></td><td>query: numeric category</td></tr>
+<tr><td><code>remove_reference_t&lt;T&gt;</code></td><td><code>T&amp;</code>→<code>T</code> (leaves <code>const</code>!)</td></tr>
+<tr><td><code>remove_cvref_t&lt;T&gt;</code></td><td>strip ref + cv (C++20)</td></tr>
+<tr><td><code>decay_t&lt;T&gt;</code></td><td>pass-by-value model</td></tr>
+<tr><td><code>conditional_t&lt;B,T,F&gt;</code></td><td>compile-time ternary on types</td></tr>
+</tbody></table>
+<pre><code>// SFINAE via enable_if (pre-C++20)
+template&lt;class T,
+  std::enable_if_t&lt;std::is_integral_v&lt;T&gt;,int&gt; = 0&gt;
+T half(T x){ return x/2; }
+
+using R = decltype(std::declval&lt;T&gt;() + std::declval&lt;U&gt;());</code></pre>
+<ul>
+<li><code>_v</code>/<code>_t</code> aliases kill <code>::value</code> / <code>typename …::type</code> noise.</li>
+<li><code>declval&lt;T&gt;()</code> = "an expression of type <code>T</code>" in <b>unevaluated</b> contexts (<code>decltype</code>/<code>sizeof</code>/<code>noexcept</code>) — no ctor needed, no runtime definition.</li>
+<li><span class="warn">!</span> <code>decltype(x)</code> = declared type; <code>decltype((x))</code> = <b>expression</b> type → adds a ref (<code>int&amp;</code> for a local).</li>
+<li><b>Tag dispatch</b> (pass an empty tag type) drives <code>std::advance</code> per iterator category; use over <code>enable_if</code> for a discrete tag hierarchy.</li>
+<li>Reach for <code>if constexpr</code> (in-function branch) or a <b>concept</b> (affects overload resolution) before writing SFINAE.</li>
+</ul>
+</section>
+
+<section class="card"><h3>constexpr Family &amp; Compile-time</h3>
+<table><thead><tr><th>Keyword</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>constexpr</code></td><td><i>may</i> run at compile time — a permission, context decides</td></tr>
+<tr><td><code>consteval</code></td><td><b>must</b> — immediate fn; runtime call = error (C++20)</td></tr>
+<tr><td><code>constinit</code></td><td>static init at compile time (kills init-order fiasco); stays <b>mutable</b></td></tr>
+</tbody></table>
+<pre><code>constexpr int sq(int x){ return x*x; }
+int a = sq(read());        // runtime: arg not constant
+constexpr int b = sq(9);   // forced compile-time
+static_assert(sq(9)==81);  // forced compile-time</code></pre>
+<ul>
+<li><span class="warn">!</span> "<code>constexpr</code> = compile-time" is the classic trap — it only runs at compile time in a constant-expression context (<code>constexpr</code> var, <code>static_assert</code>, array bound, template arg).</li>
+<li>C++20 widened it hugely: <code>new</code>/<code>delete</code>, <code>constexpr</code> <code>vector</code>/<code>string</code>, virtual fns, <code>try</code> — you can build &amp; sort a vector at compile time (every allocation must be freed before eval ends).</li>
+<li><code>std::is_constant_evaluated()</code> branches compile-time vs runtime paths.</li>
+<li><code>if constexpr</code> discards the <b>untaken</b> branch (not instantiated) → the readable replacement for tag dispatch/SFINAE branching.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Ranges &amp; Views (C++20)</h3>
+<p>A <b>range</b> has <code>begin()</code>/<code>end()</code>. A <b>view</b> is a non-owning, O(1)-to-copy, <b>lazy</b> adaptor — building it does no work; elements compute on demand as you iterate.</p>
+<pre><code>std::vector&lt;int&gt; v{1,2,3,4,5,6};
+auto pipe = v | std::views::filter([](int x){return x%2==0;})
+              | std::views::transform([](int x){return x*x;});
+// nothing computed yet — one fused pass on iteration
+for(int x: pipe) use(x);          // 4 16 36
+// materialise:  auto out = pipe | std::ranges::to&lt;std::vector&gt;(); // C++23</code></pre>
+<ul>
+<li><code>range | adaptor</code> ≡ <code>adaptor(range)</code>; reads in data-flow order, fuses into <b>one pass, no intermediate containers</b>. <code>take(n)</code> means the rest is never computed.</li>
+<li><b>Projection</b>: <code>ranges::sort(ws, {}, &amp;Widget::price)</code> — sort "by field" with no comparator lambda. Signature: <code>algo(range, cmp={}, proj={})</code>.</li>
+<li><code>std::ranges::sort(v)</code> takes the whole range (no <code>begin/end</code>), is concept-constrained (clean errors), composes with views.</li>
+<li><span class="warn">!</span> Views are non-owning — piping off a <b>temporary</b> container dangles. Ranges defend the algorithm case: <code>ranges::find(std::vector{...},x)</code> returns <code>std::ranges::dangling</code> (won't compile as an iterator). <b>Borrowed ranges</b> (<code>string_view</code>, <code>span</code>, lvalue containers) stay valid.</li>
+<li>Where they bite: <b>debug builds</b> (unfused adaptor layers) far slower than a raw loop; lazy side-effecting predicates re-run on every traversal; harder to step in a debugger.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Coroutines (C++20)</h3>
+<p>A function that can <b>suspend</b> mid-body, return control, and later <b>resume</b> with locals intact. Becomes one purely by <i>using</i> <code>co_await</code>/<code>co_yield</code>/<code>co_return</code> — no signature keyword.</p>
+<pre><code>std::generator&lt;int&gt; fib(){          // C++23 std::generator
+  int a=0,b=1;
+  while(true){ co_yield a; std::tie(a,b)=std::pair{b,a+b}; }
+}
+Task&lt;std::string&gt; fetch(Url u){
+  auto c = co_await connect(u);     // suspend until connected
+  co_return co_await c.read();
+}</code></pre>
+<ul>
+<li><b>Frame</b>: holds locals, a copy of params, the <b>promise</b>, resume point — usually heap-allocated, but <b>HALO</b> may elide it when the lifetime is bounded.</li>
+<li><b>Promise type</b> (<code>Ret::promise_type</code>): compiler-driven hooks — <code>get_return_object</code>, <code>initial_suspend</code> (lazy vs eager), <code>yield_value</code>/<code>return_value</code>, <code>final_suspend</code> (<code>noexcept</code>), <code>unhandled_exception</code>.</li>
+<li><b>Awaiter</b> triad: <code>await_ready</code> (skip suspend?) → <code>await_suspend(h)</code> (stash handle for later resume; return a handle = <b>symmetric transfer</b>, constant stack) → <code>await_resume</code> (yields <code>co_await</code>'s result).</li>
+<li><span class="warn">!</span> Reference/<code>string_view</code>/<code>span</code> <b>parameters</b> dangle: the frame copies the reference, not the referent. Take coroutine params <b>by value</b>.</li>
+<li>C++20 shipped only the <b>machinery</b> — no standard <code>task</code>; <code>std::generator</code> arrived in C++23. Real async needs an executor (Asio, cppcoro, stdexec/P2300 in C++26) — the <b>executor gap</b>.</li>
+<li>Single-threaded &amp; cooperative — a coroutine is <b>not</b> a thread; concurrency comes from the scheduler.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Vocabulary Types &amp; Modern C++ Timeline</h3>
+<table><thead><tr><th>Type</th><th>Models</th></tr></thead><tbody>
+<tr><td><code>optional&lt;T&gt;</code></td><td>maybe-a-value (kills sentinel/-1 returns)</td></tr>
+<tr><td><code>variant&lt;A,B&gt;</code></td><td>one-of-N (type-safe union); <code>std::visit</code></td></tr>
+<tr><td><code>expected&lt;T,E&gt;</code></td><td>value-or-error, no exceptions (C++23)</td></tr>
+<tr><td><code>any</code></td><td>type-erased single value</td></tr>
+<tr><td><code>span&lt;T&gt;</code> / <code>string_view</code></td><td>non-owning view over contiguous data</td></tr>
+</tbody></table>
+<table><thead><tr><th>Std</th><th>Headline adds</th></tr></thead><tbody>
+<tr><td>C++11</td><td>the reset: move, smart ptrs, <code>auto</code>, lambdas, <code>nullptr</code>, <code>&lt;thread&gt;</code>+memory model, <code>constexpr</code>, variadics</td></tr>
+<tr><td>C++14</td><td>polish: generic lambdas, <code>make_unique</code>, relaxed <code>constexpr</code></td></tr>
+<tr><td>C++17</td><td>structured bindings, <code>if constexpr</code>, <code>optional</code>/<code>variant</code>, <code>string_view</code>, folds, guaranteed elision, <code>[[nodiscard]]</code></td></tr>
+<tr><td>C++20</td><td>2nd reset: concepts, ranges, coroutines, modules, <code>&lt;=&gt;</code>, <code>span</code>, <code>format</code>, <code>jthread</code></td></tr>
+<tr><td>C++23</td><td>fill-in: <code>expected</code>, <code>print</code>, <code>generator</code>, <code>mdspan</code>, deducing <code>this</code>, <code>ranges::to</code></td></tr>
+</tbody></table>
+<ul>
+<li>Move typically steals pointers + nulls the source — cheap because it <b>doesn't</b> copy the payload.</li>
+<li>Perfect forwarding needs a <b>deduced</b> <code>T&amp;&amp;</code> (forwarding ref) + <code>std::forward&lt;T&gt;</code>; <code>void f(string&amp;&amp;)</code> is a plain rvalue ref, not forwarding <span class="warn">!</span></li>
+<li>Modules cut build coupling vs textual <code>#include</code>, but <span class="warn">!</span> toolchain/CMake support is still uneven in 2026 — adopt with eyes open.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Performance &amp; Data Layout</h3>
+<p><b>Measure before optimising</b> — profile (<code>perf</code>, VTune, google-benchmark), find the hot 3%, fix that. Guessing is how you make code uglier <i>and</i> slower.</p>
+<ul>
+<li><b>Cache locality dominates.</b> A main-memory miss is ~100&times; an L1 hit — algorithmic constant factors are usually about memory access, not instruction count.</li>
+<li><b>AoS → SoA</b>: if a loop touches one field of many objects, store fields in parallel arrays (struct-of-arrays) so each cache line carries only useful data; enables auto-vectorisation.</li>
+<li><code>vector</code> beats <code>list</code>/<code>map</code> for traversal almost always — contiguous, prefetch-friendly. Prefer <code>reserve()</code> to kill reallocations.</li>
+<li><b>Zero-overhead abstraction</b>: templates/inlining/RAII compile to the same code you'd hand-write. <code>std::function</code>, virtual calls, and <code>shared_ptr</code> refcounts are the non-zero-cost ones — avoid on hot paths.</li>
+<li>Prefer <code>emplace_back</code> + move; pass <code>const&amp;</code>/<code>string_view</code>/<code>span</code> to avoid copies.</li>
+<li>Small-buffer optimisation (SSO): short <code>std::string</code>s live inline, no heap — don't fear small strings.</li>
+<li>Look at the asm on <b>godbolt</b> / <code>-S</code>; check what actually inlined and vectorised under <code>-O2 -march=native</code>.</li>
+<li><span class="warn">!</span> Signed overflow &amp; strict aliasing are UB the optimiser <i>exploits</i> — bugs that appear only at <code>-O2</code>. Use <code>-fsanitize=undefined</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Strings, Format, Time &amp; Files</h3>
+<pre><code>std::string s = std::format("{} = {:.2f}", name, x);  // C++20, type-safe
+std::print("{:&gt;8}\n", n);                              // C++23, no iostream
+std::string_view sv = s;      // non-owning; O(1) substr, no alloc
+
+namespace fs = std::filesystem;
+for (auto&amp; e : fs::directory_iterator(dir))
+    if (e.is_regular_file()) total += fs::file_size(e);
+
+auto t0 = std::chrono::steady_clock::now();
+/* work */
+auto ms = std::chrono::duration_cast&lt;
+            std::chrono::milliseconds&gt;(
+            std::chrono::steady_clock::now() - t0).count();</code></pre>
+<ul>
+<li><code>std::format</code>/<code>std::print</code> replace <code>printf</code> (not type-safe) and <code>iostream</code> (verbose, slow) — compile-time-checked format strings.</li>
+<li><span class="warn">!</span> <code>string_view</code> is non-owning — never return one referencing a local <code>string</code>, and remember it is <b>not</b> guaranteed null-terminated (don't hand <code>.data()</code> to a C API expecting <code>\0</code>).</li>
+<li>Use <code>steady_clock</code> for durations (monotonic), <code>system_clock</code> for wall-clock timestamps.</li>
+<li><code>fs::path</code> handles platform separators; wrap filesystem calls that can throw, or use the <code>error_code</code> overloads.</li>
+</ul>
 </section>
 
 <section class="card"><h3>&#9733; Code Review Checklist</h3>

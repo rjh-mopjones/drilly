@@ -77,7 +77,7 @@ pre code{background:none; padding:0; font-size:1em;}
 <section class="card legend"><h3>How to read &amp; print</h3>
 <ul>
 <li><span class="warn">!</span> footgun / gotcha &nbsp; <code>&#9744;</code> pre-code checklist item</li>
-<li>Scope: <b>9 katas</b> from a blank file in interview time. The hard part is rarely the algorithm — it's <b>satisfying the borrow checker</b>: who owns what, move vs borrow, does it even compile in safe Rust.</li>
+<li>Scope: <b>13 katas</b> from a blank file in interview time. The hard part is rarely the algorithm — it's <b>satisfying the borrow checker</b>: who owns what, move vs borrow, does it even compile in safe Rust.</li>
 <li>Method (every kata): design <b>ownership-first</b> → write inline <code>#[test]</code>s first → implement to compile+pass → note complexity. <b>Making it compile is half the work.</b></li>
 <li>Run one kata: <code>cargo test -p solution &lt;kata&gt;</code>; unsafe capstone adds <code>cargo +nightly miri test</code>. Last 2 cards = pre-code checklist + common mistakes.</li>
 <li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
@@ -110,6 +110,9 @@ pre code{background:none; padding:0; font-size:1em;}
 <tr><td><b>linked structure</b> (DLL, graph, tree)</td><td><b>arena</b>: <code>Vec&lt;Node&gt;</code>+<code>usize</code> idx</td></tr>
 <tr><td>single-thread interior mutation</td><td><code>RefCell</code> (runtime borrow check)</td></tr>
 <tr><td>shared mutable across threads</td><td><code>Arc&lt;Mutex&lt;T&gt;&gt;</code></td></tr>
+<tr><td>resource returned on scope exit</td><td><b>RAII guard</b>: <code>Option&lt;T&gt;</code>+<code>Drop</code>+<code>Deref</code></td></tr>
+<tr><td>block until a resource frees</td><td><code>Condvar</code>+<code>while</code> predicate loop</td></tr>
+<tr><td>testable time-dependent logic</td><td>inject clock: <code>Box&lt;dyn Fn()-&gt;Instant&gt;</code></td></tr>
 <tr><td>ints/small POD</td><td><code>Copy</code> (duplicates, no move)</td></tr>
 </tbody></table>
 <p><span class="warn">!</span> The naive DLL wants <b>two owners per node</b> (prev+next) — safe Rust allows one. The idiomatic fix is <b>indices, not pointers</b>:</p>
@@ -332,6 +335,90 @@ for w in &amp;mut self.workers { w.handle.take().unwrap().join()?; }</code></pre
 <p><span class="warn">!</span> <b>Gotchas:</b> <code>while let Ok(job)=rx.lock()?.recv(){job()}</code> holds the guard for the whole body → all jobs serialised. <code>Receiver</code> isn't <code>Clone</code>.</p>
 </section>
 
+<section class="card"><h3>connpool — RAII Guard (Drop = release)</h3>
+<p><b>Topic:</b> RAII — ownership + <code>Drop</code> as resource management. Bounded pool of reusable connections; <code>acquire</code> hands back a guard, the return happens <b>in the guard's <code>Drop</code></b> — no <code>release()</code> to forget. Same shape as <code>MutexGuard</code>/<code>File</code>/<code>Box</code>.</p>
+<pre><code>pub struct PooledConn&lt;T&gt; {
+    conn: Option&lt;T&gt;,       // Option so Drop can move it out of &amp;mut self
+    inner: Arc&lt;Inner&lt;T&gt;&gt;,  // where to return it
+}
+// Deref/DerefMut -&gt; T (guard IS the connection);
+struct Inner&lt;T&gt; { free: Mutex&lt;VecDeque&lt;T&gt;&gt;, available: Condvar, capacity: usize }
+impl&lt;T&gt; Drop for PooledConn&lt;T&gt; {
+    fn drop(&amp;mut self) {
+        if let Some(c) = self.conn.take() {            // move out
+            self.inner.free.lock().unwrap().push_back(c);
+            self.inner.available.notify_one();          // wake one blocked acquirer
+        }
+    }
+}</code></pre>
+<ul>
+<li><b>Move:</b> return rides on ownership, not caller discipline → leak-free on every <code>?</code>/early-return/panic. Three mechanics: <code>Option&lt;T&gt;</code> (move out of <code>&amp;mut self</code>), <code>Deref/DerefMut</code> (ergonomic), <code>Drop</code> (the return).</li>
+<li><code>acquire</code> blocks on the <code>Condvar</code> in a <b><code>while</code> loop</b> (spurious wakeups); <code>try_acquire</code> is a single <code>pop_front()?</code>, never waits.</li>
+<li><b>Tests:</b> Barrier-gated <code>thread::scope</code> — <code>max_seen &lt;= capacity</code> (never over-hands) + <code>available() == capacity</code> at end.</li>
+</ul>
+<p><span class="warn">!</span> <b>Gotchas:</b> a <code>release(conn)</code> method reintroduces the leak RAII deletes. <code>if free.is_empty()</code> before <code>wait</code> (must be <code>while</code>). Forgetting <code>notify_one</code> → returned conn sits idle while acquirers sleep forever.</p>
+</section>
+
+<section class="card"><h3>circuitbreaker — 3-State FSM + Injected Clock</h3>
+<p><b>Topic:</b> FSM as <code>enum</code>+<code>match</code>, <code>Mutex</code>-shared state, <b>injected clock</b> for deterministic time. Fronts a flaky downstream; trips <code>Open</code> after N consecutive fails, fast-fails without calling <code>f</code>, probes after cooldown.</p>
+<pre><code>pub enum State { Closed, Open, HalfOpen }
+pub enum CallError&lt;E&gt; { Open, Inner(E) }  // Open: f NOT run · Inner: real err kept
+pub struct CircuitBreaker {
+    inner: Mutex&lt;Inner&gt;,   // State + counters + opened_at, one lock
+    clock: Box&lt;dyn Fn() -&gt; Instant + Send + Sync&gt;,  // Instant::now prod, fake in test
+}
+pub fn call&lt;T,E&gt;(&amp;self, f: impl FnOnce()-&gt;Result&lt;T,E&gt;) -&gt; Result&lt;T, CallError&lt;E&gt;&gt;;</code></pre>
+<table><thead><tr><th>State</th><th>on call</th></tr></thead><tbody>
+<tr><td><b>Closed</b></td><td>run f; success resets count; Nth <i>consecutive</i> fail → Open + stamp time</td></tr>
+<tr><td><b>Open</b></td><td><b>don't run f</b>, return <code>Open</code>; after cooldown → HalfOpen (lazy, next call)</td></tr>
+<tr><td><b>HalfOpen</b></td><td>run f; Nth success → Closed; <i>first</i> fail → Open, restart timer</td></tr>
+</tbody></table>
+<ul>
+<li><b>Move:</b> run <code>f</code> <i>inside</i> the lock hold — decision + transition atomic, or two threads both trip. Clock is a <code>Box&lt;dyn Fn&gt;</code> seam → test advances a shared <code>Instant</code>, zero real sleeps.</li>
+<li><code>state()</code> is <code>&amp;self</code> + interior mutability (applies pending cooldown expiry); no timer thread.</li>
+</ul>
+<p><span class="warn">!</span> <b>Gotchas:</b> counting <i>total</i> not <i>consecutive</i> fails (a success must reset). Moving Open→HalfOpen on a background timer (it's lazy). Running <code>f</code> before locking splits check from transition.</p>
+</section>
+
+<section class="card"><h3>parkinglot — Enums + Best-Fit</h3>
+<p><b>Topic:</b> closed-set modelling — enums, exhaustive <code>match</code>, ticket-as-capability. Two closed sets + one lookup table. Best-fit = smallest free spot that fits, so a bike doesn't burn a Large a truck needs.</p>
+<pre><code>enum VehicleKind { Motorcycle, Car, Truck }
+#[derive(PartialOrd, Ord)] enum SpotKind { Small, Medium, Large } // decl order = size
+struct Ticket { spot_kind: SpotKind, index: usize, plate: String } // unforgeable receipt
+// fit rules AND best-fit order in one exhaustive match, smallest-first:
+fn fit_order(k: VehicleKind) -&gt; &amp;'static [SpotKind] {
+    match k {
+        VehicleKind::Motorcycle =&gt; &amp;[Small, Medium, Large],
+        VehicleKind::Car        =&gt; &amp;[Medium, Large],
+        VehicleKind::Truck      =&gt; &amp;[Large],
+    }
+}</code></pre>
+<ul>
+<li><b>Move:</b> enums over <code>Box&lt;dyn Vehicle&gt;</code> — closed set → no alloc, no vtable, and the compiler enforces the fit rules. Add <code>Bus</code> → build breaks until every <code>match</code> places it.</li>
+<li><b>Best-fit is free:</b> <code>park</code> walks the ascending <code>fit_order</code> slice, takes first free spot — that <i>is</i> best-fit, not a separate algorithm.</li>
+<li><b>Ticket = capability:</b> <code>unpark</code> consumes it by value, frees only if the plate still matches → double-free unrepresentable, <code>UnknownTicket</code> otherwise.</li>
+</ul>
+<p><span class="warn">!</span> <b>Gotchas:</b> a <code>_ =&gt;</code> arm in <code>fit_order</code> silently mis-parks the next kind. First-fit (largest-first / any free) starves trucks. <code>unpark</code> trusting the index alone lets a stale ticket evict a live car.</p>
+</section>
+
+<section class="card"><h3>vending — Transaction + Greedy Change</h3>
+<p><b>Topic:</b> stateful transaction + greedy change-making. Three state buckets: <code>slots</code> (stock+price), <code>float</code> (coins to give), <code>inserted</code> (punter escrow). <code>select</code> is one <b>all-or-nothing</b> transition.</p>
+<pre><code>enum Coin { Nickel, Dime, Quarter }  // cents() via match — invalid coin unrepresentable
+enum VendError {
+    SoldOut,
+    InsufficientFunds { needed: u32, balance: u32 }, // data carries the UI hint
+    ExactChangeOnly,                                 // affordable, float can't make change
+}
+struct Dispensed { product: String, change: Vec&lt;Coin&gt; }
+// select: validate slot+stock, balance&gt;=price, float can make change — THEN commit</code></pre>
+<ul>
+<li><b>Move:</b> every failure path returns <b>before the first mutation</b> → atomic without rollback. A punter who gets <code>InsufficientFunds</code> keeps their money; the slot stays buyable.</li>
+<li><code>balance()</code> is derived (sum the escrow), one source of truth — no drift vs a stored counter. Inserted coins <b>join the float</b> in the change pool.</li>
+<li><b>Greedy change:</b> largest coin first — optimal for canonical <code>5/10/25</code> with enough supply. A finite float can strand greedy → that's <code>ExactChangeOnly</code>, not a bug (DP is the robust fix).</li>
+</ul>
+<p><span class="warn">!</span> <b>Gotchas:</b> mutate-as-you-validate corrupts the machine on the error path. "Greedy always works" — only canonical + unlimited. Making <code>InsufficientFunds</code> a bare tag drops the <code>needed</code>/<code>balance</code> the caller needs.</p>
+</section>
+
 <section class="card"><h3>spscring — Unsafe Capstone + Miri</h3>
 <p><b>Topic:</b> <code>unsafe</code>, atomics ordering, hand-written <code>Send</code>/<code>Sync</code>. Wait-free SPSC ring — no locks, no per-item alloc.</p>
 <pre><code>struct Ring&lt;T&gt; {
@@ -346,6 +433,7 @@ unsafe impl&lt;T: Send&gt; Sync for Ring&lt;T&gt; {}</code></pre>
 <li><b>Ordering:</b> read your <i>own</i> index <code>Relaxed</code>; read the <i>other</i>'s <code>Acquire</code>; publish your own <code>Release</code>. That one release→acquire edge is the entire soundness proof — name it aloud.</li>
 <li>Allocate <b>N+1</b> slots, keep one empty → tell full from empty with no shared counter. <code>PhantomData&lt;Cell&lt;()&gt;&gt;</code> makes handles <code>!Sync</code> (enforces single producer/consumer).</li>
 <li><b>Drop</b> uses <code>get_mut()</code> (single owner, no atomics); drops only <code>[head,tail)</code>.</li>
+<li><b>Why <code>unsafe</code> at all:</b> safe Rust forbids two threads touching one buffer slot; the ring proves via the release→acquire edge that producer and consumer never touch the <i>same</i> slot at the same time, so the aliasing is sound — you assert what the borrow checker can't see. Hence the hand-written <code>unsafe impl Send/Sync</code>.</li>
 </ul>
 <p><span class="warn">!</span> <b>Gotcha:</b> green <code>cargo test</code> proves nothing — run <code>cargo +nightly miri test -p solution spscring</code>. <code>SeqCst</code> everywhere works but hides that you don't know which pair matters.</p>
 </section>
@@ -368,6 +456,15 @@ unsafe impl&lt;T: Send&gt; Sync for Ring&lt;T&gt; {}</code></pre>
 <li><code>let-else</code>: <code>let Some(x) = opt else { return };</code> — guard clause.</li>
 <li><code>?</code> on <code>Option</code>: <code>let idx = *self.map.get(k)?;</code></li>
 <li><code>matches!(x, Err(E::Missing))</code> in tests.</li>
+<li><code>Option::take()</code> — move out of <code>&amp;mut self</code> (Drop-shutdown, Drop-release, iterator flush).</li>
+<li><code>entry(k).or_default()</code> / <code>or_insert_with(|| ..)</code> — insert-or-get in one lookup.</li>
+<li><code>map_or(0, Vec::len)</code> — default when the key is absent, no <code>unwrap</code>.</li>
+<li><code>#[non_exhaustive]</code> on public error enums — add a variant without breaking callers.</li>
+</ul>
+<h4>Where the type system's guarantees stop</h4>
+<ul>
+<li><b>Safe Rust kills:</b> data races, use-after-free, double-free, null deref, iterator invalidation.</li>
+<li><b>Still on you:</b> deadlock, lost update, logic bugs, <code>RefCell</code> runtime panics, <code>unsafe</code> UB, resource leaks (unless RAII). Name the boundary unprompted — that's the senior tell.</li>
 </ul>
 </section>
 
@@ -394,7 +491,14 @@ unsafe impl&lt;T: Send&gt; Sync for Ring&lt;T&gt; {}</code></pre>
 <li>&#9744; RMW held inside <b>one</b> lock guard (no lost update).</li>
 <li>&#9744; Multiple locks acquired in a <b>global sorted order</b> (no deadlock); registry lock not held across a per-item lock.</li>
 <li>&#9744; Shutdown by <b>closing the channel</b> (drop sender), then <code>join</code> — no sentinel, no <code>sleep</code>.</li>
+<li>&#9744; <code>Condvar::wait</code> guarded by a <b><code>while</code></b> predicate (spurious wakeups), paired with a <code>notify_one</code> on release.</li>
 <li>&#9744; <code>unsafe</code>: every block has a checkable <code>// SAFETY:</code>; minimal <code>Acquire</code>/<code>Release</code>; verified with <b>Miri</b>.</li>
+</ul>
+<h4>Resources &amp; time</h4>
+<ul>
+<li>&#9744; Borrowed resource returned by <b>RAII <code>Drop</code></b>, never a <code>release()</code> the caller can forget — held as <code>Option&lt;T&gt;</code> so <code>Drop</code> can move it out; <code>Deref/DerefMut</code> for ergonomics.</li>
+<li>&#9744; Time-dependent logic reads an <b>injected clock</b> (<code>Fn() -&gt; Instant</code>), so tests advance time by hand — no real <code>sleep</code>.</li>
+<li>&#9744; Multi-step transaction (vend, hedge) <b>validates every path before the first mutation</b> — atomic commit-or-abort, no half-mutated rollback.</li>
 </ul>
 <h4>Tests first</h4>
 <ul>
@@ -417,6 +521,14 @@ unsafe impl&lt;T: Send&gt; Sync for Ring&lt;T&gt; {}</code></pre>
 <tr><td>last candle / leftover jobs dropped</td><td>forgot the end-flush / recv-drains-buffer <span class="warn">!</span></td></tr>
 <tr><td><code>10-2-3 == 11</code></td><td>right-recursed; left-assoc needs a loop <span class="warn">!</span></td></tr>
 <tr><td>reaching for <code>unsafe</code> on the LRU</td><td>red flag — the index design is safe <i>and</i> fast <span class="warn">!</span></td></tr>
+<tr><td>a <code>release()</code>/<code>close()</code> method on a pool</td><td>leaks on every error path; return via <code>Drop</code> (RAII) <span class="warn">!</span></td></tr>
+<tr><td><code>if free.is_empty()</code> before <code>Condvar::wait</code></td><td>spurious wakeup pops empty; use <code>while</code> <span class="warn">!</span></td></tr>
+<tr><td>breaker still calls <code>f</code> when Open</td><td>whole point is to <i>not</i> touch the downstream <span class="warn">!</span></td></tr>
+<tr><td>breaker counts <i>total</i> not <i>consecutive</i> fails</td><td>a success must reset the counter <span class="warn">!</span></td></tr>
+<tr><td>time logic reads <code>Instant::now()</code> in the guts</td><td>untestable; inject the clock as a seam <span class="warn">!</span></td></tr>
+<tr><td>parking uses first-fit / a <code>_</code> arm</td><td>starves trucks; enumerate + best-fit slice <span class="warn">!</span></td></tr>
+<tr><td>vending mutates before validating</td><td>corrupt on error; validate-all then commit <span class="warn">!</span></td></tr>
+<tr><td>"greedy change always works"</td><td>only canonical + unlimited float; else <code>ExactChangeOnly</code> <span class="warn">!</span></td></tr>
 </tbody></table>
 <p>Senior signal in one line: <i>state the ownership shape first, model errors as enums, match exhaustively, and know exactly where the type system's guarantees stop.</i></p>
 </section>
