@@ -92,6 +92,26 @@ pre code{background:none; padding:0; font-size:1em;}
 </ul>
 </section>
 
+<section class="card"><h3>Context Window &amp; In-Context Learning</h3>
+<ul>
+<li><b>Context window</b> = max tokens the model attends over in one forward pass (prompt + generation). Bounded internally by <b>attention O(n²) compute</b> + <b>KV-cache O(n) memory</b> + how far positional encodings were trained/extended — not an arbitrary product cap.</li>
+<li><b>In-context learning (ICL)</b>: give examples in the prompt (few-shot) and behavior adapts — <span class="warn">!</span> <b>no weights change</b>. Nothing is "learned" persistently; it's conditioning. New chat → the adaptation is gone.</li>
+<li>Mechanism: attention reads the in-prompt demos and shifts the next-token distribution. The <b>learning</b> (weights) happened in pretraining; ICL just <i>uses</i> it.</li>
+<li><span class="warn">!</span> Facts past the cutoff or outside context simply aren't there → hallucination or "I don't know". RAG injects them <b>into context</b>, doesn't teach the weights.</li>
+<li>Everything in-window is re-attended every step — long context is a <b>recurring compute/memory cost</b>, not free memory.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Reasoning, Math &amp; Chain-of-Thought</h3>
+<ul>
+<li>"Just predicting the next token" still reasons because <b>predicting text well requires the underlying skill</b>: to continue a worked solution the model must have internalized the procedure. Capability is <i>emergent machinery</i> for lowering prediction loss.</li>
+<li><b>Chain-of-thought</b>: emitting intermediate steps gives the model more <b>forward passes / tokens to compute in</b> — each step conditions the next. One-shot answers get one pass; CoT spreads a hard problem over many. That's why "think step by step" helps.</li>
+<li><span class="warn">!</span> <b>Arithmetic is fragile</b> not because it "can't reason" but because tokenization splits numbers oddly (see strawberry) and there's no built-in ALU — it approximates learned patterns. Tools/code execution fix this.</li>
+<li>No retrieval from a database: knowledge is <b>interpolated from weights</b> → confident wrong answers (hallucination) look identical to right ones internally.</li>
+<li><b>Reasoning models</b> are trained (RL on verifiable rewards — did the code pass, is the answer correct) to produce long useful CoT before answering, spending more inference compute for accuracy.</li>
+</ul>
+</section>
+
 <section class="card"><h3>Tokenization (BPE)</h3>
 <ul>
 <li>Text → integer IDs via a <b>subword</b> vocab (byte-level BPE / SentencePiece), <b>V ≈ 30k–130k</b>.</li>
@@ -178,6 +198,22 @@ w = softmax(scores)   # future → exp(-inf)=0</code></pre>
 </ul>
 </section>
 
+<section class="card"><h3>Masked Attention — worked example</h3>
+<pre><code>scores (3 tokens, pre-mask):
+        t0    t1    t2
+ t0 [ 2.0  -inf  -inf ]   # t0 sees only t0
+ t1 [ 1.0   3.0  -inf ]   # t1 sees t0,t1
+ t2 [ 0.5   2.0   1.5 ]   # t2 sees all
+row-softmax → each row sums to 1, upper-tri = 0</code></pre>
+<ul>
+<li>Row <b>i</b> = how token i distributes attention over the past; column <b>j</b> = how much everyone attends <i>to</i> token j.</li>
+<li>t0's row is forced one-hot on itself (only legal key) → the first token can only ever attend to itself. <span class="warn">!</span></li>
+<li>After softmax on t1: <code>[e^1, e^3]</code> renormalized ≈ <code>[0.12, 0.88]</code> over (t0,t1); t2 slot stays exactly 0.</li>
+<li>Because masking is <b>before</b> softmax, each row is a clean probability distribution over <i>only</i> legal positions — no leaked mass.</li>
+<li>One forward pass scores all 3 rows at once = 3 next-token predictions (training); at generation only the <b>last row</b> is used.</li>
+</ul>
+</section>
+
 <section class="card"><h3>Multi-Head Attention</h3>
 <pre><code>d_k = D / h
 per head: Q,K,V are (T, d_k)
@@ -245,6 +281,21 @@ flowchart TB
 </ul>
 </section>
 
+<section class="card"><h3>Param Count — worked example (GPT-2 small)</h3>
+<pre><code>config: D=768, N=12, V=50257, T=1024
+per block   = 12·D² = 12·768² ≈ 7.08M
+blocks      = 12 · 7.08M      ≈ 85M
+token embed = V·D = 50257·768 ≈ 38.6M  (tied head: reused)
+pos embed   = T·D = 1024·768  ≈ 0.79M
+total       ≈ 85M + 38.6M     ≈ 124M ✓</code></pre>
+<ul>
+<li>Rule of thumb: <b>12·D² per layer</b> (4D² attn + 8D² FFN), so <code>12·N·D²</code> for the stack, plus <code>V·D</code> embeddings.</li>
+<li><span class="warn">!</span> Embeddings are <b>38M of 124M here (~31%)</b> — huge in a small model. Scale D up and the D² term dominates; embeddings become a rounding error.</li>
+<li><b>Double D</b> → params ~4× (D² term), compute ~4×. <b>Double N</b> → params ~2×, compute ~2× but <b>2× sequential depth</b> (latency).</li>
+<li>Weight tying folds the LM head into the embedding → no separate <code>V·D</code> for output. Biases/norms are negligible (a few ·D per layer).</li>
+</ul>
+</section>
+
 <section class="card"><h3>The Forward Pass (shapes)</h3>
 <pre><code>ids            (B, T)
  → embed+pos   (B, T, D)
@@ -274,6 +325,35 @@ min-p: keep p_i ≥ p·max(p)</code></pre>
 </ul>
 </section>
 
+<section class="card"><h3>Softmax, Cross-Entropy &amp; Perplexity</h3>
+<pre><code>softmax(z)_i = exp(z_i) / Σ_j exp(z_j)
+loss = −log p_model(true next)   # cross-entropy = NLL
+perplexity = exp(loss)           # effective branching factor</code></pre>
+<ul>
+<li><b>Why exp</b>: makes every prob positive and turns <b>additive</b> logit gaps into <b>multiplicative</b> odds — a logit +2 higher is <code>e²≈7.4×</code> likelier, level-independent.</li>
+<li><span class="warn">!</span> <b>Numerical stability</b>: subtract <code>max(z)</code> before exp so it never overflows — result is identical (shift-invariant).</li>
+<li>The softmax+cross-entropy gradient is famously clean: <code>dL/dz_i = p_i − y_i</code> (predicted minus one-hot). That <code>(pred − target)</code> signal is what flows back through the LM head.</li>
+<li><b>Perplexity</b> = <code>exp(loss)</code>: "how many equally-likely tokens is it choosing between." 1 = perfect; only comparable under the <b>same tokenizer + corpus</b>. <span class="warn">!</span></li>
+<li>Loss floor = irreducible entropy of language → perplexity approaches a floor &gt; 1, never 1.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Logprobs, Penalties &amp; Reproducibility</h3>
+<ul>
+<li><b>logprobs</b> = <code>log softmax(logits)</code> per token. Uses: <b>confidence</b> (very negative = unsure → hallucination flag), <b>perplexity</b>/scoring, <b>classification</b> (read logprob of "yes" vs "no" instead of parsing prose), constrained A-vs-B selection.</li>
+</ul>
+<table><thead><tr><th>Penalty</th><th>Effect on seen token t</th></tr></thead><tbody>
+<tr><td>frequency</td><td><code>logit −= α·count(t)</code> (scales with uses)</td></tr>
+<tr><td>presence</td><td><code>logit −= β</code> if t appeared at all (flat)</td></tr>
+<tr><td>repetition</td><td><code>logit /= r</code> (r&gt;1) — divides +ve logits</td></tr>
+</tbody></table>
+<ul>
+<li><span class="warn">!</span> Too-strong penalty starves needed words (articles, a name) → degrades fluency for diversity.</li>
+<li><b>min-p</b>: keep <code>p_i ≥ p·max(p)</code> — adaptive like top-p, relative to the peak.</li>
+<li><b>Reproducible</b> gen: set <code>T=0</code> (or fix <code>seed</code>), pin <b>model version + batch size 1 + fixed hardware</b>. <span class="warn">!</span> Even then float non-associativity / kernel choice / MoE routing can flip a near-tie argmax across environments.</li>
+</ul>
+</section>
+
 <section class="card"><h3>Autoregressive Gen &amp; KV Cache</h3>
 <pre><code>loop: forward → last logits → sample
       → append token → repeat until EOS/max</code></pre>
@@ -287,6 +367,17 @@ min-p: keep p_i ≥ p·max(p)</code></pre>
 <tr><td><b>Prefill</b> (prompt)</td><td>parallel, compute-bound → TTFT ∝ prompt len</td></tr>
 <tr><td><b>Decode</b> (per token)</td><td>1/step, memory-bandwidth-bound → flat TPOT</td></tr>
 </tbody></table>
+</section>
+
+<section class="card"><h3>Inference Serving &amp; Latency</h3>
+<ul>
+<li><b>Total latency</b> ≈ <code>TTFT + n_out · TPOT</code>. <b>TTFT</b> = prefill (∝ prompt length + queue); <b>TPOT/ITL</b> = per decode step, roughly flat, creeps up as the cache grows.</li>
+<li><span class="warn">!</span> <b>Decode is memory-bandwidth-bound</b>: each step multiplies a <code>(1,D)</code> activation but must stream <b>all weights + the whole KV cache</b> from HBM. Bytes moved ≫ FLOPs → GPU waits on memory.</li>
+<li><b>Batching</b> is the big decode lever: amortize one weight-read across many sequences' tokens → throughput scales with bandwidth, not TFLOPs.</li>
+<li><b>Prompt / prefix caching</b>: shared system prompt or doc → compute its KV <b>once</b>, reuse across requests. Prefill runs only over the new suffix → TTFT + cost drop. <span class="warn">!</span> Only valid while the prefix is byte-identical and model version unchanged.</li>
+<li><b>Paged attention</b> (vLLM): allocate the cache in fixed pages on demand (like OS virtual memory) → no fragmentation, more concurrent sequences, higher batch/throughput.</li>
+<li><b>Quantization</b> (int8/int4) speeds decode by shrinking the bytes to move; <b>GQA/MQA</b> shrink <code>n_kv_heads</code> → smaller cache read per step.</li>
+</ul>
 </section>
 
 <section class="card"><h3>Pretraining</h3>
@@ -315,6 +406,34 @@ AdamW: per-param adaptive step + decoupled decay</code></pre>
 </ul>
 </section>
 
+<section class="card"><h3>Backprop, AdamW &amp; Stability</h3>
+<ul>
+<li><b>Backprop = reverse-mode autodiff</b>: one backward sweep computes <code>dL/dW</code> for <b>every</b> weight at once (cost ≈ one forward), reusing cached activations. <span class="warn">!</span> It propagates <b>derivatives</b>, not data, backward.</li>
+<li><b>Why AdamW not SGD</b>: transformer loss is <b>ill-conditioned</b> (gradient scales vary wildly per param). Adam tracks per-param mean <code>m</code> + variance <code>v</code> → adaptive, well-scaled step each. <b>W</b> = decoupled weight decay.</li>
+<li><b>Warmup</b>: on step 1 weights are random and Adam's <code>v</code> is unreliable — a full LR blows up. Ramp lets stats settle, then decay for precision. Pairs with…</li>
+<li><b>Gradient clipping</b>: if <code>‖g‖ &gt; max_norm</code>, rescale down (keep direction) → one spiky batch can't send loss to NaN and wreck a days-long run. <span class="warn">!</span></li>
+<li><b>Init</b>: small <b>random</b> (never zeros — zeros = identical neurons, identical grads, never break symmetry). Variance <code>~1/D</code> (Xavier/Kaiming) so signal neither explodes nor vanishes over N layers.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Training Memory Ledger</h3>
+<pre><code>per parameter, bf16 compute + fp32 Adam:
+  bf16 weight        2 B
+  bf16 gradient      2 B
+  fp32 master weight 4 B
+  fp32 Adam m        4 B
+  fp32 Adam v        4 B
+  --------------------------
+  ≈ 16 B / param   (vs 2 B to SERVE)</code></pre>
+<ul>
+<li><span class="warn">!</span> The <b>weights are only ~1/8 of training memory</b> — Adam's m,v + fp32 master dominate (12 of 16 B). A 14 GB model can need &gt;100 GB of state <b>before activations</b>.</li>
+<li>Plus <b>activations</b> for every layer (scale with <code>batch·seq·depth</code>) — cached by the forward pass for backprop. This is why training ≫ inference memory.</li>
+<li><b>Activation checkpointing</b>: recompute activations in the backward pass instead of storing → trade compute for memory.</li>
+<li><b>ZeRO / optimizer-state sharding</b>: split m,v (and master weights) across data-parallel GPUs so no one GPU holds it all.</li>
+<li>Train FLOPs ≈ <b>6·N·D</b> (fwd 2N + bwd 4N per token); inference ≈ 2N/token.</li>
+</ul>
+</section>
+
 <section class="card"><h3>Scaling Laws &amp; Compute</h3>
 <pre><code>loss ~ N^-a  (smooth power law in N, D, C)
 FLOPs_train ≈ 6 · N · D      # params × tokens
@@ -324,7 +443,8 @@ FLOPs_infer ≈ 2 · N / token</code></pre>
 <li><b>Chinchilla</b>: for a fixed C, scale N and D <b>together</b> — <b>~20 tokens/param</b> is compute-optimal. <span class="warn">!</span> GPT-3-era models were <b>under-trained</b> (too big, too little data).</li>
 <li><span class="warn">!</span> Returns <b>diminish but don't vanish</b> — irreducible floor, never 0.</li>
 <li><b>Emergent abilities</b>: appear sharply above scale — but many vanish under smoother metrics (possible measurement artifact, treat with skepticism).</li>
-<li>Training compute = one-time, enormous; inference = recurring, per-request.</li>
+<li>Training compute = one-time, enormous; inference = recurring, per-request — at scale, total inference spend can dwarf the one-off training cost.</li>
+<li><b>Worked budget</b>: a 7B model at Chinchilla-optimal ≈ 140B tokens → <code>6·7e9·1.4e11 ≈ 5.9e21</code> FLOPs. Fit loss on small runs, then <b>extrapolate</b> the power law before committing the big spend.</li>
 </ul>
 </section>
 
@@ -352,6 +472,10 @@ FLOPs_infer ≈ 2 · N / token</code></pre>
 </tbody></table>
 <ul>
 <li><b>Alignment</b> = helpful/honest/harmless. Side effects: <b>alignment tax</b> (capability dip, over-refusal), <b>sycophancy</b> (agreeing to please). <span class="warn">!</span> The RM is discarded at inference — deployed model is the tuned policy.</li>
+<li><b>RM loss</b> (Bradley-Terry): <code>−log σ(r(x,y_w) − r(x,y_l))</code> — only the score <i>gap</i> matters, so absolute reward scale is arbitrary. Humans <b>compare</b>, rarely author.</li>
+<li><span class="warn">!</span> <b>Reward hacking</b> (Goodhart): policy exploits RM flaws — pads length, over-hedges, flatters — for score without being better. KL leash + fresh comparisons are the defense.</li>
+<li><b>Order is fixed</b>: pretrain → SFT → (RLHF or DPO). SFT gives both the assistant format <b>and</b> the frozen reference the KL/log-ratios measure against.</li>
+<li><b>Refusals/safety = learned behavior</b> in the weights (SFT + preference data), not a rulebook at inference → hence jailbreaks and over-refusal.</li>
 </ul>
 </section>
 
@@ -369,8 +493,10 @@ FLOPs_infer ≈ 2 · N / token</code></pre>
 <ul>
 <li><span class="warn">!</span> FlashAttn is <b>exact</b>, not an approximation — win is IO, not dropped terms.</li>
 <li><span class="warn">!</span> GQA/MQA main win = <b>smaller KV cache</b> (decode is memory-bound), not FLOPs.</li>
-<li><span class="warn">!</span> MoE = <b>sparse activation</b>: huge <i>total</i> params, few <i>active</i>/token → more params at ~same FLOPs/token.</li>
-<li><span class="warn">!</span> Quantization <b>casts</b> existing weights; it doesn't shrink the param count or retrain.</li>
+<li><span class="warn">!</span> MoE = <b>sparse activation</b>: huge <i>total</i> params, few <i>active</i>/token → more params at ~same FLOPs/token. Routing (top-k of E experts) can depend on batch → a source of T=0 nondeterminism.</li>
+<li><span class="warn">!</span> Quantization <b>casts</b> existing weights; it doesn't shrink the param count or retrain. int8/int4 mainly wins decode (fewer bytes to stream).</li>
+<li><b>GQA numbers</b>: MHA has <code>n_kv_heads = h</code>; MQA = 1; GQA = a group count in between (e.g. 8 groups for 64 query heads) → cache shrinks by <code>h / n_kv_heads</code>×.</li>
+<li><b>Sliding-window</b> attention caps each token to a local window <code>w</code> → attention drops O(n²)→O(n·w) and the KV cache is bounded by <code>w</code>, not full length.</li>
 </ul>
 </section>
 

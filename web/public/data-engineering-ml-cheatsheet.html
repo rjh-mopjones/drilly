@@ -217,7 +217,12 @@ LEFT JOIN LATERAL (
 <li><b>Log-and-wait</b> <span class="ansi">gold</span> — log the <i>exact</i> feature values served online, wait for labels, train on the logged values. Training then matches serving by construction, whatever the offline path does.</li>
 </ul>
 <h4>Detect (it throws no error)</h4>
-<p>Compare serving-input stats to training stats (TFDV skew detection); reconcile online vs offline samples; watch feature distributions at the pipeline, not just model metrics.</p>
+<ul>
+<li><b>Consistency test in CI</b> — push the same input through the batch and streaming paths; assert identical outputs (a contract test that catches rounding / timezone / null-handling drift before deploy).</li>
+<li><b>Distribution comparison</b> — continuously diff training-time vs serving-time feature distributions (TFDV skew detection); a divergence is a skew alarm.</li>
+<li><b>Log-and-train audit</b> — sample served vectors, re-derive them via the batch path, and require a match.</li>
+</ul>
+<p>Watch distributions <b>at the pipeline</b>, not just model metrics — skew shows up in the inputs weeks before it shows up in the loss.</p>
 </section>
 
 <section class="card"><h3>Data Validation for ML</h3>
@@ -232,9 +237,12 @@ LEFT JOIN LATERAL (
 <ul>
 <li><b>Tools</b>: Great Expectations (suites), TFDV (ML schema + skew/drift), Pandera (typed dataframes), dbt tests (SQL models).</li>
 <li><b>Gate</b> = pass / <b>block</b> / <b>quarantine</b> + alert — not a warning nobody reads <span class="warn">!</span></li>
-<li><b>Data contract</b>: enforced schema+semantics agreed with the upstream producer.</li>
+<li><b>Data contract</b>: enforced schema+semantics agreed with the upstream producer — a breaking change fails <i>their</i> CI, not your model.</li>
+<li><b>Reference-based, not fixed thresholds</b> — compare to a rolling/seasonal baseline (PSI / KS distance) so seasonality doesn't false-positive.</li>
+<li><b>Fail-closed vs fail-open per feature</b> — a fraud feature <b>blocks</b>; a cosmetic one may ship-and-alert. Encode the stakes.</li>
+<li><b>Quarantine, don't drop</b> — keep bad partitions inspectable; hold last-good so serving degrades to <i>stale</i> (loud, via freshness) not <i>wrong</i> (silent).</li>
 </ul>
-<p><span class="warn">!</span> "Loads without error" ≠ valid — the worst data loads fine and is subtly wrong.</p>
+<p><span class="warn">!</span> "Loads without error" ≠ valid — the worst data loads fine and is subtly wrong. Gate <b>both</b> the training set and the live serving inputs, not just once on train.</p>
 </section>
 
 <section class="card"><h3>Data Quality &amp; Testing</h3>
@@ -331,9 +339,11 @@ LEFT JOIN LATERAL (
 <h4>DL input pipelines</h4>
 <ul>
 <li><code>tf.data</code> / PyTorch <code>DataLoader</code>: parallel load, <b>prefetch</b>, cache, <code>num_workers</code>.</li>
-<li>Shard to sequential formats (<b>TFRecord / WebDataset</b>) — millions of tiny files kill throughput.</li>
+<li>Shard to sequential formats (<b>TFRecord / WebDataset</b>) — millions of tiny files kill throughput; many workers read shards in parallel and can stream a set too big for local disk.</li>
+<li><b>Prefetch</b> prepares batch N+1 on CPU while the GPU trains on batch N — overlaps prep with compute so the GPU never stalls.</li>
+<li><b>Cache after decode</b> (the expensive step) when it fits, to skip repeated work across epochs; large sequential object-store reads beat random small reads.</li>
 <li><b>Augment train-only</b> — never on val/test <span class="warn">!</span></li>
-<li><span class="warn">!</span> The input pipeline is often the bottleneck: a starved GPU sits idle. Profile and <b>keep the GPU fed</b>.</li>
+<li><b>Throughput-budget</b> <span class="warn">!</span> — measure input samples/s vs the GPU's consumption rate; if input &lt; GPU the accelerator <b>starves</b> and you pay for hardware that waits. Add workers / deepen prefetch / reshard until input ≥ GPU.</li>
 </ul>
 </section>
 
@@ -385,6 +395,119 @@ LEFT JOIN LATERAL (
 </ul>
 </section>
 
+<section class="card"><h3>System-Design Answer Frame</h3>
+<p>Drive a DE-for-ML design round like any system-design interview — dual-path always:</p>
+<ul>
+<li><b>1. Clarify (2–3 min)</b> — online vs batch? latency budget? per-feature freshness? scale (rows/s, entities, size)? labels available or must we create them? leakage/consistency constraints? This sets every freshness/latency/cost tradeoff.</li>
+<li><b>2. Sketch the DAG</b> — <code>ingest → validate → transform (shared def) → store (offline+online) → serve (train+infer)</code>, with a <b>label track</b> and a <b>versioning/lineage track</b> underneath.</li>
+<li><b>3. Defend the four hard parts, proactively</b> — skew (shared transform + log-and-train), point-in-time (as-of joins), bad data (validation gate), staleness (freshness SLA + monitoring).</li>
+<li><b>4. Scale/cost</b> — batch vs streaming <i>per feature</i>; materialise vs compute-on-read; storage tiering.</li>
+<li><b>5. Reproducibility</b> — versioned snapshots + lineage: rebuild any training set, trace any prediction.</li>
+<li><b>6. Boundaries</b> — serving infra / registry / model-monitoring → <b>MLOps</b>; Spark/Kafka internals → <b>Data Engineering</b>.</li>
+</ul>
+<p><span class="warn">!</span> Junior tell: "I'd use a feature store" with no derivation, or designing training and <b>forgetting serving</b> (guarantees skew). Requirements first, dual-path always, volunteer the failure modes before asked.</p>
+</section>
+
+<section class="card"><h3>Reference Feature-Platform Sketch</h3>
+<p>The frame most DE-for-ML design prompts want on the whiteboard — real-time <b>and</b> batch under one definition:</p>
+<pre><code>sources (CDC, events, batch)
+  → ingest (bronze raw)
+  → [VALIDATION GATE]
+  → feature transforms (SHARED defs)
+      |                        |
+  batch (Spark/dbt)      streaming (Flink)
+      |                        |
+  OFFLINE store          ONLINE store
+  (Parquet/Delta)        (KV, latest+TTL)
+      |         \              |
+  training   point-in-time  serving (low-lat)
+              join
+  underneath: registry (defs, versions,
+  owners) + lineage + monitoring</code></pre>
+<ul>
+<li><b>Shared defs, dual execution</b> → batch and streaming stay consistent (no skew).</li>
+<li><b>Two stores</b> — offline (cheap, history, PIT, training) + online (hot, latest, TTL, serving).</li>
+<li><b>Per-feature freshness routing</b> — slow → batch, real-time → streaming; don't stream what doesn't need it.</li>
+<li><b>Registry</b> makes features first-class named/owned/versioned artifacts — compute once, reuse across teams.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Diagnose: Features Stale/Wrong in Prod</h3>
+<p>Model degraded, pipeline may look green. Walk backward from the data, cheapest/most-likely first:</p>
+<table><thead><tr><th>#</th><th>Check</th><th>Points to</th></tr></thead><tbody>
+<tr><td>1</td><td>Freshness lag per feature</td><td>frozen value / refresh failed / watermark stalled / consumer lag</td></tr>
+<tr><td>2</td><td>Null-rate + row-count vs baseline</td><td>dropped column, partial outage, join miss</td></tr>
+<tr><td>3</td><td>Schema / contract logs</td><td>upstream rename/retype/drop → transform silently defaults to null</td></tr>
+<tr><td>4</td><td>Recent backfill?</td><td>stamped <code>now()</code> not event-time; new def on old rows; double-write</td></tr>
+<tr><td>5</td><td>Online vs offline value diff</td><td>train/serve skew — two code paths diverged</td></tr>
+<tr><td>6</td><td>Late-event rate / watermark</td><td>events dropped after watermark → undercounted aggregates</td></tr>
+</tbody></table>
+<p>Then <b>lineage</b> localises it to a feature/partition/upstream job. <span class="warn">!</span> Distinguish <b>stale</b> (frozen, loud via freshness) vs <b>broken</b> (schema/null) vs <b>skew</b> (data fine, served values differ) — it's a decision tree, not one fix.</p>
+</section>
+
+<section class="card"><h3>Offline Great, Prod Bad — Rank Suspects</h3>
+<p>The gap is almost always a data problem. Check in this order:</p>
+<ul>
+<li><b>1. Leakage / PIT violation</b> <span class="warn">!</span> — offline used latest values or a future-encoding feature → inflated metric prod can't reproduce. Verify <code>feature_time &lt;= label_time</code>; hunt label-proxy features.</li>
+<li><b>2. Train/serve skew</b> — compare logged served vectors vs training-derived values + distributions.</li>
+<li><b>3. Distribution shift</b> — training data non-representative (sampling bias, stale snapshot); compare train vs live distributions.</li>
+<li><b>4. Stale/broken serving features</b> — freshness lag + null-rate at serving.</li>
+<li><b>5. Source mismatch</b> — training read a clean warehouse, serving reads a raw live source with different semantics; trace both paths via lineage.</li>
+</ul>
+<p><span class="warn">!</span> An over-optimistic offline metric is a <b>red flag for leakage/skew</b>, not a win. The two headline culprits — PIT leakage (offline too good) and skew (serving shifted) — go first.</p>
+</section>
+
+<section class="card"><h3>Continuous / Online Learning — Data Risks</h3>
+<p>Model retrains on fresh prod data + labels. Design the <i>data</i> side:</p>
+<pre><code>serving → log features + predictions
+labels arrive (delayed) → PIT-join to logs
+→ [validation gate] → versioned training set
+→ retrain trigger (schedule/drift) → new model</code></pre>
+<ul>
+<li><b>Log-and-train</b> → skew-free by construction.</li>
+<li><b>Delayed-label join</b> by prediction id, respecting timing.</li>
+<li><b>Gate + versioned snapshot</b> each cycle for rollback.</li>
+</ul>
+<h4>Why it's riskier — errors compound through the loop</h4>
+<ul>
+<li><b>Feedback loops</b> <span class="warn">!</span> — the model shapes what data you collect (labels only for what it surfaced); mitigate with exploration/randomisation + logging un-surfaced items.</li>
+<li><b>Label delay/attribution</b> — recent labels incomplete → biased toward fast outcomes.</li>
+<li><b>Bad-data amplification</b> — one incident bakes into the next model automatically; validation gate + circuit-breaker essential.</li>
+<li><b>Runaway degradation</b> — bad retrain → worse data → worse retrain; gold-set eval before promotion.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Implicit Labels — Bias Traps</h3>
+<p>Labels free from behaviour: click=positive, no-click=negative, conversion=positive. Cheap and huge, but every trap below is baked in.</p>
+<ul>
+<li><b>Attribution window</b> — how long after an impression an action counts. Too short misses slow conversions; too long adds noise.</li>
+<li><b>Exposure / feedback bias</b> <span class="warn">!</span> — you only get labels for what the model <i>showed</i>; never-surfaced good items get no positives → self-reinforcing blind spot. Mitigate: exploration (epsilon/randomised serving) + log exposure.</li>
+<li><b>Presentation / position bias</b> — top slot gets clicked regardless of relevance; needs position-aware / debiased modelling.</li>
+<li><b>Negative-label ambiguity</b> — "no click" ≠ clean negative (didn't see it, was distracted); treat unobserved carefully.</li>
+<li><b>Delayed / partial labels</b> — conversions lag; recent data has incomplete positives.</li>
+</ul>
+<p><span class="warn">!</span> A gold set of <b>human</b> labels is still needed to <i>measure and correct</i> these biases — implicit labels alone narrow the model's world while dashboards look fine.</p>
+</section>
+
+<section class="card"><h3>Weak Supervision + Active Learning Loop</h3>
+<p>Labelling as a loop, not a one-shot — maximise <i>quality-measured</i> labels at acceptable cost, not raw volume:</p>
+<pre><code>unlabeled pool
+ ├ weak supervision: labeling functions
+ │   → label model → probabilistic labels
+ ├ active learning: pick most-informative
+ │   (uncertainty / LF disagreement) → humans
+ ├ gold-set QA: adjudicated truth
+ │   → kappa + label-model accuracy
+ → versioned label set → training</code></pre>
+<ul>
+<li><b>Weak supervision (Snorkel-style)</b> — many noisy labeling functions (regexes, heuristics, weak models) combined by a label model; covers the bulk cheaply.</li>
+<li><b>Active learning</b> — spend scarce human labels on the highest-uncertainty / highest-disagreement points, not random ones.</li>
+<li><b>Gold set</b> — trusted adjudicated items measure inter-annotator agreement (Cohen's/Fleiss' kappa) <i>and</i> validate the label model.</li>
+<li><b>Label versioning</b> — stamp each set with <code>label_version</code> + class definition so a training set rebuilds when definitions drift.</li>
+</ul>
+<p><span class="warn">!</span> Tradeoffs to say aloud: weak supervision trades noise for scale; active learning trades pipeline complexity for label efficiency; gold sets cost expert time but are the only ground truth.</p>
+</section>
+
 <section class="card"><h3>&#9733; Design &amp; Review Checklist</h3>
 <h4>Consistency / skew</h4>
 <ul>
@@ -425,6 +548,11 @@ LEFT JOIN LATERAL (
 <tr><td>Can't reproduce a model's training data</td><td>upstream table mutated in place; no versioning/time-travel <span class="warn">!</span></td></tr>
 <tr><td>Great accuracy, collapses on deploy</td><td>label leakage (target proxy in features)</td></tr>
 <tr><td>Streaming diverges from batch</td><td>processing-time windows or different windowing logic</td></tr>
+<tr><td>Model never learns a good item is good</td><td>exposure/feedback bias — no positives for un-surfaced items <span class="warn">!</span></td></tr>
+<tr><td>Quality worsens each retrain cycle</td><td>bad-data amplification / runaway degradation in the online-learning loop</td></tr>
+<tr><td>Recent positives look too low</td><td>label attribution delay — conversions not yet observed</td></tr>
+<tr><td>Top-ranked results over-clicked</td><td>presentation/position bias in implicit labels, not true relevance</td></tr>
+<tr><td>Validation false-positives every Monday</td><td>fixed thresholds vs seasonality — use a rolling/seasonal baseline <span class="warn">!</span></td></tr>
 </tbody></table>
 </section>
 

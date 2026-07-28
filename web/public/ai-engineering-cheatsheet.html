@@ -138,6 +138,9 @@ pre code{background:none; padding:0; font-size:1em;}
 <li>It's a <b>loop, not one hop</b>; the <code>id</code> glues results to calls (enables parallel calls).</li>
 <li><code>tool_choice</code>: <code>auto</code> / <code>required</code> / named / <code>none</code>.</li>
 <li>Design: <b>few, orthogonal, well-described</b> tools beat an API dump — too many degrades selection <span class="warn">!</span></li>
+<li>The <b>description is the prompt</b>: the model picks by name+description, so write them for the model, not the docs. Ambiguous/overlapping tools → wrong-tool errors.</li>
+<li><b>Parallel calls</b>: model can emit several tool calls in one turn (independent lookups); execute concurrently, glue results back by <code>id</code>.</li>
+<li>Return <b>errors as tool results</b>, not exceptions — let the model see "not found" and recover/branch rather than crashing the loop.</li>
 </ul>
 <p><span class="warn">!</span> Always <b>cap iterations + token budget</b> (model drives the loop → can spin). <span class="warn">!</span> Tool <i>code</i> is yours; tool <i>output</i> is untrusted (web page, doc, DB row).</p>
 </section>
@@ -171,6 +174,7 @@ pre code{background:none; padding:0; font-size:1em;}
 <tr><td>Generate</td><td>ignores ctx / trusts wrong chunk</td></tr>
 </tbody></table>
 <p><b>Two halves:</b> indexing (offline batch) vs serving (per-query). Most wins are at <b>ingest+chunk</b>, not a bigger model. Serving latency is dominated by <b>generation (seconds)</b>, not retrieval (tens of ms).</p>
+<p><b>Debug order = pipeline order.</b> Before blaming the model, check upstream: was the right chunk even <i>retrieved</i> (raise k / add hybrid)? Was it <i>ranked</i> into the prompt (rerank)? Only then is it a generation problem (grounding, lost-in-the-middle, overflow). A "hallucination" in a RAG app is usually a <b>retrieval miss</b> in disguise — the model fell back to parametric guessing.</p>
 </section>
 
 <section class="card"><h3>Chunking Strategies</h3>
@@ -264,6 +268,7 @@ fit: system + history + retrieved ≤ usable_input</code></pre>
 <tr><td>independent calls</td><td>parallelise</td></tr>
 </tbody></table>
 <p><span class="warn">!</span> Shrinking the <i>prompt</i> barely moves latency — attack <b>output length &amp; model choice</b>. <span class="warn">!</span> Agent loops are <b>5–20 calls/action</b> — cost multiplies by loop length. <span class="warn">!</span> "Cheaper model" is only a win if it <b>still passes your eval</b>.</p>
+<p><b>Attribute spend</b> at the gateway per <i>user / feature / prompt-version</i> — a single monthly total tells you nothing about which feature is bleeding. <b>Streaming</b> improves perceived latency but you still pay for every token generated before a client disconnect, so cap <code>max_tokens</code> anyway.</p>
 </section>
 
 <section class="card"><h3>Model Selection &amp; Routing</h3>
@@ -309,6 +314,13 @@ strong/frontier model → return</code></pre>
 <tr><td><b>Context recall</b></td><td>retr: needed info surfaced → <b>retrieval gap</b></td></tr>
 </tbody></table>
 <p><span class="warn">!</span> LLM-judge has <b>position, verbosity, self-preference bias</b> — validate it. <span class="warn">!</span> Offline win = the <b>proxy</b> moved; confirm online. Good retrieval metrics ≠ good answers (found ≠ used correctly).</p>
+<h4>Making an LLM-judge trustworthy</h4>
+<ul>
+<li><b>Validate the judge against human labels</b> first — measure its agreement rate; an unvalidated judge is just a second opinion, not a metric.</li>
+<li>Prefer <b>pairwise</b> (A vs B) over absolute 1–10 scores — models rank better than they calibrate. Randomise order to cancel position bias.</li>
+<li>Give a <b>rubric + reference answer</b>; ask for the reason before the verdict; use a <i>different</i> model to dodge self-preference.</li>
+<li>Watch the tail, not the mean — average score hides the catastrophic 3% of cases that actually hurt users.</li>
+</ul>
 </section>
 
 <section class="card"><h3>Guardrails &amp; Safety</h3>
@@ -319,6 +331,7 @@ guardrail     = code that blocks → control, enforced</code></pre>
 <ul>
 <li>Moderation = <b>per-category scores vs tunable thresholds</b>, not one yes/no. Threshold per context.</li>
 <li>PII detect/redact on input &amp; output; keep the bot on-topic without lobotomising it.</li>
+<li>Order checks <b>cheap-first</b>: deterministic regex/schema/denylist before a model-based classifier, so the expensive check only runs on what survives.</li>
 </ul>
 <p><span class="warn">!</span> A system prompt is <b>not</b> a guardrail (inside the trust boundary). <span class="warn">!</span> <b>Fail-open vs fail-closed</b> is a deliberate per-check call — open keeps product usable but may leak harm; closed is safer but a flaky guardrail = outage.</p>
 </section>
@@ -344,6 +357,81 @@ LLM:     system + user + retrieved doc + tool out  ← one stream</code></pre>
 <li><span class="warn">!</span> A partial value is <b>provisional</b> — never fire a side-effect until the object is complete &amp; validated (stream can error mid-way).</li>
 <li>Handle mid-stream errors &amp; client disconnects; you still pay for tokens already generated.</li>
 </ul>
+</section>
+
+<section class="card"><h3>Inference &amp; Serving (Self-Host)</h3>
+<p>Serving is a <b>memory-bandwidth &amp; memory-capacity</b> problem, not raw FLOPs. Decode reads the <i>whole</i> model per token → you wait on <b>bytes moved</b>, not math. Every lever spends a surplus resource to buy the scarce one.</p>
+<table><thead><tr><th>Phase</th><th>Profile</th></tr></thead><tbody>
+<tr><td><b>Prefill</b></td><td>parallel read of the prompt → first token; compute-heavy, sets <b>TTFT</b>.</td></tr>
+<tr><td><b>Decode</b></td><td>1 token/pass, autoregressive; <b>bandwidth-bound</b>, sets throughput.</td></tr>
+</tbody></table>
+<ul>
+<li><b>Batching</b> amortises the weight-read across many requests → throughput scales with batch size <span class="warn">!</span> but per-request latency <i>rises</i>.</li>
+<li><b>KV cache</b> stores K/V for every token×layer×request so decode doesn't recompute attention. Grows linearly with sequence → <b>caps concurrency</b> &amp; is why long contexts are pricey <span class="warn">!</span></li>
+<li><b>Continuous batching</b> (add/evict per step) + <b>PagedAttention</b> (KV in OS-style pages, ~0 fragmentation) = the vLLM/TGI throughput wins.</li>
+<li><b>Speculative decoding</b>: small draft model guesses K tokens, big model verifies in 1 pass → <b>latency</b> win, lossless quality; useless on a saturated batch.</li>
+</ul>
+<pre><code>weights ≈ params × bytes/param   (fp16=2, int8=1, int4≈0.5)
+7B fp16 ≈ 14GB · 7B int4 ≈ 3.5GB · 70B fp16 ≈ 140GB (&gt;1 GPU)
+KV_free = GPU_mem − weights − ~15% overhead
+concurrency ≈ KV_free ÷ KV_bytes_per_token</code></pre>
+<p><b>Quantization</b> (int8≈lossless, int4 GPTQ/AWQ often close) is the top self-host lever — <span class="warn">!</span> not free: <b>eval the quantized model</b>, take the most aggressive tier that still passes. Too big for one GPU → tensor (split each layer's matrices) / pipeline (put layer stages on different GPUs) parallelism.</p>
+<p><span class="warn">!</span> Self-host only wins on <b>hard privacy</b> or <b>high steady utilisation</b> — idle rented GPUs destroy the economics. API is the default.</p>
+</section>
+
+<section class="card"><h3>App Architecture &amp; Orchestration</h3>
+<p>Design like a backend engineer wrapping a <b>flaky, non-deterministic third-party API</b>. Push complexity to the edges; keep the model call a thin, swappable, <i>inspectable</i> seam.</p>
+<pre><code>client → AI gateway → orchestration → models
+                                    → tools/data
+         (observability spans all)</code></pre>
+<table><thead><tr><th>Layer</th><th>Owns</th></tr></thead><tbody>
+<tr><td><b>Gateway</b></td><td>keys, routing, rate/budget, fallback, cache, cost logs → model = <b>config value</b>.</td></tr>
+<tr><td><b>Orchestration</b></td><td>prompt assembly, chain/graph, retries, output validation.</td></tr>
+<tr><td><b>Observability</b></td><td>full trace: <b>assembled prompt + raw response</b>, versions, tokens, cost.</td></tr>
+</tbody></table>
+<ul>
+<li><b>Chain</b> = fixed linear pipeline (readable, testable). <b>Graph</b> = nodes + conditional/looping edges — only pay for it when branching/loops are <i>real</i> <span class="warn">!</span> most "graphs" are a chain in costume.</li>
+<li><b>Prompts &amp; model versions = code</b>: <code>triage@v7</code>, pinned <code>model@snapshot</code>, eval-gated, ship decoupled from deploys. "latest" silently changing under you = incident <span class="warn">!</span></li>
+<li>Resilience ladder: bounded <b>timeout</b> (vs p99) + stream → <b>retry</b> (backoff+jitter, cap ~2, retryable only) → <b>circuit breaker</b> → <b>fallback</b> model/provider → graceful degrade.</li>
+</ul>
+<p><span class="warn">!</span> Retry is <b>not</b> safe once a call has side effects — the ambiguous "succeeded but response lost" case double-fires. <b>Idempotency lives at the action layer</b>; separate "generate the plan" from "execute the plan".</p>
+<p><span class="warn">!</span> You can't reproduce a bad answer by re-running — you debug from the <b>logged trace</b>. Wire observability before you need it.</p>
+</section>
+
+<section class="card"><h3>Hallucination &amp; Reliability</h3>
+<p>A model is a <b>next-token predictor optimised for plausibility</b>, with no ground-truth signal. Fluency and factuality are <b>decoupled</b> — a fabricated citation is a high-probability continuation. It's <b>structural</b>, not a bug you patch.</p>
+<ul>
+<li><span class="warn">!</span> Bigger model lowers the rate, never to zero; <code>temperature:0</code> gives a <i>deterministic</i> wrong answer, not a right one.</li>
+<li><b>OOD &amp; sycophancy</b> are the danger zones: rare entities / your jargon → interpolation; leading questions → confident agreement with a false premise.</li>
+</ul>
+<p>You don't make the model reliable — you build a <b>reliable system around it</b>. Stack cheap-broad under expensive-precise:</p>
+<table><thead><tr><th>Layer</th><th>Note</th></tr></thead><tbody>
+<tr><td><b>Ground</b></td><td>answer only from retrieved sources + cite → removes the gap. <b>Primary</b> mitigation.</td></tr>
+<tr><td>Self-consistency</td><td>sample N, vote; spread = uncertainty. Misses <b>systematic</b> error; N× cost <span class="warn">!</span></td></tr>
+<tr><td>Verify</td><td><b>independent</b> check: tool/DB/schema (strong) &gt; 2nd-model judge (weak).</td></tr>
+<tr><td><b>Abstain</b></td><td>"I don't know" beats a confident guess when wrong &gt;&gt; silent.</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> <b>Logprobs &amp; verbalized confidence lie</b> — they measure token likelihood, not truth; a fabrication is high-logprob. Real confidence comes from <i>outside</i> the generation (agreement / external verifier).</p>
+<p><span class="warn">!</span> Grounding shifts the failure, doesn't erase it: model can be <b>unfaithful to correct</b> evidence or <b>faithful to wrong</b> evidence. Put the human at the <b>irreversible</b> step; make residual errors visible &amp; recoverable.</p>
+</section>
+
+<section class="card"><h3>Multimodal &amp; Beyond Text</h3>
+<p>Non-text inputs become tokens the same transformer consumes. An image is patchified → encoded → projected into token space, so it's <b>many tokens, not one input</b> — same per-token price &amp; context budget as prose.</p>
+<pre><code>sentence      ~15-30 tok
+low-detail img ~85 tok
+high-detail   ~500-1500+ tok  (re-tiled → each sub-img encoded)</code></pre>
+<ul>
+<li><b>Reduce to text first.</b> Digital PDF/DOCX → extract embedded text (cheap, exact); send the image only for a real <i>scan/photo</i> where info lives in pixels <span class="warn">!</span></li>
+<li>Boundary is <b>lossy &amp; silent</b>: OCR mangles tables/columns, transcriber mis-hears names, VLM can't read fine print — and the LLM reasons fluently over the garbage <span class="warn">!</span></li>
+</ul>
+<table><thead><tr><th>Choice</th><th>Trade</th></tr></thead><tbody>
+<tr><td>OCR→LLM</td><td>cheap, fast; destroys <b>layout</b> — tables/forms collapse.</td></tr>
+<tr><td>Layout-aware VLM</td><td>robust on tables/scans; pricey (image tokens).</td></tr>
+<tr><td>STT→LLM→TTS</td><td>observable, swappable, guardrail-able; latency <b>additive</b>, loses prosody.</td></tr>
+<tr><td>Native speech2speech</td><td>low-latency, keeps tone; black box, no transcript to audit.</td></tr>
+</tbody></table>
+<p><b>Multimodal RAG</b>: retrieve on a cheap proxy (caption / CLIP-style shared-space embedding), then feed the <i>raw image</i> to the VLM at generation. <b>Extraction</b> (receipt→JSON) = reliability problem: schema-constrain + business-rule validate (line items sum?) + confidence/bbox → <b>human-review the tail</b>.</p>
+<p><span class="warn">!</span> Image <b>generation</b> is an async, two-sided-moderated (prompt <i>and</i> output pixels), cost-capped subsystem — not a sync API call.</p>
 </section>
 
 <section class="card"><h3>&#9733; Design / Review Checklist</h3>
@@ -372,6 +460,13 @@ LLM:     system + user + retrieved doc + tool out  ← one stream</code></pre>
 <li>&#9744; Prompts versioned + gated by a golden-set regression check in CI; LLM-judge validated.</li>
 <li>&#9744; Guardrails as an independent layer; fail-open/closed chosen deliberately per check.</li>
 </ul>
+<h4>Reliability &amp; architecture</h4>
+<ul>
+<li>&#9744; Grounding is the backbone; abstention wired to retrieval/verification (not vibes); irreversible action has a human at the step.</li>
+<li>&#9744; Model behind a gateway (swappable config); prompt + model versions pinned &amp; observable; assembled prompt + raw response logged per request.</li>
+<li>&#9744; Multimodal reduced to text where the signal allows; extraction schema-constrained + rule-validated + confidence-gated to human review.</li>
+<li>&#9744; Self-host justified by hard privacy or steady utilisation; quantization eval'd, not assumed; batch/latency policy set to an SLO.</li>
+</ul>
 </section>
 
 <section class="card"><h3>Symptom &rarr; Cause</h3>
@@ -388,6 +483,14 @@ LLM:     system + user + retrieved doc + tool out  ← one stream</code></pre>
 <tr><td>offline eval up, users unhappy</td><td>proxy moved, not the outcome; confirm online</td></tr>
 <tr><td>ranking looks random</td><td>metric ≠ embed training metric / un-normalized dot <span class="warn">!</span></td></tr>
 <tr><td>"it got better" after a prompt tweak</td><td>one lucky sample — no eval set <span class="warn">!</span></td></tr>
+<tr><td>model very sure but fabricating</td><td>high logprob ≠ truth; verify externally, don't trust self-confidence <span class="warn">!</span></td></tr>
+<tr><td>all N samples agree, still wrong</td><td>systematic error — self-consistency only cancels variance <span class="warn">!</span></td></tr>
+<tr><td>self-hosted 70B won't fit one GPU</td><td>weights+KV+overhead &gt; VRAM → quantize / shard / smaller model</td></tr>
+<tr><td>big batch = throughput up, users wait</td><td>batch trades per-request latency for throughput; cap batch to SLO</td></tr>
+<tr><td>retry sent the email twice</td><td>side-effecting call retried; idempotency key at the action layer <span class="warn">!</span></td></tr>
+<tr><td>can't repro the bad answer</td><td>non-deterministic — debug the logged assembled-prompt+raw-response trace</td></tr>
+<tr><td>VLM invents a total on a receipt</td><td>misread fine print; schema+arithmetic validate + confidence→human <span class="warn">!</span></td></tr>
+<tr><td>PDF Q&amp;A slow &amp; pricey</td><td>sent page images of digital text — extract embedded text instead <span class="warn">!</span></td></tr>
 </tbody></table>
 </section>
 

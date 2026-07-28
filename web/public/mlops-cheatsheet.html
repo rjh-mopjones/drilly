@@ -330,6 +330,9 @@ PSI = &Sigma;_bins (actual% - expected%) * ln(actual%/expected%)
 <li>Tests: <b>KS</b> (continuous, CDF distance) · <b>chi-square</b> (categorical) · <b>PSI</b> (binned index) · KL/JS/Wasserstein · <b>embedding drift</b> (text/images).</li>
 <li><span class="warn">!</span> <b>Drift ≠ a proven performance drop.</b> Inputs can shift with accuracy intact; accuracy can fall with no input drift. Drift = "investigate," not "degraded" or "retrain now."</li>
 <li><span class="warn">!</span> At scale, tiny meaningless shifts test as significant — use <b>effect-size bands</b> (PSI) + business impact, not raw p-values.</li>
+<li><b>Univariate misses interactions</b> — each feature can look stable while their <i>joint</i> distribution moves. Watch prediction drift + embedding drift as multivariate catches.</li>
+<li><b>Reference window matters</b> — compare against a fixed training-baseline (catches slow decay) <i>and</i> a rolling recent window (catches sudden breaks); pick a window that spans full seasonality or weekly patterns read as drift.</li>
+<li>Tools: Evidently, NannyML (estimates performance <b>without labels</b>), whylogs, cloud monitors.</li>
 </ul>
 </section>
 
@@ -358,6 +361,8 @@ PSI = &Sigma;_bins (actual% - expected%) * ln(actual%/expected%)
 </ul>
 <ul>
 <li>Alt designs: <b>bandits</b> (minimize regret, adaptive) · <b>interleaving</b> (sensitive, ranking) · <b>shadow</b> (validate before A/B). <b>Champion/challenger</b> = the standing loop.</li>
+<li><b>SRM (sample-ratio mismatch)</b> <span class="warn">!</span> — arms don't match the intended split (e.g. 48/52 on a 50/50) → a bucketing/logging bug; the result is <b>invalid</b>, don't read it. Chi-square the assignment counts first.</li>
+<li><b>Offline↔online gap</b>: offline AUC up ≠ live KPI up. The online experiment is the judge; ship on the KPI, not the offline number.</li>
 </ul>
 </section>
 
@@ -381,12 +386,163 @@ PSI = &Sigma;_bins (actual% - expected%) * ln(actual%/expected%)
 </section>
 
 <section class="card"><h3>LLMOps — what changes</h3>
+<p>Same control loop (version → test → deploy → monitor), but the <b>expensive versioned artifact moves from weights to prompt + index + eval set</b>. Weights are frozen &amp; vendor-owned.</p>
+<table><thead><tr><th>Stage</th><th>Same</th><th>New</th></tr></thead><tbody>
+<tr><td>version</td><td>registry, stages, rollback</td><td>prompt registry, index snapshots</td></tr>
+<tr><td>train</td><td>—</td><td>no gradient fit — prompt/retrieval tuning</td></tr>
+<tr><td>test</td><td>CI, no-regression gate</td><td>LLM-as-judge, golden sets, eval-in-CI</td></tr>
+<tr><td>monitor</td><td>latency, errors</td><td><b>cost/tokens</b>, refusal/hallucination, guardrail breaches</td></tr>
+</tbody></table>
+<h4>Version the <b>bundle</b>, not one string</h4>
+<pre><code>release = prompt@v9 + rag_index@2026-06-28
+        + model@pinned + {temp,top_k,max_tok}
+        + eval_set@v4   # roll back the whole bundle</code></pre>
 <ul>
-<li>Often <b>no fine-tune/retrain</b> → the artifacts to version are <b>prompts, RAG corpus/index, and eval sets</b>, plus model/provider + params.</li>
-<li><b>Eval-in-CI</b> <span class="warn">!</span> — no single accuracy number; use an eval suite (LLM-as-judge, golden Q&amp;A, rubric scores). Regression = a scored eval drop, gated like a metric.</li>
-<li>Monitor <b>cost/token, latency, refusal/hallucination rate</b>; cache; route small→big models by difficulty.</li>
+<li><span class="warn">!</span> Pin the <b>vendor model version</b> — a silent provider upgrade is an unauthorized, unversioned deploy.</li>
+<li><b>Eval layers</b>: programmatic checks (JSON parses, no PII, cites source) + LLM-as-judge (faithfulness/safety rubric) + human sample to calibrate the judge.</li>
+<li><span class="warn">!</span> Eval is <b>noisy</b> — same input scores differently (temp, judge variance); judges have length/position/self-preference bias. Multiple samples, pin the judge, watch variance.</li>
+<li>Cost levers: <b>cache</b>, <b>route</b> easy→small / hard→big model, token budgets.</li>
 <li>RAG "drift" = the <b>knowledge base</b> going stale, not weights — re-index on a schedule.</li>
 <li>Guardrails: prompt-injection filtering, output validation, PII redaction. (See AI Engineering primer.)</li>
+</ul>
+</section>
+
+<section class="card"><h3>Design: answer structure &amp; diagnosis funnel</h3>
+<p>An MLOps design answer = a normal system-design loop <b>plus 3 axes classical design ignores: data, model, offline/online split.</b> Don't open by naming tools — open with requirements.</p>
+<h4>The skeleton</h4>
+<ul>
+<li><b>Clarify</b> — QPS, p99 budget, feature freshness, scale, cost, accuracy bar, and <b>how/when labels arrive</b> (the ML-specific one people forget).</li>
+<li><b>Draw two paths separately</b> — training/offline vs serving/online. This one move earns credit and structures everything after.</li>
+<li><b>Walk components</b> — data → feature store → pipeline → registry → serving → monitoring → CT; each: choice + tradeoff.</li>
+<li><b>Name the ML risks aloud</b> — skew (same feature defs), label delay (proxy metrics), drift trigger, <b>rollback</b>.</li>
+</ul>
+<h4>Diagnosis funnel <span class="warn">!</span> (accuracy dropped)</h4>
+<p>Walk the pipeline <b>backwards</b>, cheap/likely first: <b>pipeline break → data → train/serve skew → drift → label delay → feedback loop.</b> "Check an upstream schema break before theorizing concept drift" = the senior signal. Usually it's broken plumbing, not genuine decay.</p>
+</section>
+
+<section class="card"><h3>Design: real-time recommendations</h3>
+<p>Core tension: <b>fresh personalized features vs a tight p99</b> (say &lt;100ms) over a huge catalog.</p>
+<pre><code>request(user,ctx)
+ -&gt; candidate gen  (ANN over embeddings: millions-&gt;~hundreds)
+ -&gt; feature fetch  (online store: user/item/session KV)
+ -&gt; ranking model  (score the hundreds, batched, GPU if heavy)
+ -&gt; top-N -&gt; log(features+scores) -&gt; clicks(delayed) -&gt; retrain</code></pre>
+<ul>
+<li><b>Two-stage</b> is how you hit the budget at scale: cheap ANN recall narrows the set; expensive ranker scores only survivors.</li>
+<li><b>Same feature defs offline/online</b> — recommenders are notorious for skew; enforce parity.</li>
+<li>Serving: dynamic batching, cache hot users/items, embedding lookups.</li>
+<li><span class="warn">!</span> <b>Exposure/feedback bias</b> — the model only sees clicks on what it chose to show; training on that reinforces itself. Mitigate with <b>exploration / logged propensities</b>.</li>
+<li>A/B every ranker change; monitor CTR/conversion, not just latency.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Design: real-time fraud detection</h3>
+<p>Sharper than recs on three axes: latency is <b>inline with money</b> (tens of ms), the adversary <b>adapts</b> (concept drift is the norm), labels are <b>very delayed</b> (chargebacks land weeks later).</p>
+<pre><code>txn -&gt; online feature fetch  (velocity aggs: count/sum
+        over 1m/1h/1d windows, computed on Flink/Kafka)
+    -&gt; fraud model (inline, &lt;~50ms, in the auth path)
+    -&gt; allow / challenge / block -&gt; log everything
+       delayed labels: chargebacks(weeks), manual review -&gt; retrain</code></pre>
+<ul>
+<li><b>Streaming velocity features</b> — sliding-window aggregates written to the online store; freshness matters, fraud is bursty.</li>
+<li><span class="warn">!</span> A timeout = a lost or wrongly-blocked transaction → <b>simplicity/reliability beat marginal accuracy</b>; fallback required.</li>
+<li><b>Frequent drift-triggered retraining</b> is mandatory — fraudsters shift P(y|x) continuously.</li>
+<li>Can't measure accuracy live → lean on <b>proxies</b> (flag rate, review outcomes, prediction dist) + a delayed ground-truth join.</li>
+<li>Threshold = business lever: false-positive (blocked good users) vs false-negative (fraud loss); monitor per-slice.</li>
+</ul>
+</section>
+
+<section class="card"><h3>GPU Serving — keep it fed</h3>
+<p>A GPU is fast only when <b>kept fed</b>; a single-request server leaves it mostly idle. Measure <b>GPU utilization + cost/1k preds</b>, not just latency — an underfed GPU is the #1 waste in ML serving.</p>
+<table><thead><tr><th>Lever</th><th>Effect</th></tr></thead><tbody>
+<tr><td>dynamic batching</td><td>one big matmul vs many tiny — biggest throughput win</td></tr>
+<tr><td>concurrent instances</td><td>N model copies/GPU (Triton) overlap compute+I/O</td></tr>
+<tr><td>TensorRT / ORT</td><td>compile + fuse ops for the target GPU</td></tr>
+<tr><td>quantize FP16/INT8</td><td>cut memory, speed compute</td></tr>
+<tr><td>MIG / fractional</td><td>partition a big card so small models don't waste it</td></tr>
+</tbody></table>
+<ul>
+<li>Tune <code>max_batch_size</code> + <code>max_queue_delay</code> against your <b>p99</b>, not p50 — bigger batches raise throughput but add queueing.</li>
+<li><span class="warn">!</span> Right-size: a <b>T4/L4 may beat an A100 on cost-per-prediction</b> for small models. Reserve big GPUs for models that need them.</li>
+</ul>
+<h4>Zero-downtime version rollout</h4>
+<ul>
+<li>Load new version <b>alongside</b> old + <b>warm</b> it (dummy inference) before traffic.</li>
+<li><b>Readiness-gate</b> the LB (route only once loaded) → ramp 5%→100% with metric gates → <b>drain</b> old gracefully → keep old warm as instant rollback.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Monitoring — the metric catalog</h3>
+<p>Route by clock: <b>ops pages at 3am; ML opens a ticket.</b> They catch non-overlapping failure classes — ship only the ops layer and you're blind to every ML-unique failure.</p>
+<h4>Operational (fast clock)</h4>
+<ul>
+<li>Latency p50/p99, QPS, error rate, saturation (CPU/GPU/mem/queue depth). Prometheus/Grafana/Datadog. Catches <b>down/slow</b>.</li>
+</ul>
+<h4>ML-specific (slow/stopped clock)</h4>
+<ul>
+<li><b>Prediction dist</b> — mean score, class rates. Observable <b>instantly, no labels</b> → first real-time proxy.</li>
+<li><b>Feature health</b> — nulls, ranges, cardinality. <b>Earliest</b> signal of an upstream pipeline/schema break.</li>
+<li><b>Quality</b> — accuracy/AUC/precision <b>once labels land</b>; the truth, but delayed. Join preds→outcomes on a rolling window, per slice.</li>
+<li><b>Business KPI</b> — revenue/CTR/fraud-caught/approval-rate; the ultimate health signal.</li>
+</ul>
+<p><span class="warn">!</span> A prediction shift flags <b>"investigate," not "broken."</b> <span class="warn">!</span> <b>Sample</b> logs — full-fidelity at high QPS is expensive; keep enough to debug + retrain.</p>
+</section>
+
+<section class="card"><h3>Batch vs online vs precompute-cache</h3>
+<p><b>Default to batch; make online earn its place</b> — online is strictly more burden (SLOs, autoscale, skew risk).</p>
+<table><thead><tr><th>Pick</th><th>When</th></tr></thead><tbody>
+<tr><td><b>batch</b></td><td>periodic preds, entities enumerable, inputs stable intra-day (nightly churn/credit-risk); simplest, cheapest, trivial to reprocess</td></tr>
+<tr><td><b>online</b></td><td>inputs only known at request time (session, the txn itself); freshness matters; entity space too large/sparse to precompute</td></tr>
+<tr><td><b>cache</b></td><td><b>hybrid</b>: score everyone in batch → write to fast KV → "online" path is a lookup. Real-time latency without real-time inference, if intra-day freshness isn't needed</td></tr>
+</tbody></table>
+<ul>
+<li>Batch pipeline: trigger → point-in-time offline features → load model from registry → bulk score (Spark/BigQuery) → write scores table → consumers read.</li>
+<li>Batch has <b>no p99 budget and no autoscaling service</b> — that's the whole appeal.</li>
+<li><span class="warn">!</span> Batch still needs <b>point-in-time features + freshness SLAs</b> on the input tables — a stale upstream table silently scores everyone on yesterday's world.</li>
+</ul>
+</section>
+
+<section class="card"><h3>First prod model — the 80/20 setup</h3>
+<p>Resist building level 2. Ship the <b>reproducibility spine</b> first, add skew/drift tooling when the pain is real.</p>
+<ol>
+<li><b>Version the data</b> — immutable snapshot (DVC / Delta table version). Non-negotiable, cheap.</li>
+<li><b>Track experiments</b> — MLflow: every run logs params, metrics, git commit, data version. Kills "which notebook won?"</li>
+<li><b>Register the model</b> — promote the winning run to a Production stage w/ lineage → rollback = re-point.</li>
+<li><b>Package reproducibly</b> — container + preprocessing + pinned deps; ONNX over raw pickle.</li>
+<li><b>Serve simply</b> — one model, one service (BentoML/KServe/plain FastAPI container). No multi-model GPU autoscaling yet.</li>
+<li><b>Monitor both layers</b> — ops (latency/errors) + a daily prediction/feature-dist check beats nothing.</li>
+</ol>
+<p><span class="warn">!</span> <b>Skip</b> for now: full feature store, CT automation, canary infra, a bespoke platform. Add each when evidence demands it (skew bites → feature store; manual retrain can't keep up → CT).</p>
+</section>
+
+<section class="card"><h3>Maturity audit → next investment</h3>
+<p>Audit against the loop; prescribe the <b>cheapest fix for the biggest silent risk</b>. Ask in dependency order — fix the <b>earliest broken link</b>, since later stages depend on it (no point automating CT if you can't reproduce or validate what it ships).</p>
+<table><thead><tr><th>Ask</th><th>If no → fix</th></tr></thead><tbody>
+<tr><td>recreate the exact prod model?</td><td>data version + tracking + registry lineage</td></tr>
+<tr><td>train &amp; serve share feature code?</td><td>feature store / shared transform lib</td></tr>
+<tr><td>rollback in seconds?</td><td>registry deploy + canary + 1-click rollback</td></tr>
+<tr><td>know it's <b>wrong</b>, not just down?</td><td>prediction/feature dist + delayed-label quality</td></tr>
+<tr><td>what triggers a retrain?</td><td>pipeline automation → drift-triggered CT</td></tr>
+</tbody></table>
+<ul>
+<li><b>Size to risk &amp; cadence</b>: a weekly-drifting fraud model justifies level 1/2; a stable quarterly model doesn't.</li>
+<li>Senior move: name the biggest <b>silent</b> risk (usually skew or missing ML monitoring), not the flashiest missing tool.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Classical ML vs DL vs LLM — emphasis</h3>
+<p>Same lifecycle shape; the weight shifts.</p>
+<table><thead><tr><th></th><th>Classical</th><th>DL</th><th>LLM</th></tr></thead><tbody>
+<tr><td>train cost</td><td>low</td><td>high (GPU)</td><td>often none</td></tr>
+<tr><td>version</td><td>data+features</td><td>data+weights</td><td>prompts+RAG+evals</td></tr>
+<tr><td>retrain</td><td>frequent</td><td>gated, costly</td><td>rarely; iterate config</td></tr>
+<tr><td>serve focus</td><td>CPU, cheap</td><td>GPU, optimize</td><td>latency+cost+guardrails</td></tr>
+<tr><td>validate</td><td>test-set metric</td><td>same</td><td>eval-in-CI, LLM-judge</td></tr>
+</tbody></table>
+<ul>
+<li>Classical: feature quality + drift-triggered retrain dominate; serving is cheap CPU.</li>
+<li>DL: distributed training + spot-with-checkpointing; serving optimization (quantize/distill/batch); harder reproducibility.</li>
+<li>Unifying: still <b>code+data+model, versioned/tested/monitored</b> — for LLMs the "model" is the prompt + retrieval stack.</li>
 </ul>
 </section>
 
@@ -435,6 +591,11 @@ PSI = &Sigma;_bins (actual% - expected%) * ln(actual%/expected%)
 <tr><td>rollback broke serving</td><td>new model changed feature schema; old features gone <span class="warn">!</span></td></tr>
 <tr><td>model reinforces its own bias</td><td>feedback loop; no exploration traffic</td></tr>
 <tr><td>bad model auto-shipped</td><td>CT with no validation guardrails <span class="warn">!</span></td></tr>
+<tr><td>GPU cost high, latency fine</td><td>GPU underfed — no dynamic batching / oversized card <span class="warn">!</span></td></tr>
+<tr><td>LLM quality dropped, no deploy</td><td>silent vendor model upgrade — pin the version</td></tr>
+<tr><td>RAG answers went stale</td><td>knowledge base not re-indexed on schedule</td></tr>
+<tr><td>each feature stable, model degrades</td><td>joint/interaction drift — univariate misses it</td></tr>
+<tr><td>weekly metric looks like drift</td><td>seasonality — reference window too short</td></tr>
 </tbody></table>
 </section>
 

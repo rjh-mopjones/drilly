@@ -155,6 +155,8 @@ var   = E[(f̂ - E[f̂])²] (sensitivity to the sample)
 <li><span class="warn">!</span> <b>Time series:</b> never shuffle — use forward-chaining / expanding window so you never train on the future.</li>
 <li><span class="warn">!</span> <b>Grouped</b> data (same user/patient) → <b>GroupKFold</b> so a group can't span train &amp; val (leakage).</li>
 <li><b>Nested CV:</b> inner loop tunes, outer loop estimates — avoids optimistic bias from tuning on the same folds you report.</li>
+<li><span class="warn">!</span> <b>CV ≫ test score</b> ⇒ you tuned on the reported folds or leaked across them → nested CV.</li>
+<li><b>Repeated k-fold</b> (different seeds) shrinks split-luck variance; report mean ± std, not one number.</li>
 </ul>
 <p><span class="warn">!</span> <b>Golden rule:</b> touch the <b>test set once</b>, at the very end. Fit all preprocessing <b>inside</b> the CV fold, not on the full data.</p>
 </section>
@@ -172,8 +174,10 @@ accuracy = (TP+TN)/N     specificity = TN/(TN+FP)</code></pre>
 <li><b>Threshold</b> (default 0.5 is arbitrary): lower → ↑recall ↓precision. Set it from business cost.</li>
 <li><b>ROC-AUC</b> = ranking quality (TPR vs FPR), threshold-free but <span class="warn">!</span> <b>optimistic under heavy imbalance</b>. <b>PR-AUC</b> for rare positives.</li>
 <li><b>Log loss</b> penalizes confident-wrong probabilities; high AUC ≠ calibrated. </li>
+<li><b>F-beta:</b> β&gt;1 weights recall (Fβ=2 for screening), β&lt;1 weights precision. <b>Macro</b> F1 averages per-class equally (fair to minority); <b>micro</b> aggregates counts (favors majority).</li>
+<li><b>Balanced accuracy</b> = mean of per-class recall — honest under imbalance. <b>MCC</b> / <b>Cohen's κ</b> summarize the whole matrix, robust to skew.</li>
 </ul>
-<p>Fraud/cancer → <b>recall</b> (a miss is catastrophic). Spam-to-inbox → <b>precision</b> (deleting a real email hurts).</p>
+<p>Fraud/cancer → <b>recall</b> (a miss is catastrophic). Spam-to-inbox → <b>precision</b> (deleting a real email hurts). Anchor the metric to <b>FP-vs-FN cost</b>, then set the threshold.</p>
 </section>
 
 <section class="card"><h3>Regression &amp; Ranking Metrics</h3>
@@ -201,7 +205,14 @@ R²   = 1 − SS_res/SS_tot      # frac. variance explained</code></pre>
 <li><b>Dates:</b> decompose to day/hour/is_weekend + cyclical sin/cos. <b>Text:</b> TF-IDF / embeddings. <b>Geo:</b> distances, clusters.</li>
 <li><b>Selection:</b> filter (correlation/MI) · wrapper (RFE) · embedded (L1, tree importance).</li>
 </ul>
-<p><b>Features &gt; model:</b> a good feature beats a fancier algorithm on the same data. This is where domain knowledge pays.</p>
+<h4>Scaling methods</h4>
+<table><thead><tr><th>Method</th><th>Use when</th></tr></thead><tbody>
+<tr><td>Standardize (z)</td><td>roughly Gaussian; default for linear/NN/PCA</td></tr>
+<tr><td>Min-max [0,1]</td><td>bounded inputs; image pixels</td></tr>
+<tr><td>Robust (median/IQR)</td><td>heavy outliers</td></tr>
+<tr><td>Log / Box-Cox</td><td>right-skewed, multiplicative</td></tr>
+</tbody></table>
+<p><b>Features &gt; model:</b> a good feature beats a fancier algorithm on the same data. This is where domain knowledge pays. <span class="warn">!</span> Fit every transform on <b>train only</b>, apply to val/test.</p>
 </section>
 
 <section class="card"><h3>Data Leakage <span class="warn">!</span></h3>
@@ -244,6 +255,8 @@ logreg:  p = σ(wᵀx + b),  loss = log-loss / BCE
 <li><b>High bias / low variance</b> family: strong linear inductive bias. Add polynomial/interaction features for nonlinearity.</li>
 <li><b>Assumptions:</b> roughly linear relationship, low multicollinearity (→ ridge), independent errors.</li>
 <li>Great <b>baseline</b>: fast, calibratable, scales to millions of sparse features (text). Regularize (L1/L2) when p is large.</li>
+<li><span class="warn">!</span> <b>Perfect separation</b> → logreg weights diverge to ±∞ (MLE undefined) → regularize. Multiclass via <b>softmax</b> (multinomial) or one-vs-rest.</li>
+<li><b>OLS closed form:</b> <code>w = (XᵀX)⁻¹Xᵀy</code> — but <code>XᵀX</code> is singular under collinearity → ridge adds <code>λI</code> and makes it invertible.</li>
 </ul>
 </section>
 
@@ -259,6 +272,8 @@ logreg:  p = σ(wᵀx + b),  loss = log-loss / BCE
 <li><b>GBM (XGBoost / LightGBM / CatBoost)</b> = the <b>tabular workhorse</b>. Lower lr + more trees + early stopping.</li>
 <li>No scaling needed; handles mixed types &amp; nonlinearity/interactions natively.</li>
 <li><span class="warn">!</span> <b>Impurity (Gini) importance is biased</b> toward high-cardinality/continuous features → use <b>permutation importance</b> or <b>SHAP</b>.</li>
+<li><b>Key GBM knobs:</b> <code>learning_rate</code> (lower + more trees generalizes better), <code>max_depth</code>/<code>num_leaves</code> (3–8 typical), <code>subsample</code> &amp; <code>colsample</code> (stochastic → regularizes), <code>min_child_weight</code>, L1/L2 leaf penalties, <b>early stopping</b> on a val set.</li>
+<li><b>CatBoost</b> handles categoricals natively (ordered target encoding, less leakage); <b>LightGBM</b> leaf-wise growth is fast but <span class="warn">!</span> overfits small data without depth limits.</li>
 </ul>
 </section>
 
@@ -297,6 +312,8 @@ logreg:  p = σ(wᵀx + b),  loss = log-loss / BCE
 <li><b>Activations:</b> <b>ReLU</b> default (cheap, no vanishing for x&gt;0, <span class="warn">!</span> dying-ReLU → LeakyReLU/GELU); sigmoid/tanh saturate; <b>softmax</b> for multiclass output.</li>
 <li><b>Backprop</b> = chain rule caching gradients layer by layer. <span class="warn">!</span> <b>Vanishing/exploding gradients</b> in deep nets → ReLU, residual connections, normalization, gradient clipping.</li>
 <li><b>Regularize:</b> dropout, weight decay, early stopping, batch/layer norm, augmentation.</li>
+<li><b>Normalization:</b> <b>BatchNorm</b> stabilizes/speeds training (batch stats — awkward for tiny batches/RNNs); <b>LayerNorm</b> per-sample (transformers). Both ease the vanishing-gradient problem.</li>
+<li><span class="warn">!</span> <b>Init matters:</b> all-zero weights → every neuron identical (symmetry never breaks). Use <b>He</b> (ReLU) / <b>Xavier</b> (tanh) init.</li>
 <li>Needs lots of data &amp; compute; wins on <b>unstructured</b> data (image/text/audio). For <b>tabular</b>, GBMs usually still beat NNs.</li>
 </ul>
 </section>
@@ -306,9 +323,13 @@ logreg:  p = σ(wᵀx + b),  loss = log-loss / BCE
 <table><thead><tr><th>Method</th><th>Note</th></tr></thead><tbody>
 <tr><td><b>k-means</b></td><td>pick k up front; assumes round, equal-size blobs; <span class="warn">!</span> scale first, sensitive to init (k-means++) &amp; outliers</td></tr>
 <tr><td><b>DBSCAN</b></td><td>density-based; finds arbitrary shapes + outliers; no k, but ε/minPts tuning</td></tr>
-<tr><td>Hierarchical</td><td>dendrogram; cut to choose #clusters</td></tr>
+<tr><td>Hierarchical</td><td>dendrogram; cut to choose #clusters; no k up front</td></tr>
+<tr><td><b>GMM</b></td><td>soft (probabilistic) assignments; elliptical clusters via EM</td></tr>
 </tbody></table>
-<ul><li>Choose k: <b>elbow</b> (inertia), <b>silhouette</b>. No labels → validate with silhouette + business meaning; beware clustering random noise.</li></ul>
+<ul>
+<li>k-means minimizes <b>within-cluster SSE (inertia)</b>; converges to a <b>local</b> optimum → <code>n_init</code> restarts + <b>k-means++</b> init.</li>
+<li>Choose k: <b>elbow</b> (inertia), <b>silhouette</b> ∈ [−1,1] (tight &amp; separated). No labels → validate with silhouette + <b>stability</b> + business meaning; beware clustering random noise.</li>
+</ul>
 <h4>Dimensionality reduction</h4>
 <ul>
 <li><b>PCA:</b> orthogonal axes of max variance (eigenvectors of covariance); keep components to ~90–95% cumulative variance. <span class="warn">!</span> Standardize first; linear only.</li>
@@ -327,6 +348,8 @@ logreg:  p = σ(wᵀx + b),  loss = log-loss / BCE
 <ul>
 <li><span class="warn">!</span> <b>Reward hacking:</b> agent games a misspecified reward. <b>Credit assignment</b> over long horizons is the core difficulty.</li>
 <li>Looks-like-RL-but-isn't → if you have labeled optimal actions, use <b>supervised</b>. <b>Contextual bandits</b> = 1-step RL. <b>RLHF</b> aligns LLMs.</li>
+<li><b>On- vs off-policy:</b> SARSA learns the policy it follows; Q-learning learns the greedy policy while exploring (off-policy). <b>Model-free</b> (learn from experience) vs <b>model-based</b> (learn/known transition dynamics, plan).</li>
+<li><span class="warn">!</span> RL is <b>sample-hungry and unstable</b> — needs a simulator or cheap interaction; rarely the right first tool for a supervised-shaped problem.</li>
 </ul>
 </section>
 
@@ -339,6 +362,160 @@ logreg:  p = σ(wᵀx + b),  loss = log-loss / BCE
 <li><b>Intrinsic</b> (linear, shallow tree, GAM) vs <b>post-hoc</b> (SHAP/LIME on a black box). Prefer intrinsic when stakes/regulation demand it.</li>
 <li><span class="warn">!</span> Correlation, not causation — importance ≠ a lever you can pull. Explanations can mislead if features are correlated.</li>
 <li>Interpretability is a real objective in regulated domains (credit, health): sometimes worth trading a few points of accuracy.</li>
+<li><b>SHAP</b> = game-theoretic Shapley values: each feature's additive contribution to <i>this</i> prediction; sums to <code>pred − base</code>. Consistent &amp; local+global, but slow.</li>
+<li><b>PDP</b> shows the average marginal effect; <span class="warn">!</span> misleading under correlated features (extrapolates to unrealistic combos) → <b>ALE</b> plots are safer.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Ensembling — Why &amp; How</h3>
+<p>Combine several models so errors cancel. Works best when members are <b>accurate but decorrelated</b> — diverse errors average out; identical models add nothing.</p>
+<table><thead><tr><th>Method</th><th>Mechanism</th></tr></thead><tbody>
+<tr><td><b>Bagging</b></td><td>same algo on bootstrap samples, average → cuts <b>variance</b> (RF)</td></tr>
+<tr><td><b>Boosting</b></td><td>sequential, each fits prior residuals → cuts <b>bias</b> (GBM)</td></tr>
+<tr><td><b>Voting</b></td><td>hard (majority) or soft (avg probs) across different algos</td></tr>
+<tr><td><b>Stacking</b></td><td>a meta-model learns to combine base out-of-fold preds</td></tr>
+<tr><td><b>Blending</b></td><td>stacking on a held-out set (simpler, less data-efficient)</td></tr>
+</tbody></table>
+<ul>
+<li><span class="warn">!</span> <b>Stacking must use out-of-fold predictions</b> for the meta-features — training the meta-model on in-sample base preds leaks.</li>
+<li>RF decorrelates trees via <b>feature subsampling</b> at each split, not just row bootstrap.</li>
+<li>Diminishing returns + serving cost/latency — a single well-tuned GBM often beats a fragile 5-model stack in production.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Threshold from Cost — Worked Example</h3>
+<p>The 0.5 cutoff is arbitrary. Pick the threshold that minimizes expected cost, given <code>C_FP</code> and <code>C_FN</code>.</p>
+<pre><code># fraud: miss (FN) costs $500, false alarm (FP) costs $5
+# → 100:1 asymmetry, favor recall, lower the threshold
+cost(t) = C_FP·FP(t) + C_FN·FN(t)
+t* = argmin_t cost(t)          # sweep t on the val set
+# Bayes-optimal for calibrated p:  flag if p &gt; C_FP/(C_FP+C_FN)
+#   = 5/(5+500) ≈ 0.0099  → flag at ~1%, not 50%</code></pre>
+<ul>
+<li>Sweep <code>t</code> over the <b>validation</b> set, plot precision/recall vs t, pick the operating point that hits the budget (e.g. analyst review capacity).</li>
+<li><span class="warn">!</span> The Bayes formula only holds if probabilities are <b>calibrated</b> — otherwise tune <code>t</code> empirically.</li>
+<li>Re-tune when the <b>base rate</b> or costs shift; a fixed threshold silently drifts out of optimum.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Anomaly &amp; Outlier Detection</h3>
+<ul>
+<li>Flag points that don't fit "normal" — fraud, intrusion, defect, monitoring. Usually <b>extreme class imbalance</b> or no labels at all.</li>
+<li><b>Statistical:</b> z-score &gt;3, IQR fences, Mahalanobis distance (accounts for covariance).</li>
+<li><b>Isolation Forest:</b> anomalies isolate in fewer random splits → short path length. Scales well, few assumptions.</li>
+<li><b>One-Class SVM:</b> learns a boundary around normal data.</li>
+<li><b>LOF:</b> local density vs neighbors — catches anomalies in variable-density regions.</li>
+<li><b>Autoencoder:</b> high reconstruction error = anomaly (unstructured data).</li>
+</ul>
+<p><span class="warn">!</span> Novelty (train on clean normals) vs outlier detection (contaminated training set) are different setups. Evaluate with <b>PR-AUC / recall@budget</b>, never accuracy.</p>
+</section>
+
+<section class="card"><h3>Curse of Dimensionality</h3>
+<ul>
+<li>As dimensions grow, points spread out: volume explodes, data becomes <b>sparse</b>, and pairwise distances <b>concentrate</b> — nearest and farthest neighbor become nearly equidistant, so "similarity" loses meaning.</li>
+<li>Hits <b>distance-based</b> methods hardest: <b>kNN</b>, k-means, RBF-SVM, clustering all degrade.</li>
+<li>Data needed to cover the space grows <b>exponentially</b> with dimension.</li>
+</ul>
+<p><b>Fixes:</b> feature selection, <b>PCA</b> / embeddings, regularization, distance metrics learned for the task, or models less distance-reliant (trees). <span class="warn">!</span> More features is not free — past a point they add noise and variance, not signal.</p>
+</section>
+
+<section class="card"><h3>Supervised Setup &amp; Loss Functions</h3>
+<pre><code>y ~ f(x) + noise            # reality: unknown f + noise
+ŷ = f(x; θ)                 # your model family + params
+θ* = argmin_θ mean loss(y, f(x;θ))   # training</code></pre>
+<p>Every supervised model = <b>function family + loss + optimizer</b>. The family encodes the inductive bias; the loss encodes what you care about; the optimizer searches θ.</p>
+<table><thead><tr><th>Task</th><th>Train on</th><th>Evaluate on</th></tr></thead><tbody>
+<tr><td>Regression</td><td>MSE (outlier-sensitive) / MAE (robust) / Huber</td><td>RMSE, MAE, R²</td></tr>
+<tr><td>Classification</td><td>cross-entropy / log-loss</td><td>accuracy, F1, AUC</td></tr>
+</tbody></table>
+<ul>
+<li><span class="warn">!</span> <b>Never train on accuracy:</b> not differentiable, flat almost everywhere (zero gradient), and ignores confidence (0.51 vs 0.99 score alike). Optimize a smooth <b>surrogate</b>, evaluate on the business metric.</li>
+<li><span class="warn">!</span> <b>MSE + sigmoid</b> = non-convex with saturated flat regions → training stalls. Cross-entropy keeps the gradient ∝ <code>(p−y)</code>, strong signal exactly when confidently wrong; it's also the max-likelihood loss.</li>
+<li><b>Align loss to the metric you're judged on</b> as closely as you can — that's the recurring senior point.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Parametric vs Non-Parametric</h3>
+<table><thead><tr><th></th><th>Parametric</th><th>Non-parametric</th></tr></thead><tbody>
+<tr><td>#params</td><td>fixed, indep. of N</td><td>grows with N</td></tr>
+<tr><td>Examples</td><td>lin/logreg, naive Bayes</td><td>kNN, trees, kernel SVM</td></tr>
+<tr><td>Assumptions</td><td>strong (e.g. linearity)</td><td>weak / flexible</td></tr>
+<tr><td>Data need</td><td>less</td><td>more</td></tr>
+<tr><td>Risk</td><td>underfit if shape wrong</td><td>overfit; big/slow at predict</td></tr>
+<tr><td>Predict cost</td><td>cheap (apply formula)</td><td>can scan data (kNN)</td></tr>
+</tbody></table>
+<ul>
+<li>Parametric <b>summarizes</b> data into fixed params then discards it — compact, fast, rigid shape.</li>
+<li><span class="warn">!</span> "Non-parametric" ≠ no parameters — the <i>effective</i> count isn't fixed in advance (kNN keeps every point).</li>
+<li>Read: parametric for limited data + a believable form; non-parametric for lots of data + unknown/complex relationship.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Choosing an Algorithm (No Free Lunch)</h3>
+<p><b>NFL:</b> averaged over <i>all</i> problems no algorithm beats another — superiority on one class is paid for on another. Practically: no universal best model, <b>match inductive bias to the problem</b>, and <b>compare empirically via CV</b>. Real problems aren't random, so strong priors exist.</p>
+<table><thead><tr><th>Data / need</th><th>Reach for</th></tr></thead><tbody>
+<tr><td>Any baseline</td><td>majority/mean, then <b>linear/logreg</b></td></tr>
+<tr><td>Tabular</td><td><b>GBM</b> (XGBoost/LightGBM); RF as low-tuning alt</td></tr>
+<tr><td>Image / audio / big text</td><td>neural nets (CNN/transformer)</td></tr>
+<tr><td>Small high-dim (bag-of-words)</td><td>SVM / naive Bayes</td></tr>
+<tr><td>Need interpretable/regulated</td><td>linear, shallow tree, GAM</td></tr>
+</tbody></table>
+<ul>
+<li>Process: <b>characterize</b> (shape, size, linearity, latency, #labels) → <b>baseline + simple</b> → strong default for the data type → <b>CV on the business metric</b> → simplest model that clears the bar.</li>
+<li><span class="warn">!</span> "Always use a neural net / XGBoost" is a junior tell — NN's bias is usually <i>wrong</i> for tabular data.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Naive Bayes &amp; Generative vs Discriminative</h3>
+<pre><code>P(y|x) ∝ P(y)·∏ P(xᵢ|y)   # "naive" = features cond. indep. | y
+predict argmax_y  P(y)·∏ P(xᵢ|y)</code></pre>
+<ul>
+<li><b>Generative</b> (naive Bayes, GMM, LDA): model <b>P(x,y)</b> / P(x|y) — can generate data, works with less data, handles missing features.</li>
+<li><b>Discriminative</b> (logreg, SVM, trees, NN): model <b>P(y|x)</b> / the boundary directly — usually higher accuracy with enough data.</li>
+<li>Naive Bayes: fast, tiny data, <b>strong on text/spam</b> despite the crude independence assumption; well-calibrated ranking but probabilities often over-confident.</li>
+<li><span class="warn">!</span> Zero-frequency: an unseen feature/class term zeroes the whole product → <b>Laplace/add-one smoothing</b>.</li>
+<li>Variants: <b>Multinomial</b> (counts, text), <b>Bernoulli</b> (binary), <b>Gaussian</b> (continuous).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Probability Calibration</h3>
+<p><b>Calibrated</b> = predicted probabilities match observed frequencies: of all "70%" cases, ~70% are truly positive. Distinct from <b>ranking</b> (AUC) and <b>accuracy</b>.</p>
+<ul>
+<li><span class="warn">!</span> A model can rank perfectly (high AUC) yet be badly calibrated — right order, meaningless numbers. Calibration ≠ discrimination.</li>
+<li><b>Care when the probability feeds a decision:</b> expected-value (<code>P(churn)·value &gt; cost</code>), risk/pricing (credit, insurance, medical), thresholding across shifting base rates, combining model outputs.</li>
+<li>Care <b>less</b> for a pure ranking or one fixed threshold (top-k).</li>
+<li><b>logreg</b> is reasonably calibrated by construction (log-loss); <b>trees / SVM / boosting often aren't</b>.</li>
+<li>Fix on a held-out set: <b>Platt scaling</b> (sigmoid) or <b>isotonic regression</b>. Check with a <b>reliability diagram</b> or <b>Brier score</b>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Decision Boundaries by Model</h3>
+<table><thead><tr><th>Model</th><th>Boundary shape</th></tr></thead><tbody>
+<tr><td>logreg / linear SVM</td><td>straight line / hyperplane (w·x+b=0)</td></tr>
+<tr><td>Decision tree</td><td>axis-aligned rectangles (staircase)</td></tr>
+<tr><td>kNN</td><td>local, jagged (small k) → smooth (large k)</td></tr>
+<tr><td>Kernel SVM</td><td>smooth curves (kernel-dependent)</td></tr>
+<tr><td>Neural net</td><td>arbitrary smooth non-linear</td></tr>
+</tbody></table>
+<ul>
+<li>The boundary shape <b>is</b> the inductive bias — it tells you what a model can even represent.</li>
+<li><span class="warn">!</span> Two classes split by a <b>circle</b> → a linear model is hopeless no matter the tuning (need features / kernel / tree / NN).</li>
+<li>Diagnose visually: a wildly wiggly boundary snaking around points = <b>overfit</b>; a straight line missing an obvious curve = <b>underfit</b>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Label Efficiency — Labels Are the Bottleneck</h3>
+<p>Labels are usually the scarcest, slowest, most expensive, <b>noisiest</b> ingredient. Label quality caps model quality — you can't learn a clean map from dirty targets. "Get more data" often means "get more <b>labels</b>," a cost/logistics problem more than an ML one.</p>
+<table><thead><tr><th>Approach</th><th>Idea</th></tr></thead><tbody>
+<tr><td><b>Transfer learning</b></td><td>fine-tune a pretrained model → far fewer labels</td></tr>
+<tr><td><b>Semi-supervised</b></td><td>few labels + lots of unlabeled data</td></tr>
+<tr><td><b>Self-supervised</b></td><td>pretext task on unlabeled data, then fine-tune</td></tr>
+<tr><td><b>Active learning</b></td><td>label the model's most <b>uncertain</b> points first</td></tr>
+<tr><td><b>Weak supervision</b></td><td>heuristics/rules generate approximate labels</td></tr>
+</tbody></table>
+<ul>
+<li><span class="warn">!</span> A small <b>clean</b> label set often beats a large noisy one — measure label quality (multi-annotator agreement, adjudication).</li>
+<li>Data strategy frequently matters more than model choice.</li>
 </ul>
 </section>
 

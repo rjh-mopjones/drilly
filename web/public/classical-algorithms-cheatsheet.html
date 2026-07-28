@@ -155,7 +155,8 @@ NO training — "lazy": just stores the data</code></pre>
 <li><span class="warn">!</span> <b>Must scale features</b> — distance is dominated by large-range features otherwise.</li>
 <li><span class="warn">!</span> <b>Curse of dimensionality</b>: in high-d all points are ~equidistant → "nearest" is meaningless. Reduce dims first.</li>
 <li>Predict cost O(nd) per query (brute force); KD-/ball-trees help in low-d, use <b>approximate NN</b> (HNSW) at scale.</li>
-<li>Non-parametric; distance-weighted voting (1/d) helps. kNN ≠ k-means (supervised lookup vs unsupervised clustering).</li>
+<li>Metric matters: Euclidean default, Manhattan for high-d, <b>cosine</b> for text/embeddings. Odd k for binary; distance-weighting (1/d) softens the k choice.</li>
+<li>Non-parametric, <b>zero training cost</b> but heavy serving — the opposite profile to eager models. kNN ≠ k-means (supervised lookup vs unsupervised clustering).</li>
 </ul>
 </section>
 
@@ -196,7 +197,8 @@ predict variance ≈ ρσ² + (1-ρ)/B · σ²  → ↓ρ helps</code></pre>
 <li>Two randomness sources: <b>bootstrap rows</b> + <b>random features</b> (<code>max_features</code> ≈ √p classif, p/3 regress). Feature subsetting <b>decorrelates</b> trees (drops ρ) — that's the extra variance cut over plain bagging.</li>
 <li><b>OOB error</b> = free validation from the ~37% of rows each tree didn't see; no separate CV needed.</li>
 <li>Knobs: <code>n_estimators</code> (more = better, never overfits — plateaus), <code>max_features</code>, <code>max_depth</code>. Parallel, robust, low-tuning.</li>
-<li><span class="warn">!</span> <b>Can't extrapolate</b> (predictions bounded by training leaves). <span class="warn">!</span> Impurity importance is <b>biased toward high-cardinality</b> features → prefer <b>permutation importance</b>.</li>
+<li><span class="warn">!</span> <b>Can't extrapolate</b> (predictions bounded by training leaves). <span class="warn">!</span> Impurity importance is <b>biased toward high-cardinality</b> features → prefer <b>permutation importance</b> or SHAP.</li>
+<li><b>Variance-of-average</b> floor: Var ≈ ρσ² as B→∞, so once trees are decorrelated, more trees only shave the (1−ρ)/B term — it plateaus, never overfits. Contrast boosting, where more trees eventually overfit.</li>
 </ul>
 </section>
 
@@ -210,6 +212,8 @@ start F₀ = mean / log-odds</code></pre>
 <li>Gradient descent in <b>function space</b>: any differentiable loss (MSE, log-loss, quantile) via its gradient.</li>
 <li><b>η (learning rate / shrinkage)</b> trades off vs <code>n_estimators</code> — small η + more trees generalises better. Standard: η≈0.01–0.1.</li>
 <li><span class="warn">!</span> <b>Overfits</b> if over-trained (opposite of RF). Regularise: <b>early stopping</b> on a val set, <b>subsample</b> (&lt;1, "stochastic GB"), column subsample, tree depth/leaf caps.</li>
+<li>Why it beats RF on accuracy: it drives <b>bias</b> down (RF only cuts variance) — but it's <b>sequential</b> (can't parallelise across trees) and far more tuning-sensitive.</li>
+<li>Supports <b>quantile loss</b> for prediction intervals and <b>Huber</b> for robustness — any differentiable loss via its gradient.</li>
 </ul>
 </section>
 
@@ -222,7 +226,8 @@ leaf weight w*ⱼ = -Σgᵢ / (Σhᵢ + λ)</code></pre>
 <li><b>Second-order</b> (Newton) split gain uses Hessian → better steps. <b>Sparsity-aware</b> default direction for missing values.</li>
 <li>Engineering: pre-sorted/​histogram splits, column blocks, cache-aware, parallel <i>within</i> a tree.</li>
 <li>Key knobs: <code>eta</code>, <code>max_depth</code>, <code>min_child_weight</code>, <code>subsample</code>, <code>colsample_bytree</code>, <code>lambda/gamma</code>, <code>n_estimators</code>+early stop.</li>
-<li><span class="warn">!</span> Tune with early stopping or you'll over-boost. The tabular workhorse.</li>
+<li>Split gain = ½[G_L²/(H_L+λ) + G_R²/(H_R+λ) − G²/(H+λ)] − γ; a split is only taken if the gain clears <b>γ</b> (pre-pruning built into the objective).</li>
+<li><span class="warn">!</span> Tune with early stopping or you'll over-boost. <b>hist</b> tree method (histogram binning, à la LightGBM) is now the fast default. The tabular workhorse.</li>
 </ul>
 </section>
 
@@ -278,6 +283,7 @@ init: k-means++  (spread-out seeds)</code></pre>
 <li>Choose k by <b>elbow</b> (inertia vs k) or <b>silhouette</b> score; there's no "true" k.</li>
 <li><span class="warn">!</span> Assumes <b>spherical, equal-size, equal-density</b> clusters (Euclidean) — fails on elongated/​nested shapes.</li>
 <li><span class="warn">!</span> <b>Scale features</b>; sensitive to outliers (means shift) → k-medoids is robust. Complexity O(n·k·d·iters).</li>
+<li><b>Converges</b> because each step (assign, then re-mean) never increases inertia and assignments are finite — but only to a <b>local</b> optimum of a non-convex objective. <b>MiniBatchKMeans</b> for large n.</li>
 </ul>
 </section>
 
@@ -313,6 +319,7 @@ project: Z = X·V_k   (keep k components)</code></pre>
 <li>Pick k by <b>cumulative explained variance</b> (e.g. 95%) or scree elbow.</li>
 <li><span class="warn">!</span> <b>Standardise first</b> — else the largest-scale feature dominates the top PC.</li>
 <li><span class="warn">!</span> Components are <b>not interpretable</b> features, and PCA is <b>unsupervised</b> — the max-variance axis needn't be the most predictive (see PLS/LDA for supervised).</li>
+<li><b>Use SVD, not covariance eigendecomposition</b> — forming XᵀX squares the condition number; truncated SVD gives the top-k cheaply for large/sparse data. <span class="warn">!</span> Fit PCA <b>inside the CV fold</b> — it learns axes from data and leaks otherwise.</li>
 </ul>
 </section>
 
@@ -326,6 +333,178 @@ project: Z = X·V_k   (keep k components)</code></pre>
 <li><span class="warn">!</span> <b>t-SNE is for pictures only</b> — cluster sizes &amp; between-cluster distances are <b>meaningless</b>; don't run downstream models on its output. <code>perplexity</code> is the key knob; non-deterministic.</li>
 <li><b>UMAP</b>: preserves more global structure, faster, embeds new points.</li>
 <li><b>LDA</b> (Fisher): supervised — maximises between-class / within-class scatter; yields ≤ <b>C-1</b> dims. It's also a classifier.</li>
+</ul>
+</section>
+
+<section class="card"><h3>AdaBoost</h3>
+<pre><code>init weights wᵢ = 1/n
+for m in 1..M:
+  fit weak learner hₘ on weighted data
+  err = Σ wᵢ·1[hₘ(xᵢ)≠yᵢ] / Σ wᵢ
+  αₘ = ½·ln((1-err)/err)         (learner vote)
+  wᵢ *= exp(αₘ·1[miss])          (upweight misses)
+final: sign( Σ αₘ·hₘ(x) )</code></pre>
+<ul>
+<li>The <b>original boosting</b>: reweight the data so each stump focuses on what the ensemble still gets wrong; confident-and-correct learners get a bigger vote αₘ.</li>
+<li>Base learner is usually a <b>decision stump</b> (depth-1 tree). Equivalent to forward stagewise additive modelling with <b>exponential loss</b> — that's the link to GBM (which generalises to any differentiable loss).</li>
+<li><span class="warn">!</span> Exponential loss is <b>sensitive to label noise / outliers</b> — persistent mislabels get exponentially upweighted. GBM with log-loss/Huber is more robust; prefer gradient boosting in practice.</li>
+<li>Still low-tuning and interpretable-ish; largely superseded by XGBoost/LightGBM but a classic derivation to know.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Key Hyperparameters by Algorithm</h3>
+<table><thead><tr><th>Model</th><th>Knobs that matter</th></tr></thead><tbody>
+<tr><td>GBM/XGB</td><td><code>eta</code>, <code>n_estimators</code>+early stop, <code>max_depth</code></td></tr>
+<tr><td>Random Forest</td><td><code>n_estimators</code> (↑ safe), <code>max_features</code></td></tr>
+<tr><td>LightGBM</td><td><code>num_leaves</code>, <code>min_data_in_leaf</code>, <code>eta</code></td></tr>
+<tr><td>SVM (RBF)</td><td><code>C</code>, <code>gamma</code> — joint 2-D grid</td></tr>
+<tr><td>kNN</td><td><code>k</code> (~√N), metric, weights</td></tr>
+<tr><td>k-means</td><td><code>k</code>, <code>init</code>=k-means++, <code>n_init</code></td></tr>
+<tr><td>Ridge/Lasso</td><td><code>λ</code> (alpha) by CV</td></tr>
+<tr><td>Trees</td><td><code>max_depth</code>, <code>min_samples_leaf</code>, ccp α</td></tr>
+</tbody></table>
+<ul>
+<li>Each model has a <b>capacity dial</b> and a <b>regularization dial</b> — tune the 2-3 that dominate, leave the rest at defaults.</li>
+<li>Say the <b>direction</b>: e.g. deeper trees / larger C / larger γ / smaller k → lower bias, higher variance. Interviewers want the mechanism, not a grid.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Tuning Strategy</h3>
+<ul>
+<li><b>Baseline first</b> — defaults + a simple model; know the floor before you tune.</li>
+<li><b>Few knobs, coarse-to-fine</b>: wide log-spaced grid to find the region, then narrow around the best point.</li>
+<li><b>CV every candidate</b> — optimise out-of-sample score, not train fit. Favour the simpler model within <b>1 standard error</b> of the best.</li>
+<li><b>Random &gt; grid</b> for large spaces (covers each dim better); <b>Bayesian</b> (Optuna/Hyperopt) is most sample-efficient.</li>
+<li><b>Early stopping</b> for boosting instead of gridding <code>n_estimators</code>: set it high, let a val metric pick the count.</li>
+<li><span class="warn">!</span> Coupled knobs aren't separable — tune <b>eta↔n_estimators</b> and <b>C↔γ</b> jointly; one-at-a-time misses the optimum.</li>
+<li>Tune <b>inside a Pipeline</b>; keep a final untouched test set (nested CV for an honest estimate).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Feature Scaling — Who Needs It</h3>
+<table><thead><tr><th>Scale?</th><th>Models</th><th>Why</th></tr></thead><tbody>
+<tr><td><b>Yes</b></td><td>kNN, k-means, hier/DBSCAN</td><td>Euclidean distance</td></tr>
+<tr><td><b>Yes</b></td><td>SVM (esp. RBF)</td><td>margin + kernel dist</td></tr>
+<tr><td><b>Yes</b></td><td>PCA</td><td>maximises variance</td></tr>
+<tr><td><b>Yes</b></td><td>Ridge/Lasso, any GD</td><td>fair penalty / convergence</td></tr>
+<tr><td><b>No</b></td><td>Trees, RF, GBM/XGB</td><td>threshold splits</td></tr>
+<tr><td><b>No</b></td><td>Naive Bayes</td><td>per-feature likelihoods</td></tr>
+</tbody></table>
+<ul>
+<li>Threshold splits are invariant to any monotone per-feature transform → scaling a feature can't change split order. That's why trees don't care.</li>
+<li><span class="warn">!</span> The interview tell: "scale for XGBoost?" → <b>no</b> (say why). "Scale for kNN/SVM/k-means/PCA?" → <b>yes</b>, and do it <b>inside the CV fold</b>.</li>
+<li>Standardise (z-score) for Gaussian-ish; min-max when bounded ranges matter; robust-scale with heavy outliers.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Leakage &amp; Pipelines</h3>
+<pre><code>Pipeline([("scale", StandardScaler()),
+          ("pca",   PCA(n_components=0.95)),
+          ("knn",   KNeighborsClassifier())])
+cross_val_score(pipe, X, y, cv=5)  # refit per fold</code></pre>
+<ul>
+<li><b>Any statistic learned from data</b> — a scaler's mean, an imputer's fill, PCA axes, a target encoding — must be fit on the <b>training fold only</b>, then applied to validation. A <code>Pipeline</code> enforces that mechanically.</li>
+<li><span class="warn">!</span> <b>Fit-then-split leaks:</b> scaling/imputing/PCA on the full dataset lets validation statistics bleed into training → inflated CV, collapse in prod.</li>
+<li><span class="warn">!</span> <b>Target-encoding leak:</b> mean-encoding a category on the same rows you train on injects the row's own label. Fix: <b>out-of-fold</b> encoding, leave-one-out, or smoothing <code>(n·catμ + m·globalμ)/(n+m)</code>; CatBoost's ordered stats do it structurally.</li>
+<li>Pipelines also kill <b>train/serve skew</b> — the identical transforms run at predict time. Ship the whole Pipeline, not just the model.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Class Imbalance</h3>
+<ul>
+<li><b>Reweight the loss first</b> — sklearn <code>class_weight="balanced"</code>, XGBoost <code>scale_pos_weight = n_neg/n_pos</code>. Cheap, no data duplication, usually enough.</li>
+<li><b>Resample</b> — oversample minority / <b>SMOTE</b> (synthetic interpolation) / undersample majority. <span class="warn">!</span> Do it <b>inside the CV fold</b> (imblearn Pipeline) — oversampling before the split duplicates rows across train and val → leak.</li>
+<li><b>Tune the threshold</b> — don't accept 0.5; pick it off the precision-recall curve to match business cost.</li>
+<li><span class="warn">!</span> <b>Accuracy is the null model</b> at 99:1 — report PR-AUC, F1, recall@precision, or balanced accuracy instead.</li>
+<li>Senior line: imbalance is a <b>loss-weighting + threshold</b> problem, not automatically a "must oversample" problem.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Complexity Cheat</h3>
+<table><thead><tr><th>Model</th><th>Train</th><th>Predict</th></tr></thead><tbody>
+<tr><td>Linear (normal eq)</td><td>O(NP²+P³)</td><td>O(P)</td></tr>
+<tr><td>Linear/Logistic SGD</td><td>O(NP)/epoch</td><td>O(P)</td></tr>
+<tr><td>kNN</td><td>O(1) store</td><td>O(NP)/query</td></tr>
+<tr><td>Naive Bayes</td><td>O(NP)</td><td>O(P·C)</td></tr>
+<tr><td>Decision tree</td><td>O(NP·log N)</td><td>O(depth)</td></tr>
+<tr><td>Random forest</td><td>O(T·NP·log N)</td><td>O(T·depth)</td></tr>
+<tr><td>GBM/XGB</td><td>O(T·NP·log N)</td><td>O(T·depth)</td></tr>
+<tr><td>SVM (kernel)</td><td>O(N²)–O(N³)</td><td>O(n_sv·P)</td></tr>
+<tr><td>k-means</td><td>O(N·k·i·P)</td><td>O(k·P)</td></tr>
+<tr><td>PCA</td><td>O(NP²+P³)</td><td>O(P·comp)</td></tr>
+</tbody></table>
+<ul>
+<li>Load-bearing facts: <span class="warn">!</span> <b>SVM O(N²–³)</b> dies past ~10⁵ rows; <span class="warn">!</span> <b>kNN O(N)/query</b> kills serving latency; <b>GBM is sequential</b> (RF parallel); PCA/linear carry a <b>P³</b> term in high-dim.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Estimator API Shapes</h3>
+<pre><code># sklearn: uniform fit / predict / transform
+model = RandomForestClassifier(n_estimators=300)
+model.fit(X_tr, y_tr)
+model.predict(X_te); model.predict_proba(X_te)
+# learned params get a trailing _  →  model.feature_importances_
+
+# XGBoost: val set + early stopping are first-class
+clf = xgb.XGBClassifier(n_estimators=1000, learning_rate=0.05,
+        max_depth=6, subsample=0.8, colsample_bytree=0.8)
+clf.fit(X_tr, y_tr, eval_set=[(X_val,y_val)],
+        early_stopping_rounds=50)</code></pre>
+<ul>
+<li>Uniform <b>fit/predict/transform</b> is why any model drops into a <code>Pipeline</code> or <code>GridSearchCV</code> unchanged. Transformers = fit+transform; predictors = fit+predict (+predict_proba).</li>
+<li>Boosting libs add native <b>missing-value</b> handling (and LightGBM native categoricals) + a binary data format (DMatrix/Dataset) for speed. Set <code>n_estimators</code> high, let early stopping choose it.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Generative vs Discriminative</h3>
+<table><thead><tr><th></th><th>Models</th><th>Learns</th></tr></thead><tbody>
+<tr><td>Discriminative</td><td>Logistic, SVM, trees, kNN</td><td>P(y|x) / boundary</td></tr>
+<tr><td>Generative</td><td>Naive Bayes, GMM, LDA</td><td>P(x,y) = P(x|y)P(y)</td></tr>
+</tbody></table>
+<ul>
+<li><b>Discriminative</b> models the decision boundary directly — usually higher accuracy when you only need to classify, and it makes no distributional assumptions about x.</li>
+<li><b>Generative</b> models how each class <i>generates</i> data, so it can sample, handle missing features, and often learns faster with <b>little data</b> (Naive Bayes shines on small text sets) — at the cost of stronger assumptions.</li>
+<li>Classic pairing: <b>Naive Bayes (gen) ↔ Logistic Regression (disc)</b> — same linear form, NB wins on tiny n, logistic wins as n grows (it converges to the lower asymptotic error).</li>
+<li>LDA is generative (Gaussian per class, shared Σ) and yields a linear boundary; QDA drops the shared-Σ assumption for a quadratic one.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Convexity &amp; Loss Functions</h3>
+<table><thead><tr><th>Model</th><th>Loss</th><th>Convex?</th></tr></thead><tbody>
+<tr><td>Linear reg</td><td>squared (MSE)</td><td>yes → global</td></tr>
+<tr><td>Logistic</td><td>log-loss (CE)</td><td>yes → global</td></tr>
+<tr><td>SVM</td><td>hinge</td><td>yes → global</td></tr>
+<tr><td>AdaBoost</td><td>exponential</td><td>yes (stagewise)</td></tr>
+<tr><td>Trees / k-means</td><td>impurity / inertia</td><td><b>no</b> → greedy/local</td></tr>
+<tr><td>GMM (EM)</td><td>−log-likelihood</td><td>no → local</td></tr>
+</tbody></table>
+<ul>
+<li><b>Convex</b> = one global minimum, so gradient descent (or a closed form) is guaranteed to find the best fit — the reason linear/logistic/SVM "just work".</li>
+<li><span class="warn">!</span> <b>Logistic with MSE is non-convex</b> — the sigmoid makes squared loss bumpy. Log-loss is the MLE <i>and</i> convex; always use it.</li>
+<li>Non-convex objectives (trees, k-means, GMM, nets) rely on <b>greedy heuristics or restarts</b> and only reach a local optimum → init and n_init matter.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Whiteboard Answer Skeleton</h3>
+<p>Every "explain algorithm X" answer follows a <b>4-beat</b> structure — say all four and you sound like you've implemented it, not memorised it.</p>
+<ul>
+<li><b>1. Objective</b> — what does it optimise? Name the loss first (MSE, log-loss, hinge, inertia, likelihood).</li>
+<li><b>2. Mechanism</b> — how does it optimise it? The update rule, the greedy split, the E/M step, the QP.</li>
+<li><b>3. Knobs + complexity</b> — what controls capacity and what does it cost to train/serve.</li>
+<li><b>4. Decisive tradeoff</b> — the one-line reason you'd pick it or not (interpretable but linear; SOTA but a black box; flexible but O(N²)).</li>
+</ul>
+<p>For <b>comparisons</b>, name the distinguishing <b>axis</b> (bagging cuts variance / boosting cuts bias; L1 sparse / L2 shrinks; PCA linear-global / t-SNE non-linear-local) rather than listing disconnected facts. For <b>derivations</b>: start from the loss, take the gradient, simplify to the clean form.</p>
+</section>
+
+<section class="card"><h3>SVM Dual &amp; Support Vectors</h3>
+<pre><code>dual:  max Σαᵢ − ½ΣΣ αᵢαⱼ yᵢyⱼ K(xᵢ,xⱼ)
+       s.t. 0 ≤ αᵢ ≤ C,   Σαᵢyᵢ = 0
+w = Σ αᵢ yᵢ xᵢ     f(x)=sign(Σ αᵢyᵢ K(xᵢ,x)+b)</code></pre>
+<ul>
+<li>The dual depends on data <b>only through dot products</b> → this is where the kernel plugs in (swap xᵢ·xⱼ for K).</li>
+<li><b>αᵢ = 0</b> for non-support-vectors → prediction cost scales with the number of <b>support vectors</b>, not n. Points with <b>0 &lt; αᵢ &lt; C</b> sit exactly on the margin; <b>αᵢ = C</b> are inside/violating it.</li>
+<li>C is the upper bound on each αᵢ — the soft-margin/regularisation cap. <b>SVR</b> extends the idea with an ε-insensitive tube for regression.</li>
+<li><span class="warn">!</span> Kernel SVM stores the training kernel → O(N²) memory; another reason it stalls on large n.</li>
 </ul>
 </section>
 
@@ -347,6 +526,21 @@ project: Z = X·V_k   (keep k components)</code></pre>
 <p>Axes that decide: n vs p, linear vs non-linear, interpretability need, tuning budget, extrapolation need.</p>
 </section>
 
+<section class="card"><h3>Bias / Variance by Model</h3>
+<table><thead><tr><th>High bias (underfit)</th><th>High variance (overfit)</th></tr></thead><tbody>
+<tr><td>Linear / logistic</td><td>Deep decision tree</td></tr>
+<tr><td>Naive Bayes</td><td>kNN with k=1</td></tr>
+<tr><td>Large-k kNN</td><td>SVM, large C &amp; γ</td></tr>
+<tr><td>Small-C SVM</td><td>Unregularised GBM (over-trained)</td></tr>
+<tr><td>Shallow stumps</td><td>GMM, full covariance</td></tr>
+</tbody></table>
+<ul>
+<li><b>Error = bias² + variance + irreducible noise.</b> Every knob on this sheet moves you along this axis — name the direction it moves you.</li>
+<li><b>Bagging/RF</b> attacks the right column (variance) by averaging; <b>boosting</b> attacks the left (bias) by sequential residual-fitting.</li>
+<li>The move: pick a family for its <i>natural</i> position, then use its regularization dial to slide toward the sweet spot via CV.</li>
+</ul>
+</section>
+
 <section class="card"><h3>&#9733; Derivations to Nail</h3>
 <ul>
 <li>&#9744; <b>Normal equation</b>: ∂/∂w ||Xw-y||² = 2Xᵀ(Xw-y)=0 → w=(XᵀX)⁻¹Xᵀy.</li>
@@ -360,6 +554,11 @@ project: Z = X·V_k   (keep k components)</code></pre>
 <li>&#9744; <b>Kernel trick</b>: replace x·x' with K(x,x'); no explicit φ.</li>
 <li>&#9744; <b>k-means / EM</b>: alternate assign ↔ update; monotone ↓ inertia / ↑ likelihood.</li>
 <li>&#9744; <b>PCA</b>: eigenvectors of covariance = SVD of centered X.</li>
+<li>&#9744; <b>PCA is max-variance</b>: maximise wᵀCw s.t. ||w||=1 → Lagrangian → Cw=λw; variance along w equals its eigenvalue λ.</li>
+<li>&#9744; <b>SVM dual</b>: only dot products appear → kernelise; αᵢ&gt;0 only for support vectors.</li>
+<li>&#9744; <b>AdaBoost</b>: αₘ=½ln((1−err)/err); upweight misses by e^αₘ; = stagewise exponential-loss fit.</li>
+<li>&#9744; <b>XGBoost gain</b>: ½[G_L²/(H_L+λ)+G_R²/(H_R+λ)−G²/(H+λ)]−γ; leaf w*=−G/(H+λ).</li>
+<li>&#9744; <b>Bagging vs boosting</b>: average low-bias/high-var → cut variance; add high-bias/low-var → cut bias.</li>
 <li>&#9744; State every model as <b>objective · fit · knob · complexity · tradeoff</b>.</li>
 </ul>
 </section>
@@ -378,6 +577,13 @@ project: Z = X·V_k   (keep k components)</code></pre>
 <tr><td>Clusters read off t-SNE plot</td><td>distances meaningless — viz only <span class="warn">!</span></td></tr>
 <tr><td>PCA dominated by one feature</td><td>unscaled data <span class="warn">!</span></td></tr>
 <tr><td>Model can't predict above max seen</td><td>trees/RF/GBM can't extrapolate <span class="warn">!</span></td></tr>
+<tr><td>CV great, production collapses</td><td>leakage: scaler/PCA/encoding fit pre-split <span class="warn">!</span></td></tr>
+<tr><td>Target encoding too good to be true</td><td>fit on train rows → do out-of-fold <span class="warn">!</span></td></tr>
+<tr><td>99% accuracy, model predicts one class</td><td>imbalance → class_weight, PR-AUC <span class="warn">!</span></td></tr>
+<tr><td>GBM keeps improving train, val worsens</td><td>no early stopping → over-boosted <span class="warn">!</span></td></tr>
+<tr><td>Logistic loss won't converge</td><td>perfect separation → add L2 <span class="warn">!</span></td></tr>
+<tr><td>GMM likelihood shoots to ∞</td><td>component collapsed on a point → floor Σ <span class="warn">!</span></td></tr>
+<tr><td>Predict slow at serve time</td><td>kNN O(N)/query or huge SVM SV set <span class="warn">!</span></td></tr>
 </tbody></table>
 </section>
 
