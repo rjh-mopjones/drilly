@@ -107,6 +107,8 @@ flowchart LR
 <li><b>Partition key choice = load balance.</b> Low-cardinality or "celebrity" key (e.g. <code>country</code>, a viral user) → <b>hot partition</b>, one node saturated <span class="warn">!</span></li>
 <li>Consistent hashing means adding/removing a node reshuffles only <b>neighbouring</b> ranges, not the whole dataset. Run <code>nodetool cleanup</code> on old owners after.</li>
 <li>The token is derived from the partition key <b>only</b> — clustering columns never affect placement.</li>
+<li>Murmur3 token space is the signed 64-bit range (−2^63 … 2^63−1) arranged as a ring; each vnode owns a contiguous arc, ownership wraps past the top back to the bottom.</li>
+<li><b>Fewer vnodes (16) + <code>allocate_tokens_for_keyspace</code></b> beats the old random-256 default: random token selection with few vnodes skews ownership; the allocation algorithm minimizes imbalance for the RF.</li>
 </ul>
 </section>
 
@@ -137,6 +139,8 @@ flowchart LR
 <li>RF3 + QUORUM tolerates <b>1 node down</b> and still reads/writes. RF3 + ALL tolerates 0.</li>
 <li>Conflicts resolved by <b>last-write-wins</b> on the cell timestamp → clock skew across nodes can silently drop a "newer" write <span class="warn">!</span> Keep NTP tight.</li>
 <li>CL is <b>per request</b> (set in the driver), not a schema property — different queries can use different CLs.</li>
+<li><b>Availability math (RF3):</b> QUORUM=2 → survives 1 replica down; ONE → survives 2 down but risks stale; ALL → survives 0. RF5 + QUORUM(3) survives 2 down — raise RF, not CL, for more slack.</li>
+<li>A CL is a <b>threshold, not a target</b>: at CL=ONE the write still propagates to all RF replicas asynchronously; ONE just means the coordinator ACKs after the first success.</li>
 </ul>
 </section>
 
@@ -209,6 +213,7 @@ flowchart LR
 <li><b>Key cache</b> → offset for hot keys; <b>partition summary/index</b> → byte offset in the SSTable; <b>row cache</b> = whole rows (great for tiny hot rows, <b>deadly on wide partitions</b> <span class="warn">!</span>).</li>
 <li>Coordinator does 1 full data read + <b>digest reads</b> from others (per CL); mismatch → <b>read repair</b> writes newest back to stale replicas.</li>
 <li><b>Speculative retry</b> sends an extra read to another replica if the first is slow — protects p99.</li>
+<li><b>read_repair</b> table option: <code>BLOCKING</code> (default — coordinator waits for the repair write before returning, so CL is honored) vs <code>NONE</code> (skip). Digest mismatch → full data reads from the disagreeing replicas to reconcile.</li>
 <li><b>SSTables-per-read</b> is the #1 read-latency lever; tombstones + too many SSTables turn a cheap read into a timeout <span class="warn">!</span></li>
 </ul>
 </section>
@@ -225,6 +230,8 @@ flowchart LR
 <li><b>Amplification trade — pick 2 of 3:</b> write / read / space. STCS optimizes writes; LCS optimizes reads; TWCS optimizes TTL data.</li>
 <li>Don't run manual <b>major compaction</b> on STCS: one giant SSTable that then won't compact and hoards tombstones <span class="warn">!</span></li>
 <li>Watch <b>pending compactions</b> (<code>nodetool compactionstats</code>) — a climbing backlog degrades reads.</li>
+<li><b>Read amp</b> = SSTables touched per read; <b>write amp</b> = times a byte is rewritten by compaction; <b>space amp</b> = on-disk size ÷ live size. STCS: low write / high read+space amp. LCS: low read+space / high write amp.</li>
+<li>Compaction runs in the background on <code>concurrent_compactors</code> threads, throttled by <code>compaction_throughput_mb_per_sec</code>; each SSTable ships a <b>partition index</b> + <b>bloom filter</b> alongside <code>Data.db</code>.</li>
 </ul>
 </section>
 
@@ -236,6 +243,8 @@ flowchart LR
 <li>Too many tombstones scanned per read → slow reads, then <code>TombstoneOverwhelmingException</code> (aborts at 100k). The <b>queue / delete-then-read pattern is an anti-pattern</b> <span class="warn">!</span></li>
 <li><b>TTL</b> auto-expires cells (→ becomes a tombstone → compacted away). Prefer <b>TTL + TWCS</b> over explicit deletes for anything time-bounded.</li>
 <li>Range/partition/row/cell tombstones exist; a range delete is cheaper than deleting many cells.</li>
+<li><b>Hidden tombstone sources:</b> inserting <code>null</code> writes a tombstone; a TTL expiry becomes one; overwriting a collection wholesale tombstones the old collection then rewrites it <span class="warn">!</span></li>
+<li>Warn threshold <code>tombstone_warn_threshold</code> (1000) logs; <code>tombstone_failure_threshold</code> (100k) aborts the query — tune the query/model, not just the threshold.</li>
 </ul>
 </section>
 
@@ -246,6 +255,7 @@ flowchart LR
 <li><b>Must repair every node within gc_grace_seconds</b> or risk zombies. Use <b>Cassandra Reaper</b> to schedule + throttle so it doesn't crush the cluster <span class="warn">!</span></li>
 <li><b>Full</b> vs <b>incremental</b> (marks repaired SSTables so they're skipped next time); <code>-pr</code> (primary range) run on <b>every</b> node avoids redundant work.</li>
 <li>Hints alone are <b>not</b> a substitute for repair — they expire and can be lost.</li>
+<li><b>Repair cadence &lt; gc_grace_seconds</b>, always — that's the operational contract. A node down longer than gc_grace must be repaired before it serves, or it resurrects deletes.</li>
 </ul>
 </section>
 
@@ -257,6 +267,8 @@ flowchart LR
 <li><b>Secondary index (2i)</b> = local per-node index; a query <b>scatter-gathers all nodes</b> → only for low-cardinality, already-restricted queries; a <b>separate table is usually better</b> <span class="warn">!</span></li>
 <li><b>SAI</b> (Storage-Attached Index, 5.0) = the modern index — multiple columns, range/text, lower overhead; still not a substitute for good partition design. Adds <b>vector/ANN</b> search.</li>
 <li>Old <b>materialized views</b> exist but are flagged experimental — hand-roll a second table + keep it in sync.</li>
+<li><b>timeuuid</b> = time-ordered UUID (v1): unique + sortable, ideal clustering key for feeds; <code>now()</code>, <code>minTimeuuid()</code>/<code>maxTimeuuid()</code> for range bounds.</li>
+<li><b>Frozen vs non-frozen:</b> a frozen collection/UDT is one opaque blob (rewrite whole to change); non-frozen allows per-element updates but each element is its own cell (more overhead, tombstones on overwrite).</li>
 </ul>
 </section>
 
@@ -323,6 +335,8 @@ nodetool decommission        # stream data off, remove node</code></pre>
 <li><b>Throttle compaction/streaming</b> so background work doesn't starve live queries; keep &lt;70% disk (STCS needs headroom).</li>
 <li>Use <code>TRACING ON</code> in <code>cqlsh</code> to see exactly which replicas + SSTables a slow query touched.</li>
 <li>Token-aware, DC-aware driver policy so clients hit a replica directly (1 hop, not 2).</li>
+<li><b>Slow-reads triage order:</b> (1) GC pauses (<code>gc.log</code>, promotion failures) → (2) wide partition (<code>tablehistograms</code> max partition bytes) → (3) tombstones/read (<code>tablestats</code>) → (4) SSTables/read + compaction backlog → (5) cold caches. Usually one of the first four.</li>
+<li>Expose metrics via <b>JMX → Prometheus + Grafana</b>; alert on p99 latency, dropped mutations, pending compactions, and hint accumulation, not just node up/down.</li>
 </ul>
 </section>
 
@@ -337,6 +351,110 @@ nodetool decommission        # stream data off, remove node</code></pre>
 <ul>
 <li><b>5.0 highlights:</b> <b>SAI</b> indexes, <b>Accord</b> general transactions, <b>vector search + ANN</b>, <b>UCS</b> compaction, trie-based memtables/SSTables.</li>
 <li>Reality check: <b>most apps don't need Cassandra</b> — its modeling + ops burden (repair, compaction, denormalization) only pays off at genuine scale / write-volume / always-on needs <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Node Lifecycle &amp; Streaming</h3>
+<p>Masterless ⇒ ops are <b>node-by-node</b>. Add/remove/replace/repair all reduce to nodes <b>streaming SSTables</b> to each other; watch <code>nodetool netstats</code> and let each finish before the next.</p>
+<table><thead><tr><th>Action</th><th>How</th></tr></thead><tbody>
+<tr><td>add node</td><td><code>auto_bootstrap</code>: joins <b>UJ</b>, streams its ranges, → <b>UN</b>. Then <code>cleanup</code> old owners <span class="warn">!</span></td></tr>
+<tr><td>remove <b>live</b></td><td><code>decommission</code> on that node — re-streams its data out first (preferred)</td></tr>
+<tr><td>remove <b>dead</b></td><td><code>removenode &lt;id&gt;</code> from a healthy node — rebuilds its ranges elsewhere</td></tr>
+<tr><td>stuck/dead</td><td><code>assassinate</code> = force out, <b>no streaming</b> → under-replicated, repair after <span class="warn">!</span></td></tr>
+<tr><td>replace dead</td><td><code>-Dcassandra.replace_address_first_boot=&lt;ip&gt;</code> — assumes the dead tokens</td></tr>
+</tbody></table>
+<ul>
+<li><b>Add one node at a time</b>; never bootstrap two at once — token allocation + streaming stay sane.</li>
+<li><b>Forgetting <code>cleanup</code></b> after an add = old nodes keep ranges they no longer own, disks stay full, "the add didn't help" <span class="warn">!</span></li>
+<li>Replace a dead node via <code>replace_address</code>, <b>not</b> a fresh join — a fresh join leaves the dead ranges under-replicated.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Gossip · Seeds · Failure Detection</h3>
+<ul>
+<li><b>Gossip</b>: every node picks ~3 peers each second and exchanges heartbeat + state (membership, load, schema version, tokens) — epidemic spread, converges in O(log n) rounds. No central registry.</li>
+<li><b>Seed</b> = a well-known <b>bootstrap contact point</b> a joining node gossips with to learn the ring. <b>Not</b> a master, not a data role.</li>
+<li><b>Never add a new node as a seed</b> — seeds skip auto-bootstrap streaming, so it would serve incomplete data. Bootstrap as non-seed, then optionally promote <span class="warn">!</span></li>
+<li>Keep a <b>small fixed set</b> (2–3/DC, across racks). "All nodes are seeds for resilience" actively <b>breaks</b> adding capacity <span class="warn">!</span></li>
+<li><b>Phi-accrual failure detector</b>: not a hard timeout — computes a probability (φ) that a node is down from the recent heartbeat-arrival distribution, adapting to network jitter. A long <b>GC pause</b> spikes φ → node marked down → coordinators drop its mutations <span class="warn">!</span></li>
+<li>States in <code>nodetool status</code>: <b>UN</b> up/normal, <b>DN</b> down, <b>UJ</b> joining, <b>UL</b> leaving, <b>UM</b> moving.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Backup · Restore · PITR</h3>
+<pre><code>nodetool snapshot -t nightly my_ks   # instant, hard-links SSTables
+nodetool clearsnapshot               # drop old snaps (unpin SSTables)
+sstableloader -d host ./sstables     # bulk restore / stream in</code></pre>
+<ul>
+<li><b>Snapshot</b> = hard-links to the immutable SSTables → <b>instant, near-zero space</b> at creation. Per-node: snapshot <b>all nodes together</b> for a cluster-consistent image.</li>
+<li>Hard-links sit on the <b>same disk</b> — <b>copy them off-node</b> or a disk loss takes the "backup" too <span class="warn">!</span></li>
+<li><b>Incremental backups</b> hard-link every new SSTable as it flushes → capture deltas between snapshots.</li>
+<li><b>PITR</b> = snapshot (base image at T) + <b>commitlog archiving</b> (every mutation after T); restore snapshot, replay archived commitlogs to the target timestamp.</li>
+<li>Snapshots <b>pin</b> SSTables even after compaction would delete them — <code>clearsnapshot</code> to reclaim. A backup you've never restored is a hypothesis, not a backup.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Rolling Restart &amp; Upgrade</h3>
+<ul>
+<li>Masterless + RF&gt;1 ⇒ take <b>one node at a time</b> offline, cluster keeps serving. Per node: <code>drain</code> → stop → change → start → wait for <b>UN</b> + gossip settle → next.</li>
+<li><b>Always <code>drain</code> first</b> (flush memtables + stop writes) so restart is clean — no long commitlog replay <span class="warn">!</span></li>
+<li><b>Restarting too fast</b> (next before the previous rejoins) can drop below the CL's required replicas → errors/unavailability <span class="warn">!</span></li>
+<li>Major upgrade: mixed-version cluster is OK <b>briefly</b> — do <b>not</b> repair, add/remove nodes, or change schema during the window. After all nodes upgraded, run <code>nodetool upgradesstables</code> to rewrite to the new format.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Worked Example — message feed</h3>
+<p>Access patterns first: (1) a conversation's messages newest-first, paged; (2) a message by id; (3) a user's conversations. One table per pattern:</p>
+<pre><code>CREATE TABLE messages_by_conv (
+  conv_id uuid, bucket text,        -- '2026-07' bounds partition
+  msg_id timeuuid,                  -- time-order + uniqueness
+  sender_id uuid, sender_name text, -- denormalized, no user join
+  body text,
+  PRIMARY KEY ((conv_id, bucket), msg_id)
+) WITH CLUSTERING ORDER BY (msg_id DESC);</code></pre>
+<ul>
+<li>Partition <code>(conv_id, bucket)</code>: groups the chat, <b>month bucket</b> caps a busy conversation's partition growth.</li>
+<li>Clustering <code>msg_id DESC</code> (timeuuid): newest-first read is a cheap key-order prefix scan; also breaks ties.</li>
+<li><code>sender_name</code> denormalized so rendering needs no lookup — the "join" happened at write time.</li>
+<li>On send, <b>fan out</b> a write to <code>messages_by_conv</code>, <code>messages_by_id</code>, <code>conversations_by_user</code>. Every read = single-partition, pre-sorted.</li>
+<li>Change to a <b>key value</b> (e.g. email in <code>users_by_email</code>) ⇒ INSERT new + DELETE old, not an in-place UPDATE <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Driver &amp; Client Tuning</h3>
+<ul>
+<li><b>Token-aware + DC-aware load balancing</b>: the driver hashes the partition key and sends the request <b>straight to a replica</b> in the local DC → 1 hop, not 2. The single biggest client win.</li>
+<li><b>Prepared statements</b>: parse once, bind many — saves coordinator CPU, avoids CQL-injection, and carries routing info for token-awareness. Prepare at startup, reuse.</li>
+<li><b>Paging</b> (<code>fetch_size</code>, default 5000): large result sets stream in pages via an opaque paging state — never pull an unbounded partition into memory at once <span class="warn">!</span></li>
+<li><b>Async + bounded concurrency</b> for bulk: fire many single-partition writes in parallel (token-aware) — <b>far</b> faster than a multi-partition batch on one coordinator.</li>
+<li><b>Retry &amp; speculative execution</b>: idempotent-only retries; speculative retry issues a second read to another replica if the first is slow → guards p99. Mark statements <code>setIdempotent(true)</code> deliberately.</li>
+<li>Set <b>CL per statement</b> in the driver (LOCAL_QUORUM default), plus connect/read timeouts sized above your compaction-worst-case.</li>
+</ul>
+</section>
+
+<section class="card"><h3>cassandra.yaml Essentials</h3>
+<table><thead><tr><th>Knob</th><th>Why</th></tr></thead><tbody>
+<tr><td><code>cluster_name</code></td><td>must match on all nodes or join is refused</td></tr>
+<tr><td><code>seeds</code></td><td>bootstrap contacts; small fixed set, same list everywhere</td></tr>
+<tr><td><code>endpoint_snitch</code></td><td><code>GossipingPropertyFileSnitch</code> — drives rack/DC-aware placement</td></tr>
+<tr><td><code>num_tokens</code></td><td>vnodes (16 modern); + <code>allocate_tokens_for_keyspace</code> for balance</td></tr>
+<tr><td><code>commitlog_directory</code></td><td>ideally a <b>separate disk</b> — sequential-write heavy</td></tr>
+<tr><td><code>commitlog_sync</code></td><td><b>periodic</b> (fast, small loss window) vs <b>batch</b> (fsync-before-ACK) <span class="warn">!</span></td></tr>
+<tr><td><code>compaction_throughput</code></td><td>throttle so background work doesn't starve live queries</td></tr>
+<tr><td><code>max_hint_window</code></td><td>how long hints are kept for a down node (default 3h)</td></tr>
+</tbody></table>
+<ul>
+<li>Most changes need a <b>rolling restart</b> to take effect. Keep configs identical cluster-wide except host-specific addresses (<code>listen_address</code>/<code>broadcast_address</code>).</li>
+</ul>
+</section>
+
+<section class="card"><h3>CAP · PACELC · Where Cassandra Sits</h3>
+<ul>
+<li><b>CAP</b>: during a partition Cassandra chooses <b>availability</b> — an <b>AP</b> store. Replicas keep taking reads/writes and reconcile later (LWW + repair), rather than refusing to serve.</li>
+<li><b>PACELC</b>: <b>P</b>artition → <b>A</b>vailability; <b>E</b>lse (normal ops) → favors <b>L</b>atency over <b>C</b>onsistency (<b>PA/EL</b>). Contrast a CP store (e.g. HBase/Spanner-style) that sacrifices availability to stay consistent.</li>
+<li>"AP" is the <b>default</b>, not a ceiling — you dial correctness per query with <b>CL</b>. <b>QUORUM read + QUORUM write with R+W&gt;RF</b> gives linearizable-ish read-your-writes on a per-key basis; <b>LWT</b> (Paxos) gives true linearizable compare-and-set when you need it.</li>
+<li>The cost of availability: <b>no cross-partition transactions</b> by default, <b>eventual</b> convergence, and <b>clock-dependent</b> conflict resolution (LWW) — keep NTP tight <span class="warn">!</span></li>
+<li><b>Accord</b> (5.0) adds genuine leaderless strict-serializable multi-partition transactions without giving up the masterless model.</li>
 </ul>
 </section>
 

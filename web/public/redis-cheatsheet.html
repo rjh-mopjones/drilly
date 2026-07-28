@@ -86,41 +86,94 @@ pre code{background:none; padding:0; font-size:1em;}
 <ul>
 <li><b>In-memory</b> key-value store; data structures as first-class values. Optional durability to disk.</li>
 <li><b>Single-threaded</b> command execution (one command at a time, atomic) — I/O is multiplexed; Redis 6+ has multi-threaded <i>I/O</i> only, not command exec.</li>
-<li>Sub-ms latency because everything is RAM + no lock contention. The event loop is the whole model.</li>
-<li>Use cases: cache, session store, rate limiter, queue, leaderboard, pub/sub, real-time counters.</li>
-<li>Rule of thumb: reach for Redis when you need sub-millisecond access to hot, mostly-ephemeral data — and keep the durable copy in a real database behind it <span class="warn">!</span></li>
-<li>Everything is a <b>string</b> under the hood at the key level; values have specialised encodings (ziplist/listpack/intset/skiplist/hashtable) chosen by size <span class="warn">!</span></li>
+<li>Sub-ms latency because everything is RAM + no lock contention + optimised C data structures. The event loop is the whole model.</li>
+<li>Use cases: cache, session store, rate limiter, queue, leaderboard, pub/sub, real-time counters, geo.</li>
+<li>Rule of thumb: reach for Redis for sub-millisecond access to hot, mostly-ephemeral data — and keep the durable copy in a real database behind it <span class="warn">!</span></li>
+<li>Everything is a <b>string</b> at the key level; values have specialised encodings (listpack/intset/skiplist/hashtable) chosen by size <span class="warn">!</span></li>
+<li><b>RESP</b> wire protocol: RESP2 (arrays/bulk strings); <b>RESP3</b> adds native maps, sets, doubles, big numbers, and <b>push</b> messages (enables client-side-cache invalidations on the same connection).</li>
+<li><b>16 logical DBs</b> (<code>SELECT n</code>) share one process/memory — namespacing only, not isolation; <b>Cluster only allows DB 0</b> <span class="warn">!</span></li>
 </ul></section>
+
+<section class="card"><h3>Redis vs Memcached</h3>
+<table><thead><tr><th></th><th>Redis</th><th>Memcached</th></tr></thead><tbody>
+<tr><td>Types</td><td>rich (list/set/zset/hash/stream…)</td><td>strings only</td></tr>
+<tr><td>Persistence</td><td>RDB + AOF</td><td>none</td></tr>
+<tr><td>Replication/HA</td><td>yes (Sentinel/Cluster)</td><td>no (client-side sharding)</td></tr>
+<tr><td>Threads</td><td>single (cmd)</td><td>multi-threaded</td></tr>
+<tr><td>Extras</td><td>Lua, pub/sub, txns, geo, HLL</td><td>plain LRU cache</td></tr>
+</tbody></table>
+<p>Pick Memcached only for the narrow "multi-threaded pure string LRU" niche; Redis wins almost everywhere because of types + persistence + HA.</p></section>
 
 <section class="card"><h3>Data Types &amp; When</h3>
 <table><thead><tr><th>Type</th><th>Use / key ops</th></tr></thead><tbody>
 <tr><td><b>String</b></td><td>cache blob, counter (<code>INCR</code> O(1)), bitmap</td></tr>
 <tr><td><b>Hash</b></td><td>object/fields (<code>HSET/HGETALL</code>); memory-efficient small objects</td></tr>
 <tr><td><b>List</b></td><td>queue/stack (<code>LPUSH/BRPOP</code>); O(1) ends</td></tr>
-<tr><td><b>Set</b></td><td>uniqueness, tags (<code>SADD/SINTER</code>)</td></tr>
+<tr><td><b>Set</b></td><td>uniqueness, tags, algebra (<code>SADD/SINTER</code>)</td></tr>
 <tr><td><b>Sorted Set</b></td><td>leaderboard, priority, time index (<code>ZADD/ZRANGEBYSCORE</code>) O(log n)</td></tr>
 <tr><td><b>Stream</b></td><td>append log + consumer groups (<code>XADD/XREADGROUP</code>)</td></tr>
 <tr><td><b>HLL</b></td><td>approx unique count, ~12KB, 0.81% err (<code>PFADD/PFCOUNT</code>)</td></tr>
 <tr><td><b>Geo</b></td><td>radius queries (zset-backed)</td></tr>
+<tr><td><b>Bitmap</b></td><td>DAU/flags, 1 bit/id (<code>SETBIT/BITCOUNT</code>)</td></tr>
 </tbody></table>
-<p><span class="warn">!</span> Avoid huge single keys (a 1M-element list/zset blocks the loop on big-O ops).</p></section>
+<p><span class="warn">!</span> Avoid huge single keys (a 1M-element list/zset blocks the loop on big-O ops). Match the structure to the access pattern — the structure <i>is</i> the design.</p></section>
+
+<section class="card"><h3>Strings · Counters · Bitmaps</h3>
+<pre><code>SET k v EX 3600 NX GET   # set+TTL, only if absent, return old
+INCR views      # O(1) atomic counter; INCRBY / DECR
+APPEND log "..."  # amortised O(1) build; watch big key !
+GETRANGE / SETRANGE k 0 5</code></pre>
+<ul>
+<li><code>INCR</code> works because integer strings use the <b>int</b> encoding (stored as a long) — atomic read-modify-return in one op, no GET-then-SET race <span class="warn">!</span></li>
+<li><b>Bitmaps</b> on a string: <code>SETBIT/GETBIT/BITCOUNT/BITOP</code>. DAU = one bit per user id; 1M users ≈ 125KB. <code>BITOP AND</code> across day keys for retention <span class="warn">!</span> only if ids are dense integers.</li>
+<li><b>BITFIELD</b> packs many small counters (e.g. 8-bit tallies) into one string with atomic <code>INCRBY</code>/overflow control.</li>
+<li>512MB max string; store JSON as a string only if you read/write it whole — else use a hash or RedisJSON (<code>JSON.SET/GET</code> path access) <span class="warn">!</span></li>
+</ul></section>
+
+<section class="card"><h3>Hashes &amp; Lists</h3>
+<pre><code>HSET user:1 name alice age 30    # object with fields
+HGET user:1 name   HGETALL user:1 # O(n) — small only !
+LPUSH q job   BRPOP q 0           # queue: FIFO, block-pop
+LRANGE q 0 9   LTRIM q 0 999      # keep newest 1000</code></pre>
+<ul>
+<li><b>Hash</b> = the object type: one key, many fields, one lot of per-key overhead. Small hashes are <b>listpack</b>-encoded (cheap). Field-level TTLs arrived in Redis 7.4 (<code>HEXPIRE</code>).</li>
+<li><b>List</b> ends are O(1) (<code>LPUSH/RPUSH/LPOP/RPOP</code>); the <b>middle is O(n)</b> — <code>LINDEX</code>/<code>LINSERT</code> on a big list is slow <span class="warn">!</span></li>
+<li><b>Stack</b> = <code>LPUSH</code>+<code>LPOP</code> (LIFO); <b>queue</b> = <code>LPUSH</code>+<code>BRPOP</code> (FIFO).</li>
+<li><code>LTRIM</code> caps a list to the latest N (capped activity feed) so it never becomes a big key.</li>
+</ul></section>
+
+<section class="card"><h3>Sets &amp; Sorted Sets</h3>
+<pre><code>SADD tags:1 red blue   SISMEMBER tags:1 red   # O(1)
+SINTER a b   SUNION a b   SDIFF a b            # set algebra
+ZADD board 1500 alice   ZINCRBY board 50 alice
+ZREVRANGE board 0 9 WITHSCORES  # top-10
+ZREVRANK board alice            # 0-based rank</code></pre>
+<ul>
+<li><b>Set</b>: uniqueness + <b>algebra</b> (intersection for "users in A and B", union, diff). All-integer sets use compact <b>intset</b>; <code>SMEMBERS</code> on a big set is O(n) — use <code>SSCAN</code>/<code>SISMEMBER</code> <span class="warn">!</span></li>
+<li><b>ZSET</b>: score-ordered, <code>ZADD</code>/<code>ZSCORE</code> O(log n), range O(log n + m). The purpose-built leaderboard, priority queue, time-index and sliding-window structure.</li>
+<li><code>ZADD</code> flags: <b>NX/XX</b> (only-add/only-update), <b>GT/LT</b> (only if greater/less — great for high-score), <b>CH</b> (count changed), <b>INCR</b>.</li>
+<li><code>ZRANGEBYLEX</code> does prefix/autocomplete when all scores are equal.</li>
+</ul></section>
 
 <section class="card"><h3>Keys · TTL · Eviction</h3>
 <pre><code>SET k v EX 3600 NX   # set + 1h TTL, only if absent
-EXPIRE k 60          # add/replace TTL
+EXPIRE k 60          # add/replace TTL; KEEPTTL to preserve
 TTL k                # -1 no TTL, -2 gone
 SCAN 0 MATCH u:* COUNT 100</code></pre>
 <ul>
-<li><b>Expiry</b> = lazy (on access) + active (sampled background). A never-accessed expired key lingers in RAM until sampled <span class="warn">!</span></li>
-<li><b>Never use <code>KEYS</code> in prod</b> — O(n), blocks the single thread. Use <code>SCAN</code> (cursor, non-blocking) <span class="warn">!</span></li>
+<li><b>Expiry</b> = lazy (on access) + active (sampled background, ~10Hz). A never-accessed expired key lingers in RAM until sampled <span class="warn">!</span></li>
+<li><b>Never use <code>KEYS</code> in prod</b> — O(n), blocks the single thread. Use <code>SCAN</code> (cursor, non-blocking, may return dupes, won't miss keys present throughout) <span class="warn">!</span></li>
 <li>Writing to a key <b>removes its TTL</b> unless you use <code>KEEPTTL</code> <span class="warn">!</span></li>
+<li>Replicas <b>don't expire keys themselves</b> — they wait for the primary's <code>DEL</code> so reads stay consistent.</li>
 </ul>
 <h4>maxmemory-policy</h4>
 <table><thead><tr><th>Policy</th><th>Evicts</th></tr></thead><tbody>
 <tr><td><code>allkeys-lru</code>/<code>lfu</code></td><td>any key (cache mode)</td></tr>
-<tr><td><code>volatile-lru</code>/<code>ttl</code></td><td>only keys with TTL</td></tr>
-<tr><td><code>noeviction</code></td><td>writes error at limit <span class="warn">!</span></td></tr>
-</tbody></table></section>
+<tr><td><code>volatile-lru</code>/<code>ttl</code>/<code>lfu</code></td><td>only keys with a TTL</td></tr>
+<tr><td><code>allkeys-random</code></td><td>any key at random</td></tr>
+<tr><td><code>noeviction</code> (default)</td><td>writes error at limit <span class="warn">!</span></td></tr>
+</tbody></table>
+<p><b>Eviction ≠ expiration</b>: expiry is TTL-driven per key; eviction is memory-pressure-driven under <code>maxmemory</code>.</p></section>
 
 <section class="card"><h3>Persistence: RDB vs AOF</h3>
 <table><thead><tr><th></th><th>RDB</th><th>AOF</th></tr></thead><tbody>
@@ -131,201 +184,354 @@ SCAN 0 MATCH u:* COUNT 100</code></pre>
 </tbody></table>
 <ul>
 <li><code>appendfsync</code>: <code>always</code> (safe, slow) · <code>everysec</code> (default, ~1s risk) · <code>no</code> (OS decides).</li>
-<li>Prod default: <b>both</b> — AOF for durability, RDB for fast restart/backups.</li>
-<li>Fork for snapshot uses copy-on-write; under heavy writes the child doubles memory briefly <span class="warn">!</span></li>
+<li>Prod default: <b>both</b> — AOF for durability, RDB for fast restart/backups. <b>Hybrid AOF</b> (RDB preamble) writes an RDB header then AOF tail: fast load + fine-grained durability.</li>
+<li><b>AOF rewrite</b> (<code>BGREWRITEAOF</code>) compacts the log to the shortest command set that rebuilds current state, so it doesn't grow forever.</li>
+<li>Fork for snapshot uses copy-on-write; under heavy writes the child can double memory briefly <span class="warn">!</span> and the fork itself pauses the main thread on big datasets.</li>
 </ul></section>
 
 <section class="card"><h3>Single-Thread Footguns</h3>
 <ul>
-<li>One slow O(n) command <b>blocks every other client</b> (head-of-line). Cul­prits: <code>KEYS</code>, big <code>SMEMBERS</code>/<code>HGETALL</code>/<code>ZRANGE 0 -1</code>, <code>SORT</code>, Lua that loops <span class="warn">!</span></li>
-<li>Find them: <code>SLOWLOG GET</code>, <code>LATENCY DOSTOR</code>, <code>redis-cli --latency</code>.</li>
-<li>Big-key deletion blocks — use <code>UNLINK</code> (async free) not <code>DEL</code> for large values <span class="warn">!</span></li>
-<li>Prefer O(1)/O(log n) ops; paginate with <code>SCAN</code>/<code>ZSCAN</code>; keep values small.</li>
+<li>One slow O(n) command <b>blocks every other client</b> (head-of-line). Culprits: <code>KEYS</code>, big <code>SMEMBERS</code>/<code>HGETALL</code>/<code>LRANGE 0 -1</code>/<code>ZRANGE 0 -1</code>, <code>SORT</code>, Lua that loops <span class="warn">!</span></li>
+<li>Find them: <code>SLOWLOG GET</code>, <code>LATENCY LATEST</code>/<code>DOCTOR</code>, <code>redis-cli --latency</code>.</li>
+<li>Big-key deletion blocks — use <code>UNLINK</code> (async free in a bg thread) not <code>DEL</code> for large values <span class="warn">!</span></li>
+<li>Prefer O(1)/O(log n) ops; paginate with <code>SCAN</code>/<code>HSCAN</code>/<code>SSCAN</code>/<code>ZSCAN</code>; keep values small.</li>
 <li><b>Pipelining</b> batches N commands in one RTT (throughput, not atomicity). <b>MULTI</b> adds atomicity.</li>
-</ul></section>
-
-<section class="card"><h3>Pub/Sub vs Streams</h3>
-<table><thead><tr><th>Pub/Sub</th><th>Streams</th></tr></thead><tbody>
-<tr><td>fire-and-forget</td><td>persisted log</td></tr>
-<tr><td>no history / offline loss <span class="warn">!</span></td><td>replay by ID</td></tr>
-<tr><td>no ack</td><td>consumer groups + <code>XACK</code></td></tr>
-</tbody></table>
-<ul>
-<li><b>Streams</b> = the durable choice for queues/event pipelines: <code>XADD</code>, <code>XREADGROUP</code>, <code>XACK</code>, <code>XPENDING</code> (unacked), <code>XCLAIM</code> (steal dead consumer's msgs).</li>
-<li>Cap growth with <code>XADD MAXLEN ~ 10000</code>.</li>
-<li><b>Keyspace notifications</b> (config <code>notify-keyspace-events</code>) publish on key events — but delivery is best-effort pub/sub <span class="warn">!</span></li>
-</ul></section>
-
-<section class="card"><h3>Transactions &amp; Lua</h3>
-<pre><code>WATCH bal
-val = GET bal          # optimistic
-MULTI
-DECRBY bal 10
-EXEC        # nil if bal changed → retry (CAS)</code></pre>
-<ul>
-<li><code>MULTI/EXEC</code> = queued commands run atomically, <b>no rollback</b> — a command erroring mid-batch still runs the rest <span class="warn">!</span> (not like SQL txns).</li>
-<li><code>WATCH</code> = optimistic lock; <code>EXEC</code> aborts if a watched key changed.</li>
-<li><b>Lua scripts</b> (<code>EVAL</code>/<code>EVALSHA</code>) run atomically on the server — best for read-modify-write in one round trip. Keep them fast (they block!) <span class="warn">!</span></li>
-<li>Redis 7 <b>Functions</b> = persisted, named server-side logic (successor to cached scripts).</li>
-</ul></section>
-
-<section class="card"><h3>Caching Patterns</h3>
-<ul>
-<li><b>Cache-aside (lazy)</b>: app reads cache → miss → load DB → <code>SET</code>. Most common; stale until TTL/invalidate.</li>
-<li><b>Write-through</b>: write cache+DB together (consistent, slower writes). <b>Write-behind</b>: write cache, async to DB (fast, risk loss).</li>
-<li>Always set a <b>TTL</b>; invalidate on write.</li>
-</ul>
-<h4>The 3 stampede failure modes <span class="warn">!</span></h4>
-<table><tbody>
-<tr><td><b>Penetration</b></td><td>miss for keys that don't exist → cache null / bloom filter</td></tr>
-<tr><td><b>Avalanche</b></td><td>many keys expire at once → jitter the TTLs</td></tr>
-<tr><td><b>Stampede</b></td><td>hot key expires, N rebuilds → lock/single-flight or early recompute</td></tr>
-</tbody></table></section>
-
-<section class="card"><h3>Distributed Lock</h3>
-<pre><code>SET lock:job <token> NX PX 30000   # acquire
-# ...do work (must finish < TTL)...
-# release ONLY if still mine (atomic):
-EVAL "if redis.call('get',KEYS[1])==ARGV[1]
-  then return redis.call('del',KEYS[1]) else return 0 end"
-  1 lock:job <token></code></pre>
-<ul>
-<li><code>SET NX PX</code> + unique token; release via Lua compare-and-del so you never delete someone else's lock <span class="warn">!</span></li>
-<li>TTL bounds a dead holder; but if work &gt; TTL two holders overlap <span class="warn">!</span> — add a fence token or watchdog.</li>
-<li><b>Redlock</b> (N independent masters, majority) is contested (Kleppmann): single Redis lock is fine for efficiency, <b>not</b> for correctness-critical mutual exclusion.</li>
-</ul></section>
-
-<section class="card"><h3>Rate Limiting &amp; Sessions</h3>
-<pre><code># fixed window
-INCR rl:user:{id}:{minute}
-EXPIRE rl:user:{id}:{minute} 60   # first time
-# > limit → reject</code></pre>
-<ul>
-<li>Fixed window = simple but bursts at edges; <b>sliding window</b> / <b>token bucket</b> (Lua for atomicity) smooth it <span class="warn">!</span></li>
-<li><b>Sessions</b>: <code>HSET session:{id}</code> + TTL; sliding expiry on each request.</li>
-<li><b>Leaderboards</b>: sorted set, <code>ZADD</code> score, <code>ZREVRANK</code> for position, <code>ZREVRANGE 0 9</code> top-10.</li>
-</ul></section>
-
-<section class="card"><h3>Replication</h3>
-<ul>
-<li><b>Async</b> primary→replica by default: acked writes can be lost on failover <span class="warn">!</span> (not strongly consistent).</li>
-<li>Replicas serve reads (scale reads), are read-only. Initial sync = RDB snapshot + backlog buffer; partial resync after brief disconnects.</li>
-<li><code>WAIT n ms</code> blocks until n replicas ack (tunable durability, not a guarantee).</li>
-<li>One primary per shard; chained replication possible.</li>
-<li><code>repl-backlog-size</code> buffers writes during a replica disconnect so it can <b>partial resync</b> (PSYNC) instead of a full RDB transfer — size it for your write rate × expected blip <span class="warn">!</span></li>
-<li>Read-from-replica scales reads but serves <b>stale</b> data (async lag); never route read-your-write flows there.</li>
-<li>Monitor <code>master_repl_offset</code> vs replica offset for lag; a growing gap means the replica can't keep up (network or slow disk).</li>
-</ul></section>
-
-<section class="card"><h3>HA: Sentinel vs Cluster</h3>
-<table><thead><tr><th>Sentinel</th><th>Cluster</th></tr></thead><tbody>
-<tr><td>HA + auto-failover</td><td>HA + <b>horizontal sharding</b></td></tr>
-<tr><td>single dataset, replicas</td><td>16384 hash slots across masters</td></tr>
-<tr><td>quorum monitors + promotes</td><td>each master owns slot range</td></tr>
-</tbody></table>
-<ul>
-<li><b>Sentinel</b>: ≥3 sentinels, quorum detects primary down → promotes a replica, updates clients.</li>
-<li><b>Cluster</b>: slot = <code>CRC16(key) mod 16384</code>. Multi-key ops must share a slot → use <b>hash tags</b> <code>{user1}:...</code> <span class="warn">!</span></li>
-<li>Cluster tolerates minority master loss; needs replicas to survive a master failure.</li>
-</ul></section>
-
-<section class="card"><h3>Memory &amp; Optimization</h3>
-<ul>
-<li><code>INFO memory</code>, <code>MEMORY USAGE key</code>, <code>--bigkeys</code> to profile.</li>
-<li>Small hashes/lists/sets use compact <b>listpack</b> encoding until a threshold, then convert to hashtable/skiplist (much bigger) <span class="warn">!</span> — keep them under the limit.</li>
-<li>Prefer hashes over many top-level keys (less per-key overhead). Shorten key names at scale.</li>
-<li><b>Fragmentation</b>: <code>mem_fragmentation_ratio</code> ≫1 → activedefrag or restart.</li>
-<li>Set <code>maxmemory</code> + eviction policy so Redis never OOM-kills the box.</li>
-<li><b>LRU is approximate</b> (samples a few keys, evicts oldest of the sample) — cheaper than true LRU; raise <code>maxmemory-samples</code> for accuracy at CPU cost. <b>LFU</b> tracks frequency, better for skewed access <span class="warn">!</span></li>
-<li>Overhead per key (dict entry + object header + expire entry) dominates for millions of tiny keys — batching fields into a hash slashes it.</li>
-</ul></section>
-
-<section class="card"><h3>Ops · Monitoring · Security</h3>
-<ul>
-<li>Watch: hit rate (<code>keyspace_hits/misses</code>), evictions, <code>connected_clients</code>, <code>instantaneous_ops_per_sec</code>, replication lag, <code>SLOWLOG</code>.</li>
-<li>Security: <b>ACLs</b> (Redis 6) per-user command/key perms; <code>requirepass</code>; TLS; bind/protected-mode; <b>rename/disable</b> <code>FLUSHALL</code>/<code>CONFIG</code>/<code>KEYS</code> <span class="warn">!</span></li>
-<li>Never expose Redis to the internet unauthenticated <span class="warn">!</span> (classic crypto-mining pwn).</li>
-<li>Backups: RDB snapshots off-box; test restores.</li>
-</ul></section>
-
-<section class="card"><h3>Bitmaps · HLL · Geo</h3>
-<ul>
-<li><b>Bitmaps</b> (on a string): <code>SETBIT/GETBIT/BITCOUNT/BITOP</code>. Daily-active-users = one bit per user id; 1M users ≈ 125KB. <code>BITCOUNT</code> for totals, <code>BITOP AND</code> across days for retention <span class="warn">!</span> only works if ids are dense integers.</li>
-<li><b>HyperLogLog</b>: <code>PFADD/PFCOUNT/PFMERGE</code> — count uniques in ~12KB with 0.81% error regardless of cardinality. Use for "unique visitors" where exactness doesn't matter.</li>
-<li><b>Geo</b> (sorted-set backed): <code>GEOADD</code>, <code>GEOSEARCH ... BYRADIUS</code> for "shops within 5km". Score encodes a geohash.</li>
-<li>These trade exactness/generality for tiny memory — pick them when an exact set would be gigabytes.</li>
-</ul></section>
-
-<section class="card"><h3>Redis Cluster Deep-dive</h3>
-<ul>
-<li><b>16384 hash slots</b> spread across masters; <code>slot = CRC16(key) mod 16384</code>. Each master owns a contiguous-ish slot range + has replicas.</li>
-<li>Client caches the slot→node map. Wrong node → <code>MOVED</code> (permanent, update map) or <code>ASK</code> (transient, mid-migration) <span class="warn">!</span></li>
-<li><b>Resharding</b> migrates slots live; a smart client follows <code>ASK</code> redirects during the move.</li>
-<li>Multi-key ops (<code>MGET</code>, <code>SINTER</code>, txns, Lua) require all keys in <b>one slot</b> → force it with a <b>hash tag</b>: <code>{user1}:profile</code>, <code>{user1}:cart</code> hash on <code>user1</code> only <span class="warn">!</span></li>
-<li>No cross-slot transactions. Cluster ≠ a bigger single DB — model for locality.</li>
+<li>Single-thread limit is real only when you saturate <b>one core</b> or have big keys — then shard (Cluster) or split hot keys.</li>
 </ul></section>
 
 <section class="card"><h3>Pipelining vs MULTI vs Lua</h3>
 <table><thead><tr><th>Tool</th><th>Gives you</th></tr></thead><tbody>
 <tr><td><b>Pipeline</b></td><td>N commands, 1 RTT — <b>throughput</b>, not atomicity, interleavable</td></tr>
 <tr><td><b>MULTI/EXEC</b></td><td>atomic batch, no other client interleaves; no rollback <span class="warn">!</span></td></tr>
-<tr><td><b>Lua / Function</b></td><td>atomic <b>read-modify-write</b> logic server-side, 1 RTT</td></tr>
+<tr><td><b>Lua / Function</b></td><td>atomic <b>read-modify-write</b> logic server-side, 1 RTT, can branch on values</td></tr>
 </tbody></table>
 <ul>
-<li>Reach for Lua when you must decide based on a value you just read (check-then-set) without a race <span class="warn">!</span></li>
+<li>Reach for Lua when you must decide based on a value you just read (check-then-set) without a race <span class="warn">!</span> — MULTI can't branch mid-transaction.</li>
 <li>Keep scripts short — they block the single thread like any command.</li>
 <li>Pipeline for bulk loads/warmups (10–100× fewer round trips).</li>
+</ul></section>
+
+<section class="card"><h3>Transactions &amp; Optimistic Lock</h3>
+<pre><code>WATCH bal              # optimistic lock on bal
+val = GET bal
+MULTI
+DECRBY bal 10
+EXEC        # nil if bal changed since WATCH → retry (CAS)</code></pre>
+<ul>
+<li><code>MULTI/EXEC</code> = queued commands run atomically, <b>no rollback</b> — a command erroring mid-batch still runs the rest <span class="warn">!</span> (not like SQL txns).</li>
+<li>No rollback because Redis command errors are programming bugs, not business conditions — omitting rollback keeps it simple and fast.</li>
+<li><code>WATCH</code> = optimistic lock; <code>EXEC</code> aborts (returns nil) if a watched key changed. Retry loop = CAS. <code>UNWATCH</code>/<code>DISCARD</code> to abandon.</li>
+<li>ACID-ish: <b>Atomic</b> (all-or-nothing queue) &amp; <b>Isolated</b> (single-threaded) yes; <b>Consistency</b> app's job; <b>Durability</b> depends on AOF fsync.</li>
+<li>Cluster: all keys in a txn must share one slot (hash tag) <span class="warn">!</span></li>
+</ul></section>
+
+<section class="card"><h3>Lua Scripting &amp; Functions</h3>
+<pre><code>EVAL "return redis.call('INCR', KEYS[1])" 1 counter
+SCRIPT LOAD "..."          # → sha; then EVALSHA <sha> ...</code></pre>
+<ul>
+<li>Runs <b>atomically</b> on the server (single-threaded) — the whole script is one indivisible step; ideal for read-modify-write in one round trip.</li>
+<li><b>KEYS vs ARGV</b>: pass every key you touch as a <code>KEYS[]</code> arg (not hard-coded) so Cluster can route and validate the slot <span class="warn">!</span></li>
+<li><code>redis.call</code> raises on error (aborts script); <code>redis.pcall</code> returns the error to handle it.</li>
+<li>Long scripts block everyone; <code>SCRIPT KILL</code> only works if no write has happened yet, else <code>SHUTDOWN NOSAVE</code> <span class="warn">!</span></li>
+<li>Redis 7 <b>Functions</b> (<code>FUNCTION LOAD</code>) = persisted, named, replicated server-side libraries — successor to relying on cached <code>EVALSHA</code>.</li>
+</ul></section>
+
+<section class="card"><h3>Pub/Sub vs Streams</h3>
+<table><thead><tr><th>Pub/Sub</th><th>Streams</th></tr></thead><tbody>
+<tr><td>fire-and-forget</td><td>persisted log</td></tr>
+<tr><td>no history / offline loss <span class="warn">!</span></td><td>replay by ID</td></tr>
+<tr><td>at-most-once, no ack</td><td>consumer groups + <code>XACK</code></td></tr>
+<tr><td>slow subscriber dropped</td><td>backlog retained (MAXLEN)</td></tr>
+</tbody></table>
+<ul>
+<li><b>Pub/Sub</b>: <code>SUBSCRIBE</code>/<code>PUBLISH</code>, <code>PSUBSCRIBE</code> patterns. Good for ephemeral fan-out (live notifications, cache-invalidation broadcasts) where a missed message is fine.</li>
+<li>Cluster: normal pub/sub floods all nodes — use <b>sharded pub/sub</b> (<code>SPUBLISH</code>/<code>SSUBSCRIBE</code>, keyed to a slot).</li>
+<li><b>Keyspace notifications</b> (<code>notify-keyspace-events</code>) publish on key events (e.g. <code>expired</code>) — but it's best-effort pub/sub, so an offline listener misses them <span class="warn">!</span> The <code>expired</code> event fires when the key is <i>actually</i> removed (lazy/active), not exactly at TTL.</li>
+</ul></section>
+
+<section class="card"><h3>Streams Deep-dive</h3>
+<pre><code>XADD events * type click user 42   # * = auto ms-seq id
+XLEN events   XRANGE events - +
+XGROUP CREATE events g1 $           # group, from now
+XREADGROUP GROUP g1 c1 COUNT 10 BLOCK 0 STREAMS events &gt;
+XACK events g1 &lt;id&gt;                 # ack processed
+XPENDING events g1                  # unacked (PEL)
+XAUTOCLAIM events g1 c2 60000 0     # steal dead consumer's msgs</code></pre>
+<ul>
+<li><b>Consumer groups</b>: each group has a cursor + a <b>Pending Entries List</b> (delivered-but-unacked). Crash before <code>XACK</code> → msg stays pending → <code>XCLAIM</code>/<code>XAUTOCLAIM</code> reassigns it. This is <b>at-least-once</b> ⇒ consumers must be idempotent.</li>
+<li>IDs are <code>&lt;ms&gt;-&lt;seq&gt;</code>, monotonic → time-ordered and range-queryable.</li>
+<li>Cap growth: <code>XADD events MAXLEN ~ 10000 * ...</code> (approximate trim is cheaper) or <code>XTRIM ... MINID</code>.</li>
+<li>Streams vs Kafka: Streams are simpler and in-RAM; graduate to Kafka for huge throughput, long retention, and true partitioned replay.</li>
+</ul></section>
+
+<section class="card"><h3>Caching Patterns</h3>
+<ul>
+<li><b>Cache-aside (lazy)</b>: app reads cache → miss → load DB → <code>SET ... EX</code>. Most common; degrades to "slower" if cache is down, not "broken".</li>
+<li><b>Read-through</b>: cache library loads on miss (app never sees DB). <b>Write-through</b>: write cache+DB together (fresh, slower writes). <b>Write-behind</b>: write cache, async to DB (fast, risk loss).</li>
+<li>Always set a <b>TTL</b> (safety net vs missed invalidation + memory leak); invalidate on write.</li>
+</ul>
+<h4>Invalidate: order matters <span class="warn">!</span></h4>
+<pre><code>db.update(id)          # 1. write source of truth FIRST
+redis.DEL("user:"+id)  # 2. then invalidate</code></pre>
+<p><b>Delete</b> (not update) on write is the safer default — you never cache a wrong value, just force a reload. Reverse order lets a reader re-cache the stale value. Residual race → short TTL / double-delete.</p>
+<h4>The 3 stampede failure modes <span class="warn">!</span></h4>
+<table><tbody>
+<tr><td><b>Penetration</b></td><td>miss for keys that don't exist → cache the null (short TTL) / Bloom filter</td></tr>
+<tr><td><b>Avalanche</b></td><td>many keys expire together → jitter the TTLs (the #1 fix)</td></tr>
+<tr><td><b>Stampede</b></td><td>hot key expires, N rebuilds → single-flight lock / serve-stale / early recompute</td></tr>
+</tbody></table></section>
+
+<section class="card"><h3>Single-flight &amp; Hit-rate</h3>
+<pre><code>read(key):
+  v = GET key
+  if v: return v                    # hit
+  if SET lock:key tok NX PX 5000:   # I recompute
+     v = db.load(key)
+     SET key v EX ttl+jitter
+     lua_release(lock:key, tok)
+     return v
+  else: sleep(short); return GET key # wait &amp; re-read</code></pre>
+<ul>
+<li>Only one request rebuilds a hot key; the rest wait or serve stale. Prevents the thundering herd from hitting the DB.</li>
+<li><b>Serve-stale-while-revalidate</b>: store logical-expiry inside the value with a longer physical TTL, so waiters get stale-but-fast data.</li>
+<li><b>Hit rate</b> = <code>keyspace_hits/(hits+misses)</code> from <code>INFO stats</code> (cumulative — sample twice &amp; diff). Healthy read cache &gt; ~90%. Falling rate → short TTLs, wrong keys cached, cold cache, or eviction thrashing.</li>
+<li><b>Client-side caching</b> (RESP3 tracking): app keeps a local copy; Redis pushes an invalidation when the key changes — cuts the round trip entirely for the hottest, rarely-changing keys.</li>
+</ul></section>
+
+<section class="card"><h3>Distributed Lock</h3>
+<pre><code>SET lock:job &lt;token&gt; NX PX 30000   # acquire (atomic)
+# ...do work (must finish &lt; TTL)...
+# release ONLY if still mine (atomic):
+EVAL "if redis.call('get',KEYS[1])==ARGV[1]
+  then return redis.call('del',KEYS[1]) else return 0 end"
+  1 lock:job &lt;token&gt;</code></pre>
+<ul>
+<li><code>SET NX PX</code> + <b>unique token</b>; release via Lua compare-and-del so you never delete someone else's lock <span class="warn">!</span> A bare <code>DEL</code> can free a lock re-acquired by another client after yours expired.</li>
+<li>One atomic <code>SET</code> — the old <code>SETNX</code>+<code>EXPIRE</code> had a crash window with no TTL = permanent deadlock <span class="warn">!</span></li>
+<li>TTL bounds a dead holder; but if work &gt; TTL two holders overlap <span class="warn">!</span> There is <b>no TTL that is both deadlock-safe and overlap-safe</b> — you trade one risk for the other.</li>
+<li><b>Watchdog</b>: bg timer renews the TTL (Lua compare-and-<code>PEXPIRE</code>, e.g. every TTL/3) while work runs; stops on crash. Redisson's default.</li>
+</ul></section>
+
+<section class="card"><h3>Locks: Redlock &amp; Fencing</h3>
+<ul>
+<li><b>Redlock</b>: acquire the same key+token on a <b>majority of N independent masters</b> (typ. 5, no replication) within a time bound; validity = TTL − elapsed. Survives a minority of node failures.</li>
+<li><b>Kleppmann critique</b>: GC pauses, network delay, and clock skew break Redlock's timing assumptions — a paused client can wake believing it still holds an expired lock. No node count fixes this.</li>
+<li><b>Fencing token</b> = monotonic int (<code>INCR fence</code>) handed out per acquire; the <i>protected resource</i> rejects any write with a token ≤ the highest it's seen. Makes a stale holder's write <b>harmless</b> — real correctness <span class="warn">!</span></li>
+<li>Single-instance lock loses safety on <b>failover</b>: async replication means the acquire write can be lost when a replica is promoted → two holders <span class="warn">!</span></li>
+<li><b>Bottom line</b>: Redis locks are fine for <b>efficiency</b> (avoid duplicate work); for <b>correctness</b> (must-be-at-most-one) use fencing tokens or a consensus system (ZooKeeper/etcd).</li>
+</ul></section>
+
+<section class="card"><h3>Rate Limiting</h3>
+<pre><code># fixed window — cheap, O(1)
+INCR rl:u:123:&lt;minute&gt;
+EXPIRE rl:u:123:&lt;minute&gt; 60   # only on first hit
+# &gt; limit → reject 429</code></pre>
+<p><span class="warn">!</span> Fixed window allows ~<b>2× the limit</b> across a boundary (100 at 12:00:59 + 100 at 12:01:00). Smooth it with:</p>
+<ul>
+<li><b>Sliding-window log</b> (ZSET of timestamps): <code>ZREMRANGEBYSCORE</code> old → <code>ZADD</code> now → <code>ZCARD</code>. <b>Exact</b>, but one member per request = memory + O(log n).</li>
+<li><b>Sliding-window counter</b>: <code>current + previous·(1−elapsed_fraction)</code> — two counters, tiny memory, smooths the burst. What Cloudflare-style limiters use.</li>
+<li><b>Token bucket</b> (Lua): tokens refill at <code>rate</code> up to <code>cap</code>, each request spends one; smooths bursts up to cap while bounding long-run rate.</li>
+</ul>
+<p>All are read-modify-write ⇒ do them <b>atomically</b> (<code>INCR</code>-then-check or Lua) or two requests race past the limit <span class="warn">!</span> Return <b>429</b> + <code>X-RateLimit-Remaining</code>/<code>Retry-After</code>.</p></section>
+
+<section class="card"><h3>Token Bucket (Lua)</h3>
+<pre><code>local st = redis.call('hmget', KEYS[1], 'tokens', 'ts')
+local tokens = tonumber(st[1]) or cap
+local ts     = tonumber(st[2]) or now
+tokens = math.min(cap, tokens + (now-ts)*rate)  -- refill
+local ok = tokens &gt;= 1
+if ok then tokens = tokens - 1 end
+redis.call('hmset', KEYS[1], 'tokens', tokens, 'ts', now)
+redis.call('expire', KEYS[1], math.ceil(cap/rate)*2)
+return ok and 1 or 0</code></pre>
+<ul>
+<li>Lua is required: the refill-check-decrement is a multi-field read-modify-write — split across client commands two requests both read the same count and both "allow" <span class="warn">!</span></li>
+<li><b>Token vs leaky bucket</b>: token bucket <i>allows</i> bursts up to cap (banked allowance); leaky bucket <i>smooths</i> to a constant drip (traffic-shaping a fragile downstream).</li>
+</ul></section>
+
+<section class="card"><h3>Sessions &amp; Queues</h3>
+<pre><code># session: hash + sliding TTL
+HSET session:abc user 123 role admin
+EXPIRE session:abc 1800     # refresh each request
+DEL session:abc             # logout = instant revoke</code></pre>
+<ul>
+<li>Redis suits sessions: fast (every request), native TTL (the whole lifecycle), and <b>shared across app servers</b> → stateless app tier. Instant revoke beats stateless JWTs (a valid JWT is accepted until expiry unless you keep a Redis denylist).</li>
+</ul>
+<h4>Reliable queue (no lost jobs)</h4>
+<pre><code>LMOVE q processing:w7 RIGHT LEFT   # atomic claim (not RPOP)
+# ...work... then ack:
+LREM processing:w7 1 &lt;job&gt;</code></pre>
+<ul>
+<li>Plain <code>LPUSH</code>+<code>BRPOP</code> is a good <i>simple</i> queue but a crash between pop and finish <b>loses the job</b> <span class="warn">!</span> The processing-list pattern keeps the job in Redis until acked; a reaper re-queues stale ones ⇒ at-least-once ⇒ idempotent consumers. Streams give the same with <code>XACK</code>.</li>
+<li><b>Delayed jobs</b>: ZSET scored by due-time; poll <code>ZRANGEBYSCORE 0 now</code> and <code>ZREM</code> claimed jobs atomically in Lua.</li>
+</ul></section>
+
+<section class="card"><h3>Replication</h3>
+<ul>
+<li><b>Async</b> primary→replica by default: primary acks the client <b>before</b> replicas confirm, so acked writes can be lost on failover <span class="warn">!</span> (eventual, not strong, consistency).</li>
+<li>Replicas serve reads (scale reads), are <b>read-only</b>. Initial <b>full sync</b> = <code>BGSAVE</code> RDB + buffered writes; then a continuous command stream.</li>
+<li><b>PSYNC / partial resync</b>: replica tracks (replication-id, offset); on a brief disconnect it resumes from the primary's in-memory <b>backlog</b> (<code>repl-backlog-size</code>) instead of a full RDB transfer — size it for write-rate × expected blip <span class="warn">!</span></li>
+<li><code>WAIT n ms</code> blocks until n replicas ack (durability dial, not linearizable, not a full guarantee).</li>
+<li><code>min-replicas-to-write</code> / <code>min-replicas-max-lag</code>: refuse writes unless N replicas are within S seconds — shrinks the loss window, trades availability (CAP made explicit).</li>
+<li>Read-from-replica serves <b>stale</b> data (lag); never route read-your-writes there. Monitor <code>master_repl_offset</code> vs replica offset for lag.</li>
+<li><b>Footgun</b>: a persistence-less replica that restarts comes back <b>empty</b> and can propagate emptiness upstream and wipe the dataset <span class="warn">!</span> Keep at least RDB on replicas.</li>
+</ul></section>
+
+<section class="card"><h3>HA: Sentinel</h3>
+<ul>
+<li><b>Sentinel</b> = external supervisor processes for a <b>non-sharded</b> primary+replicas: monitor, notify, auto-failover, and act as a <b>config provider</b> (clients ask it for the current primary). Not a proxy — data never flows through it.</li>
+<li>Failover state machine: <b>SDOWN</b> (one sentinel's opinion after <code>down-after-milliseconds</code>) → <b>ODOWN</b> (a <b>quorum</b> agree) → elect a <b>leader</b> (needs a <b>majority</b> of all sentinels) → promote best replica (<code>REPLICAOF NO ONE</code>) → repoint the rest.</li>
+<li><b>Quorum ≠ majority</b>: quorum triggers ODOWN; a majority authorises the promotion. With 5 sentinels, quorum 2, a leader still needs 3 votes <span class="warn">!</span></li>
+<li>Run an <b>odd number ≥ 3</b> across failure domains so a partition can't split evenly and can still form a majority.</li>
+<li>Best replica = filter unhealthy → lowest <code>replica-priority</code> (0 = never) → highest offset → smallest run-id.</li>
+<li>Failover restores availability, <b>not</b> the un-replicated writes (async). <b>TILT mode</b>: a sentinel that detects clock jumps sits out to avoid spurious failovers.</li>
+</ul></section>
+
+<section class="card"><h3>HA: Sentinel vs Cluster</h3>
+<table><thead><tr><th>Sentinel</th><th>Cluster</th></tr></thead><tbody>
+<tr><td>HA + auto-failover</td><td>HA + <b>horizontal sharding</b></td></tr>
+<tr><td>single dataset, replicas</td><td>16384 hash slots across masters</td></tr>
+<tr><td>external quorum monitors</td><td>built-in gossip failover</td></tr>
+<tr><td>all 16 DBs, full multi-key</td><td>DB 0 only, same-slot only</td></tr>
+</tbody></table>
+<ul>
+<li>Decision: <b>data fits one node?</b> → Sentinel (simpler, keeps multi-key/txns). Too big or need write-scaling → Cluster.</li>
+<li>Don't pay Cluster's complexity just for HA on a small dataset.</li>
+</ul></section>
+
+<section class="card"><h3>Redis Cluster Deep-dive</h3>
+<ul>
+<li><b>16384 hash slots</b> across masters; <code>slot = CRC16(key) mod 16384</code>. Each master owns a slot range + has replicas. (16384 slots, <i>not</i> nodes — the bitmap gossiped between nodes stays ~2KB.)</li>
+<li>Client caches the slot→node map (<code>CLUSTER SLOTS/SHARDS</code>) and routes directly. Wrong node → <b><code>MOVED</code></b> (permanent, update map) or <b><code>ASK</code></b> (transient, mid-migration, send <code>ASKING</code> first, don't update map) <span class="warn">!</span></li>
+<li><b>Resharding</b> moves slots live; keys already moved → ASK, not yet → served by source; then MOVED.</li>
+<li>Multi-key ops (<code>MGET</code>, <code>SINTER</code>, txns, Lua) require all keys in <b>one slot</b> or <code>CROSSSLOT</code> error → force it with a <b>hash tag</b>: only the substring in <code>{...}</code> is hashed, so <code>user:{123}:profile</code> &amp; <code>user:{123}:cart</code> co-locate <span class="warn">!</span> Over-coarse tags create a hot slot.</li>
+<li>Built-in HA: gossip on the <b>cluster bus</b> (port +10000) → PFAIL→FAIL → a replica gets a master majority vote → promoted. <b>No Sentinel</b>.</li>
+<li>Availability is <b>per-slot</b>: lose a master + all its replicas and that slot range is down; <code>cluster-require-full-coverage no</code> keeps the rest serving. Min viable = <b>3 masters</b> (majority voting) + a replica each.</li>
+<li>Still <b>async</b> ⇒ same failover loss window; a minority-side master keeps taking writes until <code>cluster-node-timeout</code> then stops.</li>
+</ul></section>
+
+<section class="card"><h3>Memory: Encodings</h3>
+<table><thead><tr><th>Type</th><th>Small</th><th>Converts to</th></tr></thead><tbody>
+<tr><td>Hash</td><td>listpack</td><td>hashtable</td></tr>
+<tr><td>List</td><td>listpack</td><td>quicklist</td></tr>
+<tr><td>Set (int)</td><td>intset</td><td>hashtable</td></tr>
+<tr><td>Set (str)</td><td>listpack</td><td>hashtable</td></tr>
+<tr><td>ZSet</td><td>listpack</td><td>skiplist</td></tr>
+<tr><td>String</td><td>int / embstr ≤44B</td><td>raw</td></tr>
+</tbody></table>
+<ul>
+<li>Small collections pack into one flat <b>listpack</b>/<b>intset</b> — tiny memory, O(n) scan (fine while small). Cross the threshold (<code>hash-max-listpack-entries</code> etc.) and it <b>converts one-way</b> to the pointer-based structure — often <b>5–10×</b> more per element <span class="warn">!</span></li>
+<li><code>OBJECT ENCODING key</code> shows the current representation.</li>
+<li>Keep collections under the threshold to stay compact; tune thresholds if records are slightly larger.</li>
+</ul></section>
+
+<section class="card"><h3>Memory &amp; Optimization</h3>
+<ul>
+<li>Profile: <code>INFO memory</code>, <code>MEMORY USAGE key</code>, <code>MEMORY DOCTOR</code>, <code>redis-cli --bigkeys</code>/<code>--memkeys</code>/<code>--hotkeys</code> (all <code>SCAN</code>-based, non-blocking).</li>
+<li><b>Per-key overhead</b> (dict entry + robj header + optional expire entry) ≈ 50–100B <i>per key</i>. Millions of tiny keys waste huge memory — <b>pack fields into a hash</b> (one key, listpack): Instagram cut ~5× this way <span class="warn">!</span></li>
+<li><b>Big key</b> = one huge value/collection → O(n) commands block the loop (a <i>latency</i> bug, not just space) + slow migration + blocking <code>DEL</code>. Split/shard it, cap it (<code>LTRIM</code>/TTL), read with SCAN-family, delete with <code>UNLINK</code>.</li>
+<li><b>Hot key</b> = one key with skewed traffic. <b>Cluster does NOT fix it</b> — it hashes to one slot on one node <span class="warn">!</span> Fix via client-side cache, read replicas, or split into <code>counter:{shard0..N}</code>.</li>
+<li>Cheaper types: <b>bitmap</b> (~1.2MB for 10M flags) vs a set of ids; <b>HLL</b> (~12KB) for approx uniques vs a growing set.</li>
+<li><b>Fragmentation</b>: <code>mem_fragmentation_ratio = RSS/used_memory</code>. &gt;1.5 → enable <code>activedefrag</code> (jemalloc, online); &lt;1 → <b>swapping</b> (bad, add RAM) <span class="warn">!</span></li>
+<li>Set <code>maxmemory</code> below box RAM (leave room for fork COW) + an eviction policy so Redis never OOM-kills the box.</li>
+</ul></section>
+
+<section class="card"><h3>Ops · Monitoring</h3>
+<pre><code>SLOWLOG GET 10        # exec time &gt; slowlog-log-slower-than (µs)
+LATENCY DOCTOR        # triage spike sources
+redis-cli --stat      # live ops/mem/clients
+redis-cli --latency   # PING RTT sampling</code></pre>
+<ul>
+<li>Alert on: <code>used_memory</code>/<code>maxmemory</code> %, rising <code>evicted_keys</code>, hit-rate drop, <code>rejected_connections</code>, persistence status ≠ ok, replica <code>master_link_status</code>/lag, <code>blocked_clients</code>, single-core CPU. Alert on leading indicators, not lagging ones.</li>
+<li><b>Latency spikes</b>: fork (BGSAVE/BGREWRITEAOF/sync), swap, Transparent Huge Pages (<b>disable THP</b>), big-key O(n), large <code>DEL</code>, expiry bursts.</li>
+<li><b>MONITOR</b> streams every command — invaluable but can halve throughput; never leave running in prod <span class="warn">!</span></li>
+<li><b>Pool connections</b> — never one per request (marches toward <code>maxclients</code> 10000 → <code>rejected_connections</code>). Give blocking cmds their own pool.</li>
+<li><code>CONFIG SET</code> is live but in-memory only — <code>CONFIG REWRITE</code> to persist. Backups: RDB off-box, snapshot on a replica, <b>test restores</b>.</li>
+</ul></section>
+
+<section class="card"><h3>Security</h3>
+<ul>
+<li>An internet-exposed, unauthenticated Redis is <b>remote code execution</b>: attacker does <code>CONFIG SET dir</code> + <code>SET</code> + <code>SAVE</code> to write a cron/SSH key/webshell as the Redis user. Mass crypto-mining pwn <span class="warn">!</span></li>
+<li><b>Network</b>: <code>bind</code> private interfaces, firewall the port, <code>protected-mode yes</code>. Never <code>bind 0.0.0.0</code> on a public IP.</li>
+<li><b>Auth</b>: <code>requirepass</code> = one all-powerful <code>default</code> user. <b>ACLs (6+)</b> = named users, per-command + per-key scope: <code>ACL SETUSER app on &gt;pw ~cache:* +get +set</code>; disable <code>default</code>. Least privilege = smaller blast radius.</li>
+<li><b>TLS</b> for client + replication on untrusted networks. Run as <b>non-root</b>.</li>
+<li>Neuter dangerous commands: <code>rename-command FLUSHALL ""</code>/<code>CONFIG</code>/<code>KEYS</code>/<code>DEBUG</code>, or deny via ACL (<code>-@dangerous</code>) — preferred, scoped.</li>
+</ul></section>
+
+<section class="card"><h3>Advanced: Bitmaps · HLL · Geo</h3>
+<ul>
+<li><b>Bitmaps</b>: <code>SETBIT/BITCOUNT/BITOP</code>. DAU = 1 bit/user; <code>BITOP OR</code> daily keys → WAU; <code>BITOP AND</code> → retention <span class="warn">!</span> dense integer ids only.</li>
+<li><b>HyperLogLog</b>: <code>PFADD/PFCOUNT/PFMERGE</code> — uniques in ~12KB, 0.81% error at any cardinality. <code>PFMERGE</code> combines periods (mergeability is the power).</li>
+<li><b>Geo</b> (zset-backed, score = geohash): <code>GEOADD</code>, <code>GEOSEARCH ... BYRADIUS</code> for "drivers within 5km", <code>GEODIST</code>.</li>
+<li>These trade exactness/generality for tiny memory — pick them when an exact set would be gigabytes. Ask: do I need the ids, or just membership (bitmap) / a count (HLL)?</li>
 </ul></section>
 
 <section class="card"><h3>Command Cost Quick-ref</h3>
 <table><thead><tr><th>Command</th><th>O()</th></tr></thead><tbody>
 <tr><td><code>GET/SET/INCR/HSET</code></td><td>O(1)</td></tr>
 <tr><td><code>LPUSH/RPUSH/LPOP</code></td><td>O(1)</td></tr>
+<tr><td><code>SADD/SISMEMBER</code></td><td>O(1)</td></tr>
 <tr><td><code>ZADD / ZSCORE</code></td><td>O(log n)</td></tr>
 <tr><td><code>ZRANGE a b</code></td><td>O(log n + m)</td></tr>
 <tr><td><code>SINTER / SUNION</code></td><td>O(n·m) <span class="warn">!</span></td></tr>
 <tr><td><code>HGETALL / SMEMBERS</code></td><td>O(n) — bounded size only <span class="warn">!</span></td></tr>
 <tr><td><code>KEYS pattern</code></td><td>O(n) — banned in prod <span class="warn">!</span></td></tr>
 <tr><td><code>DEL bigkey</code></td><td>O(n) blocking → <code>UNLINK</code></td></tr>
+<tr><td><code>PFADD / PFCOUNT</code></td><td>O(1)</td></tr>
 </tbody></table></section>
 
 <section class="card"><h3>Redis 7.x &amp; Alternatives</h3>
 <ul>
-<li><b>Functions</b> (7.0): persisted, named server-side logic (replaces relying on cached <code>EVALSHA</code> scripts).</li>
-<li><b>ACLv2</b>, multi-part AOF, client-side caching (<b>tracking</b>: server invalidates client caches), sharded pub/sub in cluster.</li>
+<li><b>Functions</b> (7.0): persisted, named, replicated server-side logic (replaces relying on cached <code>EVALSHA</code>).</li>
+<li><b>ACLv2</b>, multi-part AOF, client-side caching (<b>tracking</b>: server invalidates client caches), <b>sharded pub/sub</b> in cluster, <code>HEXPIRE</code> (7.4) hash-field TTLs.</li>
 <li>Licence shift (2024) → <b>Valkey</b> (Linux Foundation fork, drop-in) is the OSS successor many adopt.</li>
-<li>Performance forks: <b>KeyDB</b> (multi-threaded), <b>Dragonfly</b> (multi-threaded, higher throughput per node).</li>
-<li>When Redis is the wrong tool: durable source-of-truth (use a DB), huge datasets ≫ RAM, complex queries — Redis is a <b>fast supplement</b>, not a primary store <span class="warn">!</span></li>
+<li>Performance forks: <b>KeyDB</b> (multi-threaded), <b>Dragonfly</b> (multi-threaded, higher throughput/node).</li>
+<li>Modules: <b>RediSearch</b> (secondary index/query), <b>RedisJSON</b> (path access), <b>RedisBloom</b> (Bloom/Cuckoo/top-k), <b>RedisTimeSeries</b>.</li>
+<li>Wrong tool for: durable source-of-truth (use a DB), datasets ≫ RAM, rich queries/joins, correctness-critical locks — Redis is a <b>fast supplement</b>, not a primary store <span class="warn">!</span></li>
+</ul></section>
+
+<section class="card"><h3>Consistency &amp; Data-Loss Windows</h3>
+<ul>
+<li><b>Cache vs DB</b>: a cache is an <b>eventually-consistent replica</b> — there is always a window where they disagree. Bound it with TTL + delete-on-write; the must-be-fresh field bypasses the cache.</li>
+<li><b>Async replication</b>: acked writes not yet on a replica are lost if the primary dies before replicating (Sentinel <i>and</i> Cluster). Narrow with <code>WAIT</code> / <code>min-replicas-to-write</code>; can't eliminate.</li>
+<li><b>Persistence gaps</b>: RDB loses since last snapshot; AOF <code>everysec</code> ≤1s. Only <code>appendfsync always</code> is per-write durable (slow).</li>
+<li><b>Locks</b>: expiry-vs-work overlap + GC pause + failover loss ⇒ efficiency yes, correctness needs fencing tokens.</li>
+<li><b>Pub/Sub</b>: at-most-once, offline subscriber loses messages — use Streams for anything you can't lose.</li>
+<li>Zero-loss requirement ⇒ Redis is not the system of record (or use MemoryDB, which adds a durable multi-AZ log).</li>
 </ul></section>
 
 <section class="card"><h3>&#9733; Design / Review Checklist</h3>
 <h4>Type &amp; access</h4>
 <ul>
 <li>&#9744; Right type for the access pattern; no huge single keys; O(n) commands paginated with <code>SCAN</code> not <code>KEYS</code> <span class="warn">!</span></li>
-<li>&#9744; Every cache key has a TTL; large deletes use <code>UNLINK</code>.</li>
+<li>&#9744; Every cache key has a TTL (with jitter); large deletes use <code>UNLINK</code>; collections kept under listpack thresholds.</li>
 </ul>
 <h4>Correctness</h4>
 <ul>
-<li>&#9744; Read-modify-write is atomic (Lua / <code>WATCH</code>-CAS), not GET-then-SET race <span class="warn">!</span></li>
-<li>&#9744; Locks use <code>SET NX PX</code> + token + Lua release; TTL &gt; max work time (or watchdog).</li>
-<li>&#9744; Aware async replication can lose acked writes; not used as source of truth for money.</li>
+<li>&#9744; Read-modify-write is atomic (Lua / <code>WATCH</code>-CAS / <code>INCR</code>), not a GET-then-SET race <span class="warn">!</span></li>
+<li>&#9744; Locks use <code>SET NX PX</code> + token + Lua release; TTL &gt; max work time (or watchdog); fencing token if correctness-critical.</li>
+<li>&#9744; Aware async replication can lose acked writes; Redis not used as source of truth for money.</li>
 </ul>
 <h4>Ops</h4>
 <ul>
 <li>&#9744; <code>maxmemory</code> + eviction policy set; persistence (AOF everysec + RDB) matches durability need.</li>
-<li>&#9744; TTL jitter / stampede protection on hot keys; auth + ACL + no public exposure.</li>
+<li>&#9744; TTL jitter / stampede protection on hot keys; auth + ACL + no public exposure; connections pooled.</li>
 </ul></section>
 
 <section class="card"><h3>Symptom → Cause</h3>
 <table><thead><tr><th>Symptom</th><th>Likely cause</th></tr></thead><tbody>
 <tr><td>latency spikes for all clients</td><td>slow O(n) command blocking the loop (<code>KEYS</code>/big range) <span class="warn">!</span></td></tr>
+<tr><td>periodic p99 spikes</td><td>fork for BGSAVE/AOF-rewrite (COW) or THP enabled <span class="warn">!</span></td></tr>
 <tr><td>writes suddenly rejected</td><td><code>maxmemory</code> hit with <code>noeviction</code> <span class="warn">!</span></td></tr>
 <tr><td>keys vanish early / TTL lost</td><td>write without <code>KEEPTTL</code> reset expiry <span class="warn">!</span></td></tr>
 <tr><td>acked write lost on failover</td><td>async replication — expected <span class="warn">!</span></td></tr>
 <tr><td>CROSSSLOT error</td><td>multi-key op across slots; add hash tag <span class="warn">!</span></td></tr>
 <tr><td>lock deleted by wrong owner</td><td>plain <code>DEL</code> release, no token check <span class="warn">!</span></td></tr>
 <tr><td>DB overwhelmed after deploy</td><td>cache avalanche — TTLs expired together <span class="warn">!</span></td></tr>
+<tr><td>one node hot, others idle</td><td>hot key — Cluster can't split it <span class="warn">!</span></td></tr>
 <tr><td>memory 2× during save</td><td>fork copy-on-write under write load</td></tr>
+<tr><td>frag ratio &lt; 1</td><td>Redis swapping — add RAM, disable swap <span class="warn">!</span></td></tr>
+<tr><td>lost pub/sub events</td><td>subscriber offline; use Streams <span class="warn">!</span></td></tr>
 </tbody></table></section>
 
 </div>

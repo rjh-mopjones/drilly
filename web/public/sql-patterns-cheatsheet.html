@@ -491,6 +491,150 @@ SELECT * FROM JSON_TABLE(data, '$.items[*]'
 </ul>
 </section>
 
+<section class="card"><h3>Running Distinct — the unsupported case</h3>
+<p><code>COUNT(DISTINCT x) OVER (ORDER BY …)</code> is <b>rejected</b> by Postgres <span class="warn">!</span> — the classic "cumulative distinct users up to each day" trap. Two reformulations:</p>
+<h4>First-appearance trick — O(N log N)</h4>
+<pre><code>WITH firsts AS (          -- each user's first day
+  SELECT DISTINCT ON (user_id) user_id, day
+  FROM logins ORDER BY user_id, day
+)
+SELECT day,
+  COUNT(*) OVER (ORDER BY day) AS distinct_so_far
+FROM firsts;</code></pre>
+<ul>
+<li>Collapsing each user to their first day turns a running-distinct into a plain running <code>COUNT(*)</code> — every user is counted exactly once, on the day they first appear.</li>
+<li>Brute-force alt: for each day, <code>COUNT(DISTINCT user_id) WHERE d &lt;= day</code> — a self-join, O(N²). Only viable on tiny tables.</li>
+<li>Same limitation bites 30-day rolling distinct (DAU/MAU) — no window form; pre-aggregate a daily distinct-user list, then window the trailing 30 days.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Temporal &amp; As-Of Joins</h3>
+<p>Time as a first-class dimension. Core op: for each A row, the most recent B row at or before A's timestamp.</p>
+<h4>As-of join — LATERAL … LIMIT 1</h4>
+<pre><code>-- most recent quote at/before each trade
+SELECT t.*, q.bid, q.ask
+FROM trades t
+CROSS JOIN LATERAL (
+  SELECT * FROM quotes q
+  WHERE q.symbol = t.symbol
+    AND q.ts &lt;= t.ts
+  ORDER BY q.ts DESC LIMIT 1
+) q;</code></pre>
+<ul>
+<li>Index <code>(symbol, ts DESC)</code> → each LATERAL is one index seek. This is Postgres's answer to KDB's <code>aj</code>.</li>
+<li><span class="warn">!</span> Ties on <code>ts</code> → <code>LIMIT 1</code> picks one arbitrarily. Add a deterministic tiebreak: <code>ORDER BY q.ts DESC, q.id DESC</code>. Non-deterministic as-of joins break downstream reconciliation.</li>
+</ul>
+<h4>SCD type-2 point-in-time lookup</h4>
+<pre><code>WHERE valid_from &lt;= :ts
+  AND (valid_to &gt; :ts OR valid_to IS NULL);</code></pre>
+<ul>
+<li><span class="warn">!</span> The <code>valid_to IS NULL</code> arm catches the <b>currently-valid</b> (open-ended) row — drop it and you miss the present tier.</li>
+<li>Range form: <code>tstzrange(valid_from, valid_to, '[)') @&gt; :ts</code> <span class="pg">PG</span>. Half-open <code>[)</code> avoids boundary double-counting.</li>
+</ul>
+<h4>Range overlap</h4>
+<ul>
+<li><code>tstzrange(a.lo,a.hi,'[)') &amp;&amp; tstzrange(b.lo,b.hi,'[)')</code> <span class="pg">PG</span> — GiST-indexable. Portable form: <code>a.lo &lt; b.hi AND a.hi &gt; b.lo</code>.</li>
+<li><span class="warn">!</span> <code>timestamptz</code> stores UTC; <code>timestamp</code> is naive. Mixing them is a silent-bug source — store <code>timestamptz</code>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Cohort, Funnel &amp; Retention</h3>
+<p>Cohort analysis = <b>pivot of distinct-user counts on (cohort, week-offset)</b>. Frame it that way and it's mechanical.</p>
+<pre><code>WITH cohorts AS (
+  SELECT user_id,
+    date_trunc('week',signup)::date AS cw
+  FROM users
+), acts AS (
+  SELECT c.cw,
+    (date_trunc('week',l.day)::date - c.cw)/7 AS off,
+    l.user_id
+  FROM cohorts c JOIN logins l USING(user_id)
+)
+SELECT cw,
+  COUNT(DISTINCT user_id) FILTER (WHERE off=0) w0,
+  COUNT(DISTINCT user_id) FILTER (WHERE off=1) w1,
+  COUNT(DISTINCT user_id) FILTER (WHERE off=2) w2
+FROM acts GROUP BY cw ORDER BY cw;</code></pre>
+<ul>
+<li>Divide each cell by <code>w0</code> per cohort for retention %.</li>
+<li><span class="warn">!</span> Naive <code>GROUP BY (cohort,off)</code> drops zero-retention cells — <code>CROSS JOIN generate_series</code> the offsets, <code>LEFT JOIN … COALESCE(…,0)</code> to fill.</li>
+</ul>
+<h4>Funnel — ordered steps</h4>
+<pre><code>MIN(ts) FILTER (WHERE event='signup')   AS s1,
+MIN(ts) FILTER (WHERE event='checkout') AS s2
+-- then COUNT(s2) FILTER (WHERE s2 &gt; s1)</code></pre>
+<ul>
+<li><span class="warn">!</span> "N-day" is ambiguous: <b>N-th day</b> = <code>day-signup = N</code>; <b>by N-day</b> = <code>BETWEEN 1 AND N</code>. Ask which.</li>
+<li>Stickiness = DAU/MAU. No <code>COUNT(DISTINCT) OVER</code> → MAU needs a 30-day rolling distinct subquery or first-appearance trick.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Statistical SQL</h3>
+<p>Most "stats in SQL" prompts want the right <b>built-in</b>, not a hand-rolled formula.</p>
+<table><thead><tr><th>Need</th><th>Function</th></tr></thead><tbody>
+<tr><td>median / p95</td><td><code>PERCENTILE_CONT(p) WITHIN GROUP (ORDER BY x)</code></td></tr>
+<tr><td>exact existing value</td><td><code>PERCENTILE_DISC(p)</code></td></tr>
+<tr><td>correlation</td><td><code>corr(y,x)</code></td></tr>
+<tr><td>OLS slope / R²</td><td><code>regr_slope(y,x)</code> / <code>regr_r2(y,x)</code></td></tr>
+<tr><td>std dev</td><td><code>stddev_pop</code> (÷N) / <code>stddev_samp</code> (÷N-1)</td></tr>
+<tr><td>most common</td><td><code>mode() WITHIN GROUP (ORDER BY x)</code></td></tr>
+<tr><td>histogram bucket</td><td><code>width_bucket(x,lo,hi,n)</code></td></tr>
+</tbody></table>
+<pre><code>SELECT customer_id,
+  PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY val) med,
+  PERCENTILE_CONT(ARRAY[0.5,0.95,0.99])
+    WITHIN GROUP (ORDER BY val) AS pcts
+FROM orders GROUP BY customer_id;</code></pre>
+<ul>
+<li><code>PERCENTILE_*</code> is an <b>ordered-set aggregate</b>, arg order in <code>regr_*</code> is <code>(y,x)</code> — dependent first.</li>
+<li><span class="warn">!</span> Bare <code>stddev()</code> = <code>stddev_samp</code> (÷N-1), not population.</li>
+<li><span class="warn">!</span> No <code>PERCENTILE_CONT … OVER</code> window form — rolling p95 must pre-aggregate per day, then window the dailies. <code>width_bucket</code> returns 0 below range, n+1 above.</li>
+</ul>
+</section>
+
+<section class="card"><h3>generate_series &amp; Zero-Fills</h3>
+<p>The dead-on tool whenever the prompt says "every day / hour", "all values in range", or "including empty buckets".</p>
+<pre><code>-- one row per day, zero-filled signups
+SELECT d::date, COUNT(s.id) AS signups
+FROM generate_series(
+  CURRENT_DATE-29, CURRENT_DATE, '1 day'::interval) d
+LEFT JOIN signups s ON s.created_at::date = d::date
+GROUP BY d::date ORDER BY d::date;</code></pre>
+<ul>
+<li><span class="warn">!</span> Without the series + <code>LEFT JOIN</code>, days with no events <b>vanish</b> — nothing anchors them. The <code>LEFT JOIN</code> + <code>COUNT(s.id)</code> (not <code>COUNT(*)</code>) gives the zero.</li>
+<li>Numeric: <code>generate_series(1,100)</code>; stepped: <code>generate_series(1,100,5)</code>.</li>
+<li>Cohort grid = <code>cohorts CROSS JOIN generate_series(0,12) AS off</code>, then <code>LEFT JOIN</code> the measured cells.</li>
+<li>Time-bucket join: <code>date_trunc('hour',ts)</code> both sides, join on the bucket; add a functional index <code>ON (date_trunc('hour',ts))</code> to keep it fast.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Postgres Power Features</h3>
+<p>For every prompt ask: "is there a PG feature that does this in one line?"</p>
+<table><thead><tr><th>Prompt smell</th><th>Feature</th></tr></thead><tbody>
+<tr><td>top-1 per group</td><td><code>DISTINCT ON</code></td></tr>
+<tr><td>conditional count</td><td><code>FILTER (WHERE …)</code></td></tr>
+<tr><td>generate a sequence</td><td><code>generate_series</code></td></tr>
+<tr><td>overlapping ranges</td><td><code>tstzrange</code> + <code>&amp;&amp;</code></td></tr>
+<tr><td>per-row dependent set</td><td><code>LATERAL</code></td></tr>
+<tr><td>array membership</td><td><code>= ANY(arr)</code></td></tr>
+<tr><td>no double-booking (schema)</td><td><code>EXCLUDE USING GIST</code></td></tr>
+<tr><td>bulk load</td><td><code>COPY</code> (10-100×)</td></tr>
+<tr><td>index a subset</td><td>partial index <code>WHERE</code></td></tr>
+</tbody></table>
+<pre><code>-- schema-level non-overlap constraint
+CREATE TABLE bookings (
+  room_id int, during tstzrange,
+  EXCLUDE USING GIST (room_id WITH =, during WITH &amp;&amp;)
+);
+-- partial index: 90% inactive → 10× smaller
+CREATE INDEX ON users (email) WHERE active;</code></pre>
+<ul>
+<li><span class="warn">!</span> <code>EXCLUDE</code> beats an app-code overlap check — the latter has a race window between read and insert.</li>
+<li><code>= ANY(arr)</code> takes a subquery-returned array where <code>IN</code> needs a literal list. Array tags: <code>@&gt;</code> (all), <code>&amp;&amp;</code> (any).</li>
+<li><code>COPY … FROM STDIN</code> is driver-callable and bypasses the per-row parser — non-negotiable past a few million rows.</li>
+</ul>
+</section>
+
 <section class="card"><h3>Anti-patterns &amp; Smells</h3>
 <ul>
 <li><span class="warn">!</span> <code>NOT IN (subquery)</code> on nullable col → zero rows. Use <code>NOT EXISTS</code>.</li>

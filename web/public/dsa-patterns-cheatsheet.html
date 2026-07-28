@@ -159,6 +159,8 @@ while l &lt; r:
 <li>Opposite-ends (sorted) · same-direction (fast/slow) · two-arrays (merge).</li>
 <li>O(N) time, O(1) space — beats the hash-map version on a sorted input <span class="warn">!</span> (no alloc).</li>
 <li>3Sum = sort + fix i + two-pointer the rest; skip dupes for uniqueness <span class="warn">!</span></li>
+<li>Container-with-most-water: always move the <b>shorter</b> wall — the taller one can't improve area <span class="warn">!</span></li>
+<li>Dutch-flag (Sort Colors) = 3 pointers (low/mid/high), one pass, O(1) space.</li>
 </ul></section>
 
 <section class="card"><h3>Sliding Window</h3>
@@ -174,6 +176,8 @@ for r in range(n):
 <li>Amortised O(N): each element enters/leaves once.</li>
 <li>"exactly K" = atMost(K) − atMost(K−1). Delete from freq map when count hits 0 <span class="warn">!</span></li>
 <li>Only valid when contiguous <b>and</b> condition monotonic in window size <span class="warn">!</span> (else DP).</li>
+<li>Min-window-substring: track <code>need</code> counts + a <code>formed</code> counter; shrink while valid, record best.</li>
+<li>Fixed-window (avg / max-sum of size k): slide by adding <code>a[r]</code> and removing <code>a[r-k]</code>.</li>
 </ul></section>
 
 <section class="card"><h3>Prefix Sum &amp; Hashing</h3>
@@ -216,6 +220,8 @@ return lo</code></pre>
 <li><b>On the answer</b> when the decision <code>feasible(x)</code> is <b>monotonic</b> (true for all x ≥ threshold) <span class="warn">!</span> — Koko bananas, Ship-within-D-days, Split-array-largest-sum.</li>
 <li>Pin the invariant (lo=first-true) to avoid off-by-one / infinite loops <span class="warn">!</span></li>
 <li>Rotated/find-min = compare mid to hi to pick the sorted half.</li>
+<li>Find-peak = compare <code>mid</code> to <code>mid+1</code>, climb uphill — O(log N) even unsorted.</li>
+<li>Two sorted arrays median = binary-search the partition of the smaller array, O(log min(m,n)).</li>
 </ul></section>
 
 <section class="card"><h3>Fast &amp; Slow / Linked List</h3>
@@ -272,6 +278,8 @@ while q:
 <ul>
 <li>Dijkstra fails with negative edges <span class="warn">!</span> — use Bellman-Ford (also detects neg cycles).</li>
 <li>K-stops constraint → Dijkstra/BF on state <code>(node, hops)</code>.</li>
+<li>Dijkstra: skip a popped node if its stored dist &gt; recorded best (lazy deletion) <span class="warn">!</span></li>
+<li>Grid with weighted cells is <b>not</b> plain BFS — use Dijkstra; equal weights only → BFS.</li>
 </ul></section>
 
 <section class="card"><h3>Topological Sort</h3>
@@ -288,6 +296,8 @@ while q:
 <ul>
 <li>DAG only; Kahn detects cycles (short output = cycle) <span class="warn">!</span></li>
 <li>DFS variant: post-order append, then reverse. O(V+E).</li>
+<li>Alien Dictionary = build edges from adjacent-word first-difference, then topo-sort the letters <span class="warn">!</span></li>
+<li>Layered Kahn (process a whole in-degree-0 wave per round) = minimum semesters / parallel courses.</li>
 </ul></section>
 
 <section class="card"><h3>Union-Find (DSU)</h3>
@@ -302,6 +312,9 @@ def union(a,b): p[find(a)] = find(b)</code></pre>
 <li>Near-O(1) amortised (α) with path compression + union by rank/size.</li>
 <li>Choose over DFS when edges arrive incrementally / you keep merging groups <span class="warn">!</span></li>
 <li>Count components = distinct roots; cycle in undirected = union of already-connected pair.</li>
+<li>Path compression <i>alone</i> = O(log N); add union-by-rank for the tight O(α(N)) <span class="warn">!</span></li>
+<li>No efficient delete — for "connected as edges are removed", process events <b>backwards</b> as unions.</li>
+<li>Only detects <b>undirected</b> cycles; directed cycles need three-colour DFS or Kahn <span class="warn">!</span></li>
 </ul></section>
 
 <section class="card"><h3>Heap / Top-K / Two Heaps</h3>
@@ -369,6 +382,281 @@ for s,e in intervals:
 </ul>
 <h4>Trie</h4>
 <ul><li><b>See:</b> prefix search, autocomplete, word dictionary, "startsWith". Node = children map + isEnd. Insert/search O(L).</li></ul></section>
+
+<section class="card"><h3>Arrays &amp; Hashing</h3>
+<p><b>See:</b> "find pair" · duplicates · anagrams · frequency · group-by-signature. Hashing is the universal <b>time-for-space trade</b>: collapse the O(N²) inner "search for a match" into an O(1) lookup.</p>
+<pre><code># Two Sum, one pass
+seen = {}                    # value -> index
+for i, x in enumerate(a):
+  if t-x in seen: return [seen[t-x], i]
+  seen[x] = i                # insert AFTER check</code></pre>
+<ul>
+<li>Three moves: set = membership, map = index lookup, Counter = frequency.</li>
+<li><b>Group Anagrams</b>: bucket by canonical key — sorted string O(L log L) or 26-char count tuple O(L) <span class="warn">!</span></li>
+<li><b>Longest Consecutive O(N)</b>: only start a run at <code>n</code> where <code>n-1</code> ∉ set — else it degrades to O(N·len) <span class="warn">!</span></li>
+<li>Keys must be <b>immutable</b>: tuple not list, frozenset not set <span class="warn">!</span> "unhashable type: 'list'".</li>
+<li>"O(1)" is <i>average</i> — worst case O(N) under collisions; say "O(1) amortised".</li>
+</ul></section>
+
+<section class="card"><h3>DP — The 5-Question Framing</h3>
+<p>State the answer to all five <b>before</b> writing code — a vague state is the #1 cause of wrong DP.</p>
+<ol style="margin:1.5px 0;padding-left:13px;">
+<li><b>State</b> — what does <code>dp[i][j]</code> <i>mean</i>, in one precise sentence?</li>
+<li><b>Transition</b> — <code>dp[i]</code> in terms of smaller states (the recurrence).</li>
+<li><b>Base case</b> — <code>dp[0]</code> / <code>dp[empty]</code>.</li>
+<li><b>Order</b> — bottom-up direction, or top-down + memo.</li>
+<li><b>Answer</b> — which cell? <code>dp[N]</code> or <code>max(dp)</code>?</li>
+</ol>
+<ul>
+<li>"dp[i] = answer for first i" is <b>vague</b>; "dp[i] = max non-adjacent sum ending at ≤ i" is <b>precise</b> <span class="warn">!</span></li>
+<li>Space-optimise only if <code>dp[i]</code> depends on <code>dp[i-1]</code> alone — <b>not</b> when you need the full table to reconstruct <span class="warn">!</span></li>
+</ul></section>
+
+<section class="card"><h3>DP Family Recognition</h3>
+<table><thead><tr><th>Signal</th><th>Family / template</th></tr></thead><tbody>
+<tr><td>max/min contiguous sum</td><td>Kadane <code>dp[i]=max(a[i],dp[i-1]+a[i])</code></td></tr>
+<tr><td>longest increasing subseq</td><td>LIS — patience O(N log N)</td></tr>
+<tr><td>pick each item 0/1, capacity</td><td>0/1 knapsack — cap loop <b>backwards</b></td></tr>
+<tr><td>unlimited picks (coins)</td><td>unbounded — cap loop <b>forwards</b></td></tr>
+<tr><td>two strings transform/match</td><td>2D LCS / edit distance</td></tr>
+<tr><td>burst/merge on a range</td><td>interval DP <code>dp[l][r]</code></td></tr>
+<tr><td>buy/sell stock, K txns</td><td>state-machine <code>dp[i][k][hold]</code></td></tr>
+<tr><td>assign N≤20 items</td><td>bitmask DP <code>dp[mask]</code></td></tr>
+<tr><td>DP over tree, per node</td><td>tree DP (postorder, 2 states)</td></tr>
+</tbody></table>
+<ul>
+<li>vs greedy: DP enumerates states; greedy needs a proof. Coin Change [1,3,4] for 6 breaks greedy → DP <span class="warn">!</span></li>
+<li>Bitmask ceiling: N=20→2²⁰≈10⁶ ok; N=30→10⁹ no <span class="warn">!</span></li>
+</ul></section>
+
+<section class="card"><h3>Tree Recursion Idioms</h3>
+<p><b>Postorder thinking</b>: each node asks children "what's your answer?" then combines — height = <code>1+max(L,R)</code>, sum = <code>val+L+R</code>.</p>
+<pre><code># "two values up" — diameter
+best = 0
+def depth(n):
+  if not n: return 0
+  L, R = depth(n.left), depth(n.right)
+  best = max(best, L+R)     # thru node
+  return 1 + max(L, R)      # to parent</code></pre>
+<ul>
+<li><b>Return value</b> = what flows up; <b>nonlocal best</b> = what accumulates. Don't mix them in one var <span class="warn">!</span> (Diameter, Max Path Sum, Longest Univalue).</li>
+<li><b>BST validate</b>: compare to immediate children is <b>wrong</b> — pass <code>(lo,hi)</code> down and tighten <span class="warn">!</span></li>
+<li>Inorder of a BST is sorted (→ Kth smallest, iterative stack).</li>
+<li>Reconstruct: pre+in or post+in with distinct values is unique; pre alone is not.</li>
+</ul></section>
+
+<section class="card"><h3>Backtracking Templates</h3>
+<table><thead><tr><th>Problem</th><th>Recurse with</th></tr></thead><tbody>
+<tr><td>subsets</td><td>include/exclude, or index <code>i+1</code></td></tr>
+<tr><td>combinations (no reuse)</td><td>pass <code>i+1</code></td></tr>
+<tr><td>combination sum (reuse)</td><td>pass <code>i</code> + remaining target</td></tr>
+<tr><td>permutations</td><td><code>used[]</code> set / in-place swap</td></tr>
+<tr><td>grid (word search, N-Queens)</td><td>DFS + visited, undo on return</td></tr>
+</tbody></table>
+<ul>
+<li><b>Dedup</b> across duplicates: sort, then <code>if i&gt;start and a[i]==a[i-1]: continue</code> <span class="warn">!</span> — skip <i>during</i> recursion, not at the end.</li>
+<li>Mutate shared state + undo (pop) — don't pass copies (slow).</li>
+<li>Cost is O(branches^depth): O(2ᴺ) subsets, O(N!) perms — pruning is the entire game, only viable N ≤ ~12–20 <span class="warn">!</span></li>
+</ul></section>
+
+<section class="card"><h3>Trie &amp; Bit Trie</h3>
+<p><b>See:</b> prefix · autocomplete · "startsWith" · word dictionary · <b>max XOR pair</b>. Structures a corpus so prefix queries are O(L), not O(N·L).</p>
+<pre><code>class Node: children={}; end=False
+def insert(w):
+  n = root
+  for c in w:
+    n = n.children.setdefault(c, Node())
+  n.end = True                # path encodes the word</code></pre>
+<ul>
+<li>Node = children map + <code>isEnd</code> flag. Store only the flag, not the word <span class="warn">!</span></li>
+<li>Ops are O(L) (word length), <b>not</b> O(N words). Wildcard <code>.</code> → recurse over all children.</li>
+<li><b>Word Search II</b> = build trie of targets, one grid DFS prunes by trie branch (drops the ×W factor).</li>
+<li><b>Bit trie</b> (depth 32): for Max XOR, greedily walk the <i>opposite</i> bit each level → O(N log U) beats O(N²).</li>
+<li>Memory O(N·L·alphabet) worst case — a hash map beats it for exact-only lookup <span class="warn">!</span></li>
+</ul></section>
+
+<section class="card"><h3>Bit Manipulation Idioms</h3>
+<table><thead><tr><th>Do</th><th>Expression</th></tr></thead><tbody>
+<tr><td>set / clear / toggle bit i</td><td><code>n|(1&lt;&lt;i)</code> · <code>n&amp;~(1&lt;&lt;i)</code> · <code>n^(1&lt;&lt;i)</code></td></tr>
+<tr><td>lowest set bit</td><td><code>n &amp; -n</code></td></tr>
+<tr><td>clear lowest set bit</td><td><code>n &amp; (n-1)</code></td></tr>
+<tr><td>power of 2?</td><td><code>n&gt;0 and n&amp;(n-1)==0</code></td></tr>
+<tr><td>popcount (Kernighan)</td><td><code>while n: n&amp;=n-1; c+=1</code></td></tr>
+<tr><td>iterate submasks of m</td><td><code>s=m; while s: …; s=(s-1)&amp;m</code></td></tr>
+</tbody></table>
+<ul>
+<li><b>XOR self-inverse</b> <code>a^a=0</code>: Single Number I = XOR all (pairs cancel).</li>
+<li>Single Number III: XOR all → <code>a^b</code>; pick any set bit; partition by it; XOR each half <span class="warn">!</span></li>
+<li>XOR = add without carry → sum without <code>+</code>: <code>(a^b)</code> plus <code>(a&amp;b)&lt;&lt;1</code> carry, loop.</li>
+<li>Python ints are arbitrary precision → mask <code>&amp; 0xFFFFFFFF</code> for 32-bit semantics <span class="warn">!</span></li>
+</ul></section>
+
+<section class="card"><h3>Cyclic Sort &amp; Index-as-Hash</h3>
+<p><b>See:</b> values in <b>[1..N]</b> + find missing/duplicate + <b>O(1) space</b>. The array is its own hash — position or sign encodes presence.</p>
+<pre><code># place a[i] at index a[i]-1
+i = 0
+while i &lt; n:
+  j = a[i] - 1
+  if a[i] != a[j]: a[i], a[j] = a[j], a[i]
+  else: i += 1
+# then: index where a[i]!=i+1 is missing</code></pre>
+<ul>
+<li><b>Cyclic sort</b>: swap value <code>k</code> to index <code>k-1</code>; amortised O(N) (each value lands once) <span class="warn">!</span> (not O(N²)).</li>
+<li><b>Index-as-hash</b>: mark seen by negating <code>a[abs(x)-1]</code>; still-positive index = missing. Handle zeros first <span class="warn">!</span></li>
+<li><b>First Missing Positive</b> (hard): cyclic sort, ignore values outside [1,N].</li>
+<li><b>Find the Duplicate</b>: treat <code>a[i]</code> as a next-pointer → Floyd's cycle, O(1) space.</li>
+<li>Both <b>mutate</b> the input — document or restore <span class="warn">!</span></li>
+</ul></section>
+
+<section class="card"><h3>Math &amp; Stream Tricks</h3>
+<table><thead><tr><th>Signal</th><th>Trick · O()</th></tr></thead><tbody>
+<tr><td>element &gt; N/2 times</td><td>Boyer-Moore vote · N / O(1)</td></tr>
+<tr><td>uniform pick from stream</td><td>reservoir (keep i-th w.p. K/i)</td></tr>
+<tr><td>a^b mod m</td><td>fast/modular pow · log b</td></tr>
+<tr><td>gcd(a,b)</td><td>Euclid <code>gcd(b,a%b)</code> · log</td></tr>
+<tr><td>primes ≤ N</td><td>Sieve · N log log N</td></tr>
+<tr><td>N-th linear recurrence</td><td>matrix expo · log N</td></tr>
+</tbody></table>
+<ul>
+<li><b>Boyer-Moore</b>: track candidate + count, cancel mismatches; survivor is majority <b>only if one exists</b> — verify in a 2nd pass <span class="warn">!</span></li>
+<li><b>Reservoir K=1</b>: replace current with prob 1/i; uniform by induction. Used for log/telemetry sampling.</li>
+<li><b>Fast power</b>: <code>a^b=(a^(b/2))²·(a if odd)</code> — halve the exponent.</li>
+</ul></section>
+
+<section class="card"><h3>Advanced (recognition-only)</h3>
+<p>Staff / HFT signal cards — <b>name the tool + complexity</b>, implement only if pushed.</p>
+<table><thead><tr><th>Signal</th><th>Tool</th></tr></thead><tbody>
+<tr><td>range query + <b>point update</b>, mutable</td><td>Segment Tree (log N)</td></tr>
+<tr><td>range <i>sum</i> + point update</td><td>Fenwick / BIT (simpler)</td></tr>
+<tr><td>range min/max, <b>immutable</b></td><td>Sparse Table (O(1) query)</td></tr>
+<tr><td>find pattern in text</td><td>KMP / Z / Rabin-Karp (N+M)</td></tr>
+<tr><td>strongly-connected components</td><td>Tarjan / Kosaraju (V+E)</td></tr>
+<tr><td>skyline / overlapping rects</td><td>line sweep + heap</td></tr>
+<tr><td>all palindromic substrings</td><td>Manacher (N)</td></tr>
+</tbody></table>
+<ul>
+<li>Fenwick needs an <b>invertible</b> op (sum ok, min/max not) <span class="warn">!</span></li>
+<li>Sparse table only for <b>idempotent</b> ops (min/max/gcd) on static data.</li>
+</ul></section>
+
+<section class="card"><h3>Intervals &amp; Sweep Line</h3>
+<p><b>See:</b> merge · meeting rooms · min arrows · car pooling · calendar / max-concurrent · skyline.</p>
+<pre><code># sweep: +1 on start, -1 on end
+ev = []
+for s,e in iv: ev += [(s,+1),(e,-1)]
+ev.sort()
+cur = best = 0
+for _, d in ev: cur += d; best = max(best,cur)</code></pre>
+<ul>
+<li>Sort by <b>start</b> to merge; by <b>end</b> for max non-overlap / min removals.</li>
+<li>Min rooms = min-heap of end times, or the sweep above (best = peak concurrency).</li>
+<li>Sweep is the <b>difference-array</b> idea in disguise (start +1, end −1, integrate) <span class="warn">!</span></li>
+<li>Tie-break at equal coordinate: process end (−1) before start (+1) if touching endpoints don't overlap <span class="warn">!</span></li>
+</ul></section>
+
+<section class="card"><h3>Graph Modelling Tricks</h3>
+<p>Half of "hard" graph problems are really <b>"model it as a graph, then run a standard algo"</b>. Name the nodes, edges, and objective before coding.</p>
+<ul>
+<li><b>State as a node</b>: <code>(node, hops)</code>, <code>(cell, keys_bitmask)</code>, <code>(r, c, dir)</code> — the shortest-path stays BFS/Dijkstra over the expanded state graph <span class="warn">!</span></li>
+<li><b>Grid → graph</b>: each cell is a node, 4/8 neighbours are edges; weighted cells → Dijkstra, 0/1 edges → 0-1 BFS deque.</li>
+<li><b>Implicit graph</b>: word ladder (edge = one-letter change), gene mutation, sliding puzzle — build neighbours on the fly, don't materialise the whole graph.</li>
+<li><b>Bidirectional BFS</b> halves the frontier when start <i>and</i> goal are known — expand the smaller side each step.</li>
+<li><b>Currency arbitrage</b> = negative cycle on <code>-log(rate)</code> edges → Bellman-Ford.</li>
+<li><b>2-colour BFS</b> = bipartite check / "can split into two groups".</li>
+</ul></section>
+
+<section class="card"><h3>String Patterns</h3>
+<p><b>See:</b> palindrome · anagram window · substring search · lexicographic build · encode/decode.</p>
+<pre><code># longest palindrome: expand center
+def grow(l, r):
+  while l&gt;=0 and r&lt;n and s[l]==s[r]:
+    l -= 1; r += 1
+  return r-l-1               # length
+# try 2N-1 centers (odd + even)</code></pre>
+<ul>
+<li><b>Palindrome</b>: two-pointer check O(N); expand-center O(N²); <b>Manacher</b> O(N) if pushed.</li>
+<li><b>Anagram / permutation in string</b>: fixed sliding window + 26-count array; compare counts as you slide.</li>
+<li><b>Substring search</b>: brute O(N·M); <b>KMP / Z</b> O(N+M) single pattern; <b>Rabin-Karp</b> rolling hash for multi-pattern / dup-substring <span class="warn">!</span></li>
+<li><b>Lexicographic smallest</b> (Remove K Digits): monotonic stack, pop bigger char while budget left.</li>
+<li>Encode/decode list of strings: length-prefix each (<code>len#word</code>) — delimiters are unsafe <span class="warn">!</span></li>
+</ul></section>
+
+<section class="card"><h3>Grid / Matrix Moves</h3>
+<p><b>See:</b> islands · flood fill · rotting oranges · shortest maze path · spiral · rotate.</p>
+<pre><code>DIRS = [(1,0),(-1,0),(0,1),(0,-1)]
+def nbrs(r, c):
+  for dr, dc in DIRS:
+    nr, nc = r+dr, c+dc
+    if 0&lt;=nr&lt;R and 0&lt;=nc&lt;C:   # bounds first
+      yield nr, nc</code></pre>
+<ul>
+<li>Grid = graph with a directions array; flatten cell → id via <code>r*C+c</code> for Union-Find.</li>
+<li><b>Shortest maze</b> (unweighted) = BFS; <b>weighted cells</b> = Dijkstra; <b>0/1 weights</b> = 0-1 BFS (deque) <span class="warn">!</span></li>
+<li><b>Multi-source BFS</b> (rotting oranges, nearest-0): seed the queue with <i>all</i> sources at level 0.</li>
+<li><b>Rotate 90°</b> in place = transpose then reverse each row; spiral = shrink 4 bounds.</li>
+<li>Mark visited in-place (<code>'#'</code>) to save space — but that mutates input <span class="warn">!</span></li>
+</ul></section>
+
+<section class="card"><h3>DP Worked Recurrences</h3>
+<h4>0/1 vs Unbounded Knapsack</h4>
+<pre><code>for item in items:            # 0/1: cap DESC
+  for c in range(C, w-1, -1):
+    dp[c] = max(dp[c], dp[c-w] + v)
+# unbounded: inner loop cap ASC (reuse item)</code></pre>
+<ul><li>Loop direction is the whole difference: backward = use each item once; forward = reuse <span class="warn">!</span></li></ul>
+<h4>Edit Distance (2D)</h4>
+<pre><code>if a[i]==b[j]: dp[i][j]=dp[i-1][j-1]
+else: dp[i][j]=1+min(dp[i-1][j],    # delete
+                     dp[i][j-1],    # insert
+                     dp[i-1][j-1])  # replace</code></pre>
+<h4>LIS in O(N log N)</h4>
+<ul><li>Keep <code>tails[]</code>; binary-search the first tail ≥ x, replace it. <code>len(tails)</code> = LIS length (tails is not a real subsequence) <span class="warn">!</span></li></ul></section>
+
+<section class="card"><h3>Two Heaps &amp; Running Stats</h3>
+<p><b>See:</b> median of a stream · sliding-window median · IPO / regret · schedule by two keys.</p>
+<pre><code># lo = max-heap (negated), hi = min-heap
+def add(x):
+  heappush(lo, -x)
+  heappush(hi, -heappop(lo))     # balance top
+  if len(hi) &gt; len(lo):
+    heappush(lo, -heappop(hi))
+median = -lo[0] if len(lo)&gt;len(hi) else (-lo[0]+hi[0])/2</code></pre>
+<ul>
+<li>Invariant: <code>|len(lo) − len(hi)| ≤ 1</code>, bigger heap holds the median.</li>
+<li>Sliding-window median = two heaps + <b>lazy deletion</b> (skip stale tops on pop) <span class="warn">!</span></li>
+<li>IPO / "regret": one heap by cost (affordable gate) feeds a max-heap by profit.</li>
+<li>Tie-break stability: push tuples <code>(key, counter, item)</code> — heapq isn't stable <span class="warn">!</span></li>
+</ul></section>
+
+<section class="card"><h3>Common Bugs — Symptom &rarr; Cause</h3>
+<table><thead><tr><th>Symptom</th><th>Likely cause</th></tr></thead><tbody>
+<tr><td>subarray-sum-K off by one</td><td>missing <code>{0:1}</code> seed</td></tr>
+<tr><td>sliding window count wrong</td><td>didn't delete freq key at 0</td></tr>
+<tr><td>binary search infinite loop</td><td><code>mid=lo+1</code> not pinned; wrong <code>lo=mid</code></td></tr>
+<tr><td>BFS revisits / TLE</td><td>marked visited on dequeue not enqueue</td></tr>
+<tr><td>BST "valid" but isn't</td><td>compared to child, not <code>(lo,hi)</code></td></tr>
+<tr><td>backtracking dup outputs</td><td>no sort + skip-equal at level</td></tr>
+<tr><td>Dijkstra wrong on neg edge</td><td>use Bellman-Ford</td></tr>
+<tr><td>heap max not working (Py)</td><td><code>heapq</code> is min-only; push negatives</td></tr>
+<tr><td>recursion depth exceeded</td><td>deep input → iterate / raise limit</td></tr>
+<tr><td>int overflow (Java/C++)</td><td><code>lo+(hi-lo)//2</code>, use long</td></tr>
+</tbody></table></section>
+
+<section class="card"><h3>Complexity Quick Reference</h3>
+<table><thead><tr><th>Operation</th><th>O()</th></tr></thead><tbody>
+<tr><td>hash get/put (avg)</td><td>O(1)</td></tr>
+<tr><td>heap push/pop</td><td>O(log N)</td></tr>
+<tr><td>heapify a list</td><td>O(N)</td></tr>
+<tr><td>sort</td><td>O(N log N)</td></tr>
+<tr><td>binary search</td><td>O(log N)</td></tr>
+<tr><td>BST op (balanced / skewed)</td><td>O(log N) / O(N)</td></tr>
+<tr><td>BFS/DFS graph</td><td>O(V+E)</td></tr>
+<tr><td>Dijkstra (heap)</td><td>O(E log V)</td></tr>
+<tr><td>Union-Find op</td><td>~O(α(N))</td></tr>
+<tr><td>trie op</td><td>O(L)</td></tr>
+<tr><td>quickselect (avg / worst)</td><td>O(N) / O(N²)</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> Always state <b>time and space</b> out loud, and the brute-force baseline first.</p></section>
 
 <section class="card"><h3>&#9733; Disambiguation Traps</h3>
 <table><thead><tr><th>Both fit… choose by</th></tr></thead><tbody>

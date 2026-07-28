@@ -88,7 +88,8 @@ pre code{background:none; padding:0; font-size:1em;}
 <li><b>2. Pick structure</b> from the quick-pick table. Almost every "all O(1)" design = <b>hashmap + a second structure</b> (DLL / array / bucket list) kept in sync.</li>
 <li><b>3. State the invariant</b> maintained between calls — the sentence you'd say out loud ("list is in MRU→LRU order", "heaps differ by ≤1", "buckets sorted by count").</li>
 <li><b>4. Edge cases</b>: empty, single element, at capacity/full, duplicate keys, wraparound, get-on-missing-key.</li>
-<li><span class="warn">!</span> If two ops each demand O(1) and one is "min/max", you almost never use a heap — reach for <b>bucketed DLL</b> or <b>index tricks</b>.</li>
+<li><b>5. Sanity-check the ops together</b>: an O(1) target on one method can force the structure that makes another method slower — verify the whole interface, not one call. State which op is amortized vs worst-case.</li>
+<li><span class="warn">!</span> If two ops each demand O(1) and one is "min/max", you almost never use a heap — reach for <b>bucketed DLL</b> or <b>index tricks</b>. A heap gives O(log n), which fails a strict O(1) bar.</li>
 </ul>
 </section>
 
@@ -107,7 +108,12 @@ pre code{background:none; padding:0; font-size:1em;}
 <tr><td>FIFO/LIFO with a twist</td><td>deque / two stacks</td><td>amort O(1)</td></tr>
 <tr><td>versioned reads</td><td>per-key sorted (ver,val)</td><td>O(log n)</td></tr>
 <tr><td>ordered set, simple code</td><td>skiplist</td><td>O(log n) exp</td></tr>
+<tr><td>prefix / autocomplete</td><td>trie + per-node top-k</td><td>O(len)</td></tr>
+<tr><td>reuse smallest freed id</td><td>min-heap of ids</td><td>O(log n)</td></tr>
+<tr><td>lazy dispose / flip</td><td>flag + counter</td><td>O(1)</td></tr>
+<tr><td>dependency recompute</td><td>DAG + topo eval</td><td>O(V+E)</td></tr>
 </tbody></table>
+<p><span class="warn">!</span> When two ops both demand O(1) and neither is a range/order query, the answer is almost always <b>hashmap + one auxiliary structure</b> kept in sync — not a fancier single container.</p>
 </section>
 
 <section class="card"><h3>LRU Cache (#29)</h3>
@@ -320,6 +326,188 @@ rangeSum(l,r)=query(r)-query(l-1)</code></pre>
 <p><span class="warn">!</span> Twitter: don't merge <b>all</b> tweets — heap only the k followees' newest. <span class="warn">!</span> Snake: check collision <b>after</b> removing the tail, or a straight follow-the-tail move false-triggers.</p>
 </section>
 
+<section class="card"><h3>Per-Op Complexity Reference</h3>
+<table><thead><tr><th>Structure</th><th>Ops</th><th>Cost</th></tr></thead><tbody>
+<tr><td>hashmap + DLL (LRU)</td><td>get/put/evict</td><td>O(1)</td></tr>
+<tr><td>freq-bucket DLLs (LFU)</td><td>get/put/evict</td><td>O(1)</td></tr>
+<tr><td>array + index map</td><td>insert/remove/random</td><td>O(1)</td></tr>
+<tr><td>count-bucket DLL</td><td>inc/dec/min/max</td><td>O(1)</td></tr>
+<tr><td>two heaps</td><td>add / median</td><td>O(log n) / O(1)</td></tr>
+<tr><td>size-k min-heap</td><td>add / kth</td><td>O(log k) / O(1)</td></tr>
+<tr><td>trie (alphabet A)</td><td>insert/search len L</td><td>O(L)</td></tr>
+<tr><td>Fenwick (BIT)</td><td>point-upd / prefix-q</td><td>O(log n)</td></tr>
+<tr><td>segment tree + lazy</td><td>range-upd / range-q</td><td>O(log n)</td></tr>
+<tr><td>prefix-sum array</td><td>build / query</td><td>O(n) / O(1)</td></tr>
+<tr><td>TreeMap / balanced BST</td><td>floor/ceil/insert</td><td>O(log n)</td></tr>
+<tr><td>skiplist</td><td>search/add/erase</td><td>O(log n) exp</td></tr>
+<tr><td>two stacks (queue)</td><td>push/pop</td><td>amort O(1)</td></tr>
+<tr><td>ring buffer</td><td>push/pop/peek</td><td>O(1)</td></tr>
+<tr><td>monotonic stack</td><td>span / next-greater</td><td>amort O(1)</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> Amortized (two-stack queue, monotonic stack, lazy-delete heap) is not worst-case — say the word. <span class="warn">!</span> Trie cost is O(L) in key length, independent of #keys — that's why it beats a hashmap for prefix queries.</p>
+</section>
+
+<section class="card"><h3>DLL + Sentinel Template</h3>
+<p>Most O(1) designs bolt a doubly linked list onto a hashmap. Memorise the sentinel-node splice/unlink so add/remove never null-check an edge.</p>
+<pre><code>class Node: key,val,prev,next
+# init once:
+head.next=tail; tail.prev=head   # empty list
+
+def _remove(n):            # unlink n
+    n.prev.next = n.next
+    n.next.prev = n.prev
+
+def _add_front(n):         # splice after head
+    n.prev = head; n.next = head.next
+    head.next.prev = n; head.next = n
+
+def _move_front(n): _remove(n); _add_front(n)
+def _last(): return tail.prev          # LRU / oldest</code></pre>
+<p><span class="warn">!</span> Two sentinels (head+tail) mean every real node always has a non-null prev and next — no branch for "first"/"last". <span class="warn">!</span> Store the <code>key</code> inside the node so eviction can delete the map entry (<code>del map[last.key]</code>) — a val-only node can't clean up the map.</p>
+</section>
+
+<section class="card"><h3>Two-Heaps — Median Deep Dive</h3>
+<p><b>Invariant:</b> <code>max(low) &le; min(high)</code> and <code>0 &le; |low| &minus; |high| &le; 1</code>. Funnel <b>every</b> insert through the other heap so the cross-order holds without any comparison.</p>
+<pre><code>add(x): low.push(x)              # low = max-heap
+        high.push(low.pop())    # funnel top across
+        if len(high) &gt; len(low):
+            low.push(high.pop()) # rebalance up
+median: low.top if |low|&gt;|high|
+        else (low.top + high.top)/2</code></pre>
+<p>Why the funnel works: pushing x onto <code>low</code> then moving <code>low</code>'s max to <code>high</code> guarantees the moved element is &ge; nothing that stays in low and &le; the rest of high — the ordering repairs itself. The size fix keeps low as the bigger (or equal) half, so odd totals read the median from <code>low.top</code>.</p>
+<p><span class="warn">!</span> Average in <b>float</b> — two large i32 roots overflow. <span class="warn">!</span> Python <code>heapq</code> is min-only: negate for the max-heap half. Java: <code>PriorityQueue&lt;&gt;(reverseOrder())</code>. Rust: wrap the min side in <code>Reverse</code>.</p>
+</section>
+
+<section class="card"><h3>Monotonic Stack Family</h3>
+<p><b>Idea:</b> keep the stack sorted (increasing or decreasing) so each element is pushed and popped once → amortized O(1) per op even though one call can pop many.</p>
+<table><tbody>
+<tr><td><b>Online Stock Span</b> (#9)</td><td>decreasing stack of <code>(price, span)</code>; while top.price &le; cur, pop and add its span. span = consecutive &le; days.</td></tr>
+<tr><td><b>Stack w/ Increment</b> (#8)</td><td>value stack + lazy <code>inc[]</code>; <code>increment(k,v)</code> adds v at <code>inc[min(k,size)-1]</code>; <code>pop</code> returns val+inc, pushes inc down one.</td></tr>
+<tr><td><b>Next Greater</b></td><td>decreasing stack of indices; on a bigger value, resolve every popped index to the current one.</td></tr>
+</tbody></table>
+<pre><code># stock span
+next(price):
+  span = 1
+  while st and st[-1].price &lt;= price:
+    span += st.pop().span
+  st.push((price, span)); return span</code></pre>
+<p><span class="warn">!</span> Lazy increment never touches all k elements — record the delta once at index <code>k-1</code> and push it down on pop, so <code>increment</code> stays O(1).</p>
+</section>
+
+<section class="card"><h3>Ordered Structures by Language</h3>
+<p>Interviewers accept a stdlib ordered map/heap but expect you to name it, know its complexity, and hand-roll it if asked.</p>
+<table><thead><tr><th>Need</th><th>Py</th><th>Java</th></tr></thead><tbody>
+<tr><td>LRU order</td><td><code>OrderedDict</code></td><td><code>LinkedHashMap(_,_,true)</code></td></tr>
+<tr><td>heap</td><td><code>heapq</code></td><td><code>PriorityQueue</code></td></tr>
+<tr><td>sorted map</td><td><code>SortedDict</code></td><td><code>TreeMap</code></td></tr>
+<tr><td>sorted multiset</td><td><code>SortedList</code></td><td><code>TreeMap&lt;v,cnt&gt;</code></td></tr>
+<tr><td>floor/ceil</td><td><code>bisect</code></td><td><code>floorKey/ceilingKey</code></td></tr>
+</tbody></table>
+<p><b>C++:</b> <code>std::map</code>/<code>set</code> (RB-tree, ordered), <code>multiset</code>, <code>priority_queue</code>, <code>lower_bound</code>. <b>Go:</b> only <code>container/heap</code> + <code>container/list</code> ship — <b>no ordered map</b>, so hand-roll a BST/skiplist or sort. <b>Rust:</b> <code>BTreeMap/BTreeSet</code>, <code>BinaryHeap</code> (max), <code>Reverse</code> for min.</p>
+<p><span class="warn">!</span> <code>LinkedHashMap</code>'s 3rd ctor arg <code>accessOrder=true</code> is what makes it LRU; override <code>removeEldestEntry</code> for the cap. <span class="warn">!</span> Go and vanilla JS have no built-in TreeMap — flag it and offer a skiplist.</p>
+</section>
+
+<section class="card"><h3>Range Trees — Segment vs BIT</h3>
+<p><b>Escalation ladder:</b> static → prefix sum; point-update + range-query → Fenwick; <b>range-update + range-query</b> → segment tree with lazy propagation (or two BITs).</p>
+<pre><code># segment tree with lazy add
+update(node,l,r,ql,qr,add):
+  push_down(node)              # flush pending lazy to kids
+  if disjoint: return
+  if [l,r] within [ql,qr]:
+    tree[node] += (r-l+1)*add
+    lazy[node] += add; return
+  recurse both halves; pull_up(node)</code></pre>
+<table><tbody>
+<tr><td><b>range-add via 2 BITs</b></td><td>maintain B1,B2; prefix trick gives range update + range query, O(log n) both.</td></tr>
+<tr><td><b>Calendar III</b> (#56)</td><td>diff map +1/&minus;1 at ends → running max is a range-add special case.</td></tr>
+<tr><td><b>2D BIT</b> (#70)</td><td>nested Fenwick, O(log m·log n).</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> Lazy propagation is the whole reason a segment tree beats a BIT for range-update — without <code>push_down</code> you'd touch O(n) leaves. <span class="warn">!</span> A naive Fenwick is point-update only; range-update needs the two-BIT trick.</p>
+</section>
+
+<section class="card"><h3>Feed / Merge-K — Twitter (#59)</h3>
+<p><b>Structure:</b> <code>followees: user→set</code>, <code>tweets: user→list of (tick, id)</code>, one monotonic <code>tick</code>. <b>Feed:</b> merge the newest tweets of self + followees, take 10.</p>
+<pre><code>getNewsFeed(u):
+  heap = max-heap by tick
+  for f in followees[u] ∪ {u}:
+    if tweets[f]: push newest (tick,id,f,idx)
+  res = []
+  while heap and len(res) &lt; 10:
+    tick,id,f,i = heap.pop(); res.append(id)
+    if i &gt; 0: push next-older tweet of f
+  return res</code></pre>
+<p><span class="warn">!</span> Don't flatten <b>all</b> tweets — seed the heap with one-per-followee and lazily pull the next from whichever you popped (classic k-way merge). <span class="warn">!</span> A single global <code>tick</code> gives a total order across users without any wall-clock time.</p>
+</section>
+
+<section class="card"><h3>Time-Window Pattern (unified)</h3>
+<p>Rate-limit / counter / average all reduce to "keep only events within <code>[t&minus;W, t]</code>". Choose the structure by what you must report.</p>
+<table><thead><tr><th>Report</th><th>Struct</th></tr></thead><tbody>
+<tr><td>allow this msg? (#51)</td><td>map msg→next-allowed ts</td></tr>
+<tr><td>count in last 300s (#52)</td><td>queue of ts, evict old on op</td></tr>
+<tr><td>avg of last k (#53)</td><td>ring buffer + running sum</td></tr>
+<tr><td>token valid? (#57)</td><td>map token→expiry, lazy-expire</td></tr>
+</tbody></table>
+<p><b>Bucketed hit counter</b> (high QPS): 300 fixed buckets <code>(ts, count)</code> indexed <code>ts%300</code>; on a hit, if the bucket's stored second is stale, reset it. getHits sums buckets within the window. O(300)=O(1) memory, no unbounded queue.</p>
+<p><span class="warn">!</span> Lazy expiry (evict on the next op, not on a timer) keeps it single-threaded and O(1) amortized. <span class="warn">!</span> Moving average: overwrite the oldest ring slot and adjust the running sum — never re-sum the window.</p>
+</section>
+
+<section class="card"><h3>Follow-ups Interviewers Push</h3>
+<ul>
+<li><b>Thread-safety:</b> templates assume single-thread. If pressed, wrap mutating ops in a lock, or shard by key (map of N independent LRUs) so locks don't contend. Read-heavy caches favour a <code>ReadWriteLock</code>.</li>
+<li><b>TTL / expiry:</b> add <code>expiry</code> to each node; lazy-evict on access or via a background sweep. LRU+TTL = check freshness in <code>get</code> before returning the value.</li>
+<li><b>Scale-out:</b> a single-machine LRU becomes a sharded / consistent-hash cache (Redis); the eviction policy is unchanged, the DLL just becomes per-shard.</li>
+<li><b>Persistence / snapshots:</b> Snapshot Array (#27) is the copy-on-write idea — version each key, never clone the whole state per snap.</li>
+<li><b>Memory bound:</b> capacity eviction (LRU/LFU) vs unbounded growth (naive hit counter, lazy-delete heaps). Call out which structures accumulate dead entries.</li>
+<li><span class="warn">!</span> Say "single-threaded unless told otherwise" up front — don't silently assume, and don't over-engineer locks when not asked.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Invariant Catalog</h3>
+<p>The one sentence you say out loud per design — the property held <b>between</b> calls. If you can state it, the code writes itself.</p>
+<table><tbody>
+<tr><td>LRU</td><td>DLL is MRU→LRU order; map points into it</td></tr>
+<tr><td>LFU</td><td>each freq bucket is LRU-ordered; <code>minFreq</code> tracks lowest non-empty</td></tr>
+<tr><td>All-O(1)</td><td>count-buckets sorted → head=min, tail=max</td></tr>
+<tr><td>GetRandom</td><td>array dense, no gaps → uniform index</td></tr>
+<tr><td>Median</td><td>every low &le; every high; sizes differ by &le;1</td></tr>
+<tr><td>BST iterator</td><td>stack top = next smallest unvisited</td></tr>
+<tr><td>Encode strings</td><td>len-prefix makes any payload self-delimiting</td></tr>
+<tr><td>Snapshot array</td><td>per-key (snapId,val) list, binary-searchable</td></tr>
+<tr><td>Skiplist</td><td>each level sorted; level i ⊇ level i+1</td></tr>
+<tr><td>Bitset</td><td><code>ones</code> count exact; flip toggles a flag not bits</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> Naming the invariant first, before any method body, is the single strongest signal in a design round.</p>
+</section>
+
+<section class="card"><h3>Graph &amp; Dependency Designs</h3>
+<table><tbody>
+<tr><td><b>Shortest Path Calc</b> (#50)</td><td>store edges in an adjacency list; <code>addEdge</code> O(1). Query: Dijkstra with a min-heap per call O(E log V), or precompute Floyd-Warshall O(V³) once if queries are dense.</td></tr>
+<tr><td><b>Excel Sum Formula</b> (#72)</td><td>cell→value + cell→formula deps. <code>set</code> clears the formula (breaks old deps); <code>sum</code> records the dependency set and recomputes; reads walk deps and re-evaluate.</td></tr>
+<tr><td><b>In-Memory FS</b> (#41)</td><td>trie of nodes: dir = name→child map, file = content buffer. <code>ls</code> sorts a dir's keys; <code>mkdir</code> creates missing path nodes; <code>addContentToFile</code> appends.</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> Excel: a <code>set</code> on a formula cell <b>must</b> sever its old dependencies, else a later recompute reads stale inputs. <span class="warn">!</span> Dijkstra needs non-negative weights; mention it. Cache Floyd-Warshall only when the graph is static between many queries.</p>
+</section>
+
+<section class="card"><h3>ID Recycling &amp; Randomized Codes</h3>
+<p>Several designs hand out and reclaim scarce integer ids, or need a short unique code. Pattern: a <b>free-set / min-heap of released ids</b> plus a high-water counter.</p>
+<table><tbody>
+<tr><td><b>Phone Directory</b> (#26)</td><td>free-set (queue) of slots + released set; <code>get</code> pops a free slot, <code>release</code> returns it, <code>check</code> tests membership.</td></tr>
+<tr><td><b>Video Platform</b> (#65)</td><td>min-heap of freed ids so the <b>smallest</b> available id is reused first; counter for fresh ids beyond the heap.</td></tr>
+<tr><td><b>TinyURL</b> (#38)</td><td>two maps long↔short; random 6-char base62 (62⁶≈57B) with collision re-roll, or a monotonic counter encoded base62.</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> "Smallest freed id first" needs a <b>heap</b>, not a plain set — a set gives arbitrary order. <span class="warn">!</span> Random codes must re-roll on collision; a counter avoids collisions but leaks sequential/guessable ids.</p>
+</section>
+
+<section class="card"><h3>Aggregation &amp; Stats Designs</h3>
+<table><tbody>
+<tr><td><b>Underground System</b> (#60)</td><td>checkIn: map id→(station,t). checkOut: key (start,end)→(sumTime,count); average = sum/count in O(1). Never store every trip.</td></tr>
+<tr><td><b>Food Rating</b> (#48)</td><td>per-cuisine heap/TreeSet keyed <code>(−rating, name)</code>; on <code>changeRating</code>, push the new entry and lazy-skip stale tops (or update a TreeSet in place).</td></tr>
+<tr><td><b>Movie Rental</b> (#64)</td><td>per-movie TreeSet <code>(price,shop)</code> for available copies + a global rented TreeSet <code>(price,shop,movie)</code>; rent/drop move between them.</td></tr>
+<tr><td><b>Leaderboard</b> (#49)</td><td>map player→score; <code>top(K)</code> heapifies the K largest — O(n log K). <code>reset</code> deletes the player.</td></tr>
+</tbody></table>
+<p><span class="warn">!</span> Keep <b>running aggregates</b> (sum+count), not raw events, when only the summary is queried — Underground's O(1) average is the model. <span class="warn">!</span> TreeSet ordering key must be a full tie-break tuple or equal-rating entries collide.</p>
+</section>
+
 <section class="card"><h3>Symptom → Cause</h3>
 <table><thead><tr><th>Symptom</th><th>Likely cause</th></tr></thead><tbody>
 <tr><td>LRU evicts wrong item</td><td>get() didn't update recency</td></tr>
@@ -333,6 +521,12 @@ rangeSum(l,r)=query(r)-query(l-1)</code></pre>
 <tr><td>iterator TLE / OOM</td><td>eager-flattened in constructor</td></tr>
 <tr><td>range update O(n)</td><td>prefix sums where BIT was needed</td></tr>
 <tr><td>stale heap top</td><td>forgot lazy-delete check vs map</td></tr>
+<tr><td>trie search matches prefix</td><td>returned on walk success, ignored <code>isEnd</code></td></tr>
+<tr><td>serialize/deserialize mismatch</td><td>null markers dropped, or ser/des use different traversal order</td></tr>
+<tr><td>snapshot O(n) per snap</td><td>copied the array — version per key instead</td></tr>
+<tr><td>calendar double-books</td><td>overlap test uses <code>&lt;=</code> where half-open needs <code>&lt;</code></td></tr>
+<tr><td>skiplist search wrong</td><td>descended with <code>&le;</code> not strict <code>&lt;</code>, or forgot the <code>update[]</code> array</td></tr>
+<tr><td>ATM dispenses then fails</td><td>no dry-run before committing denom counts</td></tr>
 </tbody></table>
 </section>
 

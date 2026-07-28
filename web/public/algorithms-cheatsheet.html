@@ -244,6 +244,8 @@ return lo</code></pre>
 <li>Knapsack is <b>pseudo-polynomial</b> — O(nW), exponential in the bit-length of W, not truly poly <span class="warn">!</span></li>
 <li>Rolling array: knapsack drops to O(W) if you iterate w <b>descending</b> for 0/1 (ascending = unbounded knapsack) <span class="warn">!</span></li>
 <li>Reconstruct the choice by storing parent pointers or back-tracing the table.</li>
+<li>State-design tell: the smallest set of variables that fully describes a subproblem (index, remaining capacity, last choice, grid position). Too many dims → look for one to drop (rolling array) or a greedy/math shortcut.</li>
+<li>"Count the number of ways" / "min/max cost to reach" with choices affecting the future is the classic DP fingerprint. If a greedy choice is provably safe, prefer it — it's cheaper <span class="warn">!</span></li>
 </ul>
 </section>
 
@@ -435,6 +437,149 @@ union(a,b):                   # union by rank/size
 <tr><td>Exact exp.</td><td>optimal; only small n (Held-Karp 2ⁿ·n²)</td></tr>
 </tbody></table>
 <p>A 2-approx = never worse than 2× optimal (not "within 2%") <span class="warn">!</span> Signal: "brute force → can you do better?" → "NP-hard, here's the reduction, so approximate/heuristic/exact-for-small-n."</p>
+</section>
+
+<section class="card"><h3>Heaps &amp; Priority Queues</h3>
+<p>Binary heap = complete tree in an array; parent of <code>i</code> at <code>(i-1)/2</code>, children at <code>2i+1</code>, <code>2i+2</code>. Root is the min (or max). Not sorted — only the heap property (parent ≤ children) holds.</p>
+<table><thead><tr><th>Op</th><th>Cost</th><th>How</th></tr></thead><tbody>
+<tr><td>peek</td><td>O(1)</td><td>read root</td></tr>
+<tr><td>push</td><td>O(log n)</td><td>append, sift-up</td></tr>
+<tr><td>pop</td><td>O(log n)</td><td>swap root/last, sift-down</td></tr>
+<tr><td>build</td><td><b>O(n)</b></td><td>Floyd sift-down bottom-up</td></tr>
+<tr><td>decrease-key</td><td>O(log n)</td><td>sift-up (needs index map)</td></tr>
+</tbody></table>
+<ul>
+<li>Bottom-up build is <b>O(n)</b>, not O(n log n): most nodes are near the leaves where sift-down is cheap — the level sum telescopes <span class="warn">!</span></li>
+<li>Uses: k-largest (size-k <i>min</i>-heap, evict the smallest), streaming median (two heaps), merge k sorted lists, Dijkstra/Prim frontier, event/sweep schedulers.</li>
+<li>No O(log n) arbitrary search or delete-by-value without a side index; no cheap "kth" beyond the root. Ties aren't stable unless you push a sequence tiebreaker <span class="warn">!</span></li>
+<li>Top-k in O(n log k) with a bounded heap beats a full O(n log n) sort when k ≪ n. Quickselect gives the boundary in O(n) avg if you don't need them ordered.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Segment Tree &amp; Fenwick (BIT)</h3>
+<p>Prefix sums are immutable. For <b>point update + range query</b> you need a log-structure.</p>
+<table><thead><tr><th>Structure</th><th>Update</th><th>Query</th><th>Space</th></tr></thead><tbody>
+<tr><td>Prefix sum</td><td>O(n) rebuild</td><td>O(1)</td><td>n</td></tr>
+<tr><td>Fenwick (BIT)</td><td>O(log n)</td><td>O(log n)</td><td>n</td></tr>
+<tr><td>Segment tree</td><td>O(log n)</td><td>O(log n)</td><td>~2n</td></tr>
+<tr><td>Seg + lazy</td><td>range O(log n)</td><td>O(log n)</td><td>~4n</td></tr>
+</tbody></table>
+<ul>
+<li><b>Fenwick</b>: tiny, fast, invertible ops only (sum, xor) — walk by <code>i += i&amp;-i</code> (update) / <code>i -= i&amp;-i</code> (query). Can't do min without tricks.</li>
+<li><b>Segment tree</b>: any associative merge (min/max/gcd/sum), the general answer; store the op at each node, combine children.</li>
+<li><b>Lazy propagation</b> defers <i>range</i> updates onto subtree roots, pushing down only when a query descends — required for range-update+range-query, easy to get wrong <span class="warn">!</span></li>
+<li>Sparse table: O(1) idempotent range query (min/gcd) after O(n log n) build, but <b>static</b> only (no updates).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Two Pointers &amp; Sliding Window</h3>
+<p>Turn an O(n²) pair/subarray scan into O(n) by moving indices monotonically instead of restarting.</p>
+<table><thead><tr><th>Shape</th><th>When</th></tr></thead><tbody>
+<tr><td>Opposite ends</td><td>sorted array, pair-sum, palindrome, container</td></tr>
+<tr><td>Fast/slow</td><td>cycle detect (Floyd), middle node, dedup in place</td></tr>
+<tr><td>Sliding window</td><td>longest/shortest subarray under a monotone constraint</td></tr>
+<tr><td>Merge two</td><td>merge sorted lists, intersection, small-range union</td></tr>
+</tbody></table>
+<ul>
+<li>Window template: expand <code>right</code>; while the window is invalid, shrink <code>left</code>; record the answer each step. Works only when growing the window can't <i>fix</i> a violation (monotone) <span class="warn">!</span></li>
+<li>Variable window needs a running aggregate (count map, sum) so validity is O(1) to test. Fixed-k window slides by add-one / drop-one.</li>
+<li>Floyd cycle: slow +1, fast +2 — they meet iff a cycle exists; restart one at head, advance both by 1 to find the entry.</li>
+<li>Sub<b>array</b> (contiguous) ⇒ window / prefix; sub<b>sequence</b> ⇒ usually DP, not a window <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Strongly Connected Components</h3>
+<p>SCC = maximal set in a <i>directed</i> graph where every vertex reaches every other. Contract each SCC → the <b>condensation</b> is a DAG (then run DAG algos). Both methods O(V+E).</p>
+<table><thead><tr><th></th><th>Kosaraju</th><th>Tarjan</th></tr></thead><tbody>
+<tr><td>Passes</td><td>2 DFS + transpose</td><td>1 DFS</td></tr>
+<tr><td>Idea</td><td>finish-order, then DFS on reversed graph</td><td>disc/low + stack</td></tr>
+<tr><td>Pick</td><td>easier to explain</td><td>faster, no transpose</td></tr>
+</tbody></table>
+<ul>
+<li><b>Kosaraju</b>: DFS pushing each vertex on finish; then pop in that order and DFS the <i>transposed</i> graph — each tree is one SCC (finish-order starts you in a sink SCC of the condensation).</li>
+<li><b>Tarjan</b>: track <code>disc[v]</code> and <code>low[v]</code> (lowest disc reachable via subtree + one back edge); when <code>low[v]==disc[v]</code>, pop the stack down to <code>v</code> = one SCC.</li>
+<li>SCCs are a <b>directed</b> concept; undirected → just connected components <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Bridges, Cut Vertices &amp; Low-link</h3>
+<p><b>low[v]</b> = earliest-discovered vertex reachable from <code>v</code>'s DFS subtree via ≤1 back edge. One low-link DFS finds bridges <i>and</i> articulation points in O(V+E).</p>
+<table><thead><tr><th>Find</th><th>Tree edge/vertex condition</th></tr></thead><tbody>
+<tr><td>Bridge (edge)</td><td><code>low[v] &gt; disc[u]</code> (strict)</td></tr>
+<tr><td>Artic. point</td><td>child with <code>low[v] &gt;= disc[u]</code></td></tr>
+<tr><td>Root artic.</td><td>root has ≥2 DFS children</td></tr>
+</tbody></table>
+<ul>
+<li>Mnemonic: bridges use strict <code>&gt;</code> (subtree can't reach even <code>u</code>), cut vertices use <code>&gt;=</code> (may reach <code>u</code> itself, not above) <span class="warn">!</span></li>
+<li>Bridge ⇏ articulation and vice-versa: two triangles sharing one vertex → that vertex is a cut point but there's <b>no</b> bridge (every edge on a cycle) <span class="warn">!</span></li>
+<li>Uses: network reliability / single points of failure, 2-edge- and 2-vertex-connected component decomposition.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Max-Flow / Min-Cut &amp; Matching</h3>
+<p>Flow network: directed, edge capacities, source <code>s</code>, sink <code>t</code>. <b>Max-flow = min-cut</b> — the maximum throughput equals the cheapest set of edges separating <code>s</code> from <code>t</code>.</p>
+<table><thead><tr><th>Algo</th><th>Path rule</th><th>Time</th></tr></thead><tbody>
+<tr><td>Ford-Fulkerson</td><td>any augmenting path</td><td>can be exp. <span class="warn">!</span></td></tr>
+<tr><td>Edmonds-Karp</td><td>BFS (shortest)</td><td>V·E²</td></tr>
+<tr><td>Dinic</td><td>level graph + blocking flow</td><td>V²·E; E·√V unit-cap</td></tr>
+</tbody></table>
+<ul>
+<li><b>Residual / back edges</b> are mandatory: pushing <code>f</code> on (u,v) adds a reverse edge cap <code>f</code> so later paths can <i>re-route</i> earlier flow. Omit them and max-flow is simply wrong <span class="warn">!</span></li>
+<li>Min-cut certificate: when no augmenting path remains, vertices reachable from <code>s</code> in the residual graph are one side of the min cut.</li>
+<li><b>Bipartite matching</b> reduces to flow: <code>s</code>→L (cap 1), L→R edges (cap 1), R→<code>t</code> (cap 1); max-flow = max matching. Dinic here is O(E·√V) (= Hopcroft-Karp).</li>
+<li>König: max matching = min vertex cover (bipartite). "Separate X from Y at min cost" or "assign under capacity" is often flow in disguise — spotting the reduction is the senior signal.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Computational Geometry</h3>
+<p>Almost everything is the sign of a <b>cross product</b> (a 2×2 determinant): <code>cross(B−A, C−A)</code> &gt;0 left turn, &lt;0 right, =0 collinear. Stay in <b>integers</b> — exact, no trig.</p>
+<table><thead><tr><th>Task</th><th>Tool</th><th>Time</th></tr></thead><tbody>
+<tr><td>Convex hull</td><td>monotone chain</td><td>n log n</td></tr>
+<tr><td>Closest pair</td><td>divide &amp; conquer strip</td><td>n log n</td></tr>
+<tr><td>Any 2 segs cross?</td><td>line sweep (B-Ottmann)</td><td>n log n</td></tr>
+<tr><td>Polygon area</td><td>shoelace</td><td>n</td></tr>
+<tr><td>Diameter of hull</td><td>rotating calipers</td><td>n (post-hull)</td></tr>
+</tbody></table>
+<ul>
+<li><b>Monotone chain</b> &gt; Graham scan in practice: sort by <code>(x,y)</code>, build lower then upper hull popping on non-CCW turns — no polar angles, no <code>atan2</code> ties.</li>
+<li><b>Segment intersect</b>: four orientations — cross iff <code>o1≠o2 &amp;&amp; o3≠o4</code>; handle collinear (zero) with an on-segment bbox check.</li>
+<li>Compare <b>squared</b> distances (skip <code>sqrt</code>); test cross against an epsilon only if forced to floats; large coords overflow 32-bit → 64-bit <span class="warn">!</span></li>
+<li>Hull is Ω(n log n) (sort reduces to it: points on a parabola come off the hull sorted).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Backtracking Dedup &amp; The Three Shapes</h3>
+<p>Enumeration counts: subsets <b>2ⁿ</b> (in/out each), permutations <b>n!</b> (track used), combinations <b>n choose k</b> (enforce increasing start index).</p>
+<pre><code># subsets/combos with duplicate INPUT values:
+sort(a)
+for i in start..n-1:
+  if i&gt;start and a[i]==a[i-1]: continue  # skip
+  choose a[i]; recurse(i+1); unchoose</code></pre>
+<ul>
+<li>Dedup by <b>skipping equal choices at the same tree level</b> (sort first) — never post-filter a set of results <span class="warn">!</span></li>
+<li>Permutations with dups: sort, and skip <code>a[i]</code> if <code>a[i]==a[i-1]</code> <b>and</b> <code>a[i-1]</code> is not currently used (its branch already covered this value).</li>
+<li>Mutate-and-undo is faster than copy-down (no allocation) but every path must restore state exactly — the classic footgun <span class="warn">!</span></li>
+<li>Branch-and-bound = backtracking + an optimistic bound to prune by objective (optimization, not just feasibility).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Paradigm Ladder — Interview Playbook</h3>
+<p>The meta-skill: narrow the space <i>out loud</i>. Restate → brute force + its cost → read <code>n</code> for the budget → name candidate paradigms → <b>verify the precondition</b> → code → test.</p>
+<h4>Pick by structure</h4>
+<table><thead><tr><th>Signal</th><th>Reach for</th></tr></thead><tbody>
+<tr><td>locally-optimal choice provable</td><td>greedy (+ exchange arg)</td></tr>
+<tr><td>independent equal halves</td><td>divide &amp; conquer</td></tr>
+<tr><td>overlapping subproblems</td><td>DP</td></tr>
+<tr><td>entities + relations / reachability</td><td>graph model</td></tr>
+<tr><td>min-max / max-min, big range</td><td>binary search on answer</td></tr>
+<tr><td>try-all-with-pruning</td><td>backtracking</td></tr>
+</tbody></table>
+<ul>
+<li>"Recursion" ≠ "DP": DP = recursion + memo over <b>overlapping</b> subproblems. No overlap → it's plain divide &amp; conquer <span class="warn">!</span></li>
+<li>Match effort to the budget — if <code>n≤100</code>, an O(n³) brute force (~10⁶ ops) is fine; correct beats clever, no prize for beating the required bound.</li>
+<li><b>"Can you make it faster?"</b> = move down the ladder: find the dominant term, ask what structure is unexploited (a sort/hash killing an inner loop, a monotone predicate enabling binary search, prefix sums for O(1) queries), restate the new complexity, re-argue correctness.</li>
+<li>Most wrong answers = skipping the precondition check (greedy without a proof, DP state with a forward dependency).</li>
+</ul>
 </section>
 
 <section class="card"><h3>&#9733; Interview Checklist</h3>

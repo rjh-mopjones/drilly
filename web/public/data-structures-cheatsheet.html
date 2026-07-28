@@ -133,7 +133,27 @@ pre code{background:none; padding:0; font-size:1em;}
 <li><code>length</code> &ne; user-visible chars. Levels: <b>byte</b> &lt; <b>code unit</b> &lt; <b>code point</b> &lt; <b>grapheme cluster</b>. <code>"😀".length==2</code> in JS/Java (UTF-16 surrogate pair) <span class="warn">!</span></li>
 <li>Reverse by code units shatters emoji/combining marks — reverse <b>grapheme clusters</b> <span class="warn">!</span></li>
 <li>UTF-8: 1–4 bytes/code point, ASCII-compatible, self-syncing; k-th code point is <code>O(n)</code> (byte-indexed).</li>
-<li>Immutability → cacheable hash, safe sharing, interning, ideal map key.</li>
+<li>Immutability → cacheable hash (compute once, O(1) thereafter — Java <code>String</code>), safe sharing, interning, ideal map key.</li>
+<li>Substring O(1) <b>view</b> (Rust <code>&amp;str</code>, C++ <code>string_view</code>, Go slice) aliases parent's lifetime; old Java shared arrays → tiny substring pinned a huge parent (leak) → now copies <span class="warn">!</span></li>
+<li><b><code>==</code> vs <code>.equals()</code></b> (Java): <code>==</code> is reference identity — literals intern so <code>"a"=="a"</code>, but a runtime-built string fails <span class="warn">!</span> Use <code>.equals()</code> for content.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Memory Layout &amp; Semantics</h3>
+<p>Constants Big-O hides. Two knobs decide real cost: <b>how a value is stored</b> and <b>how it's passed</b>.</p>
+<table><thead><tr><th>Semantics</th><th>Assign/pass = / mutation</th></tr></thead><tbody>
+<tr><td>value</td><td>copies whole value / original untouched (C#/Go/Rust structs, C++ objects, primitives)</td></tr>
+<tr><td>reference</td><td>copies a handle / both see the change (Java/Py/JS objects)</td></tr>
+</tbody></table>
+<h4>2-D layout</h4>
+<ul>
+<li><b>Row-major</b> (C, NumPy): <code>[i][j]</code> at <code>base+(i*ncols+j)*sz</code> — iterate <b>inner index innermost</b> or you stride &amp; thrash cache <span class="warn">!</span> Column-major = Fortran/MATLAB/R.</li>
+<li><b>True 2-D</b> = one contiguous block, perfect locality. <b>Jagged</b> (Java <code>int[][]</code>) = array of row <i>pointers</i>, extra indirection, ragged rows, cheap row-swap.</li>
+</ul>
+<h4>Gotchas / adjacent</h4>
+<ul>
+<li>Value copies can be <b>O(n)</b>; reference passing is O(1) but invites aliasing bugs <span class="warn">!</span> Know which your type is.</li>
+<li><b>Interning:</b> one canonical copy per distinct immutable value → O(1) ref-equality + memory savings (Java literals, Py identifiers). <b>Rope</b> = tree of string fragments → O(log n) concat/insert, O(log n) index (text editors) vs flat string's O(1) index / O(n) edit.</li>
 </ul>
 </section>
 
@@ -151,7 +171,9 @@ pre code{background:none; padding:0; font-size:1em;}
 <ul>
 <li>"insert is O(1)" only <i>at</i> the node — finding it is O(n) <span class="warn">!</span> Pointer overhead + scattered nodes make it 10–100x slower than an array to iterate.</li>
 <li>Reversal: save <code>curr.next</code> before rewiring or you sever the list <span class="warn">!</span></li>
-<li><b>Floyd cycle detect:</b> slow+1, fast+2; meet ⇒ cycle (O(1) space vs hash-set O(n)). Entry: reset one to head, advance both by 1. Middle: fast/slow one pass. Merge sorted lists: O(1) splice, no copy.</li>
+<li><b>Floyd cycle detect:</b> slow+1, fast+2; meet ⇒ cycle (O(1) space vs hash-set O(n)). Fast gains +1/step in the cycle so the gap must close. Entry: reset one to head, advance both by 1. Middle: fast/slow one pass.</li>
+<li><b>Merge sort &gt; quicksort</b> for lists: needs only sequential access + O(1) splice, no random access or aux array, and it's stable. Merge two sorted lists = dummy head + tail, attach smaller, O(n+m) / O(1) space.</li>
+<li><b>Intrusive list</b> = <code>next/prev</code> live <i>inside</i> the data object (Linux <code>list_head</code>) — no wrapper alloc, one object in many lists. Delete given only a mid-node: copy successor's value in, unlink successor (fails on tail) <span class="warn">!</span></li>
 </ul>
 </section>
 
@@ -210,6 +232,7 @@ pre code{background:none; padding:0; font-size:1em;}
 <li>O(1) <b>average</b>, not guaranteed — all-collide ⇒ O(n). <b>Hash-flooding DoS</b>: seeded/SipHash, or tree-ify buckets (Java &gt;8 → red-black, O(log n)) <span class="warn">!</span></li>
 <li>Open-addr delete needs <b>tombstones</b> — clearing a slot breaks probe chains <span class="warn">!</span></li>
 <li>Must verify key equality after hashing (lossy). <b>equal ⇒ equal hash</b> contract; mutating a key's hash-fields strands the entry <span class="warn">!</span></li>
+<li>Resize is <b>rehash-all</b> (indices depend on m — can't memcpy) → a single insert can spike O(n); pre-size if final count known. Load factor is the master dial: too high ⇒ long chains/probe runs, too low ⇒ wasted memory + poorer locality.</li>
 </ul>
 </section>
 
@@ -305,6 +328,7 @@ pre code{background:none; padding:0; font-size:1em;}
 <li><b>A heap is NOT sorted</b> — in-order is meaningless, only root is extreme <span class="warn">!</span></li>
 <li>Build-heap is <b>O(n)</b>, not O(n log n) — sift-down cost ∝ node height, most nodes shallow <span class="warn">!</span> (n one-by-one inserts <i>is</i> O(n log n)).</li>
 <li>decrease-key needs elem→index map, or use <b>lazy deletion</b> (push new, skip stale on pop) — Dijkstra.</li>
+<li>Binary heap = default; <b>d-ary</b> shallower (faster decrease-key, slower extract); <b>Fibonacci</b> O(1) amortized insert/decrease-key but huge constants — rarely worth it <span class="warn">!</span></li>
 </ul>
 <h4>Patterns</h4>
 <ul>
@@ -328,7 +352,7 @@ pre code{background:none; padding:0; font-size:1em;}
 <ul>
 <li>Not faster than a hash set for <b>exact</b> lookup (both O(L)) — the win is <b>prefix ops</b> hash can't do <span class="warn">!</span></li>
 <li>Forgetting <code>isEnd</code> ⇒ "ca" wrongly a word when only "cat" inserted <span class="warn">!</span> Ops are O(L), not O(1) <span class="warn">!</span></li>
-<li>Alphabet = any symbol set (bytes, Unicode via map, DNA, <b>bits</b> for XOR/IP-prefix). Longest-prefix match (routing): record last <code>isEnd</code> while descending.</li>
+<li>Alphabet = any symbol set (bytes, Unicode via map, DNA, <b>bits</b> for XOR/IP-prefix). Longest-prefix match (routing): record last <code>isEnd</code> while descending. Memory-heavy on sparse fan-out (null child slots) — radix/Patricia collapses chains to fix it.</li>
 </ul>
 </section>
 
@@ -350,6 +374,24 @@ pre code{background:none; padding:0; font-size:1em;}
 </ul>
 </section>
 
+<section class="card"><h3>Graph Traversal &amp; Algorithms</h3>
+<p>Both BFS and DFS visit every vertex+edge once ⇒ <b>O(V+E)</b> on an adjacency list. A <code>visited</code> set is mandatory (cycles ⇒ infinite loop) and you must launch from <b>every</b> unvisited vertex to cover all components.</p>
+<table><thead><tr><th>Algo</th><th>Struct / gets you</th></tr></thead><tbody>
+<tr><td>BFS</td><td>queue — shortest path in <b>unweighted</b> graph, level order</td></tr>
+<tr><td>DFS</td><td>stack/recursion — cycle detect, topo, path exists, SCC</td></tr>
+<tr><td>Dijkstra</td><td>min-heap — shortest path, <b>non-negative</b> weights, O((V+E)log V)</td></tr>
+<tr><td>Bellman-Ford</td><td>edge list — handles <b>negative</b> edges, detects neg cycles, O(VE)</td></tr>
+<tr><td>topo sort</td><td>Kahn (BFS on in-degree) / DFS post-order — DAG only</td></tr>
+</tbody></table>
+<h4>Gotchas</h4>
+<ul>
+<li>BFS gives shortest path only when edges are <b>unit-weight</b> — weighted needs Dijkstra <span class="warn">!</span></li>
+<li><b>Dijkstra breaks on negative edges</b> (a settled node may still improve) — use Bellman-Ford <span class="warn">!</span> Lazy-delete stale heap entries (push new dist, skip if &gt; recorded).</li>
+<li>Directed-cycle detect = DFS 3-colour (white/grey/black); a back-edge to a <b>grey</b> node ⇒ cycle. Undirected cycle = DSU or DFS ignoring the parent edge <span class="warn">!</span></li>
+<li>Topo order exists <b>iff</b> DAG; Kahn leftover nodes with in-degree&gt;0 ⇒ a cycle. Grid/matrix problems = implicit graph (cell = node, 4/8 neighbours = edges).</li>
+</ul>
+</section>
+
 <section class="card"><h3>Union-Find (Disjoint Set Union)</h3>
 <p>Dynamic connectivity: <code>find(x)</code> (which set?) + <code>union(x,y)</code> (merge). Forest in a <code>parent[]</code> array; root is its own parent; same set ⇔ same root. Space O(n).</p>
 <pre><code>find(x):  # path compression
@@ -367,7 +409,8 @@ union(x,y):
 </ul>
 <h4>Gotchas / uses</h4>
 <ul>
-<li><b>Union only — no split / undo / delete</b> in vanilla form <span class="warn">!</span> (need rollback DSU / offline reverse). Tells you <i>whether</i> connected, not the path <span class="warn">!</span></li>
+<li><b>Union only — no split / undo / delete</b> in vanilla form <span class="warn">!</span> Deletion needs a <b>rollback DSU</b> (drop path-compression so changes are revertible) or process ops <b>offline in reverse</b> (deletions become additions). Tells you <i>whether</i> connected, not the path <span class="warn">!</span></li>
+<li>Union by <b>size</b> gives component counts for free; by <b>rank</b> tracks a height bound — either yields O(log n) height. Don't update ranks during path compression (rank stays a loose upper bound, which is fine).</li>
 <li>Kruskal MST (cycle test), count components (start n, dec on real merge), undirected cycle detect, accounts-merge, grid percolation. Prefer over BFS/DFS when merges+queries are interleaved &amp; numerous.</li>
 </ul>
 </section>
@@ -390,7 +433,8 @@ union(x,y):
 <h4>Gotchas</h4>
 <ul>
 <li><b>Prefix-sum ≠ Fenwick</b> — a plain array can't update cheaply <span class="warn">!</span> BIT can't do <b>min/max</b> (not invertible — can't subtract a prefix) <span class="warn">!</span></li>
-<li>Range update on a seg-tree needs <b>lazy propagation</b> or it's O(n log n) <span class="warn">!</span> Size seg-tree ~4n or it corrupts <span class="warn">!</span> Static + idempotent (min) → sparse table instead.</li>
+<li>Range update on a seg-tree needs <b>lazy propagation</b> (stamp delta on covered nodes, push down only when a later query descends) or it's O(n log n) <span class="warn">!</span> Size seg-tree ~4n (unbalanced when n≠2^k) or recursion indexes past the array &amp; corrupts <span class="warn">!</span> Static + idempotent (min) → sparse table instead.</li>
+<li>BIT does <b>range update</b> via difference array: <code>upd(l,+d); upd(r+1,−d)</code>; range-upd+range-query = two BITs. k-th smallest = BIT over value-freqs + binary-lifting on bits, O(log n). Seg-tree node can carry a struct (sum+min+max) with an assoc <code>merge</code>.</li>
 </ul>
 </section>
 
@@ -401,13 +445,13 @@ union(x,y):
 <tr><td>rank / select</td><td>O(log n) via per-pointer <b>span</b></td></tr>
 </tbody></table>
 <ul>
-<li>vs balanced BST: trades <i>guaranteed</i> for <i>expected</i> O(log n), but <b>no rotations/color rules</b> → simpler code + far easier <b>concurrency</b> (local pointer splices).</li>
+<li>vs balanced BST: trades <i>guaranteed</i> for <i>expected</i> O(log n), but <b>no rotations/color rules</b> → simpler code + far easier <b>concurrency</b> (local pointer splices, no global rebalance).</li>
 <li>~<code>1/(1−p)</code> pointers/node (~2 at p=0.5). <b>Treap</b> = BST + heap on random priorities → expected O(log n), easy split/merge.</li>
 </ul>
 <h4>Gotchas / uses</h4>
 <ul>
 <li>O(log n) <b>expected, not worst</b> — but randomness is internal (no adversarial worst case like hash flooding) <span class="warn">!</span> Less cache-friendly than a B-tree.</li>
-<li>Redis ZSET, LevelDB/RocksDB memtable, Java <code>ConcurrentSkipListMap</code>.</li>
+<li>Redis ZSET (score-ordered + rank via per-pointer spans), LevelDB/RocksDB memtable, Java <code>ConcurrentSkipListMap</code>.</li>
 </ul>
 </section>
 
@@ -424,7 +468,8 @@ union(x,y):
 <h4>Gotchas</h4>
 <ul>
 <li>"B" ≠ binary <span class="warn">!</span> Node ~50–70% full (split slack) <span class="warn">!</span> Hash index can't range-scan; B+ keeps order.</li>
-<li>Write amplification (in-place page rewrite) → <b>LSM-tree</b> for write-heavy (sequential appends + compaction, read-amplification trade).</li>
+<li>Write amplification (in-place page rewrite) → <b>LSM-tree</b> for write-heavy (sequential appends + compaction, read-amplification trade). LSM memtable is often a skip list; SSTables merge-compact in the background.</li>
+<li>Cost model is <b>block transfers, not comparisons</b> — a red-black tree (~30 pointer hops = ~30 seeks) loses badly to a B+ tree's 3–4 page reads on disk, even at equal O(log n) <span class="warn">!</span></li>
 </ul>
 </section>
 
@@ -443,7 +488,8 @@ union(x,y):
 <h4>Gotchas</h4>
 <ul>
 <li>Bloom has <b>no</b> false negatives — claiming otherwise is the classic error <span class="warn">!</span> Can't delete from a plain Bloom (shared bits) → <b>Counting Bloom</b> (counters) <span class="warn">!</span></li>
-<li>&epsilon; degrades if filled past design n <span class="warn">!</span> <b>Mergeable</b>: Bloom=OR, HLL=per-bucket max, CMS=add → per-shard then combine.</li>
+<li>&epsilon; degrades if filled past design n — <b>size for expected n up front</b> <span class="warn">!</span> <b>Mergeable</b>: Bloom=OR, HLL=per-bucket max, CMS=add → per-shard then combine.</li>
+<li><b>Placement:</b> Bloom in front of a slow disk/DB skips lookups for definitely-absent keys (crawler "seen this URL?", LSM read path). HLL for "unique visitors" billions in ~1.5KB; CMS for "heavy hitters" / rate-limit approx.</li>
 </ul>
 </section>
 
@@ -452,7 +498,7 @@ union(x,y):
 <h4>LRU cache — O(1) get &amp; put</h4>
 <ul>
 <li>Hash map <code>key→node</code> + <b>doubly</b> linked list (recency order). get: map locate O(1), splice to head O(1). Evict = pop tail. Doubly (not singly) so you unlink a held node in O(1) <span class="warn">!</span></li>
-<li><b>LFU</b> harder: <code>key→(val,freq)</code> + <code>freq→list</code> + <code>minFreq</code>.</li>
+<li><b>LFU</b> harder: <code>key→(val,freq)</code> + <code>freq→list</code> + <code>minFreq</code>; on access bump freq &amp; move node between freq-lists, evict from <code>minFreq</code> list's tail.</li>
 </ul>
 <h4>Other composites</h4>
 <table><thead><tr><th>Need</th><th>Structure</th></tr></thead><tbody>
@@ -489,6 +535,11 @@ union(x,y):
 <tr><td>dynamic connectivity</td><td>union-find</td></tr>
 <tr><td>O(1) get + ordered evict</td><td>hash map + linked list</td></tr>
 <tr><td>disk index, ranges</td><td>B+ tree</td></tr>
+<tr><td>shortest path, unweighted</td><td>BFS (queue)</td></tr>
+<tr><td>shortest path, +weights</td><td>Dijkstra (min-heap)</td></tr>
+<tr><td>schedule with deps</td><td>topo sort on a DAG</td></tr>
+<tr><td>membership, huge + approx OK</td><td>Bloom filter</td></tr>
+<tr><td>distinct count at scale</td><td>HyperLogLog</td></tr>
 </tbody></table>
 </section>
 

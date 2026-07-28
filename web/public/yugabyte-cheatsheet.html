@@ -161,6 +161,8 @@ value = column value  (or tombstone for delete)</code></pre>
 -- range: explicit boundaries
 ... SPLIT AT VALUES ((1000),(2000),(3000));</code></pre></li>
 <li>Tablet count tradeoff: too few = no parallelism; too many = Raft/heartbeat overhead per tablet <span class="warn">!</span></li>
+<li>A tablet is the unit of three things at once: <b>distribution</b> (which node), <b>replication</b> (its Raft group), and <b>parallelism</b> (a scan fans one RPC per tablet). More tablets → more scale-out headroom but more per-group cost.</li>
+<li>Auto-split is online and non-blocking — reads/writes keep flowing; the new halves can then rebalance to emptier nodes via the master load balancer.</li>
 </ul>
 </section>
 
@@ -254,6 +256,8 @@ flowchart LR
 <li><b>Reader hits an intent</b> → looks up the owner's status: COMMITTED &amp; commit-time ≤ read point → visible; PENDING → ignore/conflict; ABORTED → dead.</li>
 <li><b>Conflict detection:</b> two intents collide on a key → lower <b>priority</b> txn aborts (40001). Under Serializable, read intents participate too (catches write skew).</li>
 <li><b>Single-shard = fast path:</b> one tablet → one Raft write, no intents, no status tablet. Keep txns single-shard &amp; short <span class="warn">!</span></li>
+<li><b>Savepoints</b> are supported — partial rollback inside a txn (<code>SAVEPOINT</code> / <code>ROLLBACK TO</code>), same Postgres semantics, useful to retry a sub-step without aborting the whole txn.</li>
+<li><b>Timestamps:</b> reads use a chosen read hybrid-time; the commit gets a single commit hybrid-time stamped on all intents at apply — that's what orders it against concurrent txns.</li>
 </ul>
 </section>
 
@@ -338,6 +342,8 @@ CREATE INDEX ON t (status) WHERE status='active'; -- partial</code></pre>
 </ul></li>
 <li><b>Cross-tablet joins shuffle</b> rows across nodes → slow. Fix: colocate, denormalize, or index the join column <span class="warn">!</span></li>
 <li>Batch/prepare to amortise round-trips; single-shard scans beat scatter-gather.</li>
+<li><b>Coordinator = any node.</b> The TServer the client lands on runs the plan and fans out; no dedicated router tier, so route clients cluster-wide (LB) — no single choke point.</li>
+<li><b>Single-tablet</b> query = one RPC to one leader (fast). <b>Scatter-gather</b> = an RPC per tablet, gathered — cost grows with tablet count and shrinks with a selective pushdown/index.</li>
 </ul>
 <pre><code>EXPLAIN (ANALYZE, DIST, VERBOSE) SELECT ...;
 -- read the DIST section: # RPCs, rows scanned,
@@ -377,7 +383,8 @@ yb-admin -master_addresses $M get_load_move_completion</code></pre>
 <li><b>Self-heal:</b> master detects under-replication (missed heartbeats) → <b>re-replicates</b> lost tablet peers onto surviving nodes to restore RF.</li>
 <li><b>TServer fails:</b> its leaders re-elect elsewhere; brief per-tablet blip, cluster stays up.</li>
 <li><b>Master fails:</b> if it was the master leader, the other 2 elect a new one; data path unaffected (masters aren't in it).</li>
-<li><b>Rolling upgrades = zero downtime</b> — one node at a time, leaders move off first.</li>
+<li><b>Rolling upgrades = zero downtime</b> — one node at a time, leaders move off first, then the node restarts and rejoins its Raft groups.</li>
+<li><b>Blacklist to drain</b> a node before decommission — the load balancer moves its tablets/leaders off first, so removal is clean with no under-replication scare.</li>
 <li>Backups: distributed <b>snapshots</b> + <b>PITR</b> (point-in-time restore). xCluster for cross-region DR.</li>
 </ul>
 </section>
@@ -413,6 +420,127 @@ yb-admin ... set_preferred_zones aws.us-east.1a</code></pre>
 <tr><td>single node / small / simple</td><td>plain Postgres</td></tr>
 </tbody></table>
 <p><span class="warn">!</span> Reality check: distributed SQL buys write scale-out + active multi-region + beyond-single-primary HA, and costs latency, operational complexity, and modelling discipline (sharding keys). Don't pay it unless you need it.</p>
+</section>
+
+<section class="card"><h3>Read Path &amp; MVCC Merge</h3>
+<ul>
+<li>A read carries a <b>read point</b> (a hybrid time). DocDB returns each column's <b>latest version ≤ read point</b> — so readers never block writers and see a consistent snapshot.</li>
+<li>Per tablet, the read merges the <b>memtable</b> (recent writes) with the on-disk <b>SSTables</b>, newest-version-wins, skipping tombstoned/superseded values.</li>
+<li><b>Bloom filters</b> skip SSTables that can't hold the key; the <b>block cache</b> serves hot blocks from RAM; compression shrinks IO. That's how an LSM keeps reads sane despite append-only writes <span class="warn">!</span></li>
+<li><b>Intents pass:</b> if a provisional (uncommitted) record for the key exists, the reader looks up the owning txn's <b>status record</b> — COMMITTED &amp; commit-time ≤ read point → visible; PENDING → conflict/ignore; ABORTED → skip.</li>
+<li><b>Read amplification</b> is the LSM tradeoff — a key's current value can be spread across memtable + several SSTables until compaction merges them. Compaction reclaims tombstone/old-version space.</li>
+<li><b>Follower/leader:</b> a linearizable read hits the <b>leader</b> under its lease; a follower read serves a local replica at bounded staleness (older read point).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Follower &amp; Replica Reads</h3>
+<p>Three ways to read, trading freshness for latency:</p>
+<table><thead><tr><th>Mode</th><th>Serves</th><th>Freshness</th></tr></thead><tbody>
+<tr><td>leader read (default)</td><td>tablet leader</td><td><b>linearizable</b></td></tr>
+<tr><td>follower read</td><td>local follower (voting)</td><td>bounded staleness</td></tr>
+<tr><td>read replica</td><td>async non-voting copy</td><td>bounded staleness</td></tr>
+</tbody></table>
+<ul>
+<li><b>Follower reads</b> offload leaders and cut latency by reading a nearby replica — you pick a staleness window; typically small, never unbounded <span class="warn">!</span></li>
+<li><b>Read replicas</b> = extra <i>async, non-voting</i> copies in another region with their own RF; don't count toward write quorum → pure read-offload / local-read / light DR.</li>
+<li>Enable per-session for read-mostly, latency-sensitive queries where slight staleness is fine (dashboards, catalogs). Correctness-critical reads stay on the leader.</li>
+</ul>
+<pre><code>SET yb_read_from_followers = true;
+SET default_transaction_read_only = true;   -- required
+-- bounded by yb_follower_read_staleness_ms (e.g. 30000)</code></pre>
+</section>
+
+<section class="card"><h3>Colocation &amp; Tablespaces</h3>
+<ul>
+<li><b>Colocated tables</b> = many <i>small</i> tables share <b>one tablet</b> instead of each getting its own Raft group. Two wins: <b>local joins/lookups</b> (same tablet, no network hop) and far less per-tablet Raft/heartbeat <b>overhead</b> <span class="warn">!</span></li>
+<li>Use for: reference/lookup tables, config, small dimension tables — the "lots of little tables" schema. <b>Don't</b> colocate large high-throughput tables — they need their own tablets to spread load, or you recreate a hotspot.</li>
+</ul>
+<pre><code>CREATE DATABASE app WITH COLOCATION = true;
+-- small tables colocated by default; opt the big ones out:
+CREATE TABLE big_events (...) WITH (COLOCATION = false);</code></pre>
+<ul>
+<li><b>Tablespaces</b> are repurposed from Postgres's "which disk" into <b>placement policy</b> — <i>which regions/zones</i> a table's or partition's tablets live in, and at what RF.</li>
+<li>Pattern: <b>colocate the small stuff for locality, shard the big stuff for scale</b>; use tablespaces to pin where data physically lives (foundation of geo-partitioning).</li>
+</ul>
+<pre><code>CREATE TABLESPACE eu_ts WITH (replica_placement=
+ '{"num_replicas":3,"placement_blocks":[
+   {"cloud":"aws","region":"eu-west","zone":"a",
+    "min_num_replicas":3}]}');</code></pre>
+</section>
+
+<section class="card"><h3><span class="ansi">CQL</span> YCQL Data Model</h3>
+<p>Same two-part key as Cassandra: <code>PRIMARY KEY ((partition), clustering...)</code>.</p>
+<ul>
+<li><b>Partition key</b> (double-parens) → <b>hashes to a tablet</b>; all rows with that key co-locate on one tablet.</li>
+<li><b>Clustering columns</b> → sort rows <i>within</i> the partition on disk (clustering order).</li>
+</ul>
+<pre><code>CREATE TABLE iot.readings (
+  device_id uuid, bucket date,      -- bound partition size
+  reading_at timestamp, metric text, value double,
+  PRIMARY KEY ((device_id, bucket), reading_at, metric))
+  WITH CLUSTERING ORDER BY (reading_at DESC);</code></pre>
+<ul>
+<li>"Latest N for a device today" = <b>single-partition, pre-sorted</b> scan — the classic time-series pattern.</li>
+<li><b>Bucket the partition key</b> (e.g. a day) so no partition grows unbounded — same anti-hotspot discipline as YSQL hash sharding <span class="warn">!</span></li>
+<li>Give up vs YSQL: no arbitrary <b>JOINs</b>, no FKs/triggers/extensions, thinner SQL — <b>query-first</b> denormalized modeling. Gain: simple high-throughput key access.</li>
+<li>Shell <code>ycqlsh &lt;host&gt; 9042</code> (familiar Cassandra client port + drivers).</li>
+</ul>
+</section>
+
+<section class="card"><h3>Backups, PITR &amp; DR</h3>
+<ul>
+<li><b>Distributed snapshots</b> — consistent, low-overhead snapshot across all tablets; the backup primitive.</li>
+<li><b>PITR</b> (point-in-time restore) — roll a database/table back to any moment in a retention window; recovers from bad deploys / accidental <code>DROP</code>/<code>DELETE</code>, not just node loss.</li>
+</ul>
+<table><thead><tr><th></th><th>Sync stretch</th><th>xCluster</th></tr></thead><tbody>
+<tr><td>coupling</td><td>one universe</td><td><b>two</b> universes</td></tr>
+<tr><td>replication</td><td>sync (Raft)</td><td><b>async</b></td></tr>
+<tr><td>RPO</td><td><b>0</b></td><td>&gt; 0 (lag)</td></tr>
+<tr><td>write latency</td><td>cross-region</td><td><b>local</b></td></tr>
+<tr><td>failover</td><td>automatic</td><td>promote standby</td></tr>
+</tbody></table>
+<ul>
+<li><b>xCluster</b> = async replication <i>between</i> clusters (uni- or bi-directional) for DR / active-active. Fast local writes, small data-loss window on failover <span class="warn">!</span></li>
+<li>Pick by RPO: <b>zero data loss + auto failover → sync stretch</b> (pay write latency); <b>local latency, tolerate small RPO → xCluster</b>.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Design Playbook — worked DDL</h3>
+<h4>Multi-tenant SaaS</h4>
+<pre><code>-- hash the tenant → spread; cluster by id → per-tenant scans
+PRIMARY KEY ((tenant_id) HASH, order_id)</code></pre>
+<p>Hashing <code>tenant_id</code> distributes tenants evenly and naturally discourages cross-tenant scans (tenant isolation). Colocate the small per-tenant config tables.</p>
+<h4>Global app, EU/US residency</h4>
+<pre><code>CREATE TABLE users (id uuid, region text, ...,
+  PRIMARY KEY ((id) HASH, region)) PARTITION BY LIST (region);
+CREATE TABLE users_eu PARTITION OF users
+  FOR VALUES IN ('eu') TABLESPACE eu_ts;   -- +us_ts</code></pre>
+<p>Row-level <b>geo-partitioning</b>: each region's rows (all 3 replicas + leaders) live in-region → GDPR residency + local write latency, no ocean hop.</p>
+<h4>Time-series / events</h4>
+<pre><code>PRIMARY KEY ((device_id) HASH, ts DESC)  -- fan writes, ordered scans
+-- must range globally? bucket it:
+PRIMARY KEY ((bucket) HASH, ts)          -- bucket = hash(id)%16</code></pre>
+<p>Never make a bare <code>SERIAL</code>/timestamp the leading un-hashed range key — that's the <b>monotonic-key hotspot</b> <span class="warn">!</span> Pre-split big tables: <code>... SPLIT INTO 24 TABLETS;</code></p>
+</section>
+
+<section class="card"><h3>Transaction Retry Pattern</h3>
+<p>Conflicts abort with <b>40001</b> — the app <b>owns the retry</b>. Wrap every txn in bounded retries with backoff; never let a 40001 surface as a user error.</p>
+<pre><code>for attempt in range(MAX):        # e.g. 5
+  try:
+    with conn.transaction():      # BEGIN..COMMIT
+      row = tx("SELECT bal FROM acct WHERE id=%s
+                FOR UPDATE", src)          # lock intent
+      tx("UPDATE acct SET bal=bal-%s WHERE id=%s", amt, src)
+      tx("UPDATE acct SET bal=bal+%s WHERE id=%s", amt, dst)
+    break                          # committed
+  except SerializationFailure:    # SQLSTATE 40001
+    sleep(backoff * 2**attempt + jitter)   # then retry
+</code></pre>
+<ul>
+<li>Keep txns <b>single-shard &amp; short</b> — fewer tablets touched = fewer conflicts + no 2PC coordination cost.</li>
+<li><b>Read restart</b> errors are a <i>different</i> beast: clock-skew ambiguity, retried internally where possible; if surfaced, <b>tighten NTP</b>, don't just retry harder <span class="warn">!</span></li>
+<li>Use the <b>weakest correct isolation</b> — Read Committed retries per-statement (fewer client retries) vs Serializable's more aborts. Reserve Serializable for real write-skew invariants.</li>
+</ul>
 </section>
 
 <section class="card"><h3>&#9744; Schema / Design Review Checklist</h3>

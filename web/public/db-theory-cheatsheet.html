@@ -442,6 +442,213 @@ T2: lock B ... wants A   -&gt; cycle</code></pre>
 <p><b>linearizable</b> &gt; sequential &gt; <b>causal</b> &gt; read-your-writes/monotonic &gt; <b>eventual</b>. Moving up costs latency/availability. Causal is the strongest model an <i>always-available</i> system can provide.</p>
 </section>
 
+<section class="card"><h3>Partitioning vs Replication</h3>
+<ul>
+<li><b>Replication</b> copies the <i>same</i> data → availability, read throughput, locality. <b>Partitioning (sharding)</b> splits <i>distinct</i> data → capacity + write throughput. Orthogonal; production does both (shard, then replicate each shard) <span class="warn">!</span></li>
+<li><b>Horizontal</b> = split by <i>rows</i> (every node has full schema, subset of rows) = "sharding". <b>Vertical</b> = split by <i>columns</i> (hot narrow cols vs cold blob).</li>
+</ul>
+<h4>Escalate before you shard</h4>
+<p>optimize queries → scale up → add read replicas → <b>then</b> shard. Sharding is a one-way door: it costs cheap joins, easy transactions, global indexes — permanently.</p>
+<h4>Two query classes</h4>
+<ul>
+<li><b>Names the partition key</b> ⇒ single-shard, fast, linearly scalable. <b>Doesn't</b> ⇒ scatter-gather across every shard, bounded by the slowest, <i>slower</i> as shards grow <span class="warn">!</span> Design the key so the dominant query is class 1.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Shard Strategies &amp; Hot Spots</h3>
+<table><thead><tr><th>Strategy</th><th>Range scan</th><th>Distribution</th></tr></thead><tbody>
+<tr><td>range (key intervals)</td><td>excellent (1–few shards)</td><td>poor — hot spots</td></tr>
+<tr><td>hash(key)→bucket</td><td>terrible (scatter)</td><td>excellent</td></tr>
+<tr><td>directory (lookup map)</td><td>flexible</td><td>controllable</td></tr>
+</tbody></table>
+<p>Core tradeoff = <b>locality vs uniformity</b>. Range → time-series/<code>BETWEEN</code>; hash → even write spread.</p>
+<h4>Hot partitions</h4>
+<ul>
+<li><b>Write skew:</b> monotonic key (timestamp, seq id) sends every insert to the tail shard under range partitioning.</li>
+<li><b>Access skew (celebrity):</b> one key read/written far more; hashing can't fix it — all their activity shares one key <span class="warn">!</span></li>
+<li>Fixes: high-cardinality evenly-accessed key (<code>user_id</code> &gt; <code>country</code> &gt; <code>is_premium</code>); hash away monotonicity; <b>salt</b> a known-hot key <code>(bucket 0..9, key)</code> (trades read fan-out for write spread); isolate whales via directory.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Consistent Hashing</h3>
+<ul>
+<li><code>node = hash(key) % N</code> breaks on resize: N→N+1 remaps <b>~N/(N+1)</b> of keys (10→11 nodes ⇒ ~91% move) ⇒ full reshuffle + cluster-wide cold cache <span class="warn">!</span></li>
+<li><b>Consistent hashing:</b> hash keys <i>and</i> nodes onto one ring; a key is owned by the first node clockwise. Adding a node steals keys only from its clockwise neighbor — only <b>~K/N</b> keys move.</li>
+</ul>
+<pre><code>ring wraps 0→MAX→0; key walks
+clockwise → first node hit owns it.
+add node ⇒ only its arc's keys move.</code></pre>
+<h4>Virtual nodes</h4>
+<ul>
+<li>Few real nodes ⇒ lumpy ring; a leaver dumps all load on one neighbor. <b>vnodes</b> = many tokens/node (Cassandra ~256) ⇒ smooth distribution, spread a departing node's load over many peers, weight bigger boxes. Used by Dynamo, Cassandra, Riak.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Partitioned Secondary Indexes</h3>
+<table><thead><tr><th></th><th>Local (doc-part.)</th><th>Global (term-part.)</th></tr></thead><tbody>
+<tr><td>index lives</td><td>with data, per shard</td><td>partitioned by term</td></tr>
+<tr><td>write</td><td>cheap, local, consistent</td><td>cross-shard, often async</td></tr>
+<tr><td>read</td><td>scatter-gather all shards</td><td>single-shard lookup</td></tr>
+<tr><td>best for</td><td>query names the PK</td><td>global lookup by attr</td></tr>
+</tbody></table>
+<ul>
+<li><b>Local</b> (Cassandra, ES shards): insert updates same-shard index — trivially consistent; but "find status=X" fans out to all shards.</li>
+<li><b>Global</b> (DynamoDB GSI): lookup by term hits one partition; write may update an index partition on a <i>different</i> node ⇒ typically <b>async / eventually consistent</b> — index lags the table <span class="warn">!</span></li>
+<li>"Pay on write vs pay on read" — no free lunch.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Cross-Shard Operations</h3>
+<ul>
+<li>Anything spanning shards forfeits single-node guarantees. <b>Query</b> without the key ⇒ scatter-gather (tail-latency bound). <b>Join</b> ⇒ ship/repartition data over the network. <b>Transaction</b> ⇒ 2PC (blocks holding locks) or sagas (no isolation) <span class="warn">!</span></li>
+</ul>
+<h4>Design so you don't have to</h4>
+<ul>
+<li><b>Co-locate</b>: pick a key that keeps things you join/transact on one shard (order + lines by <code>order_id</code>) — Spanner interleaved tables, Vitess keyspaces. The partition key <b>is</b> the join &amp; transaction boundary.</li>
+<li><b>Denormalize</b> to kill the join; keep a <b>read model</b> (CQRS/materialized view) for the cross-cutting query; <b>accept eventual consistency</b> via sagas for genuinely cross-entity flows.</li>
+<li>Can't avoid analytics-across-all? Wrong system — push to an OLAP store via CDC.</li>
+</ul>
+</section>
+
+<section class="card"><h3>2PC &amp; 3PC (atomic commit)</h3>
+<pre><code>Phase1 VOTE: coord--PREPARE--&gt;parts
+  each durably logs, replies YES/NO
+Phase2 DECIDE: all YES-&gt;COMMIT
+                any NO -&gt;ABORT</code></pre>
+<ul>
+<li>Once a participant votes <b>YES</b> it's <i>prepared/uncertain</i>: gave up the right to abort, must hold locks until it hears the decision. Decision is final when the coordinator writes its commit record.</li>
+<li><b>Blocking failure</b> <span class="warn">!</span>: coordinator dies after votes but before the decision ⇒ prepared participants can't commit or abort — stuck holding locks. A peer that also voted YES knows nothing more.</li>
+<li><b>3PC</b> adds a PRE-COMMIT round to remove blocking — but is <b>unsafe under partitions</b> (two sub-groups can decide differently), so ~never used.</li>
+<li>Modern fix: back the commit decision with <b>consensus</b> (Spanner/CockroachDB run 2PC over Paxos/Raft) ⇒ a dead coordinator is replaced, decision survives.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Sagas &amp; Compensation</h3>
+<pre><code>T1 reserve → T2 charge → T3 ship → T4 X
+compensate: C2 refund ← C1 unreserve</code></pre>
+<ul>
+<li>Multi-service txn as a sequence of <i>local</i> ACID txns; each <b>T&#8341;</b> has a <b>compensating C&#8341;</b> that semantically undoes it. No global lock, no prepared state.</li>
+<li><b>Compensation ≠ rollback</b>: rollback erases uncommitted changes (nobody saw them); compensation runs a <i>new</i> txn after the original committed &amp; was visible — you don't un-charge, you refund. Must be idempotent; some actions aren't cleanly compensable.</li>
+<li><b>Gives up isolation</b> <span class="warn">!</span>: intermediate state is visible — use pending/reserved states + idempotency keys.</li>
+<li>Sagas: cross-service, long-lived flows. 2PC (consensus-backed): short, tightly-coupled, need real atomic isolation.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Consensus, Raft &amp; FLP</h3>
+<p><b>Consensus</b> = agree on one value (leader, next log entry, commit outcome) despite crashes/lost msgs. Turns unreliable nodes into one replicated state machine.</p>
+<table><thead><tr><th>Property</th><th>Meaning</th></tr></thead><tbody>
+<tr><td>Agreement</td><td>no two correct nodes differ (safety)</td></tr>
+<tr><td>Validity</td><td>decided value was proposed (safety)</td></tr>
+<tr><td>Termination</td><td>every correct node decides (liveness)</td></tr>
+</tbody></table>
+<ul>
+<li><b>Quorum</b> = majority; any two majorities overlap ⇒ can't decide conflicting values. 5 nodes tolerate 2 failures.</li>
+<li><b>Raft:</b> terms (one leader each); randomized election timeouts break split votes; leader appends, commits once a majority persists; up-to-date vote rule keeps committed entries. Paxos = same guarantees, harder to reason about.</li>
+<li><b>FLP</b> <span class="warn">!</span>: no deterministic algo guarantees termination in a <i>fully async</i> net with 1 crash (can't tell crashed from slow). Attacks liveness, not safety. Escape via timeouts (partial synchrony) + randomization — safety unconditional, termination eventual.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Idempotency &amp; Exactly-Once</h3>
+<ul>
+<li><b>Idempotent</b>: applying N times = applying once. <code>SET bal=100</code> yes; <code>bal=bal+10</code> no. Makes retries safe.</li>
+<li><b>Exactly-once <i>delivery</i> is impossible</b> <span class="warn">!</span>: no ack ⇒ sender can't tell "msg lost" from "ack lost" ⇒ retry (at-least-once, dup risk) or don't (at-most-once, loss risk). No third option.</li>
+<li>Get exactly-once <b>effect</b>: at-least-once delivery + idempotent processing.</li>
+</ul>
+<pre><code>INSERT INTO processed(key,result)
+VALUES('req-9f3a',...)
+ON CONFLICT(key) DO NOTHING;
+-- 0 rows ⇒ replay, return stored result</code></pre>
+<ul>
+<li>Techniques: idempotency keys (Stripe), producer-id+seq dedup (Kafka), atomic dedup — write the marker <i>in the same txn</i> as the effect. Non-transactional effect (email, external API) ⇒ push idempotency downstream <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Consistency Models Spectrum</h3>
+<pre><code>strict serializable  txn + real-time  most coord
+linearizable         1-obj real-time
+sequential           total, not RT
+causal               happens-before   max under partition
+session              read-your-writes
+eventual             converge if stop least coord</code></pre>
+<ul>
+<li><b>Linearizable ≠ serializable</b> <span class="warn">!</span>: linearizability = <i>single object</i>, real-time recency (no stale read after ack). Serializability = <i>multi-object txns</i> equal to <i>some</i> serial order — can return <b>stale</b> snapshot data. Both ⇒ <b>strict serializable</b> (Spanner, CockroachDB).</li>
+<li>Stronger = more synchronous cross-replica agreement on the write path ⇒ higher p99 + refuse writes on the minority partition side. Pick the <b>weakest model that's still correct</b>.</li>
+<li><b>Causal</b> is the strongest model an <i>always-available</i> system can offer.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Session Guarantees &amp; CRDTs</h3>
+<h4>Per-session (cheap, no global coord)</h4>
+<ul>
+<li><b>Read-your-writes:</b> your later reads see your write. <b>Monotonic reads:</b> never see an older value than you already saw. <b>Monotonic writes:</b> your writes apply in issue order. <b>Writes-follow-reads:</b> a reply orders after the message it replies to. All four ≈ per-session causal.</li>
+</ul>
+<h4>CRDTs</h4>
+<ul>
+<li>Merge is <b>commutative + associative + idempotent</b> ⇒ replicas converge with no coordination or conflict logic — order/dupes/grouping don't matter.</li>
+<li><b>G-Counter:</b> per-replica vector, increment own entry, merge = element-wise <code>max</code>, value = sum ⇒ concurrent increments both survive. <b>OR-Set:</b> tag each add with an id; remove deletes only observed tags ⇒ concurrent add/remove is "add-wins".</li>
+<li>Convergence is free; you live with the <i>merge semantics</i> the type encodes <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>NoSQL Families</h3>
+<table><thead><tr><th>Family</th><th>Cheap op</th><th>Weak at</th></tr></thead><tbody>
+<tr><td>key-value</td><td><code>GET/PUT</code> by key</td><td>query inside values</td></tr>
+<tr><td>document</td><td>fetch/update whole aggregate</td><td>cross-doc joins</td></tr>
+<tr><td>wide-column</td><td>high write, range in partition</td><td>ad-hoc non-key queries</td></tr>
+<tr><td>graph</td><td>multi-hop traversal</td><td>bulk scans, sharding</td></tr>
+<tr><td>time-series</td><td>time-window scans</td><td>random updates</td></tr>
+</tbody></table>
+<ul>
+<li><b>Wide-column</b> = sorted map of maps <code>PK→(colkey→val)</code>, LSM-backed; PK=series, clustering=ts ⇒ time range = one contiguous scan.</li>
+<li><b>Graph / index-free adjacency:</b> nodes hold pointers to neighbors ⇒ hop cost = local degree, <b>independent of graph size</b>; relational hop = O(log n) index lookup per node, worse each hop <span class="warn">!</span></li>
+<li><b>Query-first modeling:</b> enumerate queries, design so each = one key lookup / one partition scan, duplicate as needed. Relational = write-time integrity + read flexibility; NoSQL = read perf + scale at write-complexity cost. Default relational until a named access pattern or scale wall pushes you off.</li>
+</ul>
+</section>
+
+<section class="card"><h3>OLTP vs OLAP &amp; Star Schema</h3>
+<p>One axis: OLTP = <b>few rows, many columns</b>; OLAP = <b>many rows, few columns</b>. Everything else follows.</p>
+<table><thead><tr><th></th><th>OLTP</th><th>OLAP</th></tr></thead><tbody>
+<tr><td>storage</td><td>row store</td><td>column store</td></tr>
+<tr><td>index</td><td>many B-trees</td><td>few; zone maps / pruning</td></tr>
+<tr><td>schema</td><td>3NF</td><td>denormalized star</td></tr>
+<tr><td>latency</td><td>ms</td><td>sec–min</td></tr>
+</tbody></table>
+<ul>
+<li><b>Star schema:</b> central <b>fact</b> (large, append-mostly, numeric measures + FKs) surrounded by <b>dimensions</b> (small, descriptive). Denormalize dims — no concurrent writers ⇒ no update anomalies, and every join over a billion-row fact costs real time. <b>Snowflake</b> normalizes dims (more joins).</li>
+<li>Columnar wins by <b>reading less</b> (touch only queried cols) + <b>compressing better</b>: RLE (value+run), dictionary (distinct→int code, filter on codes), delta/bit-packing. Don't run analytics on the OLTP primary — replicate to a columnar warehouse; layouts are physically incompatible <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Caching Strategies</h3>
+<table><thead><tr><th>Strategy</th><th>Fresh?</th><th>Best for</th></tr></thead><tbody>
+<tr><td>cache-aside</td><td>stale till invalidated</td><td>general read-heavy</td></tr>
+<tr><td>read-through</td><td>same</td><td>clean abstraction</td></tr>
+<tr><td>write-through</td><td>always fresh</td><td>read-after-write</td></tr>
+<tr><td>write-back</td><td>fresh, loss on crash</td><td>loss-tolerant counters</td></tr>
+<tr><td>write-around</td><td>stale till read</td><td>write-heavy rarely-read</td></tr>
+</tbody></table>
+<ul>
+<li>Common combo: <b>cache-aside reads + write-around / invalidate-on-write</b> — DB is source of truth, cache is a disposable accelerator. Reach for write-back only when losing recent writes is OK <span class="warn">!</span></li>
+<li>Invalidate by <b>delete, not update</b>: delete is idempotent &amp; order-tolerant; "set to my value" races (stale reader repopulates). Bound residual staleness with a <b>TTL</b>; for strong sync use <b>CDC</b> (tail WAL/binlog) so cache lags but never contradicts committed state.</li>
+</ul>
+</section>
+
+<section class="card"><h3>Cache Failure Modes &amp; Durability Tower</h3>
+<table><thead><tr><th>Failure</th><th>Mitigation</th></tr></thead><tbody>
+<tr><td>thundering herd (hot-key expiry)</td><td>single-flight lock, serve-stale</td></tr>
+<tr><td>stampede (mass expiry)</td><td>TTL jitter, early probabilistic refresh</td></tr>
+<tr><td>penetration (non-existent keys)</td><td>negative caching, Bloom filter</td></tr>
+</tbody></table>
+<h4>"Write returned" ≠ durable <span class="warn">!</span></h4>
+<pre><code>write()  -&gt; OS page cache (RAM, volatile)
+fsync()  -&gt; device write cache (DRAM)
+barrier  -&gt; platters/flash (durable)</code></pre>
+<ul>
+<li><code>fsync</code> the WAL on commit (cheap sequential) — data pages flush lazily, recovery replays the log. Consumer drives have <i>lied</i> about flush; BBU cache is trusted.</li>
+<li><b>PITR</b> = base backup + continuous WAL archiving ⇒ replay logs forward to any timestamp (stop just before a bad <code>DELETE</code>). <b>RPO</b> = tolerable data loss; <b>RTO</b> = tolerable downtime.</li>
+</ul>
+</section>
+
 <section class="card"><h3>&#9733; Design &amp; Review Checklist</h3>
 <h4>Schema</h4>
 <ul>
