@@ -33,86 +33,188 @@ The algorithms reference for the Data Structures & Algorithms track — the clas
 ### Summary
 
 **What this topic covers**
-This topic is about how you *measure* an algorithm before you run it: asymptotic notation (Big-O, Theta, Omega), the distinction between best/average/worst case, amortized analysis, how to solve the recurrence relations that recursive algorithms produce (including the Master Theorem), and space complexity. The mental model: analysis is about *growth rate as input grows without bound*, not stopwatch time. Constants and lower-order terms are noise; what survives is how the cost scales. A senior candidate also reads the problem's input constraints backwards to *infer the target complexity* the interviewer expects.
+How to answer one question about any algorithm: *"as the input gets big, how fast does the work grow?"* That is what Big-O measures — not seconds, but the **shape of the growth**. This topic builds the whole vocabulary: Big-O / Θ / Ω, why we ignore constants, best vs average vs worst case, amortized analysis (why an occasional expensive step is still cheap on average), how to turn a recursive algorithm into a **recurrence** and solve it (Master Theorem and recursion trees), space complexity, and the single most useful interview trick — reading the input size to guess the required complexity before you write any code.
+
+**Mental model**
+Big-O is a way of comparing algorithms that ignores everything machine-specific (CPU speed, language, constant factors) and keeps only how the work scales with input size `n`. Think of it as sorting algorithms into a few buckets: constant `O(1)`, logarithmic `O(log n)`, linear `O(n)`, `O(n log n)`, quadratic `O(n²)`, exponential `O(2ⁿ)`. Moving up a bucket eventually dominates any constant-factor advantage — an `O(n)` algorithm beats an `O(n²)` one once `n` is large enough, even if the `O(n²)` one is written in tight C and the `O(n)` one in Python. The whole game is: figure out which bucket your algorithm falls in, and whether that bucket is fast enough for the `n` you'll face.
 
 **Key terms**
-*Big-O* — asymptotic upper bound, "grows no faster than". *Omega* — asymptotic lower bound, "grows no slower than". *Theta* — tight bound, O and Omega together. *Best/average/worst case* — the input that minimizes/expects/maximizes cost for a *fixed* input size n; orthogonal to the O/Theta axis. *Amortized cost* — average cost per operation across a worst-case sequence, not an average over random inputs. *Recurrence* — an equation defining T(n) in terms of T on smaller inputs, e.g. T(n) = 2T(n/2) + O(n). *Master Theorem* — a closed-form solver for divide-and-conquer recurrences of the form T(n) = a T(n/b) + f(n). *Auxiliary space* — extra memory beyond the input.
+- **Big-O `O(...)`** — an *upper bound* on growth: "grows no faster than". The one you'll use 95% of the time.
+- **Big-Theta `Θ(...)`** — a *tight* bound: upper and lower match, "grows exactly like".
+- **Big-Omega `Ω(...)`** — a *lower bound*: "grows at least this fast".
+- **Best / average / worst case** — the fastest, typical, and slowest input for a given `n`.
+- **Amortized cost** — the average cost *per operation* across a long run, even if some single operations are expensive.
+- **Recurrence** — an equation defining an algorithm's cost in terms of its cost on smaller inputs, e.g. `T(n) = 2·T(n/2) + n`.
+- **Master Theorem** — a formula that solves the common "divide into `a` pieces of size `n/b`, do `f(n)` extra work" recurrences.
+- **Recursion tree** — drawing out the recursive calls level by level and summing the work to solve a recurrence.
+- **Space complexity** — extra memory used as `n` grows, *including* the recursion call stack.
 
 **Core mechanics**
-Big-O formally means: T(n) is O(g(n)) if there exist constants c > 0 and n0 such that T(n) <= c*g(n) for all n >= n0. That "for all n >= n0" is why constants and lower terms drop: 3n^2 + 100n + 7 is O(n^2) because for large n the n^2 term dominates. To analyze code, count operations as a function of n: sequential blocks add (take the max), nested loops multiply, and recursion becomes a recurrence you solve. The Master Theorem compares f(n) against n^(log_b a): if f is polynomially smaller, T(n) = Theta(n^(log_b a)); if equal (within a log factor), you gain a log; if f is polynomially larger (and regular), T(n) = Theta(f(n)). Amortized analysis (aggregate, accounting, or potential method) proves that expensive operations are rare enough that the *sequence* is cheap — dynamic array doubling is the canonical case: any single push may cost O(n) to resize, but n pushes cost O(n) total, so O(1) amortized.
+To find an algorithm's Big-O, count how the number of basic steps scales with `n`, then keep only the fastest-growing term and drop constants: `3n² + 100n + 7` becomes `O(n²)`. For **loops**, multiply: two nested loops over `n` is `n × n = O(n²)`; a loop that halves `n` each time is `O(log n)`. For **recursion**, write a recurrence and solve it. The Master Theorem handles the standard "split into equal parts" shape; the recursion-tree method handles the rest by summing the work at every level. Space is counted the same way, and the recursion stack counts: a function that recurses `n` deep uses `O(n)` stack even if each call uses `O(1)` locals.
 
 **Trade-offs**
-Asymptotic analysis deliberately throws away constants, so it can mislead at real-world sizes: an O(n log n) algorithm with a huge constant can lose to an O(n^2) one for small n (this is why library sorts switch to insertion sort under ~16 elements). Theta is more informative than O but you often can only prove O. Worst-case bounds are honest but pessimistic; average-case is realistic but assumes an input distribution you must state. Amortized O(1) is a *sequence* guarantee — it does not bound a single operation's latency, which matters for real-time systems.
+Big-O hides the constant factor, and constants matter for real, small inputs — an `O(n²)` insertion sort beats an `O(n log n)` merge sort for `n < ~16`, which is why real sort libraries switch to insertion sort on tiny pieces. Worst-case analysis is pessimistic but safe (you're guaranteed never worse); average-case is realistic but assumes an input distribution; amortized is the honest answer when costs are lumpy (a hash table insert is `O(1)` amortized even though the occasional resize is `O(n)`). Pick the lens that matches the guarantee you need.
 
 **Common confusions**
-Big-O is an *upper bound*, not "the worst case" — you can say bubble sort is O(n^2) worst case and O(n) best case; O and case-analysis are independent axes. Saying "worst case Big-O" is fine, but "average-case Omega" is equally valid. Amortized is not average-case: amortized holds even for adversarial input, average assumes randomness. People also over-tighten: writing O(2n) or O(n^2 + n) is not wrong but not simplified. And log base is irrelevant in O (change of base is a constant factor) — but the base *matters* inside the Master Theorem's n^(log_b a).
+"Big-O is the worst case" — no. Big-O is a *bound on growth*; you can state a best-case Big-O too. Worst/average/best are about *which input*; O/Θ/Ω are about *which bound*. "`O(log n)` — log of what base?" — the base doesn't matter for Big-O (changing base is just a constant factor), so we write `log n`. "Amortized means average case" — different: average case averages over *inputs*; amortized averages over a *sequence of operations* on one structure. "`O(1)` is always faster" — only asymptotically; a `O(1)` with a huge constant can lose to a small `O(n)` on real sizes.
 
 **Why interviewers ask**
-Complexity analysis is the fastest signal of whether you can reason about scale rather than just pass tests. The classic angle: "what's the complexity?" then "can you do better?" — where "better" is a target you should *infer from constraints* (n <= 20 hints exponential/bitmask; n <= 10^5 hints O(n log n); n <= 10^9 hints O(log n) or O(1) math). A senior follow-up probes space-time trade-offs and whether your average-case claim states its distribution.
+Complexity analysis is the language the rest of the interview is spoken in: you'll be asked "what's the time and space complexity?" after every problem, and "can you do better?" is a nudge to move down a bucket. The signal isn't reciting definitions — it's *reasoning*: inferring the target complexity from the constraints ("n up to 10⁵ → I need `O(n log n)` or better"), spotting that a nested loop is `O(n²)`, and knowing when the constant factor actually matters. Getting the complexity wrong makes a correct algorithm look wrong (and vice versa).
 
 ### What is the difference between Big-O, Big-Theta, and Big-Omega?
 
-They bound growth from different directions. Big-O is an upper bound: T(n) is O(g) if T grows no faster than g (T(n) <= c*g(n) for large n). Big-Omega is a lower bound: T grows no slower than g. Big-Theta is a tight bound — both O and Omega hold, so T grows *exactly* like g up to constants. In interviews people say "O(n log n)" loosely to mean the tight bound, but strictly, saying an algorithm is O(n^2) only claims it is no worse than that; it could secretly be faster. Use Theta when you can prove the bound is tight, O when you can only prove the ceiling.
+They answer *different questions* about the same function. Imagine your algorithm does `f(n)` steps.
+- **Big-O `O(g)`** is an **upper bound**: `f` grows *no faster than* `g`. "It's at most this bad."
+- **Big-Omega `Ω(g)`** is a **lower bound**: `f` grows *at least as fast as* `g`. "It's at least this expensive."
+- **Big-Theta `Θ(g)`** is **both at once** (a tight bound): `f` grows *exactly like* `g`.
+
+A worked example: linear search through `n` items. In the worst case it does `n` comparisons, so it's `O(n)`. It always does *at least* 1 comparison, so it's `Ω(1)`. Its worst case is *tightly* `Θ(n)` (both bounds are `n`). In everyday interview talk people say "O(n)" even when they mean the tight bound — that's fine and universally understood; reach for Θ only when the distinction matters.
 
 ### Why do we drop constants and lower-order terms?
 
-Because Big-O measures asymptotic growth as n approaches infinity, and there for any fixed constants the highest-order term dominates. 5n^2 + 1000n + 50 and n^2 both grow quadratically — double n and both roughly quadruple. The definition bakes this in: T(n) is O(g(n)) if T(n) <= c*g(n) for all n beyond some n0, and you are free to pick c large enough to absorb constants and n0 large enough to absorb lower terms. The caveat: constants are *not* irrelevant in practice; they just are not what asymptotic notation is designed to capture.
+Because Big-O is about **how the work grows**, not the exact count, and for large `n` the fastest-growing term swamps everything else. Take `f(n) = 3n² + 100n + 7`. At `n = 1000`: the `3n²` term is 3,000,000, the `100n` term is 100,000, the `7` is nothing. The `n²` part is already 97% of the total, and its share only grows. So we keep `n²` and write `O(n²)`. We drop the `3` for the same reason we ignore CPU speed: a 3× constant is a fixed multiplier that doesn't change the *bucket*. This is why an `O(n)` algorithm eventually beats an `O(n²)` one no matter the constants — growth rate wins in the end.
 
 ### What is the difference between best, average, and worst case?
 
-They fix the input *size* n and vary *which* input of that size you feed in. Worst case is the input maximizing cost (quicksort on already-sorted data with a naive pivot: O(n^2)). Best case minimizes it (quicksort with perfectly balanced pivots: O(n log n)). Average case is the expected cost over a distribution of inputs (quicksort with random pivots: O(n log n) expected). This axis is independent of O/Theta: each case can itself be given an O, Omega, or Theta bound. Interviewers usually want worst case unless you flag an average-case assumption explicitly.
+These pick *which input of size `n`* you measure.
+- **Best case** — the luckiest input (often useless for guarantees).
+- **Worst case** — the unluckiest input; the guarantee you can promise. This is what Big-O usually refers to.
+- **Average case** — expected cost over a realistic distribution of inputs.
+
+Quicksort is the classic illustration: best `Θ(n log n)` (pivots split evenly), average `Θ(n log n)` (random pivots split well enough), worst `Θ(n²)` (every pivot is the smallest element, e.g. an already-sorted array with a naive pivot). You quote worst case when you need a guarantee and average case when the worst case is rare and you care about typical speed.
 
 ### How does average-case analysis differ from amortized analysis?
 
-Average-case averages over a *distribution of inputs* and assumes some input is random — if the assumption is violated, the bound can fail. Amortized averages over a *sequence of operations on a single data structure* and holds for *any* sequence, including adversarial ones. Example: a hash table is O(1) *average* case (assuming good hashing and no adversary crafting collisions), whereas dynamic-array append is O(1) *amortized* — even an adversary choosing the worst push sequence cannot make n pushes cost more than O(n). One relies on randomness; the other is a worst-case guarantee spread across operations.
+They average over different things. **Average case** averages over *many different inputs* and needs an assumption about how likely each input is. **Amortized** averages over a *sequence of operations on one data structure* and makes **no probabilistic assumption** — it's a guarantee about the total cost of the sequence. So "hash lookup is `O(1)` average case" (assuming keys hash uniformly) is a probabilistic claim, whereas "appending to a dynamic array is `O(1)` amortized" is a *worst-case guarantee over any sequence of appends* — no luck required.
 
 ### Explain amortized analysis with the dynamic array example.
 
-A dynamic array (Java ArrayList, C++ vector, Python list) stores elements in a fixed block and doubles capacity when full. A single append is usually O(1), but when the block fills, it allocates a block twice as large and copies everything — O(n) for that one push. Amortized analysis shows this is rare: starting empty, resizes happen at sizes 1, 2, 4, 8, ..., n, and the total copy work is 1 + 2 + 4 + ... + n < 2n = O(n). Spread across n pushes, that is O(1) amortized per push. The doubling is essential — growing by a *constant* amount instead would make total copy work O(n^2), i.e. O(n) amortized per push.
+A dynamic array (Python `list`, Java `ArrayList`) is a fixed block that **doubles** in size when full. Most appends just write into a free slot — `O(1)`. But when it's full, an append allocates a 2× block and copies everything over — `O(n)`. That one step looks expensive, so is append really cheap?
+
+Yes, because the expensive copies are rare and their cost is spread thin. Doubling from 1 → n costs `1 + 2 + 4 + ... + n ≈ 2n` total copies across *all* appends. Add the `n` cheap writes and the whole sequence of `n` appends is `~3n` work, i.e. **`O(1)` per append amortized**.
+
+```python
+class DynamicArray:
+    def __init__(self):
+        self.data = [None]        # backing block
+        self.n = 0                # number of items stored
+
+    def append(self, x):
+        if self.n == len(self.data):        # full -> grow
+            new = [None] * (2 * len(self.data))   # double the capacity
+            for i in range(self.n):         # O(n) copy, but rare
+                new[i] = self.data[i]
+            self.data = new
+        self.data[self.n] = x               # O(1) common case
+        self.n += 1
+```
+
+The key is doubling. If instead you grew by a fixed `+1` each time, every append copies everything and the total becomes `1 + 2 + ... + n = O(n²)` — `O(n)` amortized. Geometric growth is what makes it `O(1)`.
 
 ### What are the three methods of amortized analysis?
 
-*Aggregate*: bound the total cost of a sequence of n operations, then divide by n. Simple but coarse. *Accounting (banker's)*: overcharge cheap operations and store the surplus as "credit" on the data structure, then spend that credit to pay for expensive operations; if credit never goes negative, the charged rate is a valid amortized bound. *Potential method*: define a potential function Phi mapping the structure's state to a non-negative number; the amortized cost of an operation is its actual cost plus the change in Phi. It is the most powerful and generalizes the accounting method. All three prove the same kind of result; potential is the go-to for formal proofs.
+Three ways to prove the same "cheap on average over the sequence" result:
+- **Aggregate** — bound the total cost of `n` operations, then divide by `n`. Simplest; the dynamic-array `3n / n = O(1)` above is aggregate.
+- **Accounting (banker's)** — charge each cheap operation a little *extra* and store the surplus as "credit," then pay for expensive operations from saved credit. Each append pays 3: 1 to store itself, 2 saved to later fund copying itself and one older element.
+- **Potential** — a mathematical version of accounting: define a "potential energy" function of the structure's state; the amortized cost is the actual cost plus the change in potential. Most general; used to prove splay-tree and Fibonacci-heap bounds.
+
+For interviews, aggregate is almost always enough — just count the total work of the sequence.
 
 ### What is a recurrence relation and how do you form one?
 
-A recurrence expresses an algorithm's running time T(n) in terms of its cost on smaller inputs. You form it by reading the recursive structure: how many subproblems (a), how much smaller each is (n/b or n-1), and the non-recursive work per call (f(n)). Merge sort makes 2 recursive calls on halves plus O(n) to merge, giving T(n) = 2T(n/2) + O(n). Binary search makes 1 call on a half plus O(1), giving T(n) = T(n/2) + O(1). A naive recursive Fibonacci gives T(n) = T(n-1) + T(n-2) + O(1). Solving the recurrence yields the closed-form complexity.
+A recurrence expresses an algorithm's cost `T(n)` in terms of its cost on **smaller inputs**, mirroring what the recursion does. You form it by reading the code: how many recursive calls, on inputs of what size, plus how much non-recursive work per call.
+
+- Binary search recurses **once** on **half**, doing `O(1)` extra: `T(n) = T(n/2) + O(1)` → `O(log n)`.
+- Merge sort recurses **twice** on **halves**, doing `O(n)` to merge: `T(n) = 2·T(n/2) + O(n)` → `O(n log n)`.
+- Naive Fibonacci recurses **twice** on nearly the same size, `O(1)` extra: `T(n) = T(n−1) + T(n−2) + O(1)` → `O(2ⁿ)`.
+
+Say it in words: "split into `a` subproblems of size `n/b`, and do `f(n)` work to split and combine." That sentence *is* the recurrence.
 
 ### State the Master Theorem and explain its three cases.
 
-For T(n) = a T(n/b) + f(n) with a >= 1, b > 1, compare f(n) to the "watershed" n^(log_b a). Case 1: if f(n) = O(n^(log_b a - e)) for some e > 0 (f is polynomially smaller), the leaves dominate and T(n) = Theta(n^(log_b a)). Case 2: if f(n) = Theta(n^(log_b a)) (they match), work is even across levels and you gain a log: T(n) = Theta(n^(log_b a) * log n). Case 3: if f(n) = Omega(n^(log_b a + e)) and the regularity condition a*f(n/b) <= c*f(n) holds, the root dominates and T(n) = Theta(f(n)). The intuition is a tug-of-war between the number of leaves and the work at the top.
+The Master Theorem instantly solves recurrences of the form `T(n) = a·T(n/b) + f(n)` — split into `a` pieces of size `n/b`, with `f(n)` extra work. Compare `f(n)` against the "leaf work" `n^(log_b a)` (how much work the recursion tree's leaves add up to):
+
+| Case | Condition (which dominates) | Answer |
+|---|---|---|
+| 1 | `f(n)` smaller than `n^(log_b a)` | `Θ(n^(log_b a))` — leaves dominate |
+| 2 | `f(n)` equal to `n^(log_b a)` | `Θ(n^(log_b a) · log n)` — balanced |
+| 3 | `f(n)` larger than `n^(log_b a)` | `Θ(f(n))` — top level dominates |
+
+Intuition: the recursion tree does work at every level. Either the top (the first `f(n)` call) dominates, or the bottom (all the tiny leaves) dominates, or they're balanced and every level costs the same so you multiply by the number of levels, `log n`.
 
 ### Apply the Master Theorem to merge sort.
 
-Merge sort: T(n) = 2T(n/2) + O(n), so a = 2, b = 2, f(n) = n. The watershed is n^(log_b a) = n^(log_2 2) = n^1 = n. Since f(n) = Theta(n) matches the watershed, this is Case 2: T(n) = Theta(n * log n) = Theta(n log n). Intuitively the recursion tree has log_2 n levels, each doing O(n) total merge work, so n * log n. Binary search T(n) = T(n/2) + O(1) has a=1, b=2, watershed n^0 = 1, f = O(1) matching, so Case 2 gives Theta(log n).
+Merge sort: `T(n) = 2·T(n/2) + O(n)`, so `a = 2`, `b = 2`, `f(n) = n`. The leaf work is `n^(log_b a) = n^(log₂ 2) = n¹ = n`. Compare: `f(n) = n` **equals** `n` — that's **Case 2**. So `T(n) = Θ(n · log n) = Θ(n log n)`.
+
+Picture the tree: each level splits the array in half, so there are `log₂ n` levels, and every level does `O(n)` total merging work (the pieces get smaller but there are more of them). `n` work per level × `log n` levels = `n log n`.
 
 ### When does the Master Theorem NOT apply?
 
-It only covers T(n) = a T(n/b) + f(n) with constant a, constant b > 1, and f asymptotically positive. It fails when: subproblems differ in size (T(n) = T(n/3) + T(2n/3) + n — use the recursion-tree or Akra-Bazzi method); a or b is not constant; f falls in the *gap* between cases (polynomially between, e.g. f(n) = n/log n vs watershed n — no polynomial separation, Case 1/3 fail, Case 2 does not match either); the regularity condition of Case 3 fails; or the recursion subtracts rather than divides (T(n) = T(n-1) + n — that is a different family, solved by summation to Theta(n^2)).
+It only covers the "equal-size subproblems" shape, so it fails when:
+- **Subproblems are unequal sizes**, e.g. `T(n) = T(n/3) + T(2n/3) + n` (quicksort-ish) — use a recursion tree or the Akra–Bazzi method.
+- **`a` or `b` isn't constant**, or the split isn't by a constant factor, e.g. `T(n) = T(n−1) + n` (this is `O(n²)`, solved by expansion, not the Master Theorem).
+- **`f(n)` isn't a clean polynomial**, e.g. `T(n) = 2T(n/2) + n/log n` falls in a gap between cases.
+
+When it doesn't fit, fall back to the recursion-tree method below or just expand the recurrence a few times and spot the pattern.
 
 ### How do you solve a recurrence with the recursion-tree method?
 
-Draw the tree: the root does f(n) work and has a children each doing f(n/b), and so on down to the base case. Sum the work *per level*, then sum across levels. For T(n) = 2T(n/2) + n: level 0 does n, level 1 does 2*(n/2) = n, level k does n — every level does n, and there are log_2 n levels, so total is n log n. For T(n) = 2T(n/2) + n^2: level k does n^2 / 2^k, a geometric series dominated by the root, giving Theta(n^2). The tree method is your fallback when the Master Theorem does not apply, and it builds the intuition the theorem formalizes.
+Draw the tree of recursive calls, compute the work at each level, and sum. For `T(n) = 2·T(n/2) + n`:
+
+```text
+level 0:            n                     work = n
+level 1:        n/2   n/2                 work = n
+level 2:     n/4  n/4 n/4  n/4            work = n
+   ...        (each level sums to n)
+level log n:  1 1 1 ... 1  (n leaves)     work = n
+```
+
+Every level sums to `n`, and there are `log₂ n` levels (halving from `n` to `1`), so the total is `n × log n = Θ(n log n)`. The method generalises: if the per-level work *grows* down the tree, the leaves dominate (Master Case 1); if it *shrinks*, the root dominates (Case 3); if it's flat like here, you multiply by the depth (Case 2).
 
 ### What is space complexity and what counts toward it?
 
-Space complexity is how memory grows with input size. You usually report *auxiliary* space — extra memory beyond the input itself — because the input is a fixed cost the caller already paid. Count: allocated data structures (a hash set of size n is O(n)), and the recursion call stack (each frame holds locals and a return address). Recursive algorithms are the classic trap: recursion depth d means O(d) stack space even if no explicit structure is allocated. Merge sort is O(n) auxiliary (the merge buffer); in-place quicksort is O(log n) auxiliary from its recursion stack in the average case, O(n) worst case.
+Space complexity is the **extra** memory an algorithm uses as `n` grows — usually not counting the input itself (that's a separate "auxiliary space" distinction, worth stating in an interview). It includes:
+- Data structures you allocate (a hash set of the elements → `O(n)`).
+- The **recursion call stack** — one frame per active call.
+- Output, if you count it.
+
+Example: iterative sum of an array is `O(1)` auxiliary (one accumulator). Merge sort is `O(n)` (the merge buffer). Recursively summing a list is `O(n)` *space* purely from the call stack, even though it computes the same thing as the `O(1)` loop.
 
 ### Does recursion depth count as space? Give an example.
 
-Yes — every unresolved recursive call keeps a stack frame alive, so the maximum recursion depth is auxiliary space. Naive recursive factorial or a linear-chain recursion of depth n uses O(n) stack even though it allocates no data structure, and can blow the stack for large n. Quicksort's space is dominated by recursion depth: balanced partitions give O(log n) depth, but worst-case partitions (sorted input, bad pivot) give O(n) depth. This is why "recurse on the smaller partition, loop on the larger" (tail-call elimination by hand) bounds quicksort's stack to O(log n) even in the worst case.
+Yes — each unfinished recursive call keeps a stack frame alive, so **maximum recursion depth is a space cost**. This is easy to miss.
+
+```python
+def sum_list(a, i=0):
+    if i == len(a):          # base case
+        return 0
+    return a[i] + sum_list(a, i + 1)   # n frames deep before any returns
+```
+
+This is `O(n)` **space** (n stacked frames) even though each frame is tiny — and on a big list it will `RecursionError` (stack overflow) in Python. The equivalent loop is `O(1)` space. Balanced-tree recursion is gentler: recursing on a balanced binary tree is `O(log n)` depth, but a skewed (linked-list-shaped) tree is `O(n)`.
 
 ### How do you infer the target complexity from input constraints?
 
-Read the maximum n and work backwards from roughly 10^8 operations per second. n <= 12 or so: factorial O(n!) or O(n^2 * 2^n) permutation/DP is fine. n <= 20-24: O(2^n) bitmask subset DP. n <= 500: O(n^3) (Floyd-Warshall, interval DP). n <= 5000: O(n^2). n <= 10^5 or 10^6: O(n log n) — sort or a heap-based sweep. n <= 10^7-10^8: O(n) linear scan only. n up to 10^9 or 10^18: O(log n) or O(1) — binary search on the answer, or closed-form math. This reverse-inference tells you which algorithm family the interviewer is fishing for before you have written a line.
+The input size tells you the complexity you're allowed — assume a machine does roughly `10⁸`–`10⁹` simple operations per second and the limit is ~1 second:
 
-### If n can be up to 10^9, what complexity must you target and why?
+| `n` up to | Budget | Approach it hints |
+|---|---|---|
+| ≤ 12 | `O(n!)` | permutations, brute force |
+| ≤ 20 | `O(2ⁿ)` | subsets, bitmask DP |
+| ≤ 500 | `O(n³)` | Floyd–Warshall, interval DP |
+| ≤ 5,000 | `O(n²)` | pairwise loops, simple DP |
+| ≤ 10⁶ | `O(n log n)` or `O(n)` | sort, sliding window, hashing |
+| ≤ 10⁹ | `O(log n)` or `O(√n)` | binary search on the answer, math |
 
-Roughly O(log n) or O(1). At 10^9, even a single linear pass is about a billion operations — borderline for a 1-2 second limit, and anything super-linear is hopeless. That constraint is a strong hint the intended solution is binary search (on a sorted array or "binary search on the answer"), a closed-form mathematical formula (arithmetic/geometric sums, combinatorics), matrix exponentiation for linear recurrences (O(log n) via fast exponentiation), or a number-theoretic trick like gcd. If the value 10^9 is a *value range* rather than a count, it also often signals you should not iterate over the range at all.
+Read the constraint *first*: it turns "what algorithm?" into "which of these buckets fits?", pruning most ideas before you write anything.
+
+### If n can be up to 10⁹, what complexity must you target and why?
+
+You cannot even *touch* every element — a single `O(n)` pass over 10⁹ items is ~1–10 seconds and usually too slow, and `O(n²)` (10¹⁸ operations) is hopeless. So `n = 10⁹` is a strong hint that the intended solution is **`O(log n)`, `O(√n)`, or `O(1)` math** — you're not meant to iterate the input. Typical moves: **binary search on the answer** (the answer is monotonic, so you probe values not elements), a **closed-form formula**, number-theoretic tricks, or `O(√n)` factorization. When you see a constraint that big, stop looking for an iteration and look for a formula or a search over the answer space.
 
 ### Is O(1) always faster than O(n) in practice?
 
-No — asymptotically yes, but for small n the constants dominate. An O(1) hash lookup involves hashing, a modulo, and possible collision probing; a linear scan of a 4-element array may be faster because it is cache-friendly and branch-predictable. This is exactly why real libraries use hybrid strategies: introsort/Timsort fall back to insertion sort for small subarrays because insertion sort's tiny constant beats merge/quicksort's overhead under ~16 elements. Big-O tells you who wins *eventually*; profiling tells you who wins at *your* n. A senior answer names the crossover and says "measure it".
+No — Big-O describes growth *for large `n`*, and hides the constant factor. An `O(1)` operation with a giant constant (say, hashing a long string, or an `O(1)` that allocates and initialises a big table) can be slower than a small `O(n)` loop for realistic sizes. Real examples: for `n < ~16`, insertion sort's `O(n²)` beats merge sort's `O(n log n)` because its constant is tiny and it's cache-friendly; a hash lookup (`O(1)`) can be slower than scanning a 4-element array (`O(n)`) because of hashing overhead and cache misses. Big-O tells you who wins *eventually*; for small, fixed sizes, measure. The senior habit is to reason in Big-O first, then remember constants and cache behaviour when the input is small or the code is hot.
 
 ## Recursion & Divide and Conquer
 
