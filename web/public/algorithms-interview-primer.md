@@ -732,490 +732,1945 @@ Stability costs a little (a stable sort may need extra space, or can't use the f
 ### Summary
 
 **What this topic covers**
-Finding an element — or a boundary — in a sorted structure in O(log n) instead of O(n). Binary search is deceptively simple to state and notoriously easy to get wrong: the real skill is the loop invariant, the boundary variants (lower bound, upper bound, first/last occurrence), and the leap to "binary search on the answer" (parametric search), where you binary-search over a *value range* using a monotonic predicate rather than over array indices. This topic also covers the search variants — exponential, interpolation, ternary — and the two bugs that plague every implementation: off-by-one on the boundary and integer overflow in the midpoint.
+Finding an element — or a *boundary* — in a sorted structure in `O(log n)` instead of `O(n)`. Binary search is deceptively simple to state and notoriously easy to get wrong: the real skill is the **loop invariant**, the **boundary variants** (lower bound, upper bound, first/last occurrence), and the leap to **binary search on the answer** (parametric search), where you binary-search over a *value range* using a monotonic predicate rather than over array indices. The topic also covers the search cousins — exponential, interpolation, ternary — and the two bugs that plague every implementation: off-by-one on the boundary, and integer overflow in the midpoint.
+
+**Mental model**
+Think of guessing a number between 1 and 100 where each guess is answered "higher" or "lower". Guessing 50 halves the possibilities no matter what the answer is; seven guesses is enough. That's binary search: **every comparison must eliminate half the remaining candidates**. The deeper idea is that the array isn't the point — the *sortedness* is. Any structure where you can ask a yes/no question whose answer is `no no no yes yes yes` along a line is searchable this way. A sorted array is just the most familiar such line; "is capacity `C` enough to ship everything in 5 days?" is another, and it lives on the number line of capacities, not on any array.
 
 **Key terms**
-*Loop invariant* — the property held before/after every iteration (the answer lives in [lo, hi]). *Lower bound* — first index whose value is >= target. *Upper bound* — first index whose value is > target. *Monotonic predicate* — a boolean f(x) that is false...false, true...true (or vice versa) across the range; the precondition for binary search on the answer. *Parametric search* — binary-searching the answer space guided by a feasibility predicate. *Exponential search* — double a bound until you overshoot, then binary search the window. *Interpolation search* — guess the position by linear estimation on value. *Ternary search* — find the extremum of a unimodal function.
+- **Loop invariant** — a property true before and after every iteration; here: "if the target exists, it is inside the current interval."
+- **Lower bound** — the first index whose value is `≥` target (where the target would be inserted, leftmost).
+- **Upper bound** — the first index whose value is `>` target (insertion point, rightmost).
+- **Monotonic predicate** — a boolean `f(x)` that is `false…false, true…true` across the range (or the reverse); the precondition for searching an answer space.
+- **Parametric search / binary search on the answer** — binary-searching the *space of possible answers*, guided by a feasibility check.
+- **Exponential (galloping) search** — double a bound until you overshoot, then binary-search the window.
+- **Interpolation search** — guess the probe position by linear estimation on the *value*, not the midpoint.
+- **Ternary search** — locate the extremum of a unimodal function by probing two points and discarding a third.
+- **Half-open interval** — a range `[lo, hi)` that includes `lo` but excludes `hi`; the convention that makes boundary searches cleanest.
 
 **Core mechanics**
-Classic binary search maintains a candidate interval and halves it each step: compute mid = lo + (hi - lo) / 2, compare a[mid] to the target, discard the half that can't contain the answer. The invariant — "if the target exists, it's within the current interval" — is what guarantees correctness; every iteration must preserve it. Time O(log n), space O(1) iterative. The recurrence is T(n) = T(n/2) + O(1) = O(log n). Boundary variants change the comparison and which pointer moves: lower_bound moves lo past values < target; upper_bound moves lo past values <= target. Binary search on the answer: define a predicate feasible(x) that's monotonic in x, then binary-search the smallest (or largest) x for which it holds — the array is conceptual, the "sorted structure" is the truth table of the predicate.
+Classic binary search keeps a candidate interval and halves it each step: compute `mid = lo + (hi - lo) // 2`, compare `a[mid]` to the target, discard the half that provably can't contain it. The invariant — "if the target exists, it's within the current interval" — is what guarantees correctness; every iteration must preserve it. Time `O(log n)` — each step halves what's left, so 1,000,000 items take about 20 steps — and `O(1)` space when iterative. The recurrence is `T(n) = T(n/2) + O(1) = O(log n)`. Boundary variants change only the comparison and which pointer moves: `lower_bound` pushes `lo` past values `<` target; `upper_bound` pushes `lo` past values `≤` target. For binary search on the answer, define `feasible(x)` that is monotonic in `x`, then binary-search the smallest (or largest) `x` where it holds — the "sorted array" is conceptual: it's the truth table of the predicate.
 
 **Trade-offs**
-Binary search needs sorted (or monotonically-structured) data; if you must sort first that's O(n log n), so for a single lookup on unsorted data linear scan wins. It beats linear search decisively for repeated lookups on static sorted data. Interpolation search averages O(log log n) on uniform data but degrades to O(n) on skewed input; binary search's O(log n) is unconditional. Hash tables give O(1) average lookup but lose ordering and range queries — binary search keeps both.
+Binary search needs sorted (or monotonically structured) data. If you must sort first that costs `O(n log n)`, so for a *single* lookup on unsorted data a linear scan wins outright. It pays off decisively for repeated lookups on static sorted data. Interpolation search averages `O(log log n)` on uniformly-distributed keys but degrades to `O(n)` on skewed input; binary search's `O(log n)` is unconditional, which is why it's the safe default. Hash tables give `O(1)` average point lookups but lose ordering and range queries — binary search keeps both. And on a sorted *array*, inserts are `O(n)`, so churning data wants a balanced tree instead.
 
 **Common confusions**
-The off-by-one wars: `lo <= hi` vs `lo < hi`, `hi = mid` vs `hi = mid - 1`. The fix is to pick one invariant and derive everything from it, not to guess-and-check. Computing mid as `(lo + hi) / 2` overflows for large indices — use `lo + (hi - lo) / 2`. Candidates think binary search only works on arrays; the real power is on the *answer space*. And they forget the data must be *monotonic* w.r.t. the predicate — binary search on a non-monotonic predicate silently returns garbage.
+The off-by-one wars: `lo <= hi` versus `lo < hi`, `hi = mid` versus `hi = mid - 1`. The fix is to pick one invariant and derive everything from it, not to guess-and-check until the tests pass. Computing `mid = (lo + hi) // 2` overflows for large indices in fixed-width integer languages — write `lo + (hi - lo) // 2`. Candidates think binary search only works on arrays; the real power is on the *answer space*. And they forget the data must be **monotonic with respect to the predicate** — binary search on a non-monotonic predicate silently returns garbage rather than failing loudly.
 
 **Why interviewers ask**
-Binary search is the ultimate "simple until it isn't" filter: anyone can state it, few write it bug-free on the first try, and fewer still recognize when a problem is secretly a binary-search-on-the-answer. The classic follow-up escalates from "find the element" to "find the first element >= x" to "minimize the maximum load across k partitions" — the same log n idea wearing progressively better disguises. It tests invariant reasoning and the ability to spot monotonic structure.
+Binary search is the ultimate "simple until it isn't" filter: anyone can state it, few write it bug-free first try, and fewer still recognise a problem that is secretly a binary search on the answer. The classic escalation goes "find the element" → "find the first element `≥ x`" → "minimise the maximum load across `k` partitions" — the same `log n` idea in progressively better disguises. It tests invariant reasoning and the ability to spot monotonic structure where none is advertised.
 
 ### Why is binary search O(log n) and linear search O(n)?
 
-Linear search checks elements one at a time, so in the worst case (element absent or last) it does n comparisons — O(n). Binary search halves the remaining search space with each comparison: n, n/2, n/4, ... down to 1. The number of halvings to reach a single element is log2(n), giving O(log n) — the recurrence is T(n) = T(n/2) + O(1). Concretely, searching a billion sorted elements takes ~30 comparisons instead of a billion. The catch is binary search requires sorted data, while linear search works on anything.
+Linear search checks elements one at a time, so in the worst case (target absent, or last) it does `n` comparisons — `O(n)`. Binary search halves the remaining search space with each comparison: `n`, `n/2`, `n/4`, … down to 1. The number of halvings needed to reach a single element is `log₂ n`, hence `O(log n)`; the recurrence is `T(n) = T(n/2) + O(1)`.
+
+In concrete numbers: on a **billion** sorted elements binary search needs about **30** comparisons (`2³⁰ ≈ 10⁹`), while linear search needs up to a billion — and doubling the data adds exactly *one* comparison. The catch is the precondition: binary search demands sorted data, linear search works on anything.
 
 ### State the binary search loop invariant and why it matters.
 
-The invariant is: "if the target exists in the array, it lies within the current search interval [lo, hi]." Every iteration must preserve this — when you discard a half, you must be certain the target can't be there. If a[mid] < target, everything at or below mid is too small, so you set lo = mid + 1, keeping the invariant. Getting the invariant explicit is the whole trick: it tells you exactly whether to use `<=` or `<` in the loop condition and whether to move the pointer to `mid` or `mid ± 1`. Bugs come from violating the invariant, not from the concept.
+The invariant is: **"if the target exists, it lies within the current interval `[lo, hi]`."** Every iteration must preserve it — when you throw away a half you must be *certain* the target cannot be there. If `a[mid] < target`, then `a[mid]` and everything left of it are too small, so `lo = mid + 1` is safe.
+
+```python
+def binary_search(a, target):            # a sorted ascending
+    lo, hi = 0, len(a) - 1               # invariant: answer, if any, in [lo, hi]
+    while lo <= hi:                      # non-empty closed interval
+        mid = lo + (hi - lo) // 2        # overflow-safe midpoint
+        if a[mid] == target:
+            return mid
+        if a[mid] < target:
+            lo = mid + 1                 # a[lo..mid] all too small - discard
+        else:
+            hi = mid - 1                 # a[mid..hi] all too big - discard
+    return -1                            # interval empty: target absent
+```
+
+Trace `a = [1, 3, 5, 7, 9, 11]`, `target = 9`. Start `lo=0, hi=5`, `mid=2`, `a[2]=5 < 9` → `lo=3`. Now `mid=4`, `a[4]=9` → return `4`. Two comparisons for six elements.
+
+Making the invariant explicit is the whole trick: it tells you whether the loop condition is `<=` or `<`, and whether a pointer moves to `mid` or `mid ± 1`. Bugs come from violating it, never from the concept.
 
 ### How do you avoid the integer overflow bug in the midpoint calculation?
 
-The naive `mid = (lo + hi) / 2` can overflow when lo + hi exceeds the integer maximum — a real bug that lived in Java's `Arrays.binarySearch` and the JDK for years. The fix is `mid = lo + (hi - lo) / 2`: mathematically identical, but the subtraction stays within bounds since hi - lo can't overflow when both are valid indices. In languages with big integers (Python) it's a non-issue, but in Java/C/C++/Rust it's a genuine trap and interviewers watch for it.
+The naive `mid = (lo + hi) / 2` overflows when `lo + hi` exceeds the maximum integer — a real bug that lived in Java's `Arrays.binarySearch` for nine years. With 32-bit signed ints the ceiling is about `2.1 × 10⁹`, so two indices past ~1.07 billion sum to a *negative* number, and a negative index either throws or reads memory it shouldn't.
+
+The fix is `mid = lo + (hi - lo) / 2` — mathematically identical for `lo ≤ hi`, but the subtraction `hi - lo` is bounded by the array length, so nothing can overflow. Java also offers the unsigned shift `(lo + hi) >>> 1`, which reinterprets the overflowed sum as unsigned and still yields the correct midpoint. Python's integers are arbitrary-precision so it's a non-issue there, but write the safe form anyway: in Java, C, C++ or Rust it's a genuine trap and interviewers watch for it.
 
 ### What is the difference between lower bound and upper bound?
 
-Both find insertion points in a sorted array with duplicates. Lower bound returns the first index whose value is >= target — the leftmost position where target could be inserted while keeping order. Upper bound returns the first index whose value is > target — the rightmost such position. If the target is present, lower_bound points at its first occurrence and upper_bound points just past its last. Their difference, upper_bound - lower_bound, is the count of elements equal to the target. Both run in O(log n) and differ only in whether the comparison is `<` (lower) or `<=` (upper) when deciding to move lo.
+Both answer "where does the target belong?" in a sorted array that may contain duplicates. **Lower bound** returns the first index whose value is `≥` target — the leftmost insertion point that keeps order. **Upper bound** returns the first index whose value is `>` target — the rightmost such position. If the target is present, `lower_bound` points at its first occurrence and `upper_bound` one past its last, so `upper_bound - lower_bound` is exactly the **count** of equal elements.
+
+```python
+def lower_bound(a, target):              # first index with a[i] >= target
+    lo, hi = 0, len(a)                   # half-open [lo, hi); hi = len is legal
+    while lo < hi:
+        mid = lo + (hi - lo) // 2
+        if a[mid] < target:              # strictly less -> not a candidate
+            lo = mid + 1
+        else:
+            hi = mid                     # a[mid] is a candidate; keep it
+    return lo                            # == hi; may be len(a)
+
+def upper_bound(a, target):              # first index with a[i] > target
+    lo, hi = 0, len(a)
+    while lo < hi:
+        mid = lo + (hi - lo) // 2
+        if a[mid] <= target:             # only change: <= instead of <
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+```
+
+Micro-example: `a = [1, 2, 2, 2, 5]`, `target = 2`. `lower_bound` → `1`, `upper_bound` → `4`, so there are `4 - 1 = 3` twos. For `target = 3` both return `4` (the insertion point), and the empty span tells you 3 is absent. Both are `O(log n)`. Learn this half-open template as your default — most binary-search questions are a lower bound in disguise.
 
 ### How do you find the first and last occurrence of a value with duplicates?
 
-Run two boundary searches. First occurrence = lower_bound(target): binary search for the leftmost index with value >= target, then check that array[index] == target. Last occurrence = upper_bound(target) - 1: find the leftmost index with value > target and step back one. Both are O(log n), so finding the full range of a duplicated value is O(log n) total. The key is that a plain binary search returns *some* matching index, not a boundary — you need the lower/upper-bound variants to pin down the extremes.
+Run two boundary searches. **First occurrence** = `lower_bound(target)`, valid only if that index is in range and the value there actually equals the target. **Last occurrence** = `upper_bound(target) - 1`, valid only if the span is non-empty.
+
+```python
+def first_last(a, target):
+    lo = lower_bound(a, target)
+    if lo == len(a) or a[lo] != target:  # target not present at all
+        return (-1, -1)
+    hi = upper_bound(a, target) - 1
+    return (lo, hi)
+```
+
+On `a = [5, 7, 7, 7, 8, 8, 10]` with `target = 7`: `lower_bound` → `1`, `upper_bound` → `4`, so the answer is `(1, 3)`. With `target = 6`: `lower_bound` → `1`, but `a[1] = 7 ≠ 6`, so `(-1, -1)`.
+
+Two `O(log n)` searches is still `O(log n)` — roughly 40 comparisons on a million elements. The point to internalise: a plain binary search returns *some* matching index, wherever the halving happened to land, not a boundary. Only the lower/upper-bound variants pin the extremes down deterministically.
 
 ### What is "binary search on the answer" and when do you use it?
 
-Instead of searching over array indices, you binary-search over the *space of possible answers*, guided by a feasibility predicate. It applies when: (1) the answer is a number in a known range [lo, hi], and (2) there's a monotonic predicate feasible(x) — if x works, every larger (or smaller) x also works. Example: "minimize the max load when splitting an array into k contiguous parts." Guess a capacity C; feasible(C) = "can we split into <= k parts each with sum <= C?" is monotonic (bigger C is easier). Binary-search the smallest feasible C. The "sorted array" is conceptual — it's the truth table false...false, true...true of the predicate.
+Instead of searching over array indices, you binary-search over the **space of possible answers**, guided by a feasibility predicate. It applies when two conditions hold: (1) the answer is a number in a known range `[lo, hi]`, and (2) there's a predicate `feasible(x)` that is **monotonic** — if `x` works, every larger `x` also works (or every smaller one, for a maximisation).
+
+The analogy: you're not looking for an item on a shelf, you're finding the temperature at which water boils by testing temperatures. You can't enumerate every candidate, but each test says which direction to go, and "does it boil?" only flips once.
+
+The recipe is always the same three steps: bound the answer range, write `feasible(x)`, then run the *exact* `lower_bound` template over values instead of indices — `if feasible(mid): hi = mid else: lo = mid + 1`. Cost is `O(log(range) × cost_of_feasible)`; the range enters only logarithmically, so a billion candidate values cost ~30 feasibility checks. The tell in a problem statement is **"minimise the maximum"** or **"maximise the minimum"** with a condition you can check directly.
 
 ### Give a concrete example of parametric search / binary search on the answer.
 
-"Ship packages within D days; find the minimum ship capacity." Capacity is the answer, ranging from max(package) to sum(packages). Define feasible(cap) = "can we deliver all packages in <= D days if each day's load <= cap?" — computed by a greedy O(n) scan. This predicate is monotonic: more capacity never needs more days. Binary-search the smallest capacity where feasible is true. Total cost O(n log(sum)). Other classics: Koko eating bananas (min eating speed), splitting an array to minimize the largest subarray sum, and "smallest divisor given a threshold." The tell is "minimize the maximum" or "maximize the minimum" with a checkable predicate.
+"Ship all packages within `D` days; find the minimum ship capacity." The answer is a capacity, and it must lie between `max(weights)` (you must carry the heaviest package) and `sum(weights)` (one giant day). `feasible(cap)` = "can we deliver everything in `≤ D` days if no day exceeds `cap`?" — answered by a greedy `O(n)` scan.
+
+```python
+def ship_within_days(weights, D):
+    def feasible(cap):                   # greedy: fill each day as full as possible
+        days, load = 1, 0
+        for w in weights:
+            if load + w > cap:           # start a new day
+                days += 1
+                load = 0
+            load += w
+        return days <= D
+
+    lo, hi = max(weights), sum(weights)  # answer is somewhere in here
+    while lo < hi:
+        mid = lo + (hi - lo) // 2
+        if feasible(mid):
+            hi = mid
+        else:
+            lo = mid + 1
+    return lo
+```
+
+Worked micro-example: `weights = [1, 2, 3, 4, 5]`, `D = 2`. The range starts as `[5, 15]`.
+
+- `mid = 10` → days `[1,2,3,4]` and `[5]` = 2 days, feasible → `hi = 10`.
+- `mid = 7` → days `[1,2,3]`, `[4]`, `[5]` = 3 days, infeasible → `lo = 8`.
+- `mid = 9` → days `[1,2,3]` and `[4,5]` = 2 days, feasible → `hi = 9`.
+- `mid = 8` → days `[1,2,3]`, `[4]`, `[5]` = 3 days, infeasible → `lo = 9`.
+
+`lo == hi == 9`, so the answer is **9**.
+
+Total cost `O(n log(sum))` — an `O(n)` greedy check times about `log₂ 10 ≈ 4` iterations here, ~30 for realistic sums. Classics with the identical shape: Koko eating bananas (minimum eating speed), splitting an array to minimise the largest subarray sum, "smallest divisor given a threshold," and allocating books to students.
 
 ### What monotonicity condition must hold for binary search on the answer to be correct?
 
-The predicate feasible(x) must be *monotonic* over the answer range: once it flips from false to true (or true to false) it never flips back. Formally, if feasible(x) is true then feasible(x') is true for all x' >= x (for a "minimize" problem). This guarantees a single boundary between the false region and the true region, which is exactly what binary search locates. If the predicate isn't monotonic — it flips multiple times — binary search will converge to *a* boundary but not necessarily the right one, silently returning a wrong answer. Always verify (and be ready to argue) monotonicity before applying the technique.
+`feasible(x)` must be **monotonic** over the answer range: once it flips from false to true it never flips back. Formally, for a minimisation problem, `feasible(x) ⟹ feasible(x')` for all `x' ≥ x`. That guarantees exactly **one** boundary between the false region and the true region — and locating a single boundary is precisely what binary search does.
+
+Sanity-check it the same way every time: argue that a larger `x` can *simulate* whatever a smaller `x` did. In the shipping example, any schedule valid at capacity `C` is still valid at `C + 1` — every day's load is still under the cap — so feasibility can only improve. That one sentence is the proof, and it's what an interviewer wants to hear.
+
+If the predicate isn't monotonic — say it reads `false, true, false, true` — binary search still terminates and still returns *a* boundary, just not the one you want. It fails **silently**: the code looks right, passes small tests, and is wrong on the case that matters. Always verify monotonicity first.
 
 ### What is exponential search and when is it better than plain binary search?
 
-Exponential search (aka galloping or doubling search) finds a range first, then binary-searches it. Start with bound = 1 and double it (1, 2, 4, 8, ...) until array[bound] exceeds the target or you pass the end; now the target lies in [bound/2, bound], a window you binary-search. It runs in O(log i) where i is the target's position — faster than O(log n) binary search when the target is near the front. Its real use is *unbounded or infinite* sorted sequences where you don't know n upfront (streams, unbounded arrays): you can't compute a midpoint without a right boundary, so you gallop to find one.
+Exponential search (galloping, or doubling search) finds a bracket first, then binary-searches inside it. Start with `bound = 1` and double — 1, 2, 4, 8, 16 — until `a[bound]` exceeds the target or you run off the end. The target must then lie in `[bound // 2, bound]`, a window you binary-search normally.
+
+```python
+def exponential_search(a, target):
+    if not a: return -1
+    if a[0] == target: return 0
+    bound = 1
+    while bound < len(a) and a[bound] < target:
+        bound *= 2                       # 1, 2, 4, 8, ... gallop past the target
+    lo = bound // 2
+    hi = min(bound, len(a) - 1)          # target, if present, is in [lo, hi]
+    while lo <= hi:                      # ordinary binary search on the window
+        mid = lo + (hi - lo) // 2
+        if a[mid] == target: return mid
+        if a[mid] < target: lo = mid + 1
+        else: hi = mid - 1
+    return -1
+```
+
+It runs in `O(log i)` where `i` is the target's *position*, beating `O(log n)` when the target is near the front: finding item 10 in a million-element array takes ~4 doublings plus ~4 binary steps instead of ~20. Its real justification is **unbounded or unknown-length** sorted sequences — streams, infinite arrays, paginated APIs. You cannot compute a midpoint without a right endpoint, so you gallop to manufacture one.
 
 ### What is interpolation search and what is its complexity?
 
-Interpolation search improves on binary search for *uniformly distributed* numeric keys by guessing the probe position rather than always taking the middle. Instead of mid = (lo + hi)/2, it estimates where the target should be by linear interpolation: pos = lo + (target - a[lo]) * (hi - lo) / (a[hi] - a[lo]) — like looking up "Smith" near the end of a phone book, not the middle. On uniformly distributed data it averages O(log log n), remarkably fast. But on skewed or clustered data the estimate is bad and it degrades to O(n) worst case. Binary search's O(log n) is distribution-independent, which is why it's the safe default.
+Interpolation search improves on binary search for **uniformly distributed numeric keys** by *guessing* where the target should be rather than always probing the middle. It's how you actually use a phone book: looking up "Smith" you open near the back, not at the halfway point.
+
+Replace the midpoint with a linear estimate: `pos = lo + (target - a[lo]) * (hi - lo) // (a[hi] - a[lo])`. On `a = [10, 20, 30, …, 100]` searching for 70, the formula lands directly on index 6 — one probe, where binary search would take four.
+
+On uniform data it averages `O(log log n)` — about 5 probes for a million elements versus 20. But the estimate assumes even spacing, and on skewed data like `[1, 2, 3, 4, 1000000]` it degrades to `O(n)`, crawling one position at a time. It also needs numeric keys you can do arithmetic on, and you must guard the division when `a[hi] == a[lo]`. Binary search's `O(log n)` is distribution-independent, which is why it's the default and interpolation search is a niche optimisation.
 
 ### What is ternary search and when do you use it?
 
-Ternary search finds the extremum (max or min) of a *unimodal* function — one that strictly increases then strictly decreases (or vice versa). It splits the range into thirds with two probes m1 and m2; by comparing f(m1) and f(m2) it discards one third that can't contain the peak, since unimodality guarantees the extremum isn't in the eliminated region. It runs in O(log n) probes (base 3/2). Use it for optimizing unimodal continuous or discrete functions — e.g. minimizing a convex cost. Note it finds *extrema*, not a target value; for locating a known value in a sorted array, binary search is strictly better (fewer function evaluations per step).
+Ternary search finds the **extremum** (peak or trough) of a **unimodal** function — one that strictly increases then strictly decreases, or vice versa. Note the difference from everything above: it locates a maximum or minimum, not a known value.
+
+Probe two points `m1 = lo + (hi - lo)/3` and `m2 = hi - (hi - lo)/3`. If `f(m1) < f(m2)` (seeking a maximum), the peak cannot be left of `m1` — a unimodal function already past its peak at `m1` could not rise again by `m2` — so set `lo = m1`. Otherwise set `hi = m2`. Each iteration discards a third of the range.
+
+Micro-example: maximise `f(x) = -(x - 3)²` on `[0, 6]`. Probes at 2 and 4 both give `-1` — a tie, so either end can go; take `hi = 4`. Next probes on `[0, 4]` are ~1.33 and ~2.67, giving `-2.79` and `-0.11`, so `lo` moves right. The interval keeps closing on 3, the true peak.
+
+It runs in `O(log n)` probes with base `3/2`, so it needs *more* function evaluations per unit of progress than binary search's base 2 — roughly 1.7× as many. Use it for optimising unimodal cost functions, continuous or discrete. Never use it to find a value in a sorted array; binary search is strictly better there. Unimodality is a hard precondition — on a two-peaked function it converges to a local extremum.
 
 ### How do you binary search a rotated sorted array?
 
-A rotated sorted array (e.g. [4,5,6,7,0,1,2]) has one pivot; at each step at least one half [lo, mid] or [mid, hi] is still properly sorted. Compute mid, then determine which half is sorted by comparing a[lo] to a[mid]: if a[lo] <= a[mid] the left half is sorted, else the right half is. Check whether the target falls within the sorted half's value range; if so, search that half, otherwise search the other. It stays O(log n) — you still halve each step. The insight is that rotation preserves enough local sortedness to keep binary search's discard rule valid; you just decide the discard by which half is monotonic.
+A rotated sorted array such as `[4, 5, 6, 7, 0, 1, 2]` is a sorted array cut at one pivot and swapped. The key observation: **at every step, at least one of the two halves is still properly sorted** — you can't cut a sorted array once and break both sides.
+
+```python
+def search_rotated(a, target):
+    lo, hi = 0, len(a) - 1
+    while lo <= hi:
+        mid = lo + (hi - lo) // 2
+        if a[mid] == target:
+            return mid
+        if a[lo] <= a[mid]:              # left half [lo, mid] is sorted
+            if a[lo] <= target < a[mid]: # target inside that sorted range?
+                hi = mid - 1
+            else:
+                lo = mid + 1
+        else:                            # right half [mid, hi] is sorted
+            if a[mid] < target <= a[hi]:
+                lo = mid + 1
+            else:
+                hi = mid - 1
+    return -1
+```
+
+Trace `a = [4,5,6,7,0,1,2]`, `target = 0`. `lo=0, hi=6, mid=3`, `a[3]=7`; `a[0]=4 ≤ 7` so the left half is sorted, and `0` is not in `[4, 7)` → `lo = 4`. Now `mid=5`, `a[5]=1`; `a[4]=0 ≤ 1` so that left half is sorted and `0` *is* in `[0, 1)` → `hi = 4`. Then `mid=4`, `a[4]=0` → return `4`.
+
+Still `O(log n)`: you discard half every step. Rotation preserves enough local sortedness to keep the discard rule valid — you just decide *which* half to test by first working out which one is monotonic. Caveat: with **duplicates** (`[1,1,1,0,1]`), `a[lo] == a[mid]` tells you nothing, and the fallback of incrementing `lo` makes the worst case `O(n)`.
 
 ### Why choose `lo < hi` vs `lo <= hi`, and how do you pick termination?
 
-The two loop styles correspond to two invariants. `while (lo <= hi)` searches a *closed* interval [lo, hi] where every index including hi is a live candidate; you exit when lo > hi (empty interval), and pointers move to mid ± 1. `while (lo < hi)` searches a *half-open* interval and converges lo and hi to a single boundary index (common for lower/upper-bound style), moving hi = mid (not mid - 1). The rule: pick the invariant first, then the loop condition, the pointer updates, and the return value all follow deterministically. Mixing conventions — `lo <= hi` with `hi = mid` — causes infinite loops. Consistency, not memorization, is the fix.
+The two styles correspond to two different invariants, and everything else follows from the choice.
+
+`while lo <= hi` searches a **closed** interval `[lo, hi]` where every index including `hi` is a live candidate. You exit when `lo > hi` — the interval is empty, the target is absent. Pointers must move to `mid + 1` / `mid - 1`, because `mid` has been examined and excluding it is what guarantees progress. Use this for exact-match search returning an index or `-1`.
+
+`while lo < hi` searches a **half-open** interval `[lo, hi)` and converges `lo` and `hi` onto a single boundary index, which it returns. Here `hi = mid` (not `mid - 1`), because `mid` might itself be the answer — you're narrowing, not excluding. Progress still holds because floor division keeps `mid < hi`. Use this for lower/upper bound and for binary search on the answer.
+
+The failure modes: mixing conventions — `while lo <= hi` with `hi = mid` — **infinite-loops** when `lo == hi` and the predicate keeps sending you left, since `mid` stays equal to `lo` and `hi` never changes. Symmetrically, `while lo < hi` with `hi = mid - 1` can skip the answer. And if you ever pair `hi = mid` with `lo = mid`, you must round the midpoint *up* (`mid = lo + (hi - lo + 1) // 2`) or `lo` never advances past `hi - 1`. The rule: **pick the invariant first**, and the loop condition, pointer updates and return value are all forced. Consistency, not memorisation.
 
 ### When is binary search the wrong choice?
 
-When the data isn't sorted and you'll query it only once — sorting to enable binary search costs O(n log n), so a single O(n) linear scan is cheaper. When the structure changes frequently, keeping it sorted for binary search is expensive (each insert is O(n) in an array); a balanced BST or hash structure may serve better. When you need O(1) exact-match lookups and don't care about order, a hash table beats O(log n). And binary search fundamentally requires *monotonic* structure — if there's no sorted order or monotonic predicate to exploit, it doesn't apply at all.
+Four situations. **Unsorted data queried once** — sorting first costs `O(n log n)`, so a single `O(n)` linear scan is cheaper; only amortise the sort across many lookups. **Frequently changing data** — keeping a sorted array sorted costs `O(n)` per insert from the shifting, swamping the `O(log n)` you saved; a balanced BST (`O(log n)` insert *and* search) serves better. **Pure membership with no ordering needs** — a hash table's expected `O(1)` beats `O(log n)`. **Tiny inputs** — below roughly 30–50 elements a linear scan often wins on wall-clock time thanks to branch prediction and cache locality, despite losing asymptotically.
+
+And the fundamental one: binary search requires **monotonic structure**. No sorted order, no monotonic predicate, no binary search — the technique simply doesn't apply, and forcing it produces confidently wrong answers.
 
 ### How does binary search compare to a hash table for lookups?
 
-Hash tables give expected O(1) point lookups; binary search on a sorted array gives O(log n). For pure "is x present" queries on a static set, the hash table is asymptotically faster. But binary search on sorted data wins on everything *order-related*: range queries ("all values between a and b"), successor/predecessor, finding the k-th smallest, and returning results in sorted order — all natural for a sorted array or tree, all impossible or expensive for a hash table. Binary search also has better worst-case guarantees (hashing can degrade to O(n) with collisions) and better cache locality on contiguous arrays. Choose by whether you need ordering and range operations, not just membership.
+Hash tables give **expected `O(1)`** point lookups; binary search on a sorted array gives **`O(log n)`**. For pure "is `x` present?" on a static set, the hash table is asymptotically faster, and in practice usually faster too.
+
+But binary search wins on everything **order-related** — operations a hash table cannot do without a full `O(n)` scan:
+
+- **Range queries** — "all values between `a` and `b`" is `lower_bound(a)` to `upper_bound(b)`, `O(log n + k)` for `k` results.
+- **Successor / predecessor** — "smallest value greater than `x`" is one `upper_bound` call.
+- **Order statistics** — the k-th smallest is just index `k`.
+- **Iteration in sorted order** — free; a hash table would need to sort first.
+
+Binary search also has better **worst-case** guarantees — `O(log n)` always, whereas hashing degrades toward `O(n)` under adversarial collisions (hash-flooding attacks) — and a contiguous sorted array has excellent **cache locality** with no per-entry overhead, while a hash table carries load-factor slack and pointer chasing. Choose by *access pattern*: membership only → hash table; ordering, ranges or predecessor queries → sorted array plus binary search, or a balanced tree if the data also changes.
 
 ## Greedy Algorithms
 
 ### Summary
 
 **What this topic covers**
-Algorithms that build a solution one step at a time, always taking the locally best-looking option and never reconsidering. The paradigm is trivially easy to *code* and treacherous to *justify*: the whole difficulty is proving that a sequence of locally optimal choices yields a globally optimal result. This topic covers the two properties that make greedy correct (greedy-choice property and optimal substructure), the exchange argument used to prove correctness, canonical wins (interval scheduling, Huffman coding, fractional knapsack), and the canonical failures (0/1 knapsack, coin change with arbitrary denominations) where greedy plausibly-but-wrongly seems right.
+Algorithms that build a solution one step at a time, always taking the locally best-looking option and never reconsidering. The paradigm is trivially easy to *code* and treacherous to *justify*: the difficulty is proving that locally optimal choices compose into a globally optimal result. This topic covers the two properties that make greedy correct (**greedy-choice property** and **optimal substructure**), the **exchange argument** used to prove it, canonical wins with code (interval scheduling, Huffman coding, fractional knapsack, MST), and the canonical failures (0/1 knapsack, coin change with arbitrary denominations) where greedy plausibly-but-wrongly seems right.
+
+**Mental model**
+Think of a hiker reaching for the highest peak by always walking uphill. On a single smooth hill, "always go up" reaches the top. On a bumpy range it strands you on a foothill, with the real summit across a valley you refused to descend into. Greedy algorithms are "always walk uphill": no memory, no lookahead, no backtracking. Dynamic programming is the hiker who surveys every route before committing — slower, never stranded. So the question is never "does greedy run fast?" (it always does) but "can I *prove* this landscape has no foothills?"
 
 **Key terms**
-*Greedy choice* — commit to the best immediate option without lookahead or backtracking. *Greedy-choice property* — some globally optimal solution contains the greedy first choice (so committing to it loses nothing). *Optimal substructure* — an optimal solution is built from optimal solutions to subproblems. *Exchange argument* — proof technique: transform any optimal solution into the greedy one, swap by swap, without worsening it. *Matroid* — the algebraic structure guaranteeing greedy optimality (deep background, rarely required). *Fractional vs 0/1* — whether you may take part of an item; fractional is greedy-solvable, 0/1 is not.
+- **Greedy choice** — commit to the best immediate option, with no lookahead and no backtracking.
+- **Greedy-choice property** — some globally optimal solution contains the greedy first choice, so committing to it loses nothing.
+- **Optimal substructure** — an optimal solution to the whole is built from optimal solutions to subproblems.
+- **Exchange argument** — the standard proof: transform any optimal solution into the greedy one, swap by swap, without ever making it worse.
+- **Greedy-stays-ahead** — the other standard proof: induct that the greedy's partial solution is at least as good as any rival's at every step.
+- **Matroid** — the algebraic structure that guarantees greedy optimality (deep background, rarely required in interviews).
+- **Fractional vs 0/1** — whether you may take part of an item; fractional is greedy-solvable, 0/1 is not.
+- **Approximation ratio** — how far a non-optimal greedy can provably stray from the optimum (e.g. `2×` for list scheduling).
 
 **Core mechanics**
-The recipe: (1) sort or order candidates by a greedy criterion; (2) iterate, taking each candidate that doesn't violate feasibility; (3) never undo. Cost is usually dominated by the sort — O(n log n) — plus a linear pass. Correctness rests on two pillars. Greedy-choice property: prove that some optimal solution *agrees with* the greedy choice, so you never sacrifice optimality by making it — typically via an exchange argument, showing any optimal solution that differs can be edited to match the greedy pick without getting worse. Optimal substructure: after committing the greedy choice, the remaining problem is a smaller instance of the same problem, so induction carries the optimality through. If either pillar fails, greedy fails.
+The recipe is three lines: (1) sort or order candidates by a greedy criterion; (2) iterate, taking each candidate that doesn't break feasibility; (3) never undo. Cost is usually dominated by the sort — `O(n log n)`, meaning the work grows a little faster than the input size — plus a linear pass. Correctness rests on two pillars. **Greedy-choice property**: prove some optimal solution *agrees with* the greedy choice, so making it sacrifices nothing — typically via an exchange argument, showing any optimal solution that differs can be edited to match the greedy pick without getting worse. **Optimal substructure**: after committing the greedy choice, what remains is a smaller instance of the same problem, so induction carries optimality through. If either pillar fails, greedy fails.
 
 **Trade-offs**
-Greedy vs dynamic programming: greedy commits immediately and never revisits, so it's faster (often O(n log n) vs DP's O(n·W) or O(n^2)) and uses O(1)-O(n) space, but it only works when the greedy-choice property holds. DP explores and combines subproblem solutions, so it's slower and heavier but correct for the broader class where a locally optimal choice can be globally wrong. Rule of thumb: try to prove greedy correct; if you can't produce an exchange argument, fall back to DP. Greedy is a *special case* of problems DP can also solve — when greedy works, DP would too but wastefully.
+Greedy versus dynamic programming: greedy commits immediately and never revisits, so it's faster (often `O(n log n)` against DP's `O(n·W)` or `O(n²)`, "n squared" meaning doubling the input quadruples the work) and uses `O(1)`–`O(n)` space — but only when the greedy-choice property holds. DP explores and combines subproblem solutions: slower and heavier, but correct for the broader class where a local choice can be globally wrong. Rule of thumb: try to prove greedy correct; if you can't produce an exchange argument, fall back to DP. Greedy is a *special case* of what DP solves — when greedy works, DP would work too, just wastefully.
 
 **Common confusions**
-The cardinal error is assuming greedy works because it *feels* obvious — 0/1 knapsack by value-density looks right and is wrong. Candidates confuse "I found a greedy that passes the examples" with "I proved it optimal"; passing tests is not a proof. Interval scheduling: the correct key is *earliest finish time*, not shortest duration or earliest start — a classic trap. Coin change is greedy-optimal for canonical coin systems (US coins) but not arbitrary ones ({1,3,4} making 6). And greedy-choice property is not the same as optimal substructure — a problem can have one without the other.
+The cardinal error is assuming greedy works because it *feels* obvious — 0/1 knapsack by value density looks right and is wrong. Candidates confuse "I found a greedy that passes the examples" with "I proved it optimal"; passing tests is not a proof. Interval scheduling: the key is *earliest finish time*, not shortest duration and not earliest start. Coin change is greedy-optimal for canonical coin systems (US coins) but not arbitrary ones — `[1, 3, 4]` making 6 breaks it. And the greedy-choice property is not optimal substructure: a problem can have the second without the first, which is precisely the DP-only class.
 
 **Why interviewers ask**
 Greedy problems test *judgment and proof*, not coding — the code is five lines; the question is "why is this correct, and how do you know it's not one of the cases where greedy fails?" Interviewers want to see you propose a greedy, then either prove it with an exchange argument or spot the counterexample that kills it. The signature follow-up is "are you sure? construct an input where that fails" — and the strong candidate either defends with a proof sketch or immediately reaches for DP.
 
 ### What defines a greedy algorithm?
 
-A greedy algorithm builds a solution incrementally, at each step making the choice that looks best *right now* according to some local criterion, and never reconsidering past choices. No backtracking, no lookahead, no exploring alternatives. Because it commits immediately, it's fast — usually dominated by an initial sort, O(n log n). The entire subtlety is correctness: a greedy is only valid if those locally optimal choices provably compose into a globally optimal solution, which is *not* guaranteed for most problems. Coding a greedy is easy; justifying it is the real work.
+A greedy algorithm builds a solution incrementally, at each step making the choice that looks best *right now* by some local criterion, and never reconsidering. No backtracking, no lookahead, no exploring alternatives. Think of filling a shopping basket on a fixed budget by always grabbing the best-value item on the shelf and never putting anything back.
+
+Because it commits immediately, it's fast — usually dominated by an initial sort, `O(n log n)`, meaning the running time grows just a little faster than the number of items. The entire subtlety is correctness: a greedy is valid only if those local choices provably compose into a globally optimal solution, which is *not* guaranteed for most problems. Coding a greedy is easy; justifying it is the real work, and the justification is what an interviewer grades.
 
 ### What two properties must a problem have for greedy to be optimal?
 
-First, the **greedy-choice property**: there exists a globally optimal solution that makes the same first choice the greedy algorithm makes — so committing to the greedy choice never forecloses optimality. Second, **optimal substructure**: after making that choice, what remains is a smaller instance of the same problem, and an optimal solution to the whole is the greedy choice plus an optimal solution to the remainder. Together they license an inductive argument: the greedy first move is safe, and by induction the greedy solution to the rest is optimal, so the whole is optimal. If either property is absent, greedy can produce suboptimal answers.
+First, the **greedy-choice property**: there exists a globally optimal solution that makes the same first choice the greedy algorithm makes — so committing to the greedy choice never forecloses optimality. Second, **optimal substructure**: after making that choice, what remains is a smaller instance of the same problem, and an optimal solution to the whole is the greedy choice plus an optimal solution to the remainder.
+
+Together they license an induction: the greedy first move is safe, and by induction the greedy solution to the rest is optimal, so the whole is optimal. Concretely for interval scheduling — pick the meeting that ends earliest (safe first move), then face the identical problem on the meetings starting after it ends (smaller instance of the same problem), and repeat. If either property is absent, greedy quietly produces suboptimal answers with no error to warn you.
 
 ### What is the exchange argument and how do you use it to prove a greedy correct?
 
-The exchange argument proves the greedy-choice property. You take an arbitrary optimal solution OPT and show you can transform it, one swap at a time, into the greedy solution G without ever making it worse. Concretely: if OPT differs from G in its first choice, argue you can *exchange* OPT's choice for the greedy choice and get a solution that's still feasible and no worse (often provably at least as good). Repeat, and OPT converges to G with quality never decreasing — so G is at least as good as OPT, hence optimal. It's the standard proof pattern for interval scheduling, Huffman, and fractional knapsack. In an interview, sketching an exchange argument is how you *demonstrate* correctness rather than assert it.
+The exchange argument proves the greedy-choice property. Take an arbitrary optimal solution `OPT` and show you can transform it, one swap at a time, into the greedy solution `G` without ever making it worse.
+
+The three steps, every time:
+
+1. Assume `OPT` differs from `G`; look at the *first* place they differ.
+2. **Exchange** `OPT`'s choice there for the greedy choice, and argue the result is still feasible and no worse.
+3. Repeat. Each swap moves `OPT` closer to `G` and never lowers its quality, so after finitely many swaps `OPT` has become `G` — therefore `G` is at least as good as `OPT`, hence optimal.
+
+It's the standard proof pattern for interval scheduling, Huffman, fractional knapsack and MST. Sketching one — even in three sentences — is how you *demonstrate* correctness rather than assert it.
 
 ### Solve interval scheduling (activity selection) greedily and state why it works.
 
-Given intervals with start/finish times, select the maximum number of non-overlapping ones. Greedy: sort by *earliest finish time*, then repeatedly take the next interval whose start is >= the last taken interval's finish. O(n log n) for the sort. Why it works (exchange argument): the interval finishing earliest leaves the most room for the rest, so some optimal solution includes it — if an optimal solution's first interval finishes later, swap it for the earliest-finishing one; it still doesn't overlap the rest and keeps the count the same. Inductively the greedy is optimal. The crucial detail is the sort key: earliest *finish*, not earliest start or shortest duration.
+Given intervals with start and finish times, select the maximum number of non-overlapping ones. Greedy: sort by *earliest finish time*, then repeatedly take the next interval that starts at or after the last taken interval's finish.
+
+```python
+def activity_selection(intervals):           # intervals: list of (start, finish)
+    intervals = sorted(intervals, key=lambda iv: iv[1])   # earliest FINISH first
+    chosen, last_finish = [], float("-inf")
+    for start, finish in intervals:
+        if start >= last_finish:             # doesn't overlap the last pick
+            chosen.append((start, finish))
+            last_finish = finish
+    return chosen
+```
+
+Micro-example: `[(0,6), (1,4), (3,5), (5,7), (5,9), (8,11)]`. Sorted by finish → `[(1,4), (3,5), (0,6), (5,7), (5,9), (8,11)]`. Take `(1,4)`; skip `(3,5)` and `(0,6)` (they start before 4); take `(5,7)`; skip `(5,9)`; take `(8,11)`. Answer: 3 activities.
+
+**Exchange argument in words.** Let `OPT` be any optimal set in time order and `g` the greedy's first pick, the interval finishing earliest of all. If `OPT` starts with some other interval `o`, then `g` finishes no later than `o`, so swapping `o` for `g` leaves `g` disjoint from the rest of `OPT` — same size, still feasible, still optimal. Recurse on the intervals starting after `g` finishes; induction does the rest.
+
+Complexity: `O(n log n)` for the sort plus one linear scan, and `O(1)` extra space beyond the sort.
+
+A close cousin asks for the *minimum number of rooms* (or railway platforms) to hold **all** meetings rather than the largest non-overlapping subset. Same interval flavour, different greedy: process meetings by start time and reuse a room whose meeting has already ended.
+
+```python
+import heapq
+
+def min_rooms(intervals):                    # intervals: list of (start, finish)
+    ends = []                                # min-heap of finish times, rooms in use
+    for start, finish in sorted(intervals):  # by start time
+        if ends and ends[0] <= start:        # earliest-finishing room is free: reuse
+            heapq.heappop(ends)
+        heapq.heappush(ends, finish)
+    return len(ends)                         # peak number of concurrent meetings
+```
+
+Micro-example: `[(0,30), (5,10), (15,20)]` → at `(5,10)` no room is free (30 > 5) so a second room opens; at `(15,20)` the 10-room has freed and is reused. Answer: 2 rooms. Cost: `O(n log n)` for the sort plus heap operations, `O(n)` space.
 
 ### Why is earliest-finish-time the right greedy key for interval scheduling, and why do the alternatives fail?
 
-Earliest finish time frees up the timeline as early as possible, maximizing room for remaining choices — that's exactly what the exchange argument exploits. Earliest *start* fails: a single interval that starts first but runs very long can block many short later intervals (one long meeting starting at 9am blocks the whole day). Shortest *duration* fails too: a short interval sitting in the middle can overlap two longer intervals that don't overlap each other, so picking the short one loses a count of 2 for a gain of 1. Only earliest-finish provably preserves optimality; the other two have easy two- or three-interval counterexamples.
+Earliest finish time frees the timeline as early as possible, maximising the room left for remaining choices — exactly what the exchange argument exploits, since the earliest-finishing interval can substitute for any other first pick without conflict.
+
+The two tempting alternatives have three-element counterexamples:
+
+- **Earliest start** fails: `[(0,10), (1,2), (3,4)]`. Greedy-by-start takes the all-day meeting `(0,10)` for 1 activity; the optimum takes the two short ones for 2.
+- **Shortest duration** fails: `[(0,5), (4,6), (5,10)]`. The short `(4,6)` overlaps both longer intervals, which don't overlap each other — greedy-by-duration gets 1, the optimum gets 2.
+
+Only earliest-finish provably preserves optimality. The general lesson: the *sort key* is where a greedy lives or dies, and a plausible-sounding key can die in three elements.
 
 ### How does Huffman coding work and why is the greedy choice optimal?
 
-Huffman builds an optimal prefix-free binary code from character frequencies. Greedy: put all characters in a min-priority-queue keyed by frequency; repeatedly extract the two *lowest*-frequency nodes, merge them under a new parent whose frequency is their sum, and reinsert; the final tree gives each character a codeword by root-to-leaf path. O(n log n) via the heap. Optimality (exchange argument): in an optimal prefix tree the two lowest-frequency characters must be siblings at the greatest depth — if they weren't, you could swap them downward without increasing the weighted path length. So merging the two rarest symbols first is a safe greedy choice, and optimal substructure carries the rest. It minimizes total encoded length sum(freq_i * depth_i).
+Huffman builds an optimal prefix-free binary code from character frequencies — frequent characters get short codewords, rare ones long, and no codeword is a prefix of another so decoding is unambiguous.
+
+Greedy: put every character in a min-priority-queue keyed by frequency; repeatedly extract the two *lowest*-frequency nodes, merge them under a parent whose frequency is their sum, and reinsert. The final tree assigns each character the codeword spelled by its root-to-leaf path.
+
+```python
+import heapq
+from itertools import count
+
+def huffman(freqs):                          # freqs: dict of char -> frequency
+    tie = count()                            # tie-breaker so heap never compares subtrees
+    heap = [(f, next(tie), ch) for ch, f in freqs.items()]
+    heapq.heapify(heap)
+    while len(heap) > 1:
+        f1, _, left = heapq.heappop(heap)    # two rarest nodes
+        f2, _, right = heapq.heappop(heap)
+        heapq.heappush(heap, (f1 + f2, next(tie), (left, right)))
+    codes = {}
+    def walk(node, prefix):
+        if isinstance(node, tuple):          # internal node: 0 = left, 1 = right
+            walk(node[0], prefix + "0")
+            walk(node[1], prefix + "1")
+        else:
+            codes[node] = prefix or "0"      # lone-symbol edge case
+    walk(heap[0][2], "")
+    return codes
+```
+
+Micro-example with frequencies `a:5, b:2, c:1, d:1`. Merge the two rarest, `c` and `d`, into a node of weight 2. The heap now holds `b:2`, `(c,d):2`, `a:5`; merge `b` with `(c,d)` into weight 4; merge that with `a` into the root, weight 9. Codes: `a = 0`, `b = 10`, `c = 110`, `d = 111`. Total encoded length `5·1 + 2·2 + 1·3 + 1·3 = 15` bits, versus `9 × 2 = 18` for a fixed-width 2-bit code.
+
+Optimality (exchange argument): in *any* optimal prefix tree the two lowest-frequency characters must be siblings at the greatest depth — otherwise you could swap them down with whatever sits there and the weighted path length `Σ freq_i · depth_i` would not increase. So merging the two rarest symbols first is safe, and optimal substructure (the merged node behaves as one symbol in a smaller instance) carries the rest. Complexity: `O(n log n)` — a heap push and pop per merge, `n − 1` merges.
 
 ### Explain fractional knapsack and why greedy solves it but 0/1 knapsack doesn't.
 
-Fractional knapsack: items have value and weight, capacity W, and you may take *fractions* of items. Greedy: sort by value-to-weight ratio (value density) descending, take whole items greedily, and take a fraction of the first item that doesn't fully fit to fill W exactly. O(n log n). It's optimal because you can always fill every unit of capacity with the best available density — the exchange argument swaps any lower-density weight in a solution for higher-density weight, strictly improving it. 0/1 knapsack forbids fractions, so you can't top off the last bit of capacity; greedily taking the highest-density item can waste capacity that a different combination would use better. 0/1 knapsack needs DP (O(n·W)) because the all-or-nothing constraint breaks the greedy-choice property.
+Fractional knapsack: items have a value and a weight, the sack has capacity `W`, and you may take *fractions* of items — think pouring grain rather than loading crates. Greedy: sort by value-to-weight ratio (value density) descending, take whole items while they fit, and take a fraction of the first item that doesn't fully fit so the sack ends up exactly full.
+
+```python
+def fractional_knapsack(items, capacity):    # items: list of (value, weight)
+    items = sorted(items, key=lambda iw: iw[0] / iw[1], reverse=True)  # density
+    total = 0.0
+    for value, weight in items:
+        if capacity <= 0:
+            break
+        take = min(weight, capacity)         # whole item, or the sliver that fits
+        total += value * (take / weight)
+        capacity -= take
+    return total
+```
+
+Micro-example: capacity 50 with items `(60, 10)`, `(100, 20)`, `(120, 30)` — densities 6, 5 and 4 per unit weight. Take the first two whole (weight 30, value 160), then 20 of the last item's 30 units for `120 × 20/30 = 80`. Total 240, sack exactly full.
+
+Why it's optimal: every unit of capacity holds the highest-density material still available. The exchange argument is one line — if a solution puts lower-density weight in the sack while higher-density weight sits outside, swap an equal weight of the two and the value strictly increases, so no such solution was optimal.
+
+0/1 knapsack forbids fractions, so you cannot top off the last sliver of capacity, and taking the highest-density item can waste room a different combination would use fully. That all-or-nothing constraint destroys the greedy-choice property, and 0/1 knapsack needs DP in `O(n·W)` — items times capacity. The fractional version stays `O(n log n)`, dominated by the density sort.
 
 ### Give a concrete example where greedy fails and DP is required.
 
-0/1 knapsack: capacity 10; items A (value 60, weight 10), B (value 40, weight 6), C (value 40, weight 5). Greedy by value density picks A (density 6) for value 60 and stops — capacity full. But B + C (weight 11) doesn't fit either; B alone or... actually take B and C: weight 6+5=11 > 10, so pick B (40, w6) then nothing fits well. Cleaner example: capacity 4, items (value 3, weight 3) density 1.0 and two items (value 2, weight 2) density 1.0 each — greedy is fine here. The classic: capacity 5, items (v10,w5), (v6,w3), (v5,w2). Greedy density picks the w5 item for value 10; but the w3+w2 combo gives value 11. Greedy is beaten because the last unit of capacity can't be filled fractionally, so DP is required.
+Take 0/1 knapsack with capacity 10 and items `(value 7, weight 6)`, `(value 5, weight 5)`, `(value 5, weight 5)`. Densities are about `1.17`, `1.0`, `1.0`, so greedy-by-density grabs the first item, has 4 capacity left, and nothing else fits — **value 7**. The optimum ignores the densest item and takes the two weight-5 items — **value 10**. Greedy loses 30% on a three-item input.
+
+```python
+def knapsack_01(items, capacity):            # items: list of (value, weight)
+    dp = [0] * (capacity + 1)                # dp[c] = best value with capacity c
+    for value, weight in items:
+        for c in range(capacity, weight - 1, -1):   # right-to-left: use each item once
+            dp[c] = max(dp[c], dp[c - weight] + value)
+    return dp[capacity]
+
+items = [(7, 6), (5, 5), (5, 5)]
+knapsack_01(items, 10)                       # -> 10, versus greedy's 7
+```
+
+The instructive part: the *fractional* version of the same instance is greedy-solvable — take `(7, 6)` whole plus four-fifths of a weight-5 item for `7 + 4 = 11`. So it isn't the densities that break greedy, it's indivisibility. The last 4 units of capacity have no partial item to absorb them, and only a search over combinations finds that skipping the densest item pays. The DP above runs in `O(n·W)` time and `O(W)` space.
 
 ### When should you reach for greedy vs dynamic programming?
 
-Reach for greedy when you can *prove* the greedy-choice property — when a locally optimal choice is provably part of some global optimum (interval scheduling, Huffman, fractional knapsack, MST). It's faster (typically O(n log n)) and lighter. Reach for DP when local choices can be globally wrong and you need to consider combinations of subproblem solutions — 0/1 knapsack, edit distance, longest common subsequence, coin change with arbitrary denominations. The practical heuristic: propose a greedy and try to construct a counterexample; if you can't and you can sketch an exchange argument, use greedy; if you find a counterexample, the presence of overlapping subproblems and conflicting choices signals DP.
+Reach for **greedy** when you can *prove* the greedy-choice property — interval scheduling, Huffman, fractional knapsack and MST all qualify. It's faster (typically `O(n log n)`) and lighter on memory.
+
+Reach for **DP** when local choices can be globally wrong and you must weigh combinations of subproblem solutions: 0/1 knapsack, edit distance, longest common subsequence, coin change with arbitrary denominations.
+
+The practical interview heuristic, in order:
+
+1. Propose the obvious greedy out loud.
+2. Spend thirty seconds trying to *break* it with a small adversarial input — three or four elements is usually enough.
+3. If you break it, switch to DP; the failure means a choice's value depends on later choices, the signature of overlapping subproblems.
+4. If you can't break it, sketch an exchange argument and commit.
+
+Signals pushing towards DP: an all-or-nothing constraint, a capacity that can be left partly unused, or two choices whose relative merit flips depending on what comes later.
 
 ### Is greedy coin change always optimal?
 
-No — it depends on the coin system. Greedy (repeatedly take the largest coin <= remaining amount) is optimal for *canonical* coin systems like US coins {1, 5, 10, 25}: for any amount it yields the fewest coins. But for arbitrary denominations it can fail. Classic counterexample: coins {1, 3, 4}, amount 6. Greedy takes 4 + 1 + 1 = 3 coins; optimal is 3 + 3 = 2 coins. Because greedy fails for general denominations, the general minimum-coin-change problem is solved with DP in O(amount * numCoins). Whether a coin system is "canonical" (greedy-safe) is itself a non-trivial property to verify.
+No — it depends entirely on the coin system. Greedy (repeatedly take the largest coin `≤` the remaining amount) is optimal for *canonical* coin systems like US coins `[1, 5, 10, 25]`, but for arbitrary denominations it can fail.
+
+The classic counterexample is coins `[1, 3, 4]` for amount 6: greedy takes 4, then 1, then 1 — three coins — while the optimum is `3 + 3`, two coins. Greedy's mistake is grabbing the 4 and stranding itself with a remainder that only 1s can fill.
+
+```python
+def greedy_coins(coins, amount):             # largest coin first, no lookahead
+    used = []
+    for c in sorted(coins, reverse=True):
+        while amount >= c:
+            amount -= c
+            used.append(c)
+    return used if amount == 0 else None
+
+def dp_coins(coins, amount):                 # true minimum, O(amount * len(coins))
+    INF = float("inf")
+    best = [0] + [INF] * amount              # best[a] = fewest coins making a
+    for a in range(1, amount + 1):
+        for c in coins:
+            if c <= a and best[a - c] + 1 < best[a]:
+                best[a] = best[a - c] + 1
+    return best[amount] if best[amount] < INF else None
+
+greedy_coins([1, 3, 4], 6)                   # -> [4, 1, 1]   (3 coins)
+dp_coins([1, 3, 4], 6)                       # -> 2           (3 + 3)
+```
+
+So the general minimum-coin problem is solved by DP in `O(amount × numCoins)` time and `O(amount)` space. Whether a coin system is "canonical" (greedy-safe) is itself non-trivial to verify — there's no quick eyeball test, which is why the safe interview answer is DP unless the denominations are stated to be canonical.
 
 ### What is optimal substructure and how does it differ from the greedy-choice property?
 
-Optimal substructure means an optimal solution to the whole problem contains optimal solutions to its subproblems — solve the parts optimally and you can assemble the optimal whole. It's shared by *both* greedy and DP problems; it's what makes recursion/induction work. The greedy-choice property is stronger and more specific: it says you can pick the locally best option *first, without solving any subproblems*, and still reach a global optimum. DP problems have optimal substructure but *lack* the greedy-choice property — you can't commit to one choice up front, you must try choices and combine. So: optimal substructure is necessary for both; the greedy-choice property is the extra ingredient that separates greedy-solvable from DP-only.
+**Optimal substructure** means an optimal solution to the whole contains optimal solutions to its subproblems — solve the parts optimally and you can assemble the optimal whole. It's shared by *both* greedy and DP problems; it's what makes recursion and induction work at all.
+
+The **greedy-choice property** is stronger: you can pick the locally best option *first, without solving any subproblems*, and still reach a global optimum.
+
+The distinction in one line: 0/1 knapsack has optimal substructure (the best packing of capacity `W` contains the best packing of the leftover capacity after any fixed decision) but *lacks* the greedy-choice property, as shown above. That's the DP-only class. Optimal substructure is necessary for both paradigms; the greedy-choice property is the extra ingredient separating greedy-solvable from DP-only.
 
 ### How do you prove a greedy algorithm is correct in an interview?
 
-Two standard approaches. (1) **Exchange argument**: take any optimal solution and show you can transform it toward the greedy solution one swap at a time without worsening it, concluding the greedy is at least as good — the go-to for scheduling, Huffman, MST. (2) **Greedy-stays-ahead**: prove by induction that after each step the greedy's partial solution is at least as good as any other solution's corresponding partial (e.g. greedy has scheduled at least as many jobs by any time t). Either way you must argue the greedy-choice property and optimal substructure. Saying "it works on the examples" is not a proof; interviewers explicitly probe for the exchange or stays-ahead argument.
+Two standard approaches, and you should be able to name both.
+
+1. **Exchange argument** — transform any optimal solution toward the greedy one swap at a time without worsening it. The go-to for scheduling, Huffman and MST.
+2. **Greedy-stays-ahead** — induct that after each step the greedy's partial solution is at least as good as any rival's. For interval scheduling: after `k` picks the greedy's `k`-th interval finishes no later than any rival's `k`-th, so greedy never runs out of room first and schedules at least as many jobs.
+
+Either way you are arguing the greedy-choice property plus optimal substructure — that's what the proofs are *for*. "It works on the examples" is not a proof, and interviewers explicitly probe for the exchange or stays-ahead argument. If you can produce neither in a couple of minutes, that's evidence too: say so, and pivot to DP.
 
 ### Why do MST algorithms (Kruskal, Prim) count as greedy, and why are they optimal?
 
-Both build a minimum spanning tree by repeatedly adding the cheapest safe edge. Kruskal sorts edges and adds the next cheapest that doesn't form a cycle (using union-find — see the Data Structures primer for the structure). Prim grows a tree from a start vertex, always adding the cheapest edge leaving the current tree (using a heap). Both are greedy: locally cheapest safe edge, no reconsideration. Optimality follows from the **cut property**: for any partition of vertices into two sets, the minimum-weight edge crossing the cut is in some MST — an exchange argument shows swapping any crossing edge for the minimum one doesn't increase total weight. Each greedy edge is a minimum crossing edge for some cut, so it's safe. Kruskal is O(E log E); Prim is O(E log V) with a binary heap.
+Both build a minimum spanning tree — the cheapest set of edges connecting every vertex — by repeatedly adding the cheapest **safe** edge and never reconsidering. That's the greedy signature.
+
+- **Kruskal** sorts all edges by weight and adds the next cheapest that doesn't form a cycle, using union-find to test connectivity (see the Data Structures primer). Cost: `O(E log E)` for `E` edges, dominated by the sort.
+- **Prim** grows one tree from a start vertex, always adding the cheapest edge leaving the tree, using a heap of candidates. Cost: `O(E log V)` with a binary heap, for `V` vertices.
+
+Optimality follows from the **cut property**: for any partition of the vertices into two sets, the minimum-weight edge crossing that partition belongs to some MST. The proof is an exchange argument — if a spanning tree omits that edge, add it, creating a cycle that contains some other crossing edge no cheaper, then delete that one; the tree stays spanning and the weight does not increase. Every edge Kruskal or Prim picks is a minimum crossing edge for some cut, so every pick is safe.
 
 ### Can a greedy give a good approximation even when it's not optimal?
 
-Yes — greedy is a workhorse for *approximation algorithms* on NP-hard problems where exact optimization is intractable. Greedy set cover picks the set covering the most uncovered elements each round and achieves an O(log n) approximation ratio — provably no polynomial algorithm does much better unless P=NP. Greedy job scheduling on machines (list scheduling) gives a 2-approximation for makespan. The pattern: even when greedy can't guarantee the optimum, you can often *bound how far off* it is, giving a fast algorithm with a proven quality guarantee. So "greedy isn't optimal here" doesn't mean "greedy is useless" — a bounded approximation is frequently the best practical option.
+Yes — greedy is the workhorse of *approximation algorithms* for NP-hard problems where exact optimisation is intractable. Greedy **set cover** repeatedly picks the set covering the most still-uncovered elements, achieving an `O(log n)` approximation ratio — within a `log n` factor of optimal, and provably no polynomial algorithm does meaningfully better unless `P = NP`.
+
+```python
+def greedy_set_cover(universe, sets):        # sets: list of set objects
+    uncovered = set(universe)
+    chosen = []
+    while uncovered:
+        best = max(sets, key=lambda s: len(s & uncovered))  # most new elements
+        if not (best & uncovered):
+            return None                      # universe is not coverable
+        chosen.append(best)
+        uncovered -= best
+    return chosen
+```
+
+Micro-example: universe `{1,2,3,4,5}` with sets `{1,2,3}`, `{3,4}`, `{4,5}`. Greedy takes `{1,2,3}` (3 new), then `{4,5}` (2 new) — two sets, optimal here.
+
+Greedy list scheduling on identical machines — assign each job to the least-loaded machine — gives a `2`-approximation for makespan: the finish time is never worse than twice the best possible. The pattern generalises. Even when greedy can't guarantee the optimum you can often *bound how far off* it is, so "greedy isn't optimal here" does not mean "greedy is useless" — a bounded approximation is frequently the best practical option.
 
 ### What is the single most common mistake candidates make with greedy problems?
 
-Assuming a greedy is correct because it's intuitive and passes the sample inputs, without proving it or hunting for a counterexample. Greedy strategies are seductive — value-density for 0/1 knapsack, shortest-interval for scheduling, largest-coin for coin change — and they're *wrong* in exactly the cases interviewers pick. The disciplined approach is: propose the greedy, then immediately try to *break* it with a small adversarial input; if you can't break it, sketch an exchange argument to prove it; if you can break it, switch to DP. Treating "it seems obvious" as sufficient justification is the mistake that separates weak from strong greedy answers.
+Assuming a greedy is correct because it's intuitive and passes the sample inputs, without proving it or hunting for a counterexample. Greedy strategies are seductive — value density for 0/1 knapsack, shortest interval for scheduling, largest coin for coin change — and they are *wrong* in exactly the cases interviewers choose.
+
+The disciplined loop is short enough to run every time: propose the greedy, immediately try to *break* it with a small adversarial input, then either sketch an exchange argument or switch to DP and say why. Treating "it seems obvious" as justification is the single behaviour separating weak greedy answers from strong ones — and both outcomes score well, because finding your own counterexample is as impressive as producing the proof.
 
 ## Dynamic Programming Fundamentals
 
 ### Summary
 
 **What this topic covers**
-Dynamic programming (DP) solves problems by breaking them into overlapping subproblems and reusing each subproblem's answer instead of recomputing it. It applies when a problem has *optimal substructure* (an optimal answer is built from optimal answers to smaller instances) and *overlapping subproblems* (the same smaller instances recur many times). The whole discipline is: define a state, write a recurrence (transition), decide an evaluation order, and store results in a table. If you can write the recurrence, the code is mechanical.
+Dynamic programming (DP) is **recursion plus remembering answers you have already computed**. It applies when a problem breaks into smaller versions of itself and those smaller versions keep coming back. Two properties must hold: *optimal substructure* (the best answer to the whole is built from best answers to smaller pieces) and *overlapping subproblems* (the same small piece is needed many times). This topic covers the mechanics — state, recurrence, base case, order, answer — with the same problem (Fibonacci) written four ways: naive recursion, top-down memoization, bottom-up tabulation, and space-optimized rolling variables. It also covers how to derive complexity, choose an iteration order, drop a dimension, and reconstruct the actual solution rather than just its value.
+
+**Mental model**
+Imagine computing `fib(50)` by hand. The naive recursion asks "what is `fib(49)`?" and "what is `fib(48)`?", and each of those re-asks the same questions again, forever, down a tree with billions of nodes — even though there are only 51 distinct questions in the whole problem. DP is nothing more cunning than keeping a notebook: before answering a question, check whether you already wrote the answer down; if so, read it off. That single change collapses an exponential tree into a linear walk. Everything else in DP — tables, loops, rolling arrays — is bookkeeping about *where the notebook lives* and *what order you fill it in*.
 
 **Key terms**
-*State* — the minimal set of parameters that uniquely identifies a subproblem (e.g. `dp[i]` = best answer considering the first `i` items). *Transition* — the recurrence relating a state to smaller states. *Optimal substructure* — optimal solution decomposes into optimal sub-solutions. *Overlapping subproblems* — the recursion tree revisits identical states. *Memoization* — top-down recursion that caches results. *Tabulation* — bottom-up iteration that fills a table. *Base case* — the smallest states answered directly. *Iteration order* — the sequence in which tabulation fills states so every dependency is ready before it is used.
+- **State** — the minimal set of parameters that uniquely identifies one subproblem. `dp[i]` = "best answer considering the first `i` items."
+- **Recurrence** (or **transition**) — the formula relating a state to smaller states, e.g. `dp[i] = max(dp[i-1], dp[i-2] + a[i])`.
+- **Base case** — the smallest states you answer directly, without recursion.
+- **Optimal substructure** — the optimum decomposes into sub-optima, so a recurrence exists at all.
+- **Overlapping subproblems** — the recursion revisits identical states, so caching pays.
+- **Memoization** — top-down: write the recursion, add a cache keyed by state.
+- **Tabulation** — bottom-up: allocate a table, fill base cases, loop states in dependency order.
+- **Iteration order** — the sequence tabulation uses so every dependency is already filled when read.
+- **Rolling array** — keeping only the last few rows/values when dependencies reach back a bounded distance.
 
 **Core mechanics**
-Two implementations of the same recurrence. *Top-down (memoization):* write the natural recursion, add a cache keyed by state; on entry, return the cached value if present, else compute and store. Only states actually reachable get computed. *Bottom-up (tabulation):* allocate the table, seed base cases, loop states in dependency order, apply the transition. Complexity is the same for both and follows a simple formula: `time = (number of states) x (cost per transition)`; `space = table size` (before optimization). For Fibonacci, `n` states, O(1) transition, so O(n) time; naive recursion is O(2^n) because it recomputes. Correctness rests on the recurrence being exact for the base cases and each transition only depending on already-correct smaller states.
+Deriving a DP is a five-step recipe: **(1) state** — what does one cell mean, in a sentence; **(2) recurrence** — how does that cell follow from smaller cells; **(3) base case** — which cells are known outright; **(4) order** — in what sequence can you fill them so nothing is read before it is written; **(5) answer** — which cell (or aggregate of cells) is the final result. Once those five are fixed, the code is mechanical. The same recurrence has two implementations: memoization computes a state lazily the first time it is requested, tabulation computes every state in a fixed sweep. Complexity follows one formula: `time = (number of states) × (cost per transition)`, and `space = table size` before optimization. Fibonacci has `n` states and O(1) work each, so it is `O(n)` — linear — while the naive recursion is `Θ(φⁿ)` with `φ ≈ 1.618`, i.e. exponential, purely because it recomputes.
 
 **Trade-offs**
-Memoization is easier to write (translate the recurrence literally), computes only reachable states, and handles sparse or hard-to-order state spaces — but pays recursion overhead and risks stack overflow on deep chains. Tabulation avoids the stack, has better constant factors and cache locality, and enables rolling-array space optimization — but you must nail the iteration order and it may compute states you never needed. DP vs greedy: DP is safe when local choices interact; greedy is faster but only correct when a local optimum is provably global. DP vs plain divide-and-conquer: use DP when subproblems overlap, otherwise D&C's independent splits are fine.
+Memoization is easier to write (you translate the recurrence literally), computes only the states actually reachable, and copes with sparse or awkwardly-ordered state spaces — but pays function-call overhead and can blow the recursion stack on long dependency chains. Tabulation avoids the stack, has tighter constants and better cache locality, and is the only form that unlocks rolling-array space reduction — but you must get the iteration order right and it may compute states you never needed. DP versus greedy: greedy is faster but only correct when a local choice provably extends to a global optimum; DP is the safe default when choices interact. DP versus plain divide-and-conquer: use DP when subproblems overlap; if they do not, D&C's independent splits already do the job.
 
 **Common confusions**
-Confusing *optimal substructure* with *overlapping subproblems* — you need both; merge-sort has substructure but no overlap (so it is not DP). Thinking memoization and tabulation give different complexities — they do not; they trade constant factors and stack usage. Under-specifying the state so two genuinely different subproblems collide in one cache slot (a wrong-answer bug). Getting the iteration order backwards so a transition reads an unfilled cell. Over-optimizing space before the 2D version is correct. Assuming every recursive problem is DP — without overlap you gain nothing from a cache.
+Conflating *optimal substructure* with *overlapping subproblems* — you need both. Merge sort has substructure (sorted halves merge into a sorted whole) but zero overlap, so it is divide-and-conquer, not DP. Believing memoization and tabulation have different complexities — they do not; they differ in constants and stack usage. Under-specifying the state, so two genuinely different subproblems land in the same cache slot — this produces confidently wrong answers rather than a crash. Getting the iteration order backwards so a transition reads an unfilled cell. Optimizing space before the plain 2D version is correct. And assuming every recursion benefits from a cache — without overlap, the cache is pure overhead.
 
 **Why interviewers ask**
-DP separates candidates who can *model* a problem from those who only pattern-match. The interviewer watches you name the state, justify the recurrence, and reason about order and complexity — the "1D vs 2D state", "can you drop a dimension", and "top-down vs bottom-up" follow-ups probe depth. It is the canonical test of turning a fuzzy optimization into a precise recurrence.
+DP separates candidates who can *model* a problem from those who pattern-match remembered solutions. The interviewer is watching you name the state out loud, justify the recurrence, and reason about order and complexity — the follow-ups ("can you make the state 1D?", "can you drop a dimension?", "top-down or bottom-up here?") all probe whether the model is yours or memorized. It is the canonical test of turning a fuzzy optimization request into a precise recurrence.
 
 ### What are the two conditions a problem must satisfy to be solvable by dynamic programming?
 
-Optimal substructure and overlapping subproblems. *Optimal substructure* means an optimal solution to the whole is composed of optimal solutions to subproblems — so you can define the answer recursively (shortest paths have it; longest *simple* paths do not). *Overlapping subproblems* means the recursion revisits the same subproblem repeatedly, so caching pays off. Both are required: without substructure the recurrence is wrong; without overlap a cache buys nothing and you may as well use divide-and-conquer.
+**Optimal substructure** and **overlapping subproblems**.
+
+*Optimal substructure* means an optimal solution to the whole problem contains optimal solutions to its subproblems, so you can write the answer recursively. Shortest paths have it: if the shortest route from A to C goes through B, the A→B piece must itself be shortest, otherwise you could swap in a better piece and improve the whole. Longest *simple* paths do **not** have it — gluing two longest sub-paths can revisit a vertex, so the pieces do not compose.
+
+*Overlapping subproblems* means the recursion asks the same question many times. `fib(5)` asks for `fib(3)` twice, `fib(2)` three times, `fib(1)` five times. That repetition is what a cache eliminates.
+
+Both are required. Without substructure the recurrence is simply wrong. Without overlap the cache never gets a hit, so you have paid for a dictionary and gained nothing — that situation is ordinary divide-and-conquer.
 
 ### How does memoization differ from tabulation?
 
-They implement the same recurrence from opposite directions. Memoization is top-down: you write the natural recursion and cache each result keyed by state, computing a state lazily the first time it is requested. Tabulation is bottom-up: you allocate a table, fill base cases, then iterate states in dependency order applying the transition. Same asymptotic time and space. Memoization is easier to derive and skips unreachable states; tabulation avoids recursion-stack limits, has tighter constants, and unlocks rolling-array space savings.
+They are two implementations of the *same* recurrence, run from opposite ends. Here is the progression on Fibonacci, defined by `fib(n) = fib(n-1) + fib(n-2)` with `fib(0) = 0`, `fib(1) = 1`.
+
+**Stage 1 — naive recursion.** Correct, and catastrophically slow, because nothing is remembered.
+
+```python
+def fib_naive(n):
+    if n <= 1:
+        return n
+    return fib_naive(n - 1) + fib_naive(n - 2)
+```
+
+**Stage 2 — top-down memoization.** Same code, plus a notebook. On entry, look the state up; on exit, write it down.
+
+```python
+def fib_memo(n, cache=None):
+    if cache is None:
+        cache = {}
+    if n <= 1:
+        return n
+    if n in cache:                 # already answered this exact question
+        return cache[n]
+    cache[n] = fib_memo(n - 1, cache) + fib_memo(n - 2, cache)
+    return cache[n]
+```
+
+**Stage 3 — bottom-up tabulation.** No recursion at all: allocate the table, seed the base cases, sweep forward so every read hits a cell that was already written.
+
+```python
+def fib_table(n):
+    if n <= 1:
+        return n
+    dp = [0] * (n + 1)             # dp[k] = fib(k)
+    dp[1] = 1                      # base cases: dp[0] = 0, dp[1] = 1
+    for k in range(2, n + 1):      # ascending: dp[k] needs k-1 and k-2
+        dp[k] = dp[k - 1] + dp[k - 2]
+    return dp[n]
+```
+
+The difference is direction and laziness, not complexity: both are `O(n)` time — linear in `n` — and `O(n)` space (memoization's cache plus its recursion stack; tabulation's array). Memoization is easier to derive, since it is the recurrence typed out verbatim, and it computes only the states actually reached. Tabulation avoids the recursion stack (`fib_memo(100000)` overflows in Python; `fib_table(100000)` does not), has tighter constants, and is the only form you can shrink with a rolling array — see the space-optimization card.
 
 ### What is a "state" in DP and why does choosing it well matter?
 
-The state is the minimal set of parameters that fully identifies a subproblem — everything the answer depends on and nothing more. `dp[i][w]` for knapsack means "best value using the first `i` items within capacity `w`". Choosing it well is the whole game: too few parameters and distinct subproblems collide (wrong answers); too many and you blow up time and memory. The state count directly sets your complexity, so a tighter state is both correct and faster.
+The state is the minimal set of parameters that fully determines a subproblem's answer — everything the answer depends on, and nothing more. Read `dp[i][w]` for knapsack out loud: "the best value achievable using only the first `i` items within capacity `w`." If you cannot say that sentence, you do not have a state yet.
+
+Choosing it well *is* the problem. Too few parameters and two genuinely different subproblems collide in one cell, producing silently wrong answers. Too many and you multiply the state count, blowing up both time and memory. Because `time = states × transition cost`, the state definition literally sets your complexity.
+
+Worked example — **House Robber**: given houses with values `a = [2, 7, 9, 3, 1]`, take a maximum-value subset with no two adjacent. The state is one number: `dp[i]` = best loot from the first `i` houses. At house `i` you either skip it (keep `dp[i-1]`) or rob it (take `a[i-1]` plus `dp[i-2]`, since `i-1` is then off-limits).
+
+```python
+def rob(a):
+    n = len(a)
+    dp = [0] * (n + 1)             # dp[i] = best loot from first i houses
+    if n >= 1:
+        dp[1] = a[0]               # base cases: dp[0] = 0, dp[1] = a[0]
+    for i in range(2, n + 1):
+        skip = dp[i - 1]
+        take = dp[i - 2] + a[i - 1]
+        dp[i] = max(skip, take)
+    return dp[n]
+```
+
+Filling the table by hand:
+
+| `i` | house value | `skip = dp[i-1]` | `take = dp[i-2] + a[i-1]` | `dp[i]` |
+|---|---|---|---|---|
+| 0 | — | — | — | 0 |
+| 1 | 2 | — | — | 2 |
+| 2 | 7 | 2 | 0 + 7 = 7 | 7 |
+| 3 | 9 | 7 | 2 + 9 = 11 | **11** |
+| 4 | 3 | 11 | 7 + 3 = 10 | 11 |
+| 5 | 1 | 11 | 11 + 1 = 12 | **12** |
+
+Answer `12`, from houses worth `2 + 9 + 1`. Note how thin the state is — a single index — and how much that buys: `n` states, O(1) per transition, so `O(n)` time. A careless state like "best loot from first `i` houses *and* whether house `i` was robbed" would work too, but doubles the table for no gain.
 
 ### How do you derive the time and space complexity of a DP solution?
 
-`time = (number of distinct states) x (work per transition)`. If there are `n * W` states and each does O(1) work, it is O(n*W). A transition that loops over `k` choices makes it O(n*W*k). Space is the table size, `O(number of states)`, before optimization. This is why the interview reflex is "how many states, how expensive is each transition" — it gives the bound directly and tells you which dimension to attack for speedups.
+One formula: **`time = (number of distinct states) × (work per transition)`**. Count the states by multiplying out the ranges of each state parameter; count the transition cost by looking at what the loop body does.
+
+- Fibonacci: `n` states, O(1) transition → `O(n)`, linear.
+- 0/1 knapsack `dp[i][w]`: `n·W` states, O(1) transition (take or skip) → `O(n·W)`.
+- A transition that loops over `k` choices, e.g. "cut the rope at any of `k` positions": `O(n·W·k)`.
+- Interval DP `dp[i][j]` with a split point scanned inside: `n²` states × `O(n)` transition → `O(n³)`, cubic.
+
+Space is the table size, `O(number of states)`, before any optimization — plus the recursion stack if you went top-down.
+
+This is why the interview reflex is "how many states, how expensive is each transition?" It gives the bound in one line, and it tells you which factor to attack: if the state count dominates, look for a redundant parameter to drop; if the transition dominates, look for a prefix sum or monotonic queue to replace the inner loop.
 
 ### Why is naive recursive Fibonacci exponential while the DP version is linear?
 
-Naive `fib(n) = fib(n-1) + fib(n-2)` rebuilds an entire binary recursion tree, recomputing `fib(k)` an exponential number of times — O(2^n) roughly (actually O(phi^n)). There are only `n` distinct subproblems, so caching each once collapses the tree to O(n) time. It is the textbook demonstration of overlapping subproblems: the work is exponential only because identical states are recomputed.
+Because the naive version rebuilds an entire binary recursion tree, and that tree is enormously redundant. Expand `fib_naive(5)`: it calls `fib(4)` and `fib(3)`; `fib(4)` calls `fib(3)` and `fib(2)`; and so on. Count how many times each distinct value is computed:
+
+| subproblem | times computed by `fib_naive(5)` | times computed by DP |
+|---|---|---|
+| `fib(4)` | 1 | 1 |
+| `fib(3)` | 2 | 1 |
+| `fib(2)` | 3 | 1 |
+| `fib(1)` | 5 | 1 |
+| `fib(0)` | 3 | 1 |
+
+Fifteen calls to answer six distinct questions — and the ratio explodes with `n`. The number of calls satisfies `C(n) = 1 + C(n-1) + C(n-2)`, which grows like the Fibonacci numbers themselves: `Θ(φⁿ)` where `φ ≈ 1.618` is the golden ratio (people usually quote the looser `O(2ⁿ)`). Concretely, `fib_naive(40)` makes about 331 million calls and takes seconds to minutes in Python; `fib_memo(40)` makes about 40 and returns instantly. At `n = 90` the naive version would not finish in your lifetime, while the tabulated version is 90 additions.
+
+The point is not that Fibonacci is important — it is that the work was exponential *only* because identical states were recomputed. There are just `n + 1` distinct subproblems; compute each once and the tree collapses to a line, `O(n)`. That is the entire value proposition of DP, visible in one example.
 
 ### What is the difference between optimal substructure and overlapping subproblems?
 
-Optimal substructure is about *correctness of decomposition* — the optimum is assembled from sub-optima, so a recurrence exists. Overlapping subproblems is about *efficiency* — those subproblems recur, so caching helps. Merge sort has optimal substructure (sorted halves merge into a sorted whole) but no overlap (the halves are disjoint), so it is divide-and-conquer, not DP. You need both properties before DP is the right tool.
+They answer different questions. Optimal substructure is about **correctness of the decomposition**: it says the optimum can be assembled from sub-optima, which is what licenses you to write a recurrence at all. Overlapping subproblems is about **efficiency**: it says those subproblems recur, which is what makes caching worthwhile.
+
+Merge sort is the clean counter-example. It has optimal substructure — sorting each half correctly and merging yields a correctly sorted whole — but the two halves are disjoint, so no subproblem is ever seen twice. Adding a cache to merge sort slows it down. It is divide-and-conquer.
+
+Longest simple path is the opposite counter-example: subproblems overlap heavily, but there is no optimal substructure (combining two longest sub-paths can reuse a vertex), so no valid recurrence exists and the problem is NP-hard.
+
+You need both properties before DP is the right tool: substructure makes it *correct*, overlap makes it *fast*.
 
 ### How do you decide the iteration order for a bottom-up DP?
 
-Fill states in an order where every state's dependencies are already computed. Read the recurrence: if `dp[i]` depends on `dp[i-1]`, iterate `i` ascending. For grid `dp[i][j]` depending on top and left neighbors, go row-major top-left to bottom-right. For 0/1 knapsack's rolling 1D array you iterate capacity *descending* to avoid reusing an item within the same pass. A quick check: the dependency graph over states must be a DAG, and you fill in a topological order of it.
+Fill states in an order where every dependency is already computed. Read the recurrence and let it dictate the loops: whatever appears on the right-hand side must have been written before the left-hand side is read.
+
+- `dp[i]` depends on `dp[i-1]` → iterate `i` ascending.
+- `dp[i][j]` depends on the cell above and the cell to the left → row-major, top-left to bottom-right.
+- Interval DP `dp[i][j]` depends on shorter intervals → iterate by increasing interval length, not by `i`.
+- 0/1 knapsack collapsed to a 1D array → iterate capacity **descending**, so the item is not reused within the same pass.
+
+The general rule: build the dependency graph over states; it must be a DAG (directed acyclic graph — no cycles), and any topological order of it is a valid fill order. If the graph has a cycle, your recurrence is circular and DP does not apply.
+
+Worked example — **unique paths in a grid**: count routes from the top-left to the bottom-right of a 3×4 grid moving only right or down. State: `dp[i][j]` = number of paths reaching cell `(i, j)`. Recurrence in words: *you arrive at a cell either from above or from the left, so its count is the sum of those two counts.* Base case: the first row and first column are all `1` (one straight-line route). Order: row-major, because `dp[i][j]` reads `dp[i-1][j]` (previous row, already done) and `dp[i][j-1]` (same row, already done this pass).
+
+```python
+def unique_paths(rows, cols):
+    dp = [[1] * cols for _ in range(rows)]   # first row/col seeded to 1
+    for i in range(1, rows):
+        for j in range(1, cols):             # row-major = dependency order
+            dp[i][j] = dp[i - 1][j] + dp[i][j - 1]
+    return dp[rows - 1][cols - 1]
+```
+
+The filled table for `rows = 3`, `cols = 4`:
+
+| | `j=0` | `j=1` | `j=2` | `j=3` |
+|---|---|---|---|---|
+| `i=0` | 1 | 1 | 1 | 1 |
+| `i=1` | 1 | 2 | 3 | 4 |
+| `i=2` | 1 | 3 | 6 | **10** |
+
+Ten paths. Every cell is the sum of the one above and the one to its left, and each of those was filled earlier in the sweep — which is exactly what "correct iteration order" means. Complexity: `rows × cols` states, O(1) each → `O(rows·cols)`, linear in the number of cells.
 
 ### When would you prefer top-down memoization over bottom-up tabulation?
 
-When only a small fraction of the state space is reachable (memoization computes just those), when the natural iteration order is awkward to express, or when the recurrence is far easier to write recursively than to linearize. Interval DP and DP over irregular states often read cleaner top-down. Switch to tabulation when recursion depth risks a stack overflow, when constant factors and cache locality matter, or when you want rolling-array space reduction.
+Prefer memoization when the state space is **sparse** — if only a small fraction of the theoretically-possible states is ever reachable, memoization computes just those while tabulation dutifully fills the whole table. Prefer it when the natural iteration order is awkward to express (interval DP, DP over subsets, digit DP), because recursion discovers the order for you. And prefer it when the recurrence is far easier to write recursively than to linearize — under interview time pressure it is usually the faster path from idea to working code.
+
+Switch to tabulation when recursion depth risks a stack overflow (Python's default limit is around 1000 frames, so a chain of `n = 10⁵` states will crash), when constant factors and cache locality matter, or when you want rolling-array space reduction, which needs an explicit fill order.
+
+A practical interview sequence: state the recurrence, write it memoized to get correctness, then say "and I can convert this to bottom-up in `O(n)` space, or `O(1)` with rolling variables."
 
 ### What is space optimization in DP and when can you apply it?
 
-When a state only depends on a bounded window of previous states, you can discard the rest. Fibonacci needs only the last two values — O(1) space instead of O(n). A 2D DP whose row `i` depends only on row `i-1` can keep two rows, or even one row updated in place, cutting O(n*m) to O(m). The prerequisite is a *bounded dependency distance*; if a transition reaches arbitrarily far back you must keep the full table. Optimize only after the unoptimized version is correct.
+When a state depends only on a **bounded window** of previous states, you can throw the rest away. Fibonacci's `dp[k]` reads only `dp[k-1]` and `dp[k-2]`, so two variables suffice:
+
+```python
+def fib_rolling(n):
+    if n <= 1:
+        return n
+    prev, curr = 0, 1              # prev = fib(k-2), curr = fib(k-1)
+    for _ in range(2, n + 1):
+        prev, curr = curr, prev + curr
+    return curr
+```
+
+Same `O(n)` time, but `O(1)` space — constant, regardless of `n` — down from the `O(n)` array. The same idea scales up: a 2D DP whose row `i` depends only on row `i-1` can keep two rows (`O(cols)` instead of `O(rows·cols)`), and sometimes a single row updated in place — that is the 0/1 knapsack trick, where iterating capacity descending stops the in-place row from reusing an item twice in one pass.
+
+The prerequisite is a **bounded dependency distance**. If a transition can reach arbitrarily far back (`dp[i]` scanning all `dp[j]` for `j < i`, as in longest increasing subsequence), you must keep the full table.
+
+Two warnings. First, optimize only once the unoptimized version is correct — space tricks are where off-by-one bugs breed. Second, rolling arrays destroy the history, so they are generally incompatible with reconstructing the actual solution.
 
 ### How would you reconstruct the actual solution, not just its optimal value?
 
-Two options. Store back-pointers: alongside each `dp` cell, record which choice produced it, then walk the pointers from the final state to the base case. Or, if you kept the full table, reconstruct by re-deriving at each step which predecessor achieved the stored optimum. Back-pointers cost extra memory but give O(path length) reconstruction; re-deriving saves memory but costs a second pass. Note reconstruction is generally incompatible with aggressive rolling-array space optimization, since you need the history.
+The DP table holds *values*; the interviewer often wants the *choices*. Two approaches. **Re-derive from the table**: keep the full table and walk backwards from the answer cell, at each step asking which predecessor could have produced the stored value — no extra memory, one backward pass of `O(path length)`. **Store back-pointers**: alongside each cell, record which choice produced it, then follow the pointers — simpler to read, but costs a parallel table.
+
+Worked example — 0/1 knapsack with items `(weight, value) = (1,1), (3,4), (4,5), (5,7)` and capacity `7`. The optimum value is `9`. Re-deriving which items achieved it:
+
+```python
+def knapsack_items(weights, values, cap, dp):
+    chosen, w = [], cap
+    for i in range(len(weights), 0, -1):     # walk items backwards
+        if dp[i][w] != dp[i - 1][w]:         # value changed => item i was taken
+            chosen.append(i - 1)
+            w -= weights[i - 1]              # free the capacity it used
+    return chosen[::-1]
+```
+
+Tracing it: `dp[4][7] = 9` and `dp[3][7] = 9`, unchanged, so item 4 (weight 5) was **not** taken. `dp[3][7] = 9` but `dp[2][7] = 5`, changed, so item 3 (weight 4, value 5) **was** taken; drop to `w = 3`. `dp[2][3] = 4` but `dp[1][3] = 1`, changed, so item 2 (weight 3, value 4) **was** taken; drop to `w = 0`. `dp[1][0] = dp[0][0] = 0`, unchanged, so item 1 was not taken. Result: items 2 and 3, total weight `7`, total value `9` — matching the stored optimum.
+
+The catch worth voicing in an interview: reconstruction needs the history, so it conflicts with aggressive rolling-array space optimization. You either keep the `O(n·W)` table, or keep a compact back-pointer structure, or use divide-and-conquer reconstruction (Hirschberg's trick) to get the path in linear space at the cost of doubling the time.
 
 ### Can every recursive problem be sped up with memoization?
 
-No. Memoization only helps when subproblems overlap. Merge sort's recursion never revisits a subproblem, so a cache adds overhead for zero benefit. Memoization also requires the function to be *pure* over its state — the result must depend only on the cached parameters, not on external mutable context. If the "state" you would cache on does not fully determine the output, caching produces wrong answers.
+No, and the two failure modes are worth naming.
+
+**No overlap, no gain.** Memoization helps only when subproblems repeat. Merge sort's recursion never revisits a subproblem, so a cache adds hashing and memory cost for zero hits. Before adding a cache, ask: "will the same argument tuple ever arrive twice?" If not, skip it.
+
+**Impure functions break it.** Memoization requires the result to be a pure function of the cached key. If the answer also depends on something outside the state — a mutable global, the order calls were made in, elapsed time, a random draw, an unmodelled parameter — the cache will hand back an answer computed under different circumstances. This is the same bug as under-specifying the state, and it is nasty precisely because it does not crash; it just returns a plausible wrong number.
 
 ### What distinguishes dynamic programming from greedy algorithms?
 
-Greedy commits to a locally optimal choice at each step and never reconsiders; DP considers all relevant choices and lets subproblem results decide. Greedy is faster (often O(n log n) with a sort) but only correct when a greedy-choice property holds — a local optimum provably extends to a global one (as in Huffman coding or interval scheduling). When choices interact so that a locally best move can hurt globally (0/1 knapsack, edit distance), you need DP. A safe interview move: reach for DP, then note if a greedy shortcut is provably valid.
+Greedy commits to the locally best choice at each step and never reconsiders. DP considers all relevant choices and lets the subproblem results decide.
+
+Greedy is faster — often just a sort, `O(n log n)` — but only correct when the **greedy-choice property** holds: a locally optimal choice provably extends to some global optimum. Interval scheduling (always take the earliest-finishing compatible interval), Huffman coding (always merge the two lowest frequencies) and fractional knapsack all have such proofs.
+
+DP is the safe choice when choices interact so that a locally best move can hurt you later. **0/1 knapsack** is the standard demonstration: with capacity 10 and items `(weight 6, value 30)`, `(weight 5, value 25)`, `(weight 5, value 25)`, greedy by value-per-weight grabs the first (ratio 5.0) and then cannot fit either other item, total `30`; DP takes the two weight-5 items for `50`.
+
+The interview move: reach for DP by default, then say "and if I can prove the greedy-choice property here, greedy would be faster" — showing you know the shortcut exists without assuming it applies.
 
 ### What is the difference between DP and divide-and-conquer?
 
-Both split a problem into subproblems, but divide-and-conquer's subproblems are *independent and non-overlapping* (merge sort, quickselect), so results are combined once and never reused. DP's subproblems *overlap*, so it stores and reuses results. If you find yourself solving the same subproblem repeatedly in a D&C recursion, that is the signal to add memoization and treat it as DP.
+Both split a problem into subproblems and combine the results, so the distinction is entirely about **overlap**. Divide-and-conquer's subproblems are independent and disjoint: merge sort splits an array into two halves that share no elements, quickselect recurses into one side only. Each subproblem is solved once, combined once, and never needed again — so there is nothing to store. DP's subproblems overlap: the same state is required by many different parents, so you store each result and reuse it. That storage is the whole difference in implementation.
+
+The practical signal: if a recursive solution keeps solving the same subproblem — the same argument tuple arriving again and again — that is the moment to add a cache and start calling it DP. Conversely, if you add a cache and it never hits, you had divide-and-conquer all along and should remove it.
 
 ### How do you turn a recurrence with multiple parameters into working code?
 
-Map each parameter to a table dimension. `dp[i][j]` becomes a 2D array; the recurrence becomes the assignment inside nested loops. Seed the base cases (usually `i == 0` or `j == 0` boundaries). Order the loops so each cell's dependencies are filled first. The transition — the max/min/sum over the recurrence's cases — is the loop body. The parameters, base cases, and order are the design work; the code writes itself once those are fixed.
+Map each state parameter to a table dimension, then follow the five-step recipe. Applied concretely to **0/1 knapsack** — items with weights `[1, 3, 4, 5]`, values `[1, 4, 5, 7]`, capacity `7`:
+
+1. **State** — `dp[i][w]` = best value using only the first `i` items within capacity `w`. Two parameters, so a 2D table of size `(n+1) × (W+1)`.
+2. **Recurrence** — in words: *for each item you either skip it, keeping the best from the previous items at the same capacity, or take it (if it fits), gaining its value on top of the best from previous items at the reduced capacity.* In symbols: `dp[i][w] = max(dp[i-1][w], dp[i-1][w - wᵢ] + vᵢ)`, with the second branch only when `wᵢ ≤ w`.
+3. **Base case** — `dp[0][w] = 0` for all `w` (no items, no value). The zero row is the boundary the whole table grows from.
+4. **Order** — `dp[i][*]` reads only row `i-1`, so iterate `i` ascending; within a row, `w` in any order.
+5. **Answer** — `dp[n][W]`, the bottom-right cell.
+
+```python
+def knapsack(weights, values, cap):
+    n = len(weights)
+    dp = [[0] * (cap + 1) for _ in range(n + 1)]   # base: row 0 all zeros
+    for i in range(1, n + 1):                      # ascending: row i needs row i-1
+        wi, vi = weights[i - 1], values[i - 1]
+        for w in range(cap + 1):
+            best = dp[i - 1][w]                    # skip item i
+            if wi <= w:                            # take item i, if it fits
+                best = max(best, dp[i - 1][w - wi] + vi)
+            dp[i][w] = best
+    return dp[n][cap]
+```
+
+For the numbers above this returns `9` (items of weight 3 and 4, values 4 and 5, exactly filling capacity 7). Complexity straight from the formula: `(n+1)·(W+1)` states × O(1) transition = `O(n·W)` time and space. Note that `O(n·W)` is *pseudo-polynomial*, not polynomial — it scales with the numeric value of `W`, not with the number of bits used to write it, which is why 0/1 knapsack is still NP-hard.
+
+The parameters, base cases, and order are the design work; the loops write themselves once those are fixed.
 
 ### A senior follow-up: your DP is correct but too slow or uses too much memory — how do you attack it?
 
-Attack the state count and the transition cost separately. To cut *time*: shrink the state (drop a redundant parameter), or speed the transition — replace an inner loop with a precomputed prefix sum, a monotonic-queue optimization, or a convex-hull / divide-and-conquer optimization where the recurrence structure allows. To cut *space*: apply a rolling array when dependencies are bounded, or store only the frontier. Always confirm which factor dominates first — profile the `states x transition` product rather than guessing, and note that some space optimizations forfeit solution reconstruction.
+Attack the two factors of `states × transition cost` separately, and measure which one dominates before you start.
+
+**To cut time, shrink the state.** Look for a parameter that is redundant or derivable from the others — often one dimension is a function of the rest, or a boolean flag is already implied by the recurrence's structure. Dropping a dimension divides the runtime by that dimension's range.
+
+**To cut time, speed the transition.** If the inner loop scans `k` choices, ask what structure it has. A sum over a contiguous window becomes a prefix sum, `O(k) → O(1)`. A minimum over a sliding window becomes a monotonic deque, `O(k) → O(1)` amortized. A transition of the form `dp[i] = min(dp[j] + cost(j, i))` may admit convex-hull or divide-and-conquer optimization when `cost` satisfies a quadrangle inequality, turning `O(n²)` into `O(n log n)`. Matrix exponentiation handles linear recurrences with huge `n` in `O(log n)` steps.
+
+**To cut space, roll the table.** If row `i` reads only row `i-1`, keep two rows, or one row updated in the correct direction — `O(n·m)` becomes `O(m)`.
+
+Then state the cost honestly: rolling arrays forfeit solution reconstruction unless you add back-pointers or use Hirschberg's reconstruction, and the transition optimizations only hold under conditions (convexity, monotonicity) you should say out loud rather than assume.
 
 ## Classic DP Problems & Patterns
 
 ### Summary
 
 **What this topic covers**
-The recurring DP archetypes an interviewer expects you to recognize on sight: 0/1 knapsack, longest common subsequence (LCS) and edit distance, longest increasing subsequence (LIS), coin change, grid/path counting, interval DP, bitmask DP, and DP on trees. Each has a signature state shape and transition. The skill is pattern-matching a new problem onto the nearest archetype, then adapting the state.
+The recurring DP *archetypes* an interviewer expects you to recognize on sight: **0/1 knapsack**, **unbounded knapsack / coin change**, **longest common subsequence (LCS)** and **edit distance**, **longest increasing subsequence (LIS)**, **grid/path counting**, **interval DP**, **bitmask DP**, and **DP on trees**. The previous topic covered the machinery — state, transition, memoization vs tabulation. This one is the vocabulary: each archetype has a signature state shape and a signature transition, and the skill being tested is pattern-matching an unfamiliar prompt onto the nearest archetype, then adapting the state to the twist.
+
+**Mental model**
+There are only about eight DP problems in interviews, wearing different costumes. Strip the story away and ask *what am I choosing?* If you're choosing a **subset** under a budget, that's knapsack. If you're **aligning two sequences**, that's the LCS grid. If you're **extending a chain**, that's LIS. If you're **walking a grid**, that's path counting. If you're **splitting a range into two ranges**, that's interval DP. If you must remember **which of a tiny set you've used**, that's a bitmask. If the input is a **tree**, it's post-order aggregation. Recognizing the costume takes seconds; inventing a bespoke recurrence takes twenty minutes and is usually buggy.
 
 **Key terms**
-*0/1 knapsack* — pick a subset under a capacity to maximize value, each item used at most once. *Unbounded knapsack* — items reusable (coin change is this shape). *LCS* — longest subsequence common to two sequences. *Edit distance* — min insert/delete/replace operations to transform one string into another. *LIS* — longest strictly increasing subsequence. *Interval DP* — state is a range `[i, j]`, built from smaller ranges. *Bitmask DP* — state includes a subset encoded as bits, for small `n`. *Tree DP* — states defined per node, combined from children via post-order.
+- **0/1 knapsack** — pick a subset under a capacity to maximize value, each item usable **at most once**.
+- **Unbounded knapsack** — same, but items are reusable any number of times (coin change is exactly this).
+- **LCS** — longest subsequence (order-preserving, gaps allowed) common to two sequences.
+- **Edit distance** (Levenshtein) — fewest insert/delete/replace operations turning one string into another.
+- **LIS** — longest strictly increasing subsequence of an array.
+- **Interval DP** — the state is a contiguous range `[i, j]`, built from smaller ranges via a split point.
+- **Bitmask DP** — the state includes a subset encoded as the bits of an integer; viable only for tiny `n`.
+- **Tree DP** — one state per node, combined from children in post-order.
+- **Rolling array** — collapsing a 2-D table to one or two rows when a transition reads only the previous row.
+- **Pseudo-polynomial** — polynomial in a numeric *value* (like capacity `W`) but exponential in its bit *length*.
 
 **Core mechanics**
-Knapsack: `dp[i][w] = max(dp[i-1][w], value[i] + dp[i-1][w-weight[i]])`; O(n*W), reducible to one row. LCS: `dp[i][j] = dp[i-1][j-1]+1` if chars match else `max(dp[i-1][j], dp[i][j-1])`; O(n*m). Edit distance: same grid with a three-way min over insert/delete/replace. LIS: O(n^2) DP, or O(n log n) via patience sorting with binary search over "tails". Coin change: unbounded knapsack, `dp[a] = min over coins of dp[a-coin]+1`; O(amount*coins). Grid paths: `dp[i][j] = dp[i-1][j] + dp[i][j-1]`; O(n*m). Interval DP: `dp[i][j]` from splits `k` in `(i, j)`; O(n^3) typical. Bitmask DP: `2^n` subsets x `n`, so O(2^n * n) or O(2^n * n^2) — only viable for `n` up to about 20. Tree DP: post-order, each node aggregates children in O(children).
+Knapsack: `dp[i][w] = max(dp[i-1][w], value[i] + dp[i-1][w - weight[i]])` — skip or take — in `O(n·W)` time (items times capacities), reducible to a single row of size `W`. LCS: `dp[i][j] = dp[i-1][j-1] + 1` on a match, else `max(dp[i-1][j], dp[i][j-1])`, in `O(n·m)`, the product of the two lengths. Edit distance: the same grid with a three-way `min` over delete/insert/replace. LIS: `O(n²)` (quadratic — every pair) by scanning all earlier indices, or `O(n log n)` (linearithmic) via patience sorting with binary search over a `tails` array. Coin change: `dp[a] = 1 + min over coins c of dp[a - c]`, `O(amount · coins)`. Grid paths: `dp[i][j] = dp[i-1][j] + dp[i][j-1]`, `O(n·m)`. Interval DP: `dp[i][j] = best over splits k of combine(dp[i][k], dp[k+1][j]) + cost`, typically `O(n³)` (cubic — `n²` ranges times an `n`-way split). Bitmask DP: `2ⁿ` masks times `n` or `n²` inner work, so `O(2ⁿ · n²)` for Held–Karp TSP. Tree DP: one post-order DFS, `O(n)` — linear, since each edge is used once.
 
 **Trade-offs**
-LIS in O(n log n) is faster but the patience-sorting version does not directly yield the subsequence without extra bookkeeping; the O(n^2) DP reconstructs more easily. Bitmask DP is exponential — it is a deliberate "n is tiny" tool, not a scalable one. Interval DP's O(n^3) is fine for `n` in the hundreds, not thousands. Rolling arrays shrink knapsack/LCS memory but complicate reconstruction. Choosing the right archetype early saves you from inventing a bespoke, buggy recurrence.
+`O(n log n)` LIS is asymptotically better but doesn't hand you the actual subsequence without extra parent pointers; the `O(n²)` version reconstructs trivially. Rolling arrays shrink knapsack and LCS memory to one or two rows, but destroy the history you need to **reconstruct** the chosen items — a direct memory-versus-traceability trade. Bitmask DP is deliberately exponential: it's the "`n` is at most about 20" tool, not a scalable one. Interval DP's cubic cost is fine for `n` in the hundreds, hopeless for thousands (some problems admit Knuth's optimization down to `O(n²)`). And knapsack's `O(n·W)` is fast only when `W` is numerically small — it is not truly polynomial.
 
 **Common confusions**
-0/1 vs unbounded knapsack — the loop direction over capacity differs (descending forbids reuse, ascending permits it); getting it wrong silently changes the problem. Subsequence (order-preserving, non-contiguous) vs substring (contiguous) in LCS-type problems. Coin change *count of ways* (sum, order of loops matters to avoid double counting) vs *min coins* (a min recurrence). LIS "strictly" vs "non-decreasing" flips a `<` to `<=` and a `lower_bound` to `upper_bound`. Forgetting bitmask DP is exponential and proposing it for large `n`.
+0/1 versus unbounded knapsack: the *only* difference in the 1-D code is the direction of the capacity loop (descending forbids reuse, ascending permits it), and getting it wrong silently solves a different problem rather than crashing. **Subsequence** (order-preserving, gaps allowed) versus **substring/subarray** (contiguous) — the first *inherits* a neighbouring state on mismatch, the second *resets to zero*. Coin change *count of ways* (coins on the outer loop, or you count permutations and over-report) versus *minimum coins* (loop order is irrelevant). LIS "strictly increasing" versus "non-decreasing" flips a `<` to a `≤` and `bisect_left` to `bisect_right`. And proposing bitmask DP when `n` is 10⁵.
 
 **Why interviewers ask**
-These archetypes are the vocabulary of DP interviews. Recognizing that a prompt is "just LCS with a twist" or "unbounded knapsack" is the signal of a prepared candidate. The follow-ups — reduce the space, reconstruct the answer, handle a variant — test whether you understand the recurrence or merely memorized code.
+These archetypes are the shared vocabulary of DP interviews. Saying "this is unbounded knapsack with an extra dimension" in the first minute is the clearest signal of a prepared candidate, and it converts a scary open problem into a known recurrence. The follow-ups do the real filtering — *reduce the space*, *reconstruct the answer*, *handle this variant*, *why is that loop backwards?* — each distinguishing someone who understands the recurrence from someone who memorized the code.
 
 ### How do you recognize a 0/1 knapsack problem and set up its recurrence?
 
-Signature: choose a subset of items, each usable at most once, to optimize a value under a capacity/budget constraint. State `dp[i][w]` = best value from the first `i` items within capacity `w`. Transition: `dp[i][w] = max(dp[i-1][w], value[i] + dp[i-1][w - weight[i]])` — skip item `i` or take it. Base case `dp[0][*] = 0`. Time O(n*W), space reducible to O(W) with a 1D array iterated capacity-*descending* so each item is used once. Note `W` makes this *pseudo-polynomial*, not truly polynomial.
+The signature: choose a **subset** of items, each usable **at most once**, to optimize a total value under a capacity/budget limit. Any prompt shaped like "pick some of these to maximize X without exceeding Y" is knapsack, whatever the story.
+
+State: `dp[i][w]` = best value using only the first `i` items with capacity `w`. In plain English: *for each item you either leave it out, inheriting the best answer from the first `i-1` items at the same capacity, or put it in, paying its weight and collecting its value on top of the best answer at the reduced capacity.* In symbols: `dp[i][w] = max(dp[i-1][w], value[i] + dp[i-1][w - weight[i]])`, with `dp[0][*] = 0`.
+
+```python
+def knapsack(weights, values, W):
+    n = len(weights)
+    dp = [[0] * (W + 1) for _ in range(n + 1)]   # dp[i][w], items 1-indexed
+    for i in range(1, n + 1):
+        wi, vi = weights[i - 1], values[i - 1]
+        for w in range(W + 1):
+            dp[i][w] = dp[i - 1][w]              # skip item i
+            if wi <= w:                          # or take it, if it fits
+                dp[i][w] = max(dp[i][w], vi + dp[i - 1][w - wi])
+    return dp[n][W]
+```
+
+Micro-example — items `(weight, value) = (1,1), (3,4), (4,5)`, capacity `W = 5`:
+
+```text
+capacity:      0  1  2  3  4  5
+no items       0  0  0  0  0  0
++ (1,1)        0  1  1  1  1  1
++ (3,4)        0  1  1  4  5  5
++ (4,5)        0  1  1  4  5  6
+```
+
+The final cell is `6` — take `(1,1)` and `(4,5)`. Note `dp[3][5] = max(dp[2][5]=5, 5 + dp[2][1]=6)`: the "take it" branch wins by one.
+
+Complexity: `n · W` cells at constant work each, so `O(n·W)` time — *items times capacities* — and `O(n·W)` space, reducible to one row. But `W` makes this **pseudo-polynomial**, not polynomial (see the dedicated card below).
 
 ### What is the difference between 0/1 and unbounded knapsack in code?
 
-The state shape is identical; the capacity loop direction differs. In the 1D rolling version, 0/1 knapsack iterates capacity *descending* so an item can be added at most once per pass. Unbounded knapsack (each item reusable any number of times — coin change is exactly this) iterates capacity *ascending*, which lets the same item be re-consumed within one pass. One flipped loop bound is the entire difference between "use once" and "use many".
+The state shape is identical. Once you collapse to a single rolling row, the *entire* difference is the direction of the capacity loop.
+
+```python
+def knapsack_01(weights, values, W):
+    dp = [0] * (W + 1)
+    for wi, vi in zip(weights, values):
+        for w in range(W, wi - 1, -1):           # DESCENDING: each item once
+            dp[w] = max(dp[w], vi + dp[w - wi])
+    return dp[W]
+
+def knapsack_unbounded(weights, values, W):
+    dp = [0] * (W + 1)
+    for wi, vi in zip(weights, values):
+        for w in range(wi, W + 1):               # ASCENDING: item reusable
+            dp[w] = max(dp[w], vi + dp[w - wi])
+    return dp[W]
+```
+
+Why backwards for 0/1? When you write `dp[w]` from `dp[w - wi]`, you need `dp[w - wi]` to still hold the *previous* item's row — an answer that has **not** yet seen the current item. Descending, cell `w - wi` sits to the left and is untouched this pass, so it's still the old row. Ascending, it was already updated with the current item, so taking it again stacks a second copy — exactly what unbounded knapsack wants.
+
+Micro-example: one item of weight 2, value 3, `W = 6`. Ascending gives `dp[2]=3`, `dp[4]=3+dp[2]=6`, `dp[6]=3+dp[4]=9` — used three times. Descending computes `dp[6]=3+dp[4]` while `dp[4]` is still `0`, so `dp[6]=3` — used once. Both are `O(n·W)`; one flipped loop bound is the whole distinction, and it fails **silently**.
 
 ### Explain the LCS recurrence and its complexity.
 
-For strings `a` (length n) and `b` (length m), `dp[i][j]` = length of the longest common subsequence of the first `i` chars of `a` and first `j` of `b`. If `a[i-1] == b[j-1]`, `dp[i][j] = dp[i-1][j-1] + 1`; otherwise `dp[i][j] = max(dp[i-1][j], dp[i][j-1])`. Base cases are the zero row and column. Time O(n*m), space O(n*m) or O(min(n,m)) with two rows. Subsequence means order-preserving but non-contiguous — do not confuse it with longest common *substring*, which resets to 0 on a mismatch.
+`dp[i][j]` = length of the longest common subsequence of the first `i` characters of `a` and the first `j` of `b`. In plain English: *if the two current characters match, that character can safely join the LCS, so take the answer with both strings one shorter and add one; if they differ, one of them must be discarded, so try dropping each and keep the better result.* In symbols: `dp[i][j] = dp[i-1][j-1] + 1` when `a[i-1] == b[j-1]`, else `max(dp[i-1][j], dp[i][j-1])`. Row 0 and column 0 are zero.
+
+```python
+def lcs(a, b):
+    n, m = len(a), len(b)
+    dp = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            if a[i - 1] == b[j - 1]:
+                dp[i][j] = dp[i - 1][j - 1] + 1              # match: diagonal + 1
+            else:
+                dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])   # drop one character
+    out, i, j = [], n, m                                     # walk back for the string
+    while i > 0 and j > 0:
+        if a[i - 1] == b[j - 1]:
+            out.append(a[i - 1]); i -= 1; j -= 1
+        elif dp[i - 1][j] >= dp[i][j - 1]:
+            i -= 1
+        else:
+            j -= 1
+    return dp[n][m], "".join(reversed(out))
+```
+
+Micro-example — `a = "ABCB"`, `b = "BDCB"`:
+
+```text
+        ""  B  D  C  B
+   ""    0  0  0  0  0
+   A     0  0  0  0  0
+   B     0  1  1  1  1
+   C     0  1  1  2  2
+   B     0  1  1  2  3
+```
+
+Answer `3`; the backward walk recovers `"BCB"`.
+
+Complexity: one pass over an `n`-by-`m` grid, `O(n·m)` time — *the product of the two lengths* — and `O(n·m)` space, reducible to two rows if you only need the length. Reconstruction needs the full table. **Subsequence** means order-preserving but non-contiguous; longest common *substring* is a different recurrence.
 
 ### How is edit distance related to LCS?
 
-Same grid, richer transition. `dp[i][j]` = minimum edits to turn the first `i` chars of `a` into the first `j` of `b`. If the chars match, `dp[i][j] = dp[i-1][j-1]`; else `dp[i][j] = 1 + min(dp[i-1][j] (delete), dp[i][j-1] (insert), dp[i-1][j-1] (replace))`. Base cases: `dp[i][0] = i`, `dp[0][j] = j` (delete-all / insert-all). O(n*m) time and space, reducible to two rows. It is LCS's cousin: matches carry the diagonal for free, mismatches take a costed min.
+Same grid, richer transition. `dp[i][j]` = minimum edits turning the first `i` characters of `a` into the first `j` of `b`. In plain English: *matching characters cost nothing, so carry the diagonal through; differing characters cost one edit, and you take the cheapest of three moves — delete from `a` (come from above), insert into `a` (come from the left), or replace (come from the diagonal).* In symbols: `dp[i][j] = dp[i-1][j-1]` on a match, else `1 + min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1])`. Base cases `dp[i][0] = i` (delete everything), `dp[0][j] = j` (insert everything).
+
+```python
+def edit_distance(a, b):
+    n, m = len(a), len(b)
+    dp = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(n + 1):
+        dp[i][0] = i                       # delete all i chars of a
+    for j in range(m + 1):
+        dp[0][j] = j                       # insert all j chars of b
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            if a[i - 1] == b[j - 1]:
+                dp[i][j] = dp[i - 1][j - 1]            # free match
+            else:
+                delete_ = dp[i - 1][j]
+                insert_ = dp[i][j - 1]
+                replace = dp[i - 1][j - 1]
+                dp[i][j] = 1 + min(delete_, insert_, replace)
+    return dp[n][m]
+```
+
+Micro-example — `a = "ab"`, `b = "bc"`:
+
+```text
+        ""  b  c
+   ""    0  1  2
+   a     1  1  2
+   b     2  1  2
+```
+
+Answer `2` (replace `a`→`b`, then `b`→`c`). `dp[2][1] = 1` because `b` matches `b`, carrying the diagonal.
+
+Complexity: `O(n·m)` time and space, reducible to two rows. The relationship worth saying out loud: both align two sequences on the same grid — LCS *maximizes* free diagonal matches, edit distance *minimizes* costed non-matches. With insert and delete only (no replace), the distance is exactly `n + m - 2·LCS(a, b)`.
 
 ### What are the two ways to solve Longest Increasing Subsequence and their complexities?
 
-O(n^2) DP: `dp[i]` = length of the longest increasing subsequence ending at index `i` = `1 + max(dp[j])` over all `j < i` with `nums[j] < nums[i]`; answer is the max cell. O(n log n) patience sorting: maintain a `tails` array where `tails[k]` is the smallest possible tail of an increasing subsequence of length `k+1`; for each element, binary-search its insertion point and overwrite. The length of `tails` at the end is the answer. The n log n version wins on speed; the n^2 version reconstructs the actual subsequence more directly via back-pointers.
+**Quadratic DP.** `dp[i]` = length of the longest increasing subsequence *ending exactly at index `i`*. In plain English: *look back at every earlier element smaller than me; the best chain I can join is the longest of theirs, plus myself.* In symbols: `dp[i] = 1 + max(dp[j])` over all `j < i` with `nums[j] < nums[i]`, defaulting to `1`. The answer is the maximum cell, not `dp[n-1]` — the LIS can end anywhere.
+
+```python
+def lis_quadratic(nums):
+    n = len(nums)
+    dp = [1] * n                    # every element is a length-1 subsequence
+    prev = [-1] * n                 # back-pointers for reconstruction
+    for i in range(n):
+        for j in range(i):
+            if nums[j] < nums[i] and dp[j] + 1 > dp[i]:
+                dp[i] = dp[j] + 1
+                prev[i] = j
+    if not n:
+        return 0, []
+    best = max(range(n), key=lambda i: dp[i])
+    seq = []
+    while best != -1:               # walk the back-pointers
+        seq.append(nums[best])
+        best = prev[best]
+    return max(dp), list(reversed(seq))
+```
+
+Micro-example — `nums = [10, 9, 2, 5, 3, 7, 101, 18]` gives `dp = [1, 1, 1, 2, 2, 3, 4, 4]`, answer `4` (e.g. `[2, 3, 7, 18]`).
+
+**Linearithmic patience sorting.** Keep a `tails` array where `tails[k]` is the smallest possible tail of an increasing subsequence of length `k+1`, binary-searching each new element into it — see the next card.
+
+Complexity: the DP is `O(n²)` time (quadratic — every element scans all earlier ones), `O(n)` space; patience sorting is `O(n log n)` (`n` elements, one binary search each), `O(n)` space. The faster version wins on speed; the quadratic one reconstructs the actual subsequence directly from `prev`.
 
 ### For LIS, how does the O(n log n) approach actually work and why is it correct?
 
-You keep `tails`, where `tails[k]` holds the minimum tail value over all increasing subsequences of length `k+1`. Each new element `x` replaces the first `tails` entry that is `>= x` (via binary search), or appends if `x` exceeds all of them. Correctness: `tails` stays sorted, and keeping the smallest possible tail for each length maximizes the chance to extend later — a greedy-on-a-DP argument. The array's length equals the LIS length, though `tails` itself is not necessarily a valid subsequence. Strict vs non-decreasing decides `lower_bound` vs `upper_bound`.
+Maintain `tails`, where `tails[k]` holds the **minimum possible tail value** over all increasing subsequences of length `k+1` seen so far. For each new element `x`, binary-search the first entry `≥ x` and overwrite it; if none exists, append.
+
+```python
+from bisect import bisect_left
+
+def lis_length(nums):
+    tails = []                       # tails[k] = min tail of an LIS of length k+1
+    for x in nums:
+        pos = bisect_left(tails, x)  # first index with tails[pos] >= x
+        if pos == len(tails):
+            tails.append(x)          # x extends the longest chain
+        else:
+            tails[pos] = x           # x is a better (smaller) tail for that length
+    return len(tails)
+```
+
+Trace on `[10, 9, 2, 5, 3, 7, 101, 18]`:
+
+```text
+x=10  -> [10]
+x=9   -> [9]             a length-1 chain ending lower is strictly better
+x=2   -> [2]
+x=5   -> [2, 5]          appended: 5 > 2, so a length-2 chain exists
+x=3   -> [2, 3]          same length, lower tail
+x=7   -> [2, 3, 7]
+x=101 -> [2, 3, 7, 101]
+x=18  -> [2, 3, 7, 18]
+```
+
+Correctness: `tails` stays sorted (a length-`k+1` chain contains a length-`k` prefix with a smaller tail), so binary search is valid. Keeping the smallest tail per length is a greedy exchange argument — a smaller tail is extendable by strictly more future elements and never fewer, so replacing never loses a solution. Two traps: `tails` is **not itself a valid subsequence** in general (its entries can come from incompatible positions), so reconstruction still needs parent pointers; and "strictly increasing" versus "non-decreasing" is `bisect_left` versus `bisect_right`. Complexity `O(n log n)` time, `O(n)` space.
 
 ### How does coin change (minimum coins) differ from coin change (number of ways)?
 
-*Minimum coins*: `dp[a]` = fewest coins summing to amount `a` = `min over coins c of dp[a - c] + 1`, base `dp[0] = 0`, infinity if unreachable. Loop order does not affect correctness. *Number of ways*: `dp[a]` = count of combinations; you must loop *coins on the outer loop, amount inner* so each combination is counted once regardless of order — swapping the loops counts permutations instead and over-counts. Both are unbounded-knapsack shaped, O(amount * coins), but the ways version's loop nesting is the classic trap.
+Both are unbounded knapsack in disguise, but one is a `min` recurrence and the other a `sum` — and only the second cares about loop order.
+
+**Minimum coins.** `dp[a]` = fewest coins summing to `a`. In plain English: *the last coin placed is some `c`; what's left is `a - c`, already solved optimally.* In symbols: `dp[a] = 1 + min over coins c ≤ a of dp[a - c]`, with `dp[0] = 0` and `∞` for unreachable amounts.
+
+**Number of ways.** `dp[a]` = number of distinct *combinations* (order irrelevant). Loop order is the whole problem: **coins outer, amount inner**.
+
+```python
+def min_coins(coins, amount):
+    INF = float("inf")
+    dp = [0] + [INF] * amount
+    for a in range(1, amount + 1):
+        for c in coins:                  # order irrelevant for a min
+            if c <= a and dp[a - c] + 1 < dp[a]:
+                dp[a] = dp[a - c] + 1
+    return -1 if dp[amount] == INF else dp[amount]
+
+def count_ways(coins, amount):
+    dp = [0] * (amount + 1)
+    dp[0] = 1                            # one way to make 0: take nothing
+    for c in coins:                      # OUTER: fix the coin
+        for a in range(c, amount + 1):   # INNER ascending: coin reusable
+            dp[a] += dp[a - c]
+    return dp[amount]
+```
+
+Micro-examples. Min coins with `coins = [1, 3, 4]`, `amount = 6` gives `dp = [0, 1, 2, 1, 1, 2, 2]` → `2` (`3 + 3`); greedy would take `4 + 1 + 1 = 3` coins, which is why this is DP and not greedy. Count ways with `coins = [1, 2]`, `amount = 3`: after coin 1, `dp = [1,1,1,1]`; after coin 2, `dp = [1,1,2,2]` → `2` (`1+1+1` and `1+2`). Swap the loops and you get `3`, because `1+2` and `2+1` are counted separately — you've silently switched from **combinations** to **permutations**.
+
+Both are `O(amount · coins)` time — *amounts times coin types* — and `O(amount)` space.
 
 ### How do you count paths in a grid with DP?
 
-`dp[i][j]` = number of ways to reach cell `(i, j)`. For moves down/right only, `dp[i][j] = dp[i-1][j] + dp[i][j-1]`, with the top row and left column seeded to 1 (a single path along the edge). Obstacles set `dp[i][j] = 0`. Time and space O(n*m), space reducible to one row since each cell needs only the current row's left neighbor and the previous row's value. Minimum-cost path variants swap the sum for `cost[i][j] + min(top, left)`.
+`dp[i][j]` = number of distinct ways to reach cell `(i, j)`. With moves restricted to down and right, *every path into a cell arrives from directly above or directly left, and those sets are disjoint* — so `dp[i][j] = dp[i-1][j] + dp[i][j-1]`. Seed the top row and left column to `1` (one path along an edge); a blocked cell is `0` so nothing routes through it.
+
+```python
+def grid_paths(rows, cols, blocked=()):
+    dp = [0] * cols
+    dp[0] = 1                                  # start cell
+    for i in range(rows):
+        for j in range(cols):
+            if (i, j) in blocked:
+                dp[j] = 0                      # unreachable
+            elif j > 0:
+                dp[j] += dp[j - 1]             # dp[j] still holds the row above
+    return dp[-1]
+```
+
+Micro-example — a 3×3 grid, no obstacles:
+
+```text
+1  1  1
+1  2  3
+1  3  6
+```
+
+Six paths, matching the closed form `C(4, 2) = 6`. The rolling single row works because each cell needs only the value above (still in `dp[j]` before the update) and the value to the left (`dp[j-1]`, already updated).
+
+Complexity: `O(n·m)` time — one constant-time update per cell — and `O(m)` space rolling, `O(n·m)` for the full table. The minimum-cost-path variant swaps the sum for `cost[i][j] + min(above, left)`: same skeleton, `+` replaced by `min`.
 
 ### What is interval DP and what is its typical complexity?
 
-Interval DP defines states over contiguous ranges: `dp[i][j]` = optimal answer for the subarray/substring from `i` to `j`, built by trying every split point `k` between them: `dp[i][j] = best over k of combine(dp[i][k], dp[k+1][j]) + cost`. Classic cases: matrix-chain multiplication, burst balloons, optimal BST, palindrome partitioning. You fill by increasing interval length so sub-ranges are ready. Typical complexity O(n^3) — O(n^2) states times an O(n) split loop — acceptable for `n` in the hundreds. Some problems admit Knuth's optimization to O(n^2).
+Interval DP defines states over **contiguous ranges**: `dp[i][j]` = optimal answer for the range `i` to `j`. In plain English: *the last operation on this range splits it into a left and a right part; try every split point, solve both halves optimally, add the cost of joining them.* In symbols: `dp[i][j] = best over k in [i, j) of combine(dp[i][k], dp[k+1][j]) + cost(i, k, j)`. The critical detail is the **fill order** — iterate by increasing interval *length* so every sub-range is ready.
+
+```python
+def matrix_chain(dims):
+    """Matrix i is dims[i-1] x dims[i]; return min scalar multiplications."""
+    n = len(dims) - 1                                # number of matrices
+    dp = [[0] * n for _ in range(n)]
+    for length in range(2, n + 1):                   # by INCREASING length
+        for i in range(n - length + 1):
+            j = i + length - 1
+            dp[i][j] = float("inf")
+            for k in range(i, j):                    # every split point
+                cost = (dp[i][k] + dp[k + 1][j]
+                        + dims[i] * dims[k + 1] * dims[j + 1])
+                dp[i][j] = min(dp[i][j], cost)
+    return dp[0][n - 1] if n else 0
+```
+
+Micro-example — `dims = [10, 30, 5, 60]`: matrices `A` (10×30), `B` (30×5), `C` (5×60). `(AB)C` costs `10·30·5 + 10·5·60 = 4500`; `A(BC)` costs `30·5·60 + 10·30·60 = 27000`. The DP tries both splits and returns `4500` — a six-fold difference from bracket placement alone.
+
+Family members: burst balloons, optimal binary search tree, palindrome partitioning, minimum cost to merge stones. Complexity: `O(n²)` ranges each trying up to `n` splits, so `O(n³)` time — *cubic* — and `O(n²)` space. Fine for `n` in the hundreds, hopeless in the thousands. A few of these satisfy the quadrangle inequality and admit **Knuth's optimization**, dropping it to `O(n²)`.
 
 ### When do you reach for bitmask DP and what limits it?
 
-When the state must track *which subset* of a small set is used or visited — traveling-salesman-style routing, assignment problems, "cover all elements". Encode the subset as an integer bitmask; state is `dp[mask][...]`. Held-Karp TSP is `dp[mask][last]` = shortest path visiting `mask` ending at `last`, O(2^n * n^2). The hard limit is exponential blowup: `2^n` masks means `n` up to roughly 20 (2^20 is about a million). If `n` is large, bitmask DP is the wrong tool — that is the interviewer's cue to check your complexity judgment.
+When the state must remember **which subset** of a small set is used or visited, and no cheaper summary (a count, a maximum) suffices — routing that visits every city once, assigning `n` tasks to `n` workers, "cover all elements". Encode the subset in the bits of an integer: bit `i` set means element `i` is used.
+
+The canonical case is **Held–Karp** for TSP: `dp[mask][last]` = cheapest route starting at city 0, visiting exactly the cities in `mask`, currently at `last`.
+
+```python
+def tsp(dist):
+    n = len(dist)
+    INF = float("inf")
+    dp = [[INF] * n for _ in range(1 << n)]      # 2^n masks x n endpoints
+    dp[1][0] = 0                                 # mask {0}, sitting at city 0
+    for mask in range(1 << n):
+        for last in range(n):
+            if dp[mask][last] == INF or not (mask >> last) & 1:
+                continue
+            for nxt in range(n):
+                if (mask >> nxt) & 1:            # already visited
+                    continue
+                nmask = mask | (1 << nxt)
+                cand = dp[mask][last] + dist[last][nxt]
+                if cand < dp[nmask][nxt]:
+                    dp[nmask][nxt] = cand
+    full = (1 << n) - 1
+    return min(dp[full][last] + dist[last][0] for last in range(1, n))
+```
+
+The loops give the complexity directly: `2ⁿ` masks × `n` endpoints × `n` next-cities = `O(2ⁿ · n²)` time — *exponential in the number of elements* — with `O(2ⁿ · n)` space. That's a huge win over the `O(n!)` brute force (for `n = 20`, about 4·10⁸ operations versus 2·10¹⁸), but the exponential is a hard wall: `2²⁰` is roughly a million masks, `2³⁰` is infeasible. Bitmask DP is a deliberate "`n ≤ about 20`" tool; proposing it for large `n` is the complexity-judgment failure the interviewer is watching for, where approximation or heuristics are the honest answer.
 
 ### How does DP on trees work?
 
-Root the tree, then post-order traverse so every node is processed after its children. Each node's state aggregates its children's already-computed states — e.g. `dp[node][0/1]` for "max independent set" (node excluded / included), where included = `value[node] + sum(dp[child][0])` and excluded = `sum(max(dp[child][0], dp[child][1]))`. One DFS, O(n) total since each edge is used once. Problems needing answers "for every node as root" use *rerooting*: a second pass that adjusts each child's answer using the parent's, keeping it O(n) instead of O(n^2).
+Root the tree anywhere and traverse **post-order**, so every node is processed after all its children. Each node aggregates its children's finished states; the tree has no cycles, so one DFS visits each edge once and the dependency order comes for free.
+
+The classic is **maximum-weight independent set** (pick nodes, no two adjacent, maximize value). Two states per node: `dp[v][0]` with `v` **excluded**, `dp[v][1]` with `v` **included**. In plain English: *if I take `v`, no child may be taken, so I add their excluded answers; if I skip `v`, each child does whatever is best for it.*
+
+```python
+import sys
+
+def max_independent_set(adj, value, root=0):
+    sys.setrecursionlimit(10 ** 6)
+    excl = [0] * len(adj)
+    incl = [0] * len(adj)
+
+    def dfs(v, parent):
+        incl[v] = value[v]
+        excl[v] = 0
+        for c in adj[v]:
+            if c == parent:
+                continue
+            dfs(c, v)                        # children first: post-order
+            incl[v] += excl[c]               # took v -> children excluded
+            excl[v] += max(excl[c], incl[c]) # skipped v -> child chooses freely
+
+    dfs(root, -1)
+    return max(incl[root], excl[root])
+```
+
+Micro-example — root `r` (value 1) with children `a` (2) and `b` (3). Leaves give `incl[a]=2, excl[a]=0`, `incl[b]=3, excl[b]=0`. Then `incl[r] = 1 + 0 + 0 = 1` and `excl[r] = max(0,2) + max(0,3) = 5`, so the answer is `5` — skip the root, take both children.
+
+Complexity: `O(n)` time — *linear*, one visit per node — and `O(n)` space plus `O(height)` recursion stack (go iterative if the tree can be a 10⁵-deep path). A common follow-up asks the answer *for every node as root*; a fresh DFS per root is `O(n²)`, so use **rerooting**: a second top-down pass handing each child the parent's answer with the child's own contribution removed, keeping it `O(n)`.
 
 ### Why is knapsack called "pseudo-polynomial" and why does it matter?
 
-Its O(n*W) runtime is polynomial in the *value* of the capacity `W`, but `W` takes only `log W` bits to write down, so the runtime is exponential in the *input size*. That is the definition of pseudo-polynomial. It matters because 0/1 knapsack is NP-hard: the DP is efficient only when `W` is numerically small; if capacities are huge (say 10^18), the table is infeasible and no known truly polynomial algorithm exists. Interviewers probe this to see whether you understand the difference between "value" and "size" complexity.
+Because `O(n·W)` is polynomial in the numeric **value** of `W`, but the input spends only `log₂ W` bits writing `W` down. Measured against the true input *size* in bits, the runtime is exponential. That gap between "polynomial in the value" and "polynomial in the bit length" is exactly what pseudo-polynomial means.
+
+Why it matters: 0/1 knapsack is **NP-hard**, and this DP is not a proof that P = NP. With `n = 100` items and `W = 10⁴` you fill a million cells — instant. With the same 100 items and `W = 10¹⁸` (a 60-bit number) the table has 10²⁰ cells and no machine will ever build it, even though the input file grew by a handful of characters. No truly polynomial algorithm is known, and none is expected.
+
+The same label attaches to subset-sum and to coin change with a huge target. Interviewers probe it to see whether you distinguish the *value* of a number from the *size* of its encoding. If capacities are astronomically large, the honest answers are a fully-polynomial-time approximation scheme (FPTAS), branch and bound, or meet-in-the-middle at `O(2^(n/2))` for small `n`.
 
 ### How would you reconstruct which items are in the optimal knapsack?
 
-Keep the full 2D table (not the rolling 1D one), then walk backward from `dp[n][W]`. At each `(i, w)`: if `dp[i][w] == dp[i-1][w]`, item `i` was not taken — move to `(i-1, w)`; otherwise it was taken — record it and move to `(i-1, w - weight[i])`. This O(n) backward pass recovers the chosen set. The catch: it needs the history, so it is incompatible with the O(W) space optimization — a common reconstruction-vs-memory trade-off.
+Keep the **full 2-D table** — not the rolling row — then walk backwards from `dp[n][W]`, asking at each cell whether the value came from skipping the item or taking it.
+
+```python
+def knapsack_items(weights, values, W):
+    n = len(weights)
+    dp = [[0] * (W + 1) for _ in range(n + 1)]
+    for i in range(1, n + 1):
+        wi, vi = weights[i - 1], values[i - 1]
+        for w in range(W + 1):
+            dp[i][w] = dp[i - 1][w]
+            if wi <= w:
+                dp[i][w] = max(dp[i][w], vi + dp[i - 1][w - wi])
+    chosen, w = [], W
+    for i in range(n, 0, -1):
+        if dp[i][w] != dp[i - 1][w]:      # value changed -> item i was taken
+            chosen.append(i - 1)
+            w -= weights[i - 1]           # refund its capacity
+    return dp[n][W], sorted(chosen)
+```
+
+The rule in words: *if `dp[i][w] == dp[i-1][w]`, item `i` changed nothing, so step up to `(i-1, w)`; otherwise it was taken — record it and step to `(i-1, w - weight[i])`.* On the earlier example (`(1,1), (3,4), (4,5)`, `W = 5`, optimum 6): `dp[3][5]=6 ≠ dp[2][5]=5` → take item 3, go to `(2, 1)`; `dp[2][1]=1 = dp[1][1]` → skip item 2; `dp[1][1]=1 ≠ dp[0][1]=0` → take item 1. Chosen `{1, 3}`, weight 5, value 6.
+
+Complexity: the backward walk is `O(n)` — *linear*, one step per item — on top of the `O(n·W)` fill. The trade-off to name out loud: reconstruction needs the history, so it is **incompatible** with the `O(W)` space optimization. If memory is tight, either keep the full table or use Hirschberg's divide-and-conquer trick (standard for LCS) to recover the answer in linear space at roughly double the time.
 
 ### How do you tell subsequence problems from substring/subarray problems?
 
-Subsequence keeps relative order but allows gaps (LCS, LIS) — the recurrence can "skip" an element by carrying a previous state forward. Substring/subarray requires contiguity — a mismatch or break *resets* the running state to zero rather than inheriting a neighbor's. Longest common *substring* uses `dp[i][j] = dp[i-1][j-1]+1` on match but `0` on mismatch (versus LCS's `max` inheritance). Spotting which one the prompt wants determines whether your transition inherits or resets, and it is a frequent source of wrong answers.
+Read the prompt for **contiguous** ("consecutive", "window", "block"). A **subsequence** keeps relative order but allows gaps, so its recurrence may *skip* an element by inheriting a neighbouring state. A **substring/subarray** must be unbroken, so a mismatch **resets** the running state to zero instead of inheriting.
+
+The clearest illustration is longest common *substring* versus LCS on the identical grid:
+
+```python
+def longest_common_substring(a, b):
+    n, m = len(a), len(b)
+    dp = [[0] * (m + 1) for _ in range(n + 1)]
+    best = 0
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            if a[i - 1] == b[j - 1]:
+                dp[i][j] = dp[i - 1][j - 1] + 1     # extend the run
+            else:
+                dp[i][j] = 0                        # RESET, not max()
+            best = max(best, dp[i][j])
+    return best                                     # answer is the max cell
+```
+
+Two diagnostic differences from LCS: the mismatch branch is `0` rather than `max(dp[i-1][j], dp[i][j-1])`, and the answer is the **maximum over all cells** rather than the bottom-right corner (a contiguous run can end anywhere). On `a = "ABCB"`, `b = "BDCB"`, LCS is `3` (`"BCB"`) but the longest common substring is only `1`. Same `O(n·m)` grid, one changed line, completely different answer.
+
+The fork recurs elsewhere: maximum-sum **subarray** is Kadane's algorithm (`best_here = max(x, best_here + x)` — the `max(x, ...)` is the reset, discarding a negative prefix), whereas maximum-sum *subsequence* is trivially "add all the positives". LIS is a subsequence problem; longest increasing *run* is contiguous and needs only a counter. Which one the prompt wants decides whether your transition **inherits or resets** — one of the most common sources of a confidently wrong DP answer.
 
 ### A senior follow-up: how would you approach a DP problem you have never seen before?
 
-Match it to the nearest archetype by its *shape*, not its story. Ask: what am I choosing (subset, ordering, partition, path)? What must the state remember (an index, a remaining budget, a visited set, a range)? That maps onto knapsack, LIS/LCS, interval DP, bitmask, or tree DP. Write the recurrence from the archetype, adapt the transition to the twist, compute `states x transition` to sanity-check feasibility, then decide top-down vs bottom-up and whether space can be squeezed. If `n` is tiny, suspect bitmask; if the input is two sequences, suspect an LCS-style grid; if it is a range, suspect interval DP.
+Match it to the nearest archetype by its **shape**, not its story, working a fixed checklist out loud:
+
+1. **What am I choosing?** A subset (knapsack), an alignment of two sequences (LCS grid), a chain to extend (LIS), a path (grid DP), a partition of a range (interval DP), an ordering over a tiny set (bitmask), or a selection on a tree (tree DP).
+2. **What must the state remember?** An index, a remaining budget, a visited set, a range, a "have I used my one free skip" flag. Under-specify it and distinct subproblems collide; over-specify it and the table explodes.
+3. **Write the archetype's recurrence, then bend it.** "Knapsack with two capacities" is `dp[i][w1][w2]`; "LCS allowing at most `k` mismatches" is `dp[i][j][k]`. Adding a dimension to a known recurrence is far safer than inventing one.
+4. **Sanity-check feasibility before coding**: `time = states × transition cost`. If that lands at 10¹² operations, the state is wrong — go back to step 2 and find a cheaper summary.
+5. **Choose the implementation.** Top-down memoization if the state space is sparse or the order is awkward; bottom-up tabulation if you'll want a rolling array. Correct full table first, space optimization second.
+6. **Pin down the base cases and the answer cell.** Is the answer `dp[n][m]`, or the max over all cells (LIS, longest common substring)? Getting this wrong is a common way to fail an otherwise correct recurrence.
+
+Fast heuristics worth stating: `n ≤ 20` suggests a bitmask; two input sequences suggest an LCS-style grid; a range or a "merge adjacent things" story suggests interval DP; a budget or capacity suggests knapsack; a tree means post-order aggregation. And always run the tiniest instance by hand before writing code — a three-element example that breaks the recurrence saves the whole interview.
 
 ## Graph Traversal & Topological Sort
 
 ### Summary
 
 **What this topic covers**
-Systematic ways to visit every vertex/edge of a graph and the structural facts those traversals reveal. Breadth-first search (BFS) and depth-first search (DFS) are the two engines; on top of them sit connected components, topological sort, cycle detection, bipartite checking, and edge classification. All run in O(V + E) on an adjacency-list graph — the traversal is cheap; the value is what you *extract* while traversing.
+Systematic ways to visit every vertex and edge of a graph, and the structural facts those visits reveal. **Breadth-first search (BFS)** and **depth-first search (DFS)** are the two engines; everything else here is a thin layer bolted on top of one of them — connected components, topological sort, cycle detection, bipartite checking, DFS edge classification. All run in `O(V + E)` — "one visit per vertex plus one look at each edge" — on an adjacency-list graph. The traversal is cheap and nearly identical every time; the value is in what you *extract* while traversing.
+
+**Mental model**
+A graph is a maze and you're an explorer with a to-do list of rooms. **BFS is a flood**: pour water in at the source and it spreads outward one ring at a time, so every room is first reached by the shortest route. The to-do list is a **queue** — it always holds rooms at distance `d` followed by rooms at distance `d + 1`, which is why BFS hands you shortest hop counts for free. **DFS is one explorer with a ball of string**: walk down a corridor as far as it goes, and only when stuck back up to the last junction and try the next one. The to-do list is a **stack**, usually the language's own call stack. Because DFS *finishes* a room only after everything downstream of it is finished, it produces a natural "I'm done and so is everything I depend on" ordering — exactly what topological sort needs. The `visited` set is identical in both, and it's the entire reason the cost is linear rather than exponential.
 
 **Key terms**
-*BFS* — level-order traversal using a queue; finds shortest paths in *unweighted* graphs. *DFS* — go-deep traversal using recursion or an explicit stack. *Connected component* — a maximal set of mutually reachable vertices (undirected). *Topological sort* — a linear ordering of a DAG where every edge points forward. *DAG* — directed acyclic graph. *Kahn's algorithm* — BFS-based topological sort using in-degrees. *Back edge* — an edge to an ancestor in the DFS tree, the signature of a cycle in a directed graph. *Bipartite* — vertices 2-colorable with no same-color edge. *Strongly connected* (directed) — mutually reachable both directions.
+- **BFS** — level-order traversal using a queue; gives shortest paths in *unweighted* graphs.
+- **DFS** — go-deep traversal using recursion or an explicit stack; backtracks when stuck.
+- **Adjacency list** — `graph[u]` is the list of `u`'s neighbours; what makes traversal `O(V + E)`.
+- **Connected component** — a maximal mutually-reachable set of vertices (undirected).
+- **DAG** — directed acyclic graph: a directed graph with no cycles.
+- **Topological sort** — a linear ordering of a DAG in which every edge points forward.
+- **In-degree** — how many edges point *into* a vertex; the counter Kahn's drains.
+- **Back edge** — a DFS edge to an ancestor still on the recursion stack; signature of a directed cycle.
+- **Bipartite** — 2-colourable so that no edge joins two same-coloured vertices.
+- **Strongly connected** (directed) — every pair of vertices mutually reachable.
 
 **Core mechanics**
-BFS: enqueue the source, mark visited, dequeue and enqueue unvisited neighbors; the visit order is by increasing distance, giving shortest hop counts. DFS: recurse into an unvisited neighbor, backtrack when stuck; naturally produces a DFS tree with discovery/finish times. Both are O(V + E) with adjacency lists (each vertex and edge touched once), O(V^2) with an adjacency matrix. Topological sort two ways: *Kahn's* — repeatedly emit a zero-in-degree vertex and decrement its neighbors' in-degrees (a queue); if you emit fewer than V vertices, a cycle exists. *DFS-based* — push each vertex onto a stack on finish, then reverse. Cycle detection: undirected — any edge to an already-visited non-parent vertex; directed — a back edge to a vertex currently on the recursion stack ("gray" node). Bipartite check: BFS/DFS 2-coloring, conflict on a same-colored edge means not bipartite.
+BFS: enqueue the source and mark it visited *when you enqueue it, not when you pop it*; then repeatedly dequeue a vertex and enqueue its unvisited neighbours. DFS: recurse into an unvisited neighbour, backtrack when all neighbours are visited; the recursion gives you discovery and finish times for free. Both are `O(V + E)` with adjacency lists — every vertex processed once, every adjacency list scanned once — and `O(V²)` with an adjacency matrix, where finding a vertex's neighbours means scanning a whole row however few edges exist. Topological sort has two flavours. **Kahn's**: repeatedly emit a vertex with in-degree `0` and decrement its neighbours' in-degrees; emitting fewer than `V` vertices means the leftovers are trapped in a cycle. **DFS-based**: append each vertex when it *finishes*, then reverse. Cycle detection: undirected needs "visited neighbour that isn't my parent"; directed needs the stronger "neighbour currently *on the recursion stack*". Bipartite check: 2-colour during BFS or DFS and fail on a same-coloured edge.
 
 **Trade-offs**
-BFS gives shortest unweighted paths and finds them level by level but can hold a wide frontier in memory (up to O(V)). DFS uses stack-depth memory (O(V) worst case, but often less) and is the natural fit for topological order, cycle detection, and edge classification — but recursion can overflow the stack on deep graphs (use an explicit stack). Kahn's vs DFS topological sort: Kahn's detects cycles cleanly (count check) and is iterative; DFS is terse and gives finish-time structure for free. Neither BFS nor DFS handles weighted shortest paths — that is Dijkstra/Bellman-Ford territory.
+BFS gives shortest unweighted paths, but the frontier can be wide — up to `O(V)` in the queue at once (a star graph enqueues everything). DFS uses memory proportional to path *depth*, often far less, and is the natural fit for topological order, cycle detection, and edge classification — but a 100,000-node chain blows Python's default recursion limit, so you convert to an explicit stack. Kahn's versus DFS topological sort: Kahn's detects cycles with a clean count check, is iterative, and lets you break ties deterministically by swapping the queue for a heap; DFS is terser and reuses finish-time structure. Neither BFS nor DFS handles *weighted* shortest paths — that's Dijkstra and Bellman-Ford territory.
 
 **Common confusions**
-Using BFS for shortest paths on a *weighted* graph — it only works when all edge weights are equal. Directed vs undirected cycle detection: the directed case needs the *on-stack* (recursion-stack) distinction, not merely "visited", because a cross edge to a finished vertex is not a cycle. Forgetting the parent exception in undirected cycle detection (the edge back to your parent is not a cycle). Assuming topological sort is unique — it is generally not; many valid orders exist. Thinking a graph with a cycle has a topological order — it does not; topo sort requires a DAG.
+Using BFS for shortest paths on a **weighted** graph — it only works when all edges cost the same. Marking visited on *dequeue* instead of *enqueue*, which lets a vertex enter the queue repeatedly. Directed versus undirected cycle detection: the directed case needs the *on-stack* distinction, not merely "visited", because an edge into an already-*finished* vertex closes no loop. Forgetting the parent exception undirected — the edge back the way you came is the same edge, not a cycle. Assuming a topological order is unique; it usually isn't. Expecting topological sort to work on a cyclic graph — it can't, and both algorithms *report* the violation rather than fail silently.
 
 **Why interviewers ask**
-Graph traversal is the substrate for a huge fraction of real problems — dependency resolution, build systems, scheduling, deadlock detection, network reachability. Interviewers check that you pick BFS vs DFS for the right reason, know the O(V + E) bound and why, and can layer a structural query (cycle, order, component, coloring) on top of a bare traversal. The classic escalation is "now detect a cycle" or "now produce a valid build order".
+Graph traversal is the substrate for a huge share of real problems: dependency resolution, build systems, scheduling, deadlock detection, network reachability, package managers, spreadsheet recalculation. Interviewers want to see you pick BFS versus DFS for a *reason*, state and justify the `O(V + E)` bound, and layer a structural query — cycle, order, component, colouring — on top of a bare traversal without rewriting it. The standard escalation on any traversal question is "now detect a cycle" or "now produce a valid build order", so both topological sorts and both cycle detections are high-leverage to know cold.
 
 ### When should you use BFS versus DFS?
 
-Use BFS when you need shortest paths in an *unweighted* graph, level-by-level processing, or the minimum number of steps — its queue visits vertices in nondecreasing distance from the source. Use DFS when you need to go deep: topological sort, cycle detection, edge classification, connected components, or exploring all paths. DFS uses recursion-stack memory proportional to depth; BFS uses queue memory proportional to the frontier width. Both are O(V + E); the choice is about what structure you need, not speed.
+Use **BFS** when you need shortest paths in an *unweighted* graph, level-by-level processing, or a minimum number of steps — its queue visits vertices in nondecreasing distance from the source. Use **DFS** when you need to go deep: topological sort, cycle detection, edge classification, connected components, enumerating all paths. Both are `O(V + E)`; the choice is about what structure you need, not speed. The memory profiles differ: DFS costs stack depth (longest path), BFS costs frontier width (widest level).
+
+Everything starts with an adjacency list built from an edge list:
+
+```python
+from collections import defaultdict, deque
+
+def build_graph(n, edges, directed=False):
+    g = defaultdict(list)
+    for u, v in edges:
+        g[u].append(v)
+        if not directed:
+            g[v].append(u)      # undirected: store the edge both ways
+    for u in range(n) if isinstance(n, int) else n:
+        g.setdefault(u, [])     # isolated vertices still need an entry
+    return g
+
+def bfs(g, src):
+    seen = {src}                            # mark on ENQUEUE, not on dequeue
+    q = deque([src])
+    order = []
+    while q:
+        u = q.popleft()                     # FIFO -> nearest first
+        order.append(u)
+        for v in g[u]:
+            if v not in seen:
+                seen.add(v)
+                q.append(v)
+    return order
+
+def dfs(g, u, seen=None, order=None):
+    seen = set() if seen is None else seen
+    order = [] if order is None else order
+    seen.add(u)
+    order.append(u)                         # pre-order: record on entry
+    for v in g[u]:
+        if v not in seen:
+            dfs(g, v, seen, order)
+    return order
+```
+
+Micro-example on the directed graph `A→B, A→C, B→D, C→D`. BFS from `A`: queue `[A]` → pop `A`, push `B`, `C` → queue `[B, C]` → pop `B`, push `D` → queue `[C, D]` → pop `C` (`D` already seen) → pop `D`. Visit order `A, B, C, D`, distances `0, 1, 1, 2`. DFS from `A`: enter `A` → enter `B` → enter `D` (dead end, back up) → back to `A` → enter `C` (`D` already visited). Visit order `A, B, D, C`. Same graph, same cost, different shape.
 
 ### Why are BFS and DFS both O(V + E)?
 
-Each vertex is marked visited and processed exactly once — O(V). For each vertex you scan its adjacency list, and across all vertices that scans every edge once (undirected: twice) — O(E). Summing gives O(V + E). This holds for adjacency-list representation. With an adjacency matrix, finding a vertex's neighbors costs O(V) regardless of edge count, making traversal O(V^2) — which is why sparse graphs use adjacency lists.
+Two separate charges add up. First, each vertex is marked visited and processed exactly once — you never re-enter a visited vertex — giving `O(V)`. Second, when you process a vertex you scan its adjacency list once; summing those lengths over all vertices scans every edge exactly once in a directed graph, twice in an undirected one (each edge sits in both endpoints' lists), giving `O(E)`. Total `O(V + E)`: one visit per vertex plus one look at each edge. The `V` term matters on its own because a graph can have many vertices and no edges — you still touch them all.
+
+This bound assumes **adjacency lists**. With an **adjacency matrix**, asking "who are `u`'s neighbours?" means scanning a whole row of length `V` however few edges exist, so traversal becomes `O(V²)` — a quadratic blow-up on a sparse graph where `E ≈ V`. That's why real graph code uses adjacency lists, and why matrices are reserved for dense graphs or algorithms that genuinely need `O(1)` edge lookups.
 
 ### How do you find connected components in an undirected graph?
 
-Iterate over all vertices; whenever you hit an unvisited one, launch a BFS or DFS from it, marking everything reachable with the same component id, then increment the id. Each traversal captures one maximal mutually-reachable set. Total cost O(V + E) because every vertex and edge is touched once across all the traversals combined. For the directed analogue (strongly connected components) you need Tarjan's or Kosaraju's algorithm, not a plain traversal.
+Loop over every vertex. Whenever you hit an unvisited one, launch a fresh BFS or DFS from it and stamp everything reachable with the same component id, then increment the id. Each traversal captures exactly one maximal mutually-reachable set, and since the traversals collectively touch each vertex and edge once, the *total* cost is `O(V + E)` — not `O(V + E)` per component.
+
+```python
+def connected_components(g, vertices):
+    comp = {}                    # vertex -> component id
+    cid = 0
+    for s in vertices:
+        if s in comp:
+            continue
+        q = deque([s])           # one BFS per undiscovered component
+        comp[s] = cid
+        while q:
+            u = q.popleft()
+            for v in g[u]:
+                if v not in comp:
+                    comp[v] = cid
+                    q.append(v)
+        cid += 1
+    return comp, cid
+```
+
+Micro-example: undirected edges `1-2, 2-3, 4-5`, plus an isolated vertex `6`. Start at `1` → BFS reaches `1, 2, 3`, all stamped component `0`. Next unvisited is `4` → BFS reaches `4, 5`, component `1`. Next is `6` → BFS reaches only itself, component `2`. Result: three components. The directed analogue — **strongly connected components** — is *not* solvable by a plain traversal; reachability from `u` to `v` doesn't imply the reverse, so you need Tarjan's or Kosaraju's algorithm.
 
 ### Explain Kahn's algorithm for topological sort.
 
-Compute every vertex's in-degree. Enqueue all zero-in-degree vertices (no prerequisites). Repeatedly dequeue a vertex, append it to the output, and decrement each neighbor's in-degree; when a neighbor's in-degree hits zero, enqueue it. Continue until the queue empties. It is O(V + E): each vertex enqueued once, each edge relaxed once. If the output contains fewer than V vertices, some vertices never reached in-degree zero — they are trapped in a cycle, so no topological order exists.
+Kahn's is BFS applied to prerequisites. Compute every vertex's **in-degree** (how many edges point at it). Enqueue every vertex with in-degree `0` — those have no prerequisites and can go first. Then repeatedly dequeue a vertex, append it to the output, and decrement each neighbour's in-degree; when a neighbour's count hits `0` its last prerequisite is satisfied, so enqueue it. Stop when the queue empties.
+
+```python
+def kahn(g, vertices):
+    indeg = {u: 0 for u in vertices}
+    for u in vertices:
+        for v in g[u]:
+            indeg[v] += 1
+    q = deque(u for u in vertices if indeg[u] == 0)
+    out = []
+    while q:
+        u = q.popleft()
+        out.append(u)
+        for v in g[u]:
+            indeg[v] -= 1        # one prerequisite of v is now satisfied
+            if indeg[v] == 0:
+                q.append(v)
+    if len(out) < len(indeg):    # some vertices never freed -> cycle
+        return None
+    return out
+```
+
+Micro-example on `A→B, A→C, B→D, C→D`. In-degrees: `A:0, B:1, C:1, D:2`. Queue starts `[A]`. Pop `A`, emit it, decrement `B→0` and `C→0`, queue `[B, C]`. Pop `B`, emit, decrement `D→1`; `D` isn't ready, queue `[C]`. Pop `C`, emit, decrement `D→0`, queue `[D]`. Pop `D`, emit. Output `A, B, C, D` — 4 of 4 vertices, so no cycle. Cost is `O(V + E)`: each vertex is enqueued once and each edge is decremented once. The count check at the end is the whole cycle-detection story — if a cycle exists, every vertex in it permanently retains at least one incoming edge from another cycle member and can never reach in-degree `0`.
 
 ### How does DFS produce a topological ordering?
 
-Run DFS; when a vertex *finishes* (all its descendants are fully explored), push it onto a stack. After visiting every vertex, pop the stack — that reversed finish-time order is a valid topological sort. Correctness: a vertex finishes only after all vertices it points to have finished, so it lands *before* them in the reversed order, meaning every edge points forward. It is O(V + E). To also detect cycles here, track on-stack vertices and flag any back edge.
+Run DFS and record each vertex the moment it **finishes** — that is, after every vertex reachable from it has already finished. Then reverse that finish list. The result is a valid topological order.
+
+The correctness argument is one sentence: for any edge `u → v`, `v` always finishes before `u` (either DFS descends into `v` from `u` and returns, or `v` was already done before `u` started), so in the *reversed* finish order `u` comes before `v` — every edge points forward.
+
+```python
+def dfs_topo(g, vertices):
+    WHITE, GREY, BLACK = 0, 1, 2
+    color = {u: WHITE for u in vertices}
+    out = []
+    def visit(u):
+        color[u] = GREY                  # on the recursion stack
+        for v in g[u]:
+            if color[v] == GREY:
+                raise ValueError("cycle detected")
+            if color[v] == WHITE:
+                visit(v)
+        color[u] = BLACK                 # finished: all descendants done
+        out.append(u)                    # post-order append
+    for u in vertices:
+        if color[u] == WHITE:
+            visit(u)
+    return out[::-1]                     # reverse the finish order
+```
+
+Micro-example on `A→B, A→C, B→D, C→D`. Visit `A` (grey) → visit `B` (grey) → visit `D` (grey, no out-edges) → `D` finishes, `out = [D]` → `B` finishes, `out = [D, B]` → back at `A`, visit `C` → `C` sees `D` already black (fine, not a cycle) → `C` finishes, `out = [D, B, C]` → `A` finishes, `out = [D, B, C, A]`. Reversed: `A, C, B, D`. A different valid order from Kahn's `A, B, C, D` — both are correct. Cost `O(V + E)`.
 
 ### How do you detect a cycle in a directed graph?
 
-Do a DFS with three vertex states: unvisited (white), in the current recursion stack (gray), and fully finished (black). If DFS reaches a gray vertex — one currently on the recursion stack — you have found a back edge, which means a cycle. Reaching a black vertex is fine (it is a cross or forward edge, not a cycle). The gray/on-stack distinction is essential: plain "visited/not-visited" cannot tell a genuine cycle from a harmless edge into an already-finished subtree. Alternatively, run Kahn's and check if it emits fewer than V vertices.
+Run DFS with **three colours**. *White* means unvisited, *grey* means currently on the recursion stack (entered but not finished), *black* means fully finished. If DFS ever follows an edge to a **grey** vertex, that vertex is an ancestor of the current one, the edge is a **back edge**, and you have a cycle. An edge to a black vertex is harmless — it's a cross or forward edge into a subtree that's already completely explored.
+
+```python
+def has_cycle_directed(g, vertices):
+    WHITE, GREY, BLACK = 0, 1, 2
+    color = {u: WHITE for u in vertices}
+    def visit(u):
+        color[u] = GREY
+        for v in g[u]:
+            if color[v] == GREY:         # back edge to an ancestor
+                return True
+            if color[v] == WHITE and visit(v):
+                return True
+        color[u] = BLACK                 # leaving u: no longer an ancestor
+        return False
+    return any(color[u] == WHITE and visit(u) for u in vertices)
+```
+
+Micro-example on `A→B, B→C, C→A`. Enter `A` (grey), enter `B` (grey), enter `C` (grey), `C` looks at `A` — grey — cycle found. Contrast with the DAG `A→B, A→C, B→D, C→D`: when `C` looks at `D`, `D` is already **black** (it finished under `B`), so no cycle is reported. That single colour distinction is the entire difference between a correct algorithm and one that cries wolf on every diamond. The alternative is to run Kahn's and check whether it emitted fewer than `V` vertices — same `O(V + E)` cost, no recursion.
 
 ### How does cycle detection differ for undirected graphs?
 
-In an undirected graph you DFS/BFS and treat *any* edge to an already-visited vertex as a cycle — *except* the edge back to the vertex you just came from (your parent), which is the same undirected edge, not a cycle. So you pass the parent down and skip it. (With a union-find structure you can alternatively detect a cycle by finding an edge whose endpoints already share a set.) The directed case is harder because it needs the recursion-stack state; the undirected case only needs visited-plus-parent.
+In an undirected graph you don't need colours — plain `visited` plus the **parent** you came from is enough. Traverse; if you reach a vertex that's already visited **and it isn't your parent**, you've closed a loop. The parent exception exists because the edge `u — v` is stored in both `g[u]` and `g[v]`, so walking from `u` to `v` and immediately seeing `u` in `v`'s list is just the same edge looked at twice, not a cycle.
+
+```python
+def has_cycle_undirected(g, vertices):
+    seen = set()
+    def visit(u, parent):
+        seen.add(u)
+        for v in g[u]:
+            if v == parent:              # the edge we just came along
+                continue
+            if v in seen or visit(v, u): # visited non-parent -> cycle
+                return True
+        return False
+    return any(u not in seen and visit(u, None) for u in vertices)
+```
+
+Micro-example: undirected `A-B, B-C, C-A`. Enter `A` (parent `None`), go to `B` (parent `A`), go to `C` (parent `B`), `C` sees `A` — visited, not its parent — cycle. Now the tree `A-B, B-C`: from `C` the only neighbour is `B`, which *is* the parent, so it's skipped and nothing is reported. Caveat: with parallel edges the parent check by vertex id wrongly skips the second one, so track *edge* ids instead. Union-find also works — if an edge's endpoints already share a set, it closes a cycle.
 
 ### Why can't plain "visited" tracking detect cycles in directed graphs?
 
-Because a directed edge into an already-visited vertex is not necessarily a cycle. If that vertex is fully *finished* (its whole subtree explored and popped), the edge is a cross or forward edge and closes no loop. A cycle exists only when the edge targets a vertex still *on the recursion stack* — an ancestor. So you must distinguish "visited and still open" (gray) from "visited and done" (black). Collapsing both into one "visited" flag produces false positives.
+Because a directed edge into an already-visited vertex is not necessarily a cycle. Take the diamond `A→B, A→C, B→D, C→D`. DFS goes `A → B → D`, finishes `D`, finishes `B`, then explores `C` and finds `D` already visited. With a single visited flag you'd shout "cycle!" — but there is none; you can't get from `D` back to `C`.
+
+The fix is to distinguish "visited and still open" from "visited and done". A cycle exists only when the edge targets a vertex still **on the recursion stack** — an ancestor, meaning there's a path from the target down to you *and* an edge from you back to it. That's grey. A black vertex has been popped off the stack entirely; nothing reached through it leads back to the current path. Collapsing grey and black into one flag produces false positives on every diamond, every shared subtree, every re-converging branch — which is most real graphs. (Undirected graphs escape this because their edges are symmetric: an edge to a visited non-parent vertex genuinely does close a loop.)
 
 ### How do you check whether a graph is bipartite?
 
-Attempt a 2-coloring. BFS or DFS from each unvisited vertex, coloring the source, then coloring every neighbor the opposite color of the current vertex. If you ever find an edge whose endpoints already share a color, the graph is not bipartite. If you finish with no conflict, it is. O(V + E). Equivalent statement: a graph is bipartite iff it has no odd-length cycle, which is exactly what a coloring conflict during traversal reveals. Remember to start a fresh traversal per component so disconnected parts are all checked.
+Attempt a **2-colouring**. Colour a source vertex `0`, then colour every neighbour the opposite colour of the vertex you came from, propagating with BFS or DFS. If you ever find an edge whose endpoints already share a colour, the graph is not bipartite. If you get through every component with no conflict, it is.
+
+```python
+def is_bipartite(g, vertices):
+    color = {}
+    for s in vertices:
+        if s in color:
+            continue
+        color[s] = 0
+        q = deque([s])                   # fresh BFS per component
+        while q:
+            u = q.popleft()
+            for v in g[u]:
+                if v not in color:
+                    color[v] = 1 - color[u]   # flip
+                    q.append(v)
+                elif color[v] == color[u]:    # same-colour edge
+                    return False
+    return True
+```
+
+Micro-example: the 4-cycle `A-B, B-C, C-D, D-A`. Colour `A = 0`; `B = 1`, `D = 1`; from `B`, `C = 0`; from `D`, `C` is already `0` and `D` is `1` — no conflict, so bipartite (`{A, C}` versus `{B, D}`). Now the triangle `A-B, B-C, C-A`: `A = 0`, `B = 1`, `C = 0`, then edge `C-A` joins two `0`s — conflict, not bipartite. Cost `O(V + E)`. Equivalently, a graph is bipartite **iff it has no odd-length cycle**, and a colouring conflict is exactly the moment you close one. The fresh traversal per unvisited vertex is essential — a disconnected graph is bipartite only if every component is.
 
 ### What are the DFS edge classifications and what does each mean?
 
-Relative to the DFS tree: *tree edges* are the edges DFS traverses to reach unvisited vertices (they form the DFS forest). *Back edges* go to an ancestor (a gray/on-stack vertex) — their presence means a cycle in directed graphs. *Forward edges* go to an already-finished descendant. *Cross edges* connect vertices in different subtrees or previously finished ones (neither ancestor nor descendant). Undirected graphs only ever have tree and back edges. Edge classification underpins cycle detection, strongly-connected-component algorithms, and bridge/articulation-point finding.
+Every edge falls into one of four classes relative to the DFS tree, decided by the colour of the target when you look at it. **Tree edges** are the ones DFS actually traverses to reach a *white* vertex; together they form the DFS forest. **Back edges** point to a *grey* vertex — an ancestor still on the recursion stack — and in a directed graph their presence is exactly equivalent to a cycle. **Forward edges** point to a *black* descendant of the current vertex, reached earlier by a longer tree path. **Cross edges** point to a *black* vertex in a different subtree — neither ancestor nor descendant.
+
+Forward and cross are told apart by discovery times: for an edge `u → v` into a black `v`, `disc[u] < disc[v]` means forward, otherwise cross. **Undirected graphs only ever have tree and back edges** — a would-be forward or cross edge would already have been traversed as a tree edge from the other end. This isn't trivia: it's the machinery behind directed cycle detection (back edge), Tarjan's strongly-connected-component algorithm, and bridge and articulation-point finding, which ask how far back a subtree's back edges reach.
 
 ### Is a topological ordering unique?
 
-Generally no. Whenever two vertices have no directed path between them, they can appear in either relative order, so a DAG usually has many valid topological sorts. It is unique only when the DAG has a Hamiltonian path — a single chain forcing a total order (in Kahn's terms, exactly one vertex has in-degree zero at every step). Interviewers use this to check you understand that "a valid order" is not "the order"; a specific one may require a tie-breaking rule (e.g. lexicographically smallest via a priority queue in Kahn's).
+Generally no. Whenever two vertices have no directed path between them in either direction, they're mutually independent and can appear in either relative order, so a typical DAG has many valid topological sorts. In the diamond `A→B, A→C, B→D, C→D`, both `A, B, C, D` and `A, C, B, D` are valid — `B` and `C` are unordered relative to each other.
+
+An ordering is unique exactly when the DAG contains a **Hamiltonian path** — a single directed chain through every vertex, forcing a total order. In Kahn's terms: "at every step the queue holds exactly one vertex"; if it ever holds two, you have a genuine choice and therefore at least two valid orders. Interviewers use this to check you say "*a* valid order" rather than "*the* order". If a specific order is required, add a tie-break: swap Kahn's `deque` for a min-heap and you get the lexicographically smallest topological sort in `O((V + E) log V)`.
 
 ### Can you run topological sort on a graph with a cycle?
 
-No — topological sort is defined only for a DAG. A cycle makes a consistent forward ordering impossible: each vertex in the cycle would have to come before another that comes before it. Both algorithms *detect* this rather than fail silently: Kahn's emits fewer than V vertices (the cyclic ones never reach in-degree zero), and DFS-based sorting finds a back edge. That detection is often the actual goal — e.g. reporting a circular dependency in a build graph.
+No — topological sort is defined only for a DAG, and the reason is immediate: for a cycle `A→B→C→A`, a valid order would need `A` before `B`, `B` before `C`, and `C` before `A`, which is a contradiction. No linear arrangement can make all three edges point forward.
+
+What matters in an interview is that both algorithms **detect** this rather than fail silently or loop forever. Kahn's emits fewer than `V` vertices — the cyclic ones never reach in-degree `0`, each held up by another cycle member — so `len(out) < V` is your flag, and the leftovers *are* the cyclic part, handy for error reporting. DFS-based sorting hits a back edge into a grey vertex and bails immediately. Often that detection is the actual goal: a build system reporting "circular dependency between `auth`, `config`, and `logging`" is running exactly this check and printing the vertices it couldn't order.
 
 ### How does BFS give shortest paths, and when does that break?
 
-In BFS the queue processes vertices in nondecreasing order of distance from the source, so the first time you reach a vertex is via a minimum-hop path — record distance as parent-distance + 1. This is exact for *unweighted* graphs (or graphs where every edge has equal weight). It breaks the moment edges have differing weights: a two-hop path can be cheaper than a one-hop path, which BFS cannot see. Then you need Dijkstra (non-negative weights) or Bellman-Ford (negative weights allowed). A special case, 0-1 BFS with a deque, handles weights of only 0 and 1.
+BFS's queue holds vertices in nondecreasing order of distance from the source: all the distance-`d` vertices come out before any distance-`d + 1` vertex. So the *first* time you reach a vertex is necessarily via a minimum-hop path, and you can record `dist[v] = dist[u] + 1` at the moment you enqueue it. Storing a parent pointer at the same time lets you rebuild the actual path by walking backwards from the target.
+
+```python
+def bfs_shortest(g, src, dst):
+    dist = {src: 0}
+    parent = {src: None}
+    q = deque([src])
+    while q:
+        u = q.popleft()
+        if u == dst:
+            break                        # early exit: dst is finalised
+        for v in g[u]:
+            if v not in dist:
+                dist[v] = dist[u] + 1    # first arrival = shortest
+                parent[v] = u
+                q.append(v)
+    if dst not in dist:
+        return None, None
+    path, cur = [], dst
+    while cur is not None:               # walk parents back to src
+        path.append(cur)
+        cur = parent[cur]
+    return dist[dst], path[::-1]
+```
+
+Micro-example on `A→B, A→C, B→D, C→D`, source `A`, target `D`. Pop `A` (`dist 0`) → set `dist[B] = dist[C] = 1`, `parent[B] = parent[C] = A`. Pop `B` → set `dist[D] = 2`, `parent[D] = B`. Pop `C` → `D` already has a distance, skip. Pop `D`, break. Reconstruction walks `D → B → A`, reversed to `A, B, D`, length 2.
+
+This is exact only for **unweighted** graphs, or graphs where every edge has equal weight. It breaks the instant weights differ: a two-hop path costing `1 + 1` beats a one-hop path costing `10`, and BFS — which counts hops, not cost — confidently returns the expensive one. Then you need Dijkstra (non-negative weights) or Bellman-Ford (negatives allowed). Useful middle case: **0-1 BFS**, where edges cost only `0` or `1` — use a `deque`, push zero-weight neighbours to the *front* and one-weight to the back, and you keep `O(V + E)`.
 
 ### How would you detect deadlock or a circular dependency in a real system with these tools?
 
-Model resources/tasks as vertices and "waits-for" or "depends-on" relationships as directed edges, then run directed cycle detection (DFS with on-stack tracking, or Kahn's and check the emitted count). A cycle is precisely a deadlock or a circular dependency. This is how build systems order compilation (topological sort of the dependency DAG) and how schedulers flag unsatisfiable job graphs. If you also want to *report* the offending loop, keep parent pointers during DFS and walk back from the vertex where the back edge closed to reconstruct the cycle.
+Model it as a directed graph and run cycle detection — that's the whole trick. For deadlock, vertices are threads or transactions and an edge `T1 → T2` means "`T1` is waiting on a lock held by `T2`"; this is the classic *waits-for* graph, and a cycle in it *is* a deadlock. For build systems and package managers, vertices are targets or packages and edges are "depends on"; a cycle is an unsatisfiable circular dependency, and the absence of one lets you emit a topological order as the build sequence.
+
+Either technique works. Pick Kahn's when you also want the order as output and want to avoid recursion limits on large dependency graphs; pick DFS when you want to *report the offending loop* — keep parent pointers, and when a back edge closes onto a grey vertex `w`, walk parents back from the current vertex until you hit `w` to print the exact cycle, `auth → config → logging → auth`. That message is usually worth more than the boolean. Databases run this continuously: a deadlock detector periodically builds the waits-for graph, finds a cycle, and aborts the cheapest transaction in it to break the loop.
 
 ### A senior follow-up: how do you avoid stack overflow when DFS-ing a very deep or large graph?
 
-Convert the recursion to an explicit stack. Push the start vertex; loop while the stack is non-empty, popping a vertex and pushing its unvisited neighbors. For post-order needs (topological sort, finish times) either push each vertex twice with an "entering/leaving" marker, or track an iterator/index per stack frame so you resume a vertex's neighbor scan after processing a child. This trades the bounded call stack for a heap-allocated stack that can grow to O(V), sidestepping the language's recursion-depth limit on graphs with long paths (deep chains, near-linked-list shapes).
+Convert the recursion into an **explicit stack** on the heap. Python's default recursion limit is about 1,000 frames, so a graph shaped like a long chain — a linked list, a deep dependency tree, a 200×200 grid traversed badly — will crash a recursive DFS long before it runs out of actual memory.
+
+The pre-order version is a direct swap of the queue for a stack:
+
+```python
+def dfs_iterative(g, src):
+    seen = {src}
+    stack = [src]
+    order = []
+    while stack:
+        u = stack.pop()                  # LIFO -> depth-first
+        order.append(u)
+        for v in reversed(g[u]):         # reversed = same order as recursion
+            if v not in seen:
+                seen.add(v)
+                stack.append(v)
+    return order
+```
+
+Post-order needs more care, because "finished" means *after* all descendants — and topological sort, finish times, and three-colour cycle detection all depend on it. The clean trick is to push each vertex twice with an entering/leaving marker:
+
+```python
+def dfs_postorder_iterative(g, vertices):
+    seen = set()
+    out = []
+    for s in vertices:
+        if s in seen:
+            continue
+        stack = [(s, False)]             # (vertex, is_leaving)
+        while stack:
+            u, leaving = stack.pop()
+            if leaving:
+                out.append(u)            # all descendants already appended
+                continue
+            if u in seen:
+                continue
+            seen.add(u)
+            stack.append((u, True))      # schedule the "finish" event
+            for v in g[u]:
+                if v not in seen:
+                    stack.append((v, False))
+    return out[::-1]                     # reversed post-order = topo sort
+```
+
+The alternative is to store a neighbour index per stack frame so you resume a vertex's scan after each child returns — fiddlier, but no duplicate entries. Either way you trade the language's bounded call stack for a heap-allocated one that can grow to `O(V)`, and the complexity stays `O(V + E)`. Raising Python's recursion limit is the common quick patch, but it's fragile — the explicit stack is the real fix, and mentioning it unprompted signals you've shipped graph code.
 
 ## Shortest Path Algorithms
 
 ### Summary
 
 **What this topic covers**
-This topic is the family of algorithms that find shortest paths in graphs: BFS for unweighted graphs, Dijkstra for non-negative weights, Bellman-Ford for graphs with negative edges (and negative-cycle detection), Floyd-Warshall for all-pairs, and A* for goal-directed search with a heuristic. The mental model: each one is a disciplined way of relaxing edges — improving a tentative distance `d[v]` whenever a shorter route through some `u` is discovered — and they differ mainly in the *order* in which they process vertices and the assumptions that order relies on.
+The algorithms that find cheapest routes through a graph: **BFS** for unweighted graphs, **0-1 BFS** for weights of only 0 or 1, **Dijkstra** for non-negative weights, **Bellman-Ford** for negative edges (plus negative-cycle detection), **DAG relaxation** in topological order, **Floyd-Warshall** for all-pairs, **Johnson's** for all-pairs on sparse graphs with negatives, and **A\*** for goal-directed search. Every one is built from a single three-line primitive — *edge relaxation* — and they differ only in **the order they relax edges** and **what that order lets them assume**.
+
+**Mental model**
+Picture `dist[v]` as "the cheapest route to `v` I have found *so far*" — a pessimistic guess starting at `∞` that only ever goes down. Relaxing edge `(u, v, w)` asks one question: *is going to `u` and then taking this edge cheaper than what I already had for `v`?* If yes, lower the guess. That is the whole toolbox. Correctness of every algorithm here reduces to one claim: **by the time you declare `dist[v]` final, every edge that could still have lowered it has already been relaxed.** BFS earns that by exploring in layers; Dijkstra by always finalising the currently-cheapest vertex; Bellman-Ford by brute force (relax everything `V-1` times, so a path of any length gets its chance); DAG relaxation by topological order (all predecessors finalised first); Floyd-Warshall by widening the set of allowed intermediate vertices one at a time.
 
 **Key terms**
-*Edge relaxation* — the operation `if d[u] + w(u,v) < d[v]: d[v] = d[u] + w(u,v)`. *Non-negative weights* — no edge weight below 0; the precondition Dijkstra needs. *Negative cycle* — a cycle whose total weight is negative; makes "shortest path" undefined (you can loop forever getting shorter). *Single-source* — shortest paths from one origin to all vertices. *All-pairs* — shortest paths between every ordered pair. *Admissible heuristic* — an A* estimate `h(v)` that never overestimates the true remaining distance. *Priority queue / min-heap* — the structure Dijkstra and A* use to always expand the closest unfinished vertex (see the Data Structures primer for the heap itself).
+- **Edge relaxation** — the update `if dist[u] + w < dist[v]: dist[v] = dist[u] + w`; the primitive all these algorithms share.
+- **Non-negative weights** — no edge below 0; the precondition Dijkstra's greedy choice depends on.
+- **Settled / finalised** — a vertex whose distance can no longer improve. Not the same as "seen" or "in the queue".
+- **Negative cycle** — a loop summing below zero; makes "shortest path" meaningless because each extra lap is cheaper.
+- **Single-source** — cheapest routes from one origin to all vertices. **All-pairs** — every ordered pair.
+- **Admissible heuristic** — an A\* estimate `h(v)` that never *over*estimates the true remaining cost.
+- **Parent array** — records who improved you, so the path itself (not just its length) can be recovered.
 
 **Core mechanics**
-BFS explores in layers, so on an unweighted graph the first time you reach a vertex is via a shortest path: `O(V + E)`. Dijkstra generalizes this — pop the closest unsettled vertex from a min-heap, settle it, relax its edges: `O((V + E) log V)` with a binary heap. Its invariant: when a vertex is popped, its distance is final, which holds *only* if no negative edge can later undercut it. Bellman-Ford instead relaxes *every* edge `V-1` times: `O(V*E)`; after `V-1` rounds all shortest paths (which have at most `V-1` edges) are found, and a `V`-th round that still relaxes something proves a negative cycle. Floyd-Warshall is dynamic programming over an intermediate-vertex set: `O(V^3)` time, `O(V^2)` space. A* is Dijkstra with priority `f(v) = g(v) + h(v)`, steering the search toward the goal.
+BFS explores in hop-layers, so the *first* arrival at a vertex is already optimal: `O(V + E)`, linear in vertices plus edges. 0-1 BFS keeps that linearity with a deque — weight-0 edges push to the **front**, weight-1 edges to the **back**. Dijkstra generalises BFS with a min-heap: pop the cheapest unsettled vertex, declare it final, relax its out-edges — `O((V + E) log V)`, roughly "one heap operation per edge, each costing a logarithm". Bellman-Ford ignores ordering and relaxes *every* edge `V-1` times: `O(V·E)`, "vertices times edges"; a `V`-th round that still improves something proves a negative cycle. DAG relaxation in topological order is `O(V + E)` and uniquely tolerates negative weights. Floyd-Warshall is DP over the allowed intermediate set with `k` outermost: `O(V³)` time (a cube in the vertex count), `O(V²)` space. A\* is Dijkstra keyed on `f(v) = g(v) + h(v)`.
 
 **Trade-offs**
-BFS is fastest but only correct when every edge costs the same. Dijkstra is the default for a single source with non-negative weights — near-linear, but it *cannot* handle negatives. Bellman-Ford is slower (`O(V*E)`) but tolerates negative edges and detects negative cycles — the price you pay for that generality. Floyd-Warshall wins when you need *all pairs* on a small/dense graph and love its three-line simplicity; on sparse graphs, running Dijkstra from each source (`O(V*(V+E) log V)`) usually beats `O(V^3)`. A* can be dramatically faster than Dijkstra with a good heuristic but degrades to Dijkstra when `h = 0`.
+BFS is fastest but only correct when every edge costs the same. Dijkstra is the default for one source with non-negative weights, but *cannot* handle negatives and no amount of re-pushing patches that. Bellman-Ford's `O(V·E)` buys exactly two things: negative edges and cycle detection. Floyd-Warshall wins on small or dense graphs when you want the whole matrix; on large sparse graphs, Dijkstra-from-every-source at `O(V·(V + E) log V)` beats `O(V³)` comfortably. A\* can explore a fraction of what Dijkstra does given a good heuristic, but degenerates to exactly Dijkstra when `h = 0`.
 
 **Common confusions**
-The big one: "just add a constant to make all weights non-negative, then run Dijkstra." That breaks — adding a constant penalizes paths with more edges unequally, changing which path is shortest. Another: thinking Dijkstra detects negative cycles (it doesn't; it can silently return wrong answers). Confusing "settled" with "visited" — a vertex can be pushed to the heap multiple times; it's *final* only when popped. Believing A* is always optimal — it is only when the heuristic is admissible (and consistent, for the graph-search version). Forgetting Floyd-Warshall's loop order: the intermediate vertex `k` must be the *outermost* loop.
+The classic trap: *"add a constant to every weight so nothing is negative, then run Dijkstra."* Wrong — a constant per **edge** penalises many-hop paths more than few-hop ones, silently flipping which route is shortest. Second: believing Dijkstra *detects* negative edges. It doesn't; it returns a plausible wrong number. Third: conflating "in the heap" with "settled" — a vertex may sit in the heap several times with different keys, and is final only when **popped**. Fourth: thinking A\* is always optimal — only with an admissible heuristic (consistent, for the settle-once graph-search variant). Fifth: writing Floyd-Warshall with `k` inside, which produces right answers on some graphs and wrong ones on others.
 
 **Why interviewers ask**
-Shortest paths test whether you can match an algorithm to graph properties rather than reflexively reaching for one tool. The classic follow-up chain: "unweighted?" → BFS; "non-negative weights?" → Dijkstra; "negative edges?" → Bellman-Ford; "all pairs on a dense graph?" → Floyd-Warshall; "huge grid with a goal?" → A*. It also probes whether you understand *why* Dijkstra's greedy choice is correct and *why* it fails on negatives — a real understanding-vs-memorization signal.
+Shortest paths test whether you *match the algorithm to the graph's properties* rather than reaching for the one you memorised. The follow-up chain is almost scripted: "unweighted?" → BFS; "weights 0 or 1?" → 0-1 BFS; "non-negative?" → Dijkstra; "a DAG?" → topological relaxation; "negative edges?" → Bellman-Ford; "all pairs, dense?" → Floyd-Warshall; "all pairs, sparse, negatives?" → Johnson's; "huge grid with a known target?" → A\*. It also probes *why* Dijkstra's greedy step is valid and *why* negatives break it — one of the cleanest understanding-versus-memorisation signals in the interview.
 
 ### What does it mean to relax an edge, and why is it the core operation?
-Relaxing edge `(u, v)` means: if the best known distance to `u` plus the edge weight beats the best known distance to `v`, update `d[v] = d[u] + w(u,v)` and record `u` as `v`'s predecessor. Every shortest-path algorithm here is just a policy for *which edges to relax and in what order*. BFS relaxes in layer order, Dijkstra in increasing-distance order, Bellman-Ford relaxes everything repeatedly. Correctness reduces to: by the time you finalize a vertex, all edges that could improve it have already been relaxed.
 
-### Why does plain BFS give shortest paths on an unweighted graph?
-BFS processes vertices in non-decreasing order of distance from the source — layer 0, then all layer-1 vertices, then layer-2, and so on. Because every edge has the same cost, the first time BFS reaches a vertex it must be via a minimum-hop path; any later route would go through a same-or-farther layer and can't be shorter. It runs in `O(V + E)` and needs only a FIFO queue, no priority queue.
-
-### How does Dijkstra's algorithm work, step by step?
-Initialize `d[source] = 0`, all others infinity, and push the source into a min-heap keyed by distance. Repeatedly pop the vertex `u` with the smallest tentative distance; if it's already settled, skip it. Otherwise settle it (its distance is now final) and relax each outgoing edge, pushing any improved neighbor back into the heap. Continue until the heap empties (or you pop the target). With a binary heap the cost is `O((V + E) log V)`; with a Fibonacci heap it's `O(E + V log V)` in theory, though binary heaps win in practice.
-
-### Why does Dijkstra require non-negative edge weights?
-Dijkstra's correctness rests on the greedy invariant: the closest unsettled vertex can be finalized because no *future* path could reach it more cheaply. A negative edge violates this — you might settle `v` at distance 5, then later discover a path through a not-yet-settled vertex plus a negative edge that reaches `v` at distance 3. Since Dijkstra never revisits a settled vertex, it locks in the wrong 5. No amount of re-pushing fixes the fundamental ordering assumption.
-
-### Can't I just add a constant to every weight to remove negatives and then use Dijkstra?
-No. Adding a constant `c` to each edge adds `c * (number of edges)` to a path's total, so paths with more edges are penalized more than paths with fewer. This can change which path is actually shortest, giving a wrong answer. (The correct reweighting is Johnson's algorithm, which uses Bellman-Ford to compute vertex potentials `h(v)` and reweights edges as `w(u,v) + h(u) - h(v)` so path comparisons are preserved.)
-
-### How does Bellman-Ford work and what's its complexity?
-Bellman-Ford relaxes *all* `E` edges, and repeats that pass `V-1` times. Any shortest path has at most `V-1` edges, and after `i` passes every shortest path using at most `i` edges is correct, so `V-1` passes settle everything. Total time is `O(V*E)`, space `O(V)`. It's slower than Dijkstra but makes no sign assumption about weights, which is exactly why it's the go-to when negative edges are present.
-
-### How does Bellman-Ford detect a negative cycle?
-After the `V-1` relaxation passes, run one more pass. If any edge can *still* be relaxed (some `d[v]` still decreases), then a shortest path with `V` edges appears to beat one with `V-1` — impossible in a graph without a negative cycle. So a successful relaxation on the `V`-th pass proves a negative cycle is reachable, and you can trace predecessor pointers back into it to report the cycle itself.
-
-### What is a negative cycle and why does it make shortest paths ill-defined?
-A negative cycle is a closed loop whose edge weights sum to less than zero. If such a cycle is reachable from the source and can reach the target, there is no shortest path: each extra lap around the cycle lowers the total distance without bound, so the infimum is negative infinity. Algorithms must therefore either assume no negative cycle (Dijkstra) or explicitly detect one (Bellman-Ford, Floyd-Warshall) rather than return a meaningless number.
-
-### How does Floyd-Warshall compute all-pairs shortest paths?
-It's DP over an allowed set of intermediate vertices. `dist[i][j]` starts as the direct edge weight (or infinity). Then for each intermediate vertex `k`, update every pair: `dist[i][j] = min(dist[i][j], dist[i][k] + dist[k][j])`. The invariant after iteration `k`: `dist[i][j]` is the shortest path using only intermediates from `{0..k}`.
+Relaxing edge `(u, v)` with weight `w` means: *if reaching `u` then taking this edge is cheaper than the best route to `v` I currently know, adopt it.* The name comes from treating `dist[v]` as an over-tight upper bound that you gradually "relax" downward toward the truth.
 
 ```python
-for k in range(n):
-    for i in range(n):
-        for j in range(n):
-            if dist[i][k] + dist[k][j] < dist[i][j]:
-                dist[i][j] = dist[i][k] + dist[k][j]
+def relax(u, v, w, dist, parent):
+    """The one primitive. Returns True if dist[v] improved."""
+    if dist[u] + w < dist[v]:          # cheaper route found
+        dist[v] = dist[u] + w          # lower the estimate
+        parent[v] = u                  # remember who improved us
+        return True
+    return False
 ```
 
-It runs in `O(V^3)` time and `O(V^2)` space, and a negative `dist[i][i]` afterward flags a negative cycle.
+Every algorithm here is that function plus a **schedule**: BFS in hop-layer order, 0-1 BFS in deque order, Dijkstra in increasing-distance order, DAG relaxation in topological order, Bellman-Ford in "all edges, repeatedly" order, Floyd-Warshall by allowed intermediate vertex. Two properties hold throughout: `dist[v]` is never *below* the true distance (it only ever records a real path's cost), and it never increases. So the only question any of these algorithms answers is *when am I allowed to stop?*
+
+### Why does plain BFS give shortest paths on an unweighted graph?
+
+BFS visits vertices in non-decreasing hop-distance: layer 0, then every layer-1 vertex, then layer-2. Because every edge costs 1, the *first* arrival at a vertex must be by a minimum-hop route — any later arrival comes from a same-or-deeper layer and cannot be shorter. That guarantee is what lets BFS use a plain FIFO queue instead of a heap, in `O(V + E)`.
+
+```python
+from collections import deque
+
+def bfs_dist(adj, src):                      # adj: {u: [v, ...]}, unweighted
+    dist = {src: 0}
+    parent = {src: None}
+    q = deque([src])
+    while q:
+        u = q.popleft()                      # FIFO = layer order
+        for v in adj[u]:
+            if v not in dist:                # first arrival is optimal
+                dist[v] = dist[u] + 1
+                parent[v] = u
+                q.append(v)
+    return dist, parent
+```
+
+**0-1 BFS** extends this to weights of only 0 or 1, still `O(V + E)`. Use a **deque**: a weight-0 edge does not increase the distance, so front-push that neighbour; a weight-1 edge back-pushes. The deque then holds at most two distinct distance values, in order — the monotone frontier a heap would give you, without the logarithm.
+
+```python
+def zero_one_bfs(adj, src, n):               # adj: {u: [(v, w) with w in {0,1}]}
+    INF = float("inf")
+    dist = [INF] * n
+    dist[src] = 0
+    dq = deque([src])
+    while dq:
+        u = dq.popleft()
+        for v, w in adj[u]:
+            if dist[u] + w < dist[v]:        # same relax step
+                dist[v] = dist[u] + w
+                dq.appendleft(v) if w == 0 else dq.append(v)
+    return dist
+```
+
+Trace `0→1 (0)`, `0→2 (1)`, `1→2 (1)`, `2→3 (0)`. Start `dist = [0, ∞, ∞, ∞]`, deque `[0]`. Pop `0`: the 0-edge sets `dist[1] = 0`, front-pushed; the 1-edge sets `dist[2] = 1`, back-pushed → `[1, 2]`. Pop `1`: `0 + 1 = 1` is not below `dist[2] = 1`, no change. Pop `2`: the 0-edge gives `dist[3] = 1`. Final `dist = [0, 0, 1, 1]`.
+
+### How does Dijkstra's algorithm work, step by step?
+
+Set `dist[source] = 0`, everything else `∞`, push `(0, source)` into a min-heap. Repeatedly pop the smallest key; if that vertex is already settled, discard the entry; otherwise **settle** it (its distance is now final) and relax each out-edge, pushing improved neighbours back. Stop when the heap empties, or early once you pop the target.
+
+The subtlety worth naming aloud is **lazy deletion**. Binary heaps cannot decrease the key of an item already inside, so instead of updating an entry you push a *new* one and skip the stale one when it surfaces. Hence the `if d > dist[u]: continue` guard, and hence a heap holding up to `O(E)` entries.
+
+```python
+import heapq
+
+def dijkstra(adj, src):                      # adj: {u: [(v, w) with w >= 0]}
+    dist = {src: 0}
+    parent = {src: None}
+    pq = [(0, src)]                          # (tentative distance, vertex)
+    while pq:
+        d, u = heapq.heappop(pq)
+        if d > dist.get(u, float("inf")):
+            continue                         # stale entry: u already settled
+        for v, w in adj.get(u, ()):
+            nd = d + w
+            if nd < dist.get(v, float("inf")):
+                dist[v] = nd                 # relax
+                parent[v] = u
+                heapq.heappush(pq, (nd, v))  # push, never decrease-key
+    return dist, parent
+```
+
+Trace on `A→B (4)`, `A→C (1)`, `C→B (2)`, `B→D (5)`, `C→D (8)` from `A`. Pop `(0,A)` → settle `A`; `dist[B] = 4`, `dist[C] = 1`; heap `[(1,C), (4,B)]`. Pop `(1,C)` → settle `C`; `C→B` gives `1 + 2 = 3 < 4`, so `dist[B] = 3`, `parent[B] = C`; `C→D` gives `dist[D] = 9`; heap `[(3,B), (4,B), (9,D)]`. Pop `(3,B)` → settle; `B→D` gives `3 + 5 = 8 < 9`, push `(8,D)`. Pop `(4,B)` → stale, skipped. Pop `(8,D)` → settle at 8. Answer `A→C→B→D`, cost 8 — the tempting direct edge `A→B (4)` is not on it.
+
+Cost `O((V + E) log V)`: one push per successful relaxation, one pop per entry, each logarithmic. A Fibonacci heap gives `O(E + V log V)` in theory, but loses on constants in practice.
+
+### Why does Dijkstra require non-negative edge weights?
+
+Dijkstra's justification is the greedy invariant: *the cheapest unsettled vertex can be finalised, because any other route to it must pass through an unsettled vertex whose distance is already ≥ its own, and adding more edges can only make things worse.* That last clause is where non-negativity does the work. With a negative edge available, adding edges can make a route **better**, and the invariant collapses.
+
+Concrete 3-node counter-example: `S→A (2)`, `S→B (3)`, `B→A (-2)`. Dijkstra pops `S`, sets `dist[A] = 2` and `dist[B] = 3`, pops `A` at 2 and settles it. The true shortest route is `S→B→A = 3 - 2 = 1`. Since Dijkstra never revisits a settled vertex, it reports 2 and never notices. It fails **silently** — no error, just a wrong number — which is why "are weights non-negative?" is a clarifying question, not a debugging step.
+
+### Can't I just add a constant to every weight to remove negatives and then use Dijkstra?
+
+No, and it is one of the most common wrong answers in graph interviews. Adding `c` to every **edge** adds `c × (hop count)` to a path, so a 5-hop route is penalised five times as hard as a 1-hop route. Paths of different lengths shift by different amounts, so the *ordering* of paths can flip.
+
+Same graph: `S→A (2)`, `S→B (3)`, `B→A (-2)`; add `c = 2` → `S→A (4)`, `S→B (5)`, `B→A (0)`. Now the direct edge costs 4 and `S→B→A` costs 5, so the reweighted graph prefers `S→A` — the opposite of the truth (2 versus 1). The one-hop path got `+2`, the two-hop path `+4`.
+
+The *correct* reweighting is **Johnson's algorithm**: run Bellman-Ford once to get a **potential** `h(v)` per vertex, then set `w'(u,v) = w(u,v) + h(u) - h(v)`. The `h` terms telescope along a path — every intermediate vertex contributes `+h` once and `-h` once — so a path's new length is `original + h(start) - h(end)`, the same shift for *every* route between the same pair. Ordering is preserved and the new weights are provably non-negative. A per-vertex potential telescopes; a per-edge constant accumulates.
+
+### How does Bellman-Ford work and what's its complexity?
+
+Bellman-Ford abandons clever ordering: relax **all `E` edges**, then repeat, `V-1` times. The induction is simple — after round `i`, every shortest path using at most `i` edges is correct, because round `i` relaxes that path's `i`-th edge after earlier rounds fixed its prefix. No shortest path needs more than `V-1` edges (more would repeat a vertex), so `V-1` rounds settle everything.
+
+```python
+def bellman_ford(edges, n, src):             # edges: [(u, v, w)], vertices 0..n-1
+    INF = float("inf")
+    dist = [INF] * n
+    parent = [None] * n
+    dist[src] = 0
+    for _ in range(n - 1):                   # V-1 rounds
+        changed = False
+        for u, v, w in edges:
+            if dist[u] != INF and dist[u] + w < dist[v]:
+                dist[v] = dist[u] + w
+                parent[v] = u
+                changed = True
+        if not changed:                      # early exit: already converged
+            break
+    for u, v, w in edges:                    # one extra round
+        if dist[u] != INF and dist[u] + w < dist[v]:
+            return None, None                # a negative cycle is reachable
+    return dist, parent
+```
+
+Trace with `S, A, B, C` and edges in the deliberately unhelpful order `A→C (3)`, `B→A (-3)`, `S→B (5)`, `S→A (4)`, source `S`. **Round 1:** the first two edges do nothing (their tails are `∞`); `S→B` sets `B = 5`; `S→A` sets `A = 4`. **Round 2:** `A→C` gives `C = 7`; `B→A` gives `5 - 3 = 2 < 4`, so `A = 2`. **Round 3:** `A→C` gives `2 + 3 = 5 < 7`, so `C = 5`. With `V = 4`, all three rounds were needed — the bound is not slack, it is the price of refusing to think about order.
+
+Time `O(V·E)` — for each of `V-1` rounds, touch every edge — and space `O(V)`. The `changed` flag often terminates it far earlier in practice.
+
+### How does Bellman-Ford detect a negative cycle?
+
+Run one **extra** round after the `V-1`. If any edge still improves a distance, you have a "shortest" path apparently using `V` edges that beats every `V-1`-edge path — impossible when shortest paths are well defined, because a `V`-edge walk must repeat a vertex, and cutting that loop out would only help unless the loop is negative. So a successful relaxation on round `V` is a **proof** that a negative cycle is reachable.
+
+To report the cycle rather than just its existence: remember a vertex `x` relaxed on that extra round, follow `parent` pointers `V` times from `x` (guaranteeing you land *inside* the cycle rather than on the tail leading into it), then walk parents from there until you return to that vertex.
+
+Add `C→B (-4)` to the previous graph and `B→A (-3)`, `A→C (3)`, `C→B (-4)` forms a cycle of weight `-4`; every lap lowers all three distances, so the extra round always finds an improvement. Note detection only covers cycles **reachable from the source** — if you need *any* negative cycle in the graph, add a virtual source with weight-0 edges to every vertex first.
+
+### What is a negative cycle and why does it make shortest paths ill-defined?
+
+A negative cycle is a closed walk whose weights sum below zero. If one is reachable from the source *and* can reach the target, there is no shortest path: take the route, do a lap, and it is cheaper; do two laps and cheaper still. The set of achievable costs has no minimum — the infimum is `-∞`.
+
+That is a definitional problem, not a numerical one, so every algorithm must take a position. Dijkstra *assumes* it away and misbehaves if you break the assumption. Bellman-Ford and Floyd-Warshall *detect* it and can answer "undefined" instead of returning nonsense. DAG relaxation is immune by construction — an acyclic graph has no cycles at all — which is why it is the one linear-time algorithm that accepts negative weights. If the interviewer asks about currency **arbitrage**, they are asking you to *find* a negative cycle (after a `-log` transform of exchange rates), and Bellman-Ford is the tool.
+
+### How does Floyd-Warshall compute all-pairs shortest paths?
+
+It is DP over the set of vertices you are **allowed to pass through**. Initialise `dist[i][j]` to the direct edge weight (`0` on the diagonal, `∞` if no edge). Then for each candidate intermediate `k` in turn, ask of every pair: *is `i → k → j` cheaper than what I have?* After iteration `k`, the invariant is exact: `dist[i][j]` is the cheapest route using only `{0..k}` as intermediates.
+
+```python
+def floyd_warshall(dist):                    # dist: V x V matrix, modified in place
+    n = len(dist)
+    nxt = [[j if dist[i][j] < float("inf") else None for j in range(n)]
+           for i in range(n)]
+    for k in range(n):                       # k OUTERMOST - this is the algorithm
+        for i in range(n):
+            dik = dist[i][k]
+            if dik == float("inf"):
+                continue                     # i cannot reach k; skip the row
+            for j in range(n):
+                if dik + dist[k][j] < dist[i][j]:
+                    dist[i][j] = dik + dist[k][j]
+                    nxt[i][j] = nxt[i][k]    # first hop from i toward j
+    return dist, nxt
+```
+
+Trace on three vertices with `0→2 (5)`, `2→1 (1)`, `1→0 (2)`. Initial rows `[0, ∞, 5]`, `[2, 0, ∞]`, `[∞, 1, 0]`. **`k = 0`:** `dist[1][2] = dist[1][0] + dist[0][2] = 2 + 5 = 7`, row 1 → `[2, 0, 7]`. **`k = 1`:** `dist[2][0] = 1 + 2 = 3`, row 2 → `[3, 1, 0]`. **`k = 2`:** `dist[0][1] = 5 + 1 = 6`, row 0 → `[0, 6, 5]`. Every pair is now correct.
+
+Cost `O(V³)` — a triple nested loop over the vertex set, a cube in the vertex count — and `O(V²)` space. Afterwards, `dist[i][i] < 0` means `i` sits on a negative cycle.
 
 ### Why must the intermediate-vertex loop be the outermost loop in Floyd-Warshall?
-Because the DP recurrence depends on having fully computed shortest paths through `{0..k-1}` before considering `k`. Putting `k` innermost would let you use `k` as an intermediate before its own via-lower-vertices distances are finalized, producing wrong results. The order encodes the subproblem dependency: "add one more allowable intermediate vertex at a time."
+
+Because `k` indexes the **DP layer**, not a coordinate. The recurrence is `dist_k[i][j] = min(dist_{k-1}[i][j], dist_{k-1}[i][k] + dist_{k-1}[k][j])`: layer `k` is defined in terms of layer `k-1`, so the whole previous layer must be complete before any cell of layer `k` is computed. With `k` outermost, one full `i`/`j` sweep advances the matrix by exactly one layer — and the in-place version is safe because `dist[i][k]` and `dist[k][j]` provably cannot change during layer `k`.
+
+Put `k` innermost and that collapses: for a fixed pair you would try every intermediate while most of the matrix still holds direct-edge values, so `dist[i][k]` may not yet be the true `i→k` distance. The result is not "slightly approximate" — it is a schedule that is right on some graphs and wrong on others, the worst kind of bug because your two-node test passes. The loop order *is* the algorithm: "let one more vertex become usable as a waypoint, then update everything."
 
 ### When would you run Floyd-Warshall versus Dijkstra from every source?
-Floyd-Warshall is `O(V^3)` regardless of density and is trivially simple to code, so it shines on small or dense graphs, or when you literally need the full distance matrix (e.g. transitive closure, graph diameter). Running Dijkstra from each source is `O(V * (V + E) log V)`, which is far better on large *sparse* graphs. Rough rule: dense or small → Floyd-Warshall; large and sparse (and non-negative weights) → repeated Dijkstra; large sparse *with negatives* → Johnson's algorithm.
+
+Floyd-Warshall is `O(V³)` regardless of density, needs `O(V²)` memory, and is six lines with no data structures. That makes it right on **small or dense** graphs (`E` approaching `V²`, where sparsity cannot be exploited anyway) and whenever you genuinely want the full matrix — graph diameter, transitive closure, `O(1)` pair queries, or a downstream DP indexed by pair.
+
+Dijkstra from every source is `O(V·(V + E) log V)`. On a sparse graph with `E ≈ V` that is about `O(V² log V)` versus `O(V³)` — a factor of `V / log V`, which at `V = 10,000` is minutes versus days.
+
+- **Dense, small, or you need the whole matrix** → Floyd-Warshall.
+- **Large and sparse, non-negative weights** → Dijkstra from each source.
+- **Large and sparse, negatives but no negative cycles** → Johnson's algorithm.
+- **You only need one pair** → don't do all-pairs at all; one Dijkstra (or A\*) with early termination.
 
 ### What is A* and how does it differ from Dijkstra?
-A* is Dijkstra with a goal-directed twist: it orders the frontier by `f(v) = g(v) + h(v)`, where `g(v)` is the known cost from the source and `h(v)` is a heuristic estimate of the remaining cost to the goal. Dijkstra is exactly A* with `h(v) = 0` — it expands uniformly in all directions. A good heuristic makes A* expand mostly toward the goal, so it can settle far fewer vertices, which matters on big grids and maps.
+
+A\* is Dijkstra with a sense of direction. Dijkstra orders its frontier by `g(v)`, the confirmed cost from the source, so it expands as an ever-growing circle, spending most of its effort *away* from the goal. A\* orders by `f(v) = g(v) + h(v)`, where `h(v)` estimates the remaining cost, so the frontier stretches toward the target. Dijkstra is precisely A\* with `h(v) = 0`.
+
+```python
+import heapq
+
+def a_star(neighbors, start, goal, h):       # h(v) -> estimated cost v..goal
+    g = {start: 0}                           # confirmed cost so far
+    parent = {start: None}
+    pq = [(h(start), start)]                 # key is f = g + h
+    while pq:
+        f, u = heapq.heappop(pq)
+        if u == goal:
+            return g[u], parent              # optimal if h is admissible
+        if f - h(u) > g.get(u, float("inf")):
+            continue                         # stale entry, same as Dijkstra
+        for v, w in neighbors(u):
+            ng = g[u] + w                    # relax, then re-key with h
+            if ng < g.get(v, float("inf")):
+                g[v] = ng
+                parent[v] = u
+                heapq.heappush(pq, (ng + h(v), v))
+    return None, parent
+```
+
+On a road network, Dijkstra explores a disc of radius equal to the trip length in every direction; A\* with straight-line distance explores something closer to an ellipse hugging the route, often expanding an order of magnitude fewer vertices for an identical answer. The worst-case bound is unchanged at `O((V + E) log V)` — the win is entirely in how much of the graph you actually touch.
 
 ### What makes an A* heuristic admissible, and why does it matter?
-A heuristic is *admissible* if it never overestimates the true remaining cost: `h(v) <= actualDistance(v, goal)` for all `v`. Admissibility guarantees A* returns an optimal path, because it never prematurely discards a route that could still turn out cheapest. A stronger property, *consistency* (`h(u) <= w(u,v) + h(v)`), additionally guarantees each vertex is expanded at most once in graph search — the analogue of Dijkstra's "settle once" property. Straight-line (Euclidean) distance is a classic admissible heuristic for maps.
+
+A heuristic is **admissible** if it never overestimates: `h(v) ≤ true distance from v to the goal`, with `h(goal) = 0`. Admissibility is what preserves optimality. Suppose A\* is about to pop the goal via a route costing `C` while a better route costing `C* < C` exists. Some vertex `x` on the better route is still queued, and its key is `f(x) = g(x) + h(x) ≤ g(x) + (true remaining from x) = C* < C` — so a min-heap would have popped `x` first. Contradiction. An admissible `h` can only *delay* unpromising directions, never discard a cheaper one.
+
+**Consistency** (the triangle inequality `h(u) ≤ w(u, v) + h(v)`) is stronger: it implies admissibility and makes `f` non-decreasing along any path, so each vertex is finalised at most once — the exact analogue of Dijkstra's settle-once property, and what makes a closed set safe. A merely admissible-but-inconsistent `h` is still correct but may need re-expansions.
+
+Practical heuristics: Euclidean distance for maps, **Manhattan** on a 4-directional grid, **Chebyshev** on an 8-directional grid, and `0` when you have nothing (giving Dijkstra back). Inflating `h` past admissibility — "weighted A\*" — is faster and gives up optimality: a fine trade for games, the wrong answer to "find the shortest path".
 
 ### How do you reconstruct the actual path, not just its length?
-Keep a `predecessor` (parent) array: whenever relaxing `(u, v)` improves `d[v]`, set `parent[v] = u`. At the end, walk `parent` pointers from the target back to the source and reverse the list. This works uniformly across BFS, Dijkstra, Bellman-Ford, and A*. For Floyd-Warshall you keep a `next[i][j]` matrix (the first hop from `i` toward `j`) and follow it forward.
+
+Maintain a `parent` map and write to it inside the relax step: whenever `(u, v)` improves `dist[v]`, set `parent[v] = u`. The relaxation that survives to the end is the one that produced the final distance, so following parents from the target back to the source traverses the shortest path in reverse — then reverse it. This is uniform across BFS, 0-1 BFS, Dijkstra, Bellman-Ford, DAG relaxation and A\*: one extra array.
+
+```python
+def reconstruct(parent, src, target):
+    path = []
+    v = target
+    while v is not None:
+        path.append(v)
+        if v == src:
+            break
+        v = parent.get(v)
+    else:
+        return []                            # target unreachable from src
+    return path[::-1]
+
+def fw_path(nxt, i, j):                      # Floyd-Warshall variant
+    if nxt[i][j] is None:
+        return []
+    path = [i]
+    while i != j:
+        i = nxt[i][j]                        # hop toward j
+        path.append(i)
+    return path
+```
+
+Floyd-Warshall needs the second shape because it has no single source: store `nxt[i][j]`, the **first hop** from `i` toward `j`, updating it to `nxt[i][k]` whenever routing through `k` wins, then walk forward. (The alternative convention stores `mid[i][j] = k` and recurses; both cost `O(V²)` extra space.) Two edge cases worth voicing: a vertex still at `∞` has no path, so return empty rather than something bogus; and with a negative cycle in range the path is undefined, so detect before reconstructing.
 
 ### An interviewer says weights can be negative but there are no negative cycles, and the graph is large and sparse — what do you use?
-Johnson's algorithm. Add a virtual source connected to every vertex with weight-0 edges, run Bellman-Ford once from it to get potentials `h(v)`, then reweight every edge to `w(u,v) + h(u) - h(v)` — now all non-negative and preserving shortest-path orderings — and finally run Dijkstra from each real source on the reweighted graph. Total `O(V*E + V*(V+E) log V)`, which beats Floyd-Warshall's `O(V^3)` on sparse graphs while still handling negatives.
+
+**Johnson's algorithm** for all-pairs; a single Bellman-Ford if they only want one source and accept `O(V·E)`. Johnson's gets Dijkstra's speed on a graph Dijkstra cannot legally run on:
+
+1. Add a **virtual source** `q` with a weight-0 edge to every vertex — it reaches everything and creates no new cycles, since nothing points back into `q`.
+2. Run **Bellman-Ford** from `q` to get potentials `h(v) = dist(q, v)`. Negative edges are handled here, once, in `O(V·E)`.
+3. **Reweight** each edge to `w'(u,v) = w(u,v) + h(u) - h(v)`. This is non-negative because Bellman-Ford's convergence gives `h(v) ≤ h(u) + w(u,v)`, which rearranges to exactly `w'(u,v) ≥ 0`.
+4. Run **Dijkstra** from every real source on the reweighted graph.
+5. **Undo** the shift: the true distance is `dist'(s,t) - h(s) + h(t)`, since the potentials telescope and shift every `s→t` route identically.
+
+Total `O(V·E + V·(V + E) log V)` — one Bellman-Ford plus `V` Dijkstras — beating Floyd-Warshall's `O(V³)` decisively on sparse graphs while still tolerating negatives. Step 3 is not the naive "add a constant" mistake precisely because the shift is per-**vertex** and telescopes, rather than per-edge and accumulating.
 
 ### How would you find the shortest path in a DAG, and can you beat Dijkstra?
-Yes. In a directed acyclic graph, process vertices in topological order and relax each one's outgoing edges as you go. Because a vertex is only relaxed after every predecessor is finalized, one linear sweep suffices — `O(V + E)`, beating Dijkstra's log factor, and it works with negative weights too (a DAG can't contain a cycle, so no negative cycle is possible). This is the standard trick for shortest/longest paths in DAG-structured DP.
+
+Yes, outright: `O(V + E)` with no heap. In a directed acyclic graph, compute a topological order and relax each vertex's out-edges in that order. When you reach `u`, every path into `u` has already been processed — that is what topological order *means* — so `dist[u]` is already final and relaxing its out-edges propagates a finished value. One linear sweep, no priority queue, no logarithm.
+
+```python
+def dag_shortest_path(adj, order, src, n):   # order: topological order of 0..n-1
+    INF = float("inf")
+    dist = [INF] * n
+    parent = [None] * n
+    dist[src] = 0
+    for u in order:                          # predecessors of u are all done
+        if dist[u] == INF:
+            continue                         # unreachable from src
+        for v, w in adj[u]:
+            if dist[u] + w < dist[v]:
+                dist[v] = dist[u] + w
+                parent[v] = u
+    return dist, parent
+```
+
+Trace the DAG `A→B (4)`, `A→C (1)`, `C→B (2)`, `B→D (5)`, `C→D (8)` in topological order `A, C, B, D`. Process `A`: `dist[B] = 4`, `dist[C] = 1`. Process `C`: `1 + 2 = 3 < 4` so `dist[B] = 3`; `dist[D] = 9`. Process `B`: `3 + 5 = 8 < 9` so `dist[D] = 8`. Process `D`: no out-edges. One pass, same answer Dijkstra needed a heap to reach.
+
+Two bonuses fall out free. **Negative weights are fine** — a DAG has no cycles, so no negative ones, and the topological argument never used non-negativity. And flipping `min` to `max` gives **longest path** in linear time, a problem that is NP-hard on general graphs — which is why critical-path scheduling and most "DAG-shaped DP" questions reduce to this loop.
 
 ## Minimum Spanning Trees
 
