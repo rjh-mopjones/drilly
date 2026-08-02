@@ -18041,3 +18041,3577 @@ Progress is stored as a percentage, never a page number, and each edition declar
 - **The read:write ratio is the design.** ~16:1 at the request level and ~100:1 in fan-out, on content that is identical for every viewer — so the CDN carries the system, and the only thing that must not be cached is the small personalised fragment.
 - **Billions of shelvings are a partitioning problem, not a storage problem.** 5B rows is under 2TB; what actually hurts is one user with 30k books and one book with 5M shelvers, and those need opposite treatments.
 - **Cross-reference rather than re-derive.** The feed is #8, the typeahead is #10, the recommender machinery is #40 — spend the time on what is genuinely different here: catalog dirtiness, popularity skew, and review brigading.
+
+### 46. Design an LLM Inference & Serving Platform
+#### Problem
+Serve an autoregressive transformer behind a public API with streaming and non-streaming completions, at high throughput, predictable per-token latency and a defensible cost per million tokens.
+
+#### Summary
+**The picture in your head:** a restaurant kitchen with one enormous, extremely slow oven. Getting the oven up to temperature for a dish (reading the prompt) is fast and parallel — you can slide fifty trays in at once. But every dish then has to come *out* of the oven one spoonful at a time, and each spoonful requires the entire oven to cycle. The only way to make that economical is to cook fifty dishes simultaneously in the same cycle. The catch: each dish reserves a fixed shelf of oven space that grows as it cooks, nobody tells you how long any dish will take, and the oven has a hard shelf limit. Scheduling that oven *is* the system.
+
+**The single-request walkthrough — prefill:** a client POSTs 800 prompt tokens to `/v1/completions` with `stream=true`. The gateway authenticates, checks the tenant's token bucket (see #1), tokenises the prompt (~3ms) and pushes the request onto a priority queue (see #16). The scheduler for a replica — 8 GPUs holding one tensor-parallel copy of the model — checks whether it can afford the request: 800 tokens ÷ 16 tokens per KV block = 50 blocks, ~16MB of key/value tensors. It can, so it admits. The prefix cache is consulted: the first 600 tokens are a system prompt this tenant has sent 40,000 times today, so those KV blocks already exist and are simply refcounted in — only 200 tokens actually need computing. Prefill runs the whole 200-token span through all 80 layers **in parallel** — one dense matmul pass, ~112 TFLOP for a full 800-token prompt, ~8ms for the 200 uncached tokens on a replica doing ~3.6 PFLOP/s. First token emitted. **TTFT ≈ 25ms** on a cache hit, ~70ms cold.
+
+**The single-request walkthrough — decode:** now the request joins the running batch of ~256 sequences and generates one token per scheduler step. Each step reads *every weight in the model* out of HBM — 17.5GB per GPU at ~2.3TB/s achieved is ~7.6ms — plus the KV cache for all 256 sequences (~10.2GB per GPU, ~4.4ms), plus ~2ms of tensor-parallel all-reduce. **One step ≈ 14ms, and it produces one token for all 256 sequences at once.** Per-stream that is ~71 tokens/s; per-replica it is ~18,000 tokens/s. Those 14ms are almost entirely spent *moving bytes*, not doing arithmetic — which is why the batch is free throughput and why running one sequence alone wastes 99% of the machine. 300 output tokens later the sampler hits a stop token, the sequence's KV blocks are freed back to the pool the same step, and a queued request is admitted in its place.
+
+**The pieces (and what each one is for):**
+- **API gateway** — authn, per-tenant token-bucket quotas on both requests/min and *tokens*/min (see #1; tokens, not requests, are the real unit of cost), request shaping, SSE connection management. Must propagate client disconnects downstream — an abandoned SSE stream that keeps generating is pure burned GPU.
+- **Priority queue (durable, partitioned by tenant and tier)** — see #16. Requests wait here, not on the GPU. Queue depth is the load-shedding signal; admission is a scheduler decision, not a load-balancer one.
+- **Scheduler (per replica, in-process)** — the heart of the system. Every step it evicts finished sequences, preempts if the KV pool is exhausted, admits from the queue against the free-block budget, and issues one fused forward pass. This is *continuous batching*: the batch membership changes every 14ms rather than every request.
+- **Paged KV cache (PagedAttention)** — the KV tensors are stored in fixed 16-token blocks, allocated non-contiguously, with a per-sequence block table — exactly virtual memory for attention. The attention kernel is rewritten to gather from the block table instead of assuming one contiguous buffer.
+- **Prefix cache (refcounted KV blocks, LRU)** — blocks keyed by a rolling hash of the token prefix. A shared system prompt is computed once and shared by every request that starts with it, across tenants only when the prefix is byte-identical.
+- **Model registry (object store + metadata DB)** — versioned safetensors shards, ~140GB per bf16 version. Replicas pull and mmap on cold start.
+- **Usage ledger + telemetry** — per-request prompt/output token counts, TTFT, inter-token latency histogram, finish reason; feeds billing and the metrics pipeline (see #17).
+
+**The thing that makes it hard:** **the KV cache is the binding constraint, and it is invisible in every FLOP-based capacity model.** Every sequence in flight holds a key and a value tensor for every token, for every layer, permanently, until it finishes — and it *grows by one token every step*. With 80 layers, 8 grouped-query KV heads and head dimension 128 in bf16, one token costs `2 × 80 × 8 × 128 × 2B = ~320KB`. A 1,100-token conversation is ~350MB of GPU memory. An 8k-token one is ~2.6GB. A 32k-token one is ~10.5GB — a single user occupying an eighth of an 80GB GPU. So the concurrency ceiling is set by memory, not compute, and it moves as prompts get longer. Worse, in the naive allocator each sequence reserves `max_tokens` worth of *contiguous* memory up front, because the attention kernel wants one flat buffer — so a request that declares `max_tokens=8192` and generates 40 tokens holds 2.6GB to use 13MB. Between that internal waste and external fragmentation of the free list, a naive server leaves 60-80% of its KV memory unused and then reports that it is "out of memory" at a batch size of 20.
+
+**Why the standard solution works:** PagedAttention (the technique vLLM is built on) borrows the operating-system answer. Split KV into fixed-size blocks of 16 tokens, keep a per-sequence page table mapping logical token positions to physical blocks, and let the attention kernel gather across them. Allocation becomes lazy and per-block: a sequence holds only what it has actually generated, rounded up to 16 tokens. External fragmentation disappears entirely because every block is the same size; internal fragmentation is bounded at 15 tokens — 15 × 320KB ≈ ~4.8MB against a ~350MB sequence, under 1.5%. Concretely, on our ~452GB per-replica pool: contiguous pre-allocation to an 8k ceiling gives 452GB ÷ 2.6GB = **~173 slots**; paged allocation at true length gives 452GB ÷ 350MB = **~1,290** — roughly a 7× concurrency win from an allocator change alone. Copy-on-write between blocks makes parallel sampling and beam search nearly free (n candidates share the prompt's blocks and fork only where they diverge), and shared prefixes fall out as refcounted blocks. The costs are real: the attention kernel is now a custom gather that runs a few percent slower than a contiguous one, the block table is an extra indirection on the hot path, and you have inherited a memory allocator — with all the eviction-policy, thrashing and accounting bugs that implies.
+
+**If you were building it tomorrow:**
+- vLLM or TensorRT-LLM as the engine (both ship paged KV, continuous batching, chunked prefill, speculative decoding). Ray or a plain Kubernetes StatefulSet for replica placement, one replica per 8-GPU NVLink node. Envoy at the edge for SSE. Kafka for the request queue (#16), Redis for tenant token buckets (#1), Prometheus + a columnar store for usage (#17).
+- Scheduler step, which is the whole design in fifteen lines:
+  ```
+  BLOCK = 16          tokens of KV per physical block
+  RESERVE = 512       blocks held back so running seqs can grow
+
+  def step():
+      while queue and kv.free_blocks() > RESERVE:
+          req = queue.peek_highest_priority()
+          shared = prefix_cache.lookup(req.prompt)     refcount, skip that prefill
+          need = ceil((len(req.prompt) - shared) / BLOCK)
+          if kv.free_blocks() - need <= RESERVE: break
+          running.add(prefill(req, skip=shared, chunk=256))
+          queue.pop()
+
+      logits = model.forward(running)                  one token for every running seq
+      for seq in running:
+          seq.append(sample(logits[seq]))              may need a new block
+          if seq.stopped(): emit_done(seq); kv.free(seq)
+      while kv.free_blocks() == 0:
+          preempt(newest_lowest_priority(running))     swap out or drop and recompute
+  ```
+
+#### Clarifying Questions
+- One model, or a fleet of models and per-tenant LoRA adapters served from shared base weights?
+- What maximum context window must we support — 4k, 32k, 128k?
+- Is streaming required for all traffic, or is some of it batch/offline where latency is irrelevant?
+- Multi-tenant with hard isolation and per-customer quotas, or a single internal consumer?
+- Interactive-latency-sensitive (chat) or throughput-sensitive (bulk document processing)?
+- Can we quantise, or is bit-for-bit output parity with bf16 a hard requirement?
+
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Many models / per-tenant adapters | shared base weights in HBM with LoRA adapters swapped per request; otherwise one model per replica pool and route by model id |
+| Long context (32k+) | KV memory dominates everything: concurrency falls ~30×, chunked prefill becomes mandatory, and KV quantisation moves from optional to required |
+| Streaming required | SSE end to end, TTFT and inter-token latency as separate SLOs, and disconnect propagation to abort generation |
+| Multi-tenant with quotas | token-bucket limits on tokens/min not just requests/min (see #1), per-tenant queues and fair-share admission to stop one tenant monopolising the batch |
+| Throughput-sensitive | push batch size past the roofline crossover, disable speculative decoding, and offer a cheaper async tier with a relaxed TTFT |
+| Quantisation allowed | fp8 weights halve the decode bandwidth term and free ~70GB/replica for KV; gate it behind an eval suite, not a vibe check |
+
+#### Requirements
+- **FR:** streaming and non-streaming completions, per-tenant quotas and usage accounting, multiple model versions with safe rollout, request cancellation, deterministic sampling on request (seed + temperature).
+- **NFR:** TTFT p95 < 400ms and inter-token latency p95 < 30ms (≥ 33 tok/s per stream) at 2k req/s peak; 99.9% availability; cost ≤ ~$0.50 per million blended tokens at realistic fleet utilisation.
+
+#### Scale Estimate
+- **Traffic:** assume ~1k req/s daily average and ~2k req/s peak (2× diurnal, US-daytime concentrated). Representative mix ~800 prompt + ~300 output tokens → peak = 2000 × 1100 = **~2.2M tokens/s**, ~190B tokens/day.
+- **Weights:** 70B params × 2B (bf16) = **~140GB**. An 80GB GPU cannot hold it — parallelism is forced on us, not chosen. fp8 → ~70GB, int4 → ~35GB.
+- **KV bytes per token:** assume 80 layers, 64 query heads, **8 KV heads (GQA)**, head_dim 128, bf16. `2 (K+V) × 80 × 8 × 128 × 2B = 327,680B` ≈ **~320KB/token**. With plain multi-head attention (64 KV heads) it is 8× that, ~2.5MB/token — GQA is the single largest KV lever and it is an architecture decision, not a serving one.
+- **KV per request:** 1100 × ~320KB = **~350MB**. At 8k context: 8192 × 320KB = ~2.6GB. At 32k: **~10.5GB for one sequence**.
+- **Per-replica memory:** 8 × 80GB = 640GB. Weights TP-sharded: 140 ÷ 8 = 17.5GB/GPU. Reserve ~6GB/GPU (activations for a 256-token prefill chunk, CUDA graphs, NCCL buffers, allocator slack). KV pool = (80 − 17.5 − 6) × 8 = **~452GB per replica**.
+- **Concurrency is a memory number:** 452GB ÷ 350MB = **~1,290 sequences** at the 1.1k-token mix; ÷ 2.6GB = ~173 at 8k; ÷ 10.5GB = **~43 at 32k**. Identical hardware, 30× fewer users, purely from context length. The paging win falls straight out: contiguous pre-allocation to an 8k ceiling gives those same ~173 slots at *every* context length, so paging is **~7×** here, for ≤1.5% internal fragmentation (≤15 unused tokens × 320KB ≈ ~4.8MB of ~350MB).
+- **Decode step:** per GPU, weight read 17.5GB ÷ (3.3TB/s × ~70% achieved = 2.3TB/s) = ~7.6ms; KV read at B=256 × ~1000 tokens ctx × 320KB ÷ 8 = ~10.2GB → ~4.4ms; all-reduce and launch ~2ms. **ITL ≈ 14ms** (~71 tok/s/stream). Replica decode throughput = 256 ÷ 14ms = **~18k output tokens/s**. Machine balance is ~1 PFLOP/s ÷ 3.3TB/s ≈ **300 FLOP/byte**, so decode stays memory-bound only up to batch ≈ 300; past that each added sequence costs latency roughly linearly — the hard ceiling on "just batch harder".
+- **Prefill:** ≈ 2 × 70e9 = **~140 GFLOP/token** (the attention n² term adds ~1.5% at 800 tokens; at 32k it is no longer ignorable). 800 tokens = ~112 TFLOP/request. At ~45% MFU → ~3.6 PFLOP/s per replica → **prefill ≈ 31ms**.
+- **Fleet:** decode 2000 × 300 = 600k tok/s ÷ 18k = **~33 replicas (264 GPUs)**. Prefill 2000 × 800 = 1.6M tok/s × 140 GFLOP = 224 PFLOP/s ÷ 3.6 = **~62 replicas (~500 GPUs)**. Peak ≈ **~765 GPUs ≈ 96 eight-GPU nodes**; ~half at daily average.
+- **Prefix caching pays for a third of the fleet:** if ~600 of the 800 prompt tokens are a shared system prompt at a ~75% hit rate, effective prefill = 800 − (600 × 0.75) = 350 tokens/request → prefill drops to ~220 GPUs, total ~485.
+- **Cost per million tokens:** assume **~$2.50/GPU-hour** amortised. Peak 765 GPUs = ~$1.9k/hour serving 7.9B tokens/hour → **~$0.24/M at 100% utilisation**; at a realistic ~50% average fleet utilisation, **~$0.48/M** before margin. An output token costs ~2.7× a prompt token here (264 GPUs for 600k tok/s vs ~500 for 1.6M tok/s) — which is exactly why providers price them separately.
+- **Weight distribution + cold start:** 140GB pulled from object store at ~2GB/s effective = ~70s, plus shard load, CUDA-graph capture and warmup → **~3-5 min to first healthy token**. 12 live versions × 140GB ≈ ~1.7TB stored; a full fleet roll is 96 × 140GB ≈ **~13TB of egress**.
+- **Telemetry + usage:** 2k req/s × ~2KB metadata (tenant, model, token counts, TTFT, ITL histogram, finish reason — no prompt content by default) = ~4MB/s → **~350GB/day**; RF=3 → ~1TB/day, 30 days hot then rolled to columnar (#17).
+
+#### API Contract
+```
+POST /v1/completions        { model, prompt, max_tokens, temperature, seed, stream }
+     stream=false  → { id, text, finish_reason, usage:{prompt_tokens, completion_tokens} }
+     stream=true   → SSE: data:{"delta":"Hel"} … data:{"usage":{…}} … data:[DONE]
+POST /v1/chat/completions   { model, messages:[{role, content}], tools?, stream }
+POST /v1/tokenize           { model, text } → { tokens: 812 }   client-side budgeting
+GET  /v1/models             → [{ id, context_window, price_in, price_out }]
+DELETE /v1/requests/{id}     abort generation, free KV this step (also fired on SSE disconnect)
+GET  /v1/usage?tenant=&from= → { tokens_in, tokens_out, cost }  quota state per #1
+```
+
+#### High-Level Design
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 556" role="img" aria-label="LLM serving platform: gateway with tenant quotas, priority queue, continuous-batching scheduler, and an eight-GPU replica running prefill and decode over a shared paged KV pool">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box" x="280" y="16" width="200" height="44" rx="9"/>
+  <text class="lbl" x="380" y="38">Client (SSE)</text>
+
+  <rect class="box" x="220" y="94" width="320" height="60" rx="9"/>
+  <text class="lbl" x="380" y="114">API Gateway</text>
+  <text class="sub" x="380" y="136">authn · per-tenant token quota (#1)</text>
+
+  <ellipse class="store" cx="90" cy="196" rx="62" ry="10"/>
+  <path class="store" d="M28,196 v42 a62,10 0 0 0 124,0 v-42"/>
+  <text class="sub" x="90" y="216">Priority queue</text>
+  <text class="sub" x="90" y="234">(#16)</text>
+
+  <rect class="box acc" x="220" y="186" width="320" height="76" rx="9"/>
+  <text class="lbl" x="380" y="206">Scheduler</text>
+  <text class="sub" x="380" y="228">admit · preempt · evict, every step</text>
+  <text class="sub" x="380" y="248">continuous batching · step ≈ 14ms</text>
+
+  <ellipse class="store" cx="672" cy="186" rx="62" ry="10"/>
+  <path class="store" d="M610,186 v42 a62,10 0 0 0 124,0 v-42"/>
+  <text class="sub" x="672" y="206">Weights</text>
+  <text class="sub" x="672" y="224">~140GB bf16</text>
+
+  <rect class="grp" x="96" y="296" width="568" height="176" rx="12"/>
+  <text class="sub" x="380" y="314">Replica = 8 GPUs, tensor-parallel</text>
+
+  <rect class="box" x="120" y="332" width="250" height="60" rx="9"/>
+  <text class="lbl" x="245" y="352">Prefill</text>
+  <text class="sub" x="245" y="374">compute-bound · chunked</text>
+
+  <rect class="box" x="390" y="332" width="250" height="60" rx="9"/>
+  <text class="lbl" x="515" y="352">Decode</text>
+  <text class="sub" x="515" y="374">bandwidth-bound · 1 tok/step</text>
+
+  <rect class="box" x="120" y="410" width="520" height="46" rx="9"/>
+  <text class="sub" x="380" y="424">Paged KV pool ~452GB · 16-token blocks</text>
+  <text class="sub" x="380" y="442">refcounted shared-prefix cache</text>
+
+  <rect class="box" x="230" y="504" width="300" height="44" rx="9"/>
+  <text class="sub" x="380" y="526">Usage ledger + metrics (#17)</text>
+
+  <path class="flow" d="M380,60 L380,94"/>
+  <path class="flow" d="M220,124 L90,124 L90,186"/>
+  <text class="edge" x="96" y="114" text-anchor="start">enqueue</text>
+  <path class="flow" d="M152,224 L220,224"/>
+  <text class="edge" x="156" y="212" text-anchor="start">admit</text>
+  <path class="flow" d="M300,262 L300,306 L245,306 L245,332"/>
+  <path class="flow" d="M370,362 L390,362"/>
+  <path class="flow" d="M245,392 L245,410"/>
+  <path class="flow" d="M515,392 L515,410"/>
+  <path class="flow dash" d="M672,228 L672,282 L600,282 L600,332"/>
+  <text class="edge" x="666" y="266" text-anchor="end">load shards</text>
+  <path class="flow dash" d="M640,352 L722,352 L722,38 L480,38"/>
+  <text class="edge" x="716" y="190" text-anchor="end">tokens (SSE)</text>
+  <path class="flow" d="M380,472 L380,504"/>
+</svg>
+```
+
+**How to read the diagram:** requests never wait on a GPU — they wait in the queue, and the per-replica scheduler pulls them in only when the paged KV pool can afford them. Inside the replica, prefill and decode are two different workloads sharing the same weights and the same KV pool, and the scheduler interleaves them every 14ms.
+
+**Why the flow is shaped this way:** admission has to be co-located with the memory it is spending. A generic load balancer can see request counts but not free KV blocks, so it will happily route a 32k-token prompt to a replica that has 12MB left. Putting the scheduler next to the allocator is the whole trick.
+
+**What this layout buys you:** GPU utilisation that tracks offered load instead of collapsing to the slowest request in a batch, and a single place — free-block count — where backpressure, preemption and load-shedding are all decided. The trade-off is that the scheduler is now a stateful, latency-critical component you cannot restart casually.
+
+#### Data Model
+- **model_registry** (object store + metadata table): safetensors shards, partition by `(model_id, version)`; row holds arch config, tokenizer hash, eval scorecard, rollout state.
+- **kv_blocks** (GPU HBM, in-process paged allocator): physical blocks keyed by `block_id`; per-sequence `block_table[seq_id] → [block_id…]`; free list is a simple stack since all blocks are one size.
+- **prefix_cache** (GPU HBM, CPU DRAM spill, LRU): key `hash(token_prefix)` → `[block_id…]` with a refcount; partition by `hash(prefix)`.
+- **request_queue** (durable log, see #16): partition by `(tenant_id, priority_tier)`; payload is token ids, sampling params, deadline.
+- **tenant_quota** (in-memory KV, see #1): `quota:{tenant}:{minute}` token buckets on both tokens/min and requests/min.
+- **usage_ledger** (columnar OLAP): `(request_id, tenant_id, model_version, prompt_tokens, output_tokens, cached_prefix_tokens, ttft_ms, itl_p50_ms, finish_reason, ts)`, partition by `(tenant_id, day)`.
+- **replica_state** (coordination store): `(replica_id, model_version, free_blocks, running_seqs, queue_depth, health)` — the routing table's input.
+
+#### Detailed Design
+**Prefill and decode are two different machines wearing one costume.** Prefill takes all N prompt tokens at once: the matmuls are `[N × d] × [d × d]`, arithmetic intensity scales with N, and the GPU runs near its FLOP roofline. Decode takes one token per sequence: the matmuls are `[B × d] × [d × d]`, so unless B is large the GPU reads 140GB of weights to do a trivial amount of arithmetic and sits at single-digit percent utilisation. Concretely, a batch-1 decode step on our replica does ~140 GFLOP in ~7.6ms — about 18 TFLOP/s against a ~8 PFLOP/s replica, **0.2% utilisation**. This asymmetry is why you cannot treat inference as one workload with one batch size, and why the two need separate SLOs: TTFT is a *prefill plus queue* number and inter-token latency is a *decode* number. Averaging them into a single "p99 latency" produces a figure that describes nothing — a request with a 20-token prompt and 2000 output tokens and one with a 20k-token prompt and 5 output tokens can have identical end-to-end latency and completely different failure causes.
+
+**Continuous batching, and why static batching wastes most of the machine.** With static batching you gather 32 requests, run them to completion together, then take the next 32. But output length varies enormously and the batch only retires when its *longest* member finishes. If output lengths are roughly exponential with mean 300, the expected maximum of 32 draws is ~300 × H₃₂ ≈ ~1,220 tokens — so the average slot sits idle for 75% of the batch's life, generating padding. Continuous (in-flight) batching makes batch membership a per-step decision: after each forward pass, finished sequences are removed and queued requests are admitted into the vacated slots immediately. Slot occupancy goes from ~25% to ~90%+, worth **~2-4× throughput** against a well-tuned static batcher. The tension it creates is direct: admitting more sequences raises throughput but lengthens every step (more KV to read), so every existing stream's inter-token latency degrades. At B=64 our ITL is ~9ms; at B=256 it is ~14ms; at B=512 we cross the roofline and it is ~22ms. The scheduler is therefore tuning a **latency-versus-throughput dial once per step**, and the right setting depends on tier: an interactive tier caps B at ~192 to hold ITL under 12ms, a batch tier runs B as high as memory allows.
+
+**Chunked prefill, because a long prompt freezes everyone.** Prefill and decode contend for the same GPU. A 32k-token prefill is 32768 × 140 GFLOP ≈ 4.6 PFLOP ≈ **~1.3s** on our replica — during which every one of the 256 decoding streams produces nothing. That is a 1.3-second inter-token stall visible to 256 unrelated users: classic head-of-line blocking. The fix is to split prefill into fixed chunks (256 or 512 tokens) and interleave chunks with decode steps, so the long prompt's TTFT degrades gracefully instead of everyone else's ITL falling off a cliff. Budget per step: one 256-token prefill chunk ≈ 10ms of compute added to a 14ms decode step. The alternative architecture is **disaggregated prefill/decode** — separate GPU pools for each phase, with KV blocks shipped over the interconnect from prefill nodes to decode nodes. That removes the interference entirely and lets you size the two pools independently (we need ~500 prefill GPUs and ~264 decode GPUs — very different numbers), at the cost of a ~350MB KV transfer per request and a much more complex failure story.
+
+**Scheduling against an unknown output length.** Admission knows the prompt length exactly and the output length not at all. Reserving `max_tokens` of KV at admission is safe and catastrophic — it is exactly the contiguous pre-allocation that paging exists to kill. So the scheduler admits optimistically against actual usage and handles the resulting OOM by **preemption**: when free blocks hit zero mid-step, evict a victim sequence and either (a) *swap* its KV to host DRAM over PCIe — ~350MB at ~16GB/s ≈ ~22ms each way — or (b) *drop and recompute* its prefill on readmission — 1100 tokens × 140 GFLOP ÷ 3.6 PFLOP/s ≈ ~43ms. Swap is cheaper per token but consumes PCIe bandwidth shared with weight loading; recompute is stateless and simpler, which is why most engines default to it. Victim choice matters: preempt the **newest, lowest-priority** sequence (LIFO), because preempting the oldest throws away the most accumulated work and produces convoys. LIFO starves late arrivals under sustained pressure, so add aging — after two preemptions a request's priority is promoted and it becomes ineligible as a victim. You can also *predict* output length (a small classifier on the prompt, ~60% accurate at bucketing short/medium/long) and use it to bias admission, but never to reserve memory: a wrong prediction that reserves is worse than no prediction at all.
+
+**Tensor parallelism inside a node, pipeline parallelism only across nodes.** 140GB of weights does not fit in 80GB, so parallelism is mandatory. **Tensor parallelism** shards every weight matrix across GPUs — each holds 1/8 of every layer — and requires an all-reduce twice per transformer block. Communication volume per step is `B × d_model × 2B × 2 × layers` = at B=256, `256 × 8192 × 2 × 2 × 80` ≈ **~670MB per step**. Over NVLink at ~900GB/s that is ~0.7ms — fine. Over a 400Gb/s network fabric (~50GB/s effective) it would be ~13ms, nearly doubling the step. **This is the rule: TP stays inside the NVLink domain.** **Pipeline parallelism** splits layers across GPUs and only ships the boundary activation — `256 × 8192 × 2B` ≈ ~4MB per micro-batch — which crosses a network link happily, but it introduces bubbles: with p stages and m micro-batches the idle fraction is `(p−1)/(m+p−1)`, and autoregressive decode is naturally m=1 unless you interleave independent batches. Our decision: **TP=8 within one node, no PP**, because 140GB ÷ 8 = 17.5GB/GPU leaves ~56GB/GPU for KV. PP would only be forced on us by a model too large for a single node — a 400B model would be TP=8 within nodes and PP=2 across two of them, accepting the bubble.
+
+**Speculative decoding: trading FLOPs for latency, and only when FLOPs are spare.** A small draft model (say 1B, ~70× cheaper per forward) proposes k=4 tokens autoregressively; the 70B target then verifies all 4 in a **single** forward pass over the span, accepting the longest prefix that matches what it would have sampled. With acceptance rate α ≈ 0.7 and k=4, expected accepted tokens per verify = `(1 − α^(k+1))/(1 − α)` = `(1 − 0.168)/0.3` ≈ **2.77**. Cost per verify ≈ 7.6ms (target, still bandwidth-bound at small batch) + 4 × ~0.3ms (draft) ≈ 8.8ms → ~3.2ms per accepted token against ~14ms baseline: a **~3-4× ITL improvement**. The catch is decisive: verification multiplies the token count in the forward pass by (k+1), so at B=256 the effective batch becomes ~1,280 tokens, well past the ~300 roofline crossover — you now pay 4.6× the FLOPs to get 2.77× the tokens and *lose*. Speculative decoding therefore pays off at **low batch sizes** (a latency-sensitive tier, off-peak hours, single-tenant deployments) and is a straight throughput regression at high load. Run it as a per-tier, load-adaptive switch: enable when running batch < 64, disable above.
+
+**Prefix caching for shared system prompts.** Hash the token ids in 16-token block granularity, rolling, so the cache key for block i covers tokens 0..16i. On admission, walk the request's blocks against the cache and refcount in every block that hits; prefill only the tail. A 600-token shared system prompt is 600 × 320KB ≈ **~192MB of KV held once** rather than per request — pin the top ~50 tenant prompts and you spend ~9.6GB of a 452GB pool to eliminate ~75% of prefill FLOPs. Two hazards: cache keys must include model version and any sampling-invariant state, or a rollout will serve KV computed by the old weights; and cross-tenant sharing of identical prefixes is a genuine (if narrow) side channel — a tenant can detect that another tenant has warmed a given prefix by timing TTFT. If that matters, partition the cache by tenant and eat the duplication.
+
+**The scheduler's step loop (visual).** Cardinalities at peak on one replica: ~1.2k requests queued platform-wide, ~256 running, ~50 KV blocks needed per admitted 800-token prompt, ~28k of ~28,250 blocks allocated. Latency budget per step: admission and block accounting ~0.3ms, one 256-token prefill chunk ~10ms (when present), the fused decode forward ~12ms, all-reduce ~2ms, sampling and detokenisation ~0.5ms, eviction and free-list return ~0.2ms.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 300" role="img" aria-label="Continuous batching scheduler loop: waiting queue, KV admission check, chunked prefill, running batch, decode step, token emission, eviction and preemption feeding back to admission">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box" x="15" y="48" width="170" height="68" rx="9"/>
+  <text class="sub" x="100" y="70">Waiting queue</text>
+  <text class="sub" x="100" y="94">~1.2k at peak</text>
+
+  <rect class="box acc" x="205" y="48" width="170" height="68" rx="9"/>
+  <text class="sub" x="290" y="64">Admission check</text>
+  <text class="sub" x="290" y="82">free blocks ≥ 50</text>
+  <text class="sub" x="290" y="100">(800 ÷ 16 tokens)</text>
+
+  <rect class="box" x="395" y="48" width="170" height="68" rx="9"/>
+  <text class="sub" x="480" y="64">Chunked prefill</text>
+  <text class="sub" x="480" y="82">256-token chunks</text>
+  <text class="sub" x="480" y="100">~10ms each</text>
+
+  <rect class="box" x="585" y="48" width="170" height="68" rx="9"/>
+  <text class="sub" x="670" y="64">Running batch</text>
+  <text class="sub" x="670" y="82">B ≈ 256 seqs</text>
+  <text class="sub" x="670" y="100">~90GB KV held</text>
+
+  <path class="flow" d="M185,82 L205,82"/>
+  <path class="flow" d="M375,82 L395,82"/>
+  <path class="flow" d="M565,82 L585,82"/>
+
+  <path class="flow" d="M670,116 L670,146 L100,146 L100,208"/>
+  <text class="edge" x="380" y="137" text-anchor="middle">one fused forward pass</text>
+
+  <rect class="box acc" x="15" y="208" width="170" height="68" rx="9"/>
+  <text class="sub" x="100" y="224">Decode step</text>
+  <text class="sub" x="100" y="242">1 token × 256</text>
+  <text class="sub" x="100" y="260">≈ 14ms</text>
+
+  <rect class="box" x="205" y="208" width="170" height="68" rx="9"/>
+  <text class="sub" x="290" y="230">Emit tokens</text>
+  <text class="sub" x="290" y="252">SSE to clients</text>
+
+  <rect class="box" x="395" y="208" width="170" height="68" rx="9"/>
+  <text class="sub" x="480" y="230">Evict finished</text>
+  <text class="sub" x="480" y="252">free KV blocks</text>
+
+  <rect class="box" x="585" y="208" width="170" height="68" rx="9"/>
+  <text class="sub" x="670" y="224">Preempt if OOM</text>
+  <text class="sub" x="670" y="242">newest, lowest pri</text>
+  <text class="sub" x="670" y="260">swap or recompute</text>
+
+  <path class="flow" d="M185,242 L205,242"/>
+  <path class="flow" d="M375,242 L395,242"/>
+  <path class="flow" d="M565,242 L585,242"/>
+
+  <path class="flow" d="M700,208 L700,176 L290,176 L290,116"/>
+  <text class="edge" x="300" y="167" text-anchor="start">readmit + admit new, every step</text>
+</svg>
+```
+
+#### Potential Follow-Up Questions
+**Q: One tenant sends 500 requests with 100k-token prompts. What breaks?**
+KV memory, immediately. Each is 100000 × 320KB = ~32GB, so a single one takes 7% of a replica's pool and eight of them fill it. Admission control must be denominated in *tokens*, not requests — the tenant's bucket (see #1) meters tokens/min, and the scheduler refuses admission when `prompt_blocks > pool × 0.15` regardless of who is asking. *If pushed:* route long-context traffic to a dedicated replica pool with a smaller batch target and fp8 KV, and price it separately — sharing a pool between 500-token and 100k-token requests means the short ones are permanently starved of slots.
+
+**Q: Why does the same prompt to the same model give different latency at 3am and 3pm?**
+TTFT is queue wait plus prefill, and queue wait is the term that moves. At 3am the batch is small, so decode is deeply memory-bound and ITL is ~9ms; at 3pm B=256 makes it ~14ms and queue wait adds ~200ms. The compute did not change; the contention did. *If pushed:* this is why you publish ITL and TTFT separately and why a load-adaptive policy (speculative decoding on at low load, off at high) makes the off-peak experience genuinely better rather than just less contended.
+
+**Q: A client opens an SSE stream, gets the first token, and vanishes. What happens?**
+Without disconnect propagation, the sequence keeps generating to `max_tokens`, holding its KV blocks and a batch slot for the full ~4s — pure waste, and at scale it is a trivial denial-of-wallet vector. The gateway must detect TCP close and issue an abort that the scheduler applies on the next step, freeing blocks. *If pushed:* SSE over some proxies buffers, so also enforce a server-side generation deadline and a heartbeat; and bill for tokens generated, not tokens delivered, so an abandoned stream is still accounted.
+
+**Q: You roll out a new model version. How do you not drop every in-flight generation?**
+Weights are immutable per replica, so a version change is a replica replacement, not an in-place swap. Drain: stop admitting to the old replica, let running sequences finish (bounded by `max_tokens`, so ~10-30s), then tear down and start the new version — which needs ~3-5 min of cold start, so you must over-provision during the roll. *If pushed:* prefix cache entries are keyed by model version so nothing stale leaks across; and route a shadow percentage of traffic to the new version first, comparing token-level logprob divergence and eval scorecard, not just error rate.
+
+**Q: Two requests are identical, same seed, same temperature. Same output?**
+Not necessarily, and this surprises people. The batch composition changes the reduction order in the fused kernels, and floating-point addition is not associative — so the same logits can differ in the last bits and, near a sampling boundary, flip a token. *If pushed:* determinism requires batch-invariant kernels (fixed reduction order regardless of batch shape) which cost throughput, or greedy decoding with a widened logit margin check. Offer determinism as a paid, slower mode rather than pretending the fast path has it.
+
+**Q: Your GPU utilisation dashboard reads 95%. Is the fleet efficient?**
+Almost certainly not. `nvidia-smi` utilisation means "a kernel was resident", not "the machine did useful work" — a batch-1 decode step pins utilisation at 100% while achieving 0.2% of peak FLOPs. The metric that matters is **goodput**: output tokens/s per GPU, and cost per million tokens. *If pushed:* track model FLOPs utilisation (MFU) for prefill and achieved memory bandwidth for decode as the two real efficiency numbers, plus KV pool occupancy — a pool sitting at 30% means you are leaving concurrency on the table.
+
+**Q: Autoscaling — the queue is backing up and nodes take five minutes to boot. What do you do?**
+Accept that reactive autoscaling cannot work at a 5-minute cold start and a 2× diurnal swing, and scale predictively off the day-over-day traffic curve with a warm buffer of ~15% idle capacity. Combine with graceful degradation the instant queue depth crosses a threshold: shed the batch tier first, cut `max_tokens` defaults, disable speculative decoding, raise the interactive batch cap. *If pushed:* keep a pool of nodes with weights already resident but no traffic (weights loaded is the slow part, not the process), and use spot/preemptible capacity for the batch tier only, where a 30-second eviction notice is survivable.
+
+**Q: Quantisation halves your cost. Why not always do it?**
+Because "quality is fine" is an empirical claim, not an architectural one. fp8 weights halve the decode bandwidth term (~7.6ms → ~3.8ms) and free ~70GB/replica for KV; fp8 KV halves bytes/token to ~160KB and doubles concurrency. But degradation is task-dependent and concentrated in the tail — long-context reasoning and code generation degrade well before a perplexity number moves. *If pushed:* gate every quantisation change behind a held-out eval suite with per-task thresholds and a canary comparing logprob divergence against the bf16 reference on live traffic; ship it per-tier so the cheap tier can be int4 and the premium tier bf16.
+
+#### Bottlenecks & Mitigations
+- **KV memory, not FLOPs, caps concurrency** — the pool fills long before the GPUs run out of arithmetic, and it fills faster as contexts grow. Paged allocation recovers ~7×; GQA cuts bytes/token 8× versus MHA; fp8 KV halves it again. Trade-off: paging costs a slower gather-based attention kernel and an allocator you now own; fp8 KV costs measurable quality on long-context tasks.
+- **Head-of-line blocking from long prefills** — one 32k prompt is ~1.3s of compute that stalls every decoding stream on the replica. Chunked prefill (256-token chunks interleaved with decode) bounds the stall to ~10ms; full disaggregation of prefill and decode pools removes it entirely at the cost of shipping ~350MB of KV per request between pools.
+- **The latency/throughput dial** — every sequence admitted lengthens the step for all the others; B=64 gives ~9ms ITL, B=512 gives ~22ms. Run separate tiers with separate batch caps rather than one compromise setting. Trade-off: tiering fragments the fleet and lowers aggregate utilisation.
+- **Unknown output length breaks admission** — you cannot size a reservation for something you cannot predict, so admission is optimistic and preemption is the safety valve. Recompute-on-readmit (~43ms) is simpler than swap-to-host (~22ms each way) and does not contend for PCIe; both are wasted work, so tune `RESERVE` so preemption stays under ~1% of steps.
+- **Cold start versus autoscaling** — 140GB of weights means ~3-5 min from scale-up decision to first token, against a demand curve that moves in seconds. Predictive scaling plus a ~15% warm buffer plus tier-based shedding; the trade-off is paying for idle GPUs at ~$2.50/hour each.
+- **Prefix cache thrash and tenant interference** — a workload with many distinct system prompts evicts the pinned ones and the hit rate collapses, silently doubling the prefill fleet's work; separately, one tenant's 500 concurrent long generations occupy every slot and starve everyone else. Pin the top-N prefixes by observed frequency and alert on hit-rate drops; enforce fair-share admission with per-tenant concurrency ceilings and token buckets (#1). Trade-off: fair-share lowers peak utilisation because you sometimes refuse work you have the capacity for.
+
+#### Failure Modes
+| Layer | Failure | Detection | Mitigation |
+|---|---|---|---|
+| GPU / replica | A GPU faults mid-step; the tensor-parallel group is dead and all ~256 in-flight generations are lost | NCCL error, step-time watchdog, per-replica heartbeat gap | Fail the replica out of the routing table immediately; clients retry with an idempotency key and re-send the prompt; partial SSE output is discarded rather than resumed (KV is unrecoverable) |
+| KV pool | Pool exhausted, preemption rate spikes and throughput collapses into thrash | Free-block gauge, preemptions/step, recompute-token counter | Raise `RESERVE` and lower the admission ceiling; shed the batch tier; preempt newest-first with aging to avoid convoys and starvation |
+| Scheduler | Scheduler process wedges; GPUs idle with a full queue | Step-rate drop to zero while queue depth grows | Watchdog restart of the replica (in-flight KV is lost — treat as a replica failure); alert on step-rate, never on GPU utilisation, which stays high while wedged |
+| Interconnect | An all-reduce hangs; the TP group deadlocks with no error | Collective timeout, step-time p99 cliff | NCCL timeouts set well below the client deadline so it becomes a crash rather than a hang; drain and replace the node; check for a degraded NVLink lane before returning it to service |
+| Weight load | Corrupt or partially written shard; replica serves garbage tokens | Checksum on load, warmup canary prompt with expected-logprob assertion | Refuse to enter the routing table until the canary passes; keep the previous version's shards resident for instant rollback |
+| Prefix cache | Stale blocks served after a model-version change | Version tag mismatch counter; output-divergence canary | Model version is part of the cache key; flush on rollout; alert if any hit is served with a non-matching version tag |
+| Queue | Backlog grows past the point where dequeued requests have already timed out | Queue depth, and age-at-dequeue versus client deadline | Deadline-aware dequeue — drop requests whose deadline has passed before spending a single GPU cycle; shed at the gateway with 429 and `Retry-After` rather than queueing indefinitely |
+| Gateway / SSE | Client disconnects undetected; generation continues, holding blocks and billing | Gap between generated-token and delivered-token counters | Propagate TCP close as an abort applied on the next step; enforce a server-side generation deadline and a heartbeat frame |
+| Tokenizer | Tokenizer version drifts from the weights after a partial rollout | Tokenizer hash compared against the registry entry at load | Refuse to start on mismatch; pin tokenizer hash in the model registry row alongside the shards |
+
+#### Observability — Key Metrics & SLOs
+- **Time-to-first-token, p50/p95/p99** (request accepted → first token emitted) — SLO p95 < 400ms. Decompose it into queue wait, prefill compute and prefix-cache hit, because a TTFT regression is almost always queue wait, and treating it as a model problem sends you debugging the wrong layer.
+- **Inter-token latency, p50/p95** (gap between consecutive tokens on one stream) — SLO p95 < 30ms, i.e. ≥ 33 tok/s, comfortably above reading speed. This is a decode-batch-size number; it degrades smoothly with load, which makes it the best early warning of saturation.
+- **KV pool occupancy and preemption rate** (allocated blocks ÷ total; preemptions per 1k steps) — SLO preemptions < 1% of steps. Occupancy below ~50% means wasted concurrency; sustained above ~95% means you are about to thrash.
+- **Goodput per GPU** (output tokens/s ÷ GPUs, and prefill MFU separately) — the real efficiency metric. Alert on a >20% week-over-week drop; GPU "utilisation" percentage is actively misleading here and should not be alerted on.
+- **Cost per million tokens, split input/output, by tenant and model version** — the number the business watches. Track it hourly against the ~$0.48/M target; a rise usually means falling prefix-cache hit rate or falling fleet utilisation, not a model change.
+- **Queue depth and age-at-dequeue by tier** (see #17) — SLO age-at-dequeue p99 < 250ms for the interactive tier. Age, not depth, is the actionable signal: a deep queue that drains fast is fine.
+- **Token-level quality canary** (logprob divergence of a fixed prompt set against the reference build) — alert on any drift, which catches bad quantisation, corrupt shards and silent kernel regressions that no latency metric will show.
+
+#### Multi-Region & DR
+- **Replication mode:** active-active regional replica pools. Inference is stateless apart from in-flight KV, which is per-replica, unreplicable and worthless once its GPU is gone — so "replication" here means replicating *weights and config*, not state. Model shards are pushed to a regional object store bucket per region; the usage ledger and quota state replicate asynchronously to a global store.
+- **RTO:** ~30s to shift traffic to another region via health-checked routing, assuming the target region has warm headroom. If it does not, RTO is bounded by cold start: **~3-5 min per node** plus scale-up time, so DR capacity planning means keeping ~20-30% warm cross-region headroom or accepting a multi-minute brownout.
+- **RPO:** effectively zero for durable state (usage ledger is append-only and replicated) but **all in-flight generations are lost** on a regional failure — no KV survives. Clients must retry with an idempotency key; a partially streamed response is discarded and regenerated, and billing dedupes on the idempotency key so the customer is not charged twice.
+- **Failover cadence:** automatic within region on replica health failure; cross-region via routing policy, exercised in quarterly game-days that specifically test the cold-start path, since that is the part everyone's runbook gets wrong.
+- **Cross-region cost:** weight distribution is the only large transfer — ~140GB per model version per region, and a full fleet roll is ~13TB of intra-region egress. Quota and usage records are tiny (~350GB/day of metadata). GPU capacity, not bandwidth, is what makes multi-region expensive here: warm DR headroom is idle GPUs at ~$2.50/hour.
+
+#### Common Mistakes / Anti-patterns
+- **Batching at the request level instead of the step level.** Gathering 32 requests and running them to completion wastes ~75% of every slot, because the batch retires on its slowest member. Continuous batching makes membership a per-step decision; say "in-flight batching" out loud, it is the single highest-leverage idea in the design.
+- **Sizing capacity from FLOPs and parameter count.** The arithmetic says the model is compute-bound; the machine says it is out of KV memory at batch 40. Always derive bytes-per-token from layers × KV heads × head_dim × dtype first, then compute the concurrency ceiling from the memory budget — that is the number that constrains you.
+- **Quoting a single p99 latency.** TTFT and inter-token latency have different causes, different fixes and different users complaining about them. One blended number hides both. Publish them separately, and decompose TTFT into queue wait versus prefill.
+- **Reserving `max_tokens` of KV at admission.** It is the contiguous-allocation mistake in a new costume: a request declaring 8192 and generating 40 tokens holds ~2.6GB to use ~13MB. Admit optimistically against actual usage and let preemption handle the shortfall.
+- **Assuming speculative decoding is a free win.** It trades FLOPs for latency, so it helps at low batch and actively costs throughput at high batch — verifying k+1 tokens per sequence pushes you past the roofline crossover. Make it load-adaptive, not always-on.
+- **Alerting on GPU utilisation.** It reads ~100% during a batch-1 decode that is achieving 0.2% of peak FLOPs, and it stays at 100% when the scheduler has wedged. Alert on goodput, step rate, and cost per million tokens instead.
+
+#### Talking Points for the Interview
+- **Say "prefill is compute-bound, decode is memory-bandwidth-bound" in the first two minutes.** Every subsequent decision — batching, chunking, disaggregation, speculative decoding, quantisation — follows from that split, and interviewers are listening for it specifically.
+- **Derive the KV cache size on the whiteboard.** `2 × layers × kv_heads × head_dim × dtype` = ~320KB/token, ~350MB/request, ~10.5GB at 32k. Then state the concurrency ceiling as a memory division. This is the arithmetic that separates people who have run this from people who have read about it.
+- **Name PagedAttention and explain it as virtual memory.** Fixed blocks, a per-sequence page table, lazy allocation, bounded internal fragmentation, refcounted sharing for prefixes and forks — and be honest that you have adopted an allocator's problems along with its wins.
+- **Frame scheduling around the unknown output length.** That is the genuinely hard part: you must commit memory for a job whose size you learn only when it ends. Optimistic admission plus LIFO preemption plus aging is the answer, and predicting length is a bias, never a reservation.
+- **Give the parallelism rule as a bandwidth argument.** Tensor parallelism inside the NVLink domain because it all-reduces twice per layer; pipeline parallelism across nodes because it only ships boundary activations — and only when the model will not fit in one node.
+- **Close on cost per million tokens.** Derive it — GPU-hours ÷ tokens-per-hour — and name the levers that move it: prefix cache hit rate, batch size, quantisation, and fleet utilisation. It is the metric the business actually funds, and connecting the systems design to it is what a senior answer sounds like.
+
+### 47. Design a Web Search Engine
+#### Problem
+Given a stream of crawled documents, build and serve an index that answers a free-text query over tens of billions of pages with the ten best results in a few hundred milliseconds.
+
+#### Summary
+**The picture in your head:** the index at the back of a fifty-billion-page encyclopedia — except no single person could ever hold that index, so it is split across a thousand librarians, each of whom owns the complete index for their own fifty-million-page slice. Ask a question and you ask all thousand at once; each returns their twenty best pages; a supervisor merges the thousand answers into one ranked list. You do not wait for the average librarian. You wait for the *slowest* one.
+
+**The single-request walkthrough (read path):** a user types `coffee shops brooklyn`. Stage 1 — the Query Service normalises it (lowercase, strip punctuation, spell-correct, stem, drop or downweight stopwords), builds a canonical cache key, and checks the query result cache; on a hit (~50-60% of traffic) it returns in ~5ms and the story ends. Stage 2 — on a miss, the query goes to a root merger, which fans out through ~30 mid-tier mergers to all ~1000 leaf shards. Stage 3 — inside each leaf, the term dictionary maps each term to a posting-list offset; the three lists cover roughly 500M, 200M and 90M documents corpus-wide, so ~10M, ~4M and ~1.8M *in this shard*. Stage 4 — block-max WAND walks the three cursors together, using per-block score upper bounds to skip whole blocks that cannot beat the current 20th-best score; it fully scores ~5k documents instead of the ~100k that actually contain all three terms. Stage 5 — each leaf returns its top 20 as `(doc_id, score)` pairs, ~800B on the wire, with a 40ms deadline. Stage 6 — the merge tree collapses 1000 × 20 = 20,000 candidates to the global top ~500. Stage 7 — a cross-encoder reranker scores those 500 on a GPU batch (~50ms). Stage 8 — the snippet service fetches the ten winners' text from the document store and highlights matched terms (~30ms). Server-side p99 lands around ~250-300ms.
+
+The write path is entirely offline and never touches a serving node synchronously. A document arrives on the crawler's output stream (see #6 — document acquisition, politeness and dedup are that question's problem, not this one). The indexer strips boilerplate, extracts ~5KB of text from ~50KB of HTML, tokenises, and emits `(term, doc_id, positions, field)` tuples. A shuffle groups them by term, sorts each posting list by `doc_id`, delta- and varbyte-encodes it, and writes an **immutable segment** — a self-contained mini-index. Segments are published to the leaf owning `hash(doc_id) % 1000`, which memory-maps them and starts serving. Nothing is ever mutated in place; deletions are a bitmap overlay and segments are periodically merged in the background.
+
+**The pieces (and what each one is for):**
+- **Indexing pipeline (Spark or Flink over the crawl stream)** — batch-shuffles trillions of `(term, doc)` tuples into sorted posting lists. Batch, not streaming, because sorting by term is a global operation and you want it to happen once per segment, not once per document.
+- **Inverted index** — the core structure: `term → posting list`, where a posting is `(doc_id, term_frequency, field_weights, positions[])`. Positions are what make phrase queries (`"coffee shops"` as an ordered pair) possible; they roughly double the index size, which is why many engines keep a positional tier and a cheaper non-positional tier and only consult positions when the query needs them.
+- **Term dictionary (FST — finite-state transducer)** — a compressed trie-like map from term string to posting-list byte offset. An FST shares prefixes *and* suffixes, so ~2B distinct terms compress to ~40GB, small enough to stay resident. Lucene uses exactly this.
+- **Leaf shard servers (~1000, document-partitioned)** — each owns ~50M documents and the *complete* index for them. Self-contained: a query can be answered entirely locally.
+- **Merge tree (root + ~30 mid-tier mergers)** — one root cannot issue 1000 RPCs and collect 1000 responses inside a 50ms budget, so the fan-out is two-level: root → 30 mergers → ~33 leaves each.
+- **Query result cache (Redis / in-process LRU)** — keyed on normalised query + locale + personalisation bucket. Query popularity is Zipf-distributed, which is what makes this cheap trick so effective.
+- **Ranking tiers** — BM25 (a term-frequency × inverse-document-frequency score with document-length normalisation) on many candidates, a learning-to-rank GBDT on thousands, a transformer cross-encoder on hundreds.
+- **Offline signal jobs** — PageRank over the link graph, spam classifiers, click-model aggregation. All batch, all producing small per-document scalars that get baked into the segment's doc-metadata block.
+
+**The thing that makes it hard:** you must partition the inverted index, and there are only two ways to do it. **Term partitioning** gives each shard a subset of *terms* — shard 7 owns everything starting with "co", so `coffee` lives entirely on one machine. A query touches only the shards holding its terms, so fan-out is 3 instead of 1000. But a multi-term query now needs a cross-shard intersection: the `coffee` list is ~500M postings ≈ ~1GB even compressed, and it lives on a different machine from the `brooklyn` list. You either ship a gigabyte per query or ship the smaller list (still tens of MB) — either way the network, not the CPU, becomes the bottleneck. Worse, term frequency is Zipf too: the shard owning `the`, `news` and `weather` serves a wildly disproportionate share of every query in the system and cannot be relieved by adding shards, because a term cannot be split. And indexing a single new document touches hundreds of shards, one per distinct term. **Document partitioning** gives each shard a subset of *documents* with a complete local index. Every query goes to every shard. Load is perfectly uniform because documents are hashed. Only ~800B of results crosses the network per shard. Indexing a document touches exactly one shard. The price is fan-out — and fan-out means your p99 is the maximum of 1000 independent latencies, not the average of one.
+
+**Why the standard solution works:** essentially every large engine chooses document partitioning and then spends its engineering budget on the tail. The arithmetic is brutal and worth saying out loud: Dean and Barroso's *The Tail at Scale* (CACM, 2013) makes the canonical observation that if a leaf has a 1-in-100 chance of being slow and a query touches 100 leaves, ~63% of queries hit at least one slow leaf. At 1000 leaves it is ~99.99% — the p99 of your *service* is roughly the p99.9 of your *leaves*. The fixes are all tail-tolerance techniques rather than throughput techniques: **hedged requests** (after the p95 elapses, send the same request to a second replica and take whichever returns first — ~5% extra load buys a large p99 reduction); **tied requests** (send to two replicas immediately, each cancels the other when it starts executing); **hard deadlines with partial results** (return once 99% of shards have answered and flag the response as partial — losing 0.5% of candidates almost never changes the top 10); **micro-partitioning** (many more logical shards than machines, so a slow machine's load can be shed at fine granularity); and **latency-induced probation** (temporarily route around a replica that is consistently slow). What you buy is uniform load, local updates, and a network cost that does not grow with corpus size. What you pay is that every machine in the fleet participates in every query, so capacity scales with `QPS × shards`, not `QPS`.
+
+**If you were building it tomorrow:**
+- Lucene (or Tantivy) for the segment format, FST dictionary and block-max WAND — do not write your own posting-list codec. Kafka for the document stream from the crawler, Spark for the index build, S3 for segment storage, local NVMe on leaves for the mmapped copy. Redis for the result cache. A GBDT (XGBoost/LightGBM) for mid-tier ranking, a distilled cross-encoder on GPU for the final ~500.
+- Leaf hot path pseudocode:
+  ```
+  cursors = [dict.postings(t) for t in query.terms]      // FST lookup per term
+  cursors.sort(key=lambda c: c.max_score, reverse=True)  // WAND needs bounded scores
+  heap = TopK(20); theta = 0
+  while True:
+    pivot = first doc where sum(upper_bounds of cursors before it) > theta
+    if pivot is None: break
+    if block_max_sum(cursors, pivot.block) <= theta:     // block-max WAND
+      skip_all_cursors_past(pivot.block); continue
+    if all_cursors_at(pivot):
+      heap.push(pivot, bm25(pivot) + w_pr*pagerank[pivot] + w_f*freshness[pivot])
+      theta = heap.kth_score()
+    advance_lagging_cursors_to(pivot)                     // uses skip pointers
+  return heap.items()
+  ```
+- Coordinator: `cache.get(key) or fanout(mergers, deadline=40ms) → merge → rerank(top 500) → snippets(top 10) → cache.put(key, ttl=10min)`.
+
+#### Clarifying Questions
+- Open web at ~50B documents, or a bounded corpus (enterprise, single-site)?
+- Do we need phrase and proximity queries, or is bag-of-words scoring enough?
+- How fresh must new content be — seconds for breaking news, or is a daily rebuild fine?
+- Is the result personalised per user, or is there one global ranking plus locale?
+- Do we own document acquisition, or does a crawler hand us a stream?
+- What is the latency SLO, and is a partial answer (99% of shards) acceptable within it?
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Open web at ~50B docs | document-partitioned index across ~1000 shards, fan-out per query, tail-tolerance as a first-class concern |
+| Bounded corpus (millions) | a single Elasticsearch cluster with a handful of shards; none of the fan-out machinery is warranted |
+| Phrase and proximity needed | store positions in the postings (roughly 2× index size); keep a non-positional tier for cheap first-pass scoring |
+| Seconds-fresh required | split into a large periodically rebuilt base index plus a small in-memory real-time index merged at query time |
+| Personalised results | the cache key must include a personalisation bucket, which multiplies key cardinality and collapses hit rate — bucket coarsely |
+| Crawler is upstream | take a document stream as the input contract (see #6) and design only the indexing and serving halves |
+| Partial answers acceptable | hard per-leaf deadlines and a "return at 99% of shards" policy, which is the single biggest p99 lever available |
+
+#### Requirements
+- **FR:** ingest a document stream, build a positional inverted index, serve boolean + ranked free-text queries with phrase support, generate snippets, keep breaking content findable within minutes, resist spam
+- **NFR:** p99 < 300ms server-side at 100k QPS peak; index freshness ≤ 5 min for the real-time tier and ≤ 3 days for the base tier; ≥ 99.95% query availability; no single shard failure may fail a query
+
+#### Scale Estimate
+- **Corpus:** assume ~50B servable documents (public estimates of the indexed web range 30-100B pages; 50B is the working figure). Average raw document ~50KB HTML → 50B × 50KB = ~2.5PB fetched. That is the crawler's output (#6), never stored hot by this system.
+- **Extracted text:** boilerplate stripping takes ~50KB HTML → ~5KB indexable text (~800 words). 50B × 5KB = ~250TB; gzip ~3:1 → ~85TB in the document store used for snippets; RF=3 → ~255TB.
+- **Postings:** ~800 body words → ~400 unique terms after stemming, plus title, URL and anchor-text fields → assume ~500 postings/doc. Total = 50B × 500 = ~25 trillion postings.
+- **Bytes per posting (compressed):** doc-id gap varbyte ~1.3B + term frequency ~0.4B + field-weight bitmap ~0.3B = ~2B non-positional. Positions add ~2 occurrences × ~1.2B per position delta ≈ ~2.5B → ~4.5B positional.
+- **Index size:** non-positional tier 25T × 2B = ~50TB; positional tier 25T × 4.5B = ~113TB. Term dictionary ~2B distinct terms × ~20B in an FST = ~40GB (negligible). Doc metadata (PageRank float 4B + spam score 2B + language 2B + crawl ts 8B + length 4B + flags 4B + padding ≈ 32B) × 50B = ~1.6TB. **One full copy ≈ ~165TB index + ~85TB doc store ≈ ~250TB**; RF=3 → ~750TB, ≈ ~1PB with the real-time tier, delete bitmaps and in-flight segments.
+- **Shard count from a memory budget:** assume a leaf with 512GB RAM, budgeting ~200GB for resident postings (the rest goes to doc-store cache, snippet buffers, model weights, OS page cache). 165TB ÷ 200GB = ~825 → round to **1000 shards**, ~50M docs and ~165GB of index each.
+- **Queries:** assume ~100k QPS peak; at a 3× peak-to-average multiplier that is ~33k/s average ≈ ~2.9B queries/day. For calibration, Google is commonly estimated at roughly 8.5B searches/day (~100k/s *average*) — treat our figure as one large engine or one large region.
+- **Fan-out cost:** 100k QPS × 1000 shards = **100M leaf RPCs/s** with a cold cache; at a 50% result-cache hit rate, ~50M/s. If one leaf sustains ~2k QPS (64 cores × ~30ms CPU per query ≈ 60 core-seconds/s — saturating, so 2k is the honest ceiling), you need 50M ÷ 2k = **~25,000 leaf nodes**, i.e. ~25 replicas per shard. This is the fan-out tax: capacity scales with `QPS × shards`.
+- **Merge network:** each leaf returns 20 hits × ~40B (doc_id 8B + score 4B + tier flags 4B + padding) = ~800B → 1000 leaves × 800B = ~800KB fanned in per query. At 50k uncached QPS that is ~40GB/s of intra-datacentre traffic — the reason the merge tree is two-level rather than a single root.
+- **Index build throughput:** assume ~5% of the corpus changes per day → 2.5B docs/day = ~29k docs/s sustained, ~145MB/s of extracted text into the indexer, producing ~29k × 500 × 4.5B ≈ ~65MB/s of new postings.
+- **Real-time tier:** ~50M documents published in the last 6 hours → 50M × 500 × 4.5B = ~113GB. Small enough to hold entirely in memory across the fleet (~113MB per shard) and rebuild continuously.
+- **Link graph (for PageRank):** 50B nodes × ~50 outlinks = ~2.5T edges × 8B (4B src + 4B dst after doc-id renumbering) = ~20TB edge list. ~40 power iterations × a full pass each ≈ ~800TB of I/O per recompute — weekly batch job, never on the serving path.
+- **Hot vs cold:** the top ~10% of documents by PageRank absorb the large majority of impressions; their postings stay in page cache. Documents with zero impressions in 90 days move to a cold tier served from slower storage with a relaxed deadline, and eventually leave the servable index entirely.
+
+#### API Contract
+```
+GET  /search?q=coffee+shops+brooklyn&start=0&num=10&lr=en
+     → { results:[{url, title, snippet, score}], total_est, took_ms, partial:false }
+GET  /suggest?q=coffee+sh                → typeahead, see #10
+POST /internal/leaf/search
+     body: { terms:[...], filters:{lang,site}, k:20, deadline_ms:40 }
+     → { hits:[{doc_id, score}], partial:bool, shard_id }
+GET  /internal/docstore/{doc_id}         → { url, title, text, last_crawled }
+POST /internal/index/publish
+     body: { segment_id, shard, uri, doc_count, generation } → { ack }
+POST /internal/index/delete
+     body: { doc_ids:[...] }             → { ack }   (writes the delete bitmap)
+```
+
+#### High-Level Design
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 448" role="img" aria-label="Web search engine architecture: query service, result cache, merge tree, document-partitioned leaf shards, reranker, snippet service, indexing pipeline">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box" x="290" y="14" width="180" height="42" rx="9"/>
+  <text class="lbl" x="380" y="35">Client</text>
+
+  <rect class="box" x="210" y="96" width="340" height="64" rx="9"/>
+  <text class="lbl" x="380" y="118">Query Service</text>
+  <text class="sub" x="380" y="138">normalise · spell · stem · rewrite</text>
+
+  <ellipse class="store" cx="680" cy="100" rx="62" ry="9"/>
+  <path class="store" d="M618,100 v32 a62,9 0 0 0 124,0 v-32"/>
+  <text class="sub" x="680" y="118">Query cache</text>
+  <text class="sub" x="680" y="134">Zipf head</text>
+  <path class="flow" d="M550,116 L618,116"/>
+
+  <rect class="box" x="30" y="196" width="190" height="44" rx="9"/>
+  <text class="lbl" x="125" y="212">ML reranker</text>
+  <text class="sub" x="125" y="230">cross-encoder, ~500</text>
+
+  <rect class="box acc" x="250" y="196" width="260" height="44" rx="9"/>
+  <text class="lbl" x="380" y="212">Root merger</text>
+  <text class="sub" x="380" y="230">20k candidates → top 500</text>
+
+  <rect class="box" x="540" y="196" width="200" height="44" rx="9"/>
+  <text class="lbl" x="640" y="212">Snippet service</text>
+  <text class="sub" x="640" y="230">doc store · highlight</text>
+
+  <rect class="box" x="250" y="272" width="260" height="44" rx="9"/>
+  <text class="lbl" x="380" y="294">Mid-tier mergers (×30)</text>
+
+  <rect class="box acc" x="170" y="348" width="420" height="68" rx="9"/>
+  <text class="lbl" x="380" y="370">Leaf shards (×1000, document-partitioned)</text>
+  <text class="sub" x="380" y="390">FST dict · skip lists · block-max WAND</text>
+  <text class="sub" x="380" y="406">~50M docs each → top 20, 40ms deadline</text>
+
+  <ellipse class="store" cx="680" cy="350" rx="62" ry="9"/>
+  <path class="store" d="M618,350 v36 a62,9 0 0 0 124,0 v-36"/>
+  <text class="sub" x="680" y="370">Immutable</text>
+  <text class="sub" x="680" y="386">segments</text>
+
+  <rect class="box" x="16" y="348" width="134" height="68" rx="9"/>
+  <text class="sub" x="83" y="368">Indexer</text>
+  <text class="sub" x="83" y="386">doc stream (#6)</text>
+  <text class="sub" x="83" y="404">tokenise · build</text>
+
+  <path class="flow" d="M380,56 L380,96"/>
+  <path class="flow" d="M380,160 L380,196"/>
+  <path class="flow" d="M380,240 L380,272"/>
+  <path class="flow" d="M380,316 L380,348"/>
+  <path class="flow" d="M590,382 L618,382"/>
+  <path class="flow" d="M150,382 L170,382"/>
+  <path class="flow" d="M510,218 L540,218"/>
+  <path class="flow dash" d="M250,294 L125,294 L125,240"/>
+  <text class="edge" x="188" y="284" text-anchor="middle">top 20 × 1000</text>
+  <path class="flow" d="M220,218 L250,218"/>
+</svg>
+```
+
+**How to read the diagram:** the vertical spine is the read path — client to query service to root merger to mid-tier to leaves — and it is symmetric on the way back up. Everything hanging off the spine is a cost-avoidance device: the cache short-circuits the fan-out entirely, the reranker only ever sees the few hundred documents the fan-out already agreed were plausible, and the snippet service is the only component that touches raw document text. The indexer feeds segments in from the side and never participates in a query.
+
+**Why the flow is shaped this way:** retrieval and ranking have opposite cost profiles. Retrieval is cheap per document but must consider billions, so it is pushed down to a thousand machines that each look at fifty million. Ranking is expensive per document but only needs to consider hundreds, so it is pulled up to a single central tier with a GPU. Putting the reranker on the leaves would mean running a transformer fifty million times per query; putting retrieval at the root would mean shipping the index to one machine. The merge tree exists purely because one root socket cannot service a thousand concurrent RPCs inside a 50ms budget.
+
+**What this layout buys you:** uniform load (documents are hashed, so no shard is hotter than another), local writes (a new document touches exactly one shard), and a network bill that is a function of `k`, not of corpus size. The cost is that every machine works on every uncached query, so your p99 is the slowest of a thousand draws and the cache hit rate is the single biggest capacity lever you own.
+
+#### Data Model
+- **postings** (immutable segment files on local NVMe, mmapped; canonical copy in object storage) — partition key `hash(doc_id) % 1000`. Layout per term: `[skip list][doc-id gaps varbyte][tf][field bitmap][position deltas]`.
+- **term_dictionary** (FST, memory-resident, one per segment) — `term → (posting_offset, doc_freq, max_score)`. `max_score` is what makes WAND possible.
+- **doc_metadata** (columnar block inside each segment, memory-resident) — `doc_id → (pagerank, spam_score, lang, crawl_ts, length, flags)`.
+- **doc_store** (distributed KV, Bigtable-like) — partition key `doc_id`; holds URL, title and extracted text for snippet generation only. Never on the retrieval path.
+- **delete_bitmap** (per segment, mutable overlay) — a bit per local doc ordinal; the only mutable thing a leaf owns.
+- **link_graph** (columnar blob store, partition key `src_host`) — `(src_doc, dst_doc, anchor_text)`; input to the offline PageRank and anchor-text jobs.
+- **rt_index** (in-memory inverted index per leaf) — the last ~6 hours of documents, rebuilt continuously, merged into the base index on the next segment publish.
+- **query_cache** (Redis / in-process LRU) — key `sha1(normalised_query | locale | personalisation_bucket)`, value the serialised top-10 with a ~10 minute TTL.
+- **click_log** (append-only event stream → batch aggregates) — `(query_hash, doc_id, position, clicked, dwell_ms)`; feeds the learning-to-rank training set.
+
+#### Detailed Design
+**Building the index is a giant distributed sort.** Documents arrive on the crawler's output topic (#6). Parsing strips scripts, nav chrome and footers with a boilerplate classifier, leaving ~5KB of text plus structured fields — title, URL tokens, headings, and inbound anchor text harvested from the link graph. Normalisation lowercases, folds Unicode (`café` → `cafe`), and applies a language-specific stemmer (`shops` → `shop`). Tokenisation emits `(term, doc_id, position, field)` for every token. The pipeline then does the only genuinely hard thing in indexing: a global shuffle that groups all tuples by term and sorts each group by `doc_id`. Sorted doc IDs are the precondition for both gap compression and linear-merge intersection — get this wrong and nothing downstream works. The output is an immutable segment containing the FST dictionary, the posting blocks and a doc-metadata column block. Publishing is an atomic pointer swap: the leaf mmaps the new segment, adds it to its searcher list, and the next query sees it. Background merges combine small segments into large ones (an LSM-style compaction), which is when deleted documents are physically dropped.
+
+**Document partitioning vs term partitioning is the decision that defines the system.** Concretely, with term partitioning the query `coffee shops brooklyn` touches three shards — attractive, until you have to intersect. The `coffee` posting list is ~500M postings ≈ ~1GB compressed and it does not live on the same machine as `brooklyn`. Shipping the smaller list to the larger is the standard trick, but "smaller" here is still ~90M postings ≈ ~180MB, per query, at 50k uncached QPS. And term popularity is Zipf: the shard owning the hundred most common query terms is asked to participate in most of the world's queries, and you cannot relieve it by adding shards because a term is indivisible. Indexing is equally bad — one new document with 500 distinct terms writes to up to 500 shards. Document partitioning inverts every one of these properties: local intersection (the whole posting list is on the machine doing the work), uniform load (hashing documents makes every shard statistically identical), a tiny network payload (~800B of `(doc_id, score)` per shard), and single-shard writes. Every large engine takes this trade. The one thing term partitioning genuinely wins — single-term-query efficiency — is worth almost nothing, because real queries average 3-4 terms.
+
+**Compression is not an optimisation here, it is what makes the index fit.** Posting lists are the overwhelming majority of the ~165TB, so every byte per posting costs ~25TB. Doc IDs within a list are sorted, so store *gaps* rather than absolute values: a list of `[1042, 1088, 1131, 1400]` becomes `[1042, 46, 43, 269]`. Then variable-byte encode — one byte holds values up to 127, two up to 16,383 — or use PFor (Frame of Reference: encode a block of 128 gaps in a fixed bit-width chosen to fit the majority, patching the handful of outliers separately), which is SIMD-decodable at billions of integers per second. The elegant part is that this compresses *exactly the lists you most need to compress*: a term in 5M of a shard's 50M documents has an average gap of 10 and fits in one byte per posting, while a rare term in 50 documents has gaps near 1M and needs 3 bytes — but there are only 50 of them. Common terms, which dominate total index size, get the best ratio. Uncompressed, `(doc_id 4B + tf 2B + 2 positions × 2B)` would be ~10B per posting = ~250TB for the positional tier alone; compression takes it to ~113TB and, more importantly, cuts the bytes read per query by the same factor, which is what actually shows up in latency.
+
+**Query execution inside a leaf: skip pointers and block-max WAND.** Naively intersecting three posting lists means walking all of them — ~16M postings in this shard for our example query. Two mechanisms avoid that. **Skip pointers**: every 128 postings, store `(doc_id, byte_offset)` in a skip list, so advancing a cursor to "the first doc ≥ 4,200,000" is a binary search over skip entries plus one block decode, not a linear scan. **WAND** (Weak AND) exploits the fact that you only want the top 20: each term has a precomputed `max_score`, the largest BM25 contribution it can ever make. Maintain θ = the current 20th-best score. Sort cursors by current doc ID, accumulate upper bounds along that order, and the first document where the running sum exceeds θ is the *pivot* — no document before it can possibly enter the top 20, so skip every cursor straight to the pivot. **Block-max WAND** refines this by storing a max score per 128-posting block rather than per term, so it can also skip whole blocks in the middle of a list that happen to contain only low-scoring documents. Worked example: of the ~16M postings in this shard, block-max WAND fully evaluates BM25 on ~5k documents — a ~3000× reduction — and the answer is provably identical to the exhaustive scan, because WAND only prunes documents it can prove cannot make the cut.
+
+The cardinalities are worth stating as a ladder, because interviewers listen for exactly this. Corpus-wide: ~50B documents indexed → ~500M contain `coffee`, ~200M `brooklyn`, ~90M `shops` → ~5M contain all three → block-max WAND fully scores ~5M ÷ 1000 shards ≈ ~5k per leaf → each leaf emits 20 → the merge tree sees 20,000 → the reranker scores 500 → the user sees 10. Latency budget at p99: cache lookup ~2ms; fan-out RPC + leaf retrieval ~40ms (hard deadline, hedged at p95 ≈ 12ms); merge tree ~10ms; feature fetch for the reranker ~20ms; cross-encoder on 500 docs, GPU-batched ~50ms; snippet generation including doc-store reads ~40ms; serialisation and egress ~15ms. Sum ≈ ~180ms of budget with ~120ms of slack against a 300ms SLO — the slack exists entirely to absorb the tail.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 300" role="img" aria-label="Search query narrowing pipeline: term dictionary lookup, posting lists, block-max WAND, per-leaf BM25 top 20, merge tier, cross-encoder rerank, top 10 with snippets">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box" x="15" y="48" width="170" height="64" rx="9"/>
+  <text class="sub" x="100" y="66">Normalised query</text>
+  <text class="sub" x="100" y="82">3 terms · locale</text>
+  <text class="sub" x="100" y="98">corpus ~50B docs</text>
+
+  <rect class="box" x="205" y="48" width="170" height="64" rx="9"/>
+  <text class="sub" x="290" y="66">FST dictionary</text>
+  <text class="sub" x="290" y="82">term → offset,</text>
+  <text class="sub" x="290" y="98">doc_freq, max_score</text>
+
+  <rect class="box" x="395" y="48" width="170" height="64" rx="9"/>
+  <text class="sub" x="480" y="66">Posting lists</text>
+  <text class="sub" x="480" y="82">500M · 200M · 90M</text>
+  <text class="sub" x="480" y="98">~5M contain all 3</text>
+
+  <rect class="box" x="585" y="48" width="170" height="64" rx="9"/>
+  <text class="sub" x="670" y="66">Block-max WAND</text>
+  <text class="sub" x="670" y="82">skip lists prune to</text>
+  <text class="sub" x="670" y="98">~5k scored / leaf</text>
+
+  <path class="flow" d="M185,80 L205,80"/>
+  <path class="flow" d="M375,80 L395,80"/>
+  <path class="flow" d="M565,80 L585,80"/>
+
+  <path class="flow" d="M670,112 L670,150 L100,150 L100,208"/>
+
+  <rect class="box acc" x="15" y="208" width="170" height="72" rx="9"/>
+  <text class="sub" x="100" y="228">BM25 top 20</text>
+  <text class="sub" x="100" y="244">per leaf shard</text>
+  <text class="sub" x="100" y="260">× 1000 shards</text>
+
+  <rect class="box" x="205" y="208" width="170" height="72" rx="9"/>
+  <text class="sub" x="290" y="228">Merge tree</text>
+  <text class="sub" x="290" y="244">20k candidates</text>
+  <text class="sub" x="290" y="260">→ global top 500</text>
+
+  <rect class="box" x="395" y="208" width="170" height="72" rx="9"/>
+  <text class="sub" x="480" y="228">Cross-encoder</text>
+  <text class="sub" x="480" y="244">rerank 500</text>
+  <text class="sub" x="480" y="260">GPU batch ~50ms</text>
+
+  <rect class="box" x="585" y="208" width="170" height="72" rx="9"/>
+  <text class="sub" x="670" y="236">Top 10 + snippets</text>
+  <text class="sub" x="670" y="254">p99 &lt; 300ms</text>
+
+  <path class="flow" d="M185,244 L205,244"/>
+  <path class="flow" d="M375,244 L395,244"/>
+  <path class="flow" d="M565,244 L585,244"/>
+</svg>
+```
+
+**Ranking is tiered because relevance quality and cost per document scale together.** Tier 1 is BM25, evaluated on the ~5k documents WAND admits per leaf: term frequency saturating (the tenth occurrence of `coffee` adds far less than the second), inverse document frequency (`brooklyn` is more discriminating than `shops`), and length normalisation so a 50k-word page does not win by accident. Field weights are folded in here — a term match in the title or in inbound anchor text is worth several times a body match, and anchor text is disproportionately valuable because it is *other people's* description of the page. Query-independent signals are added as a cheap linear term from the doc-metadata block: PageRank, freshness decay, and a spam penalty. Tier 2 runs at the merge tier on the 20,000 gathered candidates — a GBDT over ~200 features (the tier-1 signals plus click-through rate for this query-document pair, dwell time, host quality, language and geo match) cutting to the top 500. Tier 3 is a transformer cross-encoder that reads the query and the document's text *together* — far more accurate than any bag-of-words score because it models word order and context, and completely unaffordable above a few hundred documents. **PageRank itself is a pure offline batch job**: a power iteration over the ~2.5T-edge link graph where each page's rank is distributed evenly across its outlinks, iterated ~40 times to convergence, run weekly on a graph-parallel framework (Pregel or Spark GraphX). It never runs at query time; it produces one 4-byte float per document that gets baked into the next segment build.
+
+**Freshness is solved by splitting the index in two, not by making one index fast.** Rebuilding 165TB of segments takes hours to days, which is fine for the 95% of the web that has not changed, and unacceptable for a news story published four minutes ago. So each leaf serves two indexes and merges the results. The **base index** is the immutable segment set, rebuilt on a rolling schedule (each shard's segments regenerated every ~2-3 days, staggered so the fleet is never rebuilding all at once). The **real-time index** is an in-memory inverted index of the last ~6 hours of documents — ~50M docs fleet-wide, ~113MB per leaf — built incrementally as documents arrive off the stream, with a ~30 second lag from crawl to searchable. A query runs against both and unions the two result sets before local top-k; the real-time tier usually contributes zero documents, and for breaking-news queries it contributes nearly all of them. When the next base segment is published, the documents it contains are dropped from the real-time tier by watermark. The subtlety is scoring consistency: the real-time tier has no PageRank (the link graph has not seen these pages yet) and no click data, so it uses source-authority priors as a stand-in — otherwise fresh documents would always lose to established ones and the tier would be pointless.
+
+**Caching is the highest-leverage component in the system and it works because query popularity is Zipf-distributed.** Query frequency follows a power law: a small head of queries accounts for a large fraction of volume, while a very long tail of unique queries accounts for the rest. Google has publicly said roughly 15% of the searches it sees each day have never been seen before — which is the same statement read from the other end: ~85% have precedent. That is what makes a result cache worth building. Three caches, in order of payoff: (1) the **query result cache**, keyed on normalised query + locale + personalisation bucket, holding the serialised top 10 with a ~10 minute TTL — a hit costs ~5ms and skips 1000 leaf RPCs, so at a 50% hit rate it halves the entire fleet's work; (2) the **posting-list cache** on each leaf, which is really just the OS page cache over mmapped segments, and which naturally retains the common terms because they are touched by most queries; (3) the **document snippet cache** for the top-ranked pages. The cache-hit-rate lever is worth quantifying in the interview: each percentage point of result-cache hit rate removes ~1M leaf RPCs/s at peak, which is ~500 leaf machines. That is why personalisation is bucketed coarsely rather than per-user — a per-user cache key would take the hit rate to near zero and multiply the serving fleet several-fold. TTL is the other dial: shorter TTLs improve freshness and destroy hit rate, so news-intent queries get a 60 second TTL while navigational queries get an hour.
+
+**Spam and adversarial SEO are a first-class ranking concern, not a filter bolted on afterwards.** A meaningful fraction of the crawlable web exists solely to rank, and unlike every other subsystem here, this one has an adversary who reads your engineering blog. The attacks are well known: keyword stuffing, cloaking (serving different content to the crawler than to users, detected by re-fetching with a browser user agent from a residential IP and diffing), link farms and paid-link networks, expired-domain abuse (buying a domain with residual PageRank and repurposing it), doorway pages, and scaled generated content. The defences are structural. **TrustRank**-style propagation seeds a set of hand-verified trustworthy hosts and propagates trust along outlinks the way PageRank propagates authority, so a link farm with no path from a trusted seed accumulates nothing. **Link-graph anomaly detection** flags reciprocal-link density, sudden inbound-link spikes, and unnatural anchor-text uniformity. **Content classifiers** catch generated and templated text. **Engagement signals** are the strongest and hardest to fake in aggregate: pogo-sticking (user clicks a result, returns within seconds, clicks the next one) is a direct relevance signal, though it is itself attackable by click farms and so must be aggregated with robust statistics. Two design rules follow. First, prefer many weak signals over few strong ones — any single dominant signal will be reverse-engineered and gamed. Second, never publish the ranking function, and roll changes out gradually, because a step change tells the adversary exactly what you altered.
+
+#### Potential Follow-Up Questions
+**Q: Why not term-partition the index and avoid the fan-out entirely?**
+Because multi-term queries then require shipping posting lists between machines — the `coffee` list is ~1GB compressed — and because term frequency is Zipf, so the shards owning common terms become permanent hotspots that adding capacity cannot fix. Indexing is also bad: one document with 500 distinct terms writes to up to 500 shards. *If pushed:* there is a narrow case where term partitioning wins — very high-throughput single-term or two-term workloads over a corpus small enough that lists fit in a few MB, e.g. a product catalogue. Hybrid schemes (term-partition the rare tail, document-partition the head) have been researched but the operational complexity has never paid for itself at web scale.
+
+**Q: Your p99 is the max of 1000 shard latencies. How do you actually make that acceptable?**
+You cannot make it acceptable by making the average leaf fast — you have to attack the tail directly. Hedged requests (re-issue to a second replica after the p95 elapses, take the first response, ~5% extra load); hard per-leaf deadlines with partial results (return once 99% of shards answer and flag `partial:true`); micro-partitioning so a slow machine's share can be shed in small pieces; and latency-induced probation for consistently slow replicas. *If pushed:* the sharpest single lever is accepting partial results. Dropping 10 of 1000 shards loses ~0.1% of candidates, and the probability that any of the global top 10 lived on exactly those shards is negligible — you are trading a statistically invisible quality loss for the entire tail.
+
+**Q: A query for a single very common term — `the` — arrives. What happens?**
+Its posting list covers most of the corpus, so intersection saves nothing and WAND's pruning is weak because the max score is uniformly low. Standard handling: maintain a stopword list and either drop such terms or treat them as optional (they contribute to scoring but not to the candidate set). For genuinely single-common-term queries the answer is served almost entirely from the result cache — these are exactly the head queries the Zipf distribution predicts. *If pushed:* for terms that are common but not stopwords (`news`, `weather`), keep a precomputed static top-k list per term, refreshed offline, and short-circuit the fan-out entirely when the query is a single such term.
+
+**Q: How do you support phrase queries like `"coffee shops"` as an exact ordered pair?**
+Positions in the postings. Intersect the two lists on `doc_id` as usual, then for each surviving document check whether any position of `shops` equals a position of `coffee` plus one. *If pushed:* positions roughly double index size and phrase verification is expensive on high-frequency pairs, so many engines maintain a *bigram index* for the most common adjacent pairs — treat `coffee_shops` as its own term with its own posting list, making the phrase query a single-term lookup. You cannot do this for all pairs (combinatorial explosion), so it is applied to the top few million pairs by query frequency.
+
+**Q: A publisher discovers that pages with 400 outbound links to their own network rank better. How do you respond?**
+This is the general shape of every SEO attack: a signal leaks, gets gamed, and the leak must be closed without a step change that confirms the attack worked. Damp the signal — PageRank contribution per outlink already decays with outdegree — and add link-graph anomaly detection for reciprocal density and network clustering. *If pushed:* roll the change out over weeks with a holdback, so the adversary cannot correlate a specific date with a specific ranking drop, and pair it with a manual-action pipeline for the worst offenders. Never announce which signal changed.
+
+**Q: Two users issue the same query one second apart and get different results. Is that a bug?**
+Not necessarily, and the interesting part is which causes are acceptable. Acceptable: different personalisation buckets, different locales, one hit the cache and one did not while a segment was published in between. Not acceptable: nondeterministic partial results, where one query lost a shard and dropped a result the other kept. *If pushed:* make partial results observable (`partial:true` in the response) and alert on the rate; if a shard is down, its replicas should cover it, and a sustained partial rate above ~0.1% means a capacity or hedging problem, not a transient.
+
+**Q: How do you delete a document — a legal takedown, say — from an immutable index?**
+Write its local ordinal to the segment's delete bitmap, which is the one mutable structure a leaf owns; the posting lists still contain it, but the scorer skips it. Physical removal happens at the next segment merge. *If pushed:* for a legal takedown with a deadline, the bitmap write must propagate to every replica of that shard and be acknowledged before you can certify compliance — so the delete path needs a synchronous quorum write and an audit log, unlike everything else in this system, which is happily asynchronous. Also purge the query result cache entries containing the doc, or a cached top-10 will keep serving it for the TTL.
+
+**Q: The reranker's GPU fleet goes down. What does the user see?**
+Degraded but not broken results: the merge tier's GBDT ordering of the top 500 is a perfectly serviceable ranking, just measurably worse. Circuit-break the reranker on error-rate or latency and serve the tier-2 order. *If pushed:* measure the quality gap in advance so you know what you are trading — run a permanent 0.1% holdback with the reranker disabled, and you will have a live estimate of the click-through delta at all times rather than discovering it during the incident.
+
+#### Bottlenecks & Mitigations
+- **Fan-out tail latency** — p99 is the max of 1000 leaf latencies, so a leaf p99 of 20ms produces a service p99 far worse than 20ms. Hedge at the p95, enforce a 40ms hard deadline, and return partial results at 99% shard coverage. The trade: hedging adds ~5% fleet load, and partial results mean the answer is no longer strictly deterministic.
+- **Result-cache hit rate collapse under personalisation** — adding user identity to the cache key takes cardinality from millions of distinct queries to billions of query-user pairs, driving the hit rate toward zero and roughly doubling the required serving fleet. Bucket personalisation coarsely (locale + a handful of interest cohorts) rather than per-user; the trade is measurably less relevant results for users with strong individual signals.
+- **Index build throughput vs freshness** — a full base rebuild over 165TB takes days, so the base index is always somewhat stale. Stagger rebuilds per shard so the fleet is never all rebuilding, and carry breaking content in the real-time tier. The trade: two indexes with two scoring regimes, and the seam between them is a permanent source of ranking inconsistency.
+- **Reranker GPU capacity** — the cross-encoder is the most expensive per-query component and GPUs are the scarcest resource; a traffic spike hits this tier first. Distil the model, batch aggressively, cut the rerank depth from 500 to 200 under load, and circuit-break to the GBDT order. The trade is a quality cliff exactly when traffic is highest.
+- **Merge-tier network fan-in** — ~800KB fanned into the merge tree per query at 50k uncached QPS is ~40GB/s, which will saturate a single root's NIC long before its CPU. Two-level merge with ~30 mid-tier nodes, and cap `k` per leaf at 20 rather than 100. The trade: a deeper tree adds a hop of latency and one more failure domain.
+- **Cold posting lists on rare terms** — a long-tail query touches lists that are not in page cache, turning a 5ms leaf query into a 50ms NVMe-bound one, and long-tail queries are exactly the ones the result cache cannot help with. Keep the term dictionary and doc metadata permanently resident, prefetch skip lists, and allow long-tail queries a longer deadline. The trade: a bimodal latency distribution that makes a single p99 SLO misleading — track head and tail queries separately.
+- **Segment merge write amplification** — LSM-style compaction rewrites the same postings repeatedly as small segments merge into large ones, and it competes with query serving for the same NVMe bandwidth. Throttle merges by IOPS budget and schedule them on replicas taken out of rotation. The trade: deferred merges mean more segments per query, and query cost grows roughly linearly in segment count.
+
+#### Failure Modes
+| Layer | Failure | Detection | Mitigation |
+|---|---|---|---|
+| Leaf shard | All replicas of one shard unavailable — 0.1% of the corpus is invisible | Per-shard response-rate gauge; `partial:true` rate alert | Return partial results with the flag set; re-replicate from object-storage segments onto spare capacity (~10 min for ~165GB); alert if the same shard degrades twice in a week |
+| Leaf shard | One slow replica drags the fan-out tail without failing health checks | Per-replica latency percentile vs fleet median | Hedged and tied requests route around it automatically; latency-induced probation removes it from rotation after sustained deviation; drain and reimage |
+| Query cache | Cache cluster fails or is cold after deploy — hit rate drops from ~55% to 0 | Cache hit-rate gauge; sudden leaf QPS doubling | Fleet is provisioned for a stated cache-miss headroom (not 2×, so degrade too): shed load by cutting rerank depth and widening deadlines; warm the cache from the head-query list on restart rather than cold-starting |
+| Index publish | A bad segment is published — corrupt postings or a bug in the tokeniser | Segment checksum on load; per-shard result-count and score-distribution canary vs previous generation | Segments are immutable and generation-tagged; roll back by pointer swap to the previous generation in seconds; canary a new build on 1% of shards before fleet-wide publish |
+| Real-time tier | Crawl stream stalls; breaking content stops appearing | Crawl-to-searchable lag gauge (SLO ≤ 5 min) | Base index continues serving everything older; page on lag > 15 min; the tier is additive, so its failure degrades freshness only, never correctness |
+| Reranker | GPU fleet unavailable or model server OOMs | Rerank call error rate and p99 | Circuit-break and serve the tier-2 GBDT order; a permanent 0.1% no-rerank holdback gives a live estimate of the quality cost |
+| Doc store | Snippet fetch fails for some results | Snippet-generation error rate per result | Serve the result with a cached or meta-description snippet rather than dropping it; a result with a poor snippet beats a missing result |
+| Merge tier | A mid-tier merger dies mid-query, silently losing ~33 shards | Shard-coverage count per response vs expected | Coverage is computed per query, not assumed; below the 99% threshold the root retries the missing subtree against a second merger within the remaining deadline |
+| Link-graph job | Weekly PageRank run fails or produces a degenerate distribution | Rank-distribution KS test against the previous run; job SLA alert | Keep serving the previous week's ranks — they are query-independent and decay slowly; never publish a rank file that fails the distribution check |
+
+#### Observability — Key Metrics & SLOs
+- **End-to-end query latency** (request received → top 10 serialised) — SLO p99 < 300ms, p50 < 60ms. Report head and long-tail queries as separate series; a single p99 hides the bimodality between cached head queries and cold-posting-list tail queries.
+- **Shard coverage per query** (fraction of the 1000 shards that answered within deadline) — SLO ≥ 99.9% of queries reach ≥ 99% coverage. This is the direct measure of whether fan-out is healthy, and it degrades long before latency alarms fire.
+- **Query result cache hit rate** — SLO ≥ 50%. Every point is worth ~1M leaf RPCs/s at peak, i.e. ~500 machines; a 5-point drop is a capacity incident, not a performance curiosity.
+- **Crawl-to-searchable lag** (document arrives on the stream → returned by a query) — SLO p95 ≤ 5 min for the real-time tier, ≤ 3 days for base-index inclusion. The freshness contract in one number.
+- **Leaf hedge rate** (fraction of leaf requests that triggered a hedged retry) — SLO ≤ 8%. Rising hedge rate is the earliest signal of fleet-wide slowdown, and hedging itself adds load, so it can go unstable if left unbounded.
+- **Ranking quality via interleaving** (per-query preference between the current model and a holdback) — watched continuously rather than SLO'd; a statistically significant negative shift blocks the model rollout. Offline NDCG on a judged set is the pre-deploy gate, interleaving is the production truth.
+- **Spam-classifier precision on the top 10** (sampled human review of results shown, not of the corpus) — SLO ≥ 99%. Spam in position 40 is irrelevant; spam in position 3 is the whole problem.
+
+#### Multi-Region & DR
+- **Replication mode:** active-active. Each region holds a complete document-partitioned copy of the index — the index is immutable and query-only, so this is a straightforward broadcast of segments from object storage rather than a consensus problem. The indexing pipeline and the PageRank job run in one primary region and publish segments globally; the real-time tier is built independently per region from a globally replicated crawl stream. Query result caches are region-local; there is no benefit to sharing them.
+- **RTO:** ~0 for query serving — a region loss is a DNS/anycast withdrawal and the next-nearest region absorbs the traffic, so recovery is bounded by DNS TTL (~1-5 min) rather than by any data recovery. Losing the *indexing* region is slower: promoting a secondary and resuming the build takes ~2-4 hours, during which serving is unaffected but the index stops advancing.
+- **RPO:** ~0 for the base index (immutable segments are durable in object storage before publish). For the real-time tier, ~minutes — a region loss drops its in-memory tier, which is rebuilt from the crawl stream on restart; the failure is invisible to users because other regions carry the same content.
+- **Failover cadence:** automatic for region withdrawal; monthly region-drain game-days; quarterly indexing-region promotion drills, since that is the path that actually has state and therefore the one that rots.
+- **Cross-region cost:** the dominant line is segment replication — ~165TB per full copy, but only the ~5%/day delta (~8TB/day) moves after the initial seed, plus the crawl stream (~145MB/s of extracted text ≈ ~12TB/day) to every region. Ranking model weights and the PageRank file (~200GB) are trivial by comparison. Serving a region locally is far cheaper than cross-region query routing would be, since a cross-region query would pay the fan-out latency twice.
+
+#### Common Mistakes / Anti-patterns
+- **Proposing term partitioning because the fan-out looks expensive.** It is the intuitive answer and it is wrong at web scale: multi-term queries turn into gigabyte network transfers, Zipf term popularity creates unfixable hotspots, and every indexed document writes to hundreds of shards. Choose document partitioning and spend the answer on how you handle the tail instead.
+- **Quoting an average leaf latency and calling it the service latency.** With 1000 shards you wait for the slowest, so the service p99 is roughly the leaf p99.9. Any answer that does not mention hedging, deadlines or partial results has not engaged with the actual hard problem.
+- **Scoring every matching document.** Five million documents match a three-term query; scoring all of them is thousands of times more work than necessary. Say "block-max WAND with skip pointers" and give the pruning ratio — this is the single most load-bearing algorithmic detail in the whole design.
+- **Running the expensive model on everything.** A cross-encoder over the candidate set is unaffordable by three orders of magnitude. Ranking must be a funnel: BM25 on thousands per shard, GBDT on twenty thousand, transformer on five hundred. State the cardinality at each tier.
+- **Treating the index as mutable.** Updating postings in place means locking, fragmentation and no safe rollback. Segments are immutable, deletes are a bitmap overlay, and publishing is an atomic pointer swap — which is also what makes rolling back a bad index build a seconds-long operation.
+- **Leaving spam until the "extensions" slide.** A large share of the crawlable web exists only to rank, and the adversary adapts to whatever you deploy. Anti-spam belongs in the ranking discussion (TrustRank propagation, link-graph anomalies, engagement signals, many weak signals rather than one strong one), not in a footnote.
+
+#### Talking Points for the Interview
+- **The partitioning choice is the whole design.** Say "document partitioning, because term partitioning ships gigabyte posting lists over the network and Zipf term popularity makes hotspots unfixable" in your first two minutes, then spend the rest of the time on its consequences.
+- **Fan-out converts a latency problem into a tail problem.** Waiting on 1000 shards means your p99 is their p99.9 — hedged requests, hard deadlines and partial results are the design, not the polish.
+- **Retrieval and ranking have opposite cost curves, so the system is a funnel.** ~50B documents → ~5M matching → ~5k scored per leaf → 20k merged → 500 reranked → 10 shown. Recite the ladder.
+- **Zipf shows up twice and pulls in opposite directions.** It makes term partitioning unworkable, and it makes the query result cache the cheapest capacity you will ever buy — worth ~500 machines per point of hit rate.
+- **Compression is a latency feature, not a storage feature.** Gap encoding plus PFor takes the positional index from ~250TB to ~113TB, and cuts bytes read per query by the same factor.
+- **Freshness is two indexes, not one fast one.** A slow immutable base plus a small in-memory real-time tier merged at query time, with source-authority priors standing in for the PageRank the new documents do not have yet.
+
+### 48. Design an E-Commerce Platform (Catalog, Cart & Flash Sales)
+#### Problem
+Serve a 200M-SKU catalog, hold a shopper's cart, and turn it into an order that correctly decrements inventory — including when 500k people try to buy the same SKU in the same 60 seconds.
+
+#### Summary
+**The picture in your head:** a supermarket the size of a city. Almost everything that happens is people wandering the aisles reading labels — that part is a printing problem, and you solve it by printing millions of identical labels and posting them everywhere (the CDN). A much smaller number of people reach the tills, and a tiny number of those are all reaching for the *same last item on the same shelf* at the same instant. The store works because browsing and buying are different systems with different rules: labels can be a few seconds out of date, the shelf count cannot be wrong by more than you are willing to apologise for.
+
+**The single-request walkthrough — read path:** a shopper taps a product link. The request hits the CDN edge, which holds a pre-rendered product page for that SKU keyed by `(sku, locale, currency)` with a 5-minute TTL. Cache hit: ~15ms, no origin touched. The page ships with a hole where the volatile bits go — price, stock band, promo badge — filled by a second request to `GET /p/{sku}/live`, served from an edge KV store with a 15-second TTL in ~25ms. On a miss the origin Catalog Service reads the product document by `sku_id` from a partitioned document store (~4KB, ~8ms) and renders. Search is a separate path: `GET /search?q=running+shoes` fans into an OpenSearch cluster (~200M docs, sharded by `hash(sku_id)`), retrieves ~1,000 candidates by BM25 plus filters, reranks the top ~200 with a learning-to-rank model, returns 40 with facets in ~120ms. Autocomplete on the search box is its own thing — see #10.
+
+**The single-request walkthrough — write path:** the shopper taps *Buy*. `POST /checkout/session` opens a checkout: the Checkout Saga reads the cart (~1KB from a KV store keyed by `cart_id`), then asks the Inventory Service to place a **hold** on each line — a reservation with a 15-minute TTL that decrements available stock without committing a sale. For a long-tail SKU that is one conditional update (`UPDATE … SET available = available - 1 WHERE sku = ? AND available >= 1`), ~3ms. Then the pricing engine re-evaluates every line and every promotion against current rules and returns a `quoted_total`. The client shows it. `POST /orders` arrives carrying an `Idempotency-Key` and the `accepted_total` the shopper actually saw. The saga writes an `order` row with status `PENDING` and the idempotency key under a unique index in the same transaction, calls the Payment Service (**payment execution is out of scope here — see #23** for auth/capture, the ambiguous-timeout problem, and the double-entry ledger), and on success converts the holds into allocations and emits a fulfilment event. Order `CONFIRMED` in ~900ms end to end, of which ~700ms is the payment provider.
+
+**The pieces (and what each one is for):**
+- **CDN + edge KV (Fastly/CloudFront + an edge key-value store)** — the product page is split into a near-static shell (title, images, description, attributes; changes maybe weekly) cached for minutes, and a volatile fragment (price, stock band, promo) cached for seconds. Splitting them is what makes the whole read path cacheable: without it, one price change would invalidate the entire page.
+- **Catalog store (partitioned document store, e.g. DynamoDB)** — one ~4KB document per `sku_id`. Documents, not rows, because SKU attributes are wildly heterogeneous (a mattress and a USB cable share almost no fields) and a wide relational table would be mostly nulls.
+- **Search index (OpenSearch + learning-to-rank)** — a denormalised ~1.5KB doc per SKU, fed by **CDC** (Change Data Capture — a stream of the catalog store's write log, via Debezium) so the index trails the catalog by seconds, not by a nightly batch.
+- **Cart Service (KV store keyed by `cart_id`)** — a durable, server-side cart. Guests get a `cart_id` cookie; the cart itself lives on the server. A cart line is *not* a reservation: it holds a price snapshot for display and nothing more.
+- **Inventory Service (in-memory counters backed by a durable store)** — the entire inventory table is ~40GB across 600M `(sku, location)` rows, so it fits in RAM. It exposes three primitives: `reserve(sku, qty) → hold_id`, `confirm(hold_id)`, `release(hold_id)`. Holds carry a TTL so an abandoned checkout returns stock automatically.
+- **Checkout Saga orchestrator (Temporal-style durable workflow)** — a **saga** is a multi-step workflow where each step commits independently and each has a compensating undo, used when the steps span services that cannot share a transaction. Orchestrated rather than choreographed so there is one place to answer "where is order 12345 stuck".
+- **Pricing & promotions engine** — a rules evaluator over `(sku, market, customer segment, cart contents)`. Runs at checkout, authoritatively. The number on the product page is a cached opinion; this is the fact.
+
+**The thing that makes it hard:** the last unit of a doorbuster SKU is one row, and at T+0 of a flash sale ~8,000 reserve attempts per second all want to decrement it — of which ~98% must be rejected. Both textbook concurrency controls fail here, and they fail in opposite directions. **Optimistic concurrency** (read `available` and version, then `UPDATE … WHERE version = ?`, retry on mismatch) succeeds for one writer per round and forces the other ~7,999 to retry; the retries arrive on top of the fresh arrivals, so the contended set grows faster than it drains and useful throughput *falls* as load rises — a livelock, not a slowdown. **Pessimistic locking** (`SELECT … FOR UPDATE`) is correct and orderly, but it serialises every buyer behind one lock: at ~3ms per critical section the row sustains ~330 decrements/s against an 8,000/s arrival rate, so the wait queue grows by ~7,670 waiters every second, connections pin, and the database's *other* work — including SKUs nobody is fighting over — starves behind an exhausted connection pool. This is #19's New Year's Eve problem, but where a hotel has one contended row per date (a natural shard) and hundreds of contenders, here there is a single undated counter and tens of thousands.
+
+**Why the standard solution works:** stop treating all SKUs the same, and make the contention *structural* rather than accidental. Three lanes, chosen by a rolling measurement of each SKU's reserve rate: cold SKUs (the 99.99%) take a plain conditional update with no lock and no retry loop; warm SKUs split their stock across `N = 32` bucket rows so `hash(cart_id) % N` spreads writes over 32 rows and cuts per-row contention by 32×; hot SKUs are routed into a per-SKU stream partition consumed by a **single** consumer that applies decrements in arrival order against an in-memory counter. Serialisation is the point, but it is serialisation *without waiting* — the requester gets a ticket immediately and the answer over SSE, and once the counter reaches zero the consumer short-circuits and rejects the entire remaining backlog in milliseconds instead of processing it. That is the property a row lock cannot give you: a lock queue must be walked, a counter queue can be truncated. The costs are real. Bucketing has an **endgame problem** — with 5 units left across 32 buckets, 27 buckets are empty and most buyers are told "sold out" while stock exists, which is *underselling*, the expensive kind of wrong. Fix it with a threshold: when total remaining drops below `2N`, a coordinator merges the buckets back into one row and promotes the SKU to the queue lane. The queue lane costs an async UX (a spinner and a push, not a synchronous 200) and a single-consumer failure domain that needs fast partition reassignment. And the honest business layer on top: **overselling is often cheaper than underselling.** An oversell costs a cancellation email, a goodwill credit, and some brand damage — call it ~£15 of expected cost. An undersell costs the entire margin on a unit that physically existed, plus the acquisition cost already spent on that session, plus the shopper who now buys it elsewhere. For replenishable stock many large retailers deliberately run a ~0.1–0.5% oversell rate. **What I would choose:** per-SKU-class policy, not a global one. Replenishable long-tail stock runs the cold lane with a small deliberate oversell buffer and auto-cancel. Limited drops — where no unit can be conjured and a cancellation is a PR incident — run the queue lane with strict zero-oversell. Warm bucketing is the middle, with the merge threshold mandatory.
+
+**If you were building it tomorrow:**
+- DynamoDB for catalog and carts; OpenSearch + CDC for search; Redis Cluster (in-memory counters, AOF-persisted) fronting Postgres for inventory and holds; Kafka for the hot-SKU lanes and the order event log; Postgres (sharded by `order_id`) for orders; Temporal for the checkout saga; Fastly + an edge KV for the read path.
+- Reserve path pseudocode:
+  ```
+  lane = heat.classify(sku)          -- rolling 10s reserve rate
+  if lane == COLD:
+      ok = db.exec("UPDATE inventory SET available = available - :q, reserved = reserved + :q "
+                   "WHERE sku = :s AND available >= :q").rows == 1
+  elif lane == WARM:
+      b = hash(cart_id) % N          -- N = 32 bucket rows
+      ok = try_bucket(sku, b) or try_bucket(sku, (b + 1) % N) or steal_from_fullest(sku)
+      if total_remaining(sku) < 2 * N: coordinator.merge_and_promote(sku)
+  else:                              -- HOT
+      ticket = stream.append("resv:" + sku, {cart_id, qty})
+      return {status: "queued", ticket}      -- answer arrives over SSE
+  if ok: return holds.put(sku, qty, cart_id, ttl = 15min)
+  ```
+- Hot-lane consumer (exactly one per SKU partition): `for msg in partition: if counter[sku] >= msg.qty: counter[sku] -= msg.qty; emit(GRANTED, hold) else: emit(SOLD_OUT)` — batch-persist the counter every 50ms, replay the partition from the last persisted offset on consumer restart.
+#### Clarifying Questions
+- Single retailer with owned stock, or a marketplace with third-party sellers and per-seller inventory?
+- Is stock replenishable, or are these one-off limited drops?
+- Do we ever accept overselling, and what is the cancellation policy?
+- Do guests check out without an account?
+- Is payment in scope, or is there an existing payment service?
+- Are flash sales scheduled and known in advance, or can they start unannounced?
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Marketplace with third-party sellers | inventory keys on `(sku, seller, location)` and one cart fans out to multiple orders, one per seller |
+| Replenishable stock | a deliberate small oversell buffer with auto-cancel is cheaper than underselling |
+| Limited one-off drops | strict zero-oversell: queue-serialise the hot SKU and reserve at add-to-cart, not at checkout |
+| Guest checkout supported | a durable server-side cart keyed by a cookie `cart_id`, plus a defined merge rule on login |
+| Payment already exists | checkout is a saga that calls it as a downstream step with compensations (see #23) |
+| Flash sales are scheduled | pre-warm the CDN and edge KV, pre-render drop pages, and stand up a waiting room ahead of T=0 |
+
+#### Requirements
+- **FR:** browse and search a 200M-SKU catalog, cart (guest + signed-in, merged on login), checkout with inventory reservation, order placement, cancellation and refund initiation
+- **NFR:** product page p99 < 200ms at the edge and < 400ms on origin miss; checkout p99 < 1.5s including payment; zero double-charge; oversell rate ≤ 0.1% of units on replenishable stock and 0 on limited drops; browse stays available at 100× checkout load
+
+#### Scale Estimate
+Public per-retailer figures are not reliably comparable, so every number below is derived from stated assumptions rather than attributed.
+- **Catalog & users:** assume ~200M SKUs, ~5M DAU steady, ~50M DAU on a sale day (10×), ~1.2 sessions/DAU.
+- **Read volume:** ~40 product-detail views + ~6 searches per session → 5M × 1.2 × 40 = 240M PDP views/day ÷ 86,400 ≈ **~2.8k/s avg**; evening peak ×4 → **~11k/s**. Searches: 5M × 1.2 × 6 = 36M/day ≈ 420/s avg, ~1.7k/s peak.
+- **Write volume:** ~1.5 add-to-cart per session → 9M/day ≈ ~100/s. Orders at ~2.5% session conversion → 5M × 1.2 × 0.025 = **~150k orders/day** ≈ 1.7/s avg, ~8/s peak.
+- **Read:write skew:** 240M PDP views ÷ 150k orders = **~1,600:1**; against all writes (cart + order), 240M ÷ 9.15M ≈ **26:1**. The first ratio is why the CDN is the main lever; the second is why the transactional tier is small enough to be boring.
+- **Sale day:** 50M DAU → 2.4B PDP views/day ≈ 28k/s avg, ~90k/s in the peak minute (≥ 95% CDN-served). Orders at 8% conversion → 50M × 1.2 × 0.08 = ~4.8M/day ≈ 55/s avg.
+- **Flash spike:** a doorbuster at T=0 runs at **~100× normal peak checkout** → ~800 orders/s sustained through the first minute (~48k orders). Reserve *attempts* run ~10× successes → **~8k reserve/s against one SKU row**, ~98% rejected. That single row, not aggregate throughput, is the design constraint.
+- **Product record:** ~4KB (sku_id 16B + title ~120B + brand_id 8B + 5 category ids 40B + description ~2KB + attribute JSON ~1KB + price 8B + currency 4B + 8 media refs ~512B + dims/weight 32B + seller_id 16B + 3 timestamps 24B + flags/padding ~220B). 200M × 4KB = **~800GB**; RF=3 → **~2.4TB**.
+- **Search index:** denormalised doc ~1.5KB (title, brand, category path, ~20 facet fields, price, rating, popularity). 200M × 1.5KB = 300GB primary; analysed-text expansion + 2 replicas ≈ ×3 → **~900GB**.
+- **Media:** 8 images/SKU × a 3-rendition ladder (thumb ~20KB + grid ~60KB + zoom ~250KB = ~330KB) ≈ **~2.6MB/SKU**. 200M × 2.6MB ≈ **~520TB**; erasure-coded at 1.5× → **~780TB**. Only ~5–10% of SKUs are fetched in any month, so the CDN working set is ~50TB, not 780TB.
+- **Inventory rows:** ~64B (sku_id 16B + location_id 8B + on_hand 4B + reserved 4B + version 8B + updated_at 8B + padding 16B). 200M SKUs × ~3 stocking locations = 600M rows × 64B ≈ **~40GB** — it fits in memory on one large node. Inventory is a *contention* problem, never a capacity one.
+- **Holds:** ~80B (hold_id 16B + sku 16B + qty 4B + cart_id 16B + expires_at 8B + state 4B + padding 16B), 15-minute TTL. Sale peak 8k/s × 900s = 7.2M live holds × 80B ≈ **~600MB**.
+- **Carts:** ~1KB (cart_id 16B + user_id 16B + 8 lines × ~44B = 352B + promo/address refs ~200B + envelope ~400B). Live plus 30-day abandoned ≈ 20M carts = **~20GB** steady; ~100GB over a sale weekend.
+- **Orders:** ~1.5KB (order_id 16B + user_id 16B + status 4B + 3 lines × ~120B = 360B + address ~300B + payment_ref 32B + totals/tax/promo ~120B + timestamps 32B + audit ~200B + envelope). 150k/day × 1.5KB ≈ 225MB/day → **~80GB/yr**; RF=3 → **~250GB/yr**. A sale day adds ~7GB. Order event log ~10 events × ~200B per order → +~0.3GB/day.
+- **Retention:** orders hot for 18 months (returns, warranty, re-order), then columnar archive for 7 years (tax and consumer-law minimums); carts purged at 90 days; holds are ephemeral and never archived.
+
+#### API Contract
+```
+GET  /search?q=&facets=&page=   → { results:[{sku,title,price,rating,thumb}], facets, total }
+GET  /p/{sku}                   → { sku, title, media[], attrs, description }   (CDN, 5m TTL)
+GET  /p/{sku}/live              → { price, stock_band, promos[] }               (edge KV, 15s TTL)
+
+POST /cart/items                body: { cart_id?, sku, qty }
+                                → { cart_id, lines[], subtotal }
+POST /cart/merge                body: { guest_cart_id }
+                                → { cart_id, lines[], conflicts[] }
+
+POST /checkout/session          body: { cart_id }
+                                → { checkout_id, holds[], expires_at, quoted_total, changes[] }
+POST /orders                    headers: Idempotency-Key
+                                body: { checkout_id, address, payment_token, accepted_total }
+                                → { order_id, status: confirmed|price_changed|sold_out|queued }
+GET  /orders/{id}               → { status, lines[], timeline[] }
+WS   /checkout/{id}/events      ← { granted|sold_out|expired }   (hot-SKU queue result)
+```
+
+#### High-Level Design
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 480" role="img" aria-label="E-commerce platform architecture: edge cache, catalog and search, cart, checkout saga, inventory holds, payment and fulfilment">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box" x="300" y="14" width="160" height="44" rx="9"/>
+  <text class="lbl" x="380" y="36">Client</text>
+  <rect class="box" x="24" y="94" width="236" height="66" rx="9"/>
+  <text class="lbl" x="142" y="114">CDN + Edge KV</text>
+  <text class="sub" x="142" y="134">static page · images (5m)</text>
+  <text class="sub" x="142" y="152">price/stock fragment (15s)</text>
+  <rect class="box" x="300" y="94" width="250" height="66" rx="9"/>
+  <text class="lbl" x="425" y="114">API GW + Waiting Room</text>
+  <text class="sub" x="425" y="134">admission tokens</text>
+  <text class="sub" x="425" y="152">priority load shedding</text>
+  <rect class="box" x="24" y="200" width="236" height="66" rx="9"/>
+  <text class="lbl" x="142" y="220">Catalog + Search</text>
+  <text class="sub" x="142" y="240">200M docs · OpenSearch</text>
+  <text class="sub" x="142" y="258">CDC from catalog store</text>
+  <rect class="box" x="290" y="200" width="190" height="66" rx="9"/>
+  <text class="lbl" x="385" y="220">Cart Service</text>
+  <text class="sub" x="385" y="240">durable server cart</text>
+  <text class="sub" x="385" y="258">guest merge on login</text>
+  <rect class="box" x="510" y="200" width="226" height="66" rx="9"/>
+  <text class="lbl" x="623" y="220">Checkout Saga</text>
+  <text class="sub" x="623" y="240">idempotency key</text>
+  <text class="sub" x="623" y="258">compensating undo</text>
+  <rect class="box acc" x="290" y="306" width="190" height="76" rx="9"/>
+  <text class="lbl" x="385" y="326">Inventory Service</text>
+  <text class="sub" x="385" y="346">holds with TTL · buckets</text>
+  <text class="sub" x="385" y="366">hot-SKU queue lane</text>
+  <rect class="box" x="510" y="306" width="226" height="48" rx="9"/>
+  <text class="lbl" x="623" y="330">Payment Service (#23)</text>
+  <rect class="box" x="510" y="392" width="226" height="48" rx="9"/>
+  <text class="lbl" x="623" y="416">Fulfilment / WMS</text>
+  <ellipse class="store" cx="140" cy="336" rx="72" ry="10"/>
+  <path class="store" d="M68,336 v40 a72,10 0 0 0 144,0 v-40"/>
+  <text class="sub" x="140" y="358">Inventory + holds</text>
+  <text class="sub" x="140" y="376">~40GB, in memory</text>
+  <path class="flow" d="M300,36 L142,36 L142,94"/>
+  <text class="edge" x="200" y="26" text-anchor="middle">browse</text>
+  <path class="flow" d="M420,58 L420,94"/>
+  <path class="flow" d="M260,127 L300,127"/>
+  <text class="edge" x="280" y="116" text-anchor="middle">miss</text>
+  <path class="flow" d="M320,160 L320,182 L142,182 L142,200"/>
+  <text class="edge" x="230" y="193" text-anchor="middle">search / PDP</text>
+  <path class="flow" d="M400,160 L400,200"/>
+  <text class="edge" x="408" y="181" text-anchor="start">add to cart</text>
+  <path class="flow" d="M520,160 L520,182 L623,182 L623,200"/>
+  <text class="edge" x="600" y="172" text-anchor="middle">POST /orders</text>
+  <path class="flow dash" d="M480,233 L510,233"/>
+  <path class="flow" d="M560,266 L560,290 L385,290 L385,306"/>
+  <text class="edge" x="470" y="281" text-anchor="middle">reserve (hold)</text>
+  <path class="flow" d="M623,266 L623,306"/>
+  <text class="edge" x="631" y="287" text-anchor="start">charge</text>
+  <path class="flow" d="M623,354 L623,392"/>
+  <text class="edge" x="631" y="374" text-anchor="start">confirm</text>
+  <path class="flow" d="M290,344 L214,344"/>
+  <path class="flow dash" d="M480,330 L495,330 L495,250 L510,250"/>
+  <text class="edge" x="500" y="310" text-anchor="start">TTL release</text>
+</svg>
+```
+
+**How to read the diagram:** the left column is the read path — client to CDN, CDN miss to catalog and search — and the right column is the write path, gateway to cart to checkout saga to inventory, payment and fulfilment. The two columns share only the gateway, deliberately.
+
+**Why the flow is shaped this way:** browsing outnumbers buying by roughly 1,600:1, so the read path is optimised to never reach the origin, while the write path is optimised for correctness under contention on a tiny dataset. The waiting room sits at the gateway because admission control is only useful before work has been admitted.
+
+**What this layout buys you:** browse survives a checkout meltdown, because a saturated inventory row cannot exhaust anything the CDN depends on. The cost is that the price a shopper sees is a cached opinion, which forces authoritative re-pricing at checkout and an explicit story for when the two disagree.
+
+#### Data Model
+- **products** (partitioned document store, e.g. DynamoDB), partition key `sku_id`; ~4KB/doc, 200M docs
+- **catalog_index** (OpenSearch), routing key `hash(sku_id)`; fed by CDC from `products`
+- **inventory** (in-memory counters with durable backing, Redis Cluster + Postgres), partition key `(sku_id, location_id)`; warm SKUs additionally keyed `(sku_id, bucket_no)` for `bucket_no ∈ [0, N)`
+- **holds** (Redis with native TTL), key `hold:{sku_id}:{hold_id}`, value `(cart_id, qty, expires_at, state)`
+- **carts** (KV store), partition key `cart_id`; a `user_id` secondary index resolves the signed-in cart on merge
+- **orders** (Postgres, sharded by `hash(order_id)`), partition key `order_id`, secondary index on `(user_id, created_at)`
+- **idempotency** (same order shard, unique index on `idempotency_key`) — never a separate service, so the dedupe and the order commit share one transaction
+- **order_events** (append-only Kafka topic), key `order_id`; the audit trail and the fulfilment feed
+- **prices_promos** (rules store + edge KV projection), key `(sku_id, market)`; the projection is display-only, the rules store is authoritative
+- **media** (object store + CDN), key `{sku_id}/{rendition}`
+
+#### Detailed Design
+**The cart is durable server-side state, and that is a decision, not a default.** A purely client-side cart (localStorage) costs nothing to run and loses the cart when the shopper switches from phone to laptop — which is most of the funnel, and abandoned-cart email is one of the highest-ROI things a retailer does, so you need the cart server-side anyway. We key the cart on a `cart_id` cookie for guests and on `user_id` for signed-in shoppers. On login the two must merge, and the merge rule matters: union by SKU, and for a SKU present in both take `max(qty)` rather than `sum(qty)`. Concrete example: alice adds two of a SKU as a guest on her phone, signs in, and her account cart already has two of the same SKU added on her laptop last week — `sum` silently makes it four and she buys twice what she wanted, which is a real and common complaint. `max` occasionally under-counts a genuine "I want four" and is trivially fixable in the UI, so it is the cheaper error. Conflicts (a line whose SKU is now delisted, or whose saved price has moved by more than a threshold) come back in a `conflicts[]` array so the UI can surface them rather than silently mutating the cart. Cart writes are ~100/s steady and ~2k/s during a sale, tiny — but every quantity change is a write, so we debounce client-side at 500ms rather than writing per keystroke.
+
+**Reserve at checkout entry, not at add-to-cart — except for drops.** Reserving at add-to-cart is the shopper-friendliest option and the most expensive: with a ~2.5% conversion rate, 97.5% of holds expire unused, so effective sellable stock is deflated by the cart abandonment rate and the site shows "sold out" while warehouses are full. Reserving at checkout entry (the moment the shopper commits to paying) sets hold volume at roughly the order rate divided by conversion-through-checkout, ~15–20% waste, which is affordable. The exception is a limited drop: there, telling someone at the payment step that the item they queued for is gone is the worst possible experience, and the whole point of the drop is that stock is fixed and small. So drop SKUs reserve at add-to-cart with a short 10-minute TTL and a visible countdown. This is the same hold pattern as #19, but the economics invert: a hotel has a handful of high-value units per date, so holds are few, long-lived, and a double-book is catastrophic; here there are millions of low-value fungible units, holds are numerous and short, and the calendar dimension that naturally shards hotel contention across date rows does not exist — one SKU is one counter.
+
+**Inventory under contention: three lanes chosen by SKU heat.** A heat classifier tracks each SKU's reserve rate over a rolling 10-second window and assigns a lane. **Cold** (< 50/s, effectively every SKU): a single conditional update, `UPDATE inventory SET available = available - :q WHERE sku = :s AND available >= :q`, which is atomic, lock-free from the caller's perspective, and either affects one row or zero — no read-modify-write, no version check, no retry loop. **Warm** (50–1,000/s): stock is split across `N = 32` bucket rows and the caller hashes `cart_id % N`, cutting per-row write rate by 32×; on an empty bucket it probes the next one and then steals from the fullest, which bounds the blast radius of skew. The endgame is the sharp edge: with 5 units left across 32 buckets, a naive implementation tells 27 buckets' worth of shoppers "sold out" while stock exists. When `total_remaining < 2N` a coordinator takes a brief lock, merges all buckets into one row, and promotes the SKU to the hot lane. **Hot** (> 1,000/s): the queue lane, below. The classifier is deliberately hysteretic — promote fast, demote slowly over ~5 minutes — because flapping between lanes during a merge is how you lose count.
+
+**The hot-SKU queue in detail.** Reserve requests for a hot SKU are appended to a per-SKU stream partition and answered asynchronously. Stage cardinalities at the peak second of a drop: ~8,000 reserve attempts/s arrive at the edge; the waiting room admits ~2,000/s with signed tokens and holds the rest with a position estimate; the classifier routes 100% of admitted traffic to the hot lane; the partition append is ~0.3ms and never blocks; the single consumer applies decrements against an in-memory counter at a measured ~50k/s, so it is never the bottleneck — admission is. Once the counter hits zero the consumer stops decrementing and drains the remaining backlog as `SOLD_OUT` at memory speed, clearing ~100k queued messages in well under a second. Latency budget for a granted reserve: ~20ms edge and admission, ~5ms append, ~10ms queue wait at the p50 depth, ~1ms decrement, ~40ms SSE delivery — p99 ~250ms, dominated by queue depth rather than by any lock. The consumer batch-persists the counter every 50ms and records the partition offset with it; on consumer failure the replacement replays from the last persisted offset, which can re-apply at most ~50ms of decrements — idempotent because each message carries a `hold_id` and the consumer skips `hold_id`s already granted.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 300" role="img" aria-label="Hot SKU reservation pipeline: reserve request, admission token, heat classifier, stream partition, single consumer, hold with TTL, confirm or expire">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <!-- row 1 -->
+  <rect class="box" x="15" y="48" width="170" height="64" rx="9"/>
+  <text class="sub" x="100" y="66">Reserve request</text>
+  <text class="sub" x="100" y="82">one SKU</text>
+  <text class="sub" x="100" y="98">~8k/s at T+0</text>
+  <rect class="box" x="205" y="48" width="170" height="64" rx="9"/>
+  <text class="sub" x="290" y="66">Waiting room</text>
+  <text class="sub" x="290" y="82">signed admission</text>
+  <text class="sub" x="290" y="98">admits ~2k/s</text>
+  <rect class="box" x="395" y="48" width="170" height="64" rx="9"/>
+  <text class="sub" x="480" y="66">Heat classifier</text>
+  <text class="sub" x="480" y="82">rolling 10s rate</text>
+  <text class="sub" x="480" y="98">cold · warm · hot</text>
+  <rect class="box" x="585" y="48" width="170" height="64" rx="9"/>
+  <text class="sub" x="670" y="66">Stream partition</text>
+  <text class="sub" x="670" y="82">one per hot SKU</text>
+  <text class="sub" x="670" y="98">append ~0.3ms</text>
+  <path class="flow" d="M185,80 L205,80"/>
+  <path class="flow" d="M375,80 L395,80"/>
+  <path class="flow" d="M565,80 L585,80"/>
+  <!-- wrap into row 2 -->
+  <path class="flow" d="M670,112 L670,150 L100,150 L100,208"/>
+  <!-- row 2 -->
+  <rect class="box acc" x="15" y="208" width="170" height="76" rx="9"/>
+  <text class="sub" x="100" y="226">Single consumer</text>
+  <text class="sub" x="100" y="242">in-memory counter</text>
+  <text class="sub" x="100" y="258">~50k decrements/s</text>
+  <text class="sub" x="100" y="274">zero → drain as sold out</text>
+  <rect class="box" x="205" y="208" width="170" height="76" rx="9"/>
+  <text class="sub" x="290" y="234">Hold written</text>
+  <text class="sub" x="290" y="250">TTL 10–15 min</text>
+  <text class="sub" x="290" y="266">result over SSE</text>
+  <rect class="box" x="395" y="208" width="170" height="76" rx="9"/>
+  <text class="sub" x="480" y="234">Confirm or expire</text>
+  <text class="sub" x="480" y="250">paid → allocate</text>
+  <text class="sub" x="480" y="266">TTL → counter += qty</text>
+  <path class="flow" d="M185,244 L205,244"/>
+  <path class="flow" d="M375,244 L395,244"/>
+  <path class="flow dash" d="M480,284 L480,296 L100,296 L100,284"/>
+  <text class="edge" x="290" y="296" text-anchor="middle">expired stock returns to the counter</text>
+</svg>
+```
+
+**Order placement is an orchestrated saga, and idempotency is a unique index.** The steps are: reserve holds → create `order(PENDING)` → charge (see #23) → confirm holds to allocations → emit fulfilment → `order(CONFIRMED)`. Compensations run in reverse: cancel the order, void the authorisation, release the holds. Each compensation is idempotent because it is keyed on the entity it undoes (`hold_id`, `psp_charge_id`, `order_id`), so a retried compensation is a no-op. Idempotency on `POST /orders` is not a cache — the `Idempotency-Key` is written into the orders shard under a unique index *in the same transaction as the order row*, so a double-submit hits a constraint violation rather than a race between a cache write and a database write. On violation we read the existing row and return it: same `order_id`, same response, HTTP 200. The genuinely awkward case is a duplicate arriving while the first is still `PENDING` — the key row exists but there is no final answer yet. Return `409` with `Retry-After: 2` and the `order_id`, and let the client poll `GET /orders/{id}`; do not block a request thread waiting on a payment provider. The key itself is generated once per checkout session and stored with the cart, so a shopper who restores a browser tab and resubmits sends the *same* key rather than a fresh one — client-generated-per-click keys are the classic way to make an idempotency scheme do nothing.
+
+**Caching the read path, and the invalidation problem.** The product page is split at the point where volatility changes. The shell — title, media, description, attributes — is cached at the CDN for 5 minutes with a surrogate key of `sku:{id}` plus `cat:{category_id}`, so a catalog edit publishes a tag purge that clears exactly the affected pages. The volatile fragment — price, promo badge, stock band — is a separate ~200B response from an edge KV with a 15-second TTL, so a price change propagates within a quarter of a minute without touching the shell. The stock badge is deliberately quantised into bands ("In stock", "Only a few left", "Sold out") with the middle band covering 1–10 units, which means an ordinary decrement changes nothing visible and needs no invalidation at all; only band *transitions* publish an update. What makes this safe is that none of it is authoritative: checkout re-prices and re-reserves against the source of truth, so a stale cache costs a corrected total on the checkout page, never a wrong charge. Never build a design where cache invalidation has to be correct for money to be correct.
+
+**Pricing and promotions are evaluated at checkout, and the two prices can legitimately differ.** The engine evaluates rules over `(sku, market, customer segment, cart contents, time)` — a "buy 3 get 1 free" promotion cannot be resolved on a product page because it depends on the rest of the cart, and tax and shipping cannot be resolved until an address exists. So divergence between the displayed price and the charged price is structural, not a bug: the promo expired between browse and checkout, the price genuinely changed, a multi-buy discount kicked in, or an address changed the tax. The design obligation is transparency, not equality. `POST /checkout/session` returns `quoted_total` plus a `changes[]` array explaining every delta, and `POST /orders` carries `accepted_total`. If the authoritative total no longer matches `accepted_total`, the order is rejected with `price_changed` and the shopper re-confirms — a shopper is never charged a number they did not see. Whether to honour the lower displayed price on a small increase is a business policy, not an engineering one, and it varies by jurisdiction; make it a configurable threshold (for example, absorb increases under 2% or £1) rather than hard-coding either answer.
+
+**Flash-sale readiness: pre-warm, waiting room, graded shedding.** For a scheduled drop, an hour before T=0 a job pre-renders the drop pages to object storage and pushes them into every CDN POP along with their image renditions, so the first request is a hit rather than 90k origin misses in a second — an unwarmed drop is a self-inflicted thundering herd. The waiting room sits at the gateway: past a configured concurrency it issues a queue position and a signed admission token good for a bounded window, converting an unbounded spike into a controlled arrival rate. Load shedding is graded by tier, and the ordering is the interesting part: shed personalisation and recommendations first (nobody notices), then new checkout entries, then search reranking (fall back to BM25), and *never* browse or in-flight checkouts. A shopper who has a hold and is mid-payment must complete — shedding them wastes a hold, a payment authorisation, and a customer. Concrete degradation ladder at 100× load: recommendations off, reviews rendered from a stale snapshot, search reranker bypassed, waiting room admitting 2k/s, and product pages served entirely from the edge with a 60-second TTL instead of 5 minutes.
+
+#### Potential Follow-Up Questions
+**Q: Why not just use optimistic concurrency on the inventory row?**
+Because under high contention the retry loop is the problem. One writer per round succeeds and the rest retry, and retries stack on top of new arrivals, so goodput falls as offered load rises — a livelock. *If pushed:* optimistic control is correct and cheap when contention is *rare*, which is true for 99.99% of SKUs, so we do use a conditional update in the cold lane. The mistake is applying one concurrency strategy uniformly; the fix is to detect the hot minority and route them somewhere that does not retry.
+
+**Q: Then why not a pessimistic row lock — it is correct and simple?**
+It is correct, and it does not keep up. A ~3ms critical section gives one row ~330 decrements/s against ~8,000 arrivals/s, so the wait queue grows by ~7,670 per second and never drains within the event. *If pushed:* the second-order damage is worse than the latency — waiters pin database connections, the pool exhausts, and unrelated SKUs start timing out. A hot row should never be able to take down cold ones; isolate it in its own lane with its own capacity.
+
+**Q: Where do you reserve — add-to-cart or checkout?**
+Checkout entry by default. Reserving at add-to-cart with ~2.5% conversion means ~97.5% of holds expire unused, so you show "sold out" with full warehouses. *If pushed:* limited drops invert this — stock is fixed, the queue is the product, and losing the item at the payment step is unacceptable, so drops reserve at add-to-cart with a 10-minute TTL and a visible countdown. Make it a per-SKU-class policy flag, not a global constant.
+
+**Q: A buyer hashes to an empty bucket while 4 units sit in other buckets. What happens?**
+Untreated, they are told "sold out" when stock exists — underselling, the expensive failure. Mitigate in two layers: probe the next bucket and then steal from the fullest before giving up, and set a merge threshold so that when `total_remaining < 2N` a coordinator collapses all buckets into one row and promotes the SKU to the queue lane. *If pushed:* the merge needs a brief exclusive window across all `N` rows, which is a real (if short) stall — do it under a distributed lock (see #35) with a hard timeout, and if the merge fails, fail *closed* to the queue lane using the last consistent total rather than leaving buckets half-merged.
+
+**Q: Would you ever deliberately oversell?**
+Yes, on replenishable stock. An oversell costs a cancellation, a goodwill credit, and some brand damage; an undersell costs the whole margin on a unit that existed plus the acquisition spend on that session plus the customer who buys it elsewhere. A ~0.1–0.5% oversell rate on the long tail is a rational trade. *If pushed:* never on limited drops, where no unit can be conjured and each cancellation is a public incident. Track oversell rate as a first-class SLO with an automatic tightening of the buffer when it breaches, and make the cancellation path generous and automatic rather than a support ticket.
+
+**Q: A shopper double-taps Buy on a flaky connection. Two orders?**
+No. The `Idempotency-Key` is written under a unique index in the same transaction as the order row, so the second insert violates the constraint and we return the original order. *If pushed:* the key must be generated once per checkout session and stored with the cart, not per click — a fresh UUID per submit makes the scheme decorative. If the duplicate arrives while the first is still `PENDING`, return `409` with `Retry-After` and the `order_id` and let the client poll, rather than blocking a thread on the payment provider.
+
+**Q: The hold expires while the payment is still in flight. Now what?**
+The saga extends the hold before calling payment — TTL is refreshed to `now + payment_timeout + margin` as the charge step begins, so a hold cannot expire under a live authorisation. If it expires anyway (a sweeper race, or a payment that outran its timeout), the order lands in `PAID_UNRESERVED`: the money is real, the stock is not. *If pushed:* re-attempt the reserve immediately; if it fails, this is an oversell and the compensation is a full automatic refund plus a goodwill credit, alerted as an SLO breach. Never leave a paid order without either stock or a refund — that state is a support incident by default.
+
+#### Bottlenecks & Mitigations
+- **Hot inventory row** — one SKU absorbs ~8k reserve/s and neither optimistic retry nor a row lock keeps up. Route by measured SKU heat: conditional update for cold, 32-way bucketing for warm, single-consumer stream serialisation for hot. Trade-off: the hot lane makes reserve asynchronous (ticket plus SSE) and introduces a single-consumer failure domain that needs sub-second partition reassignment.
+- **CDN origin stampede at T=0** — a drop page not yet in cache produces ~90k simultaneous origin misses. Pre-render and pre-push drop pages and images to every POP an hour ahead, and enable request coalescing at the edge so concurrent misses for the same key produce one origin fetch. Trade-off: pre-warming costs egress for pages that may not sell, and a late content edit must re-warm.
+- **Search index CDC lag on price changes** — a price edit reaches the search index seconds to minutes later, so a price-sorted results page can be visibly wrong. Keep price out of the cached result card where possible and hydrate it from the edge KV; index a coarse price *band* for filtering rather than the exact value. Trade-off: exact-price sorting is then approximate near band boundaries.
+- **Checkout saga orchestrator as a shared dependency** — every order flows through it, so its outage stops all purchasing while browse continues. Run it as a durable workflow engine with persisted state so a restart resumes mid-order rather than restarting the saga, and shard workflow ownership by `hash(order_id)`. Trade-off: durable workflow state adds ~2 extra persisted writes per order.
+- **Hold-expiry sweeper backlog** — after a sale, millions of holds expire at once and a slow sweeper leaves stock invisible for minutes. Prefer native TTL with keyspace-expiry events over a polling scan, and treat the sweeper as a backstop that reconciles, not the primary mechanism. Trade-off: TTL-driven expiry gives weaker ordering guarantees, so the reconciler must be idempotent against holds already released.
+- **Payment provider rate limits during a spike** — 800 orders/s can exceed a provider's per-merchant limit and turn into a wall of 429s. Bulkhead the payment step with its own concurrency budget and queue, spread across two providers with health-based routing (see #23). Trade-off: multi-provider adds reconciliation complexity across two settlement reports.
+
+#### Failure Modes
+| Layer | Failure | Detection | Mitigation |
+|---|---|---|---|
+| CDN | POP-wide eviction or cold cache at drop time causes origin flood | Origin request rate vs. baseline; cache hit ratio drop below 90% | Request coalescing at the edge; pre-warm before scheduled drops; origin shield tier; serve stale-while-revalidate for up to 60s |
+| Catalog store | Partition unavailable; PDP misses cannot be rendered | Per-partition error rate; origin 5xx by `sku_id` prefix | Serve stale CDN copy beyond TTL (`stale-if-error` 24h); degrade to a minimal page with title and price from the edge KV |
+| Search | Index shard down or reranker timing out | Shard health; search p99 and empty-result-rate alerts | Fail over to replica shards; bypass the reranker and serve BM25 order; cache top-1k head queries for a full-outage fallback |
+| Inventory hot lane | Single consumer for a hot SKU dies mid-drop | Consumer heartbeat; partition lag alert at > 2s | Standby consumer takes the partition; replay from the last persisted offset; `hold_id` dedupe makes re-application safe; worst case ~50ms of decrements re-applied |
+| Inventory buckets | Skewed hashing empties some buckets while stock remains | Per-bucket remaining distribution; sold-out-with-stock counter | Next-bucket probe then steal-from-fullest; forced merge and promotion to the queue lane when `total_remaining < 2N` |
+| Holds | Hold expires while payment is in flight | `PAID_UNRESERVED` order count; hold-extension failure rate | Extend TTL before the charge step; on failure re-reserve immediately, else automatic full refund plus goodwill credit and an alert |
+| Checkout saga | Orchestrator crashes between payment success and hold confirmation | Orders stuck in `PENDING` beyond 60s | Durable workflow state resumes from the last completed step; a reconciler queries the provider by idempotency key (see #23) and either confirms or compensates |
+| Payment provider | Provider degraded or rate limiting during the spike | 429 rate; auth latency p99; provider health endpoint | Bulkheaded concurrency budget with a bounded queue; failover to secondary provider; if both are down, shed *new* checkouts and keep browse fully up |
+| Order store | Order shard primary fails after payment capture | Shard write error rate; replication lag alert | Synchronous replica promotion; the payment step is never acked to the client until the order row is durable, so a lost ack becomes an idempotent retry |
+
+#### Observability — Key Metrics & SLOs
+- **Product page latency** (edge hit and origin miss, tracked separately) — SLO p99 < 200ms at the edge, < 400ms on origin miss; the edge number is the one shoppers feel at scale, and separating them stops a good hit ratio from hiding a rotting origin.
+- **CDN cache hit ratio** (per surrogate-key class) — SLO ≥ 95% for product shells, ≥ 80% for the live fragment; a hit-ratio dip is the leading indicator of an origin overload, minutes before latency moves.
+- **Oversell rate** (units sold beyond on-hand ÷ units sold) — SLO ≤ 0.1% on replenishable stock and 0 on limited drops; breach auto-tightens the oversell buffer and pages, because this is the metric where a deliberate trade-off becomes an accidental one.
+- **Sold-out-with-stock counter** (reserve rejections where total remaining across buckets > 0) — SLO ≈ 0; every occurrence is lost revenue and it is the only direct signal that the bucket endgame is misbehaving.
+- **Hot-lane queue depth and drain time** (per hot SKU) — alert when depth exceeds 100k or drain time after zero-stock exceeds 2s; a rising drain time means the consumer is not short-circuiting and is walking the backlog instead.
+- **Checkout success rate by stage** (session → reserve → payment → confirm) — SLO ≥ 98% reserve-to-confirm; a stage-attributed drop distinguishes an inventory problem from a payment problem within one dashboard glance.
+- **Price-change divergence rate** (orders returning `price_changed`) — SLO < 0.5%; a spike means edge KV TTLs or promo propagation are out of step and shoppers are being repeatedly re-quoted.
+
+#### Multi-Region & DR
+- **Replication mode:** catalog, search, media and carts are active-active — they are read-dominated and tolerant of seconds of staleness. Inventory and orders are **single-writer per key**: each SKU is homed to one region, each order to one shard's region. This is the one place where active-active is wrong; a multi-master counter resolves conflicts by merging, and merged decrements oversell by construction.
+- **RTO:** ~30s for in-region replica promotion (catalog, cart, search). ~5 minutes for inventory home-region failover, because the new home must replay the durable hold log before accepting reserves — accepting them early is exactly how you oversell.
+- **RPO:** ~0 for orders and payments (synchronous quorum before ack; nothing is confirmed to a shopper until it is durable). ~seconds for carts and catalog (async replication; a lost cart edit is recoverable by the shopper). Holds: ~50ms, bounded by the counter persistence interval, which is why a re-applied decrement must be idempotent on `hold_id`.
+- **Failover cadence:** in-region promotion is automatic; cross-region inventory failover is a deliberate operator action with a runbook, because the replay step is not safely automatic. Game-days quarterly, and one mandatory rehearsal in the four weeks before a known peak event.
+- **Cross-region cost:** the catalog is the bulk — ~800GB of documents plus ~520TB of media, replicated once and then served from CDN, so steady-state egress is dominated by cache fill, not by replication. Orders and the event log are ~0.5GB/day, negligible. Inventory replicates a change log of ~64B records at ~2k/s peak ≈ ~130KB/s — trivially cheap, and worth doing synchronously within a region.
+
+#### Common Mistakes / Anti-patterns
+- **Treating inventory as one concurrency problem with one answer.** Whichever single strategy you pick is wrong for either the long tail or the hot SKU. Classify by measured heat and route to a lane; say the classifier out loud, because it is the actual design.
+- **Reserving stock at add-to-cart for everything.** With ~2.5% conversion, most holds expire unused and the site reports sold out while warehouses are full. Reserve at checkout entry by default and only reserve earlier for limited drops, where the economics genuinely invert.
+- **Making cache invalidation load-bearing for money.** If a stale cached price can result in a wrong charge, the design is broken. Cache display prices freely, but re-price authoritatively at checkout and reconcile against `accepted_total` so a stale cache costs a re-quote, never a wrong charge.
+- **Idempotency as a Redis cache in front of the endpoint.** A cache write and an order write can interleave, and a cache eviction silently re-enables duplicates. Put the key under a unique index in the same transaction as the order row, and define the still-`PENDING` case explicitly rather than leaving it to a race.
+- **Bucketing stock without an endgame plan.** Splitting a counter into `N` rows fixes contention and creates a new failure where buyers see "sold out" while units sit in other buckets. Always pair bucketing with probe-and-steal plus a merge threshold that collapses the buckets before they run dry.
+- **Load shedding that drops in-flight checkouts.** Shedding a shopper who already holds stock and an authorisation wastes all three. Shed personalisation, then new checkout entries, then search ranking quality — and protect browse and in-flight checkout absolutely.
+
+#### Talking Points for the Interview
+- **Browse and buy are two systems with two consistency models.** ~1,600 page views per order means the read path is a caching problem and the write path is a contention problem; conflating them is the most common way this question goes wrong.
+- **The hot SKU is the whole interview.** Say why optimistic retry livelocks and why a row lock queues faster than it drains, then reach for holds, bucketing and single-consumer serialisation as a lane policy rather than one silver bullet.
+- **Queue-based serialisation wins because a queue can be truncated and a lock queue must be walked.** Once the counter hits zero the consumer rejects the entire backlog at memory speed — that is the property, and it is worth naming explicitly.
+- **Overselling versus underselling is a business decision you should own.** State the cost asymmetry, pick per SKU class, and instrument the oversell rate as an SLO so the deliberate trade never quietly becomes an accident.
+- **Idempotency belongs in a unique index, not a cache.** One transaction, one constraint, and a defined answer for the duplicate that arrives while the first is still pending.
+- **Displayed price and charged price legitimately differ.** Promotions depend on the whole cart and tax depends on the address, so the design obligation is an explained delta and a re-confirm, not an impossible guarantee of equality.
+
+### 49. Design Ticketmaster (High-Demand Ticket Booking)
+#### Problem
+Sell specific numbered seats for a live event to a million people who all press "buy" at the same announced second, without double-selling a seat and without letting scalper bots take the whole allocation.
+
+#### Summary
+**The picture in your head:** a stadium box office with exactly 60,000 numbered seats, and a queue outside that goes from empty to a million people in ten seconds because the on-sale time was printed on a poster. Everyone wants row 5 centre. A security guard at the door lets people in at a rate the tills can actually serve, hands everyone else a numbered slip, and — crucially — tells the people at the back the truth as soon as it's known: the seats will be gone long before you reach the front. This is deliberately *not* the hotel problem (see #19). Hotel demand arrives as a smooth Poisson-ish trickle against interchangeable room-type counters, and the hot row is a rare pathology; here the demand curve is a spike, the inventory is individually identified seats that buyers contend for *by name*, and there is an organised, funded adversary whose entire business is beating your real users to row 5.
+
+**The single-request walkthrough (the read path — the one that kills you):** at 09:59:50 a user loads the event page. They get a static HTML shell and a JavaScript client from the CDN — no origin request at all. The client calls `GET /event/42/queue` and receives a queue token: a 16-byte opaque id plus a random 64-bit `sort_key` drawn at issue time. That is one origin write, ~150k of them per second across the arriving crowd, absorbed by a sharded counter-free token service (random keys mean no single INCR hotspot). From then on the client is entirely CDN-fed: it polls `GET /q/42/serving` every 5s, a ~20B JSON object holding a single `now_serving` watermark, cached at every POP with a 2s TTL. 1.5M clients × 1 poll / 5s = ~300k req/s, but the origin sees ~100 POPs ÷ 2s ≈ ~50 req/s. Position is computed *on the client* by comparing its own `sort_key` rank against the watermark. The waiting room costs essentially nothing.
+
+**The single-request walkthrough (the write path):** the watermark passes the user's key at 10:03:12. The client exchanges its token for a session at `POST /event/42/admit`; the Admission Controller checks a risk score, then grants a 15-minute purchase session. The client now fetches two things: the venue geometry (~2.4MB of section/row/seat coordinates, immutable per venue configuration, cached at the CDN forever) and the seat status bitmap (2 bits per seat → 60k seats = ~15KB raw, ~5KB gzipped, republished to the CDN once per second). The user clicks seats 118-C-7 and 118-C-8. `POST /event/42/hold` sorts the seat ids ascending (deadlock avoidance), then issues `SET seat:42:118-C-7 <session> NX EX 600` against Redis — a compare-and-set that succeeds only if the key is absent. Both succeed in ~1.5ms; a hold record is written-behind to the durable store. The user has 10 minutes. Checkout runs the payment saga (see #23), flips both seats from `held` to `sold`, and emits two ticket records with rotating-barcode seeds. If the user does nothing, a reaper — or simply the Redis TTL — returns the seats to `available` and the next bitmap publish shows them green again.
+
+**The pieces (and what each one is for):**
+- **CDN with short-TTL micro-objects (Fastly/CloudFront)** — serves the waiting page, the `now_serving` watermark and the seat-status bitmap. This is the single most load-bearing component. Every one of those objects is *shared* across all viewers, so a 150,000:1 request-collapsing ratio is available for free; you only get it if you make the object global rather than per-user.
+- **Queue token service (Redis Cluster, random sort keys)** — issues a token per arriving user. Deliberately *not* a monotonic counter: a single `INCR` tops out around ~150k ops/s and, worse, makes arrival order the thing being competed for. A random 64-bit key is a lottery draw, shardable across 16 nodes with zero coordination.
+- **Admission Controller (token bucket, see #1)** — releases users from the queue into the purchase flow at a rate derived from Little's law, not from a guess. It is the same primitive as a rate limiter, sized by inventory rather than by capacity.
+- **Seat state store (Redis with `SET NX EX`, plus write-behind to Postgres)** — the authoritative *hot* copy of every seat's status. An in-memory store with atomic conditional-set primitives and native key TTLs gives you hold acquisition, hold expiry and hold release in one operation each, at ~100µs. See #35 for the general lock semantics; a seat hold is a lease-with-TTL, which is exactly a distributed lock with a business name.
+- **Risk Engine** — scores every token at issue and again at admission: device fingerprint, TLS/JA3 signature, residential-proxy ASN reputation, account age, payment-instrument reuse. Its output is *challenge / allow / shadow-deny*, not a hard block, because a hard block is a free A/B signal for the attacker.
+- **Order and ticket store (Postgres, partitioned by event)** — the durable record. Small: ~60k tickets per event. The difficulty here is arrival shape, not volume.
+
+**The thing that makes it hard:** the demand curve is a spike, and *the read side is bigger than the write side*. Everyone fixates on "two people want the same seat" — that race is real but it is one `SET NX` and it is over in a microsecond. The actual failure is that 1.5M browsers each want a live picture of 60,000 seats, refreshed as other people take them. Naively, that is 1.5M × 60k seat states/s of read amplification. Every naive fix fails in a different way. Querying the seat table per client melts the database on *reads* before a single hold is attempted. Holding a WebSocket per client for push updates means 1.5M connections opened inside ten seconds, which is a connection-establishment stampede your load balancers will not survive. Optimistic retry on the seat rows produces livelock: 500 clients all CAS on row 5 centre, one wins, 499 retry, they collide again, and the retry traffic grows faster than the inventory shrinks. And the queue itself, if you implement it as "everyone polls an application server for their position", is a 300k QPS service that exists purely to tell people to wait.
+
+**Why the standard solution works:** you invert the problem — make the hot state a *single shared immutable object* rather than a per-user query, and put a rate-limiting gate in front of everything that isn't. The seat bitmap is one ~5KB artefact republished once per second; 1.5M viewers of one object is a CDN's happiest possible day, and one second of staleness costs a user an occasional "that seat just went" — the same acceptable friction #19 accepts between its search index and its inventory rows. The virtual waiting room converts an unbounded spike into a controlled trickle: admit ~100 users/s, and the purchase path never sees more than a few hundred concurrent buyers no matter how many are outside. What it costs is honesty about scarcity — with 60k seats and 1.5M buyers, ~97% of the queue will never be admitted, and the queue's most important job is telling them that quickly rather than fairly ordering people who cannot be served.
+
+**If you were building it tomorrow:**
+- Fastly or CloudFront for the waiting page, watermark and seat bitmap. Redis Cluster for queue tokens and seat state (`SET NX EX` + keyspace-expiry events). A small Go admission service. Postgres partitioned by `event_id` for orders and tickets. Kafka for the write-behind and the audit log. Stripe behind the saga of #23.
+- Admission and hold hot path:
+  ```
+  issue_token(event, req):                    -- ~150k/s at the spike
+    tok = { id: uuid4(), sort_key: rand64(),
+            risk: risk.score(req.fingerprint, req.asn) }
+    redis.zadd("q:{event}", tok.sort_key, tok.id)   -- sharded 16 ways
+    return tok                                -- client polls CDN from here on
+
+  admit_loop(event):                          -- one leader per event
+    while inflight(event) < CONCURRENCY_CAP:  -- 25,000
+      tok = queue.pop_lowest_sort_key()
+      if tok.risk > THRESH: challenge(tok); continue
+      grant_session(tok, ttl=15min)
+      publish_watermark(event, tok.sort_key)  -- CDN object, 2s TTL
+
+  hold(session, seat_ids):                    -- all-or-nothing
+    for s in sorted(seat_ids):                -- ascending: no deadlock
+      if not redis.set("seat:{e}:{s}", session, nx=True, ex=600):
+        release(acquired); return 409 CONFLICT
+      acquired.append(s)
+    kafka.emit(HoldTaken(session, acquired))  -- write-behind durability
+    return { hold_id, expires_at: now+600 }
+  ```
+#### Clarifying Questions
+- Reserved seating with a seat map, or general admission by quantity?
+- Is the on-sale time publicly announced, or a rolling/staggered release?
+- Fairness model — strict first-come-first-served, or a randomised draw at the on-sale instant?
+- Are we in the resale market too, or primary sales only?
+- What is the purchase limit, and enforced against what identity — account, payment instrument, or delivery address?
+- Is pricing fixed at announcement, or does it move during the on-sale?
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Reserved seating with a seat map | seat-level state with atomic per-seat holds, plus a shared CDN-published status bitmap for reads; general admission instead collapses to a sharded counter, closer to #19 |
+| Publicly announced on-sale time | a virtual waiting room is mandatory, not optional; the spike becomes the primary design driver |
+| Staggered / rolling release | admission control can be gentler, and the queue becomes a smoothing buffer rather than a dam |
+| Randomised draw fairness | tokens carry a random sort key, killing the latency advantage bots buy; strict FCFS instead needs a monotonic sequencer that is both a hotspot and a bot subsidy |
+| Resale in scope | tickets need transferable identity and rotating barcodes, plus a price-cap policy engine |
+| Purchase limits per payment instrument | identity resolution across accounts becomes a first-class service, not a validation rule |
+
+#### Requirements
+- **FR:** browse events, view a live seat map, join the queue, be admitted, hold specific seats, check out, receive transferable tickets; enforce purchase limits; release expired holds.
+- **NFR:** zero double-sold seats (hard, every incident is a postmortem); seat map staleness ≤ 1s; queue-position update ≤ 5s; hold acquisition p99 < 100ms; the system must absorb ~150k arrivals/s for ~10s with no origin saturation; ≥ 90% of primary inventory sold to non-automated buyers.
+
+#### Scale Estimate
+- **Platform baseline:** Ticketmaster reports on the order of ~600M fee-bearing tickets/yr across Live Nation platforms (earnings disclosures — approximate). 600M ÷ 365 ≈ ~1.6M tickets/day average. The average is a lie for this system: essentially all of the engineering difficulty lives in a few hundred on-sale minutes per year.
+- **The on-sale spike:** assume a ~60k-seat stadium show and ~1.5M users arriving within the first ~10s. Arrival rate = 1.5M ÷ 10 = ~150k new sessions/s. Buyer-to-seat ratio = 1.5M ÷ 60k = **25:1**. At an average order of ~2.4 seats, tickets wanted = 1.5M × 2.4 = ~3.6M against 60k → **~60:1 by ticket**. Roughly 1 in 60 arrivals leaves with anything.
+- **Seat-map reads (the load nobody budgets for):** static geometry = 60k seats × ~40B (seat_id 4B + section 2B + row 2B + number 2B + x/y 8B + tier 1B + label ~12B + padding ~9B) ≈ ~2.4MB, immutable per venue configuration. Dynamic status = 2 bits/seat → 60k × 2 bits = ~15KB raw, ~5KB gzipped. If 1.5M clients poll status every 1s from origin: 1.5M × 5KB = ~7.5GB/s ≈ ~60 Gbps sustained. CDN-served with a 1s TTL, the origin serves one object per POP per second — ~100 POPs → ~100 req/s. A **~150,000:1** collapse, and the whole reason the read path is survivable.
+- **Queue-position reads:** 1.5M clients × 1 poll / 5s = ~300k req/s. Published as one global `now_serving` watermark (~20B) with a 2s CDN TTL → origin ~100 POPs ÷ 2s ≈ **~50 req/s**. Position is computed client-side.
+- **Admission rate (derived, not guessed):** Little's law. Cap concurrent in-flow buyers at C = 25,000 — each may hold ~2.4 seats, so worst case ~60k seats held, exactly one venue's worth and no more. Average in-flow session ≈ 4 min = 240s (most users abandon or finish well inside the 10-min hold TTL). Admission rate = C ÷ 240 ≈ ~104 users/s → round to **~100/s**.
+- **Time to sell out:** 60k seats ÷ 2.4 seats/order = ~25k orders needed; at a ~60% checkout completion rate that requires 25k ÷ 0.6 ≈ ~42k admissions. 42k ÷ 100/s ≈ ~420s ≈ **~7 minutes**.
+- **Queue drain vs inventory (the honest number):** draining all 1.5M at 100/s would take 1.5M ÷ 100 = 15,000s ≈ **~4.2 hours**, but inventory is gone in ~7 minutes. So ~1.46M users (~97%) must be told "sold out" without ever being admitted. Design the terminal state first.
+- **Seat state per event:** ~80B/seat (seat_id 8B + status 1B + holder_token 16B + hold_expiry 8B + order_id 16B + price_tier 2B + version 4B + padding ~25B). 60k × 80B = **~5MB per event** — an entire stadium on-sale's hot working set fits in one Redis shard. ~10k concurrently live events × 5MB = ~50GB cluster-wide; RF=2 in-memory → ~100GB.
+- **Hold write rate:** ~100 admissions/s × ~2.5 hold attempts each (users retry after losing a race) × ~2.4 seats ≈ **~600 CAS ops/s per event**. Trivial in absolute throughput. The difficulty is contention on the *same* keys, not ops/s — which is exactly why gating admission is the right lever.
+- **Durable records:** order ≈ ~400B (order_id 16B + user_id 16B + event_id 8B + seats array ~6×8B + price 8B + payment_ref 32B + status 4B + timestamps 24B + delivery ~200B + padding ~44B). Ticket ≈ ~200B (ticket_id 16B + order_id 16B + seat_id 8B + event_id 8B + barcode_seed 32B + rotation_epoch 8B + status 1B + transfer_ptr 8B + audit ~80B + padding ~23B). 600M tickets/yr × 200B = ~120GB/yr; RF=3 → **~360GB/yr**. The dataset is small; the arrival shape is the problem.
+- **Venue geometry assets:** ~10k distinct venue configurations × ~2.4MB ≈ ~24GB of immutable CDN objects. Never invalidated — a new configuration is a new URL.
+- **Queue tokens:** 1.5M × ~64B (id 16B + issued_at 8B + sort_key 8B + risk 2B + fingerprint_hash 16B + padding ~14B) ≈ **~100MB per on-sale**, TTL'd 24h after the on-sale opens.
+- **Hot vs cold:** seat state is hot for the ~2 hours around on-sale and read-mostly forever after. Evict settled events from Redis within 24h; only live and upcoming on-sales stay resident, which is what keeps the ~50GB figure flat rather than growing with the catalogue.
+
+#### API Contract
+```
+GET  /event/{id}                → { name, venue_config_url, on_sale_at, state }
+POST /event/{id}/queue          body: { fingerprint, attestation }
+                                → { token, sort_key_rank, watermark_url }
+GET  /q/{id}/serving            → { now_serving_rank, est_wait_s }   (CDN, 2s TTL)
+GET  /venue/{cfg}/geometry      → seat coordinates, immutable         (CDN, 1y TTL)
+GET  /event/{id}/status.bin     → 2-bit-per-seat bitmap               (CDN, 1s TTL)
+POST /event/{id}/admit          body: { token }  → { session, expires_at } | 429
+POST /event/{id}/hold           body: { session, seat_ids[] | quantity }
+                                → { hold_id, seats[], expires_at } | 409 CONFLICT
+POST /hold/{hold_id}/checkout   body: { payment_method, idempotency_key }
+                                → { order_id, tickets[] }             (see #23)
+DELETE /hold/{hold_id}          → { released: [seat_ids] }
+GET  /ticket/{id}/barcode       → { rotating_token, valid_until }
+```
+
+#### High-Level Design
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 490" role="img" aria-label="Ticketmaster on-sale architecture: CDN waiting room, queue token service, admission control, seat hold and checkout">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+  <rect class="box" x="290" y="20" width="180" height="46" rx="9"/>
+  <text class="lbl" x="380" y="43">1.5M Clients</text>
+  <rect class="box" x="20" y="110" width="210" height="62" rx="9"/>
+  <text class="lbl" x="125" y="128">CDN / Edge</text>
+  <text class="sub" x="125" y="148">waiting page · seat bitmap</text>
+  <text class="sub" x="125" y="164">now_serving (2s TTL)</text>
+  <rect class="box" x="275" y="110" width="210" height="62" rx="9"/>
+  <text class="lbl" x="380" y="128">Queue Token Svc</text>
+  <text class="sub" x="380" y="148">random sort key · sharded</text>
+  <text class="sub" x="380" y="164">~150k tokens/s</text>
+  <rect class="box" x="530" y="110" width="210" height="62" rx="9"/>
+  <text class="lbl" x="635" y="128">Risk Engine</text>
+  <text class="sub" x="635" y="148">fingerprint · proxy ASN</text>
+  <text class="sub" x="635" y="164">challenge / shadow-deny</text>
+  <rect class="box acc" x="275" y="215" width="210" height="62" rx="9"/>
+  <text class="lbl" x="380" y="233">Admission Ctrl</text>
+  <text class="sub" x="380" y="253">token bucket (#1)</text>
+  <text class="sub" x="380" y="269">~100 users/s</text>
+  <rect class="box acc" x="245" y="310" width="270" height="64" rx="9"/>
+  <text class="lbl" x="380" y="330">Purchase API</text>
+  <text class="sub" x="380" y="350">atomic seat hold · 10-min TTL</text>
+  <text class="sub" x="380" y="366">best-available allocator</text>
+  <ellipse class="store" cx="650" cy="300" rx="70" ry="10"/>
+  <path class="store" d="M580,300 v40 a70,10 0 0 0 140,0 v-40"/>
+  <text class="sub" x="650" y="320">Seat State (Redis)</text>
+  <text class="sub" x="650" y="338">CAS + TTL (#35)</text>
+  <rect class="box" x="180" y="425" width="190" height="46" rx="9"/>
+  <text class="sub" x="275" y="448">Checkout · Payment (#23)</text>
+  <ellipse class="store" cx="610" cy="415" rx="70" ry="10"/>
+  <path class="store" d="M540,415 v34 a70,10 0 0 0 140,0 v-34"/>
+  <text class="sub" x="610" y="437">Orders · Tickets</text>
+  <path class="flow" d="M310,66 L310,92 L125,92 L125,110"/>
+  <text class="edge" x="200" y="84" text-anchor="middle">poll (static objects)</text>
+  <path class="flow" d="M400,66 L400,110"/>
+  <text class="edge" x="408" y="88" text-anchor="start">join queue</text>
+  <path class="flow" d="M530,141 L490,141"/>
+  <path class="flow acc" d="M380,172 L380,215"/>
+  <text class="edge" x="388" y="194" text-anchor="start">next token</text>
+  <path class="flow acc" d="M380,277 L380,310"/>
+  <text class="edge" x="388" y="295" text-anchor="start">session granted</text>
+  <path class="flow" d="M515,325 L578,325"/>
+  <text class="edge" x="520" y="313" text-anchor="start">hold (CAS)</text>
+  <path class="flow dash" d="M650,350 L650,388 L125,388 L125,172"/>
+  <text class="edge" x="330" y="380" text-anchor="middle">seat bitmap · publish 1/s</text>
+  <path class="flow" d="M320,374 L320,400 L275,400 L275,425"/>
+  <path class="flow" d="M370,448 L538,448"/>
+  <text class="edge" x="454" y="438" text-anchor="middle">order + tickets</text>
+</svg>
+```
+
+**How to read the diagram:** the left column is the read path and it never touches the origin — the waiting page, the position watermark and the seat bitmap are all shared CDN objects. The centre column is a funnel: a token service that absorbs the spike, an admission controller that meters it, and a purchase API that only ever sees a few hundred concurrent buyers. The right column is state and adjudication.
+
+**Why the flow is shaped this way:** the arrival rate and the service rate differ by three orders of magnitude, so something has to buffer. Putting the buffer in front of the application (a queue of tokens) rather than inside it (threads, connections, database locks) means the expensive tier is sized for the sustainable rate, not the peak. The Risk Engine sits at the *token gate* rather than at checkout because rejecting a bot after it holds a seat has already cost you the seat for ten minutes.
+
+**What this layout buys you:** an origin that is nearly flat through the spike, and a database that never sees contention it wasn't admitted for. The trade is a user-visible waiting room and up to one second of seat-map staleness — the same bargain #19 makes between its search index and its inventory rows, taken further because the mismatch here is far larger.
+
+#### Data Model
+- **events** (transactional store, PK `event_id`): `(event_id, venue_config_id, on_sale_at, state, pricing_policy_id)`
+- **seat_state** (in-memory store, key `seat:{event_id}:{seat_id}`, sharded by `event_id`): value = `(status, holder_session, order_id, version)` with native key TTL carrying the hold expiry
+- **seats** (transactional store, partition by `venue_config_id`): `(venue_config_id, seat_id, section, row, number, x, y, tier)` — immutable geometry, mirrored to CDN
+- **holds** (append-only log / write-behind, partition by `event_id`): `(hold_id, session, seat_ids[], acquired_at, expires_at, outcome)`
+- **orders** (transactional store, partition by `event_id`): `(order_id, user_id, event_id, seat_ids[], price, payment_ref, status)`
+- **tickets** (transactional store, partition by `event_id`): `(ticket_id, order_id, seat_id, barcode_seed, rotation_epoch, holder_id, transfer_state)`
+- **queue_tokens** (in-memory sorted set, key `q:{event_id}`, sharded 16 ways): member = token id, score = random `sort_key`
+- **identity_graph** (transactional store, indexed by payment fingerprint, device hash, address hash): backs purchase limits across accounts
+
+#### Detailed Design
+
+**The waiting room is a CDN artefact, not a service.** The naive waiting room is an endpoint that returns "you are number 843,201". At 1.5M clients polling every 5s that is ~300k QPS of per-user state lookup — an entire service tier whose only output is "keep waiting". Invert it: the server publishes one global watermark (`now_serving_rank`, ~20B) as a cacheable object with a 2s TTL, and the client, which already knows its own rank from token issue, subtracts. Origin load falls from ~300k req/s to ~50 req/s, and the client's estimated wait is `(my_rank − now_serving) ÷ observed_admission_rate`, computed locally and smoothed over the last three polls so it doesn't jitter. Nor should you reach for WebSockets out here: 1.5M connection establishments inside ten seconds is a TLS-handshake stampede that exhausts load-balancer accept queues before a single seat is sold. Push is correct *after* admission, where there are only ~25k concurrent sessions and you genuinely want it for hold countdowns and seat-taken invalidation — cheap mechanism outside the gate, expensive one inside. The one thing you must *not* do is let the estimate be optimistic: users who will never be admitted should see "unlikely to be reached" within a minute, not a countdown that quietly stalls.
+
+**Fairness: lottery draw versus first-come-first-served.** Strict FCFS sounds fair and is not. Ordering by arrival timestamp makes the competition a contest in network latency and client count, both of which are purchasable — a bot on a cloud instance 3ms from your edge with 5,000 parallel sessions beats a real user on home broadband every single time, and it does so deterministically. It is also a throughput problem: a monotonic sequencer is a single-writer hotspot at ~150k arrivals/s. Assigning each token a random 64-bit `sort_key` fixes both. Arrival order stops mattering (within the on-sale window), so the 3ms advantage is worth nothing, and the "counter" becomes 16 independent shards with no coordination. Bots can still buy more lottery tickets by opening more sessions — which is precisely why the draw must be combined with per-identity admission caps, below. The usual production shape is a hybrid: everyone who arrives in the first N seconds goes into one randomised pool; arrivals after that are appended FCFS behind it, because by then the fairness question is moot.
+
+**Admission control is Little's law, not a guess.** Pick the concurrency cap from inventory: at most C buyers in-flow, each able to hold up to `max_order` seats, so `C × max_order ≤ total_seats` keeps the worst case at "everything held, nothing oversold". For 60k seats and a 6-seat limit that is C ≈ 10,000; with a realistic 2.4-seat average, C = 25,000 is the operating choice. Then admission rate = C ÷ mean_session_seconds = 25,000 ÷ 240 ≈ ~104/s. The controller is a token bucket (see #1) refilled by *completions*, not by a fixed clock: every checkout, abandonment and TTL expiry returns a slot, so the rate self-tunes if users are slower than modelled. The failure to avoid is admitting on a fixed schedule while sessions run long — in-flow count creeps past C, every seat is held, and admitted users see a fully grey map, which is the worst experience the system can produce.
+
+The funnel below gives the stage-by-stage cardinalities and where the time goes. Latency budget for one admitted buyer: token issue ~15ms (one sharded Redis write), watermark polling amortised to ~0, admission handshake ~40ms including the risk lookup, geometry fetch ~80ms from a warm POP, bitmap fetch ~8ms, seat hold p99 < 100ms (dominated by a single `SET NX` at ~1.5ms plus network), checkout 2-6s (payment provider dominates, see #23).
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 320" role="img" aria-label="On-sale funnel: 1.5M arrivals through CDN waiting page, token draw, position watermark, admission gate, risk scoring, seat hold, checkout, sold out">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+  <!-- row 1 -->
+  <rect class="box" x="15" y="48" width="170" height="72" rx="9"/>
+  <text class="sub" x="100" y="64">1.5M arrive in ~10s</text>
+  <text class="sub" x="100" y="82">CDN waiting page</text>
+  <text class="sub" x="100" y="100">0 origin QPS</text>
+  <rect class="box" x="205" y="48" width="170" height="72" rx="9"/>
+  <text class="sub" x="290" y="64">Token draw</text>
+  <text class="sub" x="290" y="82">random 64-bit key</text>
+  <text class="sub" x="290" y="100">~150k tokens/s</text>
+  <rect class="box" x="395" y="48" width="170" height="72" rx="9"/>
+  <text class="sub" x="480" y="64">Position estimate</text>
+  <text class="sub" x="480" y="82">watermark, 2s CDN TTL</text>
+  <text class="sub" x="480" y="100">~50 origin req/s</text>
+  <rect class="box" x="585" y="48" width="170" height="72" rx="9"/>
+  <text class="sub" x="670" y="64">Admission gate</text>
+  <text class="sub" x="670" y="82">Little's law: C ÷ 240s</text>
+  <text class="sub" x="670" y="100">~100 users/s</text>
+  <path class="flow" d="M185,84 L205,84"/>
+  <path class="flow" d="M375,84 L395,84"/>
+  <path class="flow" d="M565,84 L585,84"/>
+  <!-- wrap to row 2 -->
+  <path class="flow" d="M670,120 L670,158 L100,158 L100,208"/>
+  <!-- row 2 -->
+  <rect class="box acc" x="15" y="208" width="170" height="76" rx="9"/>
+  <text class="sub" x="100" y="226">Risk score</text>
+  <text class="sub" x="100" y="244">fingerprint · proxy ASN</text>
+  <text class="sub" x="100" y="262">~15% challenged</text>
+  <rect class="box acc" x="205" y="208" width="170" height="76" rx="9"/>
+  <text class="sub" x="290" y="226">Seat hold</text>
+  <text class="sub" x="290" y="244">SET NX EX 600</text>
+  <text class="sub" x="290" y="262">~600 CAS/s per event</text>
+  <rect class="box" x="395" y="208" width="170" height="76" rx="9"/>
+  <text class="sub" x="480" y="226">Checkout</text>
+  <text class="sub" x="480" y="244">~60% complete</text>
+  <text class="sub" x="480" y="262">~25k orders</text>
+  <rect class="box" x="585" y="208" width="170" height="76" rx="9"/>
+  <text class="sub" x="670" y="226">Sold out</text>
+  <text class="sub" x="670" y="244">60k seats in ~7 min</text>
+  <text class="sub" x="670" y="262">~1.46M told early</text>
+  <path class="flow" d="M185,244 L205,244"/>
+  <path class="flow" d="M375,244 L395,244"/>
+  <path class="flow" d="M565,244 L585,244"/>
+</svg>
+```
+
+**Seat holds and the millisecond race, precisely.** Two admitted users both tap seat 118-C-7 at 10:03:12.0041 and 10:03:12.0043. Both requests land on different Purchase API instances. Both issue `SET seat:42:118-C-7 <session> NX EX 600` to the Redis shard that owns `event:42`. Redis executes commands on that key serially on a single thread, so exactly one `SET` returns `OK` and the other returns `nil` — there is no window, no version check, no retry loop. The loser gets `409 CONFLICT` with the seat's new status inline so the client can grey it immediately rather than waiting for the next bitmap publish. For a multi-seat order the operation must be all-or-nothing: acquire in ascending seat-id order (two orders overlapping on {7,8} and {8,9} can then never deadlock), and on the first failure release everything already acquired with a `DEL`-if-mine Lua script so you cannot delete a hold that a *different* session subsequently took. That release-if-mine check is the same fencing concern as #35 — a bare `DEL` is the classic distributed-lock bug wearing a seat map.
+
+**Expiry, write-behind and what "released" actually means.** The hold's authority is the Redis key TTL; when it lapses the seat is available again with no reaper involved, which matters because a reaper is a single point of "everything is stuck held". A subscriber on keyspace-expiry events writes the release into the durable log and marks the bitmap dirty. Durability runs *behind* the hot path: `HoldTaken` and `HoldReleased` go to Kafka, and a consumer materialises them into Postgres. The one transition that is not write-behind is `held → sold`, which is a synchronous transaction: the payment saga (see #23) authorises, then a single Postgres transaction inserts the order and the ticket rows and flips seat status, and only then is Redis updated to `sold` with no TTL. If Redis is lost entirely, the seat's truth is reconstructible from Postgres plus the Kafka log; if Postgres is behind, no seat has been *sold* that isn't recorded.
+
+**Best-available allocation defuses the contention you'd otherwise create.** Left to themselves, every buyer clicks the same twenty seats and you manufacture a hot-key problem. Offer "best 2 available in tier A" as the default path and have the server pick: it walks a pre-scored preference list for the tier, skipping seats whose keys exist, and CASes the first contiguous pair it finds. Because the server picks, you can *deliberately spread* concurrent allocations across the tier — hash the session id into the preference list's starting offset — so 200 concurrent best-available requests contend on ~200 distinct keys rather than one. Manual seat picking stays available; it just isn't the default, and the users who insist on row 5 centre are the ones who absorb the conflict rate.
+
+**Bot defence, and the economics you cannot engineer around.** Start from the adversary's P&L: a $150 face-value ticket that resells at $600 is $450 of margin, so a scalper who lands 1,000 tickets on one show clears ~$450k. Against that, residential proxy bandwidth runs a few dollars per GB, CAPTCHA-solving farms charge on the order of $1-2 per 1,000 solves, and aged accounts are a commodity. Their cost per purchase attempt is *cents*. No single control survives that ratio, so you layer, cheapest first: (1) a JS/WASM proof-of-work at the token gate — ~200ms on a real phone, invisible to a human, but 5,000 parallel sessions now cost the attacker real CPU; (2) device and TLS fingerprinting — JA3/JA4 signatures, canvas and font entropy, headless-browser tells; (3) ASN and proxy reputation, since residential-proxy exit nodes cluster in identifiable ranges and show impossible geo-velocity across sessions sharing a fingerprint; (4) purchase limits enforced against an **identity graph**, not an account — same payment-instrument fingerprint, same delivery address hash, same device, capped at N tickets per event regardless of how many accounts they wear; (5) shadow-denial for high-confidence bots: the session appears to work, holds appear to succeed, checkout fails at the last step, so the operator gets no clean signal to A/B their evasion against. The honest framing for an interview is that this is *loss-limitation*, not prevention: the measurable goal is "≥ 90% of inventory to humans", and the strongest real lever is not detection at all but making the ticket non-transferable-for-profit (below), which attacks the margin rather than the bot.
+
+**Delivery: rotating barcodes.** A static barcode is a bearer instrument that can be screenshotted and sold ten times. Issue instead a per-ticket `barcode_seed` and derive the displayed code as `HMAC(seed, floor(now / 15s))`, rendered in the app and refreshed every ~15 seconds with a visible animation so a screenshot is self-evidently stale at the gate. The scanner validates offline against a pre-downloaded seed list with a ±2-epoch clock tolerance, so gate scanning survives a dead stadium network — which it will have, with 60,000 phones in one place. Legitimate transfer re-issues the seed to the new holder and invalidates the old one, so the resale market is forced through your platform, where a price cap and a fee schedule can be applied. This is the control that actually moves scalper economics: it converts an anonymous bearer asset into a registered one.
+
+#### Potential Follow-Up Questions
+**Q: Two users click the same seat 2ms apart — walk me through exactly what happens.**
+Both `SET seat:{event}:{id} <session> NX EX 600` land on the same Redis shard, which runs them serially on one thread; one returns `OK`, one returns `nil`. The loser gets a `409` carrying the seat's new status so the UI greys it instantly. There is no retry loop and no version compare. *If pushed:* the subtle bug is multi-seat orders — acquire ascending by seat id so overlapping orders can't deadlock, and release with a compare-and-delete Lua script (`if GET == mine then DEL`) so a late rollback can't free a seat someone else has since taken. That fencing check is the same failure #35 warns about.
+
+**Q: Why not strict first-come-first-served? Users think it's the fair option.**
+Because FCFS is a latency auction, and latency is for sale. A bot 3ms from your edge running 5,000 sessions wins deterministically over a human on home broadband; you'd be selling the inventory to whoever spent most on infrastructure. It's also a single-writer sequencer at ~150k arrivals/s. A random sort key per token makes arrival order irrelevant and shards trivially. *If pushed:* the lottery doesn't stop an attacker buying more entries, so it only works paired with per-identity caps at the gate; and you should be transparent about it in the UI, because "you were 900,000th" reads as broken to a user who clicked at exactly 10:00:00.
+
+**Q: The queue tells someone they're position 900,000. Do you just let them wait?**
+No — that is the design's most important honest moment. At ~100 admissions/s and ~42k admissions to exhaustion, anyone ranked beyond ~50k is not getting in. Compute the exhaustion rank as inventory sells and terminate everyone beyond it with "sold out" plus a waitlist opt-in, within about a minute of on-sale. *If pushed:* keep a small margin (say 2× the projected exhaustion rank) held in the queue rather than terminated, because release-backs from expired holds and failed payments genuinely do return inventory — typically ~40% of holds don't convert, and those seats need buyers standing by.
+
+**Q: The hold TTL expires while the payment authorisation is still in flight. Now what?**
+Freeze the seat rather than release it: on entering checkout, extend the key TTL to cover the payment timeout (e.g. `EXPIRE 900`) and mark the hold `committing`. If authorisation then succeeds you sell; if it fails or times out you release explicitly. *If pushed:* the genuinely nasty case is authorisation succeeding *after* you released and someone else bought the seat — you must be able to void the auth (never capture before the seat flip commits, exactly the authorise-not-capture rule from #19) and, if you somehow captured, treat it as an oversell incident with automatic refund plus compensation, because you cannot un-sell a seat that has been issued.
+
+**Q: The Redis shard holding event 42's seat state fails at 10:00:04. What breaks and what do you do?**
+Holds stop; sales stop. Fail over to the replica, but understand what you've lost: asynchronous replication means the last few hundred milliseconds of holds may be missing, so a seat could be re-holdable by a second buyer. *If pushed:* the safe protocol is to freeze the event on failover (reject new holds), rebuild seat state from Postgres `sold` rows plus the Kafka `HoldTaken` log — which is durable and ordered — and only then reopen, typically ~30-60s. Sold seats are never at risk because `held → sold` is a synchronous Postgres transaction; only in-flight holds are, and the worst case there is a user losing a hold, not a double-sold seat.
+
+**Q: Dynamic pricing during an on-sale — how, and what breaks?**
+Price is snapshotted onto the hold at acquisition and honoured for the TTL; the pricing engine adjusts tier prices from sell-through velocity on a slow loop (minutes, not seconds). *If pushed:* what breaks is trust and cache coherence together — a user who sees $150 on a 1-second-stale bitmap and $310 at checkout will (correctly) call it a bait-and-switch, so never re-price inside a hold, publish price changes as a distinct visible event, and expect that surge pricing on high-demand shows is a reputational decision the business makes, not an optimisation engineering slips in.
+
+**Q: How do you stop someone screenshotting a barcode and selling it twice?**
+Rotating barcodes: display `HMAC(seed, floor(now/15s))`, refreshed every ~15s with a visible animation, validated by scanners offline against a pre-downloaded seed list with ±2-epoch tolerance. A screenshot is stale within seconds. *If pushed:* this only works if transfer is a first-class product feature — re-issue the seed to the recipient and invalidate the sender's — otherwise you've merely made legitimate ticket-sharing painful while a determined reseller just hands over the phone. The real anti-scalping lever is the registered-transfer market with a price cap, not the barcode.
+
+**Q: How does this differ from the hotel design in #19, in one breath?**
+Hotels have smooth arrivals against interchangeable per-type counters and rare hot rows; the correct answer there is `SELECT … FOR UPDATE` and a saga. Here arrivals are a spike, inventory is named seats that buyers want *specifically*, and there's a funded adversary. *If pushed:* the structural consequence is that #19 puts its cleverness in the transaction and #49 puts it in front of the transaction — admission control and CDN-shared state — because by the time contention reaches the database you have already lost.
+
+#### Bottlenecks & Mitigations
+- **Seat-map read amplification** — 1.5M clients wanting live status of 60k seats is a heavier load than every write in the system combined, and serving it from the origin is impossible at ~60 Gbps. Publish a single 2-bit-per-seat bitmap (~5KB gzipped) to the CDN once per second and let request collapsing do the work; the cost is up to 1s of staleness and a `409` on the occasional seat that was taken inside the window, which the client handles by greying the seat inline.
+- **Queue-position polling** — a per-user position endpoint is ~300k QPS of pure overhead. Publish one global watermark with a 2s TTL and compute position client-side; the cost is a slightly coarser estimate and a client that must be trusted to display its own rank honestly (it can't cheat — the rank is signed into the token and re-verified at admission).
+- **Token-issue hotspot** — a monotonic sequencer for FCFS ordering is a single-writer bottleneck at ~150k/s and a livelock risk under retry. Random 64-bit sort keys shard across 16 nodes with zero coordination; the cost is giving up strict arrival ordering, which is the right trade because arrival ordering was a bot subsidy anyway.
+- **Hot-seat contention** — everyone clicks the same twenty seats, concentrating CAS traffic on a handful of keys. Make server-side best-available the default path and hash the session id into the preference-list starting offset so concurrent allocations spread across the tier; the cost is that users lose the illusion of a free choice, mitigated by keeping manual picking available for those who want it.
+- **Admitted-but-starved sessions** — if admission runs on a clock while sessions run long, in-flow count drifts past C, every seat is held, and admitted users see an entirely grey map. Refill the admission bucket from *completions* (checkout, abandon, TTL expiry) rather than a timer; the cost is a variable admission rate that must be exposed in the wait estimate.
+- **Payment provider as the tail** — checkout is 2-6s and the provider is the slowest hop, so a provider slowdown silently inflates mean session time and collapses admission throughput via Little's law. Circuit-break the provider, extend hold TTLs when its p99 degrades, and reduce the admission rate rather than the concurrency cap; the cost is a longer queue that is at least honest.
+- **Release-back storms** — when ~40% of holds expire, seats return in bursts and the bitmap flickers green, triggering a click stampede on the same freed seats. Stagger release visibility by randomising the reap-to-publish delay over a few seconds; the cost is a marginally staler map in exchange for a smoothed retry curve.
+
+#### Failure Modes
+| Layer | Failure | Detection | Mitigation |
+|---|---|---|---|
+| CDN | POP loses the seat-bitmap object or serves it stale past TTL | Per-POP object age and origin-fetch ratio; client-reported bitmap timestamp skew | Multi-CDN with health-checked failover; clients fall back to a direct `GET /event/{id}/status.bin` with a jittered 5s poll and an explicit "map may be stale" banner; conflicts are already handled by `409` on hold |
+| Queue token service | A token shard fails during the spike; a slice of arrivals get no token | Token-issue error rate per shard; arrival-to-token conversion below 99% | Client retries against a different shard (shard chosen by client-side hash with fallback ring); a lost token means re-drawing a new random key, which is fair by construction since order doesn't matter |
+| Admission controller | Leader for an event dies mid-on-sale; admissions stop | Watermark advance rate hits zero while queue depth > 0 | Leader election per event with a short lease; new leader resumes from the persisted watermark and in-flight count; over-admitting slightly on handover is safe because the concurrency cap is a soft bound, under-admitting is not |
+| Seat state store | Redis shard for the event fails; async replica is milliseconds behind | Shard health; hold-latency p99 spike; replication lag alarm | Freeze the event, promote the replica, rebuild seat state from Postgres `sold` rows plus the ordered Kafka `HoldTaken` log, reopen in ~30-60s; sold seats are never at risk since `held → sold` is a synchronous Postgres transaction |
+| Payment provider | Authorisation succeeds after the hold was released and the seat resold | Post-hoc reconciliation of captures against sold seats | Never capture before the seat flip commits; auto-void late authorisations; if a capture slipped through, treat as an oversell incident with automatic refund plus goodwill compensation — the seat cannot be un-sold |
+| Risk engine | Engine unavailable, or a rule misfires and challenges every real user | Challenge rate per minute vs baseline; admission-to-checkout conversion collapse | Fail *open* on unavailability (a bot-heavy on-sale is better than a dead one) but tighten per-identity purchase caps automatically to bound the damage; auto-rollback a rule whose challenge rate deviates > 3σ from baseline |
+| Bot wave | A residential-proxy pool defeats fingerprinting and consumes admission slots | Admission-to-checkout conversion anomaly; ASN concentration; identity-graph collision rate | Raise proof-of-work difficulty dynamically; shadow-deny the suspect cohort so operators get no clean feedback; tighten identity-graph caps; post-sale, cancel and re-release orders that violate limits |
+| Gate scanning | Stadium network is saturated; scanners can't reach the validation API | Scanner offline-mode rate at the venue | Scanners pre-download the event's seed list and validate `HMAC` offline with ±2-epoch clock tolerance, syncing redemptions when connectivity returns; duplicate redemptions are resolved at the gate by staff, not by the network |
+
+#### Observability — Key Metrics & SLOs
+- **Origin QPS during on-sale** (requests reaching origin ÷ total client requests) — SLO: origin sees < 0.1% of client requests in the first 60s. This is the single number that tells you the CDN offload is working; if it climbs, everything downstream is about to fail.
+- **Seat-bitmap publish age** (seconds between the last seat state change and its appearance at the edge) — SLO p99 ≤ 2s. Beyond that, `409` conflict rates climb and the map stops feeling live.
+- **Hold conflict rate** (`409`s ÷ hold attempts) — SLO < 15% steady, alert above 40%. High conflict means either the bitmap is stale or best-available spreading has stopped working, and it maps directly to user frustration.
+- **In-flow concurrency vs cap** (admitted sessions not yet terminal ÷ C) — SLO: stays within 0.8-1.05 of the cap. Drift above means admission is outrunning completions and admitted users are about to see a fully-held map.
+- **Admission-to-checkout conversion, segmented by risk band** — health metric; the low-risk cohort should convert at ~60%. A high-risk cohort converting *better* than the low-risk one is the clearest single signal that the risk model has been defeated.
+- **Time-to-terminal-state for unwinnable queue positions** — SLO: users beyond the projected exhaustion rank are told "sold out" within 90s of on-sale. Slow honesty is the biggest driver of support load and of the "the site was broken" narrative.
+- **Oversold seats** — SLO: zero, hard. Counted daily by reconciling ticket rows against distinct `(event_id, seat_id)`; every non-zero day is a postmortem.
+
+#### Multi-Region & DR
+- **Replication mode:** an event is *homed* to one region and its seat state has a single authoritative Redis cluster there — seat allocation is fundamentally a single-writer problem and active-active on seat keys would trade a solved race for an unsolvable one. The CDN layer, queue token service and waiting room are global and stateless-ish (tokens are region-tagged and forwarded to the home region at admission). Orders and tickets replicate synchronously across AZs and asynchronously cross-region.
+- **RTO:** ~30-60s for in-region Redis failover including the freeze-rebuild-reopen protocol. Cross-region failover of a *live* on-sale is deliberately not automated — you postpone the on-sale instead, because rebuilding seat state in a second region from an async replica risks exactly the double-sell the whole design exists to prevent. For events not currently on-sale, cross-region cutover is ~10-15 minutes.
+- **RPO:** zero for sold seats (synchronous Postgres transaction plus multi-AZ sync replication). Seconds for in-flight holds, which are recoverable from the ordered Kafka log; the acceptable loss is "a user's hold vanishes and they must re-pick", never "a seat is sold twice".
+- **Failover cadence:** automatic AZ-level failover; quarterly full DR game-day against a synthetic on-sale replaying a recorded 1.5M-arrival trace; every major on-sale gets a pre-flight load test at 2× projected arrivals in the week before.
+- **Cross-region cost:** small in bytes — ~360GB/yr of tickets and orders, plus the Kafka hold log. CDN egress for the geometry and bitmap objects dominates the bill by orders of magnitude, and is the number to optimise: one extra kilobyte on the bitmap is ~1.5GB of egress per on-sale second.
+
+#### Common Mistakes / Anti-patterns
+- **Treating this as the hotel problem (#19) with more traffic.** Reaching for `SELECT … FOR UPDATE` on seat rows means the database is where the million-way contention lands, and no amount of tuning survives it. The defence has to sit *in front of* the transaction — admission control and shared CDN state — so the database only ever sees the trickle it was sized for.
+- **Optimistic locking with retry on seat rows.** 500 clients CAS the same seat, one wins, 499 retry, and the retry traffic grows faster than the inventory shrinks — classic livelock, and it manifests as a total stall rather than a graceful degradation. Use a single atomic `SET NX` that fails immediately and definitively, and tell the loser in the response.
+- **A waiting room built out of application servers.** If holding a place in the queue costs you a session, a connection or a database row per user, you have simply moved the spike from the purchase path to the queue path. The queue must be a counter and a static page; if it isn't cheaper than the thing it protects, it isn't a queue, it's a second outage. Static barcodes are the same error at the other end of the flow — a screenshot is a bearer instrument, and rotating `HMAC`-derived codes remove an entire fraud category for almost nothing.
+- **Strict first-come-first-served, presented as fairness.** Ordering by arrival time sells the inventory to whoever has the lowest latency and the most parallel sessions, which is definitionally the bots. A randomised draw at the on-sale instant, plus per-identity caps, is fairer in outcome even though it feels less fair in the UI.
+- **Purchase limits enforced per account.** Accounts are free; the limit has to bind to something that costs money to duplicate — payment-instrument fingerprint, delivery address, device. An attacker with 20,000 accounts and one card should hit the cap on ticket four.
+- **Letting the queue lie about wait time.** A countdown that stalls, or a position that never moves, generates more support load and worse press than an early "you're unlikely to be reached". Compute the exhaustion rank from live sell-through and terminate hopeless positions fast.
+
+#### Talking Points for the Interview
+- **Name the spike in the first sentence, and contrast it with #19.** "A million people at 10:00:00 against 60,000 named seats" is the whole problem statement; a hotel's smooth arrivals against interchangeable counters is a different system, and saying so early shows you've identified the actual constraint rather than pattern-matching to reservations.
+- **The read path is bigger than the write path.** Almost everyone designs the seat-lock first. Leading with "1.5M browsers each want a live view of 60k seats, and that's ~60 Gbps before anyone buys anything" is the differentiating observation.
+- **Derive the admission rate with Little's law, out loud.** C = 25,000 in-flow, ~240s mean session, so ~100 admissions/s and ~7 minutes to sell out. Numbers that come from the hold TTL and the seat count beat any number you assert.
+- **The seat hold is a distributed lease, and say why `DEL` is a bug.** `SET NX EX` plus compare-and-delete on release is the whole mechanism; naming the fencing hazard (see #35) shows you know why the obvious rollback is wrong.
+- **Fairness is a design decision with a security consequence.** FCFS is a latency auction that you'd be running on behalf of scalpers; a randomised draw plus identity-bound caps is the defensible choice, and it's worth stating that you'd be transparent about it in the UI.
+- **Bot defence is loss-limitation with a stated target, not prevention.** A scalper clearing ~$450k on one show will outspend any single control; layer proof-of-work, fingerprinting, ASN reputation, identity-graph caps and shadow-denial, measure "≥ 90% of inventory to humans", and note that registered transfer with rotating barcodes attacks the margin rather than the bot.
+
+### 50. Design a RAG System (Retrieval-Augmented Generation)
+#### Problem
+Answer natural-language questions about a company's own documents — wikis, tickets, PDFs, source code — by retrieving the relevant passages and having a language model write a cited answer from them, without ever surfacing content the asker is not allowed to read.
+
+#### Summary
+**The picture in your head:** a research librarian who has read nothing but has memorised where everything is. You ask "what's our parental leave policy in Ireland?"; they walk the stacks, pull eight pages out of eight different binders, spread them on the desk in order of usefulness, and then a second person — who reads only those eight pages and nothing else — writes you a paragraph with footnotes. Two rules make the whole thing work: the librarian is not allowed to hand you a page from a binder your badge doesn't open, and the writer is not allowed to say anything that isn't on the desk. Almost every failure of a RAG system is one of those two rules quietly breaking.
+
+**The single-request walkthrough (query path):** a user asks the assistant a question. Stage 0 — identity: the gateway resolves the caller to a principal and a set of ACL group IDs from a 60-second-TTL cache (~2ms). Stage 1 — query embedding: the question goes through the same embedding model used at ingest, producing a 1024-dimensional vector (~8ms p50 on a batched GPU endpoint). Stage 2 — parallel retrieval: a dense approximate-nearest-neighbour search over the HNSW index returns the top 200 chunks (~25ms p95, scatter-gather over 6 shards, slowest shard dominates), while a lexical BM25 query over an inverted index returns another top 200 (~30ms p95, see #47); both carry the ACL group set as a hard pre-filter predicate. Stage 3 — fusion: the two ranked lists are merged with reciprocal rank fusion into ~300 unique chunks (~3ms). Stage 4 — rerank: the top 100 by fused score go through a cross-encoder that scores each (question, chunk) pair jointly (~90ms p95 — the most expensive retrieval step by far). Stage 5 — assembly: dedupe near-identical chunks, drop anything whose `effective_to` has passed, keep the top 8 (~6k tokens), order them highest-score-first-and-last. Stage 6 — generation: prompt goes to the inference tier (see #46); first token at ~700ms, full 400-token answer streamed over ~8s. Time to first token p95 ≈ 1.2s; retrieval and rerank together are only ~180ms of it.
+
+**The write path is a pipeline, not a request:** a Confluence page is edited. The connector's change-data-capture poll (or webhook) sees the new version within ~60s and emits `{source, external_id, version}`. A parser turns the page into normalised text plus a heading path. The chunker splits it on structural boundaries into ~512-token chunks with ~64 tokens of overlap. Each chunk is hashed; unchanged chunks are skipped, so a one-paragraph edit re-embeds 1 chunk, not 11. Changed chunks go to the embedding workers, then an upsert writes the vector into the HNSW index, the text into the chunk store, and the tokens into the lexical index — all keyed by `(doc_id, ordinal)`. Median edit-to-searchable is ~90s.
+
+**The pieces (and what each one is for):**
+- **Connectors + CDC** — one adapter per source system (Confluence, Jira, GitHub, Google Drive, an S3 bucket of PDFs). Each keeps a watermark or delta token so a poll fetches only what changed since last run, rather than re-crawling 50M documents nightly. Webhooks where the source offers them, polling where it doesn't; a weekly full reconciliation sweep catches deletions the webhook missed, because a deleted document that stays searchable is a security incident, not a staleness bug.
+- **Chunker** — the most consequential and most underrated component. Structure-aware where structure exists (split on markdown headings, PDF sections, function boundaries in code), fixed-size with overlap as the fallback. Emits `(doc_id, ordinal, text, heading_path, char_span)`.
+- **Embedding model** — maps text to a 1024-dimensional vector such that semantically similar text lands nearby. The *same* model must embed both documents and queries; vectors from two different models are not comparable at all, which is why a model upgrade is a full re-index (below).
+- **Vector index (HNSW)** — Hierarchical Navigable Small World: a layered graph where each chunk is a node wired to ~32 near neighbours, and search greedily walks from a sparse top layer down to the dense bottom one, keeping a candidate list of size `efSearch`. Gives ~0.97 recall@100 at ~10ms per shard, but stores every full vector plus the graph in RAM.
+- **Lexical index (BM25 over an inverted index)** — the classic term-frequency ranking (see #47). It catches exactly what embeddings miss: error codes, ticket IDs, product names, acronyms, and any rare token the embedding model has effectively never seen.
+- **Cross-encoder reranker** — runs the question and one chunk through a single transformer *together*, so every query token attends to every chunk token. Far more accurate than a dot product between two independently computed vectors, and ~1000× more expensive per pair — which is exactly why it runs on 100 candidates and not 500M.
+- **ACL resolver** — maps a principal to the set of group IDs they hold, refreshed on a short TTL. Chunks carry group IDs, not user IDs, so a document shared with 5,000 people is still one small array.
+- **Evaluation harness** — a labelled question set plus retrieval and generation metrics, wired into CI. Without it, nobody can tell whether last week's chunker change made the product better or worse.
+
+**The thing that makes it hard:** the system confidently answers from the wrong chunks, and nothing in your dashboards goes red. Four distinct mechanisms produce it. *One:* vector similarity measures topical relatedness, not answerhood — "how much parental leave do I get?" is closest to the HR page's introductory paragraph *about* leave, while the chunk containing "26 weeks" ranks eleventh. *Two:* the lost-in-the-middle effect — with 20 chunks in the prompt, models attend well to the beginning and end of the context and poorly to the middle, so a correct chunk placed tenth is often ignored. *Three:* conflicting versions — the retriever surfaces the 2019 expenses policy and the 2025 one, they are near-identical semantically, and the model picks one essentially at random and cites it convincingly. *Four:* more context makes it worse — going from 5 chunks to 20 reliably *lowers* faithfulness, because each irrelevant chunk is another thing the model can plausibly ground a wrong sentence in. Every one of these produces a fluent, well-cited, wrong answer, and users report it as "the AI is unreliable" rather than as a retrieval bug.
+
+**Why the standard solution works:** stack cheap mitigations that each attack one mechanism, then measure. Hybrid retrieval fixes the vocabulary half of problem one — BM25 finds the chunk containing the literal string "26 weeks" that the embedding ranked eleventh. The cross-encoder reranker fixes the rest of it: scoring the question and chunk jointly is precisely the operation that distinguishes "about this topic" from "answers this question", and it reorders the top 100 into a top 8 that is dramatically better than the raw dense ranking. Ordering by rerank score with the best chunks at both ends of the prompt defeats lost-in-the-middle. Hard filters on `effective_from`/`effective_to` metadata plus a recency prior kill the stale-conflict case at the retrieval layer, where it belongs, rather than hoping the model notices the dates. Near-duplicate deduplication by content hash and MinHash stops eight copies of the same onboarding doc consuming the whole budget. And an abstention threshold — if the top rerank score is below a calibrated floor, return "I don't know, here's what I found" — converts the worst failure into the second-best outcome. The cost is real: the reranker is a GPU fleet, hybrid retrieval doubles the query fan-out, and abstention will annoy users on questions the corpus genuinely does answer. You tune the floor against the labelled set, not against intuition.
+
+**If you were building it tomorrow:**
+- Qdrant or Vespa for vectors (both support filtered HNSW natively); OpenSearch or the same Vespa cluster for BM25; Postgres for documents, ACLs and eval labels; S3 plus a manifest for raw chunk text; Kafka between every ingest stage; Ragas-style metrics in CI.
+- Query path pseudocode:
+  ```
+  groups   = acl.groups_for(principal)            -- cached, 60s TTL
+  qvec     = embed(question)                      -- same model as ingest
+  dense    = ann.search(qvec, k=200, filter=acl_any(groups) and not_expired())
+  lexical  = bm25.search(question, k=200, filter=same)
+  fused    = rrf(dense, lexical, k=60)            -- score = sum 1/(60 + rank)
+  top100   = fused[:100]
+  scored   = cross_encoder.score(question, top100)
+  kept     = dedupe(recency_weight(scored))[:8]
+  if kept[0].score < ABSTAIN_FLOOR: return no_answer(kept[:3])
+  ctx      = interleave_best_at_both_ends(kept)   -- beats lost-in-the-middle
+  return llm.stream(prompt(question, ctx), cite=True)
+  ```
+- Ingest path: `cdc_event → parse → chunk → hash → skip_unchanged → embed → upsert(vector, lexical, chunk_store)`, with the chunk hash as the idempotency key so replays are free.
+#### Clarifying Questions
+- Is the corpus permissioned per-document, or can everyone in the company read everything?
+- Must every answer cite its sources, and is "I don't know" an acceptable response?
+- How fresh must an edit be — visible in minutes, or is overnight acceptable?
+- Prose only, or also code and structured ticket data?
+- Do we own the embedding and generation models, or are they third-party APIs?
+- Is this a chat surface where seconds are fine, or an inline suggestion surface (see #10)?
+
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Per-document permissions | ACL group IDs on every chunk, evaluated as a pre-filter inside the ANN traversal, and fail-closed if the resolver is down |
+| Citations required, abstention allowed | rerank scores become a product feature — a calibrated floor gates the answer, and every sentence is checked against a cited chunk |
+| Freshness in minutes | CDC connectors with webhooks plus incremental per-chunk re-embedding, not a nightly full crawl |
+| Code and tickets in scope | structure-aware chunkers per source type, and hybrid retrieval becomes mandatory because identifiers do not embed well |
+| Third-party models | you cannot re-embed cheaply, so the model upgrade path and per-token cost dominate the design |
+| Chat-latency budget | reranking on 100 candidates fits comfortably; an inline surface would force a bi-encoder-only path and a much smaller k |
+
+#### Requirements
+- **FR:** ingest heterogeneous sources incrementally, chunk and embed, hybrid retrieve with ACL enforcement, rerank, generate a streamed answer with citations, abstain when unsupported, and re-index on document or model change.
+- **NFR:** p95 time-to-first-token < 1.5s and p95 retrieve+rerank < 250ms at 500 queries/s peak; edit-to-searchable p50 < 2 min; permission revocation effective within 60s; zero cross-tenant or cross-ACL leaks; recall@10 ≥ 0.90 and faithfulness ≥ 0.95 on the labelled set.
+
+#### Scale Estimate
+- **Corpus (assumption):** ~50M source documents — assume ~2M wiki pages, ~20M tickets and comments, ~3M PDFs, ~25M code files. These are stated assumptions for a large enterprise, not a published figure.
+- **Chunks:** average document ≈ 5,000 tokens. At 512-token chunks with 64 tokens of overlap (stride 448) a 5,000-token doc yields ⌈5000/448⌉ ≈ 12 chunks; tickets yield 1. Blended ≈ 10 → 50M × 10 = **~500M chunks**.
+- **Chunk record:** ~2.4KB (chunk_id 16B + doc_id 16B + ordinal 4B + text ~2KB for 512 tokens at ~4B/token + heading_path ~120B + acl_group_ids ~64B (8 × 8B) + effective_from/to 16B + source_type 1B + content_hash 32B + embed_model_version 4B + padding ~100B). 500M × 2.4KB = ~1.2TB; RF=3 → **~3.6TB**.
+- **Vectors, and why the dtype is a design decision:** 1024 dims × 4B (fp32) = 4KB/vector → 500M × 4KB = **~2TB**. fp16 halves it to ~1TB. int8 scalar quantisation → 1KB/vector → ~500GB. Product quantisation at m=64 sub-vectors × 8 bits → 64B/vector → ~32GB.
+- **HNSW graph overhead:** M=32 → layer-0 neighbour list is 2M=64 IDs × 4B = 256B/node, upper layers add ≈ 1/31 → ~270B/node. 500M × 270B ≈ **~135GB**, on top of whatever the vectors cost.
+- **Why that forces sharding:** HNSW with int8 vectors = 500GB + 135GB ≈ **~635GB** of resident RAM. At ~128GB usable index RAM per node that is **6 shards** (~83M vectors each); RF=3 → 18 index nodes. fp32 would be ~2.1TB → 17 shards → 51 nodes, ~3× the fleet for a recall gain of roughly one point. IVF-PQ would compress to ~32GB and fit on 3 nodes, but recall@100 falls from ~0.97 to ~0.85 — acceptable for a recommender, not for "what is the policy". **Verdict: HNSW + int8, 6 shards, RF=3.**
+- **Query volume:** 500 q/s peak; assume 3× peak-to-average → ~170 q/s average → ~15M queries/day.
+- **Reranker fleet:** 500 q/s × 100 pairs = 50,000 pairs/s. A ~110M-parameter cross-encoder on a ~600-token pair ≈ 2 × 110M × 600 ≈ 132 GFLOPs/pair → 50k × 132 GFLOPs ≈ **6.6 PFLOP/s**. At ~250 TFLOP/s effective per accelerator → **~27 accelerators**, call it 30 with headroom.
+- **Generation fleet (the dominant cost):** 500 q/s × ~6.5k prompt tokens = **~3.3M prefill tokens/s**. At ~15k prefill tokens/s per accelerator for a mid-size model → **~220 accelerators** (see #46). Generation is ~8× the reranker and ~20× everything else combined — which is the entire argument for prefix caching, a smaller answering model, and semantic caching.
+- **Ingest volume:** assume ~2% of documents change per day → 1M docs/day → ~10M chunks touched, of which chunk-hashing skips ~70% → ~3M re-embeds/day ≈ 35/s average, ~600/s in a bulk-import burst.
+- **Full re-index on model upgrade:** 500M chunks × 512 tokens through a ~1B-parameter encoder ≈ 2 × 1e9 × 512 ≈ 1 TFLOP/chunk → 5 × 10²⁰ FLOPs total. At ~300 TFLOP/s effective → ~1.7M GPU-seconds ≈ **~460 GPU-hours**; on 64 accelerators that is ~7h of embedding plus ~3h of parallel graph build → **~1 day end to end**, during which you hold both indexes → peak index RAM ~1.3TB rather than 635GB.
+- **Eval set:** ~2,000 labelled (question, doc_id, char_span) pairs, stratified across the five source types. Retrieval metrics run in ~2 min; the LLM-judged generation metrics are the slow part at ~15 min.
+- **Semantic cache:** assume ~15% of queries are near-duplicates of one seen in the last hour → ~15% deflection off the generation tier ≈ ~33 accelerators saved, which is more than the entire reranker fleet.
+
+#### API Contract
+```
+POST /ask               body: { q, filters?{source, after, space}, top_k?, stream? }
+     → SSE: {delta:"..."} … {citations:[{doc_id, chunk_id, uri, title, char_span, score}], abstained:false}
+POST /retrieve          body: { q, k, filters }
+     → [{chunk_id, doc_id, text, dense_score, bm25_score, rrf, rerank_score}]
+GET  /documents/{id}    → { uri, title, source, effective_from, effective_to, acl_groups[], chunk_count, embed_model_version }
+POST /ingest/event      body: { source, external_id, event: created|updated|deleted, version }  → 202
+GET  /eval/runs/{id}    → { recall_at_10, mrr, ndcg, faithfulness, answer_relevance, context_relevance, delta_vs_baseline }
+```
+
+#### High-Level Design
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 470" role="img" aria-label="RAG architecture: ingestion connectors, chunking and embedding into vector, lexical and chunk stores, then a query path of hybrid retrieval, reranking and generation">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box" x="20" y="20" width="200" height="52" rx="9"/>
+  <text class="lbl" x="120" y="38">Connectors + CDC</text>
+  <text class="sub" x="120" y="58">wiki · tickets · PDFs · code</text>
+  <rect class="box" x="250" y="20" width="200" height="52" rx="9"/>
+  <text class="lbl" x="350" y="38">Parse + chunk</text>
+  <text class="sub" x="350" y="58">512 tok · 64 overlap</text>
+  <rect class="box" x="480" y="20" width="200" height="52" rx="9"/>
+  <text class="lbl" x="580" y="38">Embed workers</text>
+  <text class="sub" x="580" y="58">1024-d · skip unchanged</text>
+  <path class="flow" d="M220,46 L250,46"/>
+  <path class="flow" d="M450,46 L480,46"/>
+
+  <ellipse class="store" cx="120" cy="130" rx="95" ry="11"/>
+  <path class="store" d="M25,130 v40 a95,11 0 0 0 190,0 v-40"/>
+  <text class="sub" x="120" y="146">Chunk + ACL store</text>
+  <text class="sub" x="120" y="164">~3.6TB, RF=3</text>
+  <ellipse class="store" cx="350" cy="130" rx="85" ry="11"/>
+  <path class="store" d="M265,130 v40 a85,11 0 0 0 170,0 v-40"/>
+  <text class="sub" x="350" y="146">Lexical index</text>
+  <text class="sub" x="350" y="164">BM25 (see #47)</text>
+  <ellipse class="store" cx="580" cy="130" rx="95" ry="11"/>
+  <path class="store" d="M485,130 v40 a95,11 0 0 0 190,0 v-40"/>
+  <text class="sub" x="580" y="146">Vector index (HNSW)</text>
+  <text class="sub" x="580" y="164">500M × int8 · 6 shards</text>
+  <path class="flow" d="M120,72 L120,119"/>
+  <path class="flow" d="M350,72 L350,119"/>
+  <path class="flow" d="M580,72 L580,119"/>
+
+  <rect class="box" x="10" y="230" width="170" height="56" rx="9"/>
+  <text class="lbl" x="95" y="250">Client</text>
+  <text class="sub" x="95" y="270">question + principal</text>
+  <rect class="box" x="200" y="230" width="170" height="56" rx="9"/>
+  <text class="lbl" x="285" y="250">Query API</text>
+  <text class="sub" x="285" y="270">embed · sem-cache</text>
+  <rect class="box" x="390" y="230" width="170" height="56" rx="9"/>
+  <text class="lbl" x="475" y="250">Hybrid retrieve</text>
+  <text class="sub" x="475" y="270">ANN + BM25 → RRF</text>
+  <rect class="box acc" x="580" y="230" width="170" height="56" rx="9"/>
+  <text class="lbl" x="665" y="250">Reranker</text>
+  <text class="sub" x="665" y="270">cross-encoder, top 100</text>
+  <path class="flow" d="M180,258 L200,258"/>
+  <path class="flow" d="M370,258 L390,258"/>
+  <path class="flow" d="M560,258 L580,258"/>
+
+  <path class="flow dash" d="M350,181 L350,200 L455,200 L455,230"/>
+  <path class="flow dash" d="M580,181 L580,214 L495,214 L495,230"/>
+  <path class="flow dash" d="M120,181 L120,360 L250,360"/>
+  <text class="edge" x="132" y="300" text-anchor="start">chunk text</text>
+
+  <rect class="box" x="250" y="345" width="260" height="64" rx="9"/>
+  <text class="lbl" x="380" y="366">Prompt + LLM (see #46)</text>
+  <text class="sub" x="380" y="390">8 chunks · cite · stream</text>
+  <rect class="box" x="545" y="345" width="205" height="64" rx="9"/>
+  <text class="lbl" x="647" y="366">ACL resolver</text>
+  <text class="sub" x="647" y="390">principal → group IDs</text>
+
+  <path class="flow" d="M740,286 L740,325 L380,325 L380,345"/>
+  <text class="edge" x="470" y="336" text-anchor="middle">top 8</text>
+  <path class="flow dash" d="M647,345 L647,300 L575,300 L575,275 L560,275"/>
+  <text class="edge" x="600" y="291" text-anchor="middle">pre-filter</text>
+  <path class="flow" d="M380,409 L380,435 L60,435 L60,288"/>
+  <text class="edge" x="200" y="425" text-anchor="middle">streamed answer + citations</text>
+</svg>
+```
+
+**How to read the diagram:** the top half is a pipeline that runs continuously and the bottom half is a request that runs in a second. They meet only at the three stores in the middle — that boundary is the whole architecture. Ingest never blocks a query, and a query never triggers ingest.
+
+**Why the flow is shaped this way:** retrieval fans out to two independent indexes because dense and lexical fail on disjoint query types, and merging two cheap rankings beats tuning one. The reranker sits between retrieval and generation because it is the only place where an expensive, accurate model can be applied to a set small enough to afford it. The ACL resolver feeds the retriever rather than filtering the results, because filtering afterwards is both slower and wrong.
+
+**What this layout buys you:** each stage can be scaled, cached and evaluated independently — you can swap the embedding model without touching the reranker, or A/B the chunker while everything downstream stays fixed. The cost is a lot of moving parts and a genuine risk that no single team owns end-to-end answer quality.
+
+#### Data Model
+- **documents** (relational, e.g. Postgres), partition by `tenant_id`: `(doc_id, source_system, external_id, uri, title, content_hash, effective_from, effective_to, acl_group_ids[], deleted_at, last_seen_at)`
+- **chunks** (object store + manifest, or wide-column), partition by `doc_id`: `(doc_id, ordinal) → text, heading_path, char_span, token_count, chunk_hash, embed_model_version`
+- **vector_index** (HNSW, e.g. Qdrant/Vespa/Milvus), sharded by `hash(doc_id)`: vector plus a filterable payload of `acl_group_ids`, `effective_from/to`, `source_type`
+- **lexical_index** (inverted index, e.g. OpenSearch — see #47), sharded by `hash(doc_id)`: same payload fields so both sides apply an identical filter
+- **acl_memberships** (KV + cache, e.g. Redis), partition by `principal_id` → `group_ids[]`, TTL 60s
+- **cdc_cursors** (relational), partition by `connector_id` → `(watermark, delta_token, last_full_sweep_at)`
+- **eval_labels** (relational), partition by `eval_set_id`: `(question, doc_id, char_span, source_type, provenance, verified_by, verified_at)`
+- **semantic_cache** (vector KV, e.g. Redis), partition by `hash(sorted(group_ids))` → `(query_vector, answer, citation_ids, corpus_version, ts)`, TTL 15 min
+
+#### Detailed Design
+
+**Chunking is a genuine trade-off, not a config default.** Small chunks (~128 tokens) retrieve precisely — the vector represents one idea, so cosine similarity is meaningful — but the retrieved text often lacks the surrounding sentence that makes it answerable, and the model either hedges or hallucinates the missing half. Large chunks (~2,000 tokens) carry enough context to answer but their embedding is an average of six unrelated ideas, so they match everything weakly and nothing strongly, and they burn the token budget four chunks in. Fixed-size splitting is cheap and cuts sentences in half; semantic chunking (embed each sentence, cut where consecutive sentences diverge) respects meaning but costs an embedding pass over every sentence at ingest; structure-aware chunking is best where structure exists. Concrete example: a 40-page benefits PDF split at 512 tokens cuts the table of leave entitlements across two chunks, so neither contains both the country column and the weeks column — split on the PDF's section headings instead and the table survives intact. The practical answer is per-source-type: headings for wikis, whole ticket + top comments for Jira, function or class for code, section boundaries for PDFs, with 512/64 fixed-size as the fallback, and small chunks stored alongside a pointer to their parent section so the assembler can expand a winning chunk to its neighbours before prompting.
+
+**Hybrid retrieval and why fusion beats a weighted sum.** Dense and lexical scores are not on a comparable scale — cosine lives in [-1, 1] with a corpus-dependent distribution, BM25 is unbounded and depends on term rarity — so `α·dense + (1-α)·bm25` requires per-corpus tuning of α and breaks whenever the corpus mix shifts. Reciprocal rank fusion ignores the scores and uses only the ranks: `score(c) = Σ_lists 1/(60 + rank_in_list(c))`. A chunk ranked 1st by BM25 but 40th by dense scores 1/61 + 1/100 ≈ 0.0264; a chunk ranked 8th by *both* scores 2 × 1/68 ≈ 0.0294 and wins. That ordering is the property you want — agreement across two independent retrievers is stronger evidence than one spectacular rank and one bad one — and you get it without tuning a single weight. Concrete example: the query "why is JOB-4471 retrying" — dense retrieval has no idea what JOB-4471 is and returns generic chunks about retry policy; BM25 returns the exact ticket as rank 1. Without the lexical arm, that question is unanswerable.
+
+**Access control, and why post-filtering is the wrong answer.** Post-filtering retrieves the top 100 ignoring permissions, then drops the ones the user cannot read. It is easy, and it breaks in two ways. First, top-k collapses: a contractor who can read 0.5% of the corpus gets back 100 chunks and keeps 0 — you would need to over-fetch by 200× and you cannot know the factor in advance. Second, it leaks by side channel: result counts, latency, and any "N results filtered" affordance tell the user that documents exist. Pre-filtering evaluates `acl_group_ids ∩ user_groups ≠ ∅` during the ANN graph traversal itself, so the top 100 are 100 chunks the user can read. The cost is that filtered HNSW degrades when the predicate is highly selective — the greedy walk spends its budget on nodes it must reject and recall collapses — so you need a fallback: if the estimated allowed-set cardinality is below ~10k chunks, skip the graph and brute-force scan that set instead, which at 10k × 1024 int8 dims is ~10MB of SIMD dot products and takes ~3ms. Concrete example: a user in a 12-person team with a private space gets exact search over 8,000 chunks; a user in the all-company group gets filtered HNSW over 500M. Permission changes propagate through the ACL resolver's 60-second TTL, not through re-indexing: chunks store *group* IDs, so removing alice from a group revokes her access on her next query without touching 500M rows. A document-level ACL change is a metadata upsert on that document's ~12 chunks — no re-embedding, because the vector did not change.
+
+**Freshness and the re-index event.** Incremental updates are cheap because of the chunk hash: parse, chunk, hash each chunk, and only embed the ones whose hash changed. A typo fix on a 12-chunk page re-embeds 1 chunk. Deletions are the dangerous case — a webhook that never fires leaves a deleted document permanently searchable, so the weekly reconciliation sweep diffs the source system's ID list against `documents` and tombstones the difference, and `deleted_at` is a hard filter on every query. Upgrading the embedding model is categorically different: vectors from model v1 and model v2 are points in unrelated spaces, and a query embedded with v2 against a v1 index returns noise that *looks* like results. There is no incremental path — you re-embed all 500M chunks (~460 GPU-hours, ~1 day, ~1.3TB peak RAM holding both indexes) and cut over atomically behind a version flag, with the eval suite run against the new index before any traffic moves. Budget it as a planned migration with a rollback, not as a config change.
+
+**Retrieval funnel, cardinalities and latency budget.** The funnel exists so that cost per candidate rises exactly as candidate count falls. Stage cardinalities at p50: 500M chunks in the index → ACL-filtered ANN returns 200 and BM25 returns 200 → RRF merges to ~300 unique → the top 100 go to the cross-encoder → dedupe and effective-date filtering leave ~85 → the top 8 (~6k tokens) enter the prompt. Latency at p95: ACL resolve 2ms, query embed 15ms, ANN 25ms, BM25 30ms (parallel with ANN, so ~30ms wall), RRF 3ms, chunk fetch 15ms, cross-encoder 90ms, assembly 5ms → **~180ms to a final chunk set**, then LLM prefill and first token ~700ms → **~1.2s TTFT**, with the remaining ~8s streamed. Note where the money is: retrieval is 15% of the latency and about 5% of the compute bill.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 300" role="img" aria-label="RAG retrieval funnel: question, query embedding, ACL-filtered dense and lexical retrieval, rank fusion, cross-encoder rerank, dedupe and recency, top 8 chunks, prompt and stream">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box" x="15" y="48" width="170" height="64" rx="9"/>
+  <text class="sub" x="100" y="70">Question</text>
+  <text class="sub" x="100" y="90">+ principal groups</text>
+  <rect class="box" x="205" y="48" width="170" height="64" rx="9"/>
+  <text class="sub" x="290" y="66">Query embed</text>
+  <text class="sub" x="290" y="82">1024-d, same model</text>
+  <text class="sub" x="290" y="98">~15ms</text>
+  <rect class="box" x="395" y="48" width="170" height="64" rx="9"/>
+  <text class="sub" x="480" y="66">ANN + BM25</text>
+  <text class="sub" x="480" y="82">ACL pre-filter</text>
+  <text class="sub" x="480" y="98">200 + 200</text>
+  <rect class="box" x="585" y="48" width="170" height="64" rx="9"/>
+  <text class="sub" x="670" y="66">RRF fusion</text>
+  <text class="sub" x="670" y="82">1/(60 + rank)</text>
+  <text class="sub" x="670" y="98">~300 unique</text>
+  <path class="flow" d="M185,80 L205,80"/>
+  <path class="flow" d="M375,80 L395,80"/>
+  <path class="flow" d="M565,80 L585,80"/>
+  <path class="flow" d="M670,112 L670,150 L100,150 L100,208"/>
+  <rect class="box acc" x="15" y="208" width="170" height="72" rx="9"/>
+  <text class="sub" x="100" y="226">Cross-encoder</text>
+  <text class="sub" x="100" y="242">top 100 pairs</text>
+  <text class="sub" x="100" y="258">joint attention</text>
+  <text class="sub" x="100" y="274">~90ms</text>
+  <rect class="box" x="205" y="208" width="170" height="72" rx="9"/>
+  <text class="sub" x="290" y="230">Dedupe + recency</text>
+  <text class="sub" x="290" y="246">effective-date filter</text>
+  <text class="sub" x="290" y="262">~85 left</text>
+  <rect class="box" x="395" y="208" width="170" height="72" rx="9"/>
+  <text class="sub" x="480" y="230">Top 8 chunks</text>
+  <text class="sub" x="480" y="246">~6k tokens</text>
+  <text class="sub" x="480" y="262">best at both ends</text>
+  <rect class="box" x="585" y="208" width="170" height="72" rx="9"/>
+  <text class="sub" x="670" y="230">Prompt + stream</text>
+  <text class="sub" x="670" y="246">cite every claim</text>
+  <text class="sub" x="670" y="262">TTFT ~1.2s</text>
+  <path class="flow" d="M185,244 L205,244"/>
+  <path class="flow" d="M375,244 L395,244"/>
+  <path class="flow" d="M565,244 L585,244"/></svg>
+```
+
+**Evaluation is a component, not a phase.** Retrieval is measured against a labelled set with recall@k (is a gold passage in the top k — the single most predictive metric, because generation cannot recover from a miss), MRR (how high the first gold passage ranks), and nDCG when relevance is graded. Generation is measured with three: *faithfulness* — decompose the answer into atomic claims and check each is entailed by a cited chunk, via an NLI model or an LLM judge; *answer relevance* — does it address the question asked; *context relevance* — what fraction of retrieved chunks the answer actually used, which is the metric that tells you k is too large. Building the set: seed it by sampling chunks stratified across the five source types, asking a model to generate a question that *this chunk uniquely answers*, then having humans verify a stratified sample and discard the ~30% that are ambiguous or answerable from ten other chunks; grow it from production by mining thumbs-down queries and unanswered follow-ups, which is where the hard cases actually live. The critical design decision: **label at the (doc_id, char_span) level, never at chunk_id.** The moment someone changes the chunker, every chunk_id in the set is stale and your entire eval history is void — the classic way teams end up with no ability to tell whether a change helped. With span labels, recall@10 means "did any retrieved chunk overlap the gold span", which survives any re-chunking. The harness runs in CI on every change to the chunker, the embedding model, the retrieval config or the prompt, and blocks merge if recall@10 drops more than 2 points or faithfulness drops more than 1 point against the current baseline.
+
+**Handling conflict, staleness and abstention.** Two chunks that both say "the expenses limit is X" with different X are indistinguishable to a similarity score. Attack it at three layers. At ingest, extract an `effective_from`/`effective_to` where the source has one and infer it from the document's version history where it doesn't; superseded versions get `effective_to` set and are excluded by a hard filter, not a soft penalty. At retrieval, apply a recency prior — multiply the rerank score by `exp(-age_days / 365)` for source types where age implies staleness (policies, runbooks) and by nothing for those where it doesn't (design docs, incident postmortems). At generation, if the surviving chunks still disagree, the prompt instructs the model to surface the conflict and cite both rather than pick — "the 2019 policy says X, the 2025 policy says Y" is a far better answer than a confident X. Abstention closes the loop: if the top rerank score is below a floor calibrated so that ~95% of below-floor questions were genuinely unanswerable on the labelled set, return the three best chunks as links with "I couldn't find a confident answer". Concrete example: asking about a policy for a country the company doesn't operate in retrieves plausible chunks about other countries at rerank scores of ~0.2, well under a 0.45 floor, and the system says so instead of inventing an entitlement.
+
+**Semantic caching, and the reason to be nervous about it.** An exact cache keyed on `(normalised_query, sorted_group_ids, corpus_version)` is free and safe. A semantic cache — embed the query, and if cosine to a cached query exceeds ~0.97 return the cached answer — deflects ~15% of traffic off a fleet of ~220 accelerators, which is worth real money. It is also the easiest way to ship a wrong answer. "What is the 2024 bonus policy?" and "What is the 2025 bonus policy?" sit at cosine ≈ 0.98; so do "can I expense alcohol" and "can I *not* expense alcohol". Embeddings encode topic, and years, negations, entity names and numbers are exactly the low-magnitude signals they compress away. The mitigations: never share a cache entry across different ACL group sets (partition the cache by `hash(sorted(group_ids))` — otherwise the cache is a permission bypass); bypass the cache entirely when the query contains a year, a number, a negation, or a proper noun not present in the cached query; keep the TTL short (~15 min) and invalidate on `corpus_version` bump; and log every cache hit with both queries so the false-hit rate is measurable rather than assumed.
+
+#### Potential Follow-Up Questions
+**Q: The answer is fluent, cited, and wrong. How do you even find out?**
+You don't, from logs — the request was a 200 with normal latency. You find out from the eval harness (faithfulness on the labelled set) and from production signals: thumbs-down rate, citation click-through, and the rate at which users immediately rephrase the same question. *If pushed:* sample ~1% of production answers into an offline faithfulness judge — decompose into claims, check entailment against the cited chunks — and alert on the rolling rate. The expensive judge on 1% of traffic is affordable; on 100% it is not.
+
+**Q: Someone changes the chunker. Your entire eval set was labelled with chunk IDs. What now?**
+Nothing works — every gold chunk_id refers to a chunk that no longer exists, so recall@10 reads as 0 and the comparison is meaningless. This is why labels are stored as `(doc_id, char_span)` and recall is computed as span overlap. *If pushed:* also pin the eval to a frozen corpus snapshot, so a chunker A/B isn't confounded by documents that changed between runs; and run the old and new chunkers over the same snapshot in a single job, reporting a paired delta rather than two absolute numbers.
+
+**Q: Why not just post-filter for permissions? It's one line of code.**
+Because top-k collapses for narrowly-permissioned users — retrieve 100, keep 0 — and the over-fetch factor needed to compensate is unbounded and unknowable in advance. It also leaks existence through result counts and latency. *If pushed:* pre-filter inside the ANN traversal, and when the allowed set is small enough that filtered HNSW loses recall (below ~10k chunks), brute-force scan the allowed set instead — 10k int8 vectors is ~10MB and ~3ms, cheaper and exactly correct.
+
+**Q: alice is removed from a group at 10:00. She queries at 10:00:30. What happens?**
+She may still get results, for up to the ACL cache TTL (60s). Whether that's acceptable is a product decision you should force out loud. *If pushed:* for sensitive corpora, publish revocations to a pub-sub channel that invalidates the specific principal's cache entry immediately, and re-check ACLs a second time on the final 8 chunks just before prompt assembly — a cheap 8-row check that closes the window at the cost of one extra round trip.
+
+**Q: You're upgrading the embedding model. Walk me through it.**
+It is a full re-index — v1 and v2 vectors are not comparable, and a mixed index silently returns garbage rather than erroring. Build a v2 index alongside v1 (~460 GPU-hours, ~1 day, both resident so peak RAM ~1.3TB), run the eval suite against v2, then flip a version flag atomically and keep v1 warm for a rollback window. *If pushed:* the queries must flip in the same instant as the index — a query embedded with v2 hitting a v1 shard is the failure to design against, so the model version is part of the shard's identity and a mismatched request is rejected, not served.
+
+**Q: A user asks something the corpus genuinely cannot answer. What comes back?**
+An abstention: top rerank score below a calibrated floor returns "I couldn't find a confident answer" plus the three closest documents as links. *If pushed:* calibrate the floor on the labelled set so that ~95% of below-floor questions were truly unanswerable, and monitor the abstention rate as an SLI — a sudden rise means retrieval regressed, and a rate near zero means the floor is too low and you are hallucinating instead of abstaining.
+
+**Q: Adding more retrieved chunks should help. Why does it hurt?**
+Two effects compound. Lost-in-the-middle: attention over a long context is strongest at the ends, so chunk 12 of 20 is effectively invisible. And distractor dilution: every irrelevant chunk is another plausible thing to ground a sentence in, so faithfulness falls as k rises past ~8. *If pushed:* measure it — sweep k from 3 to 30 on the labelled set and plot faithfulness against recall@k. Recall keeps rising and faithfulness peaks and falls; the crossover is your k. Ordering the kept chunks best-first-and-last recovers a chunk of the loss for free.
+
+**Q: The question needs two documents to answer — the policy and the country-specific addendum. Single-shot retrieval gets one.**
+Single-shot RAG genuinely fails multi-hop questions. First mitigation is query decomposition: an LLM rewrites the question into 2–3 sub-queries, each retrieved independently, and the union is reranked together. *If pushed:* the more expensive answer is an agentic loop — retrieve, let the model decide whether it can answer, and if not issue a follow-up retrieval with a refined query, up to 3 hops. It roughly triples latency and cost, so gate it behind a classifier that detects multi-hop questions rather than running it on everything.
+
+**Q: 500 q/s of generation is ~220 accelerators. How do you make that cheaper without wrecking quality?**
+Prefix caching first — the system prompt and citation instructions are identical across requests, so their KV cache is computed once (see #46). Then semantic caching for ~15% deflection. Then a smaller answering model: with 8 well-reranked chunks in the prompt, the task is closer to extraction than reasoning, and a mid-size model often matches a large one on faithfulness. *If pushed:* spend the savings on the reranker instead — a better top-8 improves answers more per dollar than a bigger generator does.
+
+#### Bottlenecks & Mitigations
+- **Cross-encoder reranker throughput** — 50,000 pairs/s at peak is ~27 accelerators and it sits directly in the latency path; a traffic spike queues and TTFT blows through the SLO. Mitigate by capping rerank depth adaptively (drop from 100 to 50 candidates when queue depth rises, which costs ~1 point of recall@8 rather than seconds of latency), batching aggressively with a 10ms window, and distilling the cross-encoder to a smaller student. Trade-off: adaptive depth means answer quality silently degrades under load, so it must be a logged, alertable state and not a silent fallback.
+- **Vector index RAM** — 500M × 1024 dims does not fit on one machine at any sane dtype. int8 scalar quantisation plus 6-way sharding keeps recall@100 at ~0.96 for ~635GB; PQ would fit on 3 nodes at ~32GB but drops recall to ~0.85. Trade-off named: you are buying ~11 points of recall with ~600GB of RAM, and for a policy-lookup product that is the right purchase.
+- **Filtered-ANN recall collapse** — a highly selective ACL predicate makes HNSW's greedy walk waste its `efSearch` budget on rejected nodes, and recall falls off a cliff exactly for the users with the least access. Mitigate by estimating allowed-set cardinality from group statistics and routing below ~10k chunks to an exact scan. Trade-off: two code paths and a cardinality estimator that can be wrong; when it is wrong you get a slow query, not an incorrect one.
+- **Full re-index on model upgrade** — ~460 GPU-hours and a period holding two indexes at ~1.3TB. Mitigate by running the re-embed on spot/preemptible capacity over a couple of days rather than sprinting, and by sharding the cutover so one shard flips at a time behind a version flag. Trade-off: a longer window with two indexes resident, in exchange for a much cheaper and more reversible migration.
+- **Ingest lag on bulk import** — onboarding a new source system enqueues tens of millions of chunks and starves the incremental lane, so ordinary edits stop appearing. Mitigate with two priority classes on the ingest queue and a hard rate cap on backfill. Trade-off: backfill takes days instead of hours, which is nearly always the right call.
+- **Generation tier cost** — ~3.3M prefill tokens/s dominates the bill by roughly an order of magnitude. Prefix caching for the fixed prompt prelude, semantic caching for ~15% deflection, and a smaller answering model justified by an eval showing no faithfulness loss. Trade-off: every one of these is a quality risk that must be gated on the labelled set, not on a vibe check.
+- **Chunk store fan-out** — fetching 300 chunk texts per query at 500 q/s is 150k reads/s against the chunk store. Mitigate by storing the text as a payload on the index entry for the top candidates, or by an LRU in front of the chunk store keyed on chunk_id — access is heavily Zipfian, so a modest cache hits ~80%. Trade-off: duplicated text inflates index memory, so only the rerank-window fields go inline.
+
+#### Failure Modes
+| Layer | Failure | Detection | Mitigation |
+|---|---|---|---|
+| ACL resolver | Resolver unavailable; retrieval cannot evaluate the permission predicate | Resolver error rate and p99; queries with unresolved principal | Fail closed — refuse the query rather than serve unfiltered results; serve from the stale principal cache only within its TTL and mark the response degraded; never fall back to "allow all" |
+| CDC connector | Webhook silently stops; a source's documents freeze at an old version | Per-connector staleness gauge (now − max last_seen_at) alert at 30 min | Watermark-based polling as a backstop for every webhook; weekly full reconciliation sweep diffs the source ID list and tombstones deletions the webhook missed |
+| Vector index shard | One of 6 shards is down; scatter-gather returns partial results | Per-shard response-rate and recall-canary alert | Serve from the RF=3 replica; if a whole shard set is unreachable, degrade to BM25-only with the response flagged, rather than answering from 5/6 of the corpus and pretending it's complete |
+| Embedding model | Version skew — a query embedded with v2 hits a v1 shard | Model-version tag mismatch counter at the shard | Reject mismatched requests rather than serve them; embedding model version is part of shard identity and the cutover is atomic behind a version flag |
+| Reranker | Model server saturated; rerank queue grows and TTFT breaches SLO | Rerank queue depth, p95 rerank latency | Adaptive depth reduction 100 → 50 → 25 with the degradation logged and alerted; circuit-break to fusion order alone as a last resort, with abstention floor raised to compensate for the weaker ranking |
+| Semantic cache | A near-duplicate query returns an answer for a different year or a negated question | Sampled offline comparison of cache-hit answers against a fresh run | High cosine floor (~0.97), mandatory bypass on years/numbers/negations/proper nouns, short TTL, per-ACL-group-set partitioning so a false hit can never also be a permission leak |
+| Chunk store | Text fetch fails for a subset of the reranked candidates | Chunk-fetch error rate; chunks-missing-per-query histogram | Prompt from the chunks that did resolve and drop the rest; if fewer than 3 resolve, abstain rather than answer from a thin context |
+| Generation tier | LLM endpoint degraded or rate-limited | TTFT p95, upstream 429/5xx rate | Fall back to a smaller model behind the same prompt contract; if all generation is down, return the reranked chunks as a ranked list of links — a working search product is a much better degradation than an error page |
+| Ingest pipeline | Poison document (corrupt PDF, 400MB file) crashes the parser repeatedly | Per-document retry counter; parser crash rate | Dead-letter after 3 attempts with the doc_id recorded; the pipeline continues; a triage queue reviews DLQ entries so a systematic parser gap surfaces rather than silently dropping a source type |
+
+#### Observability — Key Metrics & SLOs
+- **Time to first token** (question received → first answer token streamed) — SLO p95 < 1.5s. Decomposed into retrieve, rerank and prefill spans, because the fix differs entirely by stage and the aggregate hides which one regressed.
+- **Retrieve + rerank latency** (excluding generation) — SLO p95 < 250ms. This is the part you own end to end; generation latency is largely a property of the model and the inference tier (see #46).
+- **recall@10 on the labelled set** (fraction of questions where a gold span is in the top 10) — SLO ≥ 0.90, evaluated in CI on every chunker, model, or retrieval-config change; a drop of more than 2 points blocks the merge.
+- **Faithfulness** (fraction of atomic claims entailed by a cited chunk) — SLO ≥ 0.95 on the labelled set, plus a rolling production estimate from a 1% offline judge sample. This is the metric that catches confidently-wrong answers, and nothing else does.
+- **Abstention rate** (queries returning "no confident answer") — expect ~5-10%; alert on a rise above 15% (retrieval regressed or a source went stale) *and* on a fall below 2% (the floor is miscalibrated and the system is guessing).
+- **Ingest staleness** (now − max `last_seen_at`, per connector) — SLO p95 < 5 min for webhook sources, < 60 min for polled ones. A frozen connector is invisible in every other metric: queries succeed, latency is fine, and the answers are quietly a month old.
+- **ACL denial correctness** (audited sample of retrieved chunk sets replayed against the authoritative permission service) — SLO zero unauthorised chunks; any single occurrence is a paging incident, not a dashboard trend.
+
+#### Multi-Region & DR
+- **Replication mode:** active-active. The vector and lexical indexes are read-only at serving time, so each region holds a full replica built from the same ingest pipeline — no cross-region consistency problem on the read path. The ingest pipeline is active-passive with a single writer region owning the CDC cursors, because two regions polling the same connector would double-process and race on watermarks. Postgres for documents and ACLs replicates async to standbys; the ACL cache is region-local with a global invalidation topic.
+- **RTO:** ~5 min for in-region node loss (RF=3 replicas absorb it with no visible impact). ~15 min for a full region loss — DNS shifts to the next-nearest region and its index replica serves immediately; the delay is warming the reranker and generation fleets, not the index. Ingest writer failover is a manual promotion (~30 min) because a split-brain writer double-processes CDC.
+- **RPO:** near zero for query traffic — the indexes are derived data and can be rebuilt from the source systems, which are the real system of record. Ingest RPO is one CDC poll interval (~60s) of un-processed change events, which the next poll re-reads from the watermark, so nothing is actually lost — documents merely appear late.
+- **Failover cadence:** automatic within region; cross-region game-day quarterly, including one that specifically exercises the ACL resolver being unreachable to confirm the system fails closed rather than open. Index rebuild-from-source is rehearsed twice a year, since it is also the embedding-model-upgrade path.
+- **Cross-region cost:** the indexes are built once and shipped as immutable segments (~635GB per generation, delta-shipped so an incremental day is ~20-40GB), which is far cheaper than replicating write operations. The generation and reranker fleets are the real regional cost — you are duplicating ~250 accelerators, so the honest options are full duplication for a hard RTO, or a smaller standby region that serves degraded (retrieval-only, no generation) until it scales up.
+
+#### Common Mistakes / Anti-patterns
+- **Treating chunk size as a config value you set once and forget.** It is the single highest-leverage parameter in the system and it interacts with the embedding model, the reranker and the token budget. Pick it per source type, measure it on the labelled set, and re-measure whenever the embedding model changes.
+- **Shipping dense-only retrieval.** Vector search cannot find `JOB-4471`, `ERR_TLS_CERT_ALTNAME_INVALID`, or an internal product codename, because those tokens carry almost no semantic signal. BM25 costs one extra index and one parallel query and it catches exactly the queries users find most infuriating to get wrong. Always hybrid.
+- **Post-filtering for access control.** Retrieve-then-drop breaks top-k for narrowly-permissioned users, leaks existence through counts and latency, and cannot be fixed by over-fetching because the required factor is unbounded. Filter inside the search, and fail closed when you cannot.
+- **Believing that more context is strictly better.** Faithfulness peaks around 8 chunks and falls afterwards — lost-in-the-middle plus distractor dilution. A 200k-token context window is not a reason to stop reranking; it is a reason to rerank harder and send less.
+- **No evaluation, or evaluation labelled at chunk ID.** Without a labelled set nobody can say whether a change helped, and the team argues from anecdotes. With chunk-ID labels, the first chunker change voids the entire history. Label at `(doc_id, char_span)` and wire the harness into CI from day one.
+- **Optimising latency when the real problem is precision.** Teams spend months shaving 40ms off ANN search while the top-8 chunks are wrong 20% of the time. Users forgive two seconds; they do not forgive a confident wrong answer about their own parental leave.
+
+#### Talking Points for the Interview
+- **The hard problem is retrieval precision, not latency or scale.** Say this early: the failure that kills the product is a fluent, cited, wrong answer, and it is invisible without deliberate measurement.
+- **Hybrid retrieval plus a cross-encoder reranker is the load-bearing pair.** Dense finds meaning, BM25 finds identifiers, the cross-encoder is the only stage that distinguishes "about this topic" from "answers this question".
+- **Derive the index memory out loud.** 500M × 1024 dims × 4B = ~2TB is the number that forces quantisation and sharding, and reciting the HNSW-versus-IVF-PQ recall trade-off shows you know why you picked one.
+- **Access control must be a pre-filter.** Post-filtering breaks top-k and leaks existence; say that chunks carry group IDs so revocation is a cache TTL, not a 500M-row re-index.
+- **An embedding model upgrade is a full re-index, and that is a real operational event.** Vectors from two models are not comparable — ~460 GPU-hours, a day of wall clock, and both indexes resident during cutover.
+- **Evaluation is a component with an owner, not a phase before launch.** recall@k and faithfulness against a span-labelled set, running in CI, blocking merges — and label spans, not chunk IDs, so the set survives a chunker change.
+
+### 51. Design a Content Delivery Network (CDN)
+#### Problem
+Serve customer-origin content — static assets, images, API responses and large media segments — from a global fleet of caches so that users get bytes from a nearby machine instead of from the origin.
+
+#### Summary
+**The picture in your head:** a publisher with one warehouse in Virginia and readers in 200 cities. Instead of couriering every book from Virginia, you open a shop in each city, and a regional depot serving every ten shops. Shops keep the bestsellers; the depot keeps the long tail; the warehouse is touched only when nobody in the region has a copy. The hard part is not opening the shops — it is telling all 200 of them, within five seconds, that page 41 of a book they already stocked is now wrong.
+
+**The single-request walkthrough (hit path):** a user in Lagos requests `https://cdn.acme.example/img/hero.7f3c9a2b.jpg`. The hostname resolves to an **anycast** address — one IP announced by BGP from all 200 PoPs at once — so the SYN is delivered by the internet's own routing to the Lagos PoP, ~8ms away. A load balancer inside the PoP hashes the connection to one of ~50 edge servers. TLS 1.3 resumes from a session ticket (0 extra round trips, ~10ms). The server builds the **cache key** from `(host, path, allowlisted query params, normalized Accept-Encoding)`, consistent-hashes it to find the key's owning server inside the PoP, and finds the object in that server's page cache. It returns `200` with `Age: 41283` and `X-Cache: HIT`. TTFB ~12ms; the 100KB body lands in ~25ms more on a 50 Mbps link. Origin was not involved and never learns this request happened.
+
+**The miss path:** same request, but the TTL has just expired. The server does not go to origin and make the user wait. It claims a per-key **single-flight** lock, immediately returns the stale copy under `stale-while-revalidate`, and revalidates in the background. The background fetch goes over a pooled HTTP/2 connection to the **regional mid-tier** in Johannesburg (~35ms); that misses too and goes to the **origin shield** — the single PoP designated for this customer, sitting next to their origin in Virginia (~180ms) — which finally issues one conditional `GET` to the origin object store (see #21) and gets `304 Not Modified` in ~40ms. Revalidation cost ~260ms of machine time and zero milliseconds of user-perceived latency. The 5M subsequent requests for that object worldwide are hits.
+
+**The pieces (and what each one is for):**
+- **Edge PoP (~200 of them)** — a rack of commodity servers with NVMe and 100 GbE NICs in a carrier-neutral facility, running an HTTP cache (nginx, Varnish, or a purpose-built one like Apple's/Fastly's Varnish fork). It terminates TLS, applies the cache key, and serves ~95% of requests without a single upstream byte.
+- **Regional mid-tier (~20 of them)** — a bigger, disk-heavy cache that ~10 edge PoPs fetch through. It exists for exactly one reason: **fan-out collapse.** Without it, an object missed at 200 edges is 200 origin requests. With it, it is 20. It is not there to be fast — it is a mid-tier hop that *adds* latency to a miss — it is there to make the origin's life survivable.
+- **Origin shield** — one PoP per customer origin, chosen for network proximity to that origin, that all mid-tiers fetch through. Collapses 20 → 1 and gives the origin a small, stable set of source IPs to allowlist.
+- **Request router (anycast BGP + GeoDNS)** — decides which PoP a user reaches. Anycast means "announce the same prefix everywhere and let the internet pick"; GeoDNS means "answer the DNS query with a different IP depending on where the resolver appears to be".
+- **Cache engine (S3-FIFO on disk, W-TinyLFU admission in RAM)** — **S3-FIFO** is three FIFO queues: a small probationary queue (~10% of capacity), a main queue, and a "ghost" queue of recently evicted keys. New objects enter the small queue; only objects hit a second time before eviction are promoted to main. **W-TinyLFU** is an admission filter: a Count-Min sketch (a compact array of counters, periodically halved so old popularity decays) estimates how often a key has been seen, and a candidate is only admitted if its estimated frequency beats the object it would evict.
+- **Purge control plane** — a globally replicated config store plus a hierarchical fan-out tree that pushes invalidations to ~13,000 edge servers, and a tag-generation table that makes bulk invalidation an O(1) counter bump rather than an enumeration.
+
+**The thing that makes it hard:** the TTL is a single dial with a cliff at both ends, and there is no safe setting. Turn it up and content goes stale — a customer changes a price and a wrong number is served for an hour from 200 cities. Turn it down and every popular object becomes a synchronised stampede: at 5M req/s for one hot object and a 200ms origin fetch, the instant the TTL expires there are 5M × 0.2 = **1,000,000 concurrent origin requests for a single URL**, and the origin — which normally sees ~1% of traffic — is hit with a spike it was never provisioned for. The only escape from the dial is explicit invalidation, and *that* is the genuinely hard distributed problem: a consensus-free broadcast to 13,000 machines across 200 datacentres, some of which are partitioned, under a five-second deadline, that must be idempotent and replayable because you cannot ask 13,000 machines to acknowledge.
+
+**Why the standard solution works:** you attack both cliffs separately. Against the herd, a cascade of coalescers — per-server single-flight, per-PoP key ownership, mid-tier coalescing, origin shield — turns 1,000,000 concurrent fetches into 1, while `stale-while-revalidate` means nobody waited for any of them; TTL jitter (`ttl × (1 ± 10%)`) stops 200 PoPs expiring in the same second. Against staleness, you remove the need to purge wherever you control the URL: content-hash the filename (`hero.7f3c9a2b.jpg`), serve it `max-age=31536000, immutable`, and change the *reference* instead of the object. New content is a new URL, so there is nothing to invalidate and the hit ratio is effectively 100%. Purge remains for the cases where you do not own the URL — a customer's `/index.html`, an API response, a legal takedown — and there you accept eventual consistency: best-effort push in ~2s, a durable purge log that a partitioned PoP replays on reconnect, and generation counters so "purge everything tagged `product-1234`" is one small record, not ten million.
+
+**If you were building it tomorrow:**
+- Edge: Linux + a Varnish/nginx-class cache, 2 × 100 GbE, 512 GB RAM, 2 × 7.7 TB NVMe. Anycast /24s announced via BGP from every PoP, with GeoDNS choosing between a handful of anycast "rings" so you retain a steering knob.
+- Control plane: Postgres as source of truth for config, mirrored into a globally replicated KV read by every PoP; Kafka as the durable purge log; a 200-wide fan-out tree with in-PoP multicast.
+- Origin: object store (see #21). Video and ABR ladders are a consumer of this system, not part of it (see #31, #11).
+- Edge request handler:
+  ```
+  key = cache_key(req)                        // host + path + allowlisted query + normalized headers
+  entry = cache.get(key)
+  if entry and entry.fresh(): return entry                  // ~95% of all requests stop here
+  if entry and entry.in_swr_window():
+      background(revalidate, key)                           // single-flight; user waits 0ms
+      return entry.with_header("Age", entry.age)
+  if inflight.claim(key):                                   // exactly one winner per server
+      resp = fetch(mid_tier → shield → origin)
+      if admit(key, resp): cache.put(key, resp, ttl=jitter(resp.ttl, 0.1))
+      return inflight.complete(key, resp)
+  return inflight.wait(key)                                 // losers park on the winner
+  ```
+#### Clarifying Questions
+- Static assets only, or also large media segments and partially-cacheable dynamic responses?
+- Do we control the URLs (can we mandate content-hashed, immutable filenames) or must we accept arbitrary customer origins?
+- What purge latency do customers need — single-digit seconds, or is a few minutes acceptable?
+- Is content public, or does some of it require per-user authorization at the edge?
+- Do we run our own network (own ASN, anycast prefixes, settlement-free peering) or rent transit?
+- Is programmable edge compute in scope, or is this pure caching?
+
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Static assets only | whole-object caching with a simple key; skip block storage and range coalescing |
+| Large media in scope | cache in fixed 2MB blocks keyed `(url, block_idx)` with read-ahead prefetch |
+| We control the URLs | content-hashed immutable names with `max-age=31536000`; purge becomes a rarely-used escape hatch |
+| Arbitrary customer origins | a full purge-by-URL/tag/origin control plane with a durable, replayable purge log |
+| Seconds-level purge SLO | eager hierarchical push to all ~13k servers; minutes-level would allow cheap lazy generation checks alone |
+| Per-user authorization | signed URLs or edge token validation, and the auth token must never enter the cache key's cached body |
+| Own ASN and prefixes | anycast for the data plane with instant BGP failover; rented transit forces DNS-only steering |
+| Edge compute in scope | V8 isolates per tenant on the same box as the cache, with a CPU/memory budget per request |
+
+#### Requirements
+- **FR:** fetch-and-cache from customer origins; route users to the nearest healthy PoP; configurable cache keys and TTLs; purge by URL, surrogate tag and whole origin; TLS termination with customer certificates; byte-range and segment support; per-origin analytics.
+- **NFR:** ≥95% request hit ratio and ≥90% byte hit ratio; p99 TTFB <50ms on an in-region hit; purge reaching 99.9% of edge servers in <5s; 99.99% data-plane availability; loss of any single PoP causes zero user-visible errors.
+
+#### Scale Estimate
+- **Traffic (stated assumptions):** ~200 PoPs, ~100M req/s at global peak, average object ~100KB, Zipf popularity with α ≈ 0.9. Peak is the Americas-evening / Europe-evening overlap; assume peak = 2.5× daily average → average ≈ 100M ÷ 2.5 = **~40M req/s**, i.e. 40M × 86,400 = **~3.5 trillion requests/day**. (Large CDNs have publicly described peaks in the tens-of-millions-of-requests-per-second and tens-of-Tbps range, so this is the right order of magnitude — treat the exact figures as assumptions.)
+- **Bytes delivered:** peak 100M/s × 100KB = 10 TB/s ≈ **~80 Tbps**. Average 40M/s × 100KB = 4 TB/s ≈ 32 Tbps → 4 TB/s × 86,400 = **~345 PB/day**, ~10 EB/month.
+- **Per-PoP load:** traffic is skewed, not uniform. Assume the top 20 PoPs carry ~50% → tier-1 PoP peak = 100M × 0.5 ÷ 20 = **~2.5M req/s**; a tail PoP = 100M × 0.5 ÷ 180 ≈ ~280k req/s. Size the fleet for the tier-1 case.
+- **Per-PoP bandwidth and server count:** 2.5M req/s × 100KB = 250 GB/s = **~2 Tbps per tier-1 PoP**. With 100 GbE NICs held to 40% sustained (headroom for DDoS absorption and neighbour-PoP failover), usable is ~40 Gbps/server → 2 Tbps ÷ 40 Gbps = **~50 servers**. Modelling ~64 servers as the fleet-wide average gives **~13,000 edge servers globally**. Note what sets this number: NIC bandwidth, not disk.
+- **Per-server load:** 2.5M ÷ 50 = 50k req/s = 5 GB/s = 40 Gbps per box. If every request touched disk that is ~50k IOPS at 100KB — which is why a RAM tier is mandatory, not an optimisation.
+- **Edge working set:** assume ~5B distinct objects requested globally per day (5B × 100KB = ~500TB of unique bytes) and that one PoP sees ~10% of that catalogue → ~500M objects ≈ ~50TB. Under Zipf α ≈ 0.9 the top ~12% of objects by popularity carry ~95% of requests → 60M × 100KB = **~6TB is the 95%-hit working set per PoP**. Provision 4× for churn, multi-tenancy and TTL overlap → **~24TB usable per PoP** (~500GB per server, one NVMe drive). 200 × 24TB ≈ **~5PB of edge storage globally**.
+- **RAM tier:** the top ~1% of objects serve ~40% of requests: 600k × 100KB = ~60GB per PoP. In practice give each server ~256GB of page cache (~2.5M objects), which absorbs ~70% of hits and holds disk to ~15k IOPS.
+- **Index metadata (a real budget line):** ~200B per cached object (key hash 16B + block map ~64B + stored headers ~64B + fetched_at 8B + ttl 4B + tag generations ~32B + queue pointers ~12B). 500M objects/PoP × 200B = **~100GB of index per PoP**, ~2GB per server, all of it resident in RAM.
+- **Mid-tier:** ~20 regions, each shielding ~10 PoPs. A region's union working set ≈ ~1.5B objects × 100KB = ~150TB; provision ~250TB per region over ~10 nodes → **~5PB of mid-tier storage globally**. It costs roughly what the edge tier costs, and the next bullet is why it is worth it.
+- **Origin egress:** at a 95% edge hit ratio, 5% of 345 PB/day = **~17 PB/day** leaves the edge. The mid-tier plus shield absorb ~80% of those misses (the same object missed at 10 PoPs is fetched from origin once) → origin sees **~3.5 PB/day, ~1% of delivered bytes**.
+- **The cost of one hit-ratio point (the number to say out loud):** 95% → 94% adds 1% of 345 PB/day = **+3.5 PB/day of edge misses** (+105 PB/month across the mid-tier fabric) and, after 80% shield absorption, **+0.7 PB/day ≈ +21 PB/month of origin egress**. At an assumed blended $0.02/GB that is **~$420k/month for one point** — and ~$2.1M/month if you had no mid-tier at all. At cloud list egress ($0.05–0.09/GB) it is 2.5–4.5× worse. Cache-key hygiene is a finance problem, not a tuning problem.
+- **Purge fan-out:** one URL purge must reach ~13,000 servers. Hierarchical: control plane → 200 PoP relays → in-PoP multicast. At 1,000 customer purges/s that is 200 × 1,000 = 200k control-plane messages/s at ~200B each ≈ ~40 MB/s leaving the control plane, with the 13M/s server-local deliveries absorbed inside each PoP.
+- **Logs:** 3.5 trillion requests/day × ~200B/line = **~690 TB/day raw**. Sample 1:100 into the real-time dashboards; ship 100% compressed ~10:1 (~70 TB/day) into a columnar warehouse with 90-day retention, because the offload metric is billed on and must be exact.
+- **Hot vs cold retention:** RAM minutes-to-hours (W-TinyLFU admission), NVMe ~1–7 days (S3-FIFO), mid-tier ~30 days, origin indefinite (see #21).
+
+#### API Contract
+```
+GET  https://cdn.acme.example/img/hero.7f3c9a2b.jpg
+     → 200  Cache-Control: public, max-age=31536000, immutable
+            Age: 41283   X-Cache: HIT   X-Served-By: los-pop-02/e17
+GET  .../video/ep1.mp4        Range: bytes=5242880-7340031  → 206 Partial Content
+
+POST /v1/purge/url    body: { urls: ["https://cdn.acme.example/index.html"] }
+                      → { purge_id, eta_ms: 2500 }
+POST /v1/purge/tag    body: { tags: ["product-1234"] }        → { purge_id }
+POST /v1/purge/origin body: { origin_id }                     → { purge_id, soft: true }
+GET  /v1/purge/{purge_id} → { pops_acked: 200, servers_acked: 12987, p99_ms: 2840 }
+PUT  /v1/config/{origin_id}
+     body: { cache_key: { query_allow: ["w","fmt"], vary: ["accept-encoding"] },
+             ttl: { default_s: 3600, swr_s: 86400 }, shield_pop: "iad", cert_ref }
+GET  /v1/stats?origin_id=..&by=pop → [{ pop, hit_ratio, byte_hit_ratio, egress_gb, p99_ttfb_ms }]
+```
+
+#### High-Level Design
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 470" role="img" aria-label="CDN architecture: anycast routing to edge PoPs, regional mid-tier, origin shield, origin, with a control plane for config and purge">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box" x="290" y="16" width="180" height="44" rx="9"/>
+  <text class="lbl" x="380" y="38">Client</text>
+
+  <rect class="box" x="230" y="88" width="300" height="62" rx="9"/>
+  <text class="lbl" x="380" y="110">Anycast BGP + GeoDNS ring</text>
+  <text class="sub" x="380" y="132">one IP from 200 PoPs · net picks nearest</text>
+
+  <rect class="box acc" x="210" y="180" width="340" height="88" rx="9"/>
+  <text class="lbl" x="380" y="202">Edge PoP (×200)</text>
+  <text class="sub" x="380" y="224">TLS · cache key · S3-FIFO + W-TinyLFU</text>
+  <text class="sub" x="380" y="246">single-flight · stale-while-revalidate</text>
+
+  <rect class="box" x="210" y="300" width="340" height="66" rx="9"/>
+  <text class="lbl" x="380" y="322">Regional mid-tier (×20)</text>
+  <text class="sub" x="380" y="344">collapses 200 edges → 20 regions</text>
+
+  <rect class="box" x="210" y="398" width="340" height="48" rx="9"/>
+  <text class="lbl" x="380" y="422">Origin shield (1 PoP per origin)</text>
+
+  <ellipse class="store" cx="665" cy="396" rx="70" ry="10"/>
+  <path class="store" d="M595,396 v34 a70,10 0 0 0 140,0 v-34"/>
+  <text class="sub" x="665" y="418">Origin</text>
+  <text class="sub" x="665" y="434">object store · #21</text>
+
+  <rect class="grp" x="20" y="180" width="150" height="88" rx="9"/>
+  <text class="lbl" x="95" y="202">Control plane</text>
+  <text class="sub" x="95" y="224">config · certs</text>
+  <text class="sub" x="95" y="246">purge fan-out</text>
+
+  <path class="flow" d="M380,60 L380,88"/>
+  <path class="flow" d="M380,150 L380,180"/>
+  <path class="flow" d="M380,268 L380,300"/>
+  <text class="edge" x="392" y="285" text-anchor="start">edge miss ≈5%</text>
+  <path class="flow" d="M380,366 L380,398"/>
+  <text class="edge" x="392" y="383" text-anchor="start">region miss ≈1% of all</text>
+  <path class="flow" d="M550,422 L595,422"/>
+  <text class="edge" x="572" y="410" text-anchor="middle">fill</text>
+
+  <path class="flow dash" d="M170,224 L210,224"/>
+  <path class="flow dash" d="M95,268 L95,333 L210,333"/>
+</svg>
+```
+
+**How to read the diagram:** requests fall down the page through three cache tiers, and only what nothing has caches reaches the origin. The dashed arrows from the left are the control plane — config and purge push *into* the caches, never through the request path.
+
+**Why the flow is shaped this way:** each tier exists to shrink the fan-out reaching the next one. The edge exists for latency; the mid-tier and shield exist purely for origin protection and cost, which is why they are allowed to add latency to a miss.
+
+**What this layout buys you:** ~99% of bytes never touch the origin, and origin capacity can be planned against a stable ~1% of delivered traffic rather than a spiky 5%. The cost is a deeper miss path — a cold object now traverses three hops — which `stale-while-revalidate` hides from the user.
+
+#### Data Model
+- **object cache** (per-server NVMe + page cache): key `(host, normalized_path, keyed_query, keyed_headers)` → `(block_map, headers, fetched_at, ttl, swr_window, tag_gens[])`; partition key `consistent_hash(cache_key)` across the PoP's servers.
+- **block store** (per-server NVMe, for large media): `(object_key, block_idx)` → 2MB chunk; partition key `consistent_hash(object_key)` so all blocks of one file share an owner.
+- **tag generations** (globally replicated read-mostly KV, pushed to every PoP): `tag → generation_counter`; partition key `tag`.
+- **origin config** (control-plane Postgres, mirrored to a global KV): `origin_id → {cache_key rules, TTL overrides, shield_pop, cert_ref, rate limits}`; partition key `origin_id`.
+- **certificates** (control-plane KV, read lazily at SNI time with a per-server LRU): `sni_hostname → (chain, key_ref)`; partition key `sni_hostname`.
+- **purge log** (durable append-only log, e.g. Kafka, 7-day retention): `(purge_id, scope, origin_id, issued_at)`; partition key `origin_id` — replayed by any PoP that was partitioned when the purge was pushed.
+- **access logs** (streamed to a columnar warehouse): `(ts, pop, server, cache_status, bytes, ttfb_ms, origin_id)`; partition key `pop`, clustered by `origin_id`.
+
+#### Detailed Design
+**Request routing: anycast for the data plane, DNS as the steering knob.** DNS-based routing answers `cdn.acme.example` with the IP of the PoP nearest the client, which gives you total control — capacity-aware, RTT-aware, per-customer. It has two blind spots. First, you see the *resolver's* address, not the client's: a Lagos user on a public resolver may be mapped to a European PoP. EDNS Client Subnet (RFC 7871) partially fixes this by forwarding a /24 of the client, but adoption is incomplete. Second, TTL is a lie — you set 30s expecting fast drains, and a meaningful share of resolvers and client stacks ignore it, so a PoP you drained keeps receiving traffic for minutes. Anycast inverts the trade: announce one /24 from all 200 PoPs and let BGP deliver. Failover is instantaneous and free — withdraw the route and the internet reconverges in seconds without any client-side cache to wait out — and volumetric attacks are automatically spread across the whole fleet instead of concentrating on one target. The cost is that the routing is not yours: BGP picks by AS-path length and local policy, not latency, so the "nearest" PoP is sometimes a continent away; you cannot drain one overloaded PoP without withdrawing the whole prefix; and a mid-connection reconvergence lands packets at a PoP with no state for that TCP flow, which sends a RST. **Pick anycast for the data plane** — mid-flow flaps are rare and most CDN flows last seconds, whereas DNS TTL blindness is constant — and keep GeoDNS on top, choosing between a handful of independently-announced anycast rings so you retain a per-customer steering knob and a way to move traffic off a bad ring.
+
+**The cache key is the whole product.** The default key is `(scheme, host, path)`. Everything you add or fail to add is a hit-ratio or a security decision. Query parameters must be **allowlisted**, not passed through: `?w=800&fmt=webp` genuinely changes the response and belongs in the key; `?utm_source=…&fbclid=…` does not, and a single asset shared with a million distinct tracking suffixes becomes a million cache entries for one object — hit ratio collapses toward zero and, at $420k per hit-ratio point, so does the customer's bill. Sort and canonicalise the surviving params so `?a=1&b=2` and `?b=2&a=1` are one key. `Vary: Accept-Encoding` is fine (three values); `Vary: User-Agent` is catastrophic (thousands of strings) — normalise to a device class instead. Cookies are where it becomes a security problem: if an origin returns a personalised page carrying `Set-Cookie: session=…` and forgets `Cache-Control: private`, and the edge stores it under a session-free key, the *next* user is served alice's page and alice's session cookie. Defence in depth: never store a response carrying `Set-Cookie` unless explicitly allowlisted; bypass the cache entirely when the request carries a session cookie unless the route is explicitly marked cacheable; treat `Cache-Control: private` and `Authorization` as never-store; strip or normalise unkeyed request headers the origin might reflect (`X-Forwarded-Host` is the classic poisoning vector) *before* forwarding; and run a continuous canary that samples cached objects and asserts none carry per-user markers.
+
+**Admission and eviction: do not let a scan destroy the cache.** Pure LRU is a bad fit for CDN traffic because it is not scan-resistant: a crawler pulling 50M cold URLs from one origin touches each exactly once, and every one of those touches promotes a useless object to the head of the list and evicts a genuinely hot one — the cache is emptied by a workload that got zero hits from it. LFU is scan-resistant but ossifies without aging: yesterday's viral image keeps its enormous counter forever and cannot be displaced. Use two mechanisms. On the disk tier, **S3-FIFO**: new objects enter a small probationary FIFO (~10% of capacity) and are only promoted to the main FIFO if they are hit a second time before they age out; keys evicted from small are recorded in a ghost queue so a later re-request is recognised as a returning object rather than a newcomer. Because everything is FIFO, reads mutate no list and need no lock — a material win at 50k req/s per server. On the RAM tier, add **W-TinyLFU admission**: on a miss, compare the candidate's estimated frequency (from a 4-bit Count-Min sketch, halved periodically so popularity decays) against the victim's, and only admit if it wins. This matters because roughly half to two-thirds of *distinct* objects in a real CDN trace are one-hit wonders. Admitting them all would both evict useful content and burn SSD write endurance for nothing: at 5% of 2.5M req/s missing, an admit-everything policy writes 125k × 100KB = 12.5 GB/s per PoP to flash.
+
+**Collapsing the thundering herd.** Take a breaking-news image at 5M req/s globally — averaged over 200 PoPs, ~25k req/s each — with a 200ms origin fetch. The instant its TTL expires, the naive count of concurrent origin requests for that one URL is 25k × 0.2s × 200 PoPs = **1,000,000**. Four coalescers apply in series and each is cheap: per-server single-flight (one in-flight fetch per key per box) takes it to ~50 servers × 200 PoPs = 12,800; consistent-hashing the key to a single owning server within each PoP takes it to 200; mid-tier coalescing takes it to 20; the origin shield takes it to **1**. Latency budget for that single real fetch: edge → mid-tier ~35ms, mid-tier → shield ~180ms, shield → origin ~40ms, plus ~15ms of processing ≈ 270ms — and *no user waits any of it*, because `stale-while-revalidate` serves the expired copy to all 5M req/s while the refresh runs. Two more guards: jitter every TTL by ±10% so 200 PoPs do not expire in the same second, and refresh probabilistically as the TTL approaches rather than at the moment it fires. This is the same family of technique as the in-memory cache stampede fix (see #34); what is different here is the geographic tiering — the collapse happens across four levels of a physical hierarchy, not in one process's lock table.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 290" role="img" aria-label="Thundering herd collapse: one million concurrent origin requests reduced to one through single-flight, PoP key ownership, mid-tier coalescing and origin shield">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <text class="edge" x="380" y="22">TTL expires on one hot object at all 200 PoPs</text>
+
+  <rect class="box" x="15" y="48" width="130" height="76" rx="9"/>
+  <text class="sub" x="80" y="68">Clients</text>
+  <text class="sub" x="80" y="86">5M req/s</text>
+  <text class="sub" x="80" y="104">one object</text>
+
+  <rect class="box" x="165" y="48" width="130" height="76" rx="9"/>
+  <text class="sub" x="230" y="68">Edge servers</text>
+  <text class="sub" x="230" y="86">single-flight</text>
+  <text class="sub" x="230" y="104">1M → 12,800</text>
+
+  <rect class="box" x="315" y="48" width="130" height="76" rx="9"/>
+  <text class="sub" x="380" y="68">PoP key owner</text>
+  <text class="sub" x="380" y="86">consistent hash</text>
+  <text class="sub" x="380" y="104">12,800 → 200</text>
+
+  <rect class="box" x="465" y="48" width="130" height="76" rx="9"/>
+  <text class="sub" x="530" y="68">Mid-tier ×20</text>
+  <text class="sub" x="530" y="86">region coalesce</text>
+  <text class="sub" x="530" y="104">200 → 20</text>
+
+  <rect class="box acc" x="615" y="48" width="130" height="76" rx="9"/>
+  <text class="sub" x="680" y="68">Origin shield</text>
+  <text class="sub" x="680" y="86">one per origin</text>
+  <text class="sub" x="680" y="104">20 → 1</text>
+
+  <path class="flow" d="M145,86 L165,86"/>
+  <path class="flow" d="M295,86 L315,86"/>
+  <path class="flow" d="M445,86 L465,86"/>
+  <path class="flow" d="M595,86 L615,86"/>
+
+  <path class="flow dash" d="M80,124 L80,196"/>
+  <path class="flow" d="M680,124 L680,196"/>
+
+  <rect class="grp" x="15" y="196" width="250" height="64" rx="9"/>
+  <text class="sub" x="140" y="216">stale-while-revalidate</text>
+  <text class="sub" x="140" y="234">all 5M req/s get the stale copy</text>
+  <text class="sub" x="140" y="252">zero user-visible latency</text>
+
+  <rect class="box" x="470" y="196" width="250" height="64" rx="9"/>
+  <text class="sub" x="595" y="216">Origin: 1 conditional GET</text>
+  <text class="sub" x="595" y="234">for the entire planet</text>
+  <text class="sub" x="595" y="252">herd collapsed 10⁶ → 1</text>
+</svg>
+```
+
+**Invalidation: versioned URLs where you own the name, purge where you do not.** Where you control the URL, do not invalidate at all — content-hash the filename (`app.7f3c9a2b.js`), serve `Cache-Control: public, max-age=31536000, immutable`, and deploy by changing the *reference* in a short-TTL HTML shell. New bytes are a new URL, so no cache anywhere on earth is ever wrong, hit ratio on assets approaches 100%, and rollback is just re-pointing the shell. This is the real answer and it should be the first thing you say. Purge exists for the residue: a customer's `/index.html`, an API response, a price change, a takedown. Implement it in two forms. **Purge-by-URL** is an eager push: control plane appends to the durable purge log, fans out to 200 PoP relays, each multicasts locally, p99 to 99.9% of servers ~2s. A PoP that was partitioned replays the log from its last offset on reconnect, which is why the log must be durable and the operation idempotent — you cannot collect 13,000 acknowledgements. **Purge-by-tag** cannot be an enumeration: "everything tagged `product-1234`" may match ten million objects across the fleet. Instead every cached object records the generation counters of its tags at fetch time, and purging a tag bumps one counter in the globally replicated generation table; on the next lookup the server compares stored generation against current and treats a mismatch as a miss. That makes bulk invalidation an O(1) push of ~40B and moves the work to lazy read-time validation — the trade being that a tag-purged object still occupies disk until it is either requested or evicted.
+
+**Tiered fetch, origin shielding and connection reuse.** The shield is chosen per origin, not per request, and is the PoP with the best network path to that origin — which also lets the customer allowlist a handful of source IPs at their firewall. Every hop uses long-lived pooled HTTP/2 (or HTTP/3) connections. This is not a micro-optimisation: without pooling, every miss pays a fresh TCP handshake plus a TLS handshake to origin — three round trips, ~200ms across an ocean — on top of the origin's own service time, roughly tripling the miss penalty and, at 17 PB/day of misses, generating a handshake rate the origin's TLS terminator cannot absorb. Pooled and multiplexed, a miss costs one round trip on an already-warm connection. Conditional revalidation (`If-None-Match` / `If-Modified-Since`) means most refreshes return a ~200B `304` rather than 100KB, so revalidation traffic is a rounding error against fill traffic.
+
+**Byte-range and segment caching for large media.** A 4 GB video must not be a single cache entry: storing it whole means one object can evict 40,000 small ones, a range request for the middle cannot be served until the whole file is fetched, and no single server should own 4 GB of one customer's content. Cache in fixed 2MB blocks keyed `(object_key, block_idx)`, with the object's *blocks* all hashing to one owning server (so a sequential read stays on one box and one connection) but each block admitted and evicted independently. A `Range: bytes=5242880-7340031` request maps to blocks 2–3; only those are fetched from upstream, aligned and coalesced into one upstream range request. Because media playback is sequential, prefetch the next two blocks on a hit — a cheap read-ahead that turns a seek-and-stall into a continuous stream. The ABR ladder, segment durations and player heuristics belong to the consumer of this system, not to it (see #31 and #11).
+
+**TLS at the edge, certificate distribution, and edge compute.** You terminate TLS for tens of thousands of customer hostnames on ~13,000 servers, so you do not ship every certificate to every box: each server resolves the SNI hostname against the control-plane KV lazily at handshake time and caches the chain in a local LRU, adding a sub-millisecond lookup to a cold handshake and nothing to a warm one. For customers who will not hand over a private key, offer keyless TLS: the private key stays in their datacentre and the edge makes an RPC for the single signing operation in the handshake — one extra round trip on connection setup, zero on resumption, and the customer keeps custody. TLS 1.3 session resumption makes most handshakes 0-RTT; allow 0-RTT early data only on idempotent `GET`s, because early data is replayable by design. Edge compute rides on the same boxes: run tenant code in V8 isolates rather than containers — an isolate is a few MB and starts in single-digit milliseconds against ~50MB and hundreds of milliseconds for a container, which is the only way per-request tenant code is affordable at 50k req/s per server — with a hard CPU-time and memory budget per request so one tenant cannot starve the cache.
+
+#### Potential Follow-Up Questions
+**Q: A customer clicks "purge everything" on their origin at 09:00 on Black Friday. What happens?**
+Naively, every PoP's copy of that origin is invalidated at once and the next wave of traffic is a 100% miss rate straight through to an origin sized for 1% — the origin falls over and takes the customer's site down. Make purge-all a **soft** purge by default: mark objects stale rather than deleting them, so `stale-while-revalidate` keeps serving while the tiers refill gradually and single-flight holds origin concurrency to one per object. *If pushed:* rate-limit the refill explicitly — a token bucket per origin at the shield capping concurrent origin fetches, with the excess served stale and a warning surfaced in the customer's dashboard. Hard purge (delete, no stale) stays available but is rate-limited to a few thousand URLs and requires an explicit flag.
+
+**Q: BGP reconverges and moves a client to a different PoP mid-download. What breaks?**
+The TCP flow arrives at a machine with no socket state for it and gets a RST; the client sees a truncated transfer. It matters least for the common case (short-lived HTTP requests over seconds) and most for large downloads. *If pushed:* clients retry with `Range` from the last received byte, so a resumed download costs one round trip rather than restarting; QUIC helps materially because a QUIC connection is identified by a connection ID rather than a 4-tuple and survives path changes; and you keep flap rates low by preferring stable, well-peered prefixes and avoiding frequent route churn during maintenance (drain by weighting announcements, not by flapping them).
+
+**Q: How do you serve content that requires authorization without leaking one user's data to another?**
+Two safe patterns. Signed URLs: the origin mints a URL with an expiry and HMAC; the edge validates the signature and serves the same cached object to anyone holding a valid signature — the object itself is not personalised, so caching is safe. Or edge token validation: the edge checks a JWT and then serves a shared cached object. What you must never do is cache a response whose *body* differs per user under a key that does not include the user. *If pushed:* enforce it structurally, not by policy — refuse to store any response carrying `Set-Cookie`, `Cache-Control: private`, or generated from a request bearing `Authorization`, unless the origin has explicitly opted that route in and declared the identity dimension as part of the cache key.
+
+**Q: A crawler pulls 50M cold URLs from one origin overnight. What does that do to your hit ratio?**
+Under pure LRU it is a disaster: 50M single-touch objects march through the cache and evict the entire hot working set, so the *other* customers on that PoP see their hit ratio collapse and their origins get hit. Under S3-FIFO with second-hit promotion, those objects never leave the small probationary queue and the main queue is untouched. *If pushed:* also cap per-origin cache occupancy (no tenant may exceed, say, 15% of a PoP's disk) so a single customer's long tail cannot crowd out the shared hot set, and rate-limit origin fills per customer so the crawler's misses do not saturate the shield.
+
+**Q: The origin goes down entirely. What do users see?**
+Ideally, the site. `stale-if-error` lets the edge serve an expired copy when the upstream returns 5xx or times out — configure a generous window (hours) because a stale page beats an error page for nearly all content. *If pushed:* combine with a circuit breaker at the shield so you stop hammering a dead origin, negative-cache 5xx responses for a few seconds so an error does not itself become a herd, and expose "served-stale-on-error" as a first-class metric so the customer knows they were saved rather than discovering it later.
+
+**Q: One object is so hot it saturates a single server's NIC. Consistent hashing put it on one box — now what?**
+At 40 Gbps usable per server, a 100KB object needs ~50k req/s to saturate one NIC, and a viral object can exceed that at a tier-1 PoP. Detect per-key request rate and, above a threshold, **replicate the hot key to all servers in the PoP** rather than routing to its owner — the object is cheap to duplicate and the fan-out benefit is what mattered, not the storage saving. *If pushed:* this is the standard hot-shard remedy; the cost is that a replicated key now has N copies to invalidate rather than 1, so the purge path must fan to the whole PoP for hot keys, which the in-PoP multicast already does.
+
+**Q: A customer says their hit ratio is 60% and blames you. How do you debug it?**
+Break the miss reasons down in the logs — the answer is almost always one of five: tracking parameters in the cache key, a `Vary` on something high-cardinality like `User-Agent` or `Cookie`, the origin sending `Cache-Control: no-store` or omitting caching headers entirely, TTLs shorter than the object's request inter-arrival time at a single PoP, or genuinely long-tail content that no cache can help. Emit a per-origin `cache_status` histogram with a *reason* code (`MISS_UNCACHEABLE_HEADER`, `MISS_EXPIRED`, `MISS_COLD`, `MISS_VARY_EXPLOSION`) so this is a dashboard, not an investigation. *If pushed:* the long-tail case is real and not fixable by tuning — if an object is requested once a week at one PoP, no TTL saves you; that is where a mid-tier earns its keep, because the union of 10 PoPs' weekly requests is often frequent enough to stay resident regionally.
+
+**Q: 5 Tbps of volumetric DDoS aimed at one customer. Does the CDN survive?**
+This is where anycast earns its place: the attack traffic is delivered to whichever PoP is nearest each botnet node, so 5 Tbps spread across 200 PoPs is ~25 Gbps each — absorbable inside the headroom you already provisioned. *If pushed:* layer per-customer rate limits at the edge so the attack cannot consume the shared origin-fill path, blackhole clearly-malicious prefixes at the PoP rather than upstream, and make sure the shield enforces a hard concurrency cap on origin fetches so an attack against uncacheable URLs (the actually dangerous variant) cannot pass through as origin load.
+
+#### Bottlenecks & Mitigations
+- **Cache-key cardinality explosion** — tracking parameters, `Vary: User-Agent`, or cookies in the key multiply one object into thousands of entries; hit ratio falls and at ~$420k per point the bill moves immediately. Allowlist query parameters, canonicalise ordering, normalise `User-Agent` to a device class, and alert on entries-per-distinct-path per origin. Trade-off: an allowlist can break a customer whose parameter genuinely varies the response, so ship it with a shadow-mode diff before enforcing.
+- **Thundering herd on TTL expiry** — 1M concurrent origin requests for one URL when a hot object expires. Single-flight per server, consistent-hash key ownership per PoP, mid-tier and shield coalescing, plus `stale-while-revalidate` and ±10% TTL jitter. Trade-off: SWR means some users are knowingly served stale content for the length of the revalidation, which is unacceptable for a small set of correctness-critical routes that must opt out.
+- **Purge fan-out at the control plane** — a burst of purges must reach ~13,000 servers under a 5s SLO, and a naive flat fan-out is 13M messages/s from one place. Hierarchical push (control plane → 200 relays → in-PoP multicast) plus generation counters for tag purges. Trade-off: eventual consistency — a partitioned PoP serves stale content until it replays the durable log.
+- **Hot key saturating one server's NIC** — consistent hashing concentrates a viral object on one box, and 50k req/s of a 100KB object is a full 40 Gbps. Detect per-key rate and replicate hot keys to every server in the PoP. Trade-off: N copies to invalidate instead of 1, and a small amount of duplicated storage.
+- **Origin capacity during mass invalidation or cold start** — a purge-all, a new PoP turning up, or a fleet restart takes hit ratio to zero against an origin sized for 1% of traffic. Soft purge by default, per-origin fill token buckets at the shield, and staged PoP turn-up with a warm-through-mid-tier period. Trade-off: slower propagation of genuinely new content immediately after a bulk purge.
+- **SSD write amplification from one-hit wonders** — admitting every miss writes ~12.5 GB/s per tier-1 PoP to flash, most of it never read again, burning endurance and evicting useful objects. W-TinyLFU admission plus S3-FIFO's second-hit promotion. Trade-off: a genuinely new-but-about-to-be-popular object is delayed one request before being admitted — negligible at CDN request rates.
+- **BGP route flap and PoP drain** — anycast gives you no per-request steering, so an overloaded or degraded PoP cannot be selectively drained. Announce several independent anycast rings and use GeoDNS to move customers between rings; drain a PoP by de-preferencing its announcement (AS-path prepending, communities) rather than withdrawing it outright. Trade-off: more prefixes to manage and a slower, coarser drain than DNS-only routing would give.
+
+#### Failure Modes
+| Layer | Failure | Detection | Mitigation |
+|---|---|---|---|
+| Request routing | A PoP is up but its upstream transit degrades; BGP still steers users into it | Per-PoP p99 TTFB and TCP retransmit rate vs its 7-day baseline | Automated health-based withdrawal of the anycast announcement; traffic reconverges to neighbours within seconds; alert if neighbour PoPs exceed 70% NIC |
+| Edge server | One box in a PoP dies mid-request | In-PoP L4 health check; per-server connection error rate | Consistent-hash ring rehomes its key range to neighbours (~1/N of keys move, briefly cold); L4 balancer stops sending it new flows; in-flight requests are client-retried |
+| Edge cache | A software rollout corrupts on-disk entries or invalidates the format | Checksum mismatch rate on read; hit-ratio cliff within one PoP | Per-object checksums, treat mismatch as a miss rather than serving corruption; canary rollouts one PoP at a time with automatic rollback on hit-ratio delta |
+| Mid-tier | A regional mid-tier is lost; its 10 PoPs lose their shield | Origin fill rate for that region spikes 5× | Edges fail over to the next-nearest mid-tier (higher latency, still shielded); per-origin fill token bucket at the shield prevents the origin absorbing the spike |
+| Purge control plane | Purge fan-out stalls; stale content stays live past the SLO | Purge-propagation p99 and per-PoP ack lag on the purge log | Durable Kafka purge log with per-PoP offsets — PoPs replay on reconnect; page when any PoP's offset lag exceeds 30s; customers can re-issue idempotently |
+| Cache key | A config change removes a keyed header and personalised responses become shared | Continuous canary asserting no `Set-Cookie` or per-user marker in cached bodies; sudden hit-ratio *jump* on a dynamic route | Fail-closed on the never-store rules regardless of config; auto-revert the config change and hard-purge the affected origin; treat as a security incident, not a caching bug |
+| Origin | Origin returns 5xx or times out entirely | Origin error rate and timeout rate per origin at the shield | `stale-if-error` serves expired copies for a configured window; circuit breaker at the shield; negative-cache 5xx for a few seconds so errors do not themselves stampede |
+| TLS | Control-plane KV unavailable, so SNI certificate lookup fails on cold handshakes | Handshake failure rate by PoP; KV read error rate | Per-server certificate LRU with a long stale-serve window (certificates change rarely); serve from the stale cache during a control-plane outage; only reject when the cert has genuinely expired |
+| Capacity | Volumetric DDoS or a flash crowd pushes a PoP past NIC capacity | NIC utilisation, drop counters, connection-establishment latency | Anycast already spreads a distributed attack across all PoPs; per-customer edge rate limits protect the shared fill path; shed the lowest-priority traffic and de-preference the announcement if the PoP is genuinely saturated |
+
+#### Observability — Key Metrics & SLOs
+- **Cache hit ratio / offload** (share of requests served without an upstream fetch) — SLO ≥95% by request and ≥90% by byte. Both are needed: request ratio drives user latency, byte ratio drives the bill. Byte ratio is always the lower of the two because large objects are the least cacheable.
+- **Origin egress** (bytes/day leaving the shield toward each customer origin) — track it alongside hit ratio and alert on a 10% week-over-week rise at flat traffic, because that is a cache-key regression showing up as money before it shows up anywhere else.
+- **p99 TTFB by geography and by cache status** (`HIT`, `MISS`, `STALE`) — SLO p99 <50ms for an in-region hit. Segment by continent: a global p99 hides a country whose users are being routed to the wrong continent by BGP.
+- **Purge propagation** (issue → 99.9% of edge servers applied) — SLO p99 <5s. Measure it as an end-to-end synthetic (purge a canary URL and re-fetch it from every PoP), not as a control-plane send count.
+- **Origin fill rate per PoP** (fraction of that PoP's requests that reached origin) — a per-PoP spike with a flat global average means one PoP is cold, mis-routed, or has lost its mid-tier.
+- **One-hit-wonder admission rate** (objects admitted that are never read again) — target <20%. Rising means the admission filter is mis-sized and you are burning flash endurance for nothing.
+- **Served-stale rate, split by cause** (`swr` vs `stale-if-error`) — `swr` is healthy and expected; `stale-if-error` climbing is an origin outage the customer may not know about yet.
+
+#### Multi-Region & DR
+- **Replication mode:** the data plane is stateless and independently active everywhere — every PoP is a full, self-healing replica of nothing, because a lost cache is a cold cache, not lost data. The control plane is single-writer (Postgres in one region) with a globally replicated read-only mirror in every PoP; PoPs never write to it.
+- **RTO:** losing a PoP is ~seconds — withdraw the anycast announcement and BGP reconverges; users see one retry at worst. Losing a whole region's mid-tier is ~1 minute to reconfigure edges onto the next-nearest shield. Losing the control-plane primary is ~5 minutes to promote a replica, during which the data plane is fully functional but config changes and purges queue.
+- **RPO:** zero for cached objects (there is nothing to lose — origin is the source of truth). Zero for config and purges, because both go through the durable log before being acknowledged; a control-plane failover replays from the log offset rather than losing purges.
+- **Failover cadence:** PoP withdrawal is automatic and happens many times a week as a routine health response; regional mid-tier failover is automatic; control-plane promotion is a quarterly game-day. Test purge propagation continuously with synthetic canaries rather than at failover time.
+- **Cross-region cost:** the meaningful line is origin egress (~3.5 PB/day at 95% offload) plus mid-tier-to-edge fill. Control-plane replication is negligible — config and tag generations together are a few GB globally, pushed as diffs. The interesting cost is *asymmetric*: every point of hit ratio you lose is ~$420k/month, so the mid-tier's storage cost is bought back many times over by the fan-out collapse it provides.
+
+#### Common Mistakes / Anti-patterns
+- **Putting the whole query string in the cache key.** One asset shared with a million `utm_*` variants becomes a million cache entries for one object, the hit ratio collapses, and the customer's origin bill quietly multiplies. Allowlist the parameters that actually vary the response, canonicalise their order, and drop the rest before the key is computed.
+- **Caching a personalised response under a key that has no identity in it.** This is the worst failure in the system: an origin returns alice's page with `Set-Cookie: session=…` and no `Cache-Control: private`, the edge stores it, and bob is served alice's page *and her session cookie*. Never store a response carrying `Set-Cookie` or generated from an `Authorization`-bearing request unless the route has explicitly opted in and declared the identity dimension; enforce this in the cache engine so no config change can turn it off, and run a canary that asserts it continuously.
+- **Relying on purge when you could have used a versioned URL.** Where you control the filename, content-hash it and serve it immutable — new bytes are a new URL and nothing anywhere is ever stale. Reaching for purge on every deploy means you have made a global, best-effort, eventually-consistent broadcast a required step in your release path.
+- **Choosing DNS routing "because it gives you control" and ignoring TTL reality.** Resolvers and client stacks routinely over-cache, so a PoP you drained keeps taking traffic for minutes, and you see the resolver's location rather than the client's. Use anycast for the data plane and keep DNS for coarse ring selection.
+- **Using plain LRU at the edge.** CDN traffic contains scans — crawlers, bulk migrations, prefetchers — and LRU is not scan-resistant, so a workload that gets zero hits can evict the entire hot set and hurt every other tenant on the box. Use an admission policy (W-TinyLFU) and a scan-resistant eviction policy (S3-FIFO), and cap per-tenant occupancy.
+- **Deleting on purge-all instead of marking stale.** A hard purge-all takes hit ratio to zero against an origin provisioned for 1% of traffic and reliably takes the customer's site down. Soft-purge by default so `stale-while-revalidate` covers the refill, and rate-limit origin fetches per origin while the tiers repopulate.
+
+#### Talking Points for the Interview
+- **The mid-tier is not there for latency — it is there for fan-out collapse.** Saying out loud that it *adds* milliseconds to a miss and is still obviously correct shows you understand what the tier is actually for.
+- **One point of cache hit ratio is ~$420k/month of origin egress.** Deriving that number is the single most persuasive thing in the answer, and it reframes cache-key design from tuning to finance.
+- **Anycast for the data plane, DNS for the steering knob.** Name the real cost of each — BGP is not yours to control and can flap mid-flow; DNS TTLs are widely ignored — and then commit to a hybrid instead of hedging.
+- **The herd collapses 1,000,000 → 1 through four coalescers, and nobody waits for any of it.** Walk the cascade with numbers, then say `stale-while-revalidate` is what makes the whole thing invisible to users.
+- **Content-hashed immutable URLs are the real answer to invalidation.** Purge is the escape hatch for URLs you do not own, and it is explicitly eventually consistent with a durable replayable log — not a synchronous guarantee.
+- **Cache poisoning is the failure that ends careers, and it is a cache-key bug.** Enforce never-store on `Set-Cookie` and `Authorization` in the engine rather than in config, and run a continuous canary against it.
+
+### 52. Design an Authentication & Authorization Service (SSO)
+#### Problem
+Run one identity provider that registers users, authenticates them with passwords, MFA and federated login, and issues tokens that every first-party app and third-party API client can verify and that the platform can revoke.
+
+#### Summary
+**The picture in your head:** the security desk in the lobby of a large office building. You show ID once at the desk (that check is slow and careful — they look at the photo, call your host, check the watchlist) and they hand you a tamper-evident badge with an expiry printed on it. Every door in the building then reads the badge locally, in milliseconds, without phoning the lobby. That is exactly the bargain: one expensive check, then millions of cheap ones. And it is exactly the flaw — when someone is fired at 10:04, every door in the building still honours their badge until it expires, unless you can somehow get a message to all of them.
+
+**The single-request walkthrough:** *login path.* A user opens the app. The client generates a random 32-byte `code_verifier`, hashes it to a `code_challenge`, and redirects the browser to `GET /authorize` with `client_id`, `redirect_uri`, `scope`, a random `state`, a `nonce`, and the challenge (~15ms). The Auth Service sees no session cookie, renders the login form, and the user POSTs email + password. The service looks up the identity row by a hash of the normalised email (~2ms), then hands the password to an isolated hashing pool that runs argon2id at 64MB / t=3 / p=1 — ~75-100ms and 64MB of RAM, deliberately. MFA is then required: a TOTP code or a WebAuthn assertion (~200ms of browser ceremony, plus human time). The service mints a one-time authorization code, stores it with the `code_challenge` and a 60s TTL, and `302`s back to `redirect_uri?code=…&state=…` (~5ms). The client compares `state` to what it stored — mismatch means abort — then POSTs the code plus the raw `code_verifier` to `/token` over the back channel. The service recomputes `SHA-256(code_verifier)`, compares it to the stored challenge, deletes the code, and signs three things: a ~10-minute access JWT, an OIDC `id_token`, and an opaque rotating refresh token (~25ms, dominated by two signatures). Machine time end to end: ~170ms p50.
+
+*Verify path — the one that actually sizes the system.* The client now calls `GET /orders` with `Authorization: Bearer <jwt>`. The order service does not call the Auth Service. It splits the token, reads the `kid` from the header, looks up the matching public key in its in-process JWKS cache (refreshed every 5 minutes), verifies the Ed25519 signature in ~40µs, checks `exp`, `iss`, `aud`, and checks the token's `jti` against a small in-memory revoked set pushed to it over a pub/sub channel. Total: **under 100µs, zero network calls**. That happens ~500k times a second. The login path happens ~5k times a second. That 100× asymmetry is the entire argument for the design, and also the source of every hard problem in it.
+
+**The pieces (and what each one is for):**
+- **Auth Service (`/authorize`, `/token`, `/revoke`, `/introspect`)** — the only component that can mint tokens. Stateless request handling; all state lives in the identity DB and the session store. Kept small and boring because it is a single point of compromise for the entire platform.
+- **Isolated hashing pool (argon2id)** — a *memory-hard* KDF: unlike SHA-256 it deliberately requires a large working memory (64MB here) per hash, which is what removes the GPU's advantage. It runs on its own worker pool with a bounded concurrency, because a request that costs 75ms of CPU and 64MB of RAM is a ~1000× amplification weapon if it shares a thread pool with anything else.
+- **Identity DB (PostgreSQL)** — users, credential hashes, MFA enrolments, account status, `tokens_valid_after`. Relational because the constraints matter (unique email, foreign keys to MFA factors) and the write rate is trivially small.
+- **Session / refresh store (Redis Cluster)** — hashed refresh tokens keyed by family, plus the revoked-JTI denylist. In-memory because the access pattern is point lookups with TTLs, which is exactly what it is good at; see #34 for the cache design and #1 for the throttling counters that live alongside it.
+- **JWKS endpoint (`/.well-known/jwks.json`)** — publishes the *public* halves of the signing keys, indexed by `kid` (key ID). Every verifier caches it. Private keys never leave the KMS/HSM; the Auth Service asks the KMS to sign, or holds a short-lived unwrapped key in memory.
+- **Revocation feed** — a pub/sub topic carrying revoked `jti` values and `tokens_valid_after` bumps to every verifier's in-process set. Small (see the Scale Estimate — a few hundred live entries), so it is affordable to replicate everywhere rather than making 500k/s of network lookups.
+- **Policy engine (RBAC now, OPA/Cedar later)** — evaluates "may this subject do this action on this resource". Deliberately *not* baked into the token beyond coarse role claims.
+
+**The thing that makes it hard:** a self-contained signed JWT is verifiable at every service with zero network calls — which is precisely why it is popular, and precisely why **you cannot revoke it**. The token *is* the authority; nothing consults you again until it expires. A user clicks "log out everywhere" on a lost phone, an admin disables a compromised account, a contractor's `admin` role is downgraded — with a pure JWT the old token keeps working, in full, at every service, until `exp`. Every fix for this reintroduces exactly the shared, network-visible state that statelessness was supposed to eliminate. That is the whole tension, and there is no clean escape from it — only a choice about where on the spectrum you sit.
+
+**Why the standard solution works:** the industry answer is to make the window small rather than zero, and to spend network calls only on the rare path. Access tokens get a **short TTL (5-15 minutes)**, so the worst-case staleness is bounded and stated as an SLO rather than wished away. Long-lived authority moves into a **rotating opaque refresh token** that *is* checked against the store on every use — one lookup per 10 minutes per session (~2k/s) instead of one per request (~500k/s), a 300× reduction. Rotation gives you **reuse detection**: each refresh invalidates the old token, so if an old one is ever presented again, either an attacker or the legitimate client has a stale copy, and killing the whole token family is the safe response. For the cases that genuinely cannot wait ten minutes, add two cheap escape hatches: a **denylist of revoked JTIs**, which stays tiny because entries only need to outlive an unexpired access token, and a **per-user `tokens_valid_after` timestamp** compared against the token's `iat`, which revokes every token for a user with one 8-byte write. Both are pushed to verifiers rather than polled. The cost is honest: you have reintroduced shared state, verifiers now have a soft dependency on a feed, and you must decide whether a verifier that has lost the feed fails open (available, briefly stale) or closed (safe, and your whole platform is down).
+
+**If you were building it tomorrow:**
+- PostgreSQL for identities and MFA enrolments; Redis Cluster for refresh tokens, denylist and login counters; AWS KMS or a CloudHSM for signing keys; Kafka for the audit log and the revocation feed; OPA or Cedar for policy; a hosted enterprise-SSO bridge (WorkOS-style) before you write your own SAML parser.
+- Ed25519 (`EdDSA`) over RS256: 64-byte signatures instead of 256-byte ones, which at 500k req/s is ~1.4 Gbps of header bytes you do not send.
+- Verifier hot path pseudocode:
+  ```
+  hdr, claims, sig = split(bearer_token)
+  key = jwks_cache[hdr.kid]                   ← refreshed every 5 min
+  assert hdr.alg == "EdDSA"                   ← never trust alg from the token
+  assert verify(key, hdr + claims, sig)
+  assert claims.exp > now and claims.iss == ISS and AUD in claims.aud
+  assert claims.jti not in revoked_set        ← in-process, pushed via pub/sub
+  assert claims.iat >= tokens_valid_after[claims.sub]  ← default 0, cached
+  return claims.sub, claims.scope
+  ```
+- Login hot path: rate-limit by (account, IP) → look up identity → argon2id compare in the isolated pool (always, even for unknown users) → MFA → mint code → exchange for tokens → append to audit log.
+#### Clarifying Questions
+- First-party applications only, or third-party OAuth clients that we do not control?
+- Do we need enterprise SSO — SAML, SCIM provisioning — on day one, or is that a later enterprise tier?
+- What revocation delay is tolerable: is "logged out within 10 minutes" acceptable, or must it be instant?
+- What does authorization actually need to express — roles, attribute conditions, or per-resource sharing?
+- Which client types: browser SPA, native mobile, server-to-server, or all three?
+- Regulatory scope — audit retention, data residency, PCI/HIPAA constraints?
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Third-party clients exist | full OAuth 2.0 with consent screens, per-client scopes, and confidential vs public client registration; PKCE mandatory for public clients |
+| Enterprise SSO on day one | a SAML/OIDC federation bridge plus SCIM provisioning, and tenant-scoped identity routing by email domain |
+| Revocation must be instant | shift toward opaque tokens with introspection, or a pushed denylist plus a ~1-minute access-token TTL, and accept the latency/coupling cost |
+| Per-resource sharing needed | relationship-based (Zanzibar-style) tuples; if only job titles matter, plain RBAC and nothing more |
+| Browser SPA in scope | tokens in httpOnly Secure SameSite cookies via a backend-for-frontend, not localStorage, plus CSRF defence |
+| Residency / audit constraints | region-pinned identity records, per-region audit sinks, and a write-global path that respects the home region |
+
+#### Requirements
+- **FR:** registration with breached-password screening; password, TOTP, WebAuthn/passkey, social and enterprise-SAML login; OAuth 2.0 authorization-code + PKCE and OpenID Connect; token issue, refresh, revoke, "log out everywhere"; role/permission checks; full audit trail.
+- **NFR:** token verification p99 < 1ms with **zero** network calls; login p99 < 500ms of machine time; revocation propagated in ≤ 1s via the feed and bounded at ≤ 10 min by access-token TTL; 99.99% availability (auth is on the critical path of every request); the credential store must survive full exfiltration without yielding usable passwords.
+
+#### Scale Estimate
+- **Identities:** assume ~500M registered, ~50M DAU (~10% daily engagement — an assumption, not a published figure).
+- **Login rate:** 50M DAU × ~1.5 authentications/day (multiple devices, session expiry) = 75M/day ÷ 86400 ≈ ~870/s average. Business hours in the two largest regions overlap into a ~5× peak → ~4.4k/s; round to **~5k logins/s peak**.
+- **Verification rate:** 50M DAU × ~200 authenticated API calls/day = 10B/day ÷ 86400 ≈ ~116k/s average; ×4 peak → **~470k/s, round to ~500k/s**. The ratio that dictates everything: 500k ÷ 5k = **100× more verifications than logins**. Any design where verification talks to the auth service converts a 5k/s service into a 500k/s service and puts it in the blast radius of every request on the platform.
+- **Refresh rate:** concurrent sessions ≈ 50M DAU × ~30 min active/day ÷ 86400s ≈ ~1M concurrent. At a 10-minute access-token TTL each refreshes every 600s → 1M ÷ 600 ≈ ~1.7k/s average, ~5k/s peak — the same order as logins, and it is a *write* (rotation), so the session store sees ~10k writes/s peak counting both.
+- **KDF cost (the number people forget):** argon2id at 64MB / t=3 / p=1 ≈ ~75ms and 64MB per hash on a modern core. 5k logins/s × 75ms = **~375 core-seconds/s ≈ 375 dedicated cores** — ~12 × 32-core hosts, call it 20 with headroom. Bounded concurrency of 32/host × 64MB = ~2GB RAM/host. One cheap HTTP request buys 75ms of CPU: a ~1000× amplification, which is why the pool is isolated and rate-limited ahead of the hash, not after it.
+- **Verification cost:** Ed25519 verify ≈ ~40µs, RSA-2048 verify ≈ ~30µs. 500k/s × 40µs = **~20 core-seconds/s ≈ 20 cores spread across the whole fleet** — effectively free. Compare introspection: 500k RPC/s at ~2k rps per instance = ~250 extra auth instances, plus ~1ms added to every API call on the platform, plus a hard availability dependency. That comparison is the answer to "why not just introspect".
+- **Denylist cost:** an entry only needs to outlive an unexpired access token, so TTL ≤ 600s. Assume ~0.1% of DAU/day trigger a revocation (logout-everywhere, admin disable, password change) = 50k/day ≈ 0.6/s × 600s = **~350 live entries ≈ ~14KB** — small enough to replicate into every verifier's memory. Done as a network lookup instead: 500k GETs/s ÷ ~100k ops/s per shard = ~5 shards, RF=3 → **~15 nodes and ~0.5ms on every single request**, for identical correctness. Push, do not poll.
+- **Identity records:** ~600B (user_id 16B + email ~64B + email_hash 32B + argon2id encoded hash ~100B + status 1B + created/updated 16B + locale/tz 16B + failed-attempt counters 16B + profile ~200B + index padding ~140B). 500M × 600B = ~300GB; RF=3 → **~900GB**. Unique index on email_hash: 500M × 48B ≈ ~24GB.
+- **MFA enrolments:** assume ~30% enrolled × ~1.3 factors = ~195M rows × ~150B (user_id 16B + type 1B + encrypted TOTP secret ~64B *or* WebAuthn credential_id ~64B + public key ~32B + sign counter 4B + created 8B) = ~30GB; RF=3 → ~90GB.
+- **Refresh / session records:** 50M DAU × ~3 devices = **~150M live sessions** × ~200B (user_id 16B + token_hash 32B + family_id 16B + issued 8B + expires 8B + rotation counter 4B + device fingerprint ~64B + ip ~16B + flags 4B + padding ~32B) = ~30GB; RF=3 → ~90GB. Comfortably in memory.
+- **Authorization codes in flight:** 5k/s × 60s TTL = ~300k live codes × ~200B ≈ ~60MB. Trivial, but must be single-use and atomically deleted.
+- **Audit log:** ~75M logins + ~150M refreshes + ~50M logouts + consent and permission changes ≈ **~300M events/day** × ~250B = ~75GB/day; RF=3 → ~225GB/day. 90 days hot in a columnar store ≈ ~7TB, then Parquet in object storage at ~4:1 → ~7TB/yr for the 1-7 year compliance tail.
+- **Token bytes on the wire:** an RS256 JWT is ~800B (claims ~300B + base64 signature ~344B + header). 500k/s × 800B = ~400MB/s ≈ **~3.2 Gbps of pure Authorization header**. Ed25519 cuts the signature to 64B → ~450B/token ≈ ~1.8 Gbps. This is a concrete reason not to stuff a permission list into the token.
+
+#### API Contract
+```
+POST /register              body: { email, password }            → { user_id }   (k-anonymity breach check)
+GET  /authorize             ?response_type=code&client_id=…&redirect_uri=…&scope=openid+profile
+                            &state=…&nonce=…&code_challenge=…&code_challenge_method=S256
+                            → 302 redirect_uri?code=…&state=…
+POST /token                 grant_type=authorization_code&code=…&code_verifier=…&client_id=…
+                            → { access_token, id_token, refresh_token, token_type, expires_in: 600 }
+POST /token                 grant_type=refresh_token&refresh_token=…  → rotated { access, refresh }
+POST /revoke                body: { token }                      → 200
+POST /sessions/revoke-all                                        → bumps tokens_valid_after, 200
+POST /mfa/verify            body: { challenge_id, totp | assertion } → { mfa_token }
+POST /introspect            body: { token }   (opaque tokens)    → { active, sub, scope, exp }
+POST /saml/acs              body: SAMLResponse (signed XML)      → session + 302
+GET  /.well-known/jwks.json                                      → { keys: [{ kid, kty, crv, x, alg }] }
+GET  /.well-known/openid-configuration                           → discovery document
+```
+
+#### High-Level Design
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 352" role="img" aria-label="SSO architecture: clients and enterprise IdP feed the auth service, which owns the identity database, hashing pool, refresh and denylist store, and publishes JWKS and a revocation feed to resource services that verify tokens locally">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box" x="20" y="18" width="200" height="44" rx="9"/>
+  <text class="sub" x="120" y="34">Enterprise IdP</text>
+  <text class="sub" x="120" y="50">SAML / OIDC federation</text>
+  <rect class="box" x="290" y="18" width="180" height="44" rx="9"/>
+  <text class="lbl" x="380" y="40">Client app</text>
+  <rect class="box" x="540" y="18" width="200" height="44" rx="9"/>
+  <text class="sub" x="640" y="34">Third-party API client</text>
+  <text class="sub" x="640" y="50">client credentials</text>
+  <rect class="box" x="20" y="110" width="430" height="94" rx="9"/>
+  <text class="lbl" x="235" y="132">Auth Service</text>
+  <text class="sub" x="235" y="154">/authorize · /token · MFA · consent</text>
+  <text class="sub" x="235" y="172">signs with KMS-held key</text>
+  <text class="sub" x="235" y="190">≈5k logins/s · ≈5k refreshes/s</text>
+  <rect class="box acc" x="490" y="110" width="250" height="94" rx="9"/>
+  <text class="lbl" x="615" y="136">Resource Services</text>
+  <text class="sub" x="615" y="160">verify signature locally</text>
+  <text class="sub" x="615" y="180">≈500k/s · zero RPC</text>
+  <rect class="box" x="20" y="252" width="126" height="72" rx="9"/>
+  <text class="sub" x="83" y="272">Hashing pool</text>
+  <text class="sub" x="83" y="290">argon2id 64MB</text>
+  <text class="sub" x="83" y="308">isolated cores</text>
+  <ellipse class="store" cx="248" cy="254" rx="62" ry="10"/>
+  <path class="store" d="M186,254 v44 a62,10 0 0 0 124,0 v-44"/>
+  <text class="sub" x="248" y="278">Identity DB</text>
+  <text class="sub" x="248" y="296">creds · MFA · roles</text>
+  <ellipse class="store" cx="400" cy="254" rx="50" ry="10"/>
+  <path class="store" d="M350,254 v44 a50,10 0 0 0 100,0 v-44"/>
+  <text class="sub" x="400" y="278">Refresh +</text>
+  <text class="sub" x="400" y="296">denylist</text>
+  <rect class="box" x="490" y="252" width="250" height="72" rx="9"/>
+  <text class="sub" x="615" y="272">JWKS + revocation feed</text>
+  <text class="sub" x="615" y="290">kid → public key, 5 min TTL</text>
+  <text class="sub" x="615" y="308">revoked JTIs pushed</text>
+  <path class="flow" d="M120,62 L120,110"/>
+  <text class="edge" x="128" y="86" text-anchor="start">assertion</text>
+  <path class="flow" d="M330,62 L330,88 L235,88 L235,110"/>
+  <text class="edge" x="250" y="78" text-anchor="start">1. login (5k/s)</text>
+  <path class="flow" d="M440,62 L440,88 L615,88 L615,110"/>
+  <text class="edge" x="452" y="78" text-anchor="start">2. bearer token (500k/s)</text>
+  <path class="flow" d="M640,62 L640,110"/>
+  <path class="flow" d="M83,204 L83,252"/>
+  <path class="flow" d="M248,204 L248,244"/>
+  <path class="flow" d="M400,204 L400,244"/>
+  <path class="flow" d="M450,176 L470,176 L470,288 L490,288"/>
+  <text class="edge" x="466" y="232" text-anchor="end">publish keys</text>
+  <path class="flow dash" d="M615,252 L615,204"/>
+  <text class="edge" x="624" y="228" text-anchor="start">pull + subscribe</text>
+</svg>
+```
+
+**How to read the diagram:** the left column is the slow, careful, stateful login path and everything it owns; the right column is the fast, stateless verification path. The only wire between them is the dashed one at the bottom — verifiers pull public keys and subscribe to revocations, and never make a per-request call.
+
+**Why the flow is shaped this way:** authentication happens 5k times a second and can afford 170ms; authorization of an individual API call happens 500k times a second and can afford 100µs. Putting them behind the same synchronous interface would force the cheap path to pay the expensive path's cost and inherit its availability.
+
+**What this layout buys you:** the Auth Service can be down for a minute and every already-authenticated request still succeeds. The price is written on the dashed line — that is where revocation staleness lives, and it is the only thing standing between "fast" and "correct".
+
+#### Data Model
+- **users** (relational, PK `user_id`, unique index on `email_hash`): `(user_id, email, email_hash, password_hash, kdf_params, status, tokens_valid_after, created_at)`
+- **mfa_factors** (relational, partition/FK by `user_id`): `(user_id, factor_id, type, secret_enc | credential_id, public_key, sign_counter)`
+- **oauth_clients** (relational, PK `client_id`): `(client_id, secret_hash, type, redirect_uris[], allowed_scopes[], tenant_id)`
+- **auth_codes** (in-memory store, key `code`, TTL 60s): `(code, user_id, client_id, redirect_uri, code_challenge, nonce, used)`
+- **refresh_tokens** (in-memory store, key `hash(token)`, secondary index `family_id`): `(token_hash, user_id, family_id, rotation_n, device_fp, expires_at, revoked)`
+- **revoked_jti** (in-memory store + pub/sub fan-out, key `jti`, TTL = access-token TTL): `(jti, revoked_at)`
+- **signing_keys** (KMS/HSM; public halves served from JWKS, key `kid`): `(kid, alg, public_key, state, not_before, retire_after)`
+- **audit_events** (append-only log → columnar store, partition by `day`, cluster by `user_id`): `(event_id, user_id, type, client_id, ip, device_fp, ts, outcome)`
+
+#### Detailed Design
+**Credential storage: a memory-hard KDF, a per-user salt, and a pepper.** Store `argon2id(password, salt, m=64MB, t=3, p=1)` with a 16-byte random salt per user, encoded into the standard PHC string so the parameters travel with the hash. The reason a fast hash is catastrophic is arithmetic, not dogma: a top consumer GPU computes on the order of ~20 GH/s of SHA-256, so an 8-character lowercase-plus-digit password space of 36⁸ ≈ 2.8×10¹² falls in ~140 seconds — the entire space, for every user in the dump, in the time it takes to make coffee. Argon2id at 64MB is bounded by memory, not arithmetic: a 24GB GPU fits ~375 concurrent lanes, each taking ~75ms, so ~5k guesses/s — the same space now takes ~18 years. That is a ~4-million-fold difference bought with 75ms per login. The per-user salt is what stops one precomputed table (or one cracked password) from covering the whole dump at once. Add a **pepper**: a secret key held in the HSM and mixed in before hashing, so a database-only exfiltration — the overwhelmingly common case — yields nothing crackable at all. Screen passwords at registration *and* at login (login is the one moment you legitimately hold the plaintext) against a breach corpus using a k-anonymity range query: SHA-1 the password, send only the first 5 hex characters of the digest, receive every matching suffix, and compare locally — the corpus never learns the password. Finally, **rehash on login** whenever `kdf_params` is below current policy, so raising cost parameters migrates the population without a mass reset. bcrypt is the acceptable older option (and its 72-byte input truncation is a real gotcha); plain SHA-256, even salted, is not.
+
+**Login factors: TOTP, WebAuthn, social, and SAML for the enterprise tail.** TOTP is a shared secret plus a 30-second time window — cheap, offline, and *phishable*: a proxy phishing page relays the six digits in real time and wins. WebAuthn/passkeys fix this structurally, because the authenticator signs a challenge bound to the **origin**, so a signature produced for `evil-acme.example` is worthless at `acme.example`; there is no secret for the user to hand over. Offer both, treat WebAuthn as the strong tier, and store TOTP secrets encrypted with a KMS key rather than in plaintext columns. Recovery codes are the real attack surface — they are passwords again, so hash them with the same KDF and burn each on use. Social login is just OIDC where we are the relying party; link accounts on **verified** email only, or you have an account-takeover primitive. Enterprise SSO exists because the buyer, not the user, demands it: an enterprise wants central provisioning, one deprovisioning switch when someone leaves, and their own MFA policy — which is why SAML (signed XML assertions POSTed to `/saml/acs`, tenant resolved by email domain) plus SCIM for user lifecycle is a sales requirement even though OIDC is technically better. Two SAML traps worth naming out loud: validate the XML signature over the correct element with correct canonicalisation (signature-wrapping attacks exploit exactly this), and cache each `assertion_id` for the `NotOnOrAfter` window to block replay.
+
+**The authorization-code flow with PKCE, parameter by parameter.** PKCE ("Proof Key for Code Exchange") gives a public client — an SPA or a mobile app that cannot keep a secret — the same protection a `client_secret` gives a confidential one. The client generates a random `code_verifier`, sends only `code_challenge = BASE64URL(SHA-256(verifier))` on the front channel, and reveals the verifier only on the back channel at token exchange. An attacker who steals the code off the redirect — a malicious app that registered the same custom URL scheme on a phone, a leaky referrer, a shoulder-surfed address bar — cannot redeem it, because they do not have the verifier and cannot derive it from the challenge. `state` is a separate defence for a separate attack: it is an unguessable value the client stores before redirecting and compares on return, which stops login-CSRF where an attacker injects *their* authorization code into your browser so you end up silently logged into their account. `nonce` is a third: it is echoed into the `id_token` so a replayed token from an older authentication is detectable. The **implicit flow** returned the access token directly in the URL fragment, which put a live credential into browser history, referrer headers and any logging in the path, with no client authentication and no refresh token — so it pushed everyone toward long-lived access tokens. It is deprecated in the OAuth 2.0 Security BCP; authorization-code + PKCE is the answer for every client type, including confidential ones.
+
+Stage cardinalities and latency for one login at peak: `/authorize` is 5k/s and ~15ms; the credential POST is 5k/s and ~120ms, of which ~75-100ms is argon2id and everything else is noise; the MFA step is 5k/s and ~200ms of browser ceremony for WebAuthn (human typing time for TOTP is excluded from the SLO); the redirect back is ~5ms; `/token` is 5k/s and ~25ms, dominated by two signatures. Total machine time ~170ms p50, ~500ms p99. In flight at any moment: ~300k unredeemed codes (5k/s × 60s TTL), each single-use and deleted atomically on redemption — a second presentation of the same code must fail *and* should revoke everything issued from it, because it means the code leaked.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 300" role="img" aria-label="OAuth 2.0 authorization code flow with PKCE: verifier generation, authorize redirect, authentication, code redirect, state check, token exchange with verifier, token issue, local verification">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <!-- row 1 -->
+  <rect class="box" x="15" y="48" width="170" height="76" rx="9"/>
+  <text class="sub" x="100" y="64">1. Client prepares</text>
+  <text class="sub" x="100" y="82">verifier = rand 32B</text>
+  <text class="sub" x="100" y="98">challenge = S256(v)</text>
+  <text class="sub" x="100" y="114">+ state, nonce</text>
+  <rect class="box" x="205" y="48" width="170" height="76" rx="9"/>
+  <text class="sub" x="290" y="64">2. GET /authorize</text>
+  <text class="sub" x="290" y="82">client_id, redirect_uri</text>
+  <text class="sub" x="290" y="98">challenge, state, nonce</text>
+  <text class="sub" x="290" y="114">≈15ms</text>
+  <rect class="box acc" x="395" y="48" width="170" height="76" rx="9"/>
+  <text class="sub" x="480" y="64">3. Authenticate</text>
+  <text class="sub" x="480" y="82">argon2id + MFA</text>
+  <text class="sub" x="480" y="98">consent if 3rd-party</text>
+  <text class="sub" x="480" y="114">≈120ms</text>
+  <rect class="box" x="585" y="48" width="170" height="76" rx="9"/>
+  <text class="sub" x="670" y="64">4. 302 redirect_uri</text>
+  <text class="sub" x="670" y="82">?code=…&amp;state=…</text>
+  <text class="sub" x="670" y="98">code TTL 60s, 1 use</text>
+  <text class="sub" x="670" y="114">≈5ms</text>
+  <path class="flow" d="M185,86 L205,86"/>
+  <path class="flow" d="M375,86 L395,86"/>
+  <path class="flow" d="M565,86 L585,86"/>
+
+  <!-- wrap to row 2 -->
+  <path class="flow" d="M670,124 L670,166 L100,166 L100,208"/>
+
+  <!-- row 2 -->
+  <rect class="box" x="15" y="208" width="170" height="76" rx="9"/>
+  <text class="sub" x="100" y="230">5. Check state</text>
+  <text class="sub" x="100" y="248">mismatch → abort</text>
+  <text class="sub" x="100" y="266">(CSRF defence)</text>
+  <rect class="box acc" x="205" y="208" width="170" height="76" rx="9"/>
+  <text class="sub" x="290" y="226">6. POST /token</text>
+  <text class="sub" x="290" y="244">code + verifier</text>
+  <text class="sub" x="290" y="262">S256(v) == challenge</text>
+  <text class="sub" x="290" y="278">burn code</text>
+  <rect class="box" x="395" y="208" width="170" height="76" rx="9"/>
+  <text class="sub" x="480" y="226">7. Tokens issued</text>
+  <text class="sub" x="480" y="244">access JWT 10 min</text>
+  <text class="sub" x="480" y="262">id_token (OIDC)</text>
+  <text class="sub" x="480" y="278">rotating refresh</text>
+  <rect class="box" x="585" y="208" width="170" height="76" rx="9"/>
+  <text class="sub" x="670" y="234">8. Verify locally</text>
+  <text class="sub" x="670" y="252">JWKS pubkey by kid</text>
+  <text class="sub" x="670" y="270">≈40µs, no network</text>
+  <path class="flow" d="M185,246 L205,246"/>
+  <path class="flow" d="M375,246 L395,246"/>
+  <path class="flow" d="M565,246 L585,246"/>
+</svg>
+```
+
+**Sessions and tokens: the revocation spectrum, and where the token lives.** Walk the whole spectrum honestly rather than declaring a winner. *(a) Pure JWT, long TTL* — 500k/s of free local verification, and no revocation whatsoever; unacceptable for anything with a "log out everywhere" button. *(b) Short-lived JWT + rotating refresh* — bounds exposure to the access-token TTL and moves the revocable authority to a token that is checked on every use, at ~2k/s instead of 500k/s. *(c) Denylist of revoked JTIs* — closes the residual window, and it does reintroduce the shared state JWTs were meant to avoid, but honestly: ~350 live entries, ~14KB, pushed over pub/sub into a set every verifier already holds in memory. *(d) `tokens_valid_after` per user* — one 8-byte column compared against `iat`, which kills every token for a user in a single write; the cost is a per-user lookup, so cache it aggressively with the same push feed and a default of zero. *(e) Opaque tokens + introspection* — perfect revocation and the arithmetic above: ~250 extra instances and ~1ms on every request on the platform. **What I would pick:** (b) + (c) + (d), with a 10-minute access TTL. I am accepting up to ~10 minutes of staleness if the pub/sub feed is degraded, in exchange for keeping 500k/s of verification entirely local, and I would say that number out loud as an SLO. Where the token lives in a browser is the same trade in miniature: `localStorage` is readable by any injected script, so one XSS is a permanent token exfiltration; an **httpOnly, Secure, SameSite=Lax cookie** cannot be read by script at all, which is why it wins — but it is attached automatically, so it needs CSRF defence (SameSite plus a double-submit token on state-changing requests). Be honest that a cookie does not *defeat* XSS: injected script can still `fetch(..., {credentials:'include'})` and act as the user. It stops the attacker from walking away with a token they can replay from anywhere, which is a meaningful reduction, not immunity. For SPAs, a backend-for-frontend that holds the tokens server-side and gives the browser only a session cookie is the strongest version of this.
+
+**Refresh-token rotation and reuse detection.** Every use of a refresh token invalidates it and issues a new one in the same **family** (`family_id`, `rotation_n`). Because a valid token is used exactly once, a *second* presentation of an already-rotated token is proof that two parties hold the lineage: either an attacker stole it and used it before the legitimate client, or the legitimate client used it and the attacker is replaying. You cannot tell which, so the safe response is to revoke the entire family — every descendant token dies and both parties must re-authenticate. Concrete example: bob's laptop is compromised at 09:00 and the token is copied. At 09:07 bob's real client refreshes normally; at 09:20 the attacker presents the copied token, the store sees `rotation_n` already superseded, and the family is killed — the attacker gets nothing and bob logs in again. The failure mode to design around is honest clients on flaky networks: the client sends a refresh, the response is lost in transit, the client retries with the same token, and naive reuse detection logs out a completely innocent user. Fix it with a short grace window — accept the immediately-previous token for ~10 seconds and return the *same* newly-issued pair (idempotent replay) rather than rotating again. Tokens are stored hashed (SHA-256 is fine here — these are 256-bit random values, not guessable passwords, so the KDF argument does not apply) and bound to a device fingerprint so a token presented from an entirely new device raises a step-up challenge.
+
+**Authorization: RBAC, ABAC, Zanzibar — and when to stop.** Start with **RBAC** and be unembarrassed about it: users hold roles, roles hold permissions, and the check is a set membership test. It covers the overwhelming majority of products, and coarse role claims are small enough to sit in the token. Move to **ABAC** when rules become conditional on attributes the role does not capture — "a support agent may read a ticket only in their assigned region, during their shift" — and express those as policy in OPA or Cedar rather than as `if` statements sprinkled across services. Move to **relationship-based (Zanzibar-style)** only when permission derives from a graph you cannot enumerate in advance: document sharing, folder inheritance, org hierarchies. There, permission is a set of tuples like `doc:42#viewer@user:alice` and `doc:42#parent@folder:9`, with rewrite rules that say a folder's viewers are also viewers of its children, and a check becomes a bounded graph traversal. That is genuinely powerful and genuinely expensive — it needs its own denormalised index and a consistency token so a user who just shared a document does not see a stale "access denied". Do not build it for an app whose entire authorization model is "admin or not". The related discipline: put only small, stable claims in the token (`sub`, `scope`, one or two roles) and evaluate fine-grained permissions at the resource service, because a permission list embedded in a token is both a size problem (see the ~3.2 Gbps figure) and a staleness problem — it is wrong the instant someone is demoted.
+
+**Key management: asymmetric signing, JWKS, and rotation with an overlap window.** Sign with **RS256 or EdDSA**, never HS256, once more than one service verifies. HMAC means every verifier holds the secret, and any verifier that holds the secret can *mint* tokens — one compromised low-value service becomes total platform compromise. With asymmetric signing the verifier only ever holds a public key. Publish those at `/.well-known/jwks.json`, indexed by `kid`, cached by verifiers for ~5 minutes. Two hard rules for the verifier: pin the expected algorithm rather than trusting the token's own `alg` header (otherwise you accept `alg: none`, or an HS256 token that an attacker forged using your published RSA public key as the HMAC secret), and reject a token whose `kid` is unknown rather than falling back to any key you happen to have. **Rotation needs an overlap window** in both directions. Publish new key K2 to JWKS while still signing with K1; wait at least one full JWKS cache TTL (~5 min, plus margin — say 15) so every verifier has seen K2; only then start signing with K2; keep K1 in JWKS for at least one full access-token lifetime (~10 min) plus margin so in-flight tokens still verify; then retire K1. Total overlap ~1 hour, scheduled rotation every 90 days. Emergency rotation collapses the window deliberately and you eat a wave of 401s — which is survivable precisely because clients hold refresh tokens and will re-mint silently.
+
+**Throttling login without building a DoS weapon.** Naive per-account lockout — "5 failures and the account is frozen for an hour" — is a denial-of-service primitive handed to attackers: anyone who knows a target's email can lock them out permanently for the cost of six requests a minute. Throttle on the **(account, IP) pair** with exponential backoff instead, so a distributed attack against one account still costs the attacker a fresh IP per handful of guesses while the real user, arriving from their usual address, is unaffected. Layer on: a signed device cookie that grants a known-good device a larger budget; CAPTCHA or proof-of-work escalation rather than a hard block; global per-IP and per-ASN ceilings; and a mandatory step-up (MFA or email confirmation) on login from an unrecognised device even when the password is correct — that last one is what actually defeats credential stuffing, because the attacker has the password and it still does not help. Read the two attack shapes differently: many distinct usernames failing from one subnet is **stuffing** (throttle the source), while one username failing from many sources is **targeted** (protect the account, notify the user, never freeze them out). Cross-reference #1 for the token-bucket mechanics and the distributed-counter design, and #34 for where those counters live. One subtlety that belongs in the same paragraph: run the argon2id comparison against a dummy hash even when the email does not exist, so response time does not leak account existence — and make `/register` and `/forgot-password` return identical responses for known and unknown addresses for the same reason. Delivery of the resulting MFA codes and "new device" alerts goes through the notification pipeline in #7.
+
+#### Potential Follow-Up Questions
+**Q: A user clicks "log out everywhere" on a lost phone. What actually happens, and when is it true?**
+Three writes: mark every refresh-token family for that user revoked, bump `tokens_valid_after = now` on the user row, and publish that bump on the revocation feed. Refresh tokens die immediately because they are checked on use. Access tokens die as verifiers receive the feed — sub-second normally. *If pushed:* if the feed is degraded, the guarantee degrades to the access-token TTL, ~10 minutes worst case. That is the SLO. Say the number rather than claiming instantaneous revocation, and make the client-visible copy say "you'll be signed out on other devices within a few minutes".
+
+**Q: An admin disables a compromised employee account at 10:04. When do they lose access?**
+Same mechanism, but this is the case that justifies the denylist: bump `tokens_valid_after`, revoke the families, and push. Verifiers holding the feed reject the next request. *If pushed:* for genuinely high-stakes actions — money movement, admin consoles, PII export — do not rely on the token at all; require a synchronous authorization check or a re-authentication at the action boundary. Bounded staleness is fine for reading a dashboard and not fine for a wire transfer, and the design should distinguish them explicitly.
+
+**Q: A refresh token is stolen. How do you notice?**
+Rotation plus reuse detection. Each token is single-use, so a second presentation of a superseded token proves two holders exist and the whole family is revoked. *If pushed:* the ambiguity is real — you cannot tell attacker-first from victim-first, so you kill both and force re-authentication, which is annoying but safe. Guard against false positives from lost responses with a ~10s idempotent grace window that returns the same pair on retry. Additionally bind tokens to a device fingerprint and step up on mismatch, and consider DPoP or mTLS sender-constraining for high-value clients, which makes a stolen bearer token useless without the matching private key.
+
+**Q: Why not just use opaque tokens and introspect on every call?**
+Because of the 100× asymmetry: 500k verifications/s against 5k logins/s. Introspection turns a 5k/s service into a 500k/s one, needs ~250 extra instances at ~2k rps each, adds ~1ms to every API request on the platform, and makes the auth service a hard synchronous dependency of everything. *If pushed:* it is still the right answer for a small deployment, or for a specific high-value audience where perfect revocation beats latency. A hybrid is common and defensible — stateless JWTs for internal service-to-service traffic, opaque tokens with introspection for third-party API clients, where you want a kill switch and per-client quota anyway.
+
+**Q: Someone runs a credential-stuffing attack: 200k username/password pairs from a breach, spread over 10,000 IPs. What fires?**
+Per-(account, IP) throttling barely engages — that is the point of spreading it. What catches it is the aggregate shape: a spike in *distinct usernames* failing from a single ASN, and an anomalous overall failure ratio. Escalate that cohort to CAPTCHA, then to mandatory step-up. *If pushed:* the structural defence is the breached-password check at registration and login — most stuffing succeeds because the password was already public. Also watch for *successful* logins from the attacking cohort, which are the actual compromises and need immediate forced reset, and remember the KDF amplification: 200k attempts at 75ms each is ~4 CPU-hours you are being made to spend, which is why the throttle sits *before* the hash.
+
+**Q: The JWKS endpoint is unreachable and a verifier restarts with a cold cache. What happens?**
+Everything fails, because the verifier cannot validate any signature — which makes JWKS a hidden single point of failure for the whole platform. Mitigate by serving JWKS from a CDN with a long stale-while-revalidate, baking the current key set into the service image as a bootstrap fallback, and never letting the cache expire hard: serve stale keys rather than failing, since a retired key's tokens have already expired anyway. *If pushed:* the same reasoning applies to the revocation feed, but with the opposite default — keys fail closed (you cannot verify without them), revocation fails open (you verify with a stale denylist). Emit a metric for feed lag and alert when a verifier's denylist is older than the access-token TTL, because at that point your revocation guarantee has silently lapsed.
+
+**Q: An attacker sends a token with `alg: none`, or an HS256 token signed with your published RSA public key.**
+Both are classic library-level breaks and both are defeated by the same rule: the verifier decides the algorithm, the token does not. Pin `alg` to the expected value, reject unknown `kid`s, and use a library API that takes the algorithm as a parameter rather than reading it from the header. *If pushed:* also validate `iss` and `aud` on every check — a token minted for one audience being replayed at another service is a real cross-service confusion attack, and `aud` is the only thing that stops it. Fuzz these paths in CI with a corpus of malformed tokens; this class of bug is found by tests, not by review.
+
+**Q: A contractor's role is downgraded from admin to viewer mid-session. Their token still says admin.**
+This is the staleness problem in its purest form and the reason permission claims should not live in the token. With coarse claims and a resource-side check against the policy engine, the downgrade takes effect on the next request. If you did embed roles, bump `tokens_valid_after` for that user to force a refresh — the refresh re-reads the roles. *If pushed:* the general rule is that the token proves *who*, and the resource service decides *what* — put identity in the token and authorization behind a cached policy lookup with a short TTL. That also keeps the token small, which matters at ~3.2 Gbps of headers.
+
+**Q: A region is partitioned from the global identity primary. Can users log in?**
+Reads work, so password verification works from the local replica and existing sessions refresh normally — auth stays up, which is the point of read-local. Writes do not: registration, password change and MFA enrolment fail, and you should degrade them with an explicit "try again shortly" rather than a generic 500. *If pushed:* the sharp edge is refresh-token rotation, which is a write. If sessions are homed to a region and refresh is routed there, the partitioned region can still rotate locally. If they are globally replicated asynchronously, a rotation in one region and a replay in another can both look valid, which weakens reuse detection precisely when you need it. Home the session, carry the region in the token, and accept a forced re-login if the home region is unreachable.
+
+#### Bottlenecks & Mitigations
+- **KDF CPU on the login tier** — argon2id is 75ms and 64MB by design, so 5k logins/s consumes ~375 cores and a login flood is a ~1000× amplification attack. Run hashing in an isolated pool with bounded concurrency and a queue with fast rejection, place rate limiting *before* the hash, and autoscale that pool independently of the rest of the service. Trade-off: bounded concurrency means shedding logins under attack rather than degrading everything, and you must tune the queue depth so a legitimate morning spike is not mistaken for a flood.
+- **Denylist lookups at verification rate** — a network lookup per verification is 500k GETs/s, ~15 Redis nodes with RF=3, ~0.5ms on every request, and a hard dependency for the entire platform. Replicate the denylist instead: it is ~350 live entries and ~14KB, so push it over pub/sub into every verifier's memory. Trade-off: verifiers can now be stale, bounded by feed lag; you must monitor that lag and treat it as a security metric, not an availability one.
+- **Refresh-rotation write amplification** — every refresh is a write to the session store, ~5k/s at peak and growing linearly with session count and inversely with access-token TTL. Halving the TTL doubles the write rate. Tune the TTL as an explicit dial between revocation latency and store load, shard by `user_id`, and keep the store in memory. Trade-off: a longer TTL is cheaper and less safe, and this is the honest place to say so.
+- **JWKS cache stampede on rotation or cold start** — a region restarting after a deploy sends thousands of simultaneous JWKS fetches, and a rotation invalidates every cache at once. Serve JWKS from a CDN, jitter the refresh interval per instance, use stale-while-revalidate, and bake a bootstrap key set into the image. Trade-off: stale keys are served during an emergency rotation, which is exactly when you want them gone — accept it and rely on short token TTLs to bound the damage.
+- **Hot tenant on the enterprise path** — one large customer's 9am login surge, or an SCIM sync pushing 100k user updates, can saturate the shared login tier. Per-tenant quotas and a separate queue for SCIM bulk operations; shard the federation bridge by tenant. Trade-off: per-tenant isolation costs utilisation, and small tenants subsidise the capacity headroom.
+- **Authorization check fan-out** — if you adopt Zanzibar-style relations, a single check can become a multi-hop graph traversal, and a page rendering 50 objects becomes 50 traversals. Batch checks into one request, maintain a denormalised reverse index, and cache per-(subject, resource-type) results with a consistency token. Trade-off: the index is another system to keep correct, and stale reads after a share are a visible product bug.
+- **Audit-log write volume** — ~300M events/day at ~75GB/day raw is larger than the identity store itself and cannot go through the transactional database. Write to Kafka, land in a columnar store, tier to object storage after 90 days. Trade-off: the audit trail is now eventually consistent with the auth decisions it records, so include a monotonic sequence per user to detect gaps.
+
+#### Failure Modes
+| Layer | Failure | Detection | Mitigation |
+|---|---|---|---|
+| Hashing pool | Login flood saturates the argon2id workers; queue grows and login p99 blows past 500ms | Pool queue depth, hash-wait p99, rejection rate | Rate limit before the hash; bounded concurrency with fast rejection and `Retry-After`; autoscale the pool independently; shed unauthenticated traffic at the edge before it reaches the KDF |
+| Revocation feed | Pub/sub lag or a partition leaves verifiers with a stale denylist; revoked tokens still honoured | Per-verifier feed-lag gauge; alert when lag > access-token TTL | Fail open with bounded staleness (verification keeps working); page on lag; shorten access-token TTL as an emergency lever; for high-value actions require a synchronous check that does not depend on the feed |
+| JWKS distribution | Endpoint down or a verifier starts with a cold cache — no signature verifies, platform-wide 401s | JWKS fetch error rate; per-service unknown-`kid` counter | CDN with long stale-while-revalidate; bootstrap key set baked into the image; never expire the cache hard, serve stale; keep retired keys published for a full token lifetime |
+| Identity DB primary | Primary fails; registrations, password changes and MFA enrolment stop | Replication lag, write error rate, failover watchdog | Synchronous replica with automatic promotion (~30s); reads continue from replicas throughout so logins and refreshes are unaffected; surface writes as explicitly retryable |
+| Session store | Redis shard loss drops refresh tokens and denylist entries for that key range | Shard health, refresh-failure rate by shard | RF=3 with automatic failover; on unrecoverable loss, users on that shard re-authenticate (degraded, not broken); denylist rebuilt by replaying the last TTL window from the audit log |
+| Signing key | Private key suspected compromised | Anomalous issuance rate; KMS access-log audit | Emergency rotation: publish new key, switch signing immediately, remove the old `kid` from JWKS, bump `tokens_valid_after` platform-wide; accept a global re-authentication wave, which refresh tokens make survivable for most users |
+| Federation bridge | Enterprise IdP certificate expires or their endpoint is down; a whole tenant cannot log in | Per-tenant login success rate; certificate expiry watch (30/7/1-day alerts) | Alert the tenant before expiry; accept both old and new signing certificates during their rotation; allow a documented per-tenant break-glass local login for admins only, itself audited |
+| Reuse detection | A flaky network causes a legitimate retry to look like refresh-token reuse; innocent users logged out | Family-revocation rate; correlation with client-side network errors | ~10s idempotent grace window returning the same rotated pair; alert if the revocation rate exceeds baseline, which usually means a client bug rather than an attack |
+| Third-party client | A compromised OAuth client's credentials are used to mint tokens for many users | Per-client issuance anomaly; consent-grant spike | Per-client rate limits and quotas; revoke `client_id` and all tokens issued under it in one operation; opaque tokens for third parties so introspection gives a real kill switch |
+
+#### Observability — Key Metrics & SLOs
+- **Token verification latency** (in-process, signature + claims + denylist) — SLO p99 < 1ms with zero network calls; a regression here is usually someone accidentally introducing an introspection call, and it multiplies across 500k/s.
+- **Login success latency** (credential POST → tokens issued, excluding human MFA entry) — SLO p99 < 500ms; watch the argon2id component separately since it should be a flat ~75-100ms and any drift means the pool is queueing.
+- **Revocation propagation lag** (revoke accepted → last verifier acknowledges) — SLO p99 < 1s, hard alert at > 60s; this is the number that turns "logged out everywhere" from a promise into a measurement, and it is a security SLO, not an availability one.
+- **Refresh-reuse detections per hour** — baseline near zero; a sustained rise means either an active token-theft campaign or a client retry bug, and distinguishing them by client version is the first triage step.
+- **Login failure ratio, split by distinct-usernames-per-source and distinct-sources-per-username** — the two ratios separate credential stuffing from targeted attack and drive different responses; alert on a 3× shift in either within 15 minutes.
+- **Account-lockout / throttle rate for legitimate users** — SLO < 0.1% of daily logins; if this climbs, the throttle is now a self-inflicted denial of service, which is the failure mode naive lockout produces.
+- **MFA enrolment and phishing-resistant share** (WebAuthn as a fraction of second factors) — a product metric with security consequences; track it because moving users off TOTP is the single largest phishing-risk reduction available.
+
+#### Multi-Region & DR
+- **Replication mode:** read-local / write-global. Identity records replicate to every region for local read (password verification is a read); registration, password change and MFA enrolment route to the user's home-region primary. Verification is fully local everywhere — JWKS and the denylist are replicated, not queried. Sessions are homed to a region, with the region encoded in the refresh token so rotation routes correctly.
+- **RTO:** ~30s for in-region primary promotion; ~5 minutes for a full regional evacuation via DNS/anycast withdrawal. Verification is unaffected throughout, which is the whole point — a regional auth outage must not become a platform outage.
+- **RPO:** ~0 for identity writes (synchronous replication within region, quorum across two regions for credential changes — you cannot afford to lose a password change). ~seconds for session and audit data, replicated asynchronously; a forced failover may lose the very latest rotations, which surfaces as a re-login.
+- **Failover cadence:** automatic in-region; cross-region evacuation game-days quarterly, including an explicit drill of "revoke a token while the feed is partitioned" so the staleness SLO is measured rather than assumed. Key rotation is a scheduled 90-day exercise with the overlap window verified in staging first.
+- **Cross-region cost:** identity replication is small (~900GB total, low change rate). The audit log dominates at ~75GB/day raw — keep it region-local and aggregate to a central lake asynchronously rather than replicating synchronously. JWKS and the revocation feed are kilobytes. None of this is a meaningful egress driver; the expensive thing is capacity headroom, since every region must be able to absorb another region's login load.
+
+#### Common Mistakes / Anti-patterns
+- **Hashing passwords with SHA-256 (or MD5, or unsalted anything).** A GPU does ~20 GH/s of SHA-256, so a whole leaked table falls in minutes. Use a memory-hard KDF — argon2id or scrypt, with bcrypt as the acceptable older option — with a per-user salt, tuned to a ~100ms budget, and rehash on login when the parameters change.
+- **Claiming a JWT can be revoked without saying how.** It cannot; that is the defining property. Name the mechanism you are adding — short TTL, denylist, `tokens_valid_after`, or opaque tokens — and state the resulting revocation window as a number. Interviewers ask this question precisely to see whether you know it is a trade rather than a free lunch.
+- **Storing tokens in `localStorage` because "cookies have CSRF problems".** Both have problems; they are different problems. `localStorage` is readable by any injected script, so one XSS is permanent token theft. httpOnly Secure SameSite cookies plus a CSRF token is the better trade, and a backend-for-frontend that keeps tokens off the browser entirely is better still.
+- **Locking an account after N failed attempts.** That is a denial-of-service primitive against any user whose email an attacker knows. Throttle on (account, IP) with exponential backoff, escalate to CAPTCHA and step-up on unrecognised devices, and never let a remote attacker permanently deny a legitimate user their account.
+- **Sharing an HMAC secret across services for HS256.** Every verifier can then mint tokens, so the weakest service in the fleet becomes a full platform compromise. Sign asymmetrically with RS256 or EdDSA, publish public keys via JWKS, and keep private keys in a KMS or HSM.
+- **Rotating signing keys without an overlap window.** Flipping keys atomically invalidates every in-flight token and every cached JWKS copy at once. Publish the new key, wait a full cache TTL, then start signing with it, and keep the old key published for at least one access-token lifetime afterwards.
+
+#### Talking Points for the Interview
+- **Derive the 100× asymmetry before designing anything.** ~5k logins/s against ~500k verifications/s is the fact that forces stateless local verification; say the ratio out loud and everything else follows from it.
+- **Statelessness and revocation are the same trade-off seen from two sides.** A JWT is fast everywhere for exactly the reason it cannot be recalled — name the spectrum, pick short TTL plus rotation plus a pushed denylist, and quote the resulting staleness window as a number.
+- **A slow password hash is a feature you can quantify.** 75ms and 64MB per login costs ~375 cores at peak and turns a two-minute GPU crack into an eighteen-year one; that arithmetic is the whole justification.
+- **PKCE gives a public client what a client secret gives a confidential one.** Walk the redirect sequence and be precise about which parameter defeats which attack — `state` for login-CSRF, `code_verifier` for a stolen code, `nonce` for id_token replay.
+- **Do not over-engineer authorization.** RBAC until attributes matter, ABAC until relationships matter, Zanzibar only when permission genuinely lives in a graph — and keep permission lists out of the token regardless.
+- **Naive lockout is an attack, not a defence.** Throttling per (account, IP) with step-up on unrecognised devices protects the user; freezing accounts hands attackers a way to lock anyone out for six requests.
+
+### 53. Design Trending Topics / Top-K in a Stream
+#### Problem
+From a firehose of keyed events, continuously maintain the approximate top K keys over 5-minute, 1-hour and 24-hour sliding windows, globally and per geography, and rank them by how *unusual* their current rate is rather than by raw volume.
+
+#### Summary
+**The picture in your head:** a newsroom with a wall of radio scanners tuned to every frequency in the country. Nobody can transcribe every broadcast — there are millions of them and most are one person talking to themselves. What the editor actually needs is a wall of needles that twitch when a frequency gets *louder than it normally is*. A station that always blares at full volume is background noise; a station that was silent an hour ago and is now shouting is the story. You keep a rough loudness meter per frequency, not a transcript, and you keep a memory of what "normal" sounds like for each one.
+
+**The single-request walkthrough (write path):** at 14:32:07 a user in London posts something containing `#eclipse`. The ingest tier normalises the key (lowercase, strip punctuation, collapse unicode confusables) and emits `{key:"#eclipse", user_id, ts, geo:"GB-LND"}` onto the event stream, partitioned by `hash(key)` (see #16). A sketch worker consumes it. First it checks a rotating Bloom filter for the tuple `(user_id, key)` in the current 5-minute generation — if this account already counted for `#eclipse` this window, the event is dropped. Otherwise the worker computes 7 independent hashes of `#eclipse`, each mod 32,768, and increments one counter in each of 7 rows of its current-minute Count-Min sketch: 7 memory writes, ~50ns total. It also probes those same 7 cells, takes the minimum as the running estimate, and offers `("#eclipse", 41,207)` to a local min-heap of the shard's top 500. At the minute boundary the worker seals the sketch, ships ~917KB to the merger, and starts a fresh one.
+
+**The single-request walkthrough (read path):** a client opens the trending panel and issues `GET /trending?window=1h&geo=GB`. This does not touch a sketch. The merger has already, at the last minute boundary, summed the 64 shard sketches cell-wise, added the result to the 60-minute ring, unioned the 64 local heaps into ~32,000 candidate keys, re-estimated each against the merged 1-hour sketch, joined the top 500 against the baseline store, computed a z-score per key, and written a 50-entry JSON blob to `trending:GB:1h` in Redis. The API is one `GET` against that key: ~2ms p99, no computation. The list is at most ~10s stale.
+
+**The pieces (and what each one is for):**
+- **Event stream (Kafka, partitioned by `hash(key)`)** — durable, replayable transport at 1M events/s (see #16). Partitioning by key hash means all occurrences of one key land on one shard, so a shard's counts for that key are complete without a network shuffle. 24-hour retention covers the longest window plus recovery.
+- **Count-Min Sketch (Cormode & Muthukrishnan, 2005)** — a `d × w` array of integer counters plus `d` independent hash functions. To count key K you increment `cell[i][h_i(K) mod w]` for every row `i`; to read K you probe the same `d` cells and take the **minimum**. It never stores K itself, so its memory is fixed regardless of how many distinct keys arrive — which is the whole point when the key space is unbounded.
+- **Per-shard min-heap of the local top ~500** — the sketch answers "how many of K?" but cannot enumerate keys, because it has thrown the keys away. The heap is the only place actual key strings live. Capped at 10× K per shard so the merge has slack.
+- **Sketch ring (60 minute-sketches + 24 hour-sketches per geo)** — sliding windows are built by summing consecutive sketches and dropping the tail. This works only because Count-Min sketches are **linearly mergeable**: `sketch(A ∪ B) = sketch(A) + sketch(B)` cell by cell, exactly, with no loss. Same property makes shard-then-merge work.
+- **Baseline store (Redis/KV, keyed by `hash(key)`)** — per key, an EWMA of its rate, an EWMA of its variance, and a 1440-slot minute-of-day profile for the top keys. This is what converts "high" into "unusually high".
+- **Abuse scorer** — per-user de-duplication, per-ASN and per-account-age concentration checks, and follower-graph clustering. Without it, 10,000 cheap accounts posting in lockstep is indistinguishable from a real event.
+- **Top-K cache (Redis)** — 3 windows × ~200 geo partitions × ~5KB = ~3MB total, rewritten every 5s. The read path must be a single `GET`; anything else and the trending panel becomes the most expensive query in the product.
+
+**The thing that makes it hard:** the key set is not known in advance and does not fit in memory. This is precisely where it diverges from #18 (Ad Click Event Aggregation), which looks superficially identical — both aggregate a huge event stream into windowed counts. But #18 counts a **bounded, enumerable** universe of ~5M ad IDs that exist in a database before the first click arrives, and its counts are **billable**, so exactness and T+1 reconciliation are the design centre. Here the keys are arbitrary strings *discovered from the data* — new hashtags, misspellings, phrases nobody has typed before — ~100M distinct per day, dominated by a long tail seen exactly once. There is no reconciliation target and nobody is invoiced. Derive the exact map: ~1.4M distinct keys per minute × ~106B per hash-map entry ≈ ~150MB *per minute*, and a 24-hour sliding window needs all 1,440 of those minute-deltas resident so you know what to subtract when a minute falls off the tail: ~216GB, per geo, in RAM. Multiply by ~200 geo partitions and you are at ~40TB of hot memory to answer "what's trending". Exact counting is not a tuning problem; it is off the table.
+
+**Why the standard solution works:** you stop trying to count everything and accept a bounded, one-sided error. The Count-Min sketch's guarantee is `est(K) ≥ true(K)` always, and `est(K) ≤ true(K) + ε·N` with probability `1 − δ`, where `N` is the total volume in the sketch. Every hash collision only ever *adds* another key's increments to a cell, so no cell can be too low, and the minimum across `d` rows is the least-contaminated of the `d` estimates. Since the error is absolute (`ε·N`) while heavy hitters are enormous under Zipf skew, the sketch is precise where you care and worthless in the tail — which is exactly the shape of the problem. The costs: you can never prove a count, you cannot enumerate keys from the sketch (hence the heap), and you must resist the temptation to use the "conservative update" optimisation, which tightens estimates but destroys linear mergeability and therefore breaks both the window ring and the shard merge.
+
+**If you were building it tomorrow:**
+- Kafka (partition by `hash(key)`, 24h retention) → Flink or a bespoke Rust/Java consumer holding sketches on heap → merger service → Redis for baselines and the served top-K → Parquet on object store for the audit trail of every published list.
+- Per-event hot path:
+  ```
+  key = normalise(raw_key)
+  if dedupe_bloom.test_and_set(user_id, key): return   /* already counted this window */
+  est = INF
+  for i in 0..d-1:
+      c = hash_i(key) & (w - 1)
+      sketch[i][c] += 1
+      est = min(est, sketch[i][c])
+  heap.offer(key, est)                                 /* cap at 10 * K */
+  ```
+- Per-minute merge and publish:
+  ```
+  merged = sum_cellwise(shard_sketches)                /* linear mergeability */
+  ring.push(merged); window_sketch += merged; window_sketch -= ring.evict_tail()
+  cands = union(shard_heaps)                           /* ~32k keys */
+  scored = [(k, trend_score(estimate(window_sketch, k), baseline[k])) for k in cands]
+  redis.set("trending:{geo}:{window}", top_k(scored, 50))
+  ```
+#### Clarifying Questions
+- Must counts be exact, or is a bounded approximation acceptable for a ranked list?
+- Is the key space known in advance, or discovered from the events themselves?
+- Does "trending" mean highest volume, or fastest-rising relative to normal?
+- Which windows and which geo granularity — country, metro, both?
+- Do we need per-user de-duplication and bot resistance?
+- How stale may the served list be?
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Approximation acceptable | probabilistic sketches with a bounded one-sided error, not exact hash maps |
+| Key space discovered from data | no pre-registered key list; sketches sized by error target, not by cardinality |
+| Trending means rate-of-change | a baseline store per key and z-score/ratio scoring on top of the counts |
+| Multiple windows and geos | a ring of per-minute sketches per geo, summed on demand via linear merge |
+| Bot resistance required | per-(user, key) de-duplication at ingest plus ASN/account-age concentration checks |
+| List may be ~10s stale | precomputed top-K in a cache, refreshed on a timer; read path is a single GET |
+
+#### Requirements
+- **FR:** ingest keyed events; maintain approximate top-K per `(window, geo)`; score by deviation from a per-key baseline; de-duplicate per user; suppress coordinated inflation; serve precomputed lists and per-key drill-down.
+- **NFR:** 1M events/s peak; published list ≤10s stale; read p99 <20ms; counting error ≤0.01% of window volume at 99.9% confidence; ≤2GB sketch state per aggregator; no unbounded per-key memory growth.
+
+#### Scale Estimate
+- **Event volume:** assume ~1M events/s peak. Peak-to-average ~3× (US evening overlapping EU evening) → avg ≈ 333k/s → 333k × 86,400 ≈ **~29B events/day**.
+- **Event size:** ~72B (key string ~24B + user_id 8B + ts 8B + geo_id 4B + event_type 1B + lang 2B + framing/padding ~25B). 29B × 72B ≈ ~2.1TB/day raw; RF=3 → ~6.3TB/day on the stream; 24h retention → ~6.3TB hot (see #16).
+- **Distinct keys:** assume ~100M distinct keys/day with Zipf skew `s ≈ 1`. Average key is active in ~20 minutes of the day → distinct keys per minute ≈ 100M × 20 ÷ 1440 ≈ **~1.4M/min**.
+- **Exact-map cost (the number that kills the naive design):** per entry = key bytes ~24B + string header 16B + count 8B + last_seen 8B + bucket pointer 8B + cached hash 8B + chain pointer 8B = 80B, × 1.33 at a 0.75 load factor ≈ **~106B/key**. A single 24h map: 100M × 106B ≈ ~10.6GB — already too large per geo, and it cannot *slide*. Proper sliding needs the per-minute deltas resident: 1,440 × 1.4M × 106B ≈ **~216GB per geo**, ×~200 geo partitions ≈ ~40TB RAM.
+- **Count-Min dimensions:** target ε = 0.01% = 1×10⁻⁴, δ = 0.001. `w = ⌈e/ε⌉ = ⌈2.71828 × 10⁴⌉ = 27,183` → round up to **32,768 (2¹⁵)** so the modulo is a bit-mask; actual ε = e/w = 8.3×10⁻⁵, slightly better than target. `d = ⌈ln(1/δ)⌉ = ⌈ln 1000⌉ = ⌈6.908⌉ = **7**`.
+- **Sketch footprint:** 32,768 × 7 = 229,376 cells. Minute sketches use 4B counters (max per-minute count ≈4M < 2³²) → **~917KB**; hour/day tiers use 8B → **~1.8MB**.
+- **Ring per geo:** 60 minute-sketches + 24 hour-sketches ≈ 84 sketches × ~1.8MB ≈ **~150MB**, and that one ring serves all three windows (5m = sum of 5, 1h = sum of 60, 24h = sum of 24 hour-tiles). Fleet: ~200 geos × ~150MB ≈ ~30GB, ~150MB resident per aggregator.
+- **The contrast:** **~150MB of sketch versus ~216GB of exact map** for identical window coverage — a **~1,400× reduction**, in exchange for an estimate that is never low and at most ~0.008% of window volume high.
+- **What that error means at rank K:** under Zipf, `count(rank K) ≈ N / (K · H(D))`, so relative error at rank K ≈ `e·K·H(D)/w`, *independent of N*. Minute window: `2.718 × 50 × 14.7 / 32,768 ≈ 6.1%`. Day window: `2.718 × 50 × 19.0 / 32,768 ≈ 7.9%`. Enough to shuffle ranks 45–55; nowhere near enough to promote a tail key at ~50 counts into the top 50. Widening the day tier to `w = 2¹⁸` cuts it to ~1.0% at ~14.7MB per sketch.
+- **Heap and HLL:** 500 entries × (key ~36B + count 8B + slot 8B) ≈ ~26KB per `(geo, window)`; unique-user HLLs run only on those 500 candidates at 3KB each (p=12, ~1.6% error) ≈ 1.5MB per `(geo, window)`, ~900MB fleet-wide.
+- **De-dup filter:** 5-min generation at 1M/s = 300M `(user, key)` tuples; 1% FPR → 9.6 bits/element → ~360MB, ×2 rotating generations ≈ ~720MB, spread over 64 shards ≈ **~11MB/shard**.
+- **Serving:** 3 windows × ~200 geos × ~5KB ≈ ~3MB in Redis, 600 writes per 5s = 120 writes/s. Reads: assume ~500M DAU × 3 panel loads/day ≈ 1.5B/day ≈ ~17k/s avg, ~60k/s peak — one Redis cluster, or a CDN with a 5s TTL.
+
+#### API Contract
+```
+GET  /trending?window=5m|1h|24h&geo=GB-LND&limit=50
+       → { as_of, window, geo, items:[{ key, count_est, error_bound, rate_per_min, score, rank_delta }] }
+GET  /trending/key/{key}?window=1h
+       → { count_est, error_bound, baseline_rate, z_score, unique_users_est, first_seen }
+POST /events          (internal) body: { key, user_id, ts, geo, source }
+WS   /trending/stream?geo=GB-LND   ← top-K deltas pushed every 5s
+```
+
+#### High-Level Design
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 700" role="img" aria-label="Trending top-K architecture: stream, sketch workers, merger ring, trend scorer, cache">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box" x="260" y="16" width="240" height="46" rx="9"/>
+  <text class="lbl" x="380" y="39">Producers · 1M events/s</text>
+
+  <rect class="box" x="240" y="94" width="280" height="56" rx="9"/>
+  <text class="lbl" x="380" y="112">Ingest · normalise key</text>
+  <text class="sub" x="380" y="133">per-(user, key) dedupe Bloom</text>
+  <rect class="box acc" x="220" y="182" width="320" height="56" rx="9"/>
+  <text class="lbl" x="380" y="200">Event Stream (see #16)</text>
+  <text class="sub" x="380" y="221">partitioned by hash(key)</text>
+  <rect class="box acc" x="20" y="282" width="220" height="86" rx="9"/>
+  <text class="lbl" x="130" y="302">Sketch Workers × 64</text>
+  <text class="sub" x="130" y="324">per-minute CM sketch</text>
+  <text class="sub" x="130" y="343">d=7 · w=32768 · ~917KB</text>
+  <text class="sub" x="130" y="360">local top-500 heap</text>
+  <rect class="box" x="270" y="282" width="200" height="86" rx="9"/>
+  <text class="lbl" x="370" y="306">Abuse Scorer</text>
+  <text class="sub" x="370" y="331">ASN concentration</text>
+  <text class="sub" x="370" y="351">account age · graph density</text>
+  <ellipse class="store" cx="640" cy="292" rx="90" ry="10"/>
+  <path class="store" d="M550,292 v40 a90,10 0 0 0 180,0 v-40"/>
+  <text class="sub" x="640" y="316">Raw archive · replay · audit</text>
+  <rect class="box acc" x="20" y="412" width="360" height="76" rx="9"/>
+  <text class="lbl" x="200" y="432">Merger · cell-wise sketch sum</text>
+  <text class="sub" x="200" y="454">ring: 60 min-tiles + 24 hour-tiles</text>
+  <text class="sub" x="200" y="472">union 64 heaps → ~32k candidates</text>
+  <ellipse class="store" cx="620" cy="422" rx="88" ry="10"/>
+  <path class="store" d="M532,422 v40 a88,10 0 0 0 176,0 v-40"/>
+  <text class="sub" x="620" y="444">Baselines · EWMA rate/var</text>
+  <rect class="box" x="180" y="530" width="330" height="66" rx="9"/>
+  <text class="lbl" x="345" y="550">Trend Scorer</text>
+  <text class="sub" x="345" y="572">z vs baseline · cold-start prior</text>
+  <text class="sub" x="345" y="589">unique-user HLL re-rank</text>
+  <ellipse class="store" cx="345" cy="636" rx="115" ry="10"/>
+  <path class="store" d="M230,636 v30 a115,10 0 0 0 230,0 v-30"/>
+  <text class="sub" x="345" y="657">Top-K cache · trending:{geo}:{window}</text>
+  <rect class="box" x="560" y="608" width="180" height="46" rx="9"/>
+  <text class="lbl" x="650" y="631">Trending API</text>
+  <path class="flow" d="M380,62 L380,94"/>
+  <path class="flow" d="M380,150 L380,182"/>
+  <path class="flow acc" d="M380,238 L380,262 L130,262 L130,282"/>
+  <path class="flow" d="M380,238 L380,282"/>
+  <path class="flow" d="M380,238 L380,262 L640,262 L640,288"/>
+  <text class="edge" x="440" y="254" text-anchor="start">replay / audit</text>
+  <path class="flow acc" d="M130,368 L130,412"/>
+  <text class="edge" x="138" y="392" text-anchor="start">sealed sketch + heap, every 60s</text>
+  <path class="flow dash" d="M370,368 L370,392 L340,392 L340,412"/>
+  <text class="edge" x="378" y="386" text-anchor="start">suppression flags</text>
+  <path class="flow" d="M200,488 L200,530"/>
+  <path class="flow" d="M532,452 L345,530"/>
+  <text class="edge" x="470" y="492" text-anchor="start">baseline join</text>
+  <path class="flow acc" d="M345,596 L345,626"/>
+  <path class="flow" d="M460,646 L560,634"/>
+  <text class="edge" x="500" y="660" text-anchor="middle">single GET</text>
+</svg>
+```
+
+**How to read the diagram:** the write path runs top to bottom and never touches the read path. Events are counted into fixed-size sketches by sharded workers, sealed once a minute, merged cell-wise into a ring, scored against baselines, and finally *materialised* as a small list in a cache. The API reads only that list.
+
+**Why the flow is shaped this way:** counting and ranking are different problems with different cost profiles. Counting must survive 1M events/s and an unbounded key space, so it uses fixed-memory sketches. Ranking needs actual key strings and historical context, so it runs once a minute over ~32k candidates where a database join is affordable.
+
+**What this layout buys you:** the expensive work happens once per minute for everyone, not once per request. The trade is staleness — the published list lags reality by up to ~10s — and the loss of any ability to answer "exactly how many" from the serving tier.
+
+#### Data Model
+- **events** (log, partition by `hash(key)`, 24h retention): `(key, user_id, ts, geo_id, source, lang)` — see #16
+- **sketch_ring** (in-process memory, snapshotted to object store), key `(geo_id, tier, bucket_ts)`: a `7 × 32768` counter array
+- **local_topk** (in-process min-heap, per `(shard, geo_id, window)`): `(key, est_count)`, capped at 500
+- **baselines** (KV store, partition by `hash(key)`): `(key, ewma_rate, ewma_var, minute_of_day[1440], first_seen, last_seen)`
+- **dedupe_filter** (in-process rotating Bloom, partition by `hash(key)`): `(user_id, key)` per 5-min generation
+- **candidate_hll** (KV, partition by `key`): HLL per `(key, window, geo)` for the ~500 candidates only
+- **trending_cache** (Redis, key `trending:{geo}:{window}`): serialised top-50 + `as_of`; every published list is also appended to an object-store Parquet audit table partitioned by day
+
+#### Detailed Design
+**Why the minimum, and why the error is one-sided.** A cell `sketch[i][c]` holds the sum of increments from *every* key that hashes to `c` in row `i`. It therefore contains your key's true count plus zero or more foreign contributions — never less. Each of the `d` rows gives you an independent over-estimate, and the minimum is the row where fewest other keys happened to collide with yours. So `est(K) ≥ true(K)` unconditionally, which is the property that makes the structure safe for ranking: you can never *miss* a heavy hitter by under-counting it, you can only occasionally over-promote a light one. Worked example: `#eclipse` truly occurred 41,000 times this minute; its 7 cells read `[41,207 · 43,880 · 41,940 · 52,110 · 41,033 · 46,720 · 44,201]`. The reported estimate is 41,033 — 33 counts high, against a guaranteed bound of `ε·N = 8.3×10⁻⁵ × 60M = 4,980`. Taking the mean (44,441) or the median (43,880) would be *worse*, because every sample is biased upward; only the minimum is an extremum of the contamination.
+
+**Linear mergeability is the crux.** Two sketches built with the same `(d, w)` and the same hash functions satisfy `sketch(A) + sketch(B) = sketch(A ∪ B)`, cell by cell, **exactly** — no approximation is introduced by merging, because each cell is a plain sum and addition is associative. Everything else in this design is a consequence. Sliding windows: keep one sketch per minute, and the 1-hour window is the cell-wise sum of the last 60. Shard-then-merge: 64 workers each count a disjoint slice and the global sketch is their sum. Expiry: maintain a running `window_sketch` and, when minute `m−60` falls off, subtract its sketch cell-wise. Subtraction is safe here — no cell can go negative, because you are only ever removing increments you previously added. This is also why the tempting **conservative-update** optimisation (increment only the cells currently equal to the row minimum, which measurably tightens estimates) is off the table: it makes the counters path-dependent, so two conservatively-updated sketches no longer sum to the sketch of the union. You must choose one or the other, and mergeability is worth more.
+
+**The sketch cannot enumerate — hence sketch + heap.** Ask the sketch "what are the top 50 keys?" and it has no answer: it stores no keys, only counters, and inverting a hash to recover candidate strings is not possible. So every worker keeps a bounded min-heap of `(key, current_estimate)` and offers each key it sees; the heap is where the strings live. Cap at 10× K = 500 per shard, not K, so the merge has slack. The alternative family is **Space-Saving / Stream-Summary** (Metwally et al., 2005) and **Lossy Counting** (Manku & Motwani, 2002): keep exactly `m` counters, and on seeing an unmonitored key, evict the current minimum and hand its count to the newcomer as a starting bid. This gives an integrated top-K with error bounded by `N/m` (at `m = 10,000` and `N = 60M`, that is 6,000 — the same order as the sketch), needs no separate heap, and is often the better single-node choice. Its weakness is exactly the sketch's strength: two Space-Saving summaries do not merge losslessly, so a sharded deployment loses accuracy at every merge boundary. Sketch + heap for distributed, Space-Saving for single-node.
+
+**Sharding and the merge-the-sketches-not-the-lists trap.** Partitioning by `hash(key)` gives each shard complete counts for its keys, which is why the local estimates are meaningful. But if you then merge only the 64 *local top-50 lists*, you lose keys. A shard that happens to own three globally-enormous keys will push a key with 900k counts down to rank 51 locally, while a shard owning only mid-weight keys promotes a 40k-count key into its local top 50. Merge the lists and the 900k key vanishes from the global answer entirely. Two fixes, used together: keep `c·K` per shard with `c ≈ 10` so the local cutoff sits far below the global one, and — the real fix — **merge the sketches, then re-estimate every candidate against the merged sketch** before the global sort. The candidate set can be lossy; the counts used to rank it must not be. Note also that key-hash partitioning creates its own hot-shard problem: a single viral key at 200k events/s pins one worker. Because sketches are mergeable, you can fall back to round-robin partitioning for the sketch path and rely on the cell-wise merge to reassemble the truth — this is the second thing mergeability buys you.
+
+The per-minute publish cycle, with cardinalities and a latency budget: 1M events/s ÷ 64 shards = ~15.6k events/s per shard → ×7 rows = ~110k counter writes/s/shard (trivially in L2 cache). At the minute boundary each shard seals and ships ~917KB (64 × 917KB ≈ 59MB/min ≈ ~1MB/s of merge traffic). The merger sums 64 × 229,376 cells = ~14.7M integer adds (~20ms), unions 64 heaps into ~32,000 candidates, re-estimates each against the merged window sketch (32,000 × 7 = 224k probes, ~2ms), sorts, takes the top 500, joins those against the baseline store (500 KV gets, ~5ms pipelined), scores, and writes 50 entries to Redis (~10ms). Budget from minute boundary to published list: seal 200ms + ship 300ms + merge 20ms + re-estimate 2ms + baseline 5ms + score 10ms + write 10ms ≈ **~550ms**, against a 10s staleness SLO.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 470" role="img" aria-label="Count-Min sketch mechanics: seven hashes increment seven cells, estimate is the minimum, and per-minute sketches merge cell-wise into a window">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box" x="12" y="34" width="190" height="48" rx="9"/>
+  <text class="sub" x="107" y="50">one event</text>
+  <text class="sub" x="107" y="68">key = a hashtag</text>
+
+  <rect class="box acc" x="12" y="122" width="190" height="66" rx="9"/>
+  <text class="sub" x="107" y="140">7 independent hashes</text>
+  <text class="sub" x="107" y="158">h_i(key) &amp; 0x7FFF</text>
+  <text class="sub" x="107" y="176">7 writes · ~50ns</text>
+  <path class="flow" d="M107,82 L107,122"/>
+  <path class="flow" d="M202,155 L232,155"/>
+  <rect class="box" x="232" y="30" width="500" height="24" rx="4"/>
+  <rect class="box acc" x="300" y="30" width="16" height="24" rx="3"/>
+  <rect class="box" x="232" y="62" width="500" height="24" rx="4"/>
+  <rect class="box acc" x="452" y="62" width="16" height="24" rx="3"/>
+  <rect class="box" x="232" y="94" width="500" height="24" rx="4"/>
+  <rect class="box acc" x="368" y="94" width="16" height="24" rx="3"/>
+  <rect class="box" x="232" y="126" width="500" height="24" rx="4"/>
+  <rect class="box acc" x="644" y="126" width="16" height="24" rx="3"/>
+  <rect class="box" x="232" y="158" width="500" height="24" rx="4"/>
+  <rect class="box acc" x="520" y="158" width="16" height="24" rx="3"/>
+  <rect class="box" x="232" y="190" width="500" height="24" rx="4"/>
+  <rect class="box acc" x="266" y="190" width="16" height="24" rx="3"/>
+  <rect class="box" x="232" y="222" width="500" height="24" rx="4"/>
+  <rect class="box acc" x="600" y="222" width="16" height="24" rx="3"/>
+  <text class="edge" x="482" y="264">d = 7 rows · w = 32,768 counters per row · ~917KB total</text>
+  <rect class="box acc" x="232" y="290" width="500" height="52" rx="9"/>
+  <text class="sub" x="482" y="308">estimate = min of the 7 marked cells</text>
+  <text class="sub" x="482" y="326">collisions only ever inflate → never under-counts</text>
+  <path class="flow" d="M482,246 L482,290"/>
+  <rect class="box" x="12" y="392" width="104" height="46" rx="9"/>
+  <text class="sub" x="64" y="415">minute m</text>
+  <rect class="box" x="128" y="392" width="104" height="46" rx="9"/>
+  <text class="sub" x="180" y="415">m − 1</text>
+  <rect class="box" x="244" y="392" width="104" height="46" rx="9"/>
+  <text class="sub" x="296" y="415">m − 2</text>
+  <rect class="box dash" x="360" y="392" width="104" height="46" rx="9"/>
+  <text class="sub" x="412" y="415">…</text>
+  <rect class="box" x="476" y="392" width="104" height="46" rx="9"/>
+  <text class="sub" x="528" y="415">m − 59</text>
+  <rect class="box acc" x="606" y="386" width="142" height="58" rx="9"/>
+  <text class="sub" x="677" y="406">Σ cell-wise</text>
+  <text class="sub" x="677" y="426">= 1h window</text>
+  <path class="flow" d="M116,415 L128,415"/>
+  <path class="flow" d="M232,415 L244,415"/>
+  <path class="flow" d="M348,415 L360,415"/>
+  <path class="flow" d="M464,415 L476,415"/>
+  <path class="flow" d="M580,415 L606,415"/>
+  <path class="flow dash" d="M528,392 L528,366 L64,366 L64,388"/>
+  <text class="edge" x="300" y="358">tail evicted: subtract cell-wise, never goes negative</text>
+</svg>
+```
+
+**Trending is not most-frequent.** A globally famous name is high-volume every single minute of every day; publishing it as "trending" is publishing that the sun rose. The score must measure *departure from that key's own normal*. Maintain per key an EWMA of its per-minute rate `μ` and of its variance `σ²` (half-life ~7 days, with a 1440-slot minute-of-day profile for the top ~100k keys so that "busy at 8pm" is not itself a signal), then score `z = (r_short − μ) / max(σ, σ_floor)`. Worked example: a steady celebrity term sits at `μ = 10,000/min, σ = 1,500`; this minute it reads 10,500 → `z = 0.33`, ignored. A term that has averaged `μ = 10/min, σ = 4` and now reads 500/min → `z = 122`, top of the list. The cheaper variant when you cannot afford per-key variance is a ratio of short-window to long-window rate: `(count_5m / 5) ÷ (count_24h / 1440)`, which needs only two sketch probes and no baseline store, at the cost of being noisy for low-count keys. Rank by `z`, but keep the raw estimate in the response so the UI can show both.
+
+**Cold start, and why it is the failure mode of z-scoring.** A brand-new key has no baseline: `μ = 0, σ = 0`, so any occurrence divides by zero and every hashtag invented in the last minute is infinitely trending. Three guards, all needed. (1) An absolute floor: a key must exceed a minimum count in the short window — say 500 in 5 minutes, ~0.0002% of window volume — before it is eligible at all, which also keeps it above the sketch's error band. (2) A Bayesian prior for unseen keys: treat a new key as if it had a pseudo-history of `μ₀ = 1/min, σ₀ = 2` drawn from the global distribution of new-key rates, so a key going 1 → 20 scores modestly while 1 → 5,000 still scores enormously. (3) Dampen by age: multiply the score by `min(1, age_minutes / 15)` so a key must sustain its rate for a quarter of an hour before it can take the top slot. Together these turn "no history" from a divide-by-zero into a defensible prior.
+
+**Spam, brigading, and per-user de-duplication.** Without defences the list is trivially purchasable: 10,000 accounts posting the same string once each looks identical to 10,000 real people reacting to news. Layered, cheap to expensive. (1) **De-duplicate at ingest** — a rotating Bloom filter over `(user_id, key)` per 5-minute generation means one account contributes at most one count per key per window, so volume becomes a proxy for *distinct participants*. (2) **Re-rank the top 500 by unique users** — run an HLL per candidate and demote any key whose event-to-unique-user ratio is far above the population median. (3) **Concentration checks** — a term where >30% of contributors share one ASN, or where the median account age is under 48 hours, or whose contributors form a dense cluster in the follow graph, is suppressed and routed to a review queue rather than hard-deleted. (4) **Publish the audit trail** — every list served is written to Parquet with its inputs, so a suppression decision can be re-examined later. Suppression is deliberately soft: like #18's "flag, don't block" stance on click fraud, a false positive here silently kills a real story, which is more costly than briefly surfacing a manipulated one.
+
+**The serving path must be boring.** Nothing on the read path computes anything. The scorer writes `trending:{geo}:{window}` as a single serialised blob every 5 seconds; the API does one Redis `GET` and returns it, p99 ~2ms. Geo fallback is a static chain (`GB-LND → GB → EU → global`) resolved at write time, not read time, so a sparse metro always has a populated key. Per-key drill-down (`/trending/key/{key}`) is the only endpoint that probes a sketch, and it is rate-limited and served from the merger's replica, never from the workers. This is the opposite of #22's leaderboard, where a Redis sorted set is queried live because the key space is small and bounded — here the ranked structure is far too large to hold, so you materialise the answer instead of the data.
+
+#### Potential Follow-Up Questions
+**Q: Why the minimum across rows, and not the mean or median?**
+Every row's cell contains the true count plus non-negative contamination from colliding keys, so every one of the `d` samples is biased upward. Averaging averages the noise in; the minimum picks the row with the least collision, which is the only estimator that preserves the one-sided `est ≥ true` guarantee. *If pushed:* the Count-Mean-Min variant subtracts each row's estimated noise floor (`(row_sum − cell) / (w − 1)`) before taking the median, which reduces the bias on light keys — but it can now under-estimate, which is unacceptable if downstream logic assumes counts are upper bounds.
+
+**Q: A key is 11th in every shard's local top-10 — do you lose it?**
+Yes, if you merge only the local lists, and this is the classic bug. Keep `10×K` per shard so the local cutoff is far below the global one, and merge the *sketches*, then re-estimate all ~32k candidates against the merged sketch before the global sort. *If pushed:* the candidate set is allowed to be lossy because a key that is outside the top 500 on every shard cannot plausibly be globally top-50 under Zipf; the counts used to rank the candidates are not allowed to be lossy, which is why re-estimation is mandatory.
+
+**Q: How do you expire the tail of a 1-hour window without corrupting counters?**
+Ring of per-minute sketches; maintain a running window sketch, add the new minute, subtract the sketch that fell off. Cell-wise, exactly, no negatives possible. *If pushed:* the cheaper alternative is exponentially decayed counters — multiply every cell by `λ = 0.98` each tick — which is one pass over 229k cells and no ring at all, but it has no crisp window boundary, so you cannot answer "top 50 in the last exactly 5 minutes" and the decayed counts are no longer mergeable with undecayed ones.
+
+**Q: A brand-new hashtag appears with no baseline. What score does it get?**
+Not infinity. It must clear an absolute floor (≥500 counts in 5 minutes) to be eligible, is scored against a global prior for new keys (`μ₀ = 1/min`), and its score is damped by `min(1, age/15min)`. *If pushed:* the floor also serves a statistical purpose — it keeps every ranked key well above the sketch's `ε·N` error band, so ranking noise never dominates the signal.
+
+**Q: 10,000 bot accounts each post a term once. What stops it trending?**
+Per-`(user, key)` de-duplication caps each account at one count, so raw volume already equals distinct participants — but 10,000 real distinct accounts is the attack. The unique-user HLL re-rank does not help; the ASN concentration, account-age median, and follow-graph density checks do. *If pushed:* suppression is soft (demote and queue for review, not delete) because a false positive silently kills a genuine grassroots story, and you keep the full audit trail so the decision is reviewable.
+
+**Q: Why not just use a Redis sorted set, like the leaderboard in #22?**
+A sorted set stores every member. #22 works because the player universe is bounded and enumerable; here it is 100M new keys a day with a long tail seen once, so `ZINCRBY` per event at 1M/s builds a structure that does not fit in memory and cannot be windowed. *If pushed:* a sorted set is still the right tool *downstream* — for the ~500 candidates, where the key set is tiny and you want exact ordering with cheap rank queries.
+
+**Q: This looks like #18. Why not run the same Flink tumbling-window aggregation?**
+Because #18 keys by `ad_id` from a bounded, pre-registered universe of ~5M ads, and its counts are billable, so it pays for exact state plus a T+1 batch reconciliation. Here the key set is discovered from the data and unbounded, so `keyBy(key)` would allocate managed state per distinct key — 100M keyed states per day, most touched once. *If pushed:* the shapes converge if you first *restrict* the key space; some deployments run a cheap pass that promotes keys crossing a floor into a registered set, then aggregate those exactly with #18's machinery, using sketches only as the admission filter.
+
+**Q: An advertiser or newsroom asks for the exact count behind a trending entry.**
+You cannot give it from the sketch — only an upper bound with a stated error band, which the API returns as `error_bound`. *If pushed:* for the ~500 published candidates you can afford exact counting, so run a second, narrow exact aggregation over just those keys off the raw archive; it is a bounded key set by construction, which is exactly #18's problem again.
+
+#### Bottlenecks & Mitigations
+- **Hot key pins one shard** — key-hash partitioning sends a viral term's 200k events/s to a single worker, whose CPU saturates while 63 idle. Switch that key (or the whole sketch path) to round-robin partitioning and rely on cell-wise merge to reassemble the counts; the cost is that per-shard estimates are no longer complete, so local heaps become advisory and the merged sketch must do all the ranking.
+- **Sketch memory × geo cardinality** — 200 geos × 84 sketches is fine, but adding language and platform dimensions multiplies combinatorially and 30GB becomes 3TB. Materialise only the dimension combinations that are actually served, and compute rarer slices on demand from the raw archive with a minutes-latency SLA rather than keeping them hot.
+- **Merge fan-in at the minute boundary** — all 64 shards ship ~917KB simultaneously, a 59MB burst into one merger every 60s, with the whole publish cycle blocked on the slowest shard. Stagger shard seal times across the minute and merge incrementally as sketches arrive; the trade is that the window boundary becomes fuzzy by a few hundred milliseconds.
+- **Baseline store lookups** — joining 32k candidates against the baseline store every minute would be 32k KV gets/minute per geo, ~100k/s fleet-wide. Join only after truncating to the top 500, and cache the baselines for keys that have trended recently; the trade is that a key rising from deep in the tail waits one extra cycle for its baseline.
+- **De-dup Bloom saturation** — a traffic spike pushes the 5-minute generation past its sized element count, the false-positive rate climbs above 1%, and real users get silently dropped. Size for 2× peak and monitor the fill ratio, rotating a generation early when it crosses 80%; the trade is a slightly shorter effective de-dup window during spikes.
+- **Ranking instability near the cutoff** — with ~6% relative error at rank 50, keys near the boundary flicker in and out between refreshes, which reads as a broken product. Apply hysteresis: a key must beat the rank-50 score by 10% to enter and fall 10% below to leave. The trade is a slightly slower reaction to genuinely new entrants.
+
+#### Failure Modes
+| Layer | Failure | Detection | Mitigation |
+|---|---|---|---|
+| Ingest | Key normalisation regression splits one term into variants (`#Eclipse` vs `#eclipse`), halving both counts | Sudden drop in top-50 count magnitudes with no traffic change; normalisation unit-test canary | Version the normaliser and shadow-run the new version for an hour comparing top-50 overlap before cutover; roll back on <90% overlap |
+| Event stream | Partition lag on one shard; its keys are under-counted in the merged sketch | Per-partition consumer lag; shard-contribution ratio deviates >2× from median | Publish the list with a `partial: true` flag and exclude the lagging shard's geo slices; backfill on catch-up since sketches are mergeable after the fact |
+| Sketch worker | Process restart loses the in-flight minute sketch entirely | Missing shard sketch at merge time; sketch-arrival count < expected | Merge with the remaining shards and mark the minute degraded; replay the lost minute from the stream into a catch-up worker and merge it in late |
+| Merger | Sketches with mismatched `(d, w)` or hash seeds after a rolling deploy are summed together, producing garbage | Sketch header version mismatch check at merge; sudden top-50 churn spike | Embed `(d, w, seed_version)` in every sketch header and refuse to merge across versions; run both versions in parallel through a full window before cutover |
+| Baseline store | Store unavailable; no z-scores can be computed | Baseline join error rate; scorer falls back | Fall back to the short/long rate-ratio score, which needs only sketch probes; serve with a `degraded_scoring` flag |
+| Abuse pipeline | Suppression model misfires and demotes a genuine breaking-news term | Suppressed-term review queue depth; manual-override rate spike | Suppression is soft (demote, not delete) with a human review queue and a fast override path; every decision written to the audit trail |
+| Top-K cache | Redis eviction or failover leaves `trending:{geo}:{window}` empty | Cache hit rate; empty-payload counter | Serve the last known good list from a local in-process copy with an `as_of` timestamp; the UI shows staleness rather than an empty panel |
+| Sparse geo | A geo partition has too little traffic for any key to clear the absolute floor | Empty-list rate per geo | Static fallback chain resolved at write time (`metro → country → region → global`) so every geo key is always populated |
+
+#### Observability — Key Metrics & SLOs
+- **Publish lag** (minute boundary → list written to cache) — SLO p99 < 3s against a 10s staleness budget; the merge fan-in and the baseline join are the two components that move it.
+- **Top-K churn rate** (Jaccard distance between consecutive published lists) — expect 5-15% per refresh; a sustained jump above 40% means ranking noise is dominating and the sketch is under-sized or hysteresis is off.
+- **Estimated relative error at rank K** (`e·K·H(D)/w`, recomputed from observed distinct-key cardinality) — SLO ≤ 8%; rising `H(D)` from a cardinality explosion silently degrades accuracy with no other symptom.
+- **Shard contribution skew** (hottest shard's event rate ÷ median) — alert above 2×; this is the leading indicator that a viral key is pinning one worker before its CPU alerts fire.
+- **De-dup filter fill ratio** — alert above 80% of sized capacity; past that the false-positive rate climbs and real events are silently discarded.
+- **Suppression rate and override rate** — suppressed terms as a fraction of candidates (expect ~1-3%) and the fraction later overridden by review (target <5%); a rising override rate means the abuse model is eating real stories.
+- **Read path** — SLO p99 < 20ms and cache hit rate > 99.9%; any miss means the write path stopped, so alert on the miss, not the latency.
+
+#### Multi-Region & DR
+- **Replication mode:** active-active ingest — events land in the nearest region and are counted into region-local sketches. Because sketches are linearly mergeable, the *global* list is produced by shipping sealed regional sketches (~917KB/min/region) to a designated aggregator and summing them; only the small sketches cross regions, never the 2.1TB/day event stream. Per-geo lists are computed entirely in-region.
+- **RTO:** ~2 minutes. A region losing its aggregator publishes stale lists from cache while a peer region's aggregator takes over its geo slices; sketches are already replicated as part of the global merge, so there is nothing to rebuild.
+- **RPO:** up to one minute of counts — the in-flight unsealed sketch. Recoverable by replaying that minute from the stream, which is worth doing for the audit trail but usually not worth delaying publication for.
+- **Failover cadence:** monthly aggregator failover drill per region; quarterly full-region evacuation exercise including a global-merge cutover to a secondary aggregator.
+- **Cross-region cost:** trivially small and this is the design's best property — ~917KB × 60 min × 24h × ~6 regions ≈ ~8GB/day of sketch traffic, versus ~2.1TB/day if you replicated raw events. Baselines (~140MB) replicate hourly; the raw archive stays region-local with a single cross-region copy for DR.
+
+#### Common Mistakes / Anti-patterns
+- **Reaching for an exact hash map or a Redis sorted set because it worked at small scale.** It fails on the long tail, not on the head: ~100M distinct keys per day, most seen once, is ~216GB per geo for a proper sliding window. Derive that number out loud before proposing sketches — the derivation is the answer, the sketch is just the consequence.
+- **Merging the shards' local top-K lists instead of their sketches.** A key ranked 11th on every shard can be globally top-10, and merging lists loses it silently with no error signal anywhere. Merge sketches, then re-estimate every candidate against the merged sketch before sorting.
+- **Using conservative update because it improves accuracy.** It does — and it breaks linear mergeability, which silently corrupts both your sliding window and your shard merge. Mergeability is the property the whole topology rests on; do not trade it for a tighter constant.
+- **Ranking by raw count and calling it trending.** The top of a volume-ranked list is the same handful of perennially-huge terms every day, which is not news and is not a product. Score by deviation from each key's own baseline, and be ready with the cold-start guards for keys that have no baseline.
+- **Ignoring per-user de-duplication.** Without it, one script with 10,000 posts costs nothing and buys the top slot. De-dupe at ingest so a count means a distinct participant, then add ASN and account-age concentration checks for the distributed case.
+- **Computing the list on the read path.** Summing 60 sketches and re-ranking 32k candidates per request is a self-inflicted outage the first time the panel goes viral. Materialise the answer on a timer and make the read a single cache `GET`.
+
+#### Talking Points for the Interview
+- **Lead with the memory derivation, not the data structure.** "~1.4M distinct keys per minute × ~106B = ~150MB/min, and a sliding 24h window needs 1,440 of those = ~216GB per geo" earns the sketch; naming Count-Min first without it does not.
+- **Say why the minimum.** Collisions only ever inflate a counter, so every row is an over-estimate and the min is the least-contaminated one — which is why the error is strictly one-sided and heavy hitters can never be missed.
+- **Name linear mergeability as the crux.** It is simultaneously what makes sliding windows work (ring of per-minute sketches), what makes sharding work (cell-wise sum across workers), and what makes multi-region cheap (~8GB/day of sketches instead of ~2.1TB/day of events).
+- **Sketch plus heap, and say why the sketch alone is insufficient.** It can score a key you name but cannot enumerate keys, because it stores no keys — mention Space-Saving as the single-node alternative and that it does not merge losslessly.
+- **Distinguish this from #18 explicitly.** Bounded, billable, exact, reconciled versus unbounded, discovered, approximate, unreconciled — that contrast shows you picked sketches for a reason rather than reciting them.
+- **Trending is rate-of-change.** A term at a steady 10k/min scores `z = 0.33`; one going 10/min → 500/min scores `z = 122`. Then immediately volunteer the cold-start problem, because that is the follow-up.
+
+### 54. Design a CI/CD & Code Deployment System
+#### Problem
+Take every commit an engineering org produces, build and test it on a shared farm, and put the resulting artifact into production across a large fleet safely enough that a bad change can be undone in minutes.
+
+#### Summary
+**The picture in your head:** a factory with two halves. The first half is an assembly line where every station stamps its output with a hash of its inputs — if the same inputs arrive again, the station hands back the part it made last time instead of building another one, which is the only reason the line keeps up with 50,000 orders a day. The second half is a controlled test track: before a batch reaches customers, one car is driven a lap while instruments compare it against a known-good car in the next lane, and the batch is held if it reads worse. The hardest rule in the factory is the one nobody likes: once a car has shipped and the customer has repainted their garage to match it, you cannot un-ship it.
+
+**The single-request walkthrough (build path):** an engineer opens a pull request on `acme/monorepo`. The source host (see #39) fires a webhook into the Pipeline Controller. The controller reads `.pipeline.yaml` **at the head SHA** — the pipeline that runs is the pipeline that was reviewed — validates it, and expands it into a DAG of ~140 jobs: lint and typecheck fan out, then build fans out, then a fan-in gate, then test shards. Test selection walks the reverse dependency graph of the ~9 changed files and drops the suite from ~500k tests to ~18k, packed into 24 shards by historical runtime. The controller emits job records to the Build Scheduler (dispatch mechanics are the job-scheduler pattern, see #36), which matches each job's constraints — `arch=x86_64`, `ram=8GB`, image digest — to a worker pool. A warm Firecracker microVM resumes from snapshot in ~800ms, mounts nothing from the host, and exchanges its OIDC job token with the identity broker for a 15-minute credential scoped read-only to the cache. For each action the worker computes an action key = SHA-256 of (argv + env + input file digests + toolchain digest); ~87% hit the content-addressed store and return outputs in ~40ms without executing anything; the ~13% that miss actually compile. Critical path: ~8 minutes wall clock, ~5.5 worker-minutes billed. The ~500MB of artifacts upload content-addressed to the artifact store (see #21) — only novel chunks cross the wire, ~60MB.
+
+**The single-request walkthrough (deploy path):** the PR merges. The same pipeline runs on `main` and produces a signed, immutable artifact pinned by digest. The Deploy Controller reads the rollout spec and starts phase 1: 1% canary — one task in 100, in one cell, gets the new digest, while an equal-sized baseline population running the *old* digest is freshly restarted so the two are comparable (a canary compared against long-running incumbents fails on JIT warm-up and heap age, not on the change). The Canary Analyzer polls the metrics system (see #17) every 30s for error rate and p99 latency on both arms. The service does 10k req/s, so 1% is 100 req/s; detecting a doubling of a 0.1% error rate at 95% confidence and 80% power needs ~23k requests **per arm**, which at 100 req/s is ~4 minutes — so bake is set to 10 minutes, comfortably above the detection floor. If the confidence interval on the difference excludes zero in the bad direction, the controller auto-rolls back: the canary task is replaced with the pinned previous digest in ~45 seconds. Otherwise it ramps 5% → 25% → one cell → region ladder, each with its own bake. Merge to global: ~3h50m for a standard service.
+
+**The pieces (and what each one is for):**
+- **Pipeline Controller** — parses the declarative pipeline spec and expands it into a DAG with fan-out (shards) and fan-in (gates). Declarative and versioned in-repo matters because an imperative, UI-configured pipeline drifts from the code it builds; with the spec at the SHA, "what ran" is always reconstructible.
+- **Build Scheduler (see #36)** — bin-packs jobs onto a heterogeneous pool. Not just a FIFO queue: jobs carry hard constraints (macOS notarization needs Apple hardware, GPU tests need an accelerator) and the scheduler must also enforce per-team fairness so one repo's 4-hour build cannot starve everyone else.
+- **Ephemeral worker (Firecracker microVM)** — a hardware-virtualized guest that boots in under a second, giving you a VM's isolation boundary at roughly a container's start-up cost. One job, one VM, destroyed after. A container would share the host kernel; CI executes arbitrary code written by whoever opened the PR, so the kernel is the wrong trust boundary.
+- **Identity broker (OIDC)** — issues each job a short-lived signed token asserting "this repo, this ref, this workflow, this run," which the cloud provider exchanges for a narrowly scoped credential. Nothing long-lived is stored on a worker, so a compromised build yields a credential that expires in 15 minutes and can only touch one repo's resources.
+- **Content-addressed store (CAS) + action cache** — maps action key → output digests. This is the single largest cost lever in the whole system; everything else is rounding error next to not rebuilding.
+- **Artifact store (see #21)** — immutable, digest-addressed, chunk-deduplicated object storage with a signed provenance attestation per artifact.
+- **Deploy Controller + Canary Analyzer (see #17)** — owns rollout strategy (rolling, blue-green, canary), bake timers, cell/region ladder, and the auto-rollback trigger.
+- **Feature-flag service** — the *release* switch. Deploying the binary and turning the behaviour on are separate events, which is what makes rollback a flag flip rather than a redeploy.
+
+**The thing that makes it hard:** rolling back code is trivial — you already have the previous artifact, pinned by digest, and pushing it is the same mechanism that pushed the new one. Rolling back *state* is not. Version 42 shipped with a migration that renamed `user_email` to `email` and dropped the old column. It ran, it succeeded, and now the table has no `user_email`. Redeploying version 41 puts a binary in production that queries a column that no longer exists — every request 500s, and you have made the outage worse by rolling back. The same trap exists in softer forms: a new message format that old consumers cannot parse, a cache entry written in a new shape, an enum value persisted that the old code rejects. And it is not only about rollback — during *any* rolling deploy, versions 41 and 42 are serving simultaneously for several minutes, so a change that is not backward-compatible is already broken before anyone thinks about undoing it.
+
+**Why the standard solution works:** three disciplines in combination. **Expand/contract**: never change a schema in place. Deploy 1 adds the new column and dual-writes both; deploy 2 backfills; deploy 3 flips reads to the new column; deploy 4, days or weeks later, drops the old one. At every intermediate point both N and N-1 run correctly, so rollback is always a code-only operation. **Decouple deploy from release**: the binary ships dark behind a flag, so the risky moment is a flag flip that reverts in milliseconds without touching the fleet. **Enforce N/N-1 compatibility as a gate**, not a convention — schema linting in CI rejects a destructive DDL statement that is not preceded by its expand phase in a previously-deployed version. The cost is real: a rename becomes four deploys spread over weeks, there is a dual-write window where a bug can corrupt both copies, and the contract phase is the one everyone forgets, so schemas accumulate dead columns until someone runs a cleanup campaign. Teams pay it anyway because the alternative is a class of incident with no recovery path.
+
+**If you were building it tomorrow:**
+- Pipeline Controller in Go, spec in YAML, DAG state in PostgreSQL. Scheduler on the #36 pattern with per-team weighted fair queueing. Workers as Firecracker microVMs from a snapshot pool. CAS on object storage (see #21) fronted by a regional read-through cache. Artifacts signed with Sigstore, provenance as in-toto/SLSA attestations. Deploy Controller as a Kubernetes-native rollout controller; canary analysis reading Prometheus (see #17); flags in a low-latency config store with a ~5s global propagation SLO.
+- Action execution and caching:
+  ```
+  key = sha256(argv + sorted(env) + [digest(f) for f in inputs] + toolchain_digest)
+  hit = action_cache.get(key)                  -- single RPC, ~40ms p50
+  if hit: return cas.fetch(hit.output_digests) -- nothing is executed
+  out = microvm.run(argv, inputs)              -- fresh VM, no host mounts, network denied by default
+  if action.hermetic: action_cache.put(key, out)
+  return out
+  ```
+- Rollout loop: pin digest → 1% canary + restarted baseline → poll analyzer every 30s → on `REGRESS` replace with previous digest and page; on `PASS` after bake, advance one rung of the ladder.
+
+#### Clarifying Questions
+- One monorepo or thousands of independent repos?
+- Do we build pull requests from forks — i.e. run untrusted code?
+- Are builds hermetic today, or does the toolchain come from the host image?
+- Who owns rollback: the platform automatically, or the on-call service team?
+- Do deploys carry schema migrations for stateful services?
+- Regulated environment — do we need change approval and an audit trail?
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| One monorepo | dependency-graph test selection and a shared content-addressed cache become mandatory, not optional |
+| Fork PRs are built | isolate on a separate credential-free worker pool; secrets are only issued to same-repo refs |
+| Builds are not hermetic | caching is unsafe until inputs are sealed; ship the sandbox and toolchain pinning before the cache |
+| Platform owns rollback | automated canary analysis with an auto-rollback trigger and a hard bake floor per stage |
+| Deploys carry migrations | expand/contract gating in CI, dual-write windows, and a schema-lint check that blocks destructive DDL |
+| Regulated | signed provenance per artifact, immutable deploy audit log, and freeze windows enforced by the controller |
+
+#### Requirements
+- **FR:** webhook trigger, declarative pipeline DAG, distributed build and test execution, artifact storage with provenance, rolling/blue-green/canary deploys, automated canary analysis, one-click and automatic rollback, feature flags, deploy freezes
+- **NFR:** p95 job queue wait < 30s, p50 PR pipeline < 10 min, artifact fetch p99 < 20s for ~500MB, rollback p95 < 5 min from decision to fleet-wide, ≥ 99.9% pipeline control-plane availability, zero long-lived secrets on workers
+
+#### Scale Estimate
+Assume ~10k engineers, ~50k commits/day, ~200k pipeline runs/day, avg run ~8 min wall clock with a long tail, avg run = 12 jobs at ~2 min each, artifacts ~500MB. All figures are assumptions for a large org, not attributed statistics.
+
+- **Run rate:** 200k ÷ 86400 ≈ ~2.3 runs/s steady. Working-hour clustering: assume 80% of runs land in a ~9h band across the org's overlapping time zones → 160k ÷ 32,400s ≈ ~4.9/s, i.e. **2.1× the daily mean**; intra-band merge waves (pre-lunch and pre-EOD) add ~1.4× → **peak ≈ 3× daily average ≈ 7 runs/s**.
+- **Worker-minutes, uncached:** 12 jobs × 2 min = 24 worker-min/run × 200k = 4.8M worker-min/day = 80k worker-hours/day → 3,333 concurrent workers at the 24h mean; × 3 peak multiplier → **~10,000 concurrent at peak**.
+- **Worker-minutes, cached at 87%:** executed work = 24 × 0.13 ≈ 3.1 worker-min, plus a fixed floor of ~0.2 min/job for VM boot, input fetch and cache RPCs = 2.4 → **~5.5 worker-min/run**, a 4.4× reduction. Peak concurrency → 10,000 ÷ 4.4 ≈ **~2,270**.
+- **Fleet size for the queue-wait SLO:** hold p95 queue wait < 30s by provisioning at ρ = 0.7 → 2,270 ÷ 0.7 ≈ **~3,250 workers ≈ 13,000 vCPU** at 4 vCPU each. Uncached the same SLO needs 10,000 ÷ 0.7 ≈ 14,300 workers ≈ 57,000 vCPU — **the cache is worth ~44,000 vCPU**. Note that at c ≈ 3,250 the Erlang-C queueing delay at ρ = 0.7 is effectively zero (large pools self-smooth); observed p95 wait is dominated by cold start, so keep ~10% (≈330) pre-booted warm.
+- **Cache hit-rate sensitivity:** at 70% instead of 87%, per-run cost = 24 × 0.30 + 2.4 = 9.6 worker-min → peak 4,000 → ~5,700 workers, a **75% fleet cost increase**. The hit rate is the budget.
+- **Heterogeneous pool tail:** assume 4% of jobs need macOS → ~90 concurrent at peak, provisioned at 120 machines. Small `c` is where queueing theory bites: at ρ = 0.75 with c = 120 the p95 wait is minutes, not seconds, so this pool gets its own SLO and its own capacity plan.
+- **Artifact growth:** 200k × 500MB = **~100TB/day raw**; with no retention policy that is ~36.5PB/yr, which is why the policy exists.
+- **Retention policy and steady state:** PR/branch runs ~95% (190k/day) at 7 days → 190k × 0.5GB × 7 = ~665TB; nightly/scheduled ~8k/day at 14 days → ~56TB; `main` builds ~2k/day at 90 days → ~90TB; artifacts that actually deployed ~600/day at 2 years for audit and rollback → 600 × 0.5GB × 730 = ~219TB. Total ≈ **~1.03PB steady state**. Chunk-level dedup across adjacent builds of the same service is high — assume ~65% → ~360TB unique; erasure coding at 1.4× → **~500TB provisioned**.
+- **CAS / action cache:** 200k runs × ~1,200 actions = 240M action executions/day; at 13% miss = ~31M misses, but most are concurrent runs racing the same key — assume ~4M genuinely new action keys/day × ~1.5MB avg output = ~6TB/day of new cache content; 21-day LRU window → **~126TB CAS**.
+- **Run records:** ~230B (run_id 16B + commit_sha 20B + repo_id 8B + spec_hash 32B + trigger 1B + actor_id 8B + status 1B + queued/started/finished 24B + duration_ms 4B + pool_id 4B + result_ref ~64B + padding ~48B) × 200k/day = ~46MB/day. Trivial; keep 2 years.
+- **Job records:** ~230B × 2.4M jobs/day ≈ ~550MB/day; RF=3 → ~1.7GB/day.
+- **Test results (the dominant metadata write):** ~80B (test_id 8B + run_id 16B + shard 4B + status 1B + duration_ms 4B + retries 1B + worker_id 8B + started_at 8B + failure_hash 8B + padding ~22B); assume ~3k tests executed per run after selection → 600M rows/day × 80B = **~48GB/day**, 90-day retention for flake analysis → ~4.3TB. Columnar store, not the transactional one.
+- **Logs:** 2.4M jobs × ~200KB = **~480GB/day**; 30 days hot (~14TB), then compressed to cold object storage.
+- **Deploy events:** ~2k deploys/day × ~400B ≈ 800KB/day — negligible in bytes, retained 2 years because it is the audit trail.
+
+#### API Contract
+```
+POST /webhooks/scm                 body: { repo, ref, sha, event }        → { run_id }
+GET  /runs/{run_id}                → { status, dag: [{job_id, state, queue_ms, duration_ms, cache_hits}] }
+POST /runs/{run_id}/cancel         → 202
+GET  /jobs/{job_id}/logs?follow=1  → chunked log stream
+POST /cache/lookup                 body: { action_key }                   → { hit: bool, output_digests[] }
+POST /artifacts                    body: chunked upload                   → { digest, provenance_id }
+POST /deploys                      body: { service, artifact_digest, strategy, target }  → { deploy_id }
+GET  /deploys/{deploy_id}          → { phase, traffic_pct, canary_verdict, bake_remaining_s }
+POST /deploys/{deploy_id}/rollback body: { reason }                       → { restored_digest, eta_s }
+POST /flags/{flag}                 body: { pct, cohorts[] }               → 200
+GET  /metrics/dora?service=&window=  → { deploy_freq, lead_time_p50, cfr, mttr_p90 }
+```
+
+#### High-Level Design
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 496" role="img" aria-label="CI/CD architecture: source webhook, pipeline controller, build scheduler with ephemeral workers, action cache, artifact store, deploy controller, canary analyzer and production fleet">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box" x="280" y="16" width="200" height="46" rx="9"/>
+  <text class="lbl" x="380" y="39">Source host (#39)</text>
+
+  <rect class="box" x="200" y="96" width="360" height="68" rx="9"/>
+  <text class="lbl" x="380" y="118">Pipeline Controller</text>
+  <text class="sub" x="380" y="140">spec at head SHA · expand DAG · fan-out / fan-in</text>
+
+  <rect class="box acc" x="150" y="200" width="340" height="84" rx="9"/>
+  <text class="lbl" x="320" y="222">Build Scheduler + Workers (#36)</text>
+  <text class="sub" x="320" y="244">one ephemeral microVM per job</text>
+  <text class="sub" x="320" y="262">OIDC short-lived creds · no stored secrets</text>
+
+  <ellipse class="store" cx="655" cy="206" rx="72" ry="10"/>
+  <path class="store" d="M583,206 v42 a72,10 0 0 0 144,0 v-42"/>
+  <text class="sub" x="655" y="228">Action cache</text>
+  <text class="sub" x="655" y="244">content-addressed</text>
+
+  <ellipse class="store" cx="655" cy="318" rx="72" ry="10"/>
+  <path class="store" d="M583,318 v42 a72,10 0 0 0 144,0 v-42"/>
+  <text class="sub" x="655" y="340">Artifacts (#21)</text>
+  <text class="sub" x="655" y="356">signed · ~500MB</text>
+
+  <rect class="box" x="150" y="316" width="340" height="76" rx="9"/>
+  <text class="lbl" x="320" y="338">Deploy Controller</text>
+  <text class="sub" x="320" y="360">rolling · blue-green · canary</text>
+  <text class="sub" x="320" y="378">flags decouple release from deploy</text>
+
+  <rect class="box" x="40" y="424" width="250" height="48" rx="9"/>
+  <text class="lbl" x="165" y="441">Canary Analyzer</text>
+  <text class="sub" x="165" y="459">canary vs baseline (#17)</text>
+
+  <rect class="box" x="330" y="424" width="290" height="48" rx="9"/>
+  <text class="lbl" x="475" y="441">Cells / regions</text>
+  <text class="sub" x="475" y="459">bake time · freeze windows</text>
+
+  <path class="flow" d="M380,62 L380,96"/>
+  <text class="edge" x="392" y="80" text-anchor="start">push / PR webhook</text>
+
+  <path class="flow" d="M320,164 L320,200"/>
+  <text class="edge" x="332" y="182" text-anchor="start">jobs</text>
+
+  <path class="flow" d="M490,227 L583,227"/>
+  <text class="edge" x="536" y="216" text-anchor="middle">87% hit</text>
+
+  <path class="flow" d="M490,276 L556,276 L556,326 L583,326"/>
+  <text class="edge" x="500" y="266" text-anchor="start">upload</text>
+
+  <path class="flow" d="M320,284 L320,316"/>
+  <text class="edge" x="332" y="300" text-anchor="start">green build</text>
+
+  <path class="flow dash" d="M490,350 L583,350"/>
+  <text class="edge" x="536" y="340" text-anchor="middle">fetch by digest</text>
+
+  <path class="flow" d="M200,392 L200,410 L165,410 L165,424"/>
+  <path class="flow" d="M420,392 L420,410 L475,410 L475,424"/>
+
+  <path class="flow dash" d="M40,448 L20,448 L20,354 L150,354"/>
+  <text class="edge" x="26" y="404" text-anchor="start">auto-rollback</text>
+</svg>
+```
+
+**How to read the diagram:** the left column is the control plane — controller decides what to run, scheduler decides where, deploy controller decides how far. The right column is the two content-addressed stores that everything else exists to populate and read. The dashed line from the analyzer back into the deploy controller is the only loop in the picture, and it is the loop that matters.
+
+**Why the flow is shaped this way:** building and deploying are separate systems joined by one immutable object. The build side is a throughput problem solved by caching and horizontal workers; the deploy side is a risk problem solved by slowness and measurement. Wiring them through a pinned artifact digest means the thing you roll back to is the exact thing that passed, not a rebuild that might differ.
+
+**What this layout buys you:** rollback becomes a scheduling operation on an artifact you already have, and the build farm can be resized independently of deploy policy. The trade-off is that the caches are now correctness-critical infrastructure — a wrong cache entry propagates to production with a green pipeline behind it.
+
+#### Data Model
+- **pipeline_runs** (transactional store, partition by `repo_id`): `(run_id, repo_id, commit_sha, spec_hash, trigger, actor_id, status, queued_at, started_at, finished_at)`
+- **jobs** (transactional store, partition by `run_id`): `(job_id, run_id, stage, deps[], pool_id, state, worker_id, exit_code, cache_hits, cache_misses, log_ref)`
+- **action_cache** (KV over object storage, key = `action_key` SHA-256): `action_key → {output_digests[], stderr_digest, exit_code, created_at}`
+- **cas_blobs** (object store, see #21, key = `content_digest`): chunk-deduplicated, immutable, never overwritten
+- **artifacts** (object store + metadata row, partition by `service_id`): `(artifact_digest, service_id, run_id, commit_sha, signature, provenance_id, retention_class)`
+- **test_results** (columnar store, partition by `(repo_id, day)`): `(run_id, test_id, shard, status, duration_ms, retries, failure_hash)`
+- **flaky_tests** (transactional store, key `test_id`): `(test_id, flake_rate_7d, quarantined_at, owner_team, quarantine_expires_at)`
+- **deploys** (transactional store, partition by `service_id`): `(deploy_id, service_id, artifact_digest, prev_digest, strategy, phase, traffic_pct, verdict, started_at, ended_at, actor_id)`
+- **flags** (low-latency config store, key `flag_name`): `(flag_name, pct, cohorts[], updated_at, updated_by)`
+
+#### Detailed Design
+**Pipeline definition and DAG expansion.** The spec is declarative YAML read at the triggering SHA, not from a UI database. The controller expands it: `matrix` entries become parallel jobs, shard counts become fan-out, and any job with `needs:` becomes a fan-in edge. Expansion is deterministic and hashed into `spec_hash`, so two runs of the same commit produce byte-identical DAGs — which is what lets you say "re-run this pipeline" and mean it. Fan-in gates are where cost control lives: the deploy job depends on all 24 test shards, so a single shard failure short-circuits the remaining fan-out and the scheduler cancels queued siblings. Concrete example: a run with 140 jobs where lint fails at 40 seconds cancels 118 not-yet-started jobs and returns ~2,400 worker-minutes to the pool.
+
+**The build farm and heterogeneous scheduling.** Jobs declare requirements; pools advertise capabilities. The scheduler is the #36 dispatch pattern with two additions. First, **weighted fair queueing per team** — without it, one repo landing a 4-hour dependency-upgrade run consumes the entire pool and every other team's 3-minute PR check sits behind it. Each team gets a share of concurrent slots; unused share is lent out but reclaimable. Second, **warm-pool management**: microVM boot from snapshot is ~800ms but a cold host with an unpulled image is ~90s, so the scheduler pre-boots ~10% of peak capacity per pool shape and treats warm-pool depletion as the real queue-wait alarm. The macOS pool is the instructive case: ~120 machines cannot be autoscaled elastically, so it runs a strict priority queue and a per-team daily budget instead.
+
+**Isolation is a security boundary, not hygiene.** CI is the highest-value target in most engineering orgs: it executes code by construction, and it holds credentials by necessity. A pull request from a fork is code written by a stranger that your infrastructure is about to run. The rules follow directly. Fork PRs run on a **separate pool with no credential broker access and egress denied by default** — they get the build and unit tests, and nothing that needs a secret. Same-repo refs get credentials, but only via the identity broker: the worker presents an OIDC token asserting `repo=acme/monorepo, ref=refs/heads/main, workflow=deploy.yaml`, and the cloud provider's trust policy exchanges it for a 15-minute role scoped to that service's resources. There is no long-lived secret on disk to steal. Production credentials are additionally gated on `ref=refs/heads/main`, so no branch — forked or not — can obtain them. The worker is a microVM rather than a container because the attack you are defending against is "malicious build step escapes to the host and reads the *next* job's memory," and a shared kernel is a large surface for that. Concrete example: a compromised transitive npm dependency runs a postinstall script during a fork PR build; on this design it finds no credentials, cannot reach the metadata endpoint, cannot egress, and dies with the VM 90 seconds later.
+
+**Content-addressed caching and the hermeticity contract.** Every action gets a key over its complete declared inputs. On a hit, outputs are fetched from CAS and the action never executes. This is what makes a monorepo tractable: a 500k-test, 10-million-line repo does not rebuild on every commit, it rebuilds the transitive closure of what changed — typically 2-8% of the graph. The correctness precondition is **hermeticity**: the action's output must be a pure function of its declared inputs. If the compiler reads `/usr/lib` from the host, or embeds `__DATE__`, or the test reads an environment variable nobody declared, then two actions with the same key can legitimately produce different outputs — and the cache will serve the wrong one, silently, with a green build. That is strictly worse than a slow build, because a slow build is visible and a wrong cache hit is not. Enforcement is mechanical: run every action in a sandbox that mounts only declared inputs, pin the toolchain by digest, zero out timestamps and build paths, and run a nightly **cache-poisoning canary** that re-executes a random 0.5% of cache hits and compares output digests. A mismatch is a page, and the key's subtree is evicted.
+
+**Test sharding, selection, and the flake economy.** Shards are packed by historical p50 runtime, not by count, so 24 shards finish within ~30s of each other instead of one straggler holding the fan-in gate for 6 minutes. Selection walks the reverse dependency graph from changed files, and the safety valve is that `main` runs the full suite unconditionally — selection is a latency optimization on PRs, never the only signal. Flakes get treated as a platform problem because they are: with ~3k tests per run, a per-test flake rate of just 0.02% gives a ~45% chance that *some* test fails spuriously in any given run, which means the modal red build is a lie. Engineers learn to re-run rather than read, and at that point the suite has negative value — a red build nobody believes is worse than no build, because it costs the same and provides no signal. The policy: the platform computes `flake_rate_7d` per test from the `test_results` store (same commit, both pass and fail), auto-quarantines anything over 1% into a non-blocking lane, pages the owning team with a 14-day expiry, and deletes the test if the deadline passes. Retries are allowed **only** for quarantined tests and only twice; retrying a blocking test converts a real intermittent bug into an invisible one.
+
+**Progressive rollout and automated canary analysis.** The ladder below is the deploy path for a standard service, with population sizes for a 10,000-task fleet and the bake time each rung needs. Bake is not a ritual delay — it is the time required to accumulate enough requests to make a statistical claim. At 1% of a 10k req/s service the canary sees 100 req/s; detecting a 0.1% → 0.2% error-rate regression at 95% confidence and 80% power needs ~23k requests per arm, so ~4 minutes minimum and a 10-minute floor for margin. Latency is harsher: a p99 comparison needs on the order of 100× more samples than a mean comparison to be stable, so p99 verdicts only become meaningful at the 5% rung. Time budget: 1% for 10 min → 5% for 15 min → 25% for 15 min → first cell for 30 min → remaining cells and regions at 60 min each → global at ~3h50m.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 320" role="img" aria-label="Progressive rollout ladder: pinned artifact, one percent canary, automated analysis, ramp, cell, region ladder, global, with an auto-rollback path">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <text class="edge" x="290" y="14" text-anchor="middle">regression → restore pinned previous digest, ~45s</text>
+  <path class="flow dash" d="M480,48 L480,26 L100,26 L100,48"/>
+
+  <rect class="box" x="15" y="48" width="170" height="70" rx="9"/>
+  <text class="sub" x="100" y="66">Merge to main</text>
+  <text class="sub" x="100" y="83">artifact pinned</text>
+  <text class="sub" x="100" y="100">by digest, signed</text>
+
+  <rect class="box" x="205" y="48" width="170" height="70" rx="9"/>
+  <text class="sub" x="290" y="66">Canary 1%</text>
+  <text class="sub" x="290" y="83">100 of 10k tasks</text>
+  <text class="sub" x="290" y="100">+ restarted baseline</text>
+
+  <rect class="box acc" x="395" y="48" width="170" height="70" rx="9"/>
+  <text class="sub" x="480" y="66">Automated analysis</text>
+  <text class="sub" x="480" y="83">error rate + p99 (#17)</text>
+  <text class="sub" x="480" y="100">~23k req/arm · bake 10m</text>
+
+  <rect class="box" x="585" y="48" width="170" height="70" rx="9"/>
+  <text class="sub" x="670" y="66">Ramp 5% → 25%</text>
+  <text class="sub" x="670" y="83">p99 verdict usable</text>
+  <text class="sub" x="670" y="100">bake 15m each</text>
+
+  <path class="flow" d="M185,83 L205,83"/>
+  <path class="flow" d="M375,83 L395,83"/>
+  <path class="flow" d="M565,83 L585,83"/>
+
+  <path class="flow" d="M670,118 L670,160 L100,160 L100,210"/>
+
+  <rect class="box" x="15" y="210" width="170" height="72" rx="9"/>
+  <text class="sub" x="100" y="228">Cell 1 of 12</text>
+  <text class="sub" x="100" y="246">full blast radius</text>
+  <text class="sub" x="100" y="264">bake 30m</text>
+
+  <rect class="box" x="205" y="210" width="170" height="72" rx="9"/>
+  <text class="sub" x="290" y="228">Region ladder</text>
+  <text class="sub" x="290" y="246">low-traffic first</text>
+  <text class="sub" x="290" y="264">bake 60m · freeze check</text>
+
+  <rect class="box" x="395" y="210" width="170" height="72" rx="9"/>
+  <text class="sub" x="480" y="238">Global 100%</text>
+  <text class="sub" x="480" y="258">merge → global ~3h50m</text>
+
+  <path class="flow" d="M185,246 L205,246"/>
+  <path class="flow" d="M375,246 L395,246"/>
+</svg>
+```
+
+**Rolling back state: expand/contract, flags, and N/N-1.** The controller enforces what the discipline requires. A migration file containing `DROP COLUMN`, `DROP TABLE`, or a narrowing type change is rejected by a CI lint unless the corresponding expand phase is recorded as deployed in a prior artifact — the check queries the `deploys` table for the service and refuses if the expand digest is not yet global. Worked example, renaming `user_email` to `email`: deploy A adds `email` nullable and dual-writes both columns (rollback to pre-A is safe: the new column is simply unread). Deploy B backfills 400M rows in chunked batches as a background job, not as a deploy step, because a migration that takes 6 hours has just made your rollback take 6 hours. Deploy C flips reads to `email` while still writing both (rollback to B is safe). Deploy D, two weeks later, stops writing `user_email`; deploy E drops it. Only the step from D onward is irreversible, and by then the change has baked for a fortnight. Meanwhile the *behaviour* change ships dark: the binary contains both code paths, the flag is at 0%, and release is a separate ramp that reverts in ~5s globally without redeploying anything. This is also why the rolling deploy itself is safe — during the 6 minutes when versions 41 and 42 both serve traffic, both understand both schemas by construction.
+
+**Freezes, and pipeline observability as a product surface.** Freeze windows (Black Friday, quarter close, a live incident) are enforced by the Deploy Controller as a policy object, not by asking people nicely — `POST /deploys` returns 423 with the freeze reason and expiry. Break-glass exists, requires a second approver, and writes an audit row; measuring how often break-glass is used is how you find out whether the freeze policy is realistic. The pipeline itself is instrumented like a production service, because it is one: queue wait, cache hit rate, and flake rate are its golden signals, and DORA metrics are its SLOs. Deployment frequency and lead time measure whether the platform is fast; change failure rate and time-to-restore measure whether it is safe — and the pairing matters, because optimizing either alone produces an obviously broken system.
+
+#### Potential Follow-Up Questions
+**Q: A contributor opens a PR from a fork and the integration test needs a database credential to pass. What do you do?**
+Nothing that gives the fork a credential. Fork PRs run on the credential-free pool with a local ephemeral database seeded by the test harness; the integration test that genuinely needs a shared environment runs post-merge, or on a maintainer-approved re-run against a same-repo mirror branch. *If pushed:* the "approve and run with secrets" button is the exact vector attackers use — the maintainer approves the diff they read, then the contributor force-pushes a malicious commit before the run starts. If you offer the button, bind approval to a specific commit SHA and re-require it on any new push.
+
+**Q: A build is not hermetic and the cache serves a stale object. How do you even find out?**
+You find out from a production incident, unless you have a cache-poisoning canary: re-execute a random ~0.5% of would-be cache hits and compare output digests against the cached ones. Mismatch rate should be zero; anything non-zero is a page. *If pushed:* the usual culprits are timestamps, absolute build paths, hash-ordered map iteration, and network access during the build. Fix them at the source — `SOURCE_DATE_EPOCH`, path remapping, deterministic iteration, sandbox with egress denied — and prove it by building the same commit twice on different hosts and diffing the artifact bit-for-bit.
+
+**Q: One team's dependency-upgrade run takes 4 hours and consumes the whole fleet. Now what?**
+Weighted fair queueing per team with lent-but-reclaimable slots, plus a per-job concurrency cap so no single run can hold more than a few percent of the pool. *If pushed:* also cap it economically — show teams their worker-minutes as a chargeback number. The 4-hour run usually turns out to be 90% cache misses caused by a lockfile churn that invalidates the world; the fix is a better cache key, not more machines.
+
+**Q: The canary looks fine but the service only does 50 req/s. Are you actually testing anything?**
+No. At 1% that is 0.5 req/s, and the ~23k requests per arm needed to detect an error-rate doubling would take ~13 hours. For low-traffic services you must either raise the canary fraction to 25-50% (accepting a bigger blast radius), extend bake to hours, or admit the canary cannot detect this class of regression and lean entirely on fast rollback plus synthetic probes. *If pushed:* say the honest thing out loud — a canary that cannot reach significance is theatre, and shipping it as a gate makes people trust a signal that does not exist.
+
+**Q: You deployed a migration that dropped a column and the new version is broken. Roll back.**
+You cannot, by redeploy — the old binary needs a column that is gone. The recovery is forward: hotfix the new version, or restore the column and backfill from a snapshot or the write-ahead log, which is minutes-to-hours of degraded service. *If pushed:* this is exactly why the destructive DDL gate exists in CI. Post-incident, the action item is never "be more careful," it is "the pipeline should have rejected this," and the fix is the expand-phase check against the `deploys` table.
+
+**Q: Two deploys for the same service start at once — a manual hotfix and an automated main-branch rollout.**
+Serialize per service with a lease keyed on `service_id` (the #35 distributed-lock pattern); the second either queues or is rejected with the in-flight `deploy_id`. Interleaved rollouts leave the fleet running three versions and make the canary comparison meaningless. *If pushed:* rollback is the one operation allowed to preempt a held lease, because the whole system exists to make rollback fast — but it takes the lease rather than ignoring it, so the preempted rollout stops cleanly instead of racing.
+
+**Q: There is a freeze on and a sev-1 needs a one-line fix shipped now.**
+Break-glass: a second approver, an audit row, and the full canary ladder compressed but not skipped — the 1% rung stays, the bake shortens. Skipping the canary during an incident is how a one-line fix becomes a second incident. *If pushed:* track break-glass frequency. If it fires weekly, the freeze policy is wrong and should be replaced with a stricter canary rather than a blanket ban.
+
+**Q: How do you keep 100TB/day of artifacts from bankrupting you?**
+Retention classes bound to how the artifact is used: PR artifacts 7 days, `main` 90 days, anything that actually deployed 2 years. Chunk-level dedup across builds of the same service recovers ~65%. *If pushed:* the subtle failure is deleting an artifact that is still the rollback target for a service nobody has deployed in three months — retention must be reference-counted against the `deploys` table, not purely time-based, or your rollback path evaporates exactly when you need it.
+
+**Q: Blue-green versus canary — when do you pick which?**
+Blue-green when the cutover must be atomic and you can afford double capacity: schema-compatible stateless services, or anything where a mixed-version fleet is unacceptable. Canary when you want statistical evidence before full exposure and can tolerate two versions running. *If pushed:* blue-green's rollback is a load-balancer flip, which is the fastest rollback available — but it gives you no gradual signal, so you learn about the regression from 100% of users at once. Most large fleets run canary into a blue-green cell.
+
+#### Bottlenecks & Mitigations
+- **Cache hit rate collapse** — a lockfile bump or toolchain upgrade invalidates the root of the graph and every action misses; the fleet needs 4× capacity for a day. Mitigate with a warm-up build on the base branch that populates the cache before the change lands widely, plus burst capacity from spot instances; the trade-off is that spot preemption adds retry churn, so cap bursts to non-critical-path jobs.
+- **Artifact fetch bandwidth at deploy time** — pushing a ~500MB artifact to 10,000 tasks simultaneously is ~5TB of egress in a few minutes and saturates the object store. Mitigate with regional artifact mirrors plus peer-to-peer distribution among tasks in a cell; trade-off is a more complex, harder-to-debug distribution path and a P2P swarm that can itself misbehave under partial failure.
+- **Small heterogeneous pools** — macOS and GPU pools have `c` in the low hundreds, so Erlang-C queueing produces multi-minute waits at utilizations the x86 pool handles fine. Mitigate with strict priority queues, per-team daily budgets, and pushing work off the special pool where possible (cross-compile, emulate); the trade-off is that emulated builds are slower and occasionally behave differently, which weakens the signal.
+- **Flaky-test drag** — spurious failures force re-runs, doubling effective cost and destroying trust in the signal. Mitigate with auto-quarantine at >1% flake rate and retries only in the quarantine lane; the trade-off is that quarantined tests protect nothing while quarantined, so the 14-day expiry-then-delete rule is what stops the lane becoming a graveyard.
+- **Control-plane database as the pipeline bottleneck** — 2.4M job state transitions/day plus per-second status polling hammers the transactional store. Mitigate by moving high-cardinality writes (test results, logs) to columnar and object stores and serving status from a read replica with a ~2s staleness budget; the trade-off is that "cancel" and "state changed" reads must bypass the replica.
+- **Canary analysis false positives** — comparing many metrics at once means multiple-comparison noise auto-rolls-back healthy deploys, and teams start disabling the gate. Mitigate by scoring a small fixed metric set with a directional test and requiring two consecutive bad intervals; the trade-off is slightly slower detection of genuine regressions.
+- **Deploy serialization across a large service graph** — with ~1,500 services each holding a per-service lease, a platform-wide dependency upgrade becomes a long serial chain. Mitigate by batching independent services into waves computed from the service dependency graph; the trade-off is a much larger blast radius per wave, so waves get their own canary rung.
+
+#### Failure Modes
+| Layer | Failure | Detection | Mitigation |
+|---|---|---|---|
+| Webhook ingress | Source host delivery fails or is dropped; commits silently never build | Gap detector comparing `main` commit SHAs against `pipeline_runs` every 5 min | Idempotent run creation keyed on `(repo_id, sha, spec_hash)`; reconciliation poller enqueues missing runs; source host webhook redelivery as second path |
+| Action cache | Non-hermetic action produces a wrong cached output served to later builds | Nightly canary re-executes ~0.5% of hits and diffs output digests | Page on any mismatch; evict the key's subtree; disable caching for the offending rule until sandboxed; block the release train that consumed it |
+| Worker pool | Warm pool depleted at a merge wave; queue wait blows the 30s SLO | p95 queue wait per pool + warm-pool depth alarm | Autoscale on queue depth with a pre-boot buffer of ~10% of peak; shed low-priority jobs (nightlies, docs builds) first; borrow from another pool shape when constraints allow |
+| Worker isolation | Malicious build step attempts host escape or credential exfiltration | Egress-deny violations, unexpected metadata-endpoint calls, syscall anomaly alerts | microVM per job destroyed after use; fork PRs on a credential-free pool; OIDC creds 15-min and ref-scoped; quarantine the host and rotate the broker trust policy |
+| Artifact store | Region-local object store degraded; deploys cannot fetch artifacts | Artifact fetch p99 and error rate per region | Multi-region replication of `retention_class=deployed` artifacts; deploy blocks rather than proceeding with a partial fleet; in-cell P2P serves tasks that already hold the blob |
+| Canary analyzer | Metrics pipeline (#17) lags or gaps; analyzer sees no data and cannot decide | Analyzer input-freshness check per interval | Fail closed — no data means no promotion, hold at the current rung and page; never interpret missing data as a pass |
+| Deploy controller | Controller crashes mid-rollout leaving the fleet on mixed versions | Reconciliation loop compares desired vs actual digest distribution per cell | Rollout state is a durable object, not controller memory; a new leader resumes from the last phase; the fleet is safe in mixed state because N/N-1 compatibility is a gate |
+| Schema migration | Destructive DDL reaches production and the previous version cannot start | Old-version task crash-loop within seconds of rollback attempt | CI gate rejecting destructive DDL without a deployed expand phase; recover forward via hotfix or column restore from snapshot/WAL; never rely on redeploy as the recovery |
+| Feature flags | Flag service unavailable; services cannot read the release switch | Flag-fetch error rate and staleness per service | Clients cache last-known values and fail to the safe default (feature off); flags are read-mostly with long client TTLs so an outage degrades to frozen-but-correct behaviour |
+
+#### Observability — Key Metrics & SLOs
+- **Job queue wait** (enqueue → worker start, per pool) — SLO p95 < 30s on the general pool. It is the metric engineers actually feel, and it degrades before capacity is exhausted, so it is the right autoscaling trigger.
+- **Action cache hit rate** (hits ÷ lookups, per repo and per rule) — SLO ≥ 85% org-wide. Below that the fleet cost roughly doubles; a sudden per-rule drop is the earliest signal of a broken hermeticity assumption.
+- **Deployment frequency** (successful production deploys per day) — target ≥ 1/day for the median service, ~2k/day org-wide. Low frequency means large batches, and large batches are what make change failure expensive.
+- **Lead time for change** (merge → running in production) — SLO p50 < 1h, p90 < 4h. This is the end-to-end health of the whole pipeline; regressions here usually trace to queue wait or bake policy, and splitting it by stage tells you which.
+- **Change failure rate** (deploys causing rollback or incident ÷ all deploys) — SLO < 15%. Paired with deployment frequency deliberately: either metric alone is trivially gamed, together they are not.
+- **Time to restore** (regression detected → previous version serving) — SLO p90 < 30 min, with the automated canary path p95 < 5 min. This is the number the entire rollback design exists to hold.
+- **Flake rate** (spurious failures ÷ total runs) — SLO < 2% of runs contain a quarantine-eligible failure. Above that, engineers stop reading red builds and the whole test investment stops paying.
+
+#### Multi-Region & DR
+- **Replication mode:** control plane active-passive with a single writable region (rollout decisions must be globally serialized per service — an active-active deploy controller can promote and roll back the same service simultaneously). Data plane active-active: worker pools, CAS read caches, and artifact mirrors are regional and independent. Artifacts with `retention_class=deployed` replicate to all regions synchronously enough to be fetchable before any rollout targets that region.
+- **RTO:** ~10 minutes for control-plane failover — rollout state is durable, so a promoted standby resumes each in-flight deploy from its last recorded phase rather than restarting it. Build capacity has effectively zero RTO: losing a region loses that region's workers, and the scheduler routes to the survivors at reduced throughput.
+- **RPO:** ~0 for artifacts and deploy records (synchronously replicated; both are audit and rollback critical). ~seconds for job state and test results, which are async — a forced failover may lose the final status of in-flight jobs, and those runs are simply re-executed, which is safe because the actions are cached and idempotent.
+- **Failover cadence:** control-plane failover exercised monthly; a full region-loss game day quarterly, including the case that matters most — can you still roll back a service while its home region is down? Rollback capability is tested in the game day explicitly, not assumed.
+- **Cross-region cost:** artifact replication dominates. Only the ~600 deployed artifacts/day replicate globally (600 × 500MB × 4 regions ≈ ~1.2TB/day egress); the ~100TB/day of PR artifacts stay regional and expire in place. CAS entries are pulled cross-region on demand and cached locally rather than pushed, since most are never read outside their origin region.
+
+#### Common Mistakes / Anti-patterns
+- **Treating CI isolation as a hygiene concern rather than a security boundary.** "It's just a build box" is how supply-chain compromises start: CI runs untrusted code and holds credentials, which is the worst possible combination. One ephemeral microVM per job, no credentials for fork PRs, and short-lived OIDC-issued tokens instead of stored secrets are baseline, not hardening.
+- **Adding a build cache before the builds are hermetic.** A cache over non-hermetic actions serves wrong outputs with a green pipeline behind them, which is far worse than a slow build because it is invisible. Sandbox inputs, pin the toolchain, and prove bit-for-bit reproducibility first; the cache is only correct if the hermeticity contract holds.
+- **Treating flaky tests as the owning team's problem.** They are a platform problem: at ~3k tests per run, a 0.02% per-test flake rate makes most red builds spurious, engineers learn to re-run without reading, and the suite's signal value goes to zero. Measure flake rate centrally, auto-quarantine, and enforce an expiry.
+- **Rolling back by redeploying the previous version, without asking what the migration did.** If the deploy dropped a column or wrote a format the old code cannot read, redeploying the old binary deepens the outage. Gate destructive DDL in CI, use expand/contract so N and N-1 always coexist, and put the behaviour change behind a flag so the fast path back is a flip, not a deploy.
+- **Setting canary bake time by feel.** A 1% canary on a low-traffic service may need hours to reach significance, and a two-minute bake on it detects nothing while looking rigorous. Derive bake from the traffic rate and the effect size you intend to catch; if the numbers do not work, raise the canary percentage or say plainly that the gate is not a gate.
+- **Building the pipeline as a UI-configured imperative script.** Job definitions living in a web console drift from the code they build, cannot be reviewed, and cannot be reconstructed for an old commit. The pipeline spec belongs in the repo at the SHA, expanded deterministically, so "what ran for commit X" is always answerable.
+
+#### Talking Points for the Interview
+- **Rollback is the property the whole system is built to protect.** Say early that code rollback is easy and state rollback is not, then structure the design around expand/contract, feature flags, and N/N-1 coexistence.
+- **Content-addressed caching is the difference between a tractable monorepo and an untenable one.** Quantify it: an 87% hit rate turns a 14,000-worker fleet into a 3,250-worker fleet, and it is only correct if builds are hermetic.
+- **CI isolation is a security boundary.** Untrusted code plus credentials is the defining risk; microVMs, credential-free fork pools, and short-lived OIDC tokens are the answer, not a nice-to-have.
+- **Canary analysis is a statistics problem before it is an infrastructure problem.** Name the sample size, name the traffic rate, and be honest that a canary that cannot reach significance is theatre.
+- **Flakiness destroys the signal, and the platform owns it.** A red build nobody believes costs the same as a green one and tells you nothing; central flake measurement and auto-quarantine are core design, not ops chores.
+- **Build throughput and deploy safety are opposing forces joined by one immutable artifact.** The build side optimizes for speed and cost, the deploy side deliberately buys time to measure, and the pinned digest is what lets both be true at once.
+
+### 55. Design an Online Auction System
+#### Problem
+Run millions of concurrent timed auctions — one seller, one item, many bidders, a published deadline — accepting bids under a strict monotonicity invariant, resolving proxy maxima server-side, determining a single winner at close, and settling payment.
+
+#### Summary
+**The picture in your head:** a village hall with ten million tables running at once. At each table there is one item, one seller, and a crowd; a clock on the wall says when that table stops. Most tables are silent for six days. Then, in the last ten seconds before a clock strikes, forty people shout at once and the auctioneer has to decide, unambiguously and for money, which shouts landed before the bell and which landed after. Crucially, most people in the crowd are not shouting — they handed the auctioneer a sealed slip saying "go up to £40 for me, but no higher, and don't tell anyone the number."
+
+**The single-request walkthrough (bid path):** bob taps *Bid £30* on a phone. The request carries `max_amount = 3000` (minor units), an idempotency key, and the price the client last rendered. Stage 1 — the Bid API validates auth, currency, tick, and that bob is not the seller (~2ms). Stage 2 — the request is routed by `hash(auction_id)` to the one partition that owns this auction, so every bid for this item is serialised by a single writer; cross-network hop ~1ms. Stage 3 — the partition reads the auction row: `state=OPEN`, `current_price=1000`, `high_bidder=alice`, `high_max=4000` (secret). Stage 4 — proxy resolution: bob's 3000 beats the displayed 1000 but loses to alice's hidden 4000, so the new displayed price becomes `min(4000, 3000 + increment(3000)) = 3100` and alice keeps the lead. Stage 5 — one conditional update writes `current_price=3100, high_bidder=alice, version=v+1` **only if** `version` is unchanged and `state='OPEN'`; two history rows are appended (bob's 3000, alice's auto-bid to 3100). Stage 6 — bob gets `OUTBID` in the same HTTP response, ~40ms server-side, ~120ms wall-clock on a cell network. Stage 7 — a price tick goes to the pub/sub bus for the ~1,500 people watching this item.
+
+**The read path is a different shape entirely.** For every person bidding there are roughly fifty watching a countdown. Those watchers hold a WebSocket, not a polling loop, and they receive a *coalesced* snapshot — price, bid count, end time — at most four times a second no matter how fast bids arrive. The countdown itself is rendered client-side from a server-supplied `end_ts` plus a one-time clock-offset handshake; we never stream seconds.
+
+**The pieces (and what each one is for):**
+- **Bid API tier (stateless, autoscaled)** — validation, authentication, idempotency-key dedupe. Rejects cheaply so garbage never reaches the ordered path.
+- **Auction partition (single writer per `auction_id`)** — a keyed executor: every event for one item lands on one owner, so contention on the price row is structural, not incidental. Same pattern as the per-instrument matching core in #42, but for a *different reason* — there, it buys microsecond determinism; here, it buys a contended row that almost never actually contends.
+- **Auctions table (`PostgreSQL` or `DynamoDB`, partition key `auction_id`)** — the mutable state: `current_price`, `high_bidder`, the secret `high_max`, `end_ts`, `version`. One row per item, updated by conditional write only.
+- **Bid log (append-only, wide-column, partition key `auction_id`)** — every submission, accepted or rejected, with provenance. Append-only because fraud remediation means *recomputing* the price from surviving bids, which you cannot do if bids were mutations of a field.
+- **Close scheduler (timer wheel over a sharded sorted set, see #36)** — 10M pending deadlines. At `end_ts` it does not "close the auction"; it *enqueues a `CLOSE` event onto the same partition log as the bids*. That distinction is the whole design.
+- **Pub/sub bus + WebSocket gateway (`NATS` or Redis Streams in front of ~48 gateway nodes)** — topic per auction. The bus delivers one message per *gateway node*, not per connection, so a 15,000-watcher item costs the bus 48 deliveries.
+- **Settlement (see #23) and notifications (see #7)** — order creation, charge, escrow for high-value lots, outbid/won/second-chance messages.
+
+**The thing that makes it hard — the deadline is contested money at a precisely known instant.** A consumer auction is quiet for six days and then takes a large share of its bids in the final ten seconds, because sniping is *rational*: bidding late denies the incumbent's proxy time to respond and reveals nothing. So load is not a smooth peak, it is a spike at a timestamp everyone can read off the page. Worse, correctness at the boundary is adversarial. If each API node decides "was this in time?" by comparing its local clock to `end_ts`, then a node whose NTP has drifted 40ms accepts a bid that an adjacent node rejects — two users, identical timing, different outcomes, and one of them has a legal claim. Wall-clock comparison distributed across N nodes is not a deadline; it is N slightly different deadlines.
+
+**Why the standard solution works:** you stop asking "what time is it?" and start asking "where in the log is it?". The `CLOSE` event is sequenced into the same per-auction stream as the bids, so *everything ordered before it is in and everything after is out* — a total order, decided once, by one writer. Without a sequencer you get the same property from a fenced conditional write: every bid carries `AND state = 'OPEN'` and the close carries `WHERE state = 'OPEN'`, so the database's own serialisation order is the sequencer. Then, on top of that, **auto-extension**: if an accepted bid lands within the final `W = 120s`, push `end_ts` to `bid_ts + W` and repeat until a full quiet window passes. This dissolves both problems at once — latency stops deciding the winner because there is always another two minutes, and the spike flattens into a decaying tail instead of a wall. It is a product decision, not just an engineering one: eBay ends standard auctions at the stated time with no extension, Amazon's auction platform extended until ten minutes passed without a bid, and Roth & Ockenfels (*American Economic Review*, 2002) found significantly more late bidding on the hard-close venue. Hard close preserves the sniping game and the load spike; auto-extension removes both and usually raises final prices, at the cost of an unbounded end time you must cap.
+
+**If you were building it tomorrow:**
+- PostgreSQL (or DynamoDB with conditional writes) for the auction row; Cassandra for the bid log; Redis sorted sets sharded by `auction_id` for the close timer; NATS JetStream for price ticks; a WebSocket gateway tier in Go.
+- Bid hot path pseudocode (one atomic step, retried at most 3×):
+  ```
+  a = read(auction_id)                      -- includes version, high_max
+  reject unless a.state == OPEN             -- CLOSE already sequenced
+  reject unless max_amount >= a.current_price + increment(a.current_price)
+  if max_amount > a.high_max:               -- challenger wins the lead
+      new_price  = min(max_amount, a.high_max + increment(a.high_max))
+      new_leader = bidder
+  else:                                     -- incumbent's proxy holds
+      new_price  = min(a.high_max, max_amount + increment(max_amount))
+      new_leader = a.high_bidder
+  new_end = (a.end_ts - now < 120s) ? now + 120s : a.end_ts
+  ok = cas(auction_id, expect_version=a.version, new_price, new_leader,
+           new_max=max(max_amount, a.high_max), new_end)
+  if not ok: retry from read                -- never silently raise the user's max
+  append_bid_log(...); publish_tick(...); notify_outbid(...)
+  ```
+#### Clarifying Questions
+- Hard close at the stated time, or auto-extension when a bid lands in the final window?
+- Proxy (maximum) bidding, or explicit bid-per-tap only?
+- Reserve prices, Buy-It-Now, and scheduled starts?
+- Is the winning bid a binding contract, and is payment pre-authorised at bid time or charged after close?
+- Live/streamed auctions with seconds-long lots, or only timed listings?
+- How many watchers per auction should we plan for relative to bidders?
+
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Auto-extension on late bids | `end_ts` becomes mutable state under the same CAS as the price, with a hard cap on total extensions |
+| Hard close at the stated time | the boundary must be a sequenced `CLOSE` event, and you must plan for a load spike at a known instant |
+| Proxy maximum bidding | store a secret `high_max` per auction, resolve cascades server-side in one atomic step, and never expose maxima |
+| Reserve + Buy-It-Now + scheduled start | a listing state machine (`SCHEDULED → OPEN → CLOSED → SETTLED`) with reserve checked only at winner determination |
+| Binding contract, charge after close | settlement is asynchronous and can fail after the auction concluded — you need strikes and second-chance offers (#23) |
+| Live streamed lots | a wholly different latency regime — sub-second, persistent connections, closer to #33 than to this design |
+| 50:1 watchers to bidders | fan-out, not bid throughput, sizes the fleet: coalesced pub/sub with per-node fan-out (#7, #41) |
+
+#### Requirements
+- **FR:** create/schedule a listing; open bidding; validated bids with proxy maxima; strict monotonic price; anti-sniping extension; deterministic close and winner determination; reserve and Buy-It-Now; real-time price to watchers; settlement, second-chance offers, and fraud remediation.
+- **NFR:** bid accept-or-reject p99 < 250ms end-to-end; **zero lost accepted bids and zero double-leaders** (the monotonicity invariant is absolute); close decision unambiguous to the millisecond regardless of node clock skew; ≥ 5M concurrent WebSocket watchers; 3-year auditable bid history.
+
+#### Scale Estimate
+All figures are stated assumptions unless marked; the platform's real numbers are not public at this granularity.
+- **Users and close rate:** assume ~500M registered, ~120M MAU (24% — most marketplace accounts are dormant buyers). ~10M concurrently live auctions at a ~3-day average duration → 10M ÷ 3 = **~3.3M closes/day = ~39 closes/s average**.
+- **Close clustering (peak multiplier 12×):** sellers pick end times deliberately ("ends Sunday 8pm"). Assume ~15% of the week's 23M closes land in one 2-hour evening window in the largest market → 3.5M ÷ 7,200s ≈ **~485 closes/s**, ~12× the daily average. Closes are bursty *before* any bid arrives.
+- **Bid submissions (heavily skewed, not uniform):** 90% of auctions (3.0M/day) × ~8 submissions = 24M; the next 9% (300k) × ~200 = 60M; the top 1% (33k) × ~2,000 = 66M. Total ≈ **~150M submissions/day ≈ ~1.7k/s** average.
+- **Bid-path write budget ~5k/s:** each accepted bid costs ~3 writes — a history row, the price CAS, and an outbid/tick event — plus rejected attempts and retries. 1.7k/s × ~3 = **~5k/s planning budget**; global evening peak ~2× → **~10k/s**.
+- **The spike is per-key, not global (multiplier ~5,000×):** a top-1% auction takes ~20% of its ~2,000 bids in the final 10s → 400 bids ÷ 10s = **~40 bids/s on one row**, against that auction's own lifetime average of 2,000 ÷ (3 × 86,400) ≈ 0.008 bids/s. That is a ~5,000× spike on a single partition key. The fleet is fine; the row is not.
+- **Bid record ~120B:** bid_id 16B + auction_id 16B + bidder_id 16B + amount 8B + max_amount 8B + ts 8B + seq 8B + flags 4B + ip_hash 8B + idempotency_key 16B + padding ~12B. History = ~100M accepted + ~30M proxy auto-bid rows = ~130M rows/day × 120B = **~16GB/day raw**; RF=3 → **~47GB/day ≈ ~17TB/yr**; 3-year audit retention → **~50TB**.
+- **Auction record ~1KB:** auction_id 16B + seller_id 16B + title 80B + category 4B + start/reserve/current price 24B + high_bidder 16B + high_max 8B + increment_band 2B + bid_count 4B + start/end ts 16B + extension_count 2B + state 1B + currency 3B + shipping ~64B + item specifics ~600B + padding ~64B ≈ ~920B. Live working set 10M × 1KB = **~10GB** — small enough to hold entirely in a RAM tier per region, which is why the CAS is cheap. Closed archive: 3.3M/day × 1KB × 365 × 3 = ~3.6TB; RF=3 → **~11TB**.
+- **Watch subscriptions:** ~48B/row (user_id 16B + auction_id 16B + created_ts 8B + prefs 2B + padding 6B); ~10 watches × 120M MAU = 1.2B rows × 48B = ~58GB; RF=3 → **~175GB**. Cheap — watching is free, so plan for it to be abundant.
+- **WebSocket tier:** assume ~4% of MAU concurrently connected at evening peak → **~5M concurrent connections**, ~8 auction subscriptions each = ~40M subscriptions. At ~10KB/connection (trimmed socket buffers + TLS state + subscription set) = **~50GB** across the tier; at ~150k connections/node → ~33 nodes, round to **~48 with headroom**.
+- **Fan-out cost (watcher:bidder = 50:1, assumed):** baseline 1.7k accepted bids/s × 50 = **~85k msgs/s ≈ ~17MB/s** at ~200B framed. A single hot auction at 40 bids/s × 15k watchers would be **600k msgs/s ≈ ~120MB/s from one item**. Coalescing to ≤4 updates/s per auction cuts that to 60k msgs/s ≈ ~12MB/s — a 10× reduction — and the *bus* only pays 4 msgs/s × 48 nodes = ~192 deliveries/s, with each node fanning out to its local ~310 connections.
+- **Media (see #21, #48):** ~8 photos × ~150KB (200px ~15KB + 800px ~120KB + 1600px ~400KB, averaged) = ~1.2MB/listing → 3.3M new listings/day ≈ **~4TB/day ingest**. Hot 90 days at full ladder ≈ ~360TB; thereafter keep only the 800px derivative (~1MB/listing) → 3-year cold ≈ ~3.6PB, erasure-coded at ~1.5× → **~5.4PB**.
+
+#### API Contract
+```
+POST /auctions            body: { title, category, start_price, reserve?, buy_now?, duration_h, start_at? }
+                          → { auction_id, state: SCHEDULED | OPEN, end_ts }
+GET  /auctions/{id}       → { current_price, bid_count, min_next_bid, end_ts, high_bidder_masked, extensions_used }
+POST /auctions/{id}/bids  body: { max_amount, idempotency_key, client_seen_price }
+                          → { status: LEADING | OUTBID | REJECTED, current_price, min_next_bid, server_recv_ts, reason? }
+GET  /auctions/{id}/bids  → [{ bidder_masked, amount, ts }]   (amounts only, never max_amount)
+POST /auctions/{id}/watch → { ok }        POST /auctions/{id}/buy-now → { order_id }
+WS   /auctions/{id}/live  → { price, bid_count, end_ts, extended? }   (broadcast, coalesced ≤4/s)
+WS   /me/live             → { type: OUTBID | WON | SECOND_CHANCE, auction_id, ... }   (unicast)
+POST /internal/auctions/{id}/second-chance   body: { to_bidder, price }   (platform-initiated only)
+```
+
+#### High-Level Design
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 540" role="img" aria-label="Online auction architecture: bid API, single-writer auction partition, close scheduler, pub/sub fan-out to WebSocket watchers, settlement">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box" x="30" y="18" width="200" height="44" rx="9"/>
+  <text class="lbl" x="130" y="40">Bidder app</text>
+
+  <rect class="box" x="530" y="18" width="200" height="44" rx="9"/>
+  <text class="lbl" x="630" y="40">Watcher clients</text>
+
+  <rect class="box" x="30" y="96" width="200" height="64" rx="9"/>
+  <text class="lbl" x="130" y="114">Bid API</text>
+  <text class="sub" x="130" y="133">validate · authn</text>
+  <text class="sub" x="130" y="150">idempotency key</text>
+
+  <rect class="box" x="530" y="96" width="200" height="64" rx="9"/>
+  <text class="lbl" x="630" y="114">WS Gateway</text>
+  <text class="sub" x="630" y="133">~5M connections</text>
+  <text class="sub" x="630" y="150">topic → local conns</text>
+
+  <rect class="box" x="30" y="222" width="170" height="76" rx="9"/>
+  <text class="lbl" x="115" y="242">Close scheduler</text>
+  <text class="sub" x="115" y="262">timer wheel, 10M</text>
+  <text class="sub" x="115" y="280">emits CLOSE event</text>
+
+  <rect class="box acc" x="230" y="210" width="300" height="100" rx="9"/>
+  <text class="lbl" x="380" y="232">Auction partition</text>
+  <text class="sub" x="380" y="253">single writer per auction_id</text>
+  <text class="sub" x="380" y="272">CAS price · resolve proxy</text>
+  <text class="sub" x="380" y="291">CLOSE terminates the log</text>
+
+  <ellipse class="store" cx="655" cy="215" rx="68" ry="10"/>
+  <path class="store" d="M587,215 v34 a68,10 0 0 0 136,0 v-34"/>
+  <text class="sub" x="655" y="234">Auctions</text>
+  <text class="sub" x="655" y="250">price · high_max</text>
+
+  <ellipse class="store" cx="655" cy="305" rx="68" ry="10"/>
+  <path class="store" d="M587,305 v34 a68,10 0 0 0 136,0 v-34"/>
+  <text class="sub" x="655" y="324">Bid log</text>
+  <text class="sub" x="655" y="340">append-only</text>
+
+  <rect class="box" x="230" y="360" width="300" height="52" rx="9"/>
+  <text class="lbl" x="380" y="378">Pub/sub bus</text>
+  <text class="sub" x="380" y="398">topic per auction · ≤4 ticks/s</text>
+
+  <rect class="box" x="170" y="460" width="420" height="58" rx="9"/>
+  <text class="lbl" x="380" y="480">Settlement (#23) · Notifications (#7)</text>
+  <text class="sub" x="380" y="501">order · charge · outbid / won / second-chance</text>
+
+  <path class="flow" d="M130,62 L130,96"/>
+  <path class="flow" d="M230,128 L300,128 L300,210"/>
+  <text class="edge" x="308" y="170" text-anchor="start">bid</text>
+
+  <path class="flow" d="M200,260 L230,260"/>
+  <text class="edge" x="202" y="248" text-anchor="start">CLOSE</text>
+
+  <path class="flow" d="M530,232 L587,232"/>
+  <text class="edge" x="534" y="221" text-anchor="start">CAS</text>
+
+  <path class="flow" d="M520,310 L520,322 L587,322"/>
+  <text class="edge" x="534" y="335" text-anchor="start">append</text>
+
+  <path class="flow" d="M380,310 L380,360"/>
+  <text class="edge" x="388" y="336" text-anchor="start">price tick</text>
+
+  <path class="flow" d="M530,398 L740,398 L740,140 L730,140"/>
+  <text class="edge" x="560" y="387" text-anchor="start">fan-out</text>
+
+  <path class="flow" d="M630,96 L630,62"/>
+
+  <path class="flow" d="M230,300 L210,300 L210,430 L380,430 L380,460"/>
+  <text class="edge" x="204" y="382" text-anchor="end">won</text>
+</svg>
+```
+
+**How to read the diagram:** the left column is the write path — a bid enters the stateless API, is routed to the one partition that owns this auction, and mutates a single row by conditional write. The close scheduler feeds that *same* partition rather than mutating state itself. The right column is the read path — a coalesced price tick leaves the partition once, hits the bus once per gateway node, and fans out locally to watchers.
+
+**Why the flow is shaped this way:** bidding and watching have nothing in common except the number on the screen. Bidding is a low-volume, high-consequence, strictly ordered write; watching is a high-volume, low-consequence, lossy broadcast. Forcing them through one path would make either the write path slow or the read path expensive. Routing `CLOSE` into the bid stream is the one deliberate coupling: the deadline must be ordered against bids, so it must travel on the same wire.
+
+**What this layout buys you:** an unambiguous close and a fan-out bill that scales with gateway nodes rather than with viewers. The trade is that one auction is one partition — a hot item has a hot key by construction, and you must be able to defend a single row at ~40 writes/s rather than shard your way out.
+
+#### Data Model
+- **auctions** (transactional store, partition key `auction_id`): `(auction_id, seller_id, state, start_price, reserve, current_price, high_bidder, high_max, increment_band, bid_count, start_ts, end_ts, extensions_used, version)` — `high_max` is never returned by any external endpoint.
+- **bids** (wide-column, partition key `auction_id`, clustering key `seq`): `(auction_id, seq, bid_id, bidder_id, amount, max_amount, kind, ts, source_ip_hash, idempotency_key)` — append-only; `kind ∈ {MANUAL, PROXY_AUTO, REJECTED}`.
+- **bidder_index** (wide-column, partition key `bidder_id`): `(bidder_id, auction_id, last_bid_ts, outcome)` — powers "my bids" and the shill-graph feature extraction.
+- **watches** (KV, partition key `user_id`; secondary index by `auction_id`): `(user_id, auction_id, created_ts, notify_prefs)`.
+- **close_timers** (Redis sorted set, sharded by `hash(auction_id)`, score = `end_ts`): the pending-deadline index; rewritten on every auto-extension.
+- **orders / payments** (see #23), **listings media** (object store + CDN, see #21).
+
+#### Detailed Design
+
+**The bid write path is one conditional update, never a read followed by a write.** The naive implementation reads `current_price = 100`, computes `105` in application code, and writes it. Run that concurrently: alice and bob both read `100`, both compute `105`, both write. The second write wins and the first is silently erased — the platform now shows one high bidder at `105` when two people validly bid, one of whom was told they were leading. Worse, `bid_count` computed the same way loses a bid outright, so the audit log and the price disagree. The fix is a single statement that carries the precondition: `UPDATE auctions SET current_price = :p, high_bidder = :b, high_max = :m, bid_count = bid_count + 1, version = version + 1 WHERE auction_id = :id AND state = 'OPEN' AND version = :v`. Zero rows affected means someone moved the price between your read and your write; re-read, re-resolve, retry, bounded at three attempts. The crucial rule on retry: **never silently raise the user's maximum**. If their max no longer clears the new price, the answer is `OUTBID`, not an auto-increase — that is their money and they did not authorise it. Routing by `hash(auction_id)` to a single writer means the CAS almost never actually fails; the CAS is the correctness backstop, the partitioning is the performance mechanism.
+
+**Proxy bidding, resolved server-side in one atomic step.** A bidder submits the *maximum* they will pay; the system bids only enough on their behalf to stay ahead. Concretely, with an increment table of £0.50 below £25, £1 to £99.99, £2.50 to £249.99, £5 above:
+
+- Start price £10. **alice** submits max £40 → displayed price £10, alice leads, `high_max = 40` (secret).
+- **bob** submits max £30. One atomic resolution: bob's £30 clears the displayed £10, so he is a contender; but £30 < £40, so alice's proxy holds. New displayed price = `min(alice_max, bob_max + increment(bob_max)) = min(40, 30 + 1) = £31`. alice still leads at £31. bob receives `OUTBID` **in the response to his own bid** — he never held the lead for a single millisecond.
+- **carol** submits max £60. Now `60 > 40`, so the lead flips: new price = `min(60, 40 + increment(40)) = £41`, carol leads, `high_max = 60`. alice is outbid at £41 even though she offered £40 — correct, because £41 is above her ceiling.
+- **Tie:** dave submits exactly £60. Rule: earlier bid wins ties (time priority, exactly as FIFO-within-a-price-level works in #42). Price goes to £60, carol keeps the lead, dave is outbid at the same number he offered. It feels wrong to dave and it is the only rule that stops a later bidder free-riding.
+
+Two things fall out. First, the "cascade" is not N transactions — it is one CAS, with two history rows appended. Second, this makes the auction approximately a **second-price (Vickrey) auction**: the winner pays one increment above the runner-up's maximum, not their own. That is the entire point of the mechanism, and it only works if maxima stay secret. If the displayed price were the leader's maximum, bidding your true value would be strictly irrational and everyone would revert to incremental sniping.
+
+**Keeping maxima secret is an active defence, not a schema property.** The obvious attack is a binary search: bob bids £31, £35, £38, £39 in sequence and reads the displayed price after each to converge on alice's ceiling to within one increment. Defences, in order of value: rate-limit bids per bidder per auction (a genuine bidder does not need eight bids in ninety seconds); detect the monotone-probe signature (strictly increasing sub-increment bids from one account, all losing) and start rejecting; never expose "you were outbid by X" or any delta; and mask bidder identities in public history. Note the honest limit — once the leader is actually beaten, their maximum is revealed by the price, and that is unavoidable. The mechanism only requires secrecy *while the leader is still leading*.
+
+**The deadline is a log position, not a wall-clock comparison.** `end_ts = 2026-08-09T20:00:00.000Z` looks like an instant, but on a fleet of API nodes it is not one. NTP-disciplined servers typically hold ~1-10ms of skew; a node with a failing sync can drift 100ms+ without alerting. PTP gets you to microseconds but needs hardware support end to end. If each node evaluates `now() < end_ts` locally, a bid at true T−20ms is accepted by the fast node and rejected by the slow one. The design must remove the comparison entirely: the scheduler enqueues `CLOSE(auction_id)` onto the auction's own ordered stream, and every event's fate is decided by its position relative to that message. Where you do not have a per-key log, the fenced conditional write gives the same guarantee at the cost of one hot row: the close does `UPDATE ... SET state = 'CLOSED', closed_seq = :s WHERE auction_id = :id AND state = 'OPEN'`, and every bid CAS carries `AND state = 'OPEN'`. The database's serialisation order *is* the sequencer. This is the same "one writer defines the order" idea as #25 and #42, but the requirement is different: there it exists to make microsecond matching deterministic and replayable for regulators; here throughput is trivial and what we need is a single unambiguous boundary.
+
+**The 3ms-before-close bid, and anti-sniping auto-extension.** bob's phone shows 3 seconds remaining and he taps. Mobile RTT is p50 ~80ms and p99 ~900ms on a congested cell network, so his bid reaches the sequencer at T+40ms — after `CLOSE`. It is rejected. He is furious, and he is not wrong: he pressed the button in time. But we cannot accept it. A client-supplied timestamp is trivially forged, and even signed it would mean reopening a settled auction and unwinding a notified winner. So we reject, and we return the **server receive timestamp** in the response so the dispute has a fact in it rather than a feeling. Auto-extension is the mechanism that makes this whole class of complaint disappear: if an accepted bid lands within the final `W = 120s`, set `end_ts = bid_ts + W` under the same CAS, and repeat until a full quiet `W` elapses. Three consequences. (1) Fairness: network latency stops deciding outcomes, because there is always another window. (2) Load: the spike at a known instant becomes a decaying tail — the ~40 bids/s on one row spread across minutes. (3) Revenue: it converts a sealed-bid-with-deadline game into a genuine ascending auction, which typically raises final prices. The cost is an unbounded end time — a two-bidder war can run all night, the seller cannot plan dispatch, and the close scheduler must rewrite the timer entry on every extension. Cap it: at most 30 extensions or a hard stop at `original_end + 1h`, whichever comes first. And be clear in the interview that this is a **product decision with real consequences** — snipers hate it, sellers love it, and the empirical evidence (Roth & Ockenfels, AER 2002, comparing eBay's hard close against Amazon's ten-minute extension) is that hard-close venues see substantially more last-minute bidding.
+
+**The bid path near the deadline, stage by stage.** Cardinalities and budget for the p99 case on a hot auction in its final minute: ~40 bid submissions/s arrive at the edge → ~35/s survive validation (the rest are below the minimum increment or from the seller) → all 35 route to **one** partition → the partition's single writer processes them serially at ~3ms each, so ~35/s consumes ~105ms of a 1,000ms second, leaving ~10× headroom before the row itself becomes the bottleneck → each accepted bid emits 1 unicast outbid message and contributes to a tick that is coalesced to ≤4/s → the ≤4 ticks fan out to 48 gateway nodes → ~310 connections each. End-to-end budget: ~2ms validate, ~1ms route, ~1ms sequence, ~3ms resolve-and-CAS, ~5ms publish, ~120ms mobile network → **p99 target 250ms** wall-clock, of which the server owns ~12ms.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 320" role="img" aria-label="Bid path near the deadline: arrival, validation, routing, sequencing, proxy resolve and CAS, auto-extension check, publish, and the CLOSE event that bounds the log">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box" x="15" y="44" width="165" height="68" rx="9"/>
+  <text class="sub" x="97" y="60">Bid tapped at T-3s</text>
+  <text class="sub" x="97" y="78">mobile RTT p50 80ms</text>
+  <text class="sub" x="97" y="96">p99 900ms</text>
+
+  <rect class="box" x="200" y="44" width="165" height="68" rx="9"/>
+  <text class="sub" x="282" y="60">Validate</text>
+  <text class="sub" x="282" y="78">authn · idempotency</text>
+  <text class="sub" x="282" y="96">~2ms · 40/s to 35/s</text>
+
+  <rect class="box" x="385" y="44" width="165" height="68" rx="9"/>
+  <text class="sub" x="467" y="60">Route</text>
+  <text class="sub" x="467" y="78">hash(auction_id)</text>
+  <text class="sub" x="467" y="96">one owning partition</text>
+
+  <rect class="box" x="570" y="44" width="175" height="68" rx="9"/>
+  <text class="sub" x="657" y="60">Sequence</text>
+  <text class="sub" x="657" y="78">append to partition log</text>
+  <text class="sub" x="657" y="96">~1ms</text>
+
+  <path class="flow" d="M180,78 L200,78"/>
+  <path class="flow" d="M365,78 L385,78"/>
+  <path class="flow" d="M550,78 L570,78"/>
+
+  <path class="flow" d="M657,112 L657,142 L97,142 L97,175"/>
+
+  <rect class="box acc" x="15" y="175" width="165" height="80" rx="9"/>
+  <text class="sub" x="97" y="192">Resolve proxy + CAS</text>
+  <text class="sub" x="97" y="210">compare maxima</text>
+  <text class="sub" x="97" y="228">version-fenced write</text>
+  <text class="sub" x="97" y="244">~3ms serial</text>
+
+  <rect class="box" x="200" y="175" width="165" height="80" rx="9"/>
+  <text class="sub" x="282" y="196">Auto-extend?</text>
+  <text class="sub" x="282" y="215">bid in final 120s →</text>
+  <text class="sub" x="282" y="234">end_ts = bid_ts + 120s</text>
+
+  <rect class="box" x="385" y="175" width="165" height="80" rx="9"/>
+  <text class="sub" x="467" y="196">Publish</text>
+  <text class="sub" x="467" y="215">outbid unicast</text>
+  <text class="sub" x="467" y="234">tick coalesced to 4/s</text>
+
+  <rect class="box dash" x="570" y="175" width="175" height="80" rx="9"/>
+  <text class="sub" x="657" y="196">CLOSE in the log</text>
+  <text class="sub" x="657" y="215">position decides,</text>
+  <text class="sub" x="657" y="234">not the wall clock</text>
+
+  <path class="flow" d="M180,215 L200,215"/>
+  <path class="flow" d="M365,215 L385,215"/>
+  <path class="flow" d="M550,215 L570,215"/>
+
+  <text class="edge" x="380" y="288">server budget ~12ms · end-to-end p99 target 250ms</text>
+</svg>
+```
+
+**Watcher fan-out is where the volume actually is.** At a 50:1 watcher-to-bidder ratio the broadcast path carries ~50× the messages of the write path, and on a hot item it carries ~15,000× that item's bid rate. Three mechanisms keep it affordable. First, **coalescing**: the auction's public state is a snapshot, not a stream of events, so last-write-wins at ≤4 updates/s is indistinguishable to a human and cuts a 600k msg/s item to 60k. Second, **topic-per-auction with node-level fan-out**: the bus delivers once per gateway node that has at least one subscriber, so bus cost is O(nodes) not O(connections); the node expands to its local set. Third, **split broadcast from unicast**: "price is now £31" is identical for everyone and is broadcast; "you are no longer the high bidder" is per-user and goes on the user's own channel (and to push, see #7). Do not try to compute per-user state in the broadcast path — that is what turns a 4 msgs/s topic into 15,000 distinct messages. The countdown never travels the wire: the client renders it from `end_ts` and a clock-offset handshake, and only an *extension* pushes a new `end_ts`. Cross-reference #41 for the same coalesced-tick fan-out pattern applied to price alerts, and #8 for the general push-vs-pull fan-out trade.
+
+**Winner determination and the payment that fails after the hammer.** When `CLOSE` is processed: if `bid_count > 0` and `current_price ≥ reserve`, the winner is `high_bidder` at `current_price`; otherwise the auction ends unsold ("reserve not met") and no order is created. The winner event creates an order (#48) and a payment intent (#23). Critically, **money moves after the auction is legally over** — in most jurisdictions and under most platform terms, the winning bid forms a binding contract at close, but the card is charged seconds to days later and can decline. So the settlement path must model failure as normal: a 48-hour payment window, reminders, then an unpaid-item case that issues a strike, relists or offers a **second-chance offer** to the runner-up. The second-chance price is capped at *the runner-up's stored maximum* — you cannot charge someone more than they bid, and this is precisely why maxima are persisted rather than discarded once beaten. For high-value lots, pre-qualify: take a card pre-authorisation hold at bid time above a threshold (say £1,000) so the winner is known-good. That is real friction and it depresses bid counts, so apply it only in the tail. Escrow is the same trade — safer settlement, slower payout, and a seller-experience cost.
+
+**Shill bidding is a graph problem, and remediation is a replay.** A shill is the seller bidding on their own item through a colluding account to inflate the price. It is the most corrosive fraud on an auction platform because it makes the price signal a lie, and it is invisible to any per-bid rule — every individual shill bid is perfectly valid. Detect it over a bipartite bidder↔seller graph built from 12 months of `bidder_index`: (a) a bidder whose bid rate on one seller's listings is far above base rate and whose **win rate is near zero** — the defining signature, because a shill must lose; (b) shared device fingerprints, payment instruments, shipping addresses, IP /24s, or tightly correlated session times; (c) timing patterns — bids arriving minutes after a genuine bid, always in the minimum increment, always just enough to trip the leader's proxy. Score with gradient-boosted trees or a GNN over those features and route high scores to **manual review, not auto-ban** — households legitimately share devices and addresses, and a false ban on a good buyer is expensive. Remediation is where the append-only bid log earns its keep: to remove a shill you must recompute what the price *would have been* from the surviving bids, replaying proxy resolution in sequence order. If bids had been modelled as mutations of a price field rather than as an event log, that computation is simply not available and the only remedy is cancelling the sale.
+
+#### Potential Follow-Up Questions
+**Q: Two bidders hit the same auction row in the same millisecond — walk me through it.**
+Both read `version = 7`; the first CAS succeeds and bumps to 8, the second affects zero rows and re-reads. On the retry the loser re-runs proxy resolution against the new price and is told `LEADING` or `OUTBID` accordingly. No bid is lost and no bid is silently escalated. *If pushed:* bound retries at 3, and note that with single-writer routing by `hash(auction_id)` the CAS should almost never fail — if your CAS-failure rate is above ~0.1% your routing is broken, not your database.
+
+**Q: A bid is accepted but the response is lost — does the user bid twice?**
+No. The client generates an idempotency key per tap; the key is stored with the bid row and a replay returns the original outcome rather than creating a second bid. Without it, a mobile client retrying a timed-out request would submit a second, higher max. *If pushed:* the key must be scoped to `(bidder_id, auction_id, max_amount)` and expire after the auction closes — reusing a stale key across auctions is worse than the bug it fixes.
+
+**Q: What stops a bidder binary-searching the leader's maximum?**
+Per-bidder-per-auction rate limits, detection of the monotone-probe pattern (strictly increasing losing bids from one account), and never exposing outbid deltas. *If pushed:* the leak is bounded, not eliminated — the price reveals the loser's max by construction. The mechanism only needs secrecy while the leader still leads, so the real defence is making probing slow and visible rather than impossible.
+
+**Q: A bid arrives 3ms before the deadline but lands after the CLOSE event. What do you do?**
+Reject it, and return the server receive timestamp so the user sees the actual fact. Accepting client timestamps would let anyone forge a winning bid, and reopening a closed auction after a winner is notified is worse than the original unfairness. *If pushed:* this is exactly the complaint auto-extension exists to eliminate — if you keep a hard close, you are choosing to own this dispute forever.
+
+**Q: The winner's card declines two days later.**
+The sale was already legally concluded, so this is a recovery flow, not a rollback: payment window → reminders → unpaid-item strike → second-chance offer to the runner-up at *their* stored maximum, or relist. *If pushed:* second-chance offers are themselves an abuse vector — a seller with a colluding account can "win", not pay, then second-chance the real underbidder at their revealed max. So the platform, never the seller, initiates the offer; the price is capped at the underbidder's max; and repeated non-payment on a seller's own listings links the accounts.
+
+**Q: One auction has 200,000 watchers in its final minute. What melts first?**
+Not the bid path — 40 writes/s on one row is nothing. The fan-out melts: 200k × 40 ticks/s would be 8M msgs/s from one item. Coalescing to 4/s and fanning out per gateway node reduces the bus to 4 × 48 = ~192 deliveries/s. *If pushed:* if a single gateway node ends up with a disproportionate share of that auction's watchers, shed the topic across more nodes by refusing new subscriptions on hot nodes at subscribe time; and drop to a 1Hz polled snapshot for that auction as a load-shed valve rather than dropping connections.
+
+**Q: How is this different from the stock exchange in #25 or the matching engine in #42?**
+Structurally similar (single writer, ordered log, price-time tie-breaking), operationally opposite. Those are continuous double auctions — many buyers, many sellers, fungible instruments, no deadline, microsecond latency, colocated participants. This is one seller, one item, many buyers, a deadline, and participants on phones with 900ms p99 networks. Throughput is trivial here (~5k/s versus millions); the deadline and the human latency are the whole problem. *If pushed:* the borrowed idea is the keyed single writer; the discarded ideas are kernel bypass, GC-free hot paths, and multicast market data — none of which matter when your slowest hop is a cell tower.
+
+**Q: A shill bid is removed a week after close. What is the price now?**
+Replay the surviving bids through proxy resolution in sequence order and recompute what the price would have been; if the winner changes, the sale is voided and the legitimate underbidder gets a second-chance offer at the recomputed price. *If pushed:* this only works because the bid log is append-only with per-bid provenance. If you also charged a final-value fee on the inflated price, the refund path has to be driven from the same recomputation, so make the replay a first-class service rather than a one-off script.
+
+#### Bottlenecks & Mitigations
+- **Single hot auction row** — a top-1% item takes ~40 bids/s on one partition key in its final seconds, and you cannot shard a price. Serialise on one writer (~3ms per resolution gives ~10× headroom at 40/s), keep the auction row in a RAM tier so the CAS is microseconds, and use auto-extension to spread the burst over minutes. Trade-off: the ceiling is one core's serial throughput per auction — acceptable here, and the reason this design would not survive as a matching engine.
+- **Close-time clustering** — ~485 closes/s in the Sunday-evening window against a ~39/s average is a 12× burst of winner determination, order creation and notification, all at once. Shard the close scheduler by `hash(auction_id)` and jitter execution by ±2s within the shard; make everything downstream of `CLOSE` asynchronous (the close itself is one conditional write; orders and emails come off a queue). Trade-off: the "you won" email lands seconds late, which nobody notices.
+- **Watcher fan-out** — the broadcast path carries ~50× the write path and up to 15,000× on a hot item; naive per-bid broadcast is 600k msgs/s from one auction. Coalesce to ≤4 snapshots/s, fan out per gateway node rather than per connection, and split per-user outbid messages onto unicast channels. Trade-off: the displayed price can lag reality by ~250ms, which matters to snipers and to nobody else.
+- **Timer-set churn under auto-extension** — every extension rewrites the auction's entry in the close-timer sorted set; a 30-extension bidding war on 33k hot auctions is a burst of index writes at exactly the wrong moment. Keep timers in a sharded Redis sorted set (O(log n) rewrite) and cap total extensions. Trade-off: capping reintroduces a hard close at the cap, so the last two minutes of a capped war have the original fairness problem back.
+- **Notification amplification at close** — one close generates messages to the winner, the seller, and every losing bidder and watcher; 485 closes/s × ~50 recipients ≈ 24k notifications/s. Route through the notification system (#7) with per-user coalescing and priority tiers — "you won" is transactional and immediate, "an auction you watched ended" is digestible. Trade-off: batching the low-priority tier delays it by minutes.
+- **Fraud review queue** — the shill-detection model surfaces far more candidates than humans can review, and auto-banning on graph features produces expensive false positives on shared households. Tier the response: score-only for the long tail, friction (verification challenge) in the middle, human review at the top. Trade-off: confirmed shills stay live for hours during review, so pair it with post-hoc replay-based remediation rather than relying on prevention alone.
+
+#### Failure Modes
+| Layer | Failure | Detection | Mitigation |
+|---|---|---|---|
+| Auction partition | Partition owner dies mid-bid; ownership moves while bids are in flight | Lease-expiry alert; per-partition write-gap detector | New owner reads the row's `version` and the tail of the bid log before accepting writes; in-flight bids fail closed and clients retry with the same idempotency key |
+| Auction row CAS | CAS-failure rate spikes — routing is broken and multiple writers are contending | CAS-retry rate per partition; alert above 0.1% | Fall back to full serialisable isolation on the row (slower but correct) while routing is repaired; never relax to read-then-write |
+| Close scheduler | Shard stalls (auctions blow past `end_ts` and keep taking bids) or fires early on a fast clock | Per-shard "overdue closes" gauge, alert past 5s; at settlement compare `closed_seq` time against `end_ts` | Independent sweeper scans `state='OPEN' AND end_ts < now - 5s`; the close is idempotent (`WHERE state='OPEN'`) so double-fire is harmless; an early close is caught at settlement and reopened *before* the winner is notified |
+| Clock / NTP | A node's clock drifts 100ms+, silently changing bid acceptance | Per-node NTP offset metric; alert above 25ms | No node compares clocks to decide acceptance — the sequenced `CLOSE` does; drift degrades only the countdown display |
+| Pub/sub bus | Bus partition down; watchers see a frozen price and a running countdown | Per-topic publish-to-deliver lag; client-side staleness heartbeat | Clients fall back to polling `GET /auctions/{id}` at 2s; the UI marks the price "reconnecting" rather than showing a stale number as live |
+| WS gateway | Node loss drops ~150k connections at once, all reconnecting together | Connection-churn rate; reconnect thundering-herd detector | Jittered exponential reconnect with a 0-30s spread; on reconnect the client fetches a snapshot rather than replaying a stream |
+| Settlement | Payment declines after the auction legally concluded | Unpaid-item aging queue; win-to-capture conversion metric | 48h window, reminders, strike, second-chance offer to the runner-up at their stored max, then relist — never silently cancel (#23) |
+| Fraud | Shill ring inflates prices for weeks before detection | Bidder win-rate ≈ 0 with high bid volume on one seller; account-linkage graph | Cancel the shill bids and replay the surviving bid log to recompute the true price; refund the delta and the final-value fee; link and suspend the ring |
+
+#### Observability — Key Metrics & SLOs
+- **Bid decision latency** (tap → LEADING/OUTBID/REJECTED returned) — SLO p99 < 250ms end-to-end, of which the server owns < 20ms. Above this, snipers lose bids they should have won and dispute volume rises.
+- **CAS retry rate per partition** (conditional writes affecting zero rows ÷ attempts) — SLO < 0.1%. This is the canary for broken key routing; a rising rate means multiple writers are reaching one auction.
+- **Overdue closes** (auctions with `state='OPEN'` and `end_ts` in the past) — SLO zero above 5s, alert on one. Every second overdue is a bid accepted after the published deadline, which is a legal problem, not a latency problem.
+- **Late-bid share** (fraction of each auction's bids in its final 10s) — not an SLO but the health signal for the closing rule: if it climbs above ~30% you have a hard-close sniping regime and should be discussing auto-extension.
+- **Tick delivery lag** (partition publish → client render, p99) — SLO < 500ms. Beyond that the displayed price is misleading during the endgame and users bid against a number that no longer exists.
+- **Win-to-capture conversion** (auctions won ÷ auctions paid within 48h) — SLO > 97%. A drop means either a payment-provider incident (#23) or a non-paying-bidder ring.
+- **Shill-score distribution and review SLA** (candidates scored above threshold, and time-to-decision) — SLO median review < 24h; a growing backlog means the model threshold is mistuned, not that fraud is rising.
+
+#### Multi-Region & DR
+- **Replication mode:** an auction is **homed to one region** and written only there — the single-writer invariant does not survive multi-master, and a price row with two masters is a lost-bid generator. Other regions serve reads from async replicas and proxy writes to the home region (adds ~80-150ms cross-Atlantic on the bid path, acceptable against a 250ms budget). Media and closed-auction archives are multi-region object store + CDN (#21).
+- **RTO:** ~30s for in-region leader promotion (lease expiry plus log-tail catch-up). Cross-region failover is a deliberate, human-approved operation: ~10 minutes, because promoting a lagging replica to owner of a live price row can lose accepted bids.
+- **RPO:** zero for accepted bids in-region (the bid log is synchronously quorum-committed before the client is told `LEADING`). Cross-region RPO is ~seconds of async lag; on a forced regional failover, auctions closing within the lag window are **suspended, not closed**, and extended by 15 minutes once the new region is authoritative — better a delayed close than a wrong winner.
+- **Failover cadence:** automatic within region; quarterly cross-region game-days deliberately scheduled *outside* the Sunday-evening close window. Close-scheduler shards fail over independently of the data tier so a stalled scheduler never blocks bidding.
+- **Cross-region cost:** bid log replication is small (~47GB/day RF=3 replicated once cross-region ≈ ~16GB/day egress). Media dominates and is served from regional CDN edges, not replicated on the write path. Price ticks are never cross-region — a watcher connects to their nearest gateway, which subscribes to the home region's bus for that auction only.
+
+#### Common Mistakes / Anti-patterns
+- **Reading the current price, computing the next one in application code, then writing it.** This loses bids under concurrency and can leave two users believing they lead. Every price change must be a single conditional write guarded by `version` and `state='OPEN'`; if zero rows are affected, re-read and re-resolve.
+- **Deciding "did this bid make the deadline?" with `now() < end_ts` on each API node.** That is N deadlines, one per clock. Sequence a `CLOSE` event into the auction's own ordered stream, or fence every bid with `AND state='OPEN'` so the database's serialisation order decides. Clock skew must never be able to change who owns an item.
+- **Showing the leader's maximum, or leaking it through outbid deltas.** Proxy bidding is only rational for the bidder if maxima stay secret — reveal them and truthful bidding becomes a losing strategy, everyone reverts to incremental sniping, and final prices fall. Display the resolved price only, and rate-limit probing.
+- **Treating a proxy cascade as a loop of separate transactions.** Writing the counter-bids one at a time means an observer can see an intermediate price, and a crash mid-cascade leaves the auction in a state no bidder authorised. Resolve the whole cascade in memory and commit one CAS with the history rows appended alongside it.
+- **Broadcasting every bid to every watcher.** At a 50:1 ratio that is 50× the write volume, and 600k msgs/s from one hot item. The public auction state is a snapshot, not a stream — coalesce to a few updates per second, fan out per gateway node, and keep per-user state (outbid, am-I-winning) off the broadcast channel.
+- **Assuming the auction is finished when the clock stops.** The winner's payment can fail days later, and it fails often enough to be a designed-for path rather than an exception. Model unpaid items, strikes, second-chance offers priced at the runner-up's stored maximum, and relisting from the start (#23).
+
+#### Talking Points for the Interview
+- **Say early that this is not a matching engine.** One seller, one item, one deadline, humans on phones — versus the continuous double auction of #25 and #42. Borrow their single-writer idea; discard their microsecond machinery.
+- **The deadline is the design.** "The auction closed at 12:00:00.000" is meaningless across nodes with clock skew; the close has to be a position in an ordered log or a fenced conditional write, decided once.
+- **Anti-sniping auto-extension solves the fairness complaint and the load spike with one mechanism** — and it is a product decision with revenue consequences, backed by the eBay-versus-Amazon closing-rule evidence.
+- **Proxy bidding makes it a second-price auction, which is why the maxima must be secret.** State the numeric example out loud: alice max £40, bob max £30 → price £31, alice still leads, bob outbid before he ever led.
+- **Write path and read path have nothing in common.** ~5k/s of strictly ordered, high-consequence writes against ~5M coalesced, lossy, fan-out connections — size and design them separately.
+- **The bid log is append-only because fraud remediation is a replay.** Removing shill bids means recomputing the price from the survivors, which is impossible if bids were mutations of a field.
