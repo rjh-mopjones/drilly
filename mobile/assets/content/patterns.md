@@ -4221,7 +4221,7 @@ PUT /chunk/{hash}
 GET /file/{id}        → metadata + chunk list
 GET /chunk/{hash}     → bytes (CDN)
 
-# Sync notifications
+  # Sync notifications
 WS: { event: file_changed, file_id, version }
 ```
 
@@ -16405,7 +16405,7 @@ cancel_order(instrument_id, order_id | client_order_id, participant_id) ->
 replace_order(instrument_id, order_id, new_price?, new_quantity) ->
   { status: REPLACED | TOO_LATE, new_order_id, seq }   # loses time priority
 
-# Asynchronous execution report (fill) pushed to both parties:
+  # Asynchronous execution report (fill) pushed to both parties:
 ExecutionReport {
   seq, exec_id, order_id, client_order_id, instrument_id,
   liquidity: MAKER | TAKER, side, last_price, last_qty,
@@ -16889,17 +16889,17 @@ Derive from a liquid multi-venue feed.
 
 #### API Contract
 ```
-# Data plane (streaming): one subscribe -> unbounded ordered stream of events
+  # Data plane (streaming): one subscribe -> unbounded ordered stream of events
 subscribe(instrument_id | instrument_set, from_seq?) -> stream<Event>
   # server-streaming (gRPC/HTTP2) or UDP multicast group join for the firehose
   # from_seq lets a consumer resume after a gap
 
-# Control plane (request/response, REST/HTTP or gRPC unary):
+  # Control plane (request/response, REST/HTTP or gRPC unary):
 submit_order(instrument_id, participant_id, side, type, price?, quantity, tif,
              client_order_id) -> { status: ACCEPTED | REJECTED | BUSY, seq, reason? }
 cancel_order(instrument_id, order_id, participant_id) -> { status, seq }
 
-# Canonical normalised event (one shape for every venue/protocol):
+  # Canonical normalised event (one shape for every venue/protocol):
 Event {
   seq,                 # monotonic, assigned by the sequencer
   instrument_id,
@@ -17328,3 +17328,716 @@ Replay a captured production log at 1x, 2x, and 10x speed and assert: zero order
 - **UDP multicast beats gRPC beats REST for progressively lower latency** - name the honest hierarchy and place each; do not overclaim gRPC as the fastest path, since TCP head-of-line blocking is why colocated market data uses multicast.
 - **Bounded everything** - bounded rings between every stage with a defined full behaviour is what turns overload into graceful degradation instead of an OOM.
 - **This pipeline is the front half of the matching engine** - it stops at handing ordered, per-instrument events to the matching cores of question 42, which is the downstream sink; being explicit about that boundary shows you see the whole system.
+
+### 44. Design Strava (Fitness Activity Tracking)
+#### Problem
+Record an athlete's GPS and sensor track on-device, upload it, compute derived stats, match it against millions of user-created segments to produce timed efforts and leaderboards, and publish it to a social feed — without leaking where the athlete lives.
+
+#### Summary
+**The picture in your head:** a running club where every member carries a stopwatch and a notebook, and the club has painted start and finish lines on 35 million stretches of road and trail worldwide. When you hand in your notebook after a ride, a clerk reads your route, works out which painted stretches you happened to cross, times you between each pair of lines, and pins the results on the noticeboard for each stretch. The clerk cannot re-read all 35 million maps for every notebook handed in — the whole trick is knowing which handful of stretches your route could plausibly have touched before doing any careful timing.
+
+**The single-request walkthrough (write path):** bob finishes a 90-minute, 40km ride in Surrey. His phone sampled GPS at ~1Hz into an on-device SQLite ring buffer — 5,400 points — plus heart-rate and power channels from paired BLE sensors, and it kept recording through a valley with no signal. On reconnect the app calls `POST /uploads/init`, gets a presigned URL, `PUT`s a ~90KB FIT file, and commits with a client-generated `upload_uuid`. The Upload API writes an `uploads` row, publishes `activity.uploaded` to Kafka, and returns `202 processing` in ~150ms — the phone is done. A worker consumes the event: parse FIT (~15ms) → clean GPS: drop 40 points with HDOP above threshold, remove a 12-point drift cluster where he stood still at a café, median-smooth the rest (~10ms) → derive stats: 40.2km by summed haversine, elapsed 1h38 vs moving 1h29 (the 9-minute gap is the café), 612m of elevation gain sampled from a 30m DEM rather than GPS altitude, and 20 rolling-window maxima for the power curve (~30ms). Then segment matching: cover the track with ~210 level-13 S2 cells, look up the segment start-point index → 9,800 candidates out of ~35M stored, bounding-box reject to ~1,200, corridor-test to ~48, ordered map-match to 22 confirmed efforts (~70ms). 22 efforts are written, 22 leaderboards updated, one of them a new KOM. Fan-out publishes a ~2KB summary to his ~180 followers. Upload → visible in feed ≈ 8s.
+
+**The single-request walkthrough (read path):** alice opens the app. The feed service reads her Redis timeline ZSET → 20 activity IDs → hydrates 20 **summary rows** (~2KB each, including an encoded polyline the client draws straight onto map tiles) → ~40KB of JSON, p99 ~180ms. No point stream is touched. When she taps bob's ride, the client issues one object-store GET for a ~30KB zstd-compressed columnar stream blob and renders the HR/power/elevation charts locally. That split — a ~2KB summary for the feed, a ~30KB stream for analysis — is the single most important storage decision in the system.
+
+**The pieces (and what each one is for):**
+- **On-device recorder (SQLite ring buffer + FIT encoder)** — writes every sample to disk immediately so an OS kill or a dead battery loses seconds, not hours. FIT is a compact binary format with delta-encoded fields; a 90-minute ride is ~90KB versus ~1.5MB as GPX (XML). Uploads are idempotent on a client-generated `upload_uuid` so retries over flaky mobile networks never duplicate an activity.
+- **Upload API + object store (S3-class, presigned PUT)** — the bytes never pass through the application tier. The API's only job is to record the intent, durably ack, and enqueue. Durability is established at the object store *before* the client is told "accepted".
+- **Kafka topic `activity.uploaded`** — decouples the ~150ms user-facing upload from the ~1s of asynchronous processing, and absorbs the 10× Saturday-morning spike as queue depth instead of as latency or dropped uploads.
+- **Processing workers (parse → clean → derive)** — everything downstream is a pure function of `(cleaned stream, segment set version, DEM version)`, which is what makes reprocessing a replay rather than a migration.
+- **DEM (Digital Elevation Model)** — a global raster of ground height, e.g. 30m-resolution Copernicus or SRTM tiles, held in a memory-mapped store. GPS altitude is noisy to ±15m, and summing that noise over 5,400 samples fabricates thousands of metres of climb. Sampling the DEM at each cleaned lat/lng and only counting monotone climbs above a ~3m threshold gives a stable number.
+- **S2 cell index over segment start-points** — S2 divides the globe into a hierarchy of cells, each a single 64-bit ID, where a prefix relationship means geographic containment. Level 13 is roughly 1km². Keyed `cell → [segment_id]`, the whole index for ~35M segments is ~560MB and the segment geometry itself ~18GB — small enough to sit in RAM on every matcher node, which is why matching costs milliseconds instead of database round-trips.
+- **Efforts store (wide-column, partition by `segment_id`)** — the highest-cardinality table in the system by an order of magnitude. Partitioning by segment makes "give me this segment's leaderboard" a single-partition read.
+- **Leaderboard cache (Redis ZSET per segment)** — see the leaderboard pattern (#22) for the sorted-set mechanics; the Strava-specific twist is `ZADD key LT elapsed athlete_id`, which only overwrites when the new time is *lower*, giving best-per-athlete dedup for free.
+- **Feed fan-out** — see the news-feed pattern (#8). Hybrid push/pull, unchanged, except that the feed row carries the ~2KB summary and never the stream.
+
+**The thing that makes it hard:** every upload must be checked against every segment it could plausibly overlap, and "plausibly" is a geometric question over ~35M stored polylines. Naively, one upload means 35M polyline-versus-polyline comparisons. Even at an optimistic 1µs per comparison that is ~35 seconds of CPU per activity; at ~80 uploads/s steady that is ~2,800 cores burning continuously, and ~28,000 cores at the Saturday-morning peak — for a feature users expect to complete before they have put the bike away. Worse, the comparison itself is not a simple intersection test: a segment on the northbound carriageway must not match a ride on the southbound one, a segment must not match a track that crosses it perpendicularly at a junction, and the athlete must have traversed the segment's points *in order*, contiguously, in the right direction.
+
+**Why the standard solution works:** a narrowing funnel, cheapest test first, where each stage is allowed false positives but never false negatives. (1) **Cell prefilter** — cover the activity track with level-13 S2 cells, dilate by one ring, and take the union of segments whose *start point* falls in that set: ~35M → ~10k, a pure hash lookup in ~2ms. (2) **Bounding-box reject** — discard any candidate whose bbox is not contained in the track's bbox plus a margin: ~10k → ~1.2k, ~1ms. (3) **Corridor test** — build a 20m spatial hash of the activity's own points once per upload, then require every segment vertex to have some activity point within ~15m: ~1.2k → ~50, ~20ms. (4) **Ordered map-match** — for the survivors only, walk the activity's point indices monotonically against the segment's vertices, enforcing direction and a maximum index gap, then interpolate entry and exit times between the bracketing GPS samples for sub-second precision: ~50 → ~22 efforts, ~30ms. Total ~100ms of CPU per upload — ~8 cores steady, ~80 at peak, a ~350× reduction. The costs are real: the corridor width is a tuning knob that trades missed efforts (a parallel cycle path 12m from the road) against false ones (the opposite carriageway), retroactively created segments need a backfill job because they were not in the index when historical activities were processed, and the index must be RAM-resident on every matcher, so segment growth is a memory-planning problem.
+
+**If you were building it tomorrow:**
+- S3 for raw uploads and stream blobs; Kafka for `activity.uploaded`; Go or Rust matcher workers with the S2 index mmap'd; Cassandra for `efforts` (partition `segment_id`) and `activities_summary` (partition `athlete_id`); PostgreSQL for athletes, segments metadata and privacy zones; Redis Cluster for leaderboards and feeds; Spark for the monthly heatmap render; CloudFront for tiles and photos.
+- Segment-matching hot path:
+  ```
+  cells = s2_cover(track.points, level=13).dilate(1)   -- ~210 cells
+  cand  = union(seg_index[c] for c in cells)           -- 35M -> ~10k
+  cand  = [s for s in cand if bbox_in(s.bbox, track.bbox, margin=25m)]
+  grid  = spatial_hash(track.points, cell=20m)         -- built once per upload
+  cand  = [s for s in cand if all(grid.near(v, 15m) for v in s.vertices)]
+  for s in cand:
+      m = ordered_match(track, s)                      -- monotone index walk
+      if m.ok and m.direction == s.direction:
+          e = interpolate_entry_exit(track, m)
+          write_effort(s.id, athlete_id, e.elapsed)
+          ZADD seg:{s.id}:alltime LT {e.elapsed} {athlete_id}
+  ```
+#### Clarifying Questions
+- Which sports, and does the segment model differ per sport (ride vs run vs swim)?
+- Are segments user-created and unbounded, or a curated catalogue?
+- How fresh must efforts and leaderboards be after upload — seconds, or is a few minutes fine?
+- How long must the device buffer offline, and is partial-activity recovery required?
+- What privacy guarantees are required: hidden home location, private activities, heatmap opt-out?
+- Is live tracking / safety beaconing in scope?
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Multiple sports with different segment semantics | sport is part of the segment key and the matcher's direction/speed plausibility rules; a ride never matches a run segment |
+| Segments are user-created and unbounded (~35M) | needs a RAM-resident S2 cell index plus a retroactive backfill job whenever a segment is created |
+| Efforts within seconds of upload | asynchronous Kafka pipeline with a p95 SLO, not a batch job; the upload API acks before processing |
+| Long offline buffering required | on-device durable ring buffer plus idempotent, resumable, chunked upload keyed on `upload_uuid` |
+| Home location must be hidden | privacy service that truncates along the *path* with randomised extra distance and junction snapping — a fixed-radius blackout is not sufficient |
+| Live tracking in scope | a separate short-TTL KV path with unguessable tokens that never enters the activity pipeline |
+
+#### Requirements
+- **FR:** record GPS + sensor streams offline; upload FIT/GPX/TCX; parse, clean and derive stats; match against user-created segments producing timed efforts; segment leaderboards with KOM/QOM crowns and filters; following graph, feed, kudos, comments; privacy zones; aggregate heatmaps; live beacon.
+- **NFR:** zero activity loss once acked (durable in object store before `202`); upload → feed p95 < 30s, upload → efforts p95 < 90s; feed read p99 < 200ms; leaderboard read p99 < 100ms; heatmap cells require ≥ 3 distinct athletes; privacy-zone endpoints must not be circle-fittable to the true centre.
+
+#### Scale Estimate
+- **Athletes:** Strava publicly announced passing 100M registered athletes in 2022 and third-party trackers put it well above that since; assume ~150M registered, ~40M MAU. All figures below are approximate and derived.
+- **Upload volume:** public reporting is on the order of ~50M activities/week → 50M × 52 ≈ **~2.5B activities/yr**. Steady rate = 2.5B ÷ 31.5M s ≈ **~80 uploads/s**. Weekend-morning peak (Saturday 08:00–11:00 local across one timezone band, plus the "upload when I get home" clump): ~10× → **~800/s**.
+- **Raw track:** 1 hour at 1Hz = 3,600 points. Per point: lat 8B + lng 8B + elevation 4B + timestamp 4B = 24B core, plus HR 1B + cadence 1B + power 2B + temp 1B + speed 2B ≈ 7B sensors → **~32B/point**. 3,600 × 32B ≈ ~115KB uncompressed; FIT's delta encoding plus gzip → **~50KB per uploaded file**.
+- **Stream store (columnar, per-channel delta+zigzag varint + zstd):** ~8B/point effective → 3,600 × 8B ≈ **~30KB/activity**. 2.5B × 30KB = **~75TB/yr**; erasure-coded at 1.5× → ~113TB/yr.
+- **Summary + polyline (the feed representation):** summary row ~500B (activity_id 8B + athlete_id 8B + sport 1B + start_ts 8B + distance 4B + elapsed 4B + moving 4B + elev_gain 4B + avg/max HR & power 8B + title ~60B + counters 16B + flags 8B + padding ~370B) + Douglas-Peucker simplification of 3,600 points down to ~300, polyline-encoded at ~5B/point = ~1.5KB → **~2KB/activity**. 2.5B × 2KB = ~5TB/yr; RF=3 → **~15TB/yr**. The summary store is **15× smaller** than the stream store and serves ~99% of reads.
+- **Raw uploads (kept 12mo for reparse-bug recovery):** 2.5B × 50KB = **~125TB** rolling, cold tier.
+- **Segments:** ~35M user-created globally (publicly reported). Per segment ~500B (id 8B + name ~40B + creator 8B + start/end S2 cell 16B + bbox 32B + ~50 vertices × 5B polyline = 250B + sport 1B + stats ~100B + padding). 35M × 500B ≈ **~18GB — RAM-resident on every matcher node**. The cell index alone (cell 8B + id 8B) is ~560MB.
+- **Efforts (the dominant row count):** assume ~20 efforts per activity. 2.5B × 20 = **~50B efforts/yr**. Per effort ~120B (effort_id 8B + segment_id 8B + athlete_id 8B + activity_id 8B + elapsed 4B + moving 4B + start_idx 4B + end_idx 4B + avg_hr 2B + avg_watts 2B + start_date 8B + flags 4B + padding ~56B). 50B × 120B = ~6TB/yr; RF=3 → **~18TB/yr**. Write rate = 50B ÷ 31.5M s ≈ **~1,600 effort-writes/s steady, ~16k/s peak** — a 20× write amplification over the upload rate, and the number to quote when someone asks what the pipeline actually costs.
+- **Naive matching cost (why the funnel exists):** 2.5B uploads × 35M segments = **~8.8 × 10¹⁶ comparisons/yr**. At 1µs each: ~35s CPU/upload → ~2,800 cores steady, ~28,000 at peak. The funnel brings it to ~100ms/upload → **~8 cores steady, ~80 at peak**.
+- **Leaderboards:** materialising every (segment, athlete) best in Redis is ~7B entries at ~80B → ~560GB and mostly cold. Instead materialise the **top 1,000 per segment for the ~2M segments with recent traffic**: 2M × 1,000 × 80B ≈ **~160GB** across the Redis cluster; the other ~33M segments are computed on demand from `efforts` with a bounded single-partition read.
+- **Photos:** assume ~10% of activities carry ~2 images at ~250KB post-resize → 2.5B × 0.1 × 2 × 250KB = **~125TB/yr**, CDN-fronted; EC 1.5× → ~190TB/yr.
+- **Heatmap tiles:** z0–z16; only ~2% of z16 tiles contain any activity → 4¹⁶ × 0.02 ≈ ~86M tiles × ~15KB ≈ ~1.3TB, plus ~33% for lower zooms → **~1.7TB per full render**, re-rendered monthly.
+- **Hot vs cold:** last 90 days of summaries (~1.2TB) and hot leaderboards live in cache; streams are cold-by-default and fetched on tap; raw uploads expire at 12 months; efforts are never deleted (a 2013 KOM is still the KOM).
+
+#### API Contract
+```
+POST /uploads/init          body: { sport, device, upload_uuid }  → { upload_id, put_url }
+PUT  <put_url>              body: <FIT|GPX|TCX bytes>             → 200
+POST /uploads/{id}/commit                                          → { status: "processing" }
+GET  /uploads/{id}                                                 → { status, activity_id?, error? }
+GET  /activities/{id}                                              → { summary, polyline, efforts[] }
+GET  /activities/{id}/streams?keys=latlng,altitude,heartrate,watts → { streams: { ... } }
+POST /segments              body: { activity_id, start_idx, end_idx, name } → { segment_id }
+GET  /segments/{id}/leaderboard?board=all_time|this_year&age=35-44 → [{ rank, athlete, elapsed }]
+GET  /feed?cursor=…                                                → [{ summary, polyline }]
+POST /activities/{id}/kudos                                        → { count }
+WS   /beacon/{token}        ← { lat, lng, ts }  every ~30s
+```
+
+#### High-Level Design
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 490" role="img" aria-label="Strava upload, processing, segment matching, leaderboard and feed architecture">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box" x="20" y="20" width="200" height="56" rx="9"/>
+  <text class="lbl" x="120" y="40">Mobile recorder</text>
+  <text class="sub" x="120" y="60">1 Hz GPS · offline buffer</text>
+
+  <rect class="box" x="280" y="20" width="200" height="56" rx="9"/>
+  <text class="lbl" x="380" y="40">Upload API</text>
+  <text class="sub" x="380" y="60">presigned PUT · idempotent</text>
+
+  <ellipse class="store" cx="665" cy="28" rx="80" ry="10"/>
+  <path class="store" d="M585,28 v34 a80,10 0 0 0 160,0 v-34"/>
+  <text class="sub" x="665" y="44">Raw FIT/GPX</text>
+  <text class="sub" x="665" y="58">object store</text>
+
+  <rect class="box" x="250" y="118" width="260" height="44" rx="9"/>
+  <text class="lbl" x="380" y="140">Kafka · activity.uploaded</text>
+
+  <rect class="box" x="30" y="200" width="300" height="84" rx="9"/>
+  <text class="lbl" x="180" y="222">Processing workers</text>
+  <text class="sub" x="180" y="244">parse · clean GPS · smooth</text>
+  <text class="sub" x="180" y="264">distance · moving time · DEM gain</text>
+
+  <rect class="box acc" x="390" y="200" width="300" height="84" rx="9"/>
+  <text class="lbl" x="540" y="222">Segment Matcher</text>
+  <text class="sub" x="540" y="244">S2 cell prefilter → corridor</text>
+  <text class="sub" x="540" y="264">→ ordered map-match</text>
+
+  <ellipse class="store" cx="120" cy="320" rx="90" ry="10"/>
+  <path class="store" d="M30,320 v40 a90,10 0 0 0 180,0 v-40"/>
+  <text class="sub" x="120" y="338">Efforts</text>
+  <text class="sub" x="120" y="354">part. segment_id</text>
+
+  <ellipse class="store" cx="380" cy="320" rx="90" ry="10"/>
+  <path class="store" d="M290,320 v40 a90,10 0 0 0 180,0 v-40"/>
+  <text class="sub" x="380" y="338">Leaderboards</text>
+  <text class="sub" x="380" y="354">Redis ZSET (#22)</text>
+
+  <ellipse class="store" cx="640" cy="320" rx="90" ry="10"/>
+  <path class="store" d="M550,320 v40 a90,10 0 0 0 180,0 v-40"/>
+  <text class="sub" x="640" y="338">Segments + S2 index</text>
+  <text class="sub" x="640" y="354">~18GB in RAM</text>
+
+  <rect class="box" x="140" y="420" width="220" height="46" rx="9"/>
+  <text class="lbl" x="250" y="443">Feed fan-out (#8)</text>
+
+  <rect class="box" x="420" y="420" width="220" height="46" rx="9"/>
+  <text class="lbl" x="530" y="443">Read API + CDN</text>
+
+  <path class="flow" d="M220,48 L280,48"/>
+  <path class="flow" d="M480,44 L585,44"/>
+  <text class="edge" x="532" y="34">bytes</text>
+  <path class="flow" d="M380,76 L380,118"/>
+  <path class="flow" d="M380,162 L380,182 L180,182 L180,200"/>
+  <path class="flow" d="M330,242 L390,242"/>
+  <text class="edge" x="360" y="231">stream</text>
+  <path class="flow dash" d="M640,284 L640,310"/>
+  <path class="flow" d="M440,284 L440,300 L120,300 L120,310"/>
+  <path class="flow" d="M210,340 L290,340"/>
+  <path class="flow" d="M40,284 L40,443 L140,443"/>
+  <text class="edge" x="52" y="400" text-anchor="start">summary</text>
+  <path class="flow" d="M380,360 L380,400 L530,400 L530,420"/>
+  <path class="flow" d="M360,443 L420,443"/>
+</svg>
+```
+
+**How to read the diagram:** the upload path is deliberately short and dumb — bytes to object storage, an event to Kafka, done. Everything expensive hangs off the event: parsing and cleaning produce a canonical stream, the matcher turns that stream into efforts, efforts feed leaderboards, and a separate cheap branch pushes the ~2KB summary into followers' feeds.
+
+**Why the flow is shaped this way:** the user-perceived latency of an upload and the cost of processing one have nothing to do with each other, so they are separated by a queue. The segment matcher is on its own box because it is the only stage whose cost scales with the size of the *global* segment corpus rather than with the size of this one activity — which is why its data store sits in RAM beside it rather than behind a network call.
+
+**What this layout buys you:** a Saturday-morning 10× spike becomes queue depth instead of upload failures, and the segment index can grow to 35M entries without adding a single database round-trip to the hot path. The trade-off is that efforts and feed entries are eventually consistent — an athlete can see their activity before their KOM notification arrives, so the UI has to be honest about "still processing".
+
+#### Data Model
+- **activities_summary** (wide-column, partition `athlete_id`, cluster `start_date DESC`): `(activity_id, sport, start_ts, distance, elapsed, moving, elev_gain, encoded_polyline, counters)` — the ~2KB feed representation
+- **activity_streams** (object store, key `athlete_id/activity_id/streams.zst`): columnar per-channel arrays, ~30KB, fetched only on activity detail
+- **raw_uploads** (object store, cold tier, key `upload_uuid`): original FIT/GPX bytes, 12-month TTL
+- **segments** (relational source of truth, sharded by `s2_cell_level8` of start point; full copy mmap'd on every matcher): `(segment_id, name, sport, start_cell, polyline, bbox, direction)`
+- **segment_cell_index** (in-RAM hash on matchers, key `s2_cell_level13`): `cell → [segment_id]`, ~560MB
+- **efforts** (wide-column, partition `segment_id`, cluster `elapsed ASC`), with a secondary view partitioned by `athlete_id` clustered by `start_date`
+- **leaderboards** (Redis ZSET, key `seg:{segment_id}:{board}`, member `athlete_id`, score `elapsed`) — see #22
+- **follows** / **feed** (relational graph + Redis ZSET per athlete, key `feed:{athlete_id}`) — see #8
+- **privacy_zones** (relational, partition `athlete_id`): encrypted centre + radius; never returned by any read API
+- **heatmap_tiles** (object store + CDN, key `{z}/{x}/{y}.png`), **beacon** (Redis, key `beacon:{token}`, TTL 4h)
+
+#### Detailed Design
+**Recording and offline buffering.** The recorder appends each 1Hz sample to an on-device SQLite table inside the same transaction that updates the in-memory session state, so an OS kill loses at most one sample. A 6-hour hike at 1Hz is 21,600 points ≈ ~700KB on disk — a device can buffer weeks of activity without pressure, so the real constraint is battery, not storage. Upload is chunked and resumable against the presigned URL; the `upload_uuid` is generated at *recording start*, not at upload time, so a client that crashes mid-upload and retries hits the same object key and the same dedup row. Sensor channels arrive on their own BLE cadence (HR ~1Hz, power ~1Hz, cadence ~0.5Hz) and are resampled onto the GPS timebase at parse time rather than on-device, keeping the recorder simple.
+
+**GPS cleaning is where most "wrong stats" bugs live.** Four passes, in order. (1) *Accuracy reject*: drop points whose reported horizontal accuracy exceeds ~50m — usually the first 20–30 seconds before the fix settles. (2) *Teleport reject*: any point implying a speed above a sport-specific ceiling (~35 m/s for a ride) relative to both neighbours is a multipath artefact, not a sprint; drop it rather than smoothing it, because a single 300m jump adds 600m of phantom distance on an out-and-back. (3) *Stationary drift collapse*: while genuinely still, consumer GPS wanders in a ~10m circle at ~0.3 m/s, which over a 9-minute café stop adds ~160m of fake distance; detect clusters whose bounding circle stays under ~15m for over 30s and collapse them to their centroid. (4) *Smoothing*: a short median filter on position, never a mean — a mean drags the track toward outliers that survived pass 2. Only then compute distance as the sum of haversine over consecutive cleaned points, and moving time as the sum of `dt` where instantaneous speed exceeds a sport threshold (~0.5 m/s running, ~1 m/s riding). Elapsed minus moving is the number athletes argue about, so the threshold is a published product decision, not an implementation detail.
+
+**Elevation comes from the terrain, not the device.** bob's barometric altimeter drifts with weather; his phone's GPS altitude is ±15m. Summing the positive deltas of either over 5,400 samples produces a number in the thousands of metres for a flat ride. Instead, sample a 30m DEM at each cleaned point (a memory-mapped global raster, ~1.5TB at 30m for land surface, sharded by tile across the worker fleet with an LRU of hot tiles), then accumulate only monotone climbs whose net rise exceeds ~3m. Concrete result: bob's ride reports 612m; the raw GPS-altitude sum would have reported ~2,900m. The DEM version is stored on the activity so that a DEM upgrade can trigger a bounded reprocessing campaign rather than silently changing everyone's totals.
+
+**Segment matching in detail.** The funnel below is the core of the system. Stage cardinalities for a typical 40km suburban ride, with the latency budget: cell cover ~210 level-13 cells (~1ms) → cell-index union yields ~9,800 candidates from ~35M (~2ms, pure in-RAM hash lookups) → bbox containment with a 25m margin trims to ~1,200 (~1ms) → corridor test against a 20m spatial hash of the activity's own points leaves ~48 (~20ms, ~60k grid probes) → ordered monotone map-match with direction and gap checks confirms ~22 efforts (~30ms) → entry/exit time interpolation between bracketing samples (~1ms). Total ~55ms p50, budget p95 < 120ms. In dense city centres the first stage degrades badly — a level-13 cell in central London can hold thousands of segment starts, pushing stage-2 output to ~80k — so matchers drop to level 14 (~250m cells) adaptively when a cell's segment count exceeds a threshold, trading a larger cell set for a much smaller candidate set.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 300" role="img" aria-label="Strava segment matching funnel: cell cover, cell index, bounding box reject, corridor test, ordered map match, efforts written">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box" x="15" y="48" width="170" height="64" rx="9"/>
+  <text class="sub" x="100" y="70">Cleaned track</text>
+  <text class="sub" x="100" y="90">3,600 pts · 40 km</text>
+
+  <rect class="box" x="205" y="48" width="170" height="64" rx="9"/>
+  <text class="sub" x="290" y="66">S2 cell cover</text>
+  <text class="sub" x="290" y="82">level 13, dilate 1</text>
+  <text class="sub" x="290" y="98">~210 cells</text>
+
+  <rect class="box" x="395" y="48" width="170" height="64" rx="9"/>
+  <text class="sub" x="480" y="66">Cell index lookup</text>
+  <text class="sub" x="480" y="82">segments by start cell</text>
+  <text class="sub" x="480" y="98">35M → ~10k</text>
+
+  <rect class="box" x="585" y="48" width="170" height="64" rx="9"/>
+  <text class="sub" x="670" y="66">Bounding-box reject</text>
+  <text class="sub" x="670" y="82">25 m margin</text>
+  <text class="sub" x="670" y="98">~10k → ~1.2k</text>
+
+  <path class="flow" d="M185,80 L205,80"/>
+  <path class="flow" d="M375,80 L395,80"/>
+  <path class="flow" d="M565,80 L585,80"/>
+
+  <path class="flow" d="M670,112 L670,150 L100,150 L100,208"/>
+
+  <rect class="box acc" x="15" y="208" width="170" height="72" rx="9"/>
+  <text class="sub" x="100" y="224">Corridor test</text>
+  <text class="sub" x="100" y="240">every vertex ≤ 15 m</text>
+  <text class="sub" x="100" y="256">of a track point</text>
+  <text class="sub" x="100" y="272">~1.2k → ~50</text>
+
+  <rect class="box" x="205" y="208" width="170" height="72" rx="9"/>
+  <text class="sub" x="290" y="224">Ordered map-match</text>
+  <text class="sub" x="290" y="240">monotone index walk</text>
+  <text class="sub" x="290" y="256">direction + gap check</text>
+  <text class="sub" x="290" y="272">~50 → ~22</text>
+
+  <rect class="box" x="395" y="208" width="170" height="72" rx="9"/>
+  <text class="sub" x="480" y="232">Efforts written</text>
+  <text class="sub" x="480" y="248">interpolated entry/exit</text>
+  <text class="sub" x="480" y="264">p95 &lt; 120ms</text>
+
+  <path class="flow" d="M185,244 L205,244"/>
+  <path class="flow" d="M375,244 L395,244"/>
+</svg>
+```
+
+**Leaderboards and crowns.** Per segment, a Redis ZSET keyed `seg:{id}:alltime` with `score = elapsed_seconds`, ascending. Best-per-athlete dedup is free via `ZADD key LT elapsed athlete_id` — `LT` only writes when the new score is lower. Crown detection must be atomic or two concurrently processed efforts both believe they took the KOM: wrap `ZADD` and `ZRANGE key 0 0` in a single Lua script so the sorted set itself, not a read-modify-write in the worker, decides who holds rank 1, and make the notification idempotent on `(segment_id, effort_id)`. Filtered boards are the interesting scaling question: 35M segments × {all-time, this year, 10 age bands, 3 weight classes, following-only} is ~500M sorted sets, which is absurd. Materialise only `alltime` and `this_year` for the ~2M segments with traffic in the last 90 days; serve every other board by reading the top ~10k rows from the `efforts` partition for that segment (one partition read, `elapsed ASC`) and filtering in the application. A "following-only" board is a set intersection against the athlete's following list, which is small. See #22 for the sorted-set internals and the rank-query cost model.
+
+**Retroactive backfill when a segment is created.** alice creates a segment on a popular climb that a million existing activities have already covered. Without backfill her leaderboard has exactly one entry — hers — and the feature is worthless. Backfill is the funnel run in reverse: an inverted index of `s2_cell → [activity_id]` (built at processing time, ~210 entries per activity, ~500B/activity, ~1.2TB/yr) yields candidate activities whose cell cover intersects the new segment's cells; those activities' streams are fetched from the object store and run through the corridor and map-match stages only. Bound it hard: last 24 months, low-priority Kafka topic with its own consumer group and a rate limit, leaderboard populated progressively with a visible "backfilling" state. A segment on a London arterial can pull ~2M candidate activities and take hours — which is fine, provided it cannot starve the live upload pipeline, hence the separate consumer group.
+
+**Privacy zones, and why radius blackout is broken.** The naive design — hide every track point within R metres of a stored home coordinate — leaks the home. Every truncated activity's visible endpoint lies *on the circle of radius R around the house*. Three endpoints determine a circle exactly; a dozen, over a few weeks of published rides, let an observer least-squares fit the centre to within metres. Randomising R per activity does not fix it: the endpoints then lie in an annulus still centred on the house, and the centroid converges just as well. The working design has three parts. (1) *Truncate along the path, not by radius*: walk outward from the start until cumulative path distance exceeds R, then continue a further uniformly random 0–R metres, so endpoints scatter through a disc rather than tracing a ring. (2) *Snap to a shared junction*: move the cut point to the nearest road-network junction that many other athletes also pass, so the visible endpoint is a location thousands of people share rather than one that is distinctive to this athlete. (3) *Hide every correlated channel*, which is the part people forget — the polyline, the start/end place names, the heatmap contribution, photo EXIF geotags, the live beacon, "athletes nearby" surfaces, and crucially **any segment effort whose segment start falls inside the zone**, since a public effort on "alice's cul-de-sac sprint" reveals the street directly. Also suppress the mismatch signal: if total distance is 20.0km but the visible track is 18.2km, the missing 1.8km is itself a hint, so report distance over the visible track or offer whole-activity hiding as the honest option.
+
+**Heatmaps and k-anonymity.** A monthly Spark job rasterises every eligible public activity onto a global grid, accumulating per-cell athlete sets rather than raw counts. A cell renders only if **≥ 3 distinct athletes** contributed, deduplicated by athlete — one person running the same trail 500 times must not clear the threshold, which is exactly the failure that turned an aggregate heat map into a map of remote facility perimeters when the only people generating traffic there were a single small population. Eligibility excludes private activities, activity inside anyone's privacy zone, and anything flagged. Render on a lag of at least one full period so a bright new trace is never attributable to a recent upload, and offer a global opt-out that is honoured at aggregation time, not at render time.
+
+**Live beacon.** A deliberately separate, deliberately cheap path: the phone posts `{lat, lng, ts}` every ~30s to `POST /beacon/{token}`, which writes a single Redis key with a 4-hour TTL and publishes to a channel; recipients hold a WebSocket. The token is a 128-bit random value shared out-of-band by the athlete, never derivable from their profile, and revoked when the activity ends plus a short grace period. Nothing touches Kafka, the matcher, or the efforts store — at ~50B per ping and maybe 1% of activities beaconing, the whole feature is a rounding error, and keeping it off the main pipeline means a beacon outage cannot delay a single upload.
+
+#### Potential Follow-Up Questions
+**Q: A new segment is created on a road a million activities have already ridden — how does its leaderboard get populated?**
+A bounded backfill job driven by an inverted `s2_cell → [activity_id]` index built at processing time; candidate activities are re-run through the corridor and map-match stages only. *If pushed:* it must run on a separate low-priority Kafka consumer group with its own rate limit, capped at the last 24 months, with the leaderboard visibly in a "backfilling" state — otherwise one popular new segment starves the live upload pipeline on a Saturday morning.
+
+**Q: Two efforts on the same segment are processed concurrently and both take the KOM — what happens?**
+Read-modify-write in the worker races and both send a "you took the KOM" push. Make the sorted set the arbiter: `ZADD` plus `ZRANGE key 0 0` inside one Lua script, so exactly one call observes itself at rank 1. *If pushed:* notifications must also be idempotent on `(segment_id, effort_id)` because Kafka is at-least-once — the same effort can legitimately be processed twice after a consumer restart.
+
+**Q: An athlete's GPS drops out in a tunnel in the middle of a segment — do they get an effort?**
+No, if the gap check is doing its job: the ordered match enforces a maximum distance and time gap between consecutive matched vertices, and a 400m hole through the middle of a segment fails it. *If pushed:* this is a genuine trade-off, since tunnels and urban canyons are exactly where real efforts happen. The refinement is to allow a gap if the surrounding points are consistent with continuous travel *and* the implied speed across the gap is plausible for the sport — and to mark such efforts as interpolated so they can be excluded from leaderboards while still counting for the athlete's own history.
+
+**Q: Someone uploads a car journey as a bike ride and takes every KOM on the motorway.**
+Sport-specific plausibility gates before the effort reaches a leaderboard: sustained speed above a per-sport ceiling, implied power above a world-record W/kg curve for that duration, acceleration profiles that no human produces, and a straight-line teleport through the segment. Flagged efforts are written but excluded from public boards pending review. *If pushed:* add community flagging with a reputation weight, and treat repeated flags on one athlete as a signal rather than acting on any single one — the false-positive cost of removing a legitimate KOM is high enough that automated removal should be reserved for the physically impossible, not the merely improbable.
+
+**Q: Why does hiding everything within 500m of home still reveal the home address?**
+Because every visible endpoint then sits on a circle of radius 500m centred on the house, and three points determine a circle. *If pushed:* randomising the radius does not help — the endpoints just fill an annulus with the same centre. Truncate by distance *along the path* plus a uniform random extra, snap the cut to a shared road junction, and hide every correlated channel including segment efforts starting inside the zone.
+
+**Q: How do you serve age-group and weight-class boards without materialising hundreds of millions of sorted sets?**
+Materialise only `alltime` and `this_year` for the ~2M recently active segments, and compute every filtered board on demand from a single `efforts` partition read (`partition segment_id`, clustered `elapsed ASC`) with application-side filtering over the top ~10k rows. *If pushed:* for the few hundred genuinely famous segments, materialise the filtered boards too and accept the write amplification — it is a bounded set you can enumerate, and it is where all the leaderboard read traffic actually goes.
+
+**Q: The device reports 3,000m of climb on a flat ride. Why, and what do you use instead?**
+Summed positive deltas of a ±15m-noisy altitude signal over thousands of samples. Sample a 30m DEM at each cleaned position and accumulate only monotone climbs above a ~3m threshold. *If pushed:* store the DEM version on the activity so an upgrade triggers a bounded reprocessing campaign; silently changing historical elevation totals is a support incident, and athletes compare year-over-year climb figures.
+
+**Q: How do you stop one person's private trail appearing on the global heatmap?**
+k-anonymity at aggregation time: a cell renders only with ≥ 3 *distinct* athletes, deduplicated, plus exclusion of private activities and anything inside a privacy zone. *If pushed:* the dedup is the whole point — counting activities rather than athletes lets a single frequent user clear any threshold, which is precisely how an aggregate map becomes a map of one person's routine.
+
+#### Bottlenecks & Mitigations
+- **Segment-matcher CPU at weekend peak** — matching is the only stage whose cost scales with the global segment corpus, and a 10× upload spike is a 10× CPU spike. Autoscale on Kafka consumer lag rather than CPU (lag leads CPU by minutes), pre-warm capacity on a weekly schedule since the spike is perfectly predictable, and shed the backfill consumer group before touching the live one. Trade-off: paying for idle capacity midweek.
+- **Dense-city cell fan-out** — a level-13 cell in central London or Manhattan holds thousands of segment starts, so the prefilter returns ~80k candidates instead of ~10k and the corridor stage dominates. Adaptively descend to level 14 (~250m cells) for cells above a segment-count threshold: more cells to look up, far fewer candidates. Trade-off: a per-cell level map that must stay in sync across matchers.
+- **Hot segment leaderboard key** — Alpe d'Huez or a popular commuter climb concentrates writes on one Redis ZSET and one `efforts` partition. Reads are absorbed by a short-TTL cache of the top 100 (which is what everyone actually looks at); writes are buffered and applied in small batches, since a leaderboard being 5 seconds stale is invisible. Trade-off: the athlete's own new PR must be read-your-writes, so the response merges the buffered effort client-side.
+- **Effort write amplification** — 20× the upload rate, ~16k writes/s at peak into the highest-cardinality table in the system. Batch efforts per activity into a single multi-partition write, and keep the effort row narrow (~120B) so the amplification costs rows, not bytes. Trade-off: a partial batch failure requires the whole activity's efforts to be replayed, which the idempotent effort key makes safe.
+- **Backfill floods** — one new segment on a busy road can enqueue millions of stream fetches from the object store, saturating egress. Separate consumer group, hard rate limit, 24-month cap, and prioritise recent activities so the leaderboard becomes useful early. Trade-off: a complete historical leaderboard can take days.
+- **Feed fan-out for pro athletes** — an athlete with ~1M followers makes fan-out-on-write expensive; the hybrid push/pull split from #8 applies unchanged, with the threshold tuned lower here because activity volume per athlete is low (~1/day, not ~20 posts/day).
+
+#### Failure Modes
+| Layer | Failure | Detection | Mitigation |
+|---|---|---|---|
+| Mobile recorder | App killed mid-activity; in-memory samples lost | Client-side gap detection on next launch; server-side elapsed-vs-point-count mismatch | Every sample committed to on-device SQLite in the same transaction as session state; on relaunch the app offers to resume or upload the partial activity |
+| Upload | Client retries after a network drop and uploads twice | Duplicate `upload_uuid` on the uploads table | Idempotent key generated at recording start, not upload time; second commit returns the existing `activity_id` |
+| Parser | A firmware update emits a FIT variant the parser mishandles; stats silently wrong | Per-device-model outlier alert on distance and elevation distributions | Raw uploads retained 12 months; fix the parser and replay the affected `(device_model, date_range)` cohort |
+| DEM store | Elevation tile shard unavailable; activities process with zero climb | Elevation-gain-is-zero rate per region | Fail the stage rather than emit a wrong value — park the activity in a retry topic, publish the feed entry without elevation, backfill on recovery |
+| Segment matcher | Matcher node starts with a stale segment index; recent segments never match | Index-version gauge per node vs the segments table watermark | Refuse to consume until the index is within N minutes of the watermark; version is stamped on every effort so a stale window can be replayed |
+| Leaderboard cache | Redis node loss wipes the ZSETs for its slots | Key-count drop; leaderboard read miss rate | ZSETs are a cache, not the source of truth — rebuild any segment's board from a single `efforts` partition read; serve directly from `efforts` while rebuilding |
+| Privacy service | Zone lookup fails and a worker publishes an untruncated polyline | Zero-truncation-rate alarm per region; fail-closed assertion in the publish path | Fail closed — if the privacy service cannot be reached, the activity is published with no map at all and reprocessed later |
+| Heatmap job | A bug lowers the effective k below threshold in one render | Pre-publish audit: sample cells and assert distinct-athlete counts | Tiles are versioned and published atomically; roll back to the previous render set via CDN origin swap |
+
+#### Observability — Key Metrics & SLOs
+- **Upload → feed-visible latency** (commit to feed entry written) — SLO p95 < 30s. This is the number athletes perceive; it must not be coupled to segment matching, and an alert here should fire before anyone notices efforts are late.
+- **Upload → efforts-complete latency** (commit to last effort written) — SLO p95 < 90s. Tracked separately precisely so it can be allowed to degrade during a spike without paging.
+- **Segment-match funnel cardinality per stage** (median candidates surviving each of the four stages) — alert when stage-2 output exceeds ~30k, which means a cell has become too dense and the adaptive level split is not engaging.
+- **Effort-write rate vs upload rate** (the amplification ratio) — expected ~20×. A sudden rise means a segment-creation storm or a matcher regression producing spurious efforts; a fall means the index is stale and real efforts are being missed.
+- **Zero-effort upload rate** (activities that produced no efforts at all) — baseline is a few percent (genuinely remote routes). A jump is the canary for a stale or corrupt segment index, and it is far more sensitive than matcher error rate because a broken matcher usually fails silently by matching nothing.
+- **Privacy truncation rate** (activities with a zone that were truncated ÷ activities with a zone) — SLO 100%, alert on any miss. This is a fail-closed correctness metric, not a performance one.
+- **Kafka consumer lag on `activity.uploaded`** — SLO < 60s at p99; it is the leading indicator for both of the latency SLOs above and the input to matcher autoscaling.
+
+#### Multi-Region & DR
+- **Replication mode:** athletes are homed to a region; uploads, streams and summaries are written and processed locally. `efforts` and leaderboards replicate asynchronously to a global view because a segment's leaderboard is inherently cross-region — a climb in the Alps is ridden by athletes homed in a dozen regions. The segment corpus is a globally replicated read-mostly dataset pushed to every matcher fleet.
+- **RTO:** ~5 minutes for in-region replica promotion of the summary and efforts stores. Full regional failover ~15–30 minutes: uploads reroute by DNS immediately (object store is multi-region), but the matcher fleet in the surviving region must scale up and load the ~18GB segment index before efforts resume.
+- **RPO:** ~0 for the activity itself — bytes are durable in the object store before the client is acked, so a region loss during processing costs a replay, not data. ~seconds for efforts and leaderboards, which are derived and fully rebuildable from the raw uploads; a forced failover may lose the most recent KOM notifications, which are re-emitted idempotently on replay.
+- **Failover cadence:** automatic in-region; cross-region game-days quarterly, exercising specifically the segment-index cold-load path since that is the long pole. Backfill and heatmap jobs are paused during failover.
+- **Cross-region cost:** efforts (~18TB/yr RF=3) and summaries (~15TB/yr) replicate globally; the ~75TB/yr stream store and ~125TB of raw uploads deliberately do **not** — they stay region-local with cross-region reads on the rare tap from a distant follower. The segment corpus is ~18GB pushed on change, which is negligible. Photo egress via CDN dominates the actual bill.
+
+#### Common Mistakes / Anti-patterns
+- **Checking every segment against every upload.** ~35M × ~2.5B/yr is ~10¹⁷ comparisons — tens of thousands of cores. State the funnel out loud, with cardinalities: cell prefilter → bbox reject → corridor test → ordered map-match, each stage allowed false positives but never false negatives.
+- **Treating segment matching as a geometric intersection test.** Two polylines crossing at a junction "intersect"; so does a ride on the opposite carriageway. A match requires traversal of the segment's points *in order*, in the correct direction, with bounded gaps — that is map-matching, not intersection, and the ordering constraint is what makes it correct.
+- **Storing the full point stream in the feed row.** A feed page of 20 activities becomes ~600KB instead of ~40KB, and 99% of it is never rendered. Keep a ~2KB summary with a simplified encoded polyline for the feed and a ~30KB columnar stream in object storage for the detail view. The 15× split is the difference between a fast feed and a slow one.
+- **Hiding a fixed radius around home.** The visible endpoints then lie on a circle centred on the house, and a dozen activities let anyone fit the centre. Truncate by distance along the path plus a random extra, snap to a shared junction, and suppress every correlated channel — including segment efforts whose start lies inside the zone.
+- **Trusting GPS or barometric altitude for elevation gain.** Summed noise over thousands of samples invents thousands of metres of climb. Sample a DEM at each cleaned point, threshold on monotone rises, and record the DEM version so a later upgrade is a controlled reprocessing rather than a silent rewrite of everyone's history.
+- **Materialising every filtered leaderboard.** Segments × time windows × age bands × weight classes is hundreds of millions of sorted sets, nearly all cold. Materialise all-time and this-year for recently active segments only; serve the rest from a single `efforts` partition read with application-side filtering.
+
+#### Talking Points for the Interview
+- **The hard part is a geospatial join, not the upload.** Say the funnel and its cardinalities — 35M → 10k → 1.2k → 50 → 22 — and the arithmetic that makes the naive version impossible.
+- **The segment corpus is small enough to hold in RAM, and that is the whole trick.** ~35M segments at ~500B is ~18GB; keeping it beside the matcher instead of behind a database is what turns matching into a ~100ms CPU cost.
+- **Summary and stream are two different objects with two different lifetimes.** ~2KB in the feed store, ~30KB in object storage — call the split out early, because it determines the storage bill and the feed latency.
+- **Everything after parsing is derived and replayable.** Efforts, leaderboards, elevation and heatmaps are pure functions of the cleaned stream plus versioned inputs, which is why backfill, DEM upgrades and matcher bugs are all the same operation.
+- **Privacy is a geometry problem here, not a permissions problem.** The circle-fit attack on radius blackout is the thing to raise unprompted; it shows you understand that the leak is in the shape of the redaction, not in the access control.
+- **Degrade the derived data, never the activity.** Under load, let efforts and crowns arrive late while the activity itself lands in seconds — and be explicit that the upload is acked only once the bytes are durable.
+
+### 45. Design Goodreads (Book Catalog, Shelves & Reviews)
+#### Problem
+Maintain a catalog of every book ever published, let members shelve and rate editions of it, aggregate ratings and reviews per creative work, and recommend what to read next.
+
+#### Summary
+**The picture in your head:** a union catalogue for every library on earth, staffed by one very stubborn cataloguer. Publishers, libraries and members all post index cards through the letterbox, and the cards are a mess — the same novel arrives as "Dune", "Dune (Dune Chronicles, Book 1)", "DUNE — 50th Anniversary Edition" and a Polish translation called "Diuna", each with a different ISBN, three different page counts and the author's name spelled four ways. The cataloguer's job is to decide which cards describe the *same book* and file them in one drawer, while keeping every original card intact. On top of that drawer, members pin their own notes: "want to read", "on page 240", "four stars, and here's why".
+
+**The single-request walkthrough — the read path:** a logged-out visitor arrives from a search engine at `/work/12345/dune`. The request hits a CDN edge node. Book pages are the SEO surface and ~90% of views are anonymous or render identically, so the *anonymous page shell* — work metadata, edition list, aggregate rating, histogram and top 10 reviews — is a CDN object with a 5-minute TTL. At a ~92% hit rate that returns in ~20ms and the origin never wakes up. On a miss, the Catalog Service reads the work document (~1ms from Redis), the edition list (~2ms), the `work_aggregates` row holding `(sum_stars, count, histogram[5])` (~1ms), and the top-10 review IDs from a per-work ranked cache (~3ms), hydrating review bodies in one batch read (~6ms). Server-side total ~40ms, p99 ~180ms. If the visitor *is* logged in, the shell is still the cached object; a second tiny call, `GET /me/shelf-state?work_id=12345`, returns `{shelf: "currently-reading", progress_pct: 43, my_rating: null}` in ~5ms and the client splices it in. Splitting personalised state out of the cacheable body is the single biggest lever in the whole design.
+
+**The single-request walkthrough — the write path:** the visitor taps "Want to Read" on the 2021 paperback. `PUT /me/shelves/want-to-read/{edition_id}` writes one ~120B row to the shelvings table (wide-column, partitioned by `user_id`, clustered by `(shelf_id, added_at)`) — a single-partition append, ~8ms. It also increments a counter in the reverse index partitioned by `edition_id` (so the book page can say "1.2M people want to read this"), emits an activity event onto Kafka for the follower feed, and returns. Later they rate it 5 stars: the rating row is written keyed by `user_id`, and an aggregate-update event goes to a stream processor that folds it into `work_aggregates` for the *work* — not the edition. The displayed average changes within ~30s. The page-count they are tracking progress against comes from the *edition* they shelved. Work-level aggregation, edition-level shelving: that split runs through everything.
+
+**The pieces (and what each one is for):**
+- **Works, editions and identifiers (document store, e.g. MongoDB or DynamoDB)** — three levels, deliberately. A *work* is the abstract creative thing ("Dune" by Frank Herbert, first published 1965). An *edition* is a physical or digital manifestation: hardback, 2021 reissue, audiobook, Polish translation — each with its own page count, cover and publisher. An *identifier* is an ISBN-10, ISBN-13 or ASIN, and the mapping is many-to-many in both directions: one edition can carry several ISBNs, and publishers do reuse and misassign ISBNs, so the identifier index maps to a *list* of edition IDs, never one.
+- **Cluster table (KV, a union-find structure)** — the only thing a merge writes. `edition_id → cluster_id` and `cluster_id → work_id`. Union-find (also called disjoint-set: a structure that tracks which items belong to the same group and merges groups in near-constant time) means merging two works of 200 editions each is a pointer update, not 400 row rewrites.
+- **Merge log (append-only)** — every merge and unmerge with the similarity score, the evidence fields that fired, the actor (pipeline or human moderator), and a timestamp. This is what makes merges reversible, which is a hard product requirement, not a nicety.
+- **Shelvings and ratings (wide-column store, e.g. Cassandra)** — billions of tiny rows, append-mostly, read by `user_id` for "my shelves" and by `edition_id` for the counters. Cassandra because the access pattern is a single-partition read of an ordered list, which is exactly what it is good at.
+- **Reviews (wide-column, partitioned by `edition_id`)** — body text, spoiler flag, helpfulness votes. Critically, a review stores the `edition_id` it was written against and *never* a `work_id`. The work is resolved through the cluster table at read time. That one decision is what makes a bad merge recoverable.
+- **`work_aggregates` (Redis + durable backing)** — `(sum_stars, count, histogram[5], last_recompute_ts)` per work. Incrementally updated on every rating; fully recomputed by a batch job after any merge or unmerge.
+- **Entity-resolution pipeline (Spark, batch + streaming)** — normalises incoming records, blocks them into small candidate groups, scores pairs, and either auto-merges, queues for human review, or creates a new work.
+- **Search (OpenSearch) and recommender (offline batch)** — the search index is over works with edition titles folded in and ISBNs as exact-match keyword fields; typeahead is a separate precomputed structure (see the autocomplete pattern, #10). Recommendations are precomputed offline and read as a list (same shape as the Spotify recommender, #40).
+
+**The thing that makes it hard:** deciding whether two records are the same book. You have ~300M edition records arriving from publisher feeds, library MARC records and user submissions, and they disagree with each other in every field. Naive pairwise comparison is 300M² ÷ 2 ≈ 4.5×10¹⁶ comparisons — not a tuning problem, an impossibility. Worse, the failure is asymmetric and highly visible. Fail to merge and you get two "Dune" pages splitting the ratings — annoying, and users complain. *Over*-merge and the reviews for one novel appear under a completely different one: a reader opens the page for a children's picture book and finds 900 reviews discussing a horror novel with the same title. That is the kind of bug that gets screenshotted. And it happens constantly, because "Selected Poems" by a common surname is a genuinely ambiguous record even to a human.
+
+**Why the standard solution works:** blocking plus scored pairing plus a reversible merge. *Blocking* means you only compare records that share a cheap key — normalised first-three-title-tokens, folded first-author surname, language. That yields ~80M blocks averaging ~4 records; Σ C(n,2) across them is ~500M pairs instead of 4.5×10¹⁶, eight orders of magnitude cheaper, and it runs in minutes. Within a block you score pairs on weighted evidence: shared ISBN-13 (strong but not conclusive), title edit-distance after normalisation, author match after transliteration folding ("Достоевский" / "Dostoevsky" / "Dostoyevsky" fold to the same key), page count within ±10%, publication year within ±1, publisher. Above ~0.92 auto-merge; 0.75–0.92 goes to a human review queue; below that, a new work. The cost is real: blocking guarantees false negatives (a record whose title was typo'd in the first three tokens lands in the wrong block and never gets compared), so you run a second pass with an alternate blocking key — ISBN prefix, or last-three-title-tokens — to catch what the first missed. And because *no* threshold is safe, every merge is written as a cluster-pointer change plus a log entry, so unmerge is a replay, not a restore-from-backup.
+
+**If you were building it tomorrow:**
+- Document store (DynamoDB / MongoDB) for works and editions. Cassandra for shelvings, ratings and reviews. Redis for `work_aggregates` and hot work documents. Kafka for activity and aggregate-update events. Spark for the nightly full dedup pass, Flink for the streaming pass on newly-ingested records. OpenSearch for catalog search. CDN in front of every anonymous book page.
+- Entity resolution:
+  ```
+  resolve(record):
+    key   = block_key(fold(record.title)[:3], fold(record.author_surname), record.lang)
+    cands = block_index.get(key) ∪ isbn_index.get(record.isbn13)
+    best, s = argmax(cands, sim(record, ·))
+    if   s >= 0.92: cluster.union(record.id, best.id)          -- auto-merge
+    elif s >= 0.75: review_queue.push(record.id, best.id, s)   -- human decides
+    else:           cluster.create(record.id)                  -- new work
+    merge_log.append(record.id, best.id, s, evidence, actor, ts)
+  ```
+- Book-page read path:
+  ```
+  shell = cdn.get(work_id) or render_shell(work_id)   -- anonymous, 5 min TTL
+  state = shelf_svc.get(user_id, work_id)             -- ~5ms, never edge-cached
+  return splice(shell, state)
+  ```
+#### Clarifying Questions
+- Do we own the catalog, or ingest it from publisher feeds, library records and user submissions?
+- Do ratings aggregate at the work level or per edition?
+- Are shelves the three defaults only, or arbitrary user-defined shelves?
+- Does search cover ISBN and review full-text, or just title and author?
+- How social is it — public reviews only, or a following graph with an activity feed?
+- Do recommendations ship at launch, and must they cover the long tail?
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Catalog is ingested from dirty third-party and user feeds | needs an entity-resolution pipeline with blocking, scored merges and a reversible audit log as a first-class component, not a batch script |
+| Ratings aggregate at the work level | reviews and ratings key on `edition_id` and resolve to a work through a cluster table, so a bad merge can be undone without touching review rows |
+| Arbitrary user shelves | shelvings are a `(user_id, shelf_id, edition_id)` wide-column row with the shelf as part of the clustering key, not three boolean columns |
+| Search includes ISBN and typo tolerance | an inverted index with keyword fields for identifiers plus fuzzy title matching, and a separate precomputed typeahead structure (see #10) |
+| Following graph with an activity feed | a fanout service with a celebrity-pull path for high-follower reviewers (see #8) rather than fanout-on-write for everyone |
+| Long-tail recommendations required | popularity-discounted collaborative filtering plus a content-based cold-start path (see #40), because pure CF only ever surfaces the head |
+
+#### Requirements
+- **FR:** book page (work + editions + aggregate + reviews), shelve an edition to a default or custom shelf, track reading progress, rate and review with spoiler tagging, search by title/author/ISBN, follow users and read a friend activity feed, reading challenges and groups, and merge/unmerge catalog entries with an audit trail.
+- **NFR:** book page p99 < 200ms server-side and < 30ms on a CDN hit, at ~9k views/s peak; shelf write p99 < 150ms; a new rating reflected in the work average within 60s; 100% of merges reversible in one operation; duplicate-work rate ≤ 1% among the top 100k works.
+
+#### Scale Estimate
+- **Members:** assume ~150M registered accounts. Book-social engagement is low-frequency — assume ~20% monthly active → ~30M MAU, and roughly MAU ÷ 7.5 → ~4M DAU.
+- **Catalog:** assume ~300M edition records clustering to ~90M distinct works (~3.3 editions/work; a bestseller has 200+, most of the long tail has exactly 1). Feed ingest ~200k new-or-changed edition records/day ≈ ~2.3/s — a trivial write rate and a brutal matching problem.
+- **Edition record:** ~2KB (title 120B + subtitle 80B + 4 author refs × 16B + isbn10 10B + isbn13 13B + asin 10B + publisher 60B + pub_date 8B + page_count 4B + language 8B + format 8B + description ~1KB + cover key 64B + source provenance ~300B + padding ~250B). 300M × 2KB = ~600GB; RF=3 → ~1.8TB.
+- **Work record:** ~1.5KB × 90M = ~135GB; RF=3 → ~400GB. Small enough that the entire works table fits in a cache tier — which is why book pages are cheap to serve.
+- **Shelvings:** assume ~5B rows. ~48B logical (user_id 8B + edition_id 8B + shelf_id 4B + added_at 8B + updated_at 8B + progress 2B + flags 2B + padding 8B) → ~120B on disk once you add the clustering key, column names and wide-column row overhead. 5B × 120B = ~600GB; RF=3 → ~1.8TB. **This asymmetry is the point:** five billion rows and it still fits on a handful of machines. Shelvings are a *partitioning* problem (one user with 30k books, one book with 5M shelvers), not a capacity problem — so partition by `user_id` for the read path you actually serve, and keep the `edition_id` side as counters rather than a full reverse list.
+- **Ratings:** ~40% of shelvings sit on the `read` shelf → ~2B; ~90% carry a star → ~1.8B ratings × ~40B (user_id 8B + edition_id 8B + stars 1B + ts 8B + flags 2B + padding 13B) = ~72GB; RF=3 → ~216GB. Rounding error next to the catalog.
+- **Reviews with text:** ~12% of ratings → ~220M. ~700B each (body ~560B — the median review is two sentences, the tail runs to essays — plus ~140B metadata and vote counters). 220M × 700B = ~154GB; RF=3 → ~460GB, plus a full-text index at ~0.4× corpus ≈ ~60GB per replica.
+- **Covers:** assume ~60% of editions have artwork → 180M × 3 resolutions (thumb ~8KB + list ~40KB + full ~180KB = ~230KB) = ~41TB; erasure-coded at ~1.4× → ~58TB in object storage, CDN-fronted.
+- **Write rate:** 4M DAU × ~4 write actions/day (shelve, progress ping, rate, review) ≈ 16M writes/day ÷ 86400 ≈ ~185/s average; evening peak ~4× → ~750/s; the January reading-challenge spike ~10× → ~2k/s. Genuinely small.
+- **Read rate:** book pages are the organic-search surface — assume ~250M page views/day → ~2.9k/s average, ~9k/s at 3× peak. Read:write ≈ 250M : 16M ≈ **~16:1** at the request level, and closer to ~100:1 once you count per-page fan-out (work + editions + aggregate + 10 reviews + shelf state). At a 92% CDN hit rate the origin sees ~230/s of shell renders — the cache is doing almost all the work.
+- **Dedup compute:** naive pairwise = 300M² ÷ 2 ≈ 4.5×10¹⁶ pairs. Blocking into ~80M blocks averaging ~4 records gives Σ C(n,2) ≈ 80M × 6 ≈ **~500M pairs**. At ~20µs per scored pair that is ~10k CPU-seconds ≈ ~3 CPU-hours — minutes of wall-clock on a modest Spark cluster, nightly.
+
+#### API Contract
+```
+GET  /work/{work_id}                      → { work_id, title, authors[], editions[], avg_rating, ratings_count, histogram[5] }
+GET  /work/{work_id}/reviews?sort=helpful&cursor=…  → { reviews[], next_cursor }
+GET  /edition/{edition_id}                → { edition_id, work_id, isbn13, page_count, format, cover_url }
+GET  /resolve?isbn=9780441013593          → { edition_id, work_id, confidence, ambiguous: bool }
+GET  /me/shelf-state?work_id={id}         → { shelf, progress_pct, my_rating }     (personalised, never edge-cached)
+PUT  /me/shelves/{shelf}/{edition_id}     body: { position? }                      → { shelf, added_at }
+POST /me/progress                         body: { edition_id, page | percent }     → { progress_pct, updated_at }
+POST /edition/{edition_id}/review         body: { rating, body, spoiler }          → { review_id }
+POST /review/{review_id}/vote             body: { helpful: bool }                  → { helpful_count }
+GET  /search?q=dune+herbert&type=work     → { hits[] }                             (typeahead: see #10)
+GET  /me/feed?cursor=…                    → { activity[] }                         (fanout: see #8)
+GET  /me/recommendations                  → { works[], reason[] }                  (offline batch: see #40)
+POST /admin/merge                         body: { work_ids[], reason }             → { cluster_id, merge_id }
+POST /admin/unmerge                       body: { merge_id, reason }               → { restored_work_ids[] }
+```
+
+#### High-Level Design
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 476" role="img" aria-label="Goodreads architecture: CDN-cached book pages, catalog, shelf and review services, offline entity resolution and recommender">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+  <rect class="box" x="280" y="16" width="200" height="44" rx="9"/>
+  <text class="lbl" x="380" y="38">Client / crawler</text>
+  <rect class="box acc" x="255" y="94" width="250" height="52" rx="9"/>
+  <text class="lbl" x="380" y="112">CDN / edge cache</text>
+  <text class="sub" x="380" y="132">anon page shell · 5 min TTL · 92% hit</text>
+  <path class="flow" d="M380,60 L380,94"/>
+  <path class="box" d="M380,146 L380,166"/>
+  <path class="box" d="M130,166 L630,166"/>
+  <path class="flow" d="M130,166 L130,184"/>
+  <path class="flow" d="M380,166 L380,184"/>
+  <path class="flow" d="M630,166 L630,184"/>
+  <text class="edge" x="392" y="176" text-anchor="start">miss</text>
+  <rect class="box" x="15" y="184" width="230" height="78" rx="9"/>
+  <text class="lbl" x="130" y="206">Catalog Service</text>
+  <text class="sub" x="130" y="228">works · editions · search</text>
+  <text class="sub" x="130" y="248">ISBN resolve</text>
+  <rect class="box" x="265" y="184" width="230" height="78" rx="9"/>
+  <text class="lbl" x="380" y="206">Shelf + Review Service</text>
+  <text class="sub" x="380" y="228">shelve · progress · rate</text>
+  <text class="sub" x="380" y="248">review write · aggregate</text>
+  <rect class="box" x="515" y="184" width="230" height="78" rx="9"/>
+  <text class="lbl" x="630" y="206">Social Service</text>
+  <text class="sub" x="630" y="228">follow · activity feed</text>
+  <text class="sub" x="630" y="248">challenges · groups</text>
+  <path class="flow" d="M130,262 L130,289"/>
+  <path class="flow" d="M380,262 L380,289"/>
+  <path class="flow" d="M630,262 L630,289"/>
+  <ellipse class="store" cx="130" cy="300" rx="95" ry="11"/>
+  <path class="store" d="M35,300 v46 a95,11 0 0 0 190,0 v-46"/>
+  <text class="sub" x="130" y="322">Works · Editions · Clusters</text>
+  <text class="sub" x="130" y="340">document store</text>
+  <ellipse class="store" cx="380" cy="300" rx="95" ry="11"/>
+  <path class="store" d="M285,300 v46 a95,11 0 0 0 190,0 v-46"/>
+  <text class="sub" x="380" y="322">Shelvings · Ratings · Reviews</text>
+  <text class="sub" x="380" y="340">wide-column, by user_id</text>
+  <ellipse class="store" cx="630" cy="300" rx="95" ry="11"/>
+  <path class="store" d="M535,300 v46 a95,11 0 0 0 190,0 v-46"/>
+  <text class="sub" x="630" y="322">Timeline cache</text>
+  <text class="sub" x="630" y="340">Redis sorted sets</text>
+  <rect class="box" x="40" y="400" width="290" height="52" rx="9"/>
+  <text class="lbl" x="185" y="418">Entity resolution (batch)</text>
+  <text class="sub" x="185" y="438">block · score · merge · audit log</text>
+  <rect class="box" x="430" y="400" width="290" height="52" rx="9"/>
+  <text class="lbl" x="575" y="418">Recommender (batch)</text>
+  <text class="sub" x="575" y="438">CF + content · popularity-discounted</text>
+  <path class="flow dash" d="M185,400 L185,372 L130,372 L130,357"/>
+  <text class="edge" x="196" y="386" text-anchor="start">merge writes clusters</text>
+  <path class="flow dash" d="M440,357 L440,378 L575,378 L575,400"/>
+  <text class="edge" x="452" y="368" text-anchor="start">ratings signal</text>
+</svg>
+```
+
+**How to read the diagram:** everything above the dashed line is the request path and everything below it is offline. The CDN sits in front of the whole read path because a book page is nearly identical for every viewer; the three services fan out from a cache miss, and each owns one store. The two batch jobs write *into* the stores rather than serving traffic.
+
+**Why the flow is shaped this way:** catalog correctness and user state have opposite properties. The catalog changes rarely, is read enormously, and is globally identical — so it is cached hard and rebuilt offline. Shelvings and ratings change per user, cannot be shared between viewers, and are cheap individually — so they are served live from a partition-by-user store and deliberately kept out of the cacheable body.
+
+**What this layout buys you:** a book page that mostly never touches a database, and an entity-resolution pipeline that can take hours without any user noticing. The trade is staleness: a rating posted now shows on the cached page up to 5 minutes late, and a merge takes minutes to propagate to aggregates and search.
+
+#### Data Model
+- **works** (document store, partition by `work_id`): `(work_id, canonical_title, author_ids[], subjects[], first_pub_year, cluster_id)`
+- **editions** (document store, partition by `edition_id`): `(edition_id, cluster_id, title, isbn10, isbn13, asin, publisher, pub_date, page_count, format, language, cover_key, source, ingested_at)`
+- **identifier_index** (KV, partition by `identifier`): `(isbn13|isbn10|asin) → [edition_id, …]` — always a list; reused and misassigned ISBNs are real
+- **clusters** (KV union-find, partition by `cluster_id`): `edition_id → cluster_id`, `cluster_id → work_id` — the only rows a merge rewrites
+- **merge_log** (append-only log, partition by `day`): `(merge_id, from[], to, score, evidence, actor, ts, reverted_by?)`
+- **shelvings** (wide-column, partition by `user_id`, cluster by `(shelf_id, added_at)`): `(user_id, shelf_id, edition_id, added_at, progress_pct, updated_at)`
+- **shelf_counters** (KV, partition by `edition_id`): per-shelf counts only, not a member list
+- **ratings** (wide-column, partition by `user_id`; second copy partitioned by `edition_id` for backfill): `(user_id, edition_id, stars, ts)`
+- **reviews** (wide-column, partition by `edition_id`, cluster by `review_id`): `(review_id, edition_id, user_id, stars, body, spoiler, helpful_up, helpful_down, ts)` — note: no `work_id` column
+- **work_aggregates** (Redis + durable backing, partition by `work_id`): `(sum_stars, count, histogram[5], last_recompute_ts)`
+- **follow graph** and **timeline cache** (Redis sorted set, partition by `user_id`) — same shape as #8
+- **search index** (OpenSearch, sharded by hash of `work_id`); **covers** (object store + CDN)
+
+#### Detailed Design
+**Three levels, and why each has to exist.** Collapse work and edition into one row and you have to choose which thing to break. Aggregate at the edition and "Dune" has 40 pages each with its own 4.2-star average computed from a few hundred ratings — the number is noisy and the page is useless. Aggregate at the work but shelve at the work and you cannot answer "how far through am I", because the hardback is 412 pages and the mass-market paperback is 896. So: shelvings, progress, page counts, covers and ISBNs live on the edition; ratings, reviews and the displayed average roll up to the work. The `GET /work/{id}` response carries the work-level aggregate alongside the full edition list, and the client shows progress against whichever edition the user shelved. One consequence worth stating: the "primary edition" shown at the top of the page is a *choice*, usually the most-shelved English edition, and it changes over time — so never store it as a foreign key, derive it.
+
+**Blocking is what makes deduplication possible at all.** The pipeline runs in five stages, and the interesting one is the second. Normalisation folds case, strips punctuation and subtitle suffixes ("(Dune Chronicles, Book 1)"), expands numerals, transliterates non-Latin author names to a Latin key, and validates the ISBN checksum — a failed checksum is itself strong evidence that the record is dirty. Blocking then groups records that share `(first 3 normalised title tokens, folded author surname, language)`, plus a second pass keyed on ISBN-13 prefix to catch records the first pass mis-blocked. Scoring is a weighted sum over ~8 features: shared ISBN (+0.4 but capped, because reuse happens), title Jaro-Winkler, author match, page-count within ±10%, pub-year within ±1, publisher, description shingle overlap, cover perceptual-hash distance. The thresholds are 0.92 for auto-merge and 0.75 for the human queue, chosen by labelling a few thousand pairs and picking the point where auto-merge precision exceeds ~99.5% — because at 500M pairs, a 0.1% false-merge rate is 500k wrong merges.
+
+Stage cardinalities on a nightly full pass, with the latency budget: 300M editions ingested → normalisation is a pure map, ~4 min on 200 cores → blocking produces ~80M blocks, ~90% with ≤ 3 members, hard-capped at 1000 by appending a sub-block key → ~500M candidate pairs → scoring at ~20µs/pair ≈ ~3 CPU-hours, ~8 min wall-clock → ~2M pairs above 0.92 auto-merge, ~400k land in the review queue, the rest rejected → cluster updates and aggregate recompute ~15 min. Whole pass under an hour. The incremental streaming path for newly-ingested records uses the same scorer against the existing block index and completes in ~200ms per record.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 344" role="img" aria-label="Entity resolution pipeline: ingest, normalise, block, score pairs, decide, cluster store, audit log, aggregate recompute">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+  <rect class="box" x="15" y="40" width="170" height="72" rx="9"/>
+  <text class="sub" x="100" y="60">Ingest</text>
+  <text class="sub" x="100" y="78">publisher · library · user</text>
+  <text class="sub" x="100" y="96">~300M editions</text>
+  <rect class="box" x="205" y="40" width="170" height="72" rx="9"/>
+  <text class="sub" x="290" y="60">Normalise</text>
+  <text class="sub" x="290" y="78">case · punct · translit</text>
+  <text class="sub" x="290" y="96">ISBN checksum</text>
+  <rect class="box" x="395" y="40" width="170" height="72" rx="9"/>
+  <text class="sub" x="480" y="60">Block</text>
+  <text class="sub" x="480" y="78">title3 + surname + lang</text>
+  <text class="sub" x="480" y="96">~80M blocks, cap 1k</text>
+  <rect class="box acc" x="585" y="40" width="170" height="72" rx="9"/>
+  <text class="sub" x="670" y="60">Score pairs</text>
+  <text class="sub" x="670" y="78">~500M pairs</text>
+  <text class="sub" x="670" y="96">not 4.5×10¹⁶</text>
+  <path class="flow" d="M185,76 L205,76"/>
+  <path class="flow" d="M375,76 L395,76"/>
+  <path class="flow" d="M565,76 L585,76"/>
+  <path class="flow" d="M670,112 L670,148 L100,148 L100,196"/>
+  <rect class="box" x="15" y="196" width="170" height="80" rx="9"/>
+  <text class="sub" x="100" y="216">Decide</text>
+  <text class="sub" x="100" y="234">≥0.92 auto-merge</text>
+  <text class="sub" x="100" y="252">0.75–0.92 human</text>
+  <text class="sub" x="100" y="268">below: new work</text>
+  <rect class="box" x="205" y="196" width="170" height="80" rx="9"/>
+  <text class="sub" x="290" y="220">Cluster store</text>
+  <text class="sub" x="290" y="238">edition → cluster → work</text>
+  <text class="sub" x="290" y="256">union-find pointer write</text>
+  <rect class="box" x="395" y="196" width="170" height="80" rx="9"/>
+  <text class="sub" x="480" y="220">Merge audit log</text>
+  <text class="sub" x="480" y="238">append-only, replayable</text>
+  <text class="sub" x="480" y="256">unmerge = rewrite ptrs</text>
+  <rect class="box" x="585" y="196" width="170" height="80" rx="9"/>
+  <text class="sub" x="670" y="220">Recompute</text>
+  <text class="sub" x="670" y="238">work avg + histogram</text>
+  <text class="sub" x="670" y="256">search reindex</text>
+  <path class="flow" d="M185,236 L205,236"/>
+  <path class="flow" d="M375,236 L395,236"/>
+  <path class="flow" d="M565,236 L585,236"/>
+  <path class="flow dash" d="M670,276 L670,308 L290,308 L290,276"/>
+  <text class="edge" x="480" y="298">unmerge replays the log — no review row is ever mutated</text>
+</svg>
+```
+
+**Merges must be reversible, so never rewrite a foreign key.** The naive merge rewrites every review, rating and shelving row from `work_A` to `work_B`. That is millions of row updates, it is slow, it is partially-applied if it crashes halfway, and it is *irreversible* — once the original `work_id` is gone from the rows, restoring it means a backup restore, and any review written since the merge has no correct home. Instead, no user-generated row ever stores a `work_id`. Reviews and ratings key on `edition_id`, which is immutable and never merges. Merging two works is a write to the cluster table: point cluster B's editions at cluster A, mark B superseded, append a `merge_log` entry, enqueue an aggregate recompute and a search reindex for the affected work. Total: a few hundred pointer writes. Unmerge reads the log entry, restores the previous cluster memberships, and re-runs the same recompute. Worked example: someone merges a children's picture book called *The Gift* into a horror novel of the same name. 900 horror reviews appear under the picture book, a user reports it, a moderator hits unmerge, and within ~2 minutes both pages are correct — including the twelve reviews written *during* the merge window, because each of them recorded the edition its author was actually looking at.
+
+**Shelves: three defaults, arbitrary extras, and one very awkward read.** The three exclusive shelves — `want-to-read`, `currently-reading`, `read` — are enforced as a constraint, not three tables: moving a book between them is a delete-plus-insert in one batch, and the transition `currently-reading → read` also stamps `date_read` (which is what the reading challenge counts). Custom shelves are additive and a book can sit on many. Progress is stored as a percentage, not a page number, precisely because the edition might be an audiobook with a runtime instead of a page count; the client converts page → percent using the shelved edition's `page_count` and the server stores the percent. The awkward read is a power user with 30k books on `want-to-read`: partitioning by `user_id` means that is one very wide partition. Cap it by clustering on `(shelf_id, added_at)` and always paging with a cursor — never `SELECT *` on a shelf — and for the handful of users past ~50k rows, the partition is still only ~6MB, which Cassandra handles fine. The genuinely hot side is the reverse direction: a book shelved by 5M people. Do not keep a member list per edition; keep counters, and if you need "which of my friends shelved this", intersect the user's follow list against their friends' shelvings rather than scanning the book's.
+
+**Ratings, aggregates, and getting the average right.** A rating write updates the user-partitioned row and emits an event to a stream processor that does `sum_stars += Δ, count += Δ_count, histogram[stars] += 1` against the work's aggregate row in Redis, with the durable copy updated asynchronously. Edits are handled as a delta (`sum_stars += new - old`) so the counters never need a re-scan. Because incremental counters drift — a lost event, a double-applied retry, a merge — a nightly job recomputes every aggregate touched in the last 24h from the ratings table and reconciles. The histogram matters more than the mean: a 4.0 average built from 50% five-stars and 30% one-stars is a very different book from a uniform 4.0, and showing the distribution is both better product and the fastest way for a human to spot brigading.
+
+**Review ranking and spoilers.** The default sort is not "most helpful votes" — that gives a review with 3 up-votes and 0 down-votes a perfect score and buries one with 900 up and 40 down. Use the Wilson lower bound on the up-vote proportion (a statistical lower bound on the true helpfulness rate given the number of votes seen), which correctly ranks 900/940 above 3/3. Blend it with a recency decay (a review of a 2010 book written last week is more useful than one from 2011), a length/quality signal, and — for logged-in users — a friend boost that floats reviews from people you follow into the top slots. The top ~50 review IDs per work are precomputed and cached; the friend boost is applied to the tail at request time so the cached list stays shareable. Spoiler-tagged reviews render collapsed behind a click, and a classifier flags likely-untagged spoilers ("I couldn't believe when X died") for a soft prompt rather than auto-hiding, because false positives on that are infuriating.
+
+**Recommendations, and why book popularity skew breaks plain collaborative filtering.** The mechanics of matrix factorisation and the offline-batch serving model are the same as the Spotify recommender (#40) — precompute a list per user nightly, serve it as a read. What is different is the shape of the data. Assume the top ~1000 works hold ~25% of all ratings while ~60% of works have fewer than 10 ratings each. Plain CF trained on that recommends the same fifty bestsellers to everyone, because co-occurrence counts are dominated by books that co-occur with *everything*. Three fixes: discount item scores by `count^0.5` so a book with 2M ratings does not automatically outrank one with 2k; train on shelf-name co-occurrence as well as ratings (user-created shelf names like "dark-academia" or "cosy-mystery" are an extraordinarily rich, free taxonomy that no publisher metadata provides); and route cold items through a content model — author, subject, description embedding, publisher, and the shelves it *has* been added to — so a debut novel with zero ratings can still be recommended on similarity to its neighbours. Cold-start users get a genre pick plus 20 books to rate during onboarding, drawn from a deliberately diversified sample rather than the top-20 bestsellers, because rating 20 bestsellers tells the model nothing that distinguishes you.
+
+**Search and the social layer.** Catalog search is an inverted index over works with all edition titles and author-name variants folded into the same document, ISBNs and ASINs as exact-match keyword fields (an ISBN query should be a lookup, not a fuzzy match), and fuzzy matching with an edit distance of 1–2 on title tokens for typo tolerance. Ranking blends BM25 with a popularity prior, because "dune" should return the novel, not a book about sand dunes. Type-ahead is a separate precomputed structure, not a query against this index — see the autocomplete pattern (#10). The social layer is a standard follow graph with a hybrid fanout feed (#8): activity events (shelved, rated, reviewed, finished) fan out on write to followers, with a pull path for reviewers who have more than ~10k followers. Reading challenges are a per-user-per-year counter driven off `date_read` transitions, recomputed rather than incremented so that un-marking a book as read corrects the count. Groups are conventional forums and deliberately not on any hot path.
+
+#### Potential Follow-Up Questions
+**Q: You merge two works that were actually different books. What does the user see, and how do you recover?**
+Reviews for one novel appear under another — highly visible and embarrassing. Recovery is one operation because no review row was mutated: reviews key on `edition_id`, the work is resolved through the cluster table, so unmerge rewrites cluster pointers, replays the `merge_log` entry, and triggers an aggregate recompute plus search reindex. Correct within ~2 minutes. *If pushed:* reviews written during the merge window still resolve correctly, because each recorded the edition its author was actually reading. Rate-limit auto-merges per work per day so a bad model deploy cannot cascade, and require human sign-off for any merge where both sides already have >1000 ratings — those are the ones people notice.
+
+**Q: A publisher feed reuses an ISBN-13 that already belongs to a different book. What breaks?**
+Nothing, if the identifier index maps to a *list* of edition IDs rather than one. The resolver treats a shared ISBN as strong-but-capped evidence (+0.4, not decisive) and requires corroboration from title, author or page count before merging. `GET /resolve?isbn=…` returns `ambiguous: true` with candidates rather than guessing. *If pushed:* if you built the index as a unique key, the second record either overwrites the first (silent data loss) or fails ingest (a stuck feed). Both are worse than modelling the real-world many-to-many.
+
+**Q: A book gets 40k one-star ratings in six hours before it has even been published. What do you do?**
+Detect it as a velocity anomaly: rating rate versus that work's trailing baseline, distribution skew toward the extremes, and account-quality features — new accounts, no prior shelvings, no reading progress, correlated signup times, shared ASN. Response is graduated: pre-publication rating lock (you cannot rate a book that is not out yet), then per-work rate limiting, then a quarantine where new ratings land in a holding buffer excluded from the displayed average until reviewed. *If pushed:* weight the *displayed* average by account history rather than deleting ratings, and keep the raw average available internally — silently deleting user content generates a second, louder controversy. Publish the histogram; a brigade is obvious in the shape of the distribution in a way it is not in the mean.
+
+**Q: A celebrity book club picks a title and its page gets 1000× traffic in minutes.**
+The page is a CDN object, so the edge absorbs almost all of it; the origin sees a thundering herd only on the first miss per POP. Use request coalescing at the edge (one origin fetch per key per POP) and stale-while-revalidate so an expired shell keeps serving while the refresh runs. *If pushed:* the write side is the real risk — the `work_aggregates` row and the edition's shelf counter become single-key hotspots at thousands of increments/second. Shard both as `N` sub-counters keyed on `(work_id, hash(user_id) % N)` and sum on read, promoting a work to sharded counters automatically when it crosses ~500 writes/s.
+
+**Q: Two users rate the same book at the same instant and the average comes out wrong.**
+Aggregates are not read-modify-write in the application; they are atomic increments (`INCRBY` on Redis, or counter columns) driven off an idempotent event stream, so concurrent writers commute. Rating *edits* apply a delta computed from the previous value stored on the user's own rating row, which is single-writer per user. *If pushed:* events carry a UUID and the stream processor dedupes on it, so at-least-once delivery does not double-count; and the nightly reconciliation pass recomputes every work touched in the last 24h from the ratings table, which is the real safety net against slow drift.
+
+**Q: A user has 30,000 books on their to-read shelf. How do you page it, and does the partition blow up?**
+Clustering by `(shelf_id, added_at)` means the shelf is an ordered range within one partition and paging is a cursor over the clustering key — no offset, no sort. At ~120B/row, 30k rows is ~3.6MB, well inside a healthy partition. *If pushed:* the problems appear at sorting by anything other than the clustering key (sort-by-title requires a client-side sort of the page, or a secondary materialised ordering) and at bulk import, where a CSV of 30k books must be rate-limited so it does not emit 30k activity events into every follower's feed. Collapse bulk imports into a single "added 30,000 books" activity item.
+
+**Q: A debut novel has zero ratings. How does it ever get recommended to anyone?**
+Content-based cold start: embed the description, subjects, author, publisher and — as soon as any exist — the user-created shelf names it has been added to, then recommend on similarity to neighbours in that space. Reserve an exploration slot (~10% of each recommendation list) for low-rating-count items so the system generates its own training signal. *If pushed:* measure it. Track catalog coverage (what fraction of the catalog is recommended to anyone in a week) alongside click-through; optimising click-through alone monotonically collapses recommendations onto the bestseller head, and coverage is the metric that catches it.
+
+**Q: How do you handle an audiobook, where there are no pages?**
+Progress is stored as a percentage, never a page number, and each edition declares its own progress unit (`pages`, `minutes`, or none). The client converts whatever the user enters into a percent using the shelved edition's metadata. *If pushed:* a user who reads half the hardback and finishes on audio expects one continuous progress bar. Model progress against the *work* with a pointer to the currently-active edition, so switching format carries the percentage across; the page counts of the two editions are irrelevant once you have normalised to percent.
+
+#### Bottlenecks & Mitigations
+- **Blocking-key skew** — blocks like "Selected Poems", "The Bible" or an untitled-record bucket can contain 50k+ members, and C(50000, 2) is 1.25B pairs in a single block, which stalls the whole Spark stage on one partition. Hard-cap block size at 1000 by appending a sub-block key (publisher, or pub-decade); accept the extra false negatives and rely on the second blocking pass to recover them. The trade is a slightly higher duplicate rate on exactly the most generic titles — which is also where merging is riskiest, so leaving them separate is the safer error.
+- **Hot work page** — a book club pick or prize winner takes 1000× traffic. The CDN absorbs reads, but the `work_aggregates` row and edition shelf counters become single-key write hotspots. Promote hot works to sharded counters `(work_id, hash(user_id) % N)` summed on read; the cost is N reads instead of one on every page render, so only do it above ~500 writes/s.
+- **Merge storm invalidation** — a pipeline change that merges 2M pairs in one pass enqueues 2M aggregate recomputes and search reindexes at once, saturating both. Rate-limit merge application to a fixed budget per hour and prioritise by rating count so the visible works reconcile first. The trade is that low-traffic duplicates linger for a day.
+- **Review ranking recompute** — Wilson-bound ranking over every review of a work is wasteful when only one vote changed. Recompute the top-50 cache lazily on a vote-count threshold (every 10 votes, or on any vote landing in the current top 100) rather than per vote; ranking is then up to a few minutes stale, which nobody perceives.
+- **Fanout for high-follower reviewers** — a reviewer with 800k followers posting five reviews in an evening triggers 4M timeline writes. Use the celebrity-pull path from #8: above ~10k followers, do not fan out; merge their recent activity at read time. The trade is a slower feed render for their followers.
+- **Search reindex cost after catalog change** — every merge changes a work document and its edition list, and full reindexing of 90M works is hours. Index incrementally off the merge log with a nightly full rebuild into a parallel index that is swapped in atomically, so a bad partial index never serves traffic.
+- **Human review queue backlog** — the 0.75–0.92 confidence band produces ~400k pairs per full pass, far more than moderators can clear. Prioritise the queue by rating count on both sides (merging two heavily-reviewed works is the highest-stakes decision) and auto-expire the low-stakes tail after 30 days as "keep separate", which is the reversible default.
+
+#### Failure Modes
+| Layer | Failure | Detection | Mitigation |
+|---|---|---|---|
+| Entity resolution | Model change causes a wave of false merges; reviews appear under wrong books | Merge-rate anomaly vs 7-day baseline; spike in user reports per merged work | Cap auto-merges/hour; require human sign-off when both sides have >1000 ratings; bulk unmerge by replaying the merge log for a time range |
+| Identifier index | Feed reuses an ISBN, resolver picks the wrong edition | `ambiguous` resolve rate per feed source; ingest validation on ISBN checksum | Map identifiers to a list, treat shared ISBN as capped evidence requiring corroboration; quarantine the offending feed source and re-run its records |
+| CDN | Edge purge storm or cold cache after a deploy sends full read volume to origin | Origin request rate vs baseline; CDN hit-rate drop below 85% | Request coalescing per POP, stale-while-revalidate, staggered purges; origin autoscale plus a load-shed that serves the last-good shell without personalisation |
+| Aggregate stream | Consumer lag or a lost event leaves work averages wrong | Kafka consumer lag; nightly reconciliation diff count | Idempotent event UUIDs with dedupe; nightly recompute of every work touched in 24h; a manual recompute endpoint per work for support |
+| Shelvings store | Hot partition from a power user or a mass CSV import times out writes | Per-partition write p99; partition size histogram | Cursor-only paging, never full-shelf reads; rate-limit bulk imports and collapse them into one activity event |
+| Review ranking cache | Ranked-review cache cold or stale after a merge | Cache hit rate; age of the top-50 list per work | Fall back to sort-by-recency (always cheap and always correct) rather than blocking the page; rebuild lazily in the background |
+| Abuse pipeline | Brigading detector misses a coordinated wave | Rating-velocity anomaly per work; share of ratings from accounts under 30 days old | Auto-quarantine new ratings on the work into a holding buffer; keep the raw average internal; publish the histogram so the skew is visible |
+| Search index | Swap of a partially-built index serves empty or wrong results | Zero-result rate; index document count vs expected | Build into a parallel index and swap atomically only after a document-count and smoke-query gate; instant rollback to the previous index alias |
+| Recommender | Batch job fails; recommendation lists go stale or empty | Job success alert; recommendation freshness age | Serve the previous day's list (staleness is invisible for a weekly-cadence product); fall back to a popularity-plus-genre list rather than an empty shelf |
+
+#### Observability — Key Metrics & SLOs
+- **Book page latency** (edge and origin, separately) — SLO p99 < 30ms on a CDN hit and < 200ms on origin render; the two are different systems and a single blended number hides an origin regression behind a healthy cache.
+- **CDN hit rate on book pages** — SLO ≥ 90%; the whole read-side capacity plan assumes it, so a drop to 80% doubles origin load and is a paging alert, not a dashboard.
+- **Auto-merge precision** (sampled human audit of merges above the 0.92 threshold) — SLO ≥ 99.5%; at ~2M merges per pass, 0.5% is 10k wrong merges, so this is the metric that governs whether the threshold can be lowered.
+- **Aggregate freshness** (rating write → work average updated) — SLO p99 < 60s; also alert on nightly reconciliation *drift* (number of works whose recomputed average differs from the stored one) exceeding ~0.01% of works touched.
+- **Rating-velocity anomaly per work** — alert when a work's hourly rating rate exceeds 20× its trailing 7-day baseline *and* more than 50% come from accounts under 30 days old; this is the brigading trigger.
+- **Human review queue depth and age** — SLO: 95% of high-stakes pairs (both sides >1000 ratings) resolved within 7 days; a growing queue means the thresholds are miscalibrated, not that moderators are slow.
+- **Recommendation catalog coverage** (distinct works recommended to ≥1 user per week ÷ catalog size) — watch for monotonic decline, which is the signature of popularity collapse even while click-through looks fine.
+
+#### Multi-Region & DR
+- **Replication mode:** active-active for reads everywhere — the catalog is globally identical and read-only at request time, so full read replicas per region plus CDN edges are cheap and obvious. Writes (shelvings, ratings, reviews) are home-region per user with async cross-region replication; the entity-resolution and recommender batch jobs run in a single primary region and push their outputs (cluster table, aggregates, recommendation lists, search index) to every region.
+- **RTO:** ~5 minutes for in-region replica promotion. Loss of the batch region is not an outage at all — the serving path keeps using the last-published cluster table and recommendation lists, so the only impact is that newly-ingested books stay unresolved until the job region recovers, tolerable for hours.
+- **RPO:** ~seconds for shelvings and ratings via async replication; a forced failover may lose the last few writes, mitigated by idempotent client retry keyed on `(user_id, edition_id, action)`. The catalog itself has an RPO of zero in practice — it is rebuildable from the source feeds plus the merge log.
+- **Failover cadence:** automatic in-region; cross-region game-days quarterly, including a deliberate batch-region failure to confirm the serving path degrades to "stale but correct" rather than failing.
+- **Cross-region cost:** the catalog snapshot and search index (~2TB) replicate on a nightly cadence, not continuously — the dominant egress line, and the reason to compress and ship deltas off the merge log rather than full dumps. Shelving and rating deltas are ~2GB/day, negligible. Cover images live in a multi-region object store behind the CDN and never cross regions on the request path.
+
+#### Common Mistakes / Anti-patterns
+- **Modelling a book as one row.** It collapses work and edition and forces you to break either aggregation (per-edition averages computed from a handful of ratings each) or progress tracking (which page count?). Three levels — work, edition, identifier — with ratings rolling up to the work and shelvings anchored to the edition.
+- **Storing `work_id` on reviews and ratings.** It makes a merge a mass row-rewrite: slow, non-atomic, and irreversible. Key user content on the immutable `edition_id` and resolve the work through a cluster table at read time, so a merge is a pointer write and an unmerge is a log replay.
+- **Comparing all pairs of catalog records.** 300M² ÷ 2 is 4.5×10¹⁶ comparisons and no amount of hardware fixes it. Block first on a cheap normalised key, cap block size, and run a second pass with an alternate key to recover the false negatives blocking creates.
+- **Treating a shared ISBN as proof of identity.** Publishers reuse ISBNs, assign them wrongly, and print them with typos. Model the identifier index as many-to-many, weight a shared ISBN as strong-but-capped evidence, and require corroboration from title, author or page count before merging.
+- **Serving personalised book pages.** Baking "your shelf status" into the page body makes the single most cacheable object in the system uncacheable and throws away the main lever you have. Serve a cacheable anonymous shell and splice the tiny personalised fragment in from a separate call.
+- **Ignoring popularity skew in the recommender.** Plain collaborative filtering on a catalog where the top 1000 works hold a quarter of all ratings recommends bestsellers to everyone forever. Discount by rating count, train on shelf-name co-occurrence, and reserve exploration slots for the long tail — then track catalog coverage, not just click-through.
+
+#### Talking Points for the Interview
+- **Say "work, edition, identifier" in the first two minutes.** Naming the three levels and explaining that ratings aggregate at the work while shelving happens at the edition is the whole problem stated correctly, and most candidates never get there.
+- **Entity resolution is the hard part, and blocking is the answer.** 4.5×10¹⁶ pairs down to ~500M by comparing only records that share a cheap normalised key — that arithmetic is the thing to say out loud.
+- **Merges must be reversible, and the way you get that is by never storing a `work_id` on user content.** One design decision buys you a one-operation undo for the most visible failure the system can have.
+- **The read:write ratio is the design.** ~16:1 at the request level and ~100:1 in fan-out, on content that is identical for every viewer — so the CDN carries the system, and the only thing that must not be cached is the small personalised fragment.
+- **Billions of shelvings are a partitioning problem, not a storage problem.** 5B rows is under 2TB; what actually hurts is one user with 30k books and one book with 5M shelvers, and those need opposite treatments.
+- **Cross-reference rather than re-derive.** The feed is #8, the typeahead is #10, the recommender machinery is #40 — spend the time on what is genuinely different here: catalog dirtiness, popularity skew, and review brigading.
