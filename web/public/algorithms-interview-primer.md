@@ -2677,509 +2677,2029 @@ Two bonuses fall out free. **Negative weights are fine** — a DAG has no cycles
 ### Summary
 
 **What this topic covers**
-A minimum spanning tree (MST) is the cheapest set of edges that connects all vertices of a weighted, undirected graph without cycles. This topic covers the two classic greedy algorithms — Kruskal's (sort edges, add the cheapest that doesn't form a cycle, using union-find) and Prim's (grow one tree outward, always adding the cheapest edge leaving it, using a heap) — plus the *cut property* that explains why greedy is even correct here, and how MST differs from a shortest-path tree.
+A minimum spanning tree (MST) is the cheapest set of edges that connects every vertex of a weighted, **undirected** graph without forming a cycle. This topic covers the two classic greedy algorithms with code — **Kruskal's** (sort all edges, accept the cheapest that doesn't close a cycle, using union-find) and **Prim's** (grow one tree from a seed, always taking the cheapest edge leaving it, using a heap) — plus the **cut property** and **cycle property** that make greedy provably correct here, the union-find structure Kruskal depends on, and the sharp distinction between an MST and a shortest-path tree. It also covers the standard follow-ups: when the MST is unique, the second-best MST, maximum spanning trees, spanning *forests* of disconnected graphs, Borůvka's parallel-friendly variant, and the MST-based 2-approximation for metric TSP.
+
+**Mental model**
+Laying cable to connect every office at the least cost. You don't care how long the route between any *two specific* offices is — only about the **total metres of cable**. That one sentence separates MST from shortest paths, and it's the trap interviewers set.
+
+Both algorithms are one greedy idea seen from two angles. Kruskal is **edge-centric**: "keep a pile of islands; repeatedly throw down the cheapest bridge in the world that joins two *different* islands." Prim is **vertex-centric**: "keep one growing blob; repeatedly grab the cheapest edge that escapes it." Neither ever backtracks, and the licence for that recklessness is the cut property: the cheapest edge crossing any split of the vertices is always safe. Every step of both algorithms is secretly picking the light edge of some cut.
 
 **Key terms**
-*Spanning tree* — a subset of `V-1` edges connecting all `V` vertices with no cycle. *MST* — a spanning tree of minimum total edge weight. *Cut* — a partition of vertices into two non-empty sets; its *crossing edges* have one endpoint in each. *Light edge* — the minimum-weight edge crossing a given cut. *Cut property* — the theorem that a light edge across any cut is safe to include in some MST. *Cycle property* — the heaviest edge on any cycle is never in the MST. *Union-find (DSU)* — the disjoint-set structure Kruskal uses to test "would this edge close a cycle?" (internals live in the Data Structures primer).
+- **Spanning tree** — exactly `V-1` edges connecting all `V` vertices with no cycle.
+- **MST** — the spanning tree of smallest total weight.
+- **Cut** — any split of the vertices into two non-empty groups; its **crossing edges** have one endpoint on each side.
+- **Light edge** — the minimum-weight crossing edge of a cut.
+- **Cut property** — a light edge across any cut is in *some* MST; this makes "accept" safe.
+- **Cycle property** — the strictly heaviest edge on any cycle is in *no* MST; this makes "reject" safe.
+- **Union-find (DSU)** — structure answering "are these two vertices already connected?" in near-constant time.
+- **α(n)** — inverse Ackermann; `≤ 4` for any realistic `n`, so union-find is "effectively `O(1)`".
+- **Spanning forest** — one MST per component, the right answer for a disconnected graph.
 
 **Core mechanics**
-Kruskal: sort all edges by weight (`O(E log E)`), then scan them cheapest-first, adding an edge iff its endpoints are in different components (a union-find `find` check); stop at `V-1` edges. With union-find's near-constant operations, total time is dominated by the sort: `O(E log E) = O(E log V)`. Prim: start from any vertex, maintain a min-heap of edges crossing from the tree to the outside, repeatedly extract the lightest edge to a new vertex and add it: `O(E log V)` with a binary heap, or `O(E + V log V)` with a Fibonacci heap; on dense graphs an adjacency-matrix `O(V^2)` version wins. Both are greedy and both are justified by the cut property.
+Kruskal: sort all `E` edges ascending (`O(E log E)`), scan cheapest-first, accept an edge only if its endpoints are in different components (a union-find check), stop after `V-1` acceptances. Union-find adds only `O(E α(V))`, so the sort dominates: `O(E log E)`, and since `E ≤ V²` that equals `O(E log V)`. Prim: from any seed, keep a min-heap of edges crossing tree-to-outside, pop the lightest whose far endpoint is still outside, absorb it, push its new frontier edges — `O(E log V)` with a binary heap, `O(E + V log V)` with a Fibonacci heap, and `Θ(V²)` with a plain array scan, which *wins* on dense graphs. On distinct weights both algorithms produce the identical tree.
 
 **Trade-offs**
-Kruskal is edge-centric and shines on sparse graphs, and it's natural when edges are already sorted or arrive in sorted order; it needs a global sort and union-find. Prim is vertex-centric and grows a single connected tree, which is convenient when the graph is dense (the `O(V^2)` matrix form beats sorting `O(V^2)` edges) or given as an adjacency structure you can traverse. Kruskal handles a *disconnected* graph gracefully by producing a minimum spanning *forest*; Prim as usually written only spans the component of its start vertex.
+Kruskal suits **sparse** graphs and edges that arrive already sorted (then it's near-linear); it needs a global sort and a DSU. Prim suits **dense** graphs — the `Θ(V²)` form avoids sorting ~`V²` edges — and fits when you're handed adjacency lists and a seed, and it can stop early once the region you care about is connected. Kruskal handles a **disconnected** graph for free, yielding a minimum spanning forest; textbook Prim only spans its seed's component. Kruskal jumps around the graph (poor locality); Prim grows one contiguous region.
 
 **Common confusions**
-The most common: assuming the MST also gives shortest paths between vertices — it does not. Confusing the cut property with the cycle property. Thinking the MST is unique — it is only when all edge weights are distinct. Forgetting that MST is defined for *undirected* graphs (the directed analogue, a minimum arborescence, needs Edmonds' algorithm, not Prim/Kruskal). Believing Prim needs non-negative weights like Dijkstra — it doesn't; MST algorithms work fine with negative edge weights because there's no notion of accumulating path cost.
+The big one: assuming the MST also gives shortest paths — it does **not**, and a three-vertex counter-example proves it. Confusing the cut property (safe to *add*) with the cycle property (safe to *discard*). Assuming the MST is unique — guaranteed only when all weights are distinct. Forgetting MST is defined for **undirected** graphs; the directed analogue (minimum arborescence) needs Edmonds', not Prim/Kruskal. Believing Prim needs non-negative weights like Dijkstra — it doesn't, because it never accumulates a path cost. And "Prim is just Dijkstra" — the code is nearly identical, but Dijkstra's heap key is `dist[u] + w` while Prim's is plain `w`.
 
 **Why interviewers ask**
-MSTs test greedy correctness reasoning: can you state the cut property and use it to argue why "always take the cheapest safe edge" actually produces an optimum? They also probe union-find fluency (via Kruskal) and heap usage (via Prim), and the sharp "MST vs shortest-path tree" distinction is a favorite trap. A frequent follow-up: "how would you detect whether the MST is unique?" or "the graph is disconnected — now what?"
+MSTs are the cleanest test of **greedy correctness reasoning**: can you state the cut property and use it to argue that "always take the cheapest safe edge" reaches a global optimum, rather than asserting greedy works? They also probe union-find and heap fluency in one question, and the MST-vs-shortest-path distinction separates memorised algorithms from understood ones. Expect follow-ups: "is the MST unique?", "find the second-best MST", "the graph is disconnected — now what?", "give me the *maximum* spanning tree".
 
 ### What exactly is a minimum spanning tree?
-Given a connected, undirected graph with weighted edges, a spanning tree is any set of `V-1` edges that connects all `V` vertices without forming a cycle. The minimum spanning tree is the spanning tree whose edge weights sum to the smallest possible total. It captures "connect everything as cheaply as possible" — think laying cable to link all offices with the least total wire. Note it's undirected and about *connection cost*, not about distances between specific pairs.
+
+Take a connected, undirected, weighted graph. A **spanning tree** is a subset of edges that touches all `V` vertices, keeps them connected, and has no cycle — which forces exactly `V-1` edges (add one more and you create a cycle; remove one and it falls apart). The **minimum** spanning tree is the one whose weights sum to the smallest total.
+
+The running example for this whole topic, five vertices with seven edges:
+
+```text
+A-B 1    A-C 4    B-C 2    B-D 6
+C-D 3    C-E 7    D-E 5
+```
+
+`{A-C 4, B-C 2, C-D 3, C-E 7}` is a spanning tree, total `16`. `{A-B 1, B-C 2, C-D 3, D-E 5}` is another, total `11` — and that one is minimum. Note what the MST does *not* promise: inside it, `A` to `E` costs `1+2+3+5 = 11`, while the original graph offers `A-C-E` at `4+7 = 11`, and other graphs make that gap far worse. MSTs optimise **total connection cost**, not any individual journey.
 
 ### State the cut property and explain why it makes greedy work.
-The cut property says: for any cut (any way of splitting the vertices into two non-empty groups), the minimum-weight edge crossing that cut belongs to *some* MST. Proof sketch by exchange: take any MST not containing that light edge `e`; adding `e` creates a cycle that must cross the cut on some other, heavier edge `e'`; swapping `e'` for `e` yields a spanning tree that's no heavier — still an MST. This is why both Kruskal and Prim can safely commit to a locally cheapest edge without backtracking.
+
+A **cut** splits the vertices into two non-empty groups; the cheapest edge with one endpoint on each side is the **light edge**. The cut property: *for any cut, a light edge crossing it belongs to some MST.*
+
+The proof is a one-paragraph exchange argument worth reciting. Let `e` be the light edge across a cut and let `T` be any MST missing it. Adding `e` to `T` creates exactly one cycle; that cycle leaves and returns across the cut, so it contains some other crossing edge `e'`, and `weight(e) ≤ weight(e')` because `e` is lightest. Delete `e'`: still `V-1` edges, still connected, so still a spanning tree — and its weight dropped by `weight(e') - weight(e) ≥ 0`. Since `T` was minimum, so is the new tree, and it contains `e`. ∎
+
+That is the entire licence for greed: every committed edge is provably extendable to an optimal solution, so nothing ever needs undoing. On the example, cut `{A}` vs the rest has crossing edges `A-B 1` and `A-C 4`, so `A-B` is safe. Cut `{A,B}` vs the rest has `A-C 4, B-C 2, B-D 6`, so `B-C 2` is safe. Both are in the MST.
 
 ### How does Kruskal's algorithm work?
-Sort every edge by ascending weight. Walk them cheapest-first; for each edge, use union-find to check whether its two endpoints are already in the same component. If they're in different components, add the edge to the MST and `union` the components; if the same, skip it (adding it would create a cycle). Stop once you've selected `V-1` edges. Each accepted edge merges two components, and the cut property guarantees the cheapest cross-component edge is always safe.
+
+Sort every edge by weight, walk them cheapest-first, and accept an edge only if its endpoints are in **different** components — otherwise it closes a cycle, so skip it. Stop at `V-1` acceptances. The "same component?" test is what union-find provides: `find(x)` returns a component id, `union(x, y)` merges two.
+
+```python
+class DSU:
+    """Disjoint-set union with path compression + union by rank."""
+
+    def __init__(self, n):
+        self.parent = list(range(n))   # every vertex starts as its own root
+        self.rank = [0] * n            # upper bound on tree height
+
+    def find(self, x):
+        while self.parent[x] != x:
+            self.parent[x] = self.parent[self.parent[x]]  # path halving
+            x = self.parent[x]
+        return x
+
+    def union(self, a, b):
+        ra, rb = self.find(a), self.find(b)
+        if ra == rb:
+            return False               # already connected -> would form a cycle
+        if self.rank[ra] < self.rank[rb]:
+            ra, rb = rb, ra            # hang the shorter tree under the taller
+        self.parent[rb] = ra
+        if self.rank[ra] == self.rank[rb]:
+            self.rank[ra] += 1
+        return True
+```
+
+```python
+def kruskal(n, edges):
+    """n vertices 0..n-1; edges = list of (weight, u, v)."""
+    dsu = DSU(n)
+    mst, total = [], 0
+    for w, u, v in sorted(edges):      # cheapest first
+        if dsu.union(u, v):            # different components -> safe edge
+            mst.append((w, u, v))
+            total += w
+            if len(mst) == n - 1:      # spanning tree complete
+                break
+    return total, mst
+```
+
+Trace (`A..E` as `0..4`), sorted order `A-B 1, B-C 2, C-D 3, A-C 4, D-E 5, B-D 6, C-E 7`:
+
+- `A-B 1` — different → **accept**; components `{A,B} {C} {D} {E}`.
+- `B-C 2` — different → **accept**; `{A,B,C} {D} {E}`.
+- `C-D 3` — different → **accept**; `{A,B,C,D} {E}`.
+- `A-C 4` — both in `{A,B,C,D}` → **reject** (closes cycle `A-B-C-A`).
+- `D-E 5` — different → **accept**. Four edges `= V-1`, stop.
+
+MST `= {A-B 1, B-C 2, C-D 3, D-E 5}`, total `11`.
 
 ### Why does Kruskal need union-find, and what's the complexity?
-Union-find answers "are these two vertices already connected?" in near-constant amortized time (inverse-Ackermann, effectively `O(1)`) using union-by-rank and path compression. Without it, cycle-checking each edge would need a graph traversal and blow up the runtime. With it, Kruskal's cost is dominated by the initial edge sort: `O(E log E)`, which since `E <= V^2` equals `O(E log V)`. The union/find operations across all edges add only near-linear overhead.
+
+Kruskal asks "are `u` and `v` already connected?" once per edge. Answering with a fresh BFS costs `O(V + E)` each time, making the whole thing `O(E·(V+E))` — hopeless. Union-find answers in near-constant time because it never stores the graph: just a forest of parent pointers saying which component each vertex is in, where merging is one pointer write.
+
+Two optimisations, both expected:
+
+- **Union by rank** — hang the shallower tree under the deeper one. Alone this bounds every tree's height at `O(log n)`, since a tree only grows taller when two equal-height trees merge, which doubles its size.
+- **Path compression** — during `find`, re-point nodes you walk past nearer the root. The code above uses *path halving* (point each node at its grandparent): one extra line, no recursion, same guarantee.
+
+With both, `m` operations on `n` elements cost `O(m · α(n))` amortised. Plain-language version of `α`: the inverse Ackermann function is `≤ 4` for any input you could physically store, so it's constant in practice — but provably not literally constant, which is why the bound isn't written `O(1)`.
+
+So Kruskal costs `O(E log E)` to sort plus `O(E α(V))` for the DSU sweep — the sort dominates. Since `E ≤ V²` gives `log E ≤ 2 log V`, that's `O(E log V)`: "sort the edges, then a near-linear pass". Space is `O(V)` for the DSU. If the edges arrive pre-sorted (or weights are small integers you can radix-sort), Kruskal drops to near-linear `O(E α(V))`.
 
 ### How does Prim's algorithm work?
-Pick any start vertex and grow a single tree. Maintain the set of edges crossing from the current tree to vertices outside it, in a min-heap. Repeatedly extract the lightest crossing edge, add its outside endpoint (and that edge) to the tree, then push that vertex's edges to still-outside neighbors. Repeat until all vertices are in the tree. Each step adds the light edge of the cut (tree vs rest), so the cut property guarantees correctness.
+
+Grow **one** tree from any seed. Keep a min-heap of edges crossing from the tree to the outside; pop the lightest, and if its far endpoint is already inside, discard it as stale and pop again — otherwise absorb that vertex and edge, and push its edges to still-outside neighbours. Stop when all `V` vertices are in. Each pop is the light edge of the cut "tree vs outside", so the cut property certifies it.
+
+```python
+import heapq
+
+
+def prim(n, adj, start=0):
+    """adj[u] = list of (v, weight); each undirected edge appears twice."""
+    in_tree = [False] * n
+    in_tree[start] = True
+    heap = [(w, start, v) for v, w in adj[start]]
+    heapq.heapify(heap)
+
+    mst, total = [], 0
+    while heap and len(mst) < n - 1:
+        w, u, v = heapq.heappop(heap)  # lightest edge leaving the tree
+        if in_tree[v]:
+            continue                   # stale: v was absorbed earlier
+        in_tree[v] = True
+        mst.append((w, u, v))
+        total += w
+        for nxt, wt in adj[v]:         # new frontier edges
+            if not in_tree[nxt]:
+                heapq.heappush(heap, (wt, v, nxt))
+    return total, mst
+```
+
+Trace from `A`. Tree `{A}`, heap `(1,A,B) (4,A,C)` → pop `(1,A,B)`, **accept `A-B 1`**, push `(2,B,C) (6,B,D)`. Pop `(2,B,C)`, **accept `B-C 2`**, push `(3,C,D) (7,C,E)`. Pop `(3,C,D)`, **accept `C-D 3`**, push `(5,D,E)`. Pop `(4,A,C)` — `C` already in tree, **discard as stale**. Pop `(5,D,E)`, **accept `D-E 5`**. Total `11` — the same tree Kruskal built, as it must be with distinct weights.
+
+This is the **lazy** version (stale entries skipped on pop, heap up to `E` items). The **eager** version keeps one entry per vertex and decrease-keys it; Python has no decrease-key, so lazy is idiomatic with identical asymptotics. Note the near-identity with Dijkstra: the only real difference is the key pushed — `dist[u] + w` versus plain `w`.
 
 ### What's Prim's complexity, and when does the dense-graph version win?
-With a binary heap keyed by each outside vertex's cheapest connecting edge, Prim runs in `O(E log V)` (a Fibonacci heap gives `O(E + V log V)`). On a *dense* graph where `E` is near `V^2`, that `log` factor hurts, and a simple adjacency-matrix implementation that scans all vertices to find the next-cheapest — `O(V^2)` with no heap — is actually faster and simpler. So: sparse graph → heap-based Prim or Kruskal; dense graph → `O(V^2)` Prim.
+
+With a binary heap each edge is pushed and popped at most once, so it's `O(E log E) = O(E log V)` — "a logarithmic heap operation per edge". A Fibonacci heap gives `O(E + V log V)`, asymptotically better but with constants that rarely pay off. Drop the heap entirely and keep `best[v]` = cheapest known edge connecting `v` to the tree, scanning the array each round:
+
+```python
+def prim_dense(n, weight, INF=float("inf")):
+    """weight[u][v] = edge weight or INF. Adjacency-matrix Prim."""
+    best, parent, in_tree = [INF] * n, [-1] * n, [False] * n
+    best[0], total = 0, 0
+    for _ in range(n):
+        u = -1                             # linear scan for closest outsider
+        for v in range(n):
+            if not in_tree[v] and (u == -1 or best[v] < best[u]):
+                u = v
+        if best[u] == INF:
+            break                          # graph is disconnected
+        in_tree[u] = True
+        total += best[u]
+        for v in range(n):                 # is u a cheaper doorway to v?
+            if not in_tree[v] and weight[u][v] < best[v]:
+                best[v], parent[v] = weight[u][v], u
+    return total, parent
+```
+
+That's `V` rounds of an `O(V)` scan plus an `O(V)` relax: `Θ(V²)`, quadratic in vertices and *independent of edge count*. On a dense graph (`E ≈ V²`) heap-Prim is `O(V² log V)` and Kruskal must sort `V²` edges for the same, while matrix-Prim is a flat `V²` with tiny constants. On a sparse graph (`E ≈ V`) heap-Prim is `O(V log V)` and `V²` is far worse. Rule: **sparse → heap Prim or Kruskal; dense → `Θ(V²)` Prim**, crossover around `E ≈ V² / log V`.
 
 ### Kruskal or Prim — how do you choose?
-If the graph is sparse, or the edges are already sorted or streamed in sorted order, Kruskal is natural and clean. If the graph is dense, Prim's `O(V^2)` matrix form avoids sorting `~V^2` edges. If the graph might be disconnected and you want a spanning *forest*, Kruskal handles it for free. If you're already given adjacency lists and want to grow from a specific vertex, Prim fits. They produce equal-total-weight trees, so it's about the graph shape and inputs, not correctness.
+
+They always produce trees of equal total weight, so it's never about correctness — only input shape.
+
+- **Sparse, or edges already sorted / streaming sorted** → Kruskal. The sort is the whole cost, so if it's free the algorithm is near-linear and the code is ten lines.
+- **Dense** → `Θ(V²)` Prim. Kruskal would sort ~`V²` edges just to reject most of them.
+- **Possibly disconnected, want a spanning forest** → Kruskal, which produces one for free.
+- **Given adjacency lists with a natural seed, or you want contiguous growth** (stop early once `k` vertices are joined) → Prim.
+- **Edges arriving online, graph too big to hold as adjacency** → Kruskal, which only needs the edge list.
+- **Parallel or distributed** → neither; Borůvka.
+
+In an interview Kruskal is usually the better thing to write: shorter, it demonstrates union-find, and its correctness argument is easier to say aloud. Add that you'd switch to matrix Prim if told the graph is dense.
 
 ### How is an MST different from a shortest-path tree?
-They optimize different things. An MST minimizes the *total* weight of edges connecting everything; a shortest-path tree (e.g. from Dijkstra) minimizes each vertex's *distance from a specific root*. They are frequently different trees. Classic example: a triangle with a root, where a direct 3-cost edge to a far vertex is on the shortest-path tree, but the MST instead uses two 2-cost edges routed through the middle vertex. Don't reach for Prim/Kruskal when someone actually wants shortest paths.
+
+Different objective functions. An MST minimises the **total weight of the tree**. A shortest-path tree (Dijkstra) minimises, *for each vertex independently*, its distance **from one chosen root**. No reason those agree — and usually they don't. Smallest counter-example, a triangle rooted at `X`:
+
+```text
+X-Y 3    X-Z 3    Y-Z 1
+```
+
+**Shortest-path tree from `X`**: `dist(X,Y) = 3` (direct beats `X-Z-Y` at `4`) and `dist(X,Z) = 3`, so the SPT is `{X-Y 3, X-Z 3}`, total **`6`**. **MST**: take `Y-Z 1` then either 3-edge, e.g. `{Y-Z 1, X-Y 3}`, total **`4`**.
+
+Different trees, each bad at the other's job: the MST is a third cheaper to *build*, but travelling `X → Z` inside it costs `3 + 1 = 4` against the true shortest distance of `3`. Also note the SPT depends on its root while the MST depends on no root at all, and that Prim and Dijkstra differ only by the heap key. Cable, pipes, clustering, backbones → MST. Routing, navigation, latency → shortest paths.
 
 ### When is the MST unique?
-The MST is guaranteed unique when all edge weights are distinct. With repeated weights, there can be multiple MSTs of equal total weight (you might swap two equal-weight edges that both safely close the same cut). A useful sufficient condition: for every cut, if the minimum crossing edge is *strictly* lighter than all other crossing edges, and similarly the max edge on every cycle is strictly heaviest, the MST is unique.
+
+**If all edge weights are distinct, the MST is unique.** It follows from the two properties: with no ties, every cut has a *strictly* lightest crossing edge (in every MST) and every cycle a *strictly* heaviest edge (in no MST), so each edge's membership is forced.
+
+Ties create the *possibility* of alternatives, not a guarantee. A triangle with weights `1, 1, 2` still has a **unique** MST — dropping the `2` is forced. A triangle with `1, 1, 1` has **three** MSTs, one per dropped edge. So duplicate weights are necessary but not sufficient for non-uniqueness, which is why the real test is the swap check below rather than "are any weights equal?".
+
+Two facts that hold even when the MST isn't unique: all MSTs of a graph share the same *multiset of edge weights*, hence the same sorted weight sequence and the same total. "The MST" is ambiguous as an edge set but never as a cost.
 
 ### How would you check whether a given graph has a unique MST?
-Compute one MST, then for each non-tree edge `e`, find the maximum-weight edge on the tree path between `e`'s endpoints. If any non-tree edge has weight *equal* to that maximum path edge, you could swap them to get a different MST of the same weight — so the MST is not unique. If no such equal-weight swap exists anywhere, the MST is unique. (This path-max query can be answered efficiently with union-find-style processing or LCA techniques.)
+
+Build one MST `T`, then test every **non-tree** edge for a free swap. Adding non-tree edge `e = (u, v)` creates exactly one cycle: `e` plus the unique tree path `u → v`. If the **heaviest edge on that path** equals `weight(e)`, swapping them gives a different spanning tree of identical total — not unique. If no non-tree edge ties its path maximum, the MST is unique. The same machinery answers **second-best MST**: each swap raises the total by `weight(e) - path_max ≥ 0`, so the second-best is the total plus the smallest *strictly positive* increase.
+
+```python
+def path_max(tree_adj, u, v):
+    """Heaviest edge on the unique tree path u -> v; O(V) per query."""
+    stack = [(u, -1, 0)]                   # (node, parent, max weight so far)
+    while stack:
+        node, par, mx = stack.pop()
+        if node == v:
+            return mx
+        for nxt, w in tree_adj[node]:
+            if nxt != par:
+                stack.append((nxt, node, max(mx, w)))
+    return None
+
+
+def unique_and_second_best(n, edges, mst_edges, total):
+    tree_adj = [[] for _ in range(n)]
+    chosen = set(mst_edges)
+    for w, u, v in mst_edges:
+        tree_adj[u].append((v, w))
+        tree_adj[v].append((u, w))
+
+    unique, best_delta = True, float("inf")
+    for w, u, v in edges:
+        if (w, u, v) in chosen:
+            continue                       # only non-tree edges make a cycle
+        m = path_max(tree_adj, u, v)
+        if w == m:
+            unique = False                 # free swap -> another MST, same cost
+        elif w > m:
+            best_delta = min(best_delta, w - m)
+    second = None if best_delta == float("inf") else total + best_delta
+    return unique, second
+```
+
+On the running graph, `T = {A-B 1, B-C 2, C-D 3, D-E 5}`, total `11`. Non-tree edge `A-C 4` has tree path `A-B-C` with max `2` → swap costs `+2`; `B-D 6` has path max `3` → `+3`; `C-E 7` has path max `5` → `+2`. No delta is zero, so the **MST is unique** (as expected, all weights distinct) and the second-best costs `11 + 2 = 13`.
+
+As written this is `O(V)` per query over `O(E)` queries, so `O(V·E)` — fine for an interview. Say next that binary lifting (store the max edge alongside each `2ᵏ` ancestor jump) answers each query in `O(log V)` for `O((V + E) log V)` overall.
 
 ### The graph is disconnected — what do MST algorithms produce?
-There's no spanning tree of a disconnected graph, so the goal becomes a *minimum spanning forest*: an MST of each connected component. Kruskal produces it automatically — it just keeps adding safe edges and naturally ends with one tree per component (`V - (number of components)` edges total). Prim only spans the component containing its start vertex, so to cover a disconnected graph you must restart it from an unvisited vertex for each remaining component.
+
+A disconnected graph has **no** spanning tree — no edge set can join components that share no edge. The goal becomes a **minimum spanning forest**: an MST per component, with exactly `V - c` edges for `c` components instead of `V - 1`.
+
+Kruskal produces this with **zero code changes**. It keeps accepting safe edges cheapest-first until the edge list runs out; it never assumes connectivity, and the `len(mst) == n - 1` early exit simply never fires. You can read the component count straight off as `n - len(mst)`.
+
+Prim does not. It terminates as soon as its seed's component is absorbed and silently omits everything else. The fix is an outer loop: after it finishes, find any vertex still not `in_tree`, restart from it, repeat — the same trick as running DFS from every unvisited vertex, free asymptotically. (In `prim_dense`, the `if best[u] == INF: break` line is exactly where the component boundary is detected.)
+
+Worth flagging: if a problem says "connect all cities" without guaranteeing connectivity, the wanted answer is often "report impossible" rather than "build a forest" — clarify. A classic variant sidesteps it: add a virtual vertex joined to every city at the cost of a local facility, and the MST of the augmented graph solves "connect or self-supply, whichever is cheaper".
 
 ### Do MST algorithms work with negative edge weights?
-Yes, unlike Dijkstra. Neither Kruskal nor Prim accumulates a running path cost that a negative edge could destabilize — they only ever compare individual edge weights to decide which is cheapest. You can add a large constant to every weight to make them all positive without changing which spanning tree is minimal (the total shifts by a fixed `(V-1) * constant` for *every* spanning tree, since all have exactly `V-1` edges). So negatives are harmless.
+
+**Yes — unlike Dijkstra, negatives are harmless.** Dijkstra breaks on them because it accumulates a running path cost and finalises vertices assuming no later path can improve them. MST algorithms accumulate nothing; they only ask "which of these individual weights is smallest?", and comparison doesn't care about sign.
+
+The airtight argument is the shift trick: every spanning tree has exactly `V-1` edges, so adding a constant `k` to every weight raises *every* spanning tree's total by exactly `(V-1)·k`, leaving the ranking untouched. Pick `k` big enough to make all weights positive and you've reduced the negative case to the positive one — no algorithm change needed.
+
+The same "only comparisons matter" insight gives the **maximum spanning tree** free: negate every weight and run the usual MST algorithm.
+
+```python
+def max_spanning_tree(n, edges):
+    """Heaviest spanning tree: Kruskal on negated weights."""
+    total, mst = kruskal(n, [(-w, u, v) for w, u, v in edges])
+    return -total, [(-w, u, v) for w, u, v in mst]
+```
+
+On the running graph that accepts `C-E 7, B-D 6, D-E 5, A-C 4` for total `22`, against the MST's `11`. Maximum spanning trees matter in practice — maximum-bandwidth (bottleneck) paths always run along one.
 
 ### State the cycle property and how it complements the cut property.
-The cycle property says: for any cycle in the graph, the *maximum*-weight edge on that cycle is never part of any MST (assuming it's the unique max). Intuition: you could always drop that heaviest cycle edge and stay connected more cheaply. Where the cut property tells you which edges are *safe to add*, the cycle property tells you which are *safe to discard* — Kruskal's "skip an edge that would form a cycle" is exactly the cycle property in action.
+
+The **cycle property**: for any cycle, its strictly heaviest edge belongs to **no** MST. The proof mirrors the cut property. Suppose a spanning tree contained that heaviest edge `h`; removing `h` splits the tree in two, but the rest of the cycle still runs between the halves, so some other cycle edge `h'` reconnects them with `weight(h') < weight(h)`. The swap is strictly cheaper, so the original wasn't minimum. ∎ ("Strictly" matters: with ties, the heaviest cycle edge may appear in *some* MST — exactly the non-uniqueness case.)
+
+The two properties are halves of one coin, and naming both is a strong signal:
+
+- **Cut property → which edges are safe to *add*.** It powers the accept branch.
+- **Cycle property → which edges are safe to *discard*.** It powers the reject branch.
+
+Kruskal is literally both, alternating. Accepting `C-D 3` is the cut property. Rejecting `A-C 4` is the cycle property: it closes cycle `A-B-C-A` with weights `1, 2, 4`, and because Kruskal scans ascending, *any* edge that closes a cycle is automatically the heaviest on it — so every rejection is provably correct. Prim's "skip the stale heap entry" is the same rejection in different clothing.
+
+A consequence worth pocketing: together they give the **bottleneck** guarantee — for any pair of vertices, the MST path between them minimises the maximum edge weight along the path, so the MST is simultaneously a minimum-bottleneck spanning tree.
 
 ### How does Borůvka's algorithm differ, and why does anyone care?
-Borůvka's algorithm proceeds in rounds: in each round, *every* current component simultaneously selects its own cheapest outgoing edge, and all those edges are added at once, merging components. Since each round at least halves the number of components, it finishes in `O(log V)` rounds, `O(E log V)` total. It matters because its inherent parallelism makes it the basis for parallel and distributed MST algorithms and for modern near-linear-time hybrids, where sequential Prim/Kruskal don't parallelize as naturally.
+
+Borůvka's (1926 — the oldest MST algorithm) works in **rounds** rather than one edge at a time. Each round, *every* current component independently picks its own cheapest outgoing edge; all chosen edges are added at once, merging components; repeat until one remains.
+
+```python
+def boruvka(n, edges):
+    dsu = DSU(n)
+    total, count = 0, n                    # count = number of components
+    while count > 1:
+        cheapest = [None] * n              # per component: (w, u, v)
+        for w, u, v in edges:
+            ru, rv = dsu.find(u), dsu.find(v)
+            if ru == rv:
+                continue                   # internal edge, not outgoing
+            for r in (ru, rv):
+                if cheapest[r] is None or (w, u, v) < cheapest[r]:
+                    cheapest[r] = (w, u, v)
+        if all(c is None for c in cheapest):
+            break                          # disconnected: forest is done
+        for c in cheapest:                 # add every chosen edge at once
+            if c and dsu.union(c[1], c[2]):
+                total += c[0]
+                count -= 1
+    return total
+```
+
+Round 1 on the running graph: `A` and `B` both pick `A-B 1`, `C` picks `B-C 2`, `D` picks `C-D 3`, `E` picks `D-E 5`. Deduplicated that's `{A-B 1, B-C 2, C-D 3, D-E 5}` — the whole MST in one round, five components down to one.
+
+Every round at least **halves** the component count (each component contributes an edge, each edge merges at least two), so there are `≤ log₂ V` rounds of an `O(E)` scan: `O(E log V)`, the same bound as the others. The payoff is that a round is embarrassingly **parallel** — each component's choice is independent — which makes Borůvka the backbone of parallel, distributed and GPU MST code, and a building block of the near-linear randomised algorithm. One gotcha: with tied weights two components can pick each other's *different* edges and form a cycle, so break ties deterministically (compare `(weight, u, v)`, as above).
 
 ### Can you use an MST to get a decent solution to the Traveling Salesman Problem?
-Yes — the MST gives a classic approximation. Build the MST, do a preorder DFS walk of it, and shortcut past already-visited vertices to form a tour. For metric TSP (where triangle inequality holds), this yields a tour at most 2x the optimum, because the optimal tour minus one edge is itself a spanning tree (so `MST <= optimal tour`) and the walk uses each MST edge twice. The sharper Christofides algorithm improves the bound to 1.5x by adding a matching. It's a favorite "MSTs are useful beyond connectivity" follow-up.
+
+Yes — the textbook 2-approximation for **metric** TSP (weights obeying the triangle inequality `d(a,c) ≤ d(a,b) + d(b,c)`, as real distances do). TSP is NP-hard, so the goal shifts from optimal to provably close. Three steps: build the MST, do a **preorder DFS walk** of it from any root, and output vertices in first-visit order, **shortcutting** past ones already seen.
+
+The bound is two lines:
+
+1. Delete any one edge from the optimal tour and you have a path visiting every vertex — a spanning tree. So `weight(MST) ≤ weight(OPT)`.
+2. A DFS walk crosses each tree edge exactly **twice** (down and back), costing `2 · weight(MST) ≤ 2 · OPT`, and shortcutting only shortens it by the triangle inequality — precisely where metricity is required.
+
+Hence `tour ≤ 2 · OPT`. **Christofides** sharpens it to `1.5 · OPT`: instead of doubling every edge, add a minimum-weight perfect matching on just the **odd-degree** MST vertices, making all degrees even (so an Eulerian circuit exists) at a cost of `≤ 0.5 · OPT`, then shortcut as before. Without the triangle inequality none of this survives — general TSP admits no constant-factor approximation unless `P = NP`. The takeaway: MSTs reach beyond connectivity into single-linkage clustering (cut the `k-1` heaviest MST edges for `k` clusters), minimum-bottleneck routing, and approximation algorithms like this one.
 
 ## Advanced Graph Algorithms
 
 ### Summary
 
 **What this topic covers**
-This topic groups the "deeper" graph algorithms interviewers reach for once BFS/DFS and shortest paths are established: strongly connected components (SCCs) via Tarjan's and Kosaraju's algorithms, bridges and articulation points (the edges/vertices whose removal disconnects a graph), and network flow — max-flow / min-cut with Ford-Fulkerson, Edmonds-Karp, and Dinic, plus bipartite matching as its most common application. The unifying theme: they extract *structural* information (connectivity, cut points, capacity bottlenecks) that simple traversal alone doesn't reveal.
+The "deeper" graph algorithms interviewers reach for once BFS/DFS and shortest paths are established: **strongly connected components** (SCCs) via Tarjan's and Kosaraju's algorithms, **bridges and articulation points** (the edges and vertices whose removal disconnects a graph), and **network flow** — max-flow / min-cut with Ford-Fulkerson, Edmonds-Karp, and Dinic, plus **bipartite matching** as its most common application, with König's and Hall's theorems as the combinatorial payoff. The unifying theme: they extract *structural* information — connectivity, single points of failure, capacity bottlenecks — that plain traversal never reveals.
+
+**Mental model**
+Two big ideas carry the whole topic. The first is **DFS timestamps**. Run a DFS and write down, for each vertex, when you first arrived (`disc`) and the earliest arrival time your subtree can climb back to using at most one non-tree edge (`low`). That one extra number answers "is there a second route around this vertex or edge?" — and *that* question is simultaneously SCCs, bridges, and articulation points. Nothing exotic is happening: it is DFS plus one running minimum. The second idea is **flow as water in pipes**. Push as much as you can from source to sink, but keep a "receipt" of everything you pushed so a later path can take it back and reroute — the residual graph. When no route with spare capacity remains, the pipes you couldn't get past *are* the bottleneck, and that bottleneck is the min cut. Learn those two ideas and a dozen algorithm names collapse into two techniques.
 
 **Key terms**
-*Strongly connected component* — a maximal set of vertices in a *directed* graph where every vertex can reach every other. *Bridge* — an edge whose removal increases the number of connected components. *Articulation point (cut vertex)* — a vertex whose removal does the same. *DFS discovery time / low-link* — the timestamp when DFS first reaches a vertex, and the lowest discovery time reachable from its subtree; the engine behind Tarjan and bridge-finding. *Flow network* — a directed graph with edge capacities, a source `s`, and a sink `t`. *Augmenting path* — an `s`-to-`t` path with spare capacity in the residual graph. *Min-cut* — the minimum total capacity you must remove to disconnect `s` from `t`.
+- **Strongly connected component (SCC)** — a maximal group of vertices in a *directed* graph where everyone can reach everyone else, following arrow directions.
+- **Condensation** — the graph you get by squashing each SCC into one node; it is always a DAG.
+- **Bridge** — an edge whose removal splits the graph into more pieces.
+- **Articulation point (cut vertex)** — a vertex whose removal splits the graph into more pieces.
+- **Discovery time `disc[v]`** — the clock reading when DFS first walks into `v`.
+- **Low-link `low[v]`** — the smallest `disc` reachable from `v`'s subtree using at most one back edge; "how far back can this subtree climb?"
+- **Flow network** — a directed graph with edge capacities, a source `s`, and a sink `t`.
+- **Residual graph** — remaining capacity forwards plus back edges recording flow already sent, so it can be undone.
+- **Augmenting path** — an `s`-to-`t` path in the residual graph with spare capacity all the way.
+- **Min cut** — the cheapest set of edges to delete so `s` can no longer reach `t`.
+- **Matching** — a set of edges sharing no endpoints; a *perfect* matching covers every vertex.
 
 **Core mechanics**
-SCCs: Tarjan runs a single DFS tracking discovery times and low-link values, popping a component off a stack whenever it finds an SCC "root" (`low[v] == disc[v]`) — `O(V + E)`. Kosaraju does two passes: DFS to order vertices by finish time, then DFS on the *transposed* graph in that order, each tree being one SCC — also `O(V + E)`. Bridges/articulation points use the same low-link DFS: an edge `(u,v)` is a bridge when `low[v] > disc[u]`; `u` is an articulation point when a child `v` has `low[v] >= disc[u]` (with a special root rule). Max-flow: Ford-Fulkerson repeatedly finds an augmenting path in the residual graph and pushes flow; Edmonds-Karp fixes the path search to BFS (`O(V*E^2)`); Dinic layers the graph with BFS then pushes blocking flows with DFS (`O(V^2 * E)`, and `O(E * sqrt(V))` on unit-capacity/bipartite-matching graphs). Max-flow equals min-cut.
+Tarjan's SCC is one DFS keeping `disc`, `low`, and a stack of "unassigned" vertices; when a vertex satisfies `low[v] == disc[v]` it roots an SCC, so pop the stack down to it — `O(V + E)` time, linear in vertices plus edges. Kosaraju does the same job in two passes: DFS the graph recording finish order, then DFS the *transposed* graph in reverse finish order, each tree being one SCC — also linear. Bridges and articulation points reuse the identical low-link DFS on an undirected graph: tree edge `(u, v)` is a bridge when `low[v] > disc[u]`; non-root `u` is a cut vertex when some child has `low[v] ≥ disc[u]`; the DFS root is a cut vertex exactly when it has two or more DFS children. Max-flow repeatedly finds an augmenting path in the residual graph and pushes the bottleneck amount along it. Edmonds-Karp finds that path with BFS, giving `O(V·E²)`; Dinic builds a BFS level graph then saturates it with DFS, giving `O(V²·E)` in general and `O(E·√V)` on unit-capacity graphs.
 
 **Trade-offs**
-Tarjan is one elegant DFS pass — usually preferred; Kosaraju needs two passes and the transposed graph but is arguably easier to explain and reason about. For flow, Ford-Fulkerson with a naive path search can be exponential (or non-terminating on irrational capacities), so you almost never use it raw — Edmonds-Karp (BFS augmenting paths) guarantees `O(V*E^2)`, and Dinic is the practical default, especially fast on unit-capacity and bipartite-matching graphs. Bipartite matching via Hopcroft-Karp gets `O(E * sqrt(V))`, the same bound Dinic achieves there.
+Tarjan is one elegant pass and is usually preferred; Kosaraju needs two passes and a transposed graph but many people find its story easier to explain correctly under pressure. Raw Ford-Fulkerson with an arbitrary path choice can be exponential (and can fail to terminate on irrational capacities), so you never ship it unrefined — Edmonds-Karp's BFS rule buys a capacity-independent bound, and Dinic is the practical default. For bipartite matching, the simple augmenting-path algorithm is `O(V·E)` and fine for interviews; Hopcroft-Karp reaches `O(E·√V)`, the same bound Dinic gets there.
 
 **Common confusions**
-SCCs are a *directed*-graph concept; the undirected analogue is just connected components (or biconnected components for the cut-vertex flavor). Confusing bridges (edges) with articulation points (vertices) — a graph can have one without the other. Mixing up the low-link conditions: bridges use strict `>`, articulation points use `>=`, and the DFS *root* is an articulation point iff it has two or more DFS children. For flow, forgetting the *residual/back edges* (which let the algorithm "undo" earlier flow) — without them max-flow is simply wrong. And assuming max-flow needs integer capacities: it doesn't for correctness, but integrality is what guarantees Ford-Fulkerson terminates.
+SCCs are a *directed* concept — the undirected analogue is ordinary connected components. Bridges are edges, articulation points are vertices, and a graph can have one without the other. The low-link conditions differ by one character: bridges use strict `>`, cut vertices use `≥`, and the root needs its own rule. In Tarjan you must relax against `disc[v]` (not `low[v]`) for a back edge, and only when `v` is still on the stack. For flow, dropping the back edges silently produces a *wrong*, too-small answer rather than an error. And integer capacities are not needed for correctness — they are what guarantees termination.
 
 **Why interviewers ask**
-These separate candidates who *use* graph libraries from those who understand graph *structure*. SCC and low-link questions test whether you can reason about DFS timestamps rather than memorize code. Max-flow / min-cut is a genuinely powerful modeling tool — many "assignment", "scheduling", and "can we separate X from Y" problems reduce to it — so interviewers probe whether you can *recognize* a flow problem in disguise, not just run the algorithm. The classic senior follow-up: "reduce this bipartite matching / vertex-cover / edge-disjoint-paths problem to max-flow."
+These separate candidates who *call* graph libraries from those who understand graph *structure*. Low-link questions test whether you can reason about DFS timestamps rather than recite code. Max-flow / min-cut is a genuine modelling weapon — assignment, scheduling, segmentation, and "can we separate X from Y" problems all reduce to it — so the real probe is whether you *recognise* a flow problem in disguise. The classic senior follow-up: "now reduce this matching / vertex-cover / edge-disjoint-paths question to max-flow."
 
 ### What is a strongly connected component?
-In a directed graph, a strongly connected component is a maximal set of vertices such that every vertex can reach every other vertex within the set, following edge directions. "Maximal" means you can't add another vertex and keep that mutual-reachability property. Every directed graph decomposes uniquely into SCCs, and if you contract each SCC to a single node you get a DAG (the *condensation*) — which is why SCC decomposition is often the first step before running DAG algorithms on a cyclic directed graph.
+
+Picture a city's one-way street map. A strongly connected component is a neighbourhood where you can drive from any corner to any other and back again without breaking the law — and it is *maximal*, meaning you cannot bolt on another corner and keep that property.
+
+Formally: in a directed graph, an SCC is a maximal vertex set where every vertex reaches every other by following edge directions. Every directed graph splits uniquely into SCCs, and contracting each SCC to a single node gives the **condensation**, which is always a DAG — cycles live *inside* components, never between them.
+
+Micro-example. Edges `0→1`, `1→2`, `2→0`, `1→3`, `3→4`. Vertices `0`, `1`, `2` form a cycle, so they are one SCC. From `3` you reach `4` but never return, so `{3}` and `{4}` are singletons. The condensation is `{0,1,2} → {3} → {4}`.
+
+That is why SCC decomposition is so often step one: it converts a messy cyclic directed graph into a DAG, and DAGs support topological order, longest paths, and clean DP.
 
 ### How does Kosaraju's algorithm find SCCs?
-Two DFS passes. First, run DFS on the original graph and push each vertex onto a stack when it *finishes* (post-order). Second, transpose the graph (reverse every edge) and repeatedly pop vertices from the stack; each DFS on the transposed graph, started from an unvisited popped vertex, visits exactly one SCC. The finish-order ensures you start each second-pass DFS from a "sink" SCC of the condensation, so it can't leak into other components. It's `O(V + E)` but touches the graph twice and needs the transpose.
+
+Kosaraju is two DFS passes and a graph reversal — no clever invariants to remember.
+
+**Pass 1.** DFS the original graph and push each vertex onto a stack when it *finishes* (after exploring all its descendants). **Pass 2.** Transpose the graph — reverse every edge — then repeatedly pop from the stack and, if the popped vertex is unvisited, DFS it in the transposed graph. Everything that DFS reaches is exactly one SCC.
+
+Why it works, in one sentence: the last vertex to finish in pass 1 lives in a **source** SCC of the condensation, and reversing all edges turns that source into a **sink**, so the second DFS is trapped inside one component.
+
+Micro-example on `0→1`, `1→2`, `2→0`, `1→3`, `3→4`. Pass 1 from `0` finishes `4`, `3`, `2`, `1`, `0`, so the stack top-down is `0, 1, 2, 3, 4`. Transposed edges: `1→0`, `2→1`, `0→2`, `3→1`, `4→3`. Pop `0`: DFS reaches `2` and `1` — SCC `{0,1,2}`. Pop `1`, `2`: visited. Pop `3`: its only edge goes to the visited `1` — SCC `{3}`. Pop `4`: SCC `{4}`.
+
+Cost is `O(V + E)` — linear in the graph — but you traverse it twice and must build the transpose.
 
 ### How does Tarjan's algorithm find SCCs in a single pass?
-Tarjan runs one DFS maintaining two numbers per vertex: `disc[v]` (discovery time) and `low[v]` (the lowest `disc` reachable from `v`'s DFS subtree, including via one back edge). Vertices are pushed onto a stack as visited. When DFS finishes a vertex `v` with `low[v] == disc[v]`, `v` is the root of an SCC — pop the stack down to `v` and that popped set is the component. Single pass, `O(V + E)`, no transpose needed, which is why it's usually preferred.
+
+Tarjan gets the same answer in one DFS, tracking two numbers per vertex plus a stack of vertices not yet assigned to a component. `disc[v]` is the clock reading when DFS entered `v`; `low[v]` is the smallest `disc` reachable from `v`'s subtree using at most one edge back into the current stack. When DFS finishes `v` and finds `low[v] == disc[v]`, nothing in `v`'s subtree could escape above `v`, so `v` roots an SCC: pop the stack down to and including `v`.
+
+```python
+def tarjan_scc(adj, n):
+    """adj[u] = list of successors. Returns SCCs in reverse topological order."""
+    disc = [-1] * n
+    low = [0] * n
+    on_stack = [False] * n
+    stack, comps = [], []
+    timer = 0
+
+    def dfs(u):
+        nonlocal timer
+        disc[u] = low[u] = timer
+        timer += 1
+        stack.append(u)
+        on_stack[u] = True
+        for v in adj[u]:
+            if disc[v] == -1:
+                dfs(v)
+                low[u] = min(low[u], low[v])      # tree edge: inherit child's reach
+            elif on_stack[v]:
+                low[u] = min(low[u], disc[v])     # back edge inside the current SCC
+        if low[u] == disc[u]:                     # u is an SCC root
+            comp = []
+            while True:
+                w = stack.pop()
+                on_stack[w] = False
+                comp.append(w)
+                if w == u:
+                    break
+            comps.append(comp)
+
+    for u in range(n):
+        if disc[u] == -1:
+            dfs(u)
+    return comps
+```
+
+Trace on the same graph. Enter `0` (`disc 0`), `1` (`disc 1`), `2` (`disc 2`); edge `2→0` finds `0` on the stack, so `low[2] = 0`, and returning gives `low[1] = low[0] = 0`. Then `1→3` (`disc 3`) and `3→4` (`disc 4`): `4` is a dead end, so `low[4] == disc[4]` — pop `{4}`; likewise pop `{3}`. Finally `low[0] == disc[0] == 0` — pop `2, 1, 0` as `{0,1,2}`.
+
+One pass, `O(V + E)`, no transpose, and the components emerge in reverse topological order of the condensation for free.
 
 ### Tarjan or Kosaraju — which and why?
-Both are `O(V + E)`. Tarjan is a single DFS with a bit of bookkeeping (disc/low/on-stack), so it's more efficient in constant factors and doesn't need to build a transposed graph. Kosaraju uses two passes and requires the transpose, but many people find its "finish-order then reverse-graph" story easier to explain and get correct under interview pressure. If you're comfortable with low-link, use Tarjan; if you want a clean explanation you won't fumble, Kosaraju is a fine choice.
+
+Both are `O(V + E)` — linear in vertices plus edges — so the choice is about constants and about what you can write correctly with an interviewer watching.
+
+**Tarjan** touches the graph once, needs no transposed copy (real memory savings at scale), and hands back the SCCs in reverse topological order, which is exactly what you want if the next step is DP over the condensation. The cost is three fiddly details: relax against `disc[v]` not `low[v]` for back edges, check `on_stack` first, and pop at `low[u] == disc[u]`.
+
+**Kosaraju** needs two traversals and an explicit transpose, but the algorithm is "finish order, then reverse graph" — two sentences, hard to garble, easy to justify aloud.
+
+Recommendation: if low-link is genuinely comfortable, use Tarjan and mention the reverse-topological bonus. Otherwise say "Kosaraju, because I can prove it to you in two sentences" — interviewers reward a correct explained algorithm over a half-remembered elegant one. A wrong Tarjan scores worse than either.
 
 ### What is the low-link value and why is it so central?
-`low[v]` is the smallest discovery time reachable from `v` by going down `v`'s DFS subtree and taking at most one back edge. Intuitively it answers "what's the earliest-discovered vertex `v`'s subtree can climb back to?" If a subtree can climb back above `v`, then removing the edge into it doesn't disconnect anything (there's an alternate route); if it can't, you've found a bridge or a cut structure. This single quantity powers Tarjan's SCCs, bridge finding, and articulation points — which is why it's worth understanding rather than memorizing.
+
+`low[v]` is the smallest discovery time reachable by walking *down* into `v`'s DFS subtree and then taking **at most one** non-tree edge back up. Plain English: *what is the earliest-discovered vertex this subtree can climb back to?*
+
+That single number answers the only question connectivity structure cares about: **is there a second route?** If `v`'s subtree can climb back above `v`'s parent, the tree edge into it is redundant — cut it and traffic detours. If it cannot climb that high, the edge (or vertex) is holding the subtree on single-handedly.
+
+Micro-example on the undirected triangle-plus-tail `0-1`, `1-2`, `2-0`, `2-3`. DFS from `0` gives `disc = [0, 1, 2, 3]`. Vertex `3` is a dead end, so `low[3] = 3`. Vertex `2` has the back edge `2-0`, so `low[2] = 0`, and likewise `low[1] = low[0] = 0`. Read it off: `low[3] = 3 > disc[2] = 2`, so `(2,3)` is a bridge; `low[2] = 0 ≤ disc[1] = 1`, so `(1,2)` is not.
+
+The same quantity powers Tarjan's SCC roots, bridges, articulation points, and biconnected components. Understanding it once buys four algorithms; memorising four templates buys nothing.
 
 ### What is a bridge, and how do you find all bridges?
-A bridge is an edge whose removal increases the number of connected components — a single point of failure in an undirected graph. Run a DFS computing `disc` and `low`. A tree edge `(u, v)` (with `v` a child of `u`) is a bridge exactly when `low[v] > disc[u]`: the subtree rooted at `v` has no back edge reaching `u` or anything above it, so that edge is the only link. One `O(V + E)` DFS finds them all. Bridges matter for network reliability and for decomposing a graph into 2-edge-connected components.
+
+A bridge is an edge whose removal increases the number of connected components — the single cable holding two halves of a network together.
+
+Run one DFS computing `disc` and `low`. A **tree edge** `(u, v)` with `v` a child of `u` is a bridge exactly when `low[v] > disc[u]`: `v`'s subtree has no back edge reaching `u` or anything earlier, so this edge is the only link. The `>` is strict — reaching `u` itself already means a cycle, hence no bridge.
+
+```python
+def bridges(adj, n):
+    """adj[u] = list of (neighbour, edge_id). Undirected; edge_id handles parallels."""
+    disc = [-1] * n
+    low = [0] * n
+    found = []
+    timer = 0
+
+    def dfs(u, in_edge):
+        nonlocal timer
+        disc[u] = low[u] = timer
+        timer += 1
+        for v, eid in adj[u]:
+            if eid == in_edge:                 # don't bounce back down the edge we arrived on
+                continue
+            if disc[v] == -1:
+                dfs(v, eid)
+                low[u] = min(low[u], low[v])
+                if low[v] > disc[u]:           # v's subtree cannot climb past u
+                    found.append((u, v))
+            else:
+                low[u] = min(low[u], disc[v])  # back edge
+
+    for u in range(n):
+        if disc[u] == -1:
+            dfs(u, -1)
+    return found
+```
+
+Skipping by *edge id* rather than parent vertex matters: with two parallel edges between `u` and `v`, neither is a bridge, and a parent check would wrongly report one.
+
+Micro-example: two triangles `0-1-2-0` and `3-4-5-3` joined by `2-3`. Every triangle edge sits on a cycle, so only `2-3` satisfies `low[3] > disc[2]`. One bridge, found in a single `O(V + E)` pass — linear time.
 
 ### What is an articulation point, and how does the condition differ from a bridge?
-An articulation point (cut vertex) is a vertex whose removal disconnects the graph. Using the same low-link DFS, a non-root vertex `u` is an articulation point if it has a child `v` with `low[v] >= disc[u]` — meaning `v`'s subtree can't reach *above* `u`, so `u` holds it on. The DFS *root* is a special case: it's an articulation point iff it has two or more DFS children. Note the difference from bridges: articulation points use `>=` (the subtree may reach back to `u` itself but no higher), bridges use strict `>`.
+
+An articulation point (cut vertex) is a vertex whose removal, along with all its edges, disconnects the graph. Same DFS, one character different in the test.
+
+A **non-root** vertex `u` is an articulation point when it has a child `v` with `low[v] ≥ disc[u]`: `v`'s subtree reaches back to `u` at best, never *above* it, so `u` is the sole gateway. The **root** has no "above" and is an articulation point exactly when it has **two or more** DFS children, since those subtrees can only be joined through it.
+
+```python
+def articulation_points(adj, n):
+    """adj[u] = list of neighbours (simple undirected graph)."""
+    disc = [-1] * n
+    low = [0] * n
+    cut = set()
+    timer = 0
+
+    def dfs(u, parent):
+        nonlocal timer
+        disc[u] = low[u] = timer
+        timer += 1
+        children = 0
+        for v in adj[u]:
+            if v == parent:
+                continue
+            if disc[v] == -1:
+                children += 1
+                dfs(v, u)
+                low[u] = min(low[u], low[v])
+                if parent != -1 and low[v] >= disc[u]:   # note: >=, not >
+                    cut.add(u)
+            else:
+                low[u] = min(low[u], disc[v])
+        if parent == -1 and children > 1:                # root rule
+            cut.add(u)
+
+    for u in range(n):
+        if disc[u] == -1:
+            dfs(u, -1)
+    return cut
+```
+
+Why `≥` rather than `>`: for a *bridge* the subtree must be unable to reach even `u`, because reaching `u` puts the edge on a cycle. For a *vertex* it is enough that the subtree cannot get past `u` — climbing back to `u` itself is no help once `u` is deleted.
+
+Micro-example: the path `a - b - c`, rooted at `a`. Vertex `b` has child `c` with `low[c] > disc[b]`, so `b` is a cut vertex; `a` is the root with one child, so it is not. Cost `O(V + E)`, linear in the graph.
 
 ### Can a graph have a bridge but no articulation point, or vice versa?
-Yes to both directions. A single edge connecting two triangles: the connecting edge is a bridge, and each of its two endpoints is also an articulation point — so they often coincide. But consider two triangles sharing exactly one common vertex: that shared vertex is an articulation point, yet there's no bridge (every edge sits on a cycle). Conversely a simple path `a - b - c` has bridges `(a,b)` and `(b,c)`, and `b` is an articulation point — so a bridge's *internal* endpoints are cut vertices, but articulation points can exist with no bridge at all.
+
+Both directions happen, which is why the two need separate tests.
+
+**Articulation point with no bridge.** The bowtie: triangles `0-1-2-0` and `2-3-4-2` sharing vertex `2`. Delete `2` and the graph falls into `{0,1}` and `{3,4}`, so `2` is a cut vertex. But every edge lies on a triangle, so removing any single edge leaves the graph connected: **zero bridges**.
+
+**Bridge with no articulation point.** Only one shape manages this: a lone edge `a - b`. It is a bridge, yet deleting `a` leaves the single vertex `b`, still connected. Generally the situation is asymmetric — if `(u, v)` is a bridge then `u` is a cut vertex *unless* `u` has degree 1, and likewise for `v`. So bridges nearly always drag articulation points along, while cut vertices often appear with no bridge in sight.
+
+**Both together.** Two triangles joined by `2-3`: that edge is a bridge and both `2` and `3` are cut vertices.
+
+Interview takeaway: when asked for "single points of failure", ask whether the failure is a *link* going down (bridges) or a *node* going down (articulation points), then run the matching test.
 
 ### Define a flow network and the max-flow problem.
-A flow network is a directed graph where each edge has a non-negative capacity, plus a designated source `s` and sink `t`. A flow assigns each edge a value between 0 and its capacity, subject to conservation: at every vertex other than `s` and `t`, flow in equals flow out. The max-flow problem asks for the maximum total flow you can push from `s` to `t`. Think of pipes with capacity limits and you want the greatest throughput from source to sink.
+
+A flow network is a directed graph where every edge `(u, v)` carries a non-negative **capacity** `c(u, v)`, plus two distinguished vertices: a **source** `s` producing material and a **sink** `t` consuming it. Think water pipes with diameter limits.
+
+A **flow** assigns each edge a value `f(u, v)` obeying two rules. *Capacity*: `0 ≤ f(u, v) ≤ c(u, v)` — you cannot overfill a pipe. *Conservation*: at every vertex except `s` and `t`, flow in equals flow out — nothing accumulates at a junction. The **value** of the flow is the net amount leaving `s`, which conservation forces to equal the amount arriving at `t`.
+
+Max-flow asks for the largest achievable value: the greatest throughput the network sustains from `s` to `t`.
+
+Micro-example. Vertices `s, a, b, t` with `s→a` capacity 3, `s→b` 2, `a→b` 1, `a→t` 2, `b→t` 3. Push 2 along `s→a→t`, 2 along `s→b→t`, and 1 along `s→a→b→t`, totalling 5. It cannot be beaten: the edges leaving `s` total `3 + 2 = 5`, a hard ceiling we exactly hit.
+
+Note what is *not* required: capacities need not be integers, the graph may contain cycles, and many different flows can share the same maximum value.
 
 ### How does the Ford-Fulkerson method work?
-Repeatedly find an augmenting path — a path from `s` to `t` in the *residual graph* where every edge still has spare capacity — and push as much flow along it as the tightest edge allows. Pushing flow updates residual capacities and, crucially, adds *back edges* that let later iterations cancel earlier flow. When no augmenting path remains, the flow is maximum. Ford-Fulkerson is a *method* (it doesn't specify how to pick the path); with integer capacities each augmentation raises flow by at least 1, so it terminates, but a bad path choice can make it very slow.
+
+Greedy with an undo button. Repeatedly find an **augmenting path** — a route from `s` to `t` where every edge still has spare capacity in the *residual* graph — and push as much as the tightest edge allows. Pushing `f` units across `(u, v)` reduces the residual capacity of `(u, v)` by `f` and *adds* `f` to the reverse edge `(v, u)`, so a later path can cancel the decision. When no augmenting path remains, the flow is maximum.
+
+Ford-Fulkerson is strictly a **method** — it never says how to choose the path. Pinning that to BFS gives **Edmonds-Karp**, which is what you should actually write:
+
+```python
+from collections import deque
+
+def edmonds_karp(cap, s, t):
+    """cap: dict of dicts; cap[u][v] = residual capacity. Mutated in place."""
+    total = 0
+    while True:
+        parent = {s: None}                       # BFS = shortest augmenting path
+        queue = deque([s])
+        while queue and t not in parent:
+            u = queue.popleft()
+            for v in list(cap[u]):
+                if cap[u][v] > 0 and v not in parent:
+                    parent[v] = u
+                    queue.append(v)
+        if t not in parent:                      # no path left -> flow is maximum
+            return total
+
+        bottleneck, v = float("inf"), t          # 1) tightest edge on the path
+        while parent[v] is not None:
+            u = parent[v]
+            bottleneck = min(bottleneck, cap[u][v])
+            v = u
+
+        v = t                                    # 2) push, opening back edges
+        while parent[v] is not None:
+            u = parent[v]
+            cap[u][v] -= bottleneck
+            cap.setdefault(v, {})
+            cap[v][u] = cap[v].get(u, 0) + bottleneck
+            v = u
+        total += bottleneck
+```
+
+Termination: with integer capacities every augmentation adds at least 1 unit, so the loop runs at most `max_flow` times. That is also the weakness — on capacities of a million, "at most a million iterations" is a genuine risk, which is exactly what BFS fixes.
 
 ### Why do we need residual/back edges?
-Back edges let the algorithm *reroute* flow it committed earlier that turned out to be suboptimal. When you push `f` units across edge `(u, v)`, you add a residual edge `(v, u)` with capacity `f`; a later augmenting path can travel that back edge, effectively canceling `f` units on `(u,v)` and sending them elsewhere. Without back edges, an early greedy choice could permanently block the true maximum, and Ford-Fulkerson would return a wrong (too-small) flow. The residual graph is what makes "greedy augmentation" provably reach the optimum.
+
+Because greedy is allowed to be wrong, and back edges are how it apologises.
+
+Pushing `f` units across `(u, v)` adds a residual edge `(v, u)` with capacity `f`. A later augmenting path travelling that back edge does not send water backwards — it *cancels* `f` units on `(u, v)` and reroutes them, keeping conservation intact.
+
+The standard micro-example makes it vivid. Capacities: `s→a` 1000, `s→b` 1000, `a→b` 1, `a→t` 1000, `b→t` 1000. Suppose the first augmenting path found is `s→a→b→t`; the tightest edge is the middle one, so only 1 unit goes through. Now `a→b` is saturated and an algorithm with no back edges is stuck at a flow of 1 — against a true answer of 2000.
+
+With back edges, the residual graph contains `b→a` with capacity 1. The next BFS finds `s→b→a→t` and pushes 999, the `b→a` segment *undoing* the earlier unit on `a→b` — effectively rewriting history into "999 on `s→b→t`, plus the misrouted unit sent straight down `a→t`". Two more augmentations reach 2000.
+
+The lesson: without back edges max-flow returns a **wrong answer with no error** — a merely maximal flow, not a maximum one.
 
 ### What's the difference between Ford-Fulkerson, Edmonds-Karp, and Dinic?
-Ford-Fulkerson is the general augmenting-path method with the path-finding left unspecified — naive choices can be exponential (or non-terminating with irrational capacities). Edmonds-Karp pins it down to *BFS* for the augmenting path (shortest path in edges), which guarantees `O(V*E^2)` regardless of capacities. Dinic goes further: it builds a BFS *level graph*, then pushes a *blocking flow* with DFS along level-respecting edges, repeating in phases — `O(V^2 * E)` in general, and a superb `O(E * sqrt(V))` on unit-capacity graphs. Dinic is the practical default.
+
+One idea at three levels of commitment.
+
+**Ford-Fulkerson** is the bare method: find any augmenting path, push, repeat. Because the path rule is unspecified, its bound depends on the capacity *values* — `O(E · max_flow)` with integers — so contrived capacities give behaviour exponential in the input size, and irrational capacities can converge without ever terminating.
+
+**Edmonds-Karp** adds one rule: always take the **BFS** path, the augmenting path with fewest edges. That makes the shortest residual `s`-`t` distance non-decreasing, and each edge can only be the bottleneck `O(V)` times, giving `O(V·E²)` — a bound depending only on the graph's size, never on the capacity numbers. About fifteen lines of code, and the right default answer in an interview.
+
+**Dinic** processes many paths per phase. BFS assigns each vertex a **level** (its residual distance from `s`); DFS then pushes a **blocking flow** using only edges from level `i` to level `i + 1`, saturating the layered graph before the next BFS. At most `V` phases gives `O(V²·E)`; on unit-capacity graphs, including bipartite matching, only about `√V` phases are needed, giving `O(E·√V)`.
+
+Practical guidance: name Ford-Fulkerson as the framework, implement Edmonds-Karp, mention Dinic as the production choice.
 
 ### State the max-flow min-cut theorem and why it matters.
-The value of the maximum `s`-`t` flow equals the capacity of the minimum `s`-`t` cut — the cheapest set of edges whose removal disconnects `s` from `t`. It matters because it links an *optimization* (push the most flow) to a *structural* certificate (the bottleneck edges), and it gives a proof of optimality: when no augmenting path exists, the vertices reachable from `s` in the residual graph define exactly the min cut. Many problems are easier to model as "find the cheapest cut" and solved via max-flow, or vice versa.
+
+**Statement.** The value of the maximum `s`-`t` flow equals the capacity of the minimum `s`-`t` cut. A **cut** partitions the vertices into a set `S` containing `s` and a set `T` containing `t`; its capacity is the total capacity of edges crossing from `S` to `T` (edges going back are free). In plain words: *the most you can push equals the cheapest way to cut the network in two.*
+
+One direction is obvious — every unit of flow must cross every cut, so flow ≤ cut capacity. The theorem's content is that the bound is always *achieved*, and the proof is constructive: when no augmenting path exists, let `S` be the vertices reachable from `s` in the residual graph. Every `S`-to-`T` edge must be saturated (or `S` would grow) and every `T`-to-`S` edge empty, so the cut's capacity equals the flow exactly.
+
+```python
+def min_cut_side(cap, s):
+    """Run AFTER max flow: vertices still reachable from s in the residual graph."""
+    seen, queue = {s}, deque([s])
+    while queue:
+        u = queue.popleft()
+        for v in list(cap[u]):
+            if cap[u][v] > 0 and v not in seen:
+                seen.add(v)
+                queue.append(v)
+    return seen          # cut edges: original u->v with u in seen and v not
+```
+
+Why it matters: it turns an optimisation into a **certificate**. The min cut names the bottleneck edges — the ones worth upgrading — and proves the flow cannot improve. It also lets you model in whichever direction is easier: image segmentation and project selection both read naturally as cuts and are solved as flows.
 
 ### How does bipartite matching reduce to max-flow?
-Given a bipartite graph with left set `L` and right set `R`, add a source `s` with capacity-1 edges to every vertex in `L`, direct each original `L`-to-`R` edge with capacity 1, and add capacity-1 edges from every `R` vertex to a sink `t`. The maximum flow equals the maximum matching: each unit of flow traces one matched `s -> l -> r -> t` path, and the capacity-1 constraints ensure each vertex is used at most once. Running Dinic here gives `O(E * sqrt(V))` — the same bound as the specialized Hopcroft-Karp algorithm.
+
+Given a bipartite graph with left set `L` and right set `R`, build a flow network: a source `s` with a capacity-1 edge to each vertex of `L`, each original `L`-to-`R` edge directed with capacity 1, and a capacity-1 edge from each vertex of `R` to a sink `t`. The maximum flow equals the maximum matching.
+
+The capacities do all the work. Each unit of flow traces one path `s → l → r → t`, which *is* a matched pair; the capacity-1 edge out of `s` stops any `l` being matched twice, and the capacity-1 edge into `t` stops any `r` being reused. Integer capacities guarantee an integral max flow, so no unit splits in half. Dinic costs `O(E·√V)` here — the same bound as Hopcroft-Karp, which is really Dinic's phases in matching language.
+
+For interviews the direct augmenting-path algorithm (Kuhn's) is shorter and easier to defend:
+
+```python
+def max_matching(adj, n_left):
+    """adj[l] = right-side neighbours of left vertex l."""
+    match_r = {}                                   # right vertex -> its left partner
+
+    def augment(l, visited):
+        for r in adj[l]:
+            if r in visited:
+                continue
+            visited.add(r)
+            if r not in match_r or augment(match_r[r], visited):
+                match_r[r] = l                     # take r, relocating its old partner
+                return True
+        return False
+
+    return sum(augment(l, set()) for l in range(n_left)), match_r
+```
+
+Micro-example: `L = {l0, l1}`, `R = {r0, r1}`, edges `l0-r0`, `l0-r1`, `l1-r0`. `l0` takes `r0`. Then `l1` wants `r0`, which is taken, so it recurses on `l0`, which relocates to `r1` — the augmenting path — giving `l1-r0` and `l0-r1`, a perfect matching. That recursion is precisely a residual back edge in disguise. Cost `O(V·E)`.
 
 ### König's theorem and Hall's theorem — how do they connect to matching?
-König's theorem states that in a bipartite graph, the size of the maximum matching equals the size of the minimum vertex cover — a special case of max-flow / min-cut, and the bridge to solving minimum vertex cover (and its complement, maximum independent set) in bipartite graphs in polynomial time. Hall's theorem gives the *existence* condition for a perfect matching on one side: a matching saturating `L` exists iff every subset `S` of `L` collectively has at least `|S|` neighbors in `R`. Interviewers love these because they turn a matching question into a clean combinatorial argument.
+
+Both convert a matching computation into a clean combinatorial statement, letting you *reason* instead of simulate.
+
+**König's theorem.** In a bipartite graph, the maximum matching size equals the minimum **vertex cover** size (a smallest vertex set touching every edge). It is max-flow / min-cut in different clothes: the min cut in the matching network corresponds exactly to a minimum vertex cover. That is powerful because minimum vertex cover is NP-hard on general graphs but *polynomial* on bipartite ones — just run matching. And since the complement of a vertex cover is an independent set, **maximum independent set** comes free: `|V| − max matching`. Grid-and-obstacle puzzles ("place the most non-attacking pieces", "cover all holes with fewest planks") almost always resolve to this.
+
+**Hall's theorem.** A matching saturating every vertex of `L` exists **iff** for every subset `S ⊆ L` the neighbourhood satisfies `|N(S)| ≥ |S|` — no group of `k` left vertices may share fewer than `k` right options. The "only if" is trivial counting; the "if" is the real theorem. Its practical value is as a **failure witness**: when no perfect matching exists you can point at the overcrowded subset — "these 3 tasks compete for the same 2 workers" — which is far more useful than "the algorithm returned 4".
+
+Sound bite: König gives the *size*, Hall gives the *reason*.
 
 ### Give an example of a problem that's secretly a max-flow problem.
-Edge-disjoint paths: "how many paths from `s` to `t` share no edge?" Set every edge's capacity to 1 and compute max-flow — the answer is exactly the number of edge-disjoint paths (Menger's theorem). Others: assigning workers to tasks (bipartite matching), scheduling with capacity constraints, image segmentation ("cut" foreground from background as a min-cut), and project-selection / max-weight-closure problems. The senior skill is *recognizing* the reduction — spotting that "separate X from Y at minimum cost" or "match/assign under capacity limits" is a flow problem in disguise, then modeling the network correctly.
+
+The clearest is **edge-disjoint paths**: "how many `s`-to-`t` routes share no edge?" Give every edge capacity 1 and compute max-flow. Integral capacities make each unit of flow one full path, and capacity 1 forbids two paths sharing an edge, so max-flow *is* the answer. Menger's theorem adds the dual: that count equals the fewest edges you must delete to sever `s` from `t` — max-flow / min-cut again.
+
+Other reductions worth having ready:
+
+- **Task assignment** — workers to jobs is bipartite matching, i.e. flow with unit capacities. If a worker can take three jobs, give their source edge capacity 3.
+- **Scheduling under capacity** — source → time slots (capacity = slots available), slots → jobs, jobs → sink (capacity = work required). A saturating flow means a feasible schedule.
+- **Image segmentation** — pixels are vertices, source is "foreground", sink is "background", edge weights encode agreement; the min cut is the optimal boundary.
+- **Project selection** — source → profitable projects (capacity = profit), prerequisites → sink (capacity = cost), infinite-capacity dependency edges; the min cut picks the best subset.
+- **Vertex-disjoint paths** — split each vertex `v` into `v_in → v_out` with capacity 1, reducing it to the edge-disjoint case.
+
+The recognition heuristic is what is really being tested. Two phrases should trigger it: *"separate X from Y at minimum cost"* (min cut) and *"assign or route things subject to capacity limits"* (max flow). Once one fires, the remaining work is modelling — vertices, directions, capacities — and stating the reduction clearly. Do that well and you rarely need to write Dinic at all.
 
 ## Backtracking & Constraint Search
 
 ### Summary
 
 **What this topic covers**
-Backtracking is systematic exhaustive search that builds a solution one decision at a time and abandons a partial candidate the instant it can no longer lead to a valid answer. The mental model is a depth-first walk of a decision tree where you prune branches that violate constraints. It is the engine behind permutation/combination/subset generation, N-queens, sudoku, graph colouring, and constraint-satisfaction problems (CSPs). Branch and bound is the same idea extended to optimization, where you prune using a bound on the best achievable objective rather than a hard feasibility check.
+Backtracking is systematic exhaustive search that builds a solution one decision at a time and abandons a partial candidate the instant it can no longer lead to a valid answer. It is the engine behind subset, permutation and combination generation, N-queens, Sudoku, graph colouring, word search on a grid, and constraint-satisfaction problems (CSPs). This topic covers the one universal template all of those instantiate, enumerating subsets/permutations/combinations without duplicates, how pruning shrinks an astronomically large tree, the CSP heuristics (minimum-remaining-values, forward checking, arc consistency), and **branch and bound** — the same idea for optimization, pruning on a *bound* for the best achievable objective rather than a hard feasibility check.
+
+**Mental model**
+Picture a decision tree. The root is "nothing decided yet." Each level is one decision (which element goes in position 3? which column for the queen in row 5?), each edge is one choice, and each leaf is a complete candidate. Backtracking is a depth-first walk of that tree: go as deep as you can, and when a branch turns out to be a dead end, **walk back up one edge, undo the choice you made there, and try the next sibling**. That "undo" is the whole trick — it's how a single mutable board or `used[]` array can be reused for the entire search instead of copying state at every node. Pruning is the second trick: if you can tell at a node that *no* leaf below it is valid, you skip the entire subtree. Brute force builds every leaf then checks it; backtracking checks on the way down and never builds most of the leaves at all.
 
 **Key terms**
-*Partial candidate / state* — the choices made so far. *Choice / candidate set* — the options available at the current step. *Constraint* — a rule a full solution must satisfy; a *pruning predicate* rejects partials that already violate it. *Choose / explore / unchoose* — the template: make a move, recurse, then undo it to restore state. *Feasibility pruning* — cut a branch that cannot satisfy constraints. *Bound* — in branch and bound, an optimistic estimate of the best objective reachable down a branch. *Search tree* — the tree of all partial candidates; leaves are complete assignments.
+- **Partial candidate / state** — the choices made so far, i.e. the path from the root to the current node.
+- **Candidate set** — the options available at the current step (the node's children).
+- **Constraint** — a rule a full solution must satisfy; a **pruning predicate** rejects partials that already violate it.
+- **Choose / explore / unchoose** — the template: make a move, recurse, then undo it to restore state.
+- **Feasibility pruning** — cutting a branch that provably cannot satisfy the constraints.
+- **Bound** — in branch and bound, an optimistic estimate of the best objective reachable inside a subtree.
+- **Search tree** — the tree of all partial candidates; leaves are complete assignments.
+- **CSP** — variables + domains + constraints; a solution assigns every variable a value violating nothing.
+- **MRV** (minimum-remaining-values) — always assign the variable with the fewest legal values left, to fail fast.
 
 **Core mechanics**
-The template is: if the state is a complete solution, record it; otherwise iterate over candidate choices, and for each one that passes the pruning check, apply it, recurse, then undo it. Correctness comes from exhaustiveness: without pruning you would enumerate every leaf, so every valid leaf is reached; pruning only removes branches that provably contain no valid leaf, so nothing valid is lost. Complexity is the number of nodes actually visited, which is why pruning matters so much: naive N-queens is O(n^n) but constraint checks cut it to roughly the number of valid placements. Space is O(depth) for the recursion stack plus whatever bookkeeping (used-columns sets, etc.) — usually O(n) — not the number of solutions, since we emit and discard.
+The template is four lines of shape: if the state is a complete solution, record it and return; otherwise loop over candidate choices, and for each one that passes the pruning check, apply it, recurse, then undo it. Correctness comes from exhaustiveness — without pruning you would reach every leaf, so every valid leaf is found; pruning only removes branches that provably contain no valid leaf, so nothing valid is lost. Complexity is **the number of nodes actually visited**, not the size of the full tree, which is exactly why pruning matters so much: naive N-queens is `O(nⁿ)` but column-and-diagonal checks cut 8-queens from ~19 million nodes to 2,057. Space is `O(depth)` for the recursion stack plus bookkeeping (used-columns sets, a visited grid) — usually `O(n)` — **not** the number of solutions, because you emit each result and discard it.
 
 **Trade-offs**
-Backtracking beats brute-force generate-and-test because it prunes early instead of building full candidates then checking them. It beats DP when the state space has no overlapping subproblems to memoize, or when you must enumerate actual solutions rather than count/optimize. It loses to DP and greedy when the problem has optimal substructure you can exploit for polynomial time — backtracking stays exponential in the worst case. Versus BFS-style search it uses far less memory (stack depth, not frontier width) but does not find shortest paths.
+Backtracking beats brute-force generate-and-test because it prunes early instead of building full candidates and then checking them. It beats dynamic programming when the state space has no overlapping subproblems to memoize, or when you must enumerate the actual solutions rather than count them or optimize over them. It loses to DP and greedy when the problem has optimal substructure you can exploit for polynomial time — backtracking stays exponential in the worst case no matter how clever the pruning. Against BFS-style search it uses far less memory (stack depth, not frontier width) but it does not find shortest paths. Mutate-and-undo is faster than passing immutable copies down (no allocation per node) but demands discipline: one missed undo silently corrupts every sibling branch.
 
 **Common confusions**
-Forgetting to unchoose — leaving mutated shared state (a `used[]` array, a board cell) corrupts sibling branches. Confusing subsets (2^n, include/exclude each element), permutations (n!, order matters, track used), and combinations (n choose k, enforce non-decreasing index to avoid duplicates). Trying to dedupe by post-filtering instead of skipping duplicate choices at the same tree level. Believing pruning changes worst-case Big-O — it changes the practical node count, not the exponential ceiling.
+Forgetting to unchoose — leaving a mutated `used[]` entry or board cell behind poisons sibling branches and produces wrong or missing answers. Confusing the three enumeration shapes: **subsets** (`2ⁿ`, include/exclude each element), **permutations** (`n!`, order matters, track used), **combinations** (`C(n,k)`, enforce a non-decreasing index so `{1,2}` and `{2,1}` aren't both emitted). Trying to dedupe by post-filtering results instead of skipping duplicate choices at the same tree level. Believing pruning changes the worst-case Big-O — it changes the practical node count and the effective branching factor, not the exponential ceiling. And appending the mutable path directly to the results list instead of a copy, so every "solution" ends up empty once the recursion unwinds.
 
 **Why interviewers ask**
-Backtracking tests whether you can turn a vague "find all / does a valid arrangement exist" into a clean recursive template with correct state restoration, and whether you can reason about the exponential cost and where pruning bites. The classic follow-up is "how would you generate results without duplicates?" or "add a constraint and show where you prune."
+Backtracking tests whether you can turn a vague "find all …" or "does a valid arrangement exist?" into a clean recursive template with correct state restoration, and whether you can reason honestly about exponential cost and where pruning bites. It's also the most reusable single template in the interview canon — subsets, permutations, combination sum, palindrome partitioning, word search, N-queens and Sudoku are all the same eight lines with different `is_complete`, `candidates` and `valid`. The standard follow-ups: "handle duplicate inputs without post-filtering," "add this constraint and show me where you prune," "what's the complexity, and is it optimal?"
 
 ### What is backtracking in one sentence?
 
-Backtracking is depth-first search over the tree of partial solutions, where you extend a candidate one choice at a time and immediately abandon (backtrack from) any partial that cannot be completed into a valid solution. It is brute force made tractable by pruning: instead of building every full candidate and testing it, you test incrementally and cut dead branches early.
+Backtracking is depth-first search over the tree of partial solutions, where you extend a candidate one choice at a time and immediately abandon (backtrack from) any partial that cannot be completed into a valid solution.
+
+The analogy: you're in a maze with a piece of chalk. At every junction you pick a corridor and mark it. When you hit a wall, you don't restart from the entrance — you walk back to the last junction, rub out that mark, and take the next corridor. Backtracking is brute force made tractable by that early abandonment: instead of building every full candidate and testing it at the end, you test incrementally on the way down and cut dead branches before paying for the subtree beneath them.
 
 ### What is the choose / explore / unchoose template?
 
-```text
-def backtrack(state):
+Every backtracking problem is this shape. Learn it once and the rest is filling in three functions.
+
+```python
+def backtrack(state, results):
     if is_complete(state):
-        record(state)
+        results.append(snapshot(state))   # copy! not the live state
         return
     for choice in candidates(state):
-        if not valid(state, choice):
-            continue          # prune
-        apply(state, choice)  # choose
-        backtrack(state)      # explore
-        undo(state, choice)   # unchoose
+        if not is_valid(state, choice):
+            continue                      # prune: skip this whole subtree
+        apply(state, choice)              # choose
+        backtrack(state, results)         # explore
+        undo(state, choice)               # unchoose
 ```
 
-The `undo` step is the heart of it: after exploring a branch you restore the state exactly as it was so the next sibling choice starts clean. Whether you mutate shared state and undo, or pass fresh copies down, is a style choice — mutate-and-undo is faster (no allocation) but must be disciplined.
+Four slots: `is_complete` (when is the path a full answer?), `candidates` (what are this node's children?), `is_valid` (which children can't possibly work?), and `apply`/`undo` (the mutation and its exact inverse). Subsets, permutations, N-queens and Sudoku differ *only* in those slots.
+
+Two details bite people. First, `snapshot` must copy — appending the live `path` gives you `k` references to one list that is empty by the time recursion unwinds. Second, `apply`/`undo` must be exact inverses; if `apply` pushes onto a path *and* marks a set, `undo` must pop *and* unmark. Mutate-and-undo avoids an allocation at every node and is what interviewers expect; passing immutable copies down needs no undo at all but is slower.
 
 ### Why must you "unchoose" after recursing?
 
-Because the state is shared across sibling branches. If you mark column 3 as used and recurse, then move to try column 4 without unmarking column 3, column 3 stays falsely occupied for the rest of the loop and for parent branches. Unchoosing restores the invariant "state reflects exactly the choices on the current root-to-node path." If instead you pass an immutable copy to each recursive call, there is nothing to undo — but you pay allocation cost on every node.
+Because the state is shared across sibling branches. If you mark column 3 as used and recurse, then loop on to try column 4 *without* unmarking column 3, column 3 stays falsely occupied for the rest of that loop and for every ancestor branch you return into. Unchoosing restores the invariant that matters: **the state reflects exactly the choices on the current root-to-node path, and nothing else.**
+
+Word search on a grid is the cleanest illustration — you mark a cell as visited so the path can't reuse it, then must restore it so a *different* path is free to use that same cell.
+
+```python
+def exist(board, word):
+    rows, cols = len(board), len(board[0])
+
+    def dfs(r, c, i):
+        if i == len(word):
+            return True
+        if r < 0 or r >= rows or c < 0 or c >= cols:
+            return False
+        if board[r][c] != word[i]:
+            return False                  # prune: wrong letter
+        board[r][c] = "\0"                # choose: mark visited in place
+        found = (dfs(r + 1, c, i + 1) or dfs(r - 1, c, i + 1)
+                 or dfs(r, c + 1, i + 1) or dfs(r, c - 1, i + 1))
+        board[r][c] = word[i]             # unchoose: restore the letter
+        return found
+
+    return any(dfs(r, c, 0) for r in range(rows) for c in range(cols))
+```
+
+Delete that restore line and the search still compiles and still finds *some* words — it just permanently burns every cell it ever touched, so a later starting square needing a shared cell fails. That is the signature bug: not a crash, a quietly wrong answer. Cost is `O(rows·cols·3ᴸ)` for a word of length `L` — four directions at the first step, three after, since you never step back — with `O(L)` stack space.
 
 ### How do you generate all subsets of a set?
 
-Each element is independently in or out, so there are 2^n subsets. Two clean approaches. Recursive include/exclude: at index i, recurse once having added element i, once without, until i reaches n. Iterative cascade: start with [[]], and for each element append it to copies of every existing subset. Bitmask: iterate mask from 0 to 2^n - 1 and include element j when bit j of mask is set. All are O(2^n * n) to materialize (each of 2^n subsets costs up to O(n) to build/copy).
+Each element is independently **in or out**, so there are `2ⁿ` subsets — the decision tree is a perfect binary tree of depth `n`. For `[1,2,3]`, the eight leaves are `[]`, `[3]`, `[2]`, `[2,3]`, `[1]`, `[1,3]`, `[1,2]`, `[1,2,3]`.
+
+Three standard ways, all `O(2ⁿ·n)` — `2ⁿ` subsets each costing up to `O(n)` to build or copy.
+
+```python
+def subsets_recursive(nums):              # include / exclude at each index
+    out, path = [], []
+    def go(i):
+        if i == len(nums):
+            out.append(path[:])           # copy the current path
+            return
+        path.append(nums[i])              # choose: include nums[i]
+        go(i + 1)
+        path.pop()                        # unchoose
+        go(i + 1)                         # explore the exclude branch
+    go(0)
+    return out
+
+def subsets_cascade(nums):                # iterative: double the list each step
+    out = [[]]
+    for x in nums:
+        out += [s + [x] for s in out]     # every existing subset, plus x
+    return out
+
+def subsets_bitmask(nums):                # mask j-th bit set  ->  include nums[j]
+    n = len(nums)
+    return [[nums[j] for j in range(n) if mask >> j & 1]
+            for mask in range(1 << n)]
+```
+
+Cascade traced on `[1,2,3]`: start `[[]]` → after 1, `[[], [1]]` → after 2, `[[], [1], [2], [1,2]]` → after 3, all eight. Bitmask traced: `mask = 5` is binary `101`, so bits 0 and 2 are set, giving `[1,3]`. The bitmask version is the one to reach for when `n ≤ 20` and you want no recursion at all; the recursive one is the one to reach for when you need to *prune* (stop descending when a running sum already exceeds a target), because the other two have no notion of a partial candidate to prune.
 
 ### How do you generate all permutations?
 
-There are n! permutations. Track which elements are already used (a boolean array or a swap-in-place scheme). At each depth pick any unused element, mark it used, recurse to fill the next position, then unmark. The in-place variant swaps element i to the front, recurses on the suffix i+1, then swaps back — no extra used array. Cost is O(n! * n) since there are n! leaves and O(n) work to copy each finished permutation.
+There are `n!` permutations. At each depth you choose which unused element occupies the next position, so the tree has branching factor `n` at the root, `n−1` below it, and so on.
+
+The recursion tree for `[1,2,3]`, depth by depth:
+
+```text
+                      []
+        /             |             \
+      [1]            [2]            [3]
+     /   \          /   \          /   \
+ [1,2]  [1,3]   [2,1]  [2,3]   [3,1]  [3,2]
+   |      |       |      |       |      |
+[1,2,3][1,3,2] [2,1,3][2,3,1] [3,1,2][3,2,1]
+```
+
+Six leaves = `3!`. Two implementations:
+
+```python
+def permutations_used(nums):              # boolean 'used' array
+    out, path = [], []
+    used = [False] * len(nums)
+    def go():
+        if len(path) == len(nums):
+            out.append(path[:])
+            return
+        for i, x in enumerate(nums):
+            if used[i]:
+                continue                  # already placed on this path
+            used[i] = True                # choose
+            path.append(x)
+            go()                          # explore
+            path.pop()                    # unchoose (both halves!)
+            used[i] = False
+    go()
+    return out
+
+def permutations_swap(nums):              # in-place, no extra used array
+    out = []
+    def go(i):
+        if i == len(nums):
+            out.append(nums[:])
+            return
+        for j in range(i, len(nums)):
+            nums[i], nums[j] = nums[j], nums[i]   # choose: bring j to front
+            go(i + 1)                             # explore the suffix
+            nums[i], nums[j] = nums[j], nums[i]   # unchoose: swap back
+    go(0)
+    return out
+```
+
+Both cost `O(n!·n)`: `n!` leaves, `O(n)` to copy each finished permutation. The swap variant uses `O(n)` total extra space instead of an extra `used` array, but it emits permutations in a different (non-lexicographic) order and is harder to adapt to duplicate-skipping — prefer the `used` array when the input may contain repeats.
 
 ### How do you generate combinations (n choose k)?
 
-Combinations are unordered, so you must avoid emitting {1,2} and {2,1} as different results. Enforce that choices are non-decreasing in index: the recursion takes a `start` index and only considers elements from `start` onward. When the current combination reaches size k, record it. Passing `start = i + 1` into the recursive call guarantees each element is used at most once and combinations come out in sorted order, which inherently prevents duplicates.
+Combinations are **unordered**, so `{1,2}` and `{2,1}` are the same answer and must be emitted once. The fix is a `start` index: the recursion only ever considers elements from `start` onward, which forces indices to increase along any path, which makes every combination come out in sorted order — and sorted order can't collide.
+
+```python
+def combinations(n, k):                   # all k-subsets of 1..n
+    out, path = [], []
+    def go(start):
+        if len(path) == k:
+            out.append(path[:])
+            return
+        if len(path) + (n - start + 1) < k:
+            return                        # prune: not enough left to reach k
+        for i in range(start, n + 1):
+            path.append(i)                # choose
+            go(i + 1)                     # explore: i+1 forbids reuse of i
+            path.pop()                    # unchoose
+    go(1)
+    return out
+
+def combination_sum(candidates, target):  # unlimited reuse of each candidate
+    candidates.sort()
+    out, path = [], []
+    def go(start, remaining):
+        if remaining == 0:
+            out.append(path[:])
+            return
+        for i in range(start, len(candidates)):
+            if candidates[i] > remaining:
+                break                     # prune: sorted, so all later ones fail too
+            path.append(candidates[i])
+            go(i, remaining - candidates[i])   # 'i' not 'i+1' -> reuse allowed
+            path.pop()
+    go(0, target)
+    return out
+```
+
+`combinations(4, 2)` yields `[1,2] [1,3] [1,4] [2,3] [2,4] [3,4]` — six, which is `C(4,2)`. In `combination_sum`, passing `i` instead of `i + 1` is the single character that switches "each element at most once" to "each element unlimited times"; sorting plus the `break` is real pruning, not cosmetics, since it kills the entire tail of the loop the moment a candidate overshoots.
 
 ### How do you handle duplicates in the input when generating subsets/permutations?
 
-Sort first so equal elements are adjacent, then skip a choice that repeats the previous choice at the same tree level. Concretely, in the loop `for i in range(start, n)`, skip when `i > start and nums[i] == nums[i-1]`. The `i > start` guard is critical: it allows the first occurrence of a value at this level but blocks the second, which is exactly the branch that would produce a duplicate result. Post-filtering with a set also works but wastes the work of generating the dupes.
+Sort first so equal elements are adjacent, then **skip a choice that repeats the previous choice at the same tree level**.
+
+```python
+def subsets_with_dups(nums):
+    nums.sort()                           # equal values become adjacent
+    out, path = [], []
+    def go(start):
+        out.append(path[:])
+        for i in range(start, len(nums)):
+            if i > start and nums[i] == nums[i - 1]:
+                continue                  # same value already tried at this level
+            path.append(nums[i])
+            go(i + 1)
+            path.pop()
+    go(0)
+    return out
+```
+
+The `i > start` guard is the whole idea and it is worth saying out loud in an interview: at a given node, `i == start` is the *first* time this value is offered as a child, so allow it; any later `i` with the same value would create a sibling subtree identical to one already explored, so skip it. Note this blocks duplicate *siblings*, not duplicate values on a path — `[2,2]` is still produced, because the second `2` is chosen one level deeper where `start` has advanced.
+
+On `nums = [1,2,2]`: at the root, `start = 0`, so children are `1` (i=0), `2` (i=1), and `2` again at i=2 — blocked, because `i > start` and `nums[2] == nums[1]`. Result: 6 distinct subsets instead of 8 with two duplicated pairs. For permutations with duplicates the same guard applies with `used[i-1]` in place of the index test: `if i > 0 and nums[i] == nums[i-1] and not used[i-1]: continue`. Post-filtering through a set also produces the right answer but pays full price for generating the duplicates first — on `[1]*20` that's `2²⁰` wasted branches to return 21 subsets.
 
 ### Explain the N-queens problem and its backtracking solution.
 
-Place n queens on an n x n board so none attack another (no shared row, column, or diagonal). Place one queen per row, so the state is a column choice per row. Maintain three sets: used columns, used "/" diagonals (indexed by row + col), and used "\" diagonals (indexed by row - col). For each row, try each column whose three keys are all free; if free, place, recurse to the next row, then remove. A full assignment across all rows is a solution. This is far faster than checking all C(n^2, n) placements because the diagonal/column sets prune almost everything.
+Place `n` queens on an `n × n` board so no two attack each other — no shared row, column, or diagonal. The first modelling insight collapses most of the problem: since every row holds exactly one queen, **the state is just "which column did I pick for each row,"** and the search is `n` levels deep with at most `n` choices per level.
+
+The second insight makes the validity check `O(1)`. A cell's `↗` diagonal is constant along `row + col`; its `↘` diagonal is constant along `row − col`. So three sets are all the bookkeeping you need.
+
+```python
+def solve_n_queens(n):
+    out, placement = [], []
+    cols, diag_up, diag_down = set(), set(), set()
+
+    def go(row):
+        if row == n:
+            out.append(placement[:])
+            return
+        for col in range(n):
+            if col in cols or (row + col) in diag_up or (row - col) in diag_down:
+                continue                  # prune: attacked, skip the subtree
+            cols.add(col)                 # choose
+            diag_up.add(row + col)
+            diag_down.add(row - col)
+            placement.append(col)
+            go(row + 1)                   # explore the next row
+            placement.pop()               # unchoose, all four pieces
+            cols.remove(col)
+            diag_up.remove(row + col)
+            diag_down.remove(row - col)
+
+    go(0)
+    return out
+```
+
+Trace `n = 4` briefly: row 0 tries col 0; row 1 can't use col 0 (column), col 1 (`↘` diagonal), so it tries col 2; row 2 then has no legal column at all and returns immediately; row 1 tries col 3; row 2 takes col 1; row 3 has nothing legal; the whole `col 0` root branch dies. Row 0 col 1 then leads to the solution `[1,3,0,2]`. Two solutions exist for `n = 4`, 92 for `n = 8`.
 
 ### What is the time complexity of N-queens?
 
-The naive upper bound is O(n^n) (n columns per row, n rows), and even placing one queen per row without pruning is O(n!). With column and diagonal pruning the number of visited nodes is dramatically smaller — empirically it grows exponentially but far below n!. There is no known polynomial algorithm to count solutions; the value is that constraint propagation makes concrete sizes (n up to ~30 for one solution) tractable. The honest interview answer: exponential worst case, but pruning cuts the constant/branching factor enormously.
+The naive upper bound is `O(nⁿ)` — `n` column choices in each of `n` rows. Restricting to one queen per row *and* distinct columns without any diagonal check gives `O(n!)`. Neither describes what actually runs, because the cost of backtracking is **the number of nodes visited**, and the constraint sets kill branches near the top of the tree where the subtrees are largest.
+
+Concretely, for `n = 8`:
+
+```python
+naive_leaves       = 8 ** 8              # 16,777,216  every column in every row
+naive_tree_nodes   = (8 ** 9 - 1) // 7   # 19,173,961  including internal nodes
+distinct_cols_only = 40320               # 8!  permutations, no diagonal pruning
+with_full_pruning  = 2057                # nodes actually visited, all 92 solutions
+```
+
+That is roughly a **9,000×** reduction in visited nodes versus the naive tree, and the gap widens with `n`. But be honest about what changed: pruning shrank the effective branching factor, not the asymptotic class. There is no known polynomial algorithm to count N-queens solutions, and the growth is still exponential — the practical payoff is that finding *one* solution stays fast to around `n ≈ 30`, and with a good heuristic much further. The interview answer to give: "exponential worst case — the usual bound quoted is `O(n!)` — but constraint pruning cuts the visited node count by orders of magnitude, e.g. 2,057 nodes instead of ~19 million for `n = 8`."
 
 ### How does backtracking solve Sudoku?
 
-Find an empty cell, try digits 1-9, and place a digit only if it violates no row, column, or 3x3 box constraint; recurse; if the recursion dead-ends (some later cell has no legal digit), undo and try the next digit. It is a CSP: variables are cells, domains are 1-9, constraints are all-different per row/column/box. Plain backtracking works; adding heuristics — pick the empty cell with the fewest legal candidates (minimum-remaining-values), and propagate forced singles — turns most human-solvable boards nearly instant.
+Find an empty cell, try digits 1–9, place a digit only if it violates no row, column or 3×3 box constraint, then recurse; if the recursion dead-ends because some later cell has no legal digit, undo and try the next digit. It's a CSP: variables are the 81 cells, domains are 1–9, constraints are all-different per row, per column, per box.
+
+```python
+def solve_sudoku(board):                  # board: 9x9 list of ints, 0 = empty
+    rows = [set() for _ in range(9)]
+    cols = [set() for _ in range(9)]
+    boxes = [set() for _ in range(9)]
+    empties = []
+    for r in range(9):
+        for c in range(9):
+            v = board[r][c]
+            if v:
+                rows[r].add(v); cols[c].add(v); boxes[(r // 3) * 3 + c // 3].add(v)
+            else:
+                empties.append((r, c))
+
+    def candidates(r, c):
+        taken = rows[r] | cols[c] | boxes[(r // 3) * 3 + c // 3]
+        return [d for d in range(1, 10) if d not in taken]
+
+    def go():
+        if not empties:
+            return True
+        # most-constrained-variable: solve the cell with fewest options first
+        best = min(range(len(empties)), key=lambda i: len(candidates(*empties[i])))
+        r, c = empties.pop(best)
+        b = (r // 3) * 3 + c // 3
+        for d in candidates(r, c):
+            board[r][c] = d                                   # choose
+            rows[r].add(d); cols[c].add(d); boxes[b].add(d)
+            if go():                                          # explore
+                return True
+            board[r][c] = 0                                   # unchoose
+            rows[r].discard(d); cols[c].discard(d); boxes[b].discard(d)
+        empties.insert(best, (r, c))      # restore the worklist too
+        return False
+
+    return go()
+```
+
+Plain left-to-right cell order already works, but the `min(...)` line is the difference between "a second or two" and "instant" on hard boards: **minimum-remaining-values** picks the cell with the fewest legal digits, so if a cell has exactly one candidate you effectively propagate a forced single, and if it has zero you discover the contradiction *now* rather than fifteen levels deeper. Note the three sets are the constraint store — maintaining them incrementally is what makes `candidates` cheap enough to call inside the `min`.
 
 ### What is a constraint satisfaction problem (CSP)?
 
-A CSP is defined by variables, a domain of possible values for each, and constraints restricting which combinations are allowed; a solution assigns every variable a value satisfying all constraints. Sudoku, graph colouring, N-queens, and scheduling are CSPs. Backtracking is the default solver, sharpened by three ideas: variable ordering (minimum-remaining-values — assign the most constrained variable first to fail fast), value ordering (least-constraining-value first), and constraint propagation (forward checking / arc consistency) that prunes domains after each assignment.
+A CSP is defined by **variables**, a **domain** of possible values for each, and **constraints** restricting which combinations are allowed; a solution assigns every variable a value satisfying all constraints. Sudoku (81 cells, domains 1–9, all-different per unit), N-queens (one variable per row, domain = columns), graph colouring (one variable per vertex, adjacent vertices differ), timetabling and register allocation are all CSPs — one solver template covers all of them.
+
+Backtracking is the default solver, sharpened by three orthogonal ideas. **Variable ordering**: assign the most constrained variable first (minimum-remaining-values) so failures surface at shallow depth where they cost you the least. **Value ordering**: try the least-constraining value first — the one that rules out fewest options for neighbours — because when you only need *one* solution you want the first branch to succeed. **Constraint propagation**: after each assignment, shrink the domains of related variables and detect emptiness early. Together these routinely turn a search that would run for hours into one that finishes immediately, without changing the exponential worst case.
 
 ### What is forward checking and how does it help?
 
-After assigning a variable, forward checking removes the newly-inconsistent values from the domains of the *unassigned* variables that share a constraint. If any variable's domain becomes empty, you backtrack immediately instead of discovering the failure many levels deeper. It is cheap look-ahead that prunes doomed branches early. Arc consistency (the AC-3 algorithm) generalizes this by repeatedly propagating domain reductions until no more values can be eliminated, catching failures even earlier at higher cost per node.
+After assigning a variable, forward checking removes the newly-inconsistent values from the domains of the **unassigned** variables that share a constraint with it. If any of those domains becomes empty, you backtrack immediately instead of discovering the same failure many levels deeper.
+
+Concretely in Sudoku: you write a `7` into cell `(0,0)`. Forward checking strikes `7` from the domain of every other cell in row 0, column 0, and the top-left box. If some cell in row 0 had domain `{7}`, it is now `{}` — the branch is dead and you undo `(0,0)` right away. Without forward checking you'd keep assigning cells happily until the search finally reached that doomed cell, wasting every node in between.
+
+Arc consistency generalizes this. The **AC-3** algorithm keeps a worklist of constraint arcs and repeatedly removes values from a domain that have no supporting value in a neighbour's domain, re-queuing affected arcs until nothing changes — so a reduction can cascade several variables away and catch failures forward checking would miss. The trade is cost per node: forward checking is one cheap sweep over neighbours, AC-3 is a fixpoint loop. Standard guidance is forward checking by default, AC-3 when the constraint graph is dense enough that propagation pays for itself.
 
 ### What is branch and bound and how does it differ from plain backtracking?
 
-Branch and bound is backtracking for optimization. Alongside feasibility pruning it computes a *bound* — an optimistic estimate of the best objective achievable in a subtree — and prunes the subtree when that bound cannot beat the best complete solution found so far. Plain backtracking prunes only on hard constraint violations; branch and bound also prunes on "this branch can't possibly improve our answer." It is how you attack the travelling salesman and knapsack optimally in practice: exponential worst case, but a good bound function prunes vast regions.
+Branch and bound is backtracking for **optimization** rather than feasibility. Alongside the usual constraint check it computes a **bound** — an optimistic estimate of the best objective achievable anywhere in the current subtree — and prunes the subtree when that bound cannot beat the best complete solution found so far (the *incumbent*).
+
+The distinction in one line: plain backtracking prunes on "this branch is illegal"; branch and bound also prunes on "this branch is legal but can't possibly improve my answer." For 0/1 knapsack you bound a partial packing by adding the fractional-knapsack value of the remaining items — that's an upper bound on anything below, so if it's `≤` the best full packing you already have, discard the subtree unopened. For travelling salesman you bound a partial tour by its current length plus a minimum-spanning-tree or cheapest-edge estimate on the unvisited cities.
+
+Two practical consequences. The bound function's quality *is* the algorithm — a tight bound prunes vast regions, a loose one degrades to exhaustive search. And a good incumbent early matters enormously, so implementations often seed the bound with a greedy heuristic and explore best-bound-first rather than strictly depth-first. It stays exponential in the worst case; it's how TSP and knapsack are solved *optimally* on real instances despite being NP-hard.
 
 ### When would you choose backtracking over dynamic programming?
 
-Choose backtracking when you must enumerate actual solutions (all subsets summing to a target, every valid board), when the state space lacks overlapping subproblems to memoize, or when constraints prune so aggressively that exhaustive search is fast enough. Choose DP when subproblems overlap and you only need a count or an optimum — DP reuses work and often turns exponential into polynomial. They combine: memoized backtracking (top-down DP) is backtracking plus a cache on the state, appropriate when the state repeats across branches.
+Choose backtracking when you must **enumerate the actual solutions** (every subset summing to a target, every valid board, all palindrome partitions) — DP can count or optimize but a table doesn't hand you the objects. Choose it when the state space has **no overlapping subproblems** to memoize, so a cache would only add overhead. And choose it when constraints prune so aggressively that exhaustive search is simply fast enough for the input sizes in play.
+
+Choose DP when subproblems overlap and you only need a count or an optimum: DP reuses work and often turns exponential into polynomial. The clean tell is whether two different decision paths can arrive at the *same* remaining problem. In combination sum on distinct positive integers, paths `[2,3]` and `[3,2]` both leave the same target remaining — overlap, so counting solutions is a polynomial DP even though *listing* them is exponential. In N-queens, two different partial placements are genuinely different states with different futures — no overlap, so DP has nothing to reuse.
+
+They also combine: **memoized backtracking is top-down DP**. Write the recursion first, then, if you notice the same state recurring across branches and you only need a value rather than the enumeration, add a dictionary keyed on the state. That is often the smoothest path in an interview — get the correct exponential recursion on the board, then earn the polynomial by caching.
 
 ### Why is exponential search sometimes acceptable in an interview?
 
-Because for many problems it is provably the best known — enumerating all 2^n subsets or n! permutations is inherently exponential in output size, and NP-hard CSPs have no known polynomial algorithm. What interviewers want is that you (1) state the true complexity honestly, (2) prune to make realistic inputs tractable, and (3) know when a polynomial DP/greedy exists so you do not reach for exponential search needlessly. Saying "this is O(2^n), which is optimal because the output itself is size 2^n" is a strong, correct answer.
+Because for many problems it is provably the best known — or provably necessary. Enumerating all `2ⁿ` subsets or all `n!` permutations is exponential *in the size of the output*, so no algorithm can do better; you cannot print `2ⁿ` things in fewer than `2ⁿ` steps. And NP-hard CSPs like Sudoku on an `n² × n²` board or graph colouring have no known polynomial algorithm at all, so exponential search with good pruning is the state of the art, not a cop-out.
+
+What interviewers actually want is three things. **State the true complexity honestly** — say `O(2ⁿ·n)` and explain where each factor comes from, rather than hoping nobody asks. **Prune so realistic inputs are tractable** — show the `break` on the sorted candidate list, the diagonal sets, the MRV ordering, and be able to say roughly how much they buy. **Know when a polynomial alternative exists**, so you don't reach for exponential search on a problem that is secretly a DP or a greedy. The strongest version of the answer sounds like: "this is `Θ(2ⁿ)`, which is optimal here because the output itself has size `2ⁿ`; if you only need the *count*, that's a `O(n·target)` DP instead."
 
 ## String Algorithms
 
 ### Summary
 
 **What this topic covers**
-This topic is about doing things with strings faster than the obvious quadratic approach — chiefly pattern matching (find occurrences of a pattern P of length m inside a text T of length n) and string similarity (edit distance). The headline algorithms are KMP and Z-algorithm (linear matching via self-structure of the pattern), Rabin-Karp (hashing a sliding window), and Boyer-Moore (skip-ahead heuristics). Suffix arrays and suffix automata are advanced index structures for many-query problems; edit distance is the canonical string DP.
+How to do things with strings faster than the obvious quadratic approach. Two families dominate. **Pattern matching**: find every occurrence of a pattern `P` of length `m` inside a text `T` of length `n`. The naive approach is `O(n·m)`; **KMP** and the **Z-algorithm** get to `O(n + m)` by exploiting the pattern's own internal repetition, **Rabin-Karp** gets there in expectation by hashing a sliding window, and **Boyer-Moore** goes *sublinear* in practice by skipping ahead. **String similarity**: **edit (Levenshtein) distance**, the canonical string DP, plus its space optimisation. The topic closes with index structures for repeated queries (**suffix arrays**, **suffix automata**) and the longest-palindromic-substring problem.
+
+**Mental model**
+Naive matching is a person who, on every mismatch, forgets everything they just read and starts again one character to the right. Every fast algorithm here is a different way of *not forgetting*. KMP remembers the pattern's self-similarity: "I've matched five characters and the sixth failed — how much of what I matched is still usable as a fresh head start?" Rabin-Karp remembers a *fingerprint* of the window, updating it in constant time as the window slides, and only reads real characters when the fingerprint matches. Boyer-Moore looks at the *end* of the alignment first, so a single bad character can prove the whole alignment impossible and let it jump `m` positions at once. Suffix arrays flip the economics entirely: pay a big one-off preprocessing cost on the text, then answer unlimited pattern queries cheaply.
 
 **Key terms**
-*Pattern P, text T*, lengths m and n. *Prefix* — a start-anchored substring; *suffix* — an end-anchored one. *Border* — a string that is both a proper prefix and a proper suffix. *Failure function / prefix function (pi)* — for each position, the length of the longest proper border of that prefix; KMP's core table. *Z-array* — for each i, the length of the longest substring starting at i that matches a prefix of the string. *Rolling hash* — a hash updatable in O(1) as the window slides. *Suffix array* — sorted order of all suffixes. *Edit (Levenshtein) distance* — min insert/delete/substitute operations to transform one string into another.
+- **Pattern `P`, text `T`** — the needle (length `m`) and the haystack (length `n`).
+- **Prefix / suffix** — a start-anchored substring / an end-anchored substring.
+- **Border** — a string that is both a *proper* prefix and a *proper* suffix of another string. `"aba"` has border `"a"`.
+- **Failure function / prefix function (`pi`)** — for each prefix of `P`, the length of its longest border. KMP's whole secret.
+- **LPS array** — "longest proper prefix that is also a suffix": another name for the same table.
+- **Z-array** — for each index `i`, the length of the longest substring starting at `i` that matches a prefix of the string.
+- **Rolling hash** — a hash you can update in `O(1)` when the window slides one character.
+- **Suffix array** — the starting indices of all suffixes, sorted lexicographically.
+- **Edit distance** — minimum insertions, deletions and substitutions to turn one string into another.
 
 **Core mechanics**
-Naive matching slides P over T and compares up to m chars per position: O(n*m). KMP precomputes the prefix function in O(m), then scans T once never re-reading a character: on a mismatch it shifts P using the failure function instead of restarting, giving O(n + m) with O(m) space. The correctness rests on the invariant that the failure function tells you the longest already-matched prefix you can keep. Rabin-Karp hashes each length-m window with a rolling hash and compares hashes in O(1), verifying character-by-character only on a hash hit; O(n + m) expected, O(n*m) worst case under adversarial collisions. Z-algorithm computes the Z-array in O(n) using a maintained [l, r] match window and is an alternative linear matcher (run it on P + separator + T). Edit distance is an O(m*n) time, O(min(m,n)) space DP.
+Naive matching tries each of the ~`n` alignments and compares up to `m` characters at each: `O(n·m)`. KMP precomputes `pi` in `O(m)` by matching the pattern against itself, then scans `T` once with a pointer that **never moves backwards** — on a mismatch it sets `j = pi[j-1]` instead of restarting — giving `O(n + m)` time (linear in the combined length of text and pattern) and `O(m)` space. Rabin-Karp hashes every length-`m` window with a rolling hash, compares hashes in `O(1)`, and verifies character-by-character only on a hash hit: `O(n + m)` expected, `O(n·m)` worst case. The Z-algorithm computes the Z-array in `O(n)` using a maintained `[l, r]` window of the rightmost prefix match; run it on `P + sentinel + T` and any Z-value equal to `m` is an occurrence. Edit distance is an `O(m·n)` DP over a table, reducible to `O(min(m, n))` space.
 
 **Trade-offs**
-KMP: guaranteed linear, single pass, tiny table — the safe default for one pattern in one text. Rabin-Karp: shines for *multiple* patterns of equal length (hash them into a set) and for 2D/substring-fingerprint problems, but needs collision handling. Boyer-Moore: sublinear in practice on natural text (often ~n/m comparisons) by skipping, which is why grep-family tools use it, but worst case is still O(n*m) without the Galil rule. Suffix array/automaton: heavy to build (O(n) or O(n log n)) but then answer many pattern queries in O(m log n) or O(m) — worth it only when you query the same text repeatedly.
+KMP is the safe default: guaranteed linear, one forward pass, an `O(m)` table, no randomness. Rabin-Karp shines when you search for **many** equal-length patterns at once (hash them all into a set and make one pass) or when a rolling fingerprint is natural (2D matching, substring dedup) — but you must handle collisions. Boyer-Moore often examines only about `n/m` characters on natural-language text, which is why grep-family tools use it, but its bookkeeping is heavier and its worst case is `O(n·m)` without the Galil rule. Suffix arrays and automata cost `O(n log n)` or `O(n)` to build and are only worth it when you query the **same text** repeatedly.
 
 **Common confusions**
-Thinking the KMP failure function stores the shift distance — it stores the longest border length; the shift is derived from it. Conflating the Z-array with the prefix function (related but indexed differently). Believing Rabin-Karp is always linear — a single global modulus invites engineered collisions, so verify matches and consider double hashing. Assuming edit distance allows transpositions (that is Damerau-Levenshtein, a different recurrence). Off-by-one in hash removal of the leading character when the window slides.
+Thinking `pi` stores a *shift distance* — it stores a *border length*; the shift is derived from it (`shift = j - pi[j-1]`). Conflating the Z-array with the prefix function: both capture self-similarity, but Z is indexed by "match starting here" and `pi` by "prefix ending here". Believing Rabin-Karp is always linear — one fixed small modulus invites engineered collisions, so verify matches and consider double hashing. Assuming edit distance allows transpositions (that is Damerau-Levenshtein, a different recurrence). Off-by-one when removing the leading character's contribution as the hash window slides.
 
 **Why interviewers ask**
-String matching separates candidates who only know O(n*m) naive from those who understand how to exploit structure (KMP), randomization (hashing), or skipping (Boyer-Moore) to hit linear/sublinear. Edit distance is the most-asked string DP and tests recurrence design plus space optimization. The favourite follow-up: "why is naive O(n*m), and how does KMP avoid re-scanning?"
+String matching cleanly separates candidates who only know the `O(n·m)` scan from those who can exploit structure (KMP), randomisation (hashing) or skipping (Boyer-Moore). It is one of the few interview topics where the *reason* an algorithm is linear is genuinely interesting, so it rewards understanding over memorisation. Edit distance is the most-asked string DP and tests recurrence design plus space optimisation. The favourite follow-up is exactly the one this topic answers: "why is naive quadratic, and how does KMP avoid re-scanning?"
 
 ### Why is naive string matching O(n*m)?
 
-Naive matching aligns the pattern at each of the ~n starting positions in the text and, for each, compares characters until a mismatch or a full match — up to m comparisons. Worst case (e.g. text "aaaa…a", pattern "aaa…ab") every alignment compares nearly all m characters before failing on the last, giving O(n*m). The waste is that after a mismatch it throws away everything it learned and restarts the pattern from scratch one position over, re-reading text characters it already examined.
+Naive matching does the obvious thing: line the pattern up at position `0` of the text, compare left to right until a mismatch or a full match, then slide one position right and start over.
+
+```python
+def naive_search(T, P):
+    n, m = len(T), len(P)
+    hits = []
+    for s in range(n - m + 1):        # each of the ~n alignments
+        k = 0
+        while k < m and T[s + k] == P[k]:   # up to m comparisons
+            k += 1
+        if k == m:
+            hits.append(s)
+    return hits
+```
+
+There are about `n` alignments and each costs up to `m` comparisons, so the worst case is `O(n·m)` — quadratic when the pattern is a decent fraction of the text.
+
+The adversarial case makes the waste obvious. Take `T = "aaaaaaaaaa"` (ten `a`s) and `P = "aaab"`. At **every** alignment the algorithm matches `"aaa"` — three successful comparisons — then fails on the `b`. It then slides by one and does the same three comparisons on almost the same characters. Across ten alignments it reads ~40 characters to find nothing, and each text character gets re-read up to four times.
+
+That re-reading is the entire problem. After matching `"aaa"` at position 0, the algorithm already *knows* that positions 1, 2 and 3 hold `a`s — but it throws that knowledge away. Every fast matcher in this topic is a different way of keeping it.
 
 ### What is the failure function (prefix function) in KMP?
 
-For each prefix of the pattern, the failure function pi[i] is the length of the longest proper border of that prefix — the longest string that is both a proper prefix and a proper suffix of P[0..i]. Intuitively it answers: "if I have matched i+1 characters and the next one mismatches, what is the longest already-matched prefix I can fall back to without moving the text pointer?" It is precomputed in O(m) by a self-match of the pattern against itself, and it is the entire secret to KMP's linearity.
+The failure function answers one question: **"I have matched `j` characters of the pattern and the next one just failed. How much of that matched prefix can I keep instead of starting over?"**
+
+Formally, `pi[i]` is the length of the longest **proper border** of `P[0..i]` — the longest string that is both a proper prefix and a proper suffix of that prefix of the pattern. "Proper" just means "not the whole thing".
+
+Here is the intuition made concrete. Suppose `P = "ababaca"` and you have matched `"ababa"` (five characters) when the sixth fails. You cannot keep all five — the alignment is dead. But `"ababa"` ends in `"aba"`, and `"aba"` is *also* how the pattern begins. So the last three characters you already read can serve as the first three characters of a fresh, shifted alignment. You keep three, discard two, and — crucially — you do **not** re-read any text. `pi[4] = 3` records exactly that.
+
+Why a *border*? Because the text you just consumed equals the pattern prefix you matched. Any new alignment that could possibly succeed must have its own prefix agree with the tail of what you already read. The longest such agreement is the longest border, and taking the *longest* one guarantees you never skip over a real occurrence.
+
+The table is built in `O(m)` by matching the pattern against itself. It is the entire reason KMP is linear.
 
 ### How does KMP achieve O(n + m)?
 
-It scans the text with a single pointer that never moves backward. It keeps a length j of how much of the pattern currently matches. On a mismatch, instead of resetting j to 0 and backing up in the text, it sets j = pi[j-1] — sliding the pattern forward by the largest safe amount implied by the border — and retries the same text character. Each text character causes at most one advance and a bounded number of failure-function fallbacks (amortized), so text processing is O(n); building pi is O(m). Total O(n + m), space O(m).
+KMP walks the text with a pointer `i` that **never moves backwards**, and keeps a counter `j` of how many pattern characters currently match. On a mismatch it does not reset `j = 0` and back up in the text; it sets `j = pi[j-1]` and retries the *same* text character against a shorter, still-valid prefix.
+
+```python
+def kmp_search(T, P):
+    if not P:
+        return []
+    pi = prefix_function(P)           # built below, O(m)
+    hits, j = [], 0                   # j = chars of P currently matched
+    for i, ch in enumerate(T):        # i never goes backwards
+        while j > 0 and ch != P[j]:
+            j = pi[j - 1]             # reuse the longest border, don't restart
+        if ch == P[j]:
+            j += 1
+        if j == len(P):
+            hits.append(i - len(P) + 1)
+            j = pi[j - 1]             # keep going for overlapping matches
+    return hits
+```
+
+Trace it on `T = "abababaca"`, `P = "ababaca"`, with `pi = [0,0,1,2,3,0,1]`:
+
+- `i = 0..4`: `a b a b a` all match, `j` climbs to `5`.
+- `i = 5`: `T[5] = 'b'` but `P[5] = 'c'` — mismatch. Set `j = pi[4] = 3`. **The text pointer stays at 5.** Now compare `T[5] = 'b'` against `P[3] = 'b'` — match, `j = 4`.
+- `i = 6`: `'a'` vs `P[4] = 'a'` — match, `j = 5`.
+- `i = 7`: `'c'` vs `P[5] = 'c'` — match, `j = 6`.
+- `i = 8`: `'a'` vs `P[6] = 'a'` — match, `j = 7 = m`. Occurrence at index `8 - 7 + 1 = 2`.
+
+Nine text characters, read once each. Naive would have re-read the middle of that text four times over.
+
+**Why it is linear, in words.** The outer loop runs once per text character, so `n` iterations. The inner `while` only ever *decreases* `j`, and `j` increases by at most one per outer iteration — so across the whole scan `j` can decrease at most `n` times in total. That is an amortised argument: individual characters may trigger several fallbacks, but the total across the run is bounded by `n`. Building `pi` is `O(m)` by the identical argument. Total time `O(n + m)` — proportional to text length plus pattern length, never their product. Space is `O(m)` for the table.
 
 ### Walk through building the KMP prefix function.
+
+The build is a self-match: run the pattern against itself with the same fallback logic the search uses.
 
 ```python
 def prefix_function(P):
     pi = [0] * len(P)
-    k = 0                     # length of current longest border
+    k = 0                             # length of the current longest border
     for i in range(1, len(P)):
         while k > 0 and P[i] != P[k]:
-            k = pi[k - 1]     # fall back to next shorter border
+            k = pi[k - 1]             # fall back to the next shorter border
         if P[i] == P[k]:
-            k += 1
+            k += 1                    # border extends by one
         pi[i] = k
     return pi
 ```
 
-`k` tracks the current border length. When P[i] extends the border, k grows; when it breaks, we fall back through progressively shorter borders via `pi[k-1]` until we can extend or reach 0. The while loop's total iterations across all i are bounded (k rises at most n times, so it can fall at most n times), giving amortized O(m).
+Read `k` as "how long a border I currently have". If `P[i]` extends it, `k` grows by one. If it breaks, fall back to the next shorter border via `pi[k-1]` and try again, all the way down to `0`.
+
+**Cell by cell on `P = "ababaca"`** (indices `0:a 1:b 2:a 3:b 4:a 5:c 6:a`):
+
+| `i` | char | comparison | `k` after | `pi[i]` | border |
+| --- | --- | --- | --- | --- | --- |
+| 0 | `a` | — (always 0) | 0 | `0` | none |
+| 1 | `b` | `P[1]='b'` vs `P[0]='a'` — no | 0 | `0` | none |
+| 2 | `a` | `P[2]='a'` vs `P[0]='a'` — yes | 1 | `1` | `"a"` |
+| 3 | `b` | `P[3]='b'` vs `P[1]='b'` — yes | 2 | `2` | `"ab"` |
+| 4 | `a` | `P[4]='a'` vs `P[2]='a'` — yes | 3 | `3` | `"aba"` |
+| 5 | `c` | vs `P[3]='b'` no → `k=pi[2]=1`; vs `P[1]='b'` no → `k=pi[0]=0`; vs `P[0]='a'` no | 0 | `0` | none |
+| 6 | `a` | `P[6]='a'` vs `P[0]='a'` — yes | 1 | `1` | `"a"` |
+
+So `pi = [0, 0, 1, 2, 3, 0, 1]`. Sanity-check `pi[4] = 3`: the prefix is `"ababa"`, and `"aba"` is indeed both its start and its end — that is the three characters KMP gets to keep on a mismatch at position 5.
+
+Row `i = 5` shows the cascade: `c` cannot extend `"aba"`, so we try the next shorter border `"a"`, then the empty border, and settle at `0`. Even though that row did three comparisons, the total work is amortised `O(m)`: `k` rises at most `m` times over the whole build, so it can fall at most `m` times.
 
 ### How does Rabin-Karp use a rolling hash?
 
-Treat each length-m window of the text as a number in some base b modulo a large prime. Compute the pattern's hash once and the first window's hash, then slide: the new hash is `(old - T[i]*b^(m-1)) * b + T[i+m]`, all mod p — O(1) per shift because you subtract the outgoing character's contribution and add the incoming one. When a window's hash equals the pattern's hash you have a *candidate*; verify character-by-character to rule out a collision. Expected O(n + m); worst case O(n*m) if many spurious hash hits force verification.
+Rabin-Karp treats each length-`m` window as a number in some base `b`, taken modulo a large prime `p`. Comparing two `m`-character strings costs `O(m)`; comparing two hashes costs `O(1)`. The trick is updating the window hash in constant time as it slides: subtract the outgoing character's contribution, shift the rest up one place, add the incoming character.
+
+```python
+def rabin_karp(T, P, base=256, mod=1_000_000_007):
+    n, m = len(T), len(P)
+    if m > n or m == 0:
+        return []
+    high = pow(base, m - 1, mod)      # weight of the leading character
+    hp = hw = 0
+    for i in range(m):                # hash P and the first window
+        hp = (hp * base + ord(P[i])) % mod
+        hw = (hw * base + ord(T[i])) % mod
+    hits = []
+    for s in range(n - m + 1):
+        if hw == hp and T[s:s + m] == P:   # verify: hashes can collide
+            hits.append(s)
+        if s + m < n:                 # roll the window one step right
+            hw = (hw - ord(T[s]) * high) % mod
+            hw = (hw * base + ord(T[s + m])) % mod
+    return hits
+```
+
+**Micro-example with tiny numbers.** Let `a = 1, b = 2, c = 3, d = 4`, base `10`, no modulus needed. `T = "abcd"`, `P = "bc"`, so `hash(P) = 2·10 + 3 = 23`. First window `"ab"` hashes to `1·10 + 2 = 12`. Roll: drop the leading `a` (`12 − 1·10 = 2`), shift and add `c` (`2·10 + 3 = 23`). That equals `hash(P)`, so we verify `T[1:3] == "bc"` — a real match. Note the `high = base^(m-1)` weight: with `m = 2` it is `10`, not `100`. Getting that power wrong is the classic bug.
+
+**Collisions.** Two different windows can hash to the same value, so a hash hit is only a *candidate*. The `T[s:s+m] == P` check is not optional — without it you report false positives. With a good random prime, spurious hits are rare, giving `O(n + m)` expected time: linear in text plus pattern. But an adversary who knows your base and modulus can manufacture a text where every window collides, forcing an `O(m)` verification at every position and dragging you back to `O(n·m)`.
 
 ### When is Rabin-Karp the right choice over KMP?
 
-When you search for many patterns at once (hash all patterns of a given length into a set, then one pass over the text checks each window's hash against the set — great for plagiarism/duplicate detection) and for 2D pattern matching or substring-fingerprint problems where a rolling hash extends naturally. For a single pattern in a single text, KMP's guaranteed linear time with no collision risk is usually cleaner. Rabin-Karp's Achilles heel is adversarial input engineered to collide, which you mitigate with a random modulus/base or double hashing.
+Three situations.
+
+**Many patterns at once.** This is the killer application. Hash all `k` patterns of length `m` into a Python `set`, then make one pass over the text, hashing each window and checking set membership in `O(1)`. That finds any of the `k` patterns in `O(n + k·m)` — KMP would need `k` separate passes. This is how plagiarism detectors and duplicate-document finders work.
+
+**Naturally rolling fingerprints.** 2D pattern matching (hash each row, then roll a hash *of hashes* down the columns), finding the longest duplicated substring via binary search on length plus a hash set, and content-defined chunking in deduplicating backup systems all fall out of the rolling hash for free. KMP has no equivalent.
+
+**Cheap-to-write.** In a contest or a whiteboard under time pressure, a rolling hash is a dozen lines and hard to get subtly wrong, whereas an off-by-one in `pi` silently breaks KMP.
+
+Against that: for **one pattern in one text**, KMP's guaranteed `O(n + m)` with zero collision risk is cleaner and needs no defensive verification. Rabin-Karp's weakness is adversarial input; mitigate it by choosing the base and modulus at random at run time, or by double hashing with two independent moduli so a collision requires both to fail simultaneously.
 
 ### What is the Z-algorithm?
 
-The Z-array of a string S gives, for each index i, the length of the longest substring starting at i that is also a prefix of S. It is computed in O(n) by maintaining a window [l, r] — the rightmost prefix-match seen so far — and reusing already-computed Z-values inside that window instead of re-comparing. For pattern matching, build S = P + sentinel + T; any position in the T region with Z-value equal to m marks a full occurrence of P. It is an alternative to KMP that many find more intuitive, with the same O(n + m) bound.
+The Z-array of a string `S` gives, for each index `i`, the length of the longest substring starting at `i` that is also a prefix of `S`. Where KMP's `pi` asks "what is the longest border of the prefix ending here?", Z asks "how far does the string match itself if I start reading here?" — the same self-similarity, viewed from the other end.
+
+```python
+def z_function(S):
+    n = len(S)
+    Z = [0] * n
+    Z[0] = n                          # convention: whole string matches itself
+    l = r = 0                         # [l, r) = rightmost prefix-match window
+    for i in range(1, n):
+        if i < r:
+            Z[i] = min(r - i, Z[i - l])   # reuse the mirror value for free
+        while i + Z[i] < n and S[Z[i]] == S[i + Z[i]]:
+            Z[i] += 1                 # extend past what we knew
+        if i + Z[i] > r:
+            l, r = i, i + Z[i]        # new rightmost window
+    return Z
+```
+
+**Worked micro-example on `S = "aabaab"`.** `Z[1]`: `S[1]='a'` matches `S[0]='a'`, but `S[2]='b'` ≠ `S[1]='a'`, so `Z[1] = 1`. `Z[2]`: `'b'` ≠ `'a'`, so `Z[2] = 0`. `Z[3]`: `a,a,b` matches `a,a,b` then the string ends — `Z[3] = 3`. `Z[4]`: `'a'` matches, then `S[5]='b'` ≠ `S[1]='a'` — `Z[4] = 1`. `Z[5] = 0`. So `Z = [6, 1, 0, 3, 1, 0]`.
+
+**Why it is linear, in words.** The `[l, r]` window only ever moves right, and the inner `while` loop only runs when it is *pushing* `r` further right. Since `r` advances at most `n` times in total across the whole scan, the total inner-loop work is `O(n)` — everything else is `O(1)` per index.
+
+**For pattern matching**, build `S = P + '\0' + T` where `\0` is a sentinel appearing in neither string. Any index in the `T` region with `Z[i] == m` marks a full occurrence of `P`, at text position `i - m - 1`. That is `O(n + m)` — the same bound as KMP, and many people find the window-reuse argument easier to internalise than the border argument.
 
 ### How does Boyer-Moore skip characters?
 
-Boyer-Moore matches the pattern against the current alignment *right-to-left*. On a mismatch it uses two heuristics to jump ahead by more than one position: the *bad-character rule* shifts so the mismatched text character aligns with its rightmost occurrence in the pattern (or past it entirely if absent), and the *good-suffix rule* shifts based on the already-matched suffix reappearing earlier in the pattern. On natural-language text this often examines only about n/m characters — sublinear — which is why tools like grep use Boyer-Moore variants. Worst case is O(n*m), tightened to O(n) by adding the Galil rule.
+Boyer-Moore's insight is to compare the alignment **right to left** while still sliding the pattern left to right. That inversion means a single mismatched character near the *end* of the alignment can rule out many alignments at once.
+
+Two heuristics decide the jump. The **bad-character rule**: on a mismatch against text character `c`, shift the pattern so that its rightmost occurrence of `c` lines up with that text position — and if `c` does not appear in the pattern at all, shift the pattern **entirely past** it. The **good-suffix rule**: if you had already matched a suffix before failing, shift so that suffix reappears elsewhere in the pattern (or so a prefix of the pattern aligns with a tail of it). Take whichever rule gives the bigger jump.
+
+**Micro-example.** `T = "abcdefgh"`, `P = "xyz"` (`m = 3`). Align at position 0 and compare right-to-left: `T[2] = 'c'` against `P[2] = 'z'` — mismatch, and `'c'` appears nowhere in `"xyz"`. Shift the whole pattern past it: the next alignment starts at position 3. Three text characters skipped after **one** comparison. Repeat, and the scan touches roughly `n/3` characters instead of `n`.
+
+That is the general shape: on large alphabets and natural-language text, most text characters are absent from the pattern, so most mismatches produce a full `m`-character jump and the algorithm examines only about `n/m` characters — **sublinear** in the text length. This is why grep-family tools use Boyer-Moore variants rather than KMP: for real-world searches, skipping beats never-backtracking.
+
+The catch: on small alphabets (DNA, binary) the skips shrink, and the worst case is still `O(n·m)`. Adding the **Galil rule** — remembering how much of the alignment was already verified so you never re-compare it — tightens the worst case to `O(n)`. The preprocessing tables are also heavier than KMP's single array, which is why KMP remains the whiteboard answer.
 
 ### What are suffix arrays and when are they worth it?
 
-A suffix array is the array of starting indices of all suffixes of a string sorted in lexicographic order. It is built in O(n log n) (or O(n) with sophisticated algorithms) and, combined with an LCP (longest-common-prefix) array, supports fast substring queries: check whether P occurs via binary search in O(m log n), count occurrences, find the longest repeated substring, etc. The trade-off: it is a preprocessing-heavy *index* — you pay the build cost once to answer many queries against a fixed text. For a single search, KMP is simpler; for repeated queries on the same text, the suffix array amortizes beautifully.
+A suffix array is the list of starting indices of all suffixes of a string, sorted lexicographically. For `S = "banana"` the six suffixes are `banana(0), anana(1), nana(2), ana(3), na(4), a(5)`; sorted they read `a(5), ana(3), anana(1), banana(0), na(4), nana(2)`, so `SA = [5, 3, 1, 0, 4, 2]`.
+
+That single array is a searchable index of *every* substring, because every substring is a prefix of some suffix. Since the suffixes are sorted, all suffixes beginning with `P` sit in one contiguous block, which you find by **binary search**: `O(log n)` probes, each comparing up to `m` characters, so `O(m log n)` per query. The block's width is the number of occurrences.
+
+Pair it with an **LCP array** (the longest common prefix between each adjacent pair in sorted order) and more falls out: the longest repeated substring is the largest LCP entry; the number of distinct substrings is `n(n+1)/2` minus the sum of the LCP array; longest common substring of two strings comes from concatenating them with a separator.
+
+The trade-off is where the cost sits. Building takes `O(n log n)` with a doubling algorithm, or `O(n)` with heavier machinery (DC3/SA-IS) — that is *far* more expensive than KMP's `O(m)` table. But the build depends only on the text, so it amortises across queries. Rule of thumb: **one search, use KMP; thousands of searches against a fixed text, build the index.** Search engines, genome browsers and code-search tools all sit firmly on the index side.
 
 ### What is a suffix automaton at a glance?
 
-A suffix automaton is the smallest deterministic automaton that recognizes all substrings of a string; it has O(n) states and edges and is built online in O(n) (for a fixed alphabet). Once built, checking whether any string is a substring is O(query length), and it answers counting-distinct-substrings and other structural questions elegantly. It is the heavier-artillery cousin of the suffix array — you would not reach for it in a typical coding interview, but knowing it exists and that it gives linear-size representation of all substrings signals depth.
+A suffix automaton is the smallest deterministic finite automaton that recognises exactly the set of substrings of a string. Feed it a query string character by character; if you never fall off an edge, the query is a substring.
+
+The remarkable facts are the size bounds: for a string of length `n` it has at most `2n − 1` states and `3n − 4` transitions — **linear**, even though the string has `Θ(n²)` distinct substrings. It is built **online** in `O(n)` for a fixed alphabet, meaning you can append characters one at a time and keep a valid automaton throughout. States correspond to equivalence classes of substrings that occur at exactly the same set of end positions, and a "suffix link" tree over those states supports counting occurrences, finding the longest common substring of two strings, and counting distinct substrings.
+
+Practically: this is heavier artillery than a typical coding interview needs, and nobody expects you to derive the construction at a whiteboard. What signals depth is knowing it exists, knowing the linear-size result (a linear-size structure representing quadratically many substrings), and knowing it is the natural upgrade from a suffix array when you need *online* construction or automaton-style queries.
 
 ### Define edit distance and its DP recurrence.
 
-Edit (Levenshtein) distance between A and B is the minimum number of single-character insertions, deletions, and substitutions to turn A into B. Let dp[i][j] be the distance between the first i chars of A and the first j chars of B. If A[i-1] == B[j-1], dp[i][j] = dp[i-1][j-1] (no cost). Otherwise dp[i][j] = 1 + min(dp[i-1][j] delete, dp[i][j-1] insert, dp[i-1][j-1] substitute). Base cases: dp[i][0] = i, dp[0][j] = j. Time O(m*n), and space reduces to O(min(m,n)) because each row depends only on the previous one.
+Edit (Levenshtein) distance between `A` and `B` is the minimum number of single-character **insertions**, **deletions** and **substitutions** needed to turn `A` into `B`.
+
+Let `dp[i][j]` be the distance between the first `i` characters of `A` and the first `j` characters of `B`. The recurrence considers what happens to the *last* character of each prefix:
+
+- If `A[i-1] == B[j-1]`, those characters pair up for free: `dp[i][j] = dp[i-1][j-1]`.
+- Otherwise pay 1 and take the best of three moves: `dp[i-1][j]` (delete from `A`), `dp[i][j-1]` (insert into `A`), `dp[i-1][j-1]` (substitute).
+- Base cases: `dp[i][0] = i` (delete everything), `dp[0][j] = j` (insert everything).
+
+```python
+def edit_distance(A, B):
+    m, n = len(A), len(B)
+    dp = [[0] * (n + 1) for _ in range(m + 1)]
+    for i in range(m + 1):
+        dp[i][0] = i                  # delete i characters
+    for j in range(n + 1):
+        dp[0][j] = j                  # insert j characters
+    for i in range(1, m + 1):
+        for j in range(1, n + 1):
+            if A[i - 1] == B[j - 1]:
+                dp[i][j] = dp[i - 1][j - 1]
+            else:
+                dp[i][j] = 1 + min(dp[i - 1][j],      # delete
+                                   dp[i][j - 1],      # insert
+                                   dp[i - 1][j - 1])  # substitute
+    return dp[m][n]
+```
+
+**Worked micro-example: `A = "cat"`, `B = "cut"`.** The table (rows `_ c a t`, columns `_ c u t`):
+
+| | `_` | `c` | `u` | `t` |
+| --- | --- | --- | --- | --- |
+| `_` | 0 | 1 | 2 | 3 |
+| `c` | 1 | **0** | 1 | 2 |
+| `a` | 2 | 1 | **1** | 2 |
+| `t` | 3 | 2 | 2 | **1** |
+
+`dp[1][1] = 0` because `c` matches `c` for free. `dp[2][2] = 1` — `a` ≠ `u`, so substitute on top of `dp[1][1] = 0`. `dp[3][3] = 1` because `t` matches `t`, inheriting `dp[2][2]`. Answer: **1**, the single substitution `a → u`. The diagonal of bold cells is the alignment path.
+
+Complexity: `O(m·n)` time — one constant-work cell per pair of prefixes — and `O(m·n)` space for the full table, which the next card fixes.
 
 ### How do you reduce edit distance to O(min(m,n)) space?
 
-Each cell dp[i][j] depends only on the current and previous rows, so you keep two rows (or one row plus a saved diagonal value) instead of the full m x n table. Iterate over the longer string in the outer loop and keep rows of length equal to the shorter string, so the working memory is O(min(m,n)). The catch: this gives the distance value but discards the DP table needed to *reconstruct* the actual edit operations — if you need the alignment itself, either keep the full table or use Hirschberg's divide-and-conquer to recover it in O(m*n) time and O(min(m,n)) space.
+Look at the recurrence: `dp[i][j]` reads only `dp[i-1][j]`, `dp[i][j-1]` and `dp[i-1][j-1]`. Everything it needs lives in the current row and the one directly above it. Rows `0` through `i-2` are dead weight, so keep two rows instead of `m+1`.
+
+Then make the rows the *short* dimension: iterate the longer string in the outer loop and keep rows of length `min(m, n) + 1`. Working memory becomes `O(min(m, n))`.
+
+```python
+def edit_distance_2rows(A, B):
+    if len(A) < len(B):               # rows track the shorter string
+        A, B = B, A
+    m, n = len(A), len(B)
+    prev = list(range(n + 1))         # dp[0][j] = j
+    for i in range(1, m + 1):
+        cur = [i] + [0] * n           # dp[i][0] = i
+        for j in range(1, n + 1):
+            if A[i - 1] == B[j - 1]:
+                cur[j] = prev[j - 1]
+            else:
+                cur[j] = 1 + min(prev[j], cur[j - 1], prev[j - 1])
+        prev = cur
+    return prev[n]
+```
+
+`prev[j]` is the cell above, `cur[j-1]` is the cell to the left, `prev[j-1]` is the diagonal — the same three neighbours, just addressed through two arrays. You can squeeze to a *single* row by stashing the diagonal in a scalar before overwriting it, which is where the classic "I clobbered the diagonal" bug comes from.
+
+**The catch**: you get the distance *number* but lose the table needed to reconstruct the actual edit script. If the interviewer asks for the alignment itself, either keep the full `O(m·n)` table and backtrack from `dp[m][n]`, or use **Hirschberg's algorithm** — divide and conquer that finds the midpoint of the optimal alignment using two linear-space forward/backward passes, then recurses — recovering the full alignment in `O(m·n)` time and `O(min(m, n))` space.
 
 ### What are common string-hashing pitfalls?
 
-Using a single small modulus invites collisions and adversarial attacks — prefer a large prime and often double hashing (two independent moduli). Integer overflow if you forget to take the modulus every step. Forgetting to precompute b^(m-1) mod p for the rolling removal, or getting its power wrong (off-by-one on the window length). Not verifying a hash match with an actual character comparison, so a collision produces a false positive. And picking a base smaller than the alphabet size, which collapses distinct characters. Treat a raw rolling hash as a fast filter, not proof of equality.
+The recurring theme: **a hash is a fast filter, not proof of equality.**
+
+- **No verification.** If a hash match is reported as a match without a character comparison, collisions become silent wrong answers. Always verify.
+- **A small or fixed modulus.** A modulus like `10007` collides constantly, and even a large *published* modulus lets an adversary construct a colliding input (this has been used to hack competitive-programming submissions). Use a large prime, and prefer one chosen at run time or **double hashing** with two independent moduli — forcing a collision in both is astronomically unlikely.
+- **Forgetting the modulus mid-computation.** Take `% mod` after every multiply-add. In languages with fixed-width integers, one skipped reduction overflows and corrupts every subsequent hash.
+- **Wrong power for the rolling removal.** The leading character's weight is `base^(m-1)`, not `base^m`. With `m = 2` and base `10`, it is `10`. Off-by-one here produces a hash that looks plausible and matches nothing.
+- **A base smaller than the alphabet.** If `base ≤ 26` while hashing values `0..25`, distinct strings collapse together systematically. Pick a base larger than the alphabet size, ideally random.
+- **Signed-modulus surprises.** After subtracting the outgoing character, the intermediate can go negative; in C/C++/Java add `mod` back before continuing. Python's `%` already returns non-negative, which hides the bug until you port the code.
 
 ### KMP vs Rabin-Karp vs Boyer-Moore — how do you choose?
 
-KMP: guaranteed O(n + m), single forward pass, no randomness — the default for one pattern, one text. Rabin-Karp: best when matching *many* equal-length patterns simultaneously or when a rolling fingerprint is natural (2D, substrings), at the cost of collision handling and worst-case O(n*m). Boyer-Moore: fastest in practice for large alphabets / natural text because it skips, making it the choice for real-world tools like grep, but its bookkeeping is heavier and worst case needs the Galil rule to stay linear. If unsure in an interview, implement KMP and mention the others as situational upgrades.
+| | Time | Preprocessing | Best for | Weakness |
+| --- | --- | --- | --- | --- |
+| **KMP** | `O(n + m)` guaranteed | `O(m)` table | One pattern, one text | No skipping — touches every character |
+| **Rabin-Karp** | `O(n + m)` expected, `O(n·m)` worst | `O(m)` hash | Many equal-length patterns; 2D; fingerprints | Collisions; adversarial input |
+| **Boyer-Moore** | ~`n/m` typical, `O(n·m)` worst | `O(m + alphabet)` tables | Large alphabets, natural text, long patterns | Heavy bookkeeping; poor on small alphabets |
+
+**KMP** is the default answer: guaranteed linear, one forward pass, no randomness, and a table you can write from memory. **Rabin-Karp** wins when the problem is really "is this window in my *set* of things" — many patterns, 2D matching, deduplication — accepting collision handling as the price. **Boyer-Moore** wins in production text search because skipping beats not-backtracking when most characters aren't in the pattern; that is why it is inside grep, not because of its asymptotics.
+
+In an interview: implement KMP, then name the other two as situational upgrades with one sentence each on when they win. If asked for the *simplest thing that works*, say Rabin-Karp with verification — it is fewer lines and easier to get right under pressure.
 
 ### How would you find the longest palindromic substring efficiently?
 
-The naive expand-around-center approach is O(n^2): for each of the ~2n centers (each character and each gap), expand outward while characters mirror. To do it in O(n), use Manacher's algorithm, which transforms the string (inserting separators so odd/even cases unify) and maintains a current rightmost palindrome boundary, reusing mirror information much like the Z-algorithm reuses its window — each center's radius is computed in amortized O(1). Most interviews accept the clean O(n^2) expand-around-center and treat Manacher as a bonus for the follow-up "can you do linear?"
+The clean answer is **expand around centre**. A palindrome is defined by its middle, so enumerate every possible centre and grow outwards while the characters mirror. There are `2n − 1` centres: `n` single characters (odd-length palindromes) and `n − 1` gaps between characters (even-length ones).
+
+```python
+def longest_palindrome(s):
+    if not s:
+        return ""
+    best = (0, 0)                     # (start, length)
+    for c in range(len(s)):
+        for lo, hi in ((c, c), (c, c + 1)):   # odd centre, then even centre
+            while lo >= 0 and hi < len(s) and s[lo] == s[hi]:
+                lo -= 1
+                hi += 1               # expand while it still mirrors
+            lo, hi = lo + 1, hi - 1   # step back to the last valid pair
+            if hi - lo + 1 > best[1]:
+                best = (lo, hi - lo + 1)
+    return s[best[0]:best[0] + best[1]]
+```
+
+**Micro-example on `s = "babad"`.** Centre `b` at index 0: `lo` immediately falls off the left edge, giving `"b"`. Centre `a` at index 1: `s[0] = 'b'` and `s[2] = 'b'` mirror, so expand to `"bab"`; next step hits index `−1` and stops. Centre `b` at index 2: `s[1] = 'a'` and `s[3] = 'a'` mirror, giving `"aba"` — same length, so the earlier answer stands. Even centres like the gap between index 0 and 1 fail immediately (`b` ≠ `a`). Result: `"bab"`, length 3.
+
+Complexity: `2n − 1` centres, each expanding up to `n/2` steps — `O(n²)` time (quadratic in the string length), `O(1)` space. This is the expected answer for the standard interview question, and it is genuinely fast on real inputs because most centres die after one or two steps.
+
+**The linear follow-up** is **Manacher's algorithm**, `O(n)`. Two ideas: first, interleave separators (`"babad"` → `"|b|a|b|a|d|"`) so every palindrome becomes odd-length and the awkward even/odd split disappears. Second — exactly the trick the Z-algorithm uses — maintain the rightmost palindrome found so far and, for each new centre inside it, initialise the radius from the **mirror** centre on the other side instead of expanding from zero. You only ever expand past what the mirror guarantees, and since the right boundary moves monotonically rightwards, the total expansion work across the whole string is `O(n)`, giving amortised `O(1)` per centre. Most interviews accept the `O(n²)` version and treat Manacher as a bonus for "can you do it in linear time?"
 
 ## Bit Manipulation
 
 ### Summary
 
 **What this topic covers**
-Bit manipulation is treating an integer as a fixed-width array of bits and using the bitwise operators to set, clear, test, and combine those bits directly. The core skills are masking (isolating or modifying specific bits), a handful of idioms (isolate/clear the lowest set bit, popcount, XOR tricks), enumerating subsets of a mask, and recognizing when a small set (n <= ~20-22) can be encoded as an integer to drive bitmask DP. The payoff is constant-factor speed and O(1)/O(word) space where a naive approach would use arrays or loops.
+Treating an integer as a fixed-width **row of switches** and flipping those switches directly with the bitwise operators. The skills are: **masking** (using `1 << i` to touch exactly one bit), a small set of **idioms** (`x & -x` isolates the lowest set bit, `x & (x - 1)` clears it, XOR cancels pairs), **popcount** (counting set bits), **enumerating subsets** of a mask, and recognising when a small universe (`n ≤ ~20-22` items) can be encoded as a single integer to drive **bitmask DP**. The payoff is large constant-factor speed and `O(1)` space where the obvious solution would allocate arrays or hash sets.
+
+**Mental model**
+Picture an 8-bit integer as eight light switches in a row, numbered right to left from 0: `12` is `00001100`, meaning switches 2 and 3 are on. Every operation in this topic is "flip some switches". `AND` is a stencil — it lets through only where the mask has a hole. `OR` paints bits on. `XOR` is a light switch — applying it twice returns you to where you started, which is why XOR both toggles bits and cancels duplicates. `NOT` inverts the whole row. Shifting slides the row left or right, which is multiplying or dividing by powers of two. Once you see a set as a row of switches, "try every subset of these 15 cities" stops being a nested-loop nightmare and becomes "count from `0` to `32767`".
 
 **Key terms**
-*Bit / mask* — a bit is a single binary digit; a mask is an integer whose set bits select positions. *AND (&), OR (|), XOR (^), NOT (~)* — bitwise operators. *Shift* — `x << k` multiplies by 2^k, `x >> k` divides (arithmetic vs logical for signed values). *Set / clear / toggle / test* a bit at position i via `1 << i`. *Least significant bit (LSB)* — the lowest bit; *lowest set bit* `x & -x`. *Popcount / Hamming weight* — the number of set bits. *Two's complement* — how signed integers and negation work, which is why `-x = ~x + 1`. *Submask* — a mask whose set bits are a subset of another mask's.
+- **Bit / mask** — a bit is one binary digit; a mask is an integer whose set bits select the positions you care about.
+- **`&` `|` `^` `~`** — AND, OR, XOR, NOT. AND tests and clears, OR sets, XOR toggles, NOT inverts.
+- **Shift** — `x << k` multiplies by `2ᵏ`; `x >> k` divides by `2ᵏ`, rounding down.
+- **One-hot mask** — `1 << i`, an integer with exactly bit `i` set; the tool for single-bit surgery.
+- **LSB / lowest set bit** — the rightmost `1` in the number; its *value* is `x & -x`, its *index* is the count of trailing zeros.
+- **Popcount (Hamming weight)** — how many bits are set, e.g. `popcount(12) = 2`.
+- **Two's complement** — the encoding where `-x == ~x + 1`; the reason `x & -x` works at all.
+- **Submask** — a mask whose set bits are a subset of another mask's, e.g. `1000` and `0100` are submasks of `1100`.
+- **Bitmask DP** — dynamic programming whose state index *is* a subset, giving `2ⁿ` states.
 
 **Core mechanics**
-Single-bit operations use a one-hot mask `1 << i`: set with `x | (1<<i)`, clear with `x & ~(1<<i)`, toggle with `x ^ (1<<i)`, test with `(x >> i) & 1`. `x & -x` isolates the lowest set bit because in two's complement `-x` is `~x + 1`, which flips every bit above the lowest set bit and leaves that bit; ANDing keeps exactly it. `x & (x-1)` clears the lowest set bit, because subtracting 1 flips the lowest set bit and all zeros below it. Popcount is either the Kernighan loop (`x &= x-1` until zero — runs once per set bit) or a hardware/library intrinsic in O(1). XOR is its own inverse (`a ^ a = 0`, `a ^ 0 = a`) and commutative, which powers find-the-unique and in-place swap. Enumerating submasks of m is the idiom `sub = (sub - 1) & m`, which visits all 2^popcount(m) subsets in total O(3^n) across all masks.
+All single-bit work uses `1 << i`: **set** with `x | (1 << i)`, **clear** with `x & ~(1 << i)`, **toggle** with `x ^ (1 << i)`, **test** with `(x >> i) & 1`. Two idioms carry most interview questions. `x & (x - 1)` **clears the lowest set bit**: subtracting 1 flips that bit to `0` and turns every zero below it into `1`, so ANDing with the original keeps the high bits and wipes the low ones. `x & -x` **isolates the lowest set bit**, because negation is "invert then add one" and the carry ripples exactly up to that bit. XOR is self-inverse (`a ^ a = 0`, `a ^ 0 = a`) and order-independent, which powers find-the-unique, find-the-missing, and swap-without-a-temporary. Enumerating submasks is the one-liner `sub = (sub - 1) & m`.
 
 **Trade-offs**
-Bit tricks give large constant-factor wins and compact state (a whole subset in one register) but hurt readability, so reserve them for hot paths and genuine set-encoding. Bitmask DP turns "try every subset" from a hashmap-of-sets into an integer-indexed array — O(2^n) states — which is exact and fast but hard-capped: n beyond ~22 makes 2^n infeasible. Prefer clear array code for ordinary logic; reach for bits when the problem is inherently about subsets, parity, or when profiling demands it.
+Bit tricks buy constant factors and compactness — a whole subset in one register, comparable and copyable in one instruction — at a real cost in readability. Reserve them for hot paths and for problems that are genuinely *about* subsets, parity, or flags; ordinary business logic should stay as plain arrays and booleans. Bitmask DP converts "try every subset" from a hashmap-of-frozensets into an integer-indexed array, which is exact and cache-friendly, but it is hard-capped: `2ⁿ` states means `n ≤ ~22` in practice, and past that you need approximation or a different formulation entirely.
 
 **Common confusions**
-`1 << 31` or `1 << 63` overflowing a signed type (use unsigned or a wide/long literal). Operator precedence: `&`, `|`, `^` bind *looser* than `==`/`+`, so `x & 1 == 0` parses as `x & (1 == 0)` — always parenthesize. Arithmetic vs logical right shift on negative numbers (sign extension). Assuming `x & -x` works the same in a language without two's-complement/arbitrary-precision semantics (Python ints are unbounded, which changes `~x`). Forgetting that XOR-swap breaks when both operands alias the same location. Confusing "lowest set bit value" (`x & -x`) with "index of lowest set bit" (that value's log2 / count of trailing zeros).
+**Precedence** is the number-one bug: `&`, `|`, `^` bind *looser* than `==` and `+`, so `x & 1 == 0` parses as `x & (1 == 0)`. Parenthesise always. **Overflow**: `1 << 31` overflows a 32-bit signed int in C/C++/Java. **Sign extension**: right-shifting a negative value fills with `1`s, so `-8 >> 1` is `-4`, not a huge positive number. **Value versus index**: `x & -x` gives the lowest set bit's *value* (`8`), not its *position* (`3`). **Python's integer model** differs from every fixed-width language — its ints are arbitrary-precision, so there is no overflow, no `>>>`, and `~x` is `-x - 1` conceptually extending with infinite sign bits.
 
 **Why interviewers ask**
-Bit questions reveal whether you understand the machine underneath the abstraction — two's complement, why `x & (x-1)` works, O(1) popcount — and whether you can spot that a small-set problem collapses into an integer. The classic escalation is single-number (XOR) → single-number-II (bit counts mod 3) → subset enumeration → full bitmask DP (travelling salesman, assignment), testing how far you can push the encoding.
+These questions expose whether you understand the machine underneath the abstraction: two's complement, why `x & (x - 1)` works, that popcount can be a single CPU instruction. They also test modelling — spotting that "choose a subset of `n ≤ 20` items" is really an integer-indexed DP, or that a uniqueness problem collapses to one XOR. The classic escalation runs single-number (XOR) → single-number-II (bit counts mod 3) → the two-unique variant (split on a differing bit) → full bitmask DP. Interviewers watch whether you *derive* the tricks on the whiteboard with actual bits, or merely recite them.
 
 ### What do the bitwise operators do?
 
-AND (`&`) yields 1 only where both bits are 1 — used to *test* and to *mask off* bits. OR (`|`) yields 1 where either is 1 — used to *set* bits. XOR (`^`) yields 1 where the bits differ — used to *toggle* and to *combine reversibly*. NOT (`~`) flips every bit — in two's complement `~x == -x - 1`. Left shift `x << k` multiplies by 2^k; right shift `x >> k` divides by 2^k (rounding toward negative infinity for arithmetic shift on signed values). These operate independently on each bit position with no carry, unlike arithmetic +.
+Each operator works on every bit position independently, with **no carry** between positions — that is the key difference from `+`. Take `a = 12 = 1100` and `b = 10 = 1010`:
+
+- `a & b = 1000 = 8` — AND gives `1` only where **both** are `1`. Used to *test* and to *mask off*.
+- `a | b = 1110 = 14` — OR gives `1` where **either** is `1`. Used to *set*.
+- `a ^ b = 0110 = 6` — XOR gives `1` where the bits **differ**. Used to *toggle* and to *combine reversibly*.
+- `~a = -13` — NOT flips every bit; in two's complement `~x == -x - 1`.
+
+Shifts slide the whole row: `a << 2 = 110000 = 48` (multiply by `2² = 4`) and `a >> 2 = 11 = 3` (divide by `4`, rounding toward negative infinity). All of these are single CPU instructions, so anything you can express in bit operations runs in constant time per word.
 
 ### How do you set, clear, toggle, and test a single bit?
 
-Build a one-hot mask `m = 1 << i`. Set bit i: `x | m`. Clear bit i: `x & ~m` (invert the mask so it is all 1s except position i, then AND). Toggle bit i: `x ^ m` (XOR flips exactly that bit). Test bit i: `(x >> i) & 1` (shift the bit down to position 0 and mask), or equivalently `(x & m) != 0`. These four are the vocabulary everything else builds on. Watch precedence — write `(x >> i) & 1`, never `x >> i & 1` if in doubt, and never `x & m == 0`.
+Build a **one-hot mask** `1 << i` — an integer with only bit `i` on — then combine it with the operator that does what you want. These six operations are the whole vocabulary; everything later in this topic is built from them.
+
+```python
+def get_bit(x, i):                       # -> 0 or 1
+    return (x >> i) & 1                  # slide bit i down to position 0, keep it
+
+def set_bit(x, i):                       # force bit i to 1
+    return x | (1 << i)
+
+def clear_bit(x, i):                     # force bit i to 0
+    return x & ~(1 << i)                 # ~(1<<i) is all 1s except position i
+
+def toggle_bit(x, i):                    # flip bit i
+    return x ^ (1 << i)
+
+def update_bit(x, i, value):             # set bit i to 0 or 1 branchlessly
+    return (x & ~(1 << i)) | (value << i)
+
+def is_power_of_two(x):
+    return x > 0 and (x & (x - 1)) == 0
+```
+
+Worked with `x = 12 = 1100`. `get_bit(x, 2)`: `1100 >> 2 = 11`, `& 1 = 1`. `set_bit(x, 1)`: mask `0010`, `1100 | 0010 = 1110 = 14`. `clear_bit(x, 3)`: mask `~1000 = ...0111`, `1100 & 0111 = 0100 = 4`. `toggle_bit(x, 2)`: `1100 ^ 0100 = 1000 = 8`. Each is constant time — a couple of machine instructions.
 
 ### What does `x & -x` do and why?
 
-It isolates the lowest set bit — returns a value with only that one bit set. In two's complement `-x == ~x + 1`. Negating flips all bits then adds 1, and the carry from the +1 ripples up through the trailing zeros and the lowest set bit, leaving everything below and including the lowest set bit "aligned" so that ANDing `x` with `-x` keeps exactly the lowest set bit and zeros everything else. Example: x = 0b10110, -x = 0b01010 (in two's complement), x & -x = 0b00010. It is the workhorse behind Fenwick-tree indexing and fast lowest-bit extraction.
+It **isolates the lowest set bit**: the result has exactly one bit on, in the position of the rightmost `1` of `x`. The reason is two's complement, where `-x == ~x + 1`. Inverting flips everything; adding `1` then ripples a carry up through the trailing zeros (which inversion turned into `1`s) and stops at the lowest set bit. The net effect is that `x` and `-x` agree in exactly one position.
+
+Write it out for `x = 12` in 8 bits:
+
+```python
+x       = 0b00001100     # 12
+not_x   = 0b11110011     # ~x
+neg_x   = 0b11110100     # ~x + 1  == -12; carry stopped at bit 2
+low_bit = x & -x         # 0b00000100 == 4  -> the lowest set bit's VALUE
+index   = low_bit.bit_length() - 1   # 2    -> its POSITION
+```
+
+Above bit 2, `x` and `-x` are bitwise complements, so AND gives `0`. Below bit 2 both are `0`. At bit 2 both are `1`. Result: `100 = 4` — the *value* `4`, not the *index* `2`; conflating those is a classic bug. Constant time, two instructions. This is what drives Fenwick-tree index stepping and fast iteration over a mask's members.
 
 ### What does `x & (x - 1)` do?
 
-It clears the lowest set bit — turns the rightmost 1 into 0 and leaves the rest unchanged. Subtracting 1 flips the lowest set bit to 0 and turns all the zeros below it into 1s; ANDing with the original x keeps the high bits, kills the borrowed low 1s, and clears that lowest bit. Example: x = 0b10100, x-1 = 0b10011, x & (x-1) = 0b10000. Two immediate uses: `x & (x-1) == 0` tests power-of-two (at most one set bit), and looping `x &= x - 1` counts set bits in one iteration per set bit.
+It **clears the lowest set bit**, leaving all other bits untouched. Subtracting `1` borrows through the trailing zeros: the lowest `1` becomes `0`, and every `0` below it becomes `1`. ANDing with the original keeps the unchanged high bits, kills the borrowed low `1`s (they were `0` in `x`), and zeroes the target bit.
+
+```python
+n       = 0b1100         # 12
+n_minus = 0b1011         # 11 -> lowest 1 flipped off, zeros below turned on
+result  = n & (n - 1)    # 0b1000 == 8   -> lowest set bit removed
+```
+
+Two consequences drop out immediately. First, `x & (x - 1) == 0` means *at most one bit is set*, which (with a positivity guard) is the **power-of-two test**. Second, repeatedly applying it strips one set bit per iteration and reaches zero after exactly popcount steps — that is Kernighan's popcount, below. Both are constant time per operation.
 
 ### How do you count set bits (popcount)?
 
-Three ways. Kernighan's loop: `count = 0; while x: x &= x - 1; count += 1` — iterates once per set bit, so O(number of set bits), better than O(word width) when bits are sparse. Library/hardware intrinsic: `popcount` / `bit_count()` / `__builtin_popcount` — effectively O(1). Precomputed table / SWAR parallel-bit-count: sum bits in chunks with masks like 0x5555… in O(log width) operations. In an interview, mention Kernighan for the elegant loop and the intrinsic for production; both are correct, differ in constant factors.
+Three approaches. **Kernighan's loop** strips one set bit per iteration, so it runs in time proportional to the *number of set bits* rather than the word width — much better on sparse values. **The library intrinsic** (`int.bit_count()` in Python 3.10+, `__builtin_popcount` in C, `Integer.bitCount` in Java) is a single CPU instruction, effectively constant time. **Counting-bits DP** computes popcount for every value `0..n` at once, which is what a bitmask DP needs when it must weigh thousands of masks.
+
+```python
+def popcount_kernighan(x):               # O(number of set bits)
+    count = 0
+    while x:
+        x &= x - 1                       # remove the lowest set bit
+        count += 1
+    return count
+
+def count_bits_dp(n):                    # popcount for every value 0..n, O(n)
+    dp = [0] * (n + 1)
+    for i in range(1, n + 1):
+        dp[i] = dp[i >> 1] + (i & 1)     # i is i>>1 with one extra low bit
+    return dp
+```
+
+Trace Kernighan on `x = 11 = 1011`: `1011 → 1010 → 1000 → 0000`, three iterations, answer `3`. Trace the DP on `i = 13 = 1101`: `i >> 1 = 110 = 6`, `dp[6] = 2`, `i & 1 = 1`, so `dp[13] = 3` — correct, since `1101` has three ones. The DP works because shifting right discards exactly the lowest bit, which `i & 1` adds back. Kernighan for a single value, the intrinsic in production, the DP when you need all of them.
 
 ### How does XOR find the single non-duplicated element?
 
-If every element appears twice except one, XOR all of them: pairs cancel because `a ^ a = 0`, and `x ^ 0 = x`, so the survivor is the unique element. It runs in O(n) time and O(1) space with a single accumulator — far better than a hash set. It works because XOR is commutative and associative, so order does not matter and duplicates annihilate regardless of position. The follow-up "what if the odd one out appears once but others appear three times?" needs a different trick: count each bit position mod 3.
+XOR annihilates pairs: `a ^ a = 0` and `x ^ 0 = x`, and it is commutative and associative, so fold order does not matter. XOR everything together and the duplicates cancel in place, leaving only the element that appeared an odd number of times — linear time, constant extra space, one accumulator instead of a hash set.
+
+```python
+def single_number(nums):                 # every value twice except one
+    acc = 0
+    for x in nums:
+        acc ^= x
+    return acc
+
+def missing_number(nums):                # nums is 0..n with exactly one missing
+    acc = len(nums)                      # seed with n, the index loop can't reach
+    for i, x in enumerate(nums):
+        acc ^= i ^ x                     # each present value cancels its index
+    return acc
+
+def two_unique(nums):                    # exactly two values appear once
+    xor_all = 0
+    for x in nums:
+        xor_all ^= x                     # == a ^ b, and a != b so this is nonzero
+    bit = xor_all & -xor_all             # a bit where a and b DIFFER
+    a = b = 0
+    for x in nums:
+        if x & bit:
+            a ^= x                       # group 1: bit set
+        else:
+            b ^= x                       # group 0: bit clear
+    return a, b
+```
+
+Micro-example for `two_unique` on `[1, 2, 1, 3]`: `xor_all = 2 ^ 3 = 010 ^ 011 = 001`, so the two answers differ in bit 0. Partitioning: bit-set group `{1, 3, 1}` XORs to `3`; bit-clear group `{2}` XORs to `2`. Both copies of a duplicate share that bit, so they land in the same group and cancel — each group reduces to one unique value. All three functions are linear time, constant space.
 
 ### How do you find the element appearing once when all others appear three times?
 
-XOR fails because triples do not cancel. Instead count, for each of the (say) 32 bit positions, how many input numbers have that bit set; take the count mod 3. Bits belonging to the tripled numbers contribute a multiple of 3 and vanish, leaving exactly the bits of the unique number. Reassemble those bits into the answer. That is O(n * word) time, O(1) space. A slicker O(1)-space variant uses two accumulators (`ones`, `twos`) implementing a mod-3 state machine over the bits, but the per-bit-count explanation is clearer to state.
+XOR fails here because three copies of `a` XOR to `a`, not `0` — cancellation only works for even multiplicities. The clear approach is to count **per bit position**: for each of the 32 positions, tally how many inputs have that bit set, then take the tally **mod 3**. Every tripled number contributes `3` (or `0`) to each position, which vanishes mod 3; what survives is exactly the bit pattern of the unique value. Reassemble the surviving positions into an integer.
+
+Concretely with `[5, 5, 5, 9]`: `5 = 0101`, `9 = 1001`. Bit 0 is set in all four numbers → `4 mod 3 = 1`. Bit 2 is set in the three `5`s → `3 mod 3 = 0`. Bit 3 is set only in `9` → `1 mod 3 = 1`. Surviving bits `1001 = 9`. Cost is the array length times the word width — effectively linear — with constant space (a 32-slot tally). A slicker variant keeps two accumulators, `ones` and `twos`, running a mod-3 state machine across all bits in parallel, but the per-position count is far easier to explain under pressure.
 
 ### How do you swap two numbers with XOR, and why is it risky?
 
-`a ^= b; b ^= a; a ^= b` swaps without a temporary: after the first line a holds a^b; the second makes b = (a^b)^b = a; the third makes a = (a^b)^a = b. It relies on XOR being self-inverse. The risk: if a and b are the *same memory location* (e.g. `swap(arr[i], arr[i])` with i == j), the first XOR zeroes it and the value is lost. It is also not faster than a temporary variable on modern CPUs and hurts readability — a party trick to know but rarely to ship.
+Three XORs swap two values with no temporary variable, exploiting XOR's self-inverse property.
+
+```python
+def xor_swap_demo(a, b):
+    a ^= b                               # a is now a^b
+    b ^= a                               # b = b ^ (a^b) = a
+    a ^= b                               # a = (a^b) ^ a = b
+    return a, b
+```
+
+Trace with `a = 1100`, `b = 1010`. Line 1: `a = 1100 ^ 1010 = 0110`. Line 2: `b = 1010 ^ 0110 = 1100` — that is the original `a`. Line 3: `a = 0110 ^ 1100 = 1010` — the original `b`. Swapped.
+
+The risk is **aliasing**. If both operands are the same memory location — `swap(arr[i], arr[j])` with `i == j` — the first XOR writes `x ^ x = 0` into that slot and the value is gone; you get `0`, not a no-op. It is also *not* faster than a temporary on a modern CPU (register renaming makes the temp free, and the three XORs form a serial dependency chain), and it reads worse. Know it; do not ship it.
 
 ### How do you enumerate all subsets of a bitmask?
 
-Use the submask-descent idiom:
+Use the **submask-descent** idiom, which walks the submasks of `m` in strictly decreasing order without ever visiting a non-submask.
 
 ```python
-sub = m
-while sub > 0:
-    process(sub)          # sub is a non-empty subset of m
-    sub = (sub - 1) & m
-process(0)                # include the empty subset if needed
+def submasks(m):                         # yields every submask of m, m down to 0
+    sub = m
+    while sub > 0:
+        yield sub                        # sub is a non-empty subset of m
+        sub = (sub - 1) & m              # step to the next-lower submask
+    yield 0                              # the empty subset, if you need it
 ```
 
-`(sub - 1) & m` skips directly from one submask to the next-lower submask of m, ignoring bits not in m. It visits every one of the 2^popcount(m) subsets. Summed over all masks m from 0 to 2^n - 1, the total work is O(3^n), because each of the n bits is independently in the mask, in the submask, or in neither — three states.
+Why `(sub - 1) & m` works: subtracting `1` gives the next-lower integer, which may switch on bits *not* in `m`; ANDing with `m` projects it straight back onto `m`'s bits, landing exactly on the next-lower submask. Trace `m = 1010`: `1010` → `1001 & 1010 = 1000` → `0111 & 1010 = 0010` → `0001 & 1010 = 0000`, stop. That is all four subsets of a two-bit mask, in descending order.
+
+A mask with `k` set bits has `2ᵏ` submasks. Summed over **all** masks from `0` to `2ⁿ - 1` the total is `3ⁿ`, not `4ⁿ`: each bit is independently in the submask, in the mask but not the submask, or in neither — three choices per bit. That `3ⁿ` bound is what makes sum-over-subsets DP feasible for `n` around 18-20.
 
 ### How do you check if a number is a power of two?
 
-A positive power of two has exactly one set bit, so `x > 0 and (x & (x - 1)) == 0`. The `x > 0` guard matters: `x & (x-1) == 0` is also true for x = 0, which is not a power of two, and you must avoid misclassifying it. Related: `x & -x == x` also holds exactly for powers of two (and zero), since the lowest set bit equals the whole number only when there is a single bit. Powers of two are worth spotting because `x % powerOfTwo == x & (powerOfTwo - 1)` and `x / powerOfTwo == x >> log2(powerOfTwo)`.
+A positive power of two has exactly one set bit, so `x > 0 and (x & (x - 1)) == 0`. The positivity guard is load-bearing: `0 & -1 == 0` too, and `0` is not a power of two. Check `x = 16 = 10000`: `x - 1 = 01111`, AND gives `00000` → yes. Check `x = 12 = 1100`: `x - 1 = 1011`, AND gives `1000 ≠ 0` → no. The equivalent test `x & -x == x` also holds exactly for powers of two (and, again, for `0`), since the lowest set bit equals the whole number only when there is a single bit.
+
+This matters beyond the trivia question, because powers of two unlock cheap substitutes for expensive arithmetic: `x % p` becomes `x & (p - 1)`, and `x // p` becomes `x >> log₂(p)`. Hash tables, allocators, and ring buffers all size themselves to powers of two for exactly this reason — the modulo on every operation collapses to one AND.
 
 ### How do you compute x mod 2^k and x divided by 2^k with bits?
 
-For non-negative x, `x % (2^k) == x & ((1 << k) - 1)` — the mask `(1<<k)-1` is k low ones, keeping only the remainder bits. And `x / (2^k) == x >> k`, a right shift dropping the low k bits. These are exact and fast for unsigned/non-negative values. The caveat is signed negatives: arithmetic right shift rounds toward negative infinity, not toward zero like integer division in many languages, and the AND-mask trick assumes a non-negative two's-complement value, so guard or use unsigned types when x can be negative.
+For non-negative `x`, the remainder mod `2ᵏ` is just the low `k` bits, and the quotient is everything above them:
+
+```python
+def mod_pow2(x, k):                      # x % (2**k), x >= 0
+    return x & ((1 << k) - 1)            # (1<<k)-1 is k low ones: a k-bit mask
+
+def div_pow2(x, k):                      # x // (2**k), x >= 0
+    return x >> k                        # drop the low k bits
+```
+
+Worked with `x = 13 = 1101` and `k = 2`. The mask is `(1 << 2) - 1 = 100 - 1 = 011`. `1101 & 0011 = 01 = 1`, and `13 % 4 == 1`. The shift `1101 >> 2 = 11 = 3`, and `13 // 4 == 3`. Both are single instructions versus a division costing tens of cycles.
+
+The caveat is **negative values**. Arithmetic right shift rounds toward negative infinity, so `-9 >> 2 == -3`, while C/C++/Java integer division truncates toward zero and gives `-2`. Python's `//` also floors, so the shift agrees there — but do not assume that portability. The AND-mask trick likewise assumes a non-negative value; guard with a sign check or use unsigned types.
 
 ### What is a bitmask and how does it encode a set?
 
-A bitmask represents a subset of a universe of n items as an integer: bit i is 1 iff item i is in the set. Membership test is `(mask >> i) & 1`, add item is `mask | (1<<i)`, remove is `mask & ~(1<<i)`, set union is `a | b`, intersection `a & b`, difference `a & ~b`, and the full set is `(1 << n) - 1`. This packs an entire subset into one register, making subsets O(1) to compare/copy and letting you index a DP array by "which subset is done." It only works when n is small (roughly <= 22-24) because there are 2^n masks.
+A bitmask represents a subset of a universe of `n` items as one integer: bit `i` is `1` exactly when item `i` is in the set. So with a universe of four items, the mask `1010` means `{item 1, item 3}`. Every set operation becomes a single machine instruction, and — crucially — the whole subset becomes a valid **array index**.
+
+```python
+FULL = (1 << 4) - 1                      # 0b1111: universe of 4 items
+
+def has(mask, i):    return (mask >> i) & 1        # membership test
+def add(mask, i):    return mask | (1 << i)        # insert item i
+def remove(mask, i): return mask & ~(1 << i)       # delete item i
+def union(a, b):     return a | b
+def intersect(a, b): return a & b
+def diff(a, b):      return a & ~b                 # in a, not in b
+def complement(m):   return m ^ FULL               # relative to the universe
+
+def all_subsets(items):                  # enumerate the 2**n subsets in index order
+    n = len(items)
+    for mask in range(1 << n):           # 0 .. 2**n - 1
+        yield [items[i] for i in range(n) if (mask >> i) & 1]
+```
+
+The `all_subsets` loop is the workhorse for power-set problems: counting from `0` to `2ⁿ - 1` visits each subset exactly once, and the inner check reads off the members. For `items = ['a','b','c']`, `mask = 5 = 101` yields `['a', 'c']`. Cost is `2ⁿ` subsets times `n` to materialise each. This encoding is only viable while `n` stays small — around 22-24 — because the number of masks doubles with every item added.
 
 ### What is bitmask DP and when do you use it?
 
-Bitmask DP uses an integer mask as the DP state to represent "which subset of a small set has been used/visited," giving O(2^n) states (often times another dimension). Classic uses: travelling salesman (`dp[mask][i]` = shortest path visiting exactly the cities in mask, ending at i, in O(2^n * n^2)), assignment/matching problems, and counting Hamiltonian paths. You reach for it when the problem screams "try every subset" and n is small enough that 2^n is affordable. It is exact and fast for n up to ~20; beyond that 2^n explodes and you need approximation or a different structure. See the Dynamic Programming topic for the full recurrences.
+Bitmask DP is dynamic programming where the state index *is* a subset. `dp[mask]` means "the best answer given that exactly the items in `mask` are done", giving `2ⁿ` states, usually with one extra dimension. The canonical example is the travelling salesman problem: `dp[mask][i]` is the shortest route that visits exactly the cities in `mask` and currently stands at city `i`, filled by trying every previous city, for `2ⁿ · n²` work overall. Assignment and matching problems (`n` workers to `n` tasks), counting Hamiltonian paths, and "partition into `k` valid groups" all fit the same shape.
+
+You reach for it when the problem screams "try every subset" and `n` is small enough that `2ⁿ` is affordable. The threshold is sharp: `n = 20` is a million masks and comfortable; `n = 25` is 33 million and painful; `n = 30` is a billion and out of reach. When the mask must be *built up* from its own submasks, combine it with the submask-descent idiom above and the cost becomes `3ⁿ` rather than `4ⁿ`. Beyond those sizes the exact approach dies and you need approximation, branch-and-bound, or a different formulation. See the Dynamic Programming topic for the full recurrences.
 
 ### What are the most common bit-manipulation bugs?
 
-Operator precedence: `&`, `|`, `^` bind looser than comparison and arithmetic, so `x & 1 == 0` means `x & (1 == 0)` — always parenthesize the bitwise part. Shift overflow: `1 << 31` overflows a 32-bit signed int (use `1u << 31` or a 64-bit literal). Sign extension: right-shifting a negative signed value fills with 1s (arithmetic shift), so logical vs arithmetic shift matters. Undefined behaviour shifting by >= the width. And in languages with arbitrary-precision integers (Python), `~x` and `x & -x` still work but negative masks behave differently than in fixed-width languages — know your integer model.
+**Precedence** — `&`, `|`, `^` bind looser than comparison and arithmetic, so `x & 1 == 0` evaluates as `x & (1 == 0)`. Parenthesise the bitwise part every time. **Shift overflow** — in C/C++/Java, `1 << 31` overflows a signed 32-bit int; use `1u << 31` or a 64-bit literal, and never shift by an amount `≥` the type width (undefined behaviour). **Sign extension** — right-shifting a negative signed value fills with `1`s, which is why Java has a separate logical shift `>>>`. **Value versus index** — `x & -x` returns the lowest set bit's value, not its position.
+
+Python deserves its own list, because its integer model is unlike every fixed-width language:
+
+```python
+big = 1 << 200                # fine: Python ints are arbitrary precision, no overflow
+print(~5)                     # -6, because ~x == -x - 1 (conceptually infinite sign bits)
+print(-1 >> 1)                # -1, NOT a huge positive: sign bits extend forever
+                              # there is no >>> operator in Python
+
+MASK32 = 0xFFFFFFFF
+def add32(a, b):              # emulate 32-bit wraparound arithmetic
+    return (a + b) & MASK32
+
+def to_signed32(x):           # reinterpret a masked value as signed 32-bit
+    x &= MASK32
+    return x - (1 << 32) if x >= (1 << 31) else x
+
+print(bin(-5))                # '-0b101': sign-magnitude display, not two's complement
+print((12).bit_count())       # 2  (Python 3.10+); (12).bit_length() == 4
+```
+
+The practical rule for Python: any problem specified in terms of 32-bit integers needs `& 0xFFFFFFFF` after every operation that could grow the value, plus a `to_signed32` conversion on the way out. Forgetting the mask silently produces enormous positive integers instead of wrapping; forgetting the conversion returns a large positive where a negative was expected. Both `x & -x` and `x & (x - 1)` behave correctly on positive Python ints; it is negatives and shifts where the model diverges.
 
 ### Why do interviewers like bit-manipulation questions?
 
-Because they expose the layer beneath the abstraction: whether you actually understand two's complement, why `x & (x-1)` clears the lowest bit, and that popcount can be O(1). They also test pattern recognition — seeing that a "choose a subset of n <= 20 items" problem is really an integer-indexed DP, or that a parity/uniqueness problem collapses to a single XOR. A strong candidate moves fluidly from the tricks (isolate lowest bit, count bits) to the modelling insight (encode the set as a mask) and states the constant-factor and space wins honestly.
+Because they expose the layer beneath the abstraction. Anyone can memorise "`x & (x - 1)` clears the lowest set bit"; only someone who understands borrow propagation can derive it on a whiteboard with `1100` and `1011` written out. The same goes for `x & -x` and two's complement, for why popcount can be one instruction, and for why XOR cancellation is really just "every bit has even parity except the odd one out".
+
+They also test **pattern recognition**, which is the more valuable signal. Seeing that "choose a subset of `n ≤ 20` items to minimise a cost" is an integer-indexed DP, or that a parity/uniqueness problem collapses to a single accumulator, is modelling skill rather than trivia. A strong answer moves fluidly between the two levels: state the trick, *show the bits* that make it obvious, then say honestly what it buys — usually a constant factor and a drop from `O(n)` extra space to `O(1)`, not a change in asymptotic class. And a strong candidate flags the traps unprompted: precedence, sign extension, and the `2ⁿ` ceiling on bitmask DP.
 
 ## Number Theory & Mathematical Algorithms
 
 ### Summary
 
 **What this topic covers**
-The small toolbox of number-theoretic algorithms interviewers actually reach for: Euclid's GCD (and LCM through it), modular arithmetic with modular inverses, fast (binary) exponentiation, the Sieve of Eratosthenes, primality testing, and combinatorics (nCr) computed under a prime modulus. The mental model: most of these are logarithmic-time tricks that let you compute exact answers to enormous quantities without ever holding a huge number — you stay inside `mod m` the whole way. The recurring theme is "reduce the problem size by a constant factor each step" (exponentiation, GCD) or "sieve once, answer many" (primes, factorials).
+The small toolbox of number-theoretic algorithms interviewers actually reach for: **Euclid's GCD** (and LCM through it), **modular arithmetic** with **modular inverses**, **binary (fast) exponentiation**, the **Sieve of Eratosthenes**, **primality testing** and **prime factorization** by trial division, **combinatorics** (`nCr`) computed under a prime modulus, and **matrix exponentiation** for linear recurrences. Together they answer the family of questions that look impossible at first glance — "what is `3¹⁰⁰⁰⁰⁰⁰⁰⁰⁰` mod `10⁹+7`?", "what is `C(200000, 100000)` mod a prime?", "what is the `10¹⁸`-th Fibonacci number?" — in microseconds, without ever holding a number bigger than about `m²`.
+
+**Mental model**
+Two ideas do almost all the work. The first is **halve the problem every step**: Euclid replaces `(a, b)` with `(b, a mod b)` and the numbers collapse geometrically; binary exponentiation squares the base and consumes one bit of the exponent per iteration. Anything that shrinks by a constant factor per step finishes in `O(log n)`, which is why these algorithms are effectively free even on astronomically large inputs. The second is **stay inside the modulus**: because `(x·y) mod m = ((x mod m)·(y mod m)) mod m`, you can reduce after every single operation, so intermediate values never exceed `m²` and the final answer is unchanged. You are not computing a huge number and then shrinking it — you never let it grow. The one operation that does *not* survive the move into modular arithmetic is division, and its replacement (the modular inverse) is where most of the subtlety lives.
 
 **Key terms**
-`gcd(a,b)` — largest integer dividing both. `lcm(a,b) = a / gcd(a,b) * b`. Modular arithmetic — doing arithmetic in the ring of residues mod m, where `(a+b) mod m`, `(a*b) mod m` are well-defined. Modular inverse of a — the x with `a*x ≡ 1 (mod m)`; it exists iff `gcd(a,m) = 1`. Fermat's little theorem — for prime p and a not divisible by p, `a^(p-1) ≡ 1 (mod p)`, so `a^(p-2)` is a's inverse. Fast exponentiation — computing `a^n` in `O(log n)` multiplications by squaring. Sieve of Eratosthenes — marking composites to list all primes up to n. nCr — binomial coefficient "n choose r". Coprime — gcd equals 1.
+- **`gcd(a, b)`** — the largest integer dividing both `a` and `b`.
+- **`lcm(a, b)`** — smallest positive integer both divide; equals `a / gcd(a, b) * b`.
+- **Coprime** — two numbers whose gcd is `1`; they share no prime factor.
+- **Modular arithmetic** — arithmetic on remainders mod `m`, where `+`, `−` and `×` are all well defined.
+- **Modular inverse of `a`** — the `x` with `a·x ≡ 1 (mod m)`; the stand-in for "divide by `a`".
+- **Extended Euclid** — Euclid's algorithm that also returns `x, y` with `a·x + m·y = gcd(a, m)`.
+- **Fermat's little theorem** — for prime `p` and `a` not a multiple of `p`, `a^(p−1) ≡ 1 (mod p)`.
+- **Binary exponentiation** — computing `a^n` with `O(log n)` multiplications by repeated squaring.
+- **Sieve of Eratosthenes** — cross off multiples of each prime to list every prime `≤ n`.
+- **`nCr`** — the binomial coefficient "`n` choose `r`", `n! / (r!·(n−r)!)`.
 
 **Core mechanics**
-Euclid's algorithm: `gcd(a,b) = gcd(b, a mod b)`, base case `gcd(a,0)=a`. Correctness rests on the invariant that the set of common divisors of (a,b) equals that of (b, a mod b). It runs in `O(log min(a,b))` — consecutive remainders drop by at least half every two steps (a Fibonacci-worst-case bound). Binary exponentiation reads the exponent's bits: `a^n = (a^(n/2))^2` for even n, `a * a^(n-1)` for odd, giving `T(n) = T(n/2) + O(1)` = `O(log n)` multiplications; keep every product `mod m` to bound number size. The sieve marks multiples of each prime p starting at `p*p`; total work is `n * sum(1/p)` = `O(n log log n)`, space `O(n)`. nCr mod prime p: precompute factorials and their inverses once (`O(n)` with a single modular inverse and a backward pass), then each query is `fact[n] * invfact[r] * invfact[n-r] mod p` in `O(1)`.
+Euclid's algorithm is `gcd(a, b) = gcd(b, a mod b)` with base case `gcd(a, 0) = a`; it is correct because `(a, b)` and `(b, a mod b)` have *identical* sets of common divisors, and it runs in `O(log min(a, b))` because consecutive remainders at least halve every two steps. Binary exponentiation reads the exponent's binary expansion: `a^n = (a^(n/2))²` when `n` is even, `a · a^(n−1)` when odd, so `T(n) = T(n/2) + O(1) = O(log n)` multiplications — logarithmic, meaning an exponent of `10¹⁸` costs about 60 multiplications. The sieve marks multiples of each prime `p` starting from `p·p`; the total marking work is `n · (1/2 + 1/3 + 1/5 + …)` summed over primes `≤ n`, which is `O(n log log n)` — in plain words, *very nearly linear*, since `log log n` is under 5 for any `n` you will ever sieve. Trial division tests candidate divisors only up to `√n`, giving `O(√n)` per query with `O(1)` space. For `nCr` mod a prime `p`, precompute `fact[0..n]` in `O(n)`, get `invfact[n]` from one Fermat inverse, fill the rest backward in `O(n)`, and answer every query in `O(1)`.
 
 **Trade-offs**
-Fermat's-inverse (`a^(p-2)`) needs a prime modulus and costs `O(log p)`; the extended-Euclid inverse works for any m coprime to a and is also `O(log m)` — reach for extended Euclid when the modulus isn't prime. Sieve vs trial division: sieve wins overwhelmingly when you need *all* primes or many primality checks up to a bound; trial division (`O(sqrt(n))` per number) wins for a single large query where n is too big to sieve. Precomputed factorials cost `O(n)` memory but turn each nCr into `O(1)` — worth it above a handful of queries; Pascal's triangle is simpler but `O(n^2)` time and memory.
+Fermat's inverse (`pow(a, p−2, p)`) is a one-liner but demands a **prime** modulus; extended Euclid works for any `m` coprime to `a` and is the same `O(log m)`, so it is the right default when the modulus is composite. Sieve versus trial division is a "one query or many" decision: the sieve costs `O(n log log n)` time and `O(n)` memory but then answers unlimited primality queries below `n` in `O(1)`, whereas trial division is `O(√n)` per query with no memory — so one enormous number favours trial division (or Miller–Rabin), while thousands of queries in a bounded range favour the sieve. Precomputed factorials cost `O(n)` memory to make each `nCr` `O(1)`; Pascal's triangle needs no inverses at all but is `O(n²)` in both time and space. Matrix exponentiation buys `O(log n)` in place of an `O(n)` DP, but at a `k³` cost per multiply, so it only pays when the state dimension `k` is tiny and `n` is huge.
 
 **Common confusions**
-You cannot divide under a modulus — you multiply by the modular inverse, and only when the divisor is coprime to m. `a % m` in most languages can be negative for negative a; normalize with `((a % m) + m) % m`. Forgetting to take mod *inside* the loop of exponentiation overflows 64-bit ints. LCM computed as `a*b/gcd` overflows if you multiply first — divide before multiplying. Fermat's inverse silently gives wrong answers if p isn't actually prime, or if a is a multiple of p (inverse doesn't exist). Sieving multiples from `2*p` instead of `p*p` still works but wastes time.
+You cannot divide under a modulus — you multiply by a modular inverse, and only when the divisor is coprime to `m`. In C, C++ and Java, `%` takes the sign of the dividend, so `-3 % 7` is `-3`, not `4`; normalize with `((a % m) + m) % m`. Forgetting to reduce *inside* the exponentiation loop overflows a 64-bit integer almost immediately. Writing `lcm = a * b / gcd(a, b)` overflows even when the true LCM fits — divide first. Fermat's inverse fails silently when `p` is not actually prime or when `a` is a multiple of `p`. Testing divisors past `√n` is not "safer", it is pure waste. And marking sieve multiples from `2p` rather than `p·p` is correct but slower.
 
 **Why interviewers ask**
-These test whether you can keep numbers bounded and reason about complexity precisely rather than reaching for big-integer libraries. The classic angle is "compute nCr mod 1e9+7" or "a^b mod m for huge b" — a direct check of fast exponentiation and modular inverse. Follow-ups probe correctness of Euclid, when an inverse exists, and how you'd handle a non-prime modulus (CRT, extended Euclid). Strong candidates state the exact Big-O and the overflow guards without prompting.
+These questions test whether you keep numbers bounded and reason about complexity precisely, instead of reaching for a big-integer library and hoping. "Compute `a^b mod m` for huge `b`" and "compute `nCr` mod `10⁹+7`" are the two canonical prompts, and both are direct checks of fast exponentiation plus modular inverse. Follow-ups probe *why* Euclid terminates, exactly when an inverse exists, why `√n` is the right cutoff, and what changes when the modulus is composite. Strong candidates state the exact complexity and the overflow guards without being asked.
 
 ### What is Euclid's algorithm and why does it terminate quickly?
 
-`gcd(a,b) = gcd(b, a mod b)` with base case `gcd(a,0) = a`. It terminates because each step replaces `(a,b)` with `(b, a mod b)`, and `a mod b < b`, so the second argument strictly decreases toward 0. It's *fast* — `O(log min(a,b))` — because in two consecutive steps the larger value at least halves: if `b <= a/2` the remainder is already `< a/2`; if `b > a/2` then `a mod b = a - b < a/2`. The worst case is consecutive Fibonacci numbers, which is where the log base is the golden ratio.
+`gcd(a, b) = gcd(b, a mod b)`, with base case `gcd(a, 0) = a`. The **intuition** is a conservation law: any number that divides both `a` and `b` also divides `a − b`, and therefore divides `a mod b` (which is just `a` minus some multiple of `b`). The reverse holds too, so `(a, b)` and `(b, a mod b)` have *exactly* the same set of common divisors — including the greatest one. Replacing the pair with a smaller pair therefore never changes the answer.
+
+It **terminates** because each step makes the second argument `a mod b`, which is strictly less than `b`, so the second slot decreases toward `0`. It is **fast** because the shrinkage is geometric: in two consecutive steps the larger value at least halves. If `b ≤ a/2` then the remainder is already below `a/2`; if `b > a/2` then `a mod b = a − b < a/2`. Either way you lose a bit every two steps.
+
+Micro-example — `gcd(48, 18)`:
+`48 mod 18 = 12` → `gcd(18, 12)`
+`18 mod 12 = 6` → `gcd(12, 6)`
+`12 mod 6 = 0` → `gcd(6, 0)` = **`6`**
+
+Three steps for numbers near 50. In general it is `O(log min(a, b))` — logarithmic, so even 64-bit inputs finish in under a hundred iterations. The worst case is consecutive Fibonacci numbers (e.g. `gcd(21, 13)`), where each step shaves off the minimum possible; that is why the log's base is the golden ratio `≈ 1.618`.
+
+```python
+def gcd_recursive(a, b):
+    if b == 0:                    # base case: gcd(a, 0) = a
+        return a
+    return gcd_recursive(b, a % b)
+
+
+def gcd(a, b):                    # iterative: no recursion depth risk
+    while b:
+        a, b = b, a % b           # simultaneous assignment, no temp needed
+    return a
+```
+
+The iterative form is preferred in interviews: it is the same `O(log min(a, b))` but uses `O(1)` space instead of `O(log min(a, b))` stack frames.
 
 ### How do you compute LCM, and what's the overflow trap?
 
-`lcm(a,b) = a / gcd(a,b) * b`. Divide by the gcd *first*, then multiply — writing `a * b / gcd` computes the full product before dividing, which can overflow 64-bit even when the true LCM fits. There is no separate LCM algorithm; it rides entirely on one gcd call, so it's `O(log min(a,b))`.
+There is no separate LCM algorithm — it rides entirely on one gcd call, from the identity `gcd(a, b) · lcm(a, b) = a · b`. Intuitively, every prime appears in the product `a·b` with the sum of its exponents in `a` and `b`; the gcd holds the minimum of the two exponents and the lcm holds the maximum, and `min + max = sum`. So `lcm(a, b) = a · b / gcd(a, b)`.
+
+The **trap** is the order of operations. Write it as `a / gcd(a, b) * b`, not `a * b / gcd(a, b)`. The second form materialises the full product first, which can overflow a 64-bit integer even when the true LCM comfortably fits — e.g. `a = b = 3·10⁹` with `gcd = 3·10⁹` has `lcm = 3·10⁹`, but `a·b = 9·10¹⁸` is right at the edge of a signed 64-bit range. Dividing first is always safe because `gcd(a, b)` divides `a` exactly.
+
+```python
+def lcm(a, b):
+    if a == 0 or b == 0:
+        return 0                  # lcm with zero is conventionally 0
+    return a // gcd(a, b) * b     # divide FIRST, then multiply
+```
+
+Micro-example: `lcm(12, 18)`. `gcd(12, 18) = 6`, so `12 // 6 * 18 = 2 * 18 = 36`. Check: 36 is the first multiple of 12 that is also a multiple of 18. Cost is one gcd, so `O(log min(a, b))` — logarithmic in the smaller input.
 
 ### Explain binary (fast) exponentiation.
 
-To compute `a^n`, look at n in binary. Square the base repeatedly (`a, a^2, a^4, ...`) and multiply into the result only for bits of n that are set. Equivalently, recursively: `a^n = (a^(n/2))^2` if n even, `a * a^(n-1)` if odd. The recurrence `T(n) = T(n/2) + O(1)` gives `O(log n)` multiplications instead of `O(n)`.
+To compute `a^n`, look at `n` in **binary**. Note that `a^13 = a^(8+4+1) = a⁸ · a⁴ · a¹`, because `13 = 1101₂`. So you only need the successive squares `a, a², a⁴, a⁸, …` — each one is the previous squared, costing one multiplication — and you fold a square into the running result exactly when the corresponding bit of `n` is set. Since `n` has `⌊log₂ n⌋ + 1` bits, you do at most `2 log₂ n` multiplications instead of `n − 1`.
+
+Equivalently, recursively: `a^n = (a^(n/2))²` when `n` is even, `a · a^(n−1)` when odd. The recurrence `T(n) = T(n/2) + O(1)` solves to `O(log n)`.
 
 ```python
 def power(a, n, m):
     result = 1
-    a %= m
+    a %= m                        # reduce once up front
+    while n > 0:
+        if n & 1:                 # this bit of the exponent is set
+            result = result * a % m
+        a = a * a % m             # next successive square
+        n >>= 1                   # consume the bit
+    return result
+```
+
+Micro-example — `power(3, 13, 1000)`, with `13 = 1101₂`:
+
+| step | `n` | bit | `result` | `a` |
+| --- | --- | --- | --- | --- |
+| 0 | 13 | 1 | `1·3 = 3` | `3² = 9` |
+| 1 | 6 | 0 | 3 | `9² = 81` |
+| 2 | 3 | 1 | `3·81 = 243` | `81² = 6561 → 561` |
+| 3 | 1 | 1 | `243·561 = 136323 → 323` | — |
+
+Answer `323`, and indeed `3¹³ = 1594323`, whose last three digits are `323`. Four iterations for an exponent of 13; an exponent of `10¹⁸` would take 60. In words: **the cost grows with the number of digits in the exponent, not with the exponent itself** — `O(log n)` multiplications, `O(1)` space.
+
+Python's builtin `pow(a, n, m)` does exactly this, and is what you should call in real code — but interviewers ask you to write it out.
+
+### Why take the modulus inside the loop rather than at the end?
+
+Because `a^n` is astronomically large. `2¹⁰⁰⁰` has 302 decimal digits; in a fixed-width language it silently overflows long before the loop ends, and in Python it becomes a big integer whose multiplications are no longer `O(1)` — the "logarithmic" algorithm degrades badly because each individual multiply gets more expensive as the operand grows.
+
+Reducing at every step is safe because modular arithmetic is a **ring homomorphism** for `+`, `−` and `×`: `(x·y) mod m = ((x mod m) · (y mod m)) mod m`. Reducing early and reducing late give the identical answer. Once both operands are `< m`, every product is `< m²`, which fits in a signed 64-bit integer whenever `m < ~3·10⁹` — and that is exactly why competitive moduli like `10⁹+7` are chosen: the square `≈ 10¹⁸` slides just under `2⁶³ ≈ 9.2·10¹⁸`.
+
+```python
+MOD = 10**9 + 7
+
+def mul(x, y):
+    return x * y % MOD                    # reduce after EVERY multiply
+
+def add(x, y):
+    return (x + y) % MOD
+
+def sub(x, y):
+    return (x - y) % MOD                  # Python: already non-negative
+```
+
+In C++ or Java you would use `long long` / `long` for the intermediate and normalize subtraction with `((x - y) % MOD + MOD) % MOD`. In Python big integers never overflow, so the failure mode is *slowness*, not wrongness — worth saying out loud, because it shows you know the difference.
+
+### What is a modular inverse and when does it exist?
+
+The modular inverse of `a` mod `m` is the `x` satisfying `a·x ≡ 1 (mod m)`. It is the modular stand-in for `1/a`.
+
+It exists **if and only if** `gcd(a, m) = 1` — that is, `a` and `m` are coprime. The intuition: consider the map `x → a·x mod m` on the `m` residues `{0, 1, …, m−1}`. If `a` and `m` share no factor, that map is a **bijection** (it hits every residue exactly once), so some residue must map to `1`, and that residue is the inverse. If `gcd(a, m) = d > 1`, then every product `a·x mod m` is a multiple of `d`, so the map's image only contains multiples of `d` — it can never produce `1`, and no inverse exists.
+
+Concretely, mod 7: `3·1=3, 3·2=6, 3·3=2, 3·4=5, 3·5=1` — every residue appears, and `3⁻¹ = 5`. But mod 6: `3·0=0, 3·1=3, 3·2=0, 3·3=3, 3·4=0, 3·5=3` — the image is only `{0, 3}`, so `3` has no inverse mod 6, exactly as `gcd(3, 6) = 3 ≠ 1` predicts.
+
+### How do you compute a modular inverse two different ways?
+
+**Route 1 — extended Euclid, works for any `m` coprime to `a`.** Run Euclid's algorithm but also track coefficients `x, y` with `a·x + m·y = gcd(a, m)`. When the gcd is `1`, reducing that equation mod `m` kills the `m·y` term and leaves `a·x ≡ 1 (mod m)`, so `x mod m` is the inverse.
+
+```python
+def extended_gcd(a, b):
+    if b == 0:
+        return a, 1, 0                    # gcd = a, and a*1 + b*0 = a
+    g, x1, y1 = extended_gcd(b, a % b)
+    return g, y1, x1 - (a // b) * y1      # unwind the substitution
+
+
+def mod_inverse(a, m):
+    g, x, _ = extended_gcd(a % m, m)
+    if g != 1:
+        return None                       # no inverse: a and m share a factor
+    return x % m                          # normalize into [0, m)
+```
+
+Micro-example — inverse of `3` mod `7`. `extended_gcd(3, 7)`: `3 mod 7 = 3` so it recurses to `extended_gcd(7, 3)` → `extended_gcd(3, 1)` → `extended_gcd(1, 0)` = `(1, 1, 0)`. Unwinding gives `3·(−2) + 7·1 = 1`, so `x = −2` and `−2 mod 7 = 5`. Check: `3·5 = 15 = 2·7 + 1`. ✓
+
+**Route 2 — Fermat's little theorem, only when `m` is prime.** For prime `p`, `a^(p−1) ≡ 1 (mod p)`, so `a^(p−2) ≡ a⁻¹`. One call to fast exponentiation:
+
+```python
+def mod_inverse_prime(a, p):
+    return pow(a, p - 2, p)               # ONLY valid when p is prime
+```
+
+Micro-example: inverse of `3` mod `7` is `3⁵ = 243 = 34·7 + 5` → `5`. Same answer.
+
+Both are `O(log m)` — logarithmic in the modulus. Use Fermat when the modulus is a known prime (`10⁹+7`, `998244353`) because it is one line; use extended Euclid when it is composite, or when you also want the Bézout coefficients for a Diophantine equation or the Chinese Remainder Theorem.
+
+### Why can't you just divide under a modulus?
+
+Because integer division does not survive the reduction. Modular arithmetic is well behaved for `+`, `−` and `×` — reduce the inputs and you get the reduced output — but not for `/`. Take `10 / 2 = 5`, so the true answer mod 7 is `5`. Now reduce first: `10 mod 7 = 3` and `2 mod 7 = 2`, and `3 / 2` is not even an integer. The two routes disagree, so "divide then mod" is not a valid operation.
+
+The fix is to replace division by multiplication with the inverse: `(a / b) mod m` becomes `a · b⁻¹ mod m`, valid **only** when `gcd(b, m) = 1`. Redo the example: `b⁻¹ = 2⁻¹ mod 7 = 4` (since `2·4 = 8 ≡ 1`), so `3 · 4 = 12 ≡ 5 (mod 7)`. ✓ — it now matches.
+
+This is the single most common modular-arithmetic mistake, and it is the reason the `nCr` recipe below is built out of inverse factorials rather than a division.
+
+### Describe the Sieve of Eratosthenes and its complexity.
+
+The sieve finds *every* prime up to `n` by elimination rather than testing. Start with a boolean array `is_prime[0..n]` all `True`, clear indices `0` and `1`. Walk `i` upward; the first unmarked number you meet is prime by construction (nothing smaller divides it), so cross off all of its multiples. What survives at the end is exactly the primes.
+
+```python
+def sieve(n):
+    is_prime = [True] * (n + 1)
+    is_prime[0] = is_prime[1] = False
+    i = 2
+    while i * i <= n:                     # stop at the square root
+        if is_prime[i]:
+            for j in range(i * i, n + 1, i):   # start at i*i, not 2*i
+                is_prime[j] = False
+        i += 1
+    return [k for k in range(n + 1) if is_prime[k]]
+```
+
+Two optimizations carry real weight. **Start marking at `i·i`**: every smaller multiple `i·c` with `c < i` already has a factor smaller than `i`, so a smaller prime crossed it off already. **Stop the outer loop at `√n`**: if `i > √n` then `i·i > n` and there is nothing left in range to mark.
+
+Micro-example, `n = 30`. `i = 2` marks `4, 6, 8, …, 30`. `i = 3` marks `9, 15, 21, 27` (`6, 12, 18, 24, 30` were already gone). `i = 4` is already marked, skip. `i = 5` marks `25` (only `5·5` is left in range). `i = 6` exceeds `√30 ≈ 5.48`, stop. Survivors: `2, 3, 5, 7, 11, 13, 17, 19, 23, 29`.
+
+Complexity is `O(n log log n)` time, `O(n)` space. That comes from summing `n/p` over all primes `p ≤ n`, and the sum of prime reciprocals grows like `log log n`. In plain words: **essentially linear** — `log log 10⁹` is under 4, so it behaves like a small constant multiple of `n`.
+
+**Segmented sieve**, in words, handles ranges too high to sieve from zero: to find the primes in `[L, R]` where `R` is as large as `10¹²` but `R − L` is manageable, first run an ordinary sieve up to `√R` to get the "base" primes, then allocate a boolean array of size `R − L + 1` indexed by offset from `L` and, for each base prime `p`, cross off the multiples of `p` inside the window (starting at the first multiple `≥ L`, or at `p·p` if that is larger). Memory drops from `O(R)` to `O(R − L + √R)`, which is what makes the problem tractable at all.
+
+### When would you use trial division instead of a sieve?
+
+When you have **one** query on a number too large to sieve up to. Trial division tests candidate divisors up to `√n` and needs `O(1)` space; the sieve needs `O(n)` time *and* `O(n)` memory before answering anything. For `n = 10¹²`, trial division does about a million operations and allocates nothing, while a sieve would need a trillion-entry array — impossible.
+
+The crossover is about query volume and range. Many primality checks with all values below, say, `10⁷`? Sieve once (`O(n log log n)`), then every query is an `O(1)` array lookup, and you also get prime *counts* and *lists* for free. One or a handful of large values? Trial division at `O(√n)` each, or Miller–Rabin if `√n` itself is too big.
+
+Trial division is also the practical way to get a **prime factorization**, which the sieve does not directly give you:
+
+```python
+def prime_factors(n):
+    factors = []
+    d = 2
+    while d * d <= n:                     # only need divisors up to sqrt n
+        while n % d == 0:
+            factors.append(d)
+            n //= d                       # divide it out completely
+        d += 1
+    if n > 1:
+        factors.append(n)                 # leftover is a prime above the root
+    return factors
+```
+
+Trace `prime_factors(84)`: `d = 2` divides twice → `n = 21`, factors `[2, 2]`. `d = 3` divides once → `n = 7`, factors `[2, 2, 3]`. `d = 4`, but `16 > 7`, so the loop exits and the leftover `7` is appended. Result `[2, 2, 3, 7]`, i.e. `84 = 2²·3·7`. The final `if n > 1` matters: after dividing out every factor below the running square root, whatever remains must itself be prime. Complexity is `O(√n)` — in words, proportional to the square root of the input, so roughly half its digit count in cost exponent.
+
+### How do you test primality for a single large n?
+
+Trial division up to `√n`, checking `2` and then odd numbers only (or a `2, 3` wheel that skips two-thirds of candidates). The reason `√n` is the right cutoff — and the point interviewers listen for — is that divisors come in **pairs**: if `n = d · e` with `d ≤ e`, then `d ≤ √n`. So if no divisor exists at or below `√n`, no divisor exists at all, and testing beyond `√n` can only rediscover the larger partner of a factor you already rejected. Halving the search space is not the win; going from `n` to `√n` is.
+
+```python
+def is_prime(n):
+    if n < 2:
+        return False
+    if n < 4:
+        return True                       # 2 and 3
+    if n % 2 == 0:
+        return False
+    d = 3
+    while d * d <= n:                     # equivalent to d <= the square root
+        if n % d == 0:
+            return False
+        d += 2                            # odd candidates only
+    return True
+```
+
+Micro-example, `n = 91`: `√91 ≈ 9.54`. Test `3` (no, `91 = 30·3 + 1`), `5` (no), `7` → `91 = 7·13`, divisible, return `False`. Micro-example, `n = 97`: test `3, 5, 7, 9`; `11·11 = 121 > 97` so the loop ends and it returns `True`.
+
+Complexity is `O(√n)` time, `O(1)` space — in words, about `√n / 2` divisions. That is roughly a million operations for `n = 10¹²`, which is fine, but hopeless for a 256-bit number. For those, use **Miller–Rabin**, a probabilistic test running in `O(k log³ n)` for `k` rounds; with a fixed set of witness bases (`2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37`) it is *deterministic* for all 64-bit integers. Interviewers normally accept `√n` trial division unless they explicitly push on huge inputs — but naming Miller–Rabin as the escalation is a cheap win.
+
+### How do you compute nCr mod a prime efficiently?
+
+`nCr = n! / (r! · (n−r)!)`. Under a prime modulus `p` you cannot divide, so each division becomes multiplication by a modular inverse:
+
+`nCr ≡ fact[n] · invfact[r] · invfact[n−r] (mod p)`
+
+Precompute both tables once and every query afterwards is three multiplications.
+
+```python
+MOD = 10**9 + 7
+
+def build_factorials(n):
+    fact = [1] * (n + 1)
+    for i in range(1, n + 1):
+        fact[i] = fact[i - 1] * i % MOD
+    invfact = [1] * (n + 1)
+    invfact[n] = pow(fact[n], MOD - 2, MOD)    # one Fermat inverse
+    for i in range(n, 0, -1):                  # walk backward, one multiply each
+        invfact[i - 1] = invfact[i] * i % MOD
+    return fact, invfact
+
+
+def nCr(n, r, fact, invfact):
+    if r < 0 or r > n:
+        return 0
+    return fact[n] * invfact[r] % MOD * invfact[n - r] % MOD
+```
+
+Micro-example with a tiny modulus `p = 7` and `n = 5`. Factorials mod 7: `fact = [1, 1, 2, 6, 3, 1]` (since `4! = 24 ≡ 3` and `5! = 120 ≡ 1`). `invfact[5] = 1⁻¹ = 1`; then `invfact[4] = 1·5 = 5`, `invfact[3] = 5·4 = 20 ≡ 6`, `invfact[2] = 6·3 = 18 ≡ 4`. Now `C(5, 2) = fact[5]·invfact[2]·invfact[3] = 1·4·6 = 24 ≡ 3 (mod 7)`. Check directly: `C(5, 2) = 10`, and `10 mod 7 = 3`. ✓
+
+Building the tables costs `O(n)` time plus one `O(log p)` inversion, and `O(n)` memory; each query is then `O(1)`. This is the standard "combinatorics mod `10⁹+7`" setup and is worth memorising verbatim.
+
+### Why precompute inverse factorials backward instead of inverting each one?
+
+Because a single modular inverse costs `O(log p)`. Inverting all `n` factorials independently would be `n` separate exponentiations — `O(n log p)`, which for `n = 2·10⁵` and a 30-bit prime is about six million multiplications instead of two hundred thousand.
+
+The backward trick uses the identity `invfact[i−1] = invfact[i] · i (mod p)`, which follows directly from `(i−1)! = i! / i`. So you pay for exactly **one** inverse — `invfact[n] = pow(fact[n], p−2, p)` — and then each earlier entry is a single multiplication. Total: `O(n)` for the whole array plus one `O(log p)` call.
+
+Micro-example with `p = 7, n = 5` from above: `invfact[5] = 1`, then `invfact[4] = 1·5 = 5`, `invfact[3] = 5·4 = 20 ≡ 6`, `invfact[2] = 6·3 ≡ 4`, `invfact[1] = 4·2 = 8 ≡ 1`, `invfact[0] = 1·1 = 1`. Six entries, one exponentiation. In words: **one logarithmic operation plus a linear pass, instead of a linear number of logarithmic operations** — a constant-factor optimization that turns out to matter a great deal in practice.
+
+### What is Fermat's little theorem and how is it used here?
+
+The theorem: for a prime `p` and any `a` not divisible by `p`, `a^(p−1) ≡ 1 (mod p)`.
+
+Why it is true, informally: multiplying every nonzero residue by `a` permutes the set `{1, 2, …, p−1}` (that is the bijection argument from the modular-inverse card). So the product of the whole set equals the product of the multiplied set: `(p−1)! ≡ a^(p−1) · (p−1)! (mod p)`. Cancel `(p−1)!`, which is legal because it is coprime to `p`, and you are left with `a^(p−1) ≡ 1`.
+
+The **use** is one algebraic step away. Multiply both sides by `a⁻¹`: `a^(p−2) ≡ a⁻¹ (mod p)`. So the modular inverse is a single call to fast exponentiation, `pow(a, p - 2, p)`, in `O(log p)`. This is what makes the `nCr` pipeline above a few lines long instead of a page.
+
+Micro-example with `p = 7, a = 3`: `3⁶ = 729 = 104·7 + 1 ≡ 1`. ✓ And `3⁵ = 243 = 34·7 + 5 ≡ 5`, which is indeed `3⁻¹` since `3·5 = 15 ≡ 1 (mod 7)`.
+
+Two catches, both worth stating unprompted: `p` must genuinely be prime (a composite modulus gives a wrong answer with no error), and `a` must not be a multiple of `p` (then `a ≡ 0` and no inverse exists at all).
+
+### What is matrix exponentiation and when does it beat linear DP?
+
+Any **linear recurrence** — one where each term is a fixed linear combination of the previous `k` terms — can be rewritten as repeated multiplication by a constant `k × k` **transition matrix**. Fibonacci, `F(n) = F(n−1) + F(n−2)`, is the standard example: the state vector `[F(n), F(n−1)]` becomes `[F(n+1), F(n)]` after one multiply by `[[1,1],[1,0]]`. Advancing one step is one matrix-vector product; advancing `n` steps is multiplying by the matrix `n` times, which is the same as raising the matrix to the `n`-th power.
+
+And matrix powers submit to exactly the same binary-exponentiation trick as scalars, because matrix multiplication is associative: `M^n = (M^(n/2))²` for even `n`. That gives `O(log n)` matrix multiplies, each costing `O(k³)` for the naive triple loop, so the total is `O(k³ log n)`.
+
+```python
+def mat_mul(A, B, mod):
+    k = len(A)
+    C = [[0] * k for _ in range(k)]
+    for i in range(k):
+        for t in range(k):
+            if A[i][t]:                        # skip zeros: common and cheap
+                for j in range(k):
+                    C[i][j] = (C[i][j] + A[i][t] * B[t][j]) % mod
+    return C
+
+
+def mat_pow(M, n, mod):
+    k = len(M)
+    result = [[int(i == j) for j in range(k)] for i in range(k)]   # identity
     while n > 0:
         if n & 1:
-            result = result * a % m
-        a = a * a % m
+            result = mat_mul(result, M, mod)
+        M = mat_mul(M, M, mod)
         n >>= 1
     return result
 ```
 
-### Why take the modulus inside the loop rather than at the end?
-
-Because `a^n` is astronomically large — it would need arbitrary-precision arithmetic and blow past 64-bit ints almost immediately. Since `(x*y) mod m = ((x mod m) * (y mod m)) mod m`, you can reduce after every multiplication and keep every intermediate below `m^2`, which fits in 64 bits for `m < ~3e9`. The final answer is identical; you've just never let the numbers grow.
-
-### What is a modular inverse and when does it exist?
-
-The modular inverse of a mod m is the x satisfying `a*x ≡ 1 (mod m)`. It exists *if and only if* `gcd(a, m) = 1` (a and m are coprime). Intuition: multiplication by a is a bijection on residues mod m exactly when a shares no factor with m, and a bijection means 1 has a preimage. When gcd > 1, a maps multiple residues together, so no inverse can undo it.
-
-### How do you compute a modular inverse two different ways?
-
-Two standard methods. (1) Fermat's little theorem, when m is prime: `a^(m-2) mod m` is the inverse, computed by fast exponentiation in `O(log m)`. (2) Extended Euclidean algorithm, for any m coprime to a: it finds x,y with `a*x + m*y = 1`, and x mod m is the inverse — also `O(log m)`. Use Fermat when the modulus is a known prime (like 1e9+7); use extended Euclid when it isn't.
-
-### Why can't you just divide under a modulus?
-
-Because division isn't defined in modular arithmetic — `(a / b) mod m` is meaningless in general. `10 / 2 = 5` but `10 mod 7 = 3` and `2 mod 7 = 2`, and `3/2` isn't an integer. Instead you multiply by the modular inverse: `a / b mod m` becomes `a * inverse(b, m) mod m`, valid only when `gcd(b,m)=1`. This is the single most common modular-arithmetic mistake.
-
-### Describe the Sieve of Eratosthenes and its complexity.
-
-Create a boolean array `is_prime[0..n]` all true, clear 0 and 1. For each i from 2 to sqrt(n), if `is_prime[i]`, mark every multiple of i starting at `i*i` as composite. What survives is prime. Starting at `i*i` (not `2*i`) is the key optimization — smaller multiples were already marked by smaller primes. Total marking work is `n * (1/2 + 1/3 + 1/5 + ...)` over primes, which is `O(n log log n)`; space is `O(n)`.
-
-### When would you use trial division instead of a sieve?
-
-For a *single* primality query on a number too large to sieve up to. Trial division checks divisors up to `sqrt(n)` — `O(sqrt(n))` per number — and needs only `O(1)` space. The sieve is `O(n log log n)` time and `O(n)` space, which only pays off when you need every prime up to n or will run many checks in that range. One big number: trial division (or Miller-Rabin). Many numbers in a range: sieve.
-
-### How do you test primality for a single large n?
-
-Trial division up to `sqrt(n)`, checking only 2 and odd numbers (or a 2,3 wheel) — `O(sqrt(n))`. For very large n where `sqrt(n)` is still too big, use the Miller-Rabin probabilistic test: it runs in `O(k log^3 n)` for k rounds and, with a fixed set of witness bases, is deterministic for all 64-bit integers. Interviewers usually accept `sqrt(n)` trial division unless they explicitly push on huge inputs.
-
-### How do you compute nCr mod a prime efficiently?
-
-`nCr = n! / (r! * (n-r)!)`. Under a prime mod p, division becomes multiplication by inverses: `fact[n] * invfact[r] % p * invfact[n-r] % p`. Precompute `fact[0..n]` in `O(n)`, compute `invfact[n]` with one Fermat inverse, then fill `invfact[i] = invfact[i+1] * (i+1) % p` backward in `O(n)`. After that, every nCr query is `O(1)`. This is the standard "combinatorics mod 1e9+7" setup.
-
-### Why precompute inverse factorials backward instead of inverting each one?
-
-Because a single modular inverse costs `O(log p)`, so inverting all n factorials directly would be `O(n log p)`. Instead compute just `invfact[n]` once, then use the identity `invfact[i] = invfact[i+1] * (i+1) mod p` to walk backward — each step is one multiplication, so the whole array is `O(n)` after a single `O(log p)` inversion. It's a classic constant-factor-that-matters optimization.
-
-### What is Fermat's little theorem and how is it used here?
-
-For a prime p and any a not divisible by p, `a^(p-1) ≡ 1 (mod p)`. Multiply both sides by `a^(-1)`: `a^(p-2) ≡ a^(-1) (mod p)`. So raising a to the `p-2` power gives its modular inverse — a one-liner via fast exponentiation. It underpins the whole nCr-mod-prime pipeline. The catch: p must genuinely be prime and a must not be a multiple of p.
-
-### What is matrix exponentiation and when does it beat linear DP?
-
-Any linear recurrence (like Fibonacci: `F(n) = F(n-1) + F(n-2)`) can be written as a matrix-vector product: state vector times a fixed transition matrix advances one step. To advance n steps, raise the matrix to the n-th power using binary exponentiation on matrices — `O(k^3 log n)` for a k-by-k matrix. This crushes an `O(n)` DP when n is astronomically large (like `10^18`), because it's logarithmic in n. The trade-off is the `k^3` factor, so it only wins when the state dimension k is small and n is huge.
+It **beats** a linear DP when `n` is astronomically large and `k` is small: a plain `O(n)` Fibonacci loop is hopeless at `n = 10¹⁸`, while `O(2³ · 60)` is about five hundred operations. It **loses** when `k` grows, because `k³` bites hard — a 100-state recurrence costs a million operations per multiply, so the linear DP wins unless `n` exceeds roughly `k³ log n` steps. Rule of thumb: reach for it when the state dimension is single-digit and `n` has more than about nine digits.
 
 ### Show the Fibonacci matrix identity.
 
@@ -3188,93 +4708,420 @@ Any linear recurrence (like Fibonacci: `F(n) = F(n-1) + F(n-2)`) can be written 
 | F(n)    F(n-1) | = | 1  0 |
 ```
 
-Raising `[[1,1],[1,0]]` to the n-th power (via binary exponentiation, all entries kept mod m) gives `F(n)` in the off-diagonal in `O(log n)` matrix multiplies. This is the canonical demonstration that matrix exponentiation turns an `O(n)` recurrence into `O(log n)`.
+Verify the base step by hand. With `M = [[1,1],[1,0]]`, `M¹` should be `[[F(2), F(1)], [F(1), F(0)]] = [[1,1],[1,0]]` ✓. Squaring: `M² = [[2,1],[1,1]]`, which claims `F(3) = 2, F(2) = 1, F(1) = 1` ✓. Cubing: `M³ = M²·M = [[3,2],[2,1]]`, claiming `F(4) = 3` ✓. The induction is one line — multiplying by `M` maps `[[F(n+1), F(n)], [F(n), F(n−1)]]` to `[[F(n+2), F(n+1)], [F(n+1), F(n)]]`, exactly the identity at `n+1`.
+
+```python
+def fib(n, mod=10**9 + 7):
+    if n == 0:
+        return 0
+    M = mat_pow([[1, 1], [1, 0]], n, mod)
+    return M[0][1]                             # the off-diagonal entry is F(n)
+```
+
+Micro-example: `fib(10)` raises `M` to the 10th power via four squarings and two folds, and reads `55` off the off-diagonal — the correct tenth Fibonacci number. Because every entry is kept reduced mod `m`, `fib(10**18)` costs the same 60-ish matrix multiplies and never touches a number larger than `m²`. This is the canonical demonstration that matrix exponentiation converts an `O(n)` recurrence into `O(log n)` — logarithmic in the *index*, not in the value.
 
 ### How do you handle negative numbers under a modulus?
 
-In C/C++/Java, `%` follows sign-of-dividend, so `-3 % 7` is `-3`, not `4`. Normalize with `((a % m) + m) % m` to force a value in `[0, m)`. Python's `%` already returns a non-negative result for positive m, so the guard is unnecessary there — but be explicit in interviews since the language matters. Getting a negative "answer" out of a mod computation is almost always this bug.
+The answer depends on the language, which is why interviewers like the question. In C, C++, Java and Go, `%` is **truncated** division: the result takes the sign of the *dividend*, so `-3 % 7` is `-3`, not `4`. In Python and Ruby, `%` is **floored**: `-3 % 7` is `4`, already the canonical representative in `[0, m)`.
+
+The portable fix is to normalize:
+
+```python
+def norm(a, m):
+    return ((a % m) + m) % m          # forces a result in [0, m)
+
+def sub_mod(a, b, m):
+    return (a - b + m) % m            # cheaper when you know |a-b| < m
+```
+
+Micro-example: `a = -3, m = 7`. In C, `a % m = -3`; add `m` → `4`; the second `% m` leaves `4` (it only matters when the first result was already non-negative and near `m`). Check: `4 ≡ -3 (mod 7)` because `4 − (−3) = 7`. ✓
+
+The `sub_mod` shortcut is the one you use inside hot loops: if both operands are already reduced into `[0, m)`, then `a − b` lies in `(−m, m)`, so adding a single `m` before the reduction is enough — no double modulo needed.
+
+Getting a negative number out of what should be a modular answer is almost always this bug, and in Python it is almost always the *opposite* bug — someone defensively adding `m` where it was never needed, which is harmless but signals confusion. Say which convention your language uses; that is what is actually being tested.
 
 ## Randomized Algorithms & Selection
 
 ### Summary
 
 **What this topic covers**
-Algorithms that use randomness to get simple, fast, robust behavior: randomized quicksort (random pivot to dodge adversarial inputs), quickselect and median-of-medians for finding the k-th smallest element (order statistics) in `O(n)`, reservoir sampling for uniform sampling from a stream of unknown length, and the Fisher-Yates shuffle for an unbiased permutation. The unifying idea: randomness converts *worst-case* guarantees you can't rely on into *expected-case* guarantees that hold regardless of input, and it does so with tiny, clean code.
+Algorithms that deliberately flip coins to get simple, fast, robust behaviour: **randomized quicksort** (a random pivot to dodge adversarial inputs), **quickselect** and **median-of-medians** for finding the k-th smallest element (an *order statistic*) in linear time, **reservoir sampling** for a uniform sample from a stream of unknown length, and the **Fisher-Yates shuffle** for a provably unbiased permutation. It also covers the two flavours of randomness — **Las Vegas** (always right, random running time) and **Monte Carlo** (bounded running time, occasionally wrong) — and the hybrid **introselect** that real libraries ship. The unifying idea: randomness converts *worst-case* guarantees you can't rely on into *expected-case* guarantees that hold for every input, and it does so with tiny, clean code.
+
+**Mental model**
+Think of a deterministic algorithm as a fixed strategy an adversary can study and defeat: "you always pick the first element as pivot? Then I'll hand you a sorted array and you'll take `O(n²)`." Randomness moves the badness out of the *input* and into the *dice*. The adversary can still get unlucky outcomes, but they can no longer *cause* them — every input now looks like a random input. The second big idea is **throwing work away**: quicksort recurses into both halves, so it pays `O(n)` per level across `log n` levels; quickselect recurses into only the half that can contain the answer, so its costs shrink geometrically (`n + n/2 + n/4 + … = 2n`) and collapse to linear. Sorting orders everything; selection only orders what it must.
 
 **Key terms**
-Order statistic — the k-th smallest element; the median is the n/2-th. Selection — finding an order statistic without fully sorting. Pivot — the element a partition step splits around. Partition — rearranging so elements < pivot precede it and > pivot follow (Lomuto or Hoare scheme). Las Vegas algorithm — always correct, running time is random (randomized quicksort, quickselect). Monte Carlo algorithm — running time is bounded, the *answer* may be wrong with small probability (Miller-Rabin). Reservoir sampling — streaming uniform sample. In-place — uses `O(1)` extra space.
+- **Order statistic** — the k-th smallest element of a collection; the median is the `n/2`-th.
+- **Selection** — finding one order statistic *without* fully sorting.
+- **Pivot** — the element a partition step splits the array around.
+- **Partition** — rearranging so that everything `<` the pivot precedes it and everything `>` follows (Lomuto or Hoare scheme); costs `O(n)`.
+- **Las Vegas algorithm** — always returns the correct answer; only the *running time* is random (randomized quicksort, quickselect).
+- **Monte Carlo algorithm** — running time is bounded, but the *answer* may be wrong with small, controllable probability (Miller-Rabin primality).
+- **Reservoir sampling** — one-pass uniform sampling from a stream whose length you don't know.
+- **Fisher-Yates** — the `O(n)` in-place shuffle that produces each of the `n!` permutations with probability `1/n!`.
+- **Introselect** — quickselect that watches its recursion depth and falls back to median-of-medians.
+- **In-place** — uses `O(1)` extra space beyond the input.
 
 **Core mechanics**
-Randomized quicksort picks a uniformly random pivot, partitions in `O(n)`, and recurses on both sides. Expected comparisons are `O(n log n)`: any two elements are compared at most once, with probability `2/(j-i+1)`, and summing gives the `2n ln n` bound — crucially independent of the input order. Quickselect is quicksort that recurses into *only one* side (the side containing rank k), giving expected `T(n) = T(n/2) + O(n) = O(n)` by the geometric series, though worst case is `O(n^2)`. Median-of-medians picks a provably good pivot (median of group-of-5 medians) to guarantee each side is at most `~70%`, yielding deterministic `O(n)` — at a large constant. Reservoir sampling keeps the current pick and replaces it with the i-th stream element with probability `1/i`; induction shows every element ends with probability `1/n`. Fisher-Yates walks the array once, swapping index i with a uniform random index in `[i, n-1]`, producing each of the n! permutations equiprobably in `O(n)`.
+Randomized quicksort picks a uniformly random pivot, partitions in `O(n)`, and recurses on both sides; expected comparisons are `Θ(n log n)` because any two elements are compared at most once, with probability `2/(j − i + 1)`, and summing over all pairs gives `≈ 2n ln n` — crucially independent of input order. Quickselect is quicksort that recurses into *only one* side, giving expected `T(n) = T(n/2) + O(n) = O(n)` by the geometric series, with a worst case of `O(n²)`. Median-of-medians picks a provably decent pivot (the median of group-of-5 medians), guaranteeing each side is at most `~70%` of the array, so `T(n) = T(n/5) + T(7n/10) + O(n)` solves to a deterministic `O(n)` — at a fat constant. Reservoir sampling keeps the current pick and replaces it with the i-th stream element with probability `1/i`; induction shows every element finishes with probability `1/n`. Fisher-Yates walks the array once, swapping index `i` with a uniform random index in `[i, n−1]`.
 
 **Trade-offs**
-Randomized quicksort vs mergesort: quicksort is in-place (`O(log n)` stack) and cache-friendly but has `O(n^2)` worst case and isn't stable; mergesort guarantees `O(n log n)` but needs `O(n)` scratch. Quickselect vs sorting-then-indexing: quickselect is expected `O(n)` vs `O(n log n)` — win when you need one order statistic, not the full order. Quickselect vs median-of-medians: the randomized version is faster in practice with a smaller constant but has a bad worst case; median-of-medians guarantees `O(n)` but its constant makes it slower on typical inputs — use it only when adversarial worst-case matters (or as the pivot-picker inside introselect).
+Randomized quicksort versus mergesort: quicksort is in-place (`O(log n)` stack) and cache-friendly but has an `O(n²)` tail and isn't stable; mergesort guarantees `O(n log n)` but needs `O(n)` scratch space. Quickselect versus sort-then-index: expected linear time beats `O(n log n)` whenever you want *one* order statistic rather than the full order. Quickselect versus median-of-medians: the randomized version is much faster in practice (small constant) but has a bad tail; median-of-medians guarantees linear time but its constant makes it slower on realistic inputs — reach for it only when a genuine adversary controls the input, or as the fallback inside introselect. Monte Carlo versus Las Vegas: you trade a time bound for a correctness bound, and cheap verification lets you convert between them.
 
 **Common confusions**
-Randomization removes the *systematic* worst case (sorted input) but not the *possibility* of `O(n^2)` — it just makes it astronomically unlikely and input-independent. "Median-of-medians" is a pivot strategy for `O(n)` selection, not itself a sort. A naive shuffle that swaps each index with *any* index in `[0, n-1]` is biased — it produces `n^n` equally likely sequences, which don't divide evenly into `n!` permutations; Fisher-Yates must draw from `[i, n-1]`. Reservoir sampling's replacement probability is `1/i` at step i, not `1/n`. Las Vegas (quicksort) and Monte Carlo (Miller-Rabin) are different guarantees — don't conflate "randomized" with "possibly wrong."
+Randomization removes the *systematic* worst case (sorted input), not the *possibility* of `O(n²)` — it just makes it astronomically unlikely and, more importantly, input-independent. "Median-of-medians" is a pivot-selection strategy inside an `O(n)` selection algorithm, not a sorting algorithm. A naive shuffle that swaps each index with *any* index in `[0, n−1]` is biased: it has `nⁿ` equally likely execution paths, and `nⁿ` is not divisible by `n!`, so some permutations come out more often. Reservoir sampling's replacement probability is `1/i` at step `i`, not `1/n`. And "randomized" does not mean "possibly wrong" — that's Monte Carlo specifically; Las Vegas algorithms are always correct.
 
 **Why interviewers ask**
-Selection ("find the k-th largest") is a top-tier interview question and the honest answer is quickselect, not "sort it." These test whether you can reason about *expected* complexity and probability, not just worst case. Fisher-Yates is a classic "is your shuffle actually uniform?" trap. Reservoir sampling checks streaming/one-pass thinking. The senior follow-up is always "what's the worst case and how do you defend against it?" — random pivot, median-of-medians, or introselect.
+"Find the k-th largest element" is a top-tier interview question, and the honest best answer is quickselect, not "sort it." These problems test whether you can reason about *expected* complexity and probability rather than reciting worst cases. Fisher-Yates is the classic "is your shuffle actually uniform?" trap and separates people who have thought about randomness from people who haven't. Reservoir sampling probes streaming and one-pass thinking. And the senior follow-up is always the same: "what's the worst case, and how do you defend against it?" — random pivot, median-of-medians, or introselect.
 
 ### Why does randomizing the pivot fix quicksort's worst case?
 
-Deterministic quicksort (first/last pivot) hits `O(n^2)` on already-sorted input because every partition peels off one element. A *random* pivot makes the worst case depend on coin flips, not input order — no fixed input is bad anymore. Expected splits are balanced enough that expected time is `O(n log n)` for *every* input. The `O(n^2)` case still exists but requires a long run of unlucky pivots, with probability vanishingly small.
+Imagine an opponent who knows your code. If your pivot rule is "always take the last element," they hand you an already-sorted array: every partition peels off exactly one element, you recurse `n` deep, and you do `n + (n−1) + (n−2) + … = Θ(n²)` work. The badness lives in the *input*, and the opponent controls the input.
+
+A random pivot moves the badness into the dice. No fixed input is bad any more, because the algorithm behaves the same way on every permutation — sorted, reverse-sorted, or shuffled. Expected running time becomes `O(n log n)` for *every* input.
+
+```python
+import random
+
+def quicksort(a, lo=0, hi=None):
+    if hi is None:
+        hi = len(a) - 1
+    if lo >= hi:
+        return a
+    p = random.randint(lo, hi)       # random pivot index -- the whole trick
+    a[p], a[hi] = a[hi], a[p]        # move pivot out of the way (Lomuto)
+    pivot = a[hi]
+    i = lo                           # boundary: a[lo:i] are < pivot
+    for j in range(lo, hi):
+        if a[j] < pivot:
+            a[i], a[j] = a[j], a[i]
+            i += 1
+    a[i], a[hi] = a[hi], a[i]        # pivot lands at its final index i
+    quicksort(a, lo, i - 1)
+    quicksort(a, i + 1, hi)
+    return a
+```
+
+Micro-example on the sorted array `[1,2,3,4,5]`. With last-element pivots you get splits of sizes `4, 3, 2, 1` — quadratic. With a random pivot, the chance of drawing an extreme pivot every single time is `(2/5)(2/4)(2/3)… `, which decays fast; the expected split is balanced enough that the recursion depth is `O(log n)` in expectation. The `O(n²)` case has not been deleted — it now requires a long run of unlucky draws, with probability that shrinks exponentially in `n`.
 
 ### Derive quicksort's expected O(n log n).
 
-Consider the sorted order. Two elements at sorted ranks i and j are compared only if one of them is chosen as pivot before any element ranked strictly between them — probability `2/(j - i + 1)`. Summing over all pairs: `sum_i sum_j 2/(j-i+1)` is `O(n log n)` (each inner sum is a harmonic series `~2 ln n`). Total expected comparisons `~2n ln n ≈ 1.39 n log2 n`. The bound holds for any input because randomness is in the pivot, not the data.
+The slick derivation counts comparisons pair by pair instead of level by level. Write the elements in **sorted order** as `z₁ < z₂ < … < zₙ`.
+
+Two elements `zᵢ` and `zⱼ` (with `i < j`) are compared **at most once** in the whole run — a comparison only ever happens against a pivot, and the pivot is removed afterwards. And they are compared **exactly when** the first pivot chosen from the block `{zᵢ, zᵢ₊₁, …, zⱼ}` is either `zᵢ` or `zⱼ`. Why: if some middle element is picked first, `zᵢ` and `zⱼ` are sent to opposite partitions and never meet again. That block has `j − i + 1` elements, all equally likely to be the first one picked, so
+
+`Pr[zᵢ compared with zⱼ] = 2 / (j − i + 1)`
+
+Expected total comparisons is the sum of these probabilities over all pairs:
+
+`E[C] = Σᵢ Σⱼ₌ᵢ₊₁ 2/(j − i + 1) = Σᵢ (2/2 + 2/3 + … ) ≈ Σᵢ 2 ln n = 2n ln n`
+
+In words: each element expects to be compared with about `2 ln n` others, and there are `n` elements. Numerically `2n ln n ≈ 1.39 · n log₂ n`, so randomized quicksort does roughly 39% more comparisons than the information-theoretic minimum — and it does this for *any* input, because the randomness is in the pivot, not in the data.
 
 ### What is quickselect and what's its complexity?
 
-Quickselect finds the k-th smallest element. Partition around a random pivot; if the pivot lands at index k you're done, otherwise recurse into *only the side* containing rank k. Because you discard one side, the expected recurrence is `T(n) = T(n/2) + O(n) = O(n)` (geometric series in the partition costs). Worst case is `O(n^2)` if pivots are consistently terrible, but expected is linear — strictly better than the `O(n log n)` of sort-then-index.
+Quickselect answers "what is the k-th smallest element?" without sorting. Partition around a random pivot. The pivot lands at its true sorted index `i`. Now compare `i` to `k`: if they're equal you're finished; if `k < i` the answer is in the left part; if `k > i` it's in the right part. Either way you **throw away the other side** and repeat.
+
+```python
+import random
+
+def quickselect(a, k):               # k is 0-based rank; returns k-th smallest
+    lo, hi = 0, len(a) - 1
+    while lo < hi:
+        p = random.randint(lo, hi)
+        a[p], a[hi] = a[hi], a[p]
+        pivot = a[hi]
+        i = lo
+        for j in range(lo, hi):      # Lomuto partition, O(hi - lo)
+            if a[j] < pivot:
+                a[i], a[j] = a[j], a[i]
+                i += 1
+        a[i], a[hi] = a[hi], a[i]
+        if i == k:
+            return a[i]
+        elif k < i:
+            hi = i - 1               # answer is left; discard the right
+        else:
+            lo = i + 1               # answer is right; discard the left
+    return a[lo]
+```
+
+Micro-example: `a = [7, 2, 9, 4, 1, 8]`, `k = 2` (third smallest, which is `4`). Suppose the random pivot is `4`. Partitioning gives `[2, 1, 4, 9, 7, 8]` with the pivot at index `2`. Since `i == k`, we return `4` after one `O(n)` pass — no sorting at all.
+
+Complexity: expected **`O(n)`** — linear, i.e. a constant number of passes over the data on average. Worst case is `O(n²)` (quadratic) if pivots are consistently terrible, but that needs a long unlucky streak. Space is `O(1)` with the loop above (the recursion is a tail call, written here as a `while`).
 
 ### Why is quickselect O(n) expected but quicksort O(n log n)?
 
-Quicksort recurses into *both* partitions, so it does `O(n)` work at each of `O(log n)` levels — `O(n log n)`. Quickselect recurses into only *one* partition, so the subproblem sizes shrink geometrically: `n + n/2 + n/4 + ... = 2n = O(n)`. The single-sided recursion is the whole difference — you never pay to order the parts you don't care about.
+One word: **branching**. Quicksort recurses into *both* partitions, so the total problem size stays at `n` on every level of the recursion — `O(n)` work per level times `O(log n)` levels gives `O(n log n)`.
+
+Quickselect recurses into *one* partition, so the surviving problem shrinks geometrically. A random pivot lands in the middle half of the array with probability `1/2`, so on average the remaining subarray is about half the size. The total work is
+
+`n + n/2 + n/4 + n/8 + … = n · (1 + ½ + ¼ + …) = 2n`
+
+That geometric series is the whole argument: the sum of a halving sequence is bounded by twice its first term, so the total is `O(n)` — **linear**, not linear-times-logarithmic. Concretely, on a million elements quicksort does roughly 20 full passes' worth of work while quickselect does about 2. You never pay to order the parts of the array you don't care about.
 
 ### How does median-of-medians guarantee linear worst case?
 
-Split the array into groups of 5, find each group's median (`O(1)` each, `O(n)` total), then recursively select the median *of those medians* as the pivot. That pivot is guaranteed greater than at least 30% and less than at least 30% of elements, so each recursion shrinks the problem to at most `~0.7n`. The recurrence `T(n) = T(n/5) + T(7n/10) + O(n)` solves to `O(n)` because `1/5 + 7/10 < 1`. It's deterministic `O(n)` — no luck required.
+Median-of-medians replaces the coin flip with a pivot that is *provably* not terrible. Split the array into groups of 5, take each group's median (constant work per group, `O(n)` total), then **recursively select the median of those `n/5` medians** and use it as the pivot.
+
+```python
+def select(a, k):                    # deterministic O(n) k-th smallest, 0-based
+    if len(a) <= 5:
+        return sorted(a)[k]
+    groups = [a[i:i + 5] for i in range(0, len(a), 5)]
+    medians = [sorted(g)[len(g) // 2] for g in groups]
+    pivot = select(medians, len(medians) // 2)   # median of medians, recursive
+    lo = [x for x in a if x < pivot]
+    eq = [x for x in a if x == pivot]
+    hi = [x for x in a if x > pivot]
+    if k < len(lo):
+        return select(lo, k)
+    if k < len(lo) + len(eq):
+        return pivot
+    return select(hi, k - len(lo) - len(eq))
+```
+
+Why the pivot is good: half of the `n/5` group medians are `≤` the chosen pivot, and each of those groups contributes 3 elements (its own median and the two below it) that are also `≤` the pivot. That's `3 · (n/10) = 3n/10`, i.e. **at least 30%** of the array on each side. So each recursive call sees at most `7n/10` elements. The recurrence is
+
+`T(n) = T(n/5) + T(7n/10) + O(n)`
+
+and because `1/5 + 7/10 = 9/10 < 1`, the work shrinks geometrically down the recursion and sums to `O(n)` — deterministic linear time, no luck required.
+
+Why groups of **5**: it is the smallest odd group size that makes `1/5 + 7/10` come out below 1. Groups of 3 give `1/3 + 2/3 = 1`, which is not `< 1`, and the recurrence degrades to `O(n log n)`.
 
 ### If median-of-medians is O(n) worst case, why prefer randomized quickselect?
 
-Constants. Median-of-medians does substantial extra work (grouping, recursive median-of-medians pivot selection) that inflates the hidden constant, making it slower than randomized quickselect on realistic inputs despite the better worst-case guarantee. In practice you use randomized quickselect and only fall back to median-of-medians when you must defend against a true adversary — which is exactly what introselect does.
+Constants. Median-of-medians pays for its guarantee: chopping into groups, sorting each group, building the medians array, and then a *whole extra recursive selection* just to choose the pivot. The hidden constant is roughly an order of magnitude larger than randomized quickselect's, so on realistic inputs the "worse" algorithm finishes first — `O(n)` with a constant of 20 loses to expected `O(n)` with a constant of 2 for every `n` you'll actually meet.
+
+The probabilistic picture also favours randomness. Randomized quickselect's chance of degrading badly falls off exponentially: the probability of using more than `c·n` comparisons shrinks exponentially in `c`. On a million elements, the odds of a pathological run are far smaller than the odds of a hardware fault.
+
+So the practical rule: use randomized quickselect by default; use median-of-medians only when an adversary genuinely controls your input (untrusted data, algorithmic-complexity attacks) or when a hard real-time bound is contractually required. Or use both — which is exactly what introselect does.
 
 ### What is reservoir sampling and when do you need it?
 
-Reservoir sampling picks a uniform random sample from a stream whose length you don't know in advance (or that's too large to store). Keep the first element as the current pick; for the i-th element, replace the pick with probability `1/i`. When the stream ends, the held element is uniformly random over all seen. It's one pass, `O(1)` memory (for a single sample), essential for streaming data or when n is unknown.
+You're reading a log file, a Kafka topic, or a database cursor. You want **one uniformly random record**, but you don't know how many records there are, and you can't hold them all in memory. Sorting or indexing is off the table; you get one pass.
+
+Reservoir sampling solves it with `O(1)` memory. Keep the first element. When the i-th element arrives (1-based), replace your held element with it with probability `1/i`. When the stream ends, whatever you're holding is uniform over everything you saw.
+
+```python
+import random
+
+def reservoir_one(stream):           # k = 1
+    pick = None
+    for i, x in enumerate(stream, start=1):
+        if random.randrange(i) == 0:   # probability 1/i
+            pick = x                   # replace the held element
+    return pick
+
+def reservoir_k(stream, k):          # general k, sample without replacement
+    res = []
+    for i, x in enumerate(stream):
+        if i < k:
+            res.append(x)              # fill the reservoir first
+        else:
+            j = random.randrange(i + 1)   # uniform in [0, i]
+            if j < k:
+                res[j] = x             # evict a random held item
+    return res
+```
+
+The general-`k` probability argument in one line: element `i` (0-based, `i ≥ k`) enters the reservoir with probability `k/(i+1)`, and a specific held element is evicted at step `t` only if the newcomer enters (`k/(t+1)`) *and* picks that slot (`1/k`) — so it survives with probability `t/(t+1)`, and the telescoping product `k/(i+1) · (i+1)/(i+2) · … · (n−1)/n` leaves every element with probability exactly `k/n`.
+
+Micro-example with `k = 1` and a 3-element stream `[A, B, C]`: `A` is kept; `B` replaces it with probability `1/2`; `C` replaces the survivor with probability `1/3`. So `Pr[C] = 1/3`, and `Pr[A] = 1 · (1/2) · (2/3) = 1/3`, and `Pr[B] = (1/2)(2/3) = 1/3`. Uniform.
 
 ### Prove reservoir sampling is uniform.
 
-By induction: after seeing i elements, each has probability `1/i` of being held. Element i is kept with probability `1/i` by construction. Any earlier element j was held with probability `1/(i-1)` and survives step i if we *don't* replace, i.e. with probability `(1 - 1/i) = (i-1)/i`; multiply: `1/(i-1) * (i-1)/i = 1/i`. So all i elements are equiprobable at every step, hence `1/n` at the end.
+Induct on the number of elements seen, for `k = 1`.
+
+**Base case.** After one element, it is held with probability `1`, which is `1/1`. ✓
+
+**Inductive step.** Assume after `i − 1` elements every one of them is held with probability `1/(i − 1)`. Now element `i` arrives.
+
+- Element `i` is kept with probability `1/i` by construction. ✓
+- Any earlier element `j` is still held only if two things happened: it was held before (probability `1/(i − 1)` by hypothesis) *and* we did **not** replace at step `i` (probability `1 − 1/i = (i − 1)/i`). Multiply:
+
+`1/(i − 1) × (i − 1)/i = 1/i` ✓
+
+So all `i` elements are equally likely at every step. Running the induction to the end of the stream gives probability `1/n` for each of the `n` elements — uniform, without ever knowing `n` in advance. That last point is what makes it magic: the invariant holds *at every prefix*, so you can stop the stream at any moment and your sample is already correct.
 
 ### Describe the Fisher-Yates shuffle.
 
-Iterate i from 0 to n-1 (or n-1 down to 1), and swap `a[i]` with `a[j]` where j is a uniform random index in `[i, n-1]`. Each of the n! permutations is produced with equal probability `1/n!`, and it runs in `O(n)` time, in place. The invariant: after processing position i, positions `0..i` hold a uniformly random selection in random order.
+Think of drawing names from a hat. Reach in, pull one out at random, put it in position 0. From the remaining names, pull another, put it in position 1. Continue. Fisher-Yates does exactly this in place: the prefix `a[0..i−1]` is the "already drawn" pile and the suffix `a[i..n−1]` is the hat.
+
+```python
+import random
+
+def shuffle(a):
+    n = len(a)
+    for i in range(n - 1):
+        j = random.randrange(i, n)   # uniform in [i, n-1] -- the unfixed suffix
+        a[i], a[j] = a[j], a[i]
+    return a
+```
+
+Micro-example on `[A, B, C]`. At `i = 0` we draw `j ∈ {0,1,2}`, each with probability `1/3`. At `i = 1` we draw `j ∈ {1,2}`, each with probability `1/2`. Total paths: `3 × 2 = 6 = 3!`, each with probability `1/6`, and each path yields a *different* permutation. So all 6 permutations are exactly equally likely.
+
+In general the number of execution paths is `n × (n−1) × … × 2 = n!`, matching the number of permutations one-to-one, so each comes out with probability `1/n!`. Complexity: `O(n)` time — a single pass — and `O(1)` extra space, in place. The invariant to state in an interview: *after processing position `i`, positions `0..i` hold a uniformly random `(i+1)`-subset in uniformly random order.*
 
 ### What's the classic bug that makes a shuffle biased?
 
-Swapping `a[i]` with a random index in the *full* range `[0, n-1]` instead of `[i, n-1]`. That version generates `n^n` equally likely execution paths, but there are only `n!` permutations, and `n^n` is not divisible by `n!` — so some permutations become more likely than others. The fix is to draw only from indices not yet fixed: `[i, n-1]`.
+Drawing the swap partner from the **full** range `[0, n−1]` instead of the unfixed suffix `[i, n−1]`:
+
+```python
+def biased_shuffle(a):               # WRONG -- do not use
+    n = len(a)
+    for i in range(n):
+        j = random.randrange(0, n)   # bug: full range, can re-touch fixed slots
+        a[i], a[j] = a[j], a[i]
+    return a
+```
+
+The counting argument: this version makes `n` independent draws from `n` choices, so it has `nⁿ` equally likely execution paths. But there are only `n!` permutations. For the output to be uniform, `nⁿ` would have to be divisible by `n!` — and for `n ≥ 3` it isn't. `3³ = 27` paths mapping onto `3! = 6` permutations means `27/6 = 4.5`, which isn't an integer, so the paths *cannot* distribute evenly.
+
+Concretely for `[A, B, C]`, the 27 paths land like this: `ACB`, `BAC`, `BCA`, and `CAB` each get **5** paths (`5/27 ≈ 18.5%`) while `ABC` and `CBA` get **4** paths each (`4/27 ≈ 14.8%`). A 25% relative skew — invisible on one run, glaring after a million. This is precisely the bug that produced the well-publicised biased browser-ballot shuffles.
+
+The fix is one character in the range: draw `j` from `[i, n−1]`, never re-touching a slot that is already finalised.
 
 ### Monte Carlo vs Las Vegas — what's the difference?
 
-A Las Vegas algorithm is *always correct*; only its running time is random (randomized quicksort, quickselect — you always get the sorted array / right element, just in expected time). A Monte Carlo algorithm has a *bounded* running time but may return a *wrong answer* with small, controllable probability (Miller-Rabin primality — it can call a composite "prime" with probability driven to near-zero by more rounds). Trade time for certainty: run more rounds to shrink Monte Carlo error.
+Both use randomness; they spend it differently.
+
+- **Las Vegas** — *always correct*, running time is a random variable. Randomized quicksort and quickselect are Las Vegas: you always get the right answer, you just don't know exactly how long it takes (expected `O(n log n)` and `O(n)` respectively).
+- **Monte Carlo** — *bounded running time*, the answer may be wrong with small, controllable probability. Miller-Rabin primality is Monte Carlo: it runs in a fixed number of rounds and can call a composite "probably prime," with error probability `≤ 4^(−rounds)`.
+
+```python
+import random
+
+def is_probably_prime(n, rounds=20):   # MONTE CARLO: fast, tiny error chance
+    if n < 2 or (n % 2 == 0 and n != 2):
+        return n == 2
+    d, r = n - 1, 0
+    while d % 2 == 0:                  # write n-1 = d * 2^r with d odd
+        d //= 2
+        r += 1
+    for _ in range(rounds):            # bounded time: exactly 'rounds' trials
+        a = random.randrange(2, n - 1)
+        x = pow(a, d, n)
+        if x in (1, n - 1):
+            continue
+        for _ in range(r - 1):
+            x = x * x % n
+            if x == n - 1:
+                break
+        else:
+            return False               # a certificate: definitely composite
+    return True                        # "probably prime": error <= 4^-rounds
+
+def las_vegas_sort(a):                 # LAS VEGAS: always right, random time
+    if len(a) <= 1:
+        return a
+    p = random.choice(a)               # the randomness only affects runtime
+    return (las_vegas_sort([x for x in a if x < p])
+            + [x for x in a if x == p]
+            + las_vegas_sort([x for x in a if x > p]))
+```
+
+Note the asymmetry inside Miller-Rabin: a `False` is *certain* (the witness proves compositeness), while `True` is only probabilistic. With 20 rounds the error is below `4⁻²⁰ ≈ 10⁻¹²` — smaller than the chance of a cosmic ray flipping a bit in your answer. Trade time for certainty: more rounds, less error.
 
 ### How do you turn a Monte Carlo algorithm into a Las Vegas one (and vice versa)?
 
-If you can *verify* a Monte Carlo answer cheaply, wrap it in a retry loop: run until the check passes — now it's always correct with random running time (Las Vegas). Conversely, cap a Las Vegas algorithm's time and return a best-guess if it exceeds the budget — now running time is bounded but correctness isn't guaranteed (Monte Carlo). Verification is the hinge between the two.
+**Verification is the hinge.**
+
+*Monte Carlo → Las Vegas:* if you can *check* a candidate answer cheaply, wrap the algorithm in a retry loop and only return when the check passes. The result is always correct; the running time becomes random (geometric in the success probability — expected `1/p` attempts if each attempt succeeds with probability `p`).
+
+*Las Vegas → Monte Carlo:* cap the time budget. Run the Las Vegas algorithm; if it exceeds the deadline, abort and return a best-effort guess. Running time is now bounded, correctness is not.
+
+```python
+def to_las_vegas(monte_carlo, verify, *args):
+    while True:
+        answer = monte_carlo(*args)              # bounded time, maybe wrong
+        if verify(answer, *args):                # cheap check
+            return answer                        # always right; time is random
+
+def to_monte_carlo(las_vegas, budget, fallback, *args):
+    result = las_vegas(*args, max_steps=budget)  # abort past the budget
+    return result if result is not None else fallback   # may be wrong
+```
+
+So for a Monte Carlo algorithm, **a cheap verifier is worth a lot** — it upgrades a probabilistic answer into a certain one for free. Miller-Rabin can't be upgraded this way in practice (verifying primality deterministically is the hard part), which is exactly why it stays Monte Carlo.
 
 ### How would you pick a random element with weighted probability?
 
-Weighted reservoir or prefix-sum sampling. For a fixed array, build a prefix-sum of weights (`O(n)`), draw a uniform value in `[0, total)`, and binary-search for the bucket — `O(log n)` per sample. For a stream, use the A-Res weighted reservoir variant (assign each item a key `u^(1/w)` for uniform u and keep the largest). The prefix-sum method is the usual interview answer for a static distribution.
+For a **static** array of weights, use prefix sums plus binary search. Build the cumulative distribution once in `O(n)`, then each sample costs `O(log n)` — logarithmic, i.e. a handful of steps even for millions of items.
+
+```python
+import bisect, random
+
+class WeightedSampler:
+    def __init__(self, weights):
+        self.cum = []                  # cumulative sums of the weights
+        total = 0
+        for w in weights:
+            total += w
+            self.cum.append(total)
+        self.total = total
+
+    def sample(self):
+        r = random.uniform(0, self.total)      # uniform in [0, total)
+        return bisect.bisect_left(self.cum, r)  # index of the owning bucket
+```
+
+Micro-example: weights `[1, 3, 1]` give cumulative `[1, 4, 5]`. A uniform draw in `[0, 5)` lands in `[0,1)` for index 0 (`20%`), `[1,4)` for index 1 (`60%`), and `[4,5)` for index 2 (`20%`) — exactly proportional to the weights.
+
+For a **stream** of unknown length, use the A-Res weighted reservoir variant: give each item the key `u^(1/w)` where `u` is uniform in `(0,1)` and `w` is its weight, and keep the `k` largest keys in a min-heap. Heavier items produce larger keys in expectation, and the maths works out to sampling proportional to weight. If you need many samples from a fixed static distribution and `O(log n)` per draw is too slow, the alias method gives `O(1)` per sample after `O(n)` setup. Prefix sums are the expected interview answer; mention the alias method as the optimisation.
 
 ### What is introselect and why is it used in real libraries?
 
-Introselect (introspective select) runs randomized quickselect but *monitors recursion depth*; if it exceeds a threshold (signaling a bad-pivot streak), it switches to median-of-medians to guarantee `O(n)`. You get quickselect's fast average case with median-of-medians' worst-case safety net. Its sorting cousin, introsort (quicksort falling back to heapsort), is what `std::sort` uses for the same reason.
+Introselect ("introspective select") is the engineering compromise: run randomized quickselect for speed, but **monitor the recursion depth**. If the depth exceeds a threshold (typically `~2·log₂ n`), that's evidence of a bad-pivot streak or an adversarial input, so switch to median-of-medians for the remainder and take the guaranteed `O(n)`.
+
+```python
+import math, random
+
+def introselect(a, k, depth_limit=None):   # 'select' is median-of-medians, above
+    if depth_limit is None:
+        depth_limit = 2 * int(math.log2(max(len(a), 2)))
+    if depth_limit == 0:
+        return select(a, k)            # guaranteed O(n) fallback
+    if len(a) <= 1:
+        return a[0]
+    pivot = random.choice(a)           # fast path: random pivot
+    lo = [x for x in a if x < pivot]
+    eq = [x for x in a if x == pivot]
+    hi = [x for x in a if x > pivot]
+    if k < len(lo):
+        return introselect(lo, k, depth_limit - 1)
+    if k < len(lo) + len(eq):
+        return pivot
+    return introselect(hi, k - len(lo) - len(eq), depth_limit - 1)
+```
+
+You get quickselect's average-case speed **and** median-of-medians' worst-case safety net, with the expensive fallback firing so rarely that it costs nothing on typical data. This is the same design as its sorting cousin **introsort** — quicksort that switches to heapsort past a depth limit — which is what C++ `std::sort` uses. The general pattern is worth naming in an interview: *fast heuristic by default, detect pathology, fall back to a guaranteed algorithm.*
 
 ### Find the k-th largest — sort, heap, or quickselect?
 
-Three options, different trade-offs. Sort then index: `O(n log n)`, dead simple, fine if you also need order. A size-k min-heap: `O(n log k)` time, `O(k)` space — best when k is small or data streams in. Quickselect: expected `O(n)`, in place, best when you need a single order statistic from an in-memory array and don't need the rest sorted. The strong answer names quickselect as optimal and the heap as the streaming/top-k choice.
+Three answers, three different situations.
+
+| Approach | Time | Space | Best when |
+| --- | --- | --- | --- |
+| Sort then index `a[n−k]` | `O(n log n)` | `O(1)`–`O(n)` | You need the full order anyway, or `n` is tiny |
+| Size-`k` min-heap | `O(n log k)` | `O(k)` | `k` is small, or data arrives as a stream |
+| Quickselect | expected `O(n)` | `O(1)` | Single order statistic from an in-memory array |
+
+The heap approach: push elements, and whenever the heap exceeds size `k`, pop the smallest. The root is then the k-th largest at all times. That's `O(n log k)` — for `k = 10` out of a billion, `log k` is about 3, so it's effectively linear with a tiny memory footprint, and it works on an unbounded stream where quickselect can't (quickselect needs random access to the whole array).
+
+```python
+import heapq
+
+def kth_largest_stream(stream, k):
+    h = []
+    for x in stream:
+        heapq.heappush(h, x)
+        if len(h) > k:
+            heapq.heappop(h)           # drop the smallest; keep top-k
+    return h[0]                        # root = k-th largest
+```
+
+The strong interview answer names **quickselect as asymptotically optimal** (expected linear — you cannot beat reading the input once), the **heap as the streaming / small-`k` / top-`k`-list choice**, and **sorting as the pragmatic option** when `n` is small or you need the order regardless. Then add the worst-case caveat unprompted: quickselect's `O(n²)` tail is defended by a random pivot, and by introselect if the input might be adversarial.
 
 ## Prefix Sums, Difference Arrays & Range Techniques
 
