@@ -54,6 +54,65 @@ Three signals. (1) **Process visibility** — interviewers want to *see* you sca
 
 Every later topic in the primer maps directly onto a branch of this tree. The Pattern Signal Tables (next topic) are the lookup table for the tree. The 23 individual pattern topics (Arrays & Hashing through Math, Geometry & Stream Patterns) are the leaves — each one expands a tree branch into the full template, traps, and problem family. If you can't walk this tree on a cold prompt, fix it first; drilling the leaves before the trunk doesn't compound. Practise on five random prompts a day: read the prompt, walk the tree out loud, name the pattern in 30 seconds. The mechanical coding comes after.
 
+### The full decision tree, in order
+
+Run this top to bottom on any cold prompt. Answer question 1, then 2, then 3; each answer either names a pattern or hands you a narrower question.
+
+```text
+1. WHAT IS THE INPUT SHAPE?
+   ├─ Array / string
+   │   ├─ sorted, or sortable for free? ................ two pointers, binary search
+   │   ├─ answer is a contiguous run? .................. sliding window, prefix sum, Kadane
+   │   ├─ answer is a subsequence (include-vs-exclude)?  DP
+   │   ├─ asks "next/previous greater or smaller"? ..... monotonic stack
+   │   ├─ values are a permutation of 1..n, O(1) space?  cyclic sort
+   │   └─ otherwise ................................... hash set / map / counter
+   ├─ Linked list .................................... fast-slow pointers, dummy head, in-place reversal
+   ├─ Tree
+   │   ├─ level by level, or shallowest depth? ........ BFS
+   │   ├─ path or subtree aggregate? .................. DFS post-order
+   │   └─ BST plus ordering or kth? ................... in-order traversal
+   ├─ Graph, unweighted .............................. BFS for shortest, DFS for reachability,
+   │                                                    union-find if only connectivity matters
+   ├─ Graph, weighted
+   │   ├─ non-negative, single source ................. Dijkstra
+   │   ├─ negative edges, or "at most k hops" ......... Bellman-Ford
+   │   └─ connect every node as cheaply as possible ... MST (Kruskal / Prim)
+   ├─ Graph, directed dependencies ................... topological sort (Kahn or DFS post-order)
+   ├─ Grid ........................................... BFS/DFS with a directions array;
+   │                                                    multi-source BFS when many starts
+   ├─ Intervals ...................................... sort by start to merge, by end to keep
+   │                                                    the most non-overlapping, then sweep
+   ├─ Stream ......................................... heap; two heaps for median;
+   │                                                    monotonic deque for windowed extremum
+   └─ Pure number, no container ...................... bit manipulation, math,
+                                                        binary search on the answer
+
+2. WHAT IS THE OBJECTIVE?
+   ├─ yes/no feasibility ............................. greedy check, boolean DP, union-find
+   ├─ count of ways .................................. DP
+   ├─ count of pairs / subarrays ..................... prefix sum + hash map
+   ├─ min or max over a contiguous run ............... sliding window or Kadane
+   ├─ min or max over choices ........................ greedy if an exchange argument holds,
+   │                                                    otherwise DP
+   ├─ shortest ....................................... BFS unweighted, Dijkstra weighted
+   ├─ kth / top-k .................................... heap of size k, or quickselect
+   ├─ enumerate all of them .......................... backtracking
+   └─ smallest X such that P(X) holds ................ binary search on the answer
+
+3. WHAT DO THE CONSTRAINTS ALLOW?
+   ├─ n ≤ 20 ......................................... 2ⁿ backtracking, bitmask DP
+   ├─ n ≤ 500 ........................................ n³ (Floyd-Warshall, interval DP)
+   ├─ n ≤ 5000 ....................................... n²
+   ├─ n ≤ 10⁵ ........................................ n log n
+   ├─ n ≤ 10⁶ ........................................ n
+   └─ value range up to 10⁹ (not the count) .......... log of the range: binary search, math
+```
+
+Four branch points account for most wrong turns. **Contiguous vs subsequence** is the first: "substring" and "subarray" are contiguous and open the sliding-window branch, "subsequence" is not and forces DP. The words look interchangeable in a prompt read aloud; they are not, and picking wrong costs you the whole interview. **Unweighted vs weighted shortest path** is the second: BFS is correct only when every edge costs the same, so the moment edge weights differ you must move to Dijkstra — and candidates routinely keep BFS because the graph "looks like a grid". A grid with per-cell costs is a weighted graph. **Greedy vs DP** is the third: greedy is only correct if you can state an exchange argument (swapping any locally-optimal choice for another never improves the answer). If you cannot say that sentence out loud, you are guessing, and DP is the safe branch. **Which number the constraint bounds** is the fourth: `n ≤ 10⁵` bounds the input, but a prompt whose *values* run to 10⁹ while `n` stays small is telling you the answer space, not the input, is what you search — that is the binary-search-on-the-answer signal, and it is the single most commonly missed branch in the tree.
+
+One discipline note: run all three questions even when question 1 already produced a pattern. Question 3 is the cheap sanity check that catches the case where you recognised a real pattern that is nonetheless too slow for the given bounds.
+
 ### Q1. A problem says N ≤ 20 and asks for "the maximum value over all subsets". What's your move?
 
 Backtracking or **bitmask DP**. At N = 20, 2^N = ~10⁶ which is fine, and a bitmask state lets you precompute or cache results for each subset. Classic signals here: "assign N tasks to N people" (minimum cost), "shortest superstring", "TSP". State is `dp[mask]` or `dp[mask][last_visited]`. If the subset itself has no order ("any subset works"), pure backtracking with include/exclude pruning is also fine and writes faster.
@@ -85,6 +144,41 @@ Backtracking or **bitmask DP**. At N = 20, 2^N = ~10⁶ which is fine, and a bit
 ### Q8. Senior interview angle: how do you tell the difference between a sliding window problem and a DP problem when both involve subarrays?
 
 The disambiguator is **contiguous vs subsequence**. Sliding window works only when the subarray is **contiguous** *and* the condition is monotonic in the window size (e.g. "longest substring with at most K distinct" — expanding can violate, shrinking restores). DP is correct when the subarray can be a **subsequence** (non-contiguous, like LIS), or when the condition isn't monotonic in window size (e.g. "maximum subarray sum" with negatives is Kadane's, a 1D DP that *coincidentally* uses a sliding-window-shaped recurrence but isn't sliding window). Rule of thumb: if "shrink the left pointer when condition violates" makes sense, it's sliding window; if you need to compare include-vs-exclude at each index, it's DP.
+
+### Worked cold reads — walking the tree end to end
+
+Three problems you have never seen, walked one question at a time. Narrate it exactly like this in the room.
+
+**LeetCode 567, Permutation in String** — *"Given two strings `s1` and `s2`, return true if `s2` contains a permutation of `s1`."*
+
+1. **Input shape** — two strings, no sorting implied, so I'm in the array/string branch.
+2. **Objective** — a yes/no feasibility question, not a max or a count.
+3. **Contiguous?** — a permutation of `s1` occupies consecutive characters, so yes, contiguous. Sliding window branch.
+4. **Candidates** — sliding window, or backtracking that generates every permutation of `s1`.
+5. **Disambiguator** — the window length is *fixed* at `len(s1)`, and I only need character counts, not the order. Generating permutations is `O(m!)`; a fixed-size window is linear. Fixed size also means no shrink loop, just slide.
+
+Pattern: fixed-size sliding window with a frequency count. Approach: build a count of `s1`, slide a window of that width over `s2`, add the entering character and remove the leaving one, and compare counts (track a `matches` counter so the compare is `O(1)`). `O(n + m)` time, `O(1)` space — the alphabet is bounded at 26.
+
+**LeetCode 300, Longest Increasing Subsequence** — *"Given an integer array `nums`, return the length of the longest strictly increasing subsequence."* **This is the one the tree has to correct.**
+
+1. **Input shape** — an unsorted integer array.
+2. **Objective** — "longest". The reflex fires immediately: longest plus array equals sliding window.
+3. **The tree stops me at question 1's second branch** — is the answer *contiguous*? The word is "subsequence", not "subarray". Elements can be skipped. Sliding window is structurally impossible here: there is no left pointer whose advance restores a violated condition, because the window isn't the answer.
+4. **Re-route** — subsequence with include-vs-exclude at each index is the DP branch. `dp[i]` = length of the longest increasing subsequence ending at `i`, `dp[i] = 1 + max(dp[j])` over all `j < i` with `nums[j] < nums[i]`.
+5. **Constraint check** — `n ≤ 2500`, so `O(n²)` passes. State it, then offer the upgrade.
+
+Pattern: DP, `O(n²)` time and `O(n)` space. The `O(n log n)` upgrade keeps a `tails` array where `tails[k]` is the smallest possible tail of an increasing subsequence of length `k + 1`; binary search each element into it. That array is not the subsequence — it only has the right *length* — and saying so unprompted is the senior signal.
+
+**LeetCode 743, Network Delay Time** — *"Send a signal from node `k`; return the time for all `n` nodes to receive it, or -1 if impossible."*
+
+1. **Input shape** — `times[i] = [u, v, w]`, a directed graph with weights.
+2. **Objective** — "time for all nodes to receive it" is the *maximum* over per-node shortest arrival times, so the core sub-problem is single-source shortest path.
+3. **Disambiguator** — BFS would be right if every edge cost the same; weights differ, so BFS's layer order no longer matches cost order. Weights are all positive, which rules out needing Bellman-Ford.
+4. **Constraints** — `n ≤ 100`, edges `≤ 6000`. Even Floyd-Warshall at `n³` would pass, which is worth naming as the two-line fallback.
+
+Pattern: Dijkstra from `k`. Approach: min-heap of `(dist, node)`, pop the closest unsettled node, relax its outgoing edges; the answer is `max(dist)` over all `n` nodes, or -1 if any is unreachable. `O(E log V)` time, `O(V + E)` space.
+
+**Where the implementation lives** — the Algorithms primer's *Algorithm Design & Interview Playbook* topic has the constraint→complexity lookup table and the full problem-attack checklist.
 
 ---
 
@@ -200,6 +294,15 @@ Three signals. (1) **Reflex pattern recognition** — Two Sum is the hello-world
 
 This is the foundation for Prefix Sum (which is hash map + cumulative sum), for Sliding Window (which often uses a frequency map for window state), for Trie (which generalises the hash to a tree of character maps), for Union Find (which is a parent-pointer map). The Top K Frequent problem links directly to Heap. Group Anagrams links to canonical-form thinking that recurs in problems like Isomorphic Strings, Word Pattern, and Substring Anagram. If you internalise that hashing is the universal time-for-space trade, every later topic that uses it (which is most of them) will feel like the same move with different decorations.
 
+### Recognition — signals that map to this pattern
+
+- **Keyword phrases** — *"two numbers that add up to"* → you need each element's complement, and complement lookup is exactly what a `value → index` map gives you in `O(1)`. *"contains a duplicate"* / *"appears more than once"* → membership over already-seen elements, so a hash set. *"group together"* → each group needs a canonical key, which is a map from key to list. *"how many times"* / *"most frequent"* → a frequency map. *"unique"*, *"distinct"*, *"deduplicate"* → set semantics stated in English. *"in any order"* on the output is a quiet permission slip: hashing destroys order, so if none is demanded, hashing is not disqualified.
+- **Input shape** — an **unsorted** array or string with no exploitable structure, and no promise you may reorder it. Sorted input would send you to two pointers or binary search; the *absence* of order is what makes hashing the cheapest way to buy `O(1)` lookup. Also: two collections you must compare (intersection, difference, "is `s` a permutation of `t`"), or a stream where you only ever ask "seen before?".
+- **Objective verbs** — *count pairs*, *check existence*, *deduplicate*, *group by*, *find the missing or duplicated element*, *top `k` frequent*, *first non-repeating*, *longest run of consecutive values*. Each is "for every element, ask a question about the rest of the collection" — the shape hashing exists to collapse.
+- **Constraint clues** — `n ≤ 10⁵`–`10⁶` with an obvious `O(n²)` brute force is the loudest signal: `n²` is `10¹⁰`, far past budget, so the target is `O(n)` and `O(n)` extra space is implicitly sanctioned. A small stated value range (`0 ≤ nums[i] < 26`, or "lowercase English letters") means you can swap the map for a fixed-size array — same pattern, better constants, and interviewers notice. A stated `O(1)` extra space bans hashing outright: go to cyclic sort, XOR, or in-place sorting.
+- **Disambiguators** — **vs two pointers**: ask *"is it sorted, or may I sort it?"* If yes and you need the pair's *values* (not original indices), two pointers is `O(n log n)` time at `O(1)` space and wins on memory; if you must return original indices, hash. **vs sorting for grouping**: ask *"must the groups come out ordered?"* Hash grouping is `O(n·L)`, sort-to-adjacency is `O(n log n)` — sort only when order or memory forces it. **vs heap for top-`k`**: ask *"do I need counts, or the ranking?"* You need the count map either way; the heap only decides extraction — `O(n log k)` heap versus `O(n)` bucketing when counts are bounded by `n`. **vs prefix sums**: ask *"individual elements, or contiguous ranges?"* Ranges mean cumulative sums, usually stored *in* a hash map — those two compose rather than compete.
+- **Anti-signals** — *"contiguous subarray"* or *"substring"* means sliding window or prefix sum; a bare frequency map without window bookkeeping will not answer it. Any *`k`-th smallest* or order statistic: hashing has no ordering, so use a heap, quickselect, or binary search. An array of `1..n` with one missing or duplicated value under `O(1)` space: cyclic sort or XOR, not a set. And "pair summing to a target" **in a sorted array** is 167, not 1 — spend the sortedness on two pointers.
+
 ### Q1. When do you reach for a hash set vs a hash map vs Counter?
 
 **Hash set** when you only care about membership ("have I seen this before?", "does this exist?"). Contains Duplicate, Longest Consecutive Sequence, intersection of two arrays. **Hash map** when you need a value associated with the key — typically an index, a count, or a list of items. Two Sum (value → index), Group Anagrams (canonical key → list of words). **Counter** when you specifically need frequency counts plus convenience operations like `most_common(k)` — Valid Anagram, Top K Frequent, Reorganize String. Counter also supports multiset arithmetic (`c1 + c2`, `c1 & c2`) which is handy for problems like "minimum window contains all characters of T".
@@ -262,6 +365,18 @@ Pros over sort: linear in word length, no allocation churn. Cons: assumes lowerc
 
 Three failure modes. (1) **Worst-case O(N) lookup** under adversarial inputs (hash flooding) — modern hash maps mitigate with randomised seeds but it's still a theoretical worst case. Alternative: balanced BST (`std::map`, `TreeMap`) for guaranteed O(log N). (2) **Memory overhead** — hash maps have 30-50% overhead from load factor + bucket arrays. For dense integer keys in `[0, M]`, a plain array indexed by key is faster and tighter. (3) **No ordering** — hash maps don't preserve insertion order in older Java/Python (Python 3.7+ does). For "Kth smallest", a heap or sorted structure beats hashing. The senior tell is naming these tradeoffs explicitly: "I'd use a hash map here because we need O(1) membership and don't care about order; for ordered iteration I'd switch to TreeMap or a sorted list."
 
+### Worked LeetCode mappings
+
+> **LeetCode 217, Contains Duplicate** — return `true` if any value appears at least twice. Signals: "appears twice" is a pure membership question, and the array is unsorted with `n ≤ 10⁵`, so the `O(n²)` pairwise scan is out. Therefore: hash set. Approach: stream the array into a `set`, returning `true` the moment an insert finds the value already present. `O(n)` time, `O(n)` space. The one-liner `len(set(nums)) != len(nums)` is the same idea without the early exit — say the early-exit version out loud, since it stops on the first duplicate rather than always paying full cost.
+
+> **LeetCode 1, Two Sum** — return the **indices** of the two numbers adding to `target`. Signals: "two numbers that add up to" → complement lookup; "return indices" → you may not sort, which kills two pointers; unsorted input. Therefore: hash map from `value → index`. Approach: one pass, and for each `x` check whether `target - x` is already in the map *before* inserting `x`, so an element is never paired with itself and duplicate values like `[3, 3]` resolve correctly. `O(n)` time, `O(n)` space. Contrast with **LeetCode 167, Two Sum II - Input Array Is Sorted**: same objective, but the sortedness buys two pointers at `O(1)` space — the disambiguator in action.
+
+> **LeetCode 347, Top K Frequent Elements** — return the `k` most frequent values. Signals: "most frequent" → frequency map; "top `k`" → an extraction step layered on that map. Therefore: hash map, then a selection strategy. Approach: build `Counter(nums)`, then either push into a size-`k` min-heap for `O(n log k)`, or exploit the fact that no count can exceed `n` and **bucket by count** into an array of `n + 1` lists, walking it from the back for `O(n)`. `O(n)` space either way. Naming both, and explaining that the bucket version wins because the counts are bounded, is the senior answer — sorting the whole count map at `O(n log n)` is the answer to beat.
+
+> **LeetCode 128, Longest Consecutive Sequence** — the length of the longest run of consecutive integers, in `O(n)`. Signals: "consecutive" over an **unsorted** array plus an explicit `O(n)` requirement — the requirement is the tell, because it forbids the obvious sort-and-scan. Therefore: hash set used for `O(1)` neighbour probing. Approach: load everything into a set, and start a walk only from values `n` where `n - 1` is absent (so `n` begins a run), then extend while `n + 1, n + 2, …` are present. Each element is visited at most twice overall, giving `O(n)` time and `O(n)` space. Without the `n - 1` guard the same code is `O(n²)` on `[1, 2, …, n]` — that guard is the entire problem.
+
+**Where the implementation lives** — the Algorithms primer's *Linear-Time & Advanced Sorting* topic has the commented reference implementation and complexity derivation.
+
 ---
 
 ## Two Pointers
@@ -305,6 +420,15 @@ Three signals. (1) **Pattern recognition on sorted inputs** — the moment the p
 **What follows from this topic**
 
 Two pointers underpins Sliding Window (which is a constrained variant — both pointers move forward, the right expands and the left shrinks based on a window condition). The linked-list variant feeds into Linked List Patterns (cycle detection, reversal, dummy nodes). The in-place compaction pattern recurs in Cyclic Sort & Index-as-Hash (where the "swap to correct index" is a same-direction two-pointer move). And the 3Sum template generalises to 4Sum, K-Sum, and Closest 3Sum — all variants of "fix N-2 indices, two-pointer the rest". If you internalise two pointers as "exploit monotonic structure with O(1) space", every later pattern that uses it will feel familiar.
+
+### Recognition — signals that map to this pattern
+
+- **Keyword phrases** — *"the array is sorted"* is the single loudest signal: sortedness is the monotonic structure that makes a directional pointer move safe, so a comparison at the ends tells you which side can be discarded. *"in-place"* or *"O(1) extra space"* rules out the hash map and the copy-to-new-array solution, leaving the slow-as-write-head idiom. *"without using extra memory"* on a linked list means Floyd's, because you cannot keep a visited set. *"palindrome"* implies symmetry around a centre — converging pointers by definition. *"pair / triplet / quadruplet that sums to"* means fix `k−2` indices and two-pointer the remaining suffix. *"remove / move / partition the elements"* with the array returned in place is fast/slow compaction.
+- **Input shape** — a sorted array (or one you may sort because the output is a set of values, not indices); a linked list where you get one forward pass and no random access; a string read from both ends; an array of small bounded categories (Dutch National Flag). If the prompt returns **original indices** on an unsorted array, sorting destroys them and this pattern is off the table unless you sort `(value, index)` pairs.
+- **Objective verbs** — "find the pair/triplet summing to `x`", "count pairs with sum `< x`", "maximise the area / container / product between two positions", "remove duplicates in place", "partition into three groups", "detect a cycle", "find the middle", "find the `n`th node from the end", "is it a palindrome".
+- **Constraint clues** — `n ≤ 10⁵` with a pair question and a sorted input means `O(n)` or `O(n log n)` is expected, so nested loops are out. `n ≤ 3000` with a *triplet* question quietly authorises `O(n²)` — that is the 3Sum budget. An explicit `O(1)` space bound on a linked-list question is almost always Floyd's or fast/slow. "Values in `[0, 2]`" or "three colours" is Dutch National Flag stated in disguise.
+- **Disambiguators** — **Two pointers vs hashing:** ask *"is the input already sorted?"* If yes, pointers win on space (`O(1)` vs `O(n)`); if not, sorting costs `O(n log n)` and the hash map's `O(n)` scan wins outright. **Two pointers vs sliding window:** ask *"do both pointers move forward, or do they converge?"* Converging from opposite ends is two pointers; both advancing left-to-right while maintaining a window predicate is sliding window — the window's constraint must be monotone in width for it to work. **Two pointers vs binary search:** ask *"am I moving one boundary per comparison, or halving the space per comparison?"* Halving requires a predicate that is monotone over the whole index range; two pointers only needs a local comparison to be decisive. **Two pointers vs a hash set on a linked list:** ask *"is `O(1)` space required?"* Only Floyd's meets that bar.
+- **Anti-signals** — the array is unsorted **and** you must return original indices (use a hash map — that is LeetCode 1, not 167). The subarray must be **contiguous** and the predicate can improve as you extend (sliding window). You need the `k` best, not a pair (heap). The "pointers" would need to jump backwards to re-examine a discarded region — that is a sign the monotonicity argument does not hold and you actually need DP or a monotonic stack.
 
 ### Q1. When do you reach for two pointers vs hash map on a "find pair" problem?
 
@@ -393,6 +517,18 @@ The trap: when you swap with `high`, don't advance `mid` — the swapped-in valu
 
 The conjecture (open for decades, widely believed) is that 3SUM requires Ω(N²) time. The intuition: there are O(N³) possible triples but only O(N²) distinct pair sums, and you must check each pair against the third element. No general algorithm is known that beats O(N²) on unbounded inputs. For small/bounded value ranges, FFT-based convolution can do O(N log N), but that's a special case. The interview-correct answer: "it's conjecturally optimal at O(N²); sort + two pointers is the standard solution. The hardness reduction is from 3SUM to many computational geometry problems (3 collinear points, etc.) — if you could beat 3SUM you'd beat all of them." Don't try to claim a sub-quadratic algorithm unless you can name the specific bounded-input trick.
 
+### Worked LeetCode mappings
+
+> **LeetCode 125, Valid Palindrome** — decide whether a string reads the same forwards and backwards, ignoring non-alphanumeric characters and case. Signals: "palindrome" is symmetry around a centre, and the comparison you need is always *first remaining* against *last remaining*. Therefore: converging pointers. Approach: `left` at `0`, `right` at `n−1`; skip non-alphanumeric characters on either side, compare the lowercased characters, and step both inward. Return `False` on the first mismatch. `O(n)` time, `O(1)` space — the trap is building a cleaned copy of the string first, which is correct but silently costs `O(n)` space.
+
+> **LeetCode 141, Linked List Cycle** — decide whether a linked list contains a cycle. Signals: a linked list (no random access, one forward pass) plus an implied or explicit `O(1)` space bound, which forbids a visited set. Therefore: fast/slow pointers. Approach: advance `slow` one node and `fast` two per iteration; if `fast` or `fast.next` becomes `None` there is no cycle, and if they ever reference the same node there is one. It terminates because `fast` gains exactly one position on `slow` per step, so inside a cycle of length `L` it closes any gap within `L` steps. `O(n)` time, `O(1)` space. The follow-up — return the node where the cycle begins — is the two-phase version in Q3.
+
+> **LeetCode 15, 3Sum** — return all unique triplets summing to zero. Signals: "triplet" + "sums to" + the answer is a set of *values*, not indices, so you are free to sort. `n ≤ 3000` authorises `O(n²)`. Therefore: sort, then fix one index and run converging pointers over the suffix. Approach: for each `i`, set `left = i+1`, `right = n−1`, and move `left` up when the sum is too small, `right` down when it is too big. Skip equal neighbours at `i` and after each hit so duplicates never reach the output. `O(n²)` time, `O(1)` extra space beyond the result. The failure mode is dedup, not the search — see Q2.
+
+> **LeetCode 42, Trapping Rain Water** — given bar heights, compute the water trapped after rain. Signals: the water above index `i` is `min(maxLeft, maxRight) − height[i]`, so every answer depends on a boundary from each side — the classic converging-pointer shape. Therefore: two pointers carrying running maxima. Approach: keep `left`, `right`, `leftMax`, `rightMax`; whichever side has the smaller bar is the *provably* limiting side, so add `leftMax − height[left]` (or the mirror) and step that pointer inward. `O(n)` time, `O(1)` space, versus the `O(n)`-space prefix/suffix-max arrays — the same "advance the shorter side" argument that makes Q4 work.
+
+**Where the implementation lives** — the Algorithms primer's *Algorithm Design & Interview Playbook* topic has the commented reference implementation and complexity derivation.
+
 ---
 
 ## Sliding Window
@@ -436,6 +572,20 @@ Three signals. (1) **Pattern recognition on contiguous problems** — "contiguou
 **What follows from this topic**
 
 Sliding window underpins Monotonic Deque (which is sliding window max/min — the deque maintains the window's extrema in O(1) amortised). It pairs with Prefix Sum for problems like "longest subarray with sum equal to K" (where the window isn't strictly monotonic but prefix-sum-diff lookup gives a one-pass solution). The "expand-to-satisfy" variant generalises to two-pointer problems on streams. And the amortised analysis here is the same idea that underpins Monotonic Stack (each index pushed and popped at most once). If you can articulate why sliding window is O(N) and not O(N²), you've internalised the amortised mindset that recurs across the whole curriculum.
+
+### Recognition — signals that map to this pattern
+
+- **Keyword phrases** — "**contiguous subarray**" and "**substring**" are the strongest tells: both mean the answer is a *span* `[left, right]`, and adjacent spans differ by one add and one remove, which is exactly what a window maintains. "**Window of size k**" names the pattern outright. "**At most k distinct / replacements / flips**" describes a *budget* that only gets harder to satisfy as the window widens — that one-directional behaviour is the licence to shrink from the left. "**Longest … such that**" versus "**smallest window … such that**" picks the flavour: longest means shrink only while invalid; smallest means shrink while still valid. "**In every window of size k**" means fixed size, no inner loop needed.
+- **Input shape** — a single flat array or string walked left to right, and, when the constraint is a sum, values that are **non-negative**. Frequency-based versions want a bounded alphabet (`a`–`z`, ASCII) so the window state is `O(1)`. A read-once stream is a giveaway too: a window needs only constant state and a bounded lookback, which is all a stream affords.
+- **Objective verbs** — "longest", "shortest", "minimum window", "maximum sum/average of size `k`", "count the subarrays that …", "does a permutation of `t` appear in `s`", "how many distinct values in each window". Anything asking you to return **a span, or the length of a span** — rather than a freely chosen set of elements — points here.
+- **Constraint clues** — `n ≤ 10⁵`–`10⁶` with a one-second limit rules out enumerating all `O(n²)` spans and demands `O(n)`; for contiguous problems that is the window. A tiny value range (`k ≤ 26`, lowercase only) says use a fixed count array, not a hash map. A stated bound like `0 ≤ nums[i] ≤ 10⁴` quietly confirms the sum is monotonic in window width — the precondition for shrinking.
+- **Disambiguators** —
+  - *Window vs DP*: ask "if the window is invalid, could widening it ever make it valid again?" If no, window. If yes — negatives in a sum, or a condition that toggles — the shrink rule is unsound and you want DP or Kadane.
+  - *Window vs prefix sum + hash map*: ask "are the values non-negative?" If so the running sum grows with width and two pointers decide correctly; with negatives you cannot decide locally whether to shrink, so store prefixes in a map and look up `prefix - k`.
+  - *Variable vs fixed window*: ask "does the problem fix the **length** or the **constraint**?" Fixed length means one pointer plus an index-`k` lookback; fixed constraint means two pointers and an inner `while`.
+  - *Window vs monotonic deque*: ask "is the window state **reversible**?" A sum or count is undone by subtracting the departing element; a max or min cannot be un-taken, so extrema need a deque.
+  - *Window vs two pointers*: two-pointer problems usually converge from both ends of a sorted array and the pointers are the answer; window pointers both march left → right and the *region between them* is the answer.
+- **Anti-signals** — "**subsequence**" (non-contiguous, so DP or greedy, not a window). "Subarray with sum exactly `k`" when negatives are allowed (prefix sum + hash map). "Maximum subarray sum" with negatives (Kadane). "Maximum in each window" (monotonic deque). "**Exactly** `k` distinct" is not monotonic on its own — reach for `atMost(k) - atMost(k-1)`, two ordinary windows subtracted.
 
 ### Q1. Walk me through the variable-size sliding window template ("longest substring with at most K distinct").
 
@@ -518,6 +668,18 @@ Same shape as the "at most K" template but flipped: extend until condition holds
 
 Sliding window breaks when the condition is **non-monotonic in window size** or when the array contains **negative numbers** in a sum-based problem. Example: "longest subarray with sum equal to K" — adding more elements can either increase or decrease the sum (with negatives), so shrinking from the left isn't guaranteed to restore feasibility. Fallback: **prefix sum + hash map**. Compute `prefix[i]`, store each prefix in a map (or set), check if `prefix[i] - K` was seen earlier. Same O(N) but doesn't rely on monotonicity. Another fallback for max/min over a fixed window: monotonic deque. The interviewer is testing whether you know sliding window has limits, not just that you know it.
 
+### Worked LeetCode mappings
+
+**LeetCode 209, Minimum Size Subarray Sum** — find the shortest contiguous subarray whose sum is `≥ target`, all values positive. Signals: "minimal length" + "subarray" (contiguous) + a threshold over **positive** numbers, so widening can only raise the sum. Therefore: expand-to-satisfy window. Approach: add `nums[right]`; while `total ≥ target`, record `right - left + 1` and subtract `nums[left]` as `left` advances. `O(n)` time, `O(1)` space. Allow negatives and the pattern dies — that variant needs prefix sums plus a monotonic deque.
+
+**LeetCode 567, Permutation in String** — does any permutation of `s1` appear as a substring of `s2`? Signals: "permutation" pins the length to `len(s1)`, "substring" makes it contiguous, and the alphabet is 26 letters. Therefore: **fixed-size** window over a count array. Approach: build the target counts, slide a window of exactly `len(s1)`, add the entering character and remove the leaving one, and keep a `matches` counter so the comparison is `O(1)` rather than re-scanning 26 slots each step. `O(n)` time, `O(1)` space.
+
+**LeetCode 424, Longest Repeating Character Replacement** — longest substring you can make uniform using at most `k` replacements. Signals: "longest" + "substring" + an explicit budget `k` that only tightens as the window widens. Therefore: variable window, shrink while invalid. Approach: the window is valid when `windowLength - maxFreq` is `≤ k`, where `maxFreq` is the most common character's count inside the window; grow `right`, shrink `left` while the test fails, track the best length. The subtlety that trips people: `maxFreq` need not be recomputed on shrink, because a stale-high `maxFreq` can only make the window look *less* valid, and the answer is a maximum. `O(n)` time, `O(26)` space.
+
+**LeetCode 76, Minimum Window Substring** — smallest substring of `s` containing every character of `t` with the right multiplicities. Signals: "minimum window" + "contains all of" → shrink-while-valid. Therefore: variable window with a required/formed counter. Approach: expand until `formed == required`, then shrink from the left while the window still satisfies, recording the minimum. The trap is comparing whole maps for equality: extra copies of a needed character are harmless, so compare per-character counts and bump `formed` only on the exact tick from `count - 1` to `count`. `O(|s| + |t|)` time, `O(alphabet)` space.
+
+**Where the implementation lives** — the Algorithms primer's *Prefix Sums, Difference Arrays & Range Techniques* topic has the commented reference implementation and complexity derivation.
+
 ---
 
 ## Prefix Sum
@@ -561,6 +723,19 @@ Three signals. (1) **Recognising "range" or "subarray" + "sum / count / property
 **What follows from this topic**
 
 Prefix sum is the gateway to **Segment Trees** and **Fenwick Trees** (when the array is mutable), which are advanced topics in the Less-Common section. It pairs naturally with hash maps (the Two-Sum-on-prefix variant), and it's the canonical preprocessing step for problems like Range Sum Query Immutable and Range Sum Query 2D Immutable. The difference-array variant is the foundation of sweep-line algorithms (Q22, Intervals) — same idea (start +1, end -1, integrate) generalises to "max concurrent meetings" and "min arrows to burst balloons". If you see "many range queries on static data" or "many range updates with one final query", prefix-sum thinking should be the first move.
+
+### Recognition — signals that map to this pattern
+
+- **Keyword phrases** — "**sum of the subarray between `left` and `right`**" plus "**multiple queries**" is the giveaway: repeated range questions over data that never changes is exactly what precomputation is for. "**How many subarrays sum to `k`**" means counting, not finding, so you need every prefix seen so far in a hash map rather than a scanning window. "**Divisible by `k`**" / "**multiple of `k`**" swaps equality for congruence — key on `prefix % k`, not `prefix`. "**XOR of the subarray**" is the same trick with XOR's self-inverse property. "**Increment every element in `[l, r]`**" repeated many times, then "**return the final array**", is the difference array, prefix sum run backwards. "**Submatrix**" or "**rectangle sum**" means the 2D build with inclusion-exclusion.
+- **Input shape** — a **static** 1D array (or a matrix, or a list of `(start, end, value)` range updates). Values may be negative — that is the point, and it is what kills the alternatives. No sortedness required; the array is read-only for the lifetime of the queries.
+- **Objective verbs** — "count subarrays with…", "answer `q` range-sum queries", "return the running/cumulative total", "apply `q` range updates then report", "find the shortest/longest subarray summing to `k`", "sum this rectangle".
+- **Constraint clues** — `n ≤ 10⁵` with `q ≤ 10⁵` queries rules out `O(n·q)` and demands `O(n + q)` — precompute once, answer in `O(1)`. A matrix up to `200 × 200` with `10⁴` queries points at the 2D variant. Explicitly stating that values can be negative (`-10⁴ ≤ nums[i] ≤ 10⁴`) is the strongest single hint: it is the constraint that forbids sliding window.
+- **Disambiguators**
+  - **Prefix sum + hash map vs sliding window** — can values be negative? If yes, prefix sum. A window only works when growing it moves the sum monotonically; with negatives, shrinking `left` can *increase* the sum, so the two-pointer invariant collapses. Positive-only "subarray sums to `k`" is a window; mixed-sign is prefix sum.
+  - **Prefix sum vs Fenwick / segment tree** — does the array change between queries? Static → prefix sum, `O(1)` queries and no code. Point updates interleaved with range queries → Fenwick tree, `O(log n)` both. You pay `log n` only to buy mutability, so don't pay it for free.
+  - **Prefix sum vs difference array** — count the updates against the reads. Many reads over fixed data → prefix sum (build once, read `O(1)`). Many range *writes* then one read → difference array (write `O(1)`, integrate once at the end). They are duals; picking the wrong one flips your complexity from `O(n + q)` to `O(n·q)`.
+  - **Prefix hash map vs Two Sum hashing** — if the target is a pair of *elements*, that is plain hashing. If it is a pair of *cumulative boundaries*, it is prefix sum — which is literally Two Sum run over the prefix array.
+- **Anti-signals** — "maximum subarray sum" with no target value is Kadane, not prefix sum (though prefix-min tracking also solves it). "Sum of any `k` elements" without contiguity is sorting or a heap — prefix sum only ever describes *contiguous* ranges. "Range minimum query" is not prefix sum: min has no inverse, so you cannot subtract two prefixes — use a sparse table or segment tree.
 
 ### Q1. Walk me through "subarray sum equals K" with a hash map.
 
@@ -650,6 +825,18 @@ def subarrays_div_by_k(nums, k):
 
 Prefix sum is **for static arrays**. The moment the array becomes mutable (point updates between range queries), every update would require recomputing the suffix of the prefix array — O(N) per update. The upgrade is **Fenwick tree (Binary Indexed Tree)** for range-sum + point-update, both O(log N). For more general operations (range min, range max, range GCD, range update with lazy propagation), **segment tree** is the answer, also O(log N) per op but more flexible. The interviewer signal: "what if the array changes?" → "Fenwick or segment tree, depending on operation". Stating that progression is the staff-level move.
 
+### Worked LeetCode mappings
+
+> **LeetCode 303, Range Sum Query - Immutable** — build a structure that answers `sumRange(left, right)` for a fixed array. Signals: the class name says *Immutable*, the array never changes, and the constraints promise up to `10⁴` calls. Therefore: the plain cumulative-sum array. Approach: in the constructor build `prefix` of length `n + 1` with `prefix[0] = 0` and `prefix[i+1] = prefix[i] + nums[i]`; each query returns `prefix[right+1] - prefix[left]`. `O(n)` build, `O(1)` per query, `O(n)` space. The `n + 1` length is what removes the `left == 0` special case.
+
+> **LeetCode 238, Product of Array Except Self** — for each index, return the product of everything else, without division and in `O(n)`. Signals: "except self" is a range query over *everything but one position*, and banning division bans the "total ÷ nums[i]" shortcut. Therefore: prefix and suffix accumulation, the same idea with `×` instead of `+`. Approach: one left-to-right pass writing the running prefix product into `answer[i]`, then one right-to-left pass multiplying in the running suffix product. `O(n)` time, `O(1)` extra space if the output array is not counted. This is the drill that teaches you the technique is about *invertible accumulation*, not about addition.
+
+> **LeetCode 560, Subarray Sum Equals K** — count the contiguous subarrays summing to exactly `k`. Signals: "count" (not "find one"), "subarray" (contiguous), and constraints allowing `nums[i]` to be negative — so no sliding window. Therefore: prefix sum + hash map, i.e. Two Sum over the prefix array. Approach: walk the array keeping a running `prefix`; add `seen[prefix - k]` to the count, then increment `seen[prefix]`; seed `seen = {0: 1}` so subarrays starting at index 0 are counted. `O(n)` time, `O(n)` space. The seed is the single most-missed line in this problem.
+
+> **LeetCode 974, Subarray Sums Divisible by K** — count the subarrays whose sum is a multiple of `k`. Signals: identical to 560 except the target is a congruence, not a value. Therefore: the same hash map keyed on `prefix % k`, because two prefixes sharing a remainder differ by a multiple of `k`. Approach: key on `((prefix % k) + k) % k` to normalise the negative remainders that Python and Java produce, count `seen[r]` before incrementing it, and keep the `{0: 1}` seed. `O(n)` time, `O(k)` space — the map holds at most `k` distinct remainders, which is a nice tightening to volunteer.
+
+**Where the implementation lives** — the Algorithms primer's *Prefix Sums, Difference Arrays & Range Techniques* topic has the commented reference implementation and complexity derivation.
+
 ---
 
 ## Monotonic Stack
@@ -693,6 +880,19 @@ Three signals. (1) **Pattern recognition on a hard-to-derive-from-scratch family
 **What follows from this topic**
 
 Monotonic stack is the close cousin of **Monotonic Deque** (next topic) — same idea but with O(1) access to both ends, used for sliding-window max/min. The amortised analysis here is the same idea that underpins Sliding Window (each element added and removed at most once). The "contribution technique" for Sum of Subarray Minimums recurs in many subarray-aggregate problems and pairs well with prefix-sum thinking. And the histogram-rectangle template is the building block for Maximal Rectangle (apply per-row to a binary matrix). If you can write the Next Greater template from memory and explain the amortised analysis, you've earned the pattern.
+
+### Recognition — signals that map to this pattern
+
+- **Keyword phrases** — "**next greater**", "**next smaller**", "**previous greater/smaller**", "**nearest larger to the right**" are the literal giveaways: each names a *directional nearest-neighbour comparison*, which is precisely what one monotonic pass resolves. "**How many days until a warmer temperature**" and "**stock span**" are the same query in disguise — a *distance* to the next qualifying element, so you stack indices rather than values. "**Largest rectangle**", "**maximal rectangle**", "**how much water is trapped**" mark the histogram family, where each bar's answer is fenced by its nearest smaller neighbour on each side. "**Lexicographically smallest after removing k**" is the lexicographic variant: pop a bigger character when a smaller one arrives, on a budget. "**Sum over all subarrays of the minimum**" is the contribution technique — each element's weight is (span left) × (span right), both spans from a stack.
+- **Input shape** — a single flat array or string of comparable values, **unsorted**, where position matters and the answer at index `i` depends on the nearest index in one direction satisfying a comparison. Heights, temperatures, prices, digits. A binary matrix is the same shape once each row becomes a histogram of column heights. On *sorted* input the pattern is pointless — the nearest greater element is just the next one.
+- **Objective verbs** — "find the next/previous …", "count days until …", "maximise the rectangle/area", "trap", "remove `k` to minimise", "sum over all subarrays of the min/max", "span of …".
+- **Constraint clues** — `n ≤ 10⁵`–`10⁶` alongside an obvious `O(n²)` double loop is the classic setup: the bound kills brute force and demands `O(n)`. Value ranges rarely matter (nothing is sorted or bucketed) except for overflow — subarray-minimum sums need a modulus.
+- **Disambiguators**
+  - **Monotonic stack vs monotonic deque** — ask: *is the query anchored to a fixed window, or to "wherever the nearest qualifying element happens to be"?* A window of fixed size `k` needs eviction from the **front** as the window slides, so you need a deque; "next greater anywhere to the right" has no left boundary to evict, so a stack suffices. One-ended access ⇒ stack.
+  - **Monotonic stack vs two pointers** — ask: *does each index need its own answer, or does the problem need one global answer?* Trapping Rain Water has a two-pointer solution because you only need the total; per-index next-greater has no two-pointer form because there is no monotone convergence to exploit. Per-index answers ⇒ stack; single aggregate over a converging pair ⇒ two pointers.
+  - **Monotonic stack vs sorting or heap** — ask: *does the answer depend on the nearest qualifying element, or on rank?* "Next greater" is about **adjacency in index order**, and sorting destroys index order; "kth largest" is about rank and wants a heap. If reordering the input would change the answer, don't reorder it.
+  - **Monotonic stack vs DP** — ask: *does the recurrence look back to the nearest index satisfying a predicate, or over all previous indices?* If a transition scans backwards for the nearest smaller/greater element, the stack replaces that inner loop and collapses `O(n²)` → `O(n)`; if it genuinely needs every previous state, it stays DP.
+- **Anti-signals** — balanced parentheses and expression evaluation use a stack but **not a monotonic** one: nothing is ordered by value, so there is no invariant to maintain. "Maximum in every window of size `k`" reads like next-greater but is the deque pattern, because elements also leave from the left.
 
 ### Q1. Walk me through Next Greater Element.
 
@@ -816,6 +1016,18 @@ The intuition: at each position, removing a larger digit in favour of a smaller 
 
 Each index `i` is pushed onto the stack exactly once (when the outer loop reaches it) and popped at most once (either by some later index resolving it or by the sentinel at the end). The total number of pop operations across all outer iterations is therefore bounded by N. The total work in the while loop is O(N) summed over the whole algorithm. The outer loop is O(N). Total: O(N). This is **amortised analysis**: an individual iteration of the outer loop can do up to N pops, but they're "paid for" by earlier pushes. Articulating this — and naming "amortised" out loud — is what separates senior from junior. The same analysis applies to sliding window (each element added once, removed at most once) and to monotonic deque (next topic).
 
+### Worked LeetCode mappings
+
+**LeetCode 496, Next Greater Element I** — for each element of `nums1` (a subset of `nums2`), find its next greater element in `nums2`. Signals: the phrase "next greater element" is the pattern's own name, and the answer is per-index and position-dependent. Therefore: monotonic stack over `nums2`, plus a hash map from value → answer so the `nums1` lookups are `O(1)`. Approach: iterate `nums2` left to right holding a strictly **decreasing** stack of unresolved values; when `nums2[i]` exceeds the top, pop and record `top → nums2[i]`. Anything left on the stack has no next greater, so it maps to `-1`. `O(n + m)` time, `O(n)` space. This is the template problem — write it from memory.
+
+**LeetCode 739, Daily Temperatures** — for each day, how many days until a warmer temperature. Signals: "how many days **until**" is a *distance* to the next qualifying element, not just its value, so you push **indices**, not temperatures. Therefore: the same decreasing stack, with `answer[popped] = i - popped`. Approach: one left-to-right pass; days still on the stack at the end keep their default `0`. `O(n)` time, `O(n)` space. The only delta from LeetCode 496 is storing indices — that substitution is the thing to internalise, because every width/distance variant depends on it.
+
+**LeetCode 84, Largest Rectangle in Histogram** — the largest axis-aligned rectangle fitting under a bar chart. Signals: "largest rectangle" over heights, and the observation that the maximal rectangle **containing bar `i`** extends until it hits a strictly smaller bar on each side. Therefore: previous-smaller and next-smaller for every bar, which is a monotonic **increasing** stack. Approach: push indices while heights rise; on a drop, pop and score `height[top] × width`, where `width = i - stack[-1] - 1` (or `i` if the stack empties). Append a `0` sentinel so the stack drains. `O(n)` time, `O(n)` space. Say "amortised" out loud: the inner `while` looks nested but each index is pushed once and popped once, so total pops ≤ `n`.
+
+**LeetCode 42, Trapping Rain Water** — total water trapped between bars. Signals: "trapped between" means each position is bounded by taller bars on both sides — the same two-sided-boundary structure as the histogram. Therefore: a decreasing stack that fills water **layer by layer**; every pop identifies a horizontal basin whose floor is the popped bar, whose walls are the new bar and the new stack top, and whose depth is `min(left, right) - floor`. `O(n)` time, `O(n)` space. Worth naming the alternative: converging two pointers solve it in `O(n)` time and `O(1)` space, so the stack is the *illustrative* answer here, not the optimal one — flagging that trade-off yourself is the senior move.
+
+**Where the implementation lives** — the Algorithms primer's *Algorithmic Analysis & Recurrences* topic has the commented reference implementation and complexity derivation.
+
 ---
 
 ## Monotonic Deque
@@ -859,6 +1071,20 @@ Three signals. (1) **Senior pattern recognition** — Sliding Window Maximum is 
 **What follows from this topic**
 
 Monotonic deque pairs naturally with **Prefix Sum** for the shortest-subarray-sum problem and with **Dynamic Programming** for the constrained-DP family (Jump Game VI, Constrained Subsequence Sum). The amortised analysis here is the same recurring theme that links Sliding Window, Monotonic Stack, and Monotonic Deque — three patterns sharing one analytical move (each element processed at most twice across the whole algorithm). If you can write Sliding Window Maximum from memory and articulate why deque beats heap, you've earned this pattern.
+
+### Recognition — signals that map to this pattern
+
+- **Keyword phrases** — "the **maximum of each sliding window** of size `k`" is the pattern's own name in the wild: one extremum query per shift, and the windows overlap heavily, which is why a rescan wastes work. "Longest subarray such that **`max − min ≤ limit`**" names both extrema, so you run *two* deques side by side — decreasing for the max, increasing for the min. "Sum **at least `k`**" alongside "`nums[i]` may be **negative**" is the loudest phrase pair here: negatives make prefix sums non-monotone, which is exactly what breaks two-pointer sliding window. "Consecutive chosen indices differ by **at most `k`**" describes a DP recurrence whose inner term is a max over the last `k` states; the deque replaces that inner scan.
+- **Input shape** — a 1-D array, or a prefix-sum array derived from one, plus a width `k`. Also a DP table where `dp[i]` reads only `dp[i-k] … dp[i-1]`. Access is left-to-right and only the last `k` indices matter, so it works on a stream. Not trees, grids, or graphs.
+- **Objective verbs** — "report the max/min of every window", "longest subarray where the spread stays bounded", "shortest subarray with sum `≥ k`", "maximum score reachable with jumps of `≤ k`".
+- **Constraint clues** — `n ≤ 10⁵` with `k` allowed up to `n` kills the `O(n·k)` rescan (`10¹⁰` operations). A heap's `O(n log k)` usually squeaks through, so the tell that `O(n)` is intended is `n` at `10⁵`–`10⁶` *plus* an explicit ask for the optimal bound. A range that includes negatives alone rules out plain sliding window for any sum-based objective.
+- **Disambiguators**
+  - *Deque vs sliding window*: ask "is the tracked quantity **reversible** on shrink?" A sum or count is undone by subtracting the departing element. An extremum is not — drop the max and you cannot recover the new one — so you must have kept the runner-up contenders, which is what the deque holds.
+  - *Deque vs monotonic stack*: ask "does anything ever leave from the **left** end?" A stack evicts only by *domination* (next-greater-element, no window). A deque evicts by domination **and** by *age*; needing age-expiry is the whole justification for the second end.
+  - *Deque vs heap*: ask "can I delete **by index** in `O(1)`?" A heap cannot, so it needs lazy deletion and costs `O(n log k)`. If the window advances by exactly one per step, the deque's amortised `O(1)` wins outright.
+  - *Deque vs sparse table / segment tree*: ask "are the query ranges **sliding forward monotonically**?" Sliding → deque, `O(n)`. Arbitrary ranges on immutable data → sparse table. Mutable array → segment tree.
+  - *Deque vs two-pointer prefix sums*: ask "are all values **positive**?" Positive means the window sum grows monotonically with width, so two pointers suffices. One negative destroys that monotonicity and hands the problem to the deque.
+- **Anti-signals** — "maximum of the entire array" is one pass, no structure. "**k-th largest** in each window" is *not* deque-able: the deque exposes only the extremum, so use two heaps or an ordered multiset. "Next greater element" with no window bound is monotonic stack — no front eviction exists. A subsequence problem with **no** adjacency bound has no window, so it is plain DP or a heap. A sum-based window on strictly positive values is ordinary sliding window; a deque there is over-engineering.
 
 ### Q1. Walk me through Sliding Window Maximum.
 
@@ -950,6 +1176,18 @@ The pattern: DP recurrence with a max-over-window subexpression → use monotoni
 
 The signal: sliding window of size K → deque. Many arbitrary queries on static data → sparse table. Mutable array → segment tree. Naming this hierarchy is the staff-level move.
 
+### Worked LeetCode mappings
+
+> **LeetCode 239, Sliding Window Maximum** — return the maximum of every contiguous window of size `k`. Signals: fixed window width, one extremum query per shift, and `n ≤ 10⁵` so the `O(n·k)` rescan is out. Therefore: the base monotonic-deque template. Approach: hold indices in decreasing value order; pop the front once it falls below `i − k + 1`, pop the back while it is dominated by the incoming value, push `i`, and read `nums[dq[0]]` once `i ≥ k − 1`. `O(n)` time amortised (each index is pushed and popped at most once), `O(k)` space. This is the one to be able to write from memory.
+
+> **LeetCode 1438, Longest Continuous Subarray With Absolute Diff Less Than or Equal to Limit** — longest subarray whose `max − min ≤ limit`. Signals: "longest" + variable width + a condition stated on *both* extrema. Therefore: variable-size sliding window driven by **two** deques. Approach: push each new element onto a decreasing max-deque and an increasing min-deque; while `maxDq[0] − minDq[0] > limit`, advance `left` and pop whichever front has expired; track the best width. `O(n)` time, `O(n)` space. The recognition step is noticing that the shrink condition is itself an extremum query.
+
+> **LeetCode 862, Shortest Subarray with Sum at Least K** — shortest subarray with sum `≥ k`, values may be negative. Signals: "shortest" + "at least" + explicitly permitted negatives. That last clause is decisive — the two-pointer solution to LeetCode 209 relies on the sum only growing as the window widens, and a negative value breaks it. Therefore: prefix sums plus a monotonic deque over prefix *indices*. Approach: build `prefix`; keep indices with increasing prefix values; for each `i`, pop from the front while `prefix[i] − prefix[dq[0]] ≥ k` (recording the width, since no later `i` beats it), then pop from the back while `prefix[dq[-1]] ≥ prefix[i]` — a larger earlier prefix is dominated forever. `O(n)` time, `O(n)` space.
+
+> **LeetCode 1425, Constrained Subsequence Sum** — maximum subsequence sum where consecutive chosen indices are at most `k` apart. Signals: an explicit `j − i ≤ k` adjacency bound, which is a window in disguise; the recurrence `dp[i] = nums[i] + max(0, max(dp[i-k] … dp[i-1]))` has a max-over-window inner term. Therefore: DP with a monotonic deque replacing the inner scan. Approach: run the deque over `dp` values in decreasing order, evict the front when `dq[0] < i − k`, read `dp[dq[0]]` in `O(1)`, and answer `max(dp)`. Turns `O(n·k)` into `O(n)` time, `O(k)` space. LeetCode 1696, *Jump Game VI*, is the same recurrence with a different framing.
+
+**Where the implementation lives** — the Algorithms primer's *Prefix Sums, Difference Arrays & Range Techniques* topic has the commented reference implementation and complexity derivation.
+
 ---
 
 ## Binary Search
@@ -993,6 +1231,15 @@ Three signals. (1) **Template discipline** — getting binary search right under
 **What follows from this topic**
 
 Binary search is the foundation of **patience-sorting LIS in O(N log N)**, of **Kth Smallest in Sorted Matrix** (binary search on the value), of **Find Peak Element**, of **Search in Rotated Sorted Array**. The binary-search-on-answer pattern recurs across many DP-like optimisation problems (Capacity to Ship, Koko, Split Array Largest Sum). It pairs with prefix sum (Maximum Size Subarray Sum Equals K), with the median-of-two-sorted-arrays template, with sparse tables (range-min query on immutable data). And the discipline you build here — pick a convention, name the invariant, never mix bounds — pays off in every other O(log N) algorithm you write.
+
+### Recognition — signals that map to this pattern
+
+- **Keyword phrases** — "sorted array" plus "find" is the shallow tell, and it only covers half the pattern. The deeper tells are optimisation wordings: *"minimum X such that …"*, *"maximum X such that …"*, *"smallest capacity/speed/divisor that still works"*, *"largest value we can guarantee"*, *"the k-th smallest value"* (value, not index), *"minimise the maximum"* / *"maximise the minimum"*. Each of those implies a threshold in an ordered answer space, and a threshold is exactly what binary search finds. Also literal: *"in `O(log n)` time"* or *"better than linear"* in the constraints section — that phrasing rules out a scan and leaves halving as the only realistic shape.
+- **Input shape** — a sorted array; a rotated sorted array; a sorted matrix (row- and column-sorted); an implicitly sorted domain such as "all integers from `1` to `max(piles)`"; or **no array at all**, just a numeric parameter with a legal range and a feasibility check. The last case is the one candidates miss: the searchable structure is the answer axis, not the input.
+- **Objective verbs** — *find*, *locate*, *insert position*, *first index ≥ target*, *count occurrences* (upper bound − lower bound), *minimise the maximum load*, *maximise the minimum distance*, *how few days/hours/machines*, *k-th smallest in a value range*.
+- **Constraint clues** — `n ≤ 10⁵` with a per-check cost of `O(n)` means `O(n log n)` is comfortable, so an `O(n)` predicate inside a `log`-many-iteration search is the intended solution. A huge *value* bound (`1 ≤ w ≤ 10⁹`) next to a modest `n` is the loudest binary-search-on-answer signal there is: you cannot enumerate `10⁹` candidates, but `log₂(10⁹) ≈ 30` checks is nothing. Conversely `n ≤ 2000` with no value bound points at DP or `n²`, not this.
+- **Disambiguators** — **Binary search vs linear scan**: ask "does testing a candidate answer tell me which side the true answer is on?" If a failed check only says *no* and gives no direction, the space isn't monotonic and halving is invalid. **Binary search on the answer vs DP**: ask "am I *choosing* a value and then verifying it greedily, or am I *building* the optimum from subproblems?" If a cheap greedy pass can verify a guess, search the guess; if verification itself needs the optimum, it's DP. **Binary search vs heap**: for "k-th smallest", ask "is `k` small, or is the value range small?" Small `k` → heap in `O(n log k)`; wide `n` but bounded values → binary search the value with a counting predicate. **Binary search vs two pointers**: on a sorted array, if you need one target, search `O(log n)`; if you need all pairs meeting a condition, the two-pointer sweep is `O(n)` and beats `n` searches.
+- **Anti-signals** — an unsorted array where you need an exact element and the predicate has no monotonicity: that's hashing, `O(n)`. Sorted data but you must return *every* match in a range: find the bounds once, then scan; the scan dominates. A predicate that flickers true/false as `x` grows (non-monotonic) — halving is simply wrong there, and the fix is to reformulate the predicate, not to patch the bounds. Finally, "sorted" input that you sorted yourself just to search once: the `O(n log n)` sort already cost more than the linear scan you avoided.
 
 ### Q1. Walk me through the canonical lower-bound template.
 
@@ -1134,6 +1381,18 @@ def find_median(a, b):
 
 The senior point: this is binary search where the *thing you're searching for* is "how many elements from A go into the left half"; the predicate "the partition is valid" is monotonic in that count. Hardest part is the boundary handling with `inf` sentinels for "the partition includes all / none of A". O(log(min(N, M))).
 
+### Worked LeetCode mappings
+
+> **LeetCode 704, Binary Search** — given a sorted array of distinct integers and a `target`, return its index or `-1`. Signals: "sorted" + "return the index" + an explicit `O(log n)` requirement in the constraints. Therefore: the textbook template. Approach: half-open bounds `left = 0`, `right = n`, compute `mid = left + (right - left) // 2`, move `left = mid + 1` when `nums[mid] < target` and `right = mid` otherwise, then check `nums[left]` once at the end. Writing it as a lower bound rather than a bespoke equality search means the same code answers "insert position" and "count occurrences" for free. `O(log n)` time, `O(1)` space.
+
+> **LeetCode 33, Search in Rotated Sorted Array** — a sorted array rotated at an unknown pivot; find `target` in `O(log n)`. Signals: "sorted" but *not* globally ordered, plus the log-time demand — so the halving must survive a broken total order. Therefore: modified binary search on the sorted half. Approach: at each `mid`, compare `nums[left]` to `nums[mid]` to learn which side is cleanly sorted, test whether `target` lies inside that side's range, and recurse into it or its complement. The invariant is "one half is always sorted", which the single pivot guarantees. `O(log n)` time, `O(1)` space. Duplicates break the guarantee and degrade the worst case to `O(n)`.
+
+> **LeetCode 875, Koko Eating Bananas** — pick the smallest eating speed `k` that clears all piles within `h` hours. Signals: the array is **not sorted** and never gets sorted; the ask is "minimum `k` such that …"; and `piles[i]` runs to `10⁹` while `n ≤ 10⁴`. That pairing — tiny `n`, enormous value range, a "minimum such that" objective — is the binary-search-on-the-answer fingerprint. Therefore: search the answer axis `[1, max(piles)]` under the predicate `can_finish(k) = Σ ceil(p / k) ≤ h`, which is monotonic because a faster Koko is never slower. Approach: lower-bound template over `k`, each probe an `O(n)` pass. `O(n log(max piles))` time, `O(1)` space. Recognising that the searchable structure is `k` and not the array is the whole problem.
+
+> **LeetCode 4, Median of Two Sorted Arrays** — median of two sorted arrays in `O(log(m+n))`. Signals: two sorted inputs plus a log bound that forbids even touching every element, so neither merging nor two pointers qualifies. Therefore: binary search on the *partition point* of the shorter array. Approach: choose `i` elements from `a` into the left half, forcing `j = half − i` from `b`; the split is correct when `a[i−1] ≤ b[j]` and `b[j−1] ≤ a[i]`, and that validity predicate is monotonic in `i`, so a failed comparison tells you which way to move. Use `±∞` sentinels for empty sides. `O(log(min(m, n)))` time, `O(1)` space.
+
+**Where the implementation lives** — the Algorithms primer's *Binary Search & Searching* topic has the commented reference implementation and complexity derivation.
+
 ---
 
 ## Linked List Patterns
@@ -1177,6 +1436,15 @@ Three signals. (1) **Pointer arithmetic under pressure** — interviewers reach 
 **What follows from this topic**
 
 Linked-list patterns are the foundation of LRU Cache, LFU Cache, and many "design X" problems. The fast/slow idiom recurs in array problems (Find the Duplicate Number with Floyd's). The merge-with-dummy-tail pattern extends to Merge K Sorted Lists (with a heap of head pointers). The reversal template is the building block for Reverse Nodes in K-Group, Reverse Linked List II (reverse between positions m and n), and Reorder List. If you can write Floyd's cycle detection with the meeting-point proof and implement LRU Cache from scratch with the doubly-linked-list + hash-map design, you've earned the pattern.
+
+### Recognition — signals that map to this pattern
+
+- **Keyword phrases** — *"given the `head` of a linked list"* outranks every other signal: it says there is no index, no `len`, no random access, so the array reflexes (sort it, binary search it, two-pointer by index) are off the table. *"Return the head of the modified list"* means the head can move — the dummy-node trigger. *"Using `O(1)` extra space"* or *"in one pass"* forbids copying values into an array and pushes you onto fast/slow pointers or in-place reversal. *"Without modifying the values, only the nodes may be changed"* is LeetCode's way of saying *do the pointer surgery, don't swap payloads*. *"The `nᵗʰ` node from the end"* means an offset fast/slow pair, because you cannot count backwards. *"`get` and `put` in `O(1)` average time"* is the LRU design signal: hash map for lookup, doubly linked list for ordering.
+- **Input shape** — a chain of `ListNode` objects: sometimes two sorted chains to merge, sometimes `k` of them, sometimes a chain with a cycle, a `random` pointer, or a `prev` pointer you add yourself. The disguised case matters — an array where every value is a valid index (`i → nums[i]`) *is* a linked list, and cycle detection applies to it unchanged.
+- **Objective verbs** — reverse, merge, detect, remove, reorder, rotate, split, partition, copy, and "design a structure with `O(1)` operations". These are all *structural* verbs. Nothing asks for a maximum, a count, or an optimum, and that absence is itself the signal.
+- **Constraint clues** — `n ≤ 5·10⁴` or `10⁵` plus an explicit `O(1)`-space requirement means one pass and a fixed set of pointers: no hash set, no array copy. `n ≤ 5000` with no space bound means the hash-map solution is fine and you should take it. `2·10⁵` calls to `get`/`put` means per-operation cost must be `O(1)`, which disqualifies a linear scan for the LRU element before you write it. Depth matters too: `n = 10⁵` rules out recursive reversal in Python, whose stack dies at roughly 1000 frames.
+- **Disambiguators** — *Floyd's fast/slow vs a visited hash set:* ask "is `O(1)` space required?" The set is easier and equally correct at `O(n)` space; the 2:1 speed ratio is what buys constant space, because the hare lapping the tortoise implicitly remembers what the set would store. *Dummy node vs special-casing the head:* ask "can this operation delete or replace the first node?" If yes, use a dummy — it gives every real node a predecessor, and deletion is only expressible via a predecessor. *Reverse in place vs push onto a stack:* ask "must the original order survive?" A stack reads the list backwards in `O(n)` space non-destructively; reversal is `O(1)` space but mutates. *Heap vs repeated pairwise merge for `k` lists:* ask "how large is `k`?" One at a time is `O(nk)`; a heap of `k` heads is `O(n log k)`, which only pays once `k` grows.
+- **Anti-signals** — the word *"list"* meaning a Python list. Check the signature: `nums: List[int]` is an array problem, `head: ListNode` is this one. "Find the middle" when the length is already known is just `len // 2` — fast/slow only earns its keep in a single pass or over a stream. Palindrome-checking a linked list *looks* like the two-pointer palindrome scan, but you cannot walk left, so reverse the second half first. "`kᵗʰ` smallest across sorted lists" is a heap problem, not pointer surgery. And sorting a linked list is merge sort, never quicksort — partitioning needs the random access a list does not have.
 
 ### Q1. Walk me through reversing a linked list iteratively.
 
@@ -1381,6 +1649,18 @@ class LRUCache:
 
 Sentinels (head and tail dummies) eliminate every special case. Doubly linked is required because eviction needs O(1) removal of an arbitrary node (need `prev` pointer). The hash map stores **node references**, not just values, so removal is O(1).
 
+### Worked LeetCode mappings
+
+> **LeetCode 206, Reverse Linked List** — reverse a singly linked list and return the new head. Signals: `head: ListNode` (no random access), "return the new head" (the head moves), and the follow-up asking for both iterative and recursive. Therefore: the three-pointer in-place reversal template. Approach: `prev = None`, walk `curr`, save `nxt = curr.next` *before* writing `curr.next = prev`, then advance both; `prev` is the answer. `O(n)` time, `O(1)` space. The recursive version costs `O(n)` stack, which is the whole reason the interviewer asks for both.
+
+> **LeetCode 21, Merge Two Sorted Lists** — splice two sorted lists into one sorted list. Signals: two `head` pointers, both inputs already sorted, output reuses the existing nodes. Therefore: dummy node plus a tail pointer. Approach: while both lists are non-empty, attach the smaller head to `tail`, advance that list and `tail`; then attach whichever remainder is left with `tail.next = a or b`. `O(n + m)` time, `O(1)` space. Without the dummy you would special-case the first comparison to initialise the result head — that branch is the bug.
+
+> **LeetCode 141, Linked List Cycle** — return whether the list contains a cycle. Signals: "cycle", a `head` input, and a follow-up asking for `O(1)` memory. Therefore: Floyd's tortoise and hare. Approach: advance `slow` by one and `fast` by two, guarding with `while fast and fast.next`; if they ever coincide there is a cycle, and if `fast` falls off the end there isn't. `O(n)` time, `O(1)` space. The hash-set version is `O(n)` space and equally correct — the follow-up exists purely to force the pointer solution. Transfer this: **LeetCode 287, Find the Duplicate Number** hands you an array, not a list, but `i → nums[i]` is a linked list with a cycle, and the same two phases find its entry point.
+
+> **LeetCode 146, LRU Cache** — design a fixed-capacity cache with `O(1)` `get` and `put`, evicting the least recently used key. Signals: "design", an explicit `O(1)` bound on both operations, and a recency *ordering* that must be updated on every access. Therefore: hash map (key → node) plus a doubly linked list ordered by recency. Approach: sentinel `head` and `tail` nodes so no insertion or removal is a special case; `get` unlinks the node and re-inserts it at the front; `put` inserts at the front and, when over capacity, unlinks `tail.prev` and deletes its key from the map. `O(1)` per operation, `O(capacity)` space. Two design points carry the interview: the list must be **doubly** linked because evicting an arbitrary node in `O(1)` requires its predecessor, and the map must store **node references**, not values, or removal degrades to a scan.
+
+**Where the implementation lives** — the Algorithms primer's *Recursion & Divide and Conquer* topic has the commented reference implementation and complexity derivation.
+
 ---
 
 ## Trees
@@ -1426,6 +1706,19 @@ Three signals. (1) **Recursive fluency** — trees are the cleanest test for "ca
 **What follows from this topic**
 
 Trees are the gateway to Graph Traversals (the same DFS/BFS, generalised to arbitrary edges with a visited set). The postorder aggregation pattern is the foundation of Tree DP (House Robber III, Binary Tree Cameras). The "two values up" pattern recurs in Longest Univalue Path, Diameter, Maximum Path Sum — recognise it and the variants write themselves. Serialise/Deserialise is the bridge to system design (designing the wire format for distributed trees). And the BST-specific tricks (iterative inorder for "Kth smallest", bounds validation) prepare you for self-balancing tree topics in the Less-Common section (AVL, Red-Black, B-Tree).
+
+### Recognition — signals that map to this pattern
+
+- **Keyword phrases** — "given the `root` of a binary tree" is the whole signal on its own: a `TreeNode` input means recursion by default, because the subproblem is always "the same question, asked of a child". "Binary **search** tree" is a different phrase and a different problem — it licenses ordering arguments (inorder is sorted; you may discard an entire subtree). "Level", "depth", "each row", "right side view" point at level-order BFS, because they name a horizontal slice that plain recursion doesn't produce in order. "Path" means a connected chain, so the answer is assembled by combining a left contribution and a right contribution at some turning node. "Ancestor", "descendant", "subtree" are vertical relationships → DFS. "Serialise", "clone", "copy" → preorder, because a root must exist before children attach to it.
+- **Input shape** — a `TreeNode` with `.left`/`.right` (or an n-ary `children` list); sometimes a level-order array with `null` holes you deserialise first. Occasionally *two* traversals (preorder + inorder, distinct values), which is a reconstruction problem. Arbitrary edges with possible cycles is not a tree — go to Graph Traversals; but `n` nodes, `n-1` edges and connectivity *is* a tree, merely adjacency-encoded.
+- **Objective verbs** — "maximum depth", "invert", "validate", "diameter", "count paths summing to `k`", "kth smallest", "lowest common ancestor", "is balanced", "flatten", "serialise".
+- **Constraint clues** — `n ≤ 10⁴`–`10⁵` with a single expected pass means `O(n)`, so per-node work must be `O(1)`: recomputing a height inside the recursion makes it `O(n²)` and times out. Height `h` can equal `n` on a skewed tree, so recursion costs `O(n)` stack — say so, and offer the explicit-stack alternative. An `O(log n)` target with a BST input means "descend one path, never traverse".
+- **Disambiguators**
+  - **DFS vs BFS** — ask "does the answer depend on distance from the root?" Yes (minimum depth, per-level lists, first node at a depth) → BFS, because it visits in non-decreasing depth order and can stop the instant it finds one. No — the answer is about a subtree's contents (height, sum, validity, LCA) → DFS, since BFS forces you to rebuild parent-child aggregation by hand.
+  - **Top-down vs bottom-up** — ask "does a node need information from its ancestors or from its descendants?" Ancestors → pass state **down** as parameters (BST bounds `(lo, hi)`, the path so far, a running prefix sum). Descendants → return state **up** and combine in postorder (height, diameter, balance). Needing both is normal: parameters descend, return values ascend.
+  - **BST vs general binary tree** — ask "is value ordering guaranteed?" If yes, prefer the ordering over the traversal: inorder yields sorted output (kth smallest in `O(h + k)`), and comparisons prune a whole side (`O(h)` LCA, search, insert). If no, every node is a candidate and you must visit all `n`.
+  - **Recursion vs explicit stack** — ask "can `h` reach `n`?" A skewed tree at `n = 10⁵` overflows Python's default limit; switch to the iterative inorder template rather than raising the limit.
+- **Anti-signals** — a "tree" that is really a grid, a cyclic graph, or a DAG with shared children: a node reachable by two parents needs a `visited` set, which is Graph Traversals, not this. "Kth smallest in a *stream*" is a heap, not a BST walk. Prefix-of-string problems that say "tree" are Tries.
 
 ### Q1. Walk me through the postorder aggregation template using Diameter as the example.
 
@@ -1563,6 +1856,18 @@ def max_path_sum(root):
 
 The two senior tells: (1) clamp child contributions at 0 (negative subtrees are skipped, not included). (2) separate "path turning at this node" (the best globally) from "path going up through one child" (what flows to the parent). Mixing these in one variable is the canonical junior bug. O(N).
 
+### Worked LeetCode mappings
+
+> **LeetCode 104, Maximum Depth of Binary Tree** — return the number of nodes along the longest root-to-leaf path. Signals: `TreeNode` input, and the answer for a node is defined purely in terms of its two children. Therefore: bottom-up postorder. Approach: `depth(node) = 0` when `node` is null, else `1 + max(depth(left), depth(right))` — nothing is passed down, everything is returned up. `O(n)` time, `O(h)` stack, which is `O(n)` on a skewed tree. The BFS alternative (count levels) is equally valid and is the honest answer to "what if the tree is a million deep?".
+
+> **LeetCode 102, Binary Tree Level Order Traversal** — return the node values grouped level by level. Signals: "level" plus a grouped output shape — the answer is indexed by distance from the root, which recursion does not give you in order. Therefore: BFS with a level-size snapshot. Approach: queue the root; on each outer iteration read `len(q)` *first*, pop exactly that many nodes into one list, enqueuing their children as you go. `O(n)` time, `O(w)` space where `w` is the widest level. Right side view, minimum depth, and per-level averages are the same loop with a different emit step.
+
+> **LeetCode 98, Validate Binary Search Tree** — decide whether a binary tree satisfies the BST property. Signals: BST plus a *global* correctness claim, and the tempting local check is wrong. Therefore: top-down DFS carrying bounds. Approach: recurse with `(lo, hi)`, reject unless `lo < node.val < hi`, and tighten — `hi = node.val` going left, `lo = node.val` going right. `O(n)` time, `O(h)` space. Equivalent recognition: inorder on a valid BST is strictly increasing, so a single inorder pass tracking the previous value also works — same complexity, and it is the one to mention when the interviewer pushes on integer overflow at the sentinel bounds.
+
+> **LeetCode 124, Binary Tree Maximum Path Sum** — the maximum sum over any connected path, which need not touch the root. Signals: "path" + "any node to any node" + negative values allowed. Therefore: the two-values-up idiom. Approach: `max_gain(node)` returns the best *downward* path through one child (clamped at `0` so negative subtrees are dropped), while a nonlocal `best` absorbs `node.val + left + right`, the path that turns at this node. `O(n)` time, `O(h)` space. Mixing the returned value and the tracked best into one variable is the classic failure here; Diameter of Binary Tree (543) is the same skeleton with edge counts instead of sums.
+
+**Where the implementation lives** — the Algorithms primer's *Recursion & Divide and Conquer* topic has the commented reference implementation and complexity derivation.
+
 ---
 
 ## Graph Traversals (BFS / DFS)
@@ -1608,6 +1913,21 @@ Three signals. (1) **BFS vs DFS choice with justification** — junior candidate
 **What follows from this topic**
 
 Graph traversals are the base layer for **Weighted Graph Algorithms** (Dijkstra is BFS + priority queue), **Topological Sort** (DFS post-order or Kahn's BFS), **Union Find** (an alternative for connectivity, especially dynamic), **A*** (Dijkstra + heuristic for pathfinding). The grid-as-graph trick recurs in many BFS/DFS problems including Pacific Atlantic Water Flow, Surrounded Regions, Number of Distinct Islands. And the three-colour DFS cycle detection is the foundation for course-schedule and topological-sort cycle handling. If you can recognise "shortest unweighted" → BFS, "connectivity" → DFS or Union Find, "multi-source distance" → multi-source BFS, you've covered the recognition layer.
+
+### Recognition — signals that map to this pattern
+
+- **Keyword phrases** — "**minimum number of steps / moves / minutes**" is the loudest BFS tell: level-by-level expansion computes exactly that, so first arrival is provably optimal. "**Shortest path**" with no weights mentioned means BFS, not Dijkstra — a heap here is a wasted `log` factor. "**Number of / count the**" islands, provinces, or regions means DFS flood-fill: distance is irrelevant, only mutual reachability. "**All paths**" means DFS with backtracking, because you must un-mark on the way out so other paths can reuse a node. "**Simultaneously**" or "**at the same time**" (rot spreading, fire spreading) is the multi-source BFS tell — every source starts at distance 0 in one queue.
+- **Input shape** — an adjacency or edge list; **an `m × n` grid of chars or ints**; a word list where neighbours differ by one letter; a set of states reachable by a fixed move set. The last two are *implicit* graphs: nothing is stored as a graph, you generate neighbours on demand.
+- **Grid is a graph** — the recognition most candidates miss. A grid is a graph whose nodes are `(r, c)` cells and whose edges are the four (or eight) in-bounds neighbours from `DIRS`. The moment a 2D grid appears with "spread", "reach", "region", or "steps", stop thinking nested loops and write the traversal template with a bounds check. Same reframe for implicit state graphs — a lock combination, a word, a `(position, keys-held)` tuple: if you can enumerate a state's successors you can BFS it, and the graph never exists in memory.
+- **Objective verbs** — *reach*, *count components*, *spread*, *flood*, *minimum steps*, *detect a cycle*, *clone*, *enumerate all paths*, *find the nearest X for every cell*.
+- **Constraint clues** — `n ≤ 10⁵` nodes with `m ≤ 2 × 10⁵` edges, or a grid up to `1000 × 1000`, points at an `O(V + E)` single pass and rules out anything per-node-quadratic. Unweighted edges are the licence to use BFS over Dijkstra. A tiny grid (`≤ 20 × 20`) with "all paths" flips you to exponential DFS — the small bound signals that's acceptable.
+- **Disambiguators**
+  - **BFS vs DFS** — ask "does the answer depend on distance?" If yes, BFS: its frontier is ordered by distance, so first arrival is shortest. If the answer is only reach/count/cycle, DFS — cheaper to write, no queue.
+  - **BFS vs Dijkstra** — ask "are all edge weights equal?" If yes, BFS; a heap buys nothing when every edge costs 1 and charges `O(log V)` per pop for the privilege. Differing weights need Dijkstra (or 0-1 BFS with a deque when weights are only 0 or 1).
+  - **DFS vs Union Find** — ask "are edges given up front, or arriving one at a time?" Static edge list → one DFS pass. Streaming unions, or components-after-each-merge → Union Find, because DFS would re-run per query.
+  - **Multi-source BFS vs BFS per source** — ask "do I need distance to the *nearest* source?" If yes, seed one queue with every source at 0; `k` separate BFSes compute the same answer `k` times slower.
+  - **Graph DFS vs tree DFS** — ask "can I revisit a node?" A tree can't cycle, so no visited set; a general graph can, so omitting it is an infinite loop, not a slow program.
+- **Anti-signals** — weighted edges dressed up as steps ("cost", "toll", "minutes *per edge*") → **Weighted Graph Algorithms**. "Ordering with prerequisites" → **Topological Sort**, not plain traversal. Shortest path in a *tree* needs no BFS machinery — the path is unique. Counting paths in a DAG with overlapping subproblems is **Dynamic Programming** over the topological order. And a grid where you optimise an accumulated sum per cell is grid DP: the tell is optimising a quantity rather than counting steps.
 
 ### Q1. Walk me through BFS shortest path on a grid.
 
@@ -1754,6 +2074,18 @@ Two traps: (1) **callers may not expect mutation** — if the grid is passed by 
 
 BFS explores by **distance** — at any point during BFS, all nodes in the queue are at distance ≤ k+1, where k is the current popped distance. The first time you reach the target is therefore the shortest path. DFS explores by **path** — it might find any path quickly but doesn't guarantee shortest unless it exhausts all paths (O(V × paths) instead of O(V + E)). The deeper point: BFS is the foundation of Dijkstra (which generalises BFS to weighted graphs with a priority queue), and 0-1 BFS (which uses a deque to handle 0-or-1 weighted edges in O(V+E)). The senior tell is naming these connections — "BFS, Dijkstra, and A* are the same algorithm with different frontier data structures (queue, min-heap, min-heap-with-heuristic)".
 
+### Worked LeetCode mappings
+
+> **LeetCode 200, Number of Islands** — count connected groups of `'1'` cells in an `m × n` grid. Signals: a grid (so: a graph), "count", "adjacent", and no notion of distance anywhere in the statement. Therefore: DFS flood-fill, the connectivity half of the pattern, not BFS. Approach: scan every cell; on an unvisited `'1'`, increment the counter and flood-fill its whole component, marking cells visited in place. Each cell is entered once, so `O(m × n)` time and `O(m × n)` worst-case recursion depth (a grid that is entirely land).
+
+> **LeetCode 133, Clone Graph** — deep-copy a connected undirected graph given one node. Signals: an explicit adjacency-list graph, "each node", and cycles are possible because the graph is undirected. Therefore: any traversal — DFS or BFS both work, since order is irrelevant — with a `original → clone` hash map doing double duty as the visited set. Approach: on first sight of a node, create its clone and record it; recurse into neighbours, appending their clones. The map is what stops the cycle from becoming infinite recursion. `O(V + E)` time, `O(V)` space.
+
+> **LeetCode 994, Rotting Oranges** — every minute, rot spreads from each rotten orange to its 4-adjacent fresh ones; return the minutes until none are fresh, or `-1`. Signals: "minimum minutes" (distance), a grid, and *many* starting points spreading *simultaneously*. Therefore: multi-source BFS — the exact case where looping a separate BFS per rotten orange is `O(rotten × m × n)` for no benefit. Approach: seed the queue with every rotten cell at time 0 and count the fresh ones; BFS outward, decrementing the fresh count; the answer is the last time value, or `-1` if any fresh orange remains. `O(m × n)` time and space.
+
+> **LeetCode 127, Word Ladder** — transform `beginWord` into `endWord` one letter at a time, each intermediate in the dictionary, returning the shortest sequence length. Signals: "shortest transformation sequence", every transformation costs the same, and there is *no graph in the input* — this is the implicit-graph tell, with words as nodes and one-letter edits as unit edges. Therefore: BFS, upgraded to bidirectional BFS since both endpoints are known. Approach: expand the smaller of the two frontiers, generating the `26 × L` single-letter mutations of each word and keeping those in the dictionary; when a generated word appears in the opposite frontier, the frontiers have met. Unidirectional is `O(bᵈ)`; bidirectional is `O(b^(d/2))`.
+
+**Where the implementation lives** — the Algorithms primer's *Graph Traversal & Topological Sort* topic has the commented reference implementation and complexity derivation.
+
 ---
 
 ## Weighted Graph Algorithms
@@ -1799,6 +2131,20 @@ Three signals. (1) **Algorithm choice with justification** — junior candidates
 **What follows from this topic**
 
 Weighted graphs are the gateway to **A*** (grid pathfinding in games), **network flow** (max-flow / min-cut), and many optimisation problems that reduce to shortest path. The MST algorithms feed into network design (cheapest way to connect N points), the Kruskal version directly uses **Union Find**. Bellman-Ford is the foundation of **arbitrage detection** (cycle with negative log-weights = arbitrage opportunity). Floyd-Warshall, despite its O(V³) cost, is the right answer for small dense graphs and pairs naturally with **transitive closure** queries. If you can name Dijkstra vs Bellman-Ford vs Floyd-Warshall by signal in 10 seconds and write the heap-based Dijkstra with stale-entry handling, you've earned the pattern.
+
+### Recognition — signals that map to this pattern
+
+- **Keyword phrases** — "minimum **cost** to reach", "**cheapest** flight", "shortest **time** for all nodes to receive the signal", "connect all points with **minimum total cost**". The tell is a scalar attached to each connection — cost, price, time, distance, effort. Once traversing one edge is not interchangeable with traversing another, "fewest hops" stops being the answer and you need a cost-ordered search. "Negative", "refund", "arbitrage" rule Dijkstra out on sight; "between **every pair**" flips you to all-pairs.
+- **Input shape** — an edge list of `[u, v, w]` triples, or an adjacency list of `(neighbour, weight)` pairs; an `n × n` matrix of pairwise distances; a grid where entering cell `(r, c)` costs `grid[r][c]` (the weight sits on the destination, not the edge); or points in the plane with an implied complete graph.
+- **Objective verbs** — "minimise total cost", "minimise the **maximum** edge along the path" (bottleneck/minimax, not sum), "connect **all** nodes as cheaply as possible" (spanning tree, not path), "return the cost for every pair", "detect a profitable cycle", "reach the target **within K stops**".
+- **Constraint clues** — `V ≤ 400` plus "answer every query" → Floyd-Warshall, `O(V³)` ≈ 6.4×10⁷, fine. `V, E ≤ 10⁵` with non-negative weights → Dijkstra, `O((V + E) log V)`. `V·E ≤ 10⁷` and weights may be negative → Bellman-Ford, `O(V·E)`. Weights restricted to `{0, 1}` → 0-1 BFS with a deque, `O(V + E)`, no heap. All weights equal → plain BFS; a heap there pays a needless `log V`.
+- **Disambiguators**
+  - **BFS vs Dijkstra** — *are all edge weights identical?* If yes, BFS is correct and strictly faster: with uniform weights the FIFO queue already dequeues in nondecreasing distance order, so the heap re-derives an ordering you get free.
+  - **Dijkstra vs Bellman-Ford** — *can any edge weight be negative?* Dijkstra finalises a node the moment it pops it, sound only when every remaining edge adds cost. One negative edge can make a longer-looking route cheaper later, killing the invariant — so you need Bellman-Ford's `V−1` relaxation passes, plus the extra pass if you must *detect* a negative cycle (the only standard algorithm that does).
+  - **Single-source vs Floyd-Warshall** — *how many sources need answers?* One → Dijkstra/Bellman-Ford. All pairs on a small `V` → Floyd-Warshall: `V` separate Dijkstra runs cost `O(V·E log V)`, worse than `O(V³)` once the graph is dense.
+  - **Shortest path vs MST** — *am I connecting two nodes or all of them?* "Cheapest way to reach `dst`" is a path; "cheapest way to keep everything connected" is a spanning tree. An MST does **not** contain shortest paths between its nodes — routing on one is a classic wrong answer.
+  - **Dijkstra vs hop-limited relaxation** — *is there a cap on edges used?* A `≤ K stops` constraint breaks finalise-on-pop; run Bellman-Ford exactly `K+1` times, or Dijkstra over an augmented `(node, hops_used)` state.
+- **Anti-signals** — a weighted **DAG** needs no heap: topologically order it and relax once, `O(V + E)`. "**Longest** path" in a general graph is NP-hard — negating weights and running Dijkstra is not a fix. "Minimum number of moves" on a uniform-cost grid is BFS. And for "smallest threshold `T` making the target reachable using only edges `≤ T`", binary search on `T` plus a BFS or Union-Find check usually beats a minimax Dijkstra.
 
 ### Q1. Walk me through Dijkstra with Python heapq.
 
@@ -1930,6 +2276,18 @@ The cell weight (cost of *entering* a cell) is conceptually an edge weight, but 
 
 Build a graph where vertices are currencies and edges are exchange rates. To detect arbitrage (a cycle whose product of rates > 1), take the **negative log** of each rate as the edge weight; a cycle of original-product > 1 becomes a cycle of log-sum < 0. Run Bellman-Ford to detect a negative cycle. O(V·E). This is a canonical staff-level interview problem because it requires (1) recognising the graph reduction, (2) the log transform, (3) knowing Bellman-Ford is the only standard algorithm that detects negative cycles. State each step out loud.
 
+### Worked LeetCode mappings
+
+> **LeetCode 743, Network Delay Time** — a signal starts at node `k`; return the time for all `n` nodes to receive it, or `-1`. Signals: directed edges carrying a positive `time` weight, one fixed source, and "how long until **all** nodes are reached". Weights differ per edge, so BFS's hop count is meaningless; nothing is negative, so Dijkstra's finalise-on-pop invariant holds. Approach: heap-based Dijkstra from `k`, then answer `max(dist)` — if any entry is still `∞`, some node is unreachable, return `-1`. `O((V + E) log V)` time, `O(V + E)` space.
+
+> **LeetCode 1584, Min Cost to Connect All Points** — given points in the plane, connect them all at minimum total Manhattan cost. Signals: "connect **all** points", "minimum cost", exactly one simple path required between any two points — that phrase is the definition of a tree, so this is MST, not shortest path. The graph is implicit and complete (`E = V²/2` edges you generate rather than read). Approach: Prim from any point, because on a dense implicit graph Prim's `O(V²)` scan beats sorting `V²` edges for Kruskal. `O(V²)` time, `O(V)` space.
+
+> **LeetCode 787, Cheapest Flights Within K Stops** — cheapest price from `src` to `dst` using at most `k` stops. Signals: weighted directed edges plus a **cap on edge count** — the disambiguator that rules out plain Dijkstra, since a route Dijkstra finalises as cheapest may use too many hops while a pricier, shorter-hop route is the only legal one. Approach: Bellman-Ford run `k + 1` times, snapshotting `cost` at the start of each pass so one pass adds exactly one flight; or Dijkstra over `(cost, node, hops_used)` state. `O(K · E)` time, `O(V)` space.
+
+> **LeetCode 778, Swim in Rising Water** — on an `n × n` elevation grid, return the earliest time you can reach the bottom-right, where at time `t` you may stand on any cell with elevation `≤ t`. Signals: a grid with a cost per cell and an objective that reads "minimise the **maximum**" rather than "minimise the sum" — the bottleneck / minimax variant. Approach: Dijkstra with the relaxation changed from `d + grid[v]` to `max(d, grid[v])`, which is still monotone non-decreasing along a path so the pop-order argument survives; equivalently, binary search the threshold `T` and BFS the cells `≤ T`, or Union-Find cells in increasing elevation until start and end connect. `O(n² log n)` time, `O(n²)` space.
+
+**Where the implementation lives** — the Algorithms primer's *Shortest Path Algorithms* topic has the commented reference implementation and complexity derivation.
+
 ---
 
 ## Heap / Priority Queue
@@ -1974,6 +2332,20 @@ Three signals. (1) **Top K pattern recognition** — the keyword "top K" or "Kth
 **What follows from this topic**
 
 Heaps are the foundation of **Dijkstra** (min-heap of `(distance, node)`), **Prim's MST** (min-heap of edges), **A*** (min-heap of `(f-score, node)`), and **event-based simulation** (next event by time). The two-heap pattern recurs in Sliding Window Median (with lazy deletion for window eviction). And the heap-vs-quickselect-vs-bucket-sort comparison is a recurring senior interview pattern (Top K Frequent Words tests it too). If you can write the heap-of-size-K template from memory and name when quickselect wins, you've earned the pattern.
+
+### Recognition — signals that map to this pattern
+
+- **Keyword phrases** — "**kth largest / smallest / closest**": *kth* means one order statistic, not a total order, so a full sort is overkill. "**Top k**" / "**k most frequent**": you need a *set* of extremes, and a size-`k` heap is the smallest structure holding "the best `k` so far". "**Median of a stream**" / "**running median**": *running* means answers are demanded between insertions, which kills sort-once and points at two heaps. "**Merge k sorted …**": the global next element is always one of `k` heads — exactly what a heap of heads answers in `O(log k)`. "**Minimum number of rooms**" or any repeated "pick the best remaining": a greedy loop whose best-remaining changes after every pick *is* a priority queue.
+- **Input shape** — an unsorted array or a **stream** of unknown length; `k` sorted lists; tasks/intervals/points each carrying one comparable key (frequency, end time, distance); a weighted graph where you repeatedly need the cheapest frontier edge (Dijkstra, Prim). Items arriving one at a time with answers required in between is almost always heap-shaped.
+- **Objective verbs** — *find the kth*, *return the top k*, *maintain the median*, *merge*, *always take the most/least X next*, *minimise the rooms/machines*.
+- **Constraint clues** — `n ≤ 10⁵–10⁶` with `k` small (often `k ≤ 100`) is the giveaway: the setter is separating `O(n log k)` from `O(n log n)`. "The stream may be arbitrarily long" or "you cannot store all elements" forbids sorting outright. If values are bounded small integers (counts in `[1, n]`), the intended answer may be `O(n)` bucket/counting — check the range first.
+- **Disambiguators**
+  - **Heap vs sorting** — ask: *do I need all `n` ordered, or only `k` of them?* Sorting orders everything at `O(n log n)`; a size-`k` heap does `n` pushes against a structure of height `log k`, so `O(n log k)`, and `O(k)` space instead of `O(n)` — decisive on a stream you cannot re-read.
+  - **Heap vs quickselect** — ask: *static, mutable, in memory, answered once?* Then quickselect's `O(n)` average beats `O(n log k)`. If the data streams, must not be mutated, or an adversary picks it (quickselect degrades to `O(n²)`), the heap wins.
+  - **Heap vs monotonic deque** — ask: *do elements leave in a predictable order?* A sliding window evicts by *index*, which a deque handles in `O(1)` amortised; a heap cannot delete an arbitrary element and needs lazy deletion. Predictable eviction → deque; arbitrary best-remaining → heap.
+  - **Heap vs greedy-after-sorting** — ask: *does the key change as I proceed?* Interval scheduling sorts once by end time and never re-ranks. Task Scheduler's "most frequent remaining" changes after every pick, so it needs a heap.
+  - **Two heaps vs one** — the tell is a **middle** element, not an extreme. One heap exposes only an end, so the median needs a max-heap below the boundary and a min-heap above it, sizes within 1.
+- **Anti-signals** — "kth largest" on an **already sorted** array is indexing, `O(1)`. "Maximum in every window of size `k`" looks heap-ish but is a monotonic deque. "Merge **two** sorted lists" is a two-pointer merge, `O(n)`, no `log`. "Kth smallest in a BST" is an in-order walk with a counter. And a problem wanting a *dynamic ordered set* with predecessor/successor or arbitrary deletion wants a balanced BST, not a priority queue.
 
 ### Q1. Walk me through Top K Frequent Elements.
 
@@ -2106,6 +2478,20 @@ The heap size at any moment = currently-active meetings; final size = maximum co
 
 The senior answer: "for top K frequent elements where counts are in [1, N], bucket sort is O(N) and beats both. For Kth largest of unbounded integers, quickselect O(N) average beats heap O(N log K) for large N. For streaming data, heap is the only option because the others require all data upfront."
 
+### Worked LeetCode mappings
+
+> **LeetCode 703, Kth Largest Element in a Stream** — return the kth largest value after each `add`. Signals: "kth largest" + stream + repeated queries between insertions. Therefore: a **min-heap capped at size `k`**. Approach: push every arriving value and pop whenever the size exceeds `k`; the root is then the kth largest, because the heap holds exactly the `k` biggest values seen and its minimum is the smallest of those. Sorting is not even on the table — you cannot re-sort an unbounded stream per query. `O(log k)` per `add`, `O(k)` space.
+
+> **LeetCode 215, Kth Largest Element in an Array** — one order statistic from a static array. Signals: "kth largest", static input, single query, `n ≤ 10⁵`. Therefore: heap **or** quickselect, and naming both is the answer the interviewer wants. Approach A: min-heap of size `k`, `O(n log k)` time and `O(k)` space — this beats sorting because you never order the `n − k` losers, only compare each against the current kth best. Approach B: quickselect, partition around a random pivot and recurse into only the side containing index `n − k`; `n + n/2 + n/4 + … = 2n`, so `O(n)` expected, `O(1)` space, but `O(n²)` worst case and it mutates the input. Pick the heap when `k ≪ n`, the input is immutable, or an adversary chooses the data.
+
+> **LeetCode 973, K Closest Points to Origin** — return the `k` points nearest the origin. Signals: "k closest" (a *set* of extremes) plus a derived comparable key. Therefore: max-heap of size `k` keyed on **squared** distance — `√` is monotonic, so computing it only burns cycles. Approach: push `(-(x² + y²), point)` into a `k`-capped heap so the worst-so-far sits at the root and is evicted first. `O(n log k)` time, `O(k)` space; quickselect on distance is `O(n)` expected if you may reorder the array.
+
+> **LeetCode 23, Merge k Sorted Lists** — merge `k` sorted linked lists. Signals: `k` sorted sources, and the global minimum is always at one of the `k` heads. Therefore: heap as a **multi-way merge**. Approach: push all `k` heads, then repeatedly pop the smallest, append it, and push that list's successor; carry a tie-breaking index because raw nodes are not comparable. Each of the `n` nodes enters a heap of size `≤ k`, so `O(n log k)` time and `O(k)` space — versus `O(n log n)` for concatenate-and-sort and `O(nk)` for rescanning all heads each step.
+
+> **LeetCode 295, Find Median from Data Stream** — maintain the median as numbers arrive. Signals: "median" (a **middle** element, not an extreme) + stream + interleaved queries. Therefore: **two heaps** — a max-heap for the lower half, a min-heap for the upper half, sizes kept within 1. The median is the larger heap's root, or the mean of both roots when sizes are equal. One heap cannot serve this because it only exposes an end; needing a value at a boundary is precisely the two-heap signal. `O(log n)` per insert, `O(1)` per query.
+
+**Where the implementation lives** — the Algorithms primer's *Randomized Algorithms & Selection* topic has the commented reference implementation and complexity derivation.
+
 ---
 
 ## Topological Sort
@@ -2149,6 +2535,19 @@ Three signals. (1) **Pattern recognition on "prerequisites" / "build order"** �
 **What follows from this topic**
 
 Topological sort is the foundation of **task scheduling** systems (Airflow, Dagster, build systems like Make and Bazel), of **module resolution** in package managers, and of **incremental compilation** strategies. It pairs naturally with **DP on DAGs** (longest path in a DAG = layered Kahn + running max), with **cycle detection** (three approaches: Kahn's, three-colour DFS, Union Find for undirected). The "build the graph from constraints" pattern recurs in Alien Dictionary, Sequence Reconstruction, and other "derive the dependency from data" problems. If you can recognise topo sort from the prompt and write Kahn's from memory with cycle detection inline, you've earned the pattern.
+
+### Recognition — signals that map to this pattern
+
+- **Keyword phrases** — the giveaway is any prompt phrased around **"before / after"**, **"prerequisite"**, **"dependency"**, or **"ordering with constraints"**. Quoted literally: *"you must take X before Y"* (a direct edge `X → Y`; the sentence *is* the graph), *"prerequisites"* (the word names the in-degree relation outright), *"build order"* / *"install order"* (dependency resolution is topological sort with a different noun), *"determine if it is possible to finish"* (the cycle-detection half — not the ordering half), *"return any valid order"* (admitting many answers exist is a DAG tell; a *unique* answer usually means plain sorting), and *"minimum number of semesters / rounds to complete everything"* (layered Kahn, where the answer is the longest chain).
+- **Input shape** — a **directed** graph, almost always handed to you as an edge list of pairs rather than an adjacency structure: `[[a, b], ...]` plus an integer `n` of nodes. Sometimes the edges are implicit and you must derive them (adjacent word pairs in Alien Dictionary; grid cells pointing to strictly larger neighbours). If the edges are undirected, this is not topological sort — see anti-signals.
+- **Objective verbs** — "order", "sequence", "schedule", "resolve", "can you finish", "is it possible", "detect a cycle", "count the minimum rounds", "find all nodes reachable only from safe states". Note that half of these never ask for an order at all; they ask a yes/no that Kahn's answers as a by-product.
+- **Constraint clues** — `n ≤ 10⁵` nodes with `10⁵` edges and no weights is the classic `O(V + E)` topological-sort budget. The absence of edge weights matters: weights push you to Dijkstra or DP-on-DAG instead. Node counts small enough for an in-degree array (`n` given as an integer, nodes labelled `0…n-1`) tell you to use an array rather than a hash map. Recursion depth `≥ 10⁴` argues for Kahn's BFS over recursive DFS in Python.
+- **Disambiguators**
+  - *Topological sort vs plain BFS/DFS*: ask **"does the order in which I visit a node depend on other nodes being finished first?"** If yes, you need in-degrees; plain traversal will happily visit a node before its prerequisite because it only tracks *visited*, not *satisfied*.
+  - *Topological sort vs Union Find*: ask **"do the edges have direction that changes the answer?"** Union Find merges symmetric relations and cannot express "a before b"; it detects undirected cycles only. Direction ⇒ Kahn's or three-colour DFS.
+  - *Topological sort vs Dijkstra*: ask **"are there edge weights?"** No weights and a DAG ⇒ topo order, and any longest/shortest path becomes a single linear pass in that order. Weights on a general graph ⇒ Dijkstra's priority queue.
+  - *Kahn's vs DFS post-order*: ask **"do I need layers or just an order?"** Layer counting ("minimum semesters") needs the queue-snapshot trick, which only Kahn's gives naturally; DFS gives you cycle *location* and finish times.
+- **Anti-signals** — an **undirected** graph asking for "connected groups" is Union Find or flood-fill DFS, not topo sort. "Shortest path in an unweighted graph" is plain BFS — topological order does not minimise hops. "Order the array" with a comparison rule that is a total order is just sorting at `O(n log n)`; topo sort is for *partial* orders where most pairs are incomparable. And a problem that asks for the **longest path in a general graph** is NP-hard — the DAG restriction is what makes it linear, so if the graph can contain cycles, you are in the wrong topic.
 
 ### Q1. Walk me through Kahn's algorithm.
 
@@ -2299,6 +2698,18 @@ The `for _ in range(len(q))` is the layer snapshot — same trick as level-order
 
 The senior tell: "Union Find doesn't work on directed graphs because direction matters for cycles — `a → b → a` is a cycle but `a → b, b → a` and `a → b, a → b` are different. Kahn's and three-colour DFS are the directed-graph options."
 
+### Worked LeetCode mappings
+
+**LeetCode 207, Course Schedule** — given `numCourses` and pairs `[a, b]` meaning you must take `b` before `a`, return whether you can finish all courses. Signals: the literal word *"prerequisite"* plus a yes/no *"can you finish"* — no order is requested, so this is the cycle-detection half of the pattern. Therefore: Kahn's algorithm, and the answer is simply `len(order) == numCourses`. Approach: build adjacency `b → a` and an in-degree array, seed the queue with in-degree `0`, count how many nodes you pop. `O(V + E)` time, `O(V + E)` space. The trap is edge direction — `[a, b]` reads right-to-left.
+
+**LeetCode 210, Course Schedule II** — same input, but return an actual valid course order (or `[]` if impossible). Signals: *"return the ordering"* combined with *"if there are many valid answers, return any of them"* — the explicit admission of multiple answers is the DAG tell. Therefore: identical Kahn's run, but you keep the popped sequence instead of just counting it. Approach: append each popped node to `order`; return `order` if it holds all `V` nodes, else `[]`. `O(V + E)` time, `O(V + E)` space. If the follow-up asks for the *lexicographically smallest* order, swap the `deque` for a min-heap and pay `O(V log V + E)`.
+
+**LeetCode 269, Alien Dictionary** — given a list of words sorted by an unknown alphabet, recover a valid character ordering. Signals: *"sorted according to the rules of this new language"* — the constraints are latent, so the recognition step is *"I must build the graph before I can sort it"*. Therefore: derive edges from adjacent word pairs, then run Kahn's over the character set. Approach: for each adjacent pair, the **first** differing character gives one edge `c1 → c2` and you stop; if `w1` is longer than `w2` and starts with it, the input is invalid. `O(C)` time in total input characters, `O(1)` space for a fixed alphabet.
+
+**LeetCode 329, Longest Increasing Path in a Matrix** — find the longest strictly increasing path in a grid, moving in four directions. Signals: *"longest path"* — normally NP-hard, but "strictly increasing" makes every edge point from smaller to larger, so the implicit graph is **acyclic**. That acyclicity is the whole recognition. Therefore: DP over a DAG, implemented either as memoised DFS or as layered Kahn peeling off cells whose larger neighbours are all resolved. Approach: treat each cell as a node with edges to strictly greater neighbours; the answer is `1 + max(children)`. `O(m · n)` time, `O(m · n)` space.
+
+**Where the implementation lives** — the Algorithms primer's *Graph Traversal & Topological Sort* topic has the commented reference implementation and complexity derivation.
+
 ---
 
 ## Union Find
@@ -2344,6 +2755,20 @@ Three signals. (1) **Recognition of "dynamic" / "incremental" connectivity** —
 **What follows from this topic**
 
 Union Find is the foundation of **Kruskal's MST** (next-section pattern), of **offline LCA on trees** (Tarjan's algorithm), of **dynamic graph connectivity** (with link-cut trees as the more powerful generalisation), and of **percolation simulation**. The "earliest moment everyone is connected" problem is the canonical incremental-connectivity test. The Satisfiability of Equality Equations problem extends to weighted Union Find (tracking ratios between connected variables) — a senior-level variant. If you can write the path-compression + union-by-rank template from memory and articulate the α(N) bound, you've earned the pattern.
+
+### Recognition — signals that map to this pattern
+
+- **Keyword phrases** — "are `a` and `b` connected?" is definitional: a *query*, asked repeatedly, about membership rather than a route. "Merge", "group", "cluster", "province", "friend circle", "equivalent to" all describe an equivalence relation, and Union Find *is* the equivalence-relation structure. "One at a time", "after each query", "the earliest moment when…" mean the graph mutates between answers — exactly where re-running a traversal collapses. "Redundant edge", "already connected" is undirected cycle detection: an edge whose endpoints already share a root. "Minimum cost to connect everything" is Kruskal, whose cycle test is a `find`.
+- **Input shape** — a list of undirected pairs (`[[a,b], …]`), often with no adjacency list built at all; an `n × n` `isConnected` matrix; strings that must be identified with each other; a grid whose cells switch on one at a time; a stream of merges interleaved with queries. Pairs in, no path out — that is the tell.
+- **Objective verbs** — count components, merge, group, "is same set", find the redundant edge, connect all at minimum cost, find the earliest timestamp at which everything is connected, detect an undirected cycle, check equalities for contradiction.
+- **Constraint clues** — `n ≤ 10⁵`–`10⁶` with a comparable number of union/query operations, and a target near `O((n + q) α(n))`, i.e. effectively linear. If `q` queries × `O(n + e)` per traversal would be `10¹⁰`, the bound wants each query near-constant. Small `n` (`≤ 500`) with a matrix input usually means Union Find and DFS both pass — pick on clarity.
+- **Disambiguators**
+  - **Union Find vs DFS/BFS** — ask: *do all the edges exist before I answer anything?* If yes and you need one count, DFS is fewer lines and one `O(v + e)` pass. If edges arrive incrementally, or you must answer "same component?" many times, Union Find wins: DFS re-derives the whole partition each time, Union Find maintains it.
+  - **Union Find vs a hash map of group ids** — ask: *do groups ever merge?* A map from item → group id copes while groups only absorb single items, but merging two groups forces an `O(n)` relabel of every member. Union Find merges with one parent-pointer write.
+  - **Union Find vs topological sort** — ask: *is the graph directed?* Union Find has no notion of direction, so `a→b` and `b→a` look like one undirected merge. Directed cycles and ordering need Kahn's or three-colour DFS.
+  - **Kruskal (Union Find) vs Prim (heap)** — ask: *is the graph dense?* Kruskal sorts all `e` edges at `O(e log e)`; Prim is `O(e log v)` with a heap and `Θ(v²)` with an array scan, which wins when `e ≈ v²`. Sparse edge list → Kruskal, whose cycle test is one `find`.
+  - **Union Find vs Dijkstra/BFS shortest path** — ask: *distance, or just yes/no?* Union Find knows only *whether* two nodes share a set, never how far apart. "Shortest", "fewest steps", or "return the path" rules it out.
+- **Anti-signals** — a static grid asked for one component count (LeetCode 200) is a DFS/BFS flood fill; Union Find works but buys nothing. Anything wanting the path or distance between two nodes is a traversal problem. Edge **deletion** is the sharpest anti-signal: there is no efficient un-union — reverse the timeline and replay deletions backwards as unions, or you are in link-cut-tree territory. Directed dependency graphs go to topological sort; "group by a key" with no merging is just a hash map.
 
 ### Q1. Walk me through Union Find with both optimisations.
 
@@ -2439,6 +2864,18 @@ The key insight: union account *indices* (not emails) when they share an email; 
 
 The proof is genuinely hard (Tarjan, 1975) and not expected in interview — but knowing the bound and naming "inverse Ackermann, effectively constant for any realistic N" is the senior signal. The intuition: each find operation either traverses a short path (cheap) or compresses a long path (expensive *but pays for many future cheap finds*). The amortised analysis amortises the expensive operations over the cheap ones using a potential function argument. The bound is the inverse Ackermann α(N), which grows so slowly that α(N) < 5 for any N ≤ 2^65536. In practice, treat Union Find ops as O(1). If pressed, say: "the proof is from Tarjan; the key idea is that path compression amortises the work across all future find operations, and the inverse Ackermann arises from the recursion structure of the analysis."
 
+### Worked LeetCode mappings
+
+**LeetCode 547, Number of Provinces** — given an `n × n` matrix where `isConnected[i][j] == 1` means cities `i` and `j` are directly linked, count the groups of mutually reachable cities. Signals: "provinces" is a rename of "connected components", the relation is symmetric, and the answer is a count with no path involved. Therefore: Union Find over `n` cities. Approach: initialise `count = n`, `union(i, j)` for every `i < j` with `isConnected[i][j] == 1`, return `uf.count`. `O(n² α(n))` time, `O(n)` space. Worth saying aloud that DFS over the matrix is equally good here — the graph is static and you answer once — and that you would only insist on Union Find if links started arriving one at a time.
+
+**LeetCode 684, Redundant Connection** — a tree of `n` nodes has had one extra undirected edge added; return the edge that can be removed, choosing the last one in the input if there are several. Signals: "redundant" + undirected + "which edge closes the loop" is textbook undirected cycle detection, and "return the *last* such edge" means process the input in order and stop at the first failure. Therefore: Union Find. Approach: walk the edges in order calling `union(u, v)`; the first call that returns `False` (endpoints already share a root) is your answer. `O(n α(n))` time, `O(n)` space. This one is the cleanest demonstration that `union` should return a boolean rather than nothing.
+
+**LeetCode 721, Accounts Merge** — each account is a name plus a list of emails; merge accounts that share at least one email, and return each merged account with its emails sorted. Signals: "merge" plus a shared-key equivalence that is *transitive* (`a` shares with `b`, `b` shares with `c` ⇒ all one person). Transitive closure over a growing set of merges is the exact thing a hash map cannot do cheaply. Therefore: Union Find over account indices. Approach: map each email to the first account index that owned it, union the current index with it on a repeat, then bucket emails by `find(index)` and prepend the name. `O(e log e)` dominated by the per-group sort, `O(e)` space.
+
+**LeetCode 1584, Min Cost to Connect All Points** — connect all points with the minimum total Manhattan distance. Signals: "connect all" + "minimum cost" + undirected weighted edges is a minimum spanning tree, and the MST greedy needs "would this edge close a cycle?" answered fast. Therefore: Kruskal driven by Union Find. Approach: generate all `n(n−1)/2` candidate edges, sort by distance, accept an edge when `union` succeeds, stop after `n−1` acceptances. `O(n² log n)` time, `O(n²)` space — and note that because the graph is complete, dense-graph Prim at `Θ(n²)` is asymptotically better if pushed.
+
+**Where the implementation lives** — the Algorithms primer's *Minimum Spanning Trees* topic has the commented reference implementation and complexity derivation.
+
 ---
 
 ## Dynamic Programming
@@ -2487,6 +2924,16 @@ Three signals. (1) **State definition discipline** — the senior tell is being 
 **What follows from this topic**
 
 DP underlies many of the hardest interview problems: Edit Distance, Regular Expression Matching, Wildcard Matching, Maximum Path Sum, Burst Balloons, Russian Doll Envelopes, Word Break II, Travelling Salesman. The state-machine DP family is the foundation of the entire Buy/Sell Stock series (six variants). Tree DP is the foundation of House Robber III, Binary Tree Cameras, and any "DP on tree" problem. Bitmask DP is the foundation of N-Queens-style assignment problems. Senior candidates internalise the families as a vocabulary; junior candidates rederive each one from scratch. If you can write Kadane's from memory, LIS in O(N log N), the 0/1 vs unbounded knapsack distinction, and articulate the five-question framing on a fresh problem, you've earned the pattern.
+
+### Recognition — signals that map to this pattern
+
+- **Keyword phrases** — *"count the number of ways"*: branches of the decision tree re-converge, so a prefix's count is reusable and you sum over transitions instead of enumerating leaves. *"minimum cost"* / *"maximum profit"* / *"longest"* over a **sequence of choices**: optimal substructure — the best answer for a prefix composes from best answers to shorter prefixes. *"can you reach / partition / is it possible"*: boolean reachability over a bounded set of achievable sums. *"at most K …"* / *"exactly K transactions"*: `K` is literally an extra state dimension. *"subsequence"* rather than *"subarray"*: skipping is allowed, so no contiguous window exists — you need a take/skip decision per index, which is the DP shape.
+- **Input shape** — one array or string with a decision at each index (linear); two strings compared position by position (string-pair); a grid with movement restricted to one direction set (grid); an array plus a separate capacity or target integer (knapsack); a range split at a pivot (interval); a tree needing children's answers first (tree); `n ≤ 20` items plus a "which subset is used" state (bitmask).
+- **Objective verbs** — "count the ways", "minimum number of coins / edits / jumps", "maximum value / profit", "longest common / increasing / palindromic", "can partition / reach / break".
+- **Constraint clues** — `n ≤ 1000` on something that smells 2D → an `O(n²)` table is intended. Two strings at `n, m ≤ 1000` → `O(n·m)`. A target given as its own bound (`amount ≤ 10⁴`) → pseudo-polynomial `O(n × target)`, and that separate bound *is* the second state dimension. `n ≤ 20` → `O(2ⁿ · n)` bitmask. General rule: DP needs a **bounded** state space, so an unexplained tight bound on some non-`n` quantity is the giveaway.
+- **Disambiguators** — **DP vs greedy**: is a locally optimal choice *provably* never regretted? Coin Change with `[1, 3, 4]`, amount `6` — greedy takes `4+1+1` (3 coins), optimum is `3+3` (2). No exchange or stay-ahead argument → DP. If you can state that proof, greedy is `O(n log n)` instead of `O(n × target)`. **DP vs backtracking**: must you *list every solution*, or report one aggregate (best value, a count, a yes/no)? Enumerating subsets to output them is backtracking — the answers are the output, nothing to reuse. Aggregating them is DP — many branches hit the same subproblem and the memo collapses them. **DP vs sliding window**: is the constraint monotonic in window size? If widening never re-permits and shrinking never re-forbids, two pointers give `O(n)`. If an element may be *skipped*, or the cost is non-monotonic, no valid window exists → DP. **DP vs memoised divide and conquer**: do branches overlap? Merge sort never revisits a range, so caching buys nothing; DP requires overlap.
+- **Sub-family buckets** — name the bucket before writing code: **linear** (`dp[i]`), **knapsack** (`dp[capacity]`, 0/1 iterates capacity backwards, unbounded forwards), **grid** (`dp[r][c]`), **interval** (`dp[i][j]` over a split point `k`), **string-pair** (`dp[i][j]` over two strings), **tree** (postorder, ≥ 2 states per node), **bitmask** (`dp[mask][i]`, `n ≤ 20`).
+- **Anti-signals** — "longest **contiguous** window under a monotone constraint" is sliding window. "Count subarrays summing to `k`" is prefix sum plus a hashmap. "Shortest path, unweighted" is BFS; non-negative weights, Dijkstra. If the state graph has **cycles** the recurrence has no topological order and won't terminate — that is shortest path in disguise.
 
 ### Q1. Walk me through the five-question DP framing.
 
@@ -2617,6 +3064,18 @@ Postorder traversal; each node returns two values (the two states). O(N) — eac
 
 Take "longest substring with at most K distinct characters". A naive state would be `dp[i] = length of longest substring ending at or before i`. But "ending at or before" is too loose — you can't extend such a state by one character because you don't know what the "ending position" is. The correct state for sliding window (not DP) is "longest substring ending exactly at i". For a true DP example: Word Break, state `dp[i] = "can break s[:i]"` (boolean), transition `dp[i] = any(dp[j] for j in range(i) if s[j:i] in dictionary)`. A vague version like "dp[i] = the broken parts" gives you a string-of-strings state that's neither bounded nor useful. The senior discipline: write the state definition on the whiteboard *first*, in one sentence, before any code. If the sentence is vague, the DP will be buggy.
 
+### Worked LeetCode mappings
+
+> **LeetCode 70, Climbing Stairs** — count the distinct ways to climb `n` stairs taking 1 or 2 steps at a time. Signals: "in how many ways" (counting), a single index to decide at, and branches that re-converge — reaching step `i` from `i-1` and from `i-2` shares every subproblem below. Therefore: **linear DP**. State: `dp[i]` = number of ways to reach step `i`. Transition: `dp[i] = dp[i-1] + dp[i-2]`, base `dp[0] = dp[1] = 1`. Only the last two cells matter, so keep two scalars. `O(n)` time, `O(1)` space.
+
+> **LeetCode 322, Coin Change** — fewest coins summing to `amount`, coins reusable. Signals: "minimum number" over repeated choices, plus a target given as its own small bound. That separate bound is the second state dimension, and reusable coins mean each denomination can be picked any number of times. Therefore: **unbounded knapsack**. State: `dp[a]` = fewest coins making `a`. Transition: `dp[a] = 1 + min(dp[a - c])` over coins `c ≤ a`, base `dp[0] = 0`, unreachable amounts stay `∞`. Note the disambiguator in action — greedy fails on `[1, 3, 4]`, amount `6`. `O(n × amount)` time, `O(amount)` space.
+
+> **LeetCode 416, Partition Equal Subset Sum** — can the array be split into two subsets of equal sum? Signals: "can you partition" (boolean feasibility), each element used **at most once**, and a bounded target (`total / 2`). Therefore: **0/1 knapsack, subset-sum flavour**. State: `dp[s]` = is sum `s` achievable? Transition: for each number, iterate `s` **downwards** so the item is counted once. Answer: `dp[total // 2]`, after the odd-total early exit. `O(n × sum)` time, `O(sum)` space.
+
+> **LeetCode 1143, Longest Common Subsequence** — longest subsequence common to two strings. Signals: two strings compared position by position, and the word *subsequence* — characters may be skipped, so no window applies and each pair of prefixes needs its own answer. Therefore: **string-pair DP**. State: `dp[i][j]` = LCS length of `a[:i]` and `b[:j]`. Transition: on a character match `dp[i-1][j-1] + 1`, otherwise `max(dp[i-1][j], dp[i][j-1])`. Same skeleton as Edit Distance above. `O(n·m)` time, reducible to `O(min(n, m))` space with two rolling rows.
+
+**Where the implementation lives** — the Algorithms primer's *Dynamic Programming Fundamentals* topic has the commented reference implementation and complexity derivation, with the family-by-family templates in *Classic DP Problems & Patterns*.
+
 ---
 
 ## Backtracking
@@ -2662,6 +3121,19 @@ Three signals. (1) **Recognition of "all" / "generate" keywords** — senior can
 **What follows from this topic**
 
 Backtracking is the foundation of constraint satisfaction (N-Queens, Sudoku, graph colouring), of generating all parse trees (Word Break II, Restore IP Addresses), of brute search with pruning (Travelling Salesman with branch-and-bound). It pairs with **bitmask DP** when the state space has structure that allows memoisation (e.g. TSP with `dp[mask][last]`). The grid-DFS variant (Word Search) is the bridge to graph DFS with explicit visited tracking. If you can write the five templates from memory and articulate the pruning argument, you've earned the pattern.
+
+### Recognition — signals that map to this pattern
+
+- **Keyword phrases** — "**return all** the possible …" / "**find all** combinations" / "**generate all** valid …" / "**list every** way to …". The word *all* is the trigger: the answer is a collection of solutions, not one number, so no greedy choice and no single DP cell can produce it — you must physically construct each candidate. "In **any order**" reinforces it (the judge accepts any permutation of the output set, which only makes sense when the output is an enumeration). "All **distinct**" or "must not contain **duplicate** subsets" adds the sort-and-skip layer. "**Place** N queens / **fill** the board / **partition** the string such that every part is a palindrome" are constraint-satisfaction phrasings of the same thing. "Return the **number of** ways" is the near-miss — see anti-signals.
+- **Input shape** — a small array of candidates (`nums`, `candidates`, `digits`), a short string to split or arrange, or a small grid to fill/walk. The defining feature is that the input is *not* the thing you scan; it is the **menu of choices** at each level of a decision tree whose depth is the size of the answer.
+- **Objective verbs** — *enumerate*, *generate*, *construct*, *place*, *partition*, *assign*, *colour*, *arrange*. All of them mean "build a candidate incrementally and emit it when complete".
+- **Constraint clues** — this is the strongest clue in the entire primer. **Small `n` plus "return all" means exponential enumeration is expected and accepted.** `n ≤ 20` (or `nums.length ≤ 20`) with subsets-style output → `O(2ⁿ · n)` is the intended answer; `n ≤ 8..10` with permutation-style output → `O(n · n!)`; a board of `n ≤ 9..16` → pruned search. The bound is the interviewer telling you the answer is exponential: `2²⁰ ≈ 10⁶` and `10! ≈ 3.6 × 10⁶` both fit comfortably, while `2³⁰` does not. Conversely, if `n ≤ 20` but the output is a single count or a boolean, suspect bitmask DP (`2ⁿ` states, not `2ⁿ` outputs) rather than raw backtracking.
+- **Disambiguators** —
+  - **Backtracking vs DP**: does the problem want the *solutions themselves* or a *count/optimum*? If you must print them, the output is already exponential and memoisation buys nothing (you cannot share a subtree whose answer is a list of full candidates). If it wants a count, overlapping subproblems collapse — go DP.
+  - **Backtracking vs BFS/DFS on a graph**: is state something you must **undo**? Graph DFS marks `visited` permanently because reaching a node once is enough. Backtracking un-marks on the way out because the *same* cell may legitimately belong to a different path. "All paths" ⇒ backtracking; "reachable?" ⇒ plain DFS.
+  - **Backtracking vs iterative subset construction**: if you only need subsets/masks with no pruning, a bitmask loop `for mask in range(1 << n)` is shorter and faster. Reach for recursion when a **prune** exists (`remaining < 0`, an invalid placement) that cuts whole subtrees.
+  - **Backtracking vs greedy**: greedy commits to a choice and never revisits. If a locally best choice can be invalidated later by a constraint, the "never revisits" assumption fails and you need the undo.
+- **Anti-signals** — "how **many** ways" with `n` in the thousands (DP or combinatorics, not enumeration); "the **shortest**/**minimum** sequence of moves" (BFS — backtracking finds *a* path, BFS finds the shortest); "the **k-th** permutation" (build it digit-by-digit with factorial arithmetic in `O(n²)`; enumerating to the k-th is a trap); and "all subarrays/substrings", which are contiguous and therefore `O(n²)` by two nested loops, not `2ⁿ` by recursion.
 
 ### Q1. Walk me through Subsets (include/exclude).
 
@@ -2814,6 +3286,18 @@ In-place visited marking (with restore on backtrack) saves memory. Pruning: as s
 
 The state space (without pruning) is N! row assignments (one queen per row, choose column). With pruning by columns and diagonals, the effective work is much less, but there's no clean closed form — it depends on the geometry of which placements survive the pruning at each level. The empirical bound for N = 14 is about 30 seconds in Python; for N = 16 it's hours. The senior-correct answer: "bounded by O(N!) in the worst case (one queen per row, N column choices each), but pruning by columns and diagonals cuts this dramatically. The exact complexity doesn't have a clean closed form — be honest that it's hard to express tighter than O(N!) with the practical note that it's vastly faster." Don't try to bluff a tighter bound; interviewers respect the honest hedge.
 
+### Worked LeetCode mappings
+
+> **LeetCode 78, Subsets** — return all possible subsets (the power set) of a distinct-integer array. Signals: "return **all** possible subsets", output is a list of lists, and the constraint is `1 ≤ nums.length ≤ 10`. That bound is the whole tell — a ten-element input with an "all" objective means `2¹⁰ = 1024` outputs are expected, so exponential is the *target*, not a failure. Therefore: include/exclude backtracking. Approach: at index `i`, recurse excluding `nums[i]`, then append it, recurse, and pop to undo; emit a copy of `current` at `i == n`. `O(n · 2ⁿ)` time (2ⁿ leaves, each copied in `O(n)`), `O(n)` extra space for the recursion stack and path.
+
+> **LeetCode 46, Permutations** — return all permutations of a distinct-integer array, in any order. Signals: "all", "in any order", and `1 ≤ nums.length ≤ 6`. A bound of 6 with an enumeration objective screams factorial — `6! = 720` — and rules out anything cleverer. Therefore: permutation backtracking with a `used` marker. Approach: at each level scan every index, skip the used ones, choose, recurse one level deeper, then unchoose; emit when the path length reaches `n`. `O(n · n!)` time, `O(n)` space beyond the output. Note the contrast with 78: subsets branch on *include/exclude* per index, permutations branch on *which unused element comes next*.
+
+> **LeetCode 39, Combination Sum** — return all unique combinations of candidates summing to a target, where each candidate may be reused unlimited times. Signals: "all unique combinations", tiny candidate list (`≤ 30`), and a bounded target (`≤ 40`) — small enough that the search tree is finite once you prune. Therefore: index-based backtracking with a remaining-target parameter. Approach: at index `i` either take `candidates[i]` and recurse **staying at `i`** (unlimited reuse), or move to `i + 1`; prune the moment `remaining < 0`. Never recursing to an index below `i` is what makes each combination emerge exactly once, so no dedup pass is needed. Roughly `O(n^(target/min))` time — the honest answer is "exponential, bounded by the tree depth `target / min(candidates)`".
+
+> **LeetCode 212, Word Search II** — return all words from a dictionary that can be spelled by an adjacent-cell path in a grid. Signals: "return **all** words", grid DFS, and a word list far too large to run 79-style search per word. Therefore: backtracking over the grid *driven by a trie* of the dictionary. Approach: walk the grid, descend the trie in lockstep, mark the cell visited and restore it on the way out; prune the instant the current prefix leaves the trie, and delete matched leaves to avoid duplicate hits. `O(rows · cols · 4^L)` worst case with the trie prune cutting almost all of it in practice.
+
+**Where the implementation lives** — the Algorithms primer's *Backtracking & Constraint Search* topic has the commented reference implementation and complexity derivation.
+
 ---
 
 ## Greedy
@@ -2857,6 +3341,21 @@ Three signals. (1) **Proof discipline** — junior candidates apply greedy refle
 **What follows from this topic**
 
 Greedy is the foundation of many interval problems (next topic), of Huffman coding, of fractional knapsack, of activity selection in scheduling. The proof discipline you build here pays off in **algorithm design interviews** where you propose a heuristic and need to justify it. The Jump Game variant connects to BFS (Jump Game II is BFS-like layered search). The greedy-with-regret pattern (IPO, Maximum Performance of a Team) is the senior extension. If you can recognise the five sub-patterns and articulate when greedy fails (Coin Change), you've earned the pattern.
+
+### Recognition — signals that map to this pattern
+
+Start from the prior that **greedy is usually the wrong guess** — it is the easiest pattern to code, so candidates reach for it far more often than it is correct. Recognition here is a *gate*, not a checklist: **can I justify this choice with an exchange argument, or find a counter-example, in 60 seconds?** If the argument lands, commit and say it out loud. If a counter-example lands, you just saved a wrong answer. If **neither** lands, write DP — an unprovable greedy is a guess, and DP is the safe superset.
+
+- **Keyword phrases** — "maximum number of non-overlapping …", "minimum number of X to remove", "earliest deadline", "as many as possible", "can you reach the end", "minimum number of jumps/arrows/platforms". Each implies you are *counting* selections rather than *valuing* them: when every accepted item is worth the same, there is nothing for DP to trade off and a sort order usually decides the answer. Also "you may take fractions of an item" — divisibility kills the dependency that forces knapsack DP.
+- **Input shape** — intervals `(start, end)`, tasks with counts or deadlines, one array you sweep left to right, or a multiset you repeatedly pop the best from. If the carried state is *one number* (furthest reach, running tank, last end time), greedy is plausible. If it is a table indexed by capacity or remainder, it is not.
+- **Objective verbs** — "maximise the count of", "minimise the number of removals", "can you complete", "earliest/latest", "minimum steps to cover". Contrast with "how many ways" or "maximum value subject to a budget" — those are DP verbs.
+- **Constraint clues** — `n ≤ 10⁵`–`10⁶` with no second dimension in the state points at `O(n log n)` sort-and-sweep or an `O(n)` single pass. The moment a second bounded dimension appears (`amount ≤ 10⁴`, `capacity ≤ 1000`), the intended answer is almost always `O(n · W)` DP — that bound exists precisely to make the table fit.
+- **Disambiguators** —
+  - *Greedy vs DP*: ask "can an early forced choice block a strictly better later combination?" Coin Change with `[1, 3, 4]` and target `6` says yes (`3+3` beats `4+1+1`), so DP. Interval selection says no, so greedy.
+  - *Sort by end vs sort by start*: end-time sort maximises how many you keep; start-time sort is for merging or overlap detection. Ending earliest leaves the largest feasible suffix, which is exactly what the exchange argument needs.
+  - *Plain greedy vs heap-greedy*: if the candidate set is fixed up front, sort once. If candidates *become* available as you progress (capital unlocks projects, cooldowns expire), the best remaining changes over time and you need a heap.
+  - *Greedy vs binary search on the answer*: if the ask is "minimum X such that a feasibility check passes", greedy is the inner check and binary search the outer loop — don't force one pass to do both.
+- **Anti-signals** — the big one: a plausible local rule with no proof. Also any objective with weights attached to choices (0/1 knapsack, weighted job scheduling, Coin Change with arbitrary denominations) — weights break the exchange argument, so go to DP. "Count the ways" is never greedy. And if the right choice now depends on knowing what comes later, it is DP or backtracking.
 
 ### Q1. Walk me through Jump Game.
 
@@ -2971,6 +3470,18 @@ Two heaps in effect: one sorted by capital (so we can identify affordable projec
 
 The senior framing: "greedy needs the greedy choice property, which must be proven. The proof is usually an exchange argument. When the proof fails, fall back to DP."
 
+### Worked LeetCode mappings
+
+> **LeetCode 53, Maximum Subarray** — find the contiguous subarray with the largest sum. Signals: "maximum" + "contiguous" + a single array with no second dimension in the state. The 60-second exchange argument: a running prefix that has gone negative can never help any later subarray, so discarding it never removes an optimal answer — that is the whole proof. Approach: Kadane — sweep once keeping `cur = max(x, cur + x)` and `best = max(best, cur)`. `O(n)` time, `O(1)` space. Note the DP framing (`dp[i]` = best sum ending at `i`) is the same recurrence; greedy here is just DP with the table collapsed to one scalar.
+
+> **LeetCode 55, Jump Game** — given jump lengths, decide whether you can reach the last index. Signals: a yes/no reachability question over one array, and the state you carry is a single scalar. Exchange argument: if index `i` is reachable then so is every `j ≤ i`, so there is never a reason to prefer a shorter jump — tracking only the furthest reachable index loses nothing. Approach: sweep, fail if `i > reach`, else `reach = max(reach, i + nums[i])`. `O(n)` time, `O(1)` space. Contrast with Jump Game II (minimum jumps), which is the same greedy re-read as BFS layers.
+
+> **LeetCode 435, Non-overlapping Intervals** — remove the fewest intervals so the rest do not overlap. Signals: "minimum number to remove" + interval input + every removal counts the same (no weights). Unweighted counting is the tell — the moment intervals carried values this would become weighted interval scheduling and therefore DP. Exchange argument: swapping any optimal schedule's first interval for the earliest-ending one leaves at least as much room, so earliest-ending is in *some* optimum. Approach: sort by end, keep an interval when `start ≥ last_end`, count the rest as removals. `O(n log n)` time, `O(1)` extra space.
+
+> **LeetCode 621, Task Scheduler** — schedule tasks with a cooldown `n` between identical tasks; return the minimum total time. Signals: "minimum time" + candidates that *become available again* as the clock advances. That re-availability is what rules out a single sort and pulls in a heap. Exchange argument: deferring the most-frequent task only pushes the same congestion later, so scheduling it first is never worse. Approach: max-heap of remaining counts plus a cooldown queue keyed by ready-time; pop the best available each tick. `O(t log k)` time for `t` ticks and `k` distinct tasks, `O(k)` space.
+
+**Where the implementation lives** — the Algorithms primer's *Greedy Algorithms* topic has the commented reference implementation and complexity derivation.
+
 ---
 
 ## Intervals
@@ -3016,6 +3527,19 @@ Three signals. (1) **Pattern recognition on "intervals" / "meetings" / "ranges"*
 **What follows from this topic**
 
 Intervals connect to **greedy** (Activity Selection, Non-overlapping Intervals), to **sweep line** (the more general tool), to **scheduling and resource allocation** in system design. The sweep-line technique recurs in Skyline Problem (priority queue + sweep), Car Pooling, Range Module. If you can write merge intervals from memory, recognise Meeting Rooms II as heap + sort, and articulate when sweep line is the right escalation, you've earned the pattern.
+
+### Recognition — signals that map to this pattern
+
+- **Keyword phrases** — "**intervals**", "`[start, end]` pairs", "**meetings**", "**rooms**", "**bookings**", "**ranges**", "**time slots**", "**overlapping**", "**merge**", "**non-overlapping**", "**busy/free schedule**". Each is the same object in a different costume: a pair of comparable endpoints on one axis. The moment a problem hands you pairs whose *second* component is guaranteed `≥` the first, your first move is a sort, not a nested scan. "Overlapping" is the sharpest tell — overlap between unsorted pairs is an `O(n²)` all-pairs question, but between *start-sorted* pairs it collapses to one local test against the previous interval, which is what buys `O(n log n)`.
+- **Input shape** — an array of 2-element pairs, sometimes pre-sorted (a hint: the sort is already paid for, so the intended solution is the `O(n)` scan); two *separate* sorted interval lists (the two-pointer intersection variant, not merge); or a stream of `book(start, end)` calls, where the offline sort is unavailable and you need an incremental structure — a sorted map of `+1/−1` deltas, or a segment tree.
+- **Objective verbs** — "merge them", "insert and merge", "*minimum number of rooms*", "*maximum concurrent*", "*minimum removals* to make non-overlapping", "*maximum number* you can attend", "find all intersections", "does anyone conflict".
+- **Constraint clues** — `n ≤ 10⁵` with coordinates up to `10⁹` says `O(n log n)` sort-and-sweep and *rules out* bucketing time into an array. Coordinates `≤ 10⁶` open the difference-array alternative (`+1` at start, `−1` at end, then prefix-sum) — `O(n + maxCoord)`, no sort. Streaming bookings with `q ≤ 400` calls tolerate the `O(q)`-per-call sorted-map sweep; `q ≤ 10⁵` forces the segment tree.
+- **Disambiguators**
+  - **Sort by start vs sort by end** — the decisive sub-signal. Sort by **start** when you must *produce* structure: merging, inserting, counting concurrency. Start order guarantees that by the time you reach interval `i`, every interval that could overlap it has already been seen, so one comparison against the running interval (or the heap's minimum end) is a complete test. Sort by **end** when you must *maximise a count of non-overlapping picks*: earliest-finish-first provably wins because finishing earliest leaves the most timeline for everything after, and an exchange argument swaps any optimal solution's first pick for the earliest-finishing one without loss. Start order fails there — one long early interval blocks several short ones. Restructure the set → sort by start; count a maximum disjoint subset → sort by end.
+  - **Heap vs sweep line** — ask "do I need *which* intervals are active, or only *how many*?" Only how many → sweep line with `±1` events, no heap. Which ones (skyline heights, the next expiry, per-room assignment) → min-heap keyed on end time.
+  - **Intervals vs two pointers** — ask "one list or two?" One → sort and sweep. Two already-sorted lists → two pointers, advancing whichever ends first, `O(m + n)` with no sort at all.
+  - **Greedy vs DP** — ask "am I maximising a *count* or a *weighted* sum?" Count → earliest-finish greedy. Weighted intervals → greedy breaks; use weighted interval scheduling DP with a binary search for the last compatible interval.
+- **Anti-signals** — "subarray"/"substring" means contiguous *indices*, not intervals; that's sliding window or prefix sum. Pairs that are `(u, v)` edges rather than `(start, end)` ranges are a graph — the giveaway is endpoints that are node labels with no ordering meaning. "Range sum query" over a fixed array is prefix sum or a segment tree, not an overlap problem. One interval plus a target value ("where does `f` cross `x`") is binary search.
 
 ### Q1. Walk me through Merge Intervals.
 
@@ -3143,6 +3667,18 @@ class MyCalendarThree:
 
 The senior point: each booking is O(N) (sweep over all events). For better performance, use a segment tree with lazy propagation, O(log N) per booking. The interviewer is testing whether you recognise that sweep-line with a sorted map is the natural approach, and whether you know the segment-tree escalation if pressed on performance.
 
+### Worked LeetCode mappings
+
+> **LeetCode 56, Merge Intervals** — given a list of `[start, end]` pairs, return the union with all overlaps merged. Signals: literally "intervals" + "merge" + "overlapping", and the output is a *restructured set* rather than a count. Therefore: sort by start, one-pass extend-or-append. Sort by start is forced here — it is the only order in which "does this interval touch the previous one?" is a complete overlap test, because every earlier-starting interval has already been folded into the running result. Approach: sort, seed `result` with the first interval, then for each next one either set `result[-1][1] = max(result[-1][1], end)` when `start ≤ result[-1][1]`, or append. `O(n log n)` time dominated by the sort, `O(n)` output.
+
+> **LeetCode 57, Insert Interval** — the input is *already sorted and non-overlapping*; splice one new interval in. Signals: "sorted", "non-overlapping", "insert". The pre-sorted guarantee is the whole hint — it says the sort is already paid for, so the intended cost is `O(n)`, and re-sorting would be leaving the point of the question on the table. Therefore: three-phase linear scan — copy everything ending strictly before the new start, absorb everything starting at or before the new end (widening the new interval by `min`/`max`), append it, copy the rest. `O(n)` time, `O(n)` output.
+
+> **LeetCode 435, Non-overlapping Intervals** — return the minimum number of intervals to remove so the rest don't overlap. Signals: "minimum removals" is the complement of "maximum kept non-overlapping", which is Activity Selection wearing a disguise. Therefore: sort by **end**, not start. Greedily keep an interval whenever its start is `≥` the last kept interval's end; the answer is `n − kept`. Earliest-finish-first is provably optimal by an exchange argument — swapping any optimal solution's first pick for the earliest-finishing interval never creates a conflict, since it frees the timeline at least as early. Sorting by start would keep one long early interval and block several short ones. `O(n log n)` time, `O(1)` extra space.
+
+> **LeetCode 253, Meeting Rooms II** — the minimum number of rooms so no two meetings share one. Signals: "minimum rooms" = maximum concurrency at any instant, a *count over time* rather than a subset. Therefore: sort by start with a min-heap of end times — pop every meeting that has already ended before pushing the new one, and the final heap size is the peak. Equivalently, sweep line: emit `(start, +1)` and `(end, −1)`, sort with `−1` ahead of `+1` on ties so a room freed at time `t` is reusable at `t`, and track the running maximum. Both are `O(n log n)` time, `O(n)` space; pick the heap when you also need to know *which* meeting expires next, the sweep when only the count matters.
+
+**Where the implementation lives** — the Algorithms primer's *Greedy Algorithms* topic has the commented reference implementation and complexity derivation.
+
 ---
 
 ## Tries
@@ -3188,6 +3724,19 @@ Three signals. (1) **Pattern recognition on "prefix" / "autocomplete"** — the 
 **What follows from this topic**
 
 Tries connect to **search engines** (autocomplete, spell-check), to **IP routing** (longest-prefix match via binary trie on IP bits), to **DNA sequence analysis** (suffix tries for substring queries). The bit-trie generalisation extends to "find pair with max AND / OR" variants. The compressed trie (radix tree) is the data structure behind many production systems (e.g. Redis's radix-tree index). If you can write the basic trie template from memory, articulate the memory cost, and recognise Word Search II as trie + DFS, you've earned the pattern.
+
+### Recognition — signals that map to this pattern
+
+- **Keyword phrases** — "**prefix**", "**starts with**", "**autocomplete**", "**type-ahead**", "**search suggestions**", "**dictionary of words**", "**spell-check**", "**wildcard `.` matches any character**", "**maximum XOR pair**", "**longest-prefix match**". Each is a query keyed on a *shared beginning* rather than a whole value, and a shared beginning is what a trie's edges encode: walking `c₁c₂…c_k` from the root lands on the one node owning every word with that prefix, so the answer set is already gathered. "Wildcard `.`" implies a trie because a hash map has nowhere to branch — the trie hands you the live children to fan out over. "Maximum XOR" implies the bit-trie: a max over pairs decided high bit first is a greedy descent.
+- **Input shape** — a **corpus of strings** (a `words` / `dictionary` array) queried **many times**, or an **array of integers** read as fixed-width bit strings. The tell is *two* inputs: a set to preprocess and a stream of queries against it. One string with one query is not a trie problem. A grid plus a word list is, because the word list is the corpus.
+- **Objective verbs** — "**design**/**implement**" a structure with `insert`/`search`/`startsWith`; "**return all words with prefix p**"; "**find all words present in the board**"; "**maximise `a XOR b`**". Note how many are *design* verbs — a trie question is often phrased as an API, not a puzzle.
+- **Constraint clues** — `words.length` up to `10⁴–10⁵` with `word.length ≤ 20`, plus `10⁵` queries: `queries × words` is `10¹⁰` (too slow), `queries × L` is `10⁶` — that gap is the trie. A lowercase-English-only constraint hints at the 26-slot array node. `nums[i] < 2³¹` with `n ≤ 2×10⁵` makes `O(n²)` pair scanning `4×10¹⁰` and `O(32n)` only `6×10⁶` — bit-trie.
+- **Disambiguators**
+  - **Trie vs hash set** — ask: *is any query keyed on a prefix rather than a whole word?* A hash set answers "is this exact word present?" in `O(L)` and nothing else; a trie answers prefix questions and **shares work across queries**, since one descent serves every word beneath it. Exact membership only → hash set, always (less memory, simpler).
+  - **Trie vs sorting + binary search** — ask: *is the corpus static and queried few times?* Sorting once and binary-searching the prefix range costs `O(N log N + Q·L·log N)` with near-zero overhead. Few queries → sort; many queries or interleaved inserts → trie, because a sorted array cannot absorb inserts cheaply.
+  - **Trie vs plain grid DFS (backtracking)** — ask: *one target or a whole word list?* One word → plain DFS with an index into it. Many words → trie first, so a single DFS pass tests all `W` words at once and dies at the first character no word can continue. The trie is the *pruning oracle*, not the search.
+  - **Bit-trie vs bitmask DP** — ask: *is the objective a max/min over pairs, decided bit by bit from the top?* That is a root-to-leaf descent — bit-trie. Objectives over *subsets* rather than pairs are bitmask DP.
+- **Anti-signals** — "**longest common prefix** of an array" looks like a trie but is a vertical character scan in `O(total chars)`; the trie is pure overhead. "**Substring** / any-position matching" is not a trie of words — that's KMP, Z-algorithm, rolling hash, or a suffix structure; a prefix tree keys on *starts*, not *contains*. "Count distinct words" is a hash set. "Group anagrams" is a sorted-key hash map — the shared structure is a multiset, not a prefix.
 
 ### Q1. Walk me through the basic trie template.
 
@@ -3334,6 +3883,18 @@ O(N × 32) = O(N) — strictly better than the O(N²) brute force. The greedy ch
 
 **Memory cost**: O(N × L × alphabet_size) in the worst case (no shared prefixes, full hash-map per node). For lowercase ASCII (26 letters), each node has up to 26 pointers; with a hash map, the overhead is ~30-50 bytes per node. For 10⁶ words of average length 10, that's ~10⁷ nodes × 50 bytes = ~500MB. **Not the right choice** when: (1) memory-constrained and the corpus has low prefix sharing; (2) you don't need prefix queries (a hash map gives O(L) exact lookup with much less overhead); (3) the corpus is huge and you need disk-resident storage (use a B-tree or sorted run on disk). For very large dictionaries, the **compressed trie (radix tree)** collapses single-child chains and saves dramatic memory. The interviewer signal: name the memory cost, name when it's the wrong tool, name the alternatives (hash map for no-prefix, radix tree for memory pressure, suffix automaton for substring queries).
 
+### Worked LeetCode mappings
+
+> **LeetCode 208, Implement Trie (Prefix Tree)** — build a structure supporting `insert`, `search`, and `startsWith`. Signals: the problem *names* the structure, and `startsWith` is the giveaway that a hash set cannot serve it. Therefore: the canonical trie. Approach: a node holding `children` (dict or 26-slot array) plus an `is_word` flag; all three operations are one walk down from the root, differing only in what happens on a miss (`insert` creates, the others return false) and whether `is_word` is checked at the end. `O(L)` per operation, `O(total characters)` space.
+
+> **LeetCode 211, Design Add and Search Words Data Structure** — like 208, but `search` accepts `.` as a single-character wildcard. Signals: "design" + a dictionary + a pattern character that must match *any* child. Therefore: trie with a DFS search. Approach: `addWord` is the plain insert; `search` recurses — on a concrete character follow that one child, on `.` fan out over `node.children.values()`. `O(L)` add; search is `O(L)` when the pattern is concrete and `O(26^d · L)` in the worst case with `d` wildcards, which is why a leading `.` is the expensive case.
+
+> **LeetCode 212, Word Search II** — given a board and a word list, return every listed word findable along an adjacent path. Signals: a **word list** (not one word) queried against a search space, and a brute force of `W` independent DFS runs. Therefore: trie as a pruning oracle over one DFS. Approach: insert all words into a trie storing the word at its terminal node; DFS every cell walking board and trie in lockstep, returning the instant the current letter is not a child; mark visited in place, and null out a word after collecting it to dedupe. `O(M·N·4^L)` versus the brute force's `O(W·M·N·4^L)`.
+
+> **LeetCode 421, Maximum XOR of Two Numbers in an Array** — return the largest `nums[i] XOR nums[j]`. Signals: "maximum" over **pairs** with `n` too large for `O(n²)`, and an objective decided one bit at a time from the top. Therefore: bit-trie. Approach: insert every number as a 32-bit path, most significant bit first; for each number descend again, preferring the **opposite** bit at every level and falling back to the same bit when that child is absent, accumulating the XOR. Greedy is optimal because a higher bit outweighs all lower bits combined. `O(32n)` = `O(n)` time, `O(32n)` space.
+
+**Where the implementation lives** — the Algorithms primer's *String Algorithms* topic has the commented reference implementation and complexity derivation.
+
 ---
 
 ## Bit Manipulation
@@ -3379,6 +3940,19 @@ Three signals. (1) **Idiom fluency** — the bit-tricks table should be reflex. 
 **What follows from this topic**
 
 Bit manipulation is the foundation of **bitmask DP** (TSP, Shortest Superstring, Smallest Sufficient Team), of **bit tries** (Maximum XOR Pair), of **bloom filters** (probabilistic membership with bit arrays), of **bitboard representations** in chess engines. The XOR trick recurs in many "find the duplicate / missing" problems (Missing Number, Find the Duplicate). And the subset-iteration idiom is the foundation of subset-sum-style DP. If you can write the idiom table from memory and articulate XOR's self-inverse property, you've earned the pattern.
+
+### Recognition — signals that map to this pattern
+
+- **Keyword phrases** — "every element appears twice except for one" is the loudest single signal here: it *names* XOR's self-inverse property (`a ^ a = 0`), so the answer is one fold over the array and nothing else. "Without using the operators `+` and `-`" forces you to rebuild addition from `^` (sum without carry) and `&` then `<<` (the carry) — those are the only pieces of an adder left to you. "Number of 1 bits" / "Hamming weight" / "set bits" is popcount, so Brian Kernighan's `n &= n - 1`. "Is it a power of two" means `n > 0 and (n & (n - 1)) == 0`, because exactly one set bit *is* the definition. "All subsets", "assign `n` tasks to `n` workers", "visit every city exactly once" with a tiny bound means the state is a subset, and a subset is an integer. And "toggle", "flip", "mask", "parity", "XOR" are literal instructions — take them literally.
+- **Input shape** — a flat integer array carrying a stated multiplicity rule (each value appears twice, or three times, or exactly once), or a single integer to decompose, or a collection of `n ≤ 20` items where every grouping must be considered. Values are almost always bounded to 32-bit signed. Note there is no ordering requirement: XOR is commutative and associative, so shuffled input costs nothing — itself a hint the intended solution ignores order.
+- **Objective verbs** — "find the one that appears once", "count the bits", "reverse the bits", "check whether", "add / multiply / divide without the operator", "enumerate all subsets", "maximum XOR of any pair", "minimum cost to cover every item".
+- **Constraint clues** — `n ≤ 20` (occasionally `≤ 22`) paired with an exponential-smelling objective is the bitmask-DP fingerprint: `2ⁿ ≈ 10⁶` states at `n = 20`, each cheap, so `O(2ⁿ · n)` fits. `O(1)` extra space demanded on an integer array kills the hash-set answer and leaves XOR as the only survivor. A 32-bit value bound means an `O(32)` per-element loop is `O(1)` in disguise — say that out loud.
+- **Disambiguators** —
+  - *XOR vs hash set* — both find the unique element in `O(n)`; ask "is `O(1)` extra space required?" A set costs `O(n)` space, so the constraint line decides it. If repeats occur an odd number of times other than one, XOR cancellation breaks and you count bits modulo `k` instead.
+  - *XOR vs cyclic sort* — both crack Missing Number. Ask "are the values a permutation of `0..n`?" If they are index-like, cyclic sort generalises to *all* missing and duplicated values; XOR recovers only a single missing value, because two unknowns leave you holding `a ^ b` with no way to split it.
+  - *Bitmask DP vs ordinary DP* — ask "must the state remember *which* items were used, or only how many?" A count fits an integer index; a specific used-set needs `2ⁿ` states, affordable only when `n ≤ 20`.
+  - *Bit tricks vs arithmetic* — ask "is the structure genuinely binary — presence, parity, powers of two?" For base-10 digit work, `%` and `//` are clearer and no slower.
+- **Anti-signals** — "count set bits for `0..n`" looks like `n` independent popcounts but is a one-line DP (`dp[i] = dp[i >> 1] + (i & 1)`). "Find the duplicate number" with values in `1..n` and no modification allowed is Floyd's cycle detection, not XOR. "Maximum XOR of two numbers" is a bit *trie*, not a fold. Any subset problem with `n > 22` is not bitmask-anything: it is greedy, DP over a different axis, or meet-in-the-middle.
 
 ### Q1. Walk me through the bit-tricks table — most important idioms.
 
@@ -3464,8 +4038,7 @@ sub = mask
 while sub > 0:
     print(bin(sub))  # process subset
     sub = (sub - 1) & mask
-# Also include the empty subset
-print(bin(0))
+print(bin(0))  # also include the empty subset
 ```
 
 Output: 1011, 1010, 1001, 1000, 0011, 0010, 0001, 0000. The `(sub - 1) & mask` trick gives the next subset in reverse order; it ends when sub = 0, at which point you've processed all subsets of `mask`. O(2^popcount(mask)) per outer iteration. Used in problems like "partition into K subsets" or "minimum cost to cover all items with packs".
@@ -3488,6 +4061,18 @@ def add(a, b):
 ```
 
 The Python quirk: `&` and `|` don't auto-truncate to 32 bits, so masking with `0xFFFFFFFF` simulates 32-bit semantics. The two's-complement conversion at the end handles negative results. The senior tell is naming "XOR is sum-without-carry, AND-then-shift is the carry, recurse" — that's the algorithmic insight; the masking is implementation detail.
+
+### Worked LeetCode mappings
+
+> **LeetCode 136, Single Number** — every element appears twice except one; return that one. Signals: the multiplicity rule is stated outright, and the follow-up demands `O(1)` extra space, which rules out a hash set or a sort. Therefore: XOR fold. Approach: `result = 0`, XOR every element in; pairs cancel via `a ^ a = 0` regardless of order, leaving the singleton. `O(n)` time, `O(1)` space.
+
+> **LeetCode 338, Counting Bits** — for every `i` in `0..n`, return its popcount. Signals: "for every `i`" turns a per-number trick into a *sequence*, and `n` can be `10⁵`, so 32 shifts per number is wasteful. Therefore: DP over previously computed answers, not the idiom table. Approach: `dp[i] = dp[i >> 1] + (i & 1)` — dropping the lowest bit gives an already-solved smaller index, then add that bit back. (Equivalently `dp[i] = dp[i & (i - 1)] + 1`.) `O(n)` time, `O(n)` space for the output.
+
+> **LeetCode 371, Sum of Two Integers** — add `a` and `b` without using `+` or `-`. Signals: the banned operator is the whole problem; you are being asked to reconstruct a hardware adder. Therefore: XOR for the sum-without-carry, AND-then-shift for the carry, loop until the carry is zero. Approach: `a, b = (a ^ b), (a & b) << 1` until `b == 0`. In Python, mask each step with `0xFFFFFFFF` and reinterpret the result as signed at the end, because Python ints are arbitrary precision and never overflow into the sign bit on their own. `O(1)` time (at most 32 iterations), `O(1)` space.
+
+> **LeetCode 260, Single Number III** — exactly two elements appear once, every other appears twice; return both, in `O(n)` time and `O(1)` space. Signals: same multiplicity phrasing as 136, but *two* unknowns, so a plain fold gives `a ^ b` and stalls. Therefore: XOR, then partition. Approach: fold to get `x = a ^ b`; because `a ≠ b`, `x` has at least one set bit, and `x & -x` isolates the lowest — a bit position where `a` and `b` differ. Sweep again, XOR-ing into two buckets by that bit: each bucket holds one singleton plus complete pairs, so each collapses to its singleton. `O(n)` time, `O(1)` space.
+
+**Where the implementation lives** — the Algorithms primer's *Bit Manipulation* topic has the commented reference implementation and complexity derivation.
 
 ---
 
@@ -3532,6 +4117,20 @@ Three signals. (1) **Recognition of "values in [1, N]" + "O(1) space"** — the 
 **What follows from this topic**
 
 Cyclic sort and index-as-hash are niche but distinctive — they show up specifically in "find missing/duplicate with O(1) space" problems and don't generalise much beyond. The mutation discipline (or restoring afterwards) is the senior practice. Floyd's cycle detection generalises beyond linked lists to any "deterministic function on a finite domain" — Happy Number uses it for cycle-in-number-transformation, Find the Duplicate uses it for cycle-in-array-as-function. If you can recognise the "values in [1, N] + O(1) space" signal and write cyclic sort from memory, you've earned the pattern.
+
+### Recognition — signals that map to this pattern
+
+- **Keyword phrases** — the one that decides it: *"an array of `n` integers where each integer is in the range `[1, n]`"* (or `[0, n-1]`) said together with *"using only constant extra space"* / *"`O(1)` extra space"* / *"without using extra space"*. That pairing essentially only ever means cyclic sort or index-as-hash. The range clause tells you every value is a legal index of the array itself; the space clause forbids the hash set that would otherwise be the obvious answer. Once both appear, stop looking — the array *is* your hash table. Supporting phrases: *"each integer appears once or twice"*, *"exactly one number is missing"*, *"exactly one number is repeated"*, *"the answer is guaranteed to be unique"* (uniqueness is what lets a single positional sweep settle it), and *"you must not modify the array"* — that last one keeps the pattern but flips you to the Floyd's variant.
+- **Input shape** — one flat, **unsorted** array of integers of length `n` whose value domain is a permutation-sized window of its own index domain: `[1, n]`, `[0, n-1]`, or `[1, n+1]`. Think "a permutation with one or two defects". No linked list, no grid, no tree, no sorted precondition. If values are unbounded, arbitrarily negative, or the array is much longer than its value range, the structural coupling is gone and so is the pattern.
+- **Objective verbs** — "find the missing number", "find all numbers disappeared", "find the duplicate", "find all duplicates", "find the smallest missing positive", "find the corrupt pair (duplicate *and* missing)", "sort this array in `O(n)`". Every one is a *presence/absence* question, not an aggregation or an ordering question — that is the family fingerprint.
+- **Constraint clues** — `n ≤ 10⁵` alongside a restated `1 ≤ nums[i] ≤ n` in the constraints block is the tell; the bound is restated precisely so you notice the coupling. A follow-up line like *"Could you do it in `O(n)` runtime and `O(1)` extra space?"* is the author naming the intended solution. Target is always `O(n)` time, `O(1)` extra space; if your plan costs more, you have missed the point rather than found a variant.
+- **Disambiguators**
+  - **Cyclic sort vs. sorting the array** — ask: *are the values a permutation of the indices?* If yes you need no comparisons at all: every value already knows its destination, so one swap places it, versus `O(n log n)` spent discovering where it goes.
+  - **Cyclic sort vs. index-as-hash** — ask: *do I need both the missing and the duplicate, or positional order restored?* Cyclic sort rearranges and answers both. Negation only records "seen", so reach for it when one boolean per index suffices and you want magnitudes still recoverable through `abs()`.
+  - **Index-as-hash vs. a hash set or frequency array** — ask: *may I mutate, and is the value range exactly the index range?* Both must be yes. A `Counter` is `O(n)` extra space and always correct; negation matches it on time and beats it only on space, which is its entire reason to exist.
+  - **Cyclic sort vs. Floyd's cycle detection** — ask: *does the prompt say the array is read-only?* Floyd's chases `i → nums[i]` as a pointer and finds the repeated value writing nothing, but it finds only *one* duplicate and depends on the `[1, n]` guarantee to keep every hop in bounds.
+  - **Cyclic sort vs. XOR or the sum formula** — ask: *is exactly one number missing with nothing duplicated?* Then `n(n+1)/2 − Σnums`, or a running XOR when overflow worries you, is one line. Cyclic sort earns its keep only when several values are missing or duplicated at once.
+- **Anti-signals** — values in `[1, n]` but the array is already **sorted** → scan for the first gap, or binary search on `nums[i] ≠ i + 1`. Range coupling present but the array is **immutable** → Floyd's, or binary search on the *value* (count elements `≤ mid`) for `O(n log n)` time and `O(1)` space. "Find duplicates" with an unbounded value range → hash set, or sort-then-scan. "Missing number in a huge range under tight memory" → bitset or bucket counting, not this. A cycle-flavoured prompt about a **linked list** rather than an array → fast & slow pointers on the list, not index-as-hash.
 
 ### Q1. Walk me through cyclic sort to find all missing numbers.
 
@@ -3623,6 +4222,18 @@ Phase 1 detects the cycle (slow and fast meet inside it); phase 2 finds the cycl
 
 The senior tell: name all four, pick by constraints (mutation allowed? need duplicates *and* missing? value range?). The interview signal is "I'd reach for cyclic sort because we need both missing and duplicate without extra space; if we couldn't mutate, I'd use Floyd's for single-duplicate or a hash set for general".
 
+### Worked LeetCode mappings
+
+**LeetCode 268, Missing Number** — an array of `n` distinct numbers drawn from `[0, n]`; return the one that is absent. Signals: value range pinned to the index range, exactly one defect, and the follow-up explicitly asking for `O(1)` extra space. Therefore: cyclic sort with the `[0, n-1]` convention — value `k` belongs at index `k`, not `k - 1`. Approach: swap `nums[i]` to index `nums[i]` while it is in range and out of place, then return the first `i` with `nums[i] ≠ i`, or `n` if the sweep is clean. `O(n)` time, `O(1)` space. Worth naming the two one-liners the constraints also permit — `n(n+1)/2 − Σnums`, or XOR of all indices and values — because "exactly one missing, none duplicated" is the narrow case where they beat a sweep.
+
+**LeetCode 448, Find All Numbers Disappeared in an Array** — `n` integers in `[1, n]`, some appearing twice and some not at all; return every value that never appears. Signals: the `[1, n]` range clause, *multiple* defects rather than one, and a follow-up demanding `O(n)` time with no extra space. Therefore: index-as-hash. Approach: for each `x`, negate `nums[abs(x) - 1]`; then every index still holding a positive value marks a missing `i + 1`. `O(n)` time, `O(1)` extra space beyond the output. The sum trick dies here — several numbers are missing, so one equation cannot recover them.
+
+**LeetCode 287, Find the Duplicate Number** — `n + 1` integers in `[1, n]` with exactly one value repeated; find it. Signals: the range clause plus two extra constraints — *you must not modify the array* and *you must use only constant extra space*. That combination rules out both cyclic sort and negation. Therefore: Floyd's cycle detection over `i → nums[i]`. Approach: pigeonhole guarantees a repeat, the repeat makes two indices point at one value, so the functional graph contains a cycle whose entrance is the duplicate; phase 1 finds a meeting point, phase 2 restarts one pointer at `nums[0]` and walks both one step at a time to the entrance. `O(n)` time, `O(1)` space. Binary search on the *value* — count how many elements are `≤ mid` — is the `O(n log n)` fallback if the cycle argument deserts you.
+
+**LeetCode 41, First Missing Positive** — an unsorted array of arbitrary integers; return the smallest missing positive, in `O(n)` time and `O(1)` space. Signals: no range guarantee at all, yet the answer is provably in `[1, n+1]`, which manufactures the coupling the pattern needs. Therefore: cyclic sort with an in-range guard. Approach: swap only when `1 ≤ nums[i] ≤ n`, letting zeros, negatives, and values `> n` sit wherever they land, then return the first `j` with `nums[j] ≠ j + 1`, else `n + 1`. `O(n)` time, `O(1)` space.
+
+**Where the implementation lives** — the Algorithms primer's *Linear-Time & Advanced Sorting* topic has the commented reference implementation and complexity derivation.
+
 ---
 
 ## Math, Geometry & Stream Patterns
@@ -3668,6 +4279,19 @@ Three signals. (1) **Mathematical fluency** — these tricks aren't algorithmic 
 **What follows from this topic**
 
 These tricks are the foundation of many specialised areas: GCD/LCM underpins number theory and cryptography; the Sieve generalises to segmented sieves for primes up to 10¹⁸; modular exponentiation underpins RSA and other crypto; reservoir sampling generalises to weighted reservoir sampling (A-Res, A-ExpJ algorithms); Boyer-Moore generalises to "find all elements appearing > N/3 times" (track two candidates); matrix exponentiation generalises to any linear recurrence (Tribonacci, Lucas, etc.). If you can recognise the math signal and reach for the right trick, you've earned the pattern.
+
+### Recognition — signals that map to this pattern
+
+Three families wearing one hat. Triage the prompt into maths, geometry, or streaming *first* — they share nothing except that none is a data-structure problem.
+
+- **Keyword phrases — maths & number theory** — "divisible by", "greatest common divisor", "count the primes below `n`", "answer modulo `10⁹ + 7`", "`x` to the power `n`", "the `n`-th term of the recurrence", "trailing zeroes", "base-26". Each says the answer is an identity, not a scan: "modulo `10⁹ + 7`" means the true value overflows, so fold the mod through every multiply; "power `n`" with `n` up to `2³¹` means binary exponentiation; "`n`-th term of a linear recurrence" with huge `n` means matrix exponentiation.
+- **Keyword phrases — geometry** — "points in the plane", "`(x, y)` coordinates", "collinear", "distance from the origin", "rectangles overlap", "inside the polygon", "convex hull", "rotate the matrix in place". These say the input is *positions*, so the tools are slope as a normalised fraction, cross product for orientation, and squared distance — never `√`, which costs precision and buys nothing when you only compare.
+- **Keyword phrases — streaming & online** — "a stream of unknown length", "you cannot store all the elements", "`O(1)` extra space", "design a class supporting `add` and `query`", "at any point in time", "pick one uniformly at random", "appears more than `n/2` times". The data arrives once and leaves; you keep a fixed-size summary, not the input.
+- **Input shape** — maths: one or two integers, or an array treated as *numbers* rather than as a sequence. Geometry: `[x, y]` pairs, or a matrix treated as a plane. Streaming: an iterator, a one-pass linked list, or a class API fed by repeated `add` calls.
+- **Objective verbs** — "compute", "count", "reduce modulo", "determine whether it terminates"; "how many are collinear", "is it inside", "closest `k`"; "sample uniformly", "find the element appearing more than `n/2` times", "maintain the running median".
+- **Constraint clues** — `n ≤ 10⁹` with a single answer expected ⇒ no loop over `n`; you need `O(log n)` or `O(√n)`. `n ≤ 10⁷` and "count primes" ⇒ sieve, `O(n log log n)`. Points `≤ 300` and "collinear" ⇒ pairwise `O(n²)` is intended. "Unknown length" or "`O(1)` space" ⇒ one pass, constant state.
+- **Disambiguators** — *Number theory vs brute force*: ask "is `n` a **value** or a **length**?" A value up to `10⁹` cannot be iterated, so the answer must be an identity. *Boyer-Moore vs a hash-map count*: ask "am I promised strictly more than `n/2`?" Only that promise makes cancellation safe; `> n/3` needs two candidates, and "most frequent, no guarantee" needs a map or heap. *Reservoir vs shuffle-and-take*: ask "do I know the length up front?" If yes, index randomly in `O(1)`; reservoir only earns its keep when the length is unknown. *Geometry vs graph*: ask "are points joined by given edges or by distance?" Given edges ⇒ traversal; implicit distance ⇒ geometry, and any pair may matter. *Streaming median vs sorting*: ask "must I answer between insertions?" Interleaved queries ⇒ two heaps; one query at the end ⇒ just sort.
+- **Anti-signals** — "find the missing number in `1..n`" looks like number theory but is index-as-hash or XOR. "Closest pair of points" at scale is divide and conquer. "Sum of the last `k` elements of a stream" is a sliding window, not reservoir sampling — reservoir is about *uniform choice*, not recency. And "top `k` of a stream" is a heap problem: the streaming *setting* does not by itself make it a streaming *trick*.
 
 ### Q1. Walk me through Boyer-Moore majority vote.
 
@@ -3743,6 +4367,17 @@ Claim: after processing N items, each item has been the final chosen with probab
 Proof by induction on N. **Base case** N=1: the only item is chosen with probability 1 = 1/1. **Inductive step**: assume true for N. At step N+1, we keep the new item with probability 1/(N+1) and the previously chosen with probability N/(N+1). By induction, each of the first N items was the chosen at step N with probability 1/N. After step N+1, each is the chosen with probability `(1/N) × (N/(N+1)) = 1/(N+1)`. The new item is the chosen with probability `1/(N+1)`. So all N+1 items have probability 1/(N+1). QED.
 
 The senior signal is writing the induction cleanly and recognising that the algorithm's elegance comes from this exact recurrence. For K > 1, the same induction shows each item is in the reservoir with probability K/N.
+### Worked LeetCode mappings
+
+**LeetCode 169, Majority Element** — return the element that appears more than `⌊n/2⌋` times; you may assume it always exists. Signals: the guarantee is *strictly* more than half, and the follow-up asks for `O(1)` space. Therefore: Boyer-Moore majority vote — the "> `n/2`" promise is exactly the precondition that makes pair-cancellation safe. Approach: hold a `candidate` and a `count`; on a match increment, on a mismatch decrement, and when `count` hits `0` adopt the current element. The survivor is the answer. `O(n)` time, `O(1)` space. Drop the guarantee and you must add a verification pass.
+
+**LeetCode 50, Pow(x, n)** — compute `x` raised to `n`, with `n` as large as `2³¹ − 1` and possibly negative. Signals: `n` is a **value**, not a length, so the `O(n)` multiply loop is `≈ 2 × 10⁹` operations. Therefore: binary (fast) exponentiation off the identity `x^n = (x^(n/2))² × (x if n is odd)`. Approach: normalise a negative `n` to `x → 1/x, n → −n`, then walk the bits of `n` — multiply the running result by the base when the low bit is set, square the base, shift right. `O(log n)` time, `O(1)` space. The same skeleton with a `% m` after every multiply is modular exponentiation.
+
+**LeetCode 382, Linked List Random Node** — return a uniformly random node value, given that the list may be very long and its length is not known in advance. Signals: "unknown length" plus "each value equally likely" plus a follow-up forbidding you to store the list. Therefore: reservoir sampling with `k = 1`. Approach: walk the list once; at the `i`-th node (1-indexed) replace the currently held value with probability `1/i`. The telescoping product `(1/i) × (i/(i+1)) × … × ((n−1)/n) = 1/n` gives uniformity. `O(n)` per call, `O(1)` space. Knowing the length instead makes this a one-line `randint` on an index — the reservoir is what you pay for *not* knowing.
+
+**LeetCode 149, Max Points on a Line** — given up to 300 points in the plane, find the largest number lying on a single straight line. Signals: `(x, y)` coordinates and "collinear", with `n` small enough that `O(n²)` is welcome. Therefore: geometry — anchor on each point and group the others by the slope of the connecting segment. Approach: for each anchor, hash every other point by its slope reduced to a normalised integer pair `(dy/g, dx/g)` where `g = gcd(dy, dx)`, sign-normalised so `(1, 2)` and `(−1, −2)` collide; the biggest bucket plus the anchor is the answer for that anchor. `O(n²)` time, `O(n)` space. Use exact fractions, never a floating-point slope — `dy/dx` loses collinear pairs to rounding, and the vertical case divides by zero.
+
+**Where the implementation lives** — the Algorithms primer's *Number Theory & Mathematical Algorithms*, *Computational Geometry Basics*, and *Randomized Algorithms & Selection* topics hold the commented reference implementations and complexity derivations.
 
 ---
 
@@ -3790,6 +4425,15 @@ Three signals. (1) **Recognition vocabulary** — at staff level, interviewers t
 **What follows from this topic**
 
 These tools connect to many specialised problem families: segment trees underpin **count of smaller numbers after self**, **range sum query - mutable**, **range increment + range sum** (with lazy propagation); Fenwick trees underpin **count inversions** via merge sort or BIT; KMP underpins **find substring without built-ins**; Tarjan's SCC underpins **2-SAT** and **condensation graph** problems; line sweep underpins **skyline**, **rectangle area union**, **overlapping rectangles**. The Less Common section is recognition-only — don't drill these to mastery, drill them to recognition. If you can name the tool from the signal and articulate the complexity, you've earned the pattern.
+
+### Recognition — signals that map to this pattern
+
+- **Keyword phrases** — "update the value at index `i`" appearing *alongside* "sum / min over the range `[l, r]`" is the loudest signal here: interleaved point updates and range queries kill prefix sums (`O(n)` to rebuild per update) and kill recomputation (`O(n)` per query), leaving a segment tree or Fenwick tree. "Find **all** occurrences of the pattern" says string-matching automaton (KMP / Z / Rabin-Karp) — it implies you must not restart the scan at every offset. "Every node can reach every other node" is the definition of a strongly connected component → Tarjan's or Kosaraju's. "Critical connection" / "removing this edge disconnects the network" is bridges, the lowlink variant. "The array does not change" plus `q` queries is sparse table. "All queries are given up front" is the word *offline*, which is Mo's algorithm.
+- **Input shape** — a mutable array plus a *stream of operations* rather than one array and one answer (usually a class API with `update` and `query` methods); a long text and a long pattern; a **directed** graph where the question treats cycles as single units; segments given as `[left, right, height]` triples that overlap arbitrarily; a tree with queries on node-to-node paths (heavy-light); a raw point cloud in the plane (convex hull).
+- **Objective verbs** — "support", "design a structure that", "handle `q` operations", "count pairs `(i, j)` with `i < j` and `nums[i] > nums[j]`", "find all occurrences", "return the outline / silhouette", "group the mutually reachable nodes", "count distinct values in every range".
+- **Constraint clues** — `n, q ≤ 10⁵` with *both* updates and queries → target `O((n + q) log n)` → segment tree or BIT. Immutable array, `q ≤ 10⁶` → you need `O(1)` per query → sparse table. `|text|, |pattern| ≤ 10⁶` → `O(n + m)`, so KMP rather than `O(n × m)`. Offline queries, no updates, `n ≤ 10⁵` → `O((n + q)√n)` Mo's is the intended budget. The meta-signal: if the obvious nested-loop solution is ~10¹⁰ operations at the stated bounds and no greedy, prefix or two-pointer trick collapses it, that gap *is* the hint that a specialised structure is intended.
+- **Disambiguators** — **Fenwick vs segment tree**: does the combine operation have an inverse? Sum does (`+` / `-`), so the BIT's prefix trick works and you write ~15 lines; min and max don't, so you need the full segment tree. **Sparse table vs segment tree**: does the array ever change? The sparse table answers in `O(1)` by overlapping two power-of-two blocks, which is only valid for idempotent operations on frozen data — a single update invalidates `O(n log n)` precomputed cells. **Prefix sum vs Fenwick**: are there any updates at all? No updates → plain prefix array, `O(1)` query, zero cleverness. **Tarjan's SCC vs Union Find**: is the graph directed? Union Find merges undirected connectivity only; mutual reachability under direction needs DFS lowlink. **Line sweep + heap vs monotonic stack**: do the intervals overlap arbitrarily (sweep events, heap of active heights) or sit on consecutive columns (monotonic stack)?
+- **Anti-signals** — range sums on an array that never changes look like a BIT problem but are just prefix sums; reaching for the tree is a downgrade, not a flex. A substring search with `n ≤ 10³` wants the built-in or the naive loop — naming KMP is fine, implementing it burns the window. Undirected "are these connected" is Union Find, not SCC. "Kth largest from a stream" is a heap, not an order-statistic tree. Counting palindromic substrings at `n ≤ 10³` is expand-from-centre `O(n²)`; Manacher only earns its complexity at `n ≥ 10⁵`. And a 2D grid that merely *looks* geometric is usually BFS/DFS, not convex hull.
 
 ### Q1. When do you reach for Segment Tree vs Fenwick Tree vs Sparse Table?
 
@@ -3907,6 +4551,18 @@ O(V + E). Used for 2-SAT and condensation graphs. Knowing the name and signal is
 The honest senior answer: at staff level, recognising the right tool and articulating the complexity is often more valuable than implementing from scratch. If the interviewer's goal is "design a system that handles range-sum queries on a mutable array with billions of updates", they want the right data structure and the right complexity bounds, not a 50-line implementation. If the goal is "implement Range Sum Query Mutable in this code window", they want the implementation.
 
 The signal: if the problem is in the "implementation" category (a single function, 20-30 lines), implement. If it's in the "design" category (a system, many components), articulate the choice and the complexity. The phrase "I'd reach for a segment tree here because we need range updates and point queries, both O(log N); the implementation is about 50 lines so I'll sketch the structure and we can fill in details if needed" is the right register.
+
+### Worked LeetCode mappings
+
+**LeetCode 28, Find the Index of the First Occurrence in a String** — return the index of the first occurrence of `needle` in `haystack`, or `-1`. Signals: a text plus a pattern, and the verb "occurrence". At the stated bounds the naive `O(n × m)` scan passes, so the recognition drill here is the *upgrade*, not the answer: say "naive is `O(n × m)`; KMP builds a failure function so the text pointer never backtracks, giving `O(n + m)` time and `O(m)` space", then implement whichever the interviewer wants. This is the cheapest problem on which to rehearse the KMP template from Q2.
+
+**LeetCode 307, Range Sum Query - Mutable** — support `update(index, val)` and `sumRange(left, right)` on the same array. Signals: it is a *class*, not a function, and the two methods are interleaved point update + range aggregate. That kills both naive options — a prefix array is `O(1)` to query but `O(n)` to update; a raw loop is `O(1)` to update but `O(n)` to query. Sum has an inverse, so the disambiguator says Fenwick tree: `O(log n)` for both operations, ~15 lines. A segment tree is equally correct and is what you would reach for if the query were range-min instead.
+
+**LeetCode 315, Count of Smaller Numbers After Self** — for each `i`, count the `j > i` with `nums[j] < nums[i]`. Signals: "count pairs" constrained on *two* orderings at once (index order and value order), with `n ≤ 10⁵` making the `O(n²)` double loop ~10¹⁰ operations. Two simultaneous orderings is the BIT signature: sweep right-to-left, query the tree for how many already-inserted values are smaller than `nums[i]`, then insert `nums[i]` (coordinate-compressed). `O(n log n)` time, `O(n)` space. Merge sort with inversion counting is the equivalent divide-and-conquer answer and is worth naming as the alternative.
+
+**LeetCode 218, The Skyline Problem** — return the key points of the silhouette formed by overlapping buildings. Signals: intervals carrying a height, overlapping arbitrarily, and an answer that only changes where the maximum over the *currently active* set changes. Therefore: line sweep over start/end events plus a max-heap of active heights with lazy expiry, exactly the decomposition in Q3. `O(n log n)` time, `O(n)` space. Run the anti-signal check out loud: this is *not* LeetCode 84's monotonic stack, because the buildings overlap freely instead of sitting on consecutive columns.
+
+**Where the implementation lives** — the Algorithms primer's *String Algorithms* topic has the commented reference implementation and complexity derivation for KMP and Z-algorithm, *Prefix Sums, Difference Arrays & Range Techniques* covers Fenwick and segment trees, and *Advanced Graph Algorithms* covers Tarjan's SCC and bridges.
 
 ---
 
