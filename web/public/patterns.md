@@ -42,6 +42,20 @@ Throttle client requests over a time window to prevent abuse, fairly distribute 
 - Strict accuracy required or is slight over-allow acceptable?
 - Multi-region deployment?
 
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Throttle by IP (not user) | pre-auth & cheap, but NATs share one IP (collateral throttling) and IPv6 rotation evades it — prefer user or API-key keying when auth exists |
+| Throttle by user ID or API key | per-account fairness, but identity must be resolved first — place the limiter after auth or use a signed key |
+| Distinct rules per endpoint | key counters by (identity, route) and load a rule map, not one global counter |
+| Slight over-allow acceptable | fixed-window or approximate counters in Redis — fast, cheap, no strict coordination |
+| Strict accuracy required | sliding-window log or token bucket with an atomic Redis Lua script — higher cost per call |
+| Rules hot-configurable | externalise rules to a watched config store — adds a control plane but no redeploys |
+| Multi-region | per-region local counters (fast, lenient) or a global counter (accurate, cross-region latency) — usually local plus async reconciliation |
+| Client must know limits | return 429 with Retry-After and X-RateLimit-* headers so clients back off |
+
 #### Requirements
 - **FR:**
   - Accept/reject per (identity, endpoint) using configurable rules
@@ -475,6 +489,18 @@ Distribute keys across a dynamic set of servers so that adding/removing a node o
 - Lookup latency budget? (<1ms in-process)
 - Need rack/AZ awareness for placement?
 
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Thousands of servers | a plain hash ring skews load — add 100-200 virtual nodes per server for under-5% imbalance |
+| Uniform within 5% | raise the vnode count — smoother spread but larger ring metadata to gossip |
+| Replication factor N=3 | walk the ring clockwise to the next N distinct physical hosts, skipping vnodes of the same host |
+| Sub-1ms lookup | keep the ring in memory as a sorted array with binary search; gossip membership changes |
+| Rack or AZ awareness | make the replica walk skip same-rack or same-AZ nodes so the N replicas span failure domains |
+| Frequent membership churn | use bounded-load or jump-hash variants to cap keys moved per change |
+
 #### Requirements
 - **FR:** map key→server; handle add/remove with minimal key movement; replication-aware
 - **NFR:** uniform distribution, O(log N) lookup, fast membership updates
@@ -774,6 +800,20 @@ Build a partitioned, replicated KV store with tunable consistency, high availabi
 - Geo-replication? (single-region or multi)
 - Value size range? (KB? MB?)
 - Need range scans or just point lookups?
+
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Write-heavy | LSM storage for fast writes, plus sloppy quorum and hinted handoff for write availability |
+| Read-heavy | add read replicas and a cache tier; raise R for freshness |
+| Strong consistency | require R+W greater than N (quorum) or a Raft leader per partition — costs latency and availability |
+| Eventual or tunable | let the client pick R and W per call; reconcile with vector clocks or last-write-wins |
+| Multi-region | async replication with conflict resolution (LWW or CRDTs); accept cross-region staleness |
+| Large values (MB) | store blobs in an object store and keep only a pointer in the KV to avoid bloating the log |
+| Range scans needed | order-preserving range partitioning (risks hot shards) instead of pure hashing |
+| Point lookups only | hash partitioning for even key spread |
 
 #### Requirements
 - **FR:** `get(k)`, `put(k,v)`, `delete(k)`; tunable W/R quorum; replication
@@ -1140,6 +1180,18 @@ Generate globally unique, roughly time-sortable 64-bit IDs across thousands of m
 - Tolerance to clock skew?
 - 64-bit constraint (DB column type) or 128-bit OK?
 
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Sortable by creation time | put the timestamp in the high bits (Snowflake layout: time, then machine, then sequence) |
+| 64-bit constraint | 41 bits time plus 10 bits machine plus 12 bits sequence, fitting a BIGINT column |
+| 128-bit acceptable | UUIDv7 is simpler and time-ordered with no machine coordination |
+| Very high per-node rate | widen the sequence bits or run multiple logical workers per host |
+| Low clock-skew tolerance | use a monotonic clock and wait or borrow on a backwards jump; NTP the fleet |
+| No per-request coordinator | lease machine IDs at startup via ZooKeeper or config, never per ID |
+
 #### Requirements
 - **FR:** unique IDs across fleet, sortable by time
 - **NFR:** >10k IDs/s/node, no external dependency on hot path, monotonic-ish
@@ -1385,6 +1437,18 @@ Generate short aliases for long URLs and serve fast HTTP redirects on lookup.
 - Analytics required? (clicks, geo, referrer)
 - Auth required to create?
 - Read/write ratio?
+
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Custom aliases allowed | need a uniqueness check and collision handling on write — store explicit alias-to-URL rows and reject dupes, so it can't be a pure hash |
+| No custom aliases | base62-encode an ID-generator counter for collision-free codes with no read-before-write |
+| Expiry or TTL | add an expiry column plus background purge (or a TTL index); expired codes redirect to 410 |
+| Analytics required | emit a click event to a queue asynchronously on redirect — never block the redirect on a write |
+| Auth required to create | gate creation behind auth while reads stay public and cacheable |
+| Read-heavy (about 100 to 1) | cache hot codes at the CDN or Redis and serve 301/302 with long cache TTL; the DB is just the source of truth |
 
 #### Requirements
 - **FR:** shorten, redirect, custom alias, expiry, basic analytics
@@ -1768,6 +1832,19 @@ Systematically download, parse, and index web pages at scale, discovering new UR
 - How fresh? (revisit cadence per page)
 - Storage destination (search index, archive, ML training set)?
 - Respect robots.txt and meta noindex?
+
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| JS-rendered SPAs | need a headless-browser render farm (expensive) rather than plain HTTP-plus-HTML parsing |
+| Per-domain politeness QPS | per-domain frontier queues with a token bucket, not one global rate limit |
+| Freshness or revisits | a priority frontier weighted by change frequency, storing last-crawled plus ETag/Last-Modified for conditional GETs |
+| Destination is a search index | pipe parsed text to the indexer; if it is an archive, store raw WARC instead |
+| Respect robots.txt | fetch and cache robots per domain and honour crawl-delay and disallow |
+| Dedup needed | a URL-seen bloom filter plus a content hash to skip near-duplicate pages |
+| Massive scale | shard the frontier by domain hash so one domain's politeness limit is not split across workers |
 
 #### Requirements
 - **FR:** seed URLs → fetch → parse → extract links → enqueue → store; respect robots.txt; dedupe content
@@ -2185,6 +2262,19 @@ Reliably deliver push, email, and SMS notifications to users at scale, respectin
 - User opt-out / preference granularity?
 - Scheduled vs immediate? Bulk broadcast?
 
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Multiple channels | channel adapters (APNs, FCM, SES, Twilio) behind one API, with a router picking channel by user preference |
+| Templated and localized | a template service with locale fallback rendered at send time, storing template IDs not raw text |
+| At-least-once OK | a queue with retries plus an idempotency key so retries do not double-send |
+| Exactly-once needed | a dedup store keyed by user and notification ID, since channels are inherently at-least-once |
+| Opt-out and preferences | a preference service checked before enqueue, respecting quiet hours and frequency caps |
+| Scheduled or bulk broadcast | a scheduler plus fan-out workers, rate-limited per provider to avoid throttling |
+| Mixed priority (OTP vs marketing) | separate priority queues so transactional messages are not stuck behind a campaign |
+
 #### Requirements
 - **FR:** send via APNs/FCM/SES/Twilio; templating; user prefs; opt-out; retries; dedupe
 - **NFR:** 10M notifs/day, fan-out scale, no-dup, observable delivery state
@@ -2572,6 +2662,18 @@ Build and serve a personalized timeline of posts from followed users, ranked by 
 - Media types? (text, image, video — different sizes)
 - Personalization signals available?
 
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Chronological | a simple merge of followees' recent posts — cheap, no ranking tier |
+| Algorithmic ranking | a ranking service scoring candidates, backed by a feature store and precomputation |
+| Celebrity outliers | hybrid fan-out — push on write for normal users, pull on read for celebrities, to avoid write amplification |
+| Real-time live updates | push new posts over websocket or long-poll; otherwise refresh on page load |
+| Rich media | store media in an object store plus CDN and keep only references and sizes in the feed |
+| Personalization signals | precompute per-user feature vectors and rank at read time from a candidate set |
+
 #### Requirements
 - **FR:** post, follow/unfollow, fetch feed, paginate, refresh
 - **NFR:** <200ms feed load p95, support celebrity fan-out, eventually consistent
@@ -2890,6 +2992,19 @@ Real-time bidirectional messaging between users — 1:1 and groups — with deli
 - Read receipts / delivery receipts?
 - Voice/video calls in scope? (assume out)
 - Message history retention?
+
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| 1:1 only | sender-to-recipient delivery is simple; a single connection-routing layer suffices |
+| Groups with a size cap | a fan-out service writing to each member's inbox; very large groups shift to a pull model |
+| E2E encryption | the server stores ciphertext only, with client-side key exchange — no server-side search or content spam checks |
+| Presence and typing | ephemeral pub/sub (Redis) with heartbeats, never persisted |
+| Read and delivery receipts | a per-message state machine (sent, delivered, read) driven by acks |
+| Offline support | store-and-forward: persist undelivered messages and push on reconnect, with a per-device sync cursor |
+| Long history retention | changes storage sizing and compliance versus delete-after-delivery |
 
 #### Requirements
 - **FR:** send/receive 1:1 + group (≤500); presence; receipts; history; offline → push
@@ -3305,6 +3420,19 @@ Suggest top queries as the user types, ranked by popularity, with sub-100ms resp
 - How often does suggestion list refresh? (real-time vs hourly)
 - Number of suggestions per response (5? 10?)
 
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Personalization | blend a global trie with per-user history rather than one shared structure |
+| Typo tolerance | add fuzzy matching (edit-distance or n-gram index) on top of the exact-prefix trie |
+| Multilingual | per-language tries with locale routing, since tokenization differs |
+| Hourly refresh | batch-rebuild the trie from query logs — simple and cheap |
+| Real-time refresh | streaming counts with incremental trie updates — more moving parts |
+| Fixed top-k suggestions | precompute and cache top-k per prefix node so a read is O(1) at the node |
+| Sub-100ms target | serve from an in-memory trie behind an edge cache and keep heavy ranking offline |
+
 #### Requirements
 - **FR:** return top-k suggestions for prefix; rank by frequency × recency
 - **NFR:** <50ms p99; updated within hours; scale globally
@@ -3658,6 +3786,18 @@ Upload, transcode, store, and stream video globally with adaptive bitrate, searc
 - Watermark / DRM?
 - Avg video length and upload rate?
 - Comments/likes/recos in scope?
+
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| On-demand only | an async transcode pipeline on upload storing renditions, with no low-latency live path |
+| Resolutions 240p to 4K | generate an adaptive-bitrate ladder with HLS/DASH manifests and segment the video |
+| DRM or watermark | add a packaging and encryption step (Widevine, FairPlay) plus key servers |
+| High upload rate | chunked resumable upload to an object store, then a queue feeding transcode workers that scale independently |
+| Comments, likes, recommendations | separate services; recommendations consume watch-history events |
+| Global delivery | push segments to a CDN and hit the origin only on cache miss |
 
 #### Requirements
 - **FR:** upload, transcode, stream (HLS/DASH), search, comments, recommendations, thumbnails
@@ -4042,6 +4182,19 @@ File sync and storage across devices with versioning, sharing, and conflict-hand
 - Selective sync? Offline access?
 - Sharing model: per-file ACL, link sharing?
 
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Large max file size | chunk files into fixed blocks, hash each, and store blocks in an object store — enables resumable upload and dedup |
+| Real-time doc collab out of scope | sync whole-file versions with conflict copies, not operational transforms (that is the Google Docs problem) |
+| Selective sync and offline | a local metadata DB plus a sync engine diffing client and server file trees, transferring only changed blocks |
+| Content-defined dedup wanted | rolling-hash chunking so a small edit re-uploads only affected blocks |
+| Per-file ACL sharing | an authorization service on every file/block access |
+| Link sharing | capability tokens (signed URLs) that bypass per-user ACLs for read |
+| Versioning | keep block manifests per version so old versions cost only changed blocks |
+
 #### Requirements
 - **FR:** upload/download, sync across devices, share, versions, conflict resolution, search
 - **NFR:** durability (11 9s), efficient sync (delta only), 99.99% availability
@@ -4383,6 +4536,18 @@ Find businesses (or any geo-tagged entities) within a radius of a given lat/lng,
 - Result count + radius bounds?
 - Filters (category, rating)?
 - Read-heavy or also high write rate?
+
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Static data (businesses) | precompute a spatial index (geohash, quadtree, or S2 cells) that rarely changes |
+| Dynamic data (drivers) | a write-heavy in-memory geo index (Redis GEO or a sharded grid) updated on every location ping |
+| Bounded radius and result count | pick a cell size near the query radius so a lookup scans few cells |
+| Filters like category or rating | combine the geo index with a secondary attribute filter, or store per-category indexes |
+| Read-heavy | cache hot cells and replicate the index for read scale |
+| High write rate too | shard the grid by region and accept approximate freshness |
 
 #### Requirements
 - **FR:** "find X within Y km of (lat,lng)", filter by category, sort by distance/rating
@@ -4832,6 +4997,18 @@ Show friends within a radius of you, updating in near-real-time as they move; op
 - Battery constraints (mobile)?
 - Privacy: per-friend opt-in?
 
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Under-10s freshness | a location pub/sub layer pushing updates, not periodic full scans |
+| High average friend count | fan-out location updates only to nearby, online friends to bound work |
+| Battery-constrained mobile | adaptive reporting cadence (slower when still) and server-side interpolation |
+| Per-friend opt-in privacy | check a sharing-permission service before any location is revealed |
+| Dynamic positions | an in-memory geo grid keyed by user, expiring stale entries by TTL |
+| Presence matters | treat offline friends as absent to avoid stale pins |
+
 #### Requirements
 - **FR:** subscribe to friend locations, push updates within X sec, privacy controls, history (optional)
 - **NFR:** real-time (<10s), battery-efficient on mobile, billions of location updates/day
@@ -5254,6 +5431,18 @@ Separately, the map tiles you see on screen were precomputed offline, stored in 
 - Routing modes (drive, walk, transit, bike)?
 - Live traffic? Indoor maps? AR?
 - Offline maps?
+
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Proprietary vs OSM data | drives the ingestion and tiling pipeline and licensing, not the serving path |
+| Map tiles | precompute raster or vector tiles per zoom level and serve from a CDN |
+| Multiple routing modes | a routing graph per mode (drive, walk, transit) with contraction hierarchies for fast queries |
+| Live traffic | overlay real-time edge weights from probe data and recompute affected routes |
+| Turn-by-turn navigation | server plans the route, client does local re-routing on GPS drift |
+| Offline maps | ship region tile packs plus a compact on-device routing graph |
 
 #### Requirements
 - **FR:** map rendering (tiled), search (geocoding), routing, turn-by-turn nav, live traffic
@@ -5688,6 +5877,18 @@ Decouple producers and consumers with durable, ordered, replayable, partitioned 
 - Delivery semantics? (at-least-once / exactly-once)
 - Retention? (time, size)
 - Single-DC or multi-region?
+
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Very high throughput | an append-only commit log with sequential disk writes, zero-copy sendfile, and batching |
+| Per-partition ordering | hash the key to a partition; ordering holds only within a partition, never globally |
+| At-least-once | consumers commit offsets after processing and dedup downstream |
+| Exactly-once | idempotent producers plus transactions (atomic produce-and-commit) |
+| Retention by time or size | segment files with a retention policy; compaction if a changelog is needed |
+| Multi-region | mirror topics async across clusters with offset translation, accepting cross-region lag |
 
 #### Requirements
 - **FR:** publish, subscribe (consumer groups), partition, replay from offset, retention, schema
@@ -6134,6 +6335,18 @@ Collect, store, query, visualize, and alert on time-series metrics from thousand
 - Alert delivery channels?
 - Self-hosted or SaaS-like?
 
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Pull collection | scrape targets on a schedule (Prometheus-style) with service discovery |
+| Push collection | an ingestion gateway with backpressure, better for short-lived or serverless jobs |
+| High cardinality | a purpose-built TSDB with an inverted label index, and cardinality limits to prevent blow-ups |
+| Retention by tier | downsample and roll up old data (raw for days, rollups for months) |
+| Alerting | an evaluation engine on recording rules plus a router (dedupe, group, silence) to channels |
+| Long-term or global | remote-write to object-store-backed storage (Thanos or Mimir) for scale and HA |
+
 #### Requirements
 - **FR:** ingest, store TSDB, query (PromQL), dashboards, alerts with grouping/silencing
 - **NFR:** millions of metrics/s, sub-second dashboard latency, durable, retention tiers
@@ -6524,6 +6737,18 @@ Aggregate ad click events in near-real-time for billing dashboards, advertiser-f
 - Billing-grade accuracy?
 - Anti-fraud requirements?
 - How fresh do dashboards need to be?
+
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Per-minute granularity | tumbling-window aggregation in a stream processor keyed by (ad, minute) |
+| Billing-grade accuracy | exactly-once processing plus a batch reconciliation layer (lambda architecture) to correct the stream |
+| Dashboards can be slightly stale | a pure streaming path is fine; skip the batch layer |
+| Anti-fraud required | a separate scoring stage before aggregation, dropping or flagging suspicious clicks |
+| Late events expected | watermarks plus allowed-lateness so late clicks still land in the right window |
+| High event rate | partition by ad ID so hot advertisers spread across workers |
 
 #### Requirements
 - **FR:** ingest clicks; aggregate by (ad_id, advertiser, time bucket); top-N queries; billing rollups
@@ -6965,6 +7190,18 @@ Search, book, and manage hotel reservations with strict no-double-booking guaran
 - Pricing dynamic (per date)?
 - Payment in scope?
 
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Inventory as room types | reserve against a per-type counter, not individual rooms, until check-in |
+| Strict no-double-booking | a transactional reservation on the inventory row (SELECT-FOR-UPDATE or conditional update), not the search index |
+| Modify and cancel allowed | a reservation state machine (held, confirmed, cancelled) with compensating inventory returns |
+| Dynamic per-date pricing | a pricing service and a price snapshot stored on the booking |
+| Payment in scope | a saga: hold inventory, charge, confirm, with rollback if charge fails |
+| Search must scale | an eventually-consistent read index (Elasticsearch) separate from the transactional inventory store |
+
 #### Requirements
 - **FR:** search by location/dates, view details, book (atomic), cancel, modify
 - **NFR:** strong consistency on inventory, eventual on search, scalable reads
@@ -7363,6 +7600,18 @@ Send, receive, store, search, and serve email at billions-of-users scale with an
 - Spam filtering required?
 - Encryption (TLS in transit, at-rest)?
 - Search latency target?
+
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| IMAP/POP support | stateful protocol servers plus folder/flag sync, not just an HTTP webmail API |
+| Long retention | tiered storage: hot recent mail in a fast store, old mail in cheap object storage |
+| Spam filtering | an inbound scoring pipeline (reputation, content ML) before delivery to the inbox |
+| Encryption at rest and in transit | TLS on SMTP/IMAP plus envelope encryption of stored bodies |
+| Low search latency | a per-user inverted index updated on delivery, separate from message storage |
+| Threading | group by conversation ID (References/In-Reply-To headers) at index time |
 
 #### Requirements
 - **FR:** SMTP send/receive, IMAP/POP, web UI, search, attachments, spam filter, threading, labels
@@ -7786,6 +8035,18 @@ Build a durable, scalable, cheap object store with key→blob semantics, accesse
 - Object size range (KB to TB)?
 - Metadata querying or just key lookup?
 
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Multi-region | async cross-region replication of objects with a region as the write home |
+| Strong read-after-write | a strongly consistent metadata service in front of eventually-consistent blob replicas |
+| Versioning and lifecycle | keep immutable object versions plus lifecycle rules to expire or tier them |
+| Object size up to TB | multipart upload of fixed parts, each erasure-coded across nodes for cheap durability |
+| Encryption | server-side envelope encryption with per-object data keys |
+| Only key lookup | a flat key-to-location metadata index; no secondary query engine needed |
+
 #### Requirements
 - **FR:** PUT, GET, DELETE, LIST in buckets; versioning; lifecycle; ACLs
 - **NFR:** 11 9s durability, 4 9s availability, virtually unlimited scale, read-after-write consistency
@@ -8187,6 +8448,18 @@ Show global / regional / friends rankings updated in real-time as scores update,
 - Real-time updates or eventual?
 - "My rank" + neighbors needed?
 
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Real-time updates | a Redis sorted set (ZADD/ZREVRANK) giving O(log n) score updates and rank reads |
+| Multiple leaderboards | one sorted set per (scope, period) with TTL for daily/weekly resets |
+| Per-region boards | shard sorted sets by region and merge only for a global view |
+| Huge player counts | approximate distant ranks (bucketed) and keep exact ranks only near the top |
+| "My rank plus neighbors" | ZREVRANK for position then ZRANGE around it — cheap on a sorted set |
+| Eventual is acceptable | batch-update the board from a stream instead of per-score writes |
+
 #### Requirements
 - **FR:** record score, top-N, my rank, neighbors, multiple leaderboards (period-based + segmented)
 - **NFR:** <100ms reads, real-time updates, scale to 100M+ players
@@ -8546,6 +8819,19 @@ Process card payments end-to-end (auth, capture, settlement, refunds) with idemp
 - Subscription / recurring?
 - Direct integration with PSP (Stripe/Adyen) or DIY card rails?
 - Compliance scope (PCI level)?
+
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Cards only | integrate a PSP and model auth-then-capture as two steps, not a single charge |
+| Also bank transfers or wallets | a payment-method abstraction with per-rail adapters and differing settlement times |
+| Multi-currency | store amounts in minor units with a currency code and record FX at capture time |
+| Recurring subscriptions | a billing scheduler plus stored mandates and retry/dunning logic for failed charges |
+| Integrate a PSP vs DIY rails | using Stripe/Adyen keeps you out of PCI scope for card data; DIY pulls the whole card vault into scope |
+| Idempotency required | every request carries an idempotency key so retries never double-charge |
+| Audit and compliance | an immutable event-sourced ledger and tokenized card data (never raw PAN) |
 
 #### Requirements
 - **FR:** charge card, refund, partial capture, subscriptions, multi-currency, ledger
@@ -9045,6 +9331,19 @@ Store user balances and process transfers between users with strong consistency,
 - Cross-shard transfers? (yes — A and B may live on different shards)
 - Latency expectation per transfer?
 
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Strong consistency required | model each transfer as a double-entry, all-or-nothing DB transaction — no eventual balances |
+| Cross-shard transfers | a two-phase commit or saga since sender and receiver may live on different shards |
+| Same-shard only | a single local transaction suffices and is far simpler |
+| Internal transfers only | a closed ledger; adding top-up/withdraw pulls in external PSP rails and reconciliation |
+| Idempotency needed | a request key per transfer so retries do not move money twice |
+| Audit-grade history | append-only ledger entries; balance is derived, never overwritten |
+| Low latency per transfer | keep hot accounts in a fast store with row-level locking to serialize concurrent debits |
+
 #### Requirements
 - **FR:** deposit, withdraw, transfer (P2P), balance query, transaction history
 - **NFR:** ACID on transfers, no money creation/loss, audit-grade, idempotent
@@ -9456,6 +9755,18 @@ Match buy/sell orders for financial instruments with deterministic, microsecond-
 - Latency target? (tens of μs)
 - Single venue or multi?
 - Pre-trade risk checks?
+
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Multiple order types | a per-instrument order book handling market, limit, stop, IOC, FOK with distinct matching rules |
+| Price-time priority | FIFO queues per price level; pro-rata instead changes the fill allocation logic |
+| Tens-of-microsecond latency | a single-threaded in-memory matching loop, no locks, cache-friendly data structures, kernel bypass |
+| Multi-venue | order routing plus a smart order router in front of independent per-venue engines |
+| Pre-trade risk checks | a risk gate before the book (15c3-5 style) that can reject in the hot path |
+| Audit and determinism | event-source every message so the book can be deterministically replayed |
 
 #### Requirements
 - **FR:** place / cancel / modify orders; match (price-time priority); market data feed; trade reporting
@@ -9939,6 +10250,18 @@ Now Elon Musk (100 million followers) posts a tweet. The fan-out service checks 
 - Direct messages?
 - Trending in scope?
 
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Media attached | store media in object store plus CDN; the tweet row holds references only |
+| Retweets and quote-tweets | store them as references to the original, not copies, to avoid duplication |
+| Real-time search across all tweets | a near-real-time inverted index (Elasticsearch) fed by a tweet event stream |
+| Celebrity fan-out | hybrid timeline: push for normal accounts, pull for celebrities to bound write amplification |
+| Direct messages | a separate chat subsystem with its own storage and delivery |
+| Trending | streaming aggregation of hashtags/terms over sliding windows |
+
 #### Requirements
 - **FR:** post tweet, follow, home timeline, user profile, search, notifications, trending
 - **NFR:** real-time-ish timelines (<5s freshness), 99.99% availability, handle celeb fan-out
@@ -10317,6 +10640,18 @@ Photo/video sharing app with feed, stories, profile, search, DMs — at billion-
 - Image filters / processing in scope?
 - Live streaming?
 
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Media is dominant | an upload-transcode-CDN pipeline is the core; the feed stores references and multiple sizes |
+| Stories (24h ephemeral) | a separate store with TTL expiry and a lightweight per-follower fan-out |
+| Reels (short video) | a recommendation-driven feed and video transcode ladder, distinct from the photo feed |
+| Direct messages | a separate chat service |
+| Server-side image processing | a processing stage on upload generating thumbnails and filters |
+| Billion-user scale | shard by user, cache hot feeds, and hybrid fan-out for high-follower accounts |
+
 #### Requirements
 - **FR:** post photo/video, follow, feed, profile, like/comment, stories, search
 - **NFR:** fast image load (CDN), worldwide low latency, durable media
@@ -10691,6 +11026,18 @@ Endless personalized short-video feed with sub-second swipe-to-play, upload, and
 - Comments/likes/duets?
 - Region-specific content (China vs global)?
 - Cold-start (new users, no signal)?
+
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Recommendation-driven feed | a candidate-generation plus ranking service is the heart, not a follow graph |
+| Sub-second swipe-to-play | pre-fetch and pre-buffer the next few videos and serve segments from edge CDN |
+| Short fixed durations | aggressive transcoding to small segments and heavy edge caching |
+| Cold-start for new users | fall back to trending/popular content until enough interaction signal exists |
+| Region-specific content | per-region content pools and compliance-aware routing |
+| Comments, likes, duets | separate interaction services feeding engagement signals back to ranking |
 
 #### Requirements
 - **FR:** upload video, browse "For You" feed, like/comment/share, follow, search by sound/effect/hashtag
@@ -11117,6 +11464,18 @@ Match riders to nearby drivers in real time, track trips, compute fares, and pro
 - Pool / shared rides?
 - ETA prediction quality?
 
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Real-time matching | a geo index of available drivers (grid or S2 cells) updated on location pings, queried per request |
+| Surge pricing | a pricing service reading live supply/demand per cell |
+| Pool/shared rides | a harder matching problem: batch riders and optimize routes, not 1:1 assignment |
+| City-by-city | shard the whole system by city/region so each is independently scalable |
+| ETA prediction | a routing/ETA service using live traffic, decoupled from matching |
+| Payments and trips | a trip state machine plus a payment saga on completion |
+
 #### Requirements
 - **FR:** rider request → match driver → track location during trip → fare calculation → payment
 - **NFR:** sub-2s match in dense areas, accurate ETAs, handle spikes (rush hour, events)
@@ -11521,6 +11880,18 @@ Two-sided marketplace: hosts list properties, guests search, book, pay, review �
 - Pricing dynamic per host?
 - Cancellation policies?
 
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Per-listing per-night inventory | a calendar model with transactional holds on date ranges to prevent double-booking |
+| Instant book | a synchronous transactional reservation; request-to-book adds a host-approval workflow |
+| Dynamic per-host pricing | a pricing service and a price snapshot stored on the booking |
+| Filters and dates | an eventually-consistent search index separate from the transactional booking store |
+| Cancellation policies | a policy engine plus a refund saga on cancel |
+| Two-sided marketplace | separate host and guest services with a booking coordinator between them |
+
 #### Requirements
 - **FR:** search by location/dates/filters, view listing, book (instant or request), payment (escrow), reviews, messaging
 - **NFR:** strong consistency on calendar; eventually consistent search; 99.99% availability
@@ -11883,6 +12254,18 @@ Stream long-form video on demand to hundreds of millions of users globally with 
 - Offline downloads?
 - Multi-device profiles?
 
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| VOD only | pre-transcode an ABR ladder on ingest; no low-latency live pipeline |
+| DRM required | a packaging/encryption step plus license servers (Widevine, PlayReady, FairPlay) |
+| Offline downloads | issue downloadable encrypted renditions with an offline license lease |
+| Multi-device profiles | per-profile watch state and recommendations, keyed under one account |
+| Global low buffering | push content to edge CDN and ISP-embedded caches; origin only on miss |
+| Personalized recommendations | an offline model plus a feature store serving per-profile ranked rows |
+
 #### Requirements
 - **FR:** browse catalog, play video, pause/resume, recommendations, search, profiles
 - **NFR:** sub-second start, no rebuffering, global low latency, durable catalog
@@ -12198,6 +12581,18 @@ Team messaging with channels, threads, DMs, search, presence, integrations — w
 - File uploads?
 - Integrations / bots / app marketplace?
 - E2E encryption?
+
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Strict workspace isolation | partition data per workspace (separate tenant boundary) for security and scaling |
+| Threading | model messages with a parent thread ID and per-thread read state |
+| File uploads | object store plus CDN with per-workspace access control |
+| Integrations and bots | an events/webhooks API plus an app platform, adding an auth and rate-limit surface |
+| Presence and typing | ephemeral pub/sub with heartbeats, not persisted |
+| Search | a per-workspace inverted index updated on message write |
 
 #### Requirements
 - **FR:** channels (public/private), DMs, threads, mentions, file uploads, search, presence, integrations
@@ -12558,6 +12953,18 @@ Multi-party real-time video/audio calls with screen share, recording, and chat �
 - Webinars (1-to-many, thousands of viewers)?
 - Geographic distribution?
 
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Small calls (a few participants) | mesh or SFU is optional; an SFU (selective forwarding unit) scales better past a handful |
+| Large calls | an SFU that forwards each sender's stream to others, avoiding N-squared encoding |
+| Webinars (thousands of viewers) | switch the broadcast leg to HLS/CDN distribution, not per-viewer SFU streams |
+| Recording | a server-side recording pipeline compositing streams to object storage |
+| E2E encryption | keys stay on clients, which rules out server-side recording and transcoding of media |
+| Geographic distribution | place media servers near participants and relay between regions to cut latency |
+
 #### Requirements
 - **FR:** create meeting, join, video/audio per participant, screen share, chat, record
 - **NFR:** <150ms one-way latency, support 1k participants/meeting, scale to millions of concurrent meetings
@@ -12870,6 +13277,19 @@ Provide a low-latency, in-memory cache layer in front of databases or computed r
 - Strong consistency between cache and DB?
 - Multi-region?
 - Cache size target?
+
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Cache-aside | the app reads cache, loads the DB on miss, and writes back — simplest and most common |
+| Write-through or write-behind | the cache sits in the write path (consistent, or async and faster but riskier on crash) |
+| TTL eviction | expire by time — good for freshness-bounded data |
+| LRU eviction | evict by recency when memory-bound — good for hot-set workloads |
+| Strong cache/DB consistency | invalidate on write and accept the extra coordination; otherwise tolerate brief staleness |
+| Multi-region | per-region cache clusters with independent invalidation, not one global cache |
+| Large cache size | shard across nodes with consistent hashing and replicate hot keys |
 
 #### Requirements
 - **FR:** GET, SET, DELETE with TTL; eviction; (optionally) data structures (lists, sets)
@@ -13259,6 +13679,18 @@ Allow only one process at a time to hold a lock identified by a key, across mach
 - Multi-region?
 - Acceptable latency to acquire?
 
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Best-effort exclusion | a single Redis SET-NX with TTL is fine — simple and fast |
+| Correctness-critical exclusion | a consensus-backed lock (ZooKeeper/etcd) with fencing tokens, since a single Redis lock is unsafe under partitions |
+| Lock timeouts | a TTL to release a dead holder, plus a fencing token so a stalled holder cannot act after expiry |
+| Re-entrancy | store the owner and a hold count in the lock value |
+| Multi-region | a regional lock service; a globally consistent lock costs cross-region latency |
+| Low acquire latency | keep the lock service close to clients and cache negative results briefly |
+
 #### Requirements
 - **FR:** acquire lock (with TTL), release, optionally renew
 - **NFR:** safety (no two holders at once), liveness (eventually grants), low overhead
@@ -13588,6 +14020,18 @@ Schedule and reliably execute jobs across a fleet of workers — one-shot, recur
 - Job failure handling (retry, DLQ, alert)?
 - DAG dependencies between jobs?
 - Latency tolerance vs scheduled time?
+
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Recurring (cron) | a schedule store plus a ticker that enqueues due jobs; one-shot uses a delay queue |
+| Exactly-once execution | a lease or lock per job run plus an idempotency key so two workers cannot both run it |
+| At-least-once acceptable | simpler at-least-once dispatch with idempotent job handlers |
+| Failure handling | retries with backoff, a dead-letter queue, and alerting on exhaustion |
+| DAG dependencies | a dependency graph and a scheduler that only enqueues a job when parents succeed |
+| Tight latency to scheduled time | a fine-grained timer wheel and enough warm workers; loose tolerance allows batch polling |
 
 #### Requirements
 - **FR:** schedule one-shot at time T; recurring (cron expr); retries with backoff; DAGs; cancel; status
@@ -13939,6 +14383,18 @@ Allow many users to edit the same document simultaneously, see each other's edit
 - Offline editing?
 - Comments + suggestions?
 - Max concurrent editors per doc?
+
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Plain text | operational transforms or a sequence CRDT over characters; rich text adds attribute handling |
+| Rich text | a structured document model (tree) with OT/CRDT over nodes and formatting spans |
+| Offline editing | a CRDT is the pragmatic choice since it merges divergent offline edits without a central server |
+| Central-server model acceptable | operational transformation with a server as the single ordering point |
+| Comments and suggestions | a separate anchored-annotation layer that survives concurrent edits |
+| High concurrent editors | shard by document and relay edits through a per-doc coordinator over websockets |
 
 #### Requirements
 - **FR:** real-time collaborative edit, presence (cursors), comments, version history, offline edit + sync
@@ -14343,6 +14799,18 @@ When the user right-swipes on candidate B: the Swipe Service records `(user_A, u
 - Image-only or also video?
 - Who-liked-you visibility (premium)?
 
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Distance/age/preference filters | a per-user candidate query over a geo plus attribute index, precomputed into a deck |
+| Swipes at scale | store right-swipes and check for a reciprocal swipe to create a match (a fast KV lookup) |
+| "Who liked you" is premium | keep an incoming-likes list per user, revealed only to paying users |
+| Super-likes and boosts | a ranking/priority signal injected into the candidate deck |
+| Match then chat | a match event unlocks a chat channel handled by a separate messaging service |
+| Image or video | media in object store plus CDN with moderation on upload |
+
 #### Requirements
 - **FR:** profile, swipe (left/right), match (mutual right), chat after match, filters, recommendations
 - **NFR:** fast feed (<300ms), accurate matching, privacy (don't leak who swiped on you)
@@ -14659,6 +15127,18 @@ Host millions of git repositories with web UI, pull requests, issues, code searc
 - Actions / CI in scope?
 - Large file storage (LFS)?
 - Multi-region?
+
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Public and private repos | an authorization layer on every git operation and API call |
+| Git hosting at scale | shard repositories across storage nodes and cache packfiles; git is the storage primitive |
+| Code search across all public | a specialized code index (trigram or symbol index), separate from repo storage |
+| Actions/CI | a job-orchestration subsystem running untrusted code in isolated runners |
+| Large file storage (LFS) | offload big blobs to an object store with pointer files in the repo |
+| Pull requests and issues | a metadata service (diffs, reviews, comments) layered over the git backend |
 
 #### Requirements
 - **FR:** git push/pull/clone over HTTPS+SSH; web UI; PR; issues; reviews; org/team mgmt; search
@@ -15012,6 +15492,18 @@ Stream music globally with low latency, generate personalized playlists, support
 - Social features (sharing, follows)?
 - Royalty calculation?
 
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Free tier with ads | an ad-insertion path and lower-bitrate streams for free users |
+| Offline downloads | encrypted downloadable tracks with an offline license lease |
+| Low-latency streaming | pre-fetch the next track and serve audio segments from edge CDN |
+| Personalized playlists | an offline recommendation model plus a feature store serving per-user rows |
+| Podcasts | a separate long-form content type with resume-position tracking |
+| Accurate royalties | an immutable per-stream event log aggregated for rights-holder payouts |
+
 #### Requirements
 - **FR:** play/pause/skip; library/playlists; recommendations (Discover Weekly); search; offline; social
 - **NFR:** sub-second start, no buffering, 99.99% availability, accurate per-stream royalty count
@@ -15352,6 +15844,20 @@ Let users subscribe to price rules on financial instruments ("AAPL crosses above
 - Do we also show alerts in-app, or only push/email?
 - Are rules allowed to reference derived data (moving avg, RSI) or only raw price?
 - Regulatory: audit trail required? (yes, for a broker)
+
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Simple threshold-cross rules | index subscriptions by (instrument, threshold) so a price tick range-queries only the rules that could fire |
+| Percent-change or windowed rules | maintain per-window state (rolling reference price) per rule, evaluated on each tick |
+| Derived-data rules (moving average, RSI) | a precompute layer publishing indicator streams the evaluator subscribes to, not raw price only |
+| Seconds-p99 freshness | an in-memory streaming evaluator keyed by instrument; a per-minute tolerance allows cheaper batch checks |
+| Fire-once vs re-arm | a per-rule state machine (armed, fired, cooling-down) so a crossing does not spam repeatedly |
+| Per-user subscription cap | shard rule storage by instrument and enforce the cap at subscribe time |
+| 24/7 (crypto) vs market-hours | a session/calendar service gating evaluation windows per instrument |
+| Audit trail required | append-only log of rule fires and deliveries for the broker's compliance |
 
 #### Requirements
 
@@ -15849,6 +16355,20 @@ Process a continuous stream of inbound events (new orders, cancels and cancel/re
 - Durability and regulatory replay requirements? (assume full event-sourced audit and deterministic replay)
 - Do we need basket / cross-instrument orders? (flag: different boundary)
 
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Market, limit, IOC, FOK plus cancel/replace | a per-instrument book with a matching state machine per order type; cancel/replace is a cancel then insert keeping or losing time priority per rule |
+| Continuous matching | a single-threaded per-instrument matching loop; auction phases add a separate uncross algorithm |
+| Single venue per instrument | no routing layer — the book is authoritative; multi-venue would add a smart order router |
+| Self-trade prevention required | check participant IDs at match time and cancel or decrement one side |
+| Small tick range | a price-indexed array of levels (O(1) best-price) instead of a tree; wide ranges favor a tree/skiplist |
+| Single-digit microsecond p99 | in-memory, lock-free, cache-friendly structures, no allocation on the hot path, kernel bypass |
+| Deterministic replay required | event-source every inbound message so the book replays bit-for-bit |
+| Basket/cross-instrument orders | flagged out of the single-book boundary — needs a coordinating layer above the engines |
+
 #### Requirements
 - **FR:**
   - Accept new orders (market, limit, IOC, FOK), cancels, and cancel/replace for each instrument
@@ -16331,6 +16851,20 @@ Absorb many independent high-rate inbound streams (market-data ticks plus order 
 - Throughput target and latency budget? (assume ~1-3M msg/s peak, microsecond-scale ingest-to-dispatch)
 - Are there cross-instrument events (basket orders, portfolio risk)? (flag: different boundary)
 - Do consumers need replay from arbitrary points, or just latest-plus-recovery? (drives log retention)
+
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Both data and control plane | split into a lossy high-rate tick path and a lossless order-entry path with different guarantees |
+| Multiple venue protocols (FIX, ITCH, proprietary) | per-feed handler adapters normalising into one canonical internal event format |
+| Ticks may be dropped under load | conflation — keep only the latest per instrument when a consumer falls behind |
+| Order flow must not be lost | bounded queues with explicit NACK/backpressure on overload, never silent drop |
+| UDP multicast available | fan out market data via multicast with a sequence-gap recovery/replay channel |
+| Microsecond ingest-to-dispatch at 1-3M msg/s | lock-free ring buffers, sharding per instrument, and busy-polling threads pinned to cores |
+| Consumers need arbitrary replay | retain an ordered log with offsets; latest-plus-recovery only needs a short buffer |
+| Cross-instrument events | flagged as a different boundary requiring a higher coordination layer |
 
 #### Requirements
 - **FR:**
