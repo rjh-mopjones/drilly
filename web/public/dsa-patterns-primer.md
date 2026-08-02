@@ -225,6 +225,74 @@ Two signals fold into one: (1) **vocabulary fluency** — staff candidates speak
 
 The 23 individual pattern topics that follow are the expansion of each row in these tables. Drilling them in order is wasted effort; instead, drill them in *frequency order* — the patterns that appear most often in interviews (arrays & hashing, two pointers, sliding window, binary search, trees, graph traversals, DP) deserve 80% of your practice budget. The advanced topics (segment tree, KMP, Tarjan's) are recognition-only — you should know the name and the signal but not feel you need to write them from scratch unprepared. If you can read a prompt and name the pattern within 30 seconds using these tables, the rest of the interview is mechanical execution.
 
+### Master keyword to pattern table
+
+The compiled vocabulary. Interviewers aren't hiding the pattern — they're testing whether you can hear it. Scan the prompt for these phrasings; the **Why** column is the part worth memorising, because it's what you say out loud to justify the choice.
+
+| Phrase in the prompt | Pattern it implies | Why |
+|---|---|---|
+| "contiguous subarray" / "substring" | Sliding window or prefix sum | Contiguity means a window has a start and an end you can move incrementally instead of re-scanning |
+| "longest / shortest ... such that" | Variable-size sliding window | The constraint is monotonic in window size, so shrinking from the left restores feasibility |
+| "at most K distinct" | Sliding window (shrink-when-violates) | Adding elements only ever increases distinct count, so the violation is repaired from the left |
+| "exactly K" (on a contiguous range) | Sliding window, twice | `exactly(K) = atMost(K) − atMost(K−1)`; "exactly" isn't monotonic but "at most" is |
+| "subarray sum equals K" (negatives allowed) | Prefix sum + hash map | With negatives the running sum isn't monotonic, so a window can't shrink correctly |
+| "range sum query", called many times | Prefix sum (static) or Fenwick/segment tree (with updates) | Precompute once to answer each query in `O(1)` or `O(log n)` |
+| "range update, then read" | Difference array | Record deltas at the two boundaries; one `O(n)` sweep materialises every update |
+| "sorted array" + "pair / triplet summing to" | Two pointers | Sortedness makes the sum monotonic in each pointer, so each step provably discards candidates |
+| "sorted array" + "`O(1)` extra space" | Two pointers | Rules out the hash map that would otherwise be the obvious answer |
+| "remove duplicates in-place" | Two pointers (slow/fast write index) | One pointer reads, one writes; no extra allocation |
+| "palindrome" | Two pointers from both ends, or expand-around-centre | The definition is literally a two-ended comparison |
+| "next greater / next smaller element" | Monotonic stack | Each element is pushed once and popped once by the first element that dominates it |
+| "largest rectangle" / "trapping water" / "stock span" | Monotonic stack | All are "find the nearest boundary on each side that breaks the trend" in disguise |
+| "maximum / minimum of every window of size K" | Monotonic deque | The stack must also evict from the front as the window slides |
+| "sorted" + "find / search" | Binary search | Each comparison halves the candidate space |
+| "minimise the maximum" / "maximise the minimum" | Binary search on the answer | The feasibility check is monotonic in the answer, which is the only precondition binary search needs |
+| "smallest capacity / speed / K such that ..." | Binary search on the answer | Same shape: you're searching a value range, not an index range |
+| "rotated sorted array" | Modified binary search | One half is always still sorted; test which, then decide the side |
+| "kth largest / smallest" | Heap of size `k`, or quickselect | A size-`k` heap costs `O(n log k)`; quickselect is `O(n)` expected but unstable |
+| "top K frequent" | Hash map count + heap or bucket sort | Counting is `O(n)`; only the selection step needs ordering |
+| "median of a stream" | Two heaps | A max-heap of the low half and a min-heap of the high half keep the middle at the two tops |
+| "merge K sorted ..." | Heap of size `k` | Only the `k` current heads can be the next output |
+| "schedule" / "meeting rooms" / "minimum number of X to cover" | Intervals + heap or greedy | Sort by one endpoint, then sweep |
+| "merge overlapping intervals" | Sort by **start** | Overlap can only occur with the interval you just placed |
+| "maximum number of non-overlapping intervals" | Sort by **end**, greedy | Finishing earliest leaves the most room for everything after |
+| "prerequisite" / "before and after" / "dependency" | Topological sort | The prompt is describing a DAG's edges in words |
+| "is it possible to finish / order them" | Topological sort with cycle detection | Impossible exactly when a cycle exists |
+| "shortest path" + unweighted or "each move costs 1" | BFS | The first time BFS reaches a node it has used the fewest edges |
+| "shortest path" + non-negative weights | Dijkstra | Greedy settling is only valid when no edge can lower a finished distance |
+| "shortest path" + negative weights | Bellman-Ford | Needs repeated relaxation, and detects negative cycles |
+| "shortest path between every pair" | Floyd-Warshall | `O(V³)` all-pairs beats running a single-source algorithm `V` times on dense graphs |
+| "connected components" / "number of islands" / "groups" | DFS/BFS flood fill, or union-find | Union-find wins when edges arrive incrementally or connectivity is queried repeatedly |
+| "grid" / "matrix" + "reach / spread / fill" | BFS or DFS (the grid *is* the graph) | Cells are nodes, adjacency is the four or eight neighbours |
+| "minimum cost to connect all" | Minimum spanning tree | Connect everything for the least total weight, no path guarantees |
+| "detect a cycle" (linked list) | Floyd's tortoise and hare | `O(1)` space; the pointers must meet inside a loop |
+| "detect a cycle" (graph) | DFS with three colours (directed) or parent tracking (undirected) | A back edge to a node still on the stack is the cycle |
+| "reverse the list" / "reorder in place" | Linked-list pointer manipulation with a dummy head | The dummy removes the head special case |
+| "nth from the end" / "middle of the list" | Fast and slow pointers | One traversal instead of measuring the length first |
+| "return all / generate every" | Backtracking | You're enumerating a decision tree, not optimising over it |
+| "all permutations / combinations / subsets" | Backtracking (choose, explore, un-choose) | Each recursion level is one decision |
+| "number of ways to ..." | Dynamic programming | Counting decomposes into sums over subproblems |
+| "minimum / maximum cost to ..." over choices | Dynamic programming | Optimal substructure with overlapping subproblems |
+| "can you partition / reach / make up exactly" | DP (subset-sum family) | A reachability table over the target value |
+| "longest increasing / common subsequence" | DP | Subsequence (non-contiguous) rules out sliding window immediately |
+| "prefix" / "autocomplete" / "starts with" | Trie | Shared prefixes are shared paths, so lookup is `O(word length)` regardless of dictionary size |
+| "array of n integers in the range `[1, n]`" | Cyclic sort / index-as-hash | Each value has a natural home index, so the array is its own hash table |
+| "appears twice except one" / "appears once" | XOR | `x ^ x = 0`, so pairs cancel and the loner survives |
+| "without using the `+` operator" | Bit manipulation | XOR is addition without carry; AND-then-shift is the carry |
+| "subsets of a set with `n ≤ 20`" | Bitmask enumeration or bitmask DP | `2²⁰ ≈ 10⁶` is small enough to enumerate |
+| "in-place" / "`O(1)` extra space" | Two pointers, cyclic sort, XOR, Floyd | These are exactly the techniques that avoid an auxiliary structure |
+| "stream" / "you can't re-read the input" | Heap, reservoir sampling, or running aggregate | You get one pass and bounded memory |
+
+**When two rows match, take the more specific one.** "Next greater element in a *circular* array" is monotonic stack with a `2n` pass, not plain monotonic stack. "Shortest path in a *weighted* grid" is Dijkstra, not BFS.
+
+**The genuinely ambiguous phrases**, and what breaks the tie:
+
+- **"subarray sum"** — all-positive values means sliding window; negatives present means prefix sum plus a hash map. Ask about the value range.
+- **"find the pair"** — sorted input means two pointers; unsorted means a hash map, unless `O(1)` space is demanded, in which case sort first and accept `O(n log n)`.
+- **"shortest"** — unweighted means BFS, non-negative weights mean Dijkstra, negative weights mean Bellman-Ford, and a DAG means topological-order DP. Always ask about the weights.
+- **"maximum"** — over a contiguous range with negatives allowed is Kadane, not sliding window; over choices is DP; over a greedy-safe structure is greedy, but only if you can defend it.
+- **"count the ways"** — DP if choices compose; combinatorics if there's a closed form. Check whether the constraints allow a formula.
+
 ### Q1. "Subarray sum equals K" — keyword scan, pattern, why.
 
 **Prefix sum + hash map**. The keyword "subarray sum equals K" is the canonical signal. Naive O(N²) checks every (i, j) pair. The trick: maintain `prefix[i]` = sum of first `i` elements; then `sum(nums[l..r]) = prefix[r+1] - prefix[l]`. So "subarray summing to K" becomes "two prefix sums differ by K", which is a Two-Sum-style hash-map lookup. One pass, O(N) time, O(N) space. Critical seed: initialise `seen = {0: 1}` to cover the case where the prefix itself equals K. Same trick generalises to subarray sum divisible by K (store `prefix % K`), subarray XOR equals K (store prefix XOR), contiguous array of 0s and 1s (treat 0 as -1).
@@ -248,6 +316,55 @@ Three valid answers. (1) **Heap of size K** — keep a min-heap of K elements; i
 ### Q6. Senior interview angle: prompt says "merge K sorted lists" — three solutions, pick.
 
 (1) **Brute concat + sort** — O(N log N) where N is total elements. Easy but ignores the "sorted" structure. (2) **Heap of size K** — push the head of each list; pop the smallest, advance that list, push the new head. O(N log K). The canonical answer. (3) **Divide and conquer** — pairwise merge K lists down to 1 in log K rounds. Also O(N log K) but with better cache behaviour for very large K. The interviewer is testing whether you reach for the heap reflexively from the "K sorted" signal, and whether you can articulate why it beats brute concat (you avoid re-sorting elements that are already in order). The space difference also matters: heap is O(K), brute is O(N).
+
+
+### Constraint and complexity signal tables
+
+The keyword table tells you *which family*. The constraints tell you *which complexity you're allowed*, and that often eliminates every candidate but one. Read the constraints before you finish reading the problem statement.
+
+**Input size → target complexity → likely patterns**
+
+| `n` up to | Target complexity | What that usually means |
+|---|---|---|
+| 10 | `O(n!)` or `O(2ⁿ)` | Full enumeration is expected — permutations, backtracking over every ordering |
+| 20 | `O(2ⁿ)` or `O(2ⁿ·n)` | Bitmask enumeration or bitmask DP over subsets; `2²⁰ ≈ 10⁶` |
+| 100 | `O(n³)` | Floyd-Warshall, interval DP, matrix-chain-shaped problems |
+| 1,000 | `O(n²)` | Pairwise DP (edit distance, LCS), the quadratic LIS, all-pairs comparison |
+| 10⁵ | `O(n log n)` | Sorting, heap, binary search on the answer, sweep line, segment tree |
+| 10⁶ | `O(n)` or `O(n log n)` | Single pass — sliding window, prefix sums, counting, two pointers |
+| 10⁸ and up | `O(n)` with a tiny constant | Bit tricks, counting sort, streaming; nothing that allocates per element |
+| 10⁹ and up | `O(log n)`, `O(√n)`, or closed form | You cannot touch every element. Binary search the answer, factorise to `√n`, or find the formula |
+
+The reverse reading is the one that wins interviews: **`n = 10⁵` with a required `O(n log n)` tells you a sort or a heap is in the answer before you know what the problem is.** Say that out loud — it's the cheapest way to show you reason from constraints.
+
+**Data-structure tell → pattern**
+
+| What the input looks like | What it points at | Why |
+|---|---|---|
+| Already sorted | Two pointers or binary search | Sortedness is free monotonicity; using a hash map instead wastes it |
+| "You may not modify the array" | Extra structure allowed, `O(1)`-space tricks ruled out | Cyclic sort and in-place marking are off the table |
+| "`O(1)` extra space" required | Two pointers, cyclic sort, XOR, Floyd's cycle detection | These are the only families that avoid an auxiliary structure |
+| Values bounded to a small range | Counting sort, bucketing, index-as-hash | A `k`-sized array replaces the comparison or the hash |
+| Values in exactly `[1, n]` with `n` elements | Cyclic sort / index-as-hash | Every value has a home index; the array is its own hash table |
+| Negative numbers present | Prefix sum + hash map, Bellman-Ford, Kadane | Rules out sliding window on sums and rules out Dijkstra |
+| Duplicates allowed | Lower/upper bound rather than plain binary search; dedup logic in backtracking | "Find it" becomes "find the boundary of the run" |
+| A stream you can't re-read | Heap, reservoir sampling, running aggregate | One pass, bounded memory, no random access |
+| Queries interleaved with updates | Fenwick tree, segment tree, or balanced BST | A static prefix array is invalidated by every update |
+| Many queries on static data | Precompute — prefix sums, sparse table, sorted copy | Amortise the build across the query count |
+| Very sparse graph (`E ≈ V`) | Adjacency list + BFS/DFS/Dijkstra | An adjacency matrix wastes `O(V²)` |
+| Very dense graph (`E ≈ V²`) | Adjacency matrix, Floyd-Warshall | The matrix is no longer wasteful and the constants are better |
+| The input is a grid | Treat it as an implicit graph | Cells are nodes and neighbours are edges; no explicit graph is built |
+
+**Read combinations, not single signals.** One signal narrows; two usually decide:
+
+- **"sorted" + "`O(1)` space"** — hashing is out, two pointers is in. This pair alone solves most "find the pair" prompts.
+- **"contiguous" + "negatives allowed"** — sliding window is out, prefix sum plus hash map is in.
+- **"all solutions" + "`n ≤ 20`"** — exponential is expected; backtracking, not DP.
+- **"shortest" + "unweighted"** — BFS, and mentioning Dijkstra here reads as not having noticed the weights.
+- **"`n ≤ 10⁵`" + "count pairs satisfying ..."** — the `O(n²)` double loop is `10¹⁰` operations and won't pass; you need sorting, a BIT, or a hash-map counting trick.
+- **"in the range `[1, n]`" + "`O(1)` space" + "find the duplicate"** — cyclic sort or Floyd's cycle detection on the value-as-pointer graph. Almost nothing else fits all three.
+
+**Where the implementation lives** — the Algorithms primer's *Algorithm Design & Interview Playbook* topic carries the same constraint-to-complexity table alongside the full problem-attack checklist and worked brute-force-to-optimal transcripts.
 
 ---
 
@@ -4610,6 +4727,58 @@ Three signals. (1) **Complexity discipline as a pre-coding check** — senior ca
 
 Complexity and edge cases are the meta-disciplines that apply to every pattern in this primer. They're what the interviewer is *implicitly* grading on every problem — not just "does the code work" but "does the candidate scan constraints, derive target complexity, enumerate edge cases, narrate the analysis". If you internalise the cheat sheet and the edge-case checklist, every problem becomes easier because you've front-loaded the analysis. And the senior interview signal — narrate constraints, complexity, edge cases all out loud — is what separates "writes working code" from "thinks like a staff engineer".
 
+### Complexity by pattern — the reference table
+
+Every pattern in this primer with the complexity you should be able to state without thinking, and — the part that actually matters — the one sentence that *justifies* it. Interviewers rarely ask "what's the complexity"; they ask "why", and the third column is the answer.
+
+| Pattern | Time | Space | What drives it |
+|---|---|---|---|
+| Arrays & hashing | `O(n)` | `O(n)` | One pass, each lookup and insert `O(1)` average |
+| Two pointers | `O(n)` | `O(1)` | The two pointers only ever move toward each other, so at most `n` total moves |
+| Two pointers after sorting | `O(n log n)` | `O(1)` or `O(n)` | The sort dominates; the scan itself is linear |
+| Sliding window | `O(n)` amortised | `O(k)` | Each element enters the window once and leaves once — `2n` operations, not `n²` |
+| Prefix sum (build then query) | `O(n)` build, `O(1)` query | `O(n)` | One cumulative pass; each query is a single subtraction |
+| Difference array | `O(1)` per update, `O(n)` finalise | `O(n)` | Updates touch two cells; one sweep materialises them all |
+| Monotonic stack | `O(n)` amortised | `O(n)` | Each index is pushed exactly once and popped at most once |
+| Monotonic deque | `O(n)` amortised | `O(k)` | Same push-once/pop-once argument, plus one eviction per element from the front |
+| Binary search | `O(log n)` | `O(1)` | Each comparison halves the candidate interval |
+| Binary search on the answer | `O(n log R)` | `O(1)` | `log R` iterations over the value range, each running an `O(n)` feasibility check |
+| Linked-list pointer work | `O(n)` | `O(1)` | One traversal, pointers rewired in place |
+| Floyd's cycle detection | `O(n)` | `O(1)` | Fast pointer closes the gap by one node per step inside the loop |
+| Tree DFS / BFS | `O(n)` | `O(h)` / `O(w)` | Every node visited once; space is the recursion depth `h` or the widest level `w` |
+| Balanced BST operations | `O(log n)` | `O(1)` | Height is `log n`; degenerate trees are `O(n)` |
+| Graph BFS / DFS | `O(V + E)` | `O(V)` | One visit per node plus one look at each edge |
+| Topological sort (Kahn) | `O(V + E)` | `O(V)` | Each node enqueued once when its in-degree hits zero |
+| Dijkstra (binary heap) | `O((V + E) log V)` | `O(V)` | Each edge can push once; each pop costs `log V` |
+| Bellman-Ford | `O(V·E)` | `O(V)` | `V − 1` rounds, each relaxing every edge |
+| Floyd-Warshall | `O(V³)` | `O(V²)` | Triple loop over intermediate, source, destination |
+| MST (Kruskal) | `O(E log E)` | `O(V)` | Sorting the edges dominates; the union-find work is near-linear |
+| MST (Prim with heap) | `O(E log V)` | `O(V)` | Each edge may be pushed once |
+| Heap push/pop | `O(log n)` | `O(n)` | Sift up or down the height of a complete binary tree |
+| Top-K with a size-`k` heap | `O(n log k)` | `O(k)` | `n` elements, each costing at most one `log k` push and pop |
+| Heapify a whole array | `O(n)` | `O(1)` | Most nodes are near the leaves — the sum of sift distances telescopes to `2n` |
+| Union-find (compressed + ranked) | `O(α(n))` amortised | `O(n)` | `α(n)` is the inverse Ackermann function — at most 4 for any real input |
+| DP (1-D) | `O(n)` states × transition | `O(n)` or `O(1)` rolled | Each state computed once; a rolling array drops the space |
+| DP (2-D) | `O(n·m)` | `O(n·m)` or `O(min(n,m))` | One cell per state pair; keep one row if you don't need reconstruction |
+| Knapsack | `O(n·W)` | `O(W)` rolled | Pseudo-polynomial: `W` is a *value*, not the input size |
+| Backtracking (subsets) | `O(2ⁿ·n)` | `O(n)` | `2ⁿ` subsets, each up to `O(n)` to copy out |
+| Backtracking (permutations) | `O(n!·n)` | `O(n)` | `n!` orderings, each `O(n)` to emit |
+| Greedy after sorting | `O(n log n)` | `O(1)` | The sort dominates a single linear sweep |
+| Intervals (sort then sweep) | `O(n log n)` | `O(n)` | Same shape; the sweep is linear |
+| Trie insert / search | `O(L)` | `O(total characters)` | Cost is the word length `L`, independent of dictionary size |
+| Bit manipulation | `O(1)` or `O(word size)` | `O(1)` | Fixed-width operations, or one pass over 32/64 bits |
+| Bitmask DP | `O(2ⁿ·n)` | `O(2ⁿ)` | One state per subset, each with up to `n` transitions |
+| Cyclic sort | `O(n)` | `O(1)` | Each swap places at least one element permanently |
+| Dynamic array append | `O(1)` amortised | `O(n)` | Doubling makes the total copy cost across `n` appends `2n` |
+
+**The three complexity claims candidates most often get wrong:**
+
+1. **Sliding window is not `O(n²)`.** A `for` loop with a `while` inside *looks* quadratic. It isn't, because the inner pointer never moves backwards — say "each element is added once and removed at most once" out loud and the point is made.
+2. **Union-find is not `O(log n)`.** With both path compression and union by rank it's `O(α(n))` amortised, which is effectively constant. Quoting `O(log n)` says you've implemented only one of the two optimisations.
+3. **Knapsack's `O(n·W)` is not polynomial.** `W` is a number in the input, not a count of items, so its size is `log W` bits — the runtime is exponential in the input *length*. This is what "pseudo-polynomial" means, and it's the follow-up that separates candidates.
+
+Two more worth pre-empting: **heapify is `O(n)`, not `O(n log n)`** (the leaf-heavy shape makes the sift distances telescope), and **quickselect is `O(n)` expected but `O(n²)` worst case** — say "expected", because the unqualified claim is wrong.
+
 ### Q1. Walk me through the complexity cheat sheet.
 
 | N | Acceptable complexity |
@@ -4687,6 +4856,58 @@ Out loud, at the start of every problem:
 
 The narration earns credit for *process*, not just outcome. Even if you don't finish coding, the interviewer has heard your full analysis and can grade your reasoning. Junior candidates skip the narration and dive into code; senior candidates frontload the analysis. The interviewer's notes will reflect this difference.
 
+
+### Edge-case drill — the checklist by input type
+
+A generic "check for empty input" list is worthless in an interview because it doesn't tell you *which* case actually breaks *this* solution. What follows is the case, and the specific pattern where a naive implementation fails on it. Narrate the two or three that are live for your problem before you write code — that's the signal, not reciting all of them.
+
+**Empty input** — `[]`, `""`, a null root, a graph with no nodes.
+- Breaks: two pointers (`left = 0`, `right = len(a) - 1` gives `right = -1`), prefix sums (`prefix[0]` sentinel saves you), any `max()`/`min()` over an empty sequence, and dividing by `len(a)`.
+- Fix: the half-open `[lo, hi)` convention and a `prefix[0] = 0` sentinel remove most of these by construction rather than by a guard clause.
+
+**Single element** — one node, one character, one interval.
+- Breaks: fast/slow pointers (the "middle" and "cycle" logic both degenerate), merge intervals (there's nothing to merge), tree diameter (a single node has depth 1 and diameter 0 — an easy off-by-one).
+
+**All elements identical** — `[5,5,5,5,5]`, `"aaaa"`.
+- Breaks: quicksort with a naive pivot (`O(n²)`, which is why three-way partitioning exists), binary search for a *boundary* (plain binary search finds *an* index, not the first or last — you need `lower_bound`), and duplicate-skipping in backtracking (this is the input that produces duplicate output sets).
+
+**Already sorted / reverse sorted.**
+- Breaks: quicksort taking first-or-last as pivot (worst case, and the reason for randomised or median-of-three pivots), and a BST built by naive insertion (degenerates to a linked list, so `O(log n)` silently becomes `O(n)`).
+
+**Negative numbers and zero.**
+- Breaks: sliding window on sums (the running sum stops being monotonic, so shrinking from the left is no longer valid — switch to prefix sum plus hash map), Dijkstra (a settled distance can be improved later, so use Bellman-Ford), and maximum-product subarray (a negative times a negative flips the sign, so you must track the running *minimum* too). Zero specifically breaks product-based tricks like "product of array except self" done by dividing.
+
+**Integer overflow.**
+- Breaks: `mid = (lo + hi) / 2` in any fixed-width language, summing a large array into a 32-bit accumulator, and `abs(INT_MIN)`. Write `mid = lo + (hi - lo) // 2` reflexively. Python's arbitrary-precision integers hide this, so say it out loud to show you know it's a real bug elsewhere.
+
+**Duplicates.**
+- Breaks: "find the index" binary search when the question actually wants the first or last occurrence, backtracking on combinations (sort first, then skip `i > start and a[i] == a[i-1]`), and any set-based dedup where multiplicity is part of the answer.
+
+**Single-node or skewed tree.**
+- Breaks: recursive DFS on a 10⁵-node skewed tree — Python's default recursion limit is 1000, so this is a `RecursionError`, not a slow answer. Convert to an explicit stack or raise the limit and say why.
+
+**Disconnected or cyclic graph.**
+- Breaks: any traversal started from a single source (you must loop over all nodes to catch every component), topological sort (a cycle means no valid ordering exists — Kahn's queue empties with nodes left over, and that check *is* the cycle detection), and DFS without a visited set (infinite loop on the first cycle).
+
+**Self-loops and parallel edges.**
+- Breaks: undirected cycle detection by parent tracking (a self-loop is a cycle the parent check misses; parallel edges look like a cycle to a naive check but may not be one, depending on the definition you agree with the interviewer).
+
+**Empty string versus a single character.**
+- Breaks: palindrome expansion (odd and even centres need separate handling), and the KMP failure function (`lps[0]` is always 0 by definition, not by computation).
+
+**`k` larger than `n`.**
+- Breaks: "kth largest" (there is no answer — clarify whether to return `None`, throw, or assume the guarantee), size-`k` heaps, and fixed-size sliding windows (`k > n` means no valid window exists at all).
+
+**The two-minute pre-submit routine.** Before you say "I'm done", dry-run exactly three inputs out loud:
+
+1. **The smallest input** — empty or one element. Catches sentinel and initialisation bugs.
+2. **The boundary input** — the first and last index, the target at position 0 and at `n-1`, `k = 1` and `k = n`. Catches off-by-one, which is the single most common failure in a working-looking solution.
+3. **One adversarial input** — the case from the list above that your specific pattern is vulnerable to: all-identical for a quicksort pivot, negatives for a sliding window, a skewed tree for recursion depth.
+
+Narrating this is worth more than finding a bug, because it demonstrates you'd catch it in production too.
+
+**Where the implementation lives** — the Algorithms primer's *Algorithmic Analysis & Recurrences* topic derives these complexities from first principles (amortised analysis, recurrences, the Master Theorem), and its *Algorithm Design & Interview Playbook* topic carries the full problem-attack checklist this routine belongs to.
+
 ---
 
 ## Closing — Bring Receipts
@@ -4730,6 +4951,42 @@ Three signals come together in every coding round. (1) **Recognition speed** —
 **What follows from this topic**
 
 This is the closing topic — what follows is your daily practice. The drill: pick five random NeetCode-150 problems each morning; read each prompt; close your eyes; name the pattern in 30 seconds (out loud); name the brute force; name the optimal; name two edge cases; then verify by reading the solution. Over weeks, you'll find the recognition becomes faster, the templates become reflexive, and the edge-case enumeration becomes automatic. The goal state isn't "I've seen this exact problem before" — it's "I see the pattern from the first sentence and the rest is mechanical". Drill until that's reflex. The interview is won in the first 30 seconds.
+
+### Pattern to implementation cross-reference
+
+Use the two primers as one system. **This primer is for recognition** — read a cold prompt, spot the signals, name the pattern and the target complexity inside 30 seconds. **The Algorithms primer is for the code and the justification** — every algorithm there carries a commented reference implementation, a worked micro-example with real numbers, and the complexity derived rather than asserted. When a drill here ends in "therefore: Dijkstra", the row below tells you exactly where to go and write it.
+
+| Pattern (this primer) | Where the implementation lives (Algorithms primer) | What you'll find there |
+|---|---|---|
+| Recognition & Decision Tree | Algorithm Design & Interview Playbook | Constraint-to-complexity table, the problem-attack checklist, worked brute-force-to-optimal transcripts |
+| Pattern Signal Tables | Algorithm Design & Interview Playbook | The same constraint table plus the transformation table (nested loop → hash map, recompute → prefix sums, and so on) |
+| Arrays & Hashing | Prefix Sums, Difference Arrays & Range Techniques | Prefix-sum plus hash-map counting, the `{0: 1}` seed, prefix XOR |
+| Two Pointers | Binary Search & Searching · Comparison Sorting | The half-open interval discipline, and the sort step that makes converging pointers valid |
+| Sliding Window | Prefix Sums, Difference Arrays & Range Techniques · Algorithmic Analysis & Recurrences | Range techniques for the non-monotonic fallback, and the amortised argument for why the window is `O(n)` |
+| Prefix Sum | Prefix Sums, Difference Arrays & Range Techniques | 1-D and 2-D prefix sums, difference arrays, Fenwick tree, segment tree, sqrt decomposition |
+| Monotonic Stack | Algorithmic Analysis & Recurrences | The push-once/pop-once amortised analysis that justifies the linear bound |
+| Monotonic Deque | Algorithmic Analysis & Recurrences | Same amortised argument with the added front-eviction step |
+| Binary Search | Binary Search & Searching | Overflow-safe midpoint, `lower_bound`/`upper_bound`, binary search on the answer, rotated arrays, exponential search |
+| Linked List Patterns | Comparison Sorting · Randomized Algorithms & Selection | Merge sort on lists, and Floyd's cycle detection alongside the other constant-space pointer tricks |
+| Trees | Recursion & Divide and Conquer | Base case and recursive step, correctness by induction, converting recursion to iteration, stack-depth limits |
+| Graph Traversals (BFS / DFS) | Graph Traversal & Topological Sort | Adjacency-list construction, iterative and recursive DFS, BFS with distance and parent pointers, three-colour cycle detection |
+| Weighted Graph Algorithms | Shortest Path Algorithms · Minimum Spanning Trees | Relaxation as the shared primitive, Dijkstra with `heapq`, Bellman-Ford, Floyd-Warshall, 0-1 BFS, A\*, Kruskal, Prim |
+| Heap / Priority Queue | Comparison Sorting · Randomized Algorithms & Selection | Heap sort and the `O(n)` heapify, plus quickselect as the alternative to a size-`k` heap |
+| Topological Sort | Graph Traversal & Topological Sort | Kahn's in-degree algorithm with the cycle check, and the DFS post-order variant |
+| Union Find | Minimum Spanning Trees | Union-find with path compression and union by rank, the `α(n)` bound, and Kruskal built on top of it |
+| Dynamic Programming | Dynamic Programming Fundamentals · Classic DP Problems & Patterns | Recursion → memo → tabulation → rolling array on one problem, the state/recurrence recipe, then knapsack, LCS, edit distance, LIS, Kadane |
+| Backtracking | Backtracking & Constraint Search | The choose/explore/un-choose template, subsets three ways, permutations, duplicate skipping, N-Queens, word search, Sudoku |
+| Greedy | Greedy Algorithms | Exchange-argument correctness, activity selection, fractional knapsack, Huffman, and the coin-change counter-example |
+| Intervals | Greedy Algorithms | Activity selection — the sort-by-end greedy that underlies every non-overlapping-interval problem |
+| Tries | String Algorithms | Trie insert and search, plus KMP, Rabin-Karp and the rest of the string toolkit |
+| Bit Manipulation | Bit Manipulation | `n & (n-1)`, `n & -n` with the two's-complement reasoning, XOR tricks, counting-bits DP, submask enumeration |
+| Cyclic Sort & Index-as-Hash | Linear-Time & Advanced Sorting | Counting sort and index-as-address sorting — the same "value is its own position" idea |
+| Math, Geometry & Stream Patterns | Number Theory & Mathematical Algorithms · Computational Geometry Basics · Randomized Algorithms & Selection | Sieve, GCD, modular inverse, fast exponentiation · cross product, convex hull, shoelace · reservoir sampling |
+| Advanced / Less Common | Advanced Graph Algorithms · Prefix Sums, Difference Arrays & Range Techniques · Intractability: P, NP & Approximation | SCC, bridges, max-flow · Fenwick and segment trees · when to stop optimising and approximate |
+| Complexity & Edge Cases | Algorithmic Analysis & Recurrences | Big-O/Θ/Ω, amortised analysis, recurrences and the Master Theorem, inferring complexity from constraints |
+| Closing — Bring Receipts | Algorithm Design & Interview Playbook | The capstone: how to attack a problem you've never seen, and what to say while you do it |
+
+The direction of travel matters. Going *recognition first, code second* is how interviews actually work, and it's the order that makes the code stick — you remember Dijkstra's heap because you remember the moment you decided the weights ruled out BFS.
 
 ### Q1. Recite the complexity-by-N cheat list.
 
@@ -4801,4 +5058,51 @@ That's the goal state. Drill until reflex.
 
 The drill: read five LeetCode prompts daily, name the pattern in 30 seconds out loud, verify. Do this for four weeks and your interview performance changes qualitatively. The 23 patterns in this primer cover 95% of what you'll see. Drill them until recognition is reflex — and bring receipts.
 
+
+### The 30-second recognition drill
+
+Recognition is a separate skill from implementation, and grinding problems trains the wrong one. If you can already write BFS from memory, solving your fortieth BFS problem teaches you almost nothing. What you actually need is reps at the *first 30 seconds*. Here's how to train that specifically.
+
+**The drill itself.** Open a problem you haven't seen. Read **only the statement and the constraints** — not the examples, not the hints, and certainly not the discussion tab.
+
+1. Start a 30-second timer.
+2. Out loud (out loud matters — silent recognition doesn't transfer to the room), say four things: **the input shape**, **the objective**, **the pattern**, and **the target complexity**.
+3. Add one sentence of justification: "`n` is 10⁵ so I need `O(n log n)` at worst, and it's a contiguous subarray with all-positive values, so sliding window."
+4. Stop the timer. Now read the examples and check.
+5. Move on. **Do not solve it.** You can do 40 of these in the time one full implementation takes.
+
+Score yourself as right, wrong, or slow (over 30 seconds). Slow counts as wrong — in the room, a minute of visible floundering costs you more than a wrong-but-quickly-corrected guess.
+
+**Keep a misrecognition log.** One line per miss: the problem, what you said, what it was, and the signal you missed. The log is the whole point — after 50 drills the same three or four confusions will account for most of your misses, and those are the only things worth studying. The pairs that dominate almost everyone's log:
+
+- **Sliding window vs prefix sum** — you missed that negatives were allowed, so the running sum isn't monotonic.
+- **Sliding window vs DP** — you missed that the problem said *subsequence*, not *substring*, so contiguity was never on the table.
+- **BFS vs Dijkstra** — you missed that edges were weighted, or that "cost" wasn't uniformly 1.
+- **Greedy vs DP** — you assumed the locally optimal choice was safe without an exchange argument, which is the single most expensive assumption in this entire subject.
+- **Two pointers vs hashing** — you missed either the "already sorted" clue or the `O(1)` space requirement.
+- **Backtracking vs DP** — you missed whether the problem wanted *every* solution or just the best value or count.
+
+Each miss is a signal you can add to your own version of the tables in *Pattern Signal Tables*. A log entry that reads "missed: 'subsequence' means non-contiguous" is worth more than an hour of re-reading the DP topic.
+
+**Spacing.** When you get a pattern wrong, re-drill it the next day, then three days later, then a week later. Three correct recognitions spread over a week beats ten in one sitting — that's the whole finding of spaced repetition, and recognition is exactly the kind of retrieval task it works best on. Patterns you've never missed need no schedule at all; leave them alone.
+
+**Converting a miss into a signal.** After each wrong answer, write the *phrase in the prompt* that should have tipped you off — the literal words, not a paraphrase. "At most K distinct" is a signal. "It was about windows" is not. Signals you've written in your own words are the ones you'll actually hear under pressure.
+
+**The day before the interview.**
+
+- **Re-read**: the decision tree in *Recognition & Decision Tree*, the constraint-to-complexity table, and your own misrecognition log. That's it — maybe 30 minutes.
+- **Leave alone**: new problems, new patterns, and anything in *Advanced / Less Common*. Learning something new the day before displaces something you already knew and adds nothing you'll be asked.
+- **Do**: two or three recognition drills to warm up, and one full implementation of a pattern you're confident in, purely to reassure yourself that your hands still work.
+- **Sleep.** Recognition speed degrades faster with fatigue than almost any other cognitive skill, and recognition speed is exactly what you're being tested on.
+
+**When you genuinely don't recognise it in the room** — and it will happen — say so and start working, in this order:
+
+1. **Restate the problem** in your own words and confirm you've understood it. This buys thinking time that reads as diligence rather than stalling.
+2. **State the brute force out loud**, with its complexity. There is always a brute force, it is never wrong, and an `O(2ⁿ)` answer on the whiteboard beats a blank whiteboard every single time.
+3. **Ask what's wasteful about it** — recomputing the same range, re-scanning after a small change, repeatedly finding the minimum. The waste names the fix: prefix sums, sliding window, a heap.
+4. **Say what you're checking** as you check it: "the values can be negative, so a sliding window won't work here — let me try prefix sums with a hash map."
+
+That sequence is itself the senior signal. Interviewers are not hiring people who recognise every problem instantly; they're hiring people who make visible, structured progress on problems they don't recognise. Bring receipts for the patterns you know, and bring a method for the ones you don't.
+
 ---
+
