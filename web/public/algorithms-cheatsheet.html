@@ -79,6 +79,7 @@ pre code{background:none; padding:0; font-size:1em;}
 <li>Focus: how each classic algorithm works, its complexity, and <b>when to reach for it</b>. Concept-first — pseudocode is language-neutral.</li>
 <li>Complexities are worst-case unless tagged <i>avg</i> / <i>amort</i>. Graphs assume <b>adjacency lists</b> (V vertices, E edges) unless noted.</li>
 <li>Last 2 cards = <b>review checklist</b> + <b>symptom→cause</b> bug table. Read the constraint table first — it tells you which family the interviewer wants.</li>
+<li><b>Companion:</b> the <i>Algorithms</i> primer has a commented implementation, a worked micro-example and the complexity derivation for every algorithm here. The <i>Patterns</i> primer + cheat sheet cover the other half — recognising <i>which</i> algorithm a cold prompt wants.</li>
 <li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b> (keeps colour bars). 4 columns built-in.</li>
 </ul></section>
 
@@ -95,6 +96,23 @@ pre code{background:none; padding:0; font-size:1em;}
 <li><b>Amortized</b> = avg cost over a <i>sequence</i>, holds even vs adversary (dyn-array push = O(1) amort: resizes at 1,2,4,…,n cost &lt;2n total). Doubling is essential — grow-by-constant is O(n²) <span class="warn">!</span></li>
 <li><b>Average</b> = expected over an input <i>distribution</i>; fails if the distribution is violated (hash table O(1) avg).</li>
 <li>Amortized O(1) is a sequence guarantee — does <b>not</b> bound one op's latency (matters for real-time) <span class="warn">!</span></li>
+</ul>
+</section>
+
+<section class="card"><h3>Recursion &amp; Divide and Conquer</h3>
+<p>Every recursive function needs exactly two things: a <b>base case</b> that returns without recursing, and a <b>recursive step</b> that makes the input strictly smaller. Missing either → infinite recursion.</p>
+<pre><code>divide_and_conquer(problem):
+    if small enough: return solve_directly(problem)   # base case
+    parts = divide(problem)                           # split
+    sub   = [divide_and_conquer(p) for p in parts]    # conquer
+    return combine(sub)                               # the hard part</code></pre>
+<ul>
+<li>The <b>combine</b> step is where the cost and the cleverness live. Merge sort's combine is an O(n) merge → n log n. Binary search's combine is free (discard one half) → log n.</li>
+<li><b>Stack depth counts as space</b>: recursing n deep is O(n) memory even with O(1) locals. Depth log n (balanced split) is safe; depth n (linked list, skewed tree, n≤10⁵) overflows <span class="warn">!</span></li>
+<li><b>Python has no tail-call optimisation</b> — default limit ~1000 frames. Convert to an explicit stack/loop rather than raising the limit <span class="warn">!</span></li>
+<li><b>Karatsuba</b>: 4 recursive multiplies → 3 by reusing (a+b)(c+d). n<sup>log₂3</sup> ≈ n<sup>1.585</sup> beats n². The lesson: fewer subproblems beats a cheaper combine.</li>
+<li>D&amp;C vs DP: D&amp;C subproblems are <b>disjoint</b>; DP's <b>overlap</b> (so you memoise). Same recursion, different reuse.</li>
+<li>Prove correctness by <b>induction</b>: base case holds, and if the recursive calls are correct then combine is correct.</li>
 </ul>
 </section>
 
@@ -149,6 +167,19 @@ pre code{background:none; padding:0; font-size:1em;}
 <ul>
 <li>They exploit key <i>values</i> instead of comparing — not general-purpose (need bounded/structured keys). Counting must be <b>stable</b> to drive radix's inner pass (prefix-sum counts, place right-to-left) <span class="warn">!</span></li>
 <li>Radix is O(n) only if d, b constant; if k≈n² counting is O(n²) — no free lunch <span class="warn">!</span></li>
+</ul>
+<h4>What libraries actually ship</h4>
+<table><thead><tr><th>Sort</th><th>Used by</th><th>Why</th></tr></thead><tbody>
+<tr><td>Timsort</td><td>Python, Java objects</td><td>stable + adaptive: O(n) on runs</td></tr>
+<tr><td>Introsort</td><td>C++ <code>std::sort</code></td><td>quicksort, falls back to heap</td></tr>
+<tr><td>Dual-pivot quick</td><td>Java primitives</td><td>stability irrelevant for ints</td></tr>
+<tr><td>External merge</td><td>DBs, big data</td><td>data exceeds RAM</td></tr>
+</tbody></table>
+<ul>
+<li><b>Timsort</b> finds already-sorted <i>runs</i> and merges them, insertion-sorting short ones — O(n) on partly-ordered real data, O(n log n) worst.</li>
+<li><b>Introsort</b> watches recursion depth; past ~2·log₂n (bad pivots heading for n²) it switches to heap sort, buying quicksort's speed with heap's guarantee.</li>
+<li><b>External merge sort</b>: sort RAM-sized chunks into sorted runs on disk, then k-way merge them. Merge sort wins here because it streams sequentially; quicksort's random access thrashes disk.</li>
+<li>"Sort 10M 32-bit ints as fast as possible" → <b>radix, base 256, 4 passes</b>, O(n). Flip the sign bit for signed keys <span class="warn">!</span></li>
 </ul>
 </section>
 
@@ -303,12 +334,16 @@ union(a,b):                   # union by rank/size
 <p>Every algo here just <b>relaxes edges</b> in a different order: <code>if d[u]+w &lt; d[v]: d[v]=d[u]+w</code>.</p>
 <table><thead><tr><th>Situation</th><th>Algorithm</th><th>Time</th></tr></thead><tbody>
 <tr><td>Unweighted</td><td>BFS</td><td>V+E</td></tr>
+<tr><td>Weights all 0 or 1</td><td>0-1 BFS (deque)</td><td>V+E</td></tr>
+<tr><td>DAG, any weights</td><td>Topo order + relax</td><td>V+E</td></tr>
 <tr><td>Non-neg weights, 1 src</td><td>Dijkstra</td><td>(V+E)log V</td></tr>
 <tr><td>Negative edges</td><td>Bellman-Ford</td><td>V·E</td></tr>
 <tr><td>All pairs, dense</td><td>Floyd-Warshall</td><td>V³</td></tr>
 <tr><td>Goal-directed, grid</td><td>A* (g+h)</td><td>≤ Dijkstra</td></tr>
 </tbody></table>
 <ul>
+<li><b>0-1 BFS</b>: push weight-0 edges to the <i>front</i> of a deque, weight-1 to the back — the deque stays sorted by distance, so you get Dijkstra's answer without the heap's log factor.</li>
+<li><b>DAG</b>: no cycles means one pass in topological order suffices — relax each vertex's out-edges when you reach it. Handles <i>negative</i> weights in linear time, which Dijkstra cannot.</li>
 <li><b>Cannot</b> add a constant to remove negatives — it penalizes longer paths unequally, changing the answer <span class="warn">!</span></li>
 <li>Dijkstra does <b>not</b> detect negative cycles — silently wrong on negatives <span class="warn">!</span></li>
 <li>Floyd-Warshall: intermediate vertex <code>k</code> must be the <b>outermost</b> loop <span class="warn">!</span> A* optimal only with an admissible (and consistent) heuristic.</li>

@@ -79,6 +79,8 @@ pre code{background:none; padding:0; font-size:1em;}
 <li>This sheet is built for <b>recognition at a glance</b>: scan the signal, name the pattern, justify with complexity. Start with the 3 grid cards (<b>4-Lens Scan</b>, <b>Signal→Pattern</b>, <b>Return-Type→Pattern</b>), then the per-pattern reference cards.</li>
 <li><span class="warn">!</span> = trap / disambiguation. <code>&#9744;</code> = pre-code checklist item.</li>
 <li>~30 patterns cover ~95% of LeetCode. Always state the brute-force baseline first, then the pattern.</li>
+<li><b>Canonical LeetCode</b> cards near the end list the defining problems per pattern — drill them by <i>recognition only</i> (30 s: name the pattern + target complexity, then check).</li>
+<li><b>Companion:</b> the <i>Algorithms</i> primer/cheat sheet holds the implementations. This sheet gets you the name; that one gets you the code — see <b>Pattern → Implementation</b>.</li>
 <li><b>Print:</b> Ctrl/⌘-P → A4, margins <i>None</i>, scale 100%, background graphics <b>on</b>. 4 columns built-in.</li>
 </ul></section>
 
@@ -657,6 +659,61 @@ median = -lo[0] if len(lo)&gt;len(hi) else (-lo[0]+hi[0])/2</code></pre>
 <tr><td>quickselect (avg / worst)</td><td>O(N) / O(N²)</td></tr>
 </tbody></table>
 <p><span class="warn">!</span> Always state <b>time and space</b> out loud, and the brute-force baseline first.</p></section>
+
+<section class="card"><h3>Canonical LeetCode by Pattern &#9312;</h3>
+<p>The problem that <i>defines</i> each pattern. If you can recognise these cold, you recognise the family.</p>
+<table><thead><tr><th>Pattern</th><th>Canonical problems</th></tr></thead><tbody>
+<tr><td>Arrays &amp; Hashing</td><td>1 Two Sum · 49 Group Anagrams · 128 Longest Consecutive Sequence · 238 Product of Array Except Self</td></tr>
+<tr><td>Two Pointers</td><td>15 3Sum · 11 Container With Most Water · 125 Valid Palindrome · 42 Trapping Rain Water</td></tr>
+<tr><td>Sliding Window</td><td>3 Longest Substring w/o Repeating · 76 Minimum Window Substring · 424 Longest Repeating Char Replacement · 567 Permutation in String</td></tr>
+<tr><td>Prefix Sum</td><td>560 Subarray Sum Equals K · 974 Subarray Sums Divisible by K · 303 Range Sum Query - Immutable</td></tr>
+<tr><td>Monotonic Stack</td><td>739 Daily Temperatures · 496 Next Greater Element I · 84 Largest Rectangle in Histogram</td></tr>
+<tr><td>Monotonic Deque</td><td>239 Sliding Window Maximum · 862 Shortest Subarray with Sum at Least K</td></tr>
+<tr><td>Binary Search</td><td>704 Binary Search · 33 Search in Rotated Sorted Array · 875 Koko Eating Bananas <span class="warn">!</span> (on the answer)</td></tr>
+<tr><td>Linked List</td><td>206 Reverse Linked List · 141 Linked List Cycle · 21 Merge Two Sorted Lists · 23 Merge k Sorted Lists</td></tr>
+<tr><td>Trees</td><td>104 Maximum Depth · 102 Level Order Traversal · 98 Validate BST · 124 Binary Tree Maximum Path Sum</td></tr>
+<tr><td>Tries</td><td>208 Implement Trie · 211 Design Add and Search Words · 212 Word Search II</td></tr>
+<tr><td>Heap / Top-K</td><td>215 Kth Largest in an Array · 347 Top K Frequent Elements · 295 Find Median from Data Stream · 973 K Closest Points</td></tr>
+</tbody></table></section>
+
+<section class="card"><h3>Canonical LeetCode by Pattern &#9313;</h3>
+<table><thead><tr><th>Pattern</th><th>Canonical problems</th></tr></thead><tbody>
+<tr><td>Graph BFS / DFS</td><td>200 Number of Islands · 133 Clone Graph · 994 Rotting Oranges · 127 Word Ladder</td></tr>
+<tr><td>Weighted Graph</td><td>743 Network Delay Time · 787 Cheapest Flights Within K Stops · 778 Swim in Rising Water · 1584 Min Cost to Connect All Points</td></tr>
+<tr><td>Topological Sort</td><td>207 Course Schedule · 210 Course Schedule II · 269 Alien Dictionary</td></tr>
+<tr><td>Union-Find</td><td>547 Number of Provinces · 684 Redundant Connection · 721 Accounts Merge</td></tr>
+<tr><td>Dynamic Programming</td><td>70 Climbing Stairs · 322 Coin Change · 1143 Longest Common Subsequence · 300 Longest Increasing Subsequence · 416 Partition Equal Subset Sum</td></tr>
+<tr><td>Kadane / max subarray</td><td>53 Maximum Subarray · 152 Maximum Product Subarray</td></tr>
+<tr><td>Backtracking</td><td>78 Subsets · 46 Permutations · 39 Combination Sum · 51 N-Queens</td></tr>
+<tr><td>Greedy</td><td>55 Jump Game · 621 Task Scheduler · 45 Jump Game II</td></tr>
+<tr><td>Intervals</td><td>56 Merge Intervals · 57 Insert Interval · 435 Non-overlapping Intervals · 253 Meeting Rooms II</td></tr>
+<tr><td>Cyclic Sort / index-as-hash</td><td>268 Missing Number · 287 Find the Duplicate Number · 448 Find All Numbers Disappeared · 41 First Missing Positive</td></tr>
+<tr><td>Bit Manipulation</td><td>136 Single Number · 338 Counting Bits · 371 Sum of Two Integers · 260 Single Number III</td></tr>
+<tr><td>Math / Geometry / Stream</td><td>169 Majority Element · 149 Max Points on a Line · 382 Linked List Random Node</td></tr>
+<tr><td>Advanced</td><td>315 Count of Smaller Numbers After Self · 218 The Skyline Problem · 329 Longest Increasing Path in a Matrix</td></tr>
+</tbody></table>
+<p>Drill these by <b>recognition only</b>: read the title + constraints, say the pattern and target complexity in 30 s, then check. Don't solve them again — you're training the first 30 seconds, not your hands.</p></section>
+
+<section class="card"><h3>Pattern &rarr; Implementation</h3>
+<p>This sheet gets you to the <i>name</i>. The <b>Algorithms</b> primer/cheat sheet has the commented code, the worked example and the complexity derivation.</p>
+<table><thead><tr><th>Pattern here</th><th>Algorithms topic</th></tr></thead><tbody>
+<tr><td>Two Pointers · Binary Search</td><td>Binary Search &amp; Searching</td></tr>
+<tr><td>Sliding Window · Prefix Sum</td><td>Prefix Sums, Difference Arrays &amp; Range Techniques</td></tr>
+<tr><td>Monotonic Stack / Deque</td><td>Algorithmic Analysis (the amortised argument)</td></tr>
+<tr><td>Trees · Linked List recursion</td><td>Recursion &amp; Divide and Conquer</td></tr>
+<tr><td>Graph BFS/DFS · Topo Sort</td><td>Graph Traversal &amp; Topological Sort</td></tr>
+<tr><td>Weighted Graph</td><td>Shortest Path Algorithms · Minimum Spanning Trees</td></tr>
+<tr><td>Union-Find</td><td>Minimum Spanning Trees (DSU + Kruskal)</td></tr>
+<tr><td>Heap / Top-K</td><td>Comparison Sorting · Randomized Algorithms &amp; Selection</td></tr>
+<tr><td>Dynamic Programming</td><td>DP Fundamentals · Classic DP Problems &amp; Patterns</td></tr>
+<tr><td>Backtracking</td><td>Backtracking &amp; Constraint Search</td></tr>
+<tr><td>Greedy · Intervals</td><td>Greedy Algorithms</td></tr>
+<tr><td>Tries · string matching</td><td>String Algorithms</td></tr>
+<tr><td>Bit Manipulation</td><td>Bit Manipulation</td></tr>
+<tr><td>Cyclic Sort</td><td>Linear-Time &amp; Advanced Sorting</td></tr>
+<tr><td>Math · Geometry · Stream</td><td>Number Theory · Computational Geometry · Randomized</td></tr>
+<tr><td>Advanced</td><td>Advanced Graph Algorithms · Range Techniques · Intractability</td></tr>
+</tbody></table></section>
 
 <section class="card"><h3>&#9733; Disambiguation Traps</h3>
 <table><thead><tr><th>Both fit… choose by</th></tr></thead><tbody>
