@@ -5128,284 +5128,1128 @@ The strong interview answer names **quickselect as asymptotically optimal** (exp
 ### Summary
 
 **What this topic covers**
-Precomputation techniques that turn repeated range queries and range updates from `O(n)` each into `O(1)` or `O(log n)`: 1D and 2D prefix sums for static range-sum queries, difference arrays for batched range *updates*, sqrt decomposition as a general-purpose blockwise middle ground, and sparse tables for `O(1)` idempotent range queries (like range-minimum) on static data. The mental model: spend `O(n)` (or `O(n log n)`) once to build a structure, then answer many queries cheaply. Prefix sums and difference arrays are duals — one answers range queries, the other applies range updates.
+Precomputation techniques that turn repeated range *queries* and range *updates* from `O(n)` each into `O(1)` or `O(log n)`. Concretely: **1-D and 2-D prefix sums** for static range-sum queries, **difference arrays** (1-D and 2-D) for batched range updates, **prefix XOR** for range-XOR and the classic "subarray with property P" trick, the **prefix-sum + hash map** pattern that cracks "count subarrays summing to `k`", **Fenwick trees** and **segment trees** for when the data changes between queries, **sqrt decomposition** as a general-purpose blockwise middle ground, and **sparse tables** for `O(1)` idempotent range queries on immutable data.
+
+**Mental model**
+One sentence: *spend `O(n)` once so that each of your many queries costs almost nothing.* Every structure here is a different point on the "how much do I pay to build vs how much per query vs can I update?" curve. Prefix sums and difference arrays are **duals** — a prefix sum turns a per-element array into cumulative totals so a *query* becomes one subtraction; a difference array turns it into deltas so an *update* becomes two writes. Fenwick and segment trees are what you reach for when the array stops being static: they give up `O(1)` queries to buy `O(log n)` updates. Sqrt decomposition sits between "scan it" and "build a tree": chunk the array so both halves of the work are `√n`-sized.
 
 **Key terms**
-Prefix sum — `pre[i] = a[0] + ... + a[i-1]`, so `sum(l, r) = pre[r+1] - pre[l]`. Difference array — `diff[i] = a[i] - a[i-1]`; adding v over `[l, r]` is `diff[l] += v; diff[r+1] -= v`, then a prefix sum reconstructs a. 2D prefix sum — inclusion-exclusion over a rectangle. Sqrt decomposition — split into `~sqrt(n)` blocks, precompute per-block aggregates. Sparse table — precomputed answers for every power-of-two-length interval, enabling `O(1)` idempotent queries. Idempotent — an operation where `f(x, x) = x` (min, max, gcd), so overlapping ranges don't double-count. Static — no updates after building.
+- **Prefix sum** — `pre[i]` is the total of the first `i` elements, so `sum(l, r) = pre[r+1] - pre[l]`.
+- **Sentinel `pre[0] = 0`** — the leading zero that makes `l = 0` need no special case.
+- **Difference array** — `diff[i] = a[i] - a[i-1]`; a range-add becomes `diff[l] += v; diff[r+1] -= v`.
+- **Inclusion-exclusion** — the `- - +` corner arithmetic that extracts a rectangle from four origin-anchored rectangles.
+- **Offline** — all updates arrive before any query, so you can batch them; **online** means they interleave.
+- **Fenwick tree (BIT)** — implicit tree over prefix sums giving `O(log n)` point-update and prefix-query.
+- **Segment tree** — explicit tree of range aggregates; `O(log n)` query and update, any associative operation.
+- **Sqrt decomposition** — split into `≈√n` blocks with a cached aggregate per block; `O(√n)` per operation.
+- **Sparse table** — precomputed answer for every power-of-two-length interval; `O(1)` query, no updates.
+- **Idempotent** — an operation where `f(x, x) = x` (min, max, gcd), so overlapping ranges don't double-count.
 
 **Core mechanics**
-1D prefix sum: build `pre` in `O(n)`, each range sum is `pre[r+1] - pre[l]` in `O(1)`. 2D: `pre[i][j]` is the sum of the rectangle from origin; a query rectangle uses inclusion-exclusion `pre[r2+1][c2+1] - pre[r1][c2+1] - pre[r2+1][c1] + pre[r1][c1]` in `O(1)` after `O(nm)` build. Difference array: to apply many range-add updates offline, record `+v` at l and `-v` at r+1 for each, then one prefix-sum pass materializes the final array — k updates in `O(k + n)` total instead of `O(kn)`. Sqrt decomposition: `~sqrt(n)` blocks, query touches at most two partial blocks (`O(sqrt(n))` elements) plus whole-block aggregates (`O(sqrt(n))` blocks) = `O(sqrt(n))` per query and update. Sparse table: `table[k][i]` answers the interval starting at i of length `2^k`, built by `table[k][i] = f(table[k-1][i], table[k-1][i + 2^(k-1)])` in `O(n log n)`; a query covers `[l, r]` with two overlapping power-of-two intervals in `O(1)` — valid only for idempotent f.
+1-D prefix sum: build in `O(n)`, each range sum is one subtraction, `O(1)`. 2-D: `pre[i][j]` is the sum of the rectangle anchored at the origin; a query rectangle costs four lookups via inclusion-exclusion, `O(1)` after an `O(nm)` build. Difference array: record `+v` at `l` and `-v` at `r+1` per update, then one prefix-sum pass materialises everything — `k` updates in `O(k + n)` instead of `O(kn)`; the 2-D version stamps four corners then sweeps both axes. Prefix-sum + hash map: track the running sum `s` and a frequency map of sums seen so far, seeded `{0: 1}`; at each index add `count[s - k]` to the answer. Fenwick: each index `i` covers the `i & -i` elements ending at `i`, so update and prefix-query both walk `O(log n)` nodes. Segment tree: `O(n)` build, `O(log n)` point-update and range-query for any associative `f`. Sqrt decomposition: a query touches ≤ 2 partial blocks (`O(√n)` elements) plus ≤ `√n` whole-block aggregates, so `O(√n)` both ways. Sparse table: `table[k][i]` answers the length-`2ᵏ` interval at `i`, built in `O(n log n)`; a query covers `[l, r]` with two overlapping power-of-two intervals in `O(1)`.
 
 **Trade-offs**
-Prefix sum vs Fenwick/segment tree: prefix sums give `O(1)` queries but `O(n)` per update (you'd rebuild) — perfect for *static* data, useless if values change often; for point-update + range-query use a Fenwick tree (`O(log n)` both), and for range-update + range-query use a segment tree with lazy propagation (both live in the Data Structures primer). Difference array vs segment tree: difference array handles *offline* batched range updates in `O(1)` each but needs a final `O(n)` pass and can't interleave queries; a lazy segment tree handles online interleaved updates and queries at `O(log n)`. Sparse table vs segment tree: sparse table is `O(1)` query but `O(n log n)` space and *no updates*; segment tree is `O(log n)` query but supports updates.
+Prefix sums are unbeatable when nothing changes — `O(1)` query — and useless when things do, because a single write invalidates every prefix after it. Difference arrays give `O(1)` range updates but are **offline only**: you cannot read a current value cheaply mid-stream, and they handle range-*add*, not range-*assign*. Fenwick trees are tiny and cache-friendly but essentially do prefix aggregates of invertible operations (sums, XOR); segment trees are more code but handle any associative operation and, with lazy propagation, range updates too. Sparse tables buy `O(1)` queries with `O(n log n)` space and zero update support. Sqrt decomposition is asymptotically worse than every tree here, but it is the least error-prone thing to write under pressure and adapts to odd query types a segment tree would need real machinery for.
 
 **Common confusions**
-Off-by-one on prefix sums — decide whether `pre` is inclusive or exclusive and stick to it; the clean convention is `pre[0]=0`, `pre[i]=pre[i-1]+a[i-1]`, `sum(l,r)=pre[r+1]-pre[l]` for 0-indexed inclusive `[l,r]`. In 2D, forgetting the `+pre[r1][c1]` inclusion-exclusion term double-subtracts the overlap. Difference arrays apply updates but you must remember the final prefix-sum reconstruction, and they only work *offline* (all updates before any query). Sparse tables are only valid for *idempotent* operations — using one for range-*sum* double-counts the overlap and gives wrong answers (use a sparse table's disjoint variant or a Fenwick tree for sums). Sqrt decomposition's block size should be `~sqrt(n)` to balance the two `O(sqrt(n))` terms.
+Off-by-one on prefix sums: pick the exclusive convention (`pre[0] = 0`, `pre[i] = pre[i-1] + a[i-1]`, `sum(l, r) = pre[r+1] - pre[l]`) and never mix it with an inclusive variant. In 2-D, dropping the `+ pre[r1][c1]` term double-subtracts the corner and under-counts. Forgetting the `{0: 1}` seed in the hash-map pattern loses every subarray that starts at index 0. Difference arrays need the final reconstruction pass — the `diff` array is not the answer. Sparse tables are only valid for **idempotent** operations: using one for range-*sum* double-counts the overlap and silently returns wrong answers. And sqrt decomposition's block size must be `≈√n`; anything else unbalances the two cost terms.
 
 **Why interviewers ask**
-Prefix sums are the single highest-leverage precomputation trick — "subarray sum equals k," "range sum query immutable," and countless problems collapse once you see them. Interviewers check whether you reach for `O(1)`-query precomputation instead of recomputing, and whether you know the *update* story (difference array offline, Fenwick/segment tree online). The classic follow-up: "now the array gets updated between queries — what changes?" — which separates candidates who memorized prefix sums from those who understand the query/update trade-off space.
+Prefix sums are the highest-leverage precomputation trick in the toolkit — "subarray sum equals `k`", "range sum query immutable", "count subarrays divisible by `k`", "matrix block sum" all collapse the moment you see them. The signal an interviewer wants is whether you instinctively precompute instead of recomputing, and whether you know the *update* story. The standard follow-up is always the same: "now the array changes between queries — what breaks?" That separates candidates who memorised `pre[r+1] - pre[l]` from those who understand the query/update trade-off space and can name Fenwick, segment tree, or difference array as appropriate.
 
 ### What is a prefix sum and how does it answer range queries in O(1)?
 
-A prefix sum array stores cumulative totals: `pre[i]` = sum of the first i elements, with `pre[0] = 0`. Then the sum of any inclusive range `[l, r]` (0-indexed) is `pre[r+1] - pre[l]` — the big prefix minus the part before l. Building `pre` is one `O(n)` pass; every subsequent range-sum query is a single subtraction, `O(1)`. It's the canonical "precompute once, query many" trick.
+A prefix sum array stores **cumulative totals**: `pre[i]` is the sum of the first `i` elements, with `pre[0] = 0`. The sum of any inclusive range `[l, r]` is then `pre[r+1] - pre[l]` — the big prefix, minus the part before `l`. Everything between `l` and `r` survives the subtraction; everything before `l` cancels.
+
+```python
+def build_prefix(a):
+    pre = [0] * (len(a) + 1)         # pre[0] = 0 sentinel
+    for i, x in enumerate(a):
+        pre[i + 1] = pre[i] + x      # running total
+    return pre
+
+def range_sum(pre, l, r):            # inclusive [l, r], 0-indexed
+    return pre[r + 1] - pre[l]
+```
+
+Worked micro-example. With `a = [3, 1, 4, 1, 5]` the build gives `pre = [0, 3, 4, 8, 9, 14]`. Then `sum(a[1..3]) = pre[4] - pre[1] = 9 - 3 = 6`, which matches `1 + 4 + 1 = 6`. And `sum(a[0..4]) = pre[5] - pre[0] = 14 - 0 = 14`.
+
+Complexity in words: one linear pass to build (time proportional to the array length, `O(n)`), then every query is a single subtraction — constant time, `O(1)`, no matter how wide the range. Extra space is one array of `n + 1` numbers, `O(n)`.
 
 ### Give the standard prefix-sum indexing convention to avoid off-by-one.
 
-Use a size-`n+1` array with `pre[0] = 0` and `pre[i] = pre[i-1] + a[i-1]`. Then for a 0-indexed inclusive range `[l, r]`, `sum = pre[r+1] - pre[l]`. The extra leading zero means `l = 0` needs no special case (`pre[0] = 0`). Pick this convention and never mix it with an inclusive-`pre` variant — inconsistency is where off-by-one bugs breed.
+Use a size-`n+1` array with `pre[0] = 0` and `pre[i] = pre[i-1] + a[i-1]`. For a 0-indexed **inclusive** range `[l, r]`, the answer is `pre[r+1] - pre[l]`. Read the convention as: *`pre[i]` is the sum of everything strictly before index `i`.*
+
+The leading zero is the whole point. Without it you would write `sum(l, r) = pre[r] - pre[l-1]` and then need a special case for `l = 0`, because `pre[-1]` does not exist. With the sentinel, `l = 0` gives `pre[r+1] - pre[0] = pre[r+1] - 0`, which is already correct — the guard clause disappears.
+
+```python
+a   = [3, 1, 4, 1, 5]
+pre = [0, 3, 4, 8, 9, 14]            # pre[i] = sum of a[0 .. i-1]
+    # sum(0, 2) = pre[3] - pre[0] = 8  - 0 = 8   -> 3+1+4
+    # sum(2, 4) = pre[5] - pre[2] = 14 - 4 = 10  -> 4+1+5
+    # sum(2, 2) = pre[3] - pre[2] = 8  - 4 = 4   -> single element
+    # empty range l > r naturally yields <= 0; guard it explicitly
+```
+
+Pick this convention once and never mix it with an inclusive-`pre` variant. Inconsistency between the two is where essentially all prefix-sum bugs come from, and they are the quiet kind that pass on the sample input.
 
 ### How does a 2D prefix sum work?
 
-`pre[i][j]` holds the sum of the rectangle from `(0,0)` to `(i-1, j-1)`. Build it with `pre[i][j] = a[i-1][j-1] + pre[i-1][j] + pre[i][j-1] - pre[i-1][j-1]` (inclusion-exclusion to avoid double-counting the overlap). A query for the rectangle `[(r1,c1),(r2,c2)]` inclusive is `pre[r2+1][c2+1] - pre[r1][c2+1] - pre[r2+1][c1] + pre[r1][c1]` — `O(1)` after `O(nm)` build.
+`pre[i][j]` holds the sum of the rectangle from `(0, 0)` to `(i-1, j-1)` — again "everything strictly above and to the left". Build it row by row with inclusion-exclusion, because the cell above and the cell to the left both already include the top-left block, so it must be subtracted back out once.
+
+```python
+def build_prefix_2d(g):              # g is rows x cols
+    rows, cols = len(g), len(g[0])
+    pre = [[0] * (cols + 1) for _ in range(rows + 1)]
+    for i in range(1, rows + 1):
+        for j in range(1, cols + 1):
+            pre[i][j] = (g[i - 1][j - 1]
+                         + pre[i - 1][j]      # block above
+                         + pre[i][j - 1]      # block to the left
+                         - pre[i - 1][j - 1]) # counted twice, remove one
+    return pre
+
+def rect_sum(pre, r1, c1, r2, c2):   # inclusive corners
+    return (pre[r2 + 1][c2 + 1]
+            - pre[r1][c2 + 1]        # strip above
+            - pre[r2 + 1][c1]        # strip to the left
+            + pre[r1][c1])           # overlap removed twice, add back
+```
+
+Worked 3×3 grid. For `g = [[1,2,3], [4,5,6], [7,8,9]]` the table is `pre = [[0,0,0,0], [0,1,3,6], [0,5,12,21], [0,12,27,45]]`. Query the bottom-right 2×2 block, rows `1..2` and columns `1..2` (values `5, 6, 8, 9`, total `28`): `pre[3][3] - pre[1][3] - pre[3][1] + pre[1][1] = 45 - 6 - 12 + 1 = 28`. Correct.
+
+Complexity: the build touches every cell once, so time proportional to the grid size, `O(n·m)`; each query is four array lookups and three additions, constant time `O(1)`. Space is one grid of `(n+1)(m+1)` numbers.
 
 ### Why does the 2D query add back one corner term?
 
-Inclusion-exclusion. Subtracting the top strip and the left strip each removes the top-left overlap rectangle *once* — so it's been subtracted twice. Adding `pre[r1][c1]` back restores that doubly-removed region exactly once. Forgetting this `+` term is the most common 2D-prefix-sum bug; the result under-counts by the top-left corner rectangle.
+Inclusion-exclusion. Start with the big rectangle `pre[r2+1][c2+1]`, which spans the origin down to the query's bottom-right corner. You want to shave off the strip above the query and the strip to the left of it. Each of those strips contains the top-left corner rectangle `pre[r1][c1]`, so subtracting both removes that corner **twice**. Adding it back once restores the correct total.
+
+Concretely on the 3×3 grid above, querying rows `1..2`, columns `1..2`: `45` is the whole grid, `- 6` removes row 0, `- 12` removes column 0 — but cell `g[0][0] = 1` lived in both, so it was removed twice. `+ pre[1][1] = +1` fixes it, giving `28` rather than the wrong `27`.
+
+This is the most common 2-D prefix-sum bug and it fails quietly: the result is too small by exactly the top-left corner rectangle, which is `0` whenever your test query starts at row 0 or column 0. Test with `r1 > 0` **and** `c1 > 0` or you will not catch it.
 
 ### What is a difference array and what problem does it solve?
 
-A difference array `diff` stores consecutive differences: `diff[i] = a[i] - a[i-1]`. Its power is *range updates*: to add v to every element in `[l, r]`, you only touch two cells — `diff[l] += v` and `diff[r+1] -= v` — in `O(1)`. After applying all updates, a single prefix-sum pass over `diff` reconstructs the final array. It's the dual of prefix sums: prefix sums answer range queries, difference arrays apply range updates.
+A difference array stores consecutive **deltas** rather than values: `diff[i] = a[i] - a[i-1]`, with `diff[0] = a[0]`. Running a prefix sum over `diff` reconstructs `a`. For `a = [3, 1, 4, 1, 5]` the deltas are `diff = [3, -2, 3, -3, 4]`, and prefix-summing those returns `[3, 1, 4, 1, 5]`.
+
+Its power is **range updates**. Adding `v` to every element of `[l, r]` means bumping the delta at the start of the range and un-bumping it just past the end — two writes, regardless of how wide the range is.
+
+```python
+def range_add(diff, l, r, v):        # add v to a[l..r] inclusive
+    diff[l] += v
+    diff[r + 1] -= v                 # diff sized n+1 so r = n-1 is safe
+
+def rebuild(diff, n):                # one pass turns deltas back into values
+    out, running = [0] * n, 0
+    for i in range(n):
+        running += diff[i]
+        out[i] = running
+    return out
+```
+
+Worked example on a length-5 array of zeros. Apply "add 5 to `[1, 3]`" then "add 2 to `[0, 1]`". After the first, `diff = [0, 5, 0, 0, -5, 0]`; after the second, `diff = [2, 5, -2, 0, -5, 0]`. Rebuilding gives `[2, 7, 5, 5, 0]` — index 0 got only the `+2`, index 1 got both, indices 2–3 got only the `+5`, index 4 got neither.
+
+It is the exact dual of a prefix sum: prefix sums make *queries* `O(1)`, difference arrays make *updates* `O(1)`, and each is undone by the other.
 
 ### How do difference arrays make k range updates O(k + n)?
 
-Each range-add update is `O(1)` (two cell writes) regardless of the range's length, so k updates cost `O(k)`. Then one `O(n)` prefix-sum pass materializes the fully-updated array. Total `O(k + n)` versus the naive `O(kn)` of updating each range element-by-element. The catch: it's *offline* — you apply all updates first, then read; you can't interleave queries between updates.
+Each range-add is two cell writes — constant time, `O(1)` — no matter whether the range covers 3 elements or 300,000. So `k` updates cost time proportional to `k`, not to the total length they span. Then a single left-to-right prefix-sum pass over `diff` materialises the finished array in time proportional to `n`. Total: `O(k + n)`, versus the naive `O(k·n)` of walking each range element by element.
+
+```python
+def apply_all(n, updates):           # updates: list of (l, r, v)
+    diff = [0] * (n + 1)
+    for l, r, v in updates:          # O(1) each -> O(k) total
+        diff[l] += v
+        diff[r + 1] -= v
+    out, running = [0] * n, 0
+    for i in range(n):               # O(n) single reconstruction pass
+        running += diff[i]
+        out[i] = running
+    return out
+```
+
+The two-dimensional version works the same way with four corner stamps per rectangle, then a prefix-sum sweep along each axis:
+
+```python
+def range_add_2d(diff, r1, c1, r2, c2, v):
+    diff[r1][c1] += v
+    diff[r1][c2 + 1] -= v
+    diff[r2 + 1][c1] -= v
+    diff[r2 + 1][c2 + 1] += v        # corner subtracted twice, add back
+```
+
+After stamping all rectangles you prefix-sum every row, then every column (or vice versa), giving `O(k + n·m)` for `k` rectangle updates on an `n × m` grid.
+
+The catch in both dimensions is that this is **offline**: all updates land first, the reconstruction happens once, and only then do you read values. You cannot cheaply interleave "what is `a[3]` right now?" between updates.
 
 ### When can't you use a difference array?
 
-When updates and queries interleave (online) — a difference array needs all updates applied before the reconstruction pass, so you can't ask for a current value mid-stream cheaply. It's also range-add only; arbitrary per-element updates or range-assign don't fit the two-cell trick directly. For online range-update-and-query, use a lazy-propagation segment tree (Data Structures primer).
+Three situations rule it out.
+
+**Updates and queries interleave (online).** The difference array is not the array — reading a current value means prefix-summing up to that index, which is `O(n)`. If a problem says "after each update, print the maximum" you need a structure that maintains real values, i.e. a lazy-propagation segment tree, which does range-update and range-query in `O(log n)` each.
+
+**The update is not a range-add.** The two-cell trick encodes "shift everything in this window by a constant". Range-*assign* (set the whole window to `v`), range-multiply, or "add `i` to `a[i]`" do not decompose into two delta writes. Some of these have cousins — a second-order difference array handles adding an arithmetic progression over a range — but the plain version does not cover them.
+
+**You need aggregates, not values.** A difference array reconstructs the final array; it tells you nothing about maxima or counts along the way without a further pass.
+
+Rule of thumb: batched range-adds followed by one read of everything → difference array. Anything interleaved or non-additive → segment tree.
 
 ### What is sqrt decomposition?
 
-Split the array into `~sqrt(n)` contiguous blocks of size `~sqrt(n)`, and precompute an aggregate (sum, min, ...) per block. A range query walks at most two partial end blocks element-by-element (`O(sqrt(n))`) and combines the whole blocks in between via their precomputed aggregates (at most `sqrt(n)` blocks, `O(sqrt(n))`). Both query and point update are `O(sqrt(n))`. It's a simple, general middle ground — easier to code than a segment tree and flexible enough for many query types.
+Split the array into contiguous blocks of size `≈√n`, giving `≈√n` blocks, and cache an aggregate (sum, min, whatever) per block. A range query walks the two partial end blocks element by element and uses the cached aggregate for every whole block in between.
+
+```python
+class SqrtSum:
+    def __init__(self, a):
+        self.a = a[:]
+        self.b = int(len(a) ** 0.5) + 1           # block size ~ the square root of n
+        self.blocks = [0] * (len(a) // self.b + 1)
+        for i, x in enumerate(a):
+            self.blocks[i // self.b] += x
+
+    def update(self, i, v):                       # point assign, O(1)
+        self.blocks[i // self.b] += v - self.a[i]
+        self.a[i] = v
+
+    def query(self, l, r):                        # inclusive, O(sqrt n)
+        total = 0
+        while l <= r and l % self.b != 0:         # partial left block
+            total += self.a[l]
+            l += 1
+        while l + self.b - 1 <= r:                # whole blocks
+            total += self.blocks[l // self.b]
+            l += self.b
+        while l <= r:                             # partial right block
+            total += self.a[l]
+            l += 1
+        return total
+```
+
+Worked example. Take `a = [3, 1, 4, 1, 5, 9, 2, 6, 5]` with block size 3, so block sums are `[8, 15, 13]`. Query `sum(2, 7)`: the partial left block contributes `a[2] = 4`, the whole middle block contributes its cached `15`, and the partial right block contributes `a[6] + a[7] = 2 + 6 = 8`. Total `27`, which matches `4 + 1 + 5 + 9 + 2 + 6`.
+
+Complexity in words: both query and point update take time proportional to the square root of the array length — `O(√n)`. Worse than a tree's `O(log n)`, but a fraction of the code.
 
 ### Why is the block size sqrt(n)?
 
-Because query cost is "partial elements" + "whole blocks" = `O(block_size) + O(n / block_size)`. Minimizing the sum of those two terms happens when they're equal: `block_size = n / block_size`, i.e. `block_size = sqrt(n)`, giving `O(sqrt(n))` overall. Larger blocks make the partial scan dominate; smaller blocks make the block count dominate.
+Because the query cost has two competing terms. Scanning the partial end blocks costs time proportional to the block size `b`; combining the whole blocks costs time proportional to how many blocks there are, `n / b`. Total cost is roughly `b + n / b`.
+
+That sum is minimised when the two terms are equal: `b = n / b`, so `b² = n`, so `b = √n` and the total is `2√n`, i.e. `O(√n)`. Push `b` larger and the element-by-element scan of the partial blocks dominates; push it smaller and the number of blocks dominates. For `n = 10⁶`, `b = 1000` gives about 2000 operations per query — whereas `b = 10` gives about 100,010 and `b = 100000` gives about 100,010 as well. The curve is flat near the minimum, so anything within a factor of two or three of `√n` is fine in practice.
+
+If updates and queries have *different* costs (say updates are `O(1)` and queries are `O(b + n/b)`), you can re-derive the optimum for the actual mix of operations — that is the general form of the argument, and interviewers like seeing it stated that way rather than as "because `√n`".
 
 ### What is a sparse table and what is it for?
 
-A sparse table precomputes the answer for every interval whose length is a power of two: `table[k][i]` covers `[i, i + 2^k - 1]`. It's built in `O(n log n)` via `table[k][i] = f(table[k-1][i], table[k-1][i + 2^(k-1)])`. It answers *idempotent* range queries (min, max, gcd) in `O(1)` on *static* data — but supports no updates. It's the go-to for immutable range-minimum queries.
+A sparse table precomputes the answer for **every interval whose length is a power of two**: `table[k][i]` covers `[i, i + 2ᵏ - 1]`. Each level is built from the one below by combining two half-length intervals.
+
+```python
+def build_sparse_min(a):
+    n = len(a)
+    levels = max(1, n.bit_length())
+    table = [a[:]] + [[0] * n for _ in range(levels - 1)]
+    for k in range(1, levels):
+        span = 1 << k
+        for i in range(n - span + 1):
+            left = table[k - 1][i]
+            right = table[k - 1][i + (span >> 1)]
+            table[k][i] = min(left, right)
+    return table
+
+def query_min(table, l, r):                # inclusive
+    k = (r - l + 1).bit_length() - 1       # floor(log2(length))
+    return min(table[k][l], table[k][r - (1 << k) + 1])
+```
+
+Complexity in words: the build fills `log₂ n` levels of `n` entries each, so time and space are both proportional to `n log n` — `O(n log n)`. Every query afterwards is two lookups and one combine, constant time, `O(1)`.
+
+The catch is that it supports **no updates** — changing one element would invalidate up to `log₂ n` entries per level, so you rebuild. That makes it the right tool for immutable data queried many times: range-minimum on a fixed array, range-gcd, and as the `O(1)` lowest-common-ancestor primitive after an Euler-tour flattening.
 
 ### How does a sparse table answer a query in O(1)?
 
-For range `[l, r]`, let `k = floor(log2(r - l + 1))`. Cover the range with *two* overlapping power-of-two intervals: one starting at l, one ending at r — `[l, l + 2^k - 1]` and `[r - 2^k + 1, r]`. Combine their two precomputed answers with `f`. Because `2^k` is at least half the range length, the two intervals fully cover `[l, r]`, and their overlap is harmless *only if* `f` is idempotent.
+For range `[l, r]` of length `L = r - l + 1`, let `k = ⌊log₂ L⌋`. Then `2ᵏ > L / 2`, so **two** intervals of length `2ᵏ` — one starting at `l`, one ending at `r` — between them cover the whole range, overlapping in the middle. Combine their two precomputed answers and you are done.
+
+Worked example with `a = [5, 2, 4, 7, 6, 3, 1, 2]`, querying the minimum over `[1, 5]` (values `2, 4, 7, 6, 3`). Length is `5`, so `k = ⌊log₂ 5⌋ = 2` and `2ᵏ = 4`. The two intervals are `[1, 4]` (min `2`) and `[2, 5]` (min `3`). Combining, `min(2, 3) = 2` — correct, and indices `2, 3, 4` were covered by both.
+
+```python
+k = (r - l + 1).bit_length() - 1     # floor(log2(len)) with no float math
+ans = f(table[k][l], table[k][r - (1 << k) + 1])
+```
+
+Use `bit_length()` rather than `math.log2` — floating-point rounding at exact powers of two is a real source of off-by-one here. Precomputing a `log` lookup table is the classic C++ version of the same idea.
 
 ### Why does a sparse table require an idempotent operation?
 
-Because its `O(1)` query uses two *overlapping* intervals, so any element in the overlap is counted twice. For min/max/gcd that's fine — `min(x, x) = x`, idempotency means double-counting doesn't change the answer. For *sum*, counting overlap elements twice inflates the result. So range-sum can't use the two-overlap trick; you'd need a Fenwick tree, prefix sums, or a disjoint sparse table variant instead.
+Because the `O(1)` query deliberately uses two **overlapping** intervals, so every element in the overlap is folded into the answer twice. That is only harmless if applying the operation to a value and itself changes nothing — `f(x, x) = x`, the definition of idempotent. `min`, `max`, `gcd`, bitwise `and` and bitwise `or` all qualify.
+
+Sum does not. On `a = [5, 2, 4, 7, 6, 3, 1, 2]`, a range-sum query over `[1, 5]` would compute `sum(a[1..4]) + sum(a[2..5]) = 19 + 20 = 39`, while the true answer is `22`; the overlap `a[2..4] = 4 + 7 + 6 = 17` got counted twice. Nothing crashes — you just get a wrong number, which is the worst failure mode.
+
+For sums on static data use a plain prefix sum (`O(1)` query, `O(n)` space, simpler than a sparse table anyway). For sums with updates use a Fenwick tree. If you genuinely need `O(1)` queries for a non-idempotent associative operation, the **disjoint sparse table** variant partitions rather than overlaps, at the cost of more intricate construction.
 
 ### Prefix sum vs Fenwick tree vs segment tree — how do you choose?
 
-Static data, range sum: prefix sums (`O(1)` query, no updates). Point update + range query: Fenwick/BIT (`O(log n)` both, compact). Range update + range query, or non-sum aggregates with updates: segment tree, with lazy propagation for range updates (`O(log n)`). The decision hinges on *whether values change* and *what operation* you need. Prefix sums are unbeatable when nothing updates; the trees earn their `O(log n)` by supporting updates. (Fenwick/segment trees live in the Data Structures primer.)
+Three questions decide it: *do values change?*, *what operation?*, *are updates point or range?*
+
+- **Static data, sums** → prefix sums. `O(1)` query, trivial code.
+- **Point update + range sum** → Fenwick tree (BIT). `O(log n)` both, smallest and fastest tree.
+- **Range update + range query, or non-invertible aggregates** → segment tree, with lazy propagation for range updates. `O(log n)` both.
+
+A Fenwick tree stores, at index `i`, the sum of the `i & -i` elements ending at `i`. That expression isolates the lowest set bit (`12` is `1100`, so `12 & -12 == 4`), which is exactly how far down the tree that node reaches. Walking `i -= i & -i` visits the `O(log n)` nodes that tile a prefix; walking `i += i & -i` visits the `O(log n)` nodes that contain index `i`.
+
+```python
+class Fenwick:
+    def __init__(self, n):
+        self.n, self.t = n, [0] * (n + 1)     # 1-indexed internally
+
+    def add(self, i, v):                      # a[i] += v, O(log n)
+        i += 1
+        while i <= self.n:
+            self.t[i] += v
+            i += i & -i                       # jump to the parent that covers i
+
+    def prefix(self, i):                      # sum of a[0 .. i-1], O(log n)
+        total = 0
+        while i > 0:
+            total += self.t[i]
+            i -= i & -i                       # strip lowest set bit
+        return total
+
+    def range_sum(self, l, r):                # inclusive
+        return self.prefix(r + 1) - self.prefix(l)
+```
+
+A segment tree is more general — any associative `f`, and it can carry lazy tags for range updates:
+
+```python
+class SegTree:                                 # iterative, 1-indexed leaves at size..2*size-1
+    def __init__(self, a, f=min, identity=float("inf")):
+        self.f, self.id = f, identity
+        self.size = 1
+        while self.size < len(a):
+            self.size *= 2
+        self.t = [identity] * (2 * self.size)
+        self.t[self.size:self.size + len(a)] = a
+        for i in range(self.size - 1, 0, -1):  # build bottom-up, O(n)
+            self.t[i] = f(self.t[2 * i], self.t[2 * i + 1])
+
+    def update(self, i, v):                    # point assign, O(log n)
+        i += self.size
+        self.t[i] = v
+        i //= 2
+        while i:
+            self.t[i] = self.f(self.t[2 * i], self.t[2 * i + 1])
+            i //= 2
+
+    def query(self, l, r):                     # inclusive, O(log n)
+        res = self.id
+        l, r = l + self.size, r + self.size + 1
+        while l < r:
+            if l & 1:
+                res = self.f(res, self.t[l]); l += 1
+            if r & 1:
+                r -= 1; res = self.f(res, self.t[r])
+            l //= 2; r //= 2
+        return res
+```
+
+Prefix sums win outright when nothing updates; the trees earn their `O(log n)` by supporting change.
 
 ### How do prefix sums crack "count subarrays with sum k"?
 
-Walk left to right tracking running prefix sum `s`. A subarray ending here with sum k exists for every earlier prefix equal to `s - k`. Keep a hash map of prefix-sum frequencies seen so far; at each index add `count[s - k]` to the answer, then increment `count[s]`. This is `O(n)` time, one pass — the prefix-sum + hashmap combination that shows up across dozens of subarray problems.
+Walk left to right tracking the running prefix sum `s`. A subarray *ending here* with sum `k` exists for every earlier prefix equal to `s - k`, because `sum(i+1 .. j) = pre[j+1] - pre[i]`. So keep a frequency map of prefix sums seen so far; at each index add `count[s - k]` to the answer, then record `s`.
+
+```python
+from collections import defaultdict
+
+def count_subarrays_with_sum(a, k):
+    seen = defaultdict(int)
+    seen[0] = 1                      # the empty prefix -- lets subarrays start at index 0
+    s = ans = 0
+    for x in a:
+        s += x
+        ans += seen[s - k]           # every earlier prefix s-k closes a valid subarray
+        seen[s] += 1
+    return ans
+```
+
+Worked example: `a = [1, 2, 3, -2, 2]`, `k = 3`. Running sums are `1, 3, 6, 4, 6`. At `s = 3` we find `s - k = 0` in the map (the seed) → 1 subarray, `[1, 2]`. At `s = 6` we find `3` → `[3]`. At `s = 4` we find `1` → `[2, 3, -2]`. At the final `s = 6` we find `3` again → `[3, -2, 2]`. Answer `4`.
+
+The `{0: 1}` seed is load-bearing: without it, any subarray starting at index 0 (here `[1, 2]`) is missed, because its "earlier prefix" is the empty one. Complexity: one pass with `O(1)` map work per element — linear time `O(n)`, linear space `O(n)`. It handles negatives, which is why sliding windows do not.
+
+The same skeleton solves a family of problems by changing what you accumulate. Prefix **XOR** works identically because XOR is its own inverse — `xor(l, r) = px[r+1] ^ px[l]`:
+
+```python
+def build_prefix_xor(a):
+    px = [0] * (len(a) + 1)
+    for i, x in enumerate(a):
+        px[i + 1] = px[i] ^ x
+    return px
+    # a  = [4, 2, 2, 6, 4] -> px = [0, 4, 6, 4, 2, 6]
+    # xor(a[1..3]) = px[4] ^ px[1] = 2 ^ 4 = 6   (2 ^ 2 ^ 6)
+```
+
+Count subarrays with XOR `k` by swapping `s += x` for `s ^= x` and `seen[s - k]` for `seen[s ^ k]`. Store `s % k` instead and you count subarrays whose sum is divisible by `k`; map `0 → -1` and `1 → +1` and you get the longest subarray with equal counts of two symbols.
 
 ### The array now changes between queries — what breaks and what do you switch to?
 
-A prefix-sum array breaks: a single element change invalidates every prefix from that index onward, so an update is `O(n)` (effectively a rebuild). For point updates with range-sum queries, switch to a Fenwick tree (`O(log n)` both). For range updates with range queries, switch to a lazy segment tree. Sparse tables also break (no updates) — for idempotent queries with updates, a segment tree replaces them. This "now it updates" pivot is the standard senior follow-up.
+A prefix-sum array breaks immediately. Changing `a[i]` invalidates `pre[i+1]` and everything after it, so an update is a rebuild — linear time, `O(n)` — and if updates are frequent you are worse off than just scanning each query. Sparse tables break for the same reason and harder, since a single element sits in `O(n log n)`-worth of precomputed intervals.
+
+What to switch to depends on the shape of the updates:
+
+- **Point update + range sum** → Fenwick tree. `O(log n)` for both, and about fifteen lines.
+- **Point update + range min/max/gcd** → segment tree (Fenwick struggles here because min is not invertible — you cannot subtract a prefix min out of another).
+- **Range update + range query** → segment tree with lazy propagation: store a pending "add `v` to this whole node's range" tag, push it down only when you descend. Still `O(log n)`.
+- **Range updates, then one final read of everything** → difference array is still fine. Being offline is a constraint, not a defect; if the problem allows it, `O(k + n)` beats `O(k log n)`.
+- **Anything unusual, and `O(√n)` is acceptable** → sqrt decomposition.
+
+Say this trade-off out loud when the interviewer pivots. "Prefix sums assume static data; with point updates I'd use a Fenwick tree at `O(log n)` per operation, and with range updates a lazy segment tree" is the answer they are fishing for — it shows you chose prefix sums *because* the data was static, not because it was the only tool you knew.
 
 ### When would you pick sqrt decomposition over a segment tree?
 
-When you want something quick to implement and flexible for unusual queries, and `O(sqrt(n))` per operation is acceptable for the input size. Sqrt decomposition is far less error-prone to code under interview pressure than a lazy segment tree, and it adapts to odd query types (like "count of values > x in a range" via sorted blocks) where a segment tree needs more machinery. You pay `O(sqrt(n))` instead of `O(log n)`, which is fine up to `n ~ 10^5` and modest query counts.
+When implementation risk matters more than the asymptotic gap. Three concrete cases.
+
+**Under time pressure.** A correct sqrt decomposition takes maybe fifteen lines and has no recursion, no lazy push-down, and no `2*i + 1` indexing to get wrong. A lazy segment tree is several times that and has genuinely subtle bugs. If the constraints allow `O(√n)`, the version you can actually finish and debug is the better answer.
+
+**Unusual query types.** Sqrt decomposition adapts to queries a segment tree cannot express as a simple associative merge. Keep each block's elements in a **sorted** copy and you can answer "how many values greater than `x` are in `[l, r]`?" by binary-searching each whole block (`O(√n · log n)`) and scanning the partials. Mo's algorithm — offline query reordering by block — is the same idea and answers "distinct values in a range" in `O((n + q)√n)` with nothing more than an add/remove pointer.
+
+**Modest input sizes.** For `n ≈ 10⁵` and a comparable query count, `√n ≈ 316` versus `log₂ n ≈ 17` is roughly a 20× factor — real, but usually well inside the time limit, and often clawed back by sqrt decomposition's flat arrays and cache-friendly sequential scans versus a tree's pointer-chasing.
+
+Reach for the segment tree when `n` is large (`10⁶`+), when queries are numerous, or when you need lazy range updates — that is where `O(log n)` genuinely stops being optional.
 
 ## Computational Geometry Basics
 
 ### Summary
 
 **What this topic covers**
-The small toolkit of geometry primitives that show up in interviews and contests: representing points and vectors, the cross-product orientation test, building a convex hull, sweeping a line across the plane, finding the closest pair of points, and detecting whether two segments intersect. The unifying mental model is that almost everything reduces to the sign of a cross product (a 2x2 determinant) — "is C left or right of the ray A->B?" — done in integer arithmetic wherever possible.
+The small toolkit of plane-geometry primitives that actually show up in interviews and contests: representing points and vectors, the **cross-product orientation test**, **convex hulls**, the **line sweep**, **closest pair of points**, **segment intersection**, **polygon area**, and **point-in-polygon**. Everything here is built on one number. If you learn nothing else from this topic, learn the cross product — the rest is that predicate wrapped in a loop.
+
+**Mental model**
+Forget school geometry. There is one primitive: given three points `A`, `B`, `C`, the cross product is **a single number whose sign tells you whether the path `A → B → C` turns left, turns right, or goes straight**. Positive = left (counter-clockwise), negative = right (clockwise), zero = the three points are collinear. That's it. A convex hull is "walk the points and pop anything that makes a right turn." A segment-intersection test is "do the endpoints of each segment fall on opposite sides of the other?" — four sign checks. Polygon area is a sum of cross products. Point-in-polygon is "count how many edges a ray crosses." You are never doing trigonometry; you are multiplying and subtracting integers and looking at a sign. The second habit that separates people who get geometry right from people who fight it all interview: **stay in integers**. No division, no square roots, no angles — because those are where the floating-point bugs live.
 
 **Key terms**
-*Point / vector*: an ordered pair `(x, y)`; a vector is the difference of two points. *Cross product* (2D): `cross(u, v) = u.x*v.y - u.y*v.x`, a scalar equal to the signed area of the parallelogram; its sign gives orientation. *Orientation / CCW test*: sign of `cross(B-A, C-A)` — positive = counter-clockwise (left turn), negative = clockwise (right turn), zero = collinear. *Convex hull*: the smallest convex polygon enclosing a set of points. *Line sweep*: process events in sorted order (usually by x), maintaining an active set. *Collinear / degenerate*: cases where points line up or coincide, the source of most bugs.
+- **Point / vector** — an ordered pair `(x, y)`. A *vector* is the difference of two points: `B - A = (B.x - A.x, B.y - A.y)`.
+- **Cross product (2-D)** — `cross(u, v) = u.x·v.y - u.y·v.x`. A single scalar, equal to the **signed area of the parallelogram** spanned by `u` and `v`.
+- **Orientation / CCW test** — the sign of `cross(B - A, C - A)`: `> 0` left turn, `< 0` right turn, `= 0` collinear.
+- **Convex hull** — the smallest convex polygon containing every point; picture a rubber band snapped around a board of nails.
+- **Monotone chain** — Andrew's hull algorithm: sort by `x`, build a lower chain and an upper chain.
+- **Line sweep** — process events in sorted `x` order while maintaining an "active set" of things the sweep line currently touches.
+- **Shoelace formula** — polygon area as a sum of cross-product terms around the boundary.
+- **Degenerate case** — duplicate points, all-collinear input, vertical segments, touching-but-not-crossing segments. The source of nearly every geometry bug.
 
 **Core mechanics**
-The cross product is the workhorse. `cross(B-A, C-A) > 0` means the path A->B->C turns left. Convex hull via **Andrew's monotone chain**: sort points by `(x, y)`, then build the lower hull left-to-right and the upper hull right-to-left, popping any point that fails to make a counter-clockwise turn (`cross <= 0`) — `O(n log n)`, dominated by the sort, `O(n)` extra space. **Graham scan** is equivalent but sorts by polar angle around the lowest point. **Closest pair** uses divide and conquer: sort by x, split, recurse on halves, then check a strip of width 2d around the dividing line where only a constant number of candidate neighbours per point exist — recurrence `T(n) = 2T(n/2) + O(n)` = `O(n log n)`. **Segment intersection** for two segments: they cross iff the endpoints of each straddle the other, tested with four orientation signs, plus explicit collinear-overlap handling when a sign is zero.
+The orientation test costs two multiplications and one subtraction, and with integer coordinates it is **exact**. **Convex hull** (Andrew's monotone chain): sort the points by `(x, y)`, sweep left-to-right popping any point that fails to make a left turn to build the *lower* hull, sweep right-to-left the same way for the *upper* hull, then concatenate. Time is `O(n log n)` — "n log n, dominated entirely by the sort, because the scan itself is linear: each point is pushed once and popped at most once" — with `O(n)` extra space. **Closest pair**: sort by `x`, split in half, recurse, then check only a vertical strip of width `2d` around the split line — `T(n) = 2T(n/2) + O(n)`, so `O(n log n)`, "n log n, the same shape as merge sort." **Segment intersection**: four orientation signs for the general case plus an explicit on-segment check for collinear touching. **Polygon area**: shoelace, one pass, `O(n)`. **Point-in-polygon**: ray casting, `O(n)` per query.
 
 **Trade-offs**
-Integer coordinates let you keep cross products exact — always prefer them; the moment you divide or take a square root you invite floating-point error. Monotone chain vs Graham scan: monotone chain is simpler to code correctly (sort by coordinate, no angle comparisons, no atan2), so it is the interview default. Brute-force closest pair is `O(n^2)` and fine up to a few thousand points; the divide-and-conquer version only pays off at scale and is fiddly to implement under time pressure.
+Integer coordinates keep cross products exact, so prefer them and never divide unless you must — the moment a `/` or a square root enters, you own a precision problem. Monotone chain versus Graham scan: both are `O(n log n)`, but monotone chain sorts by plain coordinates instead of polar angle, so there is no pivot to choose and no angle ties to break. It is the interview default. Brute-force closest pair is `O(n²)` — "quadratic, every pair compared" — and is genuinely the right answer up to a few thousand points; the divide-and-conquer version is fiddly and only pays for itself at scale. Say that trade-off out loud rather than reaching straight for the clever one.
 
 **Common confusions**
-Comparing floating-point cross products against `== 0` instead of an epsilon; using `atan2` for angle sorting and hitting precision/tie bugs; forgetting collinear points on a hull edge (decide up front whether to keep or drop them); overflow — cross products of large `int` coordinates need 64-bit accumulation; and conflating "segments intersect" (bounded) with "lines intersect" (infinite). Distances: compare squared distances to avoid `sqrt` entirely.
+Comparing a floating-point cross product to `== 0` (it will almost never be exactly zero — use integers, or an epsilon). Using `atan2` to sort by angle, then hitting precision and tie-break bugs; a cross-product comparator does the same job exactly. Forgetting to decide whether collinear points *on* a hull edge are kept or dropped — the problem statement usually cares. Overflow: cross products of large 32-bit coordinates need 64-bit accumulation. And conflating **segments** (bounded) with **lines** (infinite) — two segments can lie on intersecting lines and still not touch.
 
 **Why interviewers ask**
-Geometry problems test whether you can translate a visual/spatial idea into a robust numeric predicate and whether you respect precision. The classic angle is "convex hull, then reason about the hull" (diameter, rotating calipers) or "detect if any two of these segments cross." Follow-ups probe degenerate cases: duplicate points, all-collinear input, and vertical segments — the candidates who name these before coding stand out.
+Geometry checks whether you can turn a picture into a robust numeric predicate, and whether you respect precision. The classic shape is "compute the hull, then reason about the hull" (diameter, bounding box, rotating calipers), or "detect whether any two of these segments cross." Follow-ups go straight at the degenerate cases — duplicate points, all-collinear input, vertical segments. Candidates who name those *before* writing code stand out immediately, because that is exactly the instinct the topic is testing.
 
 ### What is the 2D cross product and what does its sign tell you?
-For vectors `u` and `v`, `cross(u, v) = u.x*v.y - u.y*v.x`. It is a scalar equal to the signed area of the parallelogram they span. Applied as `cross(B-A, C-A)`, the sign tells you the turn direction of A->B->C: positive means C is to the left (counter-clockwise turn), negative means right (clockwise), zero means the three points are collinear. This single predicate underlies orientation tests, hull construction, and intersection tests.
+
+For two vectors `u` and `v`, the 2-D cross product is `cross(u, v) = u.x·v.y - u.y·v.x` — one number, not a vector. Geometrically it is the **signed area of the parallelogram** the two vectors span, which is why its magnitude matters for area and its sign matters for direction.
+
+Applied as `cross(B - A, C - A)` it answers: *standing at `A` and walking to `B`, is `C` on my left or my right?*
+
+```python
+def cross(ox, oy, ax, ay, bx, by):
+    return (ax - ox) * (by - oy) - (ay - oy) * (bx - ox)
+
+def orient(o, a, b):
+    d = cross(o[0], o[1], a[0], a[1], b[0], b[1])
+    return (d > 0) - (d < 0)      # 1 = left/CCW, -1 = right/CW, 0 = collinear
+```
+
+Worked micro-example. Take `A = (0,0)`, `B = (4,0)`, `C = (2,3)`. Then `B - A = (4,0)` and `C - A = (2,3)`, so `cross = 4·3 - 0·2 = 12 > 0` — a **left turn**, counter-clockwise. Move `C` to `(2,-3)`: `cross = 4·(-3) - 0·2 = -12 < 0` — a **right turn**. Put `C` at `(7,0)`: `cross = 4·0 - 0·7 = 0` — **collinear**. Same formula, three answers, no trigonometry.
+
+That single predicate is the foundation of orientation tests, convex hulls, intersection tests, and polygon area. Learn it once and the rest of this topic is bookkeeping.
 
 ### How does the orientation (CCW) test work and why prefer it over computing angles?
-Compute `d = cross(B-A, C-A)` and branch on `sign(d)`. It answers "which side of line AB does C lie on" using only multiplications and subtractions. Prefer it over `atan2` or slopes because with integer coordinates it is exact — no division, no trig, no floating-point rounding. Slope-based tests divide by `dx` and blow up on vertical lines; angle-based tests accumulate `atan2` error and create tie-breaking headaches. The cross product sidesteps all of that.
+
+Compute `d = cross(B - A, C - A)` and branch on `sign(d)`. It answers "which side of the line through `A` and `B` does `C` lie on" using two multiplications and a subtraction — no division, no trigonometry, no square roots.
+
+Why not use angles or slopes instead?
+
+- **Slopes divide.** `slope = (B.y - A.y) / (B.x - A.x)` explodes on a vertical segment where `B.x == A.x`, and rounds everywhere else. The cross product is the same comparison with the division multiplied away.
+- **`atan2` is floating point.** Angle values accumulate error, and two points at nearly-identical angles sort unpredictably. A cross-product comparator gives the same ordering exactly.
+- **Integers stay exact.** If your input coordinates are integers, `cross` is an integer, so `d == 0` genuinely means collinear rather than "collinear to within rounding."
+
+Micro-example of the failure mode: `A = (0,0)`, `B = (0,5)` (vertical), `C = (-1,2)`. Slope-based code divides by `B.x - A.x = 0`. The cross product just computes `0·2 - 5·(-1) = 5 > 0`, and reports "left." One expression, no special case, exact.
 
 ### How do you compute a convex hull with Andrew's monotone chain?
-Sort the points by `(x, y)`. Build the lower hull: iterate left to right, and while the last two hull points plus the new point do not make a counter-clockwise turn (`cross <= 0`), pop the last point; then push. Build the upper hull the same way iterating right to left. Concatenate, dropping the duplicated endpoints. It is `O(n log n)` time (the sort dominates; the scan is linear because each point is pushed and popped at most once) and `O(n)` space. It avoids polar-angle sorting entirely, which is why it is the safer choice in an interview.
+
+Intuition: sort the points left to right, then trace along the bottom of the cloud keeping only left turns, then trace back along the top the same way. The two chains together are the rubber band.
+
+```python
+def convex_hull(points):
+    pts = sorted(set(points))            # sort by (x, y), drop duplicates
+    if len(pts) <= 2:
+        return pts
+
+    def build(seq):
+        chain = []
+        for p in seq:
+            # pop while the last turn is clockwise or collinear
+            while len(chain) >= 2 and orient(chain[-2], chain[-1], p) <= 0:
+                chain.pop()
+            chain.append(p)
+        return chain
+
+    lower = build(pts)
+    upper = build(reversed(pts))
+    return lower[:-1] + upper[:-1]       # drop the shared endpoints
+```
+
+Worked micro-example on `[(0,0), (1,1), (2,3), (4,0)]`. Sorted, that is already the order. Lower chain: push `(0,0)`, push `(1,1)`; at `(2,3)` the turn `(0,0) → (1,1) → (2,3)` gives `cross = 1·3 - 1·2 = 1 > 0`, a left turn, so push. At `(4,0)` the turn `(1,1) → (2,3) → (4,0)` gives `-7 ≤ 0`, so pop `(2,3)`; then `(0,0) → (1,1) → (4,0)` gives `-4 ≤ 0`, so pop `(1,1)`; push `(4,0)`. Lower = `[(0,0), (4,0)]`. The upper chain, walking back, yields `[(4,0), (2,3), (0,0)]`. Concatenating gives the triangle `(0,0), (4,0), (2,3)` — the interior point `(1,1)` is correctly discarded.
+
+Complexity: `O(n log n)` time — "n log n, and the sort is the whole cost, because the two scans are linear: every point is pushed exactly once and popped at most once" — with `O(n)` extra space. Use `< 0` instead of `<= 0` in the pop condition if the problem wants collinear points *kept* on hull edges.
 
 ### How does Graham scan differ from monotone chain?
-Graham scan picks the lowest (then leftmost) point as a pivot, sorts the rest by polar angle around it, then walks the sorted list maintaining a stack, popping on non-left turns. It is also `O(n log n)`. The difference is the sort key: Graham uses angles (best done with cross-product comparators, not `atan2`), monotone chain uses plain coordinate order and builds two chains. Monotone chain has fewer edge cases (no pivot selection, no angle ties), so most people reach for it; the two produce the same hull.
+
+Graham scan picks the lowest (then leftmost) point as a **pivot**, sorts every other point by polar angle around that pivot, then walks the sorted list with a stack, popping whenever the next point is not a left turn. It is also `O(n log n)` — "n log n, again dominated by the sort."
+
+The only real difference is the **sort key**. Graham sorts by angle; monotone chain sorts by plain `(x, y)` coordinate order and builds two chains instead of one loop. Same hull, same complexity.
+
+Monotone chain wins in interviews for three concrete reasons: no pivot to select (one fewer thing to get wrong), no angle comparator (so no `atan2` and no precision trap), and no tie-breaking rule for points at equal angle from the pivot (which in Graham scan must be sorted by distance, ascending on the first ray and descending on the last — a genuinely easy detail to fluff under pressure). If you do write Graham scan, sort with a **cross-product comparator**, never with computed angles.
 
 ### Why is a convex hull bounded below by O(n log n)?
-Building the hull can sort numbers: place values `x_i` as points `(x_i, x_i^2)` on a parabola — all are on the hull, and reading them off the hull yields them in sorted order. So a comparison-based hull algorithm that beat `O(n log n)` would beat the sorting lower bound, which is impossible. Hence `O(n log n)` is optimal for comparison-based hull construction, and monotone chain/Graham both hit it.
+
+Because you can sort with a hull. Given `n` numbers `x₁ … xₙ`, map each to the point `(xᵢ, xᵢ²)`. Every one of those points lies on a parabola, and every point on a parabola is a vertex of the convex hull of any set of parabola points — the curve is strictly convex, so nothing is ever inside. Compute the hull, read the vertices off starting from the leftmost, and you have the original numbers in sorted order.
+
+Worked micro-example: sorting `[3, 1, 2]` becomes hulling `(3,9), (1,1), (2,4)`. All three are hull vertices; reading them left-to-right gives `1, 2, 3`.
+
+So if a comparison-based hull algorithm ran in less than `O(n log n)`, you could sort in less than `O(n log n)` using only comparisons — contradicting the `Ω(n log n)` comparison-sorting lower bound. Hence `Ω(n log n)` is a genuine floor for comparison-based hull construction, and both monotone chain and Graham scan hit it exactly. (Output-sensitive algorithms like Chan's achieve `O(n log h)` for `h` hull vertices, which is better when the hull is tiny, but it is not a comparison-model violation — `h ≤ n`.)
 
 ### What is the line-sweep technique?
-Imagine a vertical line sweeping left to right across the plane. You precompute "events" (segment endpoints, points, rectangle edges), sort them by x, and process them in order while maintaining an "active set" of objects currently intersecting the sweep line, usually in a balanced BST keyed by y. Work happens only at events, and neighbours in the active set are the only pairs that can interact. It turns many `O(n^2)` "check all pairs" problems into `O(n log n)` by exploiting sorted order and locality.
+
+Picture a vertical line sliding left to right across the plane. Nothing interesting happens while it slides through empty space; things only change when it hits something. So: precompute the **events** (segment endpoints, points, rectangle edges), sort them by `x`, and process them in order while maintaining an **active set** of the objects the sweep line currently crosses — usually a balanced BST keyed by `y`.
+
+The payoff is locality. In the active set, ordered by `y`, only **neighbours** can interact. That turns "check all `O(n²)` pairs" — "quadratic, every pair" — into "check `O(n)` pairs of neighbours across `O(n)` events, each with an `O(log n)` BST operation," which is `O(n log n)` — "n log n, one log-factor per event."
+
+Micro-example of the idea on intervals (a 1-D sweep): to find whether any of `[1,4], [6,9], [3,7]` overlap, sort the endpoints into events `1+, 3+, 4-, 6+, 7-, 9-`. At `3+` the active set already contains `[1,4]`, so an overlap is detected immediately — no pairwise scan needed. The same skeleton, with a `y`-ordered active set, powers segment intersection, rectangle union area, and the skyline problem.
 
 ### How does line sweep detect if any two of n segments intersect?
-The Bentley-Ottmann approach: events are segment endpoints (and, in the full version, discovered intersections). Sweep left to right; the active set holds segments crossing the sweep line, ordered by their y at the current x. On a left endpoint, insert the segment and test it against its immediate neighbours above and below; on a right endpoint, remove it and test the two segments that become adjacent. Any intersection first appears between segments that are adjacent in this order, so checking neighbours suffices. Detecting whether *any* intersection exists is `O(n log n)`.
+
+This is the Bentley–Ottmann sweep. Events are the segment endpoints, sorted by `x`. The active set holds every segment currently crossing the sweep line, ordered by the `y` at which it crosses.
+
+- **Left endpoint:** insert the segment into the active set, then test it against its immediate neighbour above and its immediate neighbour below.
+- **Right endpoint:** remove the segment, then test the two segments that have just become adjacent to each other.
+
+Why testing only neighbours is enough: if two segments intersect, then just before the crossing `x` they must be **adjacent** in the `y`-order — the segment order changes continuously, so two segments cannot swap places without first becoming neighbours. So the very first intersection in the plane is guaranteed to be caught at some event where the crossing pair are neighbours.
+
+Cost: `O(n)` events, each doing `O(log n)` BST work plus a constant number of orientation tests, so **`O(n log n)`** — "n log n, a log factor per endpoint" — to answer *does any intersection exist*. Reporting **all** `k` intersections costs `O((n + k) log n)`, because each discovered crossing becomes a new event that swaps two segments in the active set.
 
 ### How does divide-and-conquer find the closest pair of points?
-Sort points by x, split into left and right halves, recurse to get the minimum distance `d` in each. The only remaining candidates are pairs straddling the divide within horizontal distance `d`, so collect points in that strip, sort them by y, and for each compare against the next few (at most 7) points in y-order — geometry guarantees a constant bound. The recurrence `T(n) = 2T(n/2) + O(n)` solves to `O(n log n)`. Below a few thousand points the `O(n^2)` brute force is simpler and often faster in practice.
+
+Start with the honest baseline — it is often the right answer.
+
+```python
+def dist2(p, q):
+    return (p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2      # squared, stays exact
+
+def closest_pair_brute(pts):
+    best = float("inf")
+    for i in range(len(pts)):
+        for j in range(i + 1, len(pts)):
+            best = min(best, dist2(pts[i], pts[j]))
+    return best
+```
+
+That is `O(n²)` — "quadratic, every pair examined" — and perfectly fine to a few thousand points. The divide-and-conquer version:
+
+```python
+def closest_pair(pts):
+    best, _ = _rec(sorted(pts))          # pre-sort by (x, y)
+    return best
+
+def _merge_y(a, b):                      # linear merge of two y-sorted lists
+    out, i, j = [], 0, 0
+    while i < len(a) and j < len(b):
+        if a[i][1] <= b[j][1]:
+            out.append(a[i]); i += 1
+        else:
+            out.append(b[j]); j += 1
+    return out + a[i:] + b[j:]
+
+def _rec(px):
+    n = len(px)
+    if n <= 3:
+        return closest_pair_brute(px), sorted(px, key=lambda p: p[1])
+    mid = n // 2
+    midx = px[mid][0]
+    dl, ly = _rec(px[:mid])
+    dr, ry = _rec(px[mid:])
+    d = min(dl, dr)                      # d is a SQUARED distance
+    py = _merge_y(ly, ry)
+    strip = [p for p in py if (p[0] - midx) ** 2 < d]
+    for i, p in enumerate(strip):
+        for q in strip[i + 1: i + 8]:    # at most 7 candidates can beat d
+            d = min(d, dist2(p, q))
+    return d, py
+```
+
+The strip argument in one sentence: inside the vertical strip, any two points closer than `d` must both sit in a `d × 2d` rectangle, and you can fit at most 8 points in such a rectangle without two of them already being closer than `d` — so scanning the next 7 points in `y`-order per point is enough.
+
+Worked micro-example: `[(0,0), (3,4), (1,1), (9,9)]`. The six pairs give squared distances `25`, `2`, `162`, `13`, `61`, `128`, so the minimum is `2`, between `(0,0)` and `(1,1)` — an actual distance of `√2`, which you never need to compute. The recurrence is `T(n) = 2T(n/2) + O(n)`, so the total is `O(n log n)` — "n log n, exactly merge sort's shape: linear work per level, log₂ n levels."
 
 ### How do you test whether two line segments intersect?
-Compute four orientations: `o1 = orient(A,B,C)`, `o2 = orient(A,B,D)`, `o3 = orient(C,D,A)`, `o4 = orient(C,D,B)`. The general case: the segments cross iff `o1 != o2` and `o3 != o4` (each pair of endpoints straddles the other segment). Then handle collinear cases where an orientation is zero: a segment endpoint may lie on the other segment, which you confirm with a bounding-box (on-segment) check. Keeping everything in integer cross products makes the general case exact.
+
+Two segments `AB` and `CD` cross in the general case exactly when each pair of endpoints **straddles** the other segment — that is, `C` and `D` are on opposite sides of line `AB`, *and* `A` and `B` are on opposite sides of line `CD`. Four orientation signs.
+
+```python
+def on_segment(a, b, p):                 # assumes a, b, p are collinear
+    return (min(a[0], b[0]) <= p[0] <= max(a[0], b[0]) and
+            min(a[1], b[1]) <= p[1] <= max(a[1], b[1]))
+
+def segments_intersect(a, b, c, d):
+    o1, o2 = orient(a, b, c), orient(a, b, d)
+    o3, o4 = orient(c, d, a), orient(c, d, b)
+    if o1 != o2 and o3 != o4:            # proper crossing, general case
+        return True
+    if o1 == 0 and on_segment(a, b, c): return True   # collinear touches
+    if o2 == 0 and on_segment(a, b, d): return True
+    if o3 == 0 and on_segment(c, d, a): return True
+    if o4 == 0 and on_segment(c, d, b): return True
+    return False
+```
+
+Worked micro-example: `A = (0,0)`, `B = (4,4)`, `C = (0,4)`, `D = (4,0)`. Then `o1 = orient(A,B,C) = +1`, `o2 = orient(A,B,D) = -1`, `o3 = orient(C,D,A) = -1`, `o4 = orient(C,D,B) = +1`. Both pairs differ, so the segments cross (at `(2,2)`) without ever computing that intersection point.
+
+The collinear branch is the part people forget: if `o1 == 0` the three points lie on one line, and the segments touch only if `C` actually falls within `AB`'s bounding box. The whole test is `O(1)` and, with integer coordinates, completely exact — no division anywhere, because you never solve for the intersection point.
 
 ### Why compare squared distances instead of actual distances?
-The Euclidean distance needs a `sqrt`, which is slow and introduces floating-point error. But `sqrt` is monotonic, so `dist(a,b) < dist(c,d)` iff `dx^2+dy^2 < ...`. For any comparison, sorting, or nearest-point query you can work entirely with squared distances and integer arithmetic, staying exact and avoiding the square root. Only compute the real distance at the very end if the problem actually needs the magnitude.
+
+Because the square root buys you nothing and costs you both speed and exactness. Squaring is monotonic on non-negative numbers, so `dist(a,b) < dist(c,d)` **if and only if** `dx² + dy²` of the first is less than that of the second. Any comparison, sort, minimum, or nearest-neighbour query can therefore be done entirely on squared distances.
+
+```python
+def closer(p, q, r):                     # is q nearer to p than r is?
+    return dist2(p, q) < dist2(p, r)     # no roots, exact on integer input
+```
+
+Worked micro-example: is `(3,4)` nearer the origin than `(0,5)`? Squared: `9 + 16 = 25` versus `0 + 25 = 25`. Exactly equal — and you know that *exactly*, in integers. Compute the actual distances in floating point and you get `5.0` versus `4.999999999999999` on some inputs, and your tie-break silently flips.
+
+Two caveats worth saying out loud. Squared distances overflow faster, so use 64-bit accumulation when coordinates are large. And if the problem genuinely wants the *magnitude* — "print the distance to 6 decimal places" — take the root exactly once, at the very end, after all the comparing is done.
 
 ### What are the main floating-point precision pitfalls in geometry?
-Testing a cross product or determinant against exact `0` when it is a float — use an epsilon, or better, keep integer coordinates so it really is exact. Dividing to get slopes or intersection points introduces rounding and division-by-zero on vertical lines. `atan2`-based angle sorts accumulate error and mis-order near-equal angles. Accumulating area or performing many chained operations drifts. Large integer coordinates overflow 32-bit multiplication — cross products need 64-bit. The senior instinct is: stay in integers, compare squared lengths, and only convert to float at the boundary.
+
+The senior instinct is one sentence: **stay in integers, compare squared quantities, and convert to floating point only at the boundary.** The specific traps:
+
+- **Testing a float cross product against `0`.** A determinant that is mathematically zero comes out as `1e-17`. If you must use floats, compare against an epsilon; if you can, use integer coordinates so it really is zero.
+- **Dividing.** Slopes and explicit intersection points both divide, which introduces rounding and blows up on vertical lines. Most predicates can be rewritten to multiply instead.
+- **`atan2` angle sorts.** Error accumulates and near-equal angles mis-order. Use a cross-product comparator.
+- **Overflow.** Coordinates up to `10⁹` produce cross products up to `~4×10¹⁸` — that fits in signed 64-bit but blows a 32-bit `int` instantly. Python is immune; C++ and Java are not.
+- **Accumulated drift.** Summing thousands of floating-point area terms loses low-order bits steadily.
+
+```python
+EPS = 1e-9
+
+def sign_f(x):                           # only when floats are unavoidable
+    if x > EPS:  return 1
+    if x < -EPS: return -1
+    return 0
+```
+
+Choosing `EPS` is a judgement call tied to your coordinate magnitude — which is precisely why the integer route is better. Say "I'll keep coordinates as integers so the orientation test is exact" early, and you have answered the robustness follow-up before it is asked.
 
 ### How do you compute the area of a simple polygon?
-Use the shoelace (surveyor's) formula: `2*Area = sum over edges of (x_i * y_{i+1} - x_{i+1} * y_i)`, wrapping the last vertex to the first, then take half the absolute value. The signed sum before taking the absolute value also tells you the winding orientation: positive means the vertices are listed counter-clockwise, negative means clockwise. It is `O(n)`, uses only cross-product-style terms, and stays exact with integer coordinates.
+
+Use the **shoelace** (surveyor's) formula: walk the vertices in order, sum a cross-product term per edge, halve the absolute value.
+
+```python
+def polygon_area2(poly):                 # returns 2 * signed area
+    total = 0
+    n = len(poly)
+    for i in range(n):
+        x1, y1 = poly[i]
+        x2, y2 = poly[(i + 1) % n]       # wrap last vertex to first
+        total += x1 * y2 - x2 * y1
+    return total
+
+def polygon_area(poly):
+    return abs(polygon_area2(poly)) / 2
+```
+
+Worked micro-example on the unit square `(0,0), (1,0), (1,1), (0,1)`: the terms are `0·0 - 1·0 = 0`, `1·1 - 1·0 = 1`, `1·1 - 0·1 = 1`, `0·0 - 0·1 = 0`. Sum `= 2`, so area `= 1`. Correct. On the triangle `(0,0), (4,0), (2,3)`: terms `0`, `4·3 - 2·0 = 12`, `0`. Sum `= 12`, area `= 6` — and notice `12` is exactly the cross product from the very first card. Twice the triangle's area *is* the cross product; the shoelace formula is just that summed around a boundary.
+
+The **sign before the absolute value** is free information: positive means the vertices were listed counter-clockwise, negative means clockwise. Complexity is `O(n)` — "linear, one pass over the vertices" — and with integer coordinates `polygon_area2` is exact, so compare doubled areas rather than halved ones when you can.
 
 ### How do you determine if a point is inside a polygon?
-Two standard methods. **Ray casting**: shoot a ray from the point (say, along +x) and count edge crossings — odd means inside, even means outside; handle vertices and horizontal edges carefully. It is `O(n)` per query and works for any simple polygon. **Winding number**: sum signed angles or use orientation tests; more robust for self-intersecting polygons. For a convex polygon you can do better — binary search on the fan of triangles from one vertex gives `O(log n)` per query after `O(n)` preprocessing.
+
+**Ray casting** is the standard answer. Fire a ray from the query point in a fixed direction (`+x` is conventional) and count how many polygon edges it crosses. Odd means inside, even means outside — every crossing flips you between inside and outside, and far away you are definitely outside.
+
+```python
+def point_in_polygon(pt, poly):
+    x, y = pt
+    inside = False
+    n = len(poly)
+    j = n - 1
+    for i in range(n):
+        xi, yi = poly[i]
+        xj, yj = poly[j]
+        straddles = (yi > y) != (yj > y)           # edge spans the ray's y
+        if straddles:
+            x_hit = xi + (y - yi) * (xj - xi) / (yj - yi)
+            if x_hit > x:                          # crossing is to the right
+                inside = not inside
+        j = i
+    return inside
+```
+
+Worked micro-example on the unit square with `pt = (0.5, 0.5)`. The left edge `(0,1) → (0,0)` straddles `y = 0.5` but hits at `x = 0`, which is *not* to the right, so no flip. The right edge `(1,0) → (1,1)` straddles and hits at `x = 1 > 0.5`, so `inside` flips to `True`. The top and bottom edges are horizontal and never straddle. Answer: inside. Move the point to `(1.5, 0.5)` and neither crossing is to the right — answer: outside.
+
+The `(yi > y) != (yj > y)` test is doing quiet work: it counts an edge exactly once when the ray passes through a shared vertex, and it skips horizontal edges entirely — the two degenerate cases that break naive implementations.
+
+**Winding number** is the alternative: sum the signed turns of the polygon boundary as seen from the point (via orientation tests) and check whether the total is non-zero. It agrees with ray casting on simple polygons and is more meaningful on **self-intersecting** ones, where "inside" is genuinely ambiguous under the even-odd rule.
+
+For a **convex** polygon you can do much better: after `O(n)` preprocessing, binary search the fan of triangles from one vertex to locate the query point's wedge, then do one orientation test — `O(log n)` per query, "logarithmic, halving the candidate wedges each step." Worth mentioning if the interviewer says "and now a million queries against the same polygon."
 
 ### When would you actually reach for computational geometry in an interview?
-When the problem is inherently spatial: "largest triangle from these points," "do these intervals/rectangles overlap," "closest pair," "is this polygon convex," "minimum enclosing shape." The tell is coordinates plus a question about containment, intersection, or extremal position. Recognise it, then reduce to primitives — usually a convex hull plus a linear scan, or a sweep. State your precision strategy (integers, squared distances) before coding; interviewers weight robustness heavily here.
+
+The tell is **coordinates plus a question about containment, intersection, or extremal position**. Concretely: "largest triangle from these points," "do these rectangles overlap," "closest pair," "is this polygon convex," "smallest enclosing box," "how many points lie inside this region," "does any pair of these roads cross."
+
+The reduction is usually short. *Extremal position* (farthest pair, widest span, tightest bounding rectangle) → convex hull, then a linear scan or rotating calipers over the hull. *Pairwise interaction among many objects* (overlapping intervals, crossing segments, rectangle union) → line sweep. *Containment* → orientation tests or ray casting. *Proximity* → sort plus divide and conquer, or a grid if coordinates are bounded.
+
+Two things to say before you write any code, because they are what the interviewer is grading:
+
+1. **The precision strategy.** "Coordinates are integers, so I'll keep every predicate as an exact cross product and compare squared distances — no division, no roots."
+2. **The degenerate cases.** Duplicate points, all points collinear, vertical segments, segments that touch at an endpoint rather than crossing, and polygons given clockwise rather than counter-clockwise.
+
+Naming those two up front converts a nervous-looking topic into a confident one, and it is genuinely rare enough to be a differentiator.
 
 ### What is a rotating calipers and what does it solve?
-After computing the convex hull, rotating calipers walks two (or more) pointers around the hull in tandem, exploiting the fact that as one support line rotates, the antipodal point advances monotonically. This computes the **diameter** (farthest pair of points) in `O(n)` after the `O(n log n)` hull, as well as the width, the minimum-area/perimeter bounding rectangle, and the maximum distance between two convex polygons. The key insight is monotonicity: you never move a pointer backwards, so the whole sweep is linear.
+
+Picture two parallel lines squeezing a convex polygon from opposite sides, like a pair of calipers. Rotate them together all the way around. At every rotation angle each line touches some vertex, and — this is the whole trick — **as one caliper rotates forward, its opposite contact point only ever advances forward too**. The contact points never move backwards.
+
+That monotonicity means you can walk two pointers around the hull in tandem, each advancing at most `n` times in total. So after the `O(n log n)` hull you get an extra `O(n)` pass — "linear, because neither pointer ever retreats, exactly like a two-pointer scan over a sorted array."
+
+Micro-example of the idea on the triangle `(0,0), (4,0), (2,3)`: fix the edge `(0,0) → (4,0)` and the farthest vertex from it is `(2,3)`. Rotate to the edge `(4,0) → (2,3)` and the farthest vertex is now `(0,0)` — the pointer moved *forward* around the hull, never back. Repeating gives every antipodal pair in one loop, and the largest gap among them is the **diameter**: here `dist((0,0),(2,3))² = 13` versus `dist((0,0),(4,0))² = 16`, so the diameter is `4`.
+
+What it solves, all in `O(n)` after the hull: the **diameter** (farthest pair of points), the **width** (minimum distance between parallel supporting lines), the **minimum-area or minimum-perimeter enclosing rectangle** (which must have a side flush with a hull edge), and the minimum distance between two convex polygons. The pattern to remember is "hull first, then one monotone two-pointer sweep" — the same idea as two pointers on a sorted array, wrapped around a polygon.
 
 ## Intractability: P, NP & Approximation
 
 ### Summary
 
 **What this topic covers**
-The theory of which problems are efficiently solvable and what to do when yours is not. It defines P, NP, NP-complete, and NP-hard; explains polynomial-time reductions and why one hard problem's difficulty transfers to another; catalogues the classic hard problems (SAT, TSP, subset-sum, vertex cover); and lays out the practical escape routes — approximation algorithms with provable ratios, heuristics, and smart exponential exact methods. The mental model: "efficiently solvable" means polynomial time, and NP-completeness is strong evidence (not proof) that no such algorithm exists.
+The theory of which problems are *efficiently solvable*, and — more usefully for an engineer — what to do when yours isn't. It defines **P**, **NP**, **NP-complete** and **NP-hard**; explains **polynomial-time reductions** and why one hard problem's difficulty transfers to another; catalogues the classic hard problems (SAT, TSP, subset-sum, vertex cover, set cover); and lays out the three escape routes — **approximation algorithms** with provable ratios, **heuristics** with no guarantee, and **exact exponential** methods that are fine when `n` is small. The one-line takeaway: "efficiently solvable" is a synonym for "polynomial time", and NP-completeness is very strong *evidence* — not proof — that no polynomial algorithm exists.
+
+**Mental model**
+Forget the Greek for a moment. **P** = "I can *find* the answer fast." **NP** = "if someone hands me an answer, I can *check* it fast." Sudoku is the canonical picture: solving a hard 25×25 grid may take you all afternoon, but checking a completed grid takes a minute — that gap between finding and checking is the entire subject. **NP-complete** = the hardest problems in the "easy to check" club: crack one in polynomial time and you crack all of them. **NP-hard** = "at least as hard as those", possibly harder, possibly not even checkable. A **reduction** is just a translator: a function that rewrites an instance of problem A as an instance of problem B so that B's answer *is* A's answer. If you own a fast solver for B and a fast translator A→B, you own a fast solver for A — which is why translating a known-hard problem *into* your problem proves your problem is hard too.
 
 **Key terms**
-*P*: decision problems solvable in polynomial time. *NP*: decision problems whose "yes" answer can be *verified* in polynomial time given a certificate. *NP-hard*: at least as hard as every problem in NP (everything in NP reduces to it); need not be in NP itself. *NP-complete*: in NP *and* NP-hard — the hardest problems that are still verifiable. *Reduction*: a polynomial-time transformation of instances of A into instances of B such that the answer is preserved. *Certificate/witness*: the short proof that a "yes" instance is a yes. *Approximation ratio*: the guaranteed worst-case bound of a heuristic's cost relative to optimal.
+- **P** — decision problems solvable in polynomial time, `O(nᵏ)` for a fixed `k`. The proxy for "tractable".
+- **NP** — decision problems whose *yes* answers have a short certificate checkable in polynomial time. "N" is *nondeterministic*, **not** "non-polynomial".
+- **Certificate / witness** — the proposed answer you hand the verifier (a tour, an assignment, a vertex set).
+- **Verifier** — the polynomial-time checker. Writing one *is* the proof that a problem is in NP.
+- **Reduction** — a polynomial-time rewrite of A-instances into B-instances preserving the yes/no answer.
+- **NP-hard** — everything in NP reduces to it; need not be in NP, need not even be a decision problem.
+- **NP-complete** — in NP **and** NP-hard: the intersection, the "hardest checkable" problems.
+- **Approximation ratio** — worst-case bound on `algorithm cost / optimal cost`. A 2-approximation is *never* worse than twice optimal.
+- **PTAS / FPTAS** — approximation schemes tunable by an accuracy parameter `ε`; FPTAS is polynomial in `1/ε` too.
+- **Pseudo-polynomial** — polynomial in a numeric *value* in the input, not in the input's *bit length*.
 
 **Core mechanics**
-NP is about *verification*, not solving: given a proposed solution (a certificate), can you check it in polynomial time? For TSP-as-a-decision-problem "is there a tour under length k," a tour is the certificate — check its length in `O(n)`. P is contained in NP. The million-dollar open question is whether P = NP. **Reductions** are how hardness spreads: if A is NP-hard and A reduces to B in polynomial time, then B is NP-hard too, because a fast solver for B would give a fast solver for A. Cook-Levin proved SAT is NP-complete from first principles; every other NP-completeness proof reduces a known-hard problem to the new one. When you cannot avoid an NP-hard problem you pick a coping strategy: **approximation** (guaranteed within a factor, e.g. 2-approx vertex cover), **heuristics** (no guarantee but good in practice, e.g. simulated annealing for TSP), or **exact exponential** methods (branch-and-bound, `O(2^n)` DP for TSP via Held-Karp) that are acceptable when n is small.
+NP is defined by verification, so the concrete way to show a problem is in NP is to write the verifier: for "is there a tour shorter than `k`", the certificate is a permutation of cities and the check is an `O(n)` sum. P ⊆ NP (ignore the certificate and just solve it). Hardness spreads by reduction: if A is NP-hard and A reduces to B in polynomial time, B is NP-hard, because a fast B-solver plus the translator would solve A fast. **Cook-Levin** proved SAT NP-complete from first principles by encoding the run of any polynomial verifier as a Boolean formula; every proof since then is "reduce 3-SAT (or a descendant) to my problem". When you can't dodge an NP-hard problem you pick a coping strategy: approximation (2-approx vertex cover, `ln n`-approx set cover, 1.5-approx metric TSP), heuristics (local search, simulated annealing, greedy with restarts), or exact exponential methods (Held-Karp's `O(n²·2ⁿ)` DP, branch-and-bound, meet-in-the-middle, industrial SAT/ILP solvers).
 
 **Trade-offs**
-Approximation buys a provable quality guarantee at the cost of not being optimal; heuristics buy speed and simplicity at the cost of any guarantee; exact exponential methods buy optimality at the cost of scaling only to small n. FPTAS/PTAS schemes let you trade running time for accuracy continuously (subset-sum has an FPTAS). The engineering choice depends on whether you need a bound, whether n is bounded, and how much the last few percent of optimality is worth.
+Approximation buys a provable quality bound and pays in optimality. Heuristics buy speed and simplicity and pay in having *no* guarantee — they can be arbitrarily bad on an adversarial input while being excellent on your real data. Exact exponential methods buy optimality and pay in scaling: Held-Karp is comfortable at `n ≈ 20` and hopeless at `n = 40`. PTAS/FPTAS let you slide continuously between the two, spending time to buy accuracy. Choose by asking three questions: do I have to *promise* a bound to someone; is `n` bounded; and how much is the last few percent of optimality actually worth?
 
 **Common confusions**
-NP does not stand for "non-polynomial" — it is "nondeterministic polynomial," about verifiability. NP-hard is not a subset of NP: the halting problem is NP-hard but not in NP. "NP-complete" implies both in NP and NP-hard. P vs NP is *open* — no one has proven fast algorithms don't exist; NP-completeness is evidence, not a theorem of impossibility. And a 2-approximation does not mean "usually within 2%" — it means never worse than twice optimal in the worst case.
+"NP means non-polynomial" — no, it's *nondeterministic polynomial*, and it's about checking, not solving. "NP-hard problems are in NP" — no: NP-hard is the broader bucket, and the halting problem is NP-hard while not being in NP at all. "NP-complete means proven impossible" — no, P vs NP is **open**; it's evidence, not a theorem of impossibility. "A 2-approximation is usually within 2%" — no, it means *never worse than 2×*, worst case; typical behaviour is often far better and is a separate, empirical claim. "The `O(n·T)` knapsack DP is polynomial" — no, it's pseudo-polynomial, because `T` is a value whose encoding is only `log T` bits long.
 
 **Why interviewers ask**
-Mostly to see that you *recognise* when a problem is intractable and stop hunting for a polynomial algorithm that likely doesn't exist. The classic angle: you propose brute force, they ask "can you do better," and the senior answer is "this is NP-hard (here's the reduction sketch), so I'd use an approximation/heuristic/exact-for-small-n." Naming a reduction from a known hard problem, or a concrete approximation ratio, is the signal they want.
+Almost never to make you prove a theorem. They want to see that you *recognise* intractability and stop hunting for a polynomial algorithm that probably doesn't exist. The classic shape: you propose brute force, they ask "can you do better", and the senior answer is "I don't think polynomial-exact is available here — this smells like a reduction from subset-sum — so I'd do exact bitmask DP for small `n`, or a 2-approximation if I need a guarantee". Naming a plausible reduction and naming a concrete coping strategy with its ratio is the whole signal.
 
 ### What does it mean for a problem to be in P?
-A decision problem is in P if some algorithm solves it in time polynomial in the input size — `O(n^k)` for a fixed `k`. Polynomial is the community's proxy for "efficient/tractable" because it composes nicely (a polynomial of a polynomial is polynomial) and is robust across reasonable machine models. Sorting, shortest paths, matching, linear programming, and primality testing are all in P. The exponent can be large, but the class draws the practical line between "we have a scalable algorithm" and "we probably don't."
+
+"In P" is the formal version of "I have a real algorithm for this". A decision problem is in P if some algorithm answers it in time polynomial in the **input size** — `O(nᵏ)` for a fixed exponent `k`. Polynomial is the community's proxy for *tractable* for two reasons: it composes (a polynomial number of calls to a polynomial routine is still polynomial), and it's robust across machine models, so the class doesn't change if you swap a Turing machine for a laptop. Sorting, shortest paths, bipartite matching, linear programming and primality testing are all in P. The class is deliberately coarse — an `O(n¹⁰⁰)` algorithm counts as "efficient" and a `1.0001ⁿ` one doesn't — but it draws the practical line between "this scales" and "this probably doesn't".
 
 ### What is NP, and why is it about verification?
-NP is the class of decision problems where a "yes" answer has a certificate that can be *checked* in polynomial time, even if *finding* it seems hard. For "does this graph have a Hamiltonian cycle," the certificate is the cycle itself — verifying it visits every vertex once is easy; discovering it is not. The name is "nondeterministic polynomial": a nondeterministic machine could guess the certificate and verify it in polynomial time. Every problem in P is in NP (you can ignore the certificate and just solve it).
+
+NP is the class of problems where a *yes* answer comes with a short **certificate** you can check quickly, even if finding that certificate looks hopeless. "Does this graph have a Hamiltonian cycle?" — the certificate is the cycle; verifying it visits every vertex exactly once is trivial, discovering it is not. The name is *nondeterministic polynomial*: a machine allowed to guess could guess the certificate and verify in polynomial time.
+
+The cleanest way to internalise this is to write a verifier, because writing one **is** the proof of membership in NP:
+
+```python
+def verify_vertex_cover(edges, cover, k):    # certificate: the set 'cover'
+    if len(cover) > k:                       # 1) claimed size is within budget
+        return False
+    s = set(cover)
+    return all(u in s or v in s for u, v in edges)   # 2) every edge is touched
+
+def verify_sat(clauses, assignment):         # clauses like [[1, -3, 4], [-1, 2]]
+    return all(                              # every clause has a true literal
+        any(assignment[abs(lit)] == (lit > 0) for lit in clause)
+        for clause in clauses
+    )
+```
+
+Both run in `O(E)` and `O(total literals)` — linear. Neither *solves* anything. That asymmetry is the whole class. Every problem in P is in NP: ignore the certificate and just solve it.
 
 ### What is the difference between NP-hard and NP-complete?
-NP-hard means "at least as hard as everything in NP" — every NP problem reduces to it in polynomial time — but it need not be in NP or even be a decision problem (optimization TSP and the halting problem are NP-hard). NP-complete means both **in NP** and **NP-hard**: the hardest problems that still have polynomial-time-checkable certificates. So NP-complete is the intersection; NP-hard is the broader "at least this hard" bucket. Solving one NP-complete problem in polynomial time would collapse all of NP into P.
+
+**NP-hard** means "at least as hard as everything in NP" — every NP problem reduces to it in polynomial time — but it needn't be in NP, or even be a decision problem. Optimisation-TSP ("give me the *shortest* tour") is NP-hard but isn't a yes/no question, and the halting problem is NP-hard while being undecidable, so certainly not in NP. **NP-complete** means both **in NP** and **NP-hard**: the hardest problems that still have polynomial-time-checkable certificates. So NP-complete is the intersection; NP-hard is the open-ended "at least this hard" bucket above it. The practical consequence: solving any single NP-complete problem in polynomial time would collapse all of NP into P at once.
 
 ### What is a polynomial-time reduction and why does it matter?
-A polynomial-time (many-one) reduction transforms instances of problem A into instances of problem B, in polynomial time, so that A's answer is "yes" exactly when the transformed B instance's answer is "yes." It matters because it transfers hardness: if A is NP-hard and A reduces to B, then B is NP-hard too — a polynomial solver for B plus the reduction would solve A in polynomial time. Reductions are the currency of complexity theory; almost every NP-completeness proof is "reduce a known NP-complete problem to mine."
+
+A polynomial-time (many-one) reduction is a translator: a polynomial-time function turning instances of A into instances of B such that A's instance is a *yes* exactly when the produced B instance is a *yes*. It matters because it transfers hardness in the direction most people get backwards — to prove **B** is hard, you reduce a known-hard **A into B**, showing B is at least as hard as A.
+
+Reductions sound abstract until you see one as code. Independent set (`is there a set of ≥ k vertices with no edge between them?`) reduces to vertex cover in one line, because `S` is an independent set exactly when the complement `V` minus `S` is a vertex cover:
+
+```python
+def independent_set_to_vertex_cover(n, edges, k):
+    """Yes-instance of IS(G, k)  <=>  yes-instance of VC(G, n - k)."""
+    return n, edges, n - k        # same graph, complemented budget
+```
+
+That's it — the "reduction" is a budget flip. Now any polynomial vertex-cover solver instantly solves independent set, so vertex cover inherits independent set's hardness. Most real reductions build *gadgets* (a small graph fragment per clause or variable) instead of being this cheap, but the shape is always the same: rewrite the input, keep the answer.
 
 ### How do we know any problem is NP-complete in the first place?
-The Cook-Levin theorem proved SAT (Boolean satisfiability) is NP-complete *directly*: it showed that the computation of any polynomial-time nondeterministic verifier can be encoded as a Boolean formula that is satisfiable iff the machine accepts. That gave the first NP-complete problem without relying on another. Every subsequent proof is a reduction: reduce SAT (or a descendant like 3-SAT) to your problem to show it's NP-hard, and exhibit a polynomial verifier to show it's in NP. Karp's 21 problems seeded the chain that now covers thousands.
+
+Reductions only move hardness around — someone had to establish a first source. The **Cook-Levin theorem** proved SAT (Boolean satisfiability) NP-complete *directly*: it showed the entire computation of any polynomial-time nondeterministic verifier can be encoded as a Boolean formula that is satisfiable if and only if the machine accepts. No prior hard problem required. Everything since is bootstrapped off it: to prove your problem NP-complete you (1) exhibit a polynomial verifier, proving it's in NP, and (2) reduce SAT — or a descendant like 3-SAT, vertex cover or subset-sum — to it, proving it's NP-hard. Karp's 21 problems seeded the chain that now covers thousands of problems across scheduling, packing, routing and layout.
 
 ### What does P vs NP actually ask, and what's the consensus?
-It asks whether every problem whose solution can be *verified* quickly can also be *solved* quickly — formally, does P = NP? If yes, thousands of currently intractable problems (and much of cryptography's hardness assumptions) would fall to polynomial algorithms. It remains open, one of the Millennium Prize problems. The strong consensus is P != NP, but that is belief backed by decades of failed attempts to find fast algorithms, not proof. This is why "NP-complete" is treated as practical evidence of intractability rather than certainty.
+
+It asks whether *checkable-fast* implies *solvable-fast*: is every problem whose solution can be verified in polynomial time also solvable in polynomial time? Formally, does `P = NP`? If yes, thousands of currently intractable optimisation problems fall to polynomial algorithms — and most of modern cryptography, which is built on the assumption that certain problems are hard to invert but easy to check, is in serious trouble. It remains open, and is one of the Millennium Prize problems. The strong consensus is `P ≠ NP`, but that's belief backed by fifty years of failed attempts, not proof. This is exactly why "NP-complete" is treated as *practical* evidence of intractability rather than certainty — the right interview phrasing is "no polynomial algorithm is known and one is unlikely", not "it's impossible".
 
 ### Why is SAT important and what is 3-SAT?
-SAT asks whether a Boolean formula has an assignment making it true; it was the first proven NP-complete problem, so it anchors the whole theory. **3-SAT** restricts each clause to exactly three literals (conjunctive normal form) and is still NP-complete, which makes it the favourite starting point for reductions — its rigid structure is easy to map onto graphs, sets, and other combinatorial gadgets. In practice, modern SAT solvers (CDCL) crack huge industrial instances fast despite the worst-case hardness, which is a nice reminder that "NP-complete" is a worst-case statement.
+
+SAT asks whether a Boolean formula has an assignment making it true. It matters because it was the *first* problem proved NP-complete, so it anchors the whole theory — it's the root of the reduction tree. **3-SAT** restricts the formula to conjunctive normal form with exactly three literals per clause (`(x₁ ∨ ¬x₃ ∨ x₄) ∧ …`) and is *still* NP-complete, which makes it the favourite starting point for reductions: its rigid, uniform structure is easy to map onto graph gadgets, set systems and colourings. The practical footnote worth saying out loud: modern CDCL SAT solvers routinely dispatch industrial instances with millions of clauses in seconds. NP-completeness is a **worst-case** statement about a family of inputs, not a prediction about the input on your desk.
 
 ### Why is the Travelling Salesman Problem hard, and is any version easy?
-TSP asks for the minimum-length tour visiting every city once. The decision version ("is there a tour under length k") is NP-complete; the optimization version is NP-hard. General TSP is even hard to approximate. But structure helps: **metric TSP** (distances satisfy the triangle inequality) admits a 2-approximation via a minimum spanning tree, and the Christofides algorithm gives 1.5. Euclidean TSP has a PTAS. Held-Karp solves it exactly in `O(n^2 * 2^n)` time and `O(2^n)` space — fine for n around 15-20, hopeless beyond.
+
+TSP asks for the minimum-length tour visiting every city exactly once. The decision version ("is there a tour of length `≤ k`?") is NP-complete; the optimisation version is NP-hard. Worse, *general* TSP with arbitrary distances can't even be approximated within any constant factor unless `P = NP` — a reduction from Hamiltonian cycle makes cheating tours astronomically expensive. But structure rescues it. **Metric TSP** (distances obey the triangle inequality, `d(a,c) ≤ d(a,b) + d(b,c)`) has a simple **2-approximation**: build a minimum spanning tree, walk it depth-first, and shortcut repeats — the MST costs less than the optimal tour, and the walk doubles it. **Christofides** improves that to 1.5 by patching the MST with a minimum matching on odd-degree vertices. **Euclidean TSP** has a PTAS. And exactly, **Held-Karp** runs in `O(n²·2ⁿ)` time with `O(n·2ⁿ)` space — comfortable to `n ≈ 20`.
 
 ### What is subset-sum and why is its "efficient" DP not polynomial?
-Subset-sum asks whether some subset of given integers sums to a target `T`. The classic DP fills a boolean table over `(index, achievable sum)` in `O(n*T)` time. That looks polynomial but `T` is a *value*, whose size in bits is `log T`, so `O(n*T)` is exponential in the input length — it's **pseudo-polynomial**. This is the textbook example of the distinction: polynomial in the numeric magnitude is not polynomial in the encoding size. Subset-sum (and partition) is NP-complete, and it has an FPTAS that trades accuracy for genuinely polynomial time.
+
+Subset-sum asks whether some subset of the given integers sums to exactly `T`. The classic DP marches a reachability table over sums:
+
+```python
+def subset_sum(nums, T):                   # O(n*T) time, O(T) space
+    can = [False] * (T + 1)
+    can[0] = True                          # empty subset reaches 0
+    for x in nums:
+        for s in range(T, x - 1, -1):      # descend so each x is used once
+            if can[s - x]:
+                can[s] = True
+    return can[T]
+```
+
+That looks polynomial, and it *is* polynomial in the number `T` — but `T` is a **value**, and its size in the input is only `log₂ T` bits. Doubling the input length by adding one bit to `T` *doubles* the running time, so `O(n·T)` is exponential in the encoding size. This is the definition of **pseudo-polynomial**. The identical point applies to the `O(n·W)` knapsack DP: it's fast when the capacity `W` is small, and useless when `W` is a 64-bit number written in 8 bytes. Subset-sum and partition are NP-complete, yet subset-sum has an **FPTAS** (round the values, dedupe near-equal sums) that gives genuine polynomial time in `n` and `1/ε`.
 
 ### What is the vertex cover problem and its classic 2-approximation?
-Vertex cover asks for the smallest set of vertices touching every edge; the decision version is NP-complete. A famous simple 2-approximation: repeatedly pick any uncovered edge `(u,v)`, add *both* endpoints to the cover, and remove all edges incident to either. Because those two vertices cover an edge that any valid cover must also cover with at least one endpoint, the matching you build lower-bounds the optimum, and you used at most twice as many vertices. It runs in `O(V + E)` and guarantees a cover no larger than twice optimal.
+
+Vertex cover asks for the smallest set of vertices touching every edge — "where do I put guards so every corridor is watched?" The decision version is NP-complete. The famous approximation is almost embarrassingly simple: find any uncovered edge, and take **both** endpoints.
+
+```python
+def vertex_cover_2approx(edges):
+    cover = set()
+    matching = []
+    for u, v in edges:
+        if u in cover or v in cover:
+            continue                    # already covered; skip
+        cover.add(u)
+        cover.add(v)                    # take BOTH endpoints
+        matching.append((u, v))         # these edges share no vertex
+    return cover, matching
+```
+
+The proof is two sentences. The edges you picked form a **matching** — no two of them share a vertex — and *any* valid cover must spend at least one distinct vertex on each of them, so `|OPT| ≥ |matching|`. You spent exactly `2·|matching|`, hence `|cover| ≤ 2·|OPT|`. Linear time, `O(V + E)`, and never worse than twice optimal. Note the elegance: the algorithm never computes `OPT`, it just builds a *lower bound* on it along the way. That trick — pair a greedy choice with a lower bound it can be compared against — is how most approximation proofs work.
 
 ### What is an approximation ratio and what's the difference between PTAS and FPTAS?
-The approximation ratio is the worst-case bound on `(algorithm's cost) / (optimal cost)` for a minimization problem (or the inverse for maximization) — a 2-approximation is never worse than twice optimal. A **PTAS** (polynomial-time approximation scheme) takes an accuracy parameter epsilon and runs in time polynomial in `n` for each fixed epsilon, but the dependence on `1/epsilon` may be exponential. An **FPTAS** is stronger: polynomial in *both* `n` and `1/epsilon`. Subset-sum has an FPTAS; general TSP has neither unless P = NP.
+
+The approximation ratio is the worst-case bound on `algorithm cost / optimal cost` for minimisation (or its inverse for maximisation). "2-approximation" means never worse than twice optimal on *any* input — a promise, not an average. A **PTAS** takes an accuracy parameter `ε` and runs in time polynomial in `n` for each fixed `ε`, but the dependence on `1/ε` may be brutal (`n^(1/ε)` is a legal PTAS). An **FPTAS** is strictly stronger: polynomial in **both** `n` and `1/ε`, e.g. `O(n³/ε)`. Subset-sum has an FPTAS; general TSP has neither unless `P = NP`.
+
+Not every ratio is a constant. Greedy **set cover** — repeatedly take the set covering the most still-uncovered elements — achieves a `ln n` ratio, and that's provably the best possible unless `P = NP`:
+
+```python
+def greedy_set_cover(universe, subsets):
+    uncovered = set(universe)
+    chosen = []
+    while uncovered:
+        best = max(subsets, key=lambda s: len(s & uncovered))
+        if not (best & uncovered):
+            return None                 # universe cannot be covered
+        chosen.append(best)
+        uncovered -= best               # each round kills a 1/OPT fraction
+    return chosen
+```
+
+The proof sketch: some set must cover at least `1/OPT` of what remains, so the uncovered count shrinks by a factor of `(1 - 1/OPT)` each round, reaching zero after about `OPT·ln n` rounds.
 
 ### When would you choose a heuristic over an approximation algorithm?
-Choose a heuristic (local search, simulated annealing, genetic algorithms, greedy with restarts) when you need good solutions fast and can't afford — or don't have — an algorithm with a provable ratio, and when empirical quality matters more than a worst-case guarantee. Approximation algorithms are preferable when you must promise a bound (SLA, safety, contractual). In interviews the honest answer is often "no polynomial exact algorithm is likely, so I'd run a heuristic and validate empirically, or an approximation if I need the guarantee."
+
+Choose a **heuristic** — local search, simulated annealing, genetic algorithms, greedy with random restarts, beam search — when you need good answers fast, no algorithm with a provable ratio exists (or the one that does is worse in practice), and empirical quality on *your* data matters more than a worst-case promise. Real TSP solvers like Lin-Kernighan routinely land within a fraction of a percent of optimal with no ratio guarantee whatsoever, comfortably beating the 1.5-approximation in practice. Choose an **approximation algorithm** when you must *promise* something: an SLA, a safety bound, a contractual limit, a regulatory argument, or a proof obligation in a paper. The honest interview answer is usually "no polynomial exact algorithm is likely here, so I'd run a heuristic and validate empirically against known-good instances — unless we need a stated bound, in which case here's the 2-approximation."
 
 ### How do exact exponential methods stay usable on NP-hard problems?
-Two levers: bound the input size, and prune aggressively. **Branch-and-bound** explores the solution tree but discards subtrees whose optimistic bound can't beat the best solution found — worst case still exponential, but often fast. **Bitmask/DP over subsets** (Held-Karp for TSP, `O(2^n)` DP) is exact for small n. **Meet-in-the-middle** splits the input to turn `O(2^n)` into roughly `O(2^{n/2})` (great for subset-sum). And modern **SAT/ILP solvers** routinely crush large real instances despite worst-case hardness. The theme: exponential is acceptable when n is small or the structure prunes hard.
+
+Two levers only: **bound `n`**, and **prune hard**. If the instance is genuinely small, exponential is fine — `2²⁰` is a million.
+
+**Bitmask DP over subsets** is the workhorse. Held-Karp for TSP keeps `dp[mask][last]` = cheapest path visiting exactly the cities in `mask` and ending at `last`, turning the `n!` tours into `n²·2ⁿ` states-and-transitions:
+
+```python
+def held_karp(dist):                        # dist: n x n matrix, tour from city 0
+    n = len(dist)
+    INF = float("inf")
+    dp = [[INF] * n for _ in range(1 << n)]
+    dp[1][0] = 0                            # visited {0}, standing on 0
+    for mask in range(1 << n):
+        if not mask & 1:
+            continue                        # every path starts at city 0
+        for last in range(n):
+            if dp[mask][last] == INF:
+                continue
+            for nxt in range(n):
+                if mask >> nxt & 1:
+                    continue                # already visited
+                nm = mask | (1 << nxt)
+                cand = dp[mask][last] + dist[last][nxt]
+                if cand < dp[nm][nxt]:
+                    dp[nm][nxt] = cand
+    full = (1 << n) - 1
+    return min(dp[full][last] + dist[last][0] for last in range(1, n))
+```
+
+**Branch-and-bound** is the other lever: explore the decision tree but compute an optimistic bound for each subtree and discard it the moment that bound can't beat the incumbent.
+
+```python
+def branch_and_bound(state, best):
+    if optimistic_bound(state) >= best.cost:
+        return                              # prune: this subtree cannot win
+    if is_complete(state):
+        best.cost = min(best.cost, cost(state))
+        return
+    for child in sorted(expand(state), key=optimistic_bound):
+        branch_and_bound(child, best)       # best-first order prunes sooner
+```
+
+Worst case is still exponential; typical case is often fast, because a good incumbent found early kills most of the tree. Add **meet-in-the-middle** (split the input in half, enumerate both halves, join — turning `2ⁿ` into about `√(2ⁿ)`, the standard trick for subset-sum) and industrial **SAT/ILP solvers**, and a great many "intractable" real problems get solved to proven optimality every day.
 
 ### How do you recognise an NP-hard problem in an interview, and what should you say?
-Signals: the problem asks for an optimal subset/permutation/partition/assignment over a combinatorial space with interacting constraints, and no obvious greedy or DP with polynomial state fits — think tours, packings, colourings, cliques, general subset selection. When you spot it, say so: "this looks NP-hard — it reduces to/from [TSP, subset-sum, vertex cover, graph colouring], so I don't expect a polynomial exact algorithm." Then pivot to a plan: exact for small n (bitmask DP, branch-and-bound), an approximation with a stated ratio, or a heuristic. Naming the reduction and the coping strategy is exactly what they're grading.
+
+The tells: you're asked for an *optimal* subset, permutation, partition, assignment or colouring over a combinatorial space; the constraints **interact**, so no local greedy choice is safe; and no DP state of polynomial size captures enough (you find yourself wanting the *set* of chosen items in the state, which is `2ⁿ`). Think tours, packings, schedules with conflicts, cliques, colourings, general subset selection with a numeric budget.
+
+When you spot it, say it explicitly: "this looks NP-hard — it smells like a reduction from subset-sum / vertex cover / graph colouring / TSP, so I don't expect a polynomial exact algorithm." Then **immediately pivot to a plan**, because stopping at "it's hard" scores nothing: exact for small `n` (bitmask DP, branch-and-bound, meet-in-the-middle), an approximation with a stated ratio, or a heuristic with an empirical validation story. Also check whether the *real* instance has structure that escapes the general hardness — bounded treewidth, a metric, small numeric values (pseudo-polynomial DP becomes viable), or a bipartite/planar special case. Naming the reduction, the coping strategy and the structural escape hatch is exactly what's being graded.
 
 ### Are there problems between P and NP-complete?
-If P != NP, then yes — Ladner's theorem guarantees "NP-intermediate" problems that are in NP but neither in P nor NP-complete. The suspected real-world examples are **integer factorization** and **graph isomorphism**: both in NP, no known polynomial algorithm, yet no NP-completeness proof (graph isomorphism now has a quasi-polynomial algorithm, strong evidence it isn't NP-complete). Factorization's presumed hardness underpins RSA. The takeaway: "not in P" and "NP-complete" are not the same claim; there is a middle tier.
+
+If `P ≠ NP`, then yes — **Ladner's theorem** guarantees the existence of "NP-intermediate" problems: in NP, but neither in P nor NP-complete. The suspected real-world inhabitants are **integer factorisation** and **graph isomorphism**. Both are in NP (the factors, or the vertex mapping, are easy-to-check certificates), neither has a known polynomial algorithm, and neither has an NP-completeness proof — graph isomorphism in fact has a **quasi-polynomial** algorithm (running time `n` raised to a poly-logarithmic power — slower than polynomial, vastly faster than exponential), which is strong evidence it *isn't* NP-complete, since no NP-complete problem is expected to admit one. Factorisation's presumed hardness is what RSA rests on; note that it's presumed hard, not proven hard, and Shor's algorithm dissolves it on a sufficiently large quantum computer. The takeaway for an interview: "not known to be in P" and "NP-complete" are different claims, and there is a middle tier between them.
 
 ## Algorithm Design & Interview Playbook
 
 ### Summary
 
 **What this topic covers**
-The meta-skill: given an unfamiliar problem, how to pick a technique, budget your complexity, reason out loud, and sanity-check before committing. It is the connective tissue over the whole primer — a decision procedure that walks from brute force through greedy, divide and conquer, dynamic programming, and graph modelling, using the input constraints as the main signal for what running time you're allowed to spend.
+The meta-skill every other topic feeds into: given a problem you have never seen, how do you pick a technique, budget your running time, reason out loud, and sanity-check before you commit? This is the connective tissue over the whole primer — a repeatable decision procedure that walks from brute force through greedy, divide and conquer, dynamic programming, graph modelling and backtracking, using the **input constraints** as the main signal for what running time you are even allowed to spend. It also covers the interview craft around the algorithm: restating the problem, narrating the funnel, dry-running on a tiny input, taking a hint gracefully, and answering "can you make it faster?"
+
+**Mental model**
+Think of it as a funnel with a budget attached. At the top sits brute force — always correct, usually too slow, and *always the right first thing to say*. The constraints tell you how much running time you can afford, which tells you how far down the funnel you have to travel. Then you look at the brute force and ask one question: **what work is it repeating?** Almost every optimisation in this primer is an answer to that question. Repeating a linear scan to find a complement → hash map. Recomputing overlapping sums → prefix sums. Recomputing overlapping subproblems → memoisation. Repeatedly finding a minimum → heap. Scanning a sorted array pairwise → two pointers or binary search. You are not "recalling the trick"; you are naming the wasted work and deleting it.
 
 **Key terms**
-*Paradigm*: a family of approaches — brute force, greedy, divide and conquer, dynamic programming, graph algorithms, backtracking. *Complexity budget*: the running time the input size implies you can afford. *State*: the variables that fully describe a subproblem in DP. *Optimal substructure*: an optimal solution is built from optimal solutions to subproblems. *Overlapping subproblems*: the same subproblem recurs, so memoize. *Greedy-choice property*: a locally optimal choice is globally safe. *Invariant*: something true at every step that argues correctness.
+- **Paradigm** — a family of approaches: brute force, greedy, divide and conquer, dynamic programming, graph algorithms, backtracking.
+- **Complexity budget** — the running time the input size implies you can afford, assuming roughly `10⁸`–`10⁹` simple operations per second.
+- **State** — the smallest set of variables that fully describes a subproblem in DP.
+- **Optimal substructure** — an optimal solution is built out of optimal solutions to subproblems.
+- **Overlapping subproblems** — the same subproblem recurs in the naive recursion, so memoising pays.
+- **Greedy-choice property** — a locally optimal choice is provably globally safe.
+- **Exchange argument** — the standard proof that swapping the greedy choice into an optimal solution never makes it worse.
+- **Invariant** — something true at every step of the algorithm that argues its correctness.
+- **Dry run** — hand-tracing your code on a size-2 or size-3 input before claiming it works.
 
 **Core mechanics**
-Start with the brute-force solution to establish correctness and a baseline complexity — it also frames the problem's structure. Then read `n` to infer the budget: `n <= 20` invites `O(2^n)` or `O(n!)` backtracking; `n <= 500` allows `O(n^3)`; `n <= 5000`, `O(n^2)`; `n <= 1e5-1e6`, `O(n log n)` or `O(n)`; `n <= 1e18`, `O(log n)` or `O(1)` (math/binary-search-on-answer). Then match structure to paradigm: independent locally-optimal choices -> greedy; problem splits into equal independent halves -> divide and conquer; overlapping subproblems with optimal substructure -> DP; entities-and-relations or reachability/shortest-path -> model as a graph and run BFS/DFS/Dijkstra/union-find. Always verify the paradigm's precondition — greedy needs an exchange-argument proof, DP needs a state with no forward dependencies. Then state complexity, walk a tiny example, and check edge cases.
+Say the brute force first: it locks in correctness, gives you a baseline complexity, and forces you to describe the problem's structure. Then read `n` and convert it to a budget — `n ≤ 20` invites `2ⁿ` or `n!` search, `n ≤ 500` allows cubic, `n ≤ 5000` allows quadratic, `n ≤ 10⁶` demands `O(n log n)` or linear, `n ≤ 10⁹` demands logarithmic, `O(√n)`, or closed-form maths. Then match structure to paradigm: independent locally-optimal choices → greedy; equal independent halves that recombine cheaply → divide and conquer; overlapping subproblems with optimal substructure → DP; entities-and-relations, reachability, ordering or cheapest-route → model it as a graph and run BFS, DFS, Dijkstra, topological sort or union-find; "try every configuration with pruning" → backtracking. Always verify the paradigm's precondition — greedy needs an exchange argument, DP needs a state with no forward dependencies. Then state the target complexity, walk a tiny example, code, dry-run, and discuss trade-offs.
 
 **Trade-offs**
-Greedy is fastest to code and fastest to run but is *wrong* unless you can prove the greedy-choice property — the seductive trap. DP is general and provably optimal but costs memory and demands you nail the state and transition. Divide and conquer parallelizes and often hits `O(n log n)` but needs the subproblems to be independent. Brute force is always correct and is the right *first* answer to state, but rarely the final one. Picking the heaviest technique when a lighter one suffices wastes interview time; picking greedy when the problem needs DP produces a confidently wrong answer.
+Greedy is the fastest to write and the fastest to run, but it is *wrong* unless you can prove the greedy-choice property — the single most seductive trap in interviews. DP is general and provably optimal but costs memory and demands you nail the state and transition exactly. Divide and conquer often lands on `O(n log n)` and parallelises well, but needs genuinely independent subproblems. Brute force is always correct and is the right *first* answer to state, rarely the final one. Reaching for the heaviest technique when a lighter one clears the budget burns interview minutes; reaching for greedy when the problem needs DP produces a confidently wrong answer, which is worse than a slow correct one.
 
 **Common confusions**
-Reaching for DP when a greedy proof exists, or asserting greedy without a proof and getting a subtle counterexample; conflating "recursion" with "DP" (DP = recursion + memoization over overlapping subproblems); mis-sizing the budget by ignoring the constant or the hidden `log`; forgetting that `O(n*T)` DP is pseudo-polynomial; and optimizing before you have a correct baseline. Another trap: not restating the problem, so you solve the wrong one.
+Reaching for DP when a two-line greedy proof exists, or asserting greedy with no proof and getting flattened by a counterexample. Conflating recursion with DP — DP is recursion *plus* memoisation over overlapping subproblems; plain recursion over disjoint subproblems is divide and conquer. Mis-sizing the budget by ignoring a large constant or a hidden `log` factor from a sort or a heap. Treating pseudo-polynomial `O(n·T)` knapsack-style DP as polynomial when `T` is a numeric value, not an input length. Optimising before you have a correct baseline. And the quiet killer: never restating the problem, so you solve a subtly different one perfectly.
 
 **Why interviewers ask**
-The whole interview *is* this topic. They want to watch you narrow the space out loud: restate, give brute force, read the constraints, name candidate paradigms and why, prove the one you pick, then code and test. The classic follow-up is "make it faster" — which is really "show me you can move down the paradigm ladder and re-argue correctness." Structured reasoning beats a memorized answer; they are hiring the process.
+The whole interview *is* this topic. Every other card in this primer is raw material; this is the procedure that turns it into an answer under time pressure. Interviewers want to watch you narrow the space out loud — restate, brute force, read the constraints, name candidate paradigms and why each does or does not fit, prove the one you pick, code it, test it. The classic follow-up, "can you make it faster?", is really "show me you can move down the paradigm ladder and re-argue correctness." Structured, self-correcting reasoning beats a memorised answer every time; they are hiring the process, because the process is what you will actually bring to work on Monday.
 
 ### How do you choose an algorithmic paradigm for an unfamiliar problem?
-Work a ladder. First state brute force to lock in correctness and a baseline. Then ask, in order: can a locally optimal choice be proven globally optimal (greedy)? Does it split into independent equal halves (divide and conquer)? Are there overlapping subproblems with optimal substructure (DP)? Is it really entities and relations, reachability, or shortest path (graph)? Does it need to try all configurations with pruning (backtracking)? Match the structure, then *verify the precondition* before committing — most wrong answers come from skipping that check.
+
+Work a ladder, top down. First state brute force to lock in correctness and a baseline complexity. Then ask, in order: can a locally optimal choice be *proven* globally optimal (greedy)? Does the input split into independent, equal-sized halves that recombine cheaply (divide and conquer)? Are there overlapping subproblems with optimal substructure (dynamic programming)? Is this really entities and relations, reachability, ordering, or shortest path (graph)? Does it need to enumerate all configurations with pruning (backtracking)? Match the structure, then **verify the precondition** before committing — most wrong answers come from skipping that check.
+
+Worked micro-example. Cold problem: *"Given an array of integers and a target, return the indices of the two numbers that sum to the target."* Brute force: two nested loops over every pair, `O(n²)` time — "quadratic, checks all `n·(n-1)/2` pairs." Now name the wasted work: the inner loop is a linear scan for `target - a[i]`, and it re-scans the same array every iteration. A lookup structure deletes that scan.
+
+```python
+def two_sum(nums, target):
+    seen = {}                        # value -> index, built as we go
+    for i, x in enumerate(nums):
+        if target - x in seen:       # O(1) instead of an inner O(n) scan
+            return [seen[target - x], i]
+        seen[x] = i
+    return []
+```
+
+That is `O(n)` time and `O(n)` space — one pass, one hash lookup per element. **Weak candidate:** "I think this is a hash map problem" (pattern recall, unjustified, and stuck if the pattern is wrong). **Strong candidate:** "Brute force is quadratic because the inner loop searches for the complement; a hash map makes that search constant time, trading `O(n)` space for `O(n)` time." Same code, completely different signal.
 
 ### How do you infer the complexity budget from the input size?
-Read the constraints as a target running time, assuming roughly `1e8-1e9` operations per second. `n <= 20`: exponential/factorial (`2^n`, `n!`) is fine — backtracking, bitmask DP. `n <= 100-500`: `O(n^3)` (Floyd-Warshall, interval DP). `n <= 5000`: `O(n^2)`. `n <= 1e5` to `1e6`: `O(n log n)` or `O(n)` — sort, sweep, hashing, linear DP. `n >= 1e9` or up to `1e18`: `O(log n)` or `O(1)` — binary search on the answer, closed-form math, matrix exponentiation. The size is the single strongest hint about which technique is even allowed.
+
+Read the constraints as a *target running time*, assuming a machine does roughly `10⁸`–`10⁹` simple operations per second and an interview problem is meant to run in about a second. The input size is the single strongest hint about which techniques are even allowed — it usually eliminates every paradigm but one or two before you have had a single idea.
+
+```text
+n ≤ 10      O(n!) or O(2ⁿ·n)   brute-force permutations, bitmask DP
+n ≤ 20      O(2ⁿ)              subset enumeration, bitmask DP, meet-in-the-middle
+n ≤ 500     O(n³)              Floyd-Warshall, interval DP, matrix work
+n ≤ 5000    O(n²)              pairwise DP, edit distance, two-loop scans
+n ≤ 10⁵     O(n log n)         sort, heap, binary search, sweep line, segment tree
+n ≤ 10⁶     O(n) or O(n log n) single pass, hashing, prefix sums, linear DP
+n ≤ 10⁹     O(log n) or O(√n)  binary search on the answer, sieve tricks, maths
+n ≤ 10¹⁸    O(log n) or O(1)   closed form, matrix exponentiation, modular maths
+```
+
+Read the table right to left too: if you have landed on a quadratic idea and `n` is `10⁶`, you know before writing a line that you need a better one. Watch hidden factors — a sort inside a loop is `O(n² log n)`, not `O(n²)` — and remember Python's per-operation constant is perhaps 50× C's, so `10⁸` operations is not really a second there. **Strong candidate:** "`n` is up to `2·10⁵`, so I need `O(n log n)` at worst — that rules out the pairwise DP and points at sorting plus a sweep."
 
 ### How do you recognise that a problem wants dynamic programming?
-Two properties must hold: **optimal substructure** (an optimal answer is composed of optimal answers to subproblems) and **overlapping subproblems** (the naive recursion recomputes the same subproblems). Tells: "count the number of ways," "min/max cost to reach," choices at each step that affect the future, and a naive exponential recursion whose call tree repeats states. If subproblems *don't* overlap it's plain divide and conquer, not DP. If a greedy choice is provably safe, prefer greedy — it's cheaper.
+
+Two properties must both hold. **Optimal substructure**: an optimal answer is composed of optimal answers to subproblems. **Overlapping subproblems**: the naive recursion solves the same subproblem many times. If subproblems do *not* overlap, it is plain divide and conquer, not DP; if a greedy choice is provably safe, prefer greedy, because it is cheaper in both code and runtime.
+
+The verbal tells are reliable: "count the number of ways", "minimum/maximum cost to reach", "can you make exactly `X`", "longest/shortest subsequence satisfying …", and any problem where a choice now constrains the choices later. The structural tell is stronger: write the naive recursion and look at its call tree. Naive Fibonacci calls `fib(n-2)` twice, `fib(n-3)` three times, and so on — an exponential tree over only `n` distinct states. Whenever the number of *distinct* states is far smaller than the number of *calls*, memoisation collapses the tree and DP is the answer. **Weak candidate:** "this feels like DP." **Strong candidate:** "the recursion branches into two calls but only ever touches `n` distinct arguments, so there are overlapping subproblems — memoising takes it from `2ⁿ` to `O(n)`."
 
 ### How do you know a greedy algorithm is actually correct?
-You need the **greedy-choice property** (a locally optimal choice leads to a globally optimal solution) plus optimal substructure. Prove it with an **exchange argument**: assume an optimal solution differs from the greedy one at the first choice, then show you can swap in the greedy choice without making the solution worse — so a greedy solution is at least as good. Interval scheduling (pick the earliest finishing interval) and Huffman coding pass this; coin change with arbitrary denominations does not, which is why it needs DP. Never assert greedy without the exchange argument.
+
+You need the **greedy-choice property** (a locally optimal choice leads to a globally optimal solution) plus optimal substructure. Prove it with an **exchange argument**: assume some optimal solution differs from the greedy one at the first choice, then show you can swap the greedy choice in without making the solution worse — therefore a greedy solution is at least as good as any optimal one.
+
+Interval scheduling is the clean example. Sorting by earliest *finish* time and taking every compatible interval is optimal: if an optimal schedule starts with a different interval, that interval finishes no earlier than the greedy pick, so replacing it leaves at least as much room for everything after — a legal swap that never loses. Now the counterexample that ruins careless greedy: coin change with denominations `[1, 3, 4]` making `6`. Greedy takes `4`, then `1`, then `1` — three coins. The optimum is `3 + 3` — two coins. No exchange argument exists, which is exactly why general coin change needs DP. **Strong candidate:** state the exchange argument in two sentences, *or* say "I can't prove a greedy choice here, and `[1,3,4]` making `6` breaks the obvious one, so I'll do the DP."
 
 ### When is divide and conquer the right tool?
-When the problem splits into subproblems that are (a) the same shape, (b) roughly equal in size, and (c) independent, and whose solutions **combine** cheaply. Merge sort, quicksort, closest pair, and Karatsuba multiplication fit. The recurrence is usually `T(n) = a*T(n/b) + O(n^d)`, and the Master Theorem tells you the result — `T(n) = 2T(n/2) + O(n)` gives `O(n log n)`. If the subproblems overlap instead of being independent, it's DP; if the combine step is trivial, it may just be a linear scan.
+
+When the problem splits into subproblems that are (a) the same shape, (b) roughly equal in size, and (c) **independent**, and whose solutions combine cheaply. Merge sort, quicksort, closest pair of points, and Karatsuba multiplication all fit. The recurrence is usually `T(n) = a·T(n/b) + O(nᵈ)`, and the Master Theorem resolves it: merge sort's `T(n) = 2T(n/2) + O(n)` gives `O(n log n)` — linearithmic — because each of the `log n` levels does `O(n)` work.
+
+The distinguishing question against DP is *independence*. If the halves share subproblems, you are recomputing, and DP with memoisation is the correct framing. If the combine step is trivial (just concatenation, or a max), you may not need recursion at all — a single linear scan often does the same job. **Strong candidate:** "The two halves never look at each other's elements, so they're independent — divide and conquer, `T(n) = 2T(n/2) + O(n)`, so `O(n log n)`."
 
 ### How do you decide to model a problem as a graph?
-Look for entities with pairwise relationships and questions about connectivity, reachability, ordering, or shortest/cheapest paths. Cues: "is everything connected," "fewest steps," "any cyclic dependency," "cheapest route," "can we order these under constraints." Map entities to nodes and relations to edges (weighted/directed as needed), then reach for the standard tool: BFS for unweighted shortest path, Dijkstra for non-negative weights, topological sort for ordering/DAG dependencies, union-find for connectivity, DFS for cycle detection. Half the battle is spotting that a non-graph-looking problem (word ladder, state puzzle) *is* a graph.
+
+Look for entities with pairwise relationships, plus a question about connectivity, reachability, ordering, or cheapest/shortest route. The verbal cues: "is everything connected", "fewest steps", "is there a cyclic dependency", "cheapest route", "can these be ordered under constraints". Map entities to nodes and relations to edges — directed or weighted as the problem demands — then reach for the standard tool: BFS for unweighted shortest path, Dijkstra for non-negative weights, Bellman-Ford when weights can be negative, topological sort for dependency ordering on a DAG, union-find for connectivity and cycle detection in undirected graphs, DFS for cycles in directed ones.
+
+Half the battle is spotting that a problem which does not *look* like a graph is one. In word ladder, each word is a node and an edge joins words differing by one letter, so "fewest transformations" is literally BFS. In a sliding-puzzle or lock-combination problem, each *configuration* is a node and each legal move is an edge — the graph is the state space, never materialised in full. **Strong candidate:** "Each board configuration is a node, each move an edge of weight 1, so shortest number of moves is BFS from the start state."
 
 ### What is "binary search on the answer" and when does it apply?
-When you can't directly compute the optimal value but you *can* cheaply check "is a value `x` feasible?" and feasibility is **monotonic** (if `x` works, everything larger — or smaller — works), binary search the answer space. Classic uses: minimize the maximum (ship packages in D days, split array to minimize largest sum), maximize the minimum. The complexity is `O(log(range) * cost_of_check)`. The tell is a min-max or max-min phrasing over a large numeric range where a direct formula is elusive but a feasibility predicate is easy.
+
+When you cannot compute the optimal value directly, but you *can* cheaply check "is value `x` feasible?", and feasibility is **monotonic** (if `x` works then everything larger works, or everything smaller does), binary search the answer space instead of the array. The tell is min-max or max-min phrasing — "minimise the largest", "maximise the smallest" — over a wide numeric range where a direct formula is elusive but a checking function is easy.
+
+```python
+def min_capacity(weights, days):
+    def feasible(cap):               # can we ship within `days` at this capacity?
+        used, load = 1, 0
+        for w in weights:
+            if load + w > cap:
+                used, load = used + 1, 0
+            load += w
+        return used <= days
+    lo, hi = max(weights), sum(weights)
+    while lo < hi:                   # invariant: answer is in [lo, hi]
+        mid = (lo + hi) // 2
+        if feasible(mid):
+            hi = mid                 # mid works, so nothing above mid is needed
+        else:
+            lo = mid + 1
+    return lo
+```
+
+Complexity is `O(log(range) · cost of one check)` — here `O(n log(sum of weights))`, which is near-linear. Note the two bounds are chosen by reasoning, not guesswork: capacity can never be below the heaviest single item, and never needs to exceed the total. **Strong candidate:** names the monotonicity out loud — "if capacity `c` works, `c+1` certainly works, so feasibility is monotone and I can binary search it."
 
 ### How should you reason out loud during a coding interview?
-Narrate the funnel: restate the problem and confirm assumptions; give a brute-force solution with its complexity; read the constraints aloud and state the target complexity; propose candidate paradigms and say why each does or doesn't fit; pick one and *justify* it (exchange argument, DP state, recurrence); walk a tiny concrete example; then code, then test on edge cases. The interviewer is grading this narration as much as the code — a clear, self-correcting thought process signals you'll be maintainable to work with.
+
+Narrate the funnel. The interviewer is grading the narration at least as much as the code, because the narration is what they will experience working with you. Run this checklist every time:
+
+```text
+1. Restate the problem in your own words; confirm you have it right.
+2. Clarify: input ranges, duplicates, negatives, empty input, ties, sorted or not?
+3. Say the brute force out loud, with its complexity. Do not code it yet.
+4. Read the constraints aloud; convert them to a target complexity.
+5. Name the wasteful step in the brute force. This is the whole game.
+6. Pick the technique that deletes that step; justify the precondition.
+7. State the target time and space complexity before writing code.
+8. Code it, narrating each block in one sentence.
+9. Dry-run on a tiny input (size 2 or 3) plus one edge case.
+10. Discuss trade-offs and what you would change at larger scale.
+```
+
+Two craft notes. **When stuck, externalise** — "I'm trying to avoid recomputing the suffix sums; let me consider preprocessing them" is useful signal, whereas silence is unreadable and reads as panic. **When given a hint, take it visibly and gracefully** — "that's helpful, so if the array is sorted I don't need the hash map, two pointers get it in `O(1)` space" shows coachability, which is a real hiring criterion. Never argue with a hint, and never pretend you had it already.
 
 ### What is the fastest way to find the DP state and transition?
-Ask "what's the smallest set of variables that fully describes a subproblem?" — those are your state dimensions (index, remaining capacity, last choice, position in a grid). Write the transition as a recurrence over smaller states, define the base cases, and confirm there are **no forward dependencies** so an evaluation order exists (bottom-up) or memoize top-down. Then compute complexity as `(number of states) * (work per transition)`. If the state has too many dimensions, look for one you can drop (rolling array) or a greedy/math shortcut.
+
+Ask the single question: *what is the smallest set of variables that fully describes a subproblem?* Those are your state dimensions — index so far, remaining capacity, last choice made, position in a grid, number of transactions left. Then write the transition as a recurrence over strictly smaller states, define the base cases, and confirm there are **no forward dependencies**, so a bottom-up evaluation order exists (or memoise top-down and let recursion order it for you).
+
+```python
+def knapsack(weights, values, cap):
+    dp = [0] * (cap + 1)             # dp[c] = best value using capacity c
+    for w, v in zip(weights, values):
+        for c in range(cap, w - 1, -1):   # descending: each item used at most once
+            dp[c] = max(dp[c], dp[c - w] + v)
+    return dp[cap]
+```
+
+The state here is "(items considered, capacity used)", and the transition is take-or-skip. Complexity is `(number of states) · (work per transition)` = `O(n·cap)` time — pseudo-polynomial, because `cap` is a *value*, not an input length. The item dimension is rolled away into a single array, cutting space from `O(n·cap)` to `O(cap)`; the descending inner loop is what keeps each item single-use. If your state has too many dimensions to fit the budget, look for one to drop (rolling array), one that is implied by the others, or a greedy/maths shortcut that avoids DP entirely.
 
 ### What are the most common traps when picking an approach?
-Asserting greedy without proof and hitting a counterexample; using DP where a greedy proof exists (over-engineering); confusing recursion with DP and blowing up on recomputation; mis-reading the budget by ignoring constants or a hidden `log`; treating pseudo-polynomial `O(n*T)` as polynomial; optimizing before you have a correct baseline; and solving a subtly wrong problem because you skipped restating it. Each is avoidable by the same discipline: baseline first, verify preconditions, size the budget honestly.
+
+Asserting greedy without a proof and walking into a counterexample. Using DP where a two-line greedy proof exists — over-engineering costs time and adds bugs. Confusing recursion with DP and blowing up on recomputation. Mis-reading the budget by ignoring a large constant or a hidden `log` from a sort or heap. Treating pseudo-polynomial `O(n·T)` as polynomial when `T` is a numeric magnitude. Optimising before you have a correct baseline, so you have nothing to fall back on when the clever idea stalls. Solving a subtly wrong problem because you never restated it. And a quieter one: silently changing the problem mid-solution ("I'll assume the input is sorted") without saying so.
+
+Every item on that list is prevented by the same discipline — baseline first, verify the precondition, size the budget honestly, and say your assumptions out loud so they can be corrected in ten seconds rather than ten minutes.
 
 ### How do you sanity-check an approach before writing code?
-Run four quick checks. **Complexity**: multiply out states/operations and confirm it fits the budget. **Small example**: trace your logic on a size-2 or size-3 case by hand and confirm the expected output. **Edge cases**: empty input, single element, all-equal, negatives, duplicates, max size. **Precondition**: for greedy, does the exchange argument hold; for DP, is the state complete and acyclic. If any check fails, you catch it before burning ten minutes coding the wrong thing — far cheaper than debugging it live.
+
+Run four fast checks, out loud, before your fingers move.
+
+- **Complexity** — multiply out states × work per state (or loops × loop bodies) and confirm it fits the budget from the constraints. If it does not, stop; coding it is wasted time.
+- **Small example** — trace the logic by hand on a size-2 or size-3 input and confirm the expected output. Most broken ideas die here, cheaply.
+- **Edge cases** — empty input, a single element, all elements equal, negatives, duplicates, ties, and the maximum allowed size. Say which ones the approach handles naturally and which need a guard clause.
+- **Precondition** — for greedy, does the exchange argument actually hold? For DP, is the state complete (no hidden variable) and acyclic (no forward dependency)? For two pointers, is the input genuinely sorted or monotone?
+
+After coding, dry-run again on the same tiny input, stepping through line by line and saying the variable values aloud — off-by-one errors in loop bounds and binary search midpoints surface almost immediately. Finish by stating complexity plainly and confidently: "`O(n log n)` time from the sort, `O(n)` space for the hash map" is a sentence, not a hedge. Hedging ("I think it's maybe around `n` log `n`?") reads as not understanding your own solution.
 
 ### When should you stop optimizing and just submit brute force?
-When the constraints permit it. If `n <= 100` and brute force is `O(n^3)`, that's about `1e6` operations — instantly fast enough, and correct beats clever. Reading the budget tells you the *required* complexity; there is no prize for beating it. State this explicitly: "n is at most 500, so `O(n^2)` is ample — I'll do the straightforward DP rather than the `O(n log n)` trick." Matching effort to the budget is itself a senior signal; premature optimization wastes time and adds bugs.
+
+When the constraints permit it. If `n ≤ 100` and brute force is cubic, that is about `10⁶` operations — instantaneous — and correct beats clever. Reading the budget tells you the *required* complexity; there is no prize for beating it, and every extra optimisation is extra surface area for bugs under time pressure.
+
+Say it explicitly, because matching effort to the budget is itself a senior signal: "`n` is at most 500, so `O(n²)` is ample — I'll write the straightforward DP rather than the `O(n log n)` trick, and I can talk through the faster version if you want it." That sentence gets you the correctness credit *and* the awareness credit. **Weak candidate:** spends twelve minutes on a segment tree for `n ≤ 1000` and never finishes. **Strong candidate:** ships the simple correct solution with time left to test it, then offers the optimisation as conversation.
 
 ### How do you handle "can you make it faster" follow-ups?
-Treat it as a prompt to move down the paradigm ladder and re-argue correctness. Identify the current bottleneck (the dominant term), then ask what structure you haven't exploited: is a sort or hash removing an inner loop; is there a greedy choice replacing the DP; can precomputation (prefix sums, sparse tables) make each query cheaper; does the answer have a monotonic feasibility check enabling binary search. State the new complexity and re-verify correctness for the new method. The follow-up is testing flexibility, not a single memorized optimum.
+
+Treat it as a prompt to move one rung down the ladder and re-argue correctness. Identify the bottleneck — the dominant term — then ask what structure you have not yet exploited. There is a small, finite catalogue of transformations, and nearly every follow-up is one of them:
+
+```text
+Wasteful pattern in the brute force        Replacement       Effect
+-----------------------------------        -----------       ------
+inner loop scanning for a complement       hash map          O(n²) → O(n)
+recomputing sums over overlapping ranges   prefix sums       O(n²) → O(n)
+recomputing overlapping subproblems        memoisation / DP  O(2ⁿ) → O(n·k)
+repeatedly finding the current minimum     heap              O(n²) → O(n log n)
+pairwise search over sorted input          two pointers      O(n²) → O(n)
+membership test over sorted input          binary search     O(n) → O(log n)
+re-deriving connectivity after each union  union-find        O(n²) → near O(n)
+recomputing a window from scratch          sliding window    O(n·k) → O(n)
+searching an ordered answer space          binary search     O(range) → O(log range)
+```
+
+Full worked transcript. Cold problem: *"find the contiguous subarray with the largest sum."* Brute force enumerates every start, every end, and sums each — `O(n³)`, cubic. First cut: keep a running sum as the end index moves, or precompute prefix sums, removing the innermost loop — `O(n²)`, quadratic. Now name the remaining waste: for each end index you are re-examining every start. But you do not need every start — you only need the best subarray *ending here*, and that is either the previous best extended by the current element, or the current element alone.
+
+```python
+def max_subarray(nums):
+    best = cur = nums[0]
+    for x in nums[1:]:
+        cur = max(x, cur + x)        # extend the previous best, or restart at x
+        best = max(best, cur)
+    return best
+```
+
+That is Kadane's algorithm: `O(n)` time, `O(1)` space, one pass. Mention the edge case unprompted — an all-negative array must return the largest single element, which this handles because `cur` restarts at `x` rather than at `0`. Then close by restating the arc: cubic → quadratic → linear, each step justified by deleting a specific piece of repeated work.
 
 ### How do you sanity-check a recurrence or complexity claim?
-Cross-check it three ways. Plug small `n` into the recurrence and expand a few levels to see the pattern. Apply the Master Theorem for `T(n) = a*T(n/b) + O(n^d)`: compare `d` against `log_b(a)`. And reason about total work per level times number of levels — merge sort does `O(n)` per level over `log n` levels = `O(n log n)`. If two of these disagree, you've made an arithmetic slip. Also confirm the *space* recurrence separately; recursion depth and memo tables are easy to under-count.
+
+Cross-check it three independent ways and see whether they agree. **Expand it**: plug in small `n` and unroll two or three levels to see the pattern emerge. **Apply the Master Theorem** to `T(n) = a·T(n/b) + O(nᵈ)` by comparing `d` against `log` base `b` of `a` — bigger, smaller, or equal picks which of the three cases applies. **Count by levels**: total work per level × number of levels — merge sort does `O(n)` of merging on each of `log n` levels, so `O(n log n)`. If two of the three disagree, you have made an arithmetic slip, not discovered a paradox.
+
+Then do the same for **space**, separately and explicitly — recursion depth and memo tables are the two most under-counted costs. A recursive solution on `n = 10⁵` with depth `n` will overflow the stack even though its time complexity looked fine, and a two-dimensional memo table on `n = 10⁴` is `10⁸` cells, which will not fit in memory even though `O(n²)` sounded acceptable. Stating "`O(n²)` time and `O(n)` space after rolling the DP table" shows you costed both.
 
 ### What separates a senior from a junior in algorithm design?
-A junior jumps to code with the first idea that seems to work; a senior narrows deliberately. Seniors restate the problem, give a baseline, read constraints to bound the search for a technique, name trade-offs explicitly, *prove* the chosen approach's precondition (exchange argument or DP state), and self-check with a small example and edge cases before coding. They also know when to stop — matching effort to the budget rather than gold-plating. The differentiator is disciplined, verbal, self-correcting reasoning under uncertainty, not raw pattern recall.
+
+A junior jumps to code with the first idea that seems to work, then debugs under pressure with no fallback. A senior narrows deliberately: restate the problem, give a baseline, read the constraints to bound the search for a technique, name the trade-offs explicitly, *prove* the chosen approach's precondition — an exchange argument for greedy, a complete acyclic state for DP — and self-check with a tiny example and a list of edge cases before writing anything. They also know when to stop, matching effort to the budget instead of gold-plating a solution that already clears it.
+
+The other visible difference is behaviour under uncertainty. A senior says "I don't see the linear solution yet; here's the `O(n log n)` one, and I think the improvement would come from avoiding the sort" — progress plus honesty. They take hints as information rather than as criticism, correct themselves out loud without spiralling, and always leave a working solution on the whiteboard. The differentiator is disciplined, verbal, self-correcting reasoning under uncertainty — not raw pattern recall.
+
