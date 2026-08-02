@@ -1,9 +1,4 @@
 ---
-created-on: "[[Journal/2026/May/12-May-Tuesday]]"
-ctime: 2026-05-12 17:41:45
-categories:
-  - "[[Categories/Interview Prep|Interview Prep]]"
-  - "[[Categories/Technical|Technical]]"
 type: interview-prep
 ---
 

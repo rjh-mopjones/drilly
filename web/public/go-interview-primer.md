@@ -1,9 +1,4 @@
 ---
-created-on: "[[Journal/2026/June/10-June-Wednesday]]"
-ctime: 2026-06-10 09:00:00
-categories:
-  - "[[Categories/Interview Prep|Interview Prep]]"
-  - "[[Categories/Technical|Technical]]"
 type: interview-prep
 ---
 

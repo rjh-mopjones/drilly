@@ -1,8 +1,5 @@
 ---
-created-on: "[[Journal/2026/April/14-Apr-Tuesday]]"
-ctime: 2026-04-14 14:04:00
-categories:
-  - "[[Categories/Interview Prep|Interview Prep]]"
+type: interview-prep
 ---
 ### 1. Design a Rate Limiter
 #### Problem

@@ -1,8 +1,5 @@
 ---
-created-on: "[[Journal/2026/April/12-Apr-Sunday]]"
-ctime: 2026-04-12 20:02:45
-categories:
-  - "[[Categories/Algorithms|Algorithms]]"
+type: interview-prep
 ---
 
 ### 1. Two Sum
