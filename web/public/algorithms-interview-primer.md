@@ -221,181 +221,372 @@ No — Big-O describes growth *for large `n`*, and hides the constant factor. An
 ### Summary
 
 **What this topic covers**
-Recursion — a function calling itself on a smaller input — and the divide-and-conquer paradigm built on top of it: split a problem into independent subproblems, solve each recursively, and *combine* their results. The mental model is a call stack of paused frames, each waiting for its child to return. Canonical examples are merge sort, binary search, and Karatsuba multiplication. This topic also covers converting recursion to iteration and the special case of tail recursion.
+Recursion is a function that solves a problem by calling itself on a smaller version of the same problem. **Divide and conquer** is the most important recursive pattern: split the problem into pieces, solve each piece recursively, then combine the answers. This topic covers how recursion actually runs (the call stack), how to write it correctly (base case + recursive case), how to turn a recursive idea into a recurrence and know its cost, the big divide-and-conquer examples (merge sort, binary search, Karatsuba multiplication), and the practical stuff — tail recursion, converting recursion to a loop, and when recursion is the wrong tool.
+
+**Mental model**
+Every recursion has two parts: a **base case** (a problem small enough to answer directly, no recursion) and a **recursive case** (break the problem into smaller instances of itself, call yourself, combine). The mental trick that makes recursion feel easy: **assume the recursive call already works.** Don't trace it in your head — trust that `solve(smaller)` returns the right answer, and just write the code that turns those sub-answers into the full answer. Divide and conquer is this idea applied to *balanced* splits: cut the input into (usually two) equal halves, recurse on each, and spend some work combining. The cost is captured by a recurrence like `T(n) = 2·T(n/2) + (combine work)`, which tells you the Big-O.
 
 **Key terms**
-*Base case* — the input small enough to answer directly without recursing; without it, infinite recursion and stack overflow. *Recursive case* — reduces the problem toward the base case. *Call stack* — the LIFO stack of activation records (frames), each holding locals, arguments, and the return address. *Divide and conquer (D&C)* — divide into subproblems, conquer (solve recursively), combine. *Combine step* — merging subproblem answers into the whole answer; often where the real work lives. *Tail recursion* — a recursive call that is the last action, with nothing left to do after it returns. *Recursion tree* — the tree of all recursive calls, whose shape gives the complexity.
+- **Base case** — the smallest input you answer without recursing; without one you loop forever.
+- **Recursive case** — reduce to a smaller instance and call yourself.
+- **Call stack** — the pile of paused function calls; each recursive call adds a frame.
+- **Stack overflow** — too many nested calls exhaust the stack (crash / `RecursionError`).
+- **Divide and conquer** — split into subproblems, solve recursively, combine.
+- **Combine step** — merging sub-answers into the whole answer; often where the real work is.
+- **Tail recursion** — the recursive call is the *last* thing the function does; can run in `O(1)` stack.
+- **Mutual recursion** — two functions that call each other (e.g. `isEven`/`isOdd`).
 
 **Core mechanics**
-Each call pushes a frame onto the call stack; the frame stays until its recursive children return, then the function finishes with their results and pops. Correctness of recursion is proved by induction: assume the recursive call is correct on smaller input (the inductive hypothesis), show the base case is correct, and show the combine step is correct — then the whole is correct. D&C's complexity comes from its recurrence T(n) = a T(n/b) + (combine cost), solved by the Master Theorem. Merge sort: split in half (a=2, b=2), combine by merging in O(n), giving O(n log n). Binary search: one half (a=1, b=2), O(1) combine, giving O(log n). Karatsuba multiplies two n-digit numbers with 3 (not 4) recursive multiplications of n/2-digit halves plus O(n) additions: T(n) = 3T(n/2) + O(n) = O(n^1.585), beating schoolbook O(n^2).
+Write the base case first, then the recursive case that shrinks the input toward the base. The machine runs it with a stack: calling a function pushes a frame (its locals and where to return); returning pops it. Divide-and-conquer algorithms recurse on parts and combine: merge sort's combine is the `O(n)` merge (this is the expensive part); binary search's "combine" is trivial (`O(1)`, just pick a half). Solve the recurrence (Master Theorem or recursion tree) for the complexity. When recursion depth is a problem, either make it tail-recursive, convert it to a loop with an explicit stack, or use memoization to cut repeated work.
 
 **Trade-offs**
-Recursion is expressive — tree/graph and D&C algorithms read almost like their mathematical definition — but each call costs a stack frame and a jump, so deep recursion risks stack overflow and carries call overhead an equivalent loop avoids. Iteration is faster and space-flat but can be clumsy for inherently branching problems. D&C shines when subproblems are *independent* (parallelizable, no shared work); when they *overlap*, plain D&C recomputes and you want dynamic programming (memoization) instead. The combine step is the crux: if combining costs more than the divide saves, D&C is not worth it.
+Recursion is often the *clearest* way to express tree/graph/divide-and-conquer logic — the code mirrors the structure. The costs are stack space (one frame per depth → `O(depth)` memory, and a crash risk on deep inputs) and, in languages without tail-call optimization (Python, Java), no automatic conversion to a loop. Iteration is usually faster (no call overhead) and safe from stack overflow but can be clumsier for naturally-recursive problems. Rule of thumb: recurse when the structure is recursive (trees, subdivisions) and the depth is small (`O(log n)`); prefer a loop when depth can be `O(n)`.
 
 **Common confusions**
-Forgetting or mis-stating the base case is the number-one bug — it must be reachable and terminate. People conflate D&C with dynamic programming: both recurse, but D&C subproblems are *disjoint* (merge sort's halves never overlap) while DP subproblems *overlap* and are cached. Another confusion: thinking all recursion is O(depth) space — it is O(max depth), and tail-recursive functions in optimizing languages can be O(1). And "tail recursion" is not just "recursion that returns a value"; it is recursion where the call is the *very last* operation, so nothing is pending on the stack afterward.
+"Recursion is always slower/worse than iteration" — for tree-shaped problems it's clearer and the depth is only `O(log n)`; the overhead is negligible. "Divide and conquer is the same as dynamic programming" — no: D&C subproblems *don't overlap* (merge sort's halves are disjoint); DP is for *overlapping* subproblems where you cache results. "The base case is optional" — it's mandatory; without it you recurse forever. "More recursion = more elegant" — deep `O(n)` recursion overflows; sometimes a loop is simply correct where recursion crashes.
 
 **Why interviewers ask**
-Recursion tests whether you can define a problem in terms of itself, identify the base case, and trust the recursion (the "recursive leap of faith"). D&C tests whether you see how to break a problem, and whether you can analyze the resulting recurrence. Classic follow-ups: "what's the space complexity?" (probing whether you count the stack), "convert this to iterative" (probing stack simulation and tail-call understanding), and "why is this O(n log n)?" (probing recurrence analysis). It is also a proxy for comfort with trees, backtracking, and graph traversal, which are all recursive.
+Recursion is the backbone of trees, graphs, backtracking, and D&C — a huge fraction of interview problems. They want to see that you can write a clean base + recursive case, reason about the stack (space cost, overflow risk), and turn a recursive idea into a complexity via a recurrence. "Can you do it iteratively?" and "what's the space complexity including the stack?" are the standard follow-ups that separate people who *use* recursion from people who *understand* it.
 
 ### What are the two essential parts of any recursive function?
 
-A base case and a recursive case. The *base case* is the smallest input you can answer directly without further recursion — it stops the recursion and prevents infinite descent. The *recursive case* breaks the problem into a smaller instance (or instances) of itself and calls the function on it, moving toward the base case. Every recursive path must eventually hit a base case, and each recursive call must make *progress* (strictly smaller input) toward it. Miss the base case, or fail to shrink the input, and you get infinite recursion and a stack-overflow crash.
+Every recursive function needs a **base case** and a **recursive case**.
+- The **base case** is the smallest input you can answer immediately, with no further recursion — it stops the recursion. For factorial, that's `factorial(0) = 1`.
+- The **recursive case** reduces the problem to a smaller version and calls itself, then uses that result. For factorial, `factorial(n) = n × factorial(n − 1)`.
+
+```python
+def factorial(n):
+    if n == 0:            # base case: stop here
+        return 1
+    return n * factorial(n - 1)   # recursive case: shrink toward 0
+```
+
+The two rules that make it correct: (1) there **is** a base case, and (2) every recursive call moves **strictly closer** to it. Break either and you get infinite recursion → stack overflow.
 
 ### What is the call stack and how does recursion use it?
 
-The call stack is a LIFO stack of activation records ("stack frames"), one per in-progress function call, each storing that call's parameters, local variables, and the return address to resume at when it finishes. When a function recurses, a new frame is pushed for the child call while the parent's frame stays paused beneath it; control only returns to the parent after the child pops. So a recursion of depth d has d frames stacked simultaneously — that is why recursion depth is the algorithm's space cost, and why too-deep recursion overflows the fixed-size stack (a StackOverflowError / segfault).
+The call stack is the machine's pile of **paused function calls**. When function A calls B, A is paused and a **frame** for B is pushed on top — the frame holds B's local variables and the spot in A to return to. When B returns, its frame is popped and A resumes. Recursion just means the function on top is another copy of the same function.
+
+Tracing `factorial(3)`: `factorial(3)` pushes and waits for `factorial(2)`, which pushes and waits for `factorial(1)`, which waits for `factorial(0)`. Now the stack is 4 frames deep. `factorial(0)` returns 1 (pop), `factorial(1)` returns 1 (pop), `factorial(2)` returns 2, `factorial(3)` returns 6. The **maximum depth of the stack is the space cost** — here `O(n)`.
 
 ### What causes a stack overflow in recursion and how do you prevent it?
 
-Recursion that goes too deep — more nested calls than the fixed call-stack size allows — overflows. Two root causes: (1) a missing or unreachable base case, or an input that never shrinks, giving *infinite* recursion; (2) legitimately deep recursion on large input (e.g. recursing per element on a list of 10^6). Prevent it by ensuring the base case is reachable and every call strictly reduces the problem, and for deep-but-finite cases, convert to iteration with an explicit stack, use tail recursion in a language that eliminates it, or increase the stack limit as a last resort. Interviewers love case (2) as a "your recursion is correct but won't scale" trap.
+A stack overflow happens when recursion goes **too deep** — the stack has a fixed size limit (Python defaults to ~1000 frames; the OS caps native stacks at a few MB), and exceeding it crashes. Two causes: (1) a **missing or unreachable base case** (infinite recursion), or (2) **legitimately deep** recursion, e.g. recursing over a 100,000-element linked list (`O(n)` depth).
+
+Fixes: ensure the base case is always reached and each call shrinks the input; for genuinely deep recursion, **convert to iteration** with an explicit stack, or make it **tail-recursive** in a language that optimizes it. In Python you can raise the limit (`sys.setrecursionlimit`) as a band-aid, but the real fix is a loop:
+
+```python
+def sum_list_iterative(a):
+    total = 0
+    for x in a:              # O(1) stack, no overflow risk
+        total += x
+    return total
+```
 
 ### How do you prove a recursive algorithm is correct?
 
-By induction on input size. First, the *base case*: show the algorithm returns the right answer for the smallest input. Then the *inductive step*: assume (the inductive hypothesis) that the recursive calls return correct answers for all smaller inputs, and show that given those correct sub-answers, your combine step produces the correct answer for input n. If both hold, correctness follows for all n. This mirrors the "recursive leap of faith" — you trust the recursive call works on smaller input rather than tracing it, and just verify the base case and the combine logic.
+By **induction**, which mirrors the recursion exactly:
+1. **Base case**: show the algorithm is correct for the smallest input(s).
+2. **Inductive step**: *assume* it's correct for all smaller inputs (the "inductive hypothesis"), then show that — given correct sub-answers — the combine step produces the correct full answer.
+
+For merge sort: base case, a 1-element array is already sorted ✓. Inductive step: assume the two recursive calls correctly sort the two halves; then the merge step correctly interleaves two sorted halves into one sorted array ✓. This is the same "trust the recursive call" trick from the mental model, made rigorous — you never trace the whole thing, you just check the base and the one combine step.
 
 ### What is the divide-and-conquer paradigm?
 
-A three-step strategy: *divide* the problem into smaller, independent subproblems of the same type; *conquer* by solving each subproblem recursively (base case for the smallest); *combine* the subproblem solutions into the answer for the original. Merge sort divides the array in half, recursively sorts each half, and combines by merging two sorted halves. Binary search divides by discarding half the search space each step. Its power is turning an O(n^2) or O(n) problem into O(n log n) or O(log n) when the divide-and-combine overhead is low. The key requirement is that subproblems be *independent* — no shared sub-work.
+Divide and conquer solves a problem in three steps: **divide** the input into smaller subproblems (usually equal-sized), **conquer** each by solving it recursively (base case for tiny inputs), and **combine** the sub-answers into the answer for the whole. The subproblems are **independent** (they don't share work) — that's the key difference from dynamic programming.
+
+Classic examples and where the work lives:
+
+| Algorithm | Divide | Combine | Cost |
+|---|---|---|---|
+| Merge sort | split in half | merge two sorted halves (`O(n)`) | `O(n log n)` |
+| Binary search | pick a half | nothing (`O(1)`) | `O(log n)` |
+| Quicksort | partition around a pivot (`O(n)`) | nothing | `O(n log n)` avg |
+| Karatsuba | split digits | 3 recursive mults + adds | `O(n^1.585)` |
 
 ### What is the "combine" step and why does it matter most?
 
-Combine is where you stitch subproblem answers into the full answer, and it usually determines the overall complexity via the recurrence T(n) = a T(n/b) + (combine cost). In merge sort the divide is trivial (compute a midpoint) but the *merge* is the O(n) combine that, summed over log n levels, produces O(n log n). In binary search combine is O(1) (just return the winning half). If the combine step is expensive it can dominate: an O(n^2) combine would swamp the recursion. Analyzing D&C is largely analyzing the combine cost — that is what the Master Theorem's f(n) measures.
+The combine step is where you stitch the sub-answers together — and it usually dominates the cost, because the divide is often trivial (just cut the array) while the combine touches all the data. In merge sort the combine (merging two sorted halves) is `O(n)` and is the *entire* reason the algorithm is `O(n log n)` rather than something cheaper. In binary search the combine is free (`O(1)`), which is exactly why it's `O(log n)` and not `O(n log n)`. When you design a D&C algorithm, the combine step's cost is the `f(n)` in the recurrence `T(n) = a·T(n/b) + f(n)` and it decides which Master Theorem case you land in — so it's the first thing to get right.
 
 ### Walk through merge sort as divide and conquer, with its complexity.
 
-Divide: split the array into two halves at the midpoint (O(1)). Conquer: recursively merge-sort each half; base case is a subarray of length 0 or 1, already sorted. Combine: merge the two sorted halves into one sorted array by repeatedly taking the smaller front element — O(n) per merge. The recurrence is T(n) = 2T(n/2) + O(n). The recursion tree has log_2 n levels, each doing O(n) total merge work, so T(n) = O(n log n) in *all* cases (best, average, worst — merge sort is not input-sensitive). Space is O(n) auxiliary for the merge buffer.
+Merge sort: **divide** the array into two halves, **conquer** by recursively sorting each half, **combine** by merging the two sorted halves into one. Base case: a 0- or 1-element array is already sorted.
+
+```python
+def merge_sort(a):
+    if len(a) <= 1:                  # base case
+        return a
+    mid = len(a) // 2
+    left = merge_sort(a[:mid])       # conquer left half
+    right = merge_sort(a[mid:])      # conquer right half
+    return merge(left, right)        # combine
+
+def merge(x, y):
+    out, i, j = [], 0, 0
+    while i < len(x) and j < len(y):
+        if x[i] <= y[j]:             # <= keeps it stable (ties go left)
+            out.append(x[i]); i += 1
+        else:
+            out.append(y[j]); j += 1
+    out.extend(x[i:]); out.extend(y[j:])   # drain the rest
+    return out
+```
+
+Recurrence: `T(n) = 2·T(n/2) + O(n)` (two half-size recursions + an `O(n)` merge) → `Θ(n log n)` in all cases. Micro-example: merging `[1,3]` and `[2]` → compare 1 vs 2 → take 1; compare 3 vs 2 → take 2; drain → take 3 → `[1,2,3]`. It's stable and needs `O(n)` extra space for the merge.
 
 ### Walk through binary search as divide and conquer, with its complexity.
 
-On a *sorted* array, compare the target to the middle element. If equal, done. If the target is smaller, recurse on the left half; if larger, recurse on the right half — each step discards half the remaining elements. Base case: the search range is empty (not found). The recurrence is T(n) = T(n/2) + O(1), which by the Master Theorem (or the recursion tree of depth log_2 n, O(1) per level) gives O(log n) time. It is D&C with only *one* subproblem and a trivial O(1) combine. The classic bug is the off-by-one in the boundary update (lo = mid + 1 vs lo = mid) causing an infinite loop.
+Binary search finds a target in a **sorted** array: look at the middle; if it matches, done; if the target is smaller, recurse on the left half; if larger, recurse on the right half. Each step throws away half the array, so the "combine" is free.
+
+```python
+def binary_search(a, target, lo=0, hi=None):
+    if hi is None: hi = len(a) - 1
+    if lo > hi:                      # base case: not found
+        return -1
+    mid = lo + (hi - lo) // 2        # avoids overflow (see below)
+    if a[mid] == target:
+        return mid
+    if target < a[mid]:
+        return binary_search(a, target, lo, mid - 1)   # left half
+    return binary_search(a, target, mid + 1, hi)       # right half
+```
+
+Recurrence: `T(n) = T(n/2) + O(1)` → `Θ(log n)`. Halving `n` down to 1 takes `log₂ n` steps — for a million items, only ~20 comparisons. (In practice write it as a loop to avoid the `O(log n)` stack.)
 
 ### What is Karatsuba multiplication and why is it faster than schoolbook?
 
-Karatsuba multiplies two n-digit numbers faster than the O(n^2) schoolbook method. Split each number into high and low halves: x = x1*B + x0, y = y1*B + y0. Schoolbook needs four half-size products (x1y1, x1y0, x0y1, x0y0). Karatsuba's trick computes the middle term x1y0 + x0y1 as (x1+x0)(y1+y0) - x1y1 - x0y0, reusing two products it already has — so only *three* half-size multiplications plus O(n) additions. The recurrence drops from T(n) = 4T(n/2) + O(n) = O(n^2) to T(n) = 3T(n/2) + O(n) = O(n^(log_2 3)) = O(n^1.585). It is the textbook proof that reducing the *branching factor* a beats shaving the combine cost.
+Multiplying two `n`-digit numbers the schoolbook way multiplies every digit by every digit → `O(n²)`. Karatsuba is a D&C trick that does it in `O(n^1.585)`. Split each number into high and low halves: `x = a·10^m + b`, `y = c·10^m + d`. Naively `x·y` needs four half-size products (`ac`, `ad`, `bc`, `bd`). Karatsuba computes the middle term `ad + bc` from just **one** extra product using the identity `ad + bc = (a+b)(c+d) − ac − bd`, so it needs only **three** recursive multiplications instead of four: `T(n) = 3·T(n/2) + O(n)`. By the Master Theorem that's `Θ(n^(log₂ 3)) = Θ(n^1.585)`. The lesson: cutting the *number of subproblems* (4 → 3) changed the exponent — the combine work was cheap, so the leaf count dominated.
 
 ### How is divide and conquer different from dynamic programming?
 
-Both solve a problem via subproblems, but D&C subproblems are *independent/disjoint* while DP subproblems *overlap*. Merge sort's two halves share no elements, so solving them separately wastes nothing — pure D&C. Naive recursive Fibonacci re-solves fib(n-2) many times because the call tree overlaps; that overlap is exponential waste, and DP fixes it by *memoizing* (caching) each subproblem's answer so it is computed once. Rule of thumb: if the recursion tree recomputes the same subproblem, you want DP (top-down memoization or bottom-up tabulation); if every subproblem is fresh, plain D&C is optimal.
+Both break a problem into subproblems, but the subproblems relate differently. In **divide and conquer** the subproblems are **independent / non-overlapping** — merge sort's two halves share nothing, so you just solve each once. In **dynamic programming** the subproblems **overlap** — naive Fibonacci recomputes `fib(3)` many times — so DP *caches* each subproblem's answer (memoization or a table) to avoid the exponential blow-up. Quick test: if drawing the recursion tree shows the *same* subproblem appearing more than once, you want DP (cache it); if every subproblem is distinct, plain D&C is fine.
 
 ### How do you convert a recursive algorithm to an iterative one?
 
-Two paths. If the recursion is *tail recursive* (the recursive call is the last action), rewrite it as a simple loop that updates the accumulator/parameters in place — no stack needed. If it is *non-tail* (work happens after the recursive call, like tree post-order traversal), simulate the call stack explicitly with an in-code stack data structure: push the work you would have recursed into, pop and process in a loop until empty. The explicit stack replaces the call stack, giving you the same O(depth) space but avoiding call overhead and the stack-overflow limit. Some patterns (like computing a running sum) collapse to a single loop with no stack at all.
+Use an **explicit stack** to replace the implicit call stack — you manually push the "work to do" and pop it in a loop. This removes stack-overflow risk and the call overhead.
+
+```python
+def inorder_iterative(root):
+    result, stack, node = [], [], root
+    while node or stack:
+        while node:                  # go left as far as possible
+            stack.append(node)
+            node = node.left
+        node = stack.pop()           # process
+        result.append(node.val)
+        node = node.right            # then go right
+    return result
+```
+
+For **tail-recursive** functions the conversion is even simpler — just a loop that updates the arguments (no stack needed). The general recipe: whatever the recursion pushes on the call stack, you push on your own stack instead.
 
 ### What is tail recursion and why does it matter?
 
-Tail recursion is when the recursive call is the *last* operation in the function — its return value is returned directly, with nothing left to compute afterward. That matters because there is no pending work in the caller's frame, so an optimizing compiler can *reuse* the current frame instead of pushing a new one (tail-call optimization / elimination), turning the recursion into a loop and reducing space from O(depth) to O(1) with no stack-overflow risk. `return factorial(n-1) * n` is *not* tail recursive (the multiply happens after the call returns); `return factHelper(n-1, acc*n)` is. Scheme/Scala/Kotlin guarantee TCO; Java, Python, and JS generally do not.
-
-### Rewrite a non-tail recursion into tail-recursive form. What is the trick?
-
-Introduce an *accumulator* parameter that carries the partial result so the recursive call becomes the final action. Naive factorial `factorial(n) = n * factorial(n-1)` is non-tail because the multiplication waits for the call to return. Add an accumulator:
+A call is **tail-recursive** when the recursive call is the *very last* action — its result is returned directly, with no further work after it. That matters because there's nothing to come back to, so a smart compiler can **reuse the current stack frame** instead of pushing a new one, running the recursion in `O(1)` stack (effectively a loop). Compare:
 
 ```python
-def fact(n, acc=1):
-    if n <= 1:
-        return acc          # base case returns the accumulated result
-    return fact(n - 1, acc * n)   # tail call: nothing pending after it
+def sum_normal(a, i=0):
+    if i == len(a): return 0
+    return a[i] + sum_normal(a, i + 1)    # NOT tail: must add after the call
+
+def sum_tail(a, i=0, acc=0):
+    if i == len(a): return acc
+    return sum_tail(a, i + 1, acc + a[i]) # tail: nothing happens after
 ```
 
-Now the multiply happens *before* the recursive call, the call is the last action, and a TCO-capable runtime runs it in O(1) space. The general trick: move the post-call work into the argument passed down.
+Languages with tail-call optimization (Scheme, Scala with `@tailrec`, most functional languages) run `sum_tail` in constant stack. The trick to make a recursion tail-recursive is to carry the running result in an **accumulator** argument so nothing is left to do after the call.
 
 ### Why doesn't Python optimize tail recursion, and what do you do about it?
 
-Python's designers deliberately omit tail-call optimization: Guido has argued it hurts debuggability (it erases stack frames from tracebacks) and that clear loops are preferred over clever recursion in Python's philosophy. So a tail-recursive Python function still pushes a frame per call and hits the default recursion limit (about 1000) on deep input. The fix: write it as an explicit `while` loop (trivial for tail recursion since there is no pending work), or use an explicit stack for non-tail recursion, or — rarely and reluctantly — raise `sys.setrecursionlimit`, which risks a real interpreter crash. In an interview, converting to a loop is the expected answer.
+Python (and the JVM/Java) deliberately **do not** optimize tail calls — Guido chose to keep full stack traces for debugging, so even a tail-recursive function pushes a frame per call and still overflows on deep input. So in Python, tail recursion buys you nothing for stack safety. The practical answer: **write a loop.** Any tail recursion converts mechanically to a `while` loop that updates the accumulator:
+
+```python
+def sum_loop(a):
+    acc = 0
+    for x in a:          # the accumulator pattern, as a loop
+        acc += x
+    return acc
+```
+
+Reach for recursion in Python when the depth is `O(log n)` (balanced trees, D&C); use a loop when depth can be `O(n)`.
 
 ### When is recursion the wrong choice?
 
-When the recursion is deep and linear (e.g. processing a long list element-by-element) it wastes a stack frame per element and risks overflow — a loop is strictly better. When subproblems overlap heavily, plain recursion is exponential and you need DP. When the language lacks TCO and depth can be large, tail recursion still overflows. And when the iterative version is just as clear (summing an array, linear search), recursion adds call overhead for no readability gain. Recursion earns its keep on genuinely branching/tree-shaped problems (traversals, backtracking, D&C) where the recursive definition is far clearer than manual stack management.
+Avoid recursion when: (1) the recursion depth can be `O(n)` on real inputs and the language doesn't optimize tail calls — you'll overflow (e.g. recursing down a long linked list in Python); (2) the subproblems **overlap** and you haven't added memoization — naive recursive Fibonacci is `O(2ⁿ)` and wasteful; (3) a simple loop is clearer and faster (summing an array). Recursion shines for genuinely recursive structures (trees, graphs, backtracking, D&C) with shallow depth; for flat, linear work a loop is simpler, faster, and can't overflow.
 
 ### What is mutual recursion and where does it appear?
 
-Mutual recursion is when two or more functions call each other in a cycle rather than a single function calling itself — e.g. `isEven(n)` calls `isOdd(n-1)` and `isOdd(n)` calls `isEven(n-1)`. It appears naturally in recursive-descent parsers (a `parseExpression` calls `parseTerm` which calls `parseFactor` which can call back to `parseExpression` for parenthesized subexpressions) and in state machines. Its correctness and termination arguments are the same as single recursion — every cycle must strictly reduce toward a base case — but the recursion tree spans multiple functions. Interviewers rarely require it but may mention it to test whether you recognize the pattern in grammar/parsing questions.
+Mutual recursion is when two (or more) functions call **each other** rather than themselves. The classic toy example:
+
+```python
+def is_even(n):
+    return True if n == 0 else is_odd(n - 1)
+def is_odd(n):
+    return False if n == 0 else is_even(n - 1)
+```
+
+It shows up naturally in **recursive-descent parsers** (a `parse_expression` calls `parse_term` which calls `parse_factor` which can call back to `parse_expression` for a parenthesised sub-expression), in evaluating grammars, and in state machines where states transition into one another. The correctness reasoning is the same induction, just spread across the mutually-recursive functions; the shared base case (here `n == 0`) is what makes it terminate.
 
 ## Comparison Sorting
 
 ### Summary
 
 **What this topic covers**
-The comparison-based sorts — bubble, insertion, selection, merge, quick, and heap sort — that order elements using only pairwise comparisons. The mental model is a spectrum: simple O(n^2) sorts that are easy and good for tiny/nearly-sorted inputs, versus the O(n log n) sorts (merge, quick, heap) that scale. This topic covers their time complexity, stability, in-place-ness, the O(n log n) comparison lower bound, quicksort's pivot problem, and the engineering reasons libraries pick one over another.
+The sorts that order elements using only **comparisons** ("is a < b?") — bubble, insertion, selection, merge, quicksort, and heap sort. The mental model is a spectrum: the simple `O(n²)` sorts (easy, fine for tiny or nearly-sorted inputs) versus the `O(n log n)` sorts (merge, quick, heap) that scale. This topic covers how each one works with a worked example and code, their three key properties (stable? in-place? adaptive?), the `O(n log n)` "you can't beat this with comparisons" lower bound, quicksort's pivot problem, and the engineering reasons real libraries pick one over another.
+
+**Mental model**
+Sorting is putting elements in order, and a *comparison* sort is only allowed to ask "which of these two is smaller?" — it never looks at the actual values (that restriction is what caps it at `O(n log n)`). Picture two families: the **quadratic** family (bubble, insertion, selection) does a nested double-loop, placing one element per pass — dead simple, great for tiny inputs, hopeless for large ones. The **`n log n`** family (merge, quick, heap) uses divide-and-conquer or a heap to avoid the wasted comparisons. The three properties you always reason about: **stable** (equal elements keep their order), **in-place** (`O(1)` extra memory), and **adaptive** (faster on nearly-sorted input). No single sort wins all three, which is why libraries *hybridise*.
 
 **Key terms**
-*Comparison sort* — sorts using only "is a < b?" comparisons; bounded below by O(n log n). *Stable* — equal elements keep their original relative order (matters when sorting by a secondary key). *In-place* — uses O(1) or O(log n) auxiliary space, sorting within the input array. *Adaptive* — runs faster on partially-sorted input (insertion sort is O(n) on sorted data). *Pivot* — the element quicksort partitions around. *Partition* — rearranging so elements less than the pivot precede it and greater follow. *Heapify* — building a heap in O(n), the basis of heap sort.
+- **Comparison sort** — orders using only "a < b?" checks; bounded below by `O(n log n)`.
+- **Stable** — equal elements keep their original relative order (matters when sorting by a second key).
+- **In-place** — uses `O(1)` (or `O(log n)` stack) extra memory, sorting within the array.
+- **Adaptive** — runs faster on partially-sorted input (insertion sort is `O(n)` on sorted data).
+- **Pivot** — the element quicksort partitions around.
+- **Partition** — rearrange so everything `< pivot` is left of it and everything `>` is right.
+- **Heapify** — build a heap in `O(n)`; the basis of heap sort.
 
 **Core mechanics**
-Bubble/insertion/selection are O(n^2): they do a nested pass, moving one element into place per outer iteration. Insertion sort is the best of the three — adaptive (O(n) on nearly-sorted data), stable, in-place, tiny constant — which is why it is the base case of industrial sorts. Merge sort recursively splits and merges: O(n log n) *guaranteed* in all cases, stable, but O(n) extra space. Quicksort partitions around a pivot and recurses on each side: O(n log n) *average*, O(n^2) worst (bad pivots), in-place, not stable — but the fastest in practice due to cache-friendliness and small constants. Heap sort builds a max-heap in O(n) then repeatedly extracts the max: O(n log n) worst-case *guaranteed*, in-place, but not stable and cache-unfriendly. The O(n log n) floor comes from the decision-tree argument: n! possible orderings need log_2(n!) = Theta(n log n) comparisons to distinguish.
+Bubble/insertion/selection are `O(n²)`: a nested pass moving one element into place per outer step. Insertion sort is the best of the three — adaptive (`O(n)` on nearly-sorted data), stable, in-place, tiny constant — which is why it's the base case inside industrial sorts. Merge sort splits and merges: `O(n log n)` **guaranteed**, stable, but `O(n)` extra space. Quicksort partitions around a pivot and recurses: `O(n log n)` **average**, `O(n²)` worst (bad pivots), in-place, not stable — but the fastest in practice (cache-friendly, small constants). Heap sort builds a max-heap then repeatedly extracts the max: `O(n log n)` **guaranteed** and in-place, but not stable and cache-unfriendly.
 
 **Trade-offs**
-The core three-way tension is worst-case guarantee vs speed vs space. Quicksort wins raw speed and is in-place but risks O(n^2) and is unstable. Merge sort guarantees O(n log n) and is stable but costs O(n) space. Heap sort guarantees O(n log n) *and* is in-place but is unstable and ~2-3x slower than quicksort due to poor cache locality and branch prediction. Simple sorts lose asymptotically but win for n < ~16 (tiny constant) and for nearly-sorted data (insertion sort's adaptivity). Real libraries hybridize to get the best of all.
+The core tension is *worst-case guarantee vs raw speed vs space*. Quicksort is fastest and in-place but risks `O(n²)` and isn't stable. Merge sort guarantees `O(n log n)` and is stable but costs `O(n)` space. Heap sort guarantees `O(n log n)` *and* is in-place but is unstable and ~2–3× slower than quicksort (poor cache locality). The simple sorts lose asymptotically but win for `n < ~16` (tiny constant) and nearly-sorted data. Real libraries hybridise to get the best of all.
 
 **Common confusions**
-"Quicksort is O(n log n)" — only on *average*; its worst case is O(n^2), which is why the pivot choice matters. Confusing stable with in-place: they are independent properties (heap sort is in-place but unstable; a naive merge sort is stable but not in-place). Believing heap sort is faster than quicksort because both are O(n log n) worst/average — constants and cache behavior make quicksort win in practice. Thinking selection sort is adaptive — it always does O(n^2) comparisons regardless of input order. And assuming every sort can beat O(n log n) — comparison sorts cannot; only non-comparison sorts (counting/radix) can, under restrictions.
+"Quicksort is `O(n log n)`" — only on *average*; its worst case is `O(n²)`, which is why pivot choice matters. Confusing **stable** with **in-place** — they're independent (heap sort is in-place but unstable; naive merge sort is stable but not in-place). Believing heap sort beats quicksort because both are `O(n log n)` — constants and cache behaviour make quicksort win. Thinking selection sort is adaptive — it always does `O(n²)` comparisons regardless of input. Assuming any sort can beat `O(n log n)` — comparison sorts can't; only non-comparison sorts (counting/radix) can, under restrictions.
 
 **Why interviewers ask**
-Sorting is the canonical vehicle for testing complexity analysis, recursion, and engineering judgment in one problem. The signal is not "can you code bubble sort" but "do you know *why* merge sort is stable and quicksort is not, when O(n^2) worst case is acceptable, and why the standard library chose what it chose." Classic follow-ups: "why is quicksort preferred despite O(n^2)?", "make quicksort's worst case unlikely", "when would you pick merge sort over quicksort?", and "prove no comparison sort beats O(n log n)". It reveals whether you reason about constants, stability, and memory, not just Big-O.
+Sorting is the classic vehicle for testing complexity analysis, recursion, and engineering judgment in one problem. The signal isn't "can you code bubble sort" — it's "do you know *why* merge sort is stable and quicksort isn't, when `O(n²)` worst case is acceptable, and why the standard library chose what it chose." Common follow-ups: "why is quicksort preferred despite `O(n²)`?", "make quicksort's worst case unlikely", "when would you pick merge sort?", and "prove no comparison sort beats `O(n log n)`."
 
 ### What does it mean for a sort to be "comparison based"?
 
-A comparison sort determines order using only pairwise comparisons between elements — questions of the form "is a less than b?" — and nothing about the elements' internal structure or value range. Bubble, insertion, selection, merge, quick, and heap sort are all comparison sorts. This generality (they work on anything with a defined ordering) comes at a price: comparison sorts are provably bounded below by Omega(n log n). Non-comparison sorts like counting sort and radix sort exploit the actual key values (e.g. integers in a known range) to beat that bound, but they are not general-purpose.
+A comparison sort decides order using only **pairwise comparisons** — "is `a` less than `b`?" — and nothing about the elements' internal structure or value range. Bubble, insertion, selection, merge, quick, and heap sort are all comparison sorts. This generality (they work on anything with a defined ordering — numbers, strings, custom objects with a comparator) comes at a price: comparison sorts are provably bounded below by `Ω(n log n)` — they cannot be faster. Non-comparison sorts like counting sort and radix sort exploit the *actual key values* (e.g. integers in a known range) to beat that bound, but they aren't general-purpose (see the next topic).
 
 ### Why can't any comparison sort be faster than O(n log n)?
 
-Because of a decision-tree lower-bound argument. Any comparison sort's execution is a binary decision tree where each internal node is a comparison with two outcomes, and each leaf is one of the n! possible orderings of the input. To sort correctly, the tree must have at least n! leaves (one per possible permutation). A binary tree with n! leaves has height at least log_2(n!), and by Stirling's approximation log_2(n!) = Theta(n log n). The height is the worst-case number of comparisons, so *every* comparison sort needs Omega(n log n) comparisons in the worst case. No cleverness with comparisons alone escapes this floor.
+Because of a counting argument. There are `n!` possible orderings of `n` elements, and a comparison sort must be able to reach any of them. Each comparison has two outcomes (yes/no), so after `k` comparisons you can distinguish at most `2^k` cases. To tell apart all `n!` orderings you need `2^k ≥ n!`, i.e. `k ≥ log₂(n!)`. And `log₂(n!)` grows like `n log n` (Stirling's approximation). So **every** comparison sort needs at least about `n log n` comparisons in the worst case — no cleverness with comparisons alone escapes this floor. (Non-comparison sorts dodge it by *not* comparing.)
 
 ### Compare bubble, insertion, and selection sort.
 
-All three are O(n^2) but differ meaningfully. *Bubble sort* repeatedly swaps adjacent out-of-order pairs, "bubbling" the largest to the end each pass — stable, in-place, and can detect a sorted array early (O(n) best case with a swap flag) but does the most swaps and is the slowest in practice. *Selection sort* finds the minimum of the unsorted region and swaps it into place — in-place, *not* adaptive (always O(n^2) comparisons), not stable in its usual form, but does only O(n) swaps (useful when writes are expensive). *Insertion sort* inserts each element into its sorted prefix — stable, in-place, and *adaptive*: O(n) on nearly-sorted data. Insertion sort is the practical winner of the three.
+All three are `O(n²)` but differ in useful ways.
+
+```python
+def insertion_sort(a):
+    for i in range(1, len(a)):
+        key, j = a[i], i - 1
+        while j >= 0 and a[j] > key:   # shift bigger elements right
+            a[j + 1] = a[j]
+            j -= 1
+        a[j + 1] = key                 # drop key into its slot
+    return a
+```
+
+- **Bubble sort** repeatedly swaps adjacent out-of-order pairs, "bubbling" the largest to the end — stable, in-place, can stop early on sorted input (`O(n)` best case), but does the most swaps and is slowest in practice.
+- **Selection sort** finds the minimum of the unsorted part and swaps it into place — in-place, **not** adaptive (always `O(n²)` comparisons), usually not stable, but does only `O(n)` swaps (handy when *writes* are expensive, e.g. flash memory).
+- **Insertion sort** inserts each element into the sorted prefix (above) — stable, in-place, and **adaptive**: `O(n)` on nearly-sorted data. It's the practical winner and the base case inside real sorts.
 
 ### Why is insertion sort used inside industrial sort implementations?
 
-Because for small arrays it beats the O(n log n) sorts despite its O(n^2) bound. Its constant factor is tiny — a simple inner loop with great cache locality and branch prediction — and it is *adaptive*, running in O(n) when data is nearly sorted. So Timsort (Python, Java objects) and introsort (C++ std::sort) recurse with merge/quicksort only until subarrays drop below a threshold (~16-64 elements), then finish with insertion sort. This hybrid captures insertion sort's low overhead on the small subproblems where the asymptotically better sorts' overhead would dominate. It is also stable and in-place, so it does not compromise those properties.
+Because for **small** arrays it beats the `O(n log n)` sorts despite its `O(n²)` bound. Its constant factor is tiny — a simple inner loop with excellent cache locality and branch prediction — and it's adaptive, so nearly-sorted runs cost `O(n)`. So Timsort (Python, Java objects) and introsort (C++ `std::sort`) recurse with merge/quicksort only until subarrays drop below a threshold (~16–64 elements), then finish each small piece with insertion sort. This hybrid captures insertion sort's low overhead exactly where the fancier sorts' overhead would dominate — and insertion sort is stable and in-place, so it doesn't compromise those properties.
 
 ### What does "stable" mean and when does it matter?
 
-A sort is stable if elements comparing equal retain their original relative order. It matters whenever you sort by a *secondary* key or do multi-key sorting: sort records by name, then stably sort by department, and within each department names stay alphabetical — instability would scramble the first sort. It also matters when equal-key elements carry distinguishable payloads you do not want reordered. Merge sort and insertion sort are stable; heap sort and typical in-place quicksort are not. This is why Java uses Timsort (stable) for object arrays but a quicksort variant for primitives, where stability is meaningless since equal primitives are indistinguishable.
+A sort is **stable** if elements that compare equal keep their original relative order. It matters whenever you sort by a *secondary* key. Sort records by name, then stably sort by department → within each department, names stay alphabetical. An unstable sort would scramble the first sort. It also matters when equal-key elements carry payloads you don't want reordered. Merge sort and insertion sort are stable; heap sort and typical in-place quicksort are not. This is exactly why Java uses Timsort (stable) for object arrays but a quicksort variant for primitives — equal primitives are indistinguishable, so stability is meaningless there.
 
 ### What does "in-place" mean, and is it the same as stable?
 
-In-place means the sort uses only O(1) (or sometimes O(log n) for recursion stack) auxiliary memory beyond the input — it rearranges within the original array rather than allocating a copy. It is *independent* of stability. Heap sort is in-place but not stable; standard merge sort is stable but not in-place (it needs an O(n) merge buffer); quicksort is in-place but not stable; insertion sort is both. Candidates often conflate the two because insertion/merge examples happen to line up, but they are orthogonal properties — one is about *memory*, the other about *equal-element ordering*.
+**In-place** means the sort uses only `O(1)` extra memory (sometimes `O(log n)` for the recursion stack) — it rearranges within the original array instead of allocating a copy. It is **independent** of stability. Heap sort is in-place but not stable; standard merge sort is stable but not in-place (it needs an `O(n)` merge buffer); quicksort is in-place but not stable; insertion sort is both. People conflate them because the insertion/merge examples happen to line up, but they're orthogonal: one is about **memory**, the other about **equal-element order**.
 
 ### Walk through how merge sort works and its complexity.
 
-Merge sort recursively splits the array into halves until subarrays have length 1 (trivially sorted), then merges pairs of sorted subarrays back up. The merge takes two sorted lists and interleaves them into one sorted list by repeatedly appending the smaller of the two front elements — O(n) per merge level. Recurrence T(n) = 2T(n/2) + O(n) gives O(n log n) in best, average, *and* worst case — it is not input-sensitive. It is stable (break merge ties toward the left half) but needs O(n) auxiliary space for the merge buffer. That guaranteed worst case and stability make it the choice for linked lists and external/large-data sorts.
+Merge sort recursively splits the array into halves until pieces are length 1 (trivially sorted), then **merges** pairs of sorted pieces back up. The merge takes two sorted lists and interleaves them by repeatedly taking the smaller front element — `O(n)` per level. (Full code is in the Recursion & Divide and Conquer topic.) The recurrence `T(n) = 2·T(n/2) + O(n)` gives `O(n log n)` in **best, average, and worst** case — it's not input-sensitive. It's stable (break merge ties toward the left half) but needs `O(n)` auxiliary space. That guaranteed worst case + stability make it the choice for **linked lists** (merge needs no random access) and **external / huge-data** sorts.
 
 ### Walk through how quicksort works and its complexity.
 
-Pick a pivot, *partition* the array so everything less than the pivot is left of it and everything greater is right (the pivot lands in its final sorted position), then recursively quicksort the left and right partitions. Base case: a partition of size 0 or 1. With balanced partitions the recurrence is T(n) = 2T(n/2) + O(n) = O(n log n), which is the average case. With consistently unbalanced partitions (one side empty) it degrades to T(n) = T(n-1) + O(n) = O(n^2). It is in-place (O(log n) stack) and typically *not* stable, but its small constant and excellent cache locality make it the fastest general sort in practice.
+Pick a **pivot**, **partition** the array so everything less than the pivot is left of it and everything greater is right (the pivot lands in its final sorted spot), then recursively quicksort the left and right partitions.
+
+```python
+def quicksort(a, lo=0, hi=None):
+    if hi is None: hi = len(a) - 1
+    if lo >= hi: return a                 # base case: 0 or 1 element
+    p = partition(a, lo, hi)
+    quicksort(a, lo, p - 1)               # left of pivot
+    quicksort(a, p + 1, hi)               # right of pivot
+    return a
+
+def partition(a, lo, hi):
+    pivot = a[hi]                         # simple: last element as pivot
+    i = lo                                # boundary of the "< pivot" region
+    for j in range(lo, hi):
+        if a[j] < pivot:
+            a[i], a[j] = a[j], a[i]
+            i += 1
+    a[i], a[hi] = a[hi], a[i]             # put pivot in place
+    return i
+```
+
+With balanced partitions the recurrence is `T(n) = 2·T(n/2) + O(n) = O(n log n)` (average). With consistently lopsided partitions (one side empty) it degrades to `T(n) = T(n−1) + O(n) = O(n²)`. It's in-place (`O(log n)` stack) and typically **not** stable, but its small constant and excellent cache locality make it the fastest general sort in practice.
 
 ### Why is quicksort O(n^2) worst case but preferred in practice?
 
-The worst case happens when the pivot is consistently the smallest or largest element, so each partition shrinks by just one and you get n levels of O(n) work — O(n^2). This occurs with a naive first/last-element pivot on already-sorted or reverse-sorted input. Yet quicksort dominates in practice because its *average* case is O(n log n) with a very small constant, it sorts *in place* (unlike merge sort's O(n) buffer), and its sequential partition scan is extremely cache-friendly and branch-predictor-friendly. Randomizing or median-of-three pivot selection makes the O(n^2) case astronomically unlikely, and introsort caps it hard by switching to heap sort — so you keep quicksort's speed with a worst-case guarantee.
+The worst case happens when the pivot is consistently the smallest or largest element, so one partition is empty and the other has `n−1` elements — e.g. an already-sorted array with "last element as pivot." That's `O(n²)`. Yet quicksort is the default general-purpose sort because: (1) its **average** case is `O(n log n)` with a *smaller constant* than merge/heap sort; (2) it's **in-place** (no `O(n)` buffer); (3) it's extremely **cache-friendly** (it works on contiguous partitions, scanning linearly). The worst case is easy to make astronomically unlikely (randomize the pivot, or median-of-three), and industrial versions (introsort) *guarantee* `O(n log n)` by switching to heap sort if recursion gets too deep. So you get quicksort's speed with a safety net.
 
 ### How does pivot choice affect quicksort, and how do you make the worst case unlikely?
 
-The pivot decides partition balance, which decides whether you get O(n log n) or O(n^2). A fixed first/last-element pivot is O(n^2) on sorted input — the common real-world case, so it is dangerous. Better strategies: *random pivot* (expected O(n log n) regardless of input, defeats adversarial *ordering* though not an adversary who sees your RNG); *median-of-three* (median of first, middle, last — cheap and handles sorted input well); or *median-of-medians* (guarantees O(n log n) but with a constant so large it is rarely used). Production code combines median-of-three with an introsort fallback to heap sort once recursion depth exceeds ~2 log n, guaranteeing O(n log n) worst case.
+The pivot decides how balanced the partitions are, which decides the complexity. A bad, fixed choice ("always the last element") is `O(n²)` on sorted/reverse-sorted input — a real attacker can feed you exactly that. Better choices:
+- **Random pivot** — pick a random index; now no *particular* input is a worst case, so it's `O(n log n)` with overwhelming probability.
+- **Median-of-three** — pivot = median of first, middle, last; cheap and kills the sorted-input worst case.
+- **Median-of-medians** — guarantees a good pivot in `O(n)`, making worst case `O(n log n)`, but the constant is too big to be worth it in practice.
+
+The pragmatic combo (used by introsort): median-of-three pivot + a depth limit; if the recursion gets too deep (a sign of bad pivots), bail out to heap sort for a guaranteed `O(n log n)`.
 
 ### What is heap sort and what are its trade-offs?
 
-Heap sort builds a max-heap from the array in O(n) (bottom-up heapify), then repeatedly swaps the root (the max) to the end of the array and sifts the new root down, shrinking the heap by one each time — extracting elements in sorted order. Each of the n extractions costs O(log n), so total is O(n log n) in *all* cases, and it is *in-place* (O(1) auxiliary). The trade-offs: it is *not stable*, and despite matching quicksort's asymptotic bound it runs ~2-3x slower in practice because heap operations jump around memory (poor cache locality) and its sift-down branches are hard to predict. See the Data Structures primer for heap internals.
+Heap sort builds a **max-heap** from the array in `O(n)`, then repeatedly swaps the max (root) to the end and shrinks the heap, re-heapifying each time.
+
+```python
+import heapq
+def heap_sort(a):
+    h = a[:]                 # copy so we don't mutate input
+    heapq.heapify(h)         # O(n) min-heap
+    return [heapq.heappop(h) for _ in range(len(h))]   # n pops x O(log n)
+```
+
+Complexity: `O(n)` to build + `n` extractions × `O(log n)` = `O(n log n)` **worst case, guaranteed**, and it's **in-place** (the classic array version). The downsides: it's **not stable**, and it's ~2–3× slower than quicksort in practice because it jumps around memory (poor cache locality) and has unpredictable branches. Its niche: when you need a hard `O(n log n)` guarantee with `O(1)` extra space (which is why introsort uses it as the fallback).
 
 ### When would you choose merge sort over quicksort?
 
-When you need a *guaranteed* O(n log n) worst case (quicksort risks O(n^2)), when you need *stability* (merge sort is stable, quicksort is not), when sorting a *linked list* (merge sort needs no random access and can merge in O(1) extra space on lists, while quicksort's partition wants random access), or when doing *external sorting* of data too big for RAM (merge sort streams sorted runs from disk and merges them, the classic external-sort algorithm). You accept its O(n) auxiliary memory in exchange. If memory is tight and average speed matters more than worst-case guarantees, you pick quicksort instead.
+Choose merge sort when you need a **guaranteed** `O(n log n)` (no `O(n²)` risk), when you need **stability**, or when the data structure suits it: **linked lists** (merge only walks forward, no random access needed, and it can be done with `O(1)` extra space on a list), and **external sorting** of data too big for RAM (merge streams sorted runs from disk). Choose quicksort for in-memory arrays where raw speed matters and stability doesn't, and you're fine relying on randomization to avoid the worst case. Rule of thumb: arrays + speed → quicksort; linked lists, stability, or hard guarantees → merge sort.
 
 ### Which sorts are stable and which are in-place? Summarize.
 
-Stable: insertion, bubble, and merge sort (and Timsort). Not stable: selection (in its usual form), quicksort, and heap sort. In-place (O(1)-O(log n) auxiliary): insertion, bubble, selection, quicksort, and heap sort. Not in-place: standard merge sort (O(n) buffer). The two clean summary points: merge sort trades space for stability + guaranteed O(n log n); heap sort trades stability for in-place + guaranteed O(n log n); quicksort trades worst-case guarantee for in-place speed. Insertion sort is the only one that is stable, in-place, *and* adaptive — just not scalable.
+| Sort | Time (avg / worst) | Stable? | In-place? | Adaptive? |
+|---|---|---|---|---|
+| Insertion | `O(n²)` / `O(n²)` (best `O(n)`) | yes | yes | yes |
+| Selection | `O(n²)` / `O(n²)` | no | yes | no |
+| Bubble | `O(n²)` / `O(n²)` (best `O(n)`) | yes | yes | yes |
+| Merge | `O(n log n)` / `O(n log n)` | yes | no (`O(n)`) | no |
+| Quicksort | `O(n log n)` / `O(n²)` | no | yes | no |
+| Heap | `O(n log n)` / `O(n log n)` | no | yes | no |
+
+Reading it: only insertion/bubble are adaptive; only merge is both stable and guaranteed `O(n log n)` (at the cost of space); only heap is both in-place and guaranteed `O(n log n)` (at the cost of stability and speed).
 
 ### What sorting algorithm does your language's standard library use, and why?
 
-Most use a *hybrid*. C++ `std::sort` uses introsort: quicksort for speed, switching to heap sort when recursion gets too deep (capping the worst case at O(n log n)) and to insertion sort for small subarrays. Python's `sorted`/`list.sort` and Java's `Arrays.sort` for objects use Timsort: a stable, adaptive merge sort that detects existing sorted "runs" and merges them, running near O(n) on real-world partially-ordered data and O(n log n) worst case. Java sorts *primitives* with a dual-pivot quicksort (stability is irrelevant for indistinguishable primitives, and it is faster/in-place). The theme: no single textbook sort is used raw — libraries combine them to get guarantees, stability where needed, and adaptivity.
+Real libraries hybridise to get guarantees *and* speed:
+- **Python** `sorted`/`list.sort` → **Timsort**: a stable merge sort that finds already-sorted "runs" and merges them, with insertion sort for small runs. Chosen because real-world data is often partially sorted, and stability is expected.
+- **Java** → **Timsort** for objects (stable, as callers expect), **dual-pivot quicksort** for primitives (fast, stability irrelevant).
+- **C++** `std::sort` → **introsort**: quicksort + median-of-three, switching to heap sort past a recursion-depth limit (guaranteeing `O(n log n)`) and insertion sort for small pieces. Not stable; `std::stable_sort` is a separate call.
+
+The theme: quicksort/merge for the bulk, insertion sort for small pieces, and a guarantee mechanism so the `O(n²)` worst case can't happen.
 
 ### Can any sort beat O(n log n)? When?
 
-Only *non-comparison* sorts, and only under restrictions on the keys. Counting sort sorts n integers in a known range [0, k) in O(n + k) by tallying occurrences — linear when k is O(n), but useless for large ranges or arbitrary comparables. Radix sort sorts fixed-width integers/strings in O(d * (n + b)) by sorting digit-by-digit (d digits, base b) using a stable counting sort per digit — effectively O(n) for bounded-width keys. Bucket sort is O(n) *expected* for uniformly distributed inputs. All of these exploit key *values*, sidestepping the comparison lower bound. General comparison sorts on arbitrary orderings cannot beat O(n log n) — the decision-tree proof forbids it.
+Yes — but only **non-comparison** sorts, and only under restrictions. Counting sort, radix sort, and bucket sort achieve `O(n)` by exploiting the *values* (e.g. integers in a bounded range, fixed-width keys) instead of comparing. They don't violate the `Ω(n log n)` lower bound because that bound is specifically about *comparison* sorts — these algorithms don't compare elements to each other at all. The catch: they need structured keys (small integers, fixed-length strings) and often extra space, so they're not general-purpose replacements. See the Linear-Time & Advanced Sorting topic for how they work.
 
 ### Why is selection sort rarely used despite being simple?
 
-Because it is O(n^2) *unconditionally* — it always scans the entire unsorted region to find each minimum, so it does not improve on sorted or nearly-sorted input (unlike insertion sort's O(n) best case). It is also not stable in its standard swap form. Its one redeeming trait is that it performs only O(n) swaps total (versus insertion/bubble's O(n^2) writes), which matters when writes are far more expensive than reads (e.g. sorting data in flash memory with limited write cycles). But for general use, insertion sort dominates it — same simplicity, same in-place property, plus stability and adaptivity — so selection sort is mostly a teaching example.
+Because it's `O(n²)` *and* gives up the one advantage the other simple sorts have: it is **not adaptive** — it always scans the whole unsorted region to find the minimum, so it does `Θ(n²)` comparisons even on an already-sorted array, where insertion sort would finish in `O(n)`. It's also usually not stable. Its single redeeming trait is that it does only `O(n)` **swaps** (writes), which can matter when writing to memory is far more expensive than reading (e.g. certain flash/EEPROM scenarios). For almost every normal case, insertion sort dominates it — same simplicity, better on real inputs.
 
 ## Linear-Time & Advanced Sorting
 
