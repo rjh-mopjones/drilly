@@ -593,82 +593,139 @@ Because it's `O(n²)` *and* gives up the one advantage the other simple sorts ha
 ### Summary
 
 **What this topic covers**
-The sorts that escape the comparison model. Counting sort, radix sort, and bucket sort don't compare elements to each other — they exploit structure in the keys (small integer range, fixed digit width, uniform distribution) to hit O(n) or O(nk) instead of O(n log n). This topic also covers the reason O(n log n) is a *wall* for comparison sorts (the decision-tree lower bound), how sorting works when the data doesn't fit in RAM (external merge sort), and what the standard libraries actually run under the hood (Timsort, introsort). The mental model: comparison sorts ask "is a < b?"; non-comparison sorts ask "what bucket does a's key fall into?".
+The sorts that beat the `O(n log n)` comparison barrier — **counting sort**, **radix sort**, and **bucket sort** — by looking at the actual key *values* instead of only comparing pairs. They run in `O(n)` under the right conditions (small integer keys, fixed-width keys, uniformly-spread data). This topic covers how each works with code, exactly *why* they escape the `Ω(n log n)` lower bound (they don't compare), their conditions and space costs, plus the industrial hybrids (**Timsort**, **introsort**) and external sorting for data that doesn't fit in memory.
+
+**Mental model**
+Comparison sorts are stuck at `O(n log n)` because "is a < b?" only gives one bit of information per comparison. Non-comparison sorts cheat by using the key's *value* as an address. Counting sort: "if I know keys are integers 0–9, I can just tally how many of each and reconstruct the order — no comparisons." Radix sort: "I can't tally 32-bit integers (4 billion buckets), but I can counting-sort one digit at a time, least-significant first, and stability glues the passes together." Bucket sort: "if values are spread uniformly over a range, scatter them into buckets, sort each small bucket, concatenate." All three trade the generality of comparison sorts (which sort *anything* orderable) for speed on *structured* keys.
 
 **Key terms**
-*Comparison sort* — orders elements using only pairwise comparisons (`<`). *Counting sort* — tally occurrences of each key value, then emit in key order. *Radix sort* — sort by digits/bytes, least-significant-digit (LSD) or most-significant-digit (MSD) first. *Bucket sort* — scatter into buckets by value range, sort each, concatenate. *Stable sort* — equal keys keep their input order (radix depends on this). *k* — key range (counting) or number of digits (radix). *External sort* — sorts data larger than memory using disk passes. *Timsort* — Python/Java's adaptive merge sort. *Introsort* — C++'s quicksort/heapsort/insertion hybrid.
+- **Non-comparison sort** — orders using key values (as indices/digits), not pairwise comparisons; can be `O(n)`.
+- **Counting sort** — tally occurrences of each key in a range `[0, k)`, then rebuild; `O(n + k)`.
+- **Radix sort** — sort fixed-width keys digit by digit using a stable sub-sort (usually counting sort).
+- **LSD** (least-significant-digit) — radix sort starting from the rightmost digit; **MSD** starts from the left.
+- **Bucket sort** — scatter values into buckets by range, sort each bucket, concatenate; `O(n)` average for uniform data.
+- **`k`** — the size of the key range (counting sort is only linear when `k = O(n)`).
+- **External sort** — sorting data too big for RAM by merging sorted runs from disk.
 
 **Core mechanics**
-Counting sort: allocate a count array of size k, tally each key, take a prefix sum to get final positions, place each element (iterating input right-to-left for stability). Time O(n + k), space O(n + k) — linear only when k = O(n). Radix sort: run a stable counting sort per digit, from least significant to most significant; d digits over base b gives O(d(n + b)). LSD radix works because a stable sort on digit i preserves the order established by digits 0..i-1. Bucket sort: with n items uniformly spread over the range, drop each into one of n buckets, insertion-sort each bucket; expected O(n) because each bucket holds O(1) items on average, worst case O(n^2) if everything lands in one bucket. External merge sort: sort memory-sized chunks (runs), write them to disk, then k-way merge the runs with a heap — minimizing disk passes is the whole game.
+Counting sort needs keys in a small known range `[0, k)`: count each value into a size-`k` array, take a prefix sum to get final positions, then place each element (iterating right-to-left to stay stable) — `O(n + k)` time, `O(n + k)` space. Radix sort handles big keys by doing `d` passes of stable counting sort, one per digit, LSD-first — `O(d·(n + b))` for `d` digits in base `b`. Bucket sort splits `[min, max)` into `n` buckets, drops each element in its bucket, sorts buckets (insertion sort), and concatenates — `O(n)` average if elements spread evenly, `O(n²)` worst (all in one bucket).
 
 **Trade-offs**
-Non-comparison sorts win when keys are bounded integers or short fixed-width strings and n is large — radix on 32-bit ints in 4 byte-passes is often faster than quicksort. They lose when k is huge (counting sort with k = 2^32 is absurd), when keys are floats/strings of unbounded length, or when you need in-place (they need O(n) auxiliary space). Comparison sorts are general-purpose and in-place-capable; that generality costs the log n factor.
+These sorts are faster than `O(n log n)` but **not general-purpose**: they need structured keys (small integers, fixed-width strings, uniformly-distributed reals) and often `O(n + k)` or `O(n·d)` extra space. Counting sort is useless if `k` is huge (sorting 64-bit IDs would need a `2^64` array). Radix sort fixes the range problem but its constant factor and `d` passes can make it lose to a well-tuned quicksort on general data, and it needs a stable sub-sort. Bucket sort assumes a uniform distribution — clustered data destroys it. So in practice comparison sorts (quicksort/Timsort) remain the default; you reach for these only when the keys fit the mould.
 
 **Common confusions**
-"Radix sort is O(n), so it beats quicksort" ignores the hidden d and b: it's O(d·n), and d can dominate. Counting sort's linearity is conditional on k = O(n) — state that constraint or you're wrong. Candidates forget radix *requires* a stable inner sort; an unstable per-digit pass corrupts higher digits. Bucket sort's O(n) is *expected under uniform input*, not worst case. And the Omega(n log n) bound only applies to comparison sorts — quoting it to dismiss radix is a classic error.
+"Radix sort violates the `O(n log n)` lower bound" — no; that bound is for *comparison* sorts, and radix doesn't compare elements. "Counting sort is always `O(n)`" — only when `k = O(n)`; it's `O(n + k)`, so `k = 10⁹` makes it `O(k)`, i.e. terrible. "LSD radix — surely you'd sort by the most significant digit?" — LSD *must* go least-significant first and rely on each pass being stable, which is the subtle part. "Bucket sort is `O(n)`" — average case, on uniform data; adversarial input is `O(n²)`.
 
 **Why interviewers ask**
-It separates people who memorized "sorting is n log n" from people who understand *why* and *when* that bound holds. The lower-bound proof tests whether you can reason about information content. The follow-up is almost always "can you sort these faster than n log n?" — and the correct move is to ask about the key domain. Knowing your language's stdlib sort (Timsort vs introsort) signals you understand real systems, not just textbook algorithms.
+This topic tests whether you understand *why* the `O(n log n)` bound exists and when it doesn't apply — a sign of real depth rather than memorised complexities. "You have 10 million 32-bit integers, sort them as fast as possible" is a classic that rewards "radix sort, `O(n)`" over "quicksort, `O(n log n)`." It also probes the stability requirement (radix breaks without a stable sub-sort) and the range/space trade-off (why counting sort fails on large key ranges).
 
 ### What is a comparison sort, and what is its fundamental speed limit?
 
-A comparison sort determines order using only pairwise comparisons — it never inspects the internal structure of a key, only asks "is a < b?". Merge sort, quicksort, heapsort, and insertion sort are all comparison sorts. The fundamental limit is Omega(n log n) comparisons in the worst case (and on average) for any comparison-based algorithm. No amount of cleverness gets a general comparison sort below n log n. To beat it you must leave the comparison model entirely and exploit structure in the keys.
+A comparison sort orders elements using only "is `a` < `b`?" checks. Because each comparison yields one bit and there are `n!` possible orderings, any comparison sort needs at least about `log₂(n!) ≈ n log n` comparisons in the worst case — the `Ω(n log n)` lower bound. So merge/quick/heap sort are essentially optimal *among comparison sorts*. The only way to go faster is to **stop comparing** and instead use the key values themselves, which is exactly what counting/radix/bucket sort do — but only for keys that are structured enough (small integers, fixed-width) to be used as array indices.
 
 ### Why is O(n log n) a hard lower bound for comparison sorts?
 
-Model any comparison sort as a binary decision tree: each internal node is one comparison with two outcomes, and each leaf is one possible output permutation. To sort correctly the tree must have a distinct reachable leaf for every one of the n! permutations of the input. A binary tree with at least n! leaves has height at least log2(n!). By Stirling's approximation, log2(n!) = Theta(n log n). The height of the tree is the worst-case number of comparisons, so every comparison sort needs Omega(n log n) comparisons. It's an information-theoretic argument: you need enough yes/no answers to distinguish n! outcomes.
+Model any comparison sort as a **decision tree**: each internal node is one comparison with two branches (`<` or `≥`), and each leaf is a final ordering the algorithm can output. To sort correctly it must be able to produce any of the `n!` permutations, so the tree needs at least `n!` leaves. A binary tree with `n!` leaves has height at least `log₂(n!)`, and Stirling's approximation gives `log₂(n!) = Θ(n log n)`. The height is the worst-case number of comparisons, so **no comparison sort can do better than `Θ(n log n)` comparisons in the worst case**. It's a fundamental information-theoretic limit, not a failure of cleverness — and non-comparison sorts sidestep it by not building this tree at all.
 
 ### How does counting sort work and what is its complexity?
 
-Counting sort sorts integer keys in a known small range [0, k). Steps: (1) allocate a count array of size k and tally how many times each key appears; (2) convert counts to a prefix sum so count[v] tells you the final position for key v; (3) iterate the input from right to left, placing each element at its computed position and decrementing the count. Iterating right-to-left keeps it stable. Time is O(n + k), space O(n + k). It's linear only when k = O(n); with a huge key range it degenerates.
+Counting sort sorts integers in a known small range `[0, k)` without any comparisons: tally how many of each value there are, then rebuild the array in order.
+
+```python
+def counting_sort(a, k):                 # a: ints in [0, k)
+    count = [0] * k
+    for x in a:                          # 1) tally
+        count[x] += 1
+    for i in range(1, k):                # 2) prefix sums -> final positions
+        count[i] += count[i - 1]
+    out = [0] * len(a)
+    for x in reversed(a):                # 3) place right-to-left = stable
+        count[x] -= 1
+        out[count[x]] = x
+    return out
+```
+
+Micro-example: `a = [2,0,2,1]`, `k = 3`. Tally → `[1,1,2]` (one 0, one 1, two 2s). Prefix → `[1,2,4]`. Placing gives `[0,1,2,2]`. Complexity: `O(n + k)` time and space. It's `O(n)` only when `k = O(n)`; if `k` is huge (large integers), the size-`k` count array makes it impractical — that's what radix sort fixes.
 
 ### Why must counting sort be stable, and how do you make it stable?
 
-Stability matters because counting sort is the workhorse inside radix sort, and radix breaks if the per-digit sort reorders equal digits. You make counting sort stable by using the prefix-sum positions and iterating the input array from the *last* element to the first: elements with equal keys are placed right-to-left into descending slots, which preserves their original left-to-right order. If you iterate left-to-right with the same prefix sums, you reverse equal-key order and lose stability.
+Stability matters because counting sort is the *sub-routine* radix sort calls on each digit — if it weren't stable, an earlier digit's ordering would be scrambled by a later pass, and radix would produce garbage. You make it stable by (1) computing **prefix sums** to know each value's ending position, and (2) placing elements by iterating the input **right-to-left**, decrementing the count each time. Right-to-left placement means equal keys are laid down in reverse-of-reverse = original order, so ties keep their relative order. (Iterating left-to-right with the same prefix-sum trick would reverse equal elements — a common bug.)
 
 ### How does LSD radix sort work, and why does starting from the least significant digit work?
 
-LSD radix sort processes digits from least significant to most significant, running a stable counting sort on each digit position. After sorting on digit 0, the array is ordered by the ones place. Sorting stably on digit 1 orders by the tens place while *preserving* the ones-place order among ties — so ties on the tens place stay sorted by ones. Inductively, after processing digit i the array is correctly sorted on digits 0..i. When the top digit is done, the whole array is sorted. Stability of the inner sort is exactly what makes this induction hold.
+LSD radix sort sorts fixed-width keys by doing one **stable counting sort per digit**, starting from the **least** significant (rightmost) digit and moving left.
+
+```python
+def radix_sort(a):                       # non-negative ints
+    if not a: return a
+    max_val = max(a)
+    exp = 1
+    while max_val // exp > 0:            # one pass per digit
+        a = counting_sort_by_digit(a, exp)   # stable, on digit at 'exp'
+        exp *= 10
+    return a
+```
+
+Why LSD-first works: after sorting by the ones digit, the array is ordered by ones. Sorting *stably* by the tens digit orders by tens, and — because it's stable — ties on the tens digit keep their ones-digit order. Inductively, after processing all digits the array is fully sorted. Micro-example on `[170, 45, 75, 90, 2, 802]`: sort by ones → `[170,90,2,802,45,75]`; by tens → `[2,802,45,170,75,90]`; by hundreds → `[2,45,75,90,170,802]`. The stability at each step is *load-bearing* — without it the whole thing breaks.
 
 ### What is the time complexity of radix sort, and when does it beat comparison sorts?
 
-For n keys of d digits in base b, radix sort runs d passes of counting sort, each O(n + b), giving O(d(n + b)). Treating d and b as constants (e.g. 32-bit integers sorted as 4 byte-passes with b = 256) it's O(n). It beats comparison sorts when n is large and keys are fixed-width and bounded — sorting millions of 32-bit integers or fixed-length strings. It loses when keys are long or variable-length (d grows), when b is chosen too large (wasting the O(b) term), or when you can't afford the O(n + b) auxiliary space. The honest statement is O(d·n): linear in n but with a factor for key width.
+Radix sort is `O(d·(n + b))` where `d` = number of digits and `b` = the base (bucket count, e.g. 10 or 256). For fixed-width keys (32-bit ints → `d = 4` bytes with base 256), `d` and `b` are constants, so it's effectively **`O(n)`**. It beats comparison sorts when: keys are integers or fixed-width strings, `n` is large, and `d` is small relative to `log n`. The rough rule: radix wins when `d < log₂ n` — i.e. the keys aren't too "wide" compared to how many of them there are. For sorting millions of 32-bit integers, radix (`O(n)`) clearly beats quicksort (`O(n log n)`); for a few hundred general objects, quicksort's small constant wins.
 
 ### How does bucket sort work and why is it O(n) on average but O(n^2) worst case?
 
-Bucket sort assumes keys are roughly uniformly distributed over a range. Create n buckets, map each element to a bucket by its value (e.g. floor(n * key) for keys in [0, 1)), then sort each bucket (usually insertion sort) and concatenate. Under uniform input each bucket holds O(1) elements in expectation, so the per-bucket sorts total O(n) and the whole thing is expected O(n). Worst case, all n elements hash into one bucket and that bucket's insertion sort is O(n^2). So bucket sort's speed is a property of the input distribution, not a guarantee — skewed data destroys it.
+Bucket sort assumes values are spread over a range (ideally **uniformly**). Split the range into `n` buckets, drop each element into its bucket, sort each bucket (insertion sort), then concatenate.
+
+```python
+def bucket_sort(a):                      # a: floats in [0, 1)
+    n = len(a)
+    buckets = [[] for _ in range(n)]
+    for x in a:
+        buckets[int(n * x)].append(x)    # value -> bucket index
+    out = []
+    for b in buckets:
+        b.sort()                         # small; insertion sort in practice
+        out.extend(b)
+    return out
+```
+
+Average `O(n)`: with uniform data each bucket holds ~1 element, so sorting all buckets is `O(n)` total. Worst `O(n²)`: if the data is clustered so all `n` elements land in **one** bucket, you're just insertion-sorting `n` elements → `O(n²)`. So bucket sort is only linear when the distribution is (near-)uniform; skewed data kills it.
 
 ### When would you choose counting/radix/bucket sort over quicksort in practice?
 
-Choose them when the keys have exploitable structure and you're sorting a lot of data. Counting sort: small integer keys (ages 0-120, byte values, small enum codes) — a single linear pass. Radix sort: large arrays of fixed-width integers, IP addresses, or fixed-length strings; databases and GPU sorts use it heavily. Bucket sort: floating-point keys known to be uniformly distributed. Stick with quicksort/introsort when keys are arbitrary comparables (custom objects, variable strings), when the range is unknown or huge, or when you need in-place sorting with O(log n) stack space rather than O(n) buckets.
+- **Counting sort** — keys are integers in a small, known range (grades 0–100, ages 0–120, bytes 0–255). `O(n)` and dead simple.
+- **Radix sort** — large volume of fixed-width integer or string keys (IDs, IP addresses, dates as `YYYYMMDD`), where `O(n)` beats `O(n log n)` and you can afford the `O(n)` extra space.
+- **Bucket sort** — floating-point values known to be roughly uniform over a range.
+
+Otherwise (general objects, arbitrary comparators, unknown ranges, unknown distributions), stick with quicksort/Timsort — the specialized sorts' preconditions don't hold, and comparison sorts' small constants and generality win.
 
 ### What is external merge sort and when do you need it?
 
-External merge sort sorts data too large to fit in RAM — think sorting a 500 GB file on a machine with 16 GB of memory. Phase 1 (run generation): read a memory-sized chunk, sort it in RAM, write the sorted "run" to disk; repeat until the whole file is split into sorted runs. Phase 2 (merge): do a k-way merge of the runs, keeping one block per run in memory and using a min-heap to pick the next smallest element, streaming output to disk. The cost model is dominated by disk I/O passes, so you maximize k (the merge fan-in) to minimize the number of passes. This is the sort behind databases and MapReduce shuffle stages.
+You need it when the data is **too big to fit in RAM** (sorting a 1 TB file on a 16 GB machine). External merge sort works in two phases: (1) **run generation** — read chunks that *do* fit in memory, sort each in-RAM, write the sorted "run" back to disk; (2) **merge** — do a k-way merge of the sorted runs, streaming a little of each at a time, writing the merged output. It minimises the expensive part — disk I/O — by reading/writing each record only a few times. This is why merge sort (sequential access, mergeable) underlies database sorts and big-data frameworks, whereas quicksort (random access within a partition) is poorly suited to disk/tape.
 
 ### What is Timsort and why do Python and Java use it?
 
-Timsort is an adaptive, stable merge sort designed for real-world data that's often partially ordered. It scans for existing ascending or descending "runs" in the data, extends short runs with insertion sort to a minimum length, and merges runs using a balancing rule with a galloping mode that skips through long stretches where one run dominates. On already-sorted or nearly-sorted input it approaches O(n); worst case stays O(n log n). It's stable (required for Python's sort semantics) and exploits the reality that logs, timestamped records, and appended data have pre-existing order. Python's `list.sort` and Java's `Arrays.sort` for objects both use it.
+Timsort is the stable, adaptive hybrid used by Python (`sorted`/`list.sort`) and Java (object arrays). It scans for **runs** — maximal already-sorted stretches — and merges them, using insertion sort to extend short runs and clever merge rules (with a stack of pending runs kept balanced). It's `O(n log n)` worst case but `O(n)` on already-sorted or reverse-sorted input, which is common in real data (appending to a sorted list, concatenating sorted files). It's chosen because it's **stable** (callers rely on it), **adaptive** (fast on real, partially-ordered data), and has good worst-case guarantees — the best all-rounder for general object sorting.
 
 ### What is introsort and why does C++ use it instead of plain quicksort?
 
-Introsort (introspective sort) is a hybrid that fixes quicksort's O(n^2) worst case while keeping its speed. It starts as quicksort but tracks recursion depth; if the depth exceeds ~2·log2(n) (a sign quicksort is degenerating on bad pivots), it switches that subrange to heapsort, which guarantees O(n log n). For small subarrays (typically < 16 elements) it falls back to insertion sort, which has low overhead on tiny inputs. C++'s `std::sort` uses introsort: you get quicksort's cache-friendly average performance with a hard O(n log n) worst-case guarantee, without relying on randomized pivots alone.
+Introsort ("introspective sort") is C++ `std::sort`'s algorithm: it runs **quicksort** for speed, but *watches the recursion depth*; if it exceeds `~2·log₂ n` (a sign of bad pivots heading toward `O(n²)`), it **switches to heap sort** for the rest, guaranteeing `O(n log n)` worst case. It also finishes small subarrays with **insertion sort**. So it gets quicksort's average-case speed and cache-friendliness, heap sort's worst-case guarantee, and insertion sort's low overhead on tiny pieces — with the `O(n²)` risk removed. (It's not stable; `std::stable_sort` is the separate stable option.)
 
 ### Can any sort beat O(n log n)? Reconcile that with the lower bound.
 
-Yes — counting, radix, and bucket sort run in linear time, and that does *not* contradict the lower bound, because the Omega(n log n) bound applies only to *comparison* sorts. Those algorithms never compare elements to each other; they use the keys' values directly as array indices (counting), digit positions (radix), or bucket assignments (bucket). By stepping outside the comparison model they sidestep the decision-tree argument entirely. The catch: they require assumptions about the keys (bounded integer range, fixed width, uniform distribution) that a general comparison sort doesn't need.
+Yes — counting, radix, and bucket sort achieve `O(n)`, and there's no contradiction. The `Ω(n log n)` bound is proven *specifically for comparison sorts* (algorithms whose only operation is comparing two elements). Non-comparison sorts don't compare elements to each other at all — they use the key's value directly as an array index (counting) or digit (radix), or its position in a range (bucket). By side-stepping the comparison model, they side-step its lower bound. The price is that they only work on **structured keys**; they can't sort arbitrary objects with a custom `<`, which comparison sorts do effortlessly.
 
 ### How would you sort a huge array of 32-bit integers as fast as possible?
 
-If the range is bounded and n is large, use LSD radix sort: treat each integer as 4 bytes and run 4 stable counting-sort passes with base 256 — O(4n) ≈ O(n), and it's cache-reasonable and parallelizable. If the range is tiny (say values 0-1000), a single counting sort in O(n + k) beats radix. If memory is tight or the keys might be arbitrary objects rather than plain ints, fall back to introsort. The senior move is to first ask about the key domain and available memory before naming an algorithm — the "fastest" sort is entirely a function of the input's structure.
+**Radix sort** (LSD, base 256): treat each 32-bit integer as 4 bytes and do 4 stable counting-sort passes, one byte at a time. That's `O(4·(n + 256)) = O(n)` — linear in the number of integers — and beats any `O(n log n)` comparison sort at scale. Details worth mentioning: base 256 means each pass uses a 256-entry count array (cache-friendly); for **signed** integers, flip the sign bit (or handle the top byte specially) so negatives sort before positives. If the array fits in memory and you want the simplest fast option, this is the answer; if it doesn't fit, external merge sort. (If `n` were small, just use the library sort — radix's constant isn't worth it.)
 
 ### How do you sort with a custom comparator, and can you still use radix sort?
 
-With a custom comparator you're back in the comparison model, so you use a comparison sort — pass the comparator to `std::sort`/`Arrays.sort`/`sorted(key=...)`. Radix and counting sort can't take an arbitrary comparator because they don't compare; they read key structure directly. You *can* sometimes adapt them by computing a *sort key* — a function mapping each element to an integer or fixed-width tuple whose natural order matches your desired order — then radix-sorting on that derived key. If your ordering can't be expressed as such a key (e.g. it depends on pairwise relationships), you're stuck with comparison sorting.
+For arbitrary objects you provide a **comparator** — a function returning negative/zero/positive for `a<b`, `a==b`, `a>b` — and use a comparison sort (Timsort/introsort), which is `O(n log n)`. Radix/counting sort **cannot** use an arbitrary comparator, because they don't compare — they need the sort key to be decomposable into digits/indices. You can still use radix if you can map each object to a **fixed-width sortable key** (e.g. encode a struct as bytes such that byte-order equals your desired order — this is how databases build sort keys). But if the ordering is defined only by a comparator you can't reduce to digits, comparison sorting is your only option.
 
 ### Is stability worth the cost, and when does it actually matter?
 
-Stability — preserving the input order of equal-keyed elements — matters whenever you sort by a secondary key after a primary one. Sort records by date, then stably by department, and within each department they stay date-ordered; without stability that second sort scrambles the first. It's essential inside radix sort. The cost is that stable sorts typically need O(n) auxiliary space (stable merge sort) rather than in-place operation; some in-place sorts (heapsort, plain quicksort) are not stable. Python and Java default to stable sorts; C++ `std::sort` is *not* stable (use `std::stable_sort` when you need it). Know your language's default — it's a common trap.
+Stability costs a little (a stable sort may need extra space, or can't use the fastest in-place quicksort), so it's worth it only when the order of equal keys carries meaning. It **matters** for: multi-key / secondary sorts (sort by date, then stably by name), preserving input order for equal elements shown to a user, and as the required sub-routine inside radix sort. It's **irrelevant** for primitives (two equal `int`s are indistinguishable — which is why Java uses unstable dual-pivot quicksort for primitive arrays but stable Timsort for objects). Rule: if you'll ever sort the same data by a second key, use a stable sort; otherwise don't pay for stability.
 
 ## Binary Search & Searching
 
