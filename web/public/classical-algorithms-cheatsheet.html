@@ -111,7 +111,8 @@ Elastic:     α·L1 + (1-α)·L2</code></pre>
 <ul>
 <li><b>Why L1 is sparse:</b> its diamond constraint has corners on the axes → optimum lands at wⱼ=0; L2's sphere has none. Soft-thresholding zeroes small coefs.</li>
 <li>Ridge closed form always invertible (λI regularises the singular XᵀX — that's the fix for OLS's failure mode).</li>
-<li>Bayesian view: Ridge = Gaussian prior on w, Lasso = Laplace prior.</li>
+<li>Bayesian view: Ridge = Gaussian prior on w, Lasso = Laplace prior. Both are the MAP estimate under that prior.</li>
+<li><span class="warn">!</span> Lasso <b>arbitrarily picks one</b> of a correlated group and zeroes the rest → Elastic Net keeps the group together and is more stable.</li>
 <li><span class="warn">!</span> <b>Standardise first</b> — penalty is scale-dependent. <span class="warn">!</span> <b>Don't penalise the intercept.</b> Pick λ by CV; larger λ = more bias, less variance.</li>
 </ul>
 </section>
@@ -127,6 +128,7 @@ grad = Xᵀ(p - y)   ← same shape as linear reg!</code></pre>
 <li>Multiclass: <b>softmax</b> (multinomial) or one-vs-rest. Coef → <b>odds ratio</b> e^wⱼ.</li>
 <li>Naturally <b>calibrated</b> (outputs are probabilities). Regularise with L2/L1 exactly as linear.</li>
 <li><span class="warn">!</span> <b>Perfect separation</b> → weights diverge to ±∞; regularisation prevents it. The honest linear baseline for any classification task.</li>
+<li>Log-loss is <b>convex</b> (single global min) → GD/Newton always find the optimum. Fast to train and serve (O(p) per prediction), naturally streaming with SGD.</li>
 </ul>
 </section>
 
@@ -143,6 +145,7 @@ work in LOG space:  log P(y) + Σ log P(xᵢ|y)</code></pre>
 <li><span class="warn">!</span> <b>Laplace smoothing</b> (+1): an unseen feature-class pair gives P=0 → whole product 0. Mandatory for text.</li>
 <li><span class="warn">!</span> <b>Log-space</b> or 100s of tiny probs underflow to 0.</li>
 <li>Generative; O(np) train, one pass, streaming-friendly. Strong high-bias baseline for spam/text; no scaling needed.</li>
+<li>Often <b>beats logistic on tiny n</b> (its generative assumptions substitute for data) but logistic overtakes it as n grows — the classic generative/discriminative pair.</li>
 </ul>
 </section>
 
@@ -170,6 +173,7 @@ regression → minimise variance / MSE of leaves</code></pre>
 <li><b>No scaling</b>, handles mixed types &amp; non-linear interactions, interpretable (white box).</li>
 <li><span class="warn">!</span> <b>High variance / overfits</b> — a deep tree memorises. Control with <code>max_depth</code>, <code>min_samples_leaf</code>, <code>min_samples_split</code> (pre-pruning) or <b>cost-complexity pruning</b> (α·|leaves|, post).</li>
 <li><span class="warn">!</span> <b>Unstable</b>: small data change → different tree. Motivates ensembles. Can't extrapolate beyond training range.</li>
+<li>Split search sorts each feature → O(n·p·log n) build; prediction is O(depth), a handful of comparisons. Handles missing values via surrogate splits.</li>
 <li>Build cost O(n·p·log n). Rarely used alone → RF / boosting.</li>
 </ul>
 </section>
@@ -252,7 +256,7 @@ margin width = 2/||w||;  SVs are points on/inside</code></pre>
 <ul>
 <li>Maximises the margin → good generalisation. Only <b>support vectors</b> (points on/violating the margin) define the boundary; rest irrelevant.</li>
 <li><b>C = regularisation:</b> large C → hard fit, narrow margin, low bias/high variance; small C → wide margin, more slack, higher bias.</li>
-<li>Hinge loss; solved via the dual QP → exposes the kernel. Decision = sign(w·x+b).</li>
+<li>Hinge loss; solved via the dual QP → exposes the kernel. Decision = sign(w·x+b). The hinge is convex → a single global optimum.</li>
 <li><span class="warn">!</span> <b>Scale features.</b> <span class="warn">!</span> Training is <b>O(n²)–O(n³)</b> → poor past ~10⁵ rows (use LinearSVC/SGD for linear + big n). No native probabilities (Platt scaling adds them).</li>
 </ul>
 </section>
@@ -292,6 +296,7 @@ init: k-means++  (spread-out seeds)</code></pre>
 <li><b>Hierarchical (agglomerative)</b>: merge closest clusters bottom-up → <b>dendrogram</b>; cut at a height for k. Linkage: single (chaining), complete, average, <b>Ward</b> (min variance, default). O(n²log n), no k upfront.</li>
 <li><b>DBSCAN</b>: density-based via (<code>eps</code>, <code>min_samples</code>). Finds <b>arbitrary shapes</b>, labels <b>noise/outliers</b>, needs no k.</li>
 <li>Core point = ≥ min_samples within eps; clusters grow through core points; unreachable points = noise.</li>
+<li>No k to choose and it flags outliers natively — the go-to when clusters are arbitrary shapes with noise, where k-means fails.</li>
 <li><span class="warn">!</span> DBSCAN struggles with <b>varying density</b> and is eps-sensitive (use a k-distance plot). HDBSCAN handles variable density.</li>
 </ul>
 </section>

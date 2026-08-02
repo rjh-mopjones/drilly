@@ -91,7 +91,7 @@ pre code{background:none; padding:0; font-size:1em;}
 <ul>
 <li><b>Observability ≠ monitoring.</b> Monitoring = known dashboards/alerts for known failures; observability = ability to ask <b>new</b> questions of your system without shipping new code.</li>
 <li>High <b>cardinality</b> + high <b>dimensionality</b> is what lets you slice by unknown-unknowns. Metrics can't hold it <span class="warn">!</span> — that's what traces/wide-events are for.</li>
-<li>Correlate the pillars: trace_id in logs, <b>exemplars</b> link a histogram bucket → a trace.</li>
+<li>Correlate the pillars: trace_id in logs, <b>exemplars</b> link a histogram bucket → a trace, shared Resource attributes tie all three together.</li>
 <li>Rule of thumb on which pillar to reach for: metrics answer "is it broken and how badly", traces answer "which hop is slow", logs answer "what exactly did that one request do". Start cheap (metrics) and drill down only as needed <span class="warn">!</span></li>
 </ul></section>
 
@@ -189,6 +189,8 @@ histogram_quantile(0.99,
 <li><b>Inhibition</b>: a firing "cluster down" suppresses the 100 downstream "pod down" alerts <span class="warn">!</span></li>
 <li><b>Silences</b>: time-boxed mutes during maintenance. <b>Repeat interval</b> re-notifies unacked.</li>
 <li>Alertmanager itself should be <b>HA</b> (gossip-clustered) — dedupes across replicas.</li>
+<li><b>Route by severity</b>: <code>page</code> → PagerDuty (wake a human), <code>ticket</code> → Jira/Slack (look tomorrow), <code>info</code> → dashboard. Not everything is a page <span class="warn">!</span></li>
+<li>Escalation: ack timeout → secondary → manager. <code>group_wait</code> delays the first notification to collect siblings; <code>repeat_interval</code> re-pages unacked.</li>
 </ul></section>
 
 <section class="card"><h3>Logging &amp; Aggregation</h3>
@@ -221,6 +223,8 @@ histogram_quantile(0.99,
 <li><b>Auto-instrumentation</b> for common libs; manual spans for business logic.</li>
 <li><b>Collector</b> = receive → process (batch, filter, redact, tail-sample) → export to any backend. Run as agent (per-node) + gateway (central).</li>
 <li>Decouples app from vendor: swap backends without re-instrumenting <span class="warn">!</span> Prefer OTel over proprietary SDKs for portability.</li>
+<li>Collector topology: <b>agent</b> DaemonSet per node (receive OTLP, cheap local batching) + <b>gateway</b> tier (tail-sampling, relabel/cardinality, routing) — the gateway is the single policy choke point.</li>
+<li>Signals share <b>Resource</b> attributes (service.name, version) so metrics/traces/logs correlate; the Collector can enrich, redact, and drop in-flight before export.</li>
 </ul></section>
 
 <section class="card"><h3>Metrics at Scale &amp; Cost</h3>

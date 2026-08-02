@@ -195,6 +195,7 @@ R²   = 1 − SS_res/SS_tot      # frac. variance explained</code></pre>
 <ul>
 <li><b>NDCG</b> (graded, position-discounted), <b>MAP</b>, <b>MRR</b> (rank of first hit), Precision@k / Recall@k. Match the metric to what the user actually sees (top-k order).</li>
 </ul>
+<p><span class="warn">!</span> <b>Report on the original scale:</b> if you trained on <code>log(y)</code>, RMSE in log-space isn't the business error — invert first. Quantile loss (pinball) targets a specific percentile for prediction intervals.</p>
 </section>
 
 <section class="card"><h3>Feature Engineering</h3>
@@ -525,8 +526,10 @@ predict argmax_y  P(y)·∏ P(xᵢ|y)</code></pre>
 <li><b>~80% of ML is data</b> — cleaning, labeling, features. Modeling is the small, glamorous part.</li>
 <li><span class="warn">!</span> <b>Train/serve skew:</b> the feature pipeline differs offline vs online → same code path both sides (feature store).</li>
 <li><b>Drift:</b> data/concept distribution shifts post-deploy → monitor inputs &amp; metrics, alert, retrain. A model that tested great decays.</li>
-<li><b>Reproducibility:</b> fix seeds, version data + code + model, log experiments.</li>
+<li><b>Reproducibility:</b> fix seeds, version data + code + model, log experiments so any result can be rebuilt exactly.</li>
 <li>Optimize the <b>business metric</b>, not just the offline loss — validate with an A/B test, not just backtest.</li>
+<li><b>Drift types:</b> <b>covariate</b> shift (P(x) moves), <b>label</b> shift (P(y) moves), <b>concept</b> drift (P(y|x) moves — the hardest, needs relabeling). Detect inputs with PSI/KS tests before metrics degrade.</li>
+<li><span class="warn">!</span> <b>Feedback loops:</b> a deployed model changes the data it later trains on (recommenders, fraud) → its own predictions bias future labels. Monitor and hold out unbiased slices.</li>
 </ul>
 </section>
 

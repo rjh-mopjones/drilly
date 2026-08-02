@@ -475,7 +475,8 @@ close(ch)                 // owner closes; range ends</code></pre>
 </tbody></table>
 <ul>
 <li>Python CPU-bound → multiprocessing / native ext / free-threaded (no-GIL) 3.13+. Threads are fine for IO.</li>
-<li>Rust's borrow checker turns most data races into compile errors — the strongest static guarantee here.</li>
+<li>Rust's borrow checker turns most data races into compile errors — the strongest static guarantee here. <code>Send</code> = safe to move across threads; <code>Sync</code> = safe to share by reference; the compiler enforces both.</li>
+<li>Go: run tests with <code>-race</code> (the TSan-based detector) in CI — it catches real data races that slip past review, at a runtime cost too high for production.</li>
 </ul>
 </section>
 
@@ -536,7 +537,7 @@ close(ch)                 // owner closes; range ends</code></pre>
 <li>Fewer contenders on an end → cheaper algorithm. Know the producer/consumer cardinality <i>before</i> picking a queue.</li>
 <li><b>Ring buffer</b>: fixed circular array + head/tail indices. Basis of the <b>LMAX Disruptor</b> — pre-allocated slots, sequence numbers, mechanical-sympathy (cache-line padded) → millions of msgs/sec, no per-op allocation.</li>
 <li><span class="warn">!</span> Coordination is <b>memory barriers on published sequences</b>, not mutexes — no lock contention, but you must get acquire/release right on the sequence.</li>
-<li>Bounded ring = backpressure for free; unbounded lock-free queue can still OOM under producer overload.</li>
+<li>Bounded ring = backpressure for free; an unbounded lock-free queue can still OOM under sustained producer overload.</li>
 </ul>
 </section>
 
@@ -560,7 +561,7 @@ if(!pool.awaitTermination(30,SECONDS)) // drain
 <li>Mechanisms: <b>bounded</b> queue/channel (producer blocks or is rejected when full), request-N (reactive streams pull), credit-based flow control, TCP windowing.</li>
 <li><b>Load shedding</b>: when you can't slow the source (external traffic), <b>drop</b> — reject early, sample, or degrade. Better a fast 503 than a slow collapse.</li>
 <li><span class="warn">!</span> Unbounded queue = hidden overload: latency climbs (Little's Law: L=λW), memory climbs, then everything dies at once with no warning. Always bound + choose a rejection policy.</li>
-<li>Rate limit at the edge: <b>token bucket</b> (bursty) / leaky bucket (smooth).</li>
+<li>Rate limit at the edge: <b>token bucket</b> (allows bursts) / leaky bucket (smooth constant rate).</li>
 </ul>
 </section>
 

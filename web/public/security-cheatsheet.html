@@ -326,6 +326,7 @@ db.query("SELECT * FROM u WHERE name = ?", [n])</code></pre>
 <tr><td>A10</td><td>SSRF</td><td>allowlist egress, block metadata IP</td></tr>
 </tbody></table>
 <p><span class="warn">!</span> A01 rose to #1 — access control is the most-breached area. A04 (Insecure Design) is new: some flaws are <b>design</b>, not bugs — a pen-test won't save a bad design.</p>
+<p>The list is a <b>baseline awareness</b> document, <b>not</b> ranked by severity for your app and <b>not</b> a complete checklist — passing a Top-10 scan is a floor, not proof of security.</p>
 </section>
 
 <section class="card"><h3>Secrets &amp; Supply Chain</h3>
@@ -381,6 +382,7 @@ db.query("SELECT * FROM u WHERE name = ?", [n])</code></pre>
 <li><b>Minimal base image</b> (distroless/alpine) = smaller attack surface + fewer CVEs. Scan images (Trivy/Grype).</li>
 <li>A container is <b>not a strong security boundary</b> like a VM — shared kernel; a kernel escape = host compromise <span class="warn">!</span></li>
 <li>No secrets in image layers (they persist even if later deleted). Use K8s Secrets (encrypt etcd at rest) / external vault.</li>
+<li>Pin base images by <b>digest</b> not <code>:latest</code>; rebuild to pick up patches; sign images (cosign) &amp; verify on admission.</li>
 </ul>
 <h4>K8s controls</h4>
 <ul>
@@ -396,6 +398,7 @@ db.query("SELECT * FROM u WHERE name = ?", [n])</code></pre>
 <li><b>Mitigations</b> (raise cost, not eliminate): <b>ASLR</b>, <b>DEP/NX</b>, stack canaries, CFI, PIE, <code>FORTIFY_SOURCE</code>.</li>
 <li><b>Best fix:</b> memory-safe languages (Rust, Go) or safe abstractions; bounds-checked APIs; never <code>gets</code>/<code>strcpy</code>.</li>
 <li><b>Insecure deserialization</b> of untrusted data &#8594; RCE — never deserialize untrusted input into live objects; use data-only formats + schema.</li>
+<li><b>Integer overflow</b> in a size/length calc &#8594; undersized allocation &#8594; heap overflow. Validate arithmetic; use checked/saturating ops.</li>
 </ul>
 </section>
 

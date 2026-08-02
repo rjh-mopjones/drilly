@@ -335,6 +335,7 @@ params(conv) = (k·k·C_in + 1)·C_out   # size-independent!</code></pre>
 <li><b>Global average pooling</b> replaces giant FC head → fewer params, any input size.</li>
 <li>Lineage: <b>LeNet</b>→<b>AlexNet</b> (ReLU+dropout+GPU)→<b>VGG</b> (stacked 3×3)→<b>Inception</b> (multi-scale, 1×1)→<b>ResNet</b> (skips)→<b>EfficientNet</b> (compound scaling).</li>
 <li>Conv block idiom: <code>Conv → Norm → Act</code> (often <code>→ Conv → Norm → +skip → Act</code>).</li>
+<li><b>Bottleneck</b> <code>1×1 reduce → 3×3 → 1×1 restore</code>: do the expensive spatial work at low channel depth → the 1×1 conv decouples "how many channels" from "spatial filtering", the trick behind Inception/ResNet efficiency.</li>
 </ul>
 </section>
 
@@ -491,6 +492,8 @@ flowchart LR
 <tr><td>GAN outputs identical</td><td>mode collapse <span class="warn">!</span></td></tr>
 <tr><td>Acc stuck at 1/#classes</td><td>label/shape mismatch, all-zero init, softmax on wrong axis</td></tr>
 <tr><td>OOM on long sequence</td><td>attention O(n²) mem → shorter ctx / checkpointing / flash-attn</td></tr>
+<tr><td>Val loss ↑ but val acc flat</td><td>over-confidence, usually benign → label smoothing / decay LR</td></tr>
+<tr><td>Loss not decreasing at all</td><td>forgot <code>zero_grad()</code>, detached graph, or frozen <code>requires_grad</code></td></tr>
 </tbody></table>
 </section>
 
