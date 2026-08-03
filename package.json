@@ -13,6 +13,7 @@
     "dev:web-legacy": "bun run --cwd web dev",
     "build:web-legacy": "bun run --cwd web build",
     "dev:mobile": "bun run --cwd mobile start",
-    "sync-content": "bash scripts/sync-content.sh"
+    "sync-content": "bash scripts/sync-content.sh",
+    "validate:sd": "python3 scripts/validate_sd.py && bun run scripts/parse-check.ts"
   }
 }

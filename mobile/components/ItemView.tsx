@@ -150,8 +150,17 @@ export function ItemView({ source, item, onNeighbourItem }: Props) {
     return () => document.removeEventListener("keydown", handler);
   }, [revealNext, hideAll]);
 
+  // Count only sections that actually exist in this item. Saved reveal state
+  // stores section *names*, so a name that has since been renamed or removed
+  // lingers in the set: counting `revealed.size` directly would over-report
+  // progress and leave allRevealed permanently false, sticking the toggle on
+  // "Show all". Filtering against sortedSections makes stale names inert.
+  const revealedCount = sortedSections.filter((s) =>
+    revealed.has(s.name),
+  ).length;
+
   const allRevealed =
-    revealed.size > 0 && revealed.size === sortedSections.length;
+    revealedCount > 0 && revealedCount === sortedSections.length;
 
   return (
     <View style={styles.container}>
@@ -198,7 +207,7 @@ export function ItemView({ source, item, onNeighbourItem }: Props) {
             </Text>
           </Pressable>
           <Text style={styles.progressText}>
-            {revealed.size} / {sortedSections.length}
+            {revealedCount} / {sortedSections.length}
           </Text>
         </View>
 
