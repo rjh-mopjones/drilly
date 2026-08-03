@@ -20,7 +20,7 @@
  * CACHE_VERSION — the old cache is deleted on activate.
  */
 
-const CACHE_VERSION = "v8";
+const CACHE_VERSION = "v9";
 const CACHE = `drilly-${CACHE_VERSION}`;
 
 const MERMAID_CDN =
