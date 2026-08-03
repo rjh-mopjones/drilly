@@ -2024,30 +2024,41 @@ GET /api/{alias}/stats
 
 ### 6. Design a Web Crawler
 #### Problem
-Systematically download, parse, and index web pages at scale, discovering new URLs as you go.
+Download the web continuously: start from seed URLs, fetch pages, extract the links they contain, and feed those back in so the crawl expands on its own. The output is a corpus for a search index, a web archive, or a training set. The hard part is not downloading; it is choosing which of billions of known URLs each fetch is spent on, and doing it without getting banned by the sites you depend on.
 #### Core
-TODO
+A crawler is a scheduler that happens to make HTTP requests. Fetching is solved. Deciding what to fetch next, on a budget that will never cover the graph, is the design.
 
-Write the whole answer as you would give it in sixty seconds, 200 to 300 words, standing alone.
+The loop is short: take a URL from the frontier, resolve the host from a local DNS cache, check the cached robots rules, fetch, parse, normalise every extracted link, ask a seen-set whether each is new, enqueue the survivors, write the page to object storage.
+
+The frontier is what the interview is about. It has to answer two questions that have nothing to do with each other: which URL is worth fetching next, and which host am I currently allowed to touch. Fold them into one ordered structure and you get either an impolite crawler or an idle one, because the highest-scoring URL is usually on a host you just hit. Keep them apart: a value tier that orders by expected payoff, and a per-host tier holding one queue and one next-allowed timestamp per host, with workers popping whichever host is ready. Politeness then needs no coordination, because a host lives in exactly one queue.
+
+Shard by registrable domain rather than by URL, so politeness state, robots cache, and the seen-set slice all sit on the node that owns the domain. The only cross-shard traffic is handing a discovered link to whoever owns its domain.
+
+Two things dominate real deployments and appear in no textbook diagram: DNS, which uncached at 50ms per lookup is most of your wall clock, and spider traps, where one site emits unbounded distinct URLs and quietly eats the budget.
 #### Summary
-**The picture in your head:** a team of librarians who have been given one seed bookshelf. Each librarian picks a book, reads it, writes down every other book it mentions, adds those titles to a shared "books to read" pile, then puts the finished book on the archive shelf. The pile grows as they work. The trick: the pile has to be organized smartly — some books are more important than others, some authors ask you not to visit too often, and some books are identical to ones you already read even though they have different titles.
+**The picture in your head:** a team of librarians who have been given one seed bookshelf. Each librarian picks a book, reads it, writes down every other book it mentions, adds those titles to a shared "books to read" pile, then puts the finished book on the archive shelf. The pile grows as they work. The trick: the pile has to be organised smartly, because some books are more important than others, some authors ask you not to visit too often, and some books are identical to ones you already read even though they have different titles.
 
 **The approaches people actually take:**
-TODO. Two or three things a competent engineer might reach for, in plain language and before any product name, with what each one buys and roughly when it wins.
 
-**The single-request walkthrough:** the crawler starts with `https://en.wikipedia.org/wiki/Systems_design`. A worker fetches the page (one HTTP GET), receives 200KB of HTML, and hands it to a parser. The parser finds 300 outbound links. For each link, the crawler checks: have we seen this URL before? It hashes the URL and asks a Bloom filter (a compact data structure that can say "definitely not seen" or "probably seen" using just 12GB for 10 billion URLs). If the Bloom filter says "probably seen," skip it. If "definitely not seen," add it to the frontier — the queue of URLs waiting to be fetched — with a priority based on the site's authority and the page's freshness. Before fetching the next URL on `wikipedia.org`, the crawler checks how long ago it last fetched from that domain and waits if needed (politeness delay). The page's content goes to object storage; click-through links ripple forward.
+*Split the frontier in two: a value tier and a per-host tier.* One structure orders URLs by how much the fetch is expected to be worth. A second holds one queue per host with a timestamp saying when that host may next be touched, and workers only ever pop a host that is ready. Politeness becomes a property of where a URL is stored rather than a rule enforced at dequeue time. It costs exact priority order, because a valuable URL waits behind its own host's clock. It wins whenever you crawl many hosts, which is any open-web crawl.
+
+*One ordered queue keyed on earliest-allowed-fetch-time.* Push politeness into the sort key: a URL's key is the time its host is next free, and priority only breaks ties. One structure, trivially checkpointed, no second heap to keep consistent. It costs the ability to reprioritise within a host without rewriting keys, and the key space goes hot when a dense host has millions of entries on adjacent timestamps. It wins on crawls of tens of millions of URLs, where the frontier fits in one ordered store and simplicity beats tuning knobs.
+
+*No live frontier at all: crawl in rounds.* Compute the next round offline as a sorted, host-grouped batch, hand it to stateless fetchers, collect the extracted links, then compute the round after. Scheduling collapses into a sort, and the priority function gets to use global link-graph signals a streaming frontier never sees. It costs discovery latency, since a link found in round N is not fetched until round N+1, hours or days later. It wins when you are building a corpus rather than chasing freshness.
+
+**The single-request walkthrough:** the crawler starts with `https://en.wikipedia.org/wiki/Systems_design`. A worker fetches the page (one HTTP GET), receives 200KB of HTML, and hands it to a parser. The parser finds 300 outbound links. For each link, the crawler checks: have we seen this URL before? It hashes the URL and asks a Bloom filter (a compact data structure that can say "definitely not seen" or "probably seen" using just 12GB for 10 billion URLs). If the Bloom filter says "definitely not seen", the URL is new and goes into the frontier, the queue of URLs waiting to be fetched, with a priority based on the site's authority and the page's freshness. If it says "probably seen", the crawler either drops the URL or pays a disk lookup to confirm, and which of those you pick is a real decision rather than a detail. Before fetching the next URL on `wikipedia.org`, the crawler checks how long ago it last fetched from that domain and waits if needed (politeness delay). The page's content goes to object storage, and the newly discovered links ripple forward.
 
 **The pieces (and what each one is for):**
-- **URL Frontier** — the queue of URLs waiting to be fetched. Not one flat queue but two tiers. Front queues handle priority (high-authority domains and frequently-changing pages go first). Back queues handle politeness (one queue per domain, with a timestamp for when that domain can next be fetched). A worker always picks from a back queue whose next-fetch time has elapsed — this naturally paces to one request per second per domain without any global lock.
-- **Bloom filter for URL dedup** — a Bloom filter is a fixed-size bit array. Adding a URL flips a few bits. Checking a URL asks whether those bits are all set. False positives (saying "seen" for a URL not actually seen) are possible at ~1%; false negatives (saying "not seen" for a URL already crawled) are impossible. At 10 billion URLs and 1% false-positive rate, the whole structure fits in 12GB of RAM. Without it, you would need a full hash table of all crawled URLs, which would be much larger.
-- **Fetcher fleet** — workers that actually issue HTTP requests. Each worker uses async I/O (an event loop rather than one OS thread per request) so a single CPU core can track thousands of in-flight connections simultaneously — most of the time is just waiting for the remote server to respond.
-- **HTML parser** — extracts text content and outbound links from the fetched HTML.
-- **Content dedup (SimHash)** — many pages are near-duplicates (different URLs, same boilerplate text with one word changed). SimHash is an algorithm that produces a short fingerprint (a 64-bit integer) such that similar pages have similar fingerprints. Comparing fingerprints with Hamming distance (number of differing bits) catches near-duplicates without comparing full page content.
-- **Robots.txt cache** — every website publishes a file at `/robots.txt` specifying which paths crawlers may and may not visit, and the minimum delay between visits (`Crawl-Delay`). The crawler fetches this file once per domain and caches it. Ignoring robots.txt is legally risky and gets your IP range banned.
+- **URL Frontier.** The queue of URLs waiting to be fetched. Not one flat queue but two tiers. Front queues handle priority (high-authority domains and frequently-changing pages go first). Back queues handle politeness (one queue per domain, with a timestamp for when that domain can next be fetched). A worker always picks from a back queue whose next-fetch time has elapsed, which paces the crawler to one request per second per domain without any global lock.
+- **Bloom filter for URL dedup.** A fixed-size bit array. Adding a URL flips a few bits; checking a URL asks whether those bits are all set. False positives (saying "seen" for a URL never seen) are possible at ~1%; false negatives (saying "not seen" for a URL already crawled) are impossible. At 10 billion URLs and a 1% false-positive rate the structure fits in 12GB of RAM, against roughly 240GB for an exact index of the same keys.
+- **Fetcher fleet.** Workers that issue the HTTP requests. Each uses async I/O, an event loop rather than one OS thread per request, so a single core tracks thousands of in-flight connections. Almost all of that time is spent waiting for the remote server.
+- **HTML parser.** Extracts text content and outbound links from the fetched HTML.
+- **Content dedup (SimHash).** Many pages are near-duplicates: different URLs, same boilerplate with one word changed. SimHash produces a short fingerprint (a 64-bit integer) such that similar pages get similar fingerprints, so comparing Hamming distance (the number of differing bits) catches near-duplicates without comparing full page content.
+- **Robots.txt cache.** Every site may publish a file at `/robots.txt` naming the paths crawlers may and may not visit and the minimum delay between visits (`Crawl-Delay`). The crawler fetches it once per domain and caches it. Ignoring robots.txt is legally risky and gets your IP range banned.
 
-**The thing that makes it hard:** spider traps. Some sites generate infinite URLs: a calendar app might produce `/calendar?date=2026-01-01`, `/calendar?date=2026-01-02`, ..., `/calendar?date=2099-12-31`. Every page has the same boilerplate with one date changed. The crawler keeps discovering "new" URLs and enqueues them forever — the frontier grows without bound, the crawl never finishes, and the archive fills with garbage. The URL dedup catches exact duplicates. The content dedup (SimHash) catches near-duplicates. But the trap produces legitimately different URLs with near-identical content — both filters help. Additionally: cap how deep you go into any one site, and track the novelty rate per domain (if 99% of URLs from a domain are unique but all nearly identical in content, stop).
+**The thing that makes it hard:** spider traps. Some sites generate unbounded URLs: a calendar app emits `/calendar?date=2026-01-01`, `/calendar?date=2026-01-02`, on to `/calendar?date=2099-12-31`, every page the same boilerplate with one date changed. The crawler keeps discovering genuinely new URLs and enqueues them forever, so the frontier grows without bound, the crawl never converges, and the archive fills with noise. URL dedup catches exact repeats and content dedup catches near-duplicates, but a trap produces legitimately distinct URLs, so neither filter stops the enqueueing, only the storing. The bounds that actually work are structural: cap depth per domain, and track novelty rate per domain, because a domain where almost every URL is new but almost every page is a near-duplicate is a trap by definition.
 
-**Why this design and what it costs:** the two-tier frontier (priority queues + per-domain back queues) decouples "what is most important" from "when am I allowed to visit this site." This is the Mercator design from 1999 and it is still the canonical architecture. It lets a thousand-worker fleet crawl thousands of domains in parallel while never exceeding one request per second per domain — without any global lock or centralized scheduler.
+**Why this design and what it costs:** the two-tier frontier decouples "what is most important" from "when am I allowed to visit this site", and it is worth being precise about why that separation has to be structural rather than a check at dequeue time. Value and availability are uncorrelated: the highest-scoring URL is almost always on a high-value host, which is the host you most recently fetched from and therefore the one on cooldown. A single priority queue with a politeness check at the head spends its time rejecting its own best candidates, so throughput collapses to whatever fraction of the head happens to be off cooldown. Storing URLs in per-host queues makes the check unnecessary: any queue the scheduler can see is by construction one it is allowed to fetch from. The cost is that priority is now approximate, since a URL's position depends on its host's backlog as much as its score. This shape dates to the Mercator crawler (Heydon and Najork, 1999) and has held up because the constraint it solves has not changed, not because of its provenance.
 
 **If you were building it tomorrow:**
 - Frontier: Redis sorted sets per domain for the back queues, min-heap on next-fetch-time. Kafka for inter-shard URL hand-off (shard the whole crawler by `hash(domain)` so politeness state stays local).
@@ -2061,13 +2072,13 @@ TODO. Two or three things a competent engineer might reach for, in plain languag
     resp = await domain_pool.get(url, timeout=10s)
     return parse(resp.html), extract_links(resp.html)
   ```
-- DNS: in-process resolver with 1-hour TTL cache — uncached DNS at 50ms per lookup otherwise dominates wall time at 1000 fetches/second.
+- DNS: in-process resolver with a 1-hour TTL cache. Uncached DNS at 50ms per lookup otherwise dominates wall time at 1000 fetches/second.
 #### What this is really testing
-TODO
+Whether you understand that the crawler's output is not pages, it is an allocation of a fixed fetch budget across an unbounded graph. Every component exists to stop that budget leaking. Deduplication so you do not buy the same page twice. Politeness so a host does not ban you and cost you the whole domain permanently. Trap detection so one calendar script does not absorb a month of throughput. A candidate who describes fetch, parse, extract, repeat has described the easy half, and will have nothing to say when asked what the system does on day 400, when the frontier holds ten times more URLs than can ever be fetched and the only interesting question is which ones get dropped.
 
-The one insight this question exists to elicit, then the contrast with the question it most resembles and why the answers differ.
+The contrast is with the web search engine question. That one takes a corpus as given and spends its budget at query time: inverted index layout, sharding by document, ranking, and a latency budget of tens of milliseconds where every extra millisecond is visible to a user. Nothing in a crawler is latency sensitive. A fetch that takes five seconds is fine, a crawl round taking a day is fine, and the only clock that matters is the per-host cooldown. The corpus that the search question treats as an input is this question's output, and its composition is the whole design decision: what got crawled, how stale it is, how much of it is duplicate boilerplate. The failure modes are opposite in kind too. A bad ranker returns bad results you can measure, sample, and A/B test. A bad crawler silently omits pages, and by construction you cannot measure what you never fetched, which is why the honest gaps in this design are all about unobservable loss rather than visible errors.
 
-Closest question: TODO
+Closest question: Q47
 #### Clarifying questions and how each answer forks the design
 - HTML only or also images/JS-rendered SPAs?
 - Politeness rules (per-domain QPS)?
@@ -2097,7 +2108,7 @@ Closest question: TODO
 - **Throughput 1B pages/month → ~400/s steady, ~2k/s peak:** mid-tier search/archive crawler (Common Crawl is ~3B/month; Google-tier is much larger). 10⁹ ÷ (30 × 86,400) = 386 ≈ 400 pages/s avg. 5× peak during catch-up windows = ~2k/s.
 - **Avg page 100KB raw, ~20KB gzipped:** Web's median HTML page is 50–150KB inflated (per HTTP Archive); use 100KB. gzip on HTML compresses ~5× → ~20KB.
 - **Archive volume ~100TB/mo raw, ~20TB/mo compressed:** 10⁹ pages × 100KB = 10¹⁴ B = 100 TB/month raw; × 1/5 = 20 TB/month compressed object-store footprint.
-- **URL frontier ~10B known, ~100M queued:** known set grows roughly with web's discoverable surface (~50–500B URLs total, but you crawl ~10B in active rotation). Queue depth = ~1 day of pending work at 400/s × 86,400 × 250d backlog cap ≈ 100M.
+- **URL frontier ~10B known, ~100M queued:** the known set grows with the web's discoverable surface (~50–500B URLs total, of which ~10B are held in active rotation). Queued depth is a buffer, not the known set: 400/s × 86,400s = 34.6M fetches/day, and holding ~3 days of admitted work against parse bursts gives 3 × 34.6M ≈ **100M queued**. The other ~9.9B known URLs sit in the seen-index unadmitted, which is the point of the first fork below: at 1B fetches/month against 10B known, we fetch under 10% of what we already know about, so admission order is the product.
 - **Bloom filter ~12 GB:** sized for 10¹⁰ keys at <1% FPR. Bloom rule of thumb: ~10 bits/key for 1% FPR (1.44 × log₂(1/p)). 10¹⁰ × 10 bits = 10¹¹ bits = 1.25 × 10¹⁰ B ≈ 12 GB RAM. Sharded across ~256 workers → ~50MB/shard.
 - **URL→first_seen index ~240GB:** 10¹⁰ × (16B url_hash + 8B ts) = 2.4 × 10¹¹ B = 240 GB on embedded KV (RocksDB/LMDB), sharded across fetcher fleet → ~1GB/node on a 256-node fleet.
 - **Page metadata ~1 TB/yr:** per-page row = url_hash (16B) + fetched_ts (8B) + http_status (2B) + content_hash (16B) + simhash (8B) + framing (~30B) ≈ 80B. 10⁹/mo × 80B = 8 × 10¹⁰ B = 80 GB/month → ~1 TB/yr.
@@ -2105,24 +2116,23 @@ Closest question: TODO
 - **Hot tier ~100 GB aggregate:** Bloom (12GB) + DNS cache (~5GB for ~10⁸ domain→IP, 50B/entry) + robots cache (~50GB for hot ~10⁷ domains × ~2KB) + in-flight per-domain queue heads (~30GB) ≈ 100 GB across fetcher pool.
 - **Cold tier ~240 TB/yr:** 20TB/month compressed × 12 = 240 TB/yr in object store; lifecycle policy → glacial after 90d for archive corpora. Page-content search index is rebuildable from this archive if lost.
 #### Key decisions
-TODO
+**Breadth-first crawl vs a priority-ordered frontier**
+- Choice: a priority-ordered frontier. Each admitted URL carries a score built from domain-level authority, observed change rate, and how overdue a revisit is, with a fixed slice of throughput reserved for URLs that have no history at all.
+- Alternative: breadth-first from the seeds. One FIFO, level by level, no scoring pipeline, no feedback loop, no model to keep trained.
+- Decider: crawl budget against reachable graph. We fetch 1B pages/month against ~10B URLs already known and in rotation, so under 10% of what we hold, before counting the 50B to 500B discoverable. When the budget is that far below the graph, ordering is not an optimisation, it is the only thing the system decides. The follow-up question is therefore never "BFS or priority" but "priority on what", and the honest answer is that the score is mostly domain-level, because per-URL signals for a page you have never fetched barely exist.
+- Alternative wins when: the target graph is bounded and you intend to fetch all of it, meaning a single site or a domain allowlist of 10⁶ to 10⁷ pages. Scoring then buys nothing, since every URL is fetched regardless, and it adds a feedback loop that can starve whole regions of the graph on a bad prior. BFS is also genuinely strong on a cold crawl of a new vertical, where every score is a guess: BFS discovery order was shown to correlate well with PageRank order (Najork and Wiener, 2001), so it is a real baseline rather than a straw man, and a priority function that cannot beat it is not earning its complexity.
 
-Two or three genuine forks. For each, in this exact shape so it stays checkable:
+**Per-host queues vs a global rate limiter**
+- Choice: one queue and one `next_allowed_time` per host, sharded by registrable domain, each host paced at 1 req/s or whatever its robots rules declare.
+- Alternative: a single global token bucket sized to the fleet's target rate, with all workers pulling from one shared priority queue and checking a per-host counter at dequeue.
+- Decider: skew in the host distribution. There are ~10⁸ registrable domains in rotation but URL counts follow a heavy power law, and the top ~10⁴ hosts hold a large share of the frontier. A global bucket at our 2,000 req/s peak, fed from a shared priority queue, hands most of that budget to the densest hosts, because their URLs are simultaneously the most numerous and the highest scoring; the long tail is starved and you will not notice, since nothing errors. Per-host queues make the arithmetic the other way round: fleet capacity is ready hosts × per-host rate, so 10,000 ready hosts × 1/s = 10,000 req/s, five times peak. Politeness is not costing throughput here, which is what makes the choice easy.
+- Alternative wins when: the crawl covers few enough hosts that there is no tail to starve, under roughly 100, so a shared queue plus a counter is simpler and behaves identically; or the hosts are yours, an internal crawl or a contracted partner feed, where the binding constraint is your own egress bandwidth rather than any host's tolerance. Two real costs of the per-host design are worth conceding: 10⁸ hosts × ~2KB of politeness and robots state is 200GB, so nearly all of it lives on disk with only ready hosts in the heap, and one host answering in 30s occupies a fetch slot for 30s, which a global limiter would simply not care about.
 
-**<name of the fork>**
-- Choice:
-- Alternative:
-- Decider:
-- Alternative wins when:
-
-**Raw material, from the old Common Mistakes:**
-
-- **DFS as the default crawl strategy** — DFS dives deep into one site first and is trivially defeated by spider traps (infinite-depth structures); BFS spreads the crawl across many domains and naturally bounds per-site depth.
-- **Treating dedup as a single-tier problem** — saying "we hash URLs in a set" works at small scale but fails at billion-URL scale where the set doesn't fit in RAM. The two-tier (Bloom + RocksDB) design is the production answer; candidates who name only one tier underspec.
-- **Synchronous DNS in the fetch loop** — uncached DNS at 50ms/lookup dominates wall time at scale; candidates who don't surface a DNS cache reveal they haven't built a real crawler.
-- **Ignoring robots.txt or treating it as advisory** — robots.txt compliance is the legal floor for public-web crawling; ignoring it invites legal action and IP-level bans across the web. Senior answer: robots.txt enforced at queue time, `<meta name="robots">` enforced at index time.
-- **One-thread-per-fetch concurrency** — wastes thousands of OS thread stacks on `recv()` waits; async I/O (epoll/kqueue) with 1000+ in-flight per thread is the only viable model at billion-page scale.
-- **Naive sharding by URL** — hashing on the full URL spreads URLs from the same domain across all shards, which makes per-domain politeness a global coordination problem. Sharding by domain instead keeps politeness state local to one shard.
+**A fixed refresh/discovery budget split vs one unified priority score**
+- Choice: enforce the split as a quota on the picker, roughly 70% of fetches to recrawling pages already in the corpus and 30% to URLs never fetched, tuned per vertical.
+- Alternative: one score, where a refresh candidate's overdue-ness and a new URL's predicted value compete on the same scale and the split emerges from the ranking.
+- Decider: whether the two populations produce comparable scores. They do not. A refresh candidate has measured history: observed change interval, ETag behaviour, inbound link count, whether the last three fetches returned 304. A new URL has only what it inherits from its parent page and its domain. In a single ranking the measured always outbids the guessed. The arithmetic makes it absolute rather than marginal: 10B known URLs against 1B fetches/month means refresh demand at even a monthly cadence is 10× the entire budget, so a unified score does not give discovery a small share, it gives it zero, and the crawl silently stops growing within weeks.
+- Alternative wins when: the corpus is closed, so discovery is genuinely worthless, such as a fixed monitored set of sites; or the budget covers refresh demand with slack, which holds below roughly 10⁷ pages, since 10⁷ pages at weekly refresh is 10⁷ / 604,800 ≈ 17 fetches/s and both populations fit comfortably. With slack, one score is strictly better than a hand-set quota, because a quota is a guess at a ratio that the data could have told you.
 #### High-level design
 **must-say**
 
@@ -2202,26 +2212,13 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 #### Deep dive
 **must-say**
 
-**Politeness:**
-- Per-domain queue; domain unlocked only after `crawl_delay` seconds since last fetch. Each domain has its own little FIFO of pending URLs and a `next_fetch_time` timestamp; workers pick whichever domain's `next_fetch_time` has elapsed and pull the head URL. This naturally caps per-domain QPS without any global coordination — at 1 req/s per domain across 10k active domains, the fleet sustains 10k pages/sec.
-- Token bucket per domain (default 1 req/s, override per `robots.txt Crawl-Delay`). The token bucket gives a small burst tolerance for paged content (a domain with crawl_delay=1 can serve 5 quick pages and then idle 5 seconds), which is gentler on the target server than rigid 1Hz pacing. If `robots.txt` specifies `Crawl-Delay: 10`, the bucket refill rate drops to 0.1 tokens/sec for that domain — the crawler respects whatever the site operator declares.
+**The URL frontier, and why it is two structures pretending to be one.**
 
-**Dedup:**
+The frontier answers one question, "what should this worker fetch right now", under two constraints that pull apart. Value ordering wants the highest-scoring URL anywhere in the system. Politeness wants a URL from any host that is currently off cooldown. Those two rarely name the same URL, because high-value URLs concentrate on high-value hosts, and those are precisely the hosts fetched from most recently. A single priority queue with a politeness check at the head therefore spends its time rejecting its own best candidates: with a head dominated by a few dense hosts each capped at 1 req/s, only a small fraction of the head is fetchable at any instant, and the crawler idles while holding 100M ready URLs.
 
-| Check | Tool | Why |
-|---|---|---|
-| URL seen | Bloom filter (RAM) → RocksDB confirm | 99% rejected at Bloom, no DB hit |
-| Exact content | MD5(content) | catches pure mirrors |
-| Near-dup content | SimHash + hamming distance < 3 | catches boilerplate variants |
+**The lease, and what the frontier owns per URL.** Fix the contract between frontier and fetcher first, because retry, dedup, and crash recovery all reduce to it. A worker does not dequeue a URL, it leases one: the frontier hands the URL over and hides it for a lease window, 60s against a 10s fetch timeout, and the worker acknowledges only after the page is committed to object storage. A crash loses nothing, because the lease expires and the URL becomes visible again.
 
-**Strategy:** BFS (level-by-level) — fairness, predictable depth. BFS visits all URLs at depth N before any at depth N+1, which spreads the crawl across many domains and bounds how deep into any single site you go before hearing from others. DFS would dive deep into one site first — risky because spider traps are infinite-depth structures and DFS doesn't escape them naturally.
-
-**Fetch optimization:**
-- Async I/O (one thread → 1000s of concurrent fetches). A crawler spends ~99% of wall-clock waiting on the network; threads-per-fetch wastes thousands of OS thread stacks just to sleep on `recv()`. An async event loop (epoll/kqueue) lets one thread track thousands of in-flight TCP sockets and only wake when a response arrives — typical fetcher worker handles 1000+ concurrent fetches on a single core.
-- DNS cache (DNS resolution is shockingly slow — 50ms+). Default OS DNS does a fresh UDP roundtrip per lookup and many systems are configured with no caching. At 1k fetches/sec, that's 50% of total wall-clock spent in DNS unless cached. Run an in-process resolver with a TTL cache (~1hr) so repeat lookups are sub-microsecond.
-- Persistent connections (HTTP keep-alive) per domain. Opening a TCP+TLS connection costs 2–4 RTTs (~100–500ms); reusing the same connection for the next page on the same domain skips this entirely. Maintain a small pool per domain (3–5 connections) — bounded so you don't accidentally DOS them.
-
-**URL lifecycle — state machine.** Every URL the crawler knows about transitions through a small set of states. Making the states explicit lets you reason about retry, dedup, and recovery uniformly.
+Two rules make that work rather than merely look tidy. The acknowledgement has to follow the storage write, not the fetch: a crash between the two otherwise leaves a URL marked crawled with no page behind it, and nothing downstream will ever notice, because the seen-set agrees it is done. And retry state belongs to the host, not the URL. A host returning 503 to every worker will otherwise draw the whole fleet back on an identical backoff schedule, so a retry re-enters that host's back queue and inherits its cooldown, with jitter on the backoff and a per-host circuit breaker above a 5xx-rate threshold. The states below are the frontier's own bookkeeping; a fetcher only ever sees a lease and sends an ack.
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 560" role="img" aria-label="Web crawler URL lifecycle state machine: Discovered, Queued, Fetching, Parsed, Archived, NeedsRefresh, with Skipped, Retry and DeadLetter branches">
@@ -2315,9 +2312,13 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 </svg>
 ```
 
-*[Source: hellointerview.com "Web Crawler" — SQS visibility-timeout-driven retry; Mercator paper §3 frontier states]*
+*[Source: lease and dead-letter semantics follow SQS visibility timeouts; frontier states follow Mercator paper §3]*
 
-**Mercator-style two-tier frontier.** Production crawlers (the canonical Mercator design from Heydon & Najork 1999, still the architectural model for modern crawlers) split the URL frontier into two tiers. *Front queues* implement priority: F=10 or so queues, each tagged with a priority level; high-quality / fast-changing URLs land in higher-priority front queues, low-priority ones in lower. *Back queues* implement politeness: B back queues (rule of thumb: B = 3× crawler thread count), each holding URLs from exactly one host. A heap maintains, for each back queue, the earliest time the host can be contacted again; the crawler thread always pops the queue whose contact-time has elapsed. Routing is: priority router selects a front queue weighted by priority, then maps the URL to its host's back queue. This gives both prioritization and politeness in one structure without ad-hoc per-URL scheduling. *[Source: Mercator paper (1999); Stanford IR Book §20.2 "The URL frontier"]*
+**The two tiers.** *Front queues* carry value. F queues, one per priority band, F around 10; a router maps each admitted URL's score to a band and appends. Bands rather than a total order is deliberate. A global priority queue over 100M entries costs a heap operation per insert, and worse, it demands a total order across signals that share no units: a change-rate estimate and a domain authority score are not commensurable, and forcing them into one number mostly hides the weights. Ten bands means the score only has to be right to one significant figure, which is all those estimates are worth anyway. Selection across bands is weighted random rather than strict, so the low bands drain slowly instead of never.
+
+*Back queues* carry politeness. B queues, each holding URLs from exactly one host, under the invariant that a host appears in at most one back queue. That invariant is the entire politeness mechanism: it makes "one request in flight to this host" a property of the data layout rather than something a lock has to enforce. Mercator sized B ≈ 3 × fetcher threads (Heydon and Najork, 1999), enough that a worker almost always finds a ready host without materialising 10⁸ queues in memory. A min-heap keyed on `next_allowed_time` holds one entry per non-empty back queue; a worker pops the root and, if that time is still in the future, sleeps until it rather than scanning for something better.
+
+*Routing* is where the tiers meet, and it happens once per host, not once per URL. When a back queue drains, its host is retired and the queue is refilled by pulling from a weighted-random front queue until a URL for some unassigned host appears; that host then owns the queue until it empties again. Priority therefore governs which hosts are admitted, and within a host the order is arrival order.
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 600" role="img" aria-label="Mercator two-tier URL frontier: front priority queues feed a weighted picker into per-host back queues, a min-heap on next fetch time, and a crawler thread that loops new URLs back">
@@ -2375,24 +2376,24 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 </svg>
 ```
 
-**Priority signals — what actually feeds the priority router.** Static signals: domain authority (PageRank-like score), historical change rate (news domain → high; archive → low), content quality (length, link-density, Boilerpipe score). Dynamic signals: HTTP `Last-Modified` / `ETag` (skip unchanged pages cheaply), `429`/`5xx` history (back off domains being defensive), revisit-overdue-ness for freshness. Combining as a weighted score lets one front-queue selection both freshen high-value content and discover new low-frequency content without separate codepaths.
+Volunteer the consequence before it is asked: **priority in this design is approximate by construction**. A top-band URL sitting behind 40,000 queued URLs on its own host at 1 req/s waits 40,000s, over eleven hours, whatever its score says. The frontier orders host admission, not URLs. When a specific URL genuinely has to be fetched soon, the mechanism is not a higher band but a separate express path that spends part of that host's rate budget directly, and it needs a hard cap on what fraction of the budget it may take, or over time it becomes the crawl.
 
-**Distributed crawl coordination.** At billion-page scale, a single fetcher pool and a single frontier don't fit. Shard the frontier by `hash(domain)`: each shard owns a subset of domains and runs its own per-domain queues, so cross-shard coordination is unnecessary for politeness. URL discovery is the only inter-shard hop — when shard A parses a page and finds a link to a domain owned by shard B, it routes the URL there via a partitioned message bus (Kafka). The Bloom filter for "URL seen" is also sharded by `hash(domain)`, so dedup queries are local to the shard that owns the URL. *[Source: Mercator paper; hellointerview.com staged-pipeline architecture]*
+**Sharding.** Partition by `hash(registrable_domain)`. Each shard owns a set of hosts and holds every piece of state keyed by host: back queues, `next_allowed_time`, parsed robots rules, and its slice of the seen-set. Because all of it is host-derived, no politeness decision needs a lock or a remote read. The only inter-shard traffic is discovery: shard A parses a page, finds a link on a host owned by shard B, and forwards the URL over a partitioned bus. At ~300 extracted links per page and 400 pages/s that is 300 × 400 = 120k URL messages/s at ~200B each, so 120,000 × 200 = 24MB/s across the whole fleet, which is negligible next to the ~40MB/s of page bytes being fetched. Sharding by `hash(url)` instead would scatter one host across every shard and turn a per-host rate limit into a distributed counter, which is the most expensive mistake available in this design.
 
-**Robots.txt and meta noindex compliance.** Two layers of "don't crawl/don't index" signals: `robots.txt` (per-domain, fetched and cached at first contact, governs whether to fetch URLs at all) and the page-level `<meta name="robots" content="noindex">` / `X-Robots-Tag` HTTP header (governs whether to *index* the fetched content). The fetcher honours `robots.txt` at queue time — disallowed paths never enter the per-domain queue. The parser honours `noindex` at extract time — the page is fetched (already paid the cost) but excluded from the search index and not surfaced in downstream products; outbound links from a `noindex` page are still followed unless `nofollow` is also present. Compliance is non-negotiable for public-web crawls; ignoring these signals invites legal action and IP-level bans across the web.
+**Persistence and restart.** The frontier is the only stateful component that cannot be rebuilt from the archive, so it is durable rather than cached: back queues on a replicated log or an embedded store per shard, with the heap reconstructed at startup by scanning queue heads. Recovery is the lease mechanism again. Everything unacknowledged at crash time reappears when its lease expires, so the restart path and the retry path are the same code, exercised continuously instead of only during an incident.
 #### Where it breaks
 **must-say**
 
 **Bottlenecks**
 
-- **DNS bottleneck** — uncached DNS at ~50ms/lookup dominates wall time when fetching at scale; the network call to the page itself becomes a small fraction of latency. An in-process DNS cache with hour-scale TTL plus an async resolver eliminates the problem; warm cache hits are sub-microsecond.
-- **Spider traps** (infinite calendar URLs) — sites generate effectively infinite URLs from query parameters or session IDs (`/calendar?date=2050-01-01` and so on). Without bounds, the frontier grows without limit and the crawl wastes budget on garbage. Cap depth per domain, blocklist URL patterns matching session-ID and pagination explosions, and drop domains where novelty rate is suspiciously high.
-- **Slow domains stall workers** — a domain that takes 30s to respond will tie up a fetcher slot for 30s if you let it, starving fast domains. Set aggressive per-fetch timeouts (10s) and a per-domain in-flight quota so any one slow site can't monopolise the worker pool.
-- **Bloom false positive** (rare URL skipped) — Bloom can return "seen" for a URL it has never seen, with probability ~1% at the chosen sizing, meaning a small fraction of URLs are wrongly skipped. The two-tier design (Bloom → RocksDB confirm on positive hit) makes false positives recoverable: if Bloom says yes, RocksDB is consulted; only if RocksDB also confirms is the URL skipped. False negatives are impossible by Bloom's construction.
-- **JS-rendered pages** — modern SPAs return ~empty HTML and load content via JS, so the HTTP fetcher sees no useful content. Routing all pages through a headless browser is ~10× the cost; instead, only escalate to the browser farm for high-value domains where most content is JS-rendered, leaving cheap HTTP fetch for the long tail.
-- **Mega-domain shard imbalance** — Wikipedia, YouTube, GitHub each have hundreds of millions of URLs; hash-sharding by domain dumps the entire load on one shard. Detect oversized domains at a daily rebalance pass and sub-shard them by `hash(domain + path_prefix)` so a single mega-domain spreads across multiple workers without breaking per-domain politeness (still serialised on the (domain, path-shard) key).
-- **Adversarial robots.txt and Crawl-Delay** — some sites declare `Crawl-Delay: 86400` (one request per day) to discourage crawling; respecting it stalls the crawl, ignoring it gets you banned. Treat very large `Crawl-Delay` values as a soft "deprioritize" signal rather than literal compliance — drop the domain to the lowest-priority front queue rather than waiting a full day per page; for compliance-bound corpora (like web archives), respect the literal value and accept the slow rate.
-- **Synchronized retry stampede on transient 5xx** — a domain that returns 503 across the fleet has every shard's worker retrying at the same intervals, hammering it. Add jitter to retry timing (`backoff = base × 2^n × random(0.5, 1.5)`) so retries spread; consider a domain-level circuit breaker that pauses *all* fetches to that domain for several minutes once 5xx-rate crosses a threshold.
+- **DNS.** Uncached resolution at ~50ms/lookup dominates wall time at scale, and the page fetch itself becomes the small part of the latency. An in-process resolver with an hour-scale TTL cache plus async lookups removes it; warm hits are sub-microsecond. This is the item most candidates never mention, and it is not in the textbook diagram.
+- **Spider traps.** Sites generate unbounded URLs from query parameters or session ids (`/calendar?date=2050-01-01` and onward). Without bounds the frontier grows without limit and the budget goes on noise. Cap depth per domain, blocklist URL patterns matching session-id and pagination explosions, and throttle domains whose novelty rate stays near 100% while their content fingerprints stay near-identical. Note this fights the third fork: an aggressive novelty ceiling also suppresses genuinely prolific sites, so the ceiling is per-domain and learned, not global.
+- **Slow domains stall workers.** A domain answering in 30s ties up a fetcher slot for 30s and starves fast domains. Per-fetch timeout of 10s and a per-domain in-flight quota of 1 keep any one slow site from taking more than its share of the pool.
+- **Bloom false positives are a policy choice, not a solved problem.** A false positive says "seen" for a URL never seen, at ~1% for our sizing; false negatives are impossible. The usual claim that a Bloom-then-KV-confirm design makes this free is wrong in the direction that matters: negatives need no disk read, positives do, and on a mature crawl the overwhelming majority of extracted links are already known, so confirming every positive means a disk lookup on most checks. You are choosing between correctness and the read amplification the filter was bought to avoid. We confirm on positives for URLs whose parent page is in the top two priority bands and accept the drop otherwise, which bounds the cost while conceding real loss in the tail. See Unresolved.
+- **JS-rendered pages.** Modern single-page apps return near-empty HTML and assemble content in the browser, so the HTTP fetcher sees nothing useful. A headless render costs 1 to 3 CPU-seconds and 2 to 5MB against ~1ms and 100KB for a plain fetch, so rendering everything at 400 pages/s would need roughly 400 × 2 = 800 cores continuously. Escalate selectively: fetch over HTTP first, route to the browser pool when extracted text is under ~500 bytes but script density is high, and cache that verdict per domain so the second pass is not paid twice.
+- **Mega-domain shard imbalance.** Wikipedia, YouTube, and GitHub each hold hundreds of millions of URLs, so hashing by domain drops all of it on one shard. A daily rebalance pass detects oversized domains and sub-shards them by `hash(domain + path_prefix)`, which spreads the URLs while keeping politeness serialised, since the rate limiter then keys on the host and the sub-shards coordinate through a single leased token per host rather than one each.
+- **Adversarial robots.txt.** Some sites declare `Crawl-Delay: 86400`, one request per day, to discourage crawling. Respecting it literally stalls that domain forever; ignoring it gets you banned. Treat very large values as a deprioritisation signal, dropping the domain to the lowest band rather than waiting a day per page, and for compliance-bound corpora such as web archives respect the literal value and accept the rate.
+- **Synchronised retry stampede.** A domain returning 503 to the whole fleet gets every worker back on the same schedule. Jitter the backoff (`base × 2^n × random(0.5, 1.5)`) and circuit-break the domain for several minutes once its 5xx rate crosses a threshold. Because retry state is held per host in the frontier rather than per URL, this is one decision per host rather than a race between workers.
 
 **Failure modes**
 
@@ -2402,59 +2403,59 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 | Crash | Frontier shard primary lost | shard ops failing on a hash range | shard replication (Kafka topic replication); secondary promoted; pending visibility timeouts force re-delivery |
 | Network | DNS resolver flakiness | DNS cache miss latency spike | hour-scale DNS TTL cache; fallback to secondary resolver; circuit-break on per-domain DNS failure |
 | Correctness | Spider trap (infinite calendar URLs) | per-domain novelty rate at 99%+ on new URLs forever | depth cap per domain; URL pattern blocklist; novelty-rate ceiling triggers domain throttle/stop |
-| Correctness | Bloom false positive skips a real new URL | offline audit comparing Bloom vs RocksDB ground truth | tune FPR < 1%; periodic Bloom rebuild from RocksDB; rely on link-graph redundancy for missed URLs to be rediscovered |
+| Correctness | Bloom false positive skips a real new URL | sampled audit of "seen" verdicts against the KV index, which estimates the loss rate but cannot recover the URLs | tune FPR < 1%; periodic Bloom rebuild from the KV index to clear accumulated drift; confirm on disk for high-band parents and accept the loss in the tail |
 | Resource | Mega-domain (Wikipedia) saturates one shard | per-shard URL count grossly imbalanced | sub-shard mega-domains by `hash(domain + path_prefix)`; daily rebalance pass detects skew |
 | Resource | Slow domain holds fetcher slot for 30s | per-fetcher in-flight time histogram skewed | aggressive per-fetch timeout (10s); per-domain in-flight quota caps slow-site impact |
 | Upstream | Target site bans crawler IPs (rate-limit retaliation) | sustained 403/429 from a domain | adaptive politeness (exponential delay); domain-level circuit breaker; rotate egress IPs as last resort if ToS-permitted |
 
 **Unresolved**
 
-TODO. Two or three things this design genuinely does not handle well, and what you would do about each.
+**URL dedup silently drops pages, and the loss is unobservable by construction.** At a 1% false-positive rate the filter tells us a URL is already crawled roughly once in every hundred genuinely new URLs, and the URL is then never fetched, never logged as skipped, and never distinguishable from a URL that simply does not exist. The standard defence is link-graph redundancy: a page linked from k independent places survives with probability 1 minus 0.01^k, so at k=3 the chance of permanent loss is one in a million. That argument is sound and it fails precisely where it matters. Pages linked from many places are popular pages we would have found anyway; the pages lost are the ones with a single inbound link, which is the profile of exactly the new, deep, and long-tail content the crawl exists to find. Confirming positives against the KV index fixes the correctness but reverses the economics, because on a mature crawl most link checks are positives and confirming them means a disk read on most checks, which is what the filter was bought to avoid. What we actually do is confirm for URLs discovered from high-band pages, accept the drop elsewhere, and run a sampled audit that estimates the loss rate without repairing it. A cheaper structure would help at the margin (a cuckoo filter gives similar space at a lower false-positive rate and supports deletion, established around 2014), but it does not change the shape of the problem: the seen-set is approximate and the corpus has a hole in it whose size we can only estimate.
+
+**Freshness cannot be measured without spending the budget it is meant to save.** The recrawl scheduler needs a per-page change rate, and the only way to observe a change is to fetch the page. A conditional GET with `If-None-Match` makes an unchanged page cheap in bytes, but it is still a request and still consumes that host's rate budget, which is the scarce resource. So the change-rate model is trained only on pages we already chose to recrawl, and that is a closed loop: a page we deprioritise is sampled rarely, looks unchanged when finally sampled, and is deprioritised further, whether or not it is actually changing. Sitemaps and `lastmod` hints would break the loop except that they are self-reported and widely wrong, often set to the render time of a template. The partial fix is to spend a small slice, around 2% of refresh throughput, on uniformly random recrawls independent of score, purely to keep the model unbiased. That bounds the drift but does not remove it, and it means we cannot state a staleness figure for the tail of the corpus, only for the head we keep sampling.
+
+**Our politeness contract is with the wrong entity.** We rate-limit per registrable domain, but the party that suffers from an impolite crawler is the origin server, and the two do not line up in either direction. Thousands of small domains sharing one hosting IP receive our full per-domain rate each, so N domains on one machine is N req/s to that machine while every individual limit is honoured. Conversely, a single domain behind a large CDN could absorb 100 req/s without noticing, and we crawl it at 1 req/s for no reason, which costs real coverage on exactly the sites with the most content. The correct grouping key is the origin, and the origin is not observable from where we stand: resolved IPs change, CDN edges are shared across unrelated sites, and the mapping is not stable enough to key durable state on. A coarse per-IP-prefix limiter layered on top of the per-domain one helps, but it reintroduces cross-shard coordination for the hosts that are most concentrated, which is the property that made per-domain politeness free in the first place. We run the per-domain limiter, apply a soft per-/24 cap computed from sampled DNS results, and accept that both numbers are approximations of a constraint we cannot see. Robots.txt inherits the same vagueness: it was only standardised as RFC 9309 in 2022, most deployed files predate it, and rule-precedence conflicts are resolved by convention rather than specification, so "we are compliant" means "we match the common interpretation" rather than anything provable.
 #### Drill questions
 1. How do you detect and escape a spider trap?
-2. A worker crashes mid-fetch — how do you not lose the URL?
+2. A worker crashes mid-fetch. How do you not lose the URL?
 3. How do you stay polite without starving the crawl?
 4. How do you handle JS-rendered SPAs?
 5. What's the dedup tradeoff with Bloom filters?
 6. How do you re-crawl for freshness?
 7. Walk me through the Mercator front-queue / back-queue design.
 8. How do you shard the crawler across many machines without coordination thrashing?
-9. A worker on a sharded crawler crashes — how does the URL not get lost?
+9. A worker on a sharded crawler crashes. How does the URL not get lost?
 10. How do you prioritize a brand-new URL with no history?
 #### Answers to drill questions
-1. Cap depth per domain, blocklist URL patterns (regex on session IDs, calendar paths). Track "novelty rate" per domain — if 99% of pages from a domain are unique low-value content, throttle or stop. *If pushed:* SimHash content dedup catches "different URL, same content" traps the URL filter misses.
+1. Cap depth per domain, blocklist URL patterns (regex on session IDs, calendar paths). Track novelty rate per domain: if 99% of URLs from a domain are new but their content fingerprints cluster, it is a trap, so throttle or stop. *If pushed:* SimHash content dedup catches "different URL, same content" traps the URL filter misses.
 
-2. Frontier uses a durable queue (Kafka or persistent Redis); URL is only removed after the page is committed to object store. In-flight URLs have a visibility timeout — re-queued if not acked. *If pushed:* idempotent fetch (URL hash dedup at write) so a retry doesn't double-store; checkpoint progress per worker for resumability.
+2. Frontier uses a durable queue (Kafka or persistent Redis); URL is only removed after the page is committed to object store. In-flight URLs hold a lease, and an unacknowledged lease expires and makes the URL visible again. *If pushed:* idempotent fetch (URL hash dedup at write) so a retry doesn't double-store; checkpoint progress per worker for resumability.
 
-3. Per-domain token bucket (default 1 req/s, override per `robots.txt Crawl-Delay`). Worker pool picks domains whose next-fetch-time has elapsed — many domains in parallel, one request at a time per domain. *If pushed:* adaptive politeness — back off if a domain returns 429 or 5xx; resume slowly.
+3. Per-domain token bucket (default 1 req/s, override per `robots.txt Crawl-Delay`). Worker pool picks domains whose next-fetch-time has elapsed, so many domains run in parallel with one request at a time per domain. *If pushed:* adaptive politeness, backing off when a domain returns 429 or 5xx and resuming slowly. Concede that per-domain is a proxy for per-origin: thousands of small domains behind one host each get their own 1 req/s, so the machine sees the sum.
 
-4. Default fetcher is HTTP-only (cheap, fast). For high-value domains where most content is JS-rendered, route to a headless browser pool (Puppeteer/Playwright) — ~10× the cost. *If pushed:* prerender service (server-side render once, cache HTML); detect rendering need by content size or `<script src>` density.
+4. Default fetcher is HTTP-only (cheap, fast). For high-value domains where most content is JS-rendered, route to a headless browser pool (Puppeteer/Playwright) at 1 to 3 CPU-seconds per page against ~1ms for a plain fetch. *If pushed:* prerender service (server-side render once, cache HTML); detect rendering need by content size or `<script src>` density.
 
-5. Bloom filters can false-positive — they may say "already seen" for a URL that has never been seen — and the consequence is that a small fraction of new URLs are skipped and never fetched. Tune the bit-width for <1% FPR so the loss rate stays below the natural redundancy of the link graph (most pages are linked from many others, so a missed URL is usually rediscovered). *If pushed:* counting Bloom or Cuckoo filters support deletions if you need to evict stale entries, and for high-value corpora a periodic rebuild from the RocksDB ground truth bounds drift over long crawl runs.
+5. A false positive says "already seen" for a URL never seen, so a small fraction of new URLs are dropped and never fetched; false negatives cannot happen. Size for <1% FPR and lean on link-graph redundancy, since a page with k independent inbound links survives with probability 1 minus 0.01^k. *If pushed:* say where that argument fails. Redundancy protects popular pages, which we would have found anyway, and the losses land on singly-linked pages, which is exactly the new long-tail content the crawl is for. Confirming positives against the KV index is correct but reverses the economics, because most link checks on a mature crawl are positives, so confirming means a disk read on most checks. We confirm only for URLs found on high-band pages and accept the loss elsewhere.
 
 6. Each URL gets a `next_revisit_ts` based on observed change rate (news domain: hourly; archive: yearly). Frontier prioritizes overdue revisits. *If pushed:* adaptive recrawl using HTTP `Last-Modified` / `ETag` to skip unchanged pages cheaply; ML model on change-rate prediction for high-value sites.
 
 7. Front queues implement *priority* (one queue per priority level, higher priority popped more often); back queues implement *politeness* (one queue per host, each with a "next contactable" timestamp on a min-heap). New URLs are routed: priority router picks a front queue, then host-router maps to the back queue for that host. Workers pull from whichever back queue is at the heap root. Decouples "what to fetch next" (priority) from "when can I fetch from this host" (politeness). *If pushed:* Mercator recommended `B = 3 × thread_count` to keep workers saturated without over-fanning hosts.
 
-8. Hash-shard by domain: each fetcher owns a subset of domains and runs its own per-domain politeness queues + its own Bloom filter slice. Inter-shard traffic is bounded to URL hand-off when one shard's parser finds a link belonging to another shard's domain — flows over Kafka or similar. No global lock, no global Bloom merge. *If pushed:* a few mega-domains (Wikipedia, YouTube) might overload a single shard; rebalance by domain weight, or sub-shard the largest by `hash(domain + path_prefix)`.
+8. Hash-shard by domain: each fetcher owns a subset of domains and runs its own per-domain politeness queues + its own Bloom filter slice. Inter-shard traffic is bounded to URL hand-off over a partitioned bus when one shard's parser finds a link belonging to another shard's domain, about 24MB/s at our volumes. No global lock, no global Bloom merge. *If pushed:* a few mega-domains (Wikipedia, YouTube) might overload a single shard; rebalance by domain weight, or sub-shard the largest by `hash(domain + path_prefix)`.
 
-9. SQS-style visibility timeout: when a worker receives a URL, the queue hides it for N seconds; the worker explicitly deletes only after the page is committed to object store. A crash means the visibility timeout expires and the URL becomes visible to other workers. Retries are bounded by `ApproximateReceiveCount` — past 5 attempts, the message goes to a dead-letter queue. *If pushed:* idempotent fetch keyed on URL hash means a re-fetched URL doesn't duplicate-store; checkpoint progress per worker for resumable bulk crawls.
+9. SQS-style visibility timeout: when a worker receives a URL, the queue hides it for N seconds; the worker explicitly deletes only after the page is committed to object store. A crash means the visibility timeout expires and the URL becomes visible to other workers. Retries are bounded by an attempt counter, and past 5 attempts the URL goes to a dead-letter queue. *If pushed:* idempotent fetch keyed on URL hash means a re-fetched URL doesn't duplicate-store; checkpoint progress per worker for resumable bulk crawls.
 
 10. Inherit priority from the parent page that linked to it (a high-priority page's outlinks are likely high-value too) and from the domain's average score. After first fetch, observed signals (change rate, content length, link count) refine the priority for next visit. *If pushed:* cold-start with a small "discovery quota" front queue that always gets some throughput, so unrecognized domains get tried at least once.
 #### Whiteboard script
-TODO
+**0-5, frame it as a budget problem.** Open with the thesis, not the components: "downloading is solved, so this system is a scheduler, and what it actually produces is a decision about where a fixed fetch budget goes." Then ask the three questions that change the design: what the corpus is for (search index, archive, training set), how fresh it has to be, and whether it is the open web or an allowlist, because a bounded graph deletes the first fork entirely. State your assumptions out loud: 1B pages/month, ~400 fetches/s average with 2k/s peaks, ~10B URLs known, ~10⁸ hosts. Draw nothing yet.
 
-A 45 minute budget: what to cover in 0-5, 5-15, 15-35 and 35-45, what to say first, and a line starting `Cut first:`.
+**5-15, the loop and the frontier.** Draw the cycle: frontier, fetcher pool, parser, content filter, archive, and the arrow from extracted links back to the frontier. Say the loop is the easy part and go straight to the frontier. Draw it as two stacked structures, priority bands above and per-host queues below, with a heap on `next_allowed_time` to the side. The line to say while drawing the arrow between them: politeness is not a check, it is where the URL is stored, because value and availability are uncorrelated and a single queue with a check at the head rejects its own best candidates. Add DNS as a box next to the fetcher and give it one sentence, since 50ms uncached is most of the wall clock and almost nobody mentions it.
 
-**Raw material, from the old Talking Points:**
+**15-35, the drill.** Protect this block; it is the interview. Go deep on the frontier: front-queue bands and why bands rather than a total order, the one-host-per-back-queue invariant, the refill step where the tiers meet, and the lease contract with the fetchers (acknowledge after the storage write, retry state held per host not per URL). Then sharding by registrable domain, and say what sharding by URL would cost: a distributed counter in place of a local rate limit. Then take the refresh-versus-discovery fork on your own terms, with the number that settles it: refresh demand at 10B known URLs is 10× a 1B/month budget, so a single unified score gives discovery zero and the crawl quietly stops growing. Keep traps, JS rendering, and mega-domain sub-sharding in reserve as one-liners to expand if asked.
 
-- **The frontier is two things in one structure** — front queues for priority, back queues for politeness; naming the Mercator design shows you've read the canonical paper.
-- **DNS is the silent killer** — explicitly surfacing this is a senior tell because it's not in the textbook architecture but dominates real performance.
-- **Bloom + RocksDB confirms is the production pattern** — cite the FPR (~1%) and explain why false positives are recoverable (link-graph redundancy) rather than catastrophic.
-- **Politeness is a legal/reputational requirement, not just performance** — framing per-domain rate limits as "we don't get banned across the web" rather than "we don't overload the target" reads as production-savvy.
-- **JS-rendered pages are a 10× cost question, not a yes/no question** — escalating to a headless browser pool only for high-value domains where most content is JS-rendered shows cost-aware design.
-- **Sharded Bloom + sharded frontier means inter-shard coordination is bounded to URL hand-off** — this is the architectural insight that makes billion-page crawls tractable.
-- **Adversarial robots.txt (`Crawl-Delay: 86400`) is a soft signal** — naming this trade-off (deprioritize vs literal compliance) shows you've grappled with the real edge cases, not just the happy path.
+**35-45, concede and close.** Give the gaps before they are found: the seen-set is approximate and drops roughly 1% of genuinely new URLs with no way to observe which ones; freshness estimates are trained only on the pages we already chose to recrawl; per-domain politeness is a proxy for a per-origin constraint we cannot see. Then two minutes of operations: the metrics you would page on (per-domain politeness violations as a hard zero, DNS cache hit rate, frontier depth growth per day, per-domain 5xx rate) and why a politeness violation is a worse incident than an outage, because a ban is permanent and an outage is not.
+
+Cut first: the content-dedup detail (SimHash, Hamming thresholds, exact-match hashing), then multi-region and the legal geography, then the fetcher's async I/O and connection-pooling detail. All three are real and none changes the architecture; the async I/O point in particular is a five-second remark that candidates stretch into five minutes. Never cut: the frontier's two tiers and why the separation is structural, DNS, and the budget-allocation framing that the whole design hangs off.
 #### Appendix
 **Data model**
 
@@ -2474,17 +2475,17 @@ get_status(crawl_id) → {pages_done, errors, last_url}
 
 **Observability**
 
-- **`crawler.fetch_throughput_pages_s`**: pages successfully fetched and parsed per second — emitted by parser stage — alert if < 50% of target for 15min
-- **`crawler.dns_cache_hit_rate`**: fraction of fetches served from local DNS cache — emitted by fetcher — alert if < 95% (cache TTL or sizing issue)
-- **`crawler.per_domain_qps_violations`**: count of fetches exceeding per-domain crawl-delay — emitted by politeness scheduler — alert if > 0 (politeness bug, will trigger bans)
-- **`crawler.bloom_false_positive_estimated`**: sampled FPR from Bloom-vs-RocksDB audits — emitted by audit pipeline — alert if > 2× target FPR
-- **`crawler.frontier_depth`**: queued URLs across all shards — emitted by frontier — alert if depth growing > 50%/day (parser/fetcher backlog)
-- **`crawler.5xx_rate_per_domain`**: rolling 5xx rate per domain — emitted by fetcher — circuit-break domain when > 30% for 5min
-- **SLOs:** target throughput sustained 95% of weekly window, fetch p95 latency < 5s (network-bound), zero per-domain politeness violations (hard SLO — banning is permanent reputation damage).
+- **`crawler.fetch_throughput_pages_s`**: pages successfully fetched and parsed per second, emitted by the parser stage, alert if < 50% of target for 15min
+- **`crawler.dns_cache_hit_rate`**: fraction of fetches served from the local DNS cache, emitted by the fetcher, alert if < 95% (cache TTL or sizing issue)
+- **`crawler.per_domain_qps_violations`**: count of fetches exceeding per-domain crawl-delay, emitted by the politeness scheduler, alert if > 0 (politeness bug, will trigger bans)
+- **`crawler.bloom_false_positive_estimated`**: sampled false-positive rate from audits of Bloom verdicts against the KV index, emitted by the audit pipeline, alert if > 2× target FPR
+- **`crawler.frontier_depth`**: queued URLs across all shards, emitted by the frontier, alert if depth grows > 50%/day (parser or fetcher backlog)
+- **`crawler.5xx_rate_per_domain`**: rolling 5xx rate per domain, emitted by the fetcher, circuit-break the domain when > 30% for 5min
+- **SLOs:** target throughput sustained 95% of weekly window, fetch p95 latency < 5s (network-bound), zero per-domain politeness violations (hard SLO, because a ban is permanent and an outage is not).
 
 **Multi-region and DR**
 
-- **Replication mode:** regional-isolation by default — each region runs its own crawler fleet against its own frontier shard subset (often partitioned by domain TLD or region for legal compliance, e.g., EU domains crawled from EU). Active-active is unusual because per-domain politeness is stronger when one shard owns each domain.
+- **Replication mode:** regional isolation by default, where each region runs its own crawler fleet against its own frontier shard subset (often partitioned by domain TLD or region for legal compliance, e.g., EU domains crawled from EU). Active-active is unusual because per-domain politeness is stronger when one shard owns each domain.
 - **RTO / RPO:** RTO 5min for fetcher fleet recovery (workers stateless, frontier shard durable); RTO 30min for frontier shard primary loss (Kafka replication failover). RPO < 1 visibility-timeout window for in-flight URLs (re-delivered automatically).
 - **Failover trigger & cadence:** automatic on health-check failure of a shard primary; tested monthly via shard-kill drill. Frontier rebuild from durable storage is an annual DR exercise (full restore from object-store-archived URL graph).
 - **Cross-region cost trade-off:** regional fleets cost zero cross-region bandwidth for crawl traffic; the small inter-shard hop (URL-discovery routing) is bounded to discovered-link forwarding (~5% of total bytes). Geo-distributing the crawler also distributes egress IPs, which is helpful for politeness (target sites see crawler load distributed across IPs) but increases legal complexity (jurisdiction-specific compliance with different robots.txt interpretations).
@@ -3840,49 +3841,60 @@ REST:
 
 ### 10. Design a Search Autocomplete (Google Suggest)
 #### Problem
-Suggest top queries as the user types, ranked by popularity, with sub-100ms response times.
+As a user types, return the ten most likely completions of what they have typed so far, ranked by how often other people have searched for them. The query is a prefix rather than a set of words, the answer to any prefix is ten short strings, and the whole round trip has to finish before the next keystroke.
 #### Core
-TODO
+The answer set for a prefix is small, finite and knowable in advance, so almost all the work happens before anyone types.
 
-Write the whole answer as you would give it in sixty seconds, 200 to 300 words, standing alone.
+An offline job reads the last day of query logs, counts how often each query string was submitted, and keeps the roughly 100 million that clear a frequency floor. It builds a prefix tree over those strings, then walks it bottom up attaching to every node the ten best completions of that node's prefix. A parent's ten come from the union of its children's tens plus its own terminal entry, so the roll-up is a single pass rather than a subtree scan per node. The result is compiled into a minimised automaton, about 12GB for 100 million queries, and published as an immutable snapshot.
+
+Serving is then a lookup and not a search. Each node holds the whole snapshot in memory; a request walks one character per typed character and reads the list already sitting there. That costs microseconds, so the network dominates: about 100ms from keypress to paint, of which the server owns 50.
+
+Two things sit on top. Popularity moves faster than an hourly rebuild, so a streaming job produces a small overlay every 60 seconds and the serving node merges the two lists. And prefix traffic is brutally skewed toward two and three character prefixes whose answers are identical for everyone, so responses are cached at the edge on a 60 second TTL and about 95% never reach the origin.
+
+Personalization stays off the shared structure. The index is global; the user's own history is blended in on the client.
 #### Summary
-**The picture in your head:** a library reference desk where the librarian has memorized the 10 most popular books for every possible opening phrase of a question. You say "how do I bake" and without consulting any catalog she immediately says "chocolate cake, sourdough bread, banana bread." She built that knowledge over years of watching what people ask — but she updates her notes every hour. At the desk itself, no searching happens — just recall.
+**The picture in your head:** a library reference desk where the librarian has memorized the 10 most popular books for every possible opening phrase of a question. You say "how do I bake" and without consulting any catalog she immediately says "chocolate cake, sourdough bread, banana bread." She built that knowledge over years of watching what people ask, but she updates her notes every hour. At the desk itself, no searching happens, just recall.
 
 **The approaches people actually take:**
-TODO. Two or three things a competent engineer might reach for, in plain language and before any product name, with what each one buys and roughly when it wins.
 
-**The single-request walkthrough:** a user types "wea" (three keystrokes). Their browser fires `GET /suggest?q=wea`. The request first hits a CDN edge node — a geographically close cache server (like Cloudflare in a nearby city). The CDN has "wea" cached (short prefixes are requested millions of times a day by millions of users, so they are always in cache). The CDN returns `["weather", "weather today", "wearable tech"]` in under 10ms without touching your servers. If the CDN misses — say the user types "weathe" and this particular 6-character prefix is rarer — the request reaches a serving node. The serving node has an in-memory trie loaded from the last hourly snapshot. A trie is a tree where each node is a character: "w" → "e" → "a" → "t" → "h" → "e" is the path for "weathe". Every node in the trie pre-stores its top-10 suggestions. The node for "weathe" already has `["weather", "weather app", "weather forecast"]` attached. The serving node reads those three entries and returns them. No scanning, no sorting — just a lookup.
+*Precompute every answer offline and make the request a lookup.* Count what people searched for, and for every prefix worth serving, store the finished list of completions right next to that prefix. A request walks the prefix and reads. What this buys is a serving cost that does not depend on how many candidates the prefix covers, which is what makes a tight latency budget comfortable at very high request rates. What it costs is freshness and flexibility: the answers are as old as the last build, and any new ranking signal means rebuilding the whole structure rather than editing a function.
+
+*Keep only the candidate structure and rank when the request arrives.* Store the prefix tree without answers, gather what lives under the prefix, score it and take the best ten. Ranking becomes something you can change, personalize and A/B test per request, and the answers are as fresh as the counts underneath them. It costs CPU proportional to the size of the subtree, which for a two or three character prefix is hundreds of thousands of candidates. This wins when the corpus is small: a product catalogue, a contact list, an internal directory.
+
+*Push the answers to the edge and treat the origin as the miss path.* Prefix traffic is extremely skewed and the short prefixes are identical for everybody, so most requests never need to reach a machine that knows anything. This is less an alternative to the first two than the thing that decides how much of either you have to buy, and it stops working the instant responses differ per user.
+
+**The single-request walkthrough:** a user types "wea" (three keystrokes). Their browser fires `GET /suggest?q=wea`. The request first hits a CDN edge node, a geographically close cache server. The CDN has "wea" cached (short prefixes are requested millions of times a day by millions of users, so they are always in cache). The CDN returns `["weather", "weather today", "wearable tech"]` in under 10ms without touching your servers. If the CDN misses, say the user types "weathe" and this particular 6-character prefix is rarer, the request reaches a serving node. The serving node has an in-memory index loaded from the last hourly snapshot. It is a trie: a tree where each node is a character, so "w" then "e" then "a" then "t" then "h" then "e" is the path for "weathe". Every node in the trie pre-stores its top-10 suggestions. The node for "weathe" already has `["weather", "weather app", "weather forecast"]` attached. The serving node reads those three entries and returns them. No scanning, no sorting, just a lookup.
 
 **The pieces (and what each one is for):**
-- **Trie (a prefix tree with precomputed top-K at every node)** — a trie is a tree where each edge is a character. The path from root to any node spells a prefix. The crucial addition: every node stores the top-10 queries that start with that prefix (precomputed at build time). A lookup walks the path character-by-character and reads the precomputed list at the final node. O(length of prefix) total — no subtree scan.
-- **Hourly batch build pipeline** — every hour, a Spark job reads the last hour of query logs (10 billion queries per day = ~416 million per hour), aggregates query frequency, builds the trie bottom-up (children first, then each parent computes its top-10 from its children's top-10 lists), compresses it to a Finite State Transducer (an FST — a compact representation that shares common suffixes between words, cutting size 5–10x), and uploads the snapshot to object storage. The build is expensive but offline — users never wait for it.
-- **FST (Finite State Transducer) for production serving** — a naive trie using hashmaps takes ~60GB for 100 million queries. An FST exploits the fact that words like "running," "jumping," "walking" all share the "-ing" suffix — that suffix path is stored once. An FST cuts the same data to ~6–12GB, fitting on a single server. The tradeoff: FSTs are immutable, but since we rebuild every hour anyway, mutability is not needed.
-- **CDN for short prefixes** — autocomplete queries for "t", "th", "the" are issued by millions of users every minute. The suggestions for those prefixes are identical for all users (ignoring personalization). A CDN caches the response and serves it from hundreds of edge locations worldwide. About 95% of autocomplete QPS resolves at the CDN with no backend involvement.
-- **Mini-trie for real-time trends** — hourly builds miss breaking news. If "earthquake california" starts trending at 2:47pm, it will not appear in suggestions until the 3pm snapshot. A streaming aggregator (Flink) builds a small additional trie every 60 seconds from the last hour of query logs. At serve time, the serving node merges results from the base hourly trie and the mini-trie. Cost: ~50–100MB of extra RAM per serving node.
-- **Personal history merge** — the global trie is shared across all users. Personalization is a small layer on top: fetch the user's last 50 queries from a Redis cache, merge the top 3 personal matches with the top 7 global matches, return the blended list. The trie itself never contains per-user data.
+- **Trie (a prefix tree with precomputed top-K at every node)** - a trie is a tree where each edge is a character. The path from root to any node spells a prefix. The crucial addition: every node stores the top-10 queries that start with that prefix, precomputed at build time. A lookup walks the path character by character and reads the precomputed list at the final node. O(length of prefix) total, with no subtree scan.
+- **Hourly batch build pipeline** - every hour, a batch job reads a rolling day of query logs (10 billion queries per day, so ~417 million per hour arriving), aggregates query frequency, builds the trie bottom up (children first, then each parent computes its top-10 from its children's top-10 lists), compiles it to a Finite State Transducer (an FST, a minimised automaton that shares common suffixes as well as prefixes, cutting size 5 to 10x), and uploads the snapshot to object storage. The build is expensive but offline, so users never wait for it.
+- **FST for production serving** - a hashmap-based trie over 100 million queries needs roughly 76GB. An FST exploits the fact that "running", "jumping" and "walking" all share the "-ing" tail, so that tail path is stored once. The same data lands at 8 to 16GB, which fits whole on a single serving box. The tradeoff is that FSTs are immutable, and since we rebuild hourly anyway, mutability is not needed.
+- **CDN for short prefixes** - autocomplete requests for "t", "th", "the" are issued constantly and their suggestions are identical for all users (before personalization). A CDN caches the response and serves it from hundreds of edge locations. About 95% of suggest traffic resolves at the edge with no backend involvement.
+- **Streaming overlay for real-time trends** - hourly builds miss breaking news. If "earthquake california" starts trending at 2:47pm, it will not appear until the 3pm snapshot. A streaming aggregator builds a small additional trie every 60 seconds from the recent query stream. At serve time the node merges the base snapshot and the overlay. Cost: 50 to 100MB of extra RAM per serving node.
+- **Personal history merge** - the index is shared across all users. Personalization is a thin layer: the client keeps the user's recent queries locally and blends its own matches into the list before painting. The shared structure never contains per-user data.
 
-**The thing that makes it hard:** some prefixes receive hundreds of times more traffic than others. The prefix "t" alone might get 2 million queries per second globally — every English word starting with "t" generates traffic on that node. Sharding the trie by prefix (shard 1 handles "a*", shard 2 handles "b*") means the "t" shard gets overwhelmed while the "z" shard is idle. Without mitigation, the "t" shard becomes the bottleneck for the entire system. The fix: replicate hot shards aggressively. Since the trie is read-only between rebuilds, adding 10 replicas of the "t" shard is trivially cheap — just load the same snapshot into 10 servers. The CDN absorbs the bulk of single-character prefix traffic anyway.
+**The thing that makes it hard:** prefix traffic follows a distribution far more skewed than the underlying query distribution, because every long query passes through the same short prefixes on the way. The prefix "th" alone takes a few percent of all suggest traffic, roughly 60K requests per second at peak, while a shard owning "z" sits near idle. Partitioning the structure by first character means the "t" partition is the bottleneck for the entire system while most of the fleet is idle. There are two ways out and you want both: make the whole structure small enough that every node holds all of it, so there is nothing to route and nothing to skew, and let the CDN absorb the short prefixes before they ever reach a server.
 
-**Why this design and what it costs:** moving ranking and aggregation to the build pipeline eliminates the need for any complex computation on the hot path. At 20 million queries per second, even a 1-millisecond computation per query would require 20,000 CPU cores just for aggregation. The serving path reduces to: walk a few characters in a trie, read a precomputed list. That is fast enough that the network round-trip dominates latency, not the computation.
+**Why this design and what it costs:** moving ranking and aggregation into the build pipeline removes essentially all computation from the hot path. At 2M peak requests per second, even 1ms of CPU per request would be 2,000 cores burning on nothing but ranking, and that is before the CDN saves you. Precomputed, the serving path is a walk of a few characters and a pointer read, so the network round trip dominates rather than the computation. What you give up is the ability to change how anything is ranked without rebuilding everything, and any freshness shorter than the build cadence has to be bolted on beside the snapshot rather than expressed inside it.
 
 **If you were building it tomorrow:**
-- Build pipeline: Spark hourly job on S3 query logs → aggregated frequencies → FST snapshot built with the `dawgdic` or `levenshtein_automata` library → snapshot uploaded to S3 → serving nodes pull and do an atomic file swap.
-- Serving node: in-process FST loaded in RAM; personal history from Redis.
-- CDN: Cloudflare with `Cache-Control: public, max-age=60` on suggest responses (1-minute TTL balances freshness with edge hit rate).
+- Build pipeline: hourly Spark job over query logs in S3, aggregated frequencies, FST compiled with a library like `dawgdic` or Lucene's FST builder, snapshot uploaded to S3, serving nodes pull and do an atomic pointer swap.
+- Serving node: the FST loaded in-process and mmapped from local NVMe; a 60 second overlay trie fed by Flink.
+- CDN: `Cache-Control: public, max-age=60` on suggest responses, which balances trend freshness against edge hit rate.
 - Hot path pseudocode:
   ```
-  def suggest(prefix, user_id):
-    base_results = fst.lookup(prefix)[:10]       # in-memory, ~0.1ms
-    mini_results = mini_trie.lookup(prefix)[:5]  # streaming overlay
-    personal = redis.get(f"history:{user_id}")[:3]
-    return merge_and_rank(base_results, mini_results, personal)[:10]
+  def suggest(prefix, locale):
+    base    = fst[locale].lookup(prefix)[:10]     # in-memory, ~1us
+    overlay = mini_trie.lookup(prefix)[:5]        # 60s streaming overlay
+    return policy_filter(merge(base, overlay))[:10]
+  # personal history is merged client-side, so this response stays cacheable
   ```
 #### What this is really testing
-TODO
+Whether you recognise that the answer to a prefix can be enumerated in advance, and that this single fact relocates the entire system. There are on the order of 10^8 prefixes worth serving and the answer to each is ten short strings, so the complete answer space is small enough to compute offline and hold in memory. Once you see that, the interview stops being about matching and starts being about the build and serve split: what the build cadence is, what freshness that cadence costs you, what you bolt on beside the snapshot to recover it, and how you get a new snapshot into a fleet without serving garbage for an hour. A candidate who reaches for an index and a scoring pass at request time has answered a harder question than the one asked.
 
-The one insight this question exists to elicit, then the contrast with the question it most resembles and why the answers differ.
+The contrast is with the web search engine question. There the query is a *set of terms*, and the number of distinct term combinations is combinatorial, so nothing can be precomputed and every request has to do real work: look up a posting list per term, intersect them with block-max WAND, and rerank. That forces a document-partitioned index across roughly 1000 shards, which forces fan-out, which makes the p99 of the service the p99.9 of the slowest leaf, which is why most of that question is tail tolerance. Here the query is a *prefix*, which is a single point in a tree. It routes to exactly one place, touches one structure, and returns a list that was computed hours ago. There is no fan-out, so there is no tail amplification, and the ranking discussion that dominates Q47 is entirely absent from the request path because it happened at build time. The latency budgets follow: a few hundred milliseconds there because a human is waiting for an answer, about 50ms of server time here because a human is mid-keystroke and the list is rewriting itself under their fingers. Prefix matching over a precomputed structure and term matching over an inverted index are different problems that happen to share a search box.
 
-Closest question: TODO
+Closest question: Q47
 #### Clarifying questions and how each answer forks the design
 - Personalization?
 - Typo tolerance?
@@ -3894,46 +3906,52 @@ Closest question: TODO
 
 | If the answer is… | Then the design… |
 |---|---|
-| Personalization | blend a global trie with per-user history rather than one shared structure |
-| Typo tolerance | add fuzzy matching (edit-distance or n-gram index) on top of the exact-prefix trie |
-| Multilingual | per-language tries with locale routing, since tokenization differs |
-| Hourly refresh | batch-rebuild the trie from query logs — simple and cheap |
-| Real-time refresh | streaming counts with incremental trie updates — more moving parts |
-| Fixed top-k suggestions | precompute and cache top-k per prefix node so a read is O(1) at the node |
-| Sub-100ms target | serve from an in-memory trie behind an edge cache and keep heavy ranking offline |
+| Personalization | blend a global structure with per-user history, and decide whether that blend happens on the client (cacheable) or the origin (not) |
+| Typo tolerance | add fuzzy matching (edit-distance or n-gram index) on top of the exact-prefix structure, with its own latency budget |
+| Multilingual | per-locale structures with routing, since tokenization and popularity distributions differ |
+| Hourly refresh | batch-rebuild from query logs, simple and cheap |
+| Real-time refresh | a streaming overlay merged at serve time, since mutating the served structure is not an option |
+| Fixed top-k suggestions | precompute and cache top-k per prefix node so a read is a pointer dereference |
+| Sub-50ms server target | serve from an in-memory structure behind an edge cache and keep all ranking offline |
 #### Requirements and scale, derived out loud
 **Requirements**
 
-- **FR:** return top-k suggestions for prefix; rank by frequency × recency
-- **NFR:** <50ms p99; updated within hours; scale globally
+- **FR:** return the top 10 completions for a prefix, ranked by frequency with recency weighting; suppress policy-blocked suggestions; support per-locale results.
+- **NFR:** server-side p99 <= 50ms, which is ~100ms keypress to paint; suggestions reflect the last hour, and terms that start trending within about a minute; globally distributed.
 
 **Scale**
 
-- **Search volume:** Google public stat ~99k searches/s = ~8.5B/day; round to 10B searches/day for headroom → 10B raw queries/day to ingest into the build pipeline.
-- **Autocomplete QPS:** typing flow per query — ~20 keystrokes avg, with a ~150ms debounce that collapses ~2 keystrokes per network call → ~10 calls/query; some users abandon mid-type → effective ~5 calls/query (debounce halves it again on slower networks). 10B queries/day × ~50 calls/query (worst-case desktop with no debounce) = ~500B calls/day; 500B ÷ 86,400 ≈ ~6M QPS steady; daytime peak (US+EU overlap) ~3× → ~20M QPS.
-- **Suggestion payload:** ~10 suggestions per response × ~30B each (text ~25B + float score 4B + JSON framing) = ~300B per response — sub-MTU and CDN-cacheable on `(prefix, locale)`.
-- **Trie size in RAM:** keep top ~100M unique queries (long tail beyond that has no real signal); avg query ~20 chars; trie node ~30B (children pointer map + top-K refs + score). 100M × 20 × 30B = ~60GB raw; FST/double-array compression cuts ~5–10× → ~6–12GB per shard.
-- **Snapshot size:** rebuild hourly → ~60GB raw snapshot/hour written to object store; replication factor 3 → ~180GB stored per hour; retain 24h for rollback = ~4.3TB hot snapshots.
-- **Cold archive:** daily query-frequency aggregates compress hard (high duplication, columnar ints) → ~10GB/day Parquet × 365 = ~3.6TB/yr — cheap to keep indefinitely for trend analysis and seasonal models.
-- **Hot vs cold:** trie shards live in RAM (sub-ms p99 lookup); raw query logs flow through a 24h hot stream (Kafka) before the hourly build job aggregates them into the trie and drops the raw logs to cold object store.
+- **Search volume:** public figures put Google at ~99k searches/s, so 99k × 86,400 = 8.5B/day. Round to **10B searches/day** for headroom.
+- **Suggest calls per search:** average query is ~20 characters. The client suppresses the first 2 characters (a 2-character prefix is nearly useless) and most users accept a suggestion or stop reading at around 8 characters, leaving ~6 eligible keystrokes; a 150ms debounce collapses one or two of them. Call it **~5 suggest calls per search**.
+- **Suggest QPS:** 10B × 5 = 50B calls/day. 50B ÷ 86,400 = **~580K QPS average**. Traffic is not flat; the US and Europe daytime overlap runs ~3× the 24-hour mean, so **~1.8M QPS peak**, round to 2M.
+- **Origin QPS:** short prefixes dominate and their answers are identical for everyone, so a 60s edge TTL gets ~95% hit rate. Origin peak = 2M × 0.05 = **~100K QPS**. That, not the 2M, is what the serving fleet is sized against.
+- **Response payload:** 10 suggestions × (~25B text + 4B score) + JSON framing ≈ **~350B**, well inside one MTU, cache key is just `(prefix, locale)`.
+- **Unique queries kept:** ~200M distinct strings appear in a day, but a frequency floor of 5 occurrences/day halves that to **~100M**, which is the build's input. Below the floor a count is indistinguishable from one determined bot.
+- **Trie nodes:** 100M queries × 20 chars = 2B character positions; prefix sharing collapses that roughly 2× → **~1B nodes**.
+- **RAM uncompressed:** ~60B per hashmap node (a small child map plus a score) × 1B = **~60GB**, plus a 10 × 8B top-K payload on the ~200M nodes shallow enough to carry one = 16GB, so **~76GB total**. That does not fit a 64GB box.
+- **RAM compiled:** FST minimisation shares suffixes as well as prefixes and amortises to ~10B per node, 5 to 10× on the whole structure → **~8 to 16GB**, call it **12GB**. Fits whole on every serving node beside the OS page cache and the streaming overlay.
+- **Snapshot distribution:** the published artifact is the 12GB FST, not the 76GB build structure. 12GB × 3 replicas = 36GB/hour; keeping 24 hours for rollback is 36GB × 24 = **~870GB**, trivial. Pulling it to a 200-node fleet is 200 × 12GB = 2.4TB/hour = **~670MB/s sustained**, which is why nodes pull from object storage rather than from the build host.
+- **Fleet size:** at ~50μs of CPU per origin request (walk, read, merge overlay, filter, serialise) one core sustains ~20K QPS saturated, so ~5K at a sane utilisation; 100K ÷ 5K = **~20 cores**. The fleet is therefore sized by memory and geographic redundancy, not CPU: **~200 nodes** worldwide, each holding the full 12GB.
+- **Cold archive:** daily query-frequency aggregates compress hard (columnar integers, heavy duplication) to ~10GB/day Parquet; × 365 = **~3.6TB/yr**, cheap enough to keep indefinitely for seasonality models.
+- **Latency budget, derived:** a 40 wpm typist emits ~3.3 characters/second, so ~300ms between keystrokes, and the list must settle well inside that. Industry target is ~100ms keypress to paint. Mobile round trip is 30 to 50ms and client render ~10ms, leaving the **server ~50ms p99**; an edge hit uses ~10ms of it.
 #### Key decisions
-TODO
+**Hashmap trie vs a compiled automaton (FST) for the served structure**
+- Choice: build with a plain pointer-and-hashmap trie in the pipeline, then compile the finished structure to a finite state transducer for serving. FST here means a minimised automaton that shares suffixes as well as prefixes, so every distinct completion is exactly one path through the machine.
+- Alternative: serve the hashmap trie directly, which the build already has in memory, and skip the compile step entirely.
+- Decider: bytes per node against the size of a serving box. 1B nodes at ~60B each is ~60GB, plus ~16GB of top-K payload, so ~76GB. That does not fit 64GB, which means sharding by first character, which reintroduces routing and hands you the hot-prefix skew problem for a structure that would otherwise fit whole. The FST amortises to ~10B per node and lands at 8 to 16GB, so every node holds everything and routing disappears. The decision is not about lookup speed; both are O(prefix length) and both are memory-bound in practice.
+- Alternative wins when: the structure fits uncompressed. Under ~10M entries a hashmap trie is roughly 5GB, which fits anywhere, and you have avoided a compile step that takes tens of minutes and a library whose internals you cannot easily debug at 3am. It also wins whenever entries must be mutated in place rather than rebuilt, because minimisation is global and a single insert can invalidate a large shared-suffix region. Anything with per-tenant or per-user entries that change continuously belongs in a mutable trie. Lucene has used FSTs for term dictionaries since 2011 for exactly this memory reason and the property still holds, but it is a read-only property and it is fair to say so.
 
-Two or three genuine forks. For each, in this exact shape so it stays checkable:
+**Precompute the top completions at every node vs rank at query time**
+- Choice: precompute. At build time every node down to depth 12 carries its finished top-10, and the request reads it.
+- Alternative: store only the candidate set, and at request time gather everything under the prefix, score it and select the best ten.
+- Decider: CPU per request against request rate, given a 50ms server budget. A three-character prefix like "wea" sits above the order of 10^5 stored completions; gathering and heap-selecting ten of them is 1 to 3ms of CPU. The precomputed read is ~1μs, three orders of magnitude cheaper. At 100K origin QPS that is the difference between 100 to 300 cores of pure ranking and about 0.1 of one. The second half of the decider is how fast the ranking actually moves: the head of the query distribution is stable over hours, with the top few thousand prefixes barely changing between weekdays, so an hourly cadence plus a 60-second overlay for what does move loses very little.
+- Alternative wins when: the candidate set is small, or the ranking depends on request-time inputs you cannot enumerate. Under a few thousand candidates per served prefix (a 100K-SKU catalogue, an enterprise directory) the scan finishes in under 100μs, so precomputation buys nothing and costs you an entire build pipeline. And once the answer must vary by inventory state, region, live promotion and user segment, the build-time cross product explodes: 10 regions × in-stock or not × 20 live promotions is 400 variants of every list, at which point ranking a small candidate set per request is both cheaper and far simpler to reason about. E-commerce autocomplete usually lands here; web-scale autocomplete does not.
 
-**<name of the fork>**
-- Choice:
-- Alternative:
-- Decider:
-- Alternative wins when:
-
-**Raw material, from the old Common Mistakes:**
-
-- **Scanning the subtree on every keystroke.** The whole point of the design is to move that work to build time.
-- **Mutating the trie on the hot path.** Immutable snapshots keep serving fast and operationally simple.
-- **Building per-user tries.** Personalization should be a small merge on top of a shared global structure.
-- **Ignoring client debounce.** Autocomplete QPS assumptions are nonsense if every keypress becomes a network call.
-- **Treating typo tolerance as free.** Fuzzy matching needs a separate budget and often a separate index.
+**Global cacheable response with a client-side personal merge vs a server-side personalized merge**
+- Choice: `/suggest` returns identical bytes for a given `(prefix, locale)` and is cached at the edge on a 60s TTL. The client holds the user's recent queries locally and blends its own matches into the list before painting.
+- Alternative: the origin looks up the user's history, merges 3 personal with 7 global, and returns a per-user list.
+- Decider: origin fleet size, which is a direct function of edge hit rate. Global responses cache at ~95%, so 2M peak QPS becomes ~100K at the origin and ~200 nodes carry it. A per-user response is uncacheable by construction, so the origin absorbs the full 2M, a 20× fleet, and every one of those requests now needs a history lookup, which puts a datastore on a path whose whole point was that it touches nothing.
+- Alternative wins when: the personal signal is worth more than the cache, or the client cannot hold the history. In a logged-in product with a modest user base, where "the document you edited yesterday" beats anything global and traffic is 5K QPS rather than 2M, the CDN was never doing meaningful work and the server-side merge is simply better. It also wins where history must not persist on the device (shared or managed devices) or must be consistent across a user's devices immediately. The honest cost of the client-side choice is that the blend is only as good as what that device has seen, so a user's first session on a new phone gets no personalization at all.
 #### High-level design
 **must-say**
 
@@ -4020,35 +4038,37 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 </svg>
 ```
 
-**How to read the diagram:** almost all the heavy work happens before a user types anything. Batch jobs build an in-memory trie from past query logs, and serving nodes answer a request by walking that trie and returning the precomputed top suggestions for the prefix.
+**How to read the diagram:** almost all the heavy work happens before a user types anything. Batch jobs build the structure from past query logs, and serving nodes answer a request by walking that structure and returning the completions already stored at the prefix.
 
-**Why the flow is shaped this way:** autocomplete traffic arrives one keystroke at a time, which means query-time scanning is a non-starter. The system moves ranking and aggregation offline so the serving path only does a tiny amount of prefix lookup work.
+**Why the flow is shaped this way:** autocomplete traffic arrives one keystroke at a time, so query-time scanning is a non-starter. Ranking and aggregation move offline and the serving path is left with a walk and a read. The diagram draws shards because the general case needs them; at 12GB compiled, this design does not, and every node holds the whole snapshot. Keep the shard boxes on the board anyway, because the interviewer will ask what happens when the structure outgrows a box.
 
-**What this layout buys you:** very low latency and predictable serving cost even at huge QPS. The tradeoff is freshness: if trends change faster than the rebuild cadence, you need a small delta path beside the main snapshot pipeline.
+**What this layout buys you:** very low latency and predictable serving cost at high QPS, with no fan-out and therefore no tail amplification. The cost is freshness. Anything that changes faster than the rebuild cadence needs a delta path running beside the main snapshot pipeline, and that delta path is the least-tested part of the system.
 #### Deep dive
 **must-say**
 
-**Why cache top-k at every node:**
-- Lookup = hash to node → return top_k → done. O(prefix_length) total.
-- Without cache, you'd traverse subtree at request time → too slow.
+**The build: bottom-up top-K, and getting a new snapshot into the fleet without serving garbage.**
 
-**Build process:**
-1. Aggregate query frequencies from logs (hourly)
-2. Build trie bottom-up
-3. At each node, compute top-k from union of children's top-k
-4. Snapshot trie → push to all serving nodes → atomic swap
+*Aggregation.* The hourly job reads a rolling 24-hour window of query logs, not just the last hour, so counts are stable enough to rank on. Each occurrence is weighted by recency with an exponential decay of roughly a 6-hour half-life, so yesterday still contributes and today dominates. About 200M distinct strings appear in a day; a floor of 5 occurrences cuts that to ~100M. The floor is not an optimisation, it is a safety property: below it a count is indistinguishable from one motivated bot, and anything you rank on that count is a suggestion someone manufactured.
 
-**Sharding.** Partition the trie by prefix — first 1-2 chars determine shard. Shard 1 owns the "a*" subtree, shard 2 owns "b*", etc. Routing is trivial (hash on prefix prefix), and each shard's working set is bounded. The downside is density skew: English queries cluster heavily on "t" (the, to, today), "h" (how, here), "w" (what, where) — those shards see 10x the QPS of "z" or "x".
-- Hot shards (e.g., "h", "the") → replicate aggressively (5-10x replication factor) so the QPS spreads across replicas. Cheap because the trie is read-only between rebuilds.
-- Skewed beyond replication-fix → switch to hash-based sharding, which gives uniform load but scrambles locality (you lose the "scan a subtree from one node" property; less of a concern when each query is just a hashmap lookup anyway).
+*The roll-up, and why one pass is enough.* Sort the surviving strings lexicographically and build the trie in a single streaming pass; sorted input means you only ever hold one root-to-leaf path in memory, so the build does not need the whole structure resident while constructing it. Then walk the trie post-order and set
 
-**Personalization.** Keep the global trie shared across all users — putting per-user data in the trie would explode storage. At request time, fetch the user's recent query history (Redis, last 50 queries with timestamps) and merge with the global top-K: typically top-3 personal slots + top-7 global. Tiebreakers favor personal matches if the global score is close. Example: a user who searches "kotlin coroutines" daily sees that as the top suggestion for "kot" even when global trends point at "kotaku news".
+```
+node.topK = best K of ( union of child.topK for each child ) + ( node's own terminal entry, if it is a complete query )
+```
 
-**Typo tolerance.** Three options, each with a different trade-off. (1) Pre-expand: at trie-build time, generate edit-distance-1 variants of each top query and add them as separate trie entries — explodes trie size 5-10x but no runtime cost. (2) BK-tree side-index: a separate metric tree of common queries supports fuzzy lookup when the prefix has zero hits — adds 50-100ms latency on the fallback path. (3) Punt entirely: let the user submit the typo'd query and the search engine's "did you mean" handle correction post-submit — fastest, loses some autocomplete utility. Google does (3); most ecommerce search does (1).
+The correctness argument is worth being able to state, because interviewers ask why this is not cheating. Any completion in a node's true top K lives in exactly one child subtree. Within that subtree it beats every completion that the parent ranks below it, so it is in that child's own top K. Therefore the union of the children's top-K lists is a sufficient candidate set for the parent, and the whole build is O(nodes × branching × K) rather than a subtree scan per node.
 
-**Multilingual.** Build one trie per language (or per locale, where regional variants matter — pt-BR vs pt-PT). The serving stack picks the trie based on the user's `Accept-Language` header or explicit locale setting; CJK languages (Chinese, Japanese, Korean) need pre-tokenization since they don't have spaces — input is converted to pinyin/romaji or segmented into character n-grams before trie lookup. Storage cost is roughly linear in number of locales because each language has its own popular-query distribution; sharing a single global trie would mix scripts and noise rankings. Mixed-language queries (English brand names typed in a Spanish session) are handled by querying the user's primary trie first and falling back to a secondary English trie if zero hits.
+That argument depends on one condition, and it is the condition people break: the score has to be a property of the completion alone, not of the (prefix, completion) pair. The moment you want "wea" to rank "weather" above "wear" for a reason that does not also apply at "we", the roll-up is invalid and you are back to scanning. Length normalisation and prefix-position boosts both break it. If you need them, you need a different build, and it will not be one pass.
 
-**Build pipeline vs serving path — visual.** Build is offline batch; serve is hot path with strict p99.
+*Depth cap.* Store top-K only down to depth 12. Past that the subtree is small (a 13-character prefix typically has fewer than 50 completions) so a scan at request time costs ~20μs, comfortably inside budget. This is what keeps the top-K payload at ~16GB uncompressed rather than growing with the deepest string.
+
+*Compile and publish.* Minimise the finished trie to an FST, ~12GB, checksum it, write it once to object storage. Serving nodes pull from the object store, never from the build host: 200 nodes × 12GB is 2.4TB per hour, ~670MB/s sustained, and a single build host would be the bottleneck for the whole rollout.
+
+*The swap, which is the part that gets drilled.* On each node: download to a temp path on local NVMe, verify the checksum, then run a canary set of ~1000 known prefixes against expected results before the file is visible to any request. Only then mmap the new file and flip one atomic pointer from old FST to new. Requests already holding the old pointer finish against the old mapping, which is unmapped when its refcount hits zero. Two consequences follow. First, both snapshots are resident during the overlap, so size the box for 24GB, not 12GB. Second, never swap the whole fleet at once: roll in waves of 10% with a two-minute soak between waves. The failure you are actually defending against is a bad *build*, not a bad download, and a bad build passes its checksum perfectly. The canary set is what catches "the aggregation job read an empty partition and every top-K is now empty", which is the outage that actually happens.
+
+*Rollback.* Keep the previous two snapshots on disk. Rollback is flipping the pointer back, which takes seconds and no network. The uncomfortable part is that the CDN keeps serving the bad answers for up to the 60-second TTL after the origin is healthy again, so you need purge-by-tag on the suggest cache and you need to have tested it, because the first time you use it will be during the incident.
+
+**Build pipeline vs serving path.**
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 485" role="img" aria-label="Autocomplete build pipeline vs serving path">
@@ -4129,125 +4149,128 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 </svg>
 ```
 
-The build path tolerates minutes of latency (it runs hourly); the serve path budgets ~100ms total round-trip including network. The CDN absorbs ~95% of QPS because most traffic hits short prefixes ("t", "th", "the") that are stable across users.
-
-**Trie vs FST comparison.** *[Source: Lucene FST docs, real-world autocomplete deployments]*
-
-| Property | Hashmap-trie | FST (Finite State Transducer) |
-|---|---|---|
-| RAM (10M queries, 12-char avg) | ~60GB | ~6-12GB (5-10x compression) |
-| Lookup | O(prefix) hashmap chain | O(prefix) state transitions |
-| Mutation | cheap (per-node insert) | expensive (rebuild whole structure) |
-| Best for | dev / mutable | prod / immutable hourly snapshot |
-
-FST exploits **shared suffixes** (every word ending "-ing" reuses one trailing path) and shared prefixes (every word starting "anti-" shares a leading path). It's structurally minimal: there is exactly one path per accepted string. This is why Lucene uses FSTs for term dictionaries — the same property that makes them small also makes them ideal for read-only hourly snapshots that get pushed to all serving nodes.
-
-**Real-time mini-trie for trends.** A streaming aggregator (Flink) builds a small trie every 60 seconds from the most recent query stream and serving nodes consult both — base hourly trie + minute-level mini-trie — and merge top-Ks at request time. Cost: each serving node holds an extra ~50-100MB of mini-trie state. Win: breaking news ("earthquake", "election results") shows up in suggestions within a minute instead of an hour.
-
-**Latency budget.** Industry target is ~100ms p99 from keypress to suggestion render. Network alone consumes 30-50ms (one round trip on mobile); the serving stack must finish in ≤50ms. CDN edge serves ~95% of QPS in <10ms. A miss costs ~30-40ms (route, memory lookup, merge with personal history). Anything more and the user has typed the next character before suggestions arrive — feels broken.
+The build path tolerates minutes of latency because it runs hourly; the serve path budgets ~50ms of server time inside a ~100ms keypress-to-paint target. Note that the diagram draws the personal merge at the origin, which is the alternative in the third fork above; the design as chosen moves that box to the client so the response stays cacheable, and the merge arrow disappears from the origin entirely.
 #### Where it breaks
 **must-say**
 
 **Bottlenecks**
 
-- **Trie size in RAM** → finite state transducer (FST) compresses 5–10×. A naive char-tree with hashmaps is ~60GB; FST exploits shared suffixes (every word ending in "-ing" shares a path) and compresses to 6-12GB per shard, fitting comfortably on a single box.
-- **Hot prefix** → CDN cache + replicate shard. Single-char prefixes ("t", "a") see 100x the QPS of long prefixes; CDN absorbs ~95% and shard replication handles the rest. Most users only type 2-3 characters before clicking a suggestion, so short prefixes dominate.
-- **Build time on log explosion** → sample logs (1%) for tail; full for head. A viral event 10x's query volume; the aggregator can't keep up with raw logs. Sampling preserves the head distribution (popular queries still dominate top-K) and only the long tail loses statistical resolution — acceptable because long-tail queries weren't going to make any node's top-10 anyway.
-- **Stale suggestions for trends** → near-real-time mini-trie for last hour, merged at serve. Hourly rebuild misses breaking news (e.g., "earthquake" trending in 5 min). A streaming aggregator builds a small trie every minute from the recent-query stream and serving nodes consult both — base trie + mini-trie — and merge top-Ks.
-
-- **Tight latency budget** (~100ms p99 end-to-end) → CDN at edge, FST in RAM, no DB round-trips on hot path. Network alone consumes half the budget on mobile; the serving stack has ~50ms total. Anything that touches a DB (personalization, ranking) must hit RAM or Redis with sub-ms latency.
-- **Snapshot push to N shards** → S3 + atomic swap. Pushing a 10GB FST snapshot to hundreds of serving shards via direct copy would saturate egress. Upload once to S3, shards fetch in parallel, atomic file swap (rename) makes the cutover instant per shard.
+- **Structure size in RAM** → compile to an FST. A hashmap trie over 100M queries is ~76GB including top-K payloads; suffix sharing brings that to 8 to 16GB, which fits on one box and removes the need to shard at all.
+- **Hot prefix** → the CDN plus a whole-structure-per-node layout. Single and double character prefixes take a few percent of all traffic each; the edge absorbs ~95% of requests, and because every node holds the entire snapshot there is no prefix-to-shard mapping left to skew. This is the main practical reason to pay for the FST compile.
+- **Build time on log explosion** → sample the tail, keep the head whole. A viral event multiplies log volume and the aggregator falls behind. Sampling at 1% below the frequency floor preserves the head distribution exactly (popular queries still dominate every top-K) and only costs resolution in the tail, which was never going to make anyone's top-10.
+- **Stale suggestions for trends** → a 60-second streaming overlay merged at serve time. The base snapshot is up to an hour old. The overlay is small (50 to 100MB per node) and adds ~5μs to a lookup, and it is the only mutable thing on the serving path, which is why it is also the riskiest (see Unresolved).
+- **Snapshot distribution** → object storage plus staged rollout. Pushing 12GB to 200 nodes from a build host would saturate its egress; upload once, let nodes pull in parallel at ~670MB/s aggregate, and roll the swap in 10% waves so a bad build cannot take the whole fleet.
+- **Tight latency budget** (~50ms of server time) → nothing on the hot path may touch a database. Every ingredient of a response is either in local RAM or already at the edge. This is precisely why personalization moved to the client: a per-user history lookup is the one thing that would put a datastore back on the path.
 
 **Failure modes**
 
 | Layer | Failure | Detection | Mitigation |
 |---|---|---|---|
-| Snapshot distribution | New trie/FST snapshot is corrupt or incomplete on some shards | Checksum mismatch and snapshot-activation failure alert | Verify checksums before swap, keep last-known-good snapshot loaded, and roll back atomically |
-| Hot shard | Prefix shard for common prefixes saturates | Per-shard QPS skew and latency spike | Replicate hot prefixes aggressively and let CDN absorb the shortest prefixes |
-| Trend overlay | Mini-trie or recent-query overlay stalls | Overlay age and recent-trend miss canary | Serve from the base hourly snapshot only until the streaming overlay recovers |
-| Personalization cache | Recent-history lookup is slow or unavailable | Personalization merge latency and cache miss spike | Fall back to global suggestions rather than delaying autocomplete |
-| Edge caching | CDN cache stampede on a popular prefix after snapshot roll | Origin QPS spike on short prefixes | Pre-warm top prefixes on rollout and single-flight origin recomputation |
-| Policy filter | Suppression rules fail and unsafe suggestions leak into top-K | Blocklist match canary and policy-violation audit | Apply filtering at build time and again at serve time as defense in depth |
+| Snapshot distribution | New snapshot is corrupt or incomplete on some nodes | Checksum mismatch and canary-prefix failure before activation | Verify checksum and canary set before the pointer flip, keep the last two known-good snapshots resident, roll back by flipping the pointer |
+| Bad build | Snapshot is well-formed but semantically empty or wrong | Canary-prefix diff against the previous snapshot, and top-K emptiness rate | Staged 10% rollout with a two-minute soak, automatic halt on canary regression |
+| Hot prefix | A prefix range saturates a node | Per-node QPS skew and p99 spike | Whole snapshot on every node so any node can serve any prefix; add replicas and let the edge absorb short prefixes |
+| Trend overlay | Streaming overlay stalls or is poisoned | Overlay age, and a spike in suggestions with no history in the base snapshot | Serve from the base snapshot alone until the overlay recovers; overlay entries are always rate-limited and policy-filtered before merge |
+| Edge cache | Cache stampede on popular prefixes after a snapshot roll | Origin QPS spike on short prefixes | Pre-warm the top prefixes ahead of the roll and single-flight origin fills |
+| Policy filter | Suppression rules fail and unsafe suggestions leak into top-K | Blocklist-match canary and policy-violation audit | Filter at build time and again at serve time, and keep purge-by-tag on the edge cache tested |
 
 **Unresolved**
 
-TODO. Two or three things this design genuinely does not handle well, and what you would do about each.
+**The tail is neither fresh nor good, and the frequency floor is why.** Roughly 15% of Google searches are ones it has never seen before, and the floor of 5 occurrences per day deletes a much larger band than that from the index. For a real fraction of prefixes the system has genuinely nothing to say and returns an empty list, which reads as broken to a user who is typing something perfectly reasonable. Lowering the floor does not fix it; it just imports bot noise into the suggestion list, which is worse than silence. The only real answer is to generate rather than retrieve, completing from an n-gram model or a small language model when the index comes up empty, and that swaps a retrieval system with a bounded output space for one that can invent a suggestion nobody has ever searched for, including defamatory ones. That is a different safety problem with a different review process attached, and we have not built it.
+
+**Popularity ranking is a feedback loop and we cannot measure our way out of it from inside.** Suggesting a query causes people to run it, which raises its count, which causes it to be suggested more. Nothing in the log distinguishes "popular because people wanted it" from "popular because we put it in front of them", and the obvious experiment does not help: engagement metrics are inflated by the same loop they are supposed to evaluate. The partial fix is a small holdout arm that never receives suggestions and ranking the head from its organic frequencies, which costs you a degraded experience for those users and is statistically far too thin to say anything about the tail. So the head is measurable and the rest is asserted. It also means a suggestion that becomes wrong (a person's name attached to an accusation, a product that was recalled) is self-reinforcing until a human intervenes.
+
+**Safety filtering is a build-time blocklist against a serve-time adversary, and the overlay is the hole.** Suppression happens at build time, which is the right place because it costs nothing at request time. But offensive and defamatory combinations are composed continuously, blocklists are string matching against people who are deliberately working around string matching, and the legally required suppression set varies by jurisdiction with a takedown clock measured in hours. The 60-second overlay is the sharpest edge here: a term can go from unseen to served in one minute, which no human review process can match, so the overlay gets a stricter automated filter and a lower trust score than the base index and will still be the path that leaks something. We accept a serve-time filter as second-line defence, costing ~0.2ms, and we accept that a suppression pushed now is still served from the edge for up to 60 seconds afterwards.
 #### Drill questions
-1. What if a serving shard goes down?
-2. How do you handle real-time trends (breaking news in last 5 minutes)?
+1. What if a serving node goes down mid-rollout?
+2. How do you handle real-time trends, breaking news in the last five minutes?
 3. How would you support typo tolerance?
-4. How do you personalize without blowing up the trie?
-5. How do you prevent suggesting offensive or sensitive queries?
-6. How would you scale this 10x to 100B queries/day?
-7. Why FST over hashmap-trie in production?
-8. What's the latency budget end-to-end?
-
-TODO. Only 8 drill questions carried over, top up to at least 10.
+4. How do you personalize without blowing up the shared structure?
+5. How do you prevent suggesting offensive or defamatory queries?
+6. How would you scale this 10x, to 100B searches/day?
+7. Why an FST over a hashmap trie in production?
+8. What is the latency budget end to end, and where does each millisecond go?
+9. How does this change for Chinese, Japanese or Korean input?
+10. Suggesting a query makes it more popular. How do you keep ranking from eating its own tail?
+11. What does the client do between keystrokes, and how does that change your QPS estimate?
+12. Walk through the moment a new snapshot lands on a serving node.
 #### Answers to drill questions
-1. Each shard is replicated 3x; LB routes around dead nodes. Trie snapshot in S3 means a new replica can warm up in minutes. Worst case: serve from CDN cache until replacement is up. *If pushed:* during rebuild, fall back to a smaller "head-only" trie (top 1% of queries) that fits on every node — degrades quality but not availability.
+1. Every node holds the whole 12GB snapshot, so there is no state to reconstruct and no shard that becomes unavailable; the load balancer routes around it and the remaining nodes absorb the traffic, which they can because CPU utilisation is ~25%. A replacement warms up by pulling the current snapshot from object storage, a few minutes at 670MB/s aggregate. *If pushed:* during the warm-up window the node must not take traffic, so readiness is gated on the canary prefix set passing, not on the process being up. A node that answers with an empty index is worse than a node that is down, because the load balancer will happily keep sending it requests.
 
-2. Mini-trie built every minute from a sliding window of recent queries, merged with the hourly base trie at serve time. *If pushed:* tradeoff between freshness and noise — too short a window and one bot can spike a query; mitigate with bot detection + rate limits before counting.
+2. A streaming aggregator builds a small overlay trie every 60 seconds from a sliding window of recent queries, and serving nodes merge it with the base snapshot at request time. *If pushed:* the tradeoff is freshness against noise. A short window means one coordinated group can spike a term into the suggestion list within a minute, so the overlay needs per-source rate limiting and bot filtering before counting, and a stricter policy filter than the base index gets. It is the least safe path in the system and it is the one with the least review time.
 
-3. Pre-expand each query into common edit-distance-1 variants and add them to the trie. Or use a BK-tree side-index for fallback fuzzy lookups when the prefix has zero hits. *If pushed:* avoid both — let the search engine's "did you mean" handle it after submission. Autocomplete on raw prefix is faster and users mostly self-correct.
+3. Three options with genuinely different costs. Pre-expand: generate edit-distance-1 variants of each top query at build time and add them as entries, which multiplies index size 5 to 10x but costs nothing at request time. Side index: a BK-tree or n-gram index consulted only when the exact prefix returns zero hits, adding 50 to 100ms on that fallback path, which blows the budget but only for requests that would otherwise show nothing. Or punt: let the user submit and let the search engine's spelling correction handle it. *If pushed:* Google essentially punts on the prefix and corrects post-submit; e-commerce search pre-expands, because "adiddas" returning nothing loses a sale. The choice follows from whether an empty suggestion list is an inconvenience or a lost transaction.
 
-4. Keep the global trie shared. Personalization is a separate per-user query history (Redis), merged at serve time — top-3 personal + top-7 global. *If pushed:* learned re-ranker on top of merged candidates uses user features (location, past queries) — heavier but cleaner than trying to bake personalization into the trie itself.
+4. Keep the shared structure global, and do the blend on the client from history stored locally. That keeps the response identical per `(prefix, locale)`, which is what preserves the ~95% edge hit rate, and the edge hit rate is what keeps the origin at 100K QPS instead of 2M. *If pushed:* the cost is that a new device has no personalization until it accumulates history, and you cannot personalize for users who clear local storage. If the product genuinely needs cross-device personalization, move the merge to the origin and accept a 20x fleet, which is a fine trade at 5K QPS and an absurd one at 2M.
 
-5. Blocklist applied at trie-build time — filter out queries matching blocked patterns before they reach any node's top-K. Periodic ML classifier re-runs on the candidate set. *If pushed:* serve-time filter as defense-in-depth; legal/regional variants (EU vs US) maintained as separate trie overlays.
+5. A blocklist applied at build time, before any string can reach a node's top-K, plus a classifier pass over the candidate set. A serve-time filter runs as second-line defence at ~0.2ms. *If pushed:* build-time filtering cannot keep up with the 60-second overlay, so the overlay gets a stricter automated filter and a lower trust weight. Jurisdictional suppression (right to be forgotten, defamation takedowns) is maintained as per-region overlays with a takedown clock in hours, and the edge cache TTL means a suppression is still served for up to 60 seconds after you push it, so purge-by-tag has to be tested before you need it.
 
-6. Add more prefix shards and replicate hot ones aggressively (geographically). Most cost is in CDN, not backend — push more prefixes to CDN edge. *If pushed:* swap from RAM trie to FST (5-10x compression) so each shard holds more; trade some lookup latency for memory headroom.
+6. 10x the searches is 20M peak suggest QPS and ~1M at the origin after the edge. The origin fleet grows linearly, which is fine because it is ~20 cores today. The interesting part is the index, which does *not* grow 10x: query popularity is Zipf, so 10x the volume yields maybe 2 to 3x the distinct strings above the frequency floor, so the FST goes from 12GB to perhaps 30GB and no longer fits comfortably beside the OS page cache on a 64GB box. *If pushed:* that is when you finally shard, and the honest cost is that you reintroduce the hot-prefix skew that holding the whole structure per node had eliminated. Shard by a hash of the first three characters rather than the first one, so "th" and "tw" land in different places.
 
-7. RAM. A hashmap-based trie at 10M queries (12-char avg) is ~60GB; an FST compresses to 6-12GB by sharing suffix paths (every "-ing" path is one). FSTs are immutable, but autocomplete rebuilds hourly anyway so mutability isn't required. Lucene uses FSTs for the same reason. *If pushed:* the trade is build complexity — FST construction is non-trivial vs trivial trie inserts. Use a trie in dev, compile to FST for prod snapshot.
+7. Memory. A hashmap trie over 100M queries at 20 characters is ~1B nodes at ~60B each, ~60GB, plus ~16GB of top-K payloads, so ~76GB, which does not fit a 64GB box. An FST shares suffixes as well as prefixes, so every "-ing" tail is one path, and amortises to ~10B per node, landing at 8 to 16GB. That fits whole on every node, which is what lets you delete the routing layer entirely. FSTs are immutable, but we rebuild hourly, so that costs nothing here. Lucene has used FSTs for term dictionaries since 2011 for the same reason. *If pushed:* the trade is build complexity, since FST construction is a real algorithm while trie insertion is trivial. Build with a trie, compile to an FST for the snapshot, and keep the trie path working so you can debug against it.
 
-8. ~100ms p99 from keypress to suggestion render. Network round-trip on mobile is 30-50ms; serving stack must finish in ≤50ms. CDN edge handles ~95% of traffic in <10ms; misses cost ~30-40ms (shard route + RAM lookup + personal-history merge). Beyond 100ms, users have typed the next character — feels broken. *If pushed:* client-side prefetch on the next likely character ("if user typed 'th', request suggestions for 'tha', 'the', 'thi' speculatively") trades bandwidth for perceived latency.
+8. ~100ms from keypress to painted list, derived from typing cadence: a 40 wpm typist leaves ~300ms between keystrokes and the list must settle well inside that. Mobile round trip is 30 to 50ms, client render ~10ms, leaving the server ~50ms p99. An edge hit uses ~10ms of that and covers ~95% of requests. An origin miss costs ~30 to 40ms: route, FST walk at ~1μs, overlay merge, policy filter, serialise. *If pushed:* the client can hide some of it by prefetching the next likely characters. If the user has typed "th", speculatively request "tha", "the" and "thi", which trades bandwidth for perceived latency and only pays off because those responses are edge-cached anyway.
+
+9. The trie is over characters, and CJK has no spaces and an alphabet in the tens of thousands, which breaks two assumptions. Input is usually romanised before it reaches you (pinyin for Chinese, romaji for Japanese), so the practical answer is to index both the romanised form and the native form and route on input method. Branching factor rises sharply, which makes an array-of-children node layout wasteful and pushes you further toward the FST. *If pushed:* build one structure per locale rather than one global one, because popularity distributions do not transfer and mixing scripts in one structure just adds noise to every ranking. Cost is roughly linear in locales, which is affordable at 12GB each only because you deploy the locales a region actually serves, not all of them everywhere.
+
+10. You cannot fully, and the honest answer says so. Suggesting a query raises its count, which raises its rank. The measurable part is a small holdout arm that receives no suggestions; rank the head from its organic frequencies and you have an unbiased signal for the queries that matter most. *If pushed:* the holdout is statistically useless for the tail, and it costs those users a degraded product. Beyond that, the mitigations are dampening rather than correction: cap how much a single hour can move a term's score, decay old counts so a self-reinforced term decays if organic interest stops, and require a term to appear in the holdout arm at all before it can enter the top three.
+
+11. It debounces, typically at 150ms, and it suppresses requests below two or three characters entirely because those answers are useless and the edge would serve them anyway. That is exactly why the estimate is ~5 calls per search rather than ~20: 20 characters typed, the first two suppressed, most users committing around character 8, and the debounce collapsing one or two of the remainder. *If pushed:* if you assume one request per keystroke you get 20 calls per search and a 2.3M QPS average instead of 580K, and every capacity number downstream is wrong by 4x. Client behaviour is a load-bearing input to this design, not a UI detail, and it is worth stating the assumption out loud before you multiply anything.
+
+12. The node downloads the new FST to a temp path on local NVMe, verifies the checksum, and runs ~1000 canary prefixes against expected results while the file is still invisible to traffic. If the canaries pass, it mmaps the file and flips a single atomic pointer; requests holding the old pointer finish against the old mapping, which is unmapped once its refcount drops to zero. Both snapshots are resident during the overlap, so the box is sized for 24GB rather than 12GB. *If pushed:* the checksum is the easy half. The failure that actually happens is a well-formed snapshot built from an empty log partition, which passes every integrity check and returns empty lists for everything, so the canary set and the 10% staged rollout with a two-minute soak are the real protection, and the pointer flip means rollback is seconds with no download.
 #### Whiteboard script
-TODO
+**0-5, frame it and name the property that decides everything.** Open with the observation, not the components: "the query is a prefix, not a set of terms, so the answer set for every prefix worth serving is small and can be computed before anyone types." Then ask the three questions that actually fork the design: personalization or not, because that decides whether the response is cacheable; refresh cadence, because that decides whether you need a delta path; and whether typos have to work, because that is a separate index with its own budget. State the assumptions out loud: ~10B searches/day, ~5 suggest calls each, ~2M peak QPS, ~50ms of server time. Draw nothing yet.
 
-A 45 minute budget: what to cover in 0-5, 5-15, 15-35 and 35-45, what to say first, and a line starting `Cut first:`.
+**5-15, the two halves.** Draw a horizontal line across the board. Above it: query logs, aggregate, top-K roll-up, compile, snapshot to object store. Below it: client, CDN, serving node holding the whole structure in memory. Say the sentence that justifies the line: everything above runs hourly and tolerates minutes; everything below has 50ms. Then do the arithmetic that makes the design inevitable, because this is the moment that separates candidates: 2M peak QPS, 95% edge hit rate, 100K at the origin, ~50μs per request, so ~20 cores. Compare that with query-time ranking at 1 to 3ms per request, which is 100 to 300 cores. Three orders of magnitude is not a tuning decision.
 
-**Raw material, from the old Talking Points:**
+**15-35, the drill.** Protect this time; it is where the interview happens. Go deep on the build: the bottom-up roll-up, and the correctness argument for why the union of children's top-K is sufficient, and the condition it depends on (scores must be a property of the completion alone, so length normalisation and prefix-position boosts break it). Then the snapshot swap, including that the failure you defend against is a bad build rather than a bad download, which is why the canary set and the staged rollout matter more than the checksum. Then take the FST fork on your own terms: 76GB against 12GB, and say the real prize is that holding the whole structure per node deletes the routing layer and the hot-prefix problem with it. Then freshness: the 60-second overlay, and volunteer that it is the least safe path in the system. Keep typo tolerance and CJK in reserve as one-liners.
 
-- **Top-K cached at every prefix node** is the central idea; say it immediately.
-- **Snapshot swap beats incremental in-place mutation** for simplicity and predictability.
-- **FST is the production memory answer.** Trie in dev, compressed automaton in prod is a strong interview answer.
-- **Short prefixes belong at the CDN edge.** Most traffic is massively skewed there.
-- **Global plus personal merge** is the personalization story; the trie stays shared.
-- **A recent-query overlay handles trends** without making the base serving path mutable.
+**35-45, concede and close.** Give the gaps before they are found: the frequency floor means the tail returns nothing and generating instead of retrieving is a different safety problem; popularity ranking is a feedback loop you can only measure through a holdout arm; safety filtering is build-time and the 60-second overlay outruns human review. Then the operational surface in two minutes: what you page on (edge hit rate by prefix length, canary failures during rollout, overlay age, empty-result rate), and DR as "the snapshot is in object storage and the structure is read-only", which makes this one of the easiest recovery stories you will ever draw.
+
+Cut first: typo tolerance and the three ways to do it, then multilingual and CJK, then the personalization mechanics beyond naming where the merge happens. All three are real and none of them changes the shape of the system. Never cut: the precompute-versus-rank arithmetic, the bottom-up roll-up and its correctness condition, and the snapshot swap.
 #### Appendix
 **Data model**
 
-**Trie node** (in-memory):
+**Build-time trie node** (in the pipeline, before compilation):
 ```
 struct Node {
-  children: map<char, Node>     # or array[26]
-  top_k: list<(query, score)>   # cached top suggestions for this prefix
+  children: map<char, Node>
+  top_k:    list<(query, score)>   # populated only to depth 12
+  terminal: optional<(query, score)>
 }
 ```
 
-Each node stores its precomputed top-k → no traversal needed at serve time.
+**Served artifact:** a minimised FST mapping prefix to a byte offset, with the top-10 list stored inline at each offset. Immutable, mmapped, replaced whole.
+
+**Overlay:** a small mutable trie rebuilt every 60 seconds from the recent query stream, same node shape, merged with the base result at request time.
 
 **API contract**
 
 ```
-GET /suggest?q={prefix}&limit=10
-  → { suggestions: [{text, score}], latency_ms }
+GET /suggest?q={prefix}&locale={locale}&limit=10
+  → 200 { suggestions: [{text, score}] }
+  Cache-Control: public, max-age=60
+  Vary: none   (the response is a pure function of q and locale)
 ```
+
+Personal history is never a parameter; the client merges it locally, which is what keeps this cacheable.
 
 **Observability**
 
-- **Autocomplete latency** — end-to-end keypress to response, with backend p99 comfortably below the network budget.
-- **Prefix-shard QPS skew** — shows whether replication strategy for hot prefixes is still adequate.
-- **Snapshot build duration and publish lag** — trending freshness depends on not stretching the batch cycle.
-- **Mini-trie freshness** — age of the streaming overlay for breaking-news terms.
-- **CDN hit rate by prefix length** — short prefixes should overwhelmingly resolve at the edge.
-- **Suppressed-suggestion rate** — catches policy regressions and malformed query floods.
+- **Edge hit rate by prefix length** - short prefixes must resolve at the edge; a drop here shows up as an origin QPS multiple, not as a latency alarm.
+- **Origin p99 by path** - base lookup, overlay merge and policy filter separately, so a regression is attributable.
+- **Canary-prefix results during rollout** - the only signal that catches a well-formed but semantically empty build.
+- **Snapshot age and rollout wave progress** - freshness plus how much of the fleet is on which build.
+- **Overlay age** - how stale the trending path is; the base index can be an hour old, the overlay cannot be five minutes old.
+- **Empty-result rate by prefix length** - the direct measure of the frequency-floor gap conceded above.
+- **Suppressed-suggestion rate** - catches policy regressions and coordinated query floods.
 
 **Multi-region and DR**
 
-- **Replication mode:** read-only trie shards are replicated globally per locale; they are ideal CDN/origin workloads.
-- **RTO:** very fast for serving-node failure because shards are immutable and reloadable from object storage snapshots.
-- **RPO:** bounded by the latest successfully published snapshot plus any recent-query overlay lag.
-- **Failover cadence:** snapshot rollback drills matter more than classic database failover because the data plane is immutable.
-- **Cross-region cost:** mostly snapshot distribution and CDN fill, not transactional replication.
+- **Replication mode:** the served artifact is read-only, so every region holds an identical copy per locale. There is no replication protocol, only a distribution job.
+- **RTO:** minutes for a node, because recovery is "pull the current snapshot and pass the canaries". Seconds for a bad build, because rollback is a pointer flip against a snapshot already on disk.
+- **RPO:** bounded by the last successfully published snapshot plus overlay lag, so at most one hour of ranking freshness. No user data is lost because none is stored on this path.
+- **Failover cadence:** rehearse snapshot rollback and edge purge-by-tag, not database failover. The data plane is immutable; the risk is publishing something wrong, not losing something.
+- **Cross-region cost:** snapshot distribution and edge fill only. 12GB per locale per hour per region, which is noise next to the request traffic it eliminates.
 
 ### 11. Design YouTube
 #### Problem
@@ -4692,63 +4715,78 @@ GET  /seg/{hash}/{rung}/...  -> segment               (CDN, max-age=31536000, im
 
 ### 12. Design Google Drive (Dropbox)
 #### Problem
-File sync and storage across devices with versioning, sharing, and conflict-handling collaboration.
+Keep a folder of arbitrary files identical across a user's devices and their collaborators', when devices go offline for days, edit independently, and reconnect expecting to converge. Files run from 1KB config files to multi-gigabyte videos, and a one-byte edit must not cost a full re-upload. Durable storage of the bytes is assumed and buyable; the product is the convergence protocol on top of it.
 #### Core
-TODO
+Storage is the easy half and you should buy it. The product is a protocol for making two replicas agree when one of them has been unplugged for a week.
 
-Write the whole answer as you would give it in sixty seconds, 200 to 300 words, standing alone.
+Split every file into chunks and name each chunk by the hash of its bytes. Everything else falls out of that. A file becomes an ordered list of hashes plus some metadata; the bytes live in an object store keyed by hash. Upload becomes a handshake: the client hashes locally, sends the list, and the server replies with the subset it does not already hold. A one-byte edit ships one chunk. An installer that a million users already uploaded ships nothing.
+
+Keep the two stores apart on purpose. Metadata is small, mutable, transactional, and needs ordering. Chunks are large, immutable, and need durability, which is exactly what an object store sells. That is question 21 and I would not rebuild it.
+
+Convergence runs off a per-namespace journal, an append only log of operations with a monotonic id. A client stores its cursor, reconnects, and asks for everything after it. Cost is proportional to what changed, not to how many files exist, which matters when a namespace holds 10 million.
+
+Commit is a compare and swap on the parent version. Two devices committing against version 2 means the second one fails, and that failure is the conflict. There is no correct automatic answer because a Word document has no merge function, so the loser is written alongside as a conflict copy and a human decides.
 #### Summary
-**The picture in your head:** a postal system where every document is sliced into numbered pages before mailing. When you change one page, you only re-send that page, and every post office along the route keeps a copy of every page it has ever received. When your laptop wakes up after a week offline, it asks the post office "what pages changed since I was last here?" and only downloads those — never the whole document.
+**The picture in your head:** a postal system where every document is sliced into numbered pages before mailing. When you change one page, you only re-send that page, and every post office along the route keeps a copy of every page it has ever received. When your laptop wakes up after a week offline, it asks the post office "what pages changed since I was last here?" and only downloads those, never the whole document.
 
 **The approaches people actually take:**
-TODO. Two or three things a competent engineer might reach for, in plain language and before any product name, with what each one buys and roughly when it wins.
 
-**The single-request walkthrough:** you edit a 200MB video file, changing 4MB near the end. Your laptop's sync agent splits the file into 4MB chunks and hashes each one (e.g. SHA-256). It sends the hash list to the Metadata Service: "I have chunks A, B, C, D, E, F." The server replies "I already have A, B, C, D, E — just send F." Your client uploads F (4MB) to the Block Service, which stores it by its hash. The Metadata Service records the new version: the file now maps to chunks [A, B, C, D, E, F_new]. It publishes a change event `{ file_id, version: 3 }` to the Notify Service via WebSocket. Your phone wakes up, sees the notification, asks for the chunk list, discovers only F changed, and downloads 4MB. Total bandwidth: 4MB instead of 200MB.
+*Ship the whole file and version it.* Hash the file, and if the server has never seen that hash, send all of it. Every save creates a new immutable version. This is a few hundred lines of client, it is very hard to get wrong, and it still deduplicates identical files across users. It fails on exactly one axis: a one-byte change to a 2GB video costs 2GB. That is fine for a write-once corpus, a phone camera roll or a scanner drop folder, where files are created and never edited.
+
+*Cut the file at fixed offsets and ship only the pieces that changed.* Slice every 4MB, hash each slice, ask the server which hashes it is missing. Overwriting bytes in place touches one slice. One pass over the bytes, and a 1GB file is 256 hashes to track. It breaks on inserts: adding 10 bytes at the front shifts every later boundary, so every hash changes and you re-upload the whole file.
+
+*Cut the file where the content says to.* Run a rolling window over the bytes and start a new chunk whenever the window's fingerprint hits a chosen pattern, so boundaries are anchored to content rather than to offsets. An insert perturbs one or two chunks and everything after it resynchronises on its own. You pay a second pass over every byte and you accept chunks of unpredictable size. This wins when files are edited in the middle: documents, source trees, database files, disk images.
+
+**The single-request walkthrough:** you edit a 200MB video file, changing 4MB near the end. Your laptop's sync agent splits the file into 4MB chunks and hashes each one with SHA-256. It sends the hash list to the Metadata Service: "I have chunks A, B, C, D, E, F." The server replies "I already hold A, B, C, D, E, just send F." Your client uploads F (4MB) to the Block Service, which stores it under its hash. The Metadata Service commits the new version against parent version 2: the file now maps to chunks [A, B, C, D, E, F_new] at version 3. It appends that to the journal and publishes `{ file_id, version: 3 }` to the Notify Service. Your phone wakes, sees the notification, asks for the chunk list, discovers only F changed, and downloads 4MB. Total bandwidth: 4MB instead of 200MB.
 
 **The pieces (and what each one is for):**
-- **Sync agent (client-side)** — the program running on your laptop or phone. Splits files into fixed 4MB chunks (a "chunk" is just a fixed-size slice of the file bytes), hashes each chunk, compares with the server's hash list, and uploads only what is missing. This is the core bandwidth-saving mechanism.
-- **Metadata Service** — stores the logical description of your files: folder structure, permissions, version history, and the ordered list of chunk hashes that make up each file. Does NOT store the actual bytes. Backed by a transactional database sharded by user_id.
-- **Block Service** — stores the raw bytes, keyed by the chunk's hash. Two chunks with the same hash (e.g. the same corporate template uploaded by a million users) are stored exactly once — this is called content-addressed storage and is how Dropbox achieves 30-50% dedup across the whole corpus.
-- **Server File Journal** — an append-only log of every change in your file namespace (create, modify, delete), each entry stamped with a monotonically increasing ID (JID). When your phone reconnects after a week offline, it fetches changes since its last-seen JID rather than scanning your entire folder tree. This keeps sync fast even if you have 10 million files.
-- **Notify Service** — a WebSocket push channel. When a file changes, the Metadata Service publishes an event to the Notify Service, which pushes it to all your other logged-in devices in real time.
+- **Sync agent (client-side).** The program running on your laptop or phone. Watches the local filesystem, splits changed files into chunks, hashes each chunk, compares against the server's list, and uploads only what is missing. It also holds the cursor into the change journal. This is where nearly all the difficulty lives.
+- **Metadata Service.** Stores the logical description of your files: folder structure, permissions, version history, and the ordered list of chunk hashes making up each version. It does not store bytes. Backed by a transactional database sharded by namespace.
+- **Block Service.** Stores raw bytes keyed by the hash of those bytes. Two chunks with identical content collide by construction and are stored once. This is content-addressed storage, and it is what makes cross-user deduplication free rather than a feature you build.
+- **Server File Journal.** An append only log of every operation in a namespace (create, modify, move, delete), each stamped with a monotonically increasing id. A device reconnecting after a week fetches everything after its last-seen id instead of walking the tree. This is the property that keeps sync cheap for a namespace with 10 million files.
+- **Notify Service.** A push channel over a persistent socket. On commit, the Metadata Service publishes an event and the Notify Service pushes it to the user's other connected devices. It is an accelerator, never a correctness mechanism: clients poll the journal regardless.
 
-**The thing that makes it hard:** two devices edit the same file while offline. Your MacBook edits `report.docx` on Tuesday; your iPad also edits `report.docx` on Tuesday. Wednesday both come online. MacBook uploads version 3 first. iPad then tries to upload its version 3. The server sees a conflict: two branches off version 2 with no common ancestor. There is no safe way to auto-merge binary files like Word documents — merging byte ranges from two divergent edits produces corruption. So the server does the only safe thing: it accepts MacBook's upload as the canonical version 3, and saves iPad's upload as `report (conflict copy from iPad).docx` alongside. Now both files exist, and you resolve the conflict manually by opening both and copying what you want.
+**The thing that makes it hard:** two devices edit the same file while offline. Your laptop edits `report.docx` on Tuesday; your tablet also edits `report.docx` on Tuesday. Wednesday both come online. The laptop commits version 3 against parent 2 and wins. The tablet then tries to commit its own version 3, also against parent 2, and the compare and swap fails. Two branches, one common ancestor, no way to reconcile them: merging byte ranges out of two divergent edits to a binary format produces a corrupt file, not a merged one. So the server does the only safe thing. It keeps the laptop's version as canonical and writes the tablet's bytes alongside as `report (conflict copy from tablet).docx`. Both files now exist and you resolve it by opening both.
 
-**Why this design and what it costs:** the hash-list handshake before every upload is what makes the system efficient at scale. Instead of "upload the file and we'll figure it out," the client first asks "which of these chunks do you already have?" and only transfers the missing ones. In a corporate environment, this handshake collapses a 1GB Office installer to ~40MB of actual transfers because 240 of 250 chunks already exist on the server from prior installs. The tradeoff is that the sync engine is complex — it must handle offline edits, network interruptions mid-upload, and the journal cursor falling behind its retention window.
+**Why this design and what it costs:** the handshake before every upload is what makes the system efficient at scale. Instead of "upload it and we will work it out", the client asks "which of these do you already have" and moves only the remainder. In a corporate tenant that collapses a 1GB installer to roughly 40MB of transfer, because 240 of its 250 chunks already exist from prior uploads. The cost is that the sync engine becomes the hard part of the product: offline edits, interrupted uploads, filesystem watchers that lose events, and cursors that fall out of the journal's retention window.
 
 **If you were building it tomorrow:**
-- Metadata in Postgres sharded by `user_id`; Block store in S3 with keys = SHA-256 of chunk bytes; Notify Service on Redis pub/sub or WebSocket server.
-- The hash-list handshake on every upload:
+- Metadata in a sharded transactional SQL store keyed by namespace; chunks in an object store with key = SHA-256 of the chunk bytes; notify over a WebSocket fleet fed by a pub/sub bus.
+- The handshake on every upload:
   ```
   hashes = [sha256(chunk) for chunk in split_4mb(file)]
-  missing = POST /file {hashes}  # server replies with hashes it lacks
+  missing = POST /file {hashes}      # server replies with the hashes it lacks
   for h in missing: PUT /chunk/{h} bytes
-  POST /file/commit {file_id, hashes, metadata}
+  POST /file/commit {file_id, parent_version, hashes, metadata}
   ```
-- On reconnect: `GET /journal?since={last_jid}` → replay operations → upload/download only deltas.
+- On reconnect: `GET /journal?since={cursor}` then replay operations, transferring only the chunks the local tree lacks.
 #### What this is really testing
-TODO
+Whether you can tell a storage problem from a replication problem. The bytes are the easy half and you should buy them. The real question is how several replicas, some unplugged for a week, agree on the state of a tree. Every interesting answer is forced by one fact: the system cannot read the files. It sees opaque bytes with no notion of a line, a cell, or a paragraph, so it has no merge function, so concurrent edits cannot be resolved automatically, so the design has to make conflicts rare and hand the survivors to a human. A candidate who spends the hour on erasure coding and replication factor has answered question 21 by accident.
 
-The one insight this question exists to elicit, then the contrast with the question it most resembles and why the answers differ.
+The contrast is with the real-time collaborative editor. Both are convergence problems and they land on opposite answers because of what each one knows about its payload. The editor owns its data model: a document is a sequence of characters with identity, so an insert at position 5 can be rewritten to mean the same thing at position 0, and two divergent histories genuinely merge into one document holding both people's work. It pays for that with a persistent connection, one owning process per document, and per-character bookkeeping, and it only works because there is exactly one format. Here the format is whatever the user dragged into the folder, so there is nothing to transform. The unit of concurrency is the file rather than the character, the unit of transfer is a 4MB chunk rather than a keystroke, and the resolution is a second file on disk rather than a merged one.
 
-Closest question: TODO
+Notice which way the offline assumption runs, too. Four hours offline is the editor's hard case, and its output is a consistent document that reads like nonsense. A week offline is the baseline here, and the output is two files and an apology. If you find yourself reaching for operational transformation in this question you have misread which problem you are in.
+
+Closest question: Q37
 #### Clarifying questions and how each answer forks the design
 - Max file size? Per-user storage cap?
 - Real-time collab in docs (Google Docs)? (assume separate problem)
 - Selective sync? Offline access?
 - Sharing model: per-file ACL, link sharing?
+- What is actually in the folder: media and installers, or documents and source?
 
 **How the answers shape the design**
 
 | If the answer is… | Then the design… |
 |---|---|
-| Large max file size | chunk files into fixed blocks, hash each, and store blocks in an object store — enables resumable upload and dedup |
+| Large max file size | chunk files into blocks, hash each, and store blocks in an object store, which buys resumable upload and dedup together |
 | Real-time doc collab out of scope | sync whole-file versions with conflict copies, not operational transforms (that is the Google Docs problem) |
-| Selective sync and offline | a local metadata DB plus a sync engine diffing client and server file trees, transferring only changed blocks |
-| Content-defined dedup wanted | rolling-hash chunking so a small edit re-uploads only affected blocks |
-| Per-file ACL sharing | an authorization service on every file/block access |
+| Selective sync and offline | a local metadata DB plus a sync engine diffing three trees (local, last-synced, server) and moving only changed blocks |
+| Files are edited in the middle | rolling-hash chunking so an insert re-uploads only the affected blocks instead of everything after them |
+| Per-file ACL sharing | an authorization service consulted on every file and block access, with a cached permission decision |
 | Link sharing | capability tokens (signed URLs) that bypass per-user ACLs for read |
-| Versioning | keep block manifests per version so old versions cost only changed blocks |
+| Heavy folder sharing | the shared folder becomes its own namespace and shard, not a subtree replicated into every member's shard |
+| Versioning | keep a chunk manifest per version so old versions cost only their changed blocks |
 #### Requirements and scale, derived out loud
 **Requirements**
 
@@ -4757,34 +4795,36 @@ Closest question: TODO
 
 **Scale**
 
-- **Users & raw size:** Google Drive ~3B Workspace-eligible accounts; assume 1B active users with paid/free quota averaging 10GB consumed (free tier 15GB partially used + paid 100GB+ pulls the mean). 1B × 10GB = **~10EB raw user data** before dedup.
-- **File-size distribution:** avg ~1MB (geometric mean — most files are <100KB texts/configs/notes; long tail to multi-GB videos and disk images skews the arithmetic mean to ~1MB). Small-file count dominates metadata QPS even though byte volume is dominated by big files.
-- **Chunk size:** 4MB fixed (matches Dropbox/Drive published values — large enough to amortise metadata + erasure-coding overhead, small enough to bound retransmits on flaky mobile). Files <4MB stored whole; many small files batched into archive chunks so metadata isn't 1:1 with files.
-- **Dedup ratio:** content-defined hashing across corpus catches corporate templates, OS-shipped files, common media → ~30–50% reduction (Dropbox public number is ~30%, internal/enterprise tenants closer to 50%). 10EB × (1 − 0.4) = **~5–7 EB effective at 1× replication**.
-- **Replication:** 3× durable on hot tier (cross-AZ object store) + erasure-coded 1.4× overhead on cold (Reed-Solomon 10+4) → 5–7 EB × 3 ≈ **~15–18 EB hot when fully active**; once ~70% of corpus migrates to EC cold → ~7 EB total stored bytes.
-- **Daily churn:** ~10% of users sync per day = ~100M syncs/day; avg sync uploads ~100KB net new (most syncs are deletes/renames/metadata) → ~10TB net new bytes/day; with 3× replication → ~30TB/day writes to object store. (Note: pre-dedup ingest is higher, ~30–50TB/day, but dedup absorbs the duplicates.)
-- **Metadata:** 1B users × ~10k files avg (consumer ~1k, enterprise ~50k+ → blended 10k) = ~10T file rows; ~5KB/row (path 200B + chunk-list 4KB for avg 1MB file at 4MB chunks ≈ 1 chunk + ACL + ts + version) → 10T × 5KB = ~50PB; replication 3× → ~150PB metadata in the sharded transactional store, partitioned by user_id.
-- **Hot tier:** chunks accessed in last 30 days are ~5% of corpus; 5% of 5–7EB = ~250–350PB on SSD-backed object storage; allow ~500PB headroom for traffic spikes.
-- **Cold tier:** chunks idle >30 days on infrequent-access; >1yr move to glacial; reads tolerate seconds-to-minutes warm-up — the 95% of bytes that never move pay for the 5% hot.
-- **Sync events:** 100M syncs/day × ~1 file_changed event each = ~100M events/day ÷ 86,400 ≈ ~1.2k/s steady fan-out via the notify service; bursty during business-hours opens (~5× peak).
+- **Users and raw size:** assume 1B active users with an average of 10GB consumed (free tier partly used, paid tiers pulling the mean up). 1B × 10GB = **~10EB raw user data** before dedup.
+- **File-size distribution:** average ~1MB. Most files are under 100KB (text, config, notes) with a long tail to multi-gigabyte videos and disk images that drags the arithmetic mean to about 1MB. Small files dominate metadata QPS; large files dominate bytes. Cross-check: 10GB per user at 1MB average is **~10k files per user**, and 1B × 10k = **~10T file rows**, which is the metadata figure below.
+- **Chunk size:** 4MB fixed, matching published Dropbox and Drive values. Large enough to amortise metadata and erasure-coding overhead, small enough to bound a retransmit on flaky mobile. Files under 4MB are stored whole; many small files are packed into archive chunks so metadata is not 1:1 with files.
+- **Dedup ratio:** content hashing across the corpus catches templates, OS-shipped files and common media. Public Dropbox figures are around 30%, enterprise tenants closer to 50%. At 40%: 10EB × (1 − 0.4) = **~6EB of distinct bytes**.
+- **Replication:** hot data is 3× replicated across AZs; cold data is erasure coded at Reed-Solomon 10+4, a 1.4× overhead. Steady state has roughly 30% of bytes hot and 70% cold: (0.3 × 6EB × 3) + (0.7 × 6EB × 1.4) = 5.4 + 5.9 = **~11EB stored**. If nothing had migrated to cold it would be 6 × 3 = 18EB, so the cold tier is worth ~7EB of hardware.
+- **Daily churn:** ~10% of users sync on a given day = 100M active user-days. Each averages ~100KB of genuinely new bytes, since most operations are deletes, renames and metadata. 100M × 100KB = **~10TB/day net new**, ×3 replication = **~30TB/day of writes**. Pre-dedup ingest is 3 to 5× that; dedup absorbs the difference at the handshake, before the bytes are sent.
+- **Metadata:** a file row is name and path (~200B) + ids (~64B) + timestamps (~32B) + version pointer (~16B), call it **~500B**. 10T rows × 500B = 5PB. Chunk lists live in their own table because they do not fit a row for large files: at 32B per hash and ~3 retained versions, 10T × 3 × 32B ≈ 1PB. So ~6PB logical, ×3 replication = **~18PB of metadata**, which is two orders of magnitude smaller than the chunk store and is why they are different systems.
+- **Journal:** 100M active user-days × ~10 file operations each = **~1B journal entries/day**, at ~100B each = **~100GB/day**, spread across 1B namespaces. At 90 days retention that is ~9TB, trivially cheap, and 90 days is the number that decides when a returning device has to fall back to a full tree diff.
+- **Sync events:** the same 1B operations/day fan out through notify: 1B ÷ 86,400 ≈ **~12k events/s** steady, with business-hours peaks around 5× = ~60k/s. Fan-out multiplies by devices per user (~2.5) and by shared-folder membership.
+- **Conflicts:** a conflict needs two devices committing off the same parent version. At roughly 1 in 10^4 modifications, 1B operations/day × 10^-4 = **~100k conflict copies/day**. Small as a rate, large as an absolute number, and the basis for the merge argument in Key decisions.
+- **Hot tier:** chunks touched in the last 30 days are ~5% of the corpus. 5% of 6EB = **~300PB on SSD-backed storage**, provisioned to ~500PB for burst.
+- **Cold tier:** everything idle past 30 days moves to infrequent access, past a year to glacial, where reads tolerate seconds of warm-up. The 95% of bytes nobody touches is what pays for the 5% that is hot.
 #### Key decisions
-TODO
+**Fixed-offset chunking vs content-defined chunking**
+- Choice: fixed 4MB chunks, each hashed with SHA-256, for a general consumer and business corpus.
+- Alternative: content-defined boundaries from a rolling hash (Rabin fingerprint or buzhash), cutting at an average of 1MB with a 512KB floor and an 8MB ceiling.
+- Decider: what fraction of modified bytes come from edits that change a file's length in the middle. Fixed chunking is correct for in-place overwrites and appends and catastrophic for inserts: a 10-byte insert at offset 0 of a 1GB file shifts all 256 boundaries and re-uploads 1GB, against roughly 2MB for content-defined, a 500× difference on that one operation. Against that, content-defined costs a second pass over every byte: SHA-256 with hardware acceleration runs at 1 to 2 GB/s per core, and a rolling hash roughly halves that, which is battery on a phone preparing a 10GB upload. Below about 5% length-changing edits, fixed wins on cost and simplicity; above about 20% you are losing whole files to single inserts and the CPU is cheap by comparison. Consumer Drive traffic is dominated by photos, video and PDFs, which are written once and never edited, so it sits at the low end.
+- Alternative wins when: the corpus is edited in the middle. A source-code or design-asset sync product, or a backup product ingesting VM images and database files where a page insert shifts everything after it. Content-defined chunking is genuinely the better default for backup and has been since the LBFS and Venti work around 2001 to 2002, which is why restic, borg and rsync's delta algorithm all use it. If the corpus mix is unknown, choosing it costs CPU and buys insurance, and that is a defensible call rather than a wrong one.
 
-Two or three genuine forks. For each, in this exact shape so it stays checkable:
+**Last writer wins with a conflict copy vs a real merge**
+- Choice: commit is a compare and swap on the parent version; the loser's bytes are preserved as a sibling file named for the losing device and the user resolves it.
+- Alternative: a three-way merge against the common ancestor, which the version history already gives you for nothing, dispatched by format: text and source merged the way a version control system does, structured formats merged field by field, everything unrecognised falling back to a conflict copy.
+- Decider: what fraction of conflicting files have a defined merge function, weighed against the asymmetry of being wrong. A conflict copy is a visible annoyance costing a user two minutes. A bad merge is silent corruption of a file the user believes is fine and may not open for six months. So the merge path needs a very high hit rate to earn its keep: below roughly 20% mergeable formats you are carrying a format sniffer, per-format merge code and a whole class of corruption bug in order to help one conflict in five. At the derived ~100k conflicts/day, 20% coverage is 20k merges/day, and a 1-in-1000 bad merge is 20 corrupted user files per day, which is not a rate a storage product survives.
+- Alternative wins when: you control the format. A notes app, a code host, or a design tool with its own document model should merge, because coverage is 100% and the merge is testable against a fixed grammar. This is really a fork about product scope rather than about merging: the moment the folder accepts arbitrary bytes, merging becomes a special case rather than the mechanism, and a design that leads with merging has quietly assumed a narrower product.
 
-**<name of the fork>**
-- Choice:
-- Alternative:
-- Decider:
-- Alternative wins when:
-
-**Raw material, from the old Common Mistakes:**
-
-- **Whole-file uploads for every edit.** That destroys both bandwidth and product ergonomics.
-- **Putting file bytes in the transactional metadata store.** Metadata and immutable blobs have different scaling properties and should stay separate.
-- **Trying to auto-merge arbitrary binary files.** Conflict copies are the safe generic answer.
-- **Polling full directory trees for sync.** Cursor-based journals are the only viable path at large namespace sizes.
-- **Ignoring small-file amplification.** Many tiny files can dominate metadata and request overhead if not packed or batched.
+**Shard metadata by user vs make each shared folder its own namespace**
+- Choice: the unit of sharding and of journaling is a namespace, not a user. A private root is one namespace; every shared folder is a separate namespace mounted into the tree of everyone it is shared with. A device syncs the union of its namespaces and keeps one cursor per namespace.
+- Alternative: shard by user_id and replicate a shared folder's metadata into each member's shard, fanning writes out to all members on every change.
+- Decider: members per shared folder multiplied by change rate. A folder with 500 members taking a 10k-file bulk edit is 5M metadata writes under the alternative against 10k under the choice, and those 5M have to be transactional across 500 shards or members will see different trees. Break-even is around 5 members: below that, per-user replication is simpler and the write amplification is invisible. Above about 50 members it is the dominant cost in the metadata tier.
+- Alternative wins when: sharing is rare, small and read-mostly, which describes a purely consumer product. It also buys something real that namespaces give up: with a user's whole tree in one shard, a move between any two folders is a single transaction. Under namespaces, moving a file out of a shared folder into your private root crosses two independently sequenced journals and cannot be atomic. That is the first Unresolved item below, and it is a genuine cost of the choice rather than a detail.
 #### High-level design
 **must-say**
 
@@ -4851,37 +4891,19 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 </svg>
 ```
 
-**How to read the diagram:** the system is split between metadata and file contents. Metadata tracks folders, permissions, versions, and change history; the file bytes themselves live in chunk or object storage and are uploaded or downloaded separately.
+**How to read the diagram:** the system is split between metadata and file contents. Metadata tracks folders, permissions, versions, and change history; the file bytes live in chunk storage and move on their own path. The client talks to all three, and it is the only component that ever holds a whole file.
 
-**Why the flow is shaped this way:** syncing gets much easier when you can reason about what changed without shipping entire files every time. Devices mostly exchange change logs and version references, then move only the chunks they actually need.
+**Why the flow is shaped this way:** the split exists so that reasoning about what changed never requires touching bytes. Devices exchange journal entries and chunk-hash lists, which are kilobytes, and fetch chunks only for what they actually need locally.
 
-**What this layout buys you:** efficient sync, version history, and better offline behavior across many devices. The tradeoff is that the sync engine becomes the hard part, especially once concurrent edits and conflict resolution enter the picture.
+**What this layout buys you:** delta sync, version history that costs only changed blocks, and sane offline behaviour across many devices. The price is that the sync agent becomes the hardest component in the system, and it is the one running on hardware you do not control.
 #### Deep dive
 **must-say**
 
-**Block-level storage.**
-- 4MB chunks → SHA-256 hash → content-addressed. Hash is the storage key, so two identical chunks from different users collide by construction and are stored exactly once. 4MB is a tuned compromise: smaller chunks improve dedup ratio but explode metadata pressure (a 1TB file at 4KB chunks = 250M metadata rows); larger reduce metadata but waste bandwidth on the "1 byte change re-uploads the whole chunk" case.
-- **Dedup across all users:** identical chunks stored once → massive savings (esp. for popular files). Corporate template decks, common OS files, popular media files — these collide enormously across users. Real-world dedup ratios run 30-50% on the full corpus, so 10EB of nominal user data becomes ~5-7EB stored.
-- Editing 1 byte of a 1GB file = 1 chunk re-uploaded (the chunk containing that byte). The other 249 chunks dedup against the prior version's hashes — zero bytes re-uploaded.
+**The convergence protocol, from a changed byte to a converged device.**
 
-**Conflict resolution.**
-- Last-write-wins per chunk (with version). Two devices edit the same file from the same base version; the later finalize call wins, the earlier one becomes a "conflict copy" alongside (`file (conflict copy from MacBook).ext`). User resolves manually by inspecting both.
-- Automatic merging is unsafe for binary files (corruption risk) and undefined for non-text; conflict-copy is the only general-purpose answer.
-- Real-time collab (Google Docs) uses CRDTs — separate problem with character-level operations and operational transform; not solvable at chunk granularity. Drive treats Docs as a different content type with its own service.
+**Three trees, not two.** The client keeps three views of its folder: the local filesystem as it is now, the server state as of its cursor, and `synced`, the last state at which the two were known to agree. Diffing local against `synced` yields local changes. Diffing server against `synced` yields remote changes. A path appearing in both diffs is a conflict, and a path in neither is untouched. Nearly every sync bug is a client that tried to work with two trees, because with only local and server you cannot distinguish "I deleted this" from "they created this".
 
-**Sync efficiency.**
-- Bidirectional rsync-like protocol; client first checks "what does server have" via the hash list, server replies "missing these N hashes," client uploads only those. Saves bandwidth on dedup hits and partial-edit cases.
-- Compression on chunks before upload (zstd or similar) — text-heavy files compress 3-5x; pre-compressed media (jpeg, mp4) skip compression to avoid wasted CPU.
-- Batch small files into single archive chunk (small file performance). 1000 1KB config files at 4MB chunks each would waste storage and metadata; a "small-file aggregator" packs them into one 4MB chunk with a manifest, cutting metadata write rate by ~1000x.
-
-**Sharing.**
-- Per-file ACL stored in metadata as `(file_id, principal_id, role)` rows; checked on every fetch via a permission service backed by a per-node LRU cache. Granular roles: owner, editor, viewer, commenter.
-- Link sharing → unguessable token in URL (e.g. 128-bit random suffix); the token grants the embedded role to anyone who has it. Treat link-share as "shared with the world if the token leaks" — no real revocation beyond regenerating the token.
-- Permission cache invalidation via pub/sub: a permission change writes to Postgres and emits an invalidation event; permission service nodes subscribe and drop the affected entries. Stale window measured in seconds — acceptable trade-off for cache effectiveness.
-
-**Limits and offline.** Per-file cap ~5TB (Drive's published limit) — beyond this the chunk-list metadata row becomes too fat to fit in one transactional store row and the upload coordinator gets unwieldy; very large files are better served by dedicated object-store APIs. Per-user storage cap is a billing-tier policy, not an architectural one; quota enforced by a counter in the metadata service that blocks new uploads when exceeded. Selective sync: client config selects which folders mirror to local disk; the sync agent subscribes to journal events for the entire user namespace but only materializes chunks for selected folders. Offline access: selectively-synced folders live on local disk and are readable/editable offline; on reconnect the sync agent computes chunk-hash deltas of locally-changed files and goes through the standard upload protocol — conflict-copy semantics resolve any concurrent server-side edits made while the client was offline.
-
-**Chunk-hash-check protocol — sequence with dedup win.** *[Source: Dropbox engineering, streaming file synchronization]* The protocol's core trick is that the client computes hashes locally and only uploads the bytes the server doesn't already have — including bytes uploaded by other users.
+**Upload is a handshake, not a transfer.** For each locally changed file the client chunks, hashes, and asks the server which hashes it lacks.
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 610" role="img" aria-label="Chunk hash dedup upload sequence">
@@ -4963,94 +4985,107 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 </svg>
 ```
 
-The dedup hit rate is the headline number: corporate environments hit 50-80% dedup because everyone has the same OS images, software installers, and template decks. A 1GB Office install with 250 chunks at 4MB each: only the user-specific 5-10 chunks actually upload; the other 240+ are already on the block servers from the millions of prior uploads. Net upload bandwidth: ~40MB instead of 1GB.
+**The server must not believe the client.** "I already have chunk `h`" is an assertion by software running on a stranger's laptop. If the server accepts it unconditionally, then knowing a hash is equivalent to holding the file, and anyone who can guess or obtain a hash can attach another user's chunk to their own file and read it. Two mitigations, and you want the second: challenge the client for a random 4KB range of the chunk it claims to hold, which costs a round trip and proves possession; or keep a per-user index and only dedup against chunks that user has actually uploaded, which is airtight but costs most of the cross-user saving. The usual shape is per-user dedup by default plus global dedup with proof of possession for chunks above a size threshold, where the bandwidth saving justifies the extra round trip.
 
-**Streaming sync (overlap upload and download).** *[Source: Dropbox tech blog]* Original Dropbox sync was two-phase: uploader fully uploads + commits before any other client can fetch. Streaming Sync overlaps the phases — downloading clients can prefetch chunks the uploader has already pushed before commit. Latency from "uploader finished" to "downloader has the file" drops up to 2x. The trick is that since chunks are content-addressed and immutable, downloaders can fetch chunks safely as they appear without waiting for the metadata to commit; the metadata commit just makes the file visible in the listing.
+**Commit is the atomic step and it is a compare and swap.** Chunks are uploaded before commit and are pure garbage until one references them, which is fine because they are immutable and content-addressed. The commit carries `(file_id, parent_version, chunk_list)` and the metadata store applies it only if the current version still equals `parent_version`. On success it writes the version row, increments chunk refcounts, and appends one journal entry, all in one transaction. On failure it returns the current version and the client resolves. Ordering is not negotiable: chunks durable, then commit, then notify. Reverse the first two and you publish a version pointing at bytes nobody has; reverse the last two and a device can be told about a version that does not exist yet.
 
-**Why 4MB chunks specifically.** Smaller chunks improve dedup ratio (more chance two users' files share a chunk) but explode metadata pressure (1TB at 4KB chunks = 250M metadata rows per file). Larger chunks reduce metadata but waste bandwidth on the "1 byte change re-uploads the whole chunk" case. 4MB is the empirical sweet spot — a 1GB file is 250 metadata rows (manageable), and a 1-byte edit re-uploads 4MB (acceptable). Some systems experiment with 8MB request batches to amortize per-request overhead while keeping the addressable chunk at 4MB.
+**The journal is what makes sync scale.** Each namespace has an append only log of operations with a monotonically increasing id. A client persists its cursor and asks for everything after it, so reconnection costs O(changes since last sync) and is completely independent of how many files the namespace holds. The alternative, comparing directory listings, is O(total files) and is already unusable at 10k files per user, let alone the 10M-file namespaces enterprise tenants build. The journal has a retention window, 90 days from the derivation above, and a client that has been away longer has to fall back to a full tree diff, which is the expensive path the journal exists to avoid.
 
-**Server File Journal (cursor-based sync).** Each user namespace has a journal of operations (create, modify, delete) with monotonically increasing JID values. Clients track their last-seen JID; on reconnect they pull `since=last_jid` and replay the operations to converge state. This is much cheaper than directory-listing diffs (which would require scanning the full tree to detect changes); the journal is appended on every metadata change, so sync is O(changes since last sync) regardless of total file count.
+**Notify accelerates and never decides.** The push channel is an optimisation on top of polling, not a replacement for it. If a notify is lost the device is stale until its next poll, which is a latency bug. If a device treated notify as the only signal, a lost message would be a permanent divergence, which is a correctness bug. Keeping the poll means the notify path can be lossy, unordered and best-effort, which is what lets it be cheap at 12k events/s.
+
+**Conflict detection falls out of the commit.** A failed compare and swap is the conflict; nothing separate detects it. The server then creates a new file, with a new file id, holding the loser's chunk list, in the same namespace. That is the key move: the conflict copy is an ordinary create, so it gets its own journal entry and propagates to every device by the normal mechanism, with no special case anywhere downstream. What it deliberately does not do is decide anything about the content, because at this layer the content is a list of hashes.
+
+**Streaming sync, if there is time.** The naive protocol is two-phase: the uploader finishes and commits, then downloaders start. Because chunks are content-addressed and immutable, a downloader can speculatively fetch chunks as they land, before the commit, and the commit is then just the moment the new version becomes visible. That roughly halves the wall-clock gap between "uploader done" and "downloader has it" on large files, and it is safe precisely because a chunk fetched early is either part of the eventual version or is discarded.
 #### Where it breaks
 **must-say**
 
 **Bottlenecks**
 
-- **Many small files** → metadata write storm; batch into one chunk. A user dropping a folder of 10k 1KB config files hits metadata at 10k writes per sync; aggregator packs them into a single archive chunk + 1 metadata row, slashing write rate by ~1000x.
-- **Massive file** (10GB) → chunked + resumable upload with offset. A 10GB upload over flaky mobile would fail catastrophically without resume; chunk-level acks let the client restart from the last acked offset, and chunks already uploaded survive across sessions.
-- **Hot chunk** (popular template file) → CDN cache, ref-count tracking. A widely-shared corporate template's chunk is requested by thousands of users; CDN edge serves it from cache, origin sees one fetch. Ref-count tracking ensures that even when many users delete the template, the chunk persists as long as one user still references it.
-- **Sync storm on shared folder edit** → debounce notifications, batch fan-out. A user editing 100 files in a shared folder (e.g. running a refactor) generates 100 events × 50 collaborators = 5000 notifications; debouncing batches multiple changes into a single "folder updated" notify with a list of changed files.
-- **Garbage collection** of orphaned chunks → ref-count + nightly sweep. Each chunk has a ref_count incremented on file creation/version, decremented on deletion; nightly sweep deletes chunks with refcount=0 after a 7-day grace period (handles ref-count drift bugs and "undelete" UX). Mark-and-sweep verifier runs weekly to catch orphans the ref-count missed.
-
-- **End-to-end sync latency** → streaming sync overlaps upload and download. Two-phase sync forces downloaders to wait for upload commit; streaming sync lets them prefetch chunks as the uploader pushes them. Halves wall-clock latency on large files; safe because chunks are content-addressed and immutable.
-- **Directory listing diffs at scale** → cursor-based journal (Server File Journal). For a user with 10M files, comparing two directory listings is intractable. The journal is append-only with monotonic JIDs; sync pulls `since=last_jid` and replays — O(changes), not O(total files).
-- **Dedup vs privacy tradeoff** → per-tenant keyspaces or chunk-level encryption. Cross-user dedup leaks information ("this hash exists" confirms someone else has the chunk). For privacy-sensitive deployments, isolate keyspaces per tenant (kills cross-tenant dedup but preserves intra-tenant) or encrypt chunks with user keys (kills all dedup but provides true privacy).
+- **Many small files.** A folder of 10k 1KB config files is 10k metadata writes on one sync. Pack them into a single archive chunk with a manifest, which cuts the metadata write rate by roughly 1000× at the cost of read amplification when one of them changes.
+- **A very large file.** A 10GB upload over flaky mobile fails outright without resume. Chunk-level acks let the client restart from the last acked chunk, and because chunks are content-addressed, partial progress survives a process restart and even a different device.
+- **A hot chunk.** A widely shared template's chunk is requested by thousands of users at once. Serve it from a CDN edge so origin sees one fetch, and keep refcounts so the chunk survives as long as any user references it.
+- **Sync storm on a shared folder.** One member running a refactor across 100 files in a folder with 50 collaborators is 5000 notifications. Debounce and batch into one "namespace advanced to journal id N" message and let each device pull the range.
+- **Garbage collection of unreferenced chunks.** Refcount on commit and on version expiry, then a nightly sweep deleting refcount-zero chunks after a 7-day grace period. Refcounts drift, so a weekly mark-and-sweep verifies against the metadata store; never trust the counter alone.
+- **Dedup leaks information.** Cross-user dedup makes chunk existence observable, so a hash becomes an oracle for "someone else has this file". Per-tenant keyspaces kill cross-tenant dedup and keep the intra-tenant win, which is where most of the value is anyway; client-side encryption with user keys kills all of it and is the honest answer where privacy is the product.
+- **Journal retention.** A device away longer than the window falls back to a full tree diff, which for a 10M-file namespace is minutes of work on both ends. Retention is a straight cost trade and 90 days is the current setting.
 
 **Failure modes**
 
 | Layer | Failure | Detection | Mitigation |
 |---|---|---|---|
-| Metadata store | Metadata commit succeeds but notify path fails, leaving devices stale until poll | Notify-failure rate and sync-lag canary | Treat notify as acceleration only; clients poll the journal periodically and reconcile by version |
-| Chunk index | Hash index or refcount drifts from actual metadata references | Orphan-chunk count and refcount-vs-mark-sweep mismatch | Run periodic mark-and-sweep verification; never trust refcounts alone forever |
-| Sync journal | Client cursor falls behind or misses journal segments | Cursor-gap and replay-failure alarms | Force a full metadata diff when the journal retention window is exceeded |
-| Conflict handling | Concurrent edits overwrite without preserving both versions | Conflict-copy generation failure alert | Always emit a preserved conflict copy for generic files; never attempt unsafe binary merges |
-| Object storage | Chunk blob unavailable in one region | Chunk-fetch 404/error spike | Multi-region replication for blobs, retry from alternate region, and lazy local recache |
-| Small-file packing | Packed archive corruption affects many tiny files at once | Archive-manifest checksum mismatch | Keep immutable manifests with per-file checksums and rebuild from source upload or prior version |
+| Metadata store | Commit succeeds but notify fails, leaving devices stale until they poll | Notify-failure rate and sync-lag canary | Treat notify as acceleration only; clients poll the journal and reconcile by version |
+| Chunk index | Refcounts drift from actual metadata references | Orphan-chunk count and refcount-vs-mark-sweep mismatch | Periodic mark-and-sweep verification; refcounts are a fast path, not the truth |
+| Sync journal | Client cursor falls behind or misses segments | Cursor-gap and replay-failure alarms | Force a full metadata diff once the retention window is exceeded |
+| Conflict handling | Concurrent edits overwrite without preserving both versions | Conflict-copy generation failure alert | Always emit a preserved conflict copy for generic files; never attempt a binary merge |
+| Object storage | Chunk unavailable in one region | Chunk-fetch error spike | Multi-region replication for chunks, retry from an alternate region, lazy local recache |
+| Small-file packing | Archive corruption affects many tiny files at once | Archive-manifest checksum mismatch | Immutable manifests with per-file checksums; rebuild from source upload or a prior version |
+| Client watcher | Filesystem events dropped, so local edits never sync | Divergence found by the periodic full rescan | Rescan on a timer and after every reconnect; treat the watcher as a latency optimisation |
 
 **Unresolved**
 
-TODO. Two or three things this design genuinely does not handle well, and what you would do about each.
+**Moves across namespace boundaries are not atomic, and we are not going to fix it.** Dragging a 10k-file folder out of a shared team folder into your private root touches two namespaces with two independent journals, and there is no transaction spanning them. What we actually do is copy then delete: new file ids, version history reset, 10k creates in one journal and 10k deletes in the other. Every other member of the team folder watches the folder disappear, and the person who moved it gets a folder with no past. The one mercy is that chunks are content-addressed, so no bytes move and the copy is a metadata operation. The clean fix is two-phase commit between namespace owners, and we are declining it on purpose: it puts a distributed transaction on the interactive path of the most common destructive operation in the product, and a half-committed move is worse than today's behaviour, which is bad but at least deterministic. What we do instead is warn in the UI before the move and keep the old path's history for the retention window so support can reconstruct it.
+
+**Rename detection is a heuristic and we know it has a miss rate.** The client learns about local changes from the OS watcher. All three major ones coalesce under load, all three can drop events, and none guarantees that a rename arrives as a rename, so a folder rename can surface as 10k deletes followed by 10k creates. We patch this by matching each new file against recently deleted ones on content hash and size, which recovers a pure rename cheaply. It does not recover rename-plus-edit, which is exactly what "Save As" over an existing file does in several common applications: the hash does not match, so it becomes an unrelated delete and create, version history breaks, and the bytes re-upload. The backstop is a periodic full rescan, which on a 500k-file tree is minutes of disk I/O we would rather not spend and which we therefore run rarely enough to leave a real window. The information genuinely is not available on some platforms, so the honest framing is that rename detection is best effort with a measured miss rate, not a guarantee.
+
+**Most of our conflicts are probably not real conflicts, and we cannot tell which.** Detection is a version compare and swap, so it fires whenever two devices commit off the same parent, whether or not the contents disagree. Many applications rewrite a file completely on save: embedded modification timestamps, re-serialised ZIP containers for Office formats, non-deterministic dictionary ordering. Opening a document, changing nothing, and closing it therefore produces different bytes and a different chunk list, and two devices doing that to the same untouched file produce a conflict copy of a file nobody edited. At the derived ~100k conflict copies a day we believe a large share are of this kind, and we cannot quantify it, because quantifying it requires understanding the format, which is the thing the whole design refuses to do. The available fix is format-aware normalisation before hashing, stripping the timestamp field and canonicalising archive entry order for the handful of formats that dominate the volume. That is a per-format hack and it has to be versioned carefully, because changing a normaliser re-chunks and re-uploads every file of that format across the fleet. We would do it for two formats and live with the rest.
 #### Drill questions
 1. What if two devices edit the same file simultaneously?
 2. How do you handle a 100GB file upload over flaky mobile?
 3. How do you garbage collect chunks when files are deleted?
 4. How do you scale metadata when a single user has 10M files?
 5. How do you prevent malicious uploads (malware, copyrighted content)?
-6. How would you migrate to a new chunk size (4MB → 16MB) in production?
+6. How would you migrate to a new chunk size (4MB to 16MB) in production?
 7. How big is the dedup win in practice?
 8. Why 4MB chunks specifically? Could we use 64KB?
 9. How does streaming sync overlap upload and download?
-
-TODO. Only 9 drill questions carried over, top up to at least 10.
+10. A shared folder with 500 members has one member rename a top-level directory holding 10k files. What crosses the wire, and to whom?
+11. A laptop reconnects after six months and its cursor is older than the journal retention window. What happens?
+12. The client says it already has chunk `h`. Should the server believe it?
 #### Answers to drill questions
-1. Last-write-wins per chunk, plus the loser's version is preserved as a "conflict copy" file alongside. User resolves manually. *If pushed:* for binary files this is the only safe answer — automatic merging risks corruption. For text files, surface a 3-way merge UI; for collaborative docs, switch to a CRDT-based product (Google Docs).
+1. The commit is a compare and swap on the parent version, so the second device's commit fails. The server keeps the winner as canonical and writes the loser's chunk list as a new file, `report (conflict copy from tablet).docx`, which then propagates as an ordinary create. *If pushed:* for binary formats this is the only safe answer, because merging byte ranges from two divergent edits corrupts the file rather than merging it. For text you could offer a three-way merge against the common ancestor, which version history gives you for free; for a genuinely collaborative document you are in the Google Docs problem instead.
 
-2. Resumable upload — client uploads in 4MB chunks, each acked individually; on disconnect, resume from last acked offset. Chunk hashes mean partial uploads survive across sessions. *If pushed:* client computes the chunk list before any upload, server pre-allocates metadata in PENDING state — recoverable even if the client process dies entirely.
+2. Resumable upload. The client chunks first, then uploads with per-chunk acks, so a disconnect resumes at the last acked chunk. Because chunks are keyed by content hash, partial progress survives a process restart and is even reusable from a different device. *If pushed:* the client computes the full chunk list before sending anything and the server records the pending version, so the upload is recoverable even if the client process dies entirely. Also note the handshake happens first, so a 100GB file that mostly already exists on the server transfers far less than 100GB.
 
-3. Reference counting: each chunk has a ref_count; deletion decrements it; nightly sweep deletes chunks with refcount=0 after a 7-day grace period. *If pushed:* refcounts are eventually consistent — combine with a periodic mark-and-sweep that verifies by scanning the metadata DB; protects against ref-count drift bugs.
+3. Refcount per chunk, incremented on every version that references it, decremented when a version expires or a file is purged. A nightly sweep deletes refcount-zero chunks after a 7-day grace period, which covers undelete and refcount bugs. *If pushed:* refcounts drift, so pair them with a weekly mark-and-sweep that scans the metadata store and recomputes reachability. Treat the counter as a fast path and the sweep as the truth.
 
-4. Shard metadata DB by user_id; within a user, paginate by `(parent_folder, name)` indexes. Avoid full-tree scans — sync uses delta tokens, not directory listings. *If pushed:* batch many small files into archive chunks (one chunk = bundle of 1000 small files + manifest) to cut metadata write rate by 1000x.
+4. Shard by namespace, and within a namespace paginate by `(parent_folder, name)`. Critically, never diff directory listings: sync uses the journal cursor, so cost is O(changes) and 10M files is irrelevant to a normal sync. *If pushed:* pack small files into archive chunks to cut the metadata write rate, and note the fallback path is the problem, since a cursor outside the retention window forces exactly the full-tree diff you designed the journal to avoid.
 
-5. Async scan after upload (ClamAV or equivalent) → quarantine on hit. Hash-match against known-bad chunk hashes blocks known malware before storing. *If pushed:* perceptual hashes (PhotoDNA) for image/video copyright detection; Content ID-style fingerprinting for audio. Trade off scan latency vs upload speed by gating downloads, not uploads.
+5. Scan asynchronously after upload and quarantine on a hit; match chunk hashes against a known-bad list to block known malware before it is ever stored. *If pushed:* perceptual hashing for image and video copyright detection, audio fingerprinting for music. Gate downloads rather than uploads so the scan latency lands on the rare path, and be explicit that scanning is incompatible with client-side encryption, which is a product decision rather than an engineering one.
 
-6. Dual-write era — new uploads use 16MB; old files stay at 4MB. Client supports both via per-file chunk-size metadata. Background re-chunker processes old files lazily during low-traffic hours. *If pushed:* don't migrate — just write new files with the new size and let the old corpus stay; rechunking the entire 10EB corpus is rarely worth it.
+6. Do not migrate. Chunk size is per-file metadata, so new uploads use 16MB and existing files stay at 4MB forever; clients read both. *If pushed:* if you must converge, re-chunk lazily when a file is next modified, so the cost rides along with work you were doing anyway. Re-chunking a 6EB corpus deliberately is billions of dollars of I/O to save a fraction of the metadata tier, which is the smaller of the two stores by two orders of magnitude.
 
-7. 50-80% in corporate environments. Everyone has the same OS images, Office installers, template decks; chunks collide enormously. A 1GB Office install with 250 chunks at 4MB: only the user-specific 5-10 chunks actually upload; the other 240+ are already in the KV store from prior uploads. Net upload: ~40MB instead of 1GB. *If pushed:* dedup also breaks privacy in subtle ways — confirming a chunk hash exists tells you someone else has that chunk; mitigations include per-tenant content-addressing keyspaces or encrypting chunks with user keys (which kills cross-user dedup but is the price of true privacy).
+7. Around 30% across a consumer corpus and 50 to 80% inside a corporate tenant, where everyone holds the same OS images, installers and template decks. A 1GB installer is 250 chunks at 4MB; typically only 5 to 10 are user-specific, so about 40MB actually transfers. *If pushed:* most of that win is intra-tenant, which matters because it means per-tenant keyspaces sacrifice much less than the headline number suggests, and per-tenant keyspaces are what close the hash-as-oracle privacy leak.
 
-8. Smaller chunks = better dedup but worse metadata pressure. 1TB at 4KB chunks = 250M metadata rows per file — your metadata DB melts. 4MB gives 256 rows for 1TB and a 4MB re-upload on a 1-byte edit (acceptable). Larger (16MB, 64MB) reduces metadata further but wastes bandwidth on partial edits. *If pushed:* you can use variable-size chunking with content-defined boundaries (rolling hash splits chunks at content-aware breakpoints) to handle inserts mid-file without re-chunking everything downstream — restic and rsync do this.
+8. Smaller chunks dedup better and cost more metadata. A 1TB file at 4KB chunks is 250M chunk rows for one file, which is not a metadata tier, it is a disaster. 4MB gives 256k rows for that same 1TB and re-uploads 4MB on a one-byte edit, which is the tolerable end of both curves. *If pushed:* if the corpus is edit-heavy the right answer is not a different fixed size but content-defined boundaries from a rolling hash, so that an insert perturbs one chunk instead of shifting all of them. That is the first fork in Key decisions.
 
-9. Original sync was two-phase: uploader commits before downloaders see anything. Streaming sync lets downloaders prefetch chunks as the uploader pushes them — the metadata commit just makes the file appear in the listing. Halves end-to-end latency. Safe because chunks are content-addressed and immutable. *If pushed:* this also helps the "uploader on slow link" case — viewers on fast networks pull chunks as they land instead of waiting for the upload to finish.
+9. The naive protocol is two-phase: the uploader commits, then downloaders fetch. Streaming sync lets downloaders speculatively pull chunks as the uploader pushes them, with the commit becoming only the point at which the new version is visible. That roughly halves the gap between "upload finished" and "other device has it" on large files. *If pushed:* it is safe because chunks are immutable and content-addressed, so an early fetch is either part of the final version or discarded. It helps most when the uploader is on a slow link and the downloaders are not.
+
+10. Under namespace sharding, one journal entry per renamed path in that namespace's journal, so 10k entries, written once. The 500 members each receive one notify saying the namespace advanced, then pull the range and apply it locally. No bytes move at all, because the chunk lists are unchanged. Under the per-user alternative it would be 10k × 500 = 5M metadata writes fanned across 500 shards. *If pushed:* the local application is the risky part. If a member's OS watcher reports the incoming rename as deletes plus creates, that member's client can bounce the whole thing back as 10k deletes, so the client has to apply server-driven renames without letting its own watcher re-observe them as local changes.
+
+11. It falls back to a full tree diff: fetch the complete server manifest for the namespace, hash the local tree, and reconcile path by path. It is correct but expensive, minutes of CPU and disk on a large namespace, and it is the path the journal exists to avoid. *If pushed:* the risk is not cost but false deletes. If the diff runs against a partially-populated local tree, say an external drive that has not mounted yet, it will conclude the user deleted everything. So the client refuses to sync a folder whose root is missing or whose file count dropped by more than a threshold, and asks the user instead.
+
+12. No. Believing it unconditionally turns a hash into an access token: anyone who obtains a chunk hash can attach that chunk to their own file and read someone else's data. Either challenge the client to return a random 4KB range of the chunk, proving possession at the cost of one round trip, or restrict dedup to chunks that user has themselves uploaded. *If pushed:* the same trust boundary matters for billing and quota, since a client that lies about chunk contents can also under-report bytes. The general rule is that the client is an optimiser and the server is the authority, and any place the server takes a client claim as fact needs an explicit reason.
 #### Whiteboard script
-TODO
+**0-5, name the problem and take the fork.** Say the thesis before any box: "this is a replication problem, not a storage problem, and the object store underneath is something I would buy rather than build." Then ask the two questions that actually change the design: what is in the folder, media and installers or documents and source trees, because that decides fixed against content-defined chunking; and how much of the corpus is shared, because that decides whether the shard key is the user or the folder. State your assumptions out loud: 1B users, 10GB each, ~10k files each, ~1MB average. Draw nothing yet.
 
-A 45 minute budget: what to cover in 0-5, 5-15, 15-35 and 35-45, what to say first, and a line starting `Cut first:`.
+**5-15, the spine.** Four boxes: sync agent, metadata service, chunk store, notify. Draw the metadata/chunk split first and say why it exists, that reasoning about what changed must never require touching bytes. Then draw upload as three arrows and narrate the handshake, hash list up, missing list down, chunks up. Then the journal as a log next to the metadata box. Say the ordering rules as you draw them: chunks durable, then commit, then notify, and notify is an accelerator because clients poll anyway.
 
-**Raw material, from the old Talking Points:**
+**15-35, the drill.** Protect this block, it is the interview. Go deep on convergence: the three trees the client keeps and why two is not enough, the compare and swap on parent version, what a conflict actually is, and why there is no merge function when the payload is opaque. Then the journal cursor, O(changes) not O(files), and the retention cliff. Then take the chunking fork on your own terms with the number that settles it, a 10-byte insert at offset zero of a 1GB file costing 1GB fixed against 2MB content-defined, and say why the consumer corpus still lands on fixed. Volunteer the "should the server believe the client's hashes" problem before you are asked; most candidates never raise it. Keep streaming sync, small-file packing and the ACL cache in reserve as one-liners.
 
-- **Content-addressed chunking is the core idea.** Chunks named by hash buy dedup, delta sync, and version efficiency.
-- **Metadata vs blob split** is the right storage separation to say early.
-- **Hash-list handshake before upload** is what avoids sending bytes the service already has.
-- **Journal-based sync makes convergence scale with changes, not tree size.**
-- **Conflict copies are intentional product behavior, not an error.**
-- **Dedup has a privacy trade-off.** That shows maturity beyond the happy-path storage story.
+**35-45, concede and close.** Give the gaps before the interviewer finds them: cross-namespace moves are not atomic and you are declining to fix it; rename detection is a heuristic with a miss rate; a large share of conflict copies are spurious because applications rewrite files on save. Then the operational surface in two minutes: the metrics you would page on (dedup hit rate, sync lag, conflict-copy rate, cursor-gap rate, orphan chunks), garbage collection as refcounts plus a mark-and-sweep you never fully trust, and DR as chunks replicating everywhere while metadata stays owned per namespace.
+
+Cut first: the storage layer, meaning erasure coding, placement and durability arithmetic, because that is question 21 and spending time on it is the single most common way to answer the wrong question here. Then link sharing and the permission cache. Then compression and small-file packing. Never cut: the metadata and chunk split, the hash handshake, the journal cursor, and conflict copies as intentional product behaviour rather than an error path.
 #### Appendix
 **Data model**
 
-- **files** (transactional store, sharded by user):
-  `(file_id, owner_id, name, parent_folder, current_version, deleted, created_at)`
-- **versions:** `(file_id, version_id, ts, size, chunk_list[])`
+- **files** (transactional store, sharded by namespace):
+  `(file_id, namespace_id, name, parent_folder, current_version, deleted, created_at)`
+- **versions:** `(file_id, version_id, parent_version, ts, size, chunk_list_ref)`
+- **chunk_list:** `(file_id, version_id, index, chunk_hash)` in its own table, because a 1TB file is 256k rows
+- **journal:** `(namespace_id, jid, op, file_id, version_id, ts)`, append only, monotonic `jid` per namespace
 - **chunks** (key-value store): `chunk_hash → (size, ref_count, blob_location)`
-- **acl:** `(file_id, principal_id, role)`
-- **blobs:** object store, key = chunk_hash → bytes
+- **acl:** `(namespace_id, principal_id, role)`
+- **blobs:** object store, key = chunk_hash
 
 **API contract**
 
@@ -5063,123 +5098,146 @@ PUT /chunk/{hash}
   body: bytes
   → { stored: true }
 
+POST /file/commit
+  body: { file_id, parent_version, hashes }
+  → { version } | 409 { current_version }
+
 GET /file/{id}        → metadata + chunk list
 GET /chunk/{hash}     → bytes (CDN)
+GET /journal?since={jid}&ns={id}  → ordered ops
 
   # Sync notifications
-WS: { event: file_changed, file_id, version }
+WS: { event: namespace_advanced, namespace_id, jid }
 ```
 
 **Observability**
 
-- **Dedup hit rate** — core efficiency signal; drops may mean hashing regressions or workload changes.
-- **Sync lag** (metadata commit to other-device convergence) — the user-facing freshness metric.
-- **Bytes avoided via chunk reuse** — practical measurement of delta-sync effectiveness.
-- **Journal replay latency and cursor-gap rate** — shows whether sync stays O(changes) instead of degrading to full scans.
-- **Orphan-chunk and refcount-drift metrics** — storage correctness and GC health.
-- **Conflict-copy rate** — important product and correctness signal for offline multi-device users.
+- **Dedup hit rate.** Core efficiency signal; a drop means a hashing regression or a workload change.
+- **Sync lag,** commit to convergence on a second device. The user-facing freshness number.
+- **Bytes avoided by chunk reuse.** The direct measure of whether delta sync is working.
+- **Journal replay latency and cursor-gap rate.** Shows whether sync is still O(changes) or degrading to full scans.
+- **Conflict-copy rate,** split by format where possible, because a rise usually means an application changed how it writes files rather than that users started colliding.
+- **Orphan-chunk count and refcount drift.** Storage correctness and GC health.
 
 **Multi-region and DR**
 
-- **Replication mode:** metadata is strongly owned per user namespace, while immutable chunks replicate broadly and can be served from any region.
-- **RTO:** chunk serving can fail over quickly; metadata-region failover is harder because namespace consistency matters.
-- **RPO:** near-zero for committed metadata versions and uploaded chunks; notify events can be lost because they are recoverable from journal replay.
-- **Failover cadence:** rehearse namespace recovery, journal rebuild, and chunk-index reconstruction separately.
-- **Cross-region cost:** large on blob replication, modest on metadata because metadata is tiny relative to file bytes.
+- **Replication mode:** metadata is strongly owned per namespace; immutable chunks replicate broadly and serve from any region.
+- **RTO:** chunk serving fails over in seconds; metadata failover is slower because namespace ordering must be preserved.
+- **RPO:** near zero for committed versions and stored chunks. Notify events are allowed to be lost, since the journal reconstructs them.
+- **Failover cadence:** rehearse namespace recovery, journal rebuild and chunk-index reconstruction as three separate drills.
+- **Cross-region cost:** large on chunk replication, negligible on metadata, which is 18PB against 11EB.
 
 ### 13. Design a Proximity Service (Yelp, Find Nearby)
 #### Problem
-Find businesses (or any geo-tagged entities) within a radius of a given lat/lng, fast.
+Answer "what is near this point" over a catalogue of 200M fixed places, in under 200ms, at hundreds of thousands of queries per second. The places do not move, so the index is a build artifact rather than a live structure and the cost is dominated entirely by reads. The hard part is that the query is a circle, the index is made of boxes, and population density varies by three orders of magnitude across the boxes.
 #### Core
-TODO
+No storage engine has a "near" operator. Everything here follows from that: you manufacture a one-dimensional key out of a latitude and a longitude, accept that any such key is lossy, and spend the rest of the design managing the loss.
 
-Write the whole answer as you would give it in sixty seconds, 200 to 300 words, standing alone.
+The key is a cell id. Cut the surface of the earth into cells, label every place with the cell it falls in, and a nearby search becomes an equality lookup on a handful of cell ids rather than a distance computation over 200M rows. Because a circle never aligns to cell edges, you read the block of cells that covers the radius, not just the one the user stands in, then run exact distance over the candidates and discard the false positives. Approximate and cheap first, exact and expensive second, on a set that is now thousands rather than hundreds of millions.
+
+The property that shapes the rest is that businesses do not move. Coordinate changes run below one per second against 60k searches per second, a read-to-write ratio near 100,000:1. That makes the index derived, disposable state: build it offline from the catalogue, validate it, swap it in atomically, and rebuild the whole thing in ten minutes if it is ever wrong. None of the write-absorption machinery a moving-entity system needs applies.
+
+The costs are all on the read side. A dense block returns 22k candidates and a rural one returns 20, so the index entry has to be slim enough that scanning 22k of them is free and self-contained enough that you hydrate only the 20 rows you return.
 #### Summary
-**The picture in your head:** a postal code system for the whole planet, where each code covers a geographic square. Finding coffee shops near you means: "what's my postal code?" then "give me everything with the same or neighboring codes, then discard anything actually too far." It's a two-step filter — the postal code is approximate and fast, the distance check is precise and slow.
+**The picture in your head:** a postal code system for the whole planet, where each code covers a geographic square. Finding coffee shops near you means: "what's my postal code?" then "give me everything with the same or neighboring codes, then discard anything actually too far." It's a two-step filter, where the postal code is approximate and fast and the distance check is precise and slow.
 
 **The approaches people actually take:**
-TODO. Two or three things a competent engineer might reach for, in plain language and before any product name, with what each one buys and roughly when it wins.
 
-**The single-request walkthrough:** you open Yelp at 40.75°N, 73.99°W (Midtown Manhattan) and search "coffee within 1km." The Search API encodes your coordinates into a geohash (think of a geohash as a short alphanumeric string where the first N characters identify a geographic cell — here `dr5ru` covers a ~600m square). It queries a Redis geo-index for all businesses in `dr5ru` plus the 8 neighboring cells (because your 1km radius might bleed into adjacent cells). Redis returns ~200 candidate business IDs in ~5ms. The API fetches full records for those 200 businesses from the Business Store, runs haversine distance math (the actual formula for distance on a sphere) on each one, discards everything beyond 1km, applies the "coffee" category filter, and sorts by distance. Top 20 results return in ~50ms total. The result is cached under the key `(dr5ru, coffee)` for 60 seconds — the next 1000 people searching for coffee in Times Square at noon all hit the cache, which is why this query can serve 100k/s at peak.
+*A fixed grid of equal cells.* Divide the world into cells of one size, store each place's cell id as an ordinary indexed column, and answer a query by reading the block of cells that covers the radius. It buys extreme simplicity: the id is an integer, so any store can index it and the index shards by key across as many nodes as you like; the build is a map over the catalogue with no structure to rebalance. It wins when you can hold the per-candidate cost near zero, and it degrades exactly where people search most.
+
+*Adaptive subdivision.* Split a region into four only when it holds more than k places, so leaves are tiny downtown and enormous in the desert and every leaf returns a bounded candidate count by construction. It buys a flat tail across a thousandfold density range. It costs a tree walk instead of a hash lookup, a structure that cannot be sharded by key without duplicating its upper levels, and a rebuild rather than an edit when the distribution shifts.
+
+*Push the geometry into the store that already holds the rows.* Keep bounding boxes alongside the business records so one query does distance, category, rating and opening hours together. It buys no second system to keep in sync and native support for shapes that are not circles, which radius search cannot express at all. It costs roughly an order of magnitude in throughput per node.
+
+The choice is not taste. It turns on two measured things: what a single candidate costs you to evaluate, and whether anything you serve is shaped like a polygon.
+
+**The single-request walkthrough:** take the fixed-grid answer, since the arithmetic below argues for it. You open the app at 40.75°N, 73.99°W in Midtown Manhattan and search coffee within 1km. The Search API encodes your coordinates to a cell id at the precision tier matching a 1km radius, a cell roughly 1.2km wide and 0.6km tall, and computes the block of cells that fully covers a 1km circle from anywhere inside that cell: three columns by five rows, fifteen cells. It scans those fifteen cells in the geo index. Midtown carries about 2,000 listings per km² and the block covers 11.2km², so about 22,000 entries come back. Each entry is 48 bytes and self-contained, so the category filter runs right there in the scan: about 330 survive as coffee. Haversine on 330 points costs 17 microseconds and leaves about 90 inside 1km. Sort by a blend of distance and rating, take 20, and only now fetch the 20 display records from the card store. Server time is about 5ms. The result is cached under `(cell, coffee, 1km, page 1)` for 60 seconds, and the next thousand people searching coffee in Times Square at noon hit that entry instead.
 
 **The pieces (and what each one is for):**
-- **Geohash** — an encoding scheme that turns a latitude/longitude pair into a short string like `dr5ruk`. Longer strings = smaller cells = more precise location. The key property: two places with the same geohash prefix are geographically close. This lets you find nearby places with a string prefix query instead of scanning all 200M businesses for distance. The catch: cell edges don't align with circles, so you always query the target cell plus all 8 neighboring cells to avoid missing places right across a cell boundary.
-- **Geo Index (Redis GEO)** — an in-memory database storing each business as a geohash-scored entry in a sorted set. Very fast prefix lookups. 200M businesses at ~80 bytes each fits in ~16GB of RAM — small enough to keep entirely in memory.
-- **Business Store (Postgres/Cassandra)** — the source of truth for business details (name, hours, ratings, address). The geo index holds only IDs and coordinates; full records are fetched ("hydrated") after candidate filtering. Keeping these separate means you can rebuild the geo index from scratch in minutes if needed.
-- **Result Cache (Redis)** — caches the final ranked results for popular `(geohash_cell, category)` combinations with a 60-second TTL (TTL = Time To Live, how long before the cache entry expires). In dense cities, ~70% of searches hit this cache, which is what makes 100k peak QPS affordable.
+- **Cell encoding** (geohash here, though S2 or H3 would do the same job) turns a latitude and longitude pair into a short string or integer where a shared prefix means geographic proximity. That is what converts a two-dimensional range query into a one-dimensional equality lookup. The catch is that cell edges are not circles, so you always read a block rather than a cell.
+- **Geo index.** A packed, read-only array of 48-byte entries sorted by cell id: business id, coordinates, category bitmask, rating, popularity, open-hours bitmap. 200M × 48B is about 10GB, so it is memory-resident on every serving node. Everything needed to filter and rank lives here, which is why hydration is 20 rows and not 22,000.
+- **Card store.** An in-memory key-value tier holding the display projection, roughly 300 bytes per business, so 200M × 300B is about 60GB. Hit once per query with a 20-key multi-get.
+- **Business catalogue.** The transactional source of truth with the full 2KB record. It is never on the search path. Both the index and the card store are built from it and can be regenerated from it.
+- **Result cache.** Keyed on `(cell, category, radius bucket, page)` rather than raw coordinates, with a 60-second TTL, so everyone standing anywhere in the same cell shares one entry. That key choice is the entire reason a 60% blended hit rate is achievable.
 
-**The thing that makes it hard:** cities are 1000x denser than rural areas. A 600m geohash cell in Times Square contains ~1000 businesses; the same cell in rural Wyoming contains ~5. A uniform index with fixed cell sizes either over-fetches in dense areas (wasting CPU on haversine for thousands of candidates) or returns too few results in sparse ones. On top of that, the geohash cell boundary problem: if you're 10 meters from the edge of your cell and searching 500m radius, half the results might live in the neighboring cell — which is why you always query 9 cells (target + 8 neighbors) even though it means fetching ~3x more candidates than the radius strictly requires.
+**The thing that makes it hard:** density varies by 1000× and the query does not. A block covering 11.2km² returns about 22,000 candidates in Midtown, about 1,700 in a typical suburb, and about 20 in a rural county. A design that pays a database read per candidate dies at the top of that range; a design that caps candidates to survive it silently drops results at the top of that range too. On top of that sits the boundary tax: a circle never aligns to cell edges, so the block you read is 3.6× the area of the circle you asked for, and every candidate in that 2.6× excess is fetched, tested, and thrown away.
 
-**Why this design and what it costs:** the two-phase filter (approximate by cell, then exact by distance) separates a cheap index lookup from an expensive distance calculation. The index prunes 200M businesses down to ~200 candidates in milliseconds. Haversine math on 200 points is trivial. Neither phase alone would work: pure haversine on 200M points takes seconds; pure cell lookup without distance refinement returns false positives near cell edges. The combination runs in under 50ms. The geohash precision is tuned to match the search radius — a 1km search uses ~600m cells (length-6 geohash), a 5km search uses ~5km cells (length-5), so you always query exactly 9 cells regardless of the radius.
+**Why this design and what it costs:** the two-phase filter separates a cheap approximate prune from an expensive exact test, and the split is only worth it if the cheap phase is genuinely cheap. Scanning a packed 48-byte entry costs about 5 nanoseconds, so even 22,000 of them is 110 microseconds against a 200ms budget. The price is denormalisation: every attribute you might filter on has to be copied into the index, so adding a filter means rebuilding 10GB rather than adding a column. Because the entities are static, that rebuild is a scheduled job and not an incident, which is the whole reason the trade is affordable here and not in a moving-entity system.
 
 **If you were building it tomorrow:**
-- Redis GEOADD for the geo index, Postgres for the business store, Redis for the result cache.
+- Offline build job producing a versioned index artifact, an in-memory KV tier for cards, the transactional catalogue as source of truth, and a short-TTL result cache.
 - Hot path:
   ```
-  cell = geohash(lat, lng, precision=6)  # ~600m cell
-  neighbors = [cell] + geohash_neighbors(cell)  # 9 cells
-  candidates = redis.GEORADIUS(center, radius_km, unit='km')
-  results = [b for b in hydrate(candidates) if haversine(b, user) <= radius_km]
-  results.sort(key=lambda b: haversine(b, user))
-  cache.set((cell, category), results, ttl=60)
+  tier  = precision_for(radius)            // 3 tiers: 5km / 1km / 200m
+  block = cells_covering(lat, lng, radius, tier)
+  cand  = [e for c in block for e in index[c] if e.category & mask]
+  hits  = [e for e in cand if haversine(e, user) <= radius]
+  top   = nlargest(20, hits, key=score)    // distance blended with rating
+  page  = card_store.mget([e.id for e in top])
+  cache.set((block[0], mask, radius_bucket, 1), page, ttl=60)
   ```
-- For moving entities (drivers): swap on-disk store for Redis GEO with heartbeat writes every 5-30 seconds.
+- Coordinate edits since the last build land in a small overlay map consulted alongside the artifact.
 #### What this is really testing
-TODO
+Whether you understand that spatial locality has to be manufactured, and that the manufactured key is lossy in a specific way you then have to pay for. Cell ids give you locality in one dimension out of two, so a circle becomes a block of boxes, the block over-covers by roughly 3.6×, and every downstream decision (how many neighbour rings to read, what precision to pick, what to put inside an index entry, what to key the cache on) is a consequence of that loss rather than an independent choice. A candidate who names geohash in the first thirty seconds has skipped the only interesting part, which is what happens between "I have a cell id" and "I have twenty ranked results".
 
-The one insight this question exists to elicit, then the contrast with the question it most resembles and why the answers differ.
+The second thing it tests is whether you notice that mobility, not geography, picks the architecture. Nearby Friends is the same sentence with one word changed and a completely different answer. There the indexed points move: every entity rewrites its position every 5 to 30 seconds, so the write rate is the entity count divided by the reporting interval, the index has to absorb writes rather than serve reads, results cannot be cached at all because they are stale before the response lands, and the interesting problems are fan-out, the friend graph, and battery on the client. Here the read-to-write ratio is inverted to about 100,000:1, so the index is a file you produce, diff, and promote, and the interesting problems are candidate-set size and cache hit rate. The same word, geohash, appears in both answers and means different things: there it is a mutable key you write on every heartbeat, here it is a column in an artifact you rebuild nightly. Give the moving answer to the static question and you have built write absorption for data that changes once a year, and you will not be able to explain why you are not caching.
 
-Closest question: TODO
+Closest question: Q14
 #### Clarifying questions and how each answer forks the design
-- Static (businesses) or dynamic (drivers) data?
-- Result count + radius bounds?
-- Filters (category, rating)?
-- Read-heavy or also high write rate?
+- Do the indexed entities move, and if so how often?
+- Is radius a client parameter, and is it bounded?
+- Result count bounds, and is the ordering by distance or by quality?
+- Filters (category, rating, open now)?
+- Is anything queried by shape rather than by radius?
 
 **How the answers shape the design**
 
 | If the answer is… | Then the design… |
 |---|---|
-| Static data (businesses) | precompute a spatial index (geohash, quadtree, or S2 cells) that rarely changes |
-| Dynamic data (drivers) | a write-heavy in-memory geo index (Redis GEO or a sharded grid) updated on every location ping |
-| Bounded radius and result count | pick a cell size near the query radius so a lookup scans few cells |
-| Filters like category or rating | combine the geo index with a secondary attribute filter, or store per-category indexes |
-| Read-heavy | cache hot cells and replicate the index for read scale |
-| High write rate too | shard the grid by region and accept approximate freshness |
+| Static entities (businesses) | build the index offline as a versioned artifact and rebuild rather than patch it |
+| Moving entities (drivers, friends) | a write-absorbing in-memory index updated on every ping, and no result caching at all |
+| Bounded client-supplied radius | bucket cell precision by radius so the covering block stays small |
+| Unbounded or absent radius | an adaptive structure supporting k-nearest-neighbour, because no fixed precision works |
+| Ranking by quality, not distance | the ranking attributes must live inside the index, or truncation drops the best results |
+| Filters like category or rating | denormalise them into the index entry, and accept that adding one means a rebuild |
+| Polygon or drive-time queries | a bounding-box index in the transactional store alongside the radius path |
 #### Requirements and scale, derived out loud
 **Requirements**
 
-- **FR:** "find X within Y km of (lat,lng)", filter by category, sort by distance/rating
-- **NFR:** <200ms p99, support dense + sparse regions, scale to 100M+ entities
+- **FR:** "find X within Y km of (lat,lng)", filter by category and rating, rank by a blend of distance and quality, paginate.
+- **NFR:** under 200ms p99, correct in both dense and sparse regions, 200M+ entities, index rebuildable from source.
 
 **Scale**
 
-- **Catalogue size:** Google Maps ~200M businesses globally (Yelp ~80M MAU, ~5M businesses; Maps is the superset). Assume ~5% churn/yr (new listings, closures, hours/menu/rating updates) → 200M × 0.05 / 365 ≈ ~30k updates/day on the slow side, but bursty ratings + AI scrapers push effective ~10M updates/day → 10M ÷ 86,400 ≈ ~120 writes/s steady — read-dominated.
-- **Search QPS:** Yelp ~80M MAU × ~1 search/user/day = ~80M searches/day = ~1k/s; scaled to a Google Maps-class peer with ~1B MAU × ~5 searches/day = ~5B/day → ~60k/s avg, ~100k/s steady headline; lunch (12pm) + dinner (7pm) bursts in dense metros push 5× → ~500k QPS peak.
-- **Entity size:** ~2KB per business — id 16B + name ~50B + lat/lng 16B + geohash ~12B + category array ~50B + rating 4B + opening hours ~200B + address ~200B + phone ~16B + photos refs ~500B + description ~1KB. 200M × 2KB = ~400GB total — fits in one replicated transactional cluster sharded by region.
-- **Geo index:** 200M points × ~80B per Redis sorted-set entry (16B business_id member + 8B geohash score + ~56B Redis ZSET overhead) = ~16GB; fits in a single in-memory cache shard with 3× HA replication.
-- **Density skew:** Manhattan ~28k businesses/km², rural US ~5/km² → ~1000× delta. An 800m geohash cell (precision-7) in Manhattan returns ~1k candidates; same cell in rural areas ~5. Implies pagination + secondary filter (category, rating) is mandatory at urban scale.
-- **Hot tier:** in-memory geo cache for the live index + a result cache keyed on `(geohash_prefix, category)` with ~60s TTL. Empirically ~80% of queries in dense areas are repeats within 60s (same lunch crowd searching "coffee").
-- **Cold tier:** full business catalogue + audit history in the transactional store (~400GB metadata + ~5× audit history ≈ 2TB); geo index can be fully rebuilt from this in ~5–10 minutes if cache is wiped.
-- **Result-cache hit rate:** target ~70% on hot prefixes (Times Square, central London); 100k QPS × (1 − 0.7) = ~30k effective backend QPS — sized so a single transactional shard tier can serve.
+- **Catalogue size:** 200M places globally (Yelp lists ~5M with ~80M MAU; a Maps-class catalogue is the superset). Full record ~2KB: id 16B + name 50B + coordinates 16B + cell id 8B + categories 50B + rating 4B + hours 200B + address 200B + phone 16B + photo refs 500B + description 1KB. 200M × 2KB = **~400GB** in the transactional store.
+- **Search rate:** 1B MAU × 5 nearby searches/day = 5B/day; 5B ÷ 86,400 = 57.9k, call it **~60k/s average**. Lunch and dinner in dense metros run about 5× the daily mean, so 60k × 5 = **~300k/s peak**.
+- **Write rate on the index:** ~10M catalogue edits/day (ratings, hours, photos, menus) is 10M ÷ 86,400 = ~120 writes/s, but under 0.5% of edits move a coordinate, so 10M × 0.005 = 50k/day = 50,000 ÷ 86,400 = **~0.6 coordinate writes/s**. Against 60k reads/s that is a **100,000:1 read-to-write ratio**, and it is the number that justifies an offline build.
+- **Index size:** 48B per entry (id 8B + two float32 coordinates 8B + cell id 8B + category bitmask 8B + rating 2B + popularity 2B + open-hours bitmap 8B + padding). 200M × 48B = **~10GB**, memory-resident on every serving node. A general-purpose sorted-set representation costs closer to 80B per member, so ~16GB, which still fits but rules out putting the whole world on one node with replicas.
+- **Card store:** display projection ~300B (id, name, rating, review count, category, thumbnail ref, short address). 200M × 300B = **~60GB**, sharded across an in-memory KV tier.
+- **Covering block:** at a 1km radius with cells 1.22km wide and 0.61km tall, columns needed each side = ceil(1000 ÷ 1220) = 1 and rows = ceil(1000 ÷ 610) = 2, so the block is 3 × 5 = **15 cells** covering 3.66km × 3.05km = 11.2km². The circle is π × 1² = 3.14km², so the block over-fetches by 11.2 ÷ 3.14 = **3.6×**.
+- **Candidates per query:** Midtown Manhattan carries ~2,000 listings/km², so 11.2 × 2,000 = **~22,000 candidates** at p99. A typical suburb at ~150/km² gives 11.2 × 150 = ~1,700, the median. A rural county at ~2/km² gives ~20. That is a **~13× median-to-p99 spread** and a 1000× spread end to end.
+- **Scan cost:** a packed 48B entry tests in ~5ns, so p99 scan = 22,000 × 5ns = **110µs**, and the median is 1,700 × 5ns = 8.5µs. Both are noise against 200ms, which is the finding that decides the first fork below.
+- **Cache:** result key is `(cell, category, radius bucket, page)`, 60s TTL. ~70% hit on the top 1,000 cells, which carry ~40% of traffic, blending to **~60% overall**. Peak backend load = 300k × (1 − 0.6) = **~120k/s**.
+- **Hydration:** filter and rank inside the index, hydrate only what you return: 120k × 20 = **2.4M card reads/s**, which is 120k multi-gets of 20 keys. Hydrating before filtering would be 120k × 2,000 mean candidates = 240M reads/s, **100× more**, and 22,000 × 2KB = 44MB of wire traffic for one Midtown query.
+- **Rebuild:** the build is a map over 400GB plus a sort of the 10GB of index entries, which lands at **5 to 10 minutes** on a modest cluster. That number is what makes "rebuild it" an ordinary response rather than an outage.
 #### Key decisions
-TODO
+**Uniform cell grid vs adaptive subdivision**
+- Choice: a uniform grid with three precision tiers selected by requested radius, plus a per-cell candidate cap as a backstop.
+- Alternative: adaptive subdivision, a quadtree whose leaves hold at most k places, so leaf cells shrink where density demands and the candidate count is bounded by construction rather than by a cap.
+- Decider: the cost of a single candidate, not the number of them. Both designs pay the same boundary tax, because a circle never aligns to cell edges either way, so the block-versus-cell question does not choose between them. What chooses is what a dense cell does to you. The grid's candidate count spans 20 to 22,000, a 1000× range, but a packed 48-byte entry tests in ~5ns, so the p99 scan is 22,000 × 5ns = 110µs against a 200ms budget, or 0.06%. A 1000× spread on a term worth 0.06% is not a problem worth a tree. Below roughly 1µs per candidate the grid wins on everything operational: an integer cell id shards by key across any store, and a rebuild is a map plus a sort.
+- Alternative wins when: a candidate costs a row read rather than an array probe, which is the case the moment the index and the store are the same system, since 22,000 row reads at 10µs each is 220ms and blows the budget on its own. Also when radius is absent so precision cannot be bucketed and you need a genuine k-nearest-neighbour walk, or when the per-cell cap is measurably dropping results people wanted. The tree is honestly better on the tail; it is worse on sharding and on rebuild, and if the whole index fits in one process those costs vanish and the tree is the better default.
 
-Two or three genuine forks. For each, in this exact shape so it stays checkable:
+**A slim self-contained index entry vs an index of ids only**
+- Choice: put coordinates, category bitmask, rating, popularity and an open-hours bitmap in the 48-byte index entry, run filtering and ranking entirely inside the scan, and hydrate only the 20 rows you return.
+- Alternative: index holds business ids, fetch the full records for every candidate, filter and rank afterwards. Simpler, and the index never goes stale on an attribute change because there are no attributes in it.
+- Decider: candidates per query multiplied by backend QPS. Peak backend is 120k/s after the result cache. Filtering first costs 120k × 20 = 2.4M card reads/s. Hydrating first costs 120k × 2,000 mean candidates = 240M reads/s, **100×**, and at p99 a single query moves 22,000 × 2KB = 44MB. The break-even sits near 20 candidates per query, which is roughly a 200m radius in a suburb.
+- Alternative wins when: candidates are naturally few, meaning a hard sub-500m radius cap in a single non-dense market. It also wins when the index and the store are the same system, since there is no fetch to avoid, and when the filter set changes faster than you can rebuild, for example filters driven by user-generated tags, where denormalising means a 10GB rebuild per tag.
 
-**<name of the fork>**
-- Choice:
-- Alternative:
-- Decider:
-- Alternative wins when:
-
-**Raw material, from the old Common Mistakes:**
-
-- **Full-table scan with exact distance.** The index exists to prune by orders of magnitude before haversine runs.
-- **Expecting the spatial index to be exact.** It should be approximate and cheap; exactness comes in the second phase.
-- **One fixed cell size for every radius and density regime.** Urban and rural query shapes are radically different.
-- **Using a driver-style live-write architecture for mostly static businesses.** Static and dynamic geo workloads want different stores.
-- **Forcing polygon and radius queries through the same primitive.** R-tree / PostGIS exists for a reason.
+**Build-and-swap vs a write-through live index**
+- Choice: build the index offline from the catalogue, publish it as a versioned immutable artifact, swap it in atomically per node, and carry the day's coordinate changes in a small in-memory overlay consulted alongside it.
+- Alternative: a live index written through on every business edit, the shape a moving-entity system uses.
+- Decider: coordinate writes against reads. 50k coordinate changes/day is 0.6/s against 60k reads/s, a ratio near 100,000:1. At that rate the daily overlay never exceeds ~50k entries, so it is a hash map on every node, and a 5-to-10-minute full rebuild is a scheduled job rather than an incident. The artifact is also testable in a way a live index is not: you can diff two versions and replay a query corpus against both before promoting.
+- Alternative wins when: coordinate writes exceed roughly 1% of reads, or freshness must be under a minute. Both flip the moment the entities move, which is exactly Q14 and Q29: a driver rewriting position every 4 seconds gives a write rate of the fleet size divided by 4, and an offline build is meaningless against it. It also wins for a young catalogue small enough to rebuild in milliseconds inside one process, where the whole build-and-promote pipeline is pure overhead.
 #### High-level design
 **must-say**
 
@@ -5244,61 +5302,21 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 </svg>
 ```
 
-**How to read the diagram:** a location query does not search the whole world. It first maps the user's location to nearby geo cells, fetches the candidate places inside those cells, and only then computes exact distance and ranking.
+**How to read the diagram:** a location query does not search the whole world. It first maps the user's location to the block of cells covering the radius, scans the candidate entries inside those cells, and only then computes exact distance and ranking.
 
-**Why the flow is shaped this way:** raw geographic distance is expensive to evaluate globally, but geo cells are cheap. The index's job is to narrow the world to a small candidate set; the ranking step's job is to turn that candidate set into something that feels accurate to a human.
+**Why the flow is shaped this way:** raw geographic distance is expensive to evaluate globally and cell membership is cheap. The index's job is to narrow the world to a scannable candidate set; the ranking step's job is to turn that candidate set into something that feels accurate to a human.
 
-**What this layout buys you:** fast nearby search without pretending the earth is a simple grid. The tradeoff is approximation: cell boundaries are only a first pass, so the second pass must clean up false positives carefully.
+**What this layout buys you:** fast nearby search without pretending the earth is a simple grid. The tradeoff is approximation: cell boundaries are only a first pass, so the second pass has to clean up false positives carefully, and the index has to carry enough per-entry data that the second pass never has to leave memory.
 #### Deep dive
 **must-say**
 
-**Geo-index comparison:**
+**The two-phase filter, and the one parameter that governs its cost.**
 
-| Structure | How | Best For | Notes |
-|---|---|---|---|
-| **Geohash** | encode lat/lng → base32 string; prefix match = nearby | uniform density | edge cell issues; check 8 neighbors |
-| **Quadtree** | recursive 4-way split until ≤k pts/leaf | density variation (cities) | handles NYC vs rural |
-| **R-tree** | bounding rectangles | polygons (e.g. delivery zones) | PostGIS uses |
-| **S2 (Google)** | sphere → hierarchical cells | spherical accuracy | most flexible |
-| **Geohex / H3 (Uber)** | hex grid | uniform neighbors | no edge weirdness |
+Phase one is a set-membership scan over a block of cells. Phase two is exact haversine distance over what phase one returned. Every latency and capacity number in this system is a function of one choice: cell size relative to the requested radius. Get it right and phase one returns thousands; get it wrong by one precision level and it returns tens of thousands or requires hundreds of lookups.
 
-**Geohash deep dive:**
-```
-"9q8yyk8ytpxr"   ← 12-char geohash
-   ↑↑↑↑↑↑↑↑↑↑↑
-   coarse → fine
+**Computing the block, and the mistake almost everyone makes.** The folk rule is "target cell plus eight neighbours". That is only correct when the cell is at least as wide and as tall as the radius. The general form is: with cells of width `w` and height `h`, cover radius `r` from any point in the centre cell with `(2·ceil(r/w) + 1) × (2·ceil(r/h) + 1)` cells.
 
-prefix "9q8yy" = ~5 km cell
-prefix "9q8yyk" = ~600 m cell
-
-To find within radius R:
-  1. Choose precision level matching R
-  2. Compute target geohash + 8 neighbors
-  3. Fetch all biz with matching prefix
-  4. Filter by exact haversine distance
-```
-
-**Quadtree:**
-```
-World
-├── NW ┬── NW (sparse → 1 leaf)
-│      ├── NE (sparse)
-│      ├── SW (sparse)
-│      └── SE
-├── NE
-├── SW (NYC region — recurse deeply)
-│   ├── ... (further subdivision until <100 biz/leaf)
-└── SE
-```
-
-**Query path:**
-1. Hash lat/lng → geohash prefix at radius-appropriate precision
-2. Fetch candidates from cell + neighbors
-3. Filter by exact haversine distance
-4. Apply category filter
-5. Sort by distance, paginate
-
-**End-to-end query sequence — two-phase filter in action.** The pattern is approximate-then-refine: spatial index prunes 200M businesses to ~hundreds of candidates by prefix; haversine then exact-filters by radius; sort and paginate complete the response. Total ~50ms median.
+Geohash makes this bite, because its cells are not square at even lengths. It interleaves longitude and latitude bits, so an odd-length prefix is roughly square and an even-length prefix is 2:1 wide. Length 5 is 4.9km × 4.9km, length 6 is 1.22km × 0.61km, length 7 is 153m × 153m. For a 1km radius at length 6, columns are ceil(1000/1220) = 1 each side but rows are ceil(1000/610) = 2 each side, so the block is 3 × 5 = 15 cells, not 9. Use 9 and you silently lose every result between 610m and 1000m due north or south of the user, which is a correctness bug that never throws and only shows up as "why is that place missing".
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 556" role="img" aria-label="Proximity search sequence: client, API, result cache, geo index, business store with cache-hit vs cache-miss branches">
@@ -5397,9 +5415,9 @@ World
 </svg>
 ```
 
-The cache key intentionally uses `geohash_prefix` (not raw lat/lng) so two queries from anywhere in the same ~600m cell share a cache entry — that's how the result-cache hit rate gets to 70%+ on Times Square coffee at noon.
+The cache key intentionally uses the cell id rather than raw coordinates, so two queries from anywhere inside the same cell share one entry. That is the difference between a cache keyed on something with millions of distinct values and one keyed on something with a few thousand hot ones, and it is why the hit rate on the top cells reaches 70%.
 
-**Geohash precision vs query cost — visual.** Pick precision such that one cell ≈ search radius; you query target cell + 8 neighbors and let haversine clean up edges. Mis-pick precision and you either over-fetch (cell too large) or miss results (cell too small).
+**Picking the tier.**
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 372" role="img" aria-label="Geohash precision versus query cost: three rows for length 5, 6, 7 showing over-fetch, good match, and under-fetch">
@@ -5467,223 +5485,236 @@ The cache key intentionally uses `geohash_prefix` (not raw lat/lng) so two queri
 </svg>
 ```
 
-Rule of thumb: cell width ≈ 1.5× search radius. The "9-cell scan" assumption (target + 8 neighbors) only holds if precision is right; otherwise you're scanning a grid, not a 3x3.
+The diagram's rule of thumb, cell width about 1.5× the radius, is the right instinct with one correction: it is the *shorter* dimension that governs, so at even geohash lengths you compare the radius against the height, not the width. The failure modes are asymmetric. Too coarse and you over-fetch: at length 5 a 1km search reads 9 cells covering 215km² against a 3.14km² circle, a 68× over-fetch, so a Midtown query scans 430,000 entries instead of 22,000. Too fine and you pay lookups: at length 7 the same search needs 15 × 15 = 225 cells, and while the over-fetch drops to 1.7× the block is no longer contiguous in cell order, so you are doing 225 range probes instead of 15. Three tiers (about 5km, 1km, 200m) selected from the requested radius covers the useful range, and the API clamps radius into those buckets rather than honouring an arbitrary value.
 
-**Geohash precision table.** *[Source: geohash.org reference]*
+**Where the time actually goes.** At the median, 15 range probes into a memory-resident array, 1,700 entries scanned at 5ns each for 8.5µs, a category bitmask AND that eliminates ~98% of them, haversine on the ~30 survivors at 50ns each, a partial sort for the top 20, and one 20-key multi-get. Server time is a few milliseconds and almost all of it is the two network hops, not the geometry. At the Midtown p99 the scan grows to 110µs and the haversine set to ~330 points for 17µs; the query is roughly 100µs slower than the median, which is invisible inside a 200ms budget. This is the payoff for making phase one a scan over packed structs rather than a fetch: a 13× swing in candidate count moves p99 by a tenth of a millisecond.
 
-| Length | Cell width × height | Use case |
-|---|---|---|
-| 4 | 39 × 19 km | regional search ("restaurants in NYC") |
-| 5 | 4.9 × 4.9 km | city-scale ("coffee shops near downtown") |
-| 6 | 1.2 × 0.6 km | neighborhood ("food within walking distance") |
-| 7 | 153 × 153 m | street-level ("bars on this block") |
-| 8 | 38 × 19 m | sub-block precision (driver dispatch) |
+**What the scan cannot absorb.** Two things break the arithmetic. The first is an unclamped radius: a 50km search in Manhattan covers 7,850km² and scans 15.7M entries at 5ns, which is 78ms of pure scan on one core, and at 120k QPS that is not survivable. Radius is clamped to 25km and the coarse tier is used above 5km, which under-serves genuinely wide searches and is a conceded limitation rather than a fix. The second is a filter that is not in the index. Every filterable attribute has to be a field in the 48-byte entry, so filters have a hard budget: the bitmask holds 64 category bits and the hours bitmap holds a coarse open-now approximation. A filter that does not fit forces either a wider entry, which is 200M × the delta, or a post-scan fetch, which reintroduces the 100× hydration cost the design exists to avoid.
 
-**H3 (Uber's hex grid) deep dive.** *[Source: Uber engineering, H3 paper]* H3 wraps Earth in **hexagons projected onto an icosahedron**, with **16 resolutions** (0-15) where each level has ~1/7 the area of the parent. **122 base cells**; to handle the icosahedron's vertices (where you can't tile with hexagons alone) H3 introduces **12 pentagons**, deliberately positioned over water to minimise land collisions.
-
-Why hexagons over geohash squares: a hex has only one neighbor distance (center-to-center is the same to all 6 neighbors), while a square has two (4 edge-neighbors closer than 4 corner-neighbors). This makes "find all cells within K rings" trivial for hex (uniform expansion) and awkward for geohash (which-direction-am-I-going calculations). Each cell is a **64-bit integer**, and child IDs truncate to ancestor IDs — so coarsening is a bitshift, not a recompute. Uber dispatches drivers, computes surge zones, and aggregates demand using H3 because uniform neighbor distance makes "demand near here" comparable across cells.
-
-**S2 vs Geohash vs H3 quick guide.**
-- **Geohash**: simplest, widely supported, edge weirdness, square cells distort near poles. Default for static low-scale.
-- **S2 (Google)**: hierarchical Hilbert curve on a sphere; better polar accuracy than geohash; 30 levels. Good for global services with high accuracy needs.
-- **H3 (Uber)**: hexagons, uniform neighbors, designed for moving entities and aggregations. Best for ride-share, demand modeling.
-
-**Quadtree for density skew.** A static geohash grid wastes precision in rural areas (one business per 1km cell) and overflows in dense areas (1000 businesses per cell in Times Square). Quadtree recurses where density demands it — leaf cells contain ≤k businesses regardless of geographic size. Trade-off: quadtree updates require rebalancing on insert/delete, which is expensive for moving entities; static businesses (Yelp) suit it well, drivers (Uber) don't.
+**Why any of this is safe.** Because the entities are static, this whole structure is a file. It is built offline, checksummed, diffed against the previous version, replayed against a corpus of recorded queries to confirm the result sets match within tolerance, and only then promoted. Nodes memory-map the new artifact, warm it, and flip a pointer. A bad build is caught before promotion, and a bad promotion is a pointer flip back. None of that is available to a system whose index is being mutated tens of thousands of times a second, which is why the same physical data structure supports a much more aggressive design here than it does in Q14 or Q29.
 #### Where it breaks
 **must-say**
 
 **Bottlenecks**
 
-- **NYC density** (1000x rural) → adaptive precision (longer geohash) or quadtree. A uniform 600m geohash cell in Manhattan returns 1k businesses; in rural Wyoming the same cell returns 1. Adaptive precision uses shorter prefixes (larger cells) for sparse areas and longer prefixes (smaller cells) for dense ones; quadtree achieves this by construction (recurses deeper where density demands it).
-- **Real-time updates** (driver locations) → in-memory grid + write-through cache. A static geohash index can't absorb 100k driver heartbeats per second; switch to in-memory Redis GEO (write-through, no batch rebuild) sharded by city/region so a single Redis node doesn't see global write traffic.
-- **Result blow-up** (radius too big) → cap candidates, paginate. A 50km radius in Manhattan would hydrate 100k businesses; cap at first 200 candidates per cell at the index layer (sorted by rating), short-circuit haversine once we have enough results, return paginated with continuation token.
-- **Hot region caching** → Redis cache popular queries (Times Square coffee shops). 70%+ of search QPS in dense areas is repeat queries (same prefix, same category, same hour); short-TTL result cache (60s) collapses the backend QPS by 3-5x. Invalidate on writes via pub/sub keyed by affected geo cells.
-
-- **Wrong precision for query radius** → query cost explodes (over-fetch or grid scan). Pick precision such that cell width ≈ 1.5× search radius; otherwise you either pull 10x candidates (haversine cost) or scan 64 cells (round-trip cost). Most APIs route to one of three pre-tuned indexes (walking/driving/regional radius buckets).
-- **Square-cell neighbor asymmetry** (geohash) → switch to H3 for moving-entity workloads. Geohash edge vs corner neighbors have different distances, biasing aggregations and "K-ring" queries. H3 hexagons have uniform 6-neighbor distance — fixes demand-aggregation math at the cost of slightly more complex implementation.
+- **Unclamped radius.** A 50km radius query in a dense metro scans 15.7M entries, 78ms on one core, and one abusive client can saturate a serving node. Clamp radius to 25km, route anything above 5km to the coarse tier, and rate-limit wide-radius queries per key. Wide searches genuinely degrade; that is the accepted cost.
+- **Result-cache stampede on a cold hot cell.** The top cells carry 40% of traffic behind a 60-second TTL, so every expiry sends thousands of concurrent identical misses to the index. Single-flight per cache key plus jittered TTLs in the 50-to-70-second band, so the hot cells do not all expire together.
+- **All-or-nothing index promotion.** The artifact is global, so a bad build is a global search outage rather than a partial one. Promote by canary node, compare result sets against the outgoing version on live traffic, and hold the previous artifact on disk so rollback is a pointer flip. Never promote a build whose entry count moved by more than 1% without a human.
+- **Antimeridian and polar cells.** Cell arithmetic wraps badly at ±180° longitude and cells degenerate near the poles, where a fixed-width cell covers almost no ground. Special-case the wrap in the block computation and clamp latitude to ±85°. It is a small amount of code that is wrong in a large fraction of implementations.
+- **Denormalised attributes drift.** Rating and popularity live in the index and change continuously in the catalogue, so between builds the index ranks on stale values. Rebuild ranking attributes on a faster cadence than coordinates, since they are the fields that actually move.
 
 **Failure modes**
 
 | Layer | Failure | Detection | Mitigation |
 |---|---|---|---|
-| Geo index | CDC/index-update lag means new or updated businesses are missing from search | Source-to-index lag and stale-result canary | Keep source-of-truth writes separate, replay CDC, and fall back to slightly stale results rather than serving wrong exactness claims |
-| Hot cell | One dense urban cell returns huge candidate sets and blows latency budget | Candidate-count histogram and per-cell p99 latency | Increase precision or split hot cells adaptively, and cache category-scoped results |
-| Precision selection | Wrong geohash/H3 resolution causes massive over-fetch or too many neighbour scans | Candidate-count spike by radius bucket | Dynamically choose precision from radius buckets and monitor over-fetch ratios |
-| Hydration store | Candidate IDs resolve slowly or partially from the business store | Multi-get latency and partial-hydration error rate | Keep the index slim, batch hydrates aggressively, and serve partial fallback if necessary |
-| Cache staleness | Hot-result cache serves businesses that have just closed or changed category | Cache invalidation lag and stale-result complaints | Short TTL plus cell-based invalidation on important updates |
-| Bad coordinates | Malformed or spoofed lat/lng records pollute nearby queries | Coordinate-sanity checks and outlier alerting | Validate writes, quarantine impossible coordinates, and rebuild affected cells from source data |
+| Index build | The build job fails or produces a truncated artifact | Entry-count and per-region checksum against the previous version | Refuse promotion outside a 1% band, keep serving the current artifact, page the owner |
+| Index promotion | A promoted artifact ranks or filters differently than intended | Canary node result-set diff against the outgoing version on live traffic | Roll back by pointer flip; the previous artifact stays resident |
+| Hot cell | A dense cell plus a wide radius blows the scan budget | Candidate-count histogram and per-cell p99 | Clamp radius, route to the coarse tier, cap candidates per cell |
+| Card store | Hydration of the top 20 is slow or partially missing | Multi-get latency and partial-hydration rate | Serve the entries the index already holds, degrade the card to name and rating |
+| Result cache | Serving businesses that have closed or changed category | Cache invalidation lag and stale-result reports | Short TTL as the primary mechanism, cell-prefix invalidation as a best-effort optimisation |
+| Ingest | Malformed or spoofed coordinates pollute cells | Coordinate-sanity checks at write, per-cell entry-count anomaly | Validate and quarantine at ingest, since a bad coordinate is baked into the next build |
 
 **Unresolved**
 
-TODO. Two or three things this design genuinely does not handle well, and what you would do about each.
+**Straight-line distance is not what people mean by near.** The index answers "within 1km as the crow flies" and users are asking "close enough to get to". A place 800m away across a river with no crossing for 3km outranks one 1.2km away on the same block, and the design has no way to know. Fixing it needs travel-time isochrones, which depend on mode of transport and time of day and therefore cannot be baked into a static artifact at all, or a routing call per candidate, which costs milliseconds against the nanoseconds the scan budget assumes. We ship the straight line, label it honestly as distance rather than as travel time, and let ranking partially compensate. It is worst exactly where users notice: waterfronts, cities cut by rail, and anywhere with significant elevation.
+
+**The index prunes by geometry and users rank by quality.** The per-cell cap is a truncation, and in a cell holding 22,000 entries any truncation is throwing away results someone wanted. Cap by distance and you discard a 4.8-star place at 900m to keep 200 mediocre ones at 300m; cap by rating and you discard the good place around the corner in favour of a famous one at the edge of the radius. The real fix is a single blended retrieval score computed during the scan, which is what the design nominally does, but a blended score cannot be truncated safely per cell because the cells are scanned independently and a cell's local top-K is not the block's global top-K. We compute the blend after the scan and cap the scan itself by distance, which means the bias is real and bounded by the cap. We measure the drop rate against an uncapped shadow query rather than claiming the problem is solved. Solving it properly means the index is a search engine with a geo filter rather than a geo index with an attribute filter, which is a different system.
+
+**Result-cache invalidation is best-effort and we know it is sometimes wrong.** The key includes category, radius bucket and page, so a single business edit touches an unbounded set of keys and there is no way to enumerate them. We invalidate by cell prefix, which over-invalidates badly: a chain updating hours across 3,000 locations wipes the hot cells in every major metro simultaneously, and the blended hit rate falls from 60% toward zero for the 60 seconds it takes to refill, tripling backend QPS at the worst possible moment. So the TTL is the real mechanism and the pub/sub invalidation is an optimisation that occasionally makes things worse. We rate-limit bulk edits into the invalidation stream and accept that a permanently closed business can appear in results for up to 60 seconds.
 #### Drill questions
-1. How do you handle the radius spanning a geohash cell boundary?
-2. How would you adapt this for moving entities (Uber drivers)?
-3. What if a single cell (Times Square) returns 10k candidates?
-4. How do you keep the index in sync with business CRUD?
-5. How would you support polygon queries (delivery zones, neighborhoods)?
+1. How do you handle a radius that spans a cell boundary?
+2. How would you adapt this for moving entities such as ride-hailing drivers?
+3. What if a single dense cell returns 22,000 candidates?
+4. How do you keep the index in sync with business creates, updates and deletes?
+5. How would you support polygon queries such as delivery zones or neighbourhoods?
 6. How do you cache and invalidate hot regions?
-7. Why does Uber use H3 instead of geohash?
-8. How do you pick geohash precision for a given radius?
-9. Geohash vs S2 vs H3 — when to use which?
-
-TODO. Only 9 drill questions carried over, top up to at least 10.
+7. Why does a ride-hailing company use hexagons rather than geohash squares?
+8. How do you pick cell precision for a given radius?
+9. Geohash, S2 and H3: when would you use each?
+10. The index is derived state. How do you ship a new version without a window where search is wrong?
+11. Your p99 is 40× your median and every slow query is in one of four cities. What do you do?
+12. How do you serve "open now" as a filter?
 #### Answers to drill questions
-1. Always query the target cell plus its 8 neighbors and let the haversine filter clean up false positives. Most candidates land in the central cell so cost stays bounded. *If pushed:* pick precision so cell width is ~1.5x the search radius — keeps neighbor scan small. Or switch to H3, where hex neighbors are uniform-distance and there's no edge weirdness.
+1. Read the whole block of cells that covers the circle, not just the user's cell, and let the exact haversine pass discard the excess. The block is `(2·ceil(r/w) + 1) × (2·ceil(r/h) + 1)` cells for cell width `w` and height `h`. *If pushed:* the folk answer "cell plus 8 neighbours" is only right when the cell is at least as large as the radius in both dimensions. Geohash cells are 2:1 at even lengths, so a 1km radius at length 6 needs 3 × 5 = 15 cells; using 9 loses everything between 610m and 1km north or south, silently.
 
-2. Swap the on-disk geohash index for an in-memory Redis GEO index — drivers GEOADD on every heartbeat (every few seconds). Read path is identical. *If pushed:* shard by city/region so a single Redis node doesn't see global write traffic; partition writes by driver_id within a region.
+2. Not by adapting this. The read-to-write ratio inverts from 100,000:1 to roughly 1:1, so the offline build, the immutable artifact, the denormalised ranking attributes and the entire result cache all stop making sense. You want a write-absorbing in-memory index sharded by city, entries with a TTL so a driver who stops reporting disappears, and no result caching at all. *If pushed:* the read path is nearly identical, which is what makes this a trap. The index structure survives the change; every operational decision around it does not.
 
-3. Cap candidates at the index layer (top-K by rating per cell, pre-sorted) and short-circuit haversine once you have enough results. *If pushed:* split hot cells with a finer-precision sub-index, or pre-bucket candidates by `(cell, category)` so category filter happens in the index, not after.
+3. Nothing, at first: 22,000 entries at 48 bytes scan in 110µs, which is 0.06% of a 200ms budget. The blow-up only matters if a candidate costs a row read, which is why the category filter and the ranking attributes live inside the index entry. *If pushed:* the real cap is on radius, not candidates, because scan cost grows with area. Above 5km you drop to a coarser tier and above 25km you refuse. A per-cell candidate cap exists as a backstop and it does drop results; we measure how often against an uncapped shadow query.
 
-4. Dual-write: every business write hits Postgres (source of truth) and emits a CDC event that updates the geo index. Eventual consistency on the order of seconds is fine for search. *If pushed:* outbox pattern + Kafka so the index update can't be lost if the index store is briefly down; nightly reconciliation job catches drift.
+4. The catalogue is the source of truth and the index is derived from it. A nightly full build produces a versioned artifact; the day's coordinate changes land in a small overlay map, at ~50k entries a trivial amount of memory, consulted alongside the artifact. Deletes go in a tombstone set filtered during the scan. *If pushed:* attribute changes are the awkward case, because rating and popularity are in the index and they move constantly. Rebuild those fields on a shorter cadence than the geometry, since the geometry is what is genuinely static.
 
-5. Switch the index to an R-tree (PostGIS) for bounding-box and polygon containment queries. Geohash/H3 don't naturally support polygons. *If pushed:* dual index — geohash for radius (most traffic), R-tree for polygon (rare); route at the API layer by query shape.
+5. Radius search cannot express a polygon, so this is a different index: bounding boxes with an R-tree, which is what the transactional store already offers. Route by query shape at the API layer, radius to the cell index and shape to the store. *If pushed:* the throughput profile is completely different, maybe thousands of QPS per node rather than tens of thousands, but polygon queries are a small fraction of traffic and are usually operator-facing rather than user-facing, so the two systems do not need matching capacity.
 
-6. Cache result page for `(geohash_prefix, category, page)` with a short TTL (60s). Most queries against Times Square coffee at noon are identical. *If pushed:* invalidate on write via pub/sub keyed by affected cells; for live data (drivers) skip caching and rely on Redis throughput.
+6. Key the result cache on `(cell, category, radius bucket, page)` rather than raw coordinates, so everyone inside a cell shares an entry, with a 60-second TTL jittered to 50-to-70 seconds so the hot cells do not expire in lockstep, and single-flight per key so an expiry does not send thousands of identical misses at the index. *If pushed:* invalidation is the weak part. The key space fans out per edit and cannot be enumerated, so cell-prefix invalidation over-invalidates and a bulk edit can collapse the hit rate. The TTL is the mechanism; treat the pub/sub as an optimisation you can turn off.
 
-7. Hexagons have uniform neighbor distance (one center-to-center distance to all 6 neighbors). Geohash squares have two distances (edge vs corner neighbors), which makes "demand within K rings" math awkward and biased. Uber aggregates demand into hex cells for surge pricing — uniform neighbor cost makes cells comparable. Plus H3 cells are 64-bit ints with hierarchical truncation: coarsening to a parent cell is a bitshift. *If pushed:* H3 has pentagons at icosahedron vertices (12 of them, deliberately placed in oceans) — they're real and code must handle them, but in practice nobody dispatches drivers from the middle of the Pacific.
+7. Hexagons have one neighbour distance, since every centre is equidistant from all six neighbours, while a square has two, with edge neighbours closer than corner ones. That makes "expand outward by k rings" a uniform operation and makes per-cell aggregates comparable, which matters when the cells are demand buckets feeding a surge price rather than just lookup keys. H3 ids are also 64-bit integers whose children truncate to their parents, so coarsening is a bit shift. *If pushed:* hexagons cannot tile a sphere, so H3 places 12 pentagons at the icosahedron vertices, deliberately over ocean. They are real and code has to handle them, and for a static business index none of this buys anything, which is why it does not appear in the answer above.
 
-8. Cell width ≈ 1.5× search radius. Too coarse and you over-fetch candidates (haversine eats the cost); too fine and you scan a grid of cells (round-trip cost). Length 5 = ~5km cell (good for "city-scale"); length 6 = ~600m cell (good for "neighborhood walkable"); length 7 = ~150m cell (street-level). *If pushed:* let the query specify radius and dynamically pick precision per query — most APIs hardcode a few buckets (walking/driving/regional) and route to the matching index.
+8. Compare the radius against the cell's *shorter* dimension and pick the tier where the block stays small. Too coarse over-fetches quadratically: at length 5 a 1km search covers 215km² against a 3.14km² circle, 68×. Too fine multiplies lookups: at length 7 the same search needs 225 cells. Three tiers at roughly 5km, 1km and 200m cover the useful range, and radius is clamped into a bucket rather than honoured exactly. *If pushed:* the tiers are a product decision as much as a technical one, since clamping means the API does not do quite what a caller asked for, and that has to be documented rather than hidden.
 
-9. Static businesses, low scale, simple needs: geohash. Global service with polar accuracy concerns or hierarchical roll-ups: S2 (Google Maps uses it). Moving entities and demand aggregation: H3 (Uber, Lyft). The choice is mostly about whether neighbor-distance uniformity matters and whether you need a Hilbert-curve property. *If pushed:* you can mix — use H3 for live driver index and PostGIS R-tree for polygon queries (delivery zones).
+9. For a static catalogue any of the three works and the choice barely moves the design, which is worth saying out loud because candidates burn ten minutes here. Geohash is simplest and its string prefixes drop into any store, at the cost of non-square cells at even lengths and distortion near the poles. S2 uses a Hilbert curve on a sphere with 30 levels and better polar behaviour, and it is the right pick if you need hierarchical roll-ups across a genuinely global surface. H3 is for moving entities and demand aggregation. *If pushed:* mixing is normal. The radius path and the polygon path are already different indexes here, so adding a third for a different access pattern is not a new kind of complexity.
+
+10. Treat it as a release, not a write. Build offline, checksum, refuse the artifact if its entry count moved more than 1% from the previous one, then diff it: replay a recorded query corpus against both versions and compare result sets. Promote to a canary node first, compare its live results against the outgoing version, then roll the fleet. Nodes memory-map the new file and flip a pointer, so the swap is atomic per node and the previous artifact stays resident for rollback. *If pushed:* the fleet is briefly mixed, so two users in the same cell can get different results for a few minutes. For a business catalogue that is fine and worth stating; for anything with a consistency requirement it is not, and you would need a coordinated flip.
+
+11. That is the density skew and it is expected, so first confirm the p99 is actually a problem rather than just a number: 40× a 3ms median is 120ms, inside a 200ms budget. If it genuinely breaks the budget, the cause is almost never the scan, it is either an unclamped radius reaching the coarse tier in a dense city or hydration fanning out beyond the top 20. Check the candidate-count histogram against the hydration count. *If pushed:* if the scan really is the cost, move those four cities to a finer precision tier, which is a per-region tier map in the build rather than a code change. That is adaptive subdivision done manually at four points, and for four cities it is cheaper than a quadtree.
+
+12. Carry a coarse open-hours bitmap in the index entry, for example 168 bits of hour-of-week compressed to a smaller approximation, and evaluate it during the scan against the query's local time. It has to be in the index, because filtering after the scan means hydrating candidates you will discard. *If pushed:* this is the attribute that most strains the static-index assumption, since it is time-varying without any write occurring. It also breaks the result cache, because `(cell, category, radius, page)` is no longer a complete key once results depend on the current hour. Add the hour bucket to the key and accept the hit-rate cost, or exclude open-now queries from the cache entirely and take the backend load.
 #### Whiteboard script
-TODO
+**0-5, frame it and take the fork.** Lead with the thesis, not the components: "nothing indexes two dimensions at once, so the job is manufacturing a one-dimensional key and then paying for the fact that it is lossy." Then ask the two questions that actually change the design: do the indexed things move, and is radius a bounded client parameter. State the assumptions out loud: 200M static places, 60k/s average and 300k/s peak, 200ms p99. Draw nothing yet.
 
-A 45 minute budget: what to cover in 0-5, 5-15, 15-35 and 35-45, what to say first, and a line starting `Cut first:`.
+**5-15, the spine.** Four boxes: client, search API, geo index, card store, with the result cache hanging off the API and the transactional catalogue off to one side feeding the index by an arrow labelled "offline build". Draw the two-phase filter as the only interesting thing on the page: block of cells in, candidates out, exact distance, top 20. Say the read-to-write ratio out loud, 0.6 writes/s against 60k reads/s, and say what it buys before anyone asks: the index is a file you produce, not a structure you mutate. Resist naming geohash until you have said all of that.
 
-**Raw material, from the old Talking Points:**
+**15-35, the drill.** Protect this time. Start with the block computation and make the correction most candidates miss: geohash cells are 2:1 at even lengths, so a 1km radius against a 610m-tall cell needs 3 by 5, not 3 by 3, and getting it wrong loses results silently. Then the candidate arithmetic, which is the heart of it: 22,000 entries in a Midtown block, 5ns each to scan so 110µs, against 22,000 row hydrates which would be 220ms. That single comparison is the whole argument for a slim self-contained index entry, and it is what makes the fixed grid beat the quadtree here. Then the build-and-promote pipeline: diff two artifacts, canary, pointer flip, roll back by pointer flip. Keep the quadtree comparison as a one-liner you can expand if asked.
 
-- **Approximate-then-exact** is the core nearby-search pattern.
-- **Choose the index by workload.** Geohash, quadtree, H3, and S2 each have a place.
-- **Density skew matters.** NYC and rural Wyoming cannot share one naive precision setting.
-- **Hot-region caching is a major practical win.** Nearby search is incredibly repetitive at lunch and commute peaks.
-- **The geo index is derived state.** The source-of-truth catalogue owns correctness.
-- **H3 is a strong answer when uniform neighbour distance matters.**
+**35-45, concede and close.** Give the gaps before they are found: straight-line distance is not what "near" means to a user and isochrones cannot be precomputed; truncation in a dense cell drops results by construction and you can only measure the rate, not remove it; result-cache invalidation over-invalidates and the TTL is doing the real work. Then operations in two minutes: candidate-count histogram, cache hit rate by metro, index freshness lag, and the rebuild drill you actually run.
+
+Cut first: the comparison of geohash against S2 against H3, then polygon queries, then multi-region. The index-family comparison in particular is where candidates lose fifteen minutes saying nothing, because for a static catalogue all three answer the same question and the choice barely moves the design. Never cut: the boundary tax and the block formula, the scan-versus-hydrate arithmetic, and the static-versus-moving fork.
 #### Appendix
 **Data model**
 
-- **businesses** (transactional store / wide-column store):
-  `(biz_id, name, lat, lng, geohash, category, rating, ...)`
-- **geo index** (in-memory geo cache):
-  `GEOADD nearby:biz lng lat biz_id` (uses geohash internally)
+- **businesses** (transactional store, source of truth):
+  `(biz_id, name, lat, lng, cell_id, categories[], rating, hours, address, ...)`
+- **geo index entry** (48B, packed array sorted by cell id, memory-resident):
+  `(biz_id u64, lat f32, lng f32, cell_id u64, category_mask u64, rating u16, popularity u16, hours_bitmap u64)`
+- **card store** (~300B): `(biz_id → name, rating, review_count, category, thumb_ref, short_address)`
+- **overlay** (in-memory, per node): `(biz_id → new cell_id)` for coordinate changes since the last build, plus a tombstone set.
 
 **API contract**
 
 ```
 GET /search
-  params: lat, lng, radius_km, category?, limit
+  params: lat, lng, radius_km (clamped to <= 25), category?, open_now?, limit, page_token?
   → { results: [{biz_id, name, lat, lng, dist_km, rating}], next_page_token }
 ```
 
 **Observability**
 
-- **Search latency** — total API p99 plus separate geo-index and hydration subspans.
-- **Candidates-per-query distribution** — best indicator of whether precision tuning is healthy.
-- **Result-cache hit rate** in dense metros — should be high and materially reduce backend load.
-- **Index freshness lag** — delay from source update to searchable state.
-- **No-result rate** by density bucket — helps catch sparse-region precision mistakes.
-- **Hot-cell skew** — a small number of cells often dominate traffic and deserve special treatment.
+- **Candidates-per-query histogram.** The single best indicator that precision tiering is healthy, and the first place to look when p99 moves.
+- **Hydration fan-out.** Cards fetched per query. Should sit at 20; anything higher means filtering has leaked out of the index.
+- **Result-cache hit rate, per metro.** Blended and top-1,000-cell, tracked separately, since the blend hides a collapse in the cells that matter.
+- **Index freshness lag.** Time from a catalogue coordinate change to it being searchable, and overlay size as the leading indicator.
+- **Build and promote health.** Entry-count delta between artifacts, canary result-set diff rate, artifact age in the fleet.
+- **No-result rate by density bucket.** Catches precision mistakes in sparse regions, which the dense-region metrics never surface.
 
 **Multi-region and DR**
 
-- **Replication mode:** geo indexes are region-local and rebuildable; the authoritative business store replicates more durably.
-- **RTO:** fast for index-node loss because the in-memory index can reload from source or snapshot.
-- **RPO:** tiny for source data, larger for in-memory derived indexes, which are acceptable to rebuild.
-- **Failover cadence:** rehearse index rebuild and hot-region cache loss, not just database leader failover.
-- **Cross-region cost:** mostly metadata replication and popular-result cache warmup, not huge blob movement.
+- **Replication mode:** the index artifact is built once and distributed to every region as a file, so regions are independent and there is no cross-region index traffic. The catalogue replicates transactionally.
+- **RTO:** minutes for a serving node, since it memory-maps an artifact already on local disk. Fleet-wide it is bounded by artifact distribution, not by rebuild.
+- **RPO:** zero for the catalogue, up to one build interval for the index, which is acceptable because the underlying data is static.
+- **Failover cadence:** rehearse artifact rollback and result-cache cold start, not just database leader failover. A cold cache at peak is the realistic incident.
+- **Cross-region cost:** distributing a 10GB index artifact plus a 60GB card set per build cycle, which is bandwidth-cheap and does not scale with traffic.
 
 ### 14. Design Nearby Friends
 #### Problem
-Show friends within a radius of you, updating in near-real-time as they move; opt-in privacy.
+Show which of a user's friends are currently within a radius of them, and keep that answer fresh as everyone involved moves. Sharing is opt-in and revocable per friend, and the app runs on a phone whose battery is the binding constraint. History is a separate, optional product.
 #### Core
-TODO
+This looks like a geo problem and is really a write-rate problem. Every point in the index moves, so the number that shapes the design is ten million position writes per second, not the query rate. The read side is nearly trivial: you never ask who in the world is near me, you ask which of my 200 friends are near me, and 200 is a list you can scan.
 
-Write the whole answer as you would give it in sixty seconds, 200 to 300 words, standing alone.
+That gives three parts. A latest-position store, one key per user holding lat, lng and a timestamp with a five minute expiry, and no history on the hot path. A sampling policy that lives on the device and sets the write rate from on-device motion state, because a phone reporting every ten seconds all day is dead by mid-afternoon and only the phone knows whether it is moving. And a filter on every write asking whether this movement changed anything for anyone: does the writer have a friend who is online, permitted, and now inside the radius. Around 85% of writes fail that test and stop there.
+
+Delivery then splits by what the user is looking at. A map on screen polls its owner's online friends every ten seconds, which is stateless and checks sharing permission on the same read that produces the answer. A proximity crossing, meaning Bob is now nearby, gets pushed over a socket, and there are only about 46,000 of those per second across the whole system against ten million writes.
+
+Privacy is structural rather than a feature. Consent is bidirectional, permission is checked on the read rather than cached at fan-out, and history is opt-in and off the hot path.
 #### Summary
-**The picture in your head:** a bulletin board where each of your friends pins a sticky note with their approximate location every few minutes. You glance at the board when you open the app, see which friends are within a mile, and get a push notification when someone new shows up nearby. The board only holds the *latest* note per person — not the full history — and only you and your friends can see each other's notes (not strangers).
+**The picture in your head:** a bulletin board where each of your friends pins a sticky note with their approximate location, replacing their own note every few minutes. You glance at the board when you open the app and see who is within a mile. Someone standing beside the board taps you on the shoulder when a friend walks into range. The board holds only the *latest* note per person, never the history, and only people you have both agreed to share with can read yours.
 
 **The approaches people actually take:**
-TODO. Two or three things a competent engineer might reach for, in plain language and before any product name, with what each one buys and roughly when it wins.
 
-**The single-request walkthrough:** Alice is walking in San Francisco. Her phone detects motion and sends a location update every 30 seconds: `POST /location { lat: 37.77, lng: -122.41, ts: ... }`. The Location Service writes Alice's latest position to a fast in-memory cache (Redis, TTL 5 minutes) and publishes the event to Alice's personal pub/sub topic: `user.location.alice`. Bob, who is Alice's friend and has the app open, subscribed to Alice's topic when he opened the app. The Subscription Service receives the event from Alice's topic, checks an ACL cache (Access Control List — a record of who is allowed to see whom's location), confirms Bob has permission and is within 2km of Alice, and pushes a WebSocket message to Bob's phone. Bob's map dot updates within ~1 second. Meanwhile Dave, also Alice's friend but in London, produces zero pub/sub traffic: the pre-filter detects no in-radius subscribers and drops the publish before it ever hits the bus.
+*Push every position through a per-person channel.* Each update fans out to whichever friends are online, permitted, and close, over a socket they hold open. Buys a dot that moves in under a second. Costs a routing table spread across the delivery fleet that must be in memory, sticky to a connection, and correct at the instant someone revokes. Wins when the promise really is a live moving dot, such as a two-person meet-up view.
+
+*Write the latest position and let viewers pull it.* Writers only write, one key each, no fan-out at all. A client with the map open fetches its online friends' positions on a timer. Buys statelessness: write cost is independent of graph shape, one person with an enormous friend list costs nothing extra, and permission is checked on the read that produces the answer, so revoking needs no invalidation anywhere. Costs freshness bounded by the timer, plus a large volume of reads that mostly return nothing new. Wins whenever ten seconds is acceptable, which for "who is around" it usually is.
+
+*Send verdicts, not positions.* The server evaluates crossings of the radius and pushes only "Bob is nearby" and "Bob left". Traffic drops two orders of magnitude, because a friend walking past generates one event rather than a hundred updates, and the viewer never receives coordinates at all. Costs the live map, and needs hysteresis so someone loitering on the boundary does not flap. Wins when the product is a notification rather than a map, which is most of the hours the app is installed but closed.
+
+Ship the second and third together: poll for the map, push for the crossing.
+
+**The single-request walkthrough:** alice is walking in San Francisco. Her phone classifies her as walking and posts every 30 seconds: `POST /location { lat: 37.77, lng: -122.41, ts: ... }`. The Location Service writes `loc:alice` into an in-memory store with a five minute expiry. Before doing anything else it runs the pre-filter: intersect alice's friend list with the set of users currently sharded onto this same node, which is everyone physically near her, and ask whether any of them is online, permitted, and now inside alice's radius when they were not on her previous write. bob qualifies, so a single crossing event is published to alice's topic and the Subscription Service routes it to bob's open socket. Meanwhile bob's map, which is on screen, is separately polling every ten seconds and pulls alice's new coordinates directly from the latest-position store on its next tick. dave, also alice's friend but in London, is not on that node at all and costs nothing: the pre-filter never sees him and no publish happens.
 
 **The pieces (and what each one is for):**
-- **Location Service** — receives the `POST /location` from the phone, writes the latest `(lat, lng, ts)` to Redis under the key `loc:{user_id}` with a 5-minute expiry. Does NOT keep full history by default (history is opt-in and stored in a separate wide-column database like Cassandra). The 5-minute TTL means a user who stops reporting disappears from the map naturally.
-- **Pub/sub bus** — a message-passing system with one topic per user (`user.location.{user_id}`). When Alice's location updates, the Location Service publishes to `user.location.alice`. Friends who care about Alice subscribe to that topic. This decouples "Alice moved" from "tell Bob and Carol." Think of it as a radio station — many listeners, one broadcaster, no direct connections needed.
-- **Subscription Service** — holds a routing table in memory: `(publisher_id → [active WebSocket connections of subscribers])`. When a location event arrives, it checks the ACL (does subscriber have permission?) and the geo-radius (is subscriber within the radius threshold?) before pushing. The pre-filter is critical: if Alice is in Tokyo and all her friends are in London, the publish is dropped before the Subscription Service even looks at the ACL.
-- **Adaptive client sampler** — logic on the phone that controls how often GPS is queried. A stationary user reports every 5 minutes; a walking user every 30 seconds; a driving user every 10 seconds. A phone reporting every 5 seconds all day would be dead in 4 hours; adaptive sampling keeps the system viable on mobile by cutting GPS reports 30x for users who aren't moving.
-- **ACL cache** — a per-node in-memory lookup that records `(publisher_id, subscriber_id) → allowed?`. Checked on every publish. When Alice revokes Bob's permission, a control-plane event immediately invalidates the cache entry — the stale window is milliseconds, not the full cache TTL.
+- **Location Service.** Accepts `POST /location`, writes the latest `(lat, lng, ts)` under `loc:{user_id}` with a five minute expiry, and runs the pre-filter. It keeps no history by default. The expiry is load-bearing: a user who stops reporting drops off the map on their own, with no tombstone to write and no cleanup job.
+- **Latest-position store.** Sharded by coarse geographic cell rather than by user id, so that every user physically near the writer is already on the writer's node. That is what makes the pre-filter a local operation rather than 20 network reads per write. Cell choice is the same one Q13 settles for static points, used here as a write-side placement key rather than a read index.
+- **Pre-filter.** The stage that decides whether a write is interesting to anybody. Roughly 85% of writes have no online, permitted friend inside the radius, and those stop here. Everything downstream is sized by what survives.
+- **Crossing publisher and Subscription Service.** One topic per user, and a routing table from publisher to the sockets of subscribers who currently have a live view. It carries crossing events, not position streams, which is why it handles tens of thousands of messages per second rather than millions.
+- **Device sampler.** Logic on the phone that sets the report rate from motion state: five minutes when still, 30 seconds walking, 10 seconds driving, one minute in the background. Motion classification runs on the sensor coprocessor at single-digit milliamps against GPS at hundreds, so the classifier is effectively free and the fix pays for itself.
+- **Permission store.** Bidirectional pair records, read on the path that produces an answer rather than cached at fan-out, so a revoke takes effect on the next read with no invalidation window.
 
-**The thing that makes it hard:** imagine a music festival: 50,000 people in one place, all with the app open, all within each other's radius. Every one of Alice's 200 friends at the festival gets a location push every 30 seconds. That's 200 pushes × 50,000 users × 2 updates/minute = 20 million WebSocket messages per minute from one event. Multiply by every user who also has friends at the festival publishing their own locations. Without a strict pre-filter ("any in-radius subscribers?") you'd publish billions of useless events per day, and without per-user topic isolation a single message bus node would see every event from every user, which doesn't scale. The pub/sub-per-user design means the fan-out is bounded by actual friend-graph overlap, not total active users.
+**The thing that makes it hard:** the write amplification is on the wrong side of the system. In a normal geo service you index once and query many times. Here you re-index a billion moving points ten million times a second, and each of those writes has to answer a question about other people before you know whether it mattered. A festival makes it concrete: 50,000 users inside a few hundred metres, all mutually in range, every one of them writing every 30 seconds. Geographic sharding, which is what makes the ordinary case cheap, puts all 50,000 on one node, and the pre-filter for each write is no longer a scan of a handful of local candidates but of thousands. The ordinary case and the interesting case want opposite layouts.
 
-**Why this design and what it costs:** keeping only the latest position (not a stream) and driving notification from a friend-graph-filtered pub/sub gives you the right answer: timely-enough proximity detection without tracking every human on the planet. The system is lazy — it only pushes when Alice moves AND Bob is nearby AND Bob has permission. Three conditions all true simultaneously is much rarer than just "Alice moved," so most location events produce zero WebSocket traffic. Bidirectional consent (both parties must approve before location sharing activates) is the correct default for location specifically — unlike social follows, where one-way is fine, one-way location access enables stalking.
+**Why this design and what it costs:** attenuating the stream early is what makes the numbers work. Device sampling cuts the base rate 10x for a still phone, the pre-filter drops 85% of what survives, and only crossings are pushed, so ten million writes per second become about 46,000 notifications per second. The cost is paid in freshness and in crowds. A polled map is up to ten seconds stale, which is invisible for a dot a few hundred metres away and obvious for one walking toward you. And the geographic sharding that makes the pre-filter cheap degrades exactly where the product is most useful.
 
 **If you were building it tomorrow:**
-- Redis for latest-location cache (`SET loc:alice 37.77,-122.41 EX 300`); Redis pub/sub or Kafka for the per-user topic bus; Cassandra for optional history partitioned by `(user_id, day_bucket)`.
-- Location update hot path:
+- Redis Cluster for the latest-position store, sharded on a coarse geohash prefix rather than the user key; Kafka for crossing events; Cassandra for opt-in history partitioned by `(user_id, day_bucket)`; Postgres for permission pairs with a read-through cache that is invalidated on write, not TTLed.
+- Write hot path:
   ```
-  redis.set(f"loc:{user_id}", f"{lat},{lng}", ex=300)
-  if has_any_nearby_friend(user_id, radius_km):  # pre-filter
-      pubsub.publish(f"user.location.{user_id}", payload)
+  cell = geohash(lat, lng, precision=5)
+  redis.set(f"loc:{user_id}", pack(lat, lng, ts), ex=300)
+  entered = crossings(user_id, cell, radius_km)   # local, uses this node's cell membership
+  for friend_id in entered:
+      if permitted(user_id, friend_id):
+          publish(f"user.crossing.{user_id}", friend_id, ts)
   ```
-- On publish receipt in Subscription Service: check ACL cache → check geo distance → push via WebSocket if both pass.
+- Map read path: `GET /nearby` returns the positions of the caller's online, permitted friends, permission joined on the read, at whatever precision the pair has agreed.
 #### What this is really testing
-TODO
+Whether you notice that when the indexed points move, the index stops being a read-side asset and becomes a write-side cost. Candidates hear "nearby" and start rebuilding a spatial index over all users, then find themselves re-indexing a billion moving points ten million times a second to answer a question whose candidate set was handed to them for free by the friend graph. The unlock is seeing that a 200-entry friend list is a better filter than any cell scheme, that the read path therefore needs no spatial structure at all, and that the only remaining job for one is deciding which shard a write lands on. Q13 settles which cell scheme; borrow that answer rather than re-deriving it, and be explicit that you are using it for placement rather than for lookup.
 
-The one insight this question exists to elicit, then the contrast with the question it most resembles and why the answers differ.
+The sharper contrast is with ride hailing, because it shares the property that makes this question hard. Uber also indexes continuously moving points at a comparable write rate, so the difference is not static against moving. It is the shape of the match. Ride hailing is bipartite and open: a rider is matched against drivers who are strangers, so the candidate set genuinely is everyone in this area and a spatial index over all live supply is unavoidable. Nearby Friends is symmetric and closed: every participant is simultaneously a moving point and a subscriber, and the candidate set is pre-declared by a graph averaging 200 entries that changes on a timescale of days. That closure is what deletes the read-side index. It also runs the other way: Uber chooses how many drivers to ping, and can cap it at eight, whereas here the fan-out is dictated by a social graph nobody controls, which is why the hot-user and festival cases are yours to survive rather than yours to tune.
 
-Closest question: TODO
+Closest question: Q29
 #### Clarifying questions and how each answer forks the design
-- Update freshness (<10s)?
-- Friend count avg + outliers?
-- Battery constraints (mobile)?
-- Privacy: per-friend opt-in?
+- Is the deliverable a moving dot on a map, or a notification when someone comes into range?
+- What is the freshness target, and is it the same for both?
+- Average and 99th-percentile friend count?
+- Is location history part of the product, or explicitly not?
+- Can sharing be one-way, or must both parties consent?
+- Does the platform give the app background execution?
 
 **How the answers shape the design**
 
 | If the answer is… | Then the design… |
 |---|---|
-| Under-10s freshness | a location pub/sub layer pushing updates, not periodic full scans |
-| High average friend count | fan-out location updates only to nearby, online friends to bound work |
-| Battery-constrained mobile | adaptive reporting cadence (slower when still) and server-side interpolation |
-| Per-friend opt-in privacy | check a sharing-permission service before any location is revealed |
-| Dynamic positions | an in-memory geo grid keyed by user, expiring stale entries by TTL |
-| Presence matters | treat offline friends as absent to avoid stale pins |
+| Notification, not a map | pushes crossing events only, and the position stream never leaves the server |
+| Freshness under 3s | flips to push per position, and buys back the routing table and its invalidation problem |
+| Freshness 10s or looser | polls the latest-position store, which removes all delivery-side state |
+| 99th-percentile friend count in the thousands | caps the visible set and shards that user's topic, because poll cost is linear in online friends |
+| History is in scope | splits into two systems, since a latest-only store and a tracking archive share nothing but the ingest |
+| One-way sharing allowed | needs an abuse and harassment surface that bidirectional consent would have removed by construction |
+| No background execution | moves the report schedule server-side, since a silent push to wake is then the only lever |
 #### Requirements and scale, derived out loud
 **Requirements**
 
-- **FR:** subscribe to friend locations, push updates within X sec, privacy controls, history (optional)
-- **NFR:** real-time (<10s), battery-efficient on mobile, billions of location updates/day
+- **FR:** see which friends are currently in range, be told when one enters or leaves it, grant and revoke sharing per friend, opt in to history separately
+- **NFR:** map staleness under 10s, crossing notification under 5s, no measurable battery regression against the app without the feature, correct within milliseconds on revoke
 
 **Scale**
 
-- **Graph size:** Facebook-scale ~1B users with the feature enabled; avg 200 friends per Dunbar-corrected social graph → 1B × 200 = **200B directed (user, friend) pairs**. Edge row ~40B (user_id 8B + friend_id 8B + permission flags 4B + last_share_ts 8B + index overhead) → 200B × 40B = ~8TB; replication 3× → ~24TB on a sharded wide-column store partitioned by user_id.
-- **Concurrent active:** ~10% of 1B users foreground at peak = ~100M (matches social-app foreground rates); background reporters (app installed, location-share permission granted, app suspended) ~50% of users = ~500M.
-- **Update size:** ~100B per location update — user_id 8B + lat/lng 16B (double precision) + ts 8B + accuracy 4B + motion_state 1B + heading/speed 8B + auth token framing ~50B — Protobuf-packed for compactness.
-- **Update frequency (adaptive):** driving 1/10s (high-motion needs fine resolution for nav-class accuracy), walking 1/30s, stationary 1/5min (no point publishing same coords), background 1/min (OS allows ~1/min for suspended apps). Blended: 100M foreground × (40% walking + 20% driving + 40% stationary) ≈ ~1/30s effective.
-- **Throughput:** foreground 100M × (1/30s) ≈ 3.3M/s; background 400M × (1/60s) ≈ 6.7M/s → **~10M location writes/s peak**; foreground-only subset ~3M/s drives the latency-critical fan-out path.
-- **Bandwidth:** 10M writes/s × 100B = ~1GB/s ingress steady; egress amplified by fan-out (each update pushes to in-radius friends, avg ~3 — most users are alone, hot spots like festivals push higher) → ~3GB/s egress.
-- **Hot tier (latest-only):** 500M users with cached last-known location × ~120B per cache entry (lat/lng 16B + ts 8B + accuracy 4B + motion 1B + key 16B + Redis overhead ~75B) = ~60GB; in-memory cache with 5min TTL, sized at ~256GB across cluster for headroom + replication.
-- **Cold tier (history, opt-in):** assume ~30% of users opt in to history (privacy default off) × ~1 update/min sustained × 60 × 24 × 365 ≈ 30M updates/user/yr × 100B = ~90TB/yr; wide-column store partitioned `(user_id, day_bucket)` with 30-day default TTL; older snapshots flushed to columnar object store (Parquet, ~10× compression) for analytics.
-- **Pub-sub fan-out:** ~10M publishes/s × avg ~3 in-radius subscribers (people with you in friend-graph + within radius threshold) = ~30M WebSocket pushes/s peak. Festival/concert hot spots can drive local fan-out 100×, requiring rate limiting and clustering.
+- **Graph size:** ~1B users with the feature enabled; avg 200 friends → 1B × 200 = **200B directed (user, friend) pairs**. Edge row ~40B (user_id 8B + friend_id 8B + permission flags 4B + last_share_ts 8B + index overhead) → 200B × 40B = ~8TB; replication 3× → ~24TB on a wide-column store partitioned by user_id.
+- **Concurrent reporters:** ~50% of enabled users report at any given time (app installed, permission granted, device awake) = ~500M. Of those, ~10% of the 1B are foreground at peak = ~100M, leaving ~400M reporting from the background.
+- **Update size:** ~100B per location update. user_id 8B + lat/lng 16B at double precision + ts 8B + accuracy 4B + motion_state 1B + heading and speed 8B + auth and framing ~55B, Protobuf-packed.
+- **Update frequency (adaptive):** driving 1/10s, walking 1/30s, stationary 1/5min, background 1/min, which is what a suspended app is typically allowed. Foreground mix ~40% walking, 20% driving, 40% stationary → 0.4/30 + 0.2/10 + 0.4/300 ≈ 0.035/s, so ~1 per 30s effective.
+- **Throughput:** foreground 100M × (1/30s) ≈ 3.3M/s; background 400M × (1/60s) ≈ 6.7M/s → **~10M location writes/s peak**.
+- **Ingress:** 10M/s × 100B = **~1GB/s** steady, before TLS and header overhead, which roughly doubles it on the wire.
+- **Pre-filter survival:** most people are not near their friends most of the time. Assume ~15% of writes have at least one online, permitted friend in range, and conditional on that the mean is ~3. Unconditional fan-out is 0.15 × 3 = 0.45 per write, so **~4.5M would-be pushes/s** if you streamed positions. This is the number that makes streaming positions look expensive and the pre-filter worth building.
+- **Crossing events:** a user enters or leaves a friend's radius maybe 4 times a day. 1B × 4 = 4B/day ÷ 86,400 = **~46k events/s**, about 100x below the position-streaming figure and 200x below the write rate. The notification path is small enough to be uninteresting, which is the point.
+- **Poll load:** 100M foreground × 1 poll per 10s = 10M requests/s, each a multi-get over the caller's online, permitted friends (~10% of 200 = ~20 keys) → 10M × 20 = **200M key reads/s**. At ~500k ops/s per cache node that is ~400 nodes.
+- **Hot tier sizing:** 500M reporters × ~120B per entry (lat/lng 16B + ts 8B + accuracy 4B + motion 1B + key 16B + per-key overhead ~75B) = **~60GB**, so ~256GB across the cluster with replication and headroom. Note the fleet is sized by the 200M reads/s, not by the 60GB: this cache is operations-bound, not memory-bound, which is unusual and worth saying out loud.
+- **Cold tier (history, opt-in):** ~30% opt in = 300M users. Naive at 1 point/min for a 30-day window: 300M × 30 × 1,440 × 100B = **~1.3PB** before replication. Gating writes on actual movement (a point only when the user has moved >50m, plus an hourly heartbeat) gives a typical ~264 points/day rather than 1,440: 300M × 30 × 264 × 100B ≈ **~240TB**, a 5.5x cut. Partition `(user_id, day_bucket)`, 30-day TTL, then downsample to Parquet in object storage.
 #### Key decisions
-TODO
+**Poll the latest positions, or push every one**
+- Choice: poll for the map view on a 10s timer, and push only proximity crossings. The two paths carry different things, so they get different mechanisms: coordinates are pulled by whoever is looking, verdicts are pushed to whoever is not.
+- Alternative: one push path carrying every position update to every in-radius, permitted friend over a held-open socket, with the map fed by that stream.
+- Decider: the freshness the product actually promises, with the crossover around 5 seconds. At a 10s timer, polling costs 10M requests/s and 200M key reads/s, about 400 cache nodes, and zero delivery-side state. Push costs 4.5M messages/s, which is fewer messages, but buys a routing table of publisher to socket spread across the fleet that must be in memory, sticky, and correct at the instant of a revoke. To match push on freshness you would poll every 3s, which is 33M requests/s and 667M key reads/s, roughly 3x the cache fleet for a difference nobody perceives on a dot 400m away. Above 5s, the stateless design is free; below 3s, it is not buyable.
+- Alternative wins when: the freshness target is genuinely sub-second, which is a real product rather than a mistake: a two-person meet-up view where both parties are walking toward each other, or a child-safety product. It also wins on graph shape rather than freshness, because poll cost is linear in online friends while push cost is not. Above roughly 200 *online* friends per user the poll does 10M × 200 = 2B reads/s and push is cheaper on every axis.
 
-Two or three genuine forks. For each, in this exact shape so it stays checkable:
+**Who sets the report rate: the device or the server**
+- Choice: the device decides, from on-device motion state, applying a policy table the server ships as remote config so the numbers stay tunable without a release.
+- Alternative: the server tells each device when to report next, based on whether anyone can currently see it, waking the device with a silent push when the schedule changes.
+- Decider: which lever is larger, and whether you can measure the second one. Motion state cuts the rate 10x going from the walking rate of 1/30s to the stationary 1/5min, and 30x from the driving rate, and only the device knows its motion state without a round trip. The classifier itself is nearly free: sensor-hub activity recognition costs single-digit mA against GPS at hundreds. Server-directed suppression attacks a different waste, the 85% of writes that no one reads. If your measured read-to-write ratio is below about 0.2 that is worth a further ~5x on top, but it costs a wake mechanism and adds a round trip of latency whenever someone opens a map onto a sleeping device.
+- Alternative wins when: the product is "share with one person for the next hour" rather than always-on with 200 friends. Then the watching set is small, explicit, and known server-side, so the suppression decision is exact instead of statistical and the 5x becomes closer to 50x. It also wins outright on platforms that grant the app no background execution, where a server-scheduled wake is the only mechanism that exists, and in that case the fork is not really a choice.
 
-**<name of the fork>**
-- Choice:
-- Alternative:
-- Decider:
-- Alternative wins when:
-
-**Raw material, from the old Common Mistakes:**
-
-- **Server-driven sampling policy only.** The phone knows motion and battery state; sampling belongs primarily on the client.
-- **Asymmetric default sharing.** For location, bidirectional consent is the safe default.
-- **Putting full history on the hot path.** Nearby-friends is mostly a latest-state system, not a tracking warehouse.
-- **Broadcasting updates to all friends regardless of proximity.** Radius pruning is a first-class scaling control.
-- **No silent pause / safety mode.** Privacy products need escape hatches that do not announce themselves.
+**Check sharing permission on the read, or at fan-out**
+- Choice: on the read. The latest-position store is written unconditionally, and every path that produces an answer, whether a poll response or a crossing evaluation, joins the permission pair on that same path.
+- Alternative: check at fan-out against a per-node permission cache fed by an invalidation stream. This is not optional if you took push in the first fork, because then the route is the answer and there is no read to attach the check to.
+- Decider: the size of the revocation window, which is a safety property and not a latency one. Read-time checks run at the read rate, 10M/s at a 10s timer, and are current by construction, so the window is zero. A 5s-TTL fan-out cache at 10M publishes/s has a window equal to invalidation propagation: single-digit milliseconds when healthy, tens of milliseconds under load, and unbounded if the control-plane channel partitions. Zero against "usually milliseconds, occasionally never" is not a close call for location data.
+- Alternative wins when: delivery is push, and then it is the only option rather than the better one. Build it honestly: TTL the cache at 5s, tear down the socket route on revoke rather than only evicting the entry, so an in-flight message that already passed the check still cannot land, and treat a partitioned control plane as a signal to fail closed and stop delivering rather than to keep serving the last known permissions.
 #### High-level design
 **must-say**
 
@@ -5749,39 +5780,26 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 </svg>
 ```
 
-**How to read the diagram:** phones periodically upload their location, the backend stores the latest known position per user, and a proximity evaluator decides whether any of that user's friends are now near enough to matter.
+**How to read the diagram:** phones upload their position on a schedule they choose, the Location Service keeps the latest one per user, and the pre-filter decides whether that movement changed anything for any of the writer's friends. Only what survives that decision reaches the bus and the sockets. The drawing shows the push path; the map view's own read, a periodic `GET /nearby` straight against the latest-position store, is the arrow this diagram leaves out.
 
-**Why the flow is shaped this way:** constant exact tracking would destroy battery and raise privacy risk, so the system works from coarse snapshots and social filtering. Most of the world is irrelevant to any given user; only their friend graph is worth checking.
+**Why the flow is shaped this way:** the expensive direction is up, not down. Ten million writes a second arrive whether or not anyone is watching, so every stage exists to shed load before the next one: the device sheds it by not sampling, the pre-filter sheds it by proving nobody cares, and the split between poll and push sheds it by refusing to stream coordinates to a screen that is switched off.
 
-**What this layout buys you:** timely-enough proximity detection without treating the product like a military tracking system. The tradeoff is that nearby becomes approximate and policy-driven rather than perfectly continuous.
+**What this layout buys you:** the delivery fleet is sized by crossings rather than by positions, roughly 46k/s against 10M/s. The costs are that the map is up to ten seconds behind, and that the geographic sharding under the latest-position store is what makes the pre-filter local, so the store's shard map is now coupled to where people physically are.
 #### Deep dive
 **must-say**
 
-**Adaptive sampling (battery saving):**
+**The write path, and how ten million positions per second become forty-six thousand notifications.** This is the mechanism that will get drilled, because it is the only part of the system that has no counterpart in a static geo service. It has three attenuation stages, and each one has to work or the next one is not affordable.
 
-| State | Sample interval |
-|---|---|
-| Stationary >5min | 5min |
-| Walking | 30s |
-| Driving (high speed) | 10s |
-| Background | 1min minimum |
+**Stage one: the device sets the base rate.** The phone classifies motion on the sensor hub, not the application processor, using platform activity recognition (`CMMotionActivity` on iOS, `ActivityRecognition` on Android), and picks a sampling interval from that state.
 
-**Pub/sub fan-out.**
-- Topic per user: `user.location.{user_id}`. Topic name is deterministic from user_id, so a subscribing client knows exactly what to subscribe to without a discovery step.
-- Friends subscribe to their friends' topics on app open; subscriptions live in the Subscription Service memory keyed `(publisher → [subscriber WS connections])`.
-- Pre-filter at publish: skip if no friend within radius. If A's location update has zero in-radius friends right now, the publish is a no-op — saves the bus traffic. Example: A is in Tokyo, all A's friends are in London → no publish even though A's location updated.
+| State | Sample interval | Why |
+|---|---|---|
+| Stationary >5min | 5min | Republishing identical coordinates buys nothing |
+| Walking | 30s | ~40m of travel between fixes, below map-dot resolution |
+| Driving (high speed) | 10s | ~200m between fixes at 70km/h, the coarsest that still looks continuous |
+| Background | 1min minimum | Roughly what a suspended app is granted anyway |
 
-**Geo-radius filter.**
-- On publish, query "who has me as friend AND is currently within R km" — first lookup is fast (friend list cached), second is the geo query.
-- Use a sliding geo-index (quadtree of online users) to find subscribers. A separate in-memory geo index, keyed by user_id with last known location, lets the publisher quickly find subscribers within R km without scanning every friend. Updated continuously as locations change.
-- Radius is configurable per user-pair (some friends share precise location, some share city-level only).
-
-**Privacy.**
-- ACL check on every publish (or cached for short TTL ~5s). Cache holds `(publisher_id, subscriber_id) → allowed?` and is invalidated via a control-plane pub-sub channel when a user toggles sharing — stale window measured in ms, not the cache TTL.
-- Geo-fence (don't share when at sensitive locations) — client-side gate. User defines "home" or "work" as a polygon; phone refuses to publish while inside that polygon. Client-side because the server should never know about sensitive locations even existing.
-- Bidirectional consent: A sharing with B requires both to have approved the relationship — prevents harassment via unilateral location subscription.
-
-**Adaptive sample rate state machine.** Phone detects motion via low-power accelerometer + activity recognition (CMMotionActivity / Google ActivityRecognition); GPS sample rate ramps up/down. The state transitions matter because the wrong state burns 10-50x the battery.
+The state machine matters more than the numbers, because the cost of being in the wrong state is 10 to 50x the battery draw and the transitions are where that goes wrong. Entering a faster state is cheap to get wrong and expensive to get slow, so motion for 5s promotes immediately. Leaving it is the opposite: a 5 minute stillness requirement before demoting stops a phone on a table from oscillating on every accidental nudge.
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 392" role="img" aria-label="Adaptive GPS sample-rate state machine: Stationary, Walking, Driving and Background states with transition conditions and GPS sample-rate notes">
@@ -5860,9 +5878,17 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 </svg>
 ```
 
-The win: a stationary user (most users, most of the day — sleep, work, sitting at home) drops from one report per 10s to one per 5min — **30x fewer publishes**. Multiplied across a billion users, it's the difference between a viable system and one that melts the pub/sub bus. Activity recognition itself runs on a low-power coprocessor (Apple's M-series motion coprocessor; Android's sensor hub) — costs single-digit mA vs GPS's 100s of mA.
+A user who is still, which is most users for most of the day, drops from the driving rate of one fix per 10s to one per 5min, **30x fewer writes**, or 10x measured against the walking rate. The classifier that decides this is nearly free: sensor-hub activity recognition draws single-digit milliamps against GPS at hundreds. That asymmetry is the whole reason the policy belongs on the device.
 
-**Pub/sub fan-out shape.**
+**Stage two: the pre-filter, which is the hard part.** Every surviving write has to answer one question before anything downstream can be sized: does this writer have a friend who is online, permitted, and now inside the radius who was not inside it on the previous write? Roughly 85% of writes answer no.
+
+The naive implementation is what sinks candidates. Fetch the writer's friend list, keep the ~20 who are online, read their positions, compute 20 haversines. At 10M writes/s that is 200M position reads per second, and if the latest-position store is sharded on user id those reads are scattered across the entire fleet: 10M scatter-gather operations per second, each waiting on its slowest of 20 shards. The tail latency alone makes it unbuildable.
+
+The fix is to shard the latest-position store on a coarse geographic cell rather than on the user key. Take Q13's cell scheme and use its output as the placement key, at a precision covering roughly 5km. Now every user physically near the writer is already resident on the writer's node, so the pre-filter is a local set intersection: the writer's friend list against this node's current cell membership, then haversine on whatever survives, which in the ordinary case is zero or one candidate. No network, no fan-in, no tail.
+
+Two costs come with that, and they are the things worth volunteering before you are asked. First, users migrate between shards as they move: a 5km cell is crossed roughly every 4 minutes at 70km/h and every 50 minutes on foot, so with ~200M users in motion at a mean crossing interval of 20 minutes you get 200M ÷ 1,200s ≈ 167k migrations/s, about 1.7% of the write rate and cheap enough to ignore. Second, load follows population, which is exactly what a hash shard exists to prevent. A quiet 5km cell holds a few thousand reporters; a stadium cell holds 50,000 inside a few hundred metres. The mitigation is to split any cell above ~5k concurrent reporters into k sub-shards by user id hash, capped at k=8, which bounds the crowd case at 8 cross-node reads per write instead of an unbounded local scan. It also reintroduces, in exactly that case, the scatter-gather the geographic sharding existed to remove.
+
+**Stage three: fan-out, and what actually gets sent.**
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 612" role="img" aria-label="Pub/sub fan-out: publisher through pre-filter and ACL decisions, routing WS pushes to friends or dropping">
@@ -5954,214 +5980,245 @@ The win: a stationary user (most users, most of the day — sleep, work, sitting
 </svg>
 ```
 
-The pre-filter step is critical: A in Tokyo, friends in London → no in-radius subscribers → publish becomes a no-op. Without pre-filter, you'd publish billions of irrelevant updates per day to topics nobody's reading meaningfully.
+Read the diamonds as the two shedding points. The pre-filter is stage two: a writer in Tokyo whose friends are all in London is not on any of their nodes, so the question is answered by absence and no publish happens at all. The permission check is second, not first, because it is the more expensive of the two and there is no reason to pay for it on a write that was going to be dropped anyway.
 
-**Cassandra schema for history.** Partition by `(user_id, day_bucket)`, clustering by timestamp. Keeps partitions bounded (~24h × 1 sample/min = 1440 rows max per partition for stationary days) regardless of total user lifetime. TTL of 30 days at full fidelity; downsample to 1 point/minute for older data and archive to S3 Parquet for analytics. Avoids the unbounded partition trap that bit Discord on Cassandra.
+What crosses the bus is a crossing event, not a position: `(subject, observer, entered|left, ts)`, with no coordinates in it. That is a deliberate reduction. A friend walking past a coffee shop generates one event where a position stream would generate a hundred, which is where the 100x between 4.5M/s and 46k/s comes from, and an observer who is not currently looking at a map never receives coordinates at all, so a compromised or merely curious client cannot passively accumulate a track.
 
-**Bidirectional consent.** A subscribes to B → both must explicitly approve before subscription becomes active. Asymmetric "follower-style" subscriptions are tempting (matches social-graph products) but for **location specifically**, it enables stalking/harassment. Bidirectional gate solves the abuse vector definitionally; the UX cost (an extra approval flow) is the price.
+Crossings need hysteresis or they flap. Entering at 1.5km and leaving at 2.0km, plus a 10 minute per-pair cooldown before re-notifying, means someone loitering on the boundary produces one notification rather than forty. Without the asymmetric thresholds a single GPS fix with 100m of error at the boundary generates an enter and a leave in the same minute.
+
+**What the whole path costs.** 10M writes/s in. Device sampling already removed the 10x that a fixed-rate client would have added. The pre-filter drops 85%, leaving 1.5M writes/s with any interested party. Of those, only genuine radius crossings publish, ~46k/s. The delivery fleet is therefore sized by a number 200x smaller than the ingest, which is the only reason this is affordable. Everything else in the system, including all 200M key reads/s of the poll path, is sized by the writes, not by the pushes.
 #### Where it breaks
 **must-say**
 
 **Bottlenecks**
 
-- **Mobile battery** → adaptive sampling, defer when stationary. A phone reporting every 5s dies in 4 hours; adaptive sampling cuts reports by 20-50x for stationary users (most of them, most of the day) by detecting motion via accelerometer and only ramping up GPS rate during active movement.
-- **Hot user (1M friends)** → cap, or shard subscribers across multiple Pub/Sub topics. Publishing to 1M subscribers per location update is intractable; cap visibility at a few hundred (most "friends" beyond that are followers, not bidirectional shares) and shard the topic across multiple partitions for legitimate high-degree cases.
-- **Privacy churn** → cache permission with short TTL + invalidate on change. ACL check on every publish at 10M publishes/s would melt the permission DB; cached permissions per Subscription Service node with a 5s TTL absorb 99%+ of checks. Invalidation events (user toggles share) propagate via control-plane pub/sub and force eviction in ms.
-- **Location update storm** → debounce client-side; coalesce at server. A buggy app could spam 100 updates/s; client debounces to 1/sec max, server coalesces dupes within a 1-sec window per user keyed on `(user_id, lat, lng) bucket`.
-- **Network blip** → buffer locally, batch upload on reconnect. Phone loses connectivity in a tunnel; client buffers up to ~30 location samples locally and uploads them in one batch on reconnect, with original timestamps so historical accuracy is preserved.
-
-- **Unbounded Cassandra partitions** for location history → partition by `(user_id, day_bucket)` not just `user_id`. Without the time bucket, partitions grow forever and reads pay the cost; with it, partitions stay ~1440 rows/day max for a stationary user.
-- **Pre-filter at publish time** → drop updates with no in-radius subscribers. A user in Tokyo with friends in London should produce zero pub/sub traffic; pre-filter via the geo index before the publish hits the bus. Without this, you spam billions of empty topics.
-- **Privacy abuse vector** → bidirectional consent is the only safe default for location-sharing. Asymmetric "follower-style" subscriptions enable harassment and stalking. Cost is one extra UX step; the alternative is unmitigated abuse.
+- **Mobile battery** → device-side adaptive sampling. A phone reporting every 5s dies in about 4 hours. Motion-state sampling cuts the rate 10 to 30x for a still device and the classifier that decides it draws single-digit mA, so the fix costs less than the problem by two orders of magnitude.
+- **Hot cells** → split any cell above ~5k concurrent reporters into at most 8 hash sub-shards. Bounds the pre-filter at 8 cross-node reads per write, at the cost of running the scatter-gather path precisely in crowds.
+- **Hot user (very high friend count)** → cap the visible sharing set at a few hundred and shard that user's topic across partitions. Poll cost is linear in online friends, so an uncapped account degrades its own read path first, which at least fails locally rather than globally.
+- **Permission check rate** → check on the read, not at fan-out. 10M reads/s against a permission store is absorbed by a read-through cache invalidated on write rather than by TTL, so there is no window where a revoked pair is still served.
+- **Location update storm** → debounce on the client to 1/s, and coalesce server-side within a 1s window per user keyed on `(user_id, cell)`. A buggy build shipping 100 updates/s to a billion devices is a self-inflicted DDoS and the server cannot assume the client is well behaved.
+- **Network blip** → buffer up to ~30 samples on the device and batch on reconnect, carrying original timestamps. The pre-filter must then evaluate crossings against the buffered sequence rather than only the newest point, or a friend who walked past during the tunnel is silently missed.
+- **Unbounded history partitions** → partition on `(user_id, day_bucket)`, never on `user_id` alone. With movement-gated writes a partition holds ~264 rows/day and a stationary day near zero; without the bucket it grows for the life of the account.
 
 **Failure modes**
 
 | Layer | Failure | Detection | Mitigation |
 |---|---|---|---|
 | Sampling / battery logic | Client stays in high-frequency GPS mode and drains battery | Sample-interval distribution and battery-health telemetry | Activity-aware client throttling, server-side anomaly detection, and remote-config fallbacks |
-| ACL enforcement | Permission revocation lags and one extra update leaks | ACL invalidation lag and privacy canary | Check permission at publish time, invalidate caches immediately, and tear down subscriptions on revoke |
-| Pub-sub | Real-time fan-out layer fails and map updates stop | Publish success rate and subscriber-delivery lag | Fall back to polling latest-known positions from hot cache until pub-sub recovers |
-| Geo cache | Latest-location TTLs expire or go stale unexpectedly | Stale-dot rate and latest-location miss alarms | Short TTL plus client reconnect / republish, and degrade to “last seen” UI rather than false precision |
+| Permission enforcement | Revocation lags and one further position leaks | Privacy canary that revokes then immediately reads back | Check on the read that produces the answer, invalidate the read-through cache on write rather than by TTL, and tear down any live route on revoke |
+| Crossing pub-sub | Notification path fails and nobody is told about arrivals | Publish success rate and subscriber-delivery lag | Map view is unaffected because it polls; degrade to detecting arrivals client-side from polled positions until the bus recovers |
+| Latest-position store | Entries expire or the shard map lags a migration | Stale-dot rate and pre-filter miss rate per cell | Five minute expiry plus client republish on foreground, and show a "last seen" time rather than a confidently wrong dot |
+| Geo shard map | A hot cell splits or merges while writes are in flight | Per-cell reporter count and cross-node read rate | Split at a fixed threshold with hysteresis, and route by the previous and current cell during the migration window |
 | History path | Optional history capture stores data when user expected ephemeral mode | History-write audits and privacy-policy canary | Separate hot latest-state from opt-in history path and hard-gate history writes behind explicit flags |
 | Spoofing | Modified clients inject impossible movement | Teleport / impossible-velocity detector | Quarantine suspicious updates, rate-limit, and require stronger device attestation for repeat offenders |
 
 **Unresolved**
 
-TODO. Two or three things this design genuinely does not handle well, and what you would do about each.
+**A silent pause is not actually silent, and we should stop implying it is.** Every location product ships a way to stop sharing without announcing it, because the threat model here is not a stranger scraping a directory, it is somebody who knows you, has your consent on file, and is watching. The problem is that absence is itself a signal. A coercive partner watching your dot sees it stop moving at 14:02 and can simply ask why. The only way to make pausing genuinely undetectable is to keep emitting plausible fabricated positions, which is lying to a user about another user and which we will not build. What we do instead is make the ambiguity real rather than claimed: the five minute expiry means a dot vanishing is routine, background suspension makes it routine again, we never surface a "sharing paused" state to the viewer, and last-seen is rounded to coarse buckets so the viewer cannot correlate the stop with an event. That narrows the inference. It does not close it, and a design document that says "safety mode solved" is worse than one that says this.
+
+**Revocation stops the next read and reaches nothing already delivered.** Read-time permission checks give a zero-length window on the *next* answer, which is the strongest guarantee available on the server, and it is easy to over-claim from there. It does not touch positions already sitting in a friend's client memory, nor any copy that client chose to keep, and a modified client that has been logging every polled position since the day sharing was granted retains all of it. Partial mitigations: cap client-side retention to the current session, quantise shared coordinates to ~100m unless a pair has opted into finer precision, and keep a server-side access log so a user can at least see who read their position and when, after the fact. None of these un-send anything. Anybody reading "revoke" as "erase" is wrong, and the UI should say so in words.
+
+**Geographic sharding degrades exactly where the product is most valuable.** The pre-filter is cheap because people near you are on your node, and in a crowd that inverts: a stadium cell splits into 8 sub-shards, each write fans in across all of them, and the per-write candidate cap starts dropping evaluations. So at a festival, which is the single situation where finding your friends matters most, crossing notifications arrive in 30 to 60 seconds instead of 5, and some do not arrive at all. We accept that rather than fix it. The honest alternatives are all bad: a second index keyed by friendship rather than geography doubles the write path for a case that is under 0.1% of cells, and raising the split cap trades the fan-in cost for a linear scan that is worse. If it became a priority, the shape I would try is a per-event ephemeral index built only for cells over the threshold, which is a different system with a different failure mode rather than a tuning change.
 #### Drill questions
-1. What if the pub/sub layer dies mid-update?
-2. How do you handle a user with 100k friends (an influencer)?
+1. What if the crossing pub/sub layer dies mid-update?
+2. How do you handle a user with 100k friends?
 3. How do you guarantee a revoked permission stops updates immediately?
 4. How would you support location history without ballooning storage?
 5. How do you prevent location spoofing or harassment?
-6. How would you scale this 10x to 1B concurrent users?
+6. How would you scale this 10x?
 7. Why bidirectional consent for location specifically?
 8. How much battery does adaptive sampling actually save?
-9. Avoiding Cassandra hot partitions for location history?
-
-TODO. Only 9 drill questions carried over, top up to at least 10.
+9. How do you avoid unbounded partitions in the history store?
+10. Q13 puts a spatial index on the read path. Why does this design not have one?
+11. A user walks across a shard boundary mid-route. What happens to an in-flight crossing?
+12. Why poll the map at 10s instead of pushing positions, when push is fewer messages?
 #### Answers to drill questions
-1. Drop the realtime push and degrade to polling — clients fetch latest locations from Redis on a slow timer (30s). No history is lost because Cassandra writes are independent of pub/sub. *If pushed:* run two pub/sub clusters active-active and have clients reconnect to the healthy one; failover is seconds, not minutes.
+1. The map is unaffected, because it polls the latest-position store directly and never touched the bus. What stops is arrival notifications. Clients with a live view can detect arrivals themselves from polled positions, so the degradation is that background users stop being told. *If pushed:* run two bus clusters active-active with clients reconnecting to the healthy one, and buffer crossings in the Location Service for the reconnect window, accepting that a crossing older than a few minutes is not worth delivering at all.
 
-2. Cap friend visibility at a few hundred, or shard their topic across multiple pub/sub partitions and round-robin subscribers. Most "friends" of that scale are followers, not bidirectional shares. *If pushed:* enforce bidirectional consent for location specifically — solves the problem definitionally.
+2. Cap the sharing set at a few hundred and shard that user's topic across partitions. The self-limiting property is worth naming: poll cost is linear in *online* friends, so an account with 100k sharing relationships degrades its own read path long before it degrades anyone else's. *If pushed:* the cap is mostly redundant under bidirectional consent, since 100k people who each individually approved location sharing with you is not a follower graph, it is a data-collection operation, and the abuse team should see it before the capacity planner does.
 
-3. Revoke writes to Postgres and emits an invalidation event on a control-plane topic; every subscription server drops the (publisher, subscriber) pair from in-memory routing tables before the next location publish. ACL check on publish reads from a per-node LRU (~0.5ms) backed by that invalidation stream — stale window measured in milliseconds, not the cache TTL. *If pushed:* hard-revoke also tears down the subscriber's WebSocket route for that publisher and forces a resubscribe, so an in-flight publish that already passed the ACL check still can't be delivered.
+3. Revoke writes to the permission store and invalidates the read-through cache on write rather than waiting for a TTL. The next poll response and the next crossing evaluation both join permission on the path that produces the answer, so there is no window at all. This is why the read-time check is worth its cost. *If pushed:* also tear down any live socket route for the pair, so a crossing already in flight cannot land, and note that none of this reaches positions the friend's client already holds.
 
-4. Async writes to Cassandra partitioned by `(user_id, day_bucket)` with TTL of 30 days default. Downsample older data (one point per minute). *If pushed:* tiered storage — hot 7 days at full fidelity in Cassandra, cold archive in S3 Parquet for analytics.
+4. Write asynchronously, partitioned `(user_id, day_bucket)` with a 30-day TTL, and gate writes on actual movement: a point only when the user has moved more than 50m, plus an hourly heartbeat. That is ~264 points/day rather than 1,440, which is the difference between ~1.3PB and ~240TB for 300M opted-in users. *If pushed:* tier it, 7 days at full fidelity and the rest downsampled into Parquet in object storage, and keep the history path physically separate from the hot path so a history outage cannot affect the live product.
 
-5. Server-side sanity checks (impossible velocity, sudden teleports → flagged), rate limit per device, mandatory per-friend opt-in with audit log. Geo-fence client-side to suppress sensitive areas. *If pushed:* attestation via mobile platform (DeviceCheck/Play Integrity) to reject rooted/spoofed clients.
+5. Server-side sanity checks catch the crude cases: impossible velocity, teleports, altitude inconsistent with terrain. Rate-limit per device and keep an access audit log. Sensitive-location suppression is a client-side polygon, deliberately, so the server never learns that a sensitive location exists. *If pushed:* platform attestation (DeviceCheck, Play Integrity) raises the bar, and it also excludes legitimate users on de-Googled Android, so it is a policy tradeoff rather than a fix. A spoofer that moves at plausible speeds along real roads is undetectable from position data alone.
 
-6. Shard pub/sub topics by user-id hash across N regional clusters; route subscribers to the same shard as friends' publishers when possible. Edge-terminate WebSockets. *If pushed:* push more filtering to client (subscribe to a coarse geohash bucket, not individual friends) — cuts subscription cardinality by 100x.
+6. The write path scales horizontally on the geographic shard map, which is the part that already survives skew, and the poll path is stateless so it scales on node count. Neither has a global coordination point. *If pushed:* the ceiling is the poll fleet at 200M key reads/s, and the lever is the timer rather than the hardware. Moving the map from a 10s to a 15s poll takes a third of the fleet out, so the first response to 10x is to ask whether the freshness promise is really 10s.
 
-7. Location enables stalking and harassment in ways that follower-style asymmetric subscriptions don't. A unilateral "I subscribe to your location" is the abuse vector. Bidirectional gate solves it definitionally — both parties approve. UX cost is one extra approval flow; safety win is enormous. *If pushed:* even bidirectional has edge cases (coercion in DV situations) — surface a "pause sharing" toggle that doesn't notify the other party, and audit-log all subscription changes so abuse patterns are detectable.
+7. Follower-style asymmetric subscription is fine for posts and dangerous for location, because a unilateral "I can see where you are" is itself the abuse. Bidirectional consent removes the vector by construction and costs one approval step. *If pushed:* it does not cover coercion, where consent was given under pressure and is real on paper. That needs a pause that does not notify, coarse last-seen rounding so a pause is not inferable, and an audit log of subscription changes so patterns are visible after the fact. Even then the gap in Unresolved stands: absence is a signal.
 
-8. Stationary users go from 1 GPS fix per 10s to 1 per 5min — 30x fewer fixes. Most users are stationary most of the day (sleep, work, sitting at home), so the average savings approach the stationary case. Activity recognition runs on a low-power coprocessor (single-digit mA) vs GPS's 100s of mA. Net effect: a phone that would die in 4 hours of constant location publishing lasts a normal day. *If pushed:* iOS's significant-location-change API offers an even cheaper option — only wakes the app when the user moves >500m, but with much coarser update cadence.
+8. From the driving rate of one fix per 10s to the stationary rate of one per 5min is 30x fewer fixes, or 10x against the walking rate, and most users are still for most of the day. The classifier itself is nearly free, running on the sensor hub at single-digit mA against GPS at hundreds. In practice this is the difference between a phone that dies in about 4 hours and one that lasts a normal day. *If pushed:* iOS significant-location-change is cheaper still, waking the app only on ~500m of movement, but the cadence is too coarse for a map and it suits the notification-only path.
 
-9. Partition by `(user_id, day_bucket)`, not just `user_id`. A stationary user generates ~24h × 1/min = 1440 rows/day; an active user maybe 10x. Partition stays bounded. Without the day_bucket, partitions grow unboundedly over a user's lifetime — same trap that bit Discord. *If pushed:* for very-active users (drivers, runners) tune bucket size down to hour or use TTL aggressively to keep working set small.
+9. Partition on `(user_id, day_bucket)` rather than `user_id`. With movement-gated writes that is ~264 rows on an active day and near zero on a still one, so the partition is bounded by the day rather than by the lifetime of the account. *If pushed:* for genuinely high-rate users, drivers and runners, drop the bucket to an hour, and lean on the TTL rather than on compaction to keep the working set small.
+
+10. Because the candidate set is already given. In Q13 you are asked which of millions of businesses are near an arbitrary point, so you must narrow the world before you can answer, and that narrowing is the spatial index. Here the question is which of my ~200 friends are near me, and 200 distance computations is cheaper than any index lookup that would have to be maintained under 10M writes/s. The index does not disappear entirely, it moves: the same cell scheme decides which shard a *write* lands on, so that the pre-filter can be local. Read index in Q13, write-placement key here.
+
+11. The write lands on the new cell's node, which does not know the user's previous position, so a naive implementation loses the enter/leave edge at every boundary. The Location Service therefore carries the previous position and cell in the write itself rather than reading it back, so the crossing evaluation is a pure function of the request. During a split or merge, route by both the previous and current cell for the migration window and deduplicate on `(subject, observer, entered|left)` at the publisher. *If pushed:* the deduplication window has to exceed the migration window or a boundary crossing produces two notifications, which users notice far more than a missing one.
+
+12. Message count is the wrong metric, because the two designs are not paying for the same thing. Push is 4.5M messages/s but the real cost is a routing table of publisher to socket, distributed, in memory, sticky to a connection, and safety-critical because the permission check has to hang off it. Poll is 10M requests/s and 200M key reads/s, which is roughly 400 cache nodes, and it buys away all of that state: no routing table, no invalidation stream, permission checked on the read that produces the answer. *If pushed:* below about 3s of target freshness the argument inverts, because polling that fast costs 667M reads/s and you are buying a cache fleet to emulate a socket you could have just held open.
 #### Whiteboard script
-TODO
+**0-5, reframe it before you draw anything.** Open with the thesis: "the points move, so this is a write-rate problem, and the read path needs no spatial index because the friend graph already gave me the candidate set." That single sentence separates you from everyone about to rebuild Yelp. Then ask the two questions that actually fork the design: is the deliverable a moving dot or a notification when someone arrives, and what is the freshness target for each. State your assumptions aloud: 1B enabled users, 200 friends, 10M writes/s, 10s map staleness. Draw nothing yet.
 
-A 45 minute budget: what to cover in 0-5, 5-15, 15-35 and 35-45, what to say first, and a line starting `Cut first:`.
+**5-15, the spine and the arithmetic.** Five boxes top to bottom: device, Location Service, latest-position store, pre-filter, crossing bus and sockets. Say the placement rules as you draw: the device sets the report rate because only it knows motion state; the store is sharded on a coarse geographic cell rather than user id, and say why in one line, because that is the non-obvious move; the pre-filter sits before the bus, so 85% of writes stop there. Then do the funnel out loud, because it is the whole argument: 10M writes/s, 85% dropped, 46k crossings/s, and a delivery fleet sized 200x below the ingest. Add the poll arrow from the map straight to the store, separate from the push path, and name it as a deliberate split.
 
-**Raw material, from the old Talking Points:**
+**15-35, the drill.** Protect this time; it is where the interview happens. Go deep on the pre-filter: the naive version is 200M scattered position reads per second with a 20-way fan-in on every write, geographic sharding makes it a local set intersection, and then volunteer both costs before you are asked, 167k shard migrations/s which is fine, and load following population which is not. Take the crowd case yourself: 50k in a stadium cell, split into at most 8 sub-shards, and concede that this reintroduces the scatter-gather in exactly the case the product cares about most. Then take the poll-against-push fork on your own terms with the 5s crossover and the 400 cache nodes. Then privacy, and treat it as architecture: read-time permission checks give a zero-length revocation window, crossing events carry no coordinates, consent is bidirectional because unilateral location access is the abuse vector rather than a scaling concern.
 
-- **Adaptive client-side sampling** is the battery story; without it the product dies on mobile.
-- **Latest-only hot cache** is the performance and privacy story; history is optional and separate.
-- **ACL at publish time** is the safety story; subscription-time checks alone are not enough.
-- **Bidirectional consent matters here more than in ordinary social follows.**
-- **Radius pre-filtering saves huge amounts of useless fan-out.**
-- **Sensitive-location geo-fences are a strong privacy differentiator to mention.**
+**35-45, concede and close.** Give the three gaps before they are found: a silent pause is inferable from absence and cannot be made otherwise without fabricating positions; revocation reaches the next read and nothing already delivered; geographic sharding degrades exactly at festivals and stadiums. Then the operational surface in two minutes, the four metrics you would page on (pre-filter drop rate per cell, crossing notification latency, revoke-to-effect time, sample-interval distribution by motion state) and DR as region-local hot state with an explicitly non-zero recovery point for live positions.
+
+Cut first: the history store and its partitioning, then the multi-region layout, then the state-machine transition thresholds. All three are real and none changes the shape of the answer, and history in particular is a separate product that will eat ten minutes if you let it. Never cut: the reframe in the first sentence, the pre-filter and why it needs geographic sharding, and read-time permission checking.
 #### Appendix
 **Data model**
 
-- **locations_latest** (fast in-memory cache): `loc:{user_id} → (lat, lng, ts)`, TTL 5min
-- **locations_history** (wide-column store, optional): `(user_id, ts, lat, lng)`
-- **friends_graph** (wide-column store): `(user_id, friend_id, ts_added)`
-- **privacy_share** (transactional store): `(user_id, friend_id, enabled, expires_at)`
+- **locations_latest** (in-memory, sharded on `geohash(lat,lng,5)`): `loc:{user_id} → (lat, lng, ts, prev_cell)`, 5min expiry
+- **cell_members** (in-memory, colocated with the shard): `cell:{geohash} → set of user_id`, drives the pre-filter
+- **locations_history** (wide-column, opt-in): `((user_id, day_bucket), ts) → (lat, lng)`, 30-day TTL, movement-gated writes
+- **friends_graph** (wide-column): `(user_id, friend_id, ts_added)`
+- **share_pairs** (transactional): `(user_id, friend_id, enabled, precision_m, expires_at)`, both directions required for sharing to be live
 
 **API contract**
 
 ```
-WebSocket subscribe:
-  → { type: subscribe, friend_ids: [...] }
-  ← { type: location_update, friend_id, lat, lng, ts }
+POST /location            body: { lat, lng, ts, motion_state }
+GET  /nearby              → [ { friend_id, lat, lng, ts, precision_m } ]   (polled, ~10s)
+POST /share/{friend}      body: { enabled: bool, precision_m }
+POST /share/pause         body: { until }        (no notification to the other party)
 
-POST /location               body: { lat, lng, ts }   (from mobile, periodic)
-POST /privacy/share/{user}   body: { enabled: bool }
+WebSocket (crossings only, no coordinates):
+  ← { type: crossing, subject_id, direction: entered|left, ts }
 ```
 
 **Observability**
 
-- **End-to-end location update latency** — device send to friend render for active sessions.
-- **Fan-out per update** — helps detect hot-user abuse, radius-filter mistakes, and event hotspots.
-- **Sample-interval distribution by motion state** — best battery-efficiency signal.
-- **ACL invalidation latency** — privacy-critical metric that should be close to instantaneous.
-- **Stale-dot rate** — fraction of rendered friend markers older than the UX target.
-- **Suppressed-sensitive-location update count** — validates client-side geo-fence behavior.
+- **Pre-filter drop rate, per cell.** The load-bearing metric. A cell whose drop rate falls is a cell about to become hot.
+- **Crossing notification latency**, device write to socket delivery, at p50 and p99.
+- **Revoke-to-effect time.** Measured by a canary that revokes and immediately reads back. Should be zero by construction, so any non-zero value is a bug rather than a tuning signal.
+- **Sample-interval distribution by motion state.** The single best battery proxy without instrumenting the battery.
+- **Stale-dot rate.** Fraction of rendered markers older than the 10s target.
+- **Shard migration rate and cross-node pre-filter reads.** Together these say whether geographic sharding is still paying for itself.
 
 **Multi-region and DR**
 
-- **Replication mode:** real-time pub-sub and hot latest-location caches are region-local; optional history replicates more durably.
-- **RTO:** very fast for gateway/pub-sub node loss because sessions reconnect; slower for whole-region failover because subscriptions must re-establish.
-- **RPO:** latest positions are ephemeral and may be lost on failover; history path should have near-zero loss for opted-in data.
-- **Failover cadence:** test permission revocation and reconnect behavior under regional failover, not just raw location writes.
-- **Cross-region cost:** mainly optional history replication and cross-region friend relationships, not massive payload sizes.
+- **Replication mode:** latest positions and the crossing bus are region-local, because a position is worthless outside the region that will read it. Permission pairs replicate synchronously, since serving a stale permission is a safety failure. History replicates asynchronously.
+- **RTO:** seconds for node loss, since clients republish on reconnect and the store rebuilds from the next write cycle. Minutes for a region, dominated by re-establishing cell membership rather than by the data.
+- **RPO:** non-zero and deliberately so for live positions; they expire in five minutes anyway, so losing them costs one report cycle. Near-zero for opted-in history and for permission state.
+- **Failover cadence:** exercise revocation and pause during a regional failover, not only the write path. The failure that matters is a permission change lost in the seam.
+- **Cross-region cost:** small, because the payloads are 100B and the only thing that must cross is permission state and history.
 
 ### 15. Design Google Maps
 #### Problem
-Render map tiles, plan routes, and provide turn-by-turn navigation globally with live traffic.
+Serve the map itself as tiles, plan driving routes across a continent in under a second, and run turn-by-turn navigation on top of both while traffic moves and roads change. The routing half is a shortest-path query over a graph of roughly 50 million intersections, which nothing interactive can solve from scratch per request. Everything that follows is a consequence of what you precompute and what that precomputation costs you when the edge weights move.
 #### Core
-TODO
+Three subsystems share a road-graph source and almost nothing else, and only one of them is hard.
 
-Write the whole answer as you would give it in sixty seconds, 200 to 300 words, standing alone.
+Tiles are a static-asset problem. Slice the world into a quadtree addressed by `(zoom, x, y)`, encode each tile as geometry rather than pixels, render once, put a CDN in front, and 95% of requests never reach an origin. Traffic is a stream-aggregation problem. Snap anonymised GPS probes to road segments, take a trimmed mean per segment over a five-minute window, publish the result as edge weights. Routing is the interview.
+
+A continental road graph is about 10 million nodes and 30 million edges. Plain Dijkstra settles most of it on a long route, on the order of a second of CPU per query on published benchmarks, so at 10,000 route computes per second you would need thousands of cores to answer something that has to return in 100ms. You buy the speed with preprocessing. Contraction hierarchies, introduced by Geisberger and co-authors in 2008, rank junctions by importance and add shortcut edges so a query climbs toward the motorway level from both ends and meets in the middle, around 150 microseconds on that graph. Roughly four orders of magnitude, paid once.
+
+The bill arrives when the weights change. Preprocessing bakes in one travel-time metric and live traffic replaces it every five minutes. The production answer is to split preprocessing in two: a contraction order that depends only on the graph shape and is computed rarely, and a customisation pass over the current weights that takes seconds and runs every window. Closures skip even that through an override channel.
+
+Geocoding, ETAs, offline packs and turn-by-turn all hang off those three.
 #### Summary
-**The picture in your head:** a wall-sized atlas printed in advance, plus a live radio traffic report. The atlas (map tiles) was printed last week and barely changes — it's cheap to hand out millions of copies. The traffic report (live road speeds) is fresh every 5 minutes and tells you which pages of the atlas to avoid. Route planning is done by a navigator who has memorized the atlas and listens to the traffic report before suggesting a path.
+**The picture in your head:** a wall-sized atlas printed in advance, plus a live radio traffic report. The atlas (map tiles) was printed last week and barely changes, so it is cheap to hand out millions of copies. The traffic report (live road speeds) is fresh every 5 minutes and tells you which pages of the atlas to avoid. Route planning is done by a navigator who has memorised the atlas, learned every motorway junction by heart so they never have to trace side streets, and listens to the traffic report before suggesting a path. The awkward part is that the memorisation took all night and the traffic report keeps invalidating it.
 
 **The approaches people actually take:**
-TODO. Two or three things a competent engineer might reach for, in plain language and before any product name, with what each one buys and roughly when it wins.
 
-**The single-request walkthrough:** you ask Maps to route from home (San Francisco) to work (Mountain View). The Routing Service loads a precomputed road graph of California into memory — roughly 10 million intersections (nodes) and 30 million road segments (edges). Each edge has a weight representing travel time. Without any tricks, finding the shortest path (Dijkstra's algorithm) would explore millions of nodes and take minutes. Instead, the service uses Contraction Hierarchies (a preprocessing technique that adds "shortcut" edges between important highway junctions so the query only needs to climb to major roads, not crawl every surface street): the route returns in under 100ms. Live traffic adjustments are overlaid as edge-weight deltas — "I-280 southbound currently 45mph instead of 65mph" — without rebuilding the whole graph. While you navigate, your phone's anonymized GPS pings join 3 million others feeding the Traffic Aggregator, which recomputes per-segment average speeds every 5 minutes and pushes those deltas to the routing service.
+*Search the graph at query time, but steer the search.* Leave the graph alone and make the search directional: guide it toward the destination using a lower bound on the distance still to go, precomputed from a few dozen reference points scattered across the map. Preprocessing is minutes and a few hundred bytes per node. Because the guide is only a lower bound, it stays valid when travel times get worse, so nothing has to be rebuilt when traffic arrives. It buys roughly 10x over an unguided search, which is not enough on its own for a continent but is exactly what you want in a region whose weights have just moved sharply.
 
-Separately, the map tiles you see on screen were precomputed offline, stored in a CDN (a geographically distributed cache network), and fetched by your phone as you pan and zoom — each tile identified by coordinates `(zoom, x, y)`. A 95% CDN cache hit rate means only 5% of tile requests ever reach the origin servers.
+*Precompute a hierarchy of shortcuts.* Rank every junction by importance, then from the bottom up remove each junction and add direct shortcut edges between its neighbours that stand in for the path through it. A query then only ever climbs from both ends toward the motorway level. That is four orders of magnitude faster than an unguided search, at the cost of roughly double the edges and preprocessing that assumes one fixed set of weights.
+
+*Precompute answers rather than structure.* Store, for every node, a small labelled set of intermediate hubs with distances, chosen so that any two nodes share a hub on their shortest path. A query becomes a merge of two sorted lists with no graph search at all, in microseconds. It costs tens of gigabytes for a continent and has to be rebuilt outright when weights change, so it suits metrics that do not move, like distance, more than live travel time.
+
+**The single-request walkthrough:** you ask Maps to route from home (San Francisco) to work (Mountain View). The routing pod already holds a preprocessed graph of the western United States in memory, roughly 10 million intersections (nodes) and 30 million road segments (edges), each edge weighted by travel time. Unguided Dijkstra would settle most of those nodes, about a second of CPU. Instead the pod runs a bidirectional search over the shortcut hierarchy, climbing from both ends until the two searches meet, and returns in about 1ms. The weights it uses were written by a customisation pass that ran 90 seconds ago over the current traffic metric, so "I-280 southbound at 45mph instead of 65mph" is already in the numbers rather than patched on top of them. While you navigate, your phone's anonymised GPS pings join roughly a million per second from devices in motion, feeding the traffic aggregator that produces the next metric.
+
+Separately, the map tiles on screen were rendered offline, stored in object storage, and served from a CDN as you pan and zoom, each tile identified by `(zoom, x, y)`. A 95% CDN hit rate means only 5% of tile requests reach an origin.
 
 **The pieces (and what each one is for):**
-- **Map Tiles** — the visual map is sliced into a grid of small image or vector files, each covering a fixed geographic area at a specific zoom level. A vector tile (format: MVT — Mapbox Vector Tile) contains the raw geometry (road lines, building shapes, labels) rather than a rendered image, so your phone renders the visual style locally. This means the same tile bytes power dark mode, light mode, and satellite view without different files — a 3x storage saving over pre-rendered raster (PNG) tiles.
-- **CDN (Content Delivery Network)** — a global network of cache servers. Tiles are served from whichever CDN server is geographically close to you. Popular tiles (central London, Times Square) stay cached indefinitely; cold tiles are fetched from origin on the first request and cached for subsequent users. CDN absorbs 95%+ of tile traffic.
-- **Road Graph** — the planet's roads stored as a mathematical graph: ~50M nodes (intersections) and ~150M edges (road segments) globally, each edge weighted by travel time. Loaded into routing service RAM for one continent at a time (~2GB per continent after Contraction Hierarchy preprocessing). Not a database — a RAM-resident data structure for fast path search.
-- **Contraction Hierarchies (CH)** — a preprocessing step (runs nightly) that ranks every road node by "importance" and adds shortcut edges between important highway junctions. During a route query, the search only travels "upward" through the importance ranking (local roads → arterials → highways) from both the origin and destination, meeting in the middle. A cross-continent route that would take minutes with raw Dijkstra takes under 100ms with CH.
-- **Traffic Aggregator** — consumes anonymized GPS pings from active navigation sessions. For each ping, a map-matching algorithm (using a Hidden Markov Model — a statistical technique for inferring which road segment the phone was on given noisy GPS coordinates) snaps the ping to a road segment. Speeds per segment are averaged over a 5-minute sliding window. Results are pushed as edge-weight overlays to the routing service — the CH graph itself is never rebuilt for traffic (that would take hours); only the edge weights change.
+- **Map tiles.** The visual map sliced into a grid of small files, each covering a fixed geographic area at one zoom level. A vector tile (MVT, the Mapbox Vector Tile format, published 2014) carries raw geometry (road centrelines, building outlines, label anchors) rather than a rendered image, so the client applies the style. The same bytes drive light mode, dark mode and any display density, which is a 3x storage saving over rendering a raster pyramid per style.
+- **CDN.** A global network of cache servers. Tiles are served from whichever point of presence is near you. Popular tiles (central London, Times Square) stay resident indefinitely; cold tiles are fetched from origin on first request. The CDN absorbs 95%+ of tile traffic, which is what keeps the origin at single-digit thousands of requests per second rather than hundreds of thousands.
+- **Road graph.** The planet's roads as a directed graph, roughly 50M nodes (intersections) and 150M edges (road segments) globally, each edge carrying a travel-time weight plus restrictions (one-way, turn bans, vehicle class). Held in routing-pod RAM one continent at a time, about 2GB after preprocessing. It is a data structure, not a database: nothing about a shortest-path search survives contact with a query planner.
+- **The preprocessed hierarchy.** A structure over that graph that makes queries fast. It has two halves that people usually conflate: an ordering of junctions plus the shortcut edges implied by it, which depend only on the shape of the road network, and the actual weights on those shortcuts, which depend on the current travel times. The first half takes hours and changes when roads change. The second takes seconds and changes every traffic window. Keeping them apart is the design.
+- **Traffic aggregator.** Consumes anonymised GPS probes from devices in motion. Map matching snaps each probe to a road segment using position, heading and the recent trajectory, usually with a hidden Markov model over candidate segments (the standard formulation is Newson and Krumm, 2009). Per-segment speeds are reduced with a trimmed mean over a 5-minute tumbling window and published as the next weight metric.
+- **Navigation session.** The client holds the route polyline and a corridor of tiles, matches its own GPS to the polyline, speaks the turns, and only asks the server for a new route when it is genuinely off-route. Re-planning is the server's job; noticing that re-planning is needed is the client's.
 
-**The thing that makes it hard:** Contraction Hierarchies are built assuming edge weights don't change much. When heavy traffic cuts I-280's speed from 65mph to 15mph — a 4x weight change — the precomputed shortcuts may no longer be optimal. You can't rebuild the CH nightly and apply live traffic deltas to a structure built for normal weights. The production fix is Customizable Contraction Hierarchies (CCH), which separates the "which nodes to contract" step (metric-independent, done once) from the "what are the actual weights" step (metric-dependent, takes seconds). For a sudden road closure, a fast-path override channel flips the edge weight to infinity in seconds without waiting for any rebuild.
+**The thing that makes it hard:** a shortcut hierarchy is correct only for the weights it was built with. When traffic cuts a motorway from 65mph to 15mph, a shortcut that summarised "go via the motorway" now summarises the wrong thing, and a query that trusts it returns a route that is not shortest under the real weights. You cannot patch this by overlaying deltas on top of a structure built for free-flow weights, because the shortcut weights themselves are derived quantities. The production answer separates the metric-independent contraction order from a metric-dependent customisation pass: the order is computed rarely, the pass recomputes every shortcut weight bottom-up in seconds, and each traffic window gets its own consistent metric. Customizable contraction hierarchies (Dibbelt, Strasser and Wagner, 2014 onward) and customizable route planning (Delling and co-authors, 2011) are the two published forms of that idea. Closures are the exception: a fast override channel sets an edge to impassable in seconds and the customisation pass picks it up on the next cycle.
 
-**Why this design and what it costs:** the system survives at scale because nearly everything is precomputed. Tiles are rendered once and cached for months. The road graph is preprocessed nightly. Only the live traffic layer requires online computation. This means 350 million navigation requests per day are served mostly by cache hits and RAM lookups, not expensive computation. The tradeoff is operational complexity: the tile rendering pipeline, CH preprocessing jobs, and traffic aggregation stream must all be kept in sync, and a nightly CH rebuild for a continent takes hours.
+**Why this design and what it costs:** almost everything is precomputed, which is why the load is survivable. Tiles are rendered once and cached for months. The contraction order is rebuilt on the cadence at which roads physically change, not the cadence at which they get busy. Only the customisation pass and the traffic aggregation run continuously. The cost is that three pipelines must stay in agreement about one graph: a tile corpus keyed by geometry, a contraction order keyed by node ids, and a weight metric keyed by edge ids. A road added by an editor is not routable until the order is rebuilt, not visible until the tile is re-rendered, and not weighted until it has probes, and those three happen on three different clocks.
 
 **If you were building it tomorrow:**
-- Tiles: precomputed MVT files in S3, served via CloudFront CDN; rebuild only changed tiles on OSM diff apply (~50TB/week of re-renders vs 5PB full rebuild).
-- Routing: continent road graph loaded into RAM on each routing service pod; CH preprocessing job runs nightly in a batch pipeline; live traffic deltas applied as an in-memory edge-weight overlay.
+- Tiles: MVT in object storage behind a CDN; re-render only the tiles whose bounding boxes intersect an applied OSM diff (~15TB/week against a 1.5PB corpus, rather than rebuilding the planet).
+- Routing: one continent's graph resident per pod; contraction order rebuilt weekly in batch; a customisation pass every 5 minutes writing a new weight array that pods swap in atomically.
 - Hot path for a route request:
   ```
-  graph = load_ch_graph(region="california")  # RAM, loaded once
-  overlay = get_traffic_overlays(graph.edges)  # fresh every 5min
-  path = bidirectional_dijkstra(graph + overlay, origin, dest)
-  return path.polyline, path.eta
+  graph   = resident_cch(region)        # order + shortcut topology, weekly
+  metric  = current_metric(region)      # weight array, swapped every 5 min
+  path    = bidirectional_search(graph, metric, origin, dest)
+  eta     = eta_model(path, metric, departure_time)
+  return path.polyline, eta
   ```
 #### What this is really testing
-TODO
+Whether you notice that the interactive latency budget makes the query itself impossible, so the entire design is a choice about what to precompute, and that precomputation and freshness are the same axis rather than two separate concerns. A candidate who says "shortest path, so Dijkstra, sharded by region" has not felt the problem. A candidate who says "contraction hierarchies" has read the right paper but usually stops one step short, which is where the interviewer is waiting: your hierarchy was built for weights that traffic replaces every five minutes, so what exactly did you precompute, and what does it cost to refresh it? Every good answer here is a position on that trade, and the honest ones concede that the fastest published schemes are the least refreshable ones.
 
-The one insight this question exists to elicit, then the contrast with the question it most resembles and why the answers differ.
+The contrast is with the ride-hailing question. Both are geospatial, both use the same lat/lng, and both ship a map to a phone, which is why they get confused. Underneath they are different problems. Ride hailing keeps an index of points that move: writes dominate, the index is rebuilt continuously, and the hard part is choosing among candidates under contention, where an approximately nearest driver is a perfectly good answer and a slightly worse one costs a few seconds of pickup time. Maps queries a structure that barely moves: reads dominate by orders of magnitude, the data is a graph rather than a point cloud, and the answer is a path whose quality depends on weights that are always slightly stale. Approximation lands differently too. A ride-hailing service that picks the second-nearest driver has degraded slightly; a router that sends you down a closed road has failed outright. Ride hailing calls a routing service like this one to compute ETAs, which is exactly the relationship: this question is the component, that one is the system around it.
 
-Closest question: TODO
+The nearby-search question is the other neighbour, and the same split applies more sharply. That one is a bounded region query over points, answered by a spatial index. This one is a path query over edges, answered by preprocessing. They share a coordinate system and nothing else.
+
+Closest question: Q29
 #### Clarifying questions and how each answer forks the design
+- Live traffic, or is a static travel-time metric acceptable?
+- How fresh must a road closure be: seconds, or next rebuild?
+- Routing modes (drive, walk, bike, transit)?
 - Map data source (OpenStreetMap or proprietary)?
-- Routing modes (drive, walk, transit, bike)?
-- Live traffic? Indoor maps? AR?
-- Offline maps?
+- Offline navigation? Indoor maps? AR?
 
 **How the answers shape the design**
 
 | If the answer is… | Then the design… |
 |---|---|
-| Proprietary vs OSM data | drives the ingestion and tiling pipeline and licensing, not the serving path |
-| Map tiles | precompute raster or vector tiles per zoom level and serve from a CDN |
-| Multiple routing modes | a routing graph per mode (drive, walk, transit) with contraction hierarchies for fast queries |
-| Live traffic | overlay real-time edge weights from probe data and recompute affected routes |
-| Turn-by-turn navigation | server plans the route, client does local re-routing on GPS drift |
-| Offline maps | ship region tile packs plus a compact on-device routing graph |
+| Live traffic | the weight metric changes every few minutes, so preprocessing must split into a metric-independent order plus a customisation pass; this is the fork the whole design turns on |
+| Static metric | classic contraction hierarchies rebuilt nightly, 150μs queries, and none of the customisation machinery |
+| Closures in seconds | an override channel that bypasses the aggregation window, plus a query-time fallback for regions whose metric is mid-refresh |
+| Multiple routing modes | one graph per mode, because walking ignores one-ways and transit is a timetable graph, not a road graph; each mode carries its own preprocessing cost |
+| Proprietary vs OSM data | changes ingestion, licensing and the tile pipeline, not the serving path or the routing algorithm |
+| Offline navigation | a compact on-device graph per region and re-planning on the phone, accepting the traffic metric is as stale as the last sync |
+| Map tiles | precompute vector tiles per zoom level, serve from a CDN, and treat them as a separate system that shares only the source data |
 #### Requirements and scale, derived out loud
 **Requirements**
 
-- **FR:** map rendering (tiled), search (geocoding), routing, turn-by-turn nav, live traffic
-- **NFR:** sub-second tile fetch, <1s route compute (continent), accurate, scalable
+- **FR:** tiled map rendering, geocoding, route planning, turn-by-turn navigation, live traffic, ETAs.
+- **NFR:** tile fetch p99 under 500ms; route compute under 100ms in the pod and under 1s end to end; a closure reflected in routing within 60s; ETA error p50 under 10% of trip duration.
 
 **Scale**
 
-- **Users / request volume:** Google publicly cites >1B Maps MAU. Assume ~500M DAU; each session opens ~20 tiles (pan/zoom) → ~10B tile req/day. Per second: 10B / 86,400 ≈ 115k tile req/s avg, ~3× peak ≈ 350k/s.
-- **Tile size:** Mapbox/OSM benchmarks: vector tile (MVT, gzip) ~10–50KB depending on density (rural vs. dense urban); raster PNG ~20–80KB at 256px (z≥14 with labels). Use ~30KB blended avg.
-- **Tile count:** quadtree → 4^z tiles per zoom. Sum z=0..20: 4^21/3 ≈ 1.4T potential. But ~70% of Earth is ocean and most high-zoom tiles are empty/uniform; real coverage (land + populated water) ~1–5% → ~50B materialised tiles × 30KB ≈ 1.5PB per style. Standard map styles (default, dark, satellite) → ×3 ≈ 5PB rendered corpus.
-- **Tile churn:** OSM diff feed shows ~3M edits/day globally → ~1% of tiles touched per week. 1% × 5PB = 50TB/wk re-render budget; incremental rendering only redoes affected (z, x, y).
-- **CDN hit rate:** Zipf-distributed tile popularity (top cities dominate) → CDN hit rate >95% empirically (Google/Mapbox blog posts). Origin = 5% × 10B = 500M req/day → ~6k req/s avg on the tile origin.
-- **Road graph:** OSM exports show ~50M routable nodes, ~150M edges globally; sub-regions ~10M nodes / ~30M edges. Contraction Hierarchies adds ~1 shortcut per edge → ~60M edges × 32B (two node IDs + weight + flags) ≈ 2GB resident per continent — fits in RAM on a single routing box.
-- **Routing QPS:** ~500M DAU × 10% in-nav at any time × peak factor → 1M concurrent navigations. Reroute every ~30s on path deviation → 1M / 30 ≈ 33k computes/s peak; with caching of common OD pairs ~10k cold computes/s.
-- **Traffic ingest:** 1B Maps phones × ~10% navigating × 1 ping/30s = ~3M pings/s steady, 30M/s during commute peaks. Ping payload (lat, lng, heading, speed, ts, anon_id) ≈ 100B → ~3GB/s ingress. Pings aggregated into per-segment speeds in 5-min tumbling windows then dropped → no long-term storage cost.
+- **Users and tile volume:** Google publicly cites over 1B Maps monthly actives. Assume 500M daily actives; a session opens ~20 tiles while panning and zooming, so 500M × 20 = **10B tile requests/day**. Per second: 10B / 86,400 = 116k/s average, and a 3x commute peak gives **~350k/s peak**.
+- **Tile size:** a gzipped vector tile runs 10 to 50KB depending on feature density, rural against dense urban. Take **30KB blended**.
+- **Tile corpus:** the quadtree holds 4^z tiles per zoom, so z=0 to 20 is (4^21 - 1)/3 ≈ 1.4T addressable. About 70% of the surface is ocean and most high-zoom tiles over land are empty, so 1 to 5% materialise: **~50B tiles × 30KB = 1.5PB** for one vector corpus. A raster design instead needs one corpus per style: 1.5PB × 3 styles = **4.5PB**, plus a parallel high-density pyramid.
+- **Tile churn:** the OSM diff feed carries ~3M edits/day, which touch ~1% of materialised tiles per week. Vector: 1% × 1.5PB = **15TB/week re-render**. Raster at three styles: 1% × 4.5PB = 45TB/week. Either is a rounding error against rebuilding the planet, which is the point of incremental invalidation.
+- **CDN hit rate:** tile popularity is Zipfian, so a small set of city-centre tiles dominates and measured hit rates exceed 95%. Origin load = 5% × 10B = 500M/day = **5.8k req/s average**, ~17k/s at peak. That is one modest origin fleet, and it is entirely a consequence of the hit rate: at 80% the origin would be 23k/s average.
+- **Road graph:** OSM exports give ~50M routable nodes and ~150M edges globally; one continent is ~10M nodes and ~30M edges. Contraction adds roughly one shortcut per original edge, so 30M × 2 = 60M edges × 32B (two node ids, weight, flags) = 1.9GB, call it **2GB resident per continent**. All six continents is ~12GB, so a global graph would physically fit one large box; the reason to pin pods per region is preprocessing blast radius, not RAM.
+- **Concurrent navigations:** 500M DAU × 10% who start at least one navigation = 50M sessions/day. At a 25-minute mean, that is 50M × 1500s = 75B session-seconds / 86,400 = 868k, so **~900k concurrent on average** and **~2.5M at commute peak**.
+- **Route computes:** trip starts are 50M / 86,400 = 580/s average and ~1.7k/s at peak. Re-plans fire on genuine deviation rather than on a timer, roughly once per 10 minutes of driving: 2.5M / 600 = **4.2k/s at peak**. Previews, where someone checks a route without navigating, run about 3x trip starts, so ~5k/s at peak. Total **~10k route computes/s peak**, minus perhaps 20% absorbed by a cache of repeated origin-destination pairs on identical metrics.
+- **The number that decides the design:** at 10k/s, an unguided bidirectional Dijkstra at ~0.5s of CPU per continental query needs 10,000 × 0.5 = **5,000 cores** running flat out. A shortcut-hierarchy query at 150μs needs 10,000 × 0.00015 = **1.5 cores**. A customisable variant at ~1ms needs **10 cores**. The gap between 5,000 and 10 is the entire argument for preprocessing, and the gap between 1.5 and 10 is what freshness costs.
+- **Traffic probes:** probes come from every device in motion with location sharing on, not only from active navigations. Assume 5% of 500M DAU are in a moving vehicle at the commute peak = 25M devices at 1 probe / 30s = 833k/s, round to **~1M probes/s peak** and ~250k/s off peak. Payload (lat, lng, heading, speed, ts, rotating id) ≈ 100B, so **~100MB/s peak ingress**. Probes are reduced within the window and dropped, so there is no long-term storage line.
+- **Coverage per window:** 1M/s × 300s = **300M probes per 5-minute window** against 150M global edges. They concentrate: assume 90% land on the busiest 3% of edges, so 270M / 4.5M edges = 60 samples each, comfortably enough for a trimmed mean, while the remaining 30M probes spread over ~20M edges at 1 to 2 samples each, below any useful threshold. So **roughly 3% of edges carry a measured weight** in any window and the rest fall back to a historical time-of-day profile. This number drives the first Unresolved item.
+- **Customisation cost:** recomputing every shortcut weight for one continent's 60M edges is a bottom-up sweep, published at around a second on a multicore machine for a Europe-sized graph. At a 5-minute cadence that is a **0.3% duty cycle**, which is why the split is affordable at all.
 #### Key decisions
-TODO
+**Which preprocessing scheme buys the routing speed**
+- Choice: split preprocessing in two. Compute a contraction order and shortcut topology from the graph shape alone, weekly, then run a metric-dependent customisation pass over the current travel times every 5 minutes and swap the resulting weight array into the pods atomically. Queries are a bidirectional search over the hierarchy at roughly 1ms.
+- Alternative: classic contraction hierarchies (Geisberger, Sanders, Schultes and Delling, 2008) rebuilt nightly for one fixed metric, giving ~150μs queries; or no hierarchy at all, using A-star guided by lower bounds precomputed from 16 to 32 landmark nodes, which is ~10x faster than an unguided search and needs no rebuild when weights change.
+- Decider: how often the metric changes, measured against how long the preprocessing takes. Classic contraction preprocessing is hours per continent; the traffic window is 5 minutes. Anything whose rebuild is slower than its metric is querying a structure built for stale weights. The customisation pass is about a second for a continent-sized graph, which is 0.3% duty cycle at a 5-minute cadence, and it costs roughly 7x on query time (150μs to 1ms), or 10 cores instead of 1.5 at 10k queries/s. That is a trivial price for tracking the metric.
+- Alternative wins when: the metric does not move. A walking or cycling graph, a distance-optimal route, or a freight network constrained by fixed bridge heights and weight limits should take classic contraction and the 150μs, because there is nothing to customise. Landmark-guided A-star wins as a targeted fallback rather than a primary: inside a region where a closure has just landed and the customisation pass has not yet run, lower bounds computed on free-flow times remain valid lower bounds as long as live traffic only makes edges slower, which is almost always the direction traffic moves, so the heuristic stays admissible and the answer stays exact. It is genuinely the right tool in that window.
 
-Two or three genuine forks. For each, in this exact shape so it stays checkable:
+**Where re-planning happens**
+- Choice: the server plans, the client watches. At trip start the client pulls the polyline plus a corridor of tiles; while driving it matches its own GPS to the polyline and only requests a new route after it is more than 50m off for more than 10 seconds.
+- Alternative: ship a compact routing graph to the device and re-plan entirely on the phone.
+- Decider: re-plan volume against download size and metric freshness. At 2.5M concurrent navigations and a re-plan roughly every 10 minutes of driving, the server side is 4.2k computes/s, about 4 cores of query time, so compute is not the reason to move it. The on-device graph is 100MB to 1GB per region and its traffic metric is only as fresh as the last sync, so a phone that re-plans locally after a week offline is routing on last week's weights.
+- Alternative wins when: connectivity rather than compute is the constraint. Offline navigation as a product requirement, roaming users who will not use data, long tunnels, or markets where coverage is unreliable. In practice this is not either or: ship both and treat on-device as an explicitly degraded mode, with the client told which metric it is holding and how old it is.
 
-**<name of the fork>**
-- Choice:
-- Alternative:
-- Decider:
-- Alternative wins when:
-
-**Raw material, from the old Common Mistakes:**
-
-- Treating routing as a real-time Dijkstra problem rather than a pre-processed graph query — candidates who pitch "just run Dijkstra on a big-enough box" miss the order-of-magnitude that CH/ALT delivers.
-- Conflating tiles and routing into one storage layer — they have orthogonal access patterns (immutable blobs vs in-memory graph) and sharing infrastructure costs both.
-- Forgetting that one stopped car shouldn't paint a road red — naive per-segment averaging without trimmed-mean smoothing produces unusable traffic colouring.
-- Picking raster tiles for a new design in 2026 — only justifiable when no platform vector renderer is available; otherwise it's a 3× storage tax for one style.
-- Re-running CH on every traffic update — CH preprocessing is hours; live traffic must be an overlay, not a rebuild trigger.
-- Ignoring the OSM diff cadence — designs that "rebuild the planet weekly" rather than applying minutely diffs miss the actual production pattern.
+**Vector tiles against pre-rendered raster**
+- Choice: one vector corpus, styled on the client.
+- Alternative: render raster pyramids per style, one PNG set per theme and density.
+- Decider: styles multiplied by display densities, against how many of your clients can run a renderer. One corpus is 1.5PB; raster costs that per style, so three styles is 4.5PB, and a high-density pyramid roughly doubles it again. Storage is not the only line: a style change on raster means re-rendering 1.5PB, while on vector it is a client release.
+- Alternative wins when: the client cannot render. Embedded car head units on fixed hardware, e-ink, print, server-generated static images, thumbnails and social previews all want pixels. The right shape then is a server-side renderer over the same vector tiles, so there is one source corpus and raster becomes an output format rather than a second pipeline.
 #### High-level design
 **must-say**
 
@@ -6229,32 +6286,13 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 </svg>
 ```
 
-**How to read the diagram:** the map display path and the routing path are related but different. Tiles are static assets prepared ahead of time, while routing queries run over a road graph and then fold in live traffic data before returning a path and ETA.
+**How to read the diagram:** three request paths leave the client and never meet again. Tiles go to a CDN and are answered by bytes written weeks ago. Geocoding goes to a text index. Only the routing path is live, and the single arrow that matters is the one coming up from the traffic aggregator: it is not a request path at all, it is the weight metric being replaced underneath a resident graph.
 
-**Why the flow is shaped this way:** static geography changes slowly, so it should be packaged and cached aggressively. Traffic and road conditions change quickly, so that logic must stay online and query-driven. Keeping those concerns separate makes both easier to scale.
+**Why the flow is shaped this way:** the split follows the rate at which each input changes. Geometry changes when someone edits a map, so it is packaged and cached. Road topology changes when a road is built, so the contraction order tracks that cadence. Travel time changes every few minutes, so only the weights ride the fast loop. Putting all three on one refresh cycle means either rebuilding tiles far too often or routing on weights that are hours old.
 
-**What this layout buys you:** cheap map rendering, flexible routing, and the ability to add live updates without rebuilding the entire world model. The tradeoff is that several data systems must line up correctly to answer what feels like one simple user question.
-#### Deep dive
-**must-say**
+**What this layout buys you:** each subsystem can be sized on its own numbers, 350k tile requests/s against 10k route computes/s against 1M probes/s, with no shared bottleneck. The cost is three pipelines that must agree about one graph. A newly added road is invisible until the tile re-renders, unroutable until the order rebuilds, and unweighted until probes arrive, and those three clocks are hours, a week, and never for a road nobody drives.
 
-**Tile rendering:**
-
-| Type | Pros | Cons |
-|---|---|---|
-| **Raster (PNG)** | server renders, simple client | huge storage; one style only |
-| **Vector (MVT)** | client renders → themeable, scalable, smaller | client CPU |
-
-→ Vector tiles winning post-2015. Pre-render once, theme/style on client. Storage savings are dramatic: a single MVT tile averages 10–50KB, vs. a separate raster set per style (default + dark + satellite at ~30KB each = 3× storage). Multiply by ~50B real tiles globally and the difference is petabytes.
-
-**Routing — why not naive Dijkstra?** A continent road graph has ~10M nodes and ~30M edges. Best-case Dijkstra explores roughly half the graph for a long route — minutes per query, single-threaded. With ~10k route requests/sec at peak, that's 600k CPU-seconds/sec, which doesn't fit on a planet's worth of routing servers. The fix is to pay the cost once during pre-processing and amortise it across every subsequent query.
-
-**Contraction Hierarchies (CH).** Pre-processing ranks nodes by "importance" (a heuristic combining edge difference, depth in shortcut tree, and node degree); then iterating bottom-up, each node is contracted by adding shortcut edges between its neighbours that represent the through-path bypassing it. After pre-processing the graph has roughly 2× the original edges, but a query only walks "upward" — bidirectional Dijkstra from source going up the hierarchy and from destination going up, meeting in the middle. A cross-continent route returns in <100ms. Pre-processing itself takes hours per continent, so it runs nightly.
-
-**A\* with landmarks (ALT).** Alternative to CH: pick K well-spread landmark nodes (often 16–32) and pre-compute the shortest distance from every node to every landmark. At query time use the triangle inequality (`dist(u, dest) >= |dist(u, L) - dist(dest, L)|`) as the A\* heuristic, picking the tightest landmark per expansion. Result is a directional search that's faster than Dijkstra but typically 5–10× slower than CH. ALT's advantage: re-weighting edges (live traffic) doesn't invalidate the heuristic — CH shortcuts can become non-optimal under heavy traffic deltas, requiring overlay logic.
-
-**Live traffic.** Anonymized GPS pings (sampled at ~1/30s per active nav session) flow into the aggregator. Map-matching snaps each ping to a road segment using lat/lng + heading + a Hidden Markov Model over the last few pings. Per-segment speed is computed over a tumbling 5-min window with a trimmed mean (drop top/bottom 10% to ignore one stopped car or one outlier doing 100mph). The result is a delta `(edge_id, new_speed_kmh)` pushed to the routing service as an overlay; next route request reflects reality.
-
-**Tile pipeline: raster vs vector rendering.** *[Source: Mapbox / MapLibre]* Two different request paths share only the `(z,x,y)` addressing scheme — one ships pixels, the other ships geometry. Storage, restyling, and high-DPI rendering all collapse into the vector pipeline as cheap operations.
+**The display half, for completeness.** The tile fork above is the whole of it: two pipelines that share only the `(z, x, y)` key, one shipping pixels and one shipping geometry.
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 610" role="img" aria-label="Tile pipeline: source and tile builder split into raster and vector lanes through object stores, CDNs and clients, vector enabling per-frame restyle">
@@ -6338,19 +6376,25 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 </svg>
 ```
 
-Raster locks one style per render — three styles (default, dark, satellite) means ~3× storage for the same world. Vector encodes only `(geometry, properties)` so style is a runtime decision; same MVT bytes drive every theme. High-DPI on raster needs a `@2x` parallel pyramid (~4× storage); vector renders any DPI for free. Trade-off is client GPU/CPU and a vector renderer (Mapbox GL, MapLibre) on every platform.
+Raster locks one style per render, so three styles is roughly 3x the storage for the same world, and a high-density variant needs a parallel pyramid on top of that. Vector encodes only geometry and properties, so style is a runtime decision and the same bytes serve every theme and every density. The cost is a working renderer on every platform you support, which is the one place the tile system gets expensive.
+#### Deep dive
+**must-say**
 
-**OSM diff replication.** *[Source: OpenStreetMap planet.osm/diffs]* Source-of-truth churns continuously — global edit rate ~10 edits/sec, ~1M edits/day. Full planet re-extracts are ~80GB compressed PBF (impractical to redownload), so OSM publishes incremental diffs at three cadences:
+**One mechanism: the preprocessed hierarchy, and the metric that runs through it.**
 
-| Granularity | Cadence | Use |
-|---|---|---|
-| Minutely | every 60s | live editing tools, internal analytics |
-| Hourly | hh:02 | most production tile builders |
-| Daily | 00:05 UTC | low-touch consumers |
+**Why an unguided search is not an option.** Dijkstra settles nodes in increasing distance from the source, so a query across a continent settles most of the graph before it reaches the target. On published benchmarks over an 18M-node Western Europe extract, one unguided query is on the order of a second of CPU and a bidirectional variant roughly halves that. At 10k route computes per second, that is thousands of cores continuously for a query with a 100ms budget. Sharding does not rescue it, because sharding a shortest-path query splits the answer rather than the load: any route crossing a boundary needs both shards plus a way to join them, which is a smaller version of the same problem.
 
-Files are gzipped `OsmChange` XML (`AAA/BBB/CCC.osc.gz`, sequence `N = AAA×10^6 + BBB×10^3 + CCC`) with a sidecar `state.txt` carrying the sequence number — Osmosis / Osmupdate consume the cursor and apply changes idempotently to a local Postgres + osm2pgsql DB. Tile invalidation is keyed by feature bounding-box → set of `(z,x,y)` tiles touched → re-render queue. Steady-state ~50TB/wk re-render churn vs ~5PB rebuild for a full planet.
+**What contraction does.** Order the nodes by an importance heuristic, classically edge difference (how many shortcuts contracting a node would add, minus the edges it removes) combined with node degree and how many neighbours are already contracted. Then process bottom-up. To contract node `v`, take every pair of neighbours `(u, w)` whose shortest path runs through `v`; if no alternative path of equal or lower weight exists, which is checked by a bounded local search called a witness search, insert a shortcut `u -> w` of weight `w(u,v) + w(v,w)`. Remove `v` and continue. The result is the original graph plus roughly one shortcut per original edge, and every node carries a rank.
 
-**Traffic state per road segment.** *[Source: Google Maps engineering]* Each edge runs a small state machine driven by the trimmed-mean speed against its historical typical for time-of-day. Hysteresis (state must hold ≥2 windows) keeps a single ping flap from oscillating the rendered colour or invalidating cached routes.
+The query is bidirectional and upward only: from the source relax only edges to higher-ranked nodes, from the target only edges from higher-ranked nodes in the reverse graph, and take the minimum of forward plus backward distance over all meeting nodes. This is exact, not approximate, which is the property most candidates fail to claim: every shortcut stands for a real path, so no optimal route is lost. It settles hundreds of nodes instead of millions, hence ~150μs. Recursively unpacking the shortcuts on the winning path recovers the actual road segments for the polyline. Contraction hierarchies were introduced in 2008 by Geisberger, Sanders, Schultes and Delling; the later variants rearrange the same two ideas, an ordering and a set of shortcuts.
+
+**Why traffic breaks it.** Both the shortcut weights and the witness decisions were computed against one specific weight function. When the metric changes, two different things go wrong. The shortcut weights become numerically stale, because `w(u,v) + w(v,w)` was evaluated under the old numbers. Worse, a shortcut that was skipped because a witness path was shorter may now be required, and a shortcut that does not exist cannot be repaired by adjusting weights. So layering traffic deltas over a classic hierarchy is not merely stale, it can be silently non-optimal, and nothing at query time can detect it. That is the real reason the nightly-rebuild-plus-overlay design is wrong rather than just old fashioned.
+
+**The split that fixes it.** Published as customizable route planning in 2011 (Delling, Goldberg, Pajor and Werneck) and as customizable contraction hierarchies from 2014 (Dibbelt, Strasser and Wagner), the fix is to make contraction metric-independent. Derive the order from graph structure alone, typically by nested dissection over a separator hierarchy rather than by edge difference, and insert every shortcut the order implies with no witness search at all. The resulting topology is valid for any non-negative metric. It carries more shortcut edges than a metric-aware contraction would, which is why queries land around 1ms rather than 150μs, and that is the entire price.
+
+Customisation is then one bottom-up sweep: visit contracted nodes in order and set each shortcut weight to the minimum over its two-hop paths. No search, one pass, parallel by level, about a second for a continent-sized graph. Operationally: a weekly job rebuilds the order when roads physically change, and a job every 5 minutes emits a weight array keyed by edge id. A metric is 60M edges x 4B = 240MB, so pods hold the topology once and swap weight arrays behind a pointer flip. A query never sees half a metric, and keeping the last several versions costs almost nothing, which matters for reproducing a complaint.
+
+**Where the weights come from, and the gate on them.** A weight array is not the raw probe stream. Map matching turns each probe into a `(segment, speed)` pair; the aggregator reduces each segment over a 5-minute tumbling window with a trimmed mean, discarding the top and bottom 10%, because a parked car with location sharing on and a motorcyclist filtering at 100mph land in the same sample set. A segment with fewer than about 5 samples in the window has no measured speed at all and keeps its historical profile for that time of day and weekday. Each segment then drives a small state machine comparing the trimmed mean against that profile, with hysteresis: a state must hold for two consecutive windows before it changes. Hysteresis is not cosmetic. A segment that flaps between free and slow rewrites its weight every window, every rewrite invalidates cached routes, and drivers already committed to a road get re-planned back and forth.
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 480" role="img" aria-label="Traffic state machine per road segment: Free, Slow, Heavy, Stopped with hysteresis thresholds and a Closed override state">
@@ -6422,38 +6466,40 @@ Files are gzipped `OsmChange` XML (`AAA/BBB/CCC.osc.gz`, sequence `N = AAA×10^6
 </svg>
 ```
 
-The `Closed` transition is exposed as a fast-path config channel (seconds, not the nightly CH rebuild) so a road closure flips the edge weight without waiting for traffic samples to confirm.
+The `Closed` transition is the exception to the whole pipeline. A verified closure arrives on an override channel that skips the aggregation window entirely and sets the edge impassable in seconds, and the next customisation pass folds it into the metric properly. Closures need that path because they are the one case where the historical profile is not merely imprecise but actively wrong: a closed road has no probes, which reads to the aggregator exactly like a quiet road.
 
-**H3 vs S2 vs quadtree for spatial sharding.** *[Source: Uber H3 Engineering]* Tiles use a quadtree (`(z,x,y)`) — naturally square, aligned to web mercator. For *aggregation* (heatmaps, traffic per zone, geofencing), H3 hexagons beat quadtree squares: hexagons have one neighbour distance (squares have two: edge vs diagonal), they approximate circles cleanly, and 16 resolutions at 7× area ratio per step give clean rollups. S2 (Google) is the same idea on a sphere with 30 levels; used internally for routing graph partitioning where cells must close under set ops. Quadtree for tiles, H3 for heatmaps, S2 for graph partitioning.
-
-**Routing modes, indoor maps, AR — scope.** Drive, walk, bike, and transit each get their own pre-processed graph: walk/bike adds footpaths and ignores one-way restrictions; transit is a separate timetable graph (RAPTOR / CSA algorithms) joined to the road graph at stop nodes for first/last-mile. Indoor maps are a parallel tile pyramid keyed by `(building_id, floor_id, z, x, y)` with their own POI/router; the global pipeline doesn't know about indoor — it's a separate product surface that lights up when the user is inside a known venue. AR turn-by-turn (e.g. Google Live View) reuses the routing output but adds a vision-based localiser on the client (matching camera frames against a Street View feature index) to refine GPS to ~1m so arrows can be anchored to real-world geometry.
+Two consequences worth saying out loud, because they get drilled. First, a route is exact only with respect to the metric it was planned on, and that metric is up to 5 minutes old, so "exact shortest path" is a claim about the algorithm and not about the road. Second, because the metric is a versioned artefact, a disputed route can be replanned against the exact metric that produced it, which is the only way to answer "why did it send me that way" without guessing.
 #### Where it breaks
 **must-say**
 
 **Bottlenecks**
 
-- **Tile storage cost** (5PB+ across styles) → vector tiles cut storage 3× by moving styling to client; only changed tiles re-rendered weekly (~50TB churn vs. 5PB rebuild).
-- **Routing latency** (Dijkstra is minutes on a continent) → CH/ALT pre-processing turns the route into a bidirectional walk on a 2× shortcut graph that fits in RAM; cross-continent <100ms.
-- **Traffic data freshness vs. noise** (one stopped car ≠ congestion) → 5-min tumbling windows with trimmed-mean smoothing; edge-weight overlay applied without rebuilding the CH hierarchy.
-- **Re-route on detour** (server can't recompute every GPS tick) → client checks distance from polyline; only triggers a server re-route on >50m deviation, off-route for >10s.
-- **Search precision** (typos, ambiguity, "Springfield" disambiguation) → ES with edge-ngrams + custom analyzer + ranking signals (population, user location, query history).
-- **Tile invalidation churn** (an OSM edit to a major boundary touches thousands of tiles across z=10–18) → bounding-box → tile-set mapping computed at apply time, deduped per render cycle; re-renders prioritised by predicted CDN-miss rate so popular tiles refresh first; cold tiles regenerate lazily on first request.
-- **Vector tile renderer fragmentation** (browser, iOS, Android, embedded car head units all need a working MVT renderer) → standardise on MapLibre GL (open-source fork of Mapbox GL pre-license-change); platforms without it get a thin raster fallback served from the same vector pipeline (server-side render of the same MVT to PNG).
+- **The customisation pass is a global serialisation point.** Every 5 minutes one job per continent must finish, or every pod in that region keeps serving the previous metric. It is about a second of work, but it depends on the aggregator's window closing on time, so an ingest stall silently becomes a routing-freshness stall. *Mitigation:* publish metric age as a first-class metric, alert above 120s, and have pods refuse to load a weight array whose fixture routes move by more than a threshold against the previous one. Stale but consistent beats fresh and wrong.
+- **Contraction order rebuilds are the risky job, not the frequent one.** The weekly order rebuild changes node ranks and shortcut topology, so every cached route and every warm metric is invalidated at once. *Mitigation:* build the new order offline, customise it against the current metric, run both orders in shadow on live traffic and compare path costs before promoting; keep the previous order loadable for instant rollback. This is why the order and the metric ship on separate pipelines rather than one nightly job.
+- **Routing latency without preprocessing.** An unguided search is ~0.5s of CPU per continental query, which at 10k/s is 5,000 cores. *Mitigation:* the hierarchy, at 1.5 to 10 cores depending on which variant. Restated here only because it is the number the whole design exists to change.
+- **Re-planning on every GPS tick.** A client that asks the server whenever it drifts turns 2.5M concurrent navigations into 80k requests/s. *Mitigation:* deviation thresholds on the client, more than 50m off the polyline sustained for more than 10s, which cuts it to ~4k/s.
+- **Tile invalidation churn.** One OSM edit to an administrative boundary touches thousands of tiles across z=10 to z=18. *Mitigation:* map the changed bounding box to a tile set at apply time, dedupe per render cycle, and order the re-render queue by predicted CDN miss rate so popular tiles refresh first while cold tiles regenerate lazily on first request.
+- **Renderer fragmentation.** Browsers, phones, car head units and embedded displays do not all have a vector renderer. *Mitigation:* standardise on one open renderer and give everything else a server-side render of the same vector tiles to raster. That keeps one source corpus, which is the whole point of the tile fork above.
 
 **Failure modes**
 
 | Layer | Failure | Detection | Mitigation |
 |---|---|---|---|
 | Tile CDN | Origin overload after large OSM diff invalidates millions of tiles | CDN miss-rate spikes, origin 5xx alerts | Pre-warm popular tiles before flipping the version pointer; rate-limit per-tile re-render queue; serve previous tile version on origin failure |
-| Routing service | CH graph corruption after a partial nightly preprocess | Continent-wide route-failure rate jumps; sanity-check fixtures fail | Pin previous CH artefact; routing pods refuse to load a graph that fails fixture checks; auto-rollback |
-| Traffic aggregator | Map-matching collapses on a vendor GPS-format change | Per-segment speed update rate drops, watermark stalls | Format-version gate at ingest; drop bad pings to a side topic; alert on segment-update lag > 5min |
+| Routing service | Partial or corrupt contraction order promoted after a weekly rebuild | Continent-wide route-failure rate jumps; fixture routes fail cost comparison | Pin the previous order artefact; pods refuse to load one that fails fixtures; auto-rollback, which is cheap because the metric is a separate artefact |
+| Customisation job | Pass misses its 5-minute slot, or emits a metric that moves fixture routes wildly | `metric_age_seconds` climbs; fixture-cost delta exceeds threshold | Keep serving the previous weight array and alert; never half-apply an array, swap behind a pointer flip |
+| Traffic aggregator | Map matching collapses on a client GPS-format change | Per-segment update rate drops, window watermark stalls | Format-version gate at ingest; route bad probes to a side stream; alert on segment-update lag over 5min |
 | Live edge weights | Closure feed pushes a bad polygon (motorway flagged closed) | Reroute storm in a region; user-reported wrong-direction spike | Operator kill-switch on closure feed; rate-limit per-region closure events; require two-source confirmation for motorway-class closures |
 | Geocoder | Index drift after partial reindex | Search recall regressions in canary | Blue/green index swap; ranking-quality gate before promotion |
 | Cross-continent stitching | Boundary-node mapping inconsistent across regional pods after schedule rollover | Cross-continent route 5xx | Dual-load the touching regions on the stitch hop; fallback to single-continent route truncated at boundary with a clear error |
 
 **Unresolved**
 
-TODO. Two or three things this design genuinely does not handle well, and what you would do about each.
+**Most of the graph has no live traffic on it, and the router cannot tell.** Working from the numbers above, roughly 300M probes per 5-minute window land on about 3% of the 150M global edges, because probes follow the roads people already drive. Every other edge carries a historical time-of-day profile, which is a different kind of number wearing the same units. A route that chooses between an arterial with 60 samples this window and a residential cut-through with none is comparing a measurement against a guess and treating them as equal. The obvious fix, tagging each weight as measured or inferred and biasing the router toward measured edges, has an obvious cost: it systematically pushes traffic onto main roads, which is a product decision about routing behaviour rather than an accuracy improvement, and it makes the residential complaint worse in one direction while making it better in the other. The feedback loop is the part with no fix at all. A road nobody is routed onto never gets probes, so its estimate never improves, and there is no way to distinguish a permanently quiet street from one that has been closed for a month. Verified closure feeds and periodic imagery cover some of it; the honest position is that "live traffic" describes a small, busy subset of the network and the rest is a well-calibrated prior.
+
+**The route is planned for the world as it is now, not as it will be when you arrive.** A 40-minute route uses this window's metric for a segment you reach in 35 minutes, which is the one segment where the metric is most likely to be wrong, because congestion moves. Time-dependent routing is a solved research problem and an expensive engineering one: the metric becomes a function of departure time rather than a scalar, so customisation cost multiplies by the number of time buckets, and the bidirectional query stops working cleanly because the backward search does not know the arrival time it should be searching from. What we actually ship is a hybrid, current weights for the first 15 to 20 minutes and historical profiles beyond, which is defensible and still wrong at the boundary: it produces routes that look optimal at departure and drift, and the drift shows up as ETA error rather than as a visibly bad route, so it is easy to under-measure. The honest mitigation is to re-plan periodically during the trip and to accept that some of those re-plans are correcting our own earlier optimism rather than reacting to new traffic.
+
+**Optimality is exact against the metric and unverifiable against reality.** The query returns a provably shortest path for the weight array it was given, but that array is an estimate, up to 5 minutes stale, with closures applied out of band. There is no ground truth to test against: you cannot know what the ideal route would have been, only what the realised trip cost. So routing quality is measured by proxies, ETA error and re-plan rate, both of which can improve while routes get worse (a router that always sends everyone down the motorway has excellent ETA accuracy). Reproducing a specific complaint needs the exact metric version that produced it, and a metric is 240MB per continent per window, which is 69GB per continent per day. Keeping every version is affordable for a week and not for a year, so we keep the last 24 hours at full cadence and hourly samples beyond that, which means complaints older than a day can be approximately reproduced and not exactly. That is a real limit on the only debugging tool that works.
 #### Drill questions
 1. How do you push a road closure live in seconds, not hours?
 2. What happens to the user mid-trip when they go offline?
@@ -6462,11 +6508,13 @@ TODO. Two or three things this design genuinely does not handle well, and what y
 5. How do you detect map data poisoning (route into a lake)?
 6. How do you monitor routing quality?
 7. Why MVT specifically and not a custom binary format?
-8. How do you keep CH valid under heavy live-traffic deltas?
-
-TODO. Only 8 drill questions carried over, top up to at least 10.
+8. How do you keep a shortcut hierarchy valid under heavy live-traffic deltas?
+9. Why does the bidirectional upward search work at all, and why does it get awkward once travel time depends on departure time?
+10. Where does the ETA come from, and why is it not just the sum of the edge weights on the returned path?
+11. A user routes from Lisbon to Warsaw and your graphs are pinned per region. What happens?
+12. How do you produce alternative routes that are genuinely different rather than the same road with one detour?
 #### Answers to drill questions
-1. Edge-weight overrides go through a fast-path config channel; the routing service applies the delta to its in-memory graph on next query. *If pushed:* full CH re-preprocessing is hours, so closures use overlay graphs / A\* fallback in affected regions until the nightly rebuild.
+1. A closure arrives on an override channel that bypasses the 5-minute aggregation window: the affected edges are set impassable in the current weight array and the next customisation pass folds the change in properly. Closures need their own path because a closed road produces no probes, which looks identical to a quiet road. *If pushed:* the override is a blunt instrument and it has to be governed. Require two independent sources for a motorway-class closure, rate-limit closures per region, and keep an operator kill switch, because a bad closure on a trunk road creates a re-planning storm across every navigation in the area within one window.
 
 2. Pre-fetch the route polyline plus a tile corridor on trip start; client navigates from cache. *If pushed:* re-routes degrade to straight-line snapping until reconnect; queue telemetry locally and flush on reconnect.
 
@@ -6474,29 +6522,31 @@ TODO. Only 8 drill questions carried over, top up to at least 10.
 
 4. Road-class penalty multipliers in edge weights; learn from aggregate trip data which shortcuts are real vs noise. *If pushed:* municipalities can submit overrides, but verify against local Maps GPS density before applying.
 
-5. Sanity checks at edit time — connectivity, road-class transitions, overlap with water polygons. *If pushed:* trust scores per editor; new contributors hit a review queue; auto-revert if downstream traffic shows zero or anomalous flow.
+5. Sanity checks at edit time: connectivity against the existing network, plausible road-class transitions, no overlap with water polygons, no segment implying a speed nothing can achieve. *If pushed:* trust scores per editor, new contributors into a review queue, and auto-revert when downstream probe data shows zero flow on a road that should be busy. The detection signal and the traffic signal are the same data, which is convenient and also means a poisoned road nobody drives stays undetected.
 
 6. Track ETA accuracy (predicted vs actual), reroute rate, and user-reported wrong-turns per region. *If pushed:* shadow-deploy new routing models on a sample of traffic and compare ETA error before flipping.
 
-7. MVT (Mapbox Vector Tile spec) is protobuf-based, ~2-5× smaller than equivalent GeoJSON after gzip, and every major renderer (Mapbox GL, MapLibre, Apple Maps internally) reads it. Standardising on MVT gives the client ecosystem for free. *If pushed:* for proprietary internal pipelines you can ship a denser custom encoding (Google's internal format is tighter than MVT) but you eat the renderer cost.
+7. MVT is protobuf-based, roughly 2 to 5x smaller than equivalent GeoJSON after gzip, and every major renderer reads it, so standardising on it buys the client ecosystem for free. *If pushed:* a proprietary encoding can be denser, and Google's internal tile format is, but then you own a renderer on every platform you ship to, which is the expensive half of the tile system rather than the cheap half.
 
-8. CH shortcuts assume edge weights monotonic-ish; a 5× weight jump on a major arterial can make a shortcut non-optimal. Production fix is *Customisable Contraction Hierarchies* (CCH) — separate the metric-independent contraction order from the metric-dependent customisation pass that runs in seconds, not hours. *If pushed:* fall back to ALT in regions with active large deltas; the heuristic stays admissible under reweighting.
+8. You do not. A classic hierarchy is built against one weight function, and a large delta invalidates not just the shortcut weights but the witness decisions that determined which shortcuts exist, so no overlay repairs it. The fix is structural: separate the metric-independent contraction order from a metric-dependent customisation pass that recomputes every shortcut weight in about a second, which is what customizable contraction hierarchies (2014 onward) and customizable route planning (2011) do. *If pushed:* in a region whose metric is mid-refresh, fall back to landmark-guided A-star, whose lower bounds stay admissible as long as live weights only exceed the free-flow weights they were computed from. That condition holds for congestion and fails for a speed-limit increase, so the fallback needs the free-flow metric refreshed whenever the road data changes, not whenever traffic does.
+
+9. It works because the shortcuts are exact: every shortcut stands for a real path of exactly that weight, so a path found in the upward-only search corresponds to a real route, and searching upward from both ends is guaranteed to meet at the highest-ranked node on the optimal path. Stopping is the subtle part: you cannot stop at the first meeting, you continue until the smallest tentative key exceeds the best combined distance found. It gets awkward with time-dependent weights because the backward search needs to know the arrival time to evaluate edge weights, and the arrival time is what you are computing. *If pushed:* the published workaround runs the backward search on a lower-bound time-independent metric to restrict the search space, then does a forward time-dependent search inside it. It is correct, it is slower, and it multiplies preprocessing by the number of time buckets, which is why most production systems use current weights near the departure and profiles beyond.
+
+10. From a separate model, because the sum of edge weights systematically underestimates. The metric captures road speeds, not the things that make a trip take longer: traffic-light phase, turn penalties, the time to get out of a car park, the pattern that the last mile in a city is slower than its segments suggest. The usual shape is path cost plus a learned correction over features (road-class mix, number of signalised turns, time of day, historical error for that origin-destination pair), trained on realised trip durations. *If pushed:* ETA and route choice are different objectives and should be measured separately. A router optimising the metric while the ETA model corrects it means the route chosen is not the route with the lowest predicted arrival time, which is a real inconsistency; the tidy fix is to fold the correction back into the metric, and the reason not to is that it makes the metric non-additive and breaks the preprocessing.
+
+11. Region-pinned pods hold one continent each, so a cross-region route is stitched at boundary nodes: the small set of edges that physically cross the border, a few hundred per continent pair. Precompute all-pairs distances between the boundary nodes of adjacent regions, then a Lisbon to Warsaw query becomes source to boundary in region A, the boundary table, and boundary to target in region B, taking the minimum over crossings. *If pushed:* cross-region routes are well under 1% of volume, so it is fine that this path is 3 to 5x slower. The failure mode worth naming is that the two regions may be running different order versions after a rollout, which makes the boundary table inconsistent; version the table with both order ids and dual-load the touching region during a rollover.
+
+12. Not by taking the second-best path, which is almost always the best path with one junction changed. The published approach (Abraham and co-authors, 2010) generates candidates through a via node and admits one only if it satisfies three tests: bounded stretch, no more than about 10% longer than the optimal; limited sharing, no more than about 80% of its edges in common with the optimal; and local optimality, meaning every reasonably long sub-path of the alternative is itself shortest, which is what stops the result being a detour that no sane driver would take. *If pushed:* the three thresholds are a product decision, not a mathematical one. Loosen sharing and you offer two versions of the same route; tighten it and you offer a genuinely different route that is 25% slower, which users read as the system being wrong.
 #### Whiteboard script
-TODO
+**0-5, split the problem and name the crux.** Say the shape before anything else: "this is three systems that share a road-graph source, and only one of them is hard." Tiles are static assets behind a CDN, traffic is stream aggregation, routing is a shortest-path query with a 100ms budget over a 10M-node graph, and that last one is where I will spend the time. Then ask the two questions that actually fork the design: is there live traffic, and how fast must a closure show up? State your assumptions out loud, 500M DAU, 10B tile requests/day, ~10k route computes/s. Draw nothing yet.
 
-A 45 minute budget: what to cover in 0-5, 5-15, 15-35 and 35-45, what to say first, and a line starting `Cut first:`.
+**5-15, the spine and the one number.** Draw the client on the left and three paths going right: tiles to a CDN, geocode to a text index, route to a routing pod, with a fourth arrow coming up into the pod from the traffic aggregator. Say that fourth arrow is the interesting one because it is not a request, it is the weight metric being replaced under a resident graph. Then put the number on the board: unguided search is ~0.5s of CPU per continental query, 10k/s means 5,000 cores, and a preprocessed query at 150μs means 1.5 cores. Four orders of magnitude is the reason the whole design exists. Take the tile fork in one line, vector because storage is per style otherwise, and move on. Do not linger on tiles.
 
-**Raw material, from the old Talking Points:**
+**15-35, the drill: preprocessing against freshness.** This is the interview, so protect it. Explain contraction properly: order nodes by importance, contract bottom-up adding shortcuts with a witness search, query is bidirectional and upward only, and say the word exact, because most candidates never claim it. Then break it deliberately: traffic invalidates not only the shortcut weights but the witness decisions, so an overlay is not "slightly stale", it is silently non-optimal. That sets up the split, metric-independent order plus a customisation pass of about a second, roughly 1ms queries instead of 150μs, running every 5 minutes at a 0.3% duty cycle. Name the dates when you cite the algorithms: contraction hierarchies 2008, customizable route planning 2011, customizable contraction hierarchies 2014 onward. Then close the loop by saying where the weights come from: map-matched probes, trimmed mean over a 5-minute window, hysteresis over two windows before a state change, and a separate override channel for closures because a closed road produces no probes and therefore looks quiet. Keep landmark-guided A-star in your pocket as the fallback for a region mid-refresh, and mention that its bound stays admissible only because traffic makes edges slower.
 
-These are what a Maps-team interviewer wants to hear surfaced unprompted:
+**35-45, concede and close.** Volunteer the gaps before they are found: only about 3% of edges get a measured weight in any window and the rest are historical priors that the router treats as equivalent; the route is planned for now rather than for when you arrive, and time-dependent routing multiplies preprocessing by the number of time buckets; optimality is exact against the metric and unverifiable against reality, so quality is measured by proxies that can improve while routes get worse. Then two minutes of operations: metric age as the page-worthy metric, fixture routes gating both the weekly order rebuild and every customisation output, and the previous artefact kept loadable for rollback.
 
-- **The system is three loosely-coupled subsystems (tiles, routing, traffic) sharing only the road-graph source** — call out the split early and size each independently.
-- **Contraction Hierarchies pre-process is the load-bearing decision** — without it, sub-second routing on a continent doesn't exist; with it, live traffic becomes an edge-weight overlay rather than a rebuild trigger.
-- **Vector tiles, not raster** — name MVT specifically; the storage and theming wins are concrete and pre-empt "why not PNGs?".
-- **Traffic is a stream-aggregation problem** — trimmed-mean over tumbling windows, hysteresis on state transitions, edge-weight overlay rather than CH rebuild.
-- **CDN > origin by a 20:1 ratio** — tile popularity is Zipfian and the CDN absorbs 95%+ of fetches; designs that don't lean on this oversize the origin.
-- **Customisable CH (CCH) is the production answer to "CH under heavy live traffic"** — separates metric-independent contraction from a fast metric-dependent customisation.
-- **Region-pinned routing pods + boundary stitching** — rather than one global CH graph; explains how cross-continent routes work without a 100GB-RAM box.
+Cut first: the OSM diff replication cadence, then indoor maps and AR, then the H3 against S2 against quadtree comparison. All three are real and none of them changes the architecture, and the spatial-indexing comparison in particular is a rabbit hole that eats the preprocessing discussion while sounding productive. Never cut: the 5,000-cores-against-1.5 number, why traffic invalidates the hierarchy structurally rather than numerically, and the coverage gap in the probe data.
 #### Appendix
 **Data model**
 
@@ -6514,9 +6564,9 @@ Same key whether raster (PNG) or vector (MVT)
 ```
 
 **Road network (graph):**
-- Nodes = intersections; Edges = road segments with weight = travel_time
-- Stored partitioned by region; loaded into routing service memory
-- ~10M nodes, ~30M edges per continent
+- Nodes = intersections; edges = road segments carrying restrictions (one-way, turn bans, vehicle class) and a rank assigned by the contraction order
+- Three artefacts, three lifecycles: the topology (order plus shortcuts, rebuilt weekly, ~2GB per continent), the weight metric (one float per edge, rebuilt every 5 minutes, 240MB per continent), and the historical profile (per edge per time-of-day bucket, rebuilt nightly)
+- Partitioned by region and resident in routing-pod memory; ~10M nodes and ~30M edges per continent, ~60M edges after contraction
 
 **API contract**
 
@@ -6532,22 +6582,23 @@ WS /navigate                           ← turn-by-turn updates
 
 **Observability**
 
-- `tile_p99_latency_ms` per CDN POP (target <200ms global, <500ms cold-tile origin)
-- `route_compute_p99_ms` (continent <100ms, cross-continent <500ms) and `route_compute_5xx_rate`
-- `eta_error_p50` (predicted vs realised arrival, watch for regional regressions)
-- `traffic_freshness_seconds` (last edge-weight overlay age; alert >120s)
-- `osm_diff_apply_lag_seconds` (hourly diffs should apply within 10min of publish)
-- `cdn_hit_ratio` per zoom band (z>14 typically <90%, z<10 should be >99%)
+- `metric_age_seconds` per region. The single most important number in the system: how old the weight array a pod is serving from actually is. Alert above 120s.
+- `fixture_route_cost_delta` per customisation output. A fixed set of routes recosted against the new metric before promotion; a large jump means bad aggregation, not bad traffic.
+- `route_compute_p99_ms` (in-region under 100ms, cross-region under 500ms) and `route_compute_5xx_rate`.
+- `eta_error_p50` (predicted against realised arrival) broken out by region, since regional regressions hide in a global median.
+- `measured_edge_fraction` per region. What share of edges have a live weight rather than a profile; this is the coverage gap made visible.
+- `tile_p99_latency_ms` per point of presence, and `cdn_hit_ratio` per zoom band (z above 14 typically under 90%, z below 10 should exceed 99%).
+- `osm_diff_apply_lag_seconds`; hourly diffs should apply within 10 minutes of publication.
 
-**SLOs:** 99.9% of tile fetches <500ms via CDN; 99.5% of route requests <1s including network; ETA error p50 <10% of trip duration; live-traffic edge weights propagated to routing within 60s of aggregation.
+**SLOs:** 99.9% of tile fetches under 500ms via CDN; 99.5% of route requests under 1s including network; ETA error p50 under 10% of trip duration; a closure reflected in routing within 60s.
 
 **Multi-region and DR**
 
-- **Replication mode:** active-active for tiles (object store + CDN, regionally replicated; clients hit nearest POP). Routing is region-pinned (each pod loads one continent's CH graph) — failover is DNS/anycast switch to a peer region's pod fleet.
-- **RTO:** 5min (DNS TTL + healthcheck cycle for routing). Tiles are immediate via CDN.
-- **RPO:** ~0 for tiles (object store replication is sync within region, async cross-region with seconds lag). Live traffic state has RPO ~5min — overlays from the failed region's aggregator are lost; the peer region's aggregator backfills within one window.
-- **Failover cadence:** quarterly game-day for routing region failover; tile origin failover is exercised monthly via traffic-shifting in CDN.
-- **Cross-region cost:** tile object replication is the dominant line (~5PB × bandwidth × replication factor); routing is cheap because the graph is rebuilt locally each night from the same OSM source. Traffic ping ingest stays in-region — no cross-region replication of raw pings.
+- **Replication mode:** active-active for tiles (object store and CDN replicated regionally, clients hit the nearest point of presence). Routing is region-pinned, each pod holding one continent's topology, so failover is an anycast or DNS switch to a peer fleet that already holds the same artefacts.
+- **RTO:** ~5min for routing (DNS TTL plus health-check cycle). Tiles are immediate through the CDN.
+- **RPO:** effectively zero for tiles. Live traffic has an RPO of one window: probes in flight to a failed region's aggregator are lost, and the peer region rebuilds a metric from the next window, so the worst case is 5 to 10 minutes of routing on the last good weights. That is a deliberate choice, since replicating raw probes cross-region to protect a value that is recomputed every 5 minutes is not worth the bandwidth.
+- **Failover cadence:** quarterly game day for routing region failover, including a customisation run in the peer region; monthly traffic-shift exercise for the tile origin.
+- **Cross-region cost:** tile replication dominates (1.5PB times bandwidth times replication factor). Routing artefacts are cheap to move and cheaper to rebuild locally from the same source. Raw probes stay in region.
 
 ### 16. Design a Distributed Message Queue (Kafka)
 #### Problem
@@ -8819,33 +8870,46 @@ Webmail REST:
 
 ### 21. Design S3 (Distributed Object Storage)
 #### Problem
-Build a durable, scalable, cheap object store with key→blob semantics, accessed via HTTP.
+Store an unbounded number of blobs under customer-chosen keys and serve them over HTTP, at a durability high enough that losing one object is a news event. Objects run from 1KB config files to 5TB datasets, and the same fleet has to be cheap enough for a decade-old archive and fast enough to serve a website. Nothing is ever modified in place: a change is new bytes and a pointer swap.
 #### Core
-TODO
+Everything follows from one property. An object is never modified in place, which turns a storage system into an index problem.
 
-Write the whole answer as you would give it in sixty seconds, 200 to 300 words, standing alone.
+Split it in two. A metadata service owns `(bucket, key) -> manifest`, where the manifest lists the immutable pieces that make up the object plus size, etag, version and encryption key reference. A data plane of dense disk servers owns `piece_id -> bytes` and holds no other logic. Every request resolves through metadata first, and there is no path to bytes that skips it.
+
+A write lands fresh pieces in the data plane, which needs no coordination because nobody has ever read them, then commits one manifest pointer in metadata. The client sees a 200 only after that commit. An overwrite is the same operation with a different pointer, so the data plane never races and all the consistency lives in one small index. S3 shipped exactly that in December 2020 with no data-plane change, because the bytes were already consistent and only the pointer read path was lagging.
+
+Durability is arithmetic. Split a piece into k data and m parity fragments, place them so no availability zone holds more than m, and run two jobs forever: repair, which rebuilds fragments after a disk dies, and scrub, which re-reads everything to catch bit rot. Eleven nines comes from the repair window, not from the code word.
+
+Layout is per tier, not global. Small and hot gets whole replicas, because a fragment read costs a seek and small objects are seek-bound. Large and cold gets erasure coding at 1.4x instead of 3x.
+
+Scaling is asymmetric: the data plane grows with bytes, metadata grows with object count, and a customer with a billion tiny objects costs nothing in bytes and everything in index.
 #### Summary
-**The picture in your head:** an enormous warehouse with a catalog desk at the front. You give the desk a label (the object key, like `photos/vacation/beach.jpg`) and a box of stuff (the bytes). The desk writes down where the box is stored and gives you a receipt. When you want the box back, you give the desk the label and it tells you exactly which shelves to go to. The warehouse physically splits each box into 9 fragments and stores them on 9 different shelves in 3 different buildings (availability zones), so even if one whole building burns down, the other two buildings' fragments are enough to reconstruct the box. Nobody mutates an existing box — if you want a new version, you store a whole new box and update the catalog to point to it.
+**The picture in your head:** an enormous warehouse with a catalog desk at the front. You give the desk a label (the object key, like `photos/vacation/beach.jpg`) and a box of stuff (the bytes). The desk writes down where the box is stored and gives you a receipt. When you want the box back, you give the desk the label and it tells you exactly which shelves to go to. The warehouse physically splits each box into 9 fragments and stores them on 9 different shelves in 3 different buildings (availability zones), so even if one whole building burns down, the other two buildings' fragments are enough to reconstruct the box. Nobody mutates an existing box: if you want a new version, you store a whole new box and update the catalog to point to it.
 
 **The approaches people actually take:**
-TODO. Two or three things a competent engineer might reach for, in plain language and before any product name, with what each one buys and roughly when it wins.
 
-**The single-request walkthrough:** you upload a 10GB machine learning dataset with `PUT /my-bucket/datasets/model-v2.parquet`. For a file this large, you must use multipart upload: (1) call `CreateMultipartUpload` → get back an `upload_id`; (2) split the file into 100 parts of 100MB each and upload them in parallel, each getting its own `ETag` (a checksum of the part bytes); (3) call `CompleteMultipartUpload` with the list of `(part_number, etag)` pairs. The `Complete` call is a metadata-only atomic operation — it swaps the `(bucket, key)` pointer in the Metadata Service to a manifest listing all 100 parts. Each part was already erasure-coded (a technique that, like RAID, lets you reconstruct missing data from survivors — specifically RS(6,3) means split the part into 6 data fragments + 3 parity fragments, any 6 of the 9 can reconstruct the part) and spread across 9 storage nodes in 3 availability zones during the upload. A `GET` request immediately after `Complete` returns the full file — the Metadata Service's `(bucket, key)` pointer is now committed and every subsequent read resolves through it, guaranteeing read-after-write consistency.
+*Keep a strongly consistent index in front of write-once bytes.* A small service maps a name to a list of chunk locations; the chunks are never touched again. The only cell that needs coordinating is a pointer, so consistency, versioning, overwrite and resumable upload collapse into one operation: build something immutable, then move the pointer. It costs an index tier on the critical path for 100% of requests while holding 0.001% of the bytes, scaling on object count while the disks scale on bytes. It wins whenever objects are written once and read many times, which is nearly always.
+
+*Make the name of the bytes be the hash of the bytes.* Identity is content, and the map from a customer key to a hash is a thin mutable layer above it. Deduplication and integrity checking come free, and immutability is enforced by construction rather than discipline. It costs placement locality, since the address is random, and makes deletion a reference-counting problem across every key that ever pointed at those bytes. It wins for backup and container-image workloads, where the same bytes arrive thousands of times.
+
+*Skip the index and compute location from the key.* Hash the key onto a ring and let a placement function tell every client which disks hold the object: no index tier, no extra round trip, reads at one hop. It costs the ability to move data without moving the key, so rebalancing rewrites objects instead of updating rows, and per-object metadata like versions, ACLs and lifecycle has nowhere to live. It wins inside one operator-controlled cluster, the case Ceph's CRUSH makes, and does not survive multi-tenant lifecycle features.
+
+**The single-request walkthrough:** you upload a 10GB machine learning dataset with `PUT /my-bucket/datasets/model-v2.parquet`. For a file this large, you must use multipart upload: (1) call `CreateMultipartUpload` and get back an `upload_id`; (2) split the file into 100 parts of 100MB each and upload them in parallel, each getting its own `ETag` (a checksum of the part bytes); (3) call `CompleteMultipartUpload` with the list of `(part_number, etag)` pairs. The `Complete` call is a metadata-only atomic operation that swaps the `(bucket, key)` pointer in the Metadata Service to a manifest listing all 100 parts. Each part was already erasure-coded (a technique that, like RAID, lets you reconstruct missing data from survivors; RS(6,3) means split the part into 6 data fragments plus 3 parity fragments, any 6 of the 9 can reconstruct the part) and spread across 9 storage nodes in 3 availability zones during the upload. A `GET` request immediately after `Complete` returns the full file, because the `(bucket, key)` pointer is now committed and every subsequent read resolves through it.
 
 **The pieces (and what each one is for):**
-- **Bucket Service** — manages bucket-level configuration: who owns the bucket, which region it lives in, access policies, versioning on/off, lifecycle rules. Backed by a small replicated SQL database (buckets are rare and rarely changed).
-- **Metadata Service** — the critical path for every request. Maps `(bucket, key)` → manifest (the list of erasure-coded fragment locations on storage nodes, plus the object's size, content type, ETag, version ID, and encryption key reference). Backed by a sharded strongly-consistent key-value store (think Raft-based, partitioned by `hash(bucket, key)`). Every GET and PUT goes through metadata first — there is no path to the bytes that bypasses this layer, which is what makes read-after-write consistency achievable.
-- **Storage Nodes** — a fleet of dense HDD servers, each storing fragments identified by a `piece_id`. No logic, just bytes in, bytes out. A storage node failure takes some fragments offline; the repair system detects this, reads surviving fragments, reconstructs the missing ones, and writes them to healthy nodes. Storage nodes scale independently of the Metadata Service — adding capacity for a bandwidth-heavy workload doesn't require scaling up metadata IOPS.
-- **Erasure coding (RS(6,3))** — instead of 3 full copies (which costs 200% storage overhead), split each object into 6 equal data fragments and compute 3 parity fragments using Reed-Solomon math (the same error-correction used in QR codes and CDs). Store all 9 on separate nodes in separate availability zones. Any 6 of the 9 fragments reconstruct the full object. Losing one entire availability zone (3 fragments) still leaves 6 intact — the minimum needed. Overhead is only 50% instead of 200%. Used for the cold tier (infrequently accessed objects); the hot tier uses 3x replication for lower read latency (no reconstruction needed — any replica answers).
-- **Background repair and scrub** — two always-running maintenance jobs. Repair detects objects with fewer than 9 healthy fragments (node died, disk failed) and reconstructs the missing fragments from survivors. Scrub re-reads every stored fragment and verifies its checksum — catching silent bit rot (hardware glitches that flip individual bits on spinning disks without triggering a read error). Both jobs are throttled to ~10% of cluster bandwidth so they don't compete with foreground reads and writes.
-- **Versioning and delete markers** — when versioning is enabled, a PUT to an existing key creates a new version ID rather than overwriting. A DELETE creates a "delete marker" — a tombstone object at the head of the version chain — making the object appear gone to a default GET, but leaving all versions recoverable by version ID. This is how "accidental delete" recovery works: remove the delete marker and the object is back.
+- **Bucket Service.** Manages bucket-level configuration: who owns the bucket, which region it lives in, access policies, versioning on or off, lifecycle rules. Backed by a small replicated SQL database, because buckets are rare and rarely changed.
+- **Metadata Service.** The critical path for every request. Maps `(bucket, key)` to a manifest (the list of fragment locations on storage nodes, plus size, content type, ETag, version ID, and encryption key reference). Backed by a sharded strongly consistent key-value store, Raft-based, partitioned on the key range. Every GET and PUT goes through metadata first, and that single fact is what makes read-after-write consistency achievable.
+- **Storage Nodes.** A fleet of dense HDD servers, each storing fragments identified by a `piece_id`. No logic, just bytes in, bytes out. A node failure takes some fragments offline; the repair system detects this, reads surviving fragments, reconstructs the missing ones, and writes them to healthy nodes. Storage nodes scale independently of metadata, so adding capacity for a bandwidth-heavy workload does not require scaling index IOPS.
+- **Erasure coding (RS(6,3)).** Instead of 3 full copies at 200% overhead, split each object into 6 equal data fragments and compute 3 parity fragments using Reed-Solomon math (the same error correction used in QR codes and CDs). Store all 9 on separate nodes in separate availability zones. Any 6 of the 9 reconstruct the object. Losing one entire zone takes 3 fragments and leaves exactly the 6 needed. Overhead is 50% instead of 200%. Used for the warm and cold tiers; the hot tier uses whole replicas, because no reconstruction means a read is one disk seek instead of six.
+- **Background repair and scrub.** Two always-running maintenance jobs. Repair detects objects with fewer than 9 healthy fragments and reconstructs the missing ones from survivors, prioritised by how little redundancy is left. Scrub re-reads every stored fragment and verifies its checksum, catching silent bit rot: hardware glitches that flip individual bits on spinning disks without triggering a read error. Both are throttled to roughly 10% of cluster bandwidth so they do not compete with foreground traffic.
+- **Versioning and delete markers.** When versioning is enabled, a PUT to an existing key creates a new version ID rather than overwriting. A DELETE creates a delete marker, a tombstone at the head of the version chain, which makes the object appear gone to a default GET while leaving every version recoverable by ID. Accidental-delete recovery is removing the marker.
 
-**The thing that makes it hard:** a viral video thumbnail that suddenly gets read 1 million times per second. All those requests resolve through the Metadata Service to the same object's fragment locations, then fan out to the same 9 storage nodes. Those 9 nodes each see ~111,000 requests per second — far beyond their normal load. The storage nodes become a bottleneck even though you have millions of them globally. CDN (a Content Delivery Network — a geographically distributed cache) absorbs 99%+ of this by caching the object at edge nodes close to users. Without CDN, a truly "hot" object would require shadow-replicating it across more nodes than the erasure code requires and routing reads round-robin, but this is an operational workaround. CDN is the real answer for any object accessed globally at high rate.
+**The thing that makes it hard:** a viral video thumbnail that suddenly gets read 1 million times per second. All those requests resolve through the Metadata Service to the same object's fragment locations, then fan out to the same 9 storage nodes. Those 9 nodes each see about 111,000 requests per second, far beyond their normal load, and the storage nodes become a bottleneck even though you have a million of them. A CDN absorbs more than 99% of this by caching the object at edge nodes close to users. Without a CDN, a genuinely hot object needs shadow replication across more nodes than the erasure code requires with round-robin reads, and that is an operational workaround rather than a design. A CDN is the real answer for anything accessed globally at high rate.
 
-**Why this design and what it costs:** objects are immutable once written, which is the load-bearing design decision. Because no object is ever modified in place, there are no read-write races on the data plane. An "overwrite" of `key=foo` is actually: write new fragments to storage nodes (data plane, no coordination needed — it's fresh bytes nobody is reading yet), then atomically swap the metadata pointer from old manifest to new manifest. The consistency guarantee lives entirely in the metadata layer, which runs a strongly-consistent consensus protocol internally. This is exactly why AWS could add strong read-after-write consistency to S3 in December 2020 with no performance penalty and no data-plane changes — the data was already consistent, they just stopped exposing the previously-intentional eventual-consistency window in the metadata read path.
+**Why this design and what it costs:** objects are immutable once written, and that is the load-bearing decision. Because nothing is modified in place, there are no read-write races on the data plane. An overwrite of `key=foo` is: write new fragments (fresh bytes nobody is reading yet, so no coordination), then atomically swap the metadata pointer from the old manifest to the new one. The consistency guarantee lives entirely in the metadata layer, which runs consensus internally. This is exactly why AWS could add strong read-after-write consistency to S3 in December 2020 with no performance penalty and no data-plane change: the data was already consistent, and they stopped exposing an eventual-consistency window that had been a deliberate read-path optimisation. The cost is that every operation, including a 1KB GET, pays an index lookup before it can touch a disk.
 
 **If you were building it tomorrow:**
-- Metadata: Raft-based sharded KV (e.g., TiKV or a custom system) partitioned by `hash(bucket, key)`; Data nodes: dense HDD servers running a simple piece-id → bytes store; CDN: CloudFront or Fastly in front of all GETs.
+- Metadata: Raft-based sharded KV (TiKV or a custom system) range-partitioned on `(bucket, key)` with automatic split. Data nodes: dense HDD servers running a `piece_id -> bytes` store. CDN in front of all GETs.
 - PUT hot path:
   ```
   # 1. Erasure-code the object
@@ -8860,67 +8924,84 @@ TODO. Two or three things a competent engineer might reach for, in plain languag
   # 4. Return 200 only after metadata commits
   return 200, manifest.etag
   ```
-- Background: repair job polls `under_replicated_object_count`; scrub job re-reads every piece on a ~weekly rolling cadence.
+- Background: repair job polls `under_replicated_object_count`; scrub re-reads every piece on a rolling 90-day cadence.
 #### What this is really testing
-TODO
+Whether you know that the durability number does not come from the erasure code. Every candidate says "Reed-Solomon 6+3, tolerates 3 losses". A code word gives you a fixed number of simultaneous losses and nothing more; eleven nines comes from the ratio between the repair window and the failure interarrival time. Run the arithmetic in the room: at 1% annual failure rate per disk and a one-hour repair window, the chance of losing 3 more of the 8 surviving fragments before repair finishes is `C(8,3) x (1.14e-6)^3`, which is about 8e-17, and multiplied by the 0.09 per-year rate of the first failure gives roughly seventeen nines. The published figure is eleven. The six orders of magnitude between them are correlated failure, software defects and operator error, which is why S3's storage layer got rewritten in Rust with an executable specification checked by property tests (ShardStore, SOSP 2021) rather than given a wider code. A candidate who reaches for a wider code to improve durability has misread which term dominates.
 
-The one insight this question exists to elicit, then the contrast with the question it most resembles and why the answers differ.
+The contrast is with the Dynamo-style key-value store. Both partition and replicate durable bytes across a fleet with no single point of failure, and both must answer how many copies and where. They diverge on two facts about the payload, and the divergence is total. Here every byte is immutable and the mean object is ~310KB; there every value is mutable and about 1.2KB.
 
-Closest question: TODO
+Immutability deletes the conflict problem rather than solving it. There is exactly one mutable cell in this entire system, the `(bucket, key) -> manifest` pointer, so we put it in a small strongly consistent index and pay a consensus round for it. Quorums, version vectors, read repair, hinted handoff and tombstone grace periods have no counterpart here because we never created the situation that needs them. A Dynamo store cannot make the same move: the value *is* the mutable cell, and putting a pointer indirection in front of a 1.2KB record doubles the request count and relocates the identical problem one level down.
+
+Payload size then decides the durability arithmetic in opposite directions. RS(6,3) on a 1MB object gives 167KB fragments at 1.5x storage and is obviously right. The same code on a 1.2KB record gives 200B fragments, so per-fragment headers and six network hops dominate the payload, and every read gathers six pieces to reconstruct. Whole replicas are correct there and wrong here. The failure in the room is answering this question with a quorum. A write here is not contested by anything, so it does not need one; it needs a durable placement and one committed pointer.
+
+Closest question: Q3
+
+Two neighbours sit directly on top of this one and neither changes the substrate: a file-sync product adds a mutable per-user namespace and delta encoding above an object store, and a CDN caches its reads. If you find yourself designing chunk placement in either of those, you have drifted into this question.
 #### Clarifying questions and how each answer forks the design
+- What does the object size distribution look like, and where is the median?
 - Single-region or multi-region?
-- Strong consistency needed?
-- Versioning / lifecycle / encryption?
-- Object size range (KB to TB)?
-- Metadata querying or just key lookup?
+- Strong read-after-write required, or is eventual acceptable?
+- Do customers LIST, or do they always arrive with a known key?
+- Versioning, lifecycle, encryption, retention lock?
+- What access frequency should we assume per object per month?
 
 **How the answers shape the design**
 
 | If the answer is… | Then the design… |
 |---|---|
-| Multi-region | async cross-region replication of objects with a region as the write home |
-| Strong read-after-write | a strongly consistent metadata service in front of eventually-consistent blob replicas |
-| Versioning and lifecycle | keep immutable object versions plus lifecycle rules to expire or tier them |
-| Object size up to TB | multipart upload of fixed parts, each erasure-coded across nodes for cheap durability |
-| Encryption | server-side envelope encryption with per-object data keys |
-| Only key lookup | a flat key-to-location metadata index; no secondary query engine needed |
+| Median object under 128KB | whole replicas, or pack small objects into large sealed extents before erasure coding |
+| Median object over 1MB, read rarely | erasure coding as the default layout, not a cold-tier exception |
+| Multi-region | async cross-region replication with one region as the write home; strong consistency stops at the region boundary |
+| Strong read-after-write | a strongly consistent metadata service that is the only path to bytes, PUT acks after the metadata commit |
+| Customers LIST by prefix | range-partition the index so a prefix scan is one range read, and accept sequential-prefix hotspots |
+| Keys always known in advance | hash-partition the index, delete an entire class of hotspot incident, lose prefix LIST |
+| Versioning and lifecycle | immutable versions plus a delete marker at the head of the chain, and a garbage collector with a grace period |
+| Object size up to TB | multipart upload of independently retryable parts, with one atomic manifest commit at the end |
+| Encryption | server-side envelope encryption with a per-object data key, which also becomes the deletion mechanism |
 #### Requirements and scale, derived out loud
 **Requirements**
 
-- **FR:** PUT, GET, DELETE, LIST in buckets; versioning; lifecycle; ACLs
-- **NFR:** 11 9s durability, 4 9s availability, virtually unlimited scale, read-after-write consistency
+- **FR:** PUT, GET, DELETE, LIST within a bucket; versioning; lifecycle transitions and expiry; per-object ACLs; multipart upload; server-side encryption.
+- **NFR:** 11 nines durability per object per year; 4 nines availability per region; strong read-after-write on every operation within a region; effectively unlimited capacity; GET p99 under 100ms in-region.
 
 **Scale**
 
-- **Object count:** AWS publicly stated >280T objects (re:Invent 2023), now likely ~350T. Use ~100T as reasoning baseline. Per-customer typical: small SaaS ~1B objects, large enterprise/data-lake ~1T.
-- **Total bytes:** estimate from object count × mean size: 100T × 1MB = 100EB logical. AWS doesn't disclose exact totals — "hundreds of EB" is the public ballpark. (1 EB = 10^18 B = 10^6 TB.)
-- **Object size distribution:** workload data (AWS blog, academic studies of S3-class workloads) shows bimodal: ~70% are small files <128KB (logs, thumbnails, JSON config) → median ~10KB. ~30% are large (10MB–5TB) → media, parquet shards, ML datasets. Arithmetic mean dragged up by the long tail to ~1MB.
-- **Storage overhead:** hot tier (Standard) replicates 3× across AZs → 200% overhead. Cold tier (Glacier-like, RS(6,3) erasure code) reconstructs from any 6 of 9 fragments → 9/6 = 1.5× = 50% overhead. With ~70% data in hot, 30% in cold: 0.7×3 + 0.3×1.5 = 2.55× → ~155% overhead — but real S3 pushes more to lower tiers; the post says ~80%, implying ~50% in cold-tier EC. 1EB logical × 1.8 = ~1.8EB physical.
-- **Request volume:** AWS cites S3 sustaining "tens of millions of req/s per region" → ~100M/s aggregate across all regions. Per-bucket hard limit before auto-partition-split is ~3,500 PUT/COPY/POST/DELETE and ~5,500 GET/HEAD per prefix per second (AWS docs).
-- **Metadata service load:** every API call resolves (bucket, key) → block-locations before touching data plane → metadata service sees the full ~100M req/s. Each record (key, version-id, size, etag, ACL pointer, block list) ≈ 500B. 100T objects × 500B = 50TB index, sharded by hash(bucket, key).
-- **Multipart uploads:** S3 enforces ≤5GB per single PUT, so >5GB objects must use multipart. Part size 5MB–5GB, max 10,000 parts → effective max object 5TB. Typical 1TB upload: 10k parts × 100MB.
-- **Repair/scrub bandwidth:** disks fail at AFR ~1% (Backblaze data); plus silent corruption. Background scrub re-reads each disk every ~100 days → ~1%/day disk-bandwidth tax. Reserve ~10% spare capacity per rack so repair after node loss completes within the durability budget.
-- **Durability math:** 11 nines = expected loss ≤1 object per 10^11. With RS(6,3) you tolerate 3 simultaneous fragment losses across 9 placement zones. AFR 1% per disk × repair MTTR <1hr means probability of 4+ correlated losses in MTTR window is far below 10^-11 — math closes (cf. AWS S3 durability whitepaper).
+Everything below is one large region unless stated. The fleet is roughly ten of these.
+
+- **Object count:** AWS has publicly stated over 400T objects across S3 (2025), up from 280T at re:Invent 2023. Take a large region at ~10% of the fleet: **~40T objects in region**.
+- **Object size:** bimodal, and the two modes drive different budgets. About 70% of objects are under 128KB (logs, thumbnails, JSON, small config) with a median near 10KB; about 30% are 1MB and up (photos, video segments, parquet shards, ML datasets). Mean = 0.7 × 10KB + 0.3 × 1MB = 7KB + 300KB = **~310KB**. The median drives the request budget and the mean drives the byte budget, so quoting one number for both is the standard way to get this section wrong.
+- **Logical bytes:** 40T × 310KB = 4 × 10¹³ × 3.1 × 10⁵ B = 1.24 × 10¹⁹ B = **~12EB in region**, which puts the fleet at ~124EB and matches the publicly stated "hundreds of exabytes". (1EB = 10¹⁸ B.)
+- **Physical bytes:** tier mix of 20% hot at 3x replication, 50% warm at RS(6,3) = 1.5x, 30% archive at RS(10,4) = 1.4x. Weighted overhead = 0.2 × 3 + 0.5 × 1.5 + 0.3 × 1.4 = 0.6 + 0.75 + 0.42 = **1.77x**. 12EB × 1.77 = **~21EB physical**.
+- **Disks:** 21EB / 20TB per drive = 2.1 × 10¹⁹ / 2 × 10¹³ = **~1.05M drives**, which at 100 drives per chassis is **~10,500 storage servers**.
+- **Request volume:** S3 sustains over 100M req/s fleet-wide (AWS, 2023). Region share ~15% at peak because traffic is skewed to the largest regions: **~15M req/s**. Read:write for an object store runs about 10:1, giving **~14M GET/s and ~1.4M PUT/s**.
+- **Metadata load and size:** every request resolves `(bucket, key)` before touching a disk, so metadata sees the full **15M ops/s**. Index record = key (~100B, keys are long and path-shaped) + version id (16B) + size (8B) + etag (16B) + storage class and flags (4B) + encryption key ref (16B) + fragment list (9 × 12B = 108B) + framing ≈ **~300B**. 40T × 300B = 1.2 × 10¹⁶ B = **~12PB of index**.
+- **Metadata node count, from two constraints, take the larger:**
+  - *Capacity:* 12PB / 4TB of NVMe per node = **3,000 nodes**.
+  - *Throughput:* an NVMe-backed shard serves ~200k ops/s with a warm cache. 15 × 10⁶ / 2 × 10⁵ = **75 nodes**.
+  - Capacity binds by 40x. Round to **4,000 metadata nodes** at 3TB of index each and 15M / 4,000 = **~3.75k ops/s per node**, which is 2% of the throughput ceiling. Worth saying out loud, because the usual claim is that metadata IOPS saturates first: at this object count it does not, index bytes do.
+- **Per-prefix ceiling:** S3 publishes ~3,500 PUT/s and ~5,500 GET/s per partitioned prefix. 15M / 5,500 = **~2,700 partitions** if load were perfectly flat; real skew means tens of thousands, and it is the skew that forces automatic splitting.
+- **Multipart limits:** single PUT capped at 5GB, part size 5MB to 5GB, max 10,000 parts, so effective max object is 5TB. A 1TB upload is 10,000 × 100MB or 1,000 × 1GB.
+- **Drive failures and repair:** 1.05M drives × 1% AFR (Backblaze publishes 1.0% to 1.4% across recent cohorts) = 10,500 failures/year = **~29 drives/day**. Each is 20TB, so 29 × 20TB = 580TB/day of reconstruction = 5.8 × 10¹⁴ / 86,400 = **~6.7GB/s** of sustained repair read. Against aggregate read bandwidth of 1.05M × 150MB/s = **158TB/s**, repair is 0.004% of the fleet. Repair is never bandwidth-constrained; it is constrained by how fast you can find the affected erasure groups in a 12PB index.
+- **Scrub:** re-read every stored byte every 90 days. 21EB / (90 × 86,400 s) = 2.1 × 10¹⁹ / 7.78 × 10⁶ = **~2.7TB/s**, which is 2.7 / 158 = **1.7% of aggregate read bandwidth**. Scrub, not repair, is the real background tax, and it still fits inside a 10% maintenance budget with 5x headroom.
+- **Durability arithmetic for RS(6,3):** the object dies if 4 of 9 fragments are lost inside one repair window. Per-disk λ = 0.01/year = 1.14 × 10⁻⁶ /hour; repair window T = 1 hour (detect, schedule, reconstruct in parallel from thousands of source disks). P(3 more of the 8 survivors fail within T) = C(8,3) × (λT)³ = 56 × (1.14 × 10⁻⁶)³ = 56 × 1.48 × 10⁻¹⁸ = **8.3 × 10⁻¹⁷**. First-failure rate per object-year = 9λ = 0.09. Annual loss = 0.09 × 8.3 × 10⁻¹⁷ = **7.5 × 10⁻¹⁸, about seventeen nines**. The published claim is eleven, so the independent-failure term is not the binding one: correlated failure, software defects and operator error are six orders of magnitude larger. Widening the code does not move the published number.
 #### Key decisions
-TODO
+**Whole replicas vs erasure coding**
+- Choice: 3x replication for objects under ~128KB or read more than a few times a month, RS(6,3) at 1.5x for the warm tier, RS(10,4) at 1.4x for archive. Layout is a per-object property recorded in the manifest, chosen at write time from the storage class and revised by lifecycle rules.
+- Alternative: erasure code everything with one code and one code path, which is a simpler system with a lower storage bill and no tier machinery to maintain.
+- Decider: seeks per read against bytes saved, and the crossover is derivable. A 20TB HDD costs ~$300 over a 5-year life, so **$5/disk-month**, and it delivers 20TB and ~100 random IOPS. That prices capacity at $5/20,000 = **$0.00025 per GB-month** and one seek at $5 / (100 × 2.6 × 10⁶ s) = **$1.9 × 10⁻⁸**. An EC read costs 6 seeks where a replica read costs 1, so 5 extra seeks = **$9.5 × 10⁻⁸ per read**. EC saves (3 − 1.5) × S = 1.5·S GB, worth 1.5 × 0.00025 = **$3.75 × 10⁻⁴ × S(GB) per month**. Break-even reads per month R* = 3.75 × 10⁻⁴ · S(GB) / 9.5 × 10⁻⁸ = **~3,950 · S(GB)**. That gives 1GB at ~3,900 reads/month (130/day), 100MB at ~400/month (13/day), 1MB at ~4/month, 128KB at ~0.5/month, and 10KB at 0.04/month, meaning one read every two years. Sanity check against the market: AWS's Standard-IA has a 128KB minimum billable object size and is marketed for objects accessed less than once a month, which is the same line arrived at from pricing rather than from disk physics.
+- Alternative wins when: you pack small objects into large sealed extents before coding, so no fragment is ever small. Then the crossover argument evaporates, EC-everything is correct, and it is what Facebook's f4 and Azure's local-reconstruction-code layer actually do. Packing is not free (a delete inside a sealed extent cannot reclaim space until the extent is compacted, and one hot object drags a 1GB extent into cache), but at a median of 10KB it is the better system and this design's small-object handling is the weaker half of it. The alternative also wins outright on flash. NVMe drops the per-operation cost by roughly four orders of magnitude while raising the per-GB cost by about 7x, which moves the 10KB crossover from one read every two years to roughly 30 reads a day. The "replicate hot and small, erasure code cold and large" rule is a statement about spinning disks, established when spinning disks were the only economic medium for bulk storage, and it does not survive a flash-only fleet.
 
-Two or three genuine forks. For each, in this exact shape so it stays checkable:
+**Strong read-after-write vs eventual consistency**
+- Choice: strong read-after-write on every operation including overwrite, delete and LIST. The metadata service is the only path to bytes, the pointer read is served by a shard leader or a lease-holding replica, and a PUT acks only after the pointer commit.
+- Alternative: ack the PUT as soon as the fragments are durable and let the pointer propagate asynchronously to a replicated read cache, exposing an eventual-consistency window of milliseconds to seconds on overwrites and LIST.
+- Decider: what the commit costs against what its absence costs. A Raft commit across three AZs inside one region is 1 to 3ms: one round trip to a majority at ~0.5ms AZ-to-AZ, plus the fsync. The data-plane write for even a 310KB object is 20 to 50ms including the fan-out to 9 nodes. So the consistency commit is **2 to 10% of PUT latency and 0% of GET latency**, while its absence forces every caller that overwrites to build a retry-until-you-see-your-own-write loop, which they get wrong. This is exactly the trade AWS re-took: S3 was eventually consistent on overwrite-PUT and LIST until **December 2020**, when strong read-after-write shipped fleet-wide at no extra cost and no measurable latency change. Date this claim explicitly in the room, because material written before 2020 asserts the opposite and interviewers who learned S3 in 2015 will expect the eventual answer. Google Cloud Storage has been strongly consistent for object operations since 2015 and Azure Blob always was, so the eventual window was an S3 implementation artefact, not a property of object stores.
+- Alternative wins when: the pointer has to be visible in more than one region. A cross-region consensus round is 60 to 150ms for US-East to Europe, which is 20 to 50x the intra-region commit and dominates the PUT for any object under ~10MB. Multi-region buckets are therefore eventually consistent by construction, and that is a defensible design rather than a compromise: you pick a write-home region, replicate asynchronously with a published lag, and tell customers that a read in the far region can be stale. It also wins for pure write-once ingest with no overwrites and no LIST, where the two models are indistinguishable for the only access pattern present and the commit is pure cost.
 
-**<name of the fork>**
-- Choice:
-- Alternative:
-- Decider:
-- Alternative wins when:
-
-**Raw material, from the old Common Mistakes:**
-
-- Designing for "3 replicas" instead of erasure coding for a cold tier — wastes 100%+ storage you could have given back to durability budget.
-- Using a single TCP session for a 100GB+ upload — guaranteed to fail; multipart with per-part retries is mandatory above ~100MB.
-- Sequential prefixes (`yyyy/mm/dd/...`) at high write rate — hits a single metadata partition; randomise the prefix or accept partition-split 503s.
-- Treating LIST as random-access — LIST is paginated B-tree range scan, fine for prefix scans, terrible as a "find my object" path; use HEAD or GET with the known key.
-- Skipping anti-affinity — 6+3 across 3 AZs only survives an AZ loss if no AZ holds more than M=3 pieces; an unconstrained placement that puts 4 pieces in one AZ silently loses durability.
-- Disabling Object Lock for compliance workloads to "save money" — defeats the immutability guarantee that justifies the storage class.
-- Treating Intelligent-Tiering as a free lunch — small objects (<128KB) aren't eligible; the per-object monitoring fee dominates if you have billions of tiny objects.
+**Range partitioning by key prefix vs hash partitioning of a flat key space**
+- Choice: range-partition the metadata index on `(bucket, key)` with automatic split when a partition exceeds its rate or size ceiling, so LIST with a prefix is a single ordered range scan. Hash the *placement* of fragments independently, so a hot prefix concentrates index load but never disk load.
+- Alternative: hash-partition on `hash(bucket, key)`, spreading every bucket uniformly across all partitions so a prefix hotspot is structurally impossible.
+- Decider: whether customers use sequential prefixes, and whether they LIST. A range partition sustains **~3,500 PUT/s and ~5,500 GET/s** before it must split, and a split takes minutes to tens of minutes because it moves a key range. A customer writing `logs/2026-08-03/` at 20k writes/s therefore lands 100% of that on one partition and takes 503s until the split lands, repeatedly, because tomorrow's date is a new hotspot. Hashing removes that entirely. Against it: with **~2,700 partitions** in region and tens of thousands in practice, a prefix LIST under hashing becomes a scatter-gather over every partition, so returning 1,000 keys costs tens of thousands of partition queries instead of one range read. Data-lake query planners LIST before every scan, so that cost is paid on the critical path of every query.
+- Alternative wins when: nobody lists. A blob store fronting a database, where every key came from a row and is therefore always known, has zero LIST traffic and the sequential-write hotspot is its only real risk. Hash the key there and you delete a whole class of operational incident that customers otherwise hit repeatedly and blame on you. The alternative also wins for internal systems that can enforce a key format, since the incident is caused by customer key naming and you cannot fix customer key naming from inside the storage system. Note that the hybrid is what makes the chosen option survivable: hashing fragment placement while range-partitioning the index means the 503 during a split is an index-tier event of seconds, not a saturated disk.
 #### High-level design
 **must-say**
 
@@ -8987,36 +9068,21 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 </svg>
 ```
 
-**How to read the diagram:** the request path looks simple because most of the real work is hidden behind metadata and placement decisions. A write records the object under a key, breaks the bytes into whatever storage layout the system uses, and spreads them across a durable set of storage nodes.
+**How to read the diagram:** there are two independent planes and one rule that connects them. The metadata service answers "where is this object" and the storage nodes answer "give me this piece". No arrow goes from client to storage node without passing through metadata first, and that missing arrow is the design.
 
-**Why the flow is shaped this way:** objects are large and mostly immutable, which makes them a good fit for separate metadata and data planes. Once written, objects should be readable from many places without needing filesystem-style coordination.
+**Why the flow is shaped this way:** the two planes have nothing in common operationally. Metadata is 12PB of small mutable records on NVMe, sized by object count, and it needs consensus. The data plane is 21EB of large immutable pieces on HDD, sized by bytes, and it needs no coordination at all because nothing it holds is ever rewritten. Fusing them would force the whole fleet onto the more expensive of the two profiles.
 
-**What this layout buys you:** extreme durability, simple object semantics, and a storage model that scales to very large blobs. The tradeoff is weaker in-place mutation support and more complexity in background repair and placement policy.
+**What this layout buys you:** the two planes scale on independent axes, so a customer with a billion 1KB objects buys index capacity and a customer with a petabyte of video buys spindles, and neither pays for the other. It also puts every consistency guarantee in one small place. The cost is a mandatory index lookup on the critical path of every request including a 1KB GET, and a background subsystem (garbage collection, repair, scrub) that is invisible to customers, is where most of the operational risk lives, and never stops running.
 #### Deep dive
 **must-say**
 
-**Erasure coding vs replication:**
+**The manifest and the atomic pointer swap, which is the only write this system really performs.**
 
-| Aspect | Replication (3x) | Erasure Coding (6+3) |
-|---|---|---|
-| Storage overhead | 200% | 50% |
-| Durability (loss tolerance) | 2 failures | 3 failures |
-| Read latency | 1 read | K reads + reconstruct |
-| Write cost | 3 writes | 9 writes |
-| Best for | hot, small | cold, large |
+An object is a pointer. `(bucket, key, version_id)` resolves to a `manifest_id`; the manifest is immutable and lists the parts; each part lists its fragments and their node locations. Three levels, and every level except the top pointer is write-once. That single structural choice is what every interesting property here is derived from, so it is worth being precise about which cell is mutable: exactly one, the pointer, and it lives in a consensus-replicated index.
 
-S3 uses replication for hot tier (S3 Standard) and erasure coding for IA / Glacier.
+A simple PUT is: encode the bytes into pieces according to the storage class, write the pieces (no coordination needed, since nobody has ever read them), build a manifest, commit the pointer. The pieces are useless garbage until the pointer moves, and harmless garbage if it never does.
 
-**Multipart upload (large objects).** A 1TB upload over a single TCP connection is doomed — average TCP session lifetime in the wild is minutes, and multi-hour transfers will fail at the worst moment. Multipart inverts the problem: client calls `Initiate` and gets an `upload_id`; uploads parts (5MB–5GB each) in parallel, each independently retryable with its own checksum (etag); calls `Complete` with the list of `(part_num, etag)` to atomically finalize the object. The `Complete` step is metadata-only — it just commits a manifest pointing at the parts. `Abort` discards all parts (and the storage they consumed). Without multipart, you'd need transactional semantics across hours; with multipart, each part's lifetime is seconds and the only transactional step is the manifest swap.
-
-**Versioning.** Each PUT to a versioned bucket creates a new `version_id` (a sortable timestamp-based ID); the latest version is the default for unversioned reads, but every prior version is fetchable by ID. DELETE creates a *delete marker* (a tombstone record at the head of the version chain) — reads see the object as gone, but the actual bytes are still there until lifecycle policy deletes them. This is critical for accidental-deletion recovery: a `DELETE` is reversible by removing the marker. Lifecycle policies finally GC tombstoned versions past their retention window (e.g. delete versions older than 30 days).
-
-**Background jobs.**
-- *GC* — scans metadata for tombstoned versions whose lifecycle window has passed; sends `delete_piece` to each storage node; the storage node moves bytes to a deletion queue and reclaims after a grace period. Eventually-consistent: bytes might survive metadata deletion by minutes, which is fine because metadata is the source of truth.
-- *Repair* — detects under-replicated objects (a node went down → 6+3 EC has only 8 of 9 pieces alive); reads any K of the surviving pieces, reconstructs missing pieces, writes to a healthy node, updates metadata. Prioritized by redundancy: objects down to K pieces (one more loss = data loss) are repaired first, even if it pre-empts foreground I/O.
-- *Scrub* — periodically reads pieces and verifies their checksums. Bit rot is real — modern HDDs have an Unrecoverable Read Error rate of ~10^-15, which at petabyte scale means flipped bits every few PB read. Scrub catches silent corruption and triggers repair to overwrite with a healthy reconstruction.
-
-**Multipart upload sequence.** *[Source: AWS S3 API reference]* Uploads >5GB *must* use multipart; the API also recommends it for anything >100MB. The mechanism replaces a multi-hour TCP session with N independent retryable parts and one atomic commit:
+**Multipart is the same mechanism with the manifest built incrementally.** `CreateMultipartUpload` allocates an `upload_id` and an in-progress manifest that is not reachable from any key. `UploadPart` encodes and writes the part's pieces, then records `(upload_id, part_num) -> piece list, etag` as an ordinary metadata row. Parts are independent: re-uploading part 7 replaces the row and orphans the previous pieces, and no other part notices. `CompleteMultipartUpload` validates the submitted `(part_num, etag)` list against the recorded rows, builds the final manifest, and commits the pointer. That commit is the only atomic step in a transfer that may have run for a day.
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 940" role="img" aria-label="S3 multipart upload sequence">
@@ -9126,157 +9192,147 @@ S3 uses replication for hot tier (S3 Standard) and erasure coding for IA / Glaci
 </svg>
 ```
 
-Three properties this mechanism delivers:
-1. **Independent part retries.** A 1TB upload at 100Mbps is ~22h on a single TCP session — guaranteed to fail. As 1000×1GB parts each finishing in ~80s, individual failures retry in seconds; the upload as a whole tolerates arbitrary churn.
-2. **Atomic completion.** `Complete` is metadata-only — it swaps the `(bucket, key)` pointer to the new manifest. There's no point at which a reader sees a half-finished upload. `Abort` discards all parts and the storage they consumed.
-3. **Storage immutability.** Each part is content-addressed in the data plane; the manifest names them. Overwriting `key=foo` is a manifest swap, not a mutation race.
+Three properties fall out, and the third is the one that catches people:
 
-**Strong read-after-write consistency (Dec 2020 change) — what actually changed.** *[Source: AWS announcement, all-things-distributed.com]* Pre-December 2020, S3 was eventually-consistent on overwrite-PUT and LIST: a sequence of `PUT key=foo; GET key=foo` could return the old object briefly (typically milliseconds to seconds, occasionally longer under load), and a LIST issued immediately after a PUT could miss the new key. Read-after-write was strong only for *new* keys, not overwrites. In December 2020 AWS shipped strong read-after-write across all operations — overwrites, deletes, and LIST included — at no extra cost and no measurable performance penalty.
+1. *Independent retries.* A 1TB upload at 100Mbps is ~22 hours on one TCP session, and a session that long will not survive a load balancer recycle, a NAT timeout or a laptop lid. As 1,000 parts of 1GB each finishing in ~80s, a failure costs 80 seconds of re-transfer instead of a day.
+2. *Atomicity without a lock.* No reader ever observes a partial object, because the pointer moves once. `Abort` discards the rows and the pieces become unreferenced.
+3. *The ETag is not the object's MD5.* For a multipart object the ETag is the MD5 of the concatenated part MD5s, with a `-N` suffix naming the part count, because the service never holds the whole object in one place and cannot compute a whole-object digest without reading it back. Any client that verifies uploads by comparing MD5s discovers this in production. Use the checksum algorithms with defined composition rules instead (S3 added CRC32C and SHA-256 as first-class object checksums in February 2022, precisely because the ETag was overloaded into a role it cannot fill).
 
-The mechanism is entirely metadata-layer; the data plane was not touched. Three properties make this work:
+**Why overwrite is free, and what that has to do with December 2020.** Overwriting `key=foo` writes a new manifest and moves the pointer. The old manifest and its pieces become unreferenced. Critically, an in-flight GET that already resolved the old `manifest_id` keeps reading valid bytes to completion, because the manifest it holds is immutable and cannot be edited out from under it. Readers snapshot the pointer once and then talk only to immutable data, which is a snapshot isolation you get for free rather than one you implement.
 
-1. *The metadata service is the strongly-consistent source of truth for `(bucket, key) → manifest_pointer`.* Internally each metadata shard runs a Raft/Paxos quorum, so a successful write is durably committed and visible to subsequent reads on that shard before the PUT acks the client.
-2. *A PUT acks the client only after the new manifest is durably committed in metadata.* The data plane writes (erasure-coded pieces fanned out to storage nodes) complete first, then the metadata pointer is swapped to the new manifest atomically; the client sees the 200 only after that swap commits.
-3. *Every GET resolves through metadata first.* The GET path is always: metadata lookup returns the manifest, then data pieces are fetched from the locations the manifest names. There is no path that reads bytes without consulting metadata, so an overwrite cannot return an old version once the metadata swap is committed.
+That is why the December 2020 change touched one line of this mechanism. Before it, the pointer *read* was served from a replicated cache that could lag the commit, so a GET after an overwrite could resolve the old `manifest_id`. After it, the pointer read goes to the shard leader or a replica holding a valid lease, so it observes every committed write. The data plane was not touched, no cost changed, and no latency was added, because the data plane never had a consistency problem to fix. If an interviewer asks how you would ship the same change, the answer is that you would not be able to unless you had already made the data plane immutable, which is the actual point of the question.
 
-Because each data piece is content-addressed (keyed by its hash) and immutable, an overwrite of `key=foo` is *not* a mutation of the existing bytes — it's a brand-new manifest pointing at a brand-new set of pieces, plus a metadata pointer swap from the old manifest to the new one. There is no data-plane race condition to lose because the data plane never mutates anything in place. This is the load-bearing detail and the reason the 2020 change shipped without a perf or cost penalty: AWS didn't have to retrofit consistency into the data plane (which would have been catastrophic), they just exposed the consistency that the metadata layer was already providing internally and removed the eventual-consistency window that had previously been a deliberate read-path optimisation.
+**What the mechanism does not give you.** The swap is atomic for one key and only one key. There is no multi-key transaction, so "replace these 400 parquet files as a single unit" is not expressible, and neither is "delete these 10,000 objects atomically". This is not an oversight to be fixed later; supporting it means a distributed transaction across range-partitioned index shards on a path currently running 1.4M PUT/s. The workaround has become an industry: table formats such as Iceberg and Delta Lake build a single-pointer commit of their own on top of this one, where a metadata file name is the atomic unit and a compare-and-swap on that name is the transaction. Recognising that they are replaying the identical trick one layer up, because the layer below refused to generalise it, is the distinction between having used an object store and having built on one.
 
-**Multi-AZ replication mechanics.** *[Source: Werner Vogels / S3 ShardStore post]* S3's 11-nines durability rests on three multiplications: erasure coding (6+3 or 17+5 depending on tier), anti-affinity placement across AZs, and continuous repair. Concrete behaviours:
-- **Anti-affinity placement.** All `K+M` pieces of an erasure group are placed on disks across `≥3` AZs in the region with the constraint that no single AZ holds more than `M` pieces. For 6+3 across 3 AZs, that's typically 3 pieces per AZ — losing one AZ takes 3 pieces, leaving K=6 alive, still recoverable.
-- **Shuffle sharding for heat.** A bucket's objects are sprayed across millions of disks; any single bucket occupies a tiny fraction of any single disk. This means a hot customer can burst across a million disks simultaneously (Lambda fan-outs are a classic case), and no individual disk becomes a hotspot for any individual workload. Aggregating millions of independent bursty workloads produces smooth aggregate demand.
-- **Continuous scrub + repair.** Every piece gets re-read against its checksum on a rolling cadence (~weekly per piece). Bit rot is real — modern HDDs have an Unrecoverable Read Error rate of ~10^-15, so at petabyte scale you flip bits per few PB read. Detected corruption triggers reconstruction from surviving pieces; the resulting healthy piece overwrites the corrupted one. Repair prioritises by remaining redundancy: an object down to K pieces (one more loss = data loss) jumps the queue ahead of an object at K+M-1.
-- **ShardStore + lightweight formal verification.** S3's storage layer was rewritten in Rust with a 1%-of-production-code executable specification that runs in property tests; verification catches state-machine bugs that would otherwise need hard-drive years to surface.
-
-**Intelligent Tiering.** *[Source: AWS S3 Intelligent-Tiering pricing]* For workloads with unpredictable access patterns, S3 Intelligent-Tiering moves objects between five access tiers automatically based on observed access:
-
-| Tier | Trigger | Cost vs Standard |
-|---|---|---|
-| Frequent Access | default / accessed in last 30d | baseline |
-| Infrequent Access | no access in 30d | -40% |
-| Archive Instant | no access in 90d | -68% |
-| Archive Access (opt-in) | no access in 90d, ms-to-min retrieval | -71% |
-| Deep Archive (opt-in) | no access in 180d, hours retrieval | -95% |
-
-A small per-object monitoring fee applies (~$0.0025 per 1000 objects/month); objects <128KB are not eligible (the monitoring fee would dominate). No retrieval charges — accessing a tiered object pulls it back to Frequent Access automatically. Used heavily for dataset / log retention where access pattern isn't known up-front.
+**Garbage is the price.** Aborted uploads, replaced parts and overwritten manifests all leave pieces with no referent. Reachability runs pointer to manifest to piece, so collecting them is a reachability problem over 12PB of index. Reference counting on every manifest write is exact but adds write amplification to the PUT path and fails permanently on a single lost decrement, which at 1.4M PUT/s is a certainty rather than a risk. Mark-and-sweep is slower and safe, and it needs a grace period so a piece written seconds ago by an upload still in flight is never swept. A 7-day grace is the usual setting, which means reclaimed space lags the delete by a week and the customer is billed for it, and it is the reason lifecycle rules for expiring incomplete multipart uploads exist at all: without one, a client that crashed in 2019 is still being charged for its parts.
 #### Where it breaks
 **must-say**
 
 **Bottlenecks**
 
-- **Hot key** (a viral video's thumbnail at 1M req/sec on one object) → CDN absorbs >99%; the few origin requests hit a per-key gateway rate limit; for in-region hot reads where CDN doesn't apply, shadow-replicate the object across more nodes than EC requires and round-robin reads.
-- **Listing huge bucket** (1B objects, naive `LIST` would be O(n)) → metadata stored in a prefix-indexed B-tree; pagination via cursor (`?marker=last_key`); range scans on common prefixes (`?prefix=2024/01/`) are O(result_size) not O(bucket_size); hard cap of 1000 keys per request.
-- **Large upload reliability** (3-hour TCP session for 1TB upload will fail) → multipart with resume; per-part checksum so a corrupted part is retried not the whole upload; client SDK retries with backoff at the part level; final `Complete` is a metadata-only atomic swap.
-- **Repair traffic on node loss** (one storage node dies, ~10TB of pieces become under-replicated, naive repair saturates network) → throttle repair to ~10% of cluster bandwidth; prioritize least-redundant first (objects down to K pieces > objects with K+1) so you minimize the window of "one more loss = data loss".
-- **Cross-region replication** (CRR copies object writes to a peer region async via per-region replication queue) → eventual consistency cross-region (typically <15min lag, can be hours after a regional outage); observable via replication latency metrics; for stronger guarantees use Multi-Region Access Points or synchronous multi-region writes (much more expensive); for compliance use cases combine CRR with Object Lock so a replicated copy is immutable for the retention window.
-- **Metadata partition hotspots** (a bucket with all keys under one prefix gets sequential PUT load that hits one metadata partition) → S3 partitions the keyspace by prefix automatically; a hot prefix triggers a partition split in seconds; client-side mitigation is randomising the prefix (`<hash>/<key>` instead of `<date>/<key>`) so writes spread evenly across partitions from day one.
-- **Metadata vs data-plane scaling asymmetry** (every operation hits metadata; data-plane bandwidth is huge but per-op rate moderate; metadata IOPS saturates first) → metadata service runs on RAM-heavy boxes with NVMe and is the critical scaling axis; data plane runs on dense HDD shelves; the two scale on independent axes — adding capacity for a workload that's metadata-heavy doesn't require adding storage.
+- **Hot key.** A viral thumbnail at 1M req/s resolves to one manifest and fans out to the same 9 nodes, roughly 111k req/s each. *Mitigation:* a CDN absorbs over 99%; origin traffic hits a per-key gateway rate limit. For in-region hot reads where a CDN does not apply, shadow-replicate the object beyond what the code requires and round-robin. Note this interacts with the first fork: a hot object should not be erasure coded at all, so the durable fix is a lifecycle rule that promotes it to whole replicas, not a special case in the read path.
+- **Metadata partition split under a sequential prefix.** A customer writing `logs/YYYY-MM-DD/` at 20k PUT/s puts all of it on one range partition against a ~3,500 PUT/s ceiling. *Mitigation:* automatic split on both rate and size, pre-split on an observed write-rate trend rather than after the 503s start, and client guidance to put a hash prefix ahead of the date. The split itself is minutes, so detection has to lead the incident.
+- **Listing a large bucket.** 40 billion keys in one bucket, and a naive LIST is a full range scan. *Mitigation:* cursor pagination at 1,000 keys per page and prefix range scans that cost O(result) rather than O(bucket). This does not solve the real request, which is the first Unresolved item below.
+- **Repair discovery, not repair bandwidth.** A dead 20TB drive holds fragments for ~10⁸ erasure groups. Reconstruction bandwidth is 0.004% of the fleet and irrelevant; finding which groups are affected means an index lookup per fragment. *Mitigation:* maintain a reverse index from `node_id` to the groups it participates in, updated on write, so a node death is a range scan of that index instead of a scan of the primary. It costs a second index write per fragment on the PUT path, and it is worth it.
+- **Scrub as a permanent tax.** Re-reading 21EB every 90 days is 2.7TB/s, 1.7% of aggregate read bandwidth, running forever. *Mitigation:* throttle to a fixed share and let the cadence stretch under load rather than letting scrub compete with foreground reads. Track scrub cadence as an SLO, because a scrub that has silently stretched to 400 days is a durability regression that no other metric shows.
+- **Cross-region replication lag.** CRR is async, typically under 15 minutes, but can reach hours after a regional event. *Mitigation:* alert on replication lag rather than on replication failure, publish the lag as the RPO, and combine with Object Lock where a compliance customer needs the replica to be immutable.
 
 **Failure modes**
 
 | Layer | Failure | Detection | Mitigation |
 |---|---|---|---|
-| Storage node | Disk death loses N pieces of an erasure group | `under_replicated_objects` counter climbs; per-disk SMART failures | Background repair reconstructs missing pieces from K survivors; prioritise objects down to K (one more loss = data loss); ~10% spare capacity per rack ensures repair finishes within MTTR budget |
-| Metadata partition | Hot prefix saturates a metadata partition | Per-partition QPS hits ceiling; client 503s on writes to that prefix | Auto-partition split on key-range; client-side mitigation is randomised prefix (`<hash>/<key>`) so writes spread across partitions from day one |
-| Anti-affinity | A bad placement decision lands too many pieces in one AZ | `pieces_per_az_max` violation alert | Placement service refuses to violate constraint; existing violations get rebalanced as background priority |
-| Multipart upload | Client crashes mid-upload, parts orphan in storage | `incomplete_uploads_count` per bucket; aged unfinished uploads | Lifecycle rule expires incomplete multipart uploads after N days; client SDK can `Abort` explicitly; storage reclaim grace period |
-| Cross-region replication | CRR queue lag spikes during regional issue | `replication_latency_seconds` per bucket | Async by design; alert on lag > 1h; failover client traffic to the replica region; replication catches up when source recovers |
-| Bit rot | Silent corruption flips bits on platter (UREs at ~10^-15) | Scrub job mismatches piece checksum | Scrub runs against every piece on a rolling weekly cadence; corruption triggers reconstruction from surviving pieces; healthy piece overwrites corrupt one |
-| Glacier retrieval | Hours of restore latency on cold-tier reads | Restore-job SLA breach | Set Tier appropriately for access pattern; for unpredictable access use Intelligent-Tiering; Standard-IA has ms retrieval at intermediate cost |
-| Quorum write | Brief AZ partition during PUT, fewer than required pieces ack | PUT 5xx rate jumps in affected AZ | Client SDK retries with exponential backoff; placement service rebalances replacement pieces; durability budget unaffected because the PUT didn't ack as committed |
+| Storage node | Disk death removes fragments from ~10⁸ erasure groups | `under_replicated_objects` climbs; SMART pre-failure | Repair reconstructs from k survivors, prioritised by remaining redundancy so groups at exactly k jump the queue; ~10% spare capacity per rack keeps repair inside the MTTR budget |
+| Metadata partition | Sequential prefix saturates one range partition | Per-partition QPS at ceiling; 503 rate on that key range | Automatic split on rate and size, pre-split on trend, client-side hash prefix |
+| Placement | Anti-affinity violated, too many fragments in one AZ | `pieces_per_az_max` alert | Placement refuses the violating write; existing violations rebalance as background priority work |
+| Multipart | Client dies mid-upload, parts orphaned | `incomplete_uploads_count` and upload age per bucket | Lifecycle rule expires incomplete uploads after N days; explicit `Abort`; mark-and-sweep with grace period |
+| Bit rot | Silent corruption; HDD unrecoverable read error rate ~10⁻¹⁵ | Scrub checksum mismatch | Reconstruct from surviving fragments and overwrite the corrupt one; a rising per-model mismatch rate is a firmware bug, not bad luck |
+| Metadata | Shard leader loss during a pointer commit | Commit latency spike; leader election counter | Raft re-elects in low seconds; an uncommitted PUT is simply not acked, so the client retries and the orphaned pieces are swept |
+| Garbage collection | Sweep falls behind, unreferenced pieces accumulate | `unreferenced_bytes` and sweep cycle time | Rate-limit the sweep but alert on cycle time; a stalled sweep shows up as a storage cost anomaly weeks before anything else notices |
+| Cold tier retrieval | Archive restore takes hours | Restore job SLA breach | Match storage class to the access pattern up front; Intelligent-Tiering only where the pattern is genuinely unknown and objects exceed the 128KB eligibility floor |
 
 **Unresolved**
 
-TODO. Two or three things this design genuinely does not handle well, and what you would do about each.
+**LIST is not a query engine, and the partition scheme guarantees it never will be.** Prefix LIST is a paginated range scan capped at 1,000 keys, so "every object modified in the last hour across 40 billion keys" is a full scan of the key range. Every customer eventually wants a predicate on something other than the key: a tag, a size, a last-modified time, a storage class. A range-partitioned index on `(bucket, key)` cannot serve any of those, and the answer we actually ship is an inventory report, a daily flat file of the bucket contents, which is a batch product with a day of lag standing in for an index. A real secondary index means a second independently partitioned copy of 12PB kept in sync with the primary, which is a cross-shard transaction on every one of 1.4M PUT/s, so we will not build it. What customers do instead is keep their own index in a database beside the bucket, which means two sources of truth that can disagree with nothing watching for it, and the divergence surfaces as "the file is in my catalog but a GET returns 404" long after the write that caused it.
+
+**We cannot prove a delete happened.** A DELETE moves the pointer; the pieces are reclaimed by a mark-and-sweep with a 7-day grace, and the blocks are physically overwritten whenever the drive next reuses them, which may be never before the drive is decommissioned. For a compliance customer asking us to prove the bytes are gone, the honest claim is that the object is unreachable and that if it was encrypted under a per-object data key we have since destroyed, it is cryptographically erased. Cryptographic erasure is a genuinely weaker claim than physical erasure and it is the one the whole industry leans on. Versioning makes it worse in a way customers reliably misread: a delete marker makes the object appear gone while every byte remains billable and recoverable, which is exactly the desired behaviour for accidental deletion and exactly the wrong behaviour for a deletion request. There is no deletion SLA here, only a deletion eventuality, and we do not publish a bound on it because we do not have one.
+
+**An availability zone outage leaves the warm tier at exactly k, with no margin.** RS(6,3) placed 3-3-3 across three zones survives a zone loss by construction: 6 fragments remain, which is precisely k and not one more. That is the boundary, not a buffer. During the outage every warm object in the region is one fragment from unrecoverable, and any drive that dies in a surviving zone destroys every erasure group it touches, which for a 20TB drive at 167KB fragments is order 10⁸ objects. At 29 drive failures a day, a six-hour zone outage puts about 7 drives inside that window. The mitigation we actually run is emergency re-encode: rebuild the missing 3 fragments into the two surviving zones, deliberately violating anti-affinity, which restores the fragment count and trades "one more disk kills it" for "the second zone failing kills it". That needs 50% spare capacity in the survivors and it is a strictly worse placement that we accept because the alternative is worse. The clean fixes are structural and expensive: spread across 4 or 5 zones, which not every region has, or run m ≥ 4 so a zone loss leaves margin, which raises overhead and repair cost on 50% of the fleet's bytes. The published eleven nines is an annualised average that quietly includes these windows, and we do not publish the in-window figure.
 #### Drill questions
-1. How do you achieve 11 nines of durability?
-2. How do you handle a hot key being read 1M times/sec?
-3. A user uploads a 5TB file — how do you not blow up memory?
-4. How do you guarantee strong read-after-write consistency?
-5. Listing a bucket with 1B objects — how?
+1. Walk me through where 11 nines actually comes from, with numbers.
+2. How do you handle a hot key being read 1M times per second?
+3. A user uploads a 5TB file. How do you not blow up memory, and what is atomic?
+4. How do you guarantee strong read-after-write consistency, and what changed in December 2020?
+5. Listing a bucket with 40 billion objects. How?
 6. How do you stop a malicious user from filling a bucket with 100PB of garbage?
-7. Walk me through what changed in Dec 2020 strong consistency.
-8. Why erasure coding 6+3 rather than 10+4 or 17+5?
-9. How does shuffle sharding stop a hot customer hurting other tenants?
-10. Intelligent-Tiering — when is it the wrong choice?
+7. Why RS(6,3) rather than RS(10,4) or RS(17,5)?
+8. At what object size and access frequency does erasure coding stop being the right choice?
+9. How does spreading a bucket across millions of disks stop a hot customer hurting other tenants?
+10. Ten billion 4KB objects in one bucket. What breaks first?
+11. An entire availability zone goes dark for six hours. What is your durability during that window?
+12. A customer asks you to prove their deleted object is unrecoverable. What can you actually say?
+13. Why is the ETag of a multipart object not the MD5 of the object?
 #### Answers to drill questions
-1. Erasure coding (e.g. 10+4) across 3+ AZs; continuous scrubbing detects bit rot; auto-repair rebuilds lost shards. *If pushed:* the math works out from per-disk AFR × independence assumptions × repair time — durability degrades fast if AZs are correlated, so anti-affinity placement is non-negotiable.
+1. Not from the code word. RS(6,3) tolerates 3 simultaneous fragment losses, full stop; the nines come from the ratio of repair window to failure interarrival. At 1% AFR, λ = 1.14 × 10⁻⁶/hour, and a 1-hour repair window gives C(8,3) × (λT)³ = 8.3 × 10⁻¹⁷ for the three extra losses, times 9λ = 0.09/year for the first, so 7.5 × 10⁻¹⁸ per object-year, about seventeen nines. *If pushed:* the published figure is eleven, and the six-order gap is correlated failure, software defects and operator error. That is why the storage layer was rewritten in Rust with an executable specification checked by property tests (ShardStore, SOSP 2021) instead of given more parity. Anyone proposing a wider code to reach more nines is optimising the term that is already 10⁶ too small to matter.
 
-2. CDN absorbs almost all of it; origin sees aggregated requests. Per-key rate limit at the gateway prevents a single bucket from exhausting capacity. *If pushed:* for in-region hot reads (no CDN), shadow-replicate the object across more nodes than EC requires; route reads round-robin.
+2. A CDN absorbs over 99%; origin sees the aggregate. A per-key gateway rate limit stops one object exhausting capacity. *If pushed:* for in-region hot reads with no CDN, shadow-replicate beyond the code's requirement and round-robin. Better still, a hot object should not be erasure coded at all, so the real fix is a lifecycle transition to whole replicas, which turns a 6-seek read into a 1-seek read and removes the reconstruction CPU as well.
 
-3. Multipart upload: client splits into parts, each part uploaded separately, gateway streams to storage nodes. *If pushed:* server holds only metadata + current part in memory; parts can be retried independently; final commit is a metadata-only operation listing the part IDs.
+3. Multipart. The client splits into up to 10,000 parts of 5MB to 5GB; the service holds only the current part's buffer plus metadata rows, so server memory is O(part size), not O(object). Each part is independently retryable. *If pushed:* the only atomic step is `CompleteMultipartUpload`, which validates the `(part_num, etag)` list, builds the final manifest and swaps one pointer. Nothing before that is visible under the key, and `Abort` makes every piece unreferenced.
 
-4. Metadata service is the source of truth and is itself strongly consistent (Raft/Paxos); a PUT only acks once new piece locations are durably committed in metadata, and every GET resolves through metadata first. Treating data pieces as immutable content-addressed blobs means an overwrite is a metadata pointer swap, not a mutation race. *If pushed:* S3 itself was eventually-consistent on overwrites and LIST until Dec 2020, when AWS shipped strong read-after-write for all operations — the change was a metadata-layer rewrite, not data-plane, which is the tell that consistency lives in metadata.
+4. The metadata service is the only path to bytes and is itself strongly consistent via Raft; a PUT acks only after the pointer commits, and every GET resolves through the pointer. Immutable content-addressed pieces mean an overwrite is a pointer swap, not a mutation race. *If pushed:* S3 was eventually consistent on overwrite-PUT and LIST until December 2020. The change moved the pointer *read* from a replicated cache that could lag the commit to the shard leader or a lease-holding replica. No data-plane change, no cost change, no measurable latency change, which is only possible because the data plane was already immutable. Material written before 2020 says the opposite and is now wrong.
 
-5. Prefix-indexed B-tree on metadata keyed by `(bucket, key)`; cursor-based pagination returns 1000 keys at a time. *If pushed:* common prefix listing (`?prefix=2024/01/`) uses a range scan that's O(result_size), not O(bucket_size).
+5. Range-partitioned index on `(bucket, key)`, cursor pagination at 1,000 keys per page, and prefix scans that cost O(result) rather than O(bucket). *If pushed:* that answers "enumerate in key order" and nothing else. Any predicate on tag, size or last-modified is a full scan, and the shipped answer is a daily inventory report, which is a batch file pretending to be an index. Say so rather than implying LIST is a query.
 
-6. Per-account quotas + usage-based billing (cost is the rate limiter). *If pushed:* abuse detection on upload patterns (e.g. random-keyed PUT floods) triggers a soft throttle and human review.
+6. Cost is the rate limiter: usage-based billing plus per-account quotas on bytes and request rate. *If pushed:* the real abuse shape is not volume, it is a random-keyed PUT flood designed to force partition splits, or millions of tiny objects that cost nothing in bytes and everything in index. Detect on objects-per-second and mean object size, throttle softly, and escalate to a human. A billion 1KB objects is 1TB of data and 300GB of index, so the index is the resource being attacked.
 
-7. Pre-Dec-2020 S3 was eventually consistent on overwrites and LIST (read-after-write was strong only for new keys). The fix was a metadata-layer rewrite: `(bucket, key) → manifest` lives in a strongly-consistent metadata store, every GET resolves through it, every PUT only acks after metadata commits. Data pieces are immutable content-addressed blobs so an overwrite is a metadata pointer swap, not a data-plane mutation race. *If pushed:* the change shipped at scale with no perf or cost penalty because the data plane wasn't touched — consistency was already achievable in metadata, AWS just hadn't surfaced it.
+7. Repair cost scales with k. RS(6,3) reconstructs by reading 6 fragments; RS(17,5) at 29% overhead reads 17, so a single disk failure generates nearly 3x the repair traffic and touches 3x as many nodes. For a warm tier where repair competes with foreground reads, 6+3 is the sweet spot; for archive where reads are rare, RS(10,4) at 1.4x or wider is right and we use it. *If pushed:* the modern answer is local reconstruction codes, which add a local parity per group so the common case of one lost fragment is repaired from a handful of local fragments rather than from k. Azure published this in 2012 and it is why wide codes became practical at all.
 
-8. 6+3 has 50% overhead, tolerates 3 simultaneous losses, and is cheap to repair (read 6 pieces to reconstruct 3). Larger codes (17+5 = 29% overhead) are cheaper on storage but each repair reads 17 pieces, so background repair traffic grows with code width; for cold tiers where access is rare, 17+5 makes sense; for warmer tiers where repair traffic competes with reads, 6+3 is the sweet spot. *If pushed:* AWS S3 Glacier uses wider codes (less storage overhead, slower retrieval), Standard uses replication (faster reads, more expensive).
+8. Derive it. A 20TB drive at ~$300 over 5 years is $5/disk-month for 20TB and ~100 IOPS, so capacity is $0.00025/GB-month and a seek is $1.9 × 10⁻⁸. EC costs 5 extra seeks per read = $9.5 × 10⁻⁸; it saves 1.5·S GB = $3.75 × 10⁻⁴ · S(GB) per month. Break-even is ~3,950 · S(GB) reads/month: 1GB at 130 reads/day, 1MB at 4 reads/month, 128KB at once every two months, 10KB at once every two years. *If pushed:* that is a statement about spinning disks. On NVMe the per-operation cost falls ~4 orders of magnitude and the per-GB cost rises ~7x, moving the 10KB crossover to roughly 30 reads a day. And the right answer for small objects is neither: pack them into large sealed extents and erasure code the extent.
 
-9. Each bucket's objects are placed across a random subset of millions of disks, so any one bucket occupies <1% of any one disk. A workload that bursts to 1M req/s reads from millions of disks simultaneously — no single disk sees the burst as concentrated load. Aggregating millions of independent bursty workloads produces smooth aggregate demand. *If pushed:* if a customer pins all their objects to one prefix and drives 1M req/s on that prefix, S3 partitions the bucket internally and rebalances; the customer might see brief 503s during partition split.
+9. Each bucket's objects are sprayed across a random subset of the ~1M drives, so no bucket occupies a meaningful fraction of any drive. A workload bursting to 1M req/s reads from hundreds of thousands of drives at once, and no single drive experiences it as concentrated load. Aggregating millions of independent bursty tenants produces smooth aggregate demand. *If pushed:* it protects the data plane, not the index. A customer who drives 1M req/s at one key prefix concentrates on one range partition regardless of how their bytes are spread, and they will see 503s until the split completes. The data plane is shuffle-sharded; the index deliberately is not, because LIST needs order.
 
-10. For workloads with predictable access patterns (always-hot content, always-cold archives), pick the right class explicitly and skip the monitoring fee. For workloads with lots of small (<128KB) objects, Intelligent-Tiering doesn't apply (small objects stay in Frequent Access). *If pushed:* for known cold archives, S3 Glacier Deep Archive is significantly cheaper than Intelligent-Tiering's Deep Archive tier when you opt-in; only use Intelligent-Tiering when access pattern is genuinely unpredictable.
+10. The index. 10¹⁰ objects × 300B = 3TB of index for 40TB of data, so this customer costs one full metadata node while occupying 0.0002% of the disks, and every one of their requests is a full index lookup for a 4KB payload. Erasure coding them is actively wrong: 9 fragments of 667B each, dominated by per-fragment headers, 6 seeks to read 4KB. *If pushed:* the correct handling is packing. Aggregate small objects into sealed extents of ~1GB, erasure code the extent, and keep the offset in the index. That trades a compaction problem (a delete inside a sealed extent reclaims nothing until the extent is rewritten) for a per-object cost that otherwise never amortises.
+
+11. Worse than published, and we do not publish the in-window number. RS(6,3) at 3-3-3 leaves exactly 6 fragments, which is exactly k, so every warm object in the region is one fragment from gone. A drive that dies in a surviving zone destroys every group it touches, order 10⁸ objects for a 20TB drive at 167KB fragments, and at 29 failures/day about 7 drives die inside a six-hour outage. *If pushed:* the mitigation is emergency re-encode into the two surviving zones, deliberately violating anti-affinity to restore the fragment count. It needs 50% spare capacity in the survivors and it trades a disk-failure exposure for a zone-failure exposure. The structural fixes are 4 or 5 zones, or m ≥ 4, and both cost real money on 50% of the fleet's bytes.
+
+12. That it is unreachable, and that if it was encrypted under a per-object data key we have destroyed, it is cryptographically erased. Not that the bytes are physically gone. Pieces are swept by mark-and-sweep with a 7-day grace, and the blocks are overwritten whenever the drive next reuses them, which may be after decommission. *If pushed:* the per-object-key design exists largely to make this claim sayable, which is why customer-managed keys are the compliance answer: destroy the key and the ciphertext is unrecoverable regardless of what is still on a platter. Also warn them that a delete marker under versioning is not a delete at all, which is the single most common misreading of this API.
+
+13. Because the service never holds the whole object in one place. The ETag of a multipart object is the MD5 of the concatenated part MD5s with a `-N` suffix naming the part count, so it depends on the part size the client chose and two byte-identical uploads with different part sizes have different ETags. *If pushed:* this makes ETag useless as an integrity check for large objects, which is why S3 added CRC32C and SHA-256 as first-class object checksums in February 2022, with defined composition over parts. Use those; the ETag was overloaded into a role it structurally cannot fill.
 #### Whiteboard script
-TODO
+**0-5, frame it and ask the three questions that fork it.** Open with the thesis rather than the components: "an object store is a strongly consistent index in front of write-once bytes, and the durability number comes from the repair window, not from the erasure code." Then ask the three things that genuinely change the design: where is the median object size, do customers LIST or do they always arrive with a known key, and single region or multi. State your assumptions out loud: 40T objects in region, mean 310KB with a 10KB median, 12EB logical, 15M req/s. Draw nothing yet.
 
-A 45 minute budget: what to cover in 0-5, 5-15, 15-35 and 35-45, what to say first, and a line starting `Cut first:`.
+**5-15, the spine.** Four boxes and one background box. Client, bucket and auth service, metadata service holding `(bucket, key) -> manifest`, storage nodes holding `piece_id -> bytes`, and GC/repair/scrub hanging off the side. As you draw the arrows, say the three rules, because they are the whole answer: nothing reads bytes without resolving through metadata; the data plane never mutates anything; a PUT acks only after the metadata pointer commits. Then say what those three buy in one sentence: consistency, versioning, overwrite and resumable upload are all the same operation, which is build something immutable then move one pointer.
 
-**Raw material, from the old Talking Points:**
+**15-35, the drill.** Protect this time. Go deep on the manifest and the pointer swap: multipart as an incrementally built manifest over independently retryable parts, `Complete` as the single atomic step, `Abort` and the orphan sweep, and the ETag being the MD5 of part MD5s rather than of the object. Then December 2020, and be precise that it moved the pointer read from a lagging cache to the leader, touched no data plane, and was only possible because the bytes were already immutable. Then take the replication-versus-erasure-coding fork on your own terms with the arithmetic: 5 extra seeks per read at $1.9 × 10⁻⁸ each against 1.5·S GB saved at $0.00025, giving ~3,950 · S(GB) reads per month, so 128KB lands at once every two months, which is where AWS's own IA guidance sits. Close the band with the durability math and the punchline that independent failures give seventeen nines while the published number is eleven.
 
-These are what an S3-fluent interviewer wants to hear surfaced unprompted:
+**35-45, concede and close.** Give the three gaps before they are found: LIST cannot become a query engine under a range-partitioned key index, deletion is provable only cryptographically, and a zone outage leaves RS(6,3) at exactly k with emergency re-encode as the ugly mitigation. Then the operational surface in two minutes: repair prioritised by remaining redundancy, scrub at 1.7% of read bandwidth with cadence tracked as an SLO, the metrics you page on, and cross-region replication as async with the lag published as the RPO.
 
-- **Three layers — bucket, metadata, data plane** — name this within the first two minutes; everything else hangs off the split.
-- **Erasure coding 6+3 over 3× replication for cold tier** — 50% overhead vs 200%, tolerates 3 simultaneous losses; replication for hot tier where read latency matters.
-- **Metadata vs data-plane scale on independent axes** — metadata IOPS hits the ceiling first; data-plane bandwidth is huge but per-op rate moderate.
-- **Multipart upload** — anything over 5GB requires it; retries at part granularity; final `Complete` is a metadata-only atomic swap.
-- **Dec 2020 strong-consistency change is metadata-layer, not data-plane** — data was already immutable; consistency was already achievable; AWS just stopped exposing the eventual-consistency window. Cite this if pressed.
-- **Shuffle sharding for heat** — any one bucket spreads across millions of disks, so a hot tenant's burst doesn't concentrate on any single disk.
-- **Anti-affinity placement is non-negotiable for the durability math** — losing one AZ must leave ≥K pieces alive; without anti-affinity, 11 nines collapses under correlated failure.
+Cut first: the storage-class matrix and Intelligent-Tiering, then cross-region replication mechanics, then encryption and the envelope key hierarchy. All three are real and none of them changes the architecture, and the storage-class matrix in particular is a pricing discussion that eats the time the manifest deserves. Never cut: the metadata-and-data split with the pointer swap, the erasure-coding crossover with its numbers, and the fact that eleven nines is set by correlated failure rather than by the code.
 #### Appendix
 **Data model**
 
-- **buckets** (replicated SQL): `(bucket_id, owner, region, policies)`
-- **objects** (sharded KV, partition by (bucket_id, key)):
+- **buckets** (replicated SQL): `(bucket_id, owner, region, policies, versioning, lifecycle_rules)`
+- **objects** (range-partitioned KV on `(bucket_id, key)`):
   ```
-  (bucket_id, key) → {
-    version_id, size, content_type, etag (md5),
-    encryption_key_id, custom_metadata,
-    storage_class, blocks: [{node_id, piece_idx, ...}]
+  (bucket_id, key, version_id) -> {
+    manifest_id, size, content_type, etag, storage_class,
+    encryption_key_id, custom_metadata, created_at, delete_marker
   }
   ```
-- **storage nodes:** flat KV, key = piece_id → bytes
+- **manifests** (immutable): `manifest_id -> [ {part_num, etag, [ {node_id, piece_id, frag_idx} ] } ]`
+- **storage nodes:** flat KV, `piece_id -> bytes`
+- **reverse index** (for repair): `node_id -> [group_id]`, written alongside each fragment
 
 **API contract**
 
 ```
-PUT  /{bucket}/{key}   body: bytes  headers: x-amz-meta-*, content-type
-GET  /{bucket}/{key}   → bytes
-DELETE /{bucket}/{key}
-GET  /{bucket}?prefix=&marker=&max-keys=  → list
+PUT    /{bucket}/{key}   body: bytes   headers: x-amz-meta-*, content-type, x-amz-checksum-*
+GET    /{bucket}/{key}   [?versionId=] -> bytes
+DELETE /{bucket}/{key}   [?versionId=]
+GET    /{bucket}?prefix=&marker=&max-keys=  -> up to 1000 keys + continuation token
+POST   /{bucket}/{key}?uploads            -> upload_id
+PUT    /{bucket}/{key}?partNumber=&uploadId=  -> ETag
+POST   /{bucket}/{key}?uploadId=          body: part list -> final ETag
 ```
 
 **Observability**
 
-- `request_per_second` per bucket per operation (PUT/GET/LIST/DELETE)
-- `request_latency_ms` p50/p99 per operation (GET p99 <100ms in-region typical)
-- `5xx_rate` per region/operation (alert at >0.1% sustained)
-- `under_replicated_object_count` (target: 0)
-- `repair_queue_depth` and `repair_throughput_bytes_per_second`
-- `scrub_progress_pct` per disk (full sweep within ~weekly cadence)
-- `replication_latency_seconds` for CRR/Multi-Region Access Points
-- `storage_used_bytes` per bucket per storage class (lifecycle effectiveness)
+- `request_latency_ms` p50/p99 per operation, split by object size bucket, because a 10KB GET and a 1GB GET share nothing but a name.
+- `metadata_commit_latency_ms` p99. Every PUT is downstream of this one number.
+- `under_replicated_object_count` and `groups_at_exactly_k`. The second is the real durability alarm; the first is a work queue.
+- `scrub_cycle_days` per storage class. A cadence that has silently stretched from 90 to 400 days is a durability regression nothing else surfaces.
+- `partition_split_rate` and per-partition 503 rate, which together identify a sequential-prefix customer before they open a ticket.
+- `unreferenced_bytes` and GC sweep cycle time. A stalled sweep shows up as a cost anomaly weeks before it shows up anywhere else.
+- `replication_latency_seconds` per bucket for cross-region.
 
-**SLOs:** 11 nines (99.999999999%) durability per object per year; 4 nines (99.99%) availability per region; GET p99 <100ms in-region; PUT acks only after metadata commit (strong read-after-write); CRR lag <15min p95.
+**SLOs:** 11 nines durability per object per year; 99.99% availability per region; strong read-after-write on all in-region operations; GET p99 under 100ms in-region for objects under 1MB; cross-region replication lag under 15 minutes at p95.
 
 **Multi-region and DR**
 
-- **Replication mode:** intra-region durability via erasure coding 6+3 across 3+ AZs (anti-affinity, no AZ holds more than M=3 pieces). Cross-region replication is opt-in per bucket: CRR (async) for general workloads, Multi-Region Access Points for failover, S3 Object Lock + replication for compliance immutability.
-- **RTO:** sub-minute for client-side failover via Multi-Region Access Points (DNS-based routing). Full regional recovery for primary writes is hours-to-days depending on outage scope.
-- **RPO:** intra-region effectively 0 (writes ack only after durable EC commit). Cross-region async typically <15min lag, can reach hours during regional brownouts.
-- **Failover cadence:** AWS exercises regional failover continuously as part of normal operations (game-days, control-plane recovery drills); customers exercise their own MRAP failover quarterly.
-- **Cross-region cost:** CRR egress + per-PUT replication request + storage on the destination side. For an EB-scale workload this is dominant; many customers replicate only critical buckets.
+- **Replication mode:** intra-region durability from erasure coding across 3 or more zones with anti-affinity, no zone holding more than m fragments. Cross-region is opt-in per bucket and asynchronous.
+- **RTO:** sub-minute for client-side failover via multi-region access points, which is DNS-based routing rather than a data operation. Full regional recovery for primary writes is hours to days depending on scope.
+- **RPO:** effectively zero intra-region, because a PUT acks only after the durable commit. Cross-region is bounded by the replication lag, typically under 15 minutes and hours during a regional brownout, and that bound is the published RPO.
+- **Failover cadence:** exercise the multi-region path quarterly, and include a read of a recently written object in the drill, because replication lag is invisible until you read across it.
+- **Cross-region cost:** egress plus a per-PUT replication request plus destination storage. At exabyte scale this dominates, so most customers replicate only the buckets that need it.
 
 ### 22. Design a Real-Time Gaming Leaderboard
 #### Problem
@@ -12629,100 +12685,125 @@ GET  /search?q=...        -> results across users, sounds, hashtags
 
 ### 29. Design Uber / Lyft (Ride Hailing)
 #### Problem
-Match riders to nearby drivers in real time, track trips, compute fares, and process payments.
+Match riders to nearby drivers in seconds, then track the trip from pickup to drop-off, price it, and settle payment. Both populations move continuously and neither is under your control: a driver can decline an offer, go offline mid-shift, or take a fare from a competing app. The same driver must never be promised to two riders.
 #### Core
-TODO
+The geo lookup is the easy part. This is an assignment problem over inventory that moves, declines, and disappears.
 
-Write the whole answer as you would give it in sixty seconds, 200 to 300 words, standing alone.
+Drivers push location every 4 seconds into an in-memory index sharded by city. A ride request reads that index for drivers within about 2 km, roughly 50 after filtering on vehicle type, scores them by predicted arrival time rather than straight-line distance, and offers the best one.
+
+The offer is where the design lives. A driver is scarce inventory, so before the offer goes out the dispatcher takes an exclusive lease: a conditional write moving that driver from available to offered, carrying the request id and a 15 second expiry. Two requests racing for the same driver mean one write wins and the loser falls through to its next candidate. Acceptance converts the lease into an assignment and writes a trip. A decline or an expiry returns the driver to the pool with no cleanup job involved, because expiry is a property of the record rather than an event someone has to fire.
+
+The trip is then a state machine: requested, matched, en route, arrived, on trip, completed. Every transition is a conditional write gated on the prior state, so a retry cannot drag a trip backwards. Payment hangs off completion asynchronously, because a declined card must not block a driver's next ride.
+
+Scale by sharding on city. Location, dispatch and trips are all city local, so a city is an independent failure domain and the only global services are identity, payments and the analytics stream.
+
+When supply runs short there are two levers, price on the rider side and repositioning bonuses on the driver side. Both act in minutes, and neither one creates cars.
 #### Summary
-**The picture in your head:** a taxi dispatcher at a busy airport with a radio and a map of pins showing every cab's location, updated every 4 seconds. When a passenger calls, the dispatcher glances at the map, picks the closest available cab, radios it an offer, and waits for acknowledgment. If the driver ignores the radio, the dispatcher calls the next closest. The whole exchange takes 10–15 seconds. Uber does this for millions of passengers simultaneously, each dispatcher only covering their city, each with a map that refreshes every 4 seconds.
+**The picture in your head:** a taxi dispatcher at a busy airport with a radio and a map of pins showing every cab, updated every 4 seconds. When a passenger calls, the dispatcher glances at the map, picks the closest free cab, radios it an offer, and waits for an acknowledgement. Crucially the dispatcher crosses that cab off the list the moment they radio it, before anyone has accepted, and puts it back if nobody answers in fifteen seconds. Otherwise two passengers get promised the same car. Uber does this for millions of passengers at once, one dispatcher per city.
 
 **The approaches people actually take:**
-TODO. Two or three things a competent engineer might reach for, in plain language and before any product name, with what each one buys and roughly when it wins.
 
-**The single-request walkthrough:** a rider in San Francisco requests a UberX at coordinates (37.78, -122.41). The Matching Service runs `GEORADIUS drivers:sf -122.41 37.78 2km` against Redis — a single in-memory command that returns all driver IDs within 2km in about 5ms. There are 47 results. The service filters to `status=available` and `vehicle_type=uberx` — 23 remain. It scores each by estimated arrival time (computed from pre-cached travel-time tiles, not a live routing call) plus driver rating. The top scorer is driver D-449. The service pushes a job offer to D-449's phone via WebSocket: "rider at [pickup], $12 fare, 3 min away." D-449 has 12 seconds to accept. They tap Accept. The Matching Service creates a trip record in Cassandra with state `MATCHED` and notifies both sides. Total time from rider tap to match: under 2 seconds.
+*Greedy, one offer at a time.* Handle each request the instant it arrives: look up nearby free drivers, rank by arrival time, hold the best one, offer, cascade on a decline. It buys the shortest time to a first offer and a state model simple enough to reason about, since exactly one driver is on hold per request. It costs global efficiency, because every request is decided without knowing what arrives one second later. It wins whenever requests are sparse relative to nearby supply, which is most cities for most of the day.
+
+*Batch a short window and solve it as one problem.* Hold arriving requests for a few seconds and assign the whole window at once, minimising total pickup time across all pairs. It buys measurably shorter average pickups when the window is genuinely full, and it is the only shape that expresses shared rides, where you assign a rider to a route rather than to a car. It costs every rider that window of latency, including the ones who would have matched instantly. It wins where density per window is high enough that greedy and optimal disagree.
+
+*Publish the request and let drivers claim it.* Broadcast to a pool and take the first claim. It buys almost no dispatch logic, and drivers like it. It costs control of the market: drivers cherry-pick, awkward trips never clear, and you still need an atomic claim, so the race has moved rather than gone. It wins in thin markets and for scheduled or freight-style work where a fast pickup is not the product.
+
+**The single-request walkthrough:** a rider in San Francisco requests an UberX at (37.78, -122.41). The Matching Service queries the city's geo index for drivers within 2 km, which returns 137 ids in well under a millisecond because it is a bounded scan over an in-memory sorted set. It filters to vehicle type and to drivers whose last ping is under 10 seconds old, leaving 52, then scores each by estimated arrival time from precomputed cell-to-cell travel-time tiles rather than a live routing call, plus a small term for acceptance history. The top scorer is driver D-449. The service now attempts a conditional write on D-449's driver record: available to offered, request id attached, expiry 15 seconds out. It wins, so the offer is pushed over D-449's existing WebSocket. D-449 taps Accept at second 6. The accept does a second conditional write, this time on the request, moving it from REQUESTED to MATCHED with driver D-449 attached, and only then converts the driver lease to assigned. Rider tap to first offer: under 2 seconds. Rider tap to accepted match: about 8 seconds, and the driver's thinking time is nearly all of it.
 
 **The pieces (and what each one is for):**
-- **Redis GEO (geo index)** — an in-memory data structure that stores geographic coordinates alongside an identifier. Under the hood it encodes each point as a **geohash** (a compact string that approximates the coordinate by subdividing a map into cells — nearby cells share a prefix). `GEORADIUS` returns all entries within a radius in milliseconds because it only needs to scan a small prefix range of the sorted set.
-- **H3 hexagonal grid** — Uber's own geographic indexing system. It divides the Earth into hexagonal cells of equal size. Hexagons beat squares because all 6 neighbors of a hexagon are at the same distance from the center — no "diagonal neighbor is farther away" problem that distorts proximity calculations with squares. Uber uses H3 cells for surge pricing zones (each cell has its own multiplier) and for dispatching candidates.
-- **Trip state machine (FSM)** — every trip is a record in Cassandra with a `status` field that can only move forward through defined states: `REQUESTED → MATCHED → DRIVER_ENROUTE → ARRIVED → ON_TRIP → COMPLETED → PAID`. Every transition is a **CAS** (compare-and-swap) database write — it only succeeds if the current state matches the expected prior state. If a stale retry tries to move a `COMPLETED` trip back to `ON_TRIP`, the database rejects it. This makes the trip lifecycle immune to duplicate requests and network retries.
-- **Surge pricing** — a multiplier (e.g., 1.5×) applied to fares in a geographic cell when demand exceeds supply. A Flink streaming job computes the ratio of ride requests to available drivers per H3 cell every 60 seconds. When the ratio crosses a threshold, it writes the multiplier to a Redis cache keyed by cell ID. The multiplier is locked onto the rider's trip at request time — a price quoted to the rider does not change during the 90 seconds before a driver arrives.
-- **Kafka + Cassandra for history** — every driver location ping (every 4 seconds, from 1 million concurrent drivers) writes to Redis for the live index (fast, in-memory, discarded after 10 seconds) and also to a Kafka stream that flows into Cassandra for historical analytics, fraud detection, and route replay. The live path and the history path are completely separate — a Kafka outage does not affect matching.
+- **Geo index (live driver positions).** An in-memory structure holding one current position per on-shift driver, keyed by city, supporting "everyone within radius r". Entries carry a 10 second TTL so a dead phone falls out with no cleanup pass. It is deliberately approximate and deliberately not durable: it is a candidate generator, never an authority on whether a driver is free. Q13 covers how the index itself is built and why cell-based schemes beat a bounding-box query.
+- **Driver record (the unit of exclusivity).** One row per driver in a store that gives linearizable conditional writes per key, holding `state ∈ {offline, available, offered, assigned}`, the request id if offered, and a lease expiry. This is the only thing in the system that decides whether a driver is free. Splitting it from the geo index is the central move: the index can be 4 seconds stale and it does not matter, because the index only nominates and the record adjudicates.
+- **Matching service.** Stateless workers, one pool per city. Reads the index, scores candidates, takes leases, pushes offers, cascades. Holds nothing that survives a restart, so a worker dying loses at most the in-flight offers, which their leases expire out of anyway.
+- **Trip state machine.** A row whose `status` moves only forward through `REQUESTED → MATCHED → DRIVER_ENROUTE → ARRIVED → ON_TRIP → COMPLETED → PAID`. Every transition is a compare-and-swap gated on the expected prior state, so a duplicate retry that tries to move a `COMPLETED` trip back to `ON_TRIP` is rejected by the store rather than by application logic.
+- **Pricing.** A multiplier per geographic cell, recomputed on a 60 second cadence from the ratio of requests to available drivers, snapped to a discrete ladder with hysteresis so a cell does not oscillate. The multiplier is locked onto the trip at request time, so a price the rider accepted does not move during the 90 seconds before the car arrives.
+- **History stream.** Every ping and every state transition also lands on an append-only stream feeding the analytics store, fraud detection and route replay. The live path and the history path share nothing: a broker outage degrades reporting and cannot touch dispatch.
 
-**The thing that makes it hard — the concert-end surge:** 10,000 people leave Madison Square Garden simultaneously and all open Uber within 60 seconds. The Matching Service for New York City suddenly receives 10,000 ride requests in the same H3 cell. The surge pricing multiplier kicks in (within 60 seconds). But even with surge, 10,000 simultaneous dispatch searches all query the same Redis GEO key `drivers:nyc` in parallel — the Redis node for that key can handle about 200,000 commands per second, so 10,000 simultaneous `GEORADIUS` queries at ~5ms each would take 50 seconds to process serially. The fix: Redis is multi-threaded for reads (concurrent `GEORADIUS` queries on the same key execute in parallel), and the Matching Service per city is a pool of stateless workers that auto-scale. The Redis node sees a spike in CPU but not a serial queue.
+**The thing that makes it hard, and it is not the index:** 10,000 people leave an arena and 3,000 of them open the app inside 60 seconds. That is 50 requests per second in one city, and the geo index does not notice; a radius query returning 50 members from a sorted set of 100,000 costs a couple of hundred microseconds, so one shard absorbs thousands per second. What actually happens is that there are maybe 300 free cars within 5 km and 3,000 riders who want one. Every dispatcher is now competing for the same few driver records, so most lease attempts fail, requests walk their whole candidate list and find nothing, and the queue of unmatched requests grows until the cars come back from their drop-offs, and then it grows again because each of those 2,700 riders is retrying. Surge rations demand within a minute and repositioning bonuses pull in cars over five to fifteen minutes, and neither closes a ten-to-one gap. The engineering job here is to fail legibly: bound how far a request walks before it backs off, tell the rider the honest wait, and do not spend the whole cluster's CPU on contended compare-and-swaps.
 
-**Why this design and what it costs:** the key architectural decision is keeping the live driver index in Redis (in-memory, fast reads) completely separate from the trip history in Cassandra (durable, slow writes acceptable). Writing 250,000 location pings per second to Cassandra directly would require a massive cluster and add latency to the match path. Redis absorbs the writes in microseconds; Cassandra absorbs the history writes asynchronously via Kafka, with no impact on matching speed. The tradeoff: a Redis crash loses the current driver positions (up to 10 seconds worth). This is acceptable — drivers send a new ping within 4 seconds, so the index self-heals.
+**Why this design and what it costs:** the live driver index is separate from durable trip history because writing 250,000 pings per second into a durable store would need a large cluster and would put its latency on the match path. Memory absorbs the pings, the stream absorbs the history asynchronously. The cost is that losing the index loses current positions, up to 10 seconds of them. That is acceptable because drivers re-ping within 4 seconds and the index self-heals, and because the index was never authoritative about availability anyway. The thing you cannot lose is the driver record and the trip row, which is why those live in a replicated store and pay for consistency.
 
 **If you were building it tomorrow:**
-- Redis Cluster (sharded by city) for the live geo index; TTL of 10s on each driver entry so dead phones auto-expire. Kafka for location event streaming. Cassandra for trip records and history.
+- Redis Cluster sharded by city for the live geo index, 10 s TTL per entry. A per-key-linearizable store for driver records and trips. Kafka for the history stream. Long-lived WebSockets from both apps to a stateful edge tier.
 - Matching hot path:
   ```
-  candidates = redis.georadius(f"drivers:{city}", lat, lng, radius=2km)
-  candidates = [d for d in candidates if d.status == 'available']
-  scores = [(driver_id, eta_tile_lookup(driver_loc, pickup_loc) + 0.1*rating) for ...]
-  top_driver = min(scores, key=lambda x: x[1])
-  websocket.push(top_driver.id, offer_message)
-  // on accept:
-  cassandra.cas(trip_id, expected_state=REQUESTED, new_state=MATCHED)
+  cands = geo.radius(city, lat, lng, 2km)          # ~50 after filtering
+  cands = [d for d in cands if d.last_ping < 10s and d.vehicle_type == req.type]
+  ranked = sort(cands, key=lambda d: eta_tile(d.cell, pickup.cell) - 20*d.accept_rate)
+  for d in ranked[:5]:                              # bounded walk, see Deep dive
+      if cas(driver[d], expect=AVAILABLE, set=OFFERED(req.id, now+15s)):
+          push_offer(d, req); break
+  else:
+      requeue(req, radius*1.5, backoff=2s)
+  # on accept, in this order:
+  #   cas(trip[req.id], expect=REQUESTED, set=MATCHED(d))   # request claimed once
+  #   cas(driver[d], expect=OFFERED(req.id), set=ASSIGNED)  # driver committed
   ```
-- Surge: Flink job consuming the rider-request Kafka stream, grouping by H3 cell on a 1-minute tumbling window, writing `surge:{cell_id}` to Redis when demand:supply ratio > threshold.
+- Surge: a streaming job over the request stream keyed by cell on a 60 s tumbling window, writing the multiplier to a cache the pricing service reads at quote time.
 #### What this is really testing
-TODO
+Whether you see the driver as scarce inventory rather than as a search result. Finding nearby drivers is a lookup, and it is solved. The moment you decide to offer one, you are allocating a mutable, self-willed resource that can say no, and every hard property of this system falls out of that: the exclusive hold taken before the offer is sent rather than after it is accepted, the expiry that returns the hold without a sweeper, the cascade to the next candidate, the second claim on the request itself so two drivers cannot both accept, and the fact that the allocation policy is a product decision with a latency price attached rather than an implementation detail. A candidate who spends thirty minutes on geohashes and H3 and then says "and then we assign the closest driver" has described the input to the problem.
 
-The one insight this question exists to elicit, then the contrast with the question it most resembles and why the answers differ.
+The closest neighbour is Nearby Friends, and the machinery looks almost identical: moving points, frequent pings, a radius index, persistent sockets pushing updates. The answers diverge because that problem is symmetric and non-exclusive. Alice's position can be delivered to two hundred friends at once and nothing is consumed by the delivery; the hard parts are fan-out cost and who is permitted to see whom, and the correct answer is largely about pre-filtering publishes so you do not pay for subscribers who are out of range. Here the populations are two-sided and asymmetric, and the output is an exclusive assignment. Reading a driver's location is free and repeatable. Assigning that driver is a one-shot allocation that has to be atomic, revocable, and fair enough that drivers keep working for you. Take the Nearby Friends answer into this room and you will have built an excellent live map of cars with no dispatcher behind it. Hotel reservations, Q19, is the other neighbour and it is closer on the allocation axis than on the geography axis, but its inventory sits still, cannot refuse a booking, and is chosen by the customer rather than by the system.
 
-Closest question: TODO
+Closest question: Q14
 #### Clarifying questions and how each answer forks the design
-- City-by-city or global?
-- Surge pricing?
-- Pool / shared rides?
-- ETA prediction quality?
+- One city or a global platform from day one?
+- Solo rides only, or shared and pooled rides?
+- Does the driver see the destination before accepting?
+- Is surge pricing permitted, and is it capped by regulation?
+- How good do ETAs have to be, and are we building the routing engine or consuming one?
+- Is there a scheduled-ride product, or is everything on demand?
 
 **How the answers shape the design**
 
 | If the answer is… | Then the design… |
 |---|---|
-| Real-time matching | a geo index of available drivers (grid or S2 cells) updated on location pings, queried per request |
-| Surge pricing | a pricing service reading live supply/demand per cell |
-| Pool/shared rides | a harder matching problem: batch riders and optimize routes, not 1:1 assignment |
-| City-by-city | shard the whole system by city/region so each is independently scalable |
-| ETA prediction | a routing/ETA service using live traffic, decoupled from matching |
-| Payments and trips | a trip state machine plus a payment saga on completion |
+| On-demand solo rides | greedy dispatch: one exclusive lease per request, offer to the top candidate, cascade on decline |
+| Shared or pooled rides | batched window matching, because the assignment is request-to-route and cannot be decided one rider at a time |
+| Destination hidden before accept | fewer declines and a simpler cascade, at the cost of driver goodwill and an appeals process for genuine refusals |
+| Surge permitted | a pricing service reading live supply and demand per cell, with the multiplier locked at request time |
+| Surge capped or banned | supply-side incentives and queueing become the only levers, so the design needs a visible virtual queue |
+| We consume routing | scoring reads precomputed cell-to-cell travel-time tiles, and the routing engine (Q15) is an external dependency with a fallback |
+| City-by-city | shard location, dispatch and trips by city so each is an independent failure domain and can scale on its own |
+| Scheduled rides | a separate reservation path that pre-commits supply, which is a different problem to on-demand dispatch and should not share the matcher |
 #### Requirements and scale, derived out loud
 **Requirements**
 
-- **FR:** rider request → match driver → track location during trip → fare calculation → payment
-- **NFR:** sub-2s match in dense areas, accurate ETAs, handle spikes (rush hour, events)
+- **FR:** rider requests a ride, system matches a driver, both sides track each other live, trip is recorded, fare is computed, payment settles.
+- **NFR:** first offer pushed within 2 s in dense areas, accepted match typically within 10 s, no driver ever offered to two riders, trip and fare records durable, spikes of 10x absorbed without a global outage.
 
 **Scale**
 
-- **MAU / rides:** ~100M MAU (Uber 2024 public disclosures); ~10M rides/day globally → 10M / 86,400 s ≈ ~120 rides/s avg; 10× rush-hour multiplier (Uber eng posts) → ~1,200 rides/s peak
-- **Active drivers / pings:** ~5M weekly active drivers; ~20% on-shift concurrency at peak → ~1M concurrent; ping cadence 4 s → 1M / 4 s = 250k location updates/s
-- **Match scan size:** GEORADIUS 2 km in a dense city: density ~5–15 drivers/km² × π × 2² ≈ 60–180, filtered to available/right-vehicle ≈ ~50 candidates
-- **Location ping size:** ~100 B = (driver_id 8 B + lat 8 B + lng 8 B + heading 4 B + speed 4 B + status 1 B + ts 8 B + Protobuf framing ~60 B)
-- **Location ping volume:** 250k pings/s × 100 B = 25 MB/s on the hot in-memory path; 25 MB/s × 86,400 s = ~2.16 TB/day raw → 5× columnar compression (numeric/timestamp columns) ≈ ~430 GB/day archived
-- **Hot geo state:** 1M concurrent drivers × 100 B = 100 MB current-position footprint per city shard, fits trivially in a RAM-resident sorted set
-- **Trip record size:** ~2 KB per trip = (polyline ~1 KB at ~50 lat/lng × 16 B + fare ~200 B + surge ~50 B + 6 timestamps × 8 B + ratings ~100 B + IDs ~150 B + framing); 2 KB × 10M trips/day = 20 GB/day; 7-yr retention (US tax/dispute) → 20 GB × 365 × 7 ≈ ~51 TB cold columnar
-- **History stream retention:** 25 MB/s × 86,400 s = 2.16 TB/day raw; 24 h hot replay × RF 3 + index/tombstone overhead ≈ ~25 TB on SSD
+- **MAU / rides:** ~100M MAU (Uber 2024 public disclosures); ~10M rides/day globally, so 10M / 86,400 s ≈ **~120 rides/s average**; a 10x rush-hour and weekend-night multiplier gives **~1,200 rides/s peak**.
+- **Active drivers / pings:** ~5M weekly active drivers; ~20% on shift at peak gives **~1M concurrent**; at a 4 s cadence that is 1M / 4 = **250k location updates/s**.
+- **Sanity check on those two together:** 10M rides/day at ~25 minutes of driver time per ride, including the pickup leg, is 10M × 25 / 60 = **~4.2M driver-hours/day** of work. If peak concurrency is 1M and the daily average is roughly 40% of peak, supply is 0.4M × 24 = **~9.6M driver-hours/day**, so fleet utilisation is ~44%. That is in the right band for a dense-market ride-hailing fleet, so the two numbers are consistent.
+- **Match scan size:** at a driver density of 5 to 15 per km² in a dense city, a 2 km radius covers π × 2² = 12.6 km², so 63 to 188 drivers; filtering to available and the right vehicle type leaves **~50 candidates**.
+- **Dispatch density, which decides greedy against batched:** demand concentrates, so assume the largest metro takes ~2% of global peak, 0.02 × 1,200 = **~24 rides/s**. A metro of ~800 km² split into 2 km catchments (12.6 km² each) is ~65 catchments, so ~0.37 rides/s per catchment; a 5 s batching window therefore holds 0.37 × 5 ≈ **2 requests** in an average catchment. A downtown core at 10x the metro average holds 10 × 2 = **~19 per window**. Only the second number is large enough for a batch assignment to differ from a greedy one.
+- **Offer economics:** assume a 70% accept rate, with the other 30% split as 20% explicit declines at ~3 s and 10% silence for the full 15 s TTL. Expected extra offer rounds per match = (1 − 0.7) / 0.7 = **0.43**, and the average cost of a failed round is (0.2 × 3 + 0.1 × 15) / 0.3 = **7 s**, so expected added wait is 0.43 × 7 ≈ **3 s**. This is why the sub-2 s NFR is time to *first offer*, not time to match; time to accepted match is ~5 s median and the server contributes ~200 ms of it.
+- **Location ping size:** ~100 B = driver_id 8 B + lat 8 B + lng 8 B + heading 4 B + speed 4 B + status 1 B + ts 8 B + Protobuf framing ~60 B.
+- **Location ping volume:** 250k/s × 100 B = **25 MB/s** on the hot in-memory path; 25 MB/s × 86,400 s = **~2.16 TB/day** raw, and at 5x columnar compression on numeric and timestamp columns, **~430 GB/day** archived.
+- **Hot geo state:** 1M concurrent drivers × 100 B = **~100 MB of current-position state globally**, so even the largest single city shard is tens of MB and sits in RAM with no tuning required. The geo index is never the capacity problem.
+- **Driver-record write rate:** two conditional writes on the driver record per successful match, taking the lease and converting it, plus one per failed offer round, so 2 + 0.43 = **~2.4 per match**; at 1,200 matches/s that is **~2,900 conditional writes/s globally**, spread across city shards. Trivial for the store, which is why exclusivity can be a per-key compare-and-swap rather than anything cleverer. Note this scales with rides, not with drivers.
+- **Trip record size:** ~2 KB per trip = polyline ~1 KB (~50 lat/lng pairs × 16 B) + fare ~200 B + surge ~50 B + 6 timestamps × 8 B + ratings ~100 B + ids ~150 B + framing. 2 KB × 10M/day = **20 GB/day**; at 7 year retention for tax and dispute purposes, 20 GB × 365 × 7 ≈ **~51 TB** cold columnar.
+- **History stream retention:** 2.16 TB/day raw; 24 h of hot replay at replication factor 3, plus index and tombstone overhead, is **~25 TB** on SSD.
 #### Key decisions
-TODO
+**Greedy per-request dispatch against batched window matching**
+- Choice: greedy. Every request is dispatched the moment it arrives, taking one exclusive driver lease and cascading on decline. Batching is available per region as a runtime switch and is on by default only for shared rides.
+- Alternative: hold every request for a 4 to 6 second window and solve each window as one bipartite assignment across all pending requests and all free drivers, minimising total pickup time.
+- Decider: requests per window per catchment. From the scale section, an average 2 km catchment in a top metro sees ~0.37 rides/s, so a 5 s window holds about 2 requests, and with ~50 candidates each the greedy and optimal assignments agree on almost all of them. Batching starts to change the answer above roughly 5 requests per window, which the same metro's downtown core reaches at ~19. Below that threshold you are paying every rider 5 seconds for an assignment you would have made anyway.
+- Alternative wins when: the product is shared rides, where a batch is not an optimisation but the only way to express the problem, since you are assigning riders to a route rather than to a car. Also at any venue-style choke point, an airport queue or a stadium exit, where both sides are already queued and the density is an order of magnitude above city average, and in very dense markets where citywide density sits above the threshold all day. Batching is genuinely better there and the 20 to 30% reduction in empty pickup miles it buys is real, not marginal; the reason it is not the default is that most catchments most of the time do not have enough in a window for it to do anything but add latency.
 
-Two or three genuine forks. For each, in this exact shape so it stays checkable:
+**Exclusivity by per-driver lease against a single-writer dispatcher per region**
+- Choice: stateless dispatch workers, with exclusivity enforced by a conditional write on the driver record carrying a TTL lease. Any worker may attempt any driver; the store arbitrates.
+- Alternative: one process owns all drivers in a geographic region and is the only thing that may assign them, so the race cannot occur by construction. This is the pattern that a matching engine uses to get determinism (Q25) and it is a real option here.
+- Decider: how much traffic sits on region boundaries, which is a function of region size against the 2 km catchment radius. A 10 km square region inset by 2 km leaves 6 × 6 = 36 km² of its 100 km² untouched, so **64% of the area is within one catchment of a boundary** and most drivers are legitimately contested between two owners. Making single-writer clean needs regions at least 10x the catchment radius, 50 km across, which drops the contested band to 1 − (46/50)² = **15%** but puts an entire metro on one thread. Symbols in an exchange partition cleanly and geography does not, and that asymmetry decides it.
+- Alternative wins when: the pool really is closed and much larger than the catchment. An airport holding lot with a FIFO driver queue is the clearest case, and there single-writer is strictly better because it also gives you a defensible ordering to show drivers. It also wins once you have switched a region to batched matching, since a batch solver is already a single writer over its window, so on any region running batching the lease degenerates into bookkeeping.
 
-**<name of the fork>**
-- Choice:
-- Alternative:
-- Decider:
-- Alternative wins when:
-
-**Raw material, from the old Common Mistakes:**
-
-- *Broadcasting offers to every nearby driver.* Causes "already taken" UX, wasted offers, and contention; offer-to-top sequentially with short TTL is the canonical model.
-- *Putting durable history on the match path.* Matching must read/write only the in-memory geo index; Kafka history is async, never blocking.
-- *Using geohash naively for dispatch quality.* Cell-size distortion at high latitude and uneven neighbour distances bias scoring; H3 hexagons are the canonical fix once geohash skew bites.
-- *Synchronous payment in the trip-completion FSM transition.* Couples trip completion to gateway availability; payment must be async with retry, trip completes regardless.
-- *Storing driver location only in Cassandra.* Cassandra writes per ping at 250k/s saturate the cluster; the in-memory hot path + async stream-to-history is the only viable shape.
-- *Continuous surge multipliers without hysteresis.* Causes flapping every minute; discrete ladder + asymmetric thresholds is the correct mechanism.
+**Rider-side price against driver-side repositioning incentives as the lever for imbalance**
+- Choice: both, with price as the fast lever and incentives as the slow one. Surge recomputes per cell on a 60 s cadence and acts on demand immediately at quote time; repositioning bonuses are issued to idle drivers within a radius of a forming deficit.
+- Alternative: supply-side only, holding price flat and moving cars with bonuses, queue position and forecast-driven pre-positioning.
+- Decider: idle supply reachable inside the window, against the size of the deficit. At 5 to 15 drivers per km² with roughly 30% idle, a 5 km reposition radius (10 minutes at 30 km/h, ~78 km²) reaches **120 to 350 idle cars**. That comfortably clears a 200 car shortfall, and it does nothing at all for the ~2,700 car shortfall an arena produces, where the only mechanism that clears the market inside the hour is price.
+- Alternative wins when: the imbalance is predictable and scheduled, so you move supply *before* the spike rather than bidding for it afterwards. A fixture list, an airport arrivals bank and a commuter peak are all forecastable a day out, and pre-positioning against a forecast beats reacting with price on both rider cost and driver earnings. It also wins by force wherever surge is capped: several jurisdictions restrict multipliers, and price-gouging rules bite during exactly the emergencies that produce the largest imbalances, so the design must work with the price lever set to 1.0x.
 #### High-level design
 **must-say**
 
@@ -12815,41 +12896,31 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 </svg>
 ```
 
-**How to read the diagram:** live location flows in from riders and drivers, a dispatch layer matches them, and a trip state machine tracks what happens next. Search, pricing, and notifications all hang off that moving state.
+**How to read the diagram:** two flows meet at the Matching Service. Driver locations come up the top edge every 4 seconds and fan into two independent sinks, the live geo store for current position and the history stream for everything else. Rider requests come in from the left. Matching reads the geo store, then pushes an offer back down the dashed arrow to a driver, and that dashed arrow is the only edge here that consumes something. Everything below Matching is what happens after an offer is accepted.
 
-**Why the flow is shaped this way:** the world keeps changing while the system is making decisions. A static database lookup is not enough when both sides are moving and local conditions can flip in seconds.
+**The box that is missing, and that you should draw:** there is no driver-state store on this diagram, and its absence is exactly the mistake the question is looking for. Add a small box next to the geo store holding one record per driver with `available / offered / assigned` and a lease expiry, and route the Matching Service through it before the offer arrow rather than after it. The geo store nominates candidates; that record decides whether a candidate is actually free.
 
-**What this layout buys you:** responsive matching and a cleaner way to reason about the ride lifecycle. The tradeoff is that geo state, dispatch, and trip transitions all need to be treated as first-class real-time concerns.
+**Why the flow is shaped this way:** live positions and durable records have opposite requirements. Positions are high volume, low value and disposable, so they live in memory behind a TTL and the history path is fully asynchronous, which is why a broker outage degrades reporting and cannot touch dispatch. Trip and driver state are low volume, high value and contended, so they need a store that can do a conditional write. Merging the two means either paying consistency costs on 250k pings per second or accepting that assignments can be lost.
+
+**What this layout buys you:** matching is a local in-memory decision with one consistent write at the end of it, and nothing durable sits on the hot path. The cost is that the two stores disagree, and they do: the geo store will happily nominate a driver who was assigned two seconds ago. The design absorbs that by treating the index as a hint and the driver record as the authority, which is the subject of the deep dive.
 #### Deep dive
 **must-say**
 
-**Matching algorithm:**
-```
-On rider request at (lat, lng):
-  1. Find candidates: GEORADIUS drivers:{city} lng lat 2km
-     filter: status=available, vehicle_type matches
-  2. Score each: ETA (real road dist) + driver rating + completion rate
-  3. Offer to top driver via WS push
-  4. Driver accepts within Ns → matched
-                rejects → offer next
-                no response → next
-  5. If no match in 30s → expand radius, surge price
-```
+**Dispatch: offering a scarce driver exactly once.**
 
-**Geo-indexing for drivers.** Redis GEO uses geohash prefixes internally — "find drivers within 2km" is a fast prefix-bounded scan over an in-memory sorted set, returning candidates in milliseconds with no disk hit. Geohash cells distort near the poles and have non-uniform neighbours (a cell's eight neighbours can be different sizes), which matters for driver-distribution math in dense areas. Uber's own H3 (hexagonal hierarchical grid) gives every cell exactly six equal-sized neighbours, making "drivers in this hex and the surrounding ring" a clean uniform query — the canonical fix once geohash skew starts hurting matching quality.
+*The candidate list is a hint. The lease is the truth.* The geo index returns drivers whose last ping is recent and whose cached status says available. Both facts are up to 4 seconds old, and 4 seconds is long enough for someone else to have taken the driver. So the index never decides anything. Scoring produces a ranked list, and the dispatcher then attempts a conditional write on the top candidate's driver record: from `AVAILABLE` to `OFFERED(request_id, expires_at)`. Only if that write succeeds does an offer leave the building. Taking the hold *before* sending the offer rather than after receiving an acceptance is the whole trick, and it is the step candidates skip. Offer first and hold later, and two dispatchers will both offer the same car, both drivers will drive to different pickups, and one rider will watch a car approach and then turn away.
 
-**Surge pricing.** Compute demand:supply ratio per H3 cell on a 1-minute tumbling window from the rider-request stream and the available-driver count from Redis GEO. When the ratio exceeds thresholds, write a multiplier (1.2×, 1.5×, 2×…) into the per-cell surge cache; rider clients fetch and display it before the request commits, so the price is locked at request time. Surge serves two purposes: it rations limited supply (high price = fewer requests) and pulls drivers toward the cell (the higher fare nudges nearby drivers to repo). The 1-minute cadence is a deliberate compromise — faster recompute oscillates as drivers respond.
+*Exclusivity is two-sided.* Holding the driver is necessary and not sufficient. If the request is offered to a second driver, because the first went silent and the lease expired, then two drivers may tap Accept within milliseconds of each other. So the request is also a resource that can be claimed exactly once. The accept path is ordered: first a conditional write on the trip row from `REQUESTED` to `MATCHED(driver_id)`, then a conditional write converting that driver's lease to `ASSIGNED`. Exactly one accept wins the trip; the loser's driver is released to `AVAILABLE` and their app shows "offer expired", which is what it looked like from their side anyway. Doing these two writes in the other order gives you a window where a driver is committed to a trip that someone else owns, and recovering from that means un-assigning a driver who has already started moving.
 
-**ETA prediction.** Routing runs Dijkstra (or A* with geographic heuristics) over the road graph weighted by current edge speeds, fed from a live traffic feed plus historical patterns by `(day_of_week, hour_of_day)`. Per-driver scoring needs an ETA per candidate, so naive scoring of 50 candidates means 50 routing calls — the optimisation is to precompute per-cell ETA tiles (travel time from cell A to cell B at this hour) so candidate scoring is a tile lookup, not a graph search. Live traffic + historical model is what gets ETAs accurate to within ~30s in normal conditions; rush-hour and incident detection are the edge cases that hurt accuracy.
+*Expiry is a property, not an event.* The lease carries `expires_at` and nothing sweeps it. A read of the driver record evaluates the lease against the store's clock, so a record in state `OFFERED` with an expiry in the past is simply available, and the next dispatcher's conditional write can take it directly. A sweeper process would be a second writer racing the accept: the sweeper reads an expired lease, decides to release, and in between the driver accepts. With expiry as a predicate on the record there is only ever one writer at the moment of decision. The clock that matters is the store's, not the phone's; the 15 second countdown the driver sees is cosmetic, and a driver who taps at 15.1 seconds gets a rejection rather than a race.
 
-**Trip state machine:**
-```
-REQUESTED → MATCHED → DRIVER_ENROUTE → ARRIVED → ON_TRIP → COMPLETED
-                                                              ↓
-                                                          PAYMENT
-                                                              ↓
-                                                          RATED
-```
+*Bound the walk.* Under contention the cascade is what burns the cluster. In an ordinary catchment the top candidate's lease succeeds nearly always. At an arena, 3,000 requests chase 300 free cars: the first 300 take them and the remaining 2,700 find nothing. Left uncapped, each of those walks all ~50 candidates and retries every 2 seconds for a minute, which is 2,700 × 50 × 30 = **4M conditional writes in that minute**, roughly 67,000/s aimed at a few hundred hot keys, against a global useful load of ~2,900/s. So the walk is capped at five attempts and then the request backs off: widen the radius by 50%, wait 2 seconds, retry, with the interval growing as the radius does, up to a deadline after which the rider is told there is nothing and offered a queue position. Five attempts instead of fifty is 2,700 × 5 × 30 = 405,000, and the growing interval takes another factor off that. Capping the walk is not a performance tweak, it is the difference between a shortage that degrades and a shortage that takes the city's dispatch tier down.
+
+*Overlapping offers, and what they cost.* Waiting the full 15 seconds on a silent driver is the largest term in time-to-match. So after 8 seconds of silence, offer to the second-ranked driver as well, holding two leases against one request. It roughly halves the tail without changing any correctness property, because the trip claim already handles two simultaneous accepts. The cost is honest and worth stating: the losing driver was sent an offer that could never have been honoured, and drivers who are shown offers that evaporate stop trusting them, which shows up as a falling accept rate and makes the underlying problem worse. So overlapping is enabled by wait time rather than by default, and the second offer is never sent inside the first 8 seconds.
+
+*Re-dispatch after a cancel.* A driver who accepts and then cancels sends the trip back to `REQUESTED` and the loop resumes, with that driver excluded from this request's candidate set. Without the exclusion the greedy scorer, which still thinks they are the nearest car, will re-offer to them within a second. A rider cancelling while an offer is outstanding cannot revoke the offer in flight; the request is marked cancelled and the driver's accept simply fails its conditional write on the trip row. One mechanism covers both races, which is the argument for making the request a claimable resource rather than handling cancellation as a special case.
+
+*The durable record.* Everything above produces transitions on one row per trip, and each transition is a conditional write gated on the prior state, so a duplicate delivery or a client retry is rejected by the store rather than by application code. The cancellation forks are distinct terminal states rather than a boolean, so refund policy and driver-rating impact each read their own state instead of inferring intent from a combination of fields.
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 812" role="img" aria-label="Uber ride lifecycle state machine">
@@ -12962,121 +13033,130 @@ REQUESTED → MATCHED → DRIVER_ENROUTE → ARRIVED → ON_TRIP → COMPLETED
 </svg>
 ```
 
-The FSM is intentionally unforgiving. Each transition is a single Cassandra row update gated on the prior state — a CAS on `(trip_id, expected_state)` so a stale client retry can't drag a `COMPLETED` trip back to `ON_TRIP`. Cancellation forks (rider, driver, no-show) are terminal states rather than booleans, so refund logic and driver-rating impact each query their own state without inferring intent. *[Source: systemdesign.io rider-matching, Uber engineering]*
-
-**H3 hex grid: cell sizes and the 7× hierarchy.** H3 has 16 resolutions (0 coarsest, 15 finest); each finer level is *exactly* 1/7 the area of its parent because the rotation between levels packs 7 children inside one parent. Resolution 8 is Uber's dispatch workhorse — ~0.74 km² per hex, roughly a city block; resolution 9 (~0.10 km²) is for fine surge zones in dense areas. Hexagons beat squares for two concrete reasons: (1) all six neighbours are equidistant from the centre — there's only *one* "neighbour distance" — so radius-style queries (`kRing(cell, k=2)` returns the cell + 18 neighbours within 2 hops) are uniform; (2) hexagons approximate circles better, so demand kernels and supply smoothing don't suffer corner artefacts. The 12 pentagon cells exist because you can't tile a sphere with hexagons alone — they sit over ocean by design so dispatch never hits them. *[Source: Uber H3 engineering blog]*
-
-**Dispatch matching: ExpressPool batching vs greedy.** Solo Uber's offer-to-top loop is greedy first-come-first-served — fine when the optimisation is per-rider latency. UberPool/ExpressPool flips this: the matcher accumulates pending requests in a 3-5s tumbling window and runs a *batch* assignment problem — Hungarian-algorithm-style bipartite matching of N requests to M drivers, optimising global ETA + detour cost rather than per-rider greed. Batching costs a few seconds of wait but cuts deadhead miles 20-30% and improves shared-ride compatibility (route overlap, seat count). The window is a tunable: longer = better match, worse latency. Solo stays greedy because a 3s wait without a co-rider is just worse UX. *[Source: systemdesign.io find-a-rider]*
-
-**Surge as hysteresis-controlled price levels.** Surge multipliers don't change continuously — they snap to a discrete ladder (1.0×, 1.2×, 1.5×, 1.8×, 2.0×, 2.5×, 3.0×) with hysteresis bands so a hex doesn't oscillate between 1.5× and 1.8× every minute as the demand:supply ratio crosses one threshold. Pricing reads the per-cell multiplier *at request time* and locks it onto the trip — a rider who saw 1.5× pays 1.5× even if surge spikes to 2× during the 90s before the driver arrives. Lock-at-request is the only honest contract; recomputing at fare time would let driver route choice change the price. The 1-minute cadence is a Flink/Samza job over the request stream + live driver-supply count, keyed by H3 cell. *[Source: systemdesign.io surge-pricing]*
+Two details in that diagram earn their place. `NO_DRIVERS` is a real terminal state reached by the bounded walk above, not an error, and the rider-facing product needs to handle it deliberately. And `PAYMENT_PENDING` sits after `COMPLETED` rather than before it: the trip is finished when the car stops, and the payment saga runs afterwards with its own retries, because a gateway timeout must never leave a driver unable to accept their next ride.
 #### Where it breaks
 **must-say**
 
 **Bottlenecks**
 
-- **Driver loc storm** (250k pings/s globally) — every active driver writes every 4s and naive Redis writes can saturate a single node. Batch updates client-side (one ping carries last-N positions when cellular drops out) and keep the TTL short (~10s) so dead drivers fall out of the index without an explicit cleanup pass.
-- **Hot city / event** (concert lets out: 10k requests in 60s) — Matching Service for that city saturates and surge alone can't ration that fast. Pre-shard by city so the spike is contained; autoscale Matching workers per city; widen radius dynamically so the candidate pool grows even if the local cell is empty.
-- **Match latency** (must be <2s in dense cities) — every network hop in the scoring loop hurts. Keep the geo index, surge cache, and pre-computed ETA tiles all in-memory in the same data centre as Matching workers; cross-region calls in the match path are unacceptable.
-- **Driver app backgrounding** — iOS/Android suspend the GPS when the app loses focus, so the driver effectively disappears from the index even though they're still driving. Detect via missed-heartbeat (no ping in 15s) and gracefully reassign the rider to another driver rather than waiting for the original to come back.
-- **Payment failures** (gateway timeout, declined card) — synchronous payment in the trip-completion path would block the FSM. Retry async with exponential backoff; trip completes regardless and the rider can settle on the next session, so a payment outage doesn't strand drivers waiting for "completed" status.
-- **H3 pentagon edge cases** — 12 cells per resolution are pentagons (5 neighbours instead of 6), creating non-uniform `kRing` results if dispatch lands on one. Mitigation is geographic: pentagon centroids sit over open ocean by Uber's deliberate H3 orientation, so urban dispatch never observes them. Test fixtures still need to hit those cells to catch regressions in code that assumes 6 neighbours.
-- **Pool batch window starvation** (rider sits in queue 5s with no Pool-eligible match) — fall back to solo dispatch after the window closes; otherwise Pool's batching latency punishes the rider for system inefficiency. The matcher returns a `solo_offer` if no batch assignment is found within the window.
-- **Surge feedback loop** (high multiplier pulls drivers in, multiplier drops, drivers leave, multiplier spikes again) — the discrete ladder + hysteresis dampens this, but the deeper fix is asymmetric thresholds: step *up* aggressively (rider sees fair price fast), step *down* slowly (drivers don't get whiplash). Cooling-off periods on per-driver re-positioning bonuses also prevent oscillating fleet movement.
+- **Contended driver records during a shortage.** Not the geo index, which handles the query volume without noticing, but the handful of `AVAILABLE` driver rows that every dispatcher in a cell is attempting at once. *Mitigation:* the bounded walk plus backoff described in the deep dive, and randomising the tie-break among candidates whose scores are within a few seconds of each other so 200 dispatchers do not all attempt the same top-ranked car.
+- **Driver location storm.** 250k pings/s globally, and a city shard that becomes hot when a region's fleet concentrates. *Mitigation:* shard the index by city and split the largest cities by cell range; let the client batch positions when cellular drops out, so a reconnecting phone sends one message carrying the last N fixes rather than N messages; keep the 10 s TTL so departed drivers evict themselves.
+- **Match latency budget.** The sub-2 s target to first offer leaves no room for a cross-region call. *Mitigation:* geo index, driver records, surge cache and ETA tiles all live in the same region as the matching workers for that city. If the ETA tile service is unreachable, score on haversine distance and accept worse assignments rather than failing the request.
+- **Driver app backgrounding.** Mobile operating systems suspend GPS when the app loses focus, so a driver who is still working disappears from the index. *Mitigation:* the 10 s index TTL already removes them from candidacy, and an outstanding offer to a backgrounded phone expires on its own at 15 s and cascades. The residual problem is a driver who is `ASSIGNED` and mid-trip going dark, which is a trip-tracking problem rather than a dispatch one: the trip holds at `ON_TRIP`, the fare interpolates along the road-graph route across the gap, and a gap over threshold flags the trip for review rather than silently billing an estimate.
+- **Payment failures.** A gateway timeout inside the completion transition would block the FSM and strand the driver. *Mitigation:* completion never waits on payment. The payment saga retries with exponential backoff under an idempotency key, the rider settles on next session if it keeps failing, and the driver is free the instant the car stops.
+- **Surge oscillation.** A cell that steps up, pulls cars in, steps down, loses them, and steps up again produces whiplash for drivers and looks arbitrary to riders. *Mitigation:* a discrete ladder rather than a continuous multiplier, with asymmetric thresholds so a cell steps up quickly and steps down slowly, plus a cooling-off period on per-driver repositioning bonuses so the fleet does not slosh.
 
 **Failure modes**
 
 | Layer | Failure | Detection | Mitigation |
 |---|---|---|---|
-| Location ingest | Redis GEO node OOM under ping storm | NIC saturation + p99 GEOADD latency alert | Per-city sharding; client-side ping batching; 10s TTL auto-evicts dead drivers |
-| Matching | WebSocket offer never acked (driver phone backgrounded) | Per-offer 10-15s timeout | Cascade to next-best driver; mark driver `idle` after missed heartbeat |
-| Trip FSM | Stale CAS write attempts (`COMPLETED → ON_TRIP`) | DB rejected-update counter | Gate every transition on prior-state CAS; reject and log; ops alert on repeat |
-| Routing | Maps API timeout / rate-limit during scoring | 5xx rate from routing service | Pre-computed cell-to-cell ETA tiles; fall back to haversine ETA on tile miss |
-| Pricing | Surge cell stale (recompute job dead) | `surge:{cell}` write age > 2 min | Default to last-known multiplier; alarm; re-elect Flink job on staleness |
-| Payment | Gateway 5xx at trip completion | Async retry queue depth + per-PSP error rate | Trip completes anyway; settle on next session; idempotency key prevents double-charge |
-| Cross-region | DC outage in primary city region | Health probes from edge | Active-active per-city deployment; failover Matching/Trip workers; Cassandra cross-region replication for trip log |
+| Geo index | Node OOM or eviction storm under a ping spike | p99 write latency and eviction rate per shard | Per-city sharding, client-side ping batching, 10 s TTL; index loss is survivable because it rebuilds in one ping cycle |
+| Driver records | Conditional-write failure rate spikes on hot keys | CAS-failure ratio per cell | Bounded walk, backoff, randomised tie-break among near-equal candidates |
+| Dispatch | Offer pushed but never acknowledged, phone backgrounded or offline | Per-offer 15 s expiry, plus missed-heartbeat on the socket | Lease expires by predicate and the request cascades; the driver is dropped from the index by TTL |
+| Dispatch | Two drivers accept the same request | Trip CAS rejection counter | Trip row claimed once; the losing driver is released and shown "offer expired" |
+| Trip FSM | Stale retry attempts a backwards transition | Rejected-transition counter per state pair | Every transition gated on prior state; repeated rejections page, because they usually mean a client retry bug |
+| Routing | ETA tile service timeout during scoring | 5xx rate and tile-miss rate | Fall back to haversine ranking; accept worse pickups rather than dropping requests |
+| Pricing | Surge job dead, cells stale | Age of the newest write per cell exceeds 2 min | Hold last known multiplier, alarm, re-elect the job; never fail open to 1.0x silently, because that is a revenue and supply event |
+| Payment | Gateway 5xx at completion | Retry queue depth and per-processor error rate | Trip completes regardless, idempotency key prevents double charge, settle next session |
+| Region | Loss of a city's primary region | Health probes from the edge | Cities are independent deployments; failover restarts stateless workers and warm-fills the index from live pings within one cycle |
 
 **Unresolved**
 
-TODO. Two or three things this design genuinely does not handle well, and what you would do about each.
+**Nothing in this design creates supply, and the shortage case is the one riders remember.** Both levers reallocate: price removes demand and bonuses move cars that already exist. When an arena releases 10,000 people into a cell holding 300 cars, the honest outcome is that most of them wait twenty minutes or walk, and no amount of dispatch cleverness changes it. What we actually do is fail legibly: bound the search, publish a truthful wait rather than an optimistic one, and offer a visible queue position so the rider can decide to leave. We have considered pre-committing supply with a driver reservation for known events, paying cars to be present before the doors open, but that is an expensive product decision rather than an engineering one, and it works only for events on a calendar. Unpredictable demand spikes have no answer here beyond degrading well.
+
+**Greedy dispatch has no defensible fairness property on the driver side.** The scorer optimises rider pickup time, so it systematically favours whoever is sitting in a dense area. A driver working a low-demand suburb can go an hour without an offer while the same downtown cars are picked repeatedly, and "the algorithm decided" is not an answer a driver will accept. You can add an idle-time term to the score, and we do, but that directly trades rider wait against driver equity and we cannot say what the correct exchange rate is; it is a policy question that the design surfaces and does not settle. It is also becoming a regulated question rather than a discretionary one, with platform-work transparency rules in several jurisdictions since around 2024 requiring that allocation logic be explicable to the people it allocates. The airport queue is the only place we have a defensible answer, and that is because it is FIFO rather than because it is optimised.
+
+**We compute money from a location trail we cannot verify.** Fares, pickup detection, wait-time charges and no-show fees all derive from GPS reported by an app on a device the driver controls. Urban canyon error of 20 to 50 metres is routine, tunnels produce multi-minute gaps that we interpolate through, and a spoofed location looks exactly like a bad fix. We snap the trail to the road graph, check speeds for plausibility, and flag anomalies for manual review, which catches crude fraud and does not make the trail trustworthy. The consequence is that every fare dispute is settled by a heuristic and a human, and the volume of those grows linearly with rides. The only structural fix is corroboration from a second source, the rider's phone or the vehicle itself, and both raise their own problems: rider phones are equally spoofable and often out of battery, and vehicle telematics exists on a fraction of the fleet.
 #### Drill questions
-1. What happens if the matched driver's app crashes mid-trip?
-2. How do you prevent a driver from cherry-picking high-fare rides by repeatedly declining?
-3. How would this scale 10x to 10M concurrent drivers?
-4. How do you handle a "concert lets out" surge — 10k requests in one cell in 60s?
-5. Why offer-to-top instead of broadcast-auction?
-6. How do you guarantee fare integrity if the rider's phone dies mid-trip?
-7. Why H3 hexagons over geohash squares for the dispatch index?
-8. Solo dispatch is greedy first-come-first-served. Why is Pool batched?
-9. How does surge avoid flapping between multipliers minute-to-minute?
-
-TODO. Only 9 drill questions carried over, top up to at least 10.
+1. Two riders request at the same instant and the same driver is the best candidate for both. Walk through exactly what happens.
+2. A driver taps Accept at the same moment their offer expires and the request has already been offered to someone else. Who gets the trip, and how do you know?
+3. Why take the hold on the driver before sending the offer rather than when the driver accepts?
+4. Why is the lease released by expiry rather than by a background sweeper?
+5. What happens if the matched driver's app crashes mid-trip?
+6. How do you prevent a driver from cherry-picking high-fare rides by repeatedly declining?
+7. How would this scale 10x to 10M concurrent drivers?
+8. A concert lets out: 10,000 people and roughly 3,000 ride requests in one cell inside a minute. What actually breaks, and what do you do?
+9. Why offer to the top driver instead of broadcasting to everyone nearby?
+10. How do you guarantee fare integrity if the rider's phone dies mid-trip?
+11. Why H3 hexagons over geohash squares for the dispatch index, and does it matter here?
+12. Solo dispatch is greedy. Why is shared-ride dispatch batched, and what would make you batch solo too?
+13. How does surge avoid flapping between multipliers minute to minute?
 #### Answers to drill questions
-1. GPS goes stale (TTL on Redis GEO entry expires); trip FSM detects no heartbeat for ~30s and flags it. Rider sees "reconnecting"; if it doesn't recover, ops can manually reassign. *If pushed:* persist last-known-good location to Cassandra so a new driver can be routed to the rider's current position, not the pickup; consider a passenger-side "I'm safe" check-in for long stalls.
+1. Both dispatchers read the geo index, both rank the same driver first, and both attempt a conditional write on that driver's record from `AVAILABLE` to `OFFERED`. Exactly one succeeds. The loser does not retry the same driver; it moves to its second candidate and attempts that one. The rider on the losing side never learns that anything happened, and their time to first offer is a few milliseconds worse. *If pushed:* the failure mode to name is what happens if you offer first and hold on accept instead. Then both offers go out, both drivers can accept, and you are choosing which one to disappoint after they have started driving.
 
-2. Track per-driver acceptance rate; below a threshold their priority in the scoring function drops. Repeated declines = temporary cooldown. *If pushed:* hide destination until accept (the actual real-world fix); enforce a daily decline budget; appeal flow for legitimate refusals (unsafe area).
+2. The request wins ties, not the driver. The accept path does a conditional write on the trip row from `REQUESTED` to `MATCHED(driver)` before it touches the driver's lease, so whichever accept reaches the trip row first owns the trip and the other is rejected. The rejected driver is released to `AVAILABLE` and shown "offer expired". *If pushed:* the expiry itself is evaluated against the store's clock as a predicate on the record, not against the phone's countdown, so there is no window where a lease is simultaneously expired and live. The visible 15 second timer on the driver's screen is cosmetic and is deliberately drawn to run out slightly early.
 
-3. Shard Redis GEO by city and split dense cities by H3 cell ranges. Matching service becomes per-city stateless workers; location ingest fan-outs via Kafka per region. *If pushed:* the bottleneck shifts to the road graph routing service — pre-compute ETA tiles per cell so scoring doesn't hit Maps API per candidate.
+3. Because an offer is a promise about a shared resource. Between sending and accepting there is a window of up to 15 seconds, and any other dispatcher reading the index during that window sees the driver as free. Holding first collapses that window to the latency of one conditional write. *If pushed:* the cost is real and worth conceding, since a held driver who declines was unavailable to anyone else for the few seconds they spent thinking. At a 70% accept rate that is roughly 0.43 wasted holds per match, each a few seconds, which is a small fraction of fleet idle time and much cheaper than double-assignment.
 
-4. Surge multiplier kicks in fast (sub-minute recompute), throttling demand. Matching service autoscales per city; expand search radius dynamically. *If pushed:* pre-warm capacity by predicting events from calendar feeds; nudge nearby drivers toward the cell with a bonus before the spike; queue requests FIFO if all drivers are taken.
+4. Because a sweeper is a second writer. It reads a lease it believes has expired, decides to release the driver, and in the gap before its write lands the driver accepts. Now the driver is both assigned and available. Making expiry a predicate that every reader evaluates means there is only ever one writer at the moment of decision, and the next dispatcher's conditional write both releases and reclaims in a single operation. *If pushed:* you still want a slow reconciliation job, but it exists for observability rather than for correctness, and it should page rather than mutate when it finds a driver stuck in `OFFERED` for minutes.
 
-5. Broadcast causes "already taken" UX and wasted offers across many drivers. Sequential offer = clean state, one driver at a time. *If pushed:* cost is latency on declines; mitigate via short offer TTL (10-15s) and parallelizing the second-best offer if the first is silent past 8s.
+5. The location entry ages out of the geo index within 10 seconds and the trip service sees no heartbeat. Rider is shown "reconnecting". The trip stays `ON_TRIP`, because we do not know that the trip has ended and guessing wrong is worse than waiting. *If pushed:* fare comes from the server-side trail, so the gap gets interpolated along the road-graph route between the last good fix and the next one, and a gap over a threshold flags the trip for review rather than silently charging an estimate. For safety rather than billing, a long stall with a rider aboard triggers a rider-side check-in.
 
-6. Trip state and GPS trail live server-side (Cassandra), driven by the driver's app. Fare is computed from the canonical server-side route, not client-claimed distance. *If pushed:* dispute flow with route replay; ML-flag anomalous routes (driver took the long way) for manual review.
+6. Track acceptance rate per driver and let it feed the score as a small penalty, not as a hard gate. Repeated declines within a short window trigger a cooldown. *If pushed:* the real-world fix is structural rather than punitive, which is hiding the destination until accept, and it works because there is nothing to cherry-pick. It costs driver goodwill and needs an appeals path for legitimate refusals, such as an unsafe area or a trip that would strand them far from home, so most platforms hide the destination for short trips and reveal it for long ones.
 
-7. Geohash neighbours have two different distances (edge vs corner) and cells distort with latitude — `kRing` queries return non-uniform supply counts in the same nominal radius, biasing scoring. H3 has one neighbour distance, equal-area within a resolution band, and a clean 1-of-7 child hierarchy so a coarse query (`res 7` for surge zones) and a fine query (`res 9` for dispatch) share an indexable prefix. *If pushed:* H3 still has the 12 pentagon edge case at icosahedron vertices; these are placed over open ocean so production dispatch never observes them. *[Source: Uber H3]*
+7. Cities are independent, so scaling is adding city shards and splitting the largest cities by cell range; the geo index is only ~100 MB of state globally, so it is not the constraint. The parts that actually strain are the persistent socket tier, which is 10M concurrent connections and needs a stateful edge with connection affinity, and the history stream at 250 MB/s. *If pushed:* the driver-record store scales with matches rather than with drivers, so 10x drivers at the same ride volume barely moves it. It is 10x *rides* that pushes conditional writes toward 29k/s, and even that is per-key independent and shards cleanly.
 
-8. Solo's optimisation is per-rider latency — a 3s wait with no benefit is worse UX. Pool optimises global routing efficiency: batching N requests over a 3-5s window lets a Hungarian-style assignment match drivers to *combinations* of compatible riders, cutting deadhead miles ~20-30% and improving co-rider route overlap. *If pushed:* the batch window is the tunable knob; longer windows give better matches at higher rider wait. Solo + Pool can share the same matcher service if the dispatch algorithm switches based on `vehicle_type`. *[Source: systemdesign.io find-a-rider]*
+8. The index is fine and the dispatch tier is what breaks, because 2,700 requests are each attempting conditional writes on the same few free drivers and failing. Cap the walk at five attempts, back off, widen the radius, and give the rider a truthful wait and a queue position. Surge rations demand inside a minute. *If pushed:* concede that this is a supply problem wearing an engineering costume. 3,000 riders and 300 cars has no dispatch solution; the deliverable is degrading legibly rather than collapsing, and pre-positioning against a known event calendar is the only thing that materially helps.
 
-9. Multipliers snap to discrete steps (1.0×, 1.2×, 1.5×, 1.8×, 2.0×, 2.5×, 3.0×) with hysteresis bands — a hex must cross a higher threshold to step up but only drops back when demand falls *below* a lower threshold, so steady-state oscillation is dampened. Plus rider-side multipliers are *locked at request time*, so the 90s before driver arrival can't change the price the rider already accepted. *If pushed:* fast oscillation in the surge cache also pulls drivers in then expels them — the supply control loop benefits from the hysteresis as much as the rider-facing UX. *[Source: systemdesign.io surge-pricing]*
+9. Broadcast produces an "already taken" experience for everyone who loses, wastes offers across the fleet, and does not remove the race, it just moves it into a first-claim-wins scramble that you still have to arbitrate. Sequential offers keep exactly one driver on hold per request and make the state trivially explainable. *If pushed:* the cost is latency on declines, and the mitigation is the overlapping second offer after 8 seconds of silence, which is a bounded, two-way version of broadcast rather than an unbounded one.
+
+10. The trip state and the GPS trail are server-side and driven by the driver's app, not the rider's, so a dead rider phone changes nothing about the fare. Fare is computed from the canonical server-side route. *If pushed:* the rider's phone dying does matter for the drop-off confirmation and for safety features, so drop-off falls back to a geofence crossing plus driver confirmation, and the trip is flagged if those disagree by more than a couple of hundred metres.
+
+11. It matters for the index and it is Q13's subject rather than this question's. Geohash cells distort with latitude and their eight neighbours sit at two different distances, so a "ring around this cell" query returns a non-uniform area and biases any per-cell supply or demand count. Hexagons have one neighbour distance and near-equal area within a resolution, so ring queries and demand kernels behave uniformly. *If pushed:* for dispatch specifically the choice is close to irrelevant, because the candidate list is refined by a real distance check and then by an ETA model anyway. Where it genuinely matters is surge, which counts supply and demand *per cell* and therefore inherits any area distortion directly into the price.
+
+12. Shared rides are not an assignment of a rider to a car, they are an assignment of a rider to a route that other riders are also on, and you cannot evaluate route compatibility one rider at a time. Batching a 3 to 5 second window lets a global assignment consider combinations. Solo stays greedy because a window with two requests in it produces the same answer as greedy, several seconds later. *If pushed:* the trigger to batch solo is measured, not architectural. Watch requests per window per catchment, and switch a region on when it holds more than about 5, which downtown cores hit at peak. The switch is per region and per hour, and the matcher runs both algorithms behind the same interface.
+
+13. Multipliers snap to a discrete ladder rather than moving continuously, and the thresholds are asymmetric: a cell must cross a higher ratio to step up than it must fall below to step down, so steady-state noise does not move it. The multiplier is locked onto the trip at request time, so the 90 seconds before the car arrives cannot change a price the rider already accepted. *If pushed:* hysteresis protects supply as much as it protects the rider experience, because the multiplier is also the signal drivers reposition on, and a value that oscillates every minute sends the fleet back and forth and makes the imbalance worse than leaving it alone.
 #### Whiteboard script
-TODO
+**0-5, name the problem type and take the first fork.** Open with the classification, not the components: "this is a matching problem over two moving populations where the supply is scarce and can say no, so the interesting decisions are dispatch policy, not geography." Then ask the three questions that actually change the design: solo only or shared rides, is surge permitted or capped, and does the driver see the destination before accepting. State the numbers you will use: ~10M rides/day, ~1,200 rides/s peak, ~1M concurrent drivers pinging every 4 s, ~50 candidates per request. Say explicitly that you are treating the geo index as solved and will spend the time elsewhere. Draw nothing yet.
 
-A 45 minute budget: what to cover in 0-5, 5-15, 15-35 and 35-45, what to say first, and a line starting `Cut first:`.
+**5-15, the spine and the split that matters.** Draw the two populations on the left, location ingest into an in-memory index at the top, matching in the middle, trip state at the bottom. Then draw the one thing most candidates omit: a separate driver record with `available / offered / assigned`, and say why it is separate from the index. The line to land is "the index nominates, the record adjudicates". Walk one request end to end in ninety seconds: radius query, filter, score by ETA rather than distance, conditional write to take the lease, push the offer, accept, claim the trip. Mention that trips and payments are separate so a card decline cannot block a driver.
 
-**Raw material, from the old Talking Points:**
+**15-35, the dispatch race, which is where the interview happens.** Protect this block. Take the hold before the offer and explain the window it closes. Then two-sided exclusivity, and be concrete: two drivers can accept, so the request is also claimed exactly once, and the order of the two writes matters. Then expiry as a predicate rather than a sweeper, and why a sweeper is a second writer. Then the bounded walk, with the arena numbers, because that is the difference between a shortage that degrades and one that takes down the dispatch tier. Then take the greedy-against-batched fork on your own terms: ~2 requests per 5 s window in an average catchment against ~19 downtown, so greedy by default with batching as a per-region switch and as the only shape for shared rides. If there is time, the boundary argument for why single-writer regions do not work here, 64% of a 10 km region is within a catchment of an edge.
 
-- **Per-city sharding plus in-memory geo index** is the foundation; Redis GEO + per-city Matching pool + Kafka history is the canonical hot/cold split. State this early.
-- **Offer-to-top, not broadcast** — sequential offers with short TTL beat broadcast auctions on UX and on system cost.
-- **Trip FSM with CAS-gated transitions** — every state change is one DB row update keyed on prior state, so stale retries can't drag a `COMPLETED` trip backward.
-- **H3 over geohash** for dispatch quality — equal-distance neighbours, equal-area cells, clean 1-of-7 child hierarchy. Mention pentagon edge case is sited over open ocean.
-- **Surge as discrete-step hysteresis** — multipliers snap to a ladder, locked at request time, asymmetric thresholds (up fast, down slow) prevent flapping.
-- **Pool batched, solo greedy** — Hungarian-style bipartite match over a 3-5s window for Pool; greedy first-come for solo. Showing you know both modes signals real operational depth.
-- **Fencing the match path against transit history latency** — Kafka backpressure must never block matching; the asymmetric write paths are intentional.
+**35-45, concede, then the operational surface.** Give the gaps before they are found: nothing here creates supply and the arena case ends in a twenty minute wait no matter what; greedy dispatch has no defensible driver-side fairness property and the idle-time term is a policy trade you cannot price; fares are computed from a location trail you cannot verify. Then two minutes of operations: what you page on (CAS failure ratio per cell, unmatched-request rate, offer accept rate, index write latency, trips stuck in a non-terminal state), and multi-region as one independent deployment per city with the index rebuilt from live pings in a single 4 second cycle.
+
+Cut first: surge mechanics beyond one sentence, since the hysteresis ladder is satisfying to draw and changes nothing architecturally. Then H3 against geohash, which is Q13's question and a known time sink here. Then the ETA model, which is Q15's. Then the payment saga, which is Q23's. Never cut: the hold before the offer, two-sided exclusivity, expiry without a sweeper, and the bounded walk.
 #### Appendix
 **Data model**
 
-- **drivers_locations** (Redis GEO):
-  `GEOADD drivers:{city} lng lat driver_id`, refreshed every 4s, TTL 10s
-- **trips** (Cassandra): `(trip_id, rider_id, driver_id, state, pickup, dropoff, fare, ts_*)`
-- **trip_history** (Cassandra, partition by user_month)
-- **surge** (Redis): `surge:{cell_id} → multiplier`, recomputed per minute
+- **driver_locations** (in-memory geo index, per city): `GEOADD drivers:{city} lng lat driver_id`, rewritten every 4 s, entry TTL 10 s. Disposable, rebuilt from live pings.
+- **driver_state** (replicated, per-key linearizable): `(driver_id, state, request_id, lease_expires_at, vehicle_type, city)` where `state ∈ {offline, available, offered, assigned}`. The authority on availability. Every write is conditional on the expected prior state.
+- **trips**: `(trip_id, rider_id, driver_id, status, pickup, dropoff, surge_locked, fare, ts_requested, ts_matched, ts_started, ts_completed)`. Status transitions are compare-and-swap on the prior status.
+- **trip_history**: partitioned by `(user_id, month)` for the rider-facing list.
+- **surge**: `surge:{cell_id} → multiplier`, recomputed every 60 s, read at quote time and copied onto the trip.
 
 **API contract**
 
 ```
-POST /ride/request    body: { pickup, dropoff, vehicle_type } → { request_id }
-GET  /ride/{id}/status  → { state, driver_loc, eta }
-POST /driver/location  body: { lat, lng, ts, status }    (every 4s)
-WS   /driver/jobs      ← push job offers
+POST /ride/request     { pickup, dropoff, vehicle_type, quoted_price_token } -> { request_id }
+GET  /ride/{id}        -> { status, driver_loc, eta, fare_estimate }
+POST /ride/{id}/cancel -> { status, cancellation_fee }
+POST /driver/location  { lat, lng, heading, speed, ts }        every 4 s
+WS   /driver/offers    <- { request_id, pickup, fare, eta, expires_at }
+POST /driver/offers/{request_id}/accept -> { trip_id } | 409 already_matched
 ```
+
+The accept endpoint returning 409 rather than 200 with a null trip is deliberate: losing the race is a normal outcome and the client must render it as an expired offer, not as an error.
 
 **Observability**
 
-- `match_latency_p99_ms` per city — target < 2,000 ms in dense cities, < 5,000 ms tail.
-- `unmatched_request_rate` per city — > 2% triggers capacity / surge investigation.
-- `driver_offer_accept_rate` — fleet-wide < 60% suggests scoring or fare regression.
-- `geoadd_lag_p99_ms` per city shard — target < 50 ms; spikes mean Redis hot-shard.
-- `trip_fsm_stuck_count` (trips in non-terminal state > expected duration) — paged when > 0.5% of in-flight trips.
-- `payment_settlement_lag_p99` — target < 30 min from `COMPLETED → PAID`; longer suggests gateway saturation.
-- SLO: 99.9% of `POST /ride/request` returning a `MATCHED` event within 30 s in covered cities; error budget burn rate alerted at 2× and 14×.
+- `time_to_first_offer_p99` per city, target under 2 s. Separate from `time_to_match_p50`, target ~5 s, because the two have different causes and conflating them hides a rising decline rate.
+- `driver_cas_failure_ratio` per cell. The direct signal for contention; a sustained value above ~20% means the bounded walk is doing real work and the cell is short of cars.
+- `offer_accept_rate` fleet-wide and per city. Below 60% suggests a scoring or fare regression, or that overlapping offers are being sent too eagerly.
+- `unmatched_request_rate` per city, above 2% triggers a capacity and pricing investigation.
+- `geo_write_latency_p99` per shard, target under 50 ms; spikes mean a hot shard rather than a global problem.
+- `trips_stuck_count`, trips in a non-terminal state past their expected duration, paged above 0.5% of in-flight trips.
+- `payment_settlement_lag_p99`, target under 30 minutes from `COMPLETED` to `PAID`.
+- SLO: 99.9% of ride requests in covered cities reach a terminal state, matched or explicitly `NO_DRIVERS`, within 30 s. Error budget burn alerted at 2x and 14x.
 
 **Multi-region and DR**
 
-- **Replication mode:** active-active per-city. Each city shard runs in its closest region; Redis GEO is region-local (rebuilt from Kafka on cold start), trip Cassandra cluster is multi-region with `LOCAL_QUORUM` writes and async replication for cross-region read replicas (history, fraud, analytics).
-- **RTO:** ~60 s for Matching/Trip workers (stateless, restart and resume from Kafka offsets); ~5 min for a full city failover (Redis warm-fill from Kafka log replay).
-- **RPO:** < 5 s for trip FSM transitions (Cassandra `LOCAL_QUORUM`); ~30 s on cross-region Cassandra replication for analytics replicas.
-- **Failover cadence:** quarterly DR game-day per major region; chaos exercises monthly.
-- **Cross-region cost:** trips and locations are city-local, so cross-region traffic is mostly Kafka history replication and metadata sync — under 5% of total egress.
+- **Replication mode:** active-active by city. Each city runs in its nearest region. The geo index is region-local and disposable. Driver records and trips use local-quorum writes with asynchronous cross-region replication for analytics and history reads.
+- **RTO:** ~60 s for matching and trip workers, which are stateless and resume from stream offsets; the geo index warm-fills from live pings inside one 4 s cycle, so it is not on the critical path.
+- **RPO:** under 5 s for trip transitions at local quorum; ~30 s for the cross-region analytics replica.
+- **Failover cadence:** quarterly game day per major region, monthly chaos exercises against the dispatch tier specifically, since that is the component with a race in it.
+- **Cross-region cost:** trips and locations are city-local, so cross-region traffic is history replication and identity or payment metadata, under 5% of total egress.
 
 ### 30. Design Airbnb (Booking Platform)
 #### Problem
@@ -17011,50 +17091,59 @@ WS   /chat/{match_id}  ← messages (see Q9)
 
 ### 39. Design GitHub (Source Code Hosting)
 #### Problem
-Host millions of git repositories with web UI, pull requests, issues, code search, CI integration.
+Host tens of millions of git repositories with a web UI, pull requests, issues, code search and CI integration. The unit of storage is not a file or an object but a git repository, which is already a content-addressed database with its own consistency rules. A push is a transaction over refs, and a fork is not a copy.
 #### Core
-TODO
+The unit of storage is a git repository, and a repository is already a database: a content-addressed Merkle DAG of objects plus a small mutable set of refs pointing into it. That one fact decides the design. You are not sharding blobs, you are placing stateful databases, and every interesting property follows from that.
 
-Write the whole answer as you would give it in sixty seconds, 200 to 300 words, standing alone.
+So the repository is the shard. Each one is assigned a replica set of three file servers spread across data centres, each holding a real bare git repo on a local filesystem, because git's access pattern is a large number of small random object reads and it wants a page cache rather than a network round trip. A push arrives at a stateless proxy that resolves owner and name to a repo id, then to the current primary. It commits in two phases: stream the objects, which are content-addressed so a partial upload is garbage rather than corruption, then compare-and-swap each ref from its expected old SHA. The ref update is the commit point and is acked only once two of the three replicas have fsynced. Repair is cheap for the same reason: a damaged replica is rebuilt from a peer with SHA verification, so corruption is detected instead of copied.
+
+Everything else hangs off that. Pull requests, issues, reviews and checks are ordinary relational rows holding two SHAs; the diff is computed on demand and cached by repo, base and head. Forks share one object pool per fork network, because ten thousand forks are ten thousand ref namespaces over one copy of the history. Code search is a separate inverted index, never grep over checkouts. And the push acks before webhooks and CI fan out, because that fan-out is several times the git traffic humans generate.
 #### Summary
-**The picture in your head:** a bank vault that also has a library card catalog and a postal sorting room. The vault stores every version of every file you have ever committed — nothing is ever overwritten, just appended to (git is content-addressed: each file version is stored by its SHA-256 hash). The library card catalog tracks pull requests, issues, code reviews, and CI check results — small structured records that reference items in the vault. The postal sorting room receives "push" events and routes them to CI pipelines, webhook subscribers, and search indexers. These three things look like one website to the user but have completely different storage needs and scaling strategies.
+**The picture in your head:** a bank vault that also has a library card catalog and a postal sorting room. The vault stores every version of every file anyone has committed, and nothing is ever overwritten, only appended (git is content-addressed: each object is stored under the hash of its contents, SHA-1 in practice, with a SHA-256 object format available since git 2.29 in 2020 but not in wide use). The library card catalog tracks pull requests, issues, reviews and CI check results, which are small structured records that reference items in the vault by hash. The postal sorting room receives push events and routes them to CI pipelines, webhook subscribers and search indexers. These three things look like one website but have completely different storage needs and scaling strategies.
 
 **The approaches people actually take:**
-TODO. Two or three things a competent engineer might reach for, in plain language and before any product name, with what each one buys and roughly when it wins.
 
-**The single-request walkthrough:** a developer runs `git push origin main` on a 50KB commit to `kubernetes/kubernetes`. The push hits GitHub's git proxy fleet — a pool of stateless L7 servers that terminate TLS and SSH, authenticate the developer's token against the auth service, parse the URL into a repo name, and look up `repo_id → primary_shard_id` from a metadata cache (Redis, backed by the metadata database). The proxy then forwards the git smart-HTTP stream (a binary protocol for sending packfiles — compressed collections of git objects) to the primary file server, a system called Spokes. The Spokes primary receives the packfile, validates all SHA hashes, writes it to disk with fsync, and simultaneously replicates to two other file servers in different data centers. Only after 2 of the 3 file servers confirm they have fsynced the data does the Spokes primary send an ack up to the proxy, which returns HTTP 200 to the developer's git client. The push took ~1 second. Then asynchronously: Spokes publishes a `push_event` to a durable queue, which triggers CI workflows (GitHub Actions), delivers webhooks to Slack/Jira/etc., and updates the search index.
+*Repositories as stateful shards on local disk.* Every repository is assigned a fixed small set of machines that own it, a router maps repository to machines, and the git binary runs against a real local filesystem. This buys the best possible git performance, because the page cache absorbs the repeated small reads that every git operation does, and it lets you reuse git's own tooling for replication and integrity checking. It costs you statefulness everywhere: placement, rebalancing, per-repository failover and hot-repository capacity all become your problem, and no repository can ever be larger or busier than one machine.
+
+*One shared filesystem underneath stateless git servers.* Put every repository on a cluster filesystem or an object store with a POSIX shim, and make the git servers interchangeable. This buys operational simplicity, because any server can serve any repository, capacity is a single pool, and a failure is a restart rather than a failover. It costs latency on every object read, which is the operation git performs most. It wins when repositories are few and large, or when someone else already runs the filesystem for you.
+
+*Keep the DAG but stop using git as the storage engine.* Store objects in a key-value store keyed by hash and refs in a transactional store, and reimplement the plumbing on top. This buys genuine horizontal scale and fleet-wide deduplication. It costs a reimplementation of a large and subtle codebase, and you own compatibility with every git client forever. It wins when a single repository is bigger than any single machine, which is the situation that produced Google's Piper and the JGit DFS backend.
+
+**The single-request walkthrough:** a developer runs `git push origin main` with a 50KB commit against `kubernetes/kubernetes`. The push hits the git proxy fleet, a pool of stateless L7 servers that terminate TLS or SSH, authenticate the token against the auth service, parse the URL into a repository name, and look up `repo_id → primary` from a cache backed by the metadata database. The proxy forwards the git smart-HTTP stream (the binary protocol that carries packfiles, which are compressed collections of git objects) to the primary file server. The primary receives the packfile, verifies every object hash, writes it to disk with fsync, and replicates to the two other file servers in different data centres. Only when 2 of 3 have fsynced does the primary compare-and-swap the `refs/heads/main` pointer from its expected old value and ack, and the proxy returns HTTP 200. Total time about 1 second, most of it upload. Then asynchronously: the primary publishes a `push_event` to a durable queue, which triggers CI workflows, delivers webhooks, and enqueues a search index update.
 
 **The pieces (and what each one is for):**
-- **Spokes (the git file server system)** — GitHub's name for the 3-replica git storage layer. Every repository lives on 3 file servers intentionally spread across data centers ("we never place a majority of repository replicas in any single datacenter"). A push is only acked to the client after 2 of 3 replicas have fsynced the packfile. If a replica is damaged (bit rot, partial write), it is rebuilt from a healthy peer using `git clone` semantics plus SHA verification — not a raw filesystem copy — so corruption is detected rather than propagated.
-- **Git proxy fleet** — stateless L7 servers that translate user-facing `github.com/kubernetes/kubernetes` URLs into internal `(repo_id, shard_id)` coordinates and then proxy the bidirectional git byte stream to the right Spokes primary. Stateless means any proxy instance can handle any request; the fleet scales horizontally behind an L4 load balancer.
-- **Metadata database (transactional, relational)** — stores small structured records: pull requests, issues, comments, code reviews, check runs, labels. These are ordinary database rows — nothing git-specific. A PR is just `(pr_id, repo_id, head_sha, base_sha, state, author_id, ...)`. The actual diff is computed on demand by asking the git server `git diff base_sha..head_sha` and cached by `(repo_id, base_sha, head_sha)`.
-- **Trigram search index** — code search works by indexing every 3-character substring ("trigram") of every source file. The query `getUserById` is rewritten as the intersection of posting lists for `get`, `etU`, `tUs`, etc. Files containing all required trigrams are candidate matches; a fast regex pass verifies them. Sharded by `repo_id` so ACL enforcement at query time is straightforward — users only query shards for repos they have access to.
-- **Webhook/CI queue (Kafka)** — decouples pushes from their downstream effects. A push acks the developer immediately; the queue durably holds the `push_event` for up to 24 hours. Webhook workers fan out deliveries to registered URLs with exponential backoff on failure. Actions scheduler reads `.github/workflows/` files from the Spokes replica at the pushed SHA and queues CI jobs.
+- **Git file servers, three per repository.** Every repository lives on three servers, deliberately placed so that no majority sits in one data centre. A push acks only after 2 of 3 have fsynced. A damaged replica (bit rot, torn write) is rebuilt from a healthy peer using git's own object transfer with hash verification, not a raw filesystem copy, so corruption is detected rather than propagated. GitHub's version of this layer is called Spokes.
+- **Git proxy fleet.** Stateless L7 servers that translate `github.com/owner/name` into an internal `(repo_id, replica set)` and then proxy the bidirectional git byte stream to the right primary. Stateless means any instance handles any request, so the fleet scales behind an ordinary L4 load balancer and a crashed instance costs one retry.
+- **Metadata database (transactional, relational).** Pull requests, issues, comments, reviews, check runs, labels, permissions. Nothing git-specific: a PR is `(pr_id, repo_id, head_sha, base_sha, state, author_id, ...)`. The diff is not stored; it is computed on demand from the two SHAs and cached by `(repo_id, base_sha, head_sha)`.
+- **Fork networks and object pools.** A fork is not a copy. All forks of a project share one object pool holding the common history, mounted as a git alternate, and each fork contributes only its own new objects plus its own refs. This is what makes forking free and what makes the storage estimate survive.
+- **Code search index.** An inverted index over ngrams of the default-branch working tree, built and served entirely outside the git servers. Q47 covers inverted-index mechanics; the part specific to here is that shards are keyed by repository so that access control can be applied by restricting which shards a query touches.
+- **Event queue.** Decouples a push from its consequences. The push acks immediately; the queue durably holds the event; webhook workers fan out with backoff, and the CI scheduler reads `.github/workflows/` from a replica at the pushed SHA and enqueues jobs. Q54 owns the pipeline side of that.
 
-**The thing that makes it hard:** a large-scale open-source project like `kubernetes/kubernetes` (chromium, llvm, the Linux kernel) is used by thousands of developers globally, each running `git clone` or `git fetch` constantly. A full clone of such a repo downloads gigabytes of data. The naive approach — serve every clone request from the primary Spokes node — quickly saturates the file server's network and disk I/O. But the more subtle problem is the history walk: to prepare a clone packfile, git must traverse the entire commit graph, which for a repo with 1 million commits takes significant CPU. For very large repos, this traversal was previously the bottleneck that made clones time out.
+**The thing that makes it hard:** the repository is not divisible. Every other storage system in this book gets to spread load by splitting the unit: an object store shards by key, a database shards by row, a CDN shards by URL. A git repository cannot be split, because a single operation walks an arbitrary subset of the whole graph and needs every object it reaches to be locally present. So a popular repository is a single stateful thing that must fit on one machine and absorb whatever traffic the internet sends it, and a large one is a single stateful thing you must move as a unit when you rebalance. Read replicas dilute the read side. Nothing dilutes the write side.
 
-**Why this design and what it costs:** GitHub's geometric repacking + multi-pack bitmaps is the canonical fix. Normal git stores all objects in one giant packfile; for a large repo this packfile can be multi-gigabyte and requires a full re-sort every time the repo changes. Geometric repacking instead maintains a set of packfiles where each is at least 2x as large as the next — the total number of packfiles grows logarithmically with object count, and they are never all merged at once. Multi-pack bitmaps are precomputed reachability indexes across all packfiles, so a clone no longer needs to traverse the commit graph at all — the bitmap directly answers "which objects are reachable from this commit?" Reported result: average repack time dropped from 60+ minutes to ~15 seconds; fetch CPU dropped 35% across all repos. For client-side, Protocol v2 + `--filter=blob:none` (partial clone) skips downloading file contents entirely until checkout — a developer can clone a 30GB monorepo to a working checkout in minutes by fetching only commit metadata first.
+**Why this design and what it costs:** the flip side is that content addressing hands you properties that most storage systems have to build. Verification is free, so repair, migration and replica comparison are all the same operation, a hash walk. Retries are free, because resending objects that already exist is a no-op and the ref update is a compare-and-swap that is either idempotent or a correct rejection. Deduplication across forks is free. What you pay is that per-repository write throughput is one machine and one primary, quorum adds a cross-data-centre round trip to every push, and maintenance is expensive: repacking a repository rewrites its object storage. GitHub's 2021 work on geometric repacking (keep a set of packs where each is at least twice the size of the next, so pack count grows logarithmically) plus multi-pack reachability bitmaps was the fix for the last of these, reported as roughly 35% less fetch CPU fleet-wide and repack times cut by an order of magnitude on the largest repositories.
 
 **If you were building it tomorrow:**
-- Spokes: 3 bare-git file servers per repo, cross-DC. Consensus layer (etcd) tracks `repo_id → (primary, replica_list, generation)`. Quorum: ack client after 2-of-3 fsync.
-- Git proxy: stateless Go service, Redis-cached `repo_id → shard` lookups (30s TTL). Rate-limit per user and per IP at the proxy.
-- Core push flow pseudocode:
+- Three bare-git file servers per repository, cross-DC. A consensus store (etcd) holds `repo_id → (primary, replicas[], generation)`. Ack after 2-of-3 fsync.
+- Git proxy: stateless Go service, cached `repo_id → primary` lookups with a 30s TTL. Rate limits per user and per IP at the proxy.
+- Core push flow:
   ```
-  shard_id = redis.get(f"repo:{repo_id}:shard") or db.lookup(repo_id)
-  primary = spokes.get_primary(shard_id)
-  stream = proxy.forward(client_stream, primary)
+  primary, gen = router.resolve(repo_id)        # cached, etcd-backed
+  stream       = proxy.forward(client_stream, primary)
+  primary.write_objects(packfile)               # verify hashes, fsync
   primary.replicate(replica_1, replica_2)
-  await quorum(2_of_3)       # wait for fsync confirmation
+  await quorum(2_of_3)                          # fsync confirmations
+  primary.cas_ref("refs/heads/main", old_sha, new_sha, gen)
   ack_client(200)
-  kafka.publish("push_event", { repo_id, sha, pusher_id })
+  queue.publish("push_event", {repo_id, ref, old_sha, new_sha})
   ```
-- For hot repos: add 5-10 read replicas, load-balance clone/fetch traffic across them. Cache common `git-upload-pack` responses by ref+commit SHA.
+- Fork networks share an object pool per visibility class. Hot repositories get 5 to 10 extra read-only replicas with fetch traffic load-balanced across them.
 #### What this is really testing
-TODO
+Whether you notice that the thing you are storing is a database, not a payload. Almost every candidate reaches for the object-storage playbook: hash the bytes, spread the chunks, erasure-code across the fleet, make the servers stateless. That playbook is wrong here for one reason. An object store's unit of durability is a single object and a GET touches exactly one of them, so objects can be placed independently and reassembled on read. A git operation walks an arbitrary reachable subgraph, touching thousands of objects, and needs all of them present on the machine doing the walk. Spread a repository across the fleet and every clone becomes a distributed graph traversal. That is why the repository, not the object, is the unit of placement, replication, failover and capacity, and why a stateful replica set beats a shared filesystem underneath stateless servers. Everything the interviewer will push on is downstream: what a push commits and when, what a fork shares, why a hot repository cannot be sharded away, and how you migrate a stateful shard with no downtime.
 
-The one insight this question exists to elicit, then the contrast with the question it most resembles and why the answers differ.
+The contrast is with the object store. There, durability is per object, so you can erasure-code 9 fragments across 3 availability zones, lose a whole zone, and reconstruct; placement is a function of the key and nothing else; scaling out is adding capacity to a pool. Here, durability is per repository and the invariant is reachability closure: a repository missing one object it can reach is corrupt, not "one object short", so the replication factor applies to the whole repository and the placement decision is a stateful assignment you have to track, rebalance and fail over. The object store's headline problems are metadata volume, tail latency and cost per stored byte. This question's headline problems are hot repositories you cannot split, forks that must share storage without leaking through it, and a two-system write path (git store plus relational metadata) with no transaction spanning the two. Give the object-store answer here and you will be asked, about four minutes in, what happens when two people push to `main` at the same moment.
 
-Closest question: TODO
+Closest question: Q21
 #### Clarifying questions and how each answer forks the design
 - Public + private repos?
 - Code search across all public?
@@ -17066,49 +17155,52 @@ Closest question: TODO
 
 | If the answer is… | Then the design… |
 |---|---|
-| Public and private repos | an authorization layer on every git operation and API call |
-| Git hosting at scale | shard repositories across storage nodes and cache packfiles; git is the storage primitive |
-| Code search across all public | a specialized code index (trigram or symbol index), separate from repo storage |
-| Actions/CI | a job-orchestration subsystem running untrusted code in isolated runners |
-| Large file storage (LFS) | offload big blobs to an object store with pointer files in the repo |
-| Pull requests and issues | a metadata service (diffs, reviews, comments) layered over the git backend |
+| Public and private repos | an authorization layer on every git operation and API call, and object pools partitioned by visibility |
+| Git hosting at scale | repositories placed as stateful replica sets; git is the storage primitive, not a payload format |
+| Forking is a product feature | shared object pools per fork network, so a fork costs refs rather than a copy of history |
+| Code search across all public | a separate inverted index sharded so access control is a shard filter, not a post-filter |
+| Actions/CI | a job-orchestration subsystem running untrusted code in isolated runners, and CI clones dominating read traffic |
+| Large file storage (LFS) | big blobs offloaded to an object store with content-addressed pointer files in the repo |
+| Pull requests and issues | a relational metadata service holding SHAs, with diffs computed on demand rather than stored |
 #### Requirements and scale, derived out loud
 **Requirements**
 
-- **FR:** git push/pull/clone over HTTPS+SSH; web UI; PR; issues; reviews; org/team mgmt; search
-- **NFR:** durable repos (no data loss), git operations performant (clone of large repos), 99.99% availability
+- **FR:** git push, pull and clone over HTTPS and SSH; web UI; pull requests; issues; reviews; org and team management; code search.
+- **NFR:** no repository data loss; clone and push latency acceptable across four orders of magnitude of repository size; 99.99% availability at the fleet level.
 
 **Scale**
 
-- **Users / repos:** GitHub reports ~100M users (2023 public stat) and 400M+ repositories (2024 Octoverse). Use 100M repos as conservative active-corpus default (drops dormant forks / spam repos that aren't in the working set). Mix: ~70% private (default since 2019 free private repos), ~30% public — derived from public Octoverse activity ratios.
-- **Git ops/s:** assume ~10% of users active per day → ~10M DAU × ~10 git ops (push/pull/clone) per active user/day = ~100M ops/day → 100M ÷ 86400 ≈ ~1.2k/s pure user ops; CI fetches dominate (each push triggers N CI clones from runners) → ~5-10x amplification → ~10k/s sustained. Peak (US working hours overlap with EU): 5x avg → ~50k/s. PR opens: ~1M PRs/day public ÷ 86400 ≈ ~12/s avg → 1k/min peak working-hours. CI runner-jobs: each push fans out to ~5 workflows → 10k pushes/s × 5 = ~50k workflow-jobs/s peak; smoothed via runner queue to 10k+ runner-jobs/min sustained.
-- **Repo size distribution:** measured GitHub stats — p50 ~5MB (typical side-project), p90 ~200MB (mature OSS lib), p99 ~2GB (large monorepo), long tail ~30GB+ (chromium, llvm, microsoft/winscope-class).
-- **Aggregate repo storage:** 100M repos × ~50MB avg (the long tail dominates the mean — even with p50 ~5MB, the chromium-class outliers pull avg ~50MB). 100M × 50MB = ~5PB raw bare-repo data; Spokes 3-replica → ~15PB across the file-server fleet.
-- **LFS blobs:** GitHub Octoverse — ~10% of repos use LFS for binary assets (designs, ML models, datasets). Avg blob volume ~500MB/repo (10 large blobs × 50MB or ~50 medium × 10MB). 100M × 0.1 × 500MB = ~5PB object-store binaries. Content-addressed cross-repo dedupe (forks share blobs) ~30% saving → ~3.5PB net.
-- **Issues/PRs records:** ~1M new issues/PRs/day (Octoverse public stat). ~5KB each (id 16B + repo_id 16B + state 4B + author 16B + assignees ~64B + labels ~256B + body ~4KB + indexed metadata ~600B). 1M × 5KB = ~5GB/day; cumulative over a year × 365 ≈ ~1.8TB/yr; multiple years on hot store → ~10TB; RF=3 → ~30TB.
-- **Comments/reviews:** ~10M/day (10x issues/PRs since each gets multiple comments). ~2KB each (body ~1KB + metadata 1KB). 10M × 2KB = ~20GB/day → ~7TB/yr.
-- **Code search index:** trigram inverted index sized ~3-5x source-code volume (each char appears in ~3 trigrams + posting-list overhead). Indexed public corpus: 100M × 0.3 public × ~50MB ÷ ~10x non-code files (binaries, generated, vendored excluded) ≈ ~150TB code source; with overhead ~500TB indexable content; × 4x trigram multiplier → ~2PB on search-index cluster.
-- **Webhook event volume:** 50k git ops/s peak × ~3 webhook subscribers avg per repo (CI + Slack + ops integrations) = ~150k webhook deliveries/s peak. Retention 7d for retries (24h primary + 6d for forensics) × avg ~100k/s × ~1KB payload = ~85TB → ~90TB on the durable queue.
-- **Audit log:** 10k git ops/s sustained × ~500B audit row (actor 16B + repo_id 16B + action enum 4B + ts 8B + ip 16B + user-agent ~200B + diff ref ~100B + padding ~140B) = 400GB/day raw. Columnar Parquet on object store, dictionary encoding on `actor`/`action`/`repo_id` → 5x compression → ~80GB/day compressed. 7yr regulatory retention × 365d × 80GB ≈ ~200TB.
+- **Users and repos:** ~100M users (public figure, 2023) and 400M+ repositories (Octoverse 2024). Take 100M repositories as the active corpus, dropping dormant forks and spam. Visibility mix roughly 70% private, 30% public.
+- **Git operations:** assume 10% of users active daily, so 10M DAU × 10 git operations each = **100M user git ops/day**. Split roughly 85% fetch or clone and 15% push, so 15M pushes/day. Each push triggers ~5 CI workflows and each job clones once, so 15M × 5 = **75M CI clones/day**. Total 100M + 75M = 175M ÷ 86,400 ≈ **2,000 git ops/s average**, peaking about 5x during the US and EU working-hours overlap at **~10,000/s**.
+- **Pushes specifically:** 15M ÷ 86,400 ≈ **175/s average**, ~900/s peak. This is the number that matters for the write path, and it is small: the write side of this system is not throughput-bound, it is bound by the fact that each push must land on one specific machine.
+- **CI jobs:** 75M ÷ 86,400 ≈ **870 workflow jobs/s average**, ~4,300/s peak. CI is 43% of all git reads, which is why runner placement is a storage question.
+- **Repo size distribution:** p50 ~5MB (side project), p90 ~200MB (mature library), p99 ~2GB (large monorepo), tail 30GB+ (chromium, llvm class).
+- **Aggregate git storage:** the mean is dominated by the tail. 1% at 2GB = 2PB; the remaining 99M at ~30MB ≈ 3PB; so ~50MB mean and **~5PB unique**, counting each fork network's shared history once. Three replicas = **~15PB** across the file-server fleet.
+- **What forks would cost without pooling:** a project like `torvalds/linux` is ~5GB packed with on the order of 10⁴ forks. Independent copies = 5GB × 10⁴ = **50TB for one project**; a shared pool is 5GB plus a few MB of divergence per fork, roughly **1,000x less**. This is the single largest storage decision in the design.
+- **LFS blobs:** ~10% of repositories use LFS, averaging ~500MB of blobs each. 100M × 0.1 × 500MB = **5PB**; content addressing dedupes across forks and re-uploads by ~30%, so **~3.5PB** in the object store.
+- **Issues and PRs:** ~1M new per day. ~5KB each (ids 48B + state and flags 8B + labels ~256B + body ~4KB + indexed metadata ~600B). 1M × 5KB = **5GB/day** → 1.8TB/yr → ~10TB of hot history, RF=3 → **~30TB**.
+- **Comments and reviews:** ~10M/day at ~2KB each = **20GB/day** → ~7TB/yr.
+- **Code search index:** the public share is ~30M repositories, but fork pooling and file-level deduplication cut the raw sum hard. GitHub reported in 2023 that its search corpus was ~115TB of content deduplicating to ~28TB unique, so take **~50TB of indexable unique text** here after dropping binaries, vendored and generated files. An ngram index runs 3 to 4x the text it covers, so **~150 to 200TB** on the search cluster, plus an update pipeline handling the ~175 pushes/s that touch indexed branches.
+- **Webhook and event volume:** 15M pushes + ~11M PR, issue and comment events = ~26M events/day × ~3 subscribers = **~78M deliveries/day** ≈ 900/s average, ~4,500/s peak. At ~1KB per payload with 7-day retention that is 78M × 7 × 1KB ≈ **550GB**, which is small. The queue is not the problem; delivery concurrency against slow receivers is.
+- **Audit log:** 175M git ops + ~500M authenticated API and web actions (10M DAU × ~50 each) ≈ **700M rows/day** × ~500B (actor 16B + repo 16B + action 4B + ts 8B + ip 16B + user agent ~200B + refs ~100B + padding) = 350GB/day raw. Columnar with dictionary encoding on actor, action and repo gives ~5x, so 70GB/day; 7-year retention × 365 × 70GB ≈ **~180TB**.
 #### Key decisions
-TODO
+**Repository placement: stateful replica sets on local disk vs a shared distributed filesystem**
+- Choice: each repository is assigned three file servers holding a real bare git repo on local NVMe, with one elected primary, and a push acked after 2-of-3 fsync. The servers are stateful and the routing table is a first-class piece of infrastructure.
+- Alternative: stateless, interchangeable git servers over a distributed POSIX filesystem or an object store with a filesystem shim, so any server can serve any repository and capacity is one pool.
+- Decider: random object reads per operation against per-read latency. Packfiles make a clone mostly sequential, but a diff, blame, merge or ancestry walk on a large repository does tens of thousands of random reads scattered through the pack via its index. At 50,000 random reads, local NVMe at ~80μs is ~4s of I/O; a network filesystem at ~500μs to 1ms is 25 to 50s. That gap is not recoverable by caching, because the working set of a busy repository does not fit in a shared cache tier. Below roughly 10,000 total repositories the operational win flips it, because you never hit the placement problems that make statefulness expensive.
+- Alternative wins when: the repository count is in the hundreds or low thousands and you already operate the filesystem, so the read-latency tax buys back real headcount. It also wins by default when a single repository exceeds one machine's disk, because at that point stateful placement is not available to you and you have to choose between a shared filesystem and reimplementing the object store. This is a genuinely defensible position for a single-tenant enterprise deployment and it is roughly what GitLab's Gitaly Cluster and NFS-backed installs do.
 
-Two or three genuine forks. For each, in this exact shape so it stays checkable:
+**Fork storage: one shared object pool per fork network vs independent copies**
+- Choice: all forks of a project share one object pool containing the common history, referenced as a git alternate. Each fork owns only its own refs and the objects it uniquely added.
+- Alternative: every fork is a complete independent repository with its own copy of the full object graph.
+- Decider: fork fan-out against repository size. 10⁴ forks × 5GB is 50TB for one project as independent copies versus ~5GB plus per-fork divergence with a pool, about 1,000x. Fork fan-out is not spread evenly; it concentrates on exactly the largest and most-cloned repositories, so the saving lands where storage hurts most. Below roughly 10 forks per project the pooling machinery costs more in complexity than it saves.
+- Alternative wins when: isolation matters more than storage, and it genuinely does in three cases. A shared pool makes any object pushed to any member reachable by raw SHA from every other member, so a private fork of a public repository cannot share a pool with it. A repository that must be provably deleted (DMCA takedown, a leaked secret, a GDPR erasure) cannot have its objects sitting in a pool that other repositories depend on. And a hard fork that diverges permanently keeps the pool alive for history nobody uses. The rule that falls out is that pools are partitioned by visibility class and any fork crossing a boundary is detached into its own storage at the cost of a full copy.
 
-**<name of the fork>**
-- Choice:
-- Alternative:
-- Decider:
-- Alternative wins when:
-
-**Raw material, from the old Common Mistakes:**
-
-- **"Primary + read-replicas via log-shipping" — wrong for Spokes.** Casual descriptions of "GitHub git storage" reach for the standard primary-async-replica topology, but Spokes uses a 3-replica cross-DC majority quorum: writes ack only after 2-of-3 fsync, replicas are full peers (not log-shipped), and a damaged replica is rebuilt from a healthy peer via `git clone` semantics with SHA verification rather than filesystem copy. Saying "log-shipping" misses the durability invariant ("never place a majority of replicas in any single datacenter") that defines the design.
-- **Treating a PR as git-native data.** A PR is relational metadata that *references* git refs (head_sha, base_sha); reviews, comments, labels, and checks live in the transactional store. Conflating the two leads to mismatched consistency models and overcomplicated PR creation flows.
-- **Standard tokenizer for code search.** Whitespace+punctuation tokenizers fail on `getUserById` ↔ `get_user_by_id` ↔ partial-substring queries. Trigram indexing is the right primitive — name it explicitly and explain the regex-rewrite path.
-- **Synchronous webhook delivery on push.** Blocking the push response on webhook fan-out means one slow integrator can stall every push to a repo. Always decouple via durable queue with retries; ack the push immediately.
-- **Unbounded CI fan-out per push.** A monorepo push can trigger 1000s of workflow jobs; without per-org concurrency limits and SHA-level dedup the runner pool collapses. State the quotas and dedup policy explicitly.
-- **Forgetting LFS for binary churn.** Committing binaries directly into git makes every clone download every version forever (delta compression is built for text). LFS replaces blobs with content-addressed pointers — for repos with binary assets this is a 100x win on clone size.
+**Code search: a separate inverted index vs grep over checkouts**
+- Choice: a separate ngram inverted index over default-branch working trees, built and served on its own cluster, with shards keyed by repository so access control is a shard filter rather than a post-filter. Q47 covers the inverted-index mechanics; what is specific here is keeping it off the git servers entirely.
+- Alternative: no index. Serve search by running `git grep` against a warm checkout on the file server that already owns the repository.
+- Decider: corpus size multiplied by query rate. `git grep` over a 200MB working tree is roughly 1 core-second. The deduplicated public corpus is ~50TB of text, so one unscoped query is on the order of 50,000 core-seconds; at even 100 global queries/s that is 5M cores, which ends the discussion. Repository-scoped search is the opposite: at 10 QPS against one repository you need ~10 cores and no index at all. The index costs ~200TB and a continuous update pipeline, so it only pays above roughly 10,000 repositories in scope per query.
+- Alternative wins when: search is always scoped to one repository or one organisation whose code fits in a warm checkout of a few GB. Grep is also strictly more correct: it never serves a stale result, it needs no reindex after a push, and it handles arbitrary regular expressions without the trigram rewrite that an index forces on you. A self-hosted single-org deployment should not build the index, and neither should the per-repository search box on a repository page, which should grep the checkout even when the global index exists.
 #### High-level design
 **must-say**
 
@@ -17171,27 +17263,31 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 </svg>
 ```
 
-**How to read the diagram:** repository storage, pull-request metadata, code search, and CI are separate subsystems connected by repo identity and git refs. A clone or push mostly cares about repo shards; a PR page mostly cares about metadata and indexes.
+**How to read the diagram:** repository storage, pull-request metadata, code search and CI are separate subsystems joined only by repository identity and git SHAs. A clone or push cares about the git storage layer and nothing else; a pull-request page cares about the metadata store and the diff cache.
 
-**Why the flow is shaped this way:** the product surface looks unified, but the workloads are not. Git object storage, search, issue tracking, and CI all want different storage and scaling strategies, so separating them keeps any one model from distorting the others.
+**Why the flow is shaped this way:** the product surface looks unified but the workloads are not. Git storage is stateful and indivisible, metadata is small and transactional, search is a large derived index, and CI is untrusted compute. Separating them keeps the hardest of those, the stateful git layer, from having to accommodate the requirements of the other three.
 
-**What this layout buys you:** a platform that can scale repo traffic, collaboration features, and automation independently. The tradeoff is more cross-system coordination whenever one user action triggers several downstream effects.
+**What this layout buys you:** each subsystem scales on its own axis, and a failure in search or CI does not stop pushes. The cost is that a single user action fans out across four systems with no transaction spanning them, which is where the reconciliation work in Unresolved comes from.
 #### Deep dive
 **must-say**
 
-**Repo sharding and routing.** Each repo is assigned a *primary shard* (one file server) plus N read replicas on other file servers in different racks/AZs. The metadata store keeps `repo_id → primary_shard_id` plus the replica list — a tiny row, indexed for fast lookup. When a user does `git push https://github.com/foo/bar`, the request hits the git proxy fleet, which auths, parses the URL into `(owner, name)`, resolves to `repo_id` in the metadata DB, looks up the primary shard, and forwards the smart-HTTP stream to that file server. Reads (`git clone`, `git fetch`) can route to any replica, balanced by load. Replication is either log-shipping (push the packfile + ref-update to replicas asynchronously after the primary commits) or filesystem-level (DRBD/LVM mirror), depending on durability requirements — log shipping is cheaper but has a small lag window where a primary failure could lose seconds of pushes. Concrete example: `git push` of a 50KB commit hits proxy → metadata lookup (~1ms) → forwards to file server #237 → primary applies ref update, fsyncs, returns success → log-shipper streams the packfile to replicas in the background within seconds.
+**A push is a transaction over refs, and the transaction is a compare-and-swap.**
 
-**Git proxy routing.** The proxy is a stateless L7 router specialized for the git protocol. For HTTPS, it terminates TLS, runs auth (token validation against the auth service), inspects the URL path to identify the repo, looks up the shard via the metadata cache (Redis-backed, TTL'd), and proxies the bidirectional byte stream to the chosen file server. For SSH, it terminates the SSH connection (validating the user's public key against the auth service), parses the requested git command (`git-upload-pack` for fetch, `git-receive-pack` for push), then opens an SSH or local-protocol connection to the shard and bridges the streams. The proxy applies per-user/per-repo rate limits, abuse detection (suspicious clone patterns), and routes writes only to primaries. Because the proxy is stateless, you can scale it horizontally behind a standard L4 load balancer; failure of any proxy instance just retries on another. Concrete example: a clone of `kubernetes/kubernetes` from CI in Frankfurt → proxy in eu-west does auth + lookup, picks the eu-west replica of the repo, streams ~3GB packfile to the client over HTTPS.
+The interesting part of a push is not moving bytes. It is that a push must be atomic, durable and safely retryable against a replica set, and git hands you most of that for free if you place the commit point correctly.
 
-**Pull requests.** A PR is a small relational entity: `(pr_id, repo_id, head_sha, base_sha, head_branch, base_branch, state, author_id, …)` plus rows in `comments`, `reviews`, `checks`. The "code" of the PR is just two git refs — the diff is computed on demand by asking the git server `git diff base_sha..head_sha`, which is a fast walk over the commit graph. Diff results are cached by `(repo_id, base_sha, head_sha)` so the same PR view is served from cache after the first viewer. Merging runs `git merge` (or `rebase`/`squash`, depending on settings) inside the bare repo on the file server, producing a merge commit, fast-forwarding the base branch ref. Concrete example: PR #1234 on `foo/bar` is opened — one row in `pull_requests`, no git mutation; reviewer requests changes, comment rows added; author pushes new commits to the head branch (git mutation, `head_sha` updated on the PR row); merge button computes diff fresh, runs `git merge`, advances `main`.
+**Two phases, objects then refs.** The client and server negotiate what the server is missing, the client sends a packfile, and the server unpacks or indexes it, verifying that every object hashes to its claimed name. At this point nothing is visible. Objects written but not referenced by any ref are unreachable, and unreachable objects are garbage, not corruption. That is the property that makes the first phase safe to abandon: a connection dropped mid-packfile leaves the repository exactly as valid as it was, and the retry re-sends only what is still missing. Phase two is the ref update, and that is the commit point. Before it, the push did not happen; after it, it did.
 
-**Code search (trigram index).** Regular tokenizers (whitespace + punctuation split) fail on code: searching `getUserById` won't find `getuserbyid` or `get_user_by_id` or partial-substring matches, and regex queries are out of reach. The fix is *trigram indexing*: every 3-char shingle in every source file becomes a posting list entry. The string `getUserById` produces trigrams `get`, `etU`, `tUs`, `Use`, `ser`, `erB`, `rBy`, `ByI`, `yId`. A query for substring `serBy` is rewritten as the intersection of the posting lists for `ser`, `erB`, `rBy` — files containing all three are candidate matches; a final regex/substring verification step runs against just the candidates. Regex queries are rewritten into a set of trigrams that any matching file must contain, then verified. This is the architecture Google's codesearch and Sourcegraph use. The index is sharded by repo (so private-repo ACLs are easy: filter shards by access at query time), then sub-sharded by trigram for very large public-repo corpora. Concrete example: search `regex:Handle.*Request` across 10M public Go files — query rewriter extracts mandatory trigrams `Han`, `dle`, `equ`, `ues`, `est`; intersection narrows to ~50k candidate files; regex runs on each; top-K returned in a few hundred ms.
+**The ref update is a compare-and-swap, and the client supplies the expected value.** The `receive-pack` protocol sends triples of `old_sha new_sha refname`, where `old_sha` is what the client believed the ref pointed at when it started. The server applies the update only if the ref still holds `old_sha`. This is optimistic concurrency control, and it is where the classic race resolves: two developers push to `main` from the same base, the first CAS succeeds, the second arrives with a stale `old_sha`, and the server rejects it. The client sees the non-fast-forward rejection and pulls. Note what the server did *not* do: it did not merge, and it did not pick a winner. Conflict resolution lives entirely on the client, which is why the server side of a source-code host is far simpler than a sync product like Q12's, where the server has to invent a conflict copy because there is no merge semantics available to it.
 
-**Webhooks / CI.** A successful push commits the ref-update on the primary shard, then publishes a `push_event` to the durable queue. Webhook workers consume the event, look up subscribers (orgs/repos with webhook URLs configured), and POST the payload (with HMAC signature for verification) to each, retrying with exponential backoff on 5xx/timeout up to ~24h. CI/Actions consumes the same event: the workflow scheduler reads the repo's `.github/workflows/*.yml` from the git server at the pushed SHA, computes which workflows match the event, queues each as a job, and the runner pool spins up an ephemeral VM (or container) per job — clones the repo at the event SHA, runs the steps, reports check results back to the PR/issues service. Concrete example: a push to `main` in a Node.js repo triggers `ci.yml` (test) and `deploy.yml` (deploy) — two workflow jobs queued, two VMs spun up, each runs ~3 minutes, posts check status; the PR view shows "all checks passed" via the checks rows on the relevant PR.
+`git push --force` bypasses the check by sending the all-zeros `old_sha`, which is why force-push loses work. `--force-with-lease` restores it by sending the SHA the client last observed, so the CAS still fires. Multi-ref pushes are all-or-nothing only if the client asks for `--atomic`, which requires the server to take a transaction over the whole ref namespace rather than updating refs one at a time. Whether your ref backend can do that depends on the backend: loose refs plus `packed-refs` needs a directory-wide lock, and the `reftable` format, which git adopted for this among other reasons, gives a real transactional block store for refs.
 
-**Large File Storage (LFS).** Git's delta compression is built for line-based text and balloons on binary blobs — committing a 100MB design file directly into git makes every clone download every version of it forever. LFS replaces the binary content in git with a tiny pointer file (`oid sha256:...`, size, version), and stores the actual blob in object storage (S3) keyed by content hash. On push, the git client uploads the blob to the LFS server (which writes to S3) before pushing the pointer-bearing commit. On clone/checkout, the git client sees the pointer, downloads the blob from LFS via a separate authenticated HTTP request, materializes the file. Cross-repo dedup is automatic via content addressing — the same 100MB file forked across 1000 repos costs one S3 blob. Concrete example: a designer commits `mockup.psd` (200MB); LFS uploads it to S3 keyed by SHA-256; the repo on disk grows by ~150 bytes (the pointer); future clones download the pointer instantly and pull the blob lazily on checkout.
+**Durability: quorum before the CAS, not after.** The primary streams the packfile to both replicas and waits for 2 of 3 fsync acknowledgements before performing the CAS and acking the client. The ordering is the whole point. If the ref moved first and the primary died before replication, a promoted replica would have objects it cannot reach and a ref history the fleet disagrees on. With objects first, the worst case after any crash is a set of unreachable objects on some subset of replicas, which the next GC collects. The cost is that every push pays a cross-data-centre round trip, roughly 1 to 3ms within a metro and 30ms or more across a continent, which is why replicas are metro-spread rather than globe-spread and why the invariant is that no majority of a repository's replicas sits in one data centre.
 
-**Spokes (GitHub's git fileserver) — three-replica majority.** Spokes is the system that replaces the original single-primary-with-replicas model with a three-way replicated git store. Every repo lives on three file servers, intentionally split across data-centres: GitHub's stated invariant is *"we never place a majority of repository replicas in any single datacenter."* This means a full-DC outage cannot lose write quorum on any repo — at least one replica in another DC has every push. Writes go to the primary; the primary streams the packfile to the other two replicas; a push acks the client only after a quorum (2 of 3) has fsynced. Repair: a damaged replica is rebuilt from a peer via `git clone` semantics rather than filesystem copy, so corruption (bit rot, partial write) is detected via SHA-1 mismatch on object verification. Routing decisions during failover rely on a small consensus layer that tracks `repo_id → (primary, replicas[], generation)` — when the primary is lost, a new primary is elected from the remaining replicas and the generation bumps. *[Source: GitHub engineering blog, "Scaling monorepo maintenance" 2021]*
+**Failover and the generation number.** A small consensus store holds `repo_id → (primary, replicas[], generation)`. On primary loss, the controller picks the replica with the highest applied ref state, bumps the generation, and publishes the new routing. Proxies stamp the generation on every forwarded request, and a demoted primary that comes back rejects writes stamped with an older generation, which fences it. This matters because content addressing does *not* protect you from split brain here. If two primaries both accept pushes to `main`, both produce valid DAG extensions, and there is no hash mismatch to detect, no corruption, and no way to tell which one the users meant. One of them is a silently lost update. Fence before promoting, and accept a few seconds of write unavailability for that repository as the price.
+
+**Retry is free, and that is unusual.** A client that loses the ack retries the whole push. Objects already present are skipped by the negotiation, so the byte cost is near zero, and the CAS either finds the ref already at `new_sha`, making the update a no-op that reports success, or finds it elsewhere, where rejecting is correct anyway. Exactly-once semantics fall out of content addressing plus CAS with no idempotency key, dedup table or transaction id. The same guarantee over an object store or a relational write path takes real machinery.
+
+**Repair and verification.** Because an object's name is its hash, verifying a replica is a walk rather than a comparison against a peer. A damaged replica is repaired by fetching from a healthy peer through git's own object transfer, so a bit-rotted object fails its hash check and is replaced rather than copied outward. Live migration is the same mechanism: replicate to a new file server, let it catch up, verify by hash, flip the routing pointer, drop the old replica, with a few seconds of push rejection and retry during the flip. Migrating a stateful shard is usually the scariest operation in a system like this. Here it is the cheapest thing in the design.
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 625" role="img" aria-label="GitHub Spokes three-replica push: client, proxy, metadata DB, primary and two replicas, webhook queue, CI runner">
@@ -17297,123 +17393,128 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 </svg>
 ```
 
-**Geometric repacking and multi-pack bitmaps.** Pre-2021 GitHub maintenance ran `git repack` on each repo to compress every object into a single packfile — for huge repos this ran in 60+ minutes and burned massive CPU. The fix is *geometric repacking*: maintain a sorted set of packs where each pack contains at least 2× as many objects as the next, so total pack count grows logarithmically with object count rather than linearly. Combined with *multi-pack bitmaps* (an index over reachability across packs, not within a single pack), serving a fetch no longer requires that all objects live in one giant pack. Reported wins: average repack time 1 minute → 15 seconds, fetch CPU down 35% across all repos and up to 80% on individual large ones. *[Source: GitHub engineering blog]*
-
-**Multi-region operation.** Yes — write-primary in one region (Spokes' three replicas straddle DCs within that primary region's metro area for cross-DC majority on writes) with async-replicated read-only mirrors in other regions (EU, APAC). The git proxy in each region prefers a local replica for reads and forwards writes back to the primary region — clones from Frankfurt hit the eu-west replica, but a push from Frankfurt pays one trans-Atlantic RTT to commit. Metadata (repo→shard, ACLs, PR/issue rows) replicates via the transactional store's native multi-region setup with bounded staleness; PR comments may take seconds to appear in a remote region, but git ref state is strongly consistent because every push routes to the primary. CI runner pools are regional, scheduled near the data they clone. Trade-off: writes pay cross-region latency, and a primary-region failure means demoting reads to remote regions until recovery — explicitly chosen over multi-write because git's content-addressable durability is hard to reconcile across async cross-region writes without operator visibility into conflicts.
-
-**Monorepo support — partial clone, sparse checkout, GVFS.** Microsoft Windows source (~270GB, 3.5M files, 8M commits) was the canonical "git can't do this" repo until GVFS (now Scalar). Three layers of support compose: (1) *Protocol v2 + partial clone* (`git clone --filter=blob:none`) skips downloading any blob until checkout — the initial clone fetches only commit graph + trees, blobs lazy-load on `git checkout`; (2) *Sparse checkout* limits the working tree to declared paths, so a developer working in one team's directory doesn't materialise the rest; (3) *Reachability bitmaps* server-side make the ref-enumeration phase O(1) rather than O(commits), so even a "clone everything" against a 10M-commit repo doesn't time out; (4) *GVFS / Scalar* virtualises the filesystem itself — `ls` on a non-materialised directory makes a synchronous fetch from the server. Combined, a 270GB repo clones to a developer machine in ~5 minutes with ~5GB of disk used. *[Source: Microsoft GVFS / Scalar docs]*
+Read the diagram as three regions. Steps 1 to 4 are routing and are stateless: any proxy, any retry. Steps 5 to 11 are the transaction, and the quorum marker is the commit point; everything above it can be abandoned safely and everything below it is committed history. Steps 12 to 15 are consequences, deliberately after the ack, because a webhook receiver or a runner pool having a bad day must never be able to fail a push.
 #### Where it breaks
 **must-say**
 
 **Bottlenecks**
 
-- **Hot repo** — `kubernetes/kubernetes` and similar OSS megaprojects get hammered by clone/fetch traffic, saturating the primary shard's disk IO and network. Add multiple read replicas (5-10 for the top repos), load-balance fetches across them, aggressive HTTP caching for `git-upload-pack` responses on common ref states (most clones request the same default-branch HEAD); for cold-region clones, edge-cache recent packfile snapshots so fetch hits the CDN before the origin shard.
-- **Massive repo** (chromium ~30GB) — full clone is gigabytes of network and disk IO, and history walk for clone enumeration is O(commits). Protocol v2 + partial clone (`--filter=blob:none`) skips blob download until checkout; sparse checkout limits materialized files to declared paths; reachability bitmaps server-side make ref-enumeration O(1); for the truly largest (Microsoft Windows-class), GVFS-style virtual filesystem with on-demand fetch is the only option.
-- **Webhook fan-out** — a single push can have 1000+ webhook subscribers; synchronous delivery would block the push response for seconds. Decouple via durable queue: ack the push immediately, fan out delivery via worker pool with retry+backoff (24h retention); per-receiver rate limits prevent one slow subscriber from starving others; signed payloads (HMAC) so receivers can verify authenticity.
-- **CI fan-out** — a push to a monorepo can trigger 1000s of CI workflows, blowing through runner capacity. Per-org concurrency limits cap parallelism; queue with priorities (paid orgs ahead of free); workflow-level dedup — if the same SHA is already running, queue subsequent triggers as a single "rebuild on completion" rather than launching N parallel duplicates.
-- **DDoS on git endpoints** — anonymous clones are unauthenticated and bandwidth-heavy, making git endpoints a juicy attack target. Rate limits per IP and per authenticated user (separate buckets); abuse detection on suspicious patterns (rapid clones from new IPs, clones immediately followed by repo creation suggesting scraping); aggressive temporary blocks for known-bad IP ranges.
-- **Spokes replica skew** — a replica that lags far behind primary becomes useless for reads; if too many lag, write quorum is at risk. Health-check replicas continuously (every 30s); if a replica's lag exceeds threshold, drain reads from it and trigger an automated re-replication from a healthy peer; alert if 2-of-3 are unhealthy because the next failure loses quorum.
-- **Repack pressure on huge repos** — geometric repacking still consumes IO at scale; on a fileserver hosting 50k repos, simultaneous repacks across many repos saturate disk. Schedule repacks per-fileserver with a global concurrency cap; prioritise by repo activity (active repos first, dormant ones can wait days); piggyback opportunistic repacks on quiet periods detected via per-repo IO metrics.
-- **Force-push reflog exhaustion** — heavy force-push usage (some teams use force-push as workflow) inflates loose object pool faster than the 90d GC can keep up. Configurable per-org reflog retention; emergency GC trigger when loose-object disk usage crosses threshold; warn users on excessive force-push patterns.
+- **A hot repository cannot be split.** A megaproject gets hammered by clones and fetches, saturating the primary's disk and network. Add 5 to 10 read-only replicas for the top repositories and load-balance fetches across them; cache `git-upload-pack` responses keyed by the requested ref state, since most clones ask for the same default-branch HEAD; edge-cache recent packfile snapshots so cold-region clones never reach the origin. None of this helps the write side, which stays on one primary.
+- **A very large repository.** A 30GB clone is gigabytes of transfer and, before reachability bitmaps, an O(commits) graph walk just to enumerate what to send. Protocol v2 with `--filter=blob:none` defers blob download until checkout; sparse checkout limits what is materialised; server-side multi-pack bitmaps make enumeration effectively constant-time; for the genuinely largest, a virtual filesystem (GVFS, now Scalar) fetches on demand.
+- **CI fan-out.** A monorepo push can trigger thousands of workflow jobs, each of which clones. Per-org concurrency caps bound parallelism, queue priorities separate paid from free, and workflow-level dedup collapses repeat triggers on the same SHA into one run plus a rebuild-on-completion. Runners are placed in the same region as the replica they will clone from, because at 870 jobs/s the clone traffic, not the compute, is what saturates first.
+- **Repack pressure.** Geometric repacking made maintenance cheap per repository, but a file server hosting tens of thousands of repositories can still saturate its disk if many repack at once. Cap concurrent repacks per server, prioritise by activity, and schedule against per-server I/O metrics rather than a fixed cron.
+- **Unauthenticated clone traffic.** Anonymous clones are bandwidth-heavy and free to request, which makes git endpoints an attractive target. Separate rate-limit buckets per IP and per authenticated user, abuse detection on clone patterns, and the ability to require authentication for expensive operations on specific repositories under load.
 
 **Failure modes**
 
 | Layer | Failure | Detection | Mitigation |
 |---|---|---|---|
-| Spokes primary | Primary file server fails mid-push; client connection dies | Replica heartbeat to coordination layer; missing primary-ack within timeout | Elect new primary from remaining replicas; bump generation; client retries push (idempotent — git protocol carries pack hash, server detects already-applied refs) |
-| Spokes replica skew | One replica falls behind; a second failure would lose write quorum | Per-replica lag SLO (max-lag > N seconds = unhealthy) | Drain reads from lagging replica; trigger automated re-replication from a healthy peer; alert if 2-of-3 unhealthy because the next failure loses quorum |
-| Git proxy | Stateless proxy crashes; in-flight git stream interrupted | Health checks at L4 LB; per-connection error rate | Client retries against another proxy instance; smart-HTTP and SSH protocols are idempotent at the request level; proxy fleet sized for N+2 redundancy per region |
-| Metadata DB | `repo_id → primary_shard` lookup unavailable | Lookup p99 latency; transactional store error rate | Cache lookup at proxy with ~30s TTL; serve stale on lookup error and probe in background; degraded: route to last-known primary even if metadata is unreachable |
-| Webhook delivery | Receiver returns 5xx or times out repeatedly | Per-receiver delivery success rate; queue depth per webhook target | Exponential backoff up to 24h retention; circuit-break consistently-failing receivers (block delivery, surface to repo admin); HMAC-signed payloads so receiver can dedupe on retry |
-| CI runner pool | Runner VM fails to start, or throughput collapses under fan-out | Job-queue depth per org; runner-launch p99 | Per-org concurrency caps; queue priorities (paid > free); workflow-level dedup (same SHA already running → "rebuild on completion"); ephemeral runner pool with hard ceiling and graceful queue |
-| Code search index | Trigram shard hot or stale | Query p99 per shard; index-build lag | Replicas per shard, fan out reads; rebuild stale shards from canonical source; degrade to "search temporarily unavailable" rather than wrong results |
-| LFS pointer↔blob mismatch | Pointer in git but blob missing in object store (corruption / orphaned upload) | LFS fetch 404 on checkout | Validate pointer→blob existence on push; re-upload from another replica (LFS is content-addressed so any source with the SHA suffices); audit-log mismatches for forensic review |
+| Git primary | Primary file server fails mid-push; client connection dies | Replica heartbeat to the consensus store; missing ack within timeout | Promote the replica with the highest applied ref state, bump generation to fence the old primary, client retries (safe: objects dedupe, ref CAS is idempotent or correctly rejects) |
+| Replica skew | One replica falls behind; a second failure would lose write quorum | Per-replica lag SLO (max lag above N seconds is unhealthy) | Drain reads from the lagging replica, re-replicate from a healthy peer, page if 2 of 3 are unhealthy because the next failure loses quorum |
+| Git proxy | Stateless proxy crashes; in-flight git stream interrupted | L4 health checks; per-connection error rate | Client retries against another instance; both smart-HTTP and SSH are safe to retry at the request level; fleet sized N+2 per region |
+| Routing lookup | `repo_id → primary` lookup unavailable | Lookup p99; consensus-store error rate | 30s TTL cache at the proxy; serve stale and probe in the background; degraded mode routes to last-known primary, which is safe because the generation stamp fences a stale target |
+| Metadata vs git divergence | Merge writes the git ref but crashes before the PR row updates | Reconciler comparing PR `head_sha` and merge state against actual ref state | Background reconciliation keyed on ref state, with git treated as authoritative; the UI can be wrong for seconds to minutes, which is conceded below |
+| Webhook delivery | Receiver returns 5xx or times out repeatedly | Per-receiver success rate; per-target queue depth | Exponential backoff within a 24h retention window; circuit-break persistently failing receivers and surface to the repo admin; HMAC-signed payloads so receivers can dedupe retries |
+| CI runner pool | Runners fail to start, or throughput collapses under fan-out | Job-queue depth per org; runner-launch p99 | Per-org concurrency caps, queue priorities, SHA-level dedup, hard ceiling with graceful queueing |
+| Search index | Shard hot or stale | Query p99 per shard; index-build lag | Replicas per shard; rebuild stale shards from the git store; degrade to "search unavailable" rather than return silently stale results |
+| LFS pointer without blob | Pointer committed but blob missing from the object store | LFS fetch 404 at checkout | Validate pointer-to-blob existence at push time; re-upload from any source holding that SHA, since LFS is content-addressed; audit-log every mismatch |
 
 **Unresolved**
 
-TODO. Two or three things this design genuinely does not handle well, and what you would do about each.
+**Shared object pools leak across the fork network, and the mitigations are all partial.** A pool means an object pushed to any member is physically present for every member, and git will serve any object by its raw SHA whether or not a ref points at it. That is the mechanism behind the well-known behaviour where a commit pushed to a private fork can be fetched through the public parent by anyone who learns the hash, and the same mechanism means deleting a repository does not delete its objects if a sibling still needs the pool. We partition pools by visibility class, which stops private objects entering a public pool but throws away deduplication at exactly the point where forks are most numerous, and it does nothing for the public-to-public case. Full isolation means one object graph per repository, which costs the 1,000x storage factor from the second fork above. We have chosen storage over isolation and documented the behaviour, which is a policy decision dressed up as an architecture, and a security-minded interviewer will say so.
+
+**There is no transaction spanning the git store and the metadata database.** A merge writes a git ref on the file server and a state change in a relational database, and nothing makes those two atomic. A crash between them leaves a branch that is merged with a pull request that says open, or a pull request marked merged whose merge commit never landed. Worse, the metadata is not even a reliable mirror of git: a force-push moves `head_sha` out from under an open review, so a review comment can be attached to a commit no ref reaches any more. We run a reconciler that treats git as authoritative and repairs metadata behind it, which means the UI is eventually consistent with the repository on a horizon of seconds to minutes, and that during that window the API can return a state no client should act on. The honest fix is a two-phase protocol with an intent record written before the ref update and cleared after, which converts silent divergence into a visible in-progress state but does not make anything atomic.
+
+**Availability is a fleet number and outages are per repository.** Three replicas serving one repository means that repository's availability is independent of the other 100M, so a 99.99% fleet SLO can coexist with a specific customer being fully down while two of their three replicas re-replicate a 30GB working set. Statelessness elsewhere does not help; the data has to be somewhere specific. Re-replication of a large repository takes minutes to tens of minutes and consumes the very disk bandwidth the surviving replicas need to serve reads, so recovery competes with availability. We prioritise re-replication by repository activity and cap its bandwidth, which means the tail of unlucky repositories has a materially worse experience than the SLO advertises. Raising the replication factor to five improves this and costs 67% more storage on 15PB, which is the trade we have not made and would revisit if per-repository availability ever became the thing customers measured.
 #### Drill questions
-1. Git LFS or just raise the repo size limit?
-2. How do you do code search across millions of repos?
-3. A push triggers 1000 CI workflows — how do you stop the runner pool collapsing?
-4. A 30GB monorepo (chromium-style) — what's the clone strategy?
-5. How do you handle a hot repo (`kubernetes/kubernetes`) hammered by clones?
-6. How do you migrate a repo to a new shard without downtime?
-7. How do you protect against a malicious push that exfiltrates secrets via webhook?
-8. Why does Spokes use 3 replicas with cross-DC majority instead of 5 with single-DC majority?
-9. How does code search handle private-repo ACLs without scanning every result?
-10. How does the geometric repacking handle a force-push that orphans 1M objects?
+1. Git LFS or just raise the repository size limit?
+2. How do you do code search across millions of repositories?
+3. A push triggers 1000 CI workflows. How do you stop the runner pool collapsing?
+4. A 30GB monorepo. What is the clone strategy?
+5. How do you handle a hot repository hammered by clones?
+6. How do you migrate a repository to a new file server without downtime?
+7. Two people push to `main` at the same moment. What does the server do?
+8. Why can you not erasure-code a repository across the fleet the way an object store does?
+9. Why three replicas with a cross-DC majority rather than five within one DC?
+10. How does code search enforce private-repository access control without scanning every result?
+11. A user forks a public repository into a private one and pushes a secret. What is exposed?
+12. How does geometric repacking handle a force-push that orphans a million objects?
 #### Answers to drill questions
-1. LFS for binary assets that change often (designs, datasets, ML models) — git's delta compression is built for text and balloons on binaries. *If pushed:* the cost is LFS adds an extra round-trip per blob (clone is two protocols, not one); for repos that just have a few large checked-in binaries, partial clone + sparse checkout is simpler than LFS.
+1. LFS for binary assets that change often (designs, datasets, model weights), because git's delta compression is built for line-based text and balloons on binaries, so every clone downloads every historical version forever. *If pushed:* LFS costs an extra round trip per blob and makes a clone two protocols instead of one; for a repository with a handful of static large files, partial clone plus sparse checkout is simpler and needs no separate server.
 
-2. Trigram index per repo (3-char shingles → posting list); query rewrites substring/regex into trigram intersection. ACL filter applied at query time after candidate set returned. *If pushed:* global search is the hard part — index size scales with code volume, not repo count; shard by repo, fan out queries, merge top-K; precompute popular query results for "trending searches".
+2. A separate ngram inverted index, sharded by repository, with the query rewritten into an index lookup and a verification pass over the candidates. Q47 has the inverted-index mechanics. *If pushed:* the size driver is unique text, not repository count, because fork pooling and file-level dedup collapse the corpus; GitHub reported ~115TB of content deduplicating to ~28TB in 2023. The hard operational part is keeping the index fresh at ~175 pushes/s while a full rebuild takes days.
 
-3. Per-org concurrency limits, queue with priorities (paid orgs ahead of free), autoscale runners with a hard ceiling. *If pushed:* workflow-level dedup — if the same SHA is already running, queue subsequent triggers as a single "rebuild on completion" rather than launching N parallel duplicates; saves 30%+ on hot repos.
+3. Per-org concurrency caps, priority queues, and autoscaling runners with a hard ceiling. *If pushed:* workflow-level dedup on SHA is the biggest win, collapsing repeat triggers into one run plus a rebuild-on-completion. Also place runners in the same region as the replica they clone from, because at 870 jobs/s the clone bandwidth saturates before the compute does.
 
-4. Protocol v2 + partial clone (`--filter=blob:none`) + sparse checkout — fetch only the directories the dev cares about. *If pushed:* server-side, store packfiles with reachability bitmaps so clone enumeration is O(1) instead of O(commits); for the genuinely largest repos (Microsoft Windows source) you need GVFS-style virtual filesystem with on-demand fetch.
+4. Protocol v2 plus `--filter=blob:none` for a partial clone, and sparse checkout to limit what is materialised on disk. *If pushed:* server-side, multi-pack reachability bitmaps make the enumeration phase effectively constant-time instead of O(commits), which is what stopped very large clones timing out. For the genuinely extreme cases (a 270GB Windows-class repository) a virtual filesystem such as Scalar fetches objects on directory access.
 
-5. Read replicas of the bare repo on multiple file servers; loadbalance reads, route writes to primary; aggressive HTTP caching for `git-upload-pack` responses on common ref states. *If pushed:* edge-cache the most recent packfile snapshots at CDN; clones from cold geos hit the snapshot first then incrementally fetch from the primary.
+5. Extra read-only replicas with fetches load-balanced across them, response caching for `git-upload-pack` keyed by the requested ref state, and edge caching of recent packfile snapshots. *If pushed:* none of that touches writes. Pushes stay on one primary, so a repository whose write rate exceeds one machine has no answer in this design short of splitting the repository, which is a product decision rather than an infrastructure one.
 
-6. Replicate to the new shard, dual-write for a window, flip the metadata pointer, verify, then drop the old replica. Pushes during the flip get a brief 503 (seconds). *If pushed:* git's content-addressable model makes this safer than typical DB migrations — you can verify by SHA equivalence on every object before flipping; rollback is just flipping the pointer back.
+6. Add the new server as an extra replica, let it catch up, verify by hash walk, flip the routing pointer in the consensus store, bump the generation, drop the old replica. Pushes during the flip get a few seconds of rejection and retry. *If pushed:* this is safer than a typical database migration precisely because content addressing makes verification total rather than sampled, and rollback is flipping the pointer back. The expensive part is bandwidth: moving a 30GB repository competes with live traffic on both endpoints.
 
-7. Webhook URLs validated against allowlist, secrets scrubbed from logs, signed payloads (HMAC). *If pushed:* sandbox webhook delivery in a separate egress network so a malicious receiver can't pivot into your infra; rate-limit per-receiver to limit blast radius if a target is compromised.
+7. The first push's ref compare-and-swap succeeds. The second arrives claiming an `old_sha` that no longer matches, so the server rejects it as a non-fast-forward and the client must fetch and rebase or merge. The server never merges and never picks a winner. *If pushed:* `--force` defeats this by sending all-zeros as `old_sha`, which is why it loses work; `--force-with-lease` sends the last observed SHA so the CAS still fires. Multi-ref atomicity requires `--atomic` plus a ref backend that supports a real transaction, which is one of the motivations for the reftable format.
 
-8. Three-with-cross-DC trades higher latency on quorum writes (must hit a remote DC every push) for *survival of any single DC outage* — losing a DC never costs you the majority. Five-with-single-DC would be cheaper to write but a DC fire is a data-loss event. GitHub's invariant is durability over write latency. *If pushed:* the cost is real — every push pays a cross-DC RTT; mitigated by colocating CI runners and the primary in the same region so the developer-perceived push latency is dominated by upload, not replication.
+8. Because a git operation walks a reachable subgraph and needs every object it reaches present locally. Erasure coding assumes the unit of access is the unit of storage, which holds for an object store where a GET touches one key. Here a single clone touches hundreds of thousands of objects, so spreading them turns every operation into a distributed traversal, and the durability unit is not the object but the reachability closure: a repository missing one reachable object is corrupt, not slightly degraded. *If pushed:* you can erasure-code the packfiles as opaque blobs for cold or archival repositories, where nobody runs live git operations against them, and some hosts do exactly that for dormant storage.
 
-9. Trigram index sharded by `repo_id`. At query time the search service first computes the user's accessible-repos set (from the auth service, cached per session), restricts the trigram intersection to those repo shards, and never reads from inaccessible shards. The user can't even time-attack on private-repo existence because the shard list is opaque. *If pushed:* large orgs with millions of accessible repos hit a problem — the access set itself is huge; precompute org-level access roll-ups and filter at the org granularity first, then per-repo within.
+9. Cross-DC majority means no single data centre holds enough replicas to lose write quorum when it fails, so a DC outage costs latency rather than availability. Five within one DC is cheaper to write to (no cross-DC round trip on the quorum path) but a DC-level event is then a data-loss event. *If pushed:* the cost is real and paid on every push: 1 to 3ms of metro round trip. It is tolerable only because pushes are ~175/s fleet-wide and each is dominated by upload time, not by the quorum. On a write path with different economics this trade flips.
 
-10. Force-push doesn't trigger immediate repack — the orphaned objects stay reachable via reflog for the configured grace period (typically 90 days). Geometric repack runs periodically (cron-ish) and only includes reachable objects in new packs; orphaned objects fall into a "loose" pool that's GC'd after the grace window. *If pushed:* concurrent force-pushes can briefly inflate disk usage with redundant packs; cap the rate of force-pushes per repo, and run urgent repack if disk pressure crosses threshold.
+10. Shard the index by repository and compute the user's accessible-repository set at query time from the auth service, then restrict the query to those shards so inaccessible shards are never read at all. Filtering after retrieval leaks existence through timing and result counts. *If pushed:* very large organisations break this, because the accessible set itself is millions of entries. Roll access up to the org or team level and filter at that granularity first, descending to per-repository only within the orgs the user belongs to.
+
+11. If the private fork shares an object pool with the public parent, the secret's objects are physically present in storage shared with public repositories, and git will serve any object by its SHA regardless of reachability, so anyone who obtains the hash can fetch it through the parent. *If pushed:* the mitigation is to partition pools by visibility so a private fork is detached into its own object storage, which costs a full copy of the history. That is the right call and it is why forking a public repository into a private one is slower and more expensive than a public-to-public fork. The residual risk is public-to-public: a commit pushed to a public fork and then deleted remains fetchable from the network by hash, which is documented behaviour rather than a bug, and is the reason "force-push to remove a leaked credential" is not a remediation. Rotate the credential.
+
+12. It does not handle it immediately, and that is deliberate. A force-push leaves the orphaned objects unreachable but present; they stay recoverable through the reflog for the retention window (90 days by default) and only then become eligible for collection. Geometric repacking only ever packs reachable objects, so the orphans sit in the loose pool consuming disk until GC. *If pushed:* a team that uses force-push as a normal workflow can inflate the loose pool faster than scheduled GC drains it. The controls are per-org reflog retention, an emergency GC trigger on a disk-usage threshold, and alerting on repositories whose loose-object count grows monotonically.
 #### Whiteboard script
-TODO
+**0-5, name the storage unit and take the fork.** Open with the thesis before any box: "the unit of storage is a git repository, and a repository is already a content-addressed database, so this is a placement problem for stateful shards, not a blob-storage problem." Then ask the three questions that actually change the design: private repositories as well as public, is code search global or repository-scoped, and is CI in scope. State the numbers you are working from out loud: ~100M repositories, ~5PB unique, ~2,000 git ops/s average with ~175 pushes/s, and CI generating more read traffic than humans do. Draw nothing yet.
 
-A 45 minute budget: what to cover in 0-5, 5-15, 15-35 and 35-45, what to say first, and a line starting `Cut first:`.
+**5-15, the spine.** Four boxes, not one: git storage, metadata, search, CI, joined only by repository id and SHAs. Then zoom into git storage and draw the replica set: one repository, three file servers, no majority in one data centre, one elected primary. Say why the servers are stateful and hold local disks, using the random-read number rather than an adjective. Then draw the proxy above them and say it is stateless and resolves `owner/name` to `(repo_id, primary, generation)`. Say "a fork is not a copy" while drawing the object pool, because it is the cheapest way to show you know what git is.
 
-**Raw material, from the old Talking Points:**
+**15-35, the drill.** Protect this time; it is where the interview happens. Go deep on the push as a transaction: objects first because unreferenced objects are garbage rather than corruption, then the ref compare-and-swap as the commit point, quorum before the CAS and not after, and what the client's `old_sha` buys you (concurrency control with no server-side merge, and free retry semantics). Volunteer split brain and say that content addressing does not save you from it, so you fence with a generation number and accept seconds of write unavailability. Then take the fork-pool decision on your own terms, including the leak, before they raise it. Then code search as a separate index with the corpus-times-QPS number, cross-referencing the search question rather than re-deriving inverted indexes. Keep hot-repository read replicas and partial clone as one-liners ready to expand.
 
-- **Separate git storage from collaboration metadata immediately.** Repos are append-heavy content-addressed blobs; PRs, checks, comments, and issues are transactional relational data.
-- **Spokes-style 3-way replication with 2-of-3 fsync quorum** is the durability story worth naming explicitly. That is what distinguishes this from a generic file server design.
-- **Git protocol routing is long-lived stream proxying, not a normal REST request.** The proxy authenticates, resolves the shard, and then tunnels smart-HTTP or SSH to the primary.
-- **Code search is its own system.** Trigram indexing, ACL filtering at query time, and separate serving infrastructure show you understand why grep-on-disk is not the answer.
-- **CI fan-out is often the hidden dominant load.** Git operations are not the only scale driver; the push side effects matter just as much.
-- **Large repos need special treatment.** Partial clone, sparse checkout, bitmaps, and sometimes dedicated shards are the right things to mention for chromium-class repos.
+**35-45, concede and close.** Give the three gaps before they are found: pools leak across the fork network and every mitigation is partial; there is no transaction across the git store and the metadata database, so the UI is eventually consistent with the repository; availability is a fleet number while outages are per repository. Then the operational surface in two minutes: what you would page on (quorum success ratio, replica lag, push p99 by size class, runner queue depth), and the multi-region shape, which is a home region for writes with read-only mirrors elsewhere.
+
+Cut first: LFS, then the CI runner internals (cross-reference Q54 and move on), then the audit-log and retention arithmetic. All three are real and none of them changes the shape of the answer. Never cut: the repository as the placement unit, the push transaction, and fork pooling.
 #### Appendix
 **Data model**
 
-- **repos** (transactional store): `(repo_id, owner_id, name, visibility, default_branch, primary_shard)`
+- **repos** (transactional store): `(repo_id, owner_id, name, visibility, default_branch, pool_id, replica_set, generation)`
 - **users / orgs / teams / permissions** (transactional store)
-- **issues / prs** (transactional store): `(id, repo_id, state, author, assignees[], labels[], body)`
-- **comments** (transactional store or sharded)
-- **git data** (filesystem on shard): bare git repos, replicated across N file servers
-- **LFS objects** (object store + content-addressed)
-- **search index** (trigram inverted index): tokenized code (handle camelCase, snake_case, identifiers)
+- **issues / prs** (transactional store): `(id, repo_id, state, head_sha, base_sha, author, assignees[], labels[], body)`
+- **comments / reviews** (transactional store, sharded by repo_id)
+- **git data** (local filesystem on each file server): bare git repositories, three replicas each, with a shared object pool per fork network mounted as an alternate
+- **LFS objects** (object store, content-addressed by SHA-256)
+- **search index** (ngram inverted index, sharded by repo_id so access control is a shard filter)
 
 **API contract**
 
 ```
-git protocol over HTTPS + SSH                  (push/pull/clone)
-REST + GraphQL APIs:
+git protocol over HTTPS + SSH                  (upload-pack, receive-pack)
+REST + GraphQL:
   GET  /repos/{owner}/{repo}
   POST /repos/{owner}/{repo}/pulls
-  GET  /search/code?q=...                      → results
-WebHooks                                       (push, PR, etc.)
+  POST /repos/{owner}/{repo}/pulls/{n}/merge   → 409 if head_sha moved
+  GET  /search/code?q=...
+Webhooks: push, pull_request, check_run        (HMAC-signed, at-least-once)
 ```
+
+Merge takes the expected `head_sha` and returns 409 if it moved, mirroring the ref compare-and-swap rather than papering over it.
 
 **Observability**
 
-- **Git op latency** (push and clone p50/p99 by repo size class) — SLO p99 push < 5s for repos < 1GB; clone latency tracked per size bucket because the long tail (chromium-class) skews any global metric.
-- **Spokes write quorum success ratio** — SLO > 99.99%; quorum failures are visible as push errors and are the most user-visible reliability signal.
-- **Replica lag distribution** — SLO p99 < 5 seconds; growth indicates network or disk pressure on one DC and is a leading indicator of quorum risk.
-- **Webhook delivery success / lag per repo** — SLO > 99% delivered within 60s; per-receiver breakdown to catch slow integrators starving others.
-- **CI runner queue depth and time-to-start** — SLO p99 time-to-start < 30s for paid tiers; queue depth is the leading indicator of runner-pool exhaustion during fan-out spikes.
-- **Code search query latency** — SLO p99 < 1s for ACL-filtered global queries; trigram intersection cost dominates and is monitored per shard.
+- **Quorum success ratio on pushes.** SLO above 99.99%. A quorum failure is a user-visible push error and is the most direct reliability signal in the system.
+- **Replica lag distribution.** SLO p99 under 5s. Growth is a leading indicator of quorum risk, since a lagging replica plus one failure is an outage for those repositories.
+- **Push and clone latency by repository size class.** SLO p99 push under 5s for repositories below 1GB. Bucket by size, because a single global number is entirely determined by the tail.
+- **Per-repository availability, not just fleet availability.** The count of repositories with fewer than two healthy replicas is the metric that matches what a customer experiences; the fleet number hides it.
+- **CI runner queue depth and time to start.** SLO p99 under 30s for paid tiers. Queue depth is the leading indicator of pool exhaustion during fan-out spikes.
+- **Webhook delivery success and lag per receiver.** SLO above 99% delivered within 60s, broken down per receiver so one slow integrator is visible before it starves others.
+- **Search index build lag.** How far behind the index is against the git store, since stale results are worse than slow ones.
 
 **Multi-region and DR**
 
-- **Replication mode:** Spokes triple-replica with cross-DC majority within the home region; async-replicated read-only mirrors in other regions (EU, APAC). Writes always route to the home-region primary; reads prefer local replica.
-- **RTO:** ~30 seconds for in-region primary failover (Spokes generation bump). Cross-region failover (lose home region entirely) is operator-triggered: ~30 minutes including DNS cutover, promotion of a remote async replica, acceptance that recent pushes may need to be re-pushed.
-- **RPO:** ~0s for in-region failover (sync 2-of-3 quorum). Cross-region: up to ~seconds of unreplicated pushes (async lag) — mitigated by git's content-addressable durability (replaying a missing push is just re-pushing the same packfile). Metadata (PRs, issues) bounded-staleness: typically seconds.
-- **Failover cadence:** automatic for Spokes in-region; cross-region game-days quarterly; CI runner pools are regional, scaled on demand.
-- **Cross-region cost:** dominant egress is git replication of pack data. Cold-start a new region cost = full mirror seed (~5PB raw bare-repo data) plus ongoing delta (~50-100GB/day live tail). LFS blobs replicated cross-region only on demand (first remote access pulls + caches at remote object store).
+- **Replication mode:** three replicas with a cross-DC majority inside a home region, plus asynchronous read-only mirrors in other regions. Reads prefer a local replica; writes always route back to the home-region primary.
+- **RTO:** ~30s for in-region primary failover (elect, bump generation, republish routing). Losing a whole region is operator-triggered at ~30 minutes including DNS cutover and promotion of async mirrors.
+- **RPO:** effectively zero in region, since the 2-of-3 fsync quorum precedes the ack. Cross-region, up to the async lag, mitigated by the fact that re-pushing a lost packfile is idempotent, so recovery is often a client retry rather than a data-loss event.
+- **Failover cadence:** automatic in region; cross-region game days quarterly. Runner pools are regional and scaled on demand.
+- **Cross-region cost:** dominated by git replication. Seeding a new region is a full ~5PB mirror plus roughly 50 to 100GB/day of live delta. LFS blobs replicate lazily: the first remote access pulls and caches at the remote object store.
 
 ### 40. Design Spotify (Music Streaming + Recommendations)
 #### Problem
@@ -20691,46 +20792,60 @@ GET  /v1/usage?tenant=&from= → { tokens_in, tokens_out, cost }  quota state pe
 
 ### 47. Design a Web Search Engine
 #### Problem
-Given a stream of crawled documents, build and serve an index that answers a free-text query over tens of billions of pages with the ten best results in a few hundred milliseconds.
+Given a stream of crawled documents, build and serve an index that answers a free-text query over tens of billions of pages, returning the ten best results in a few hundred milliseconds. Document acquisition is the crawler's problem (#6); the input contract here is a stream of fetched pages. The output is a ranked list with a snippet per result, plus a freshness guarantee measured in minutes for newly published content.
 #### Core
-TODO
+Two decisions carry this system: how you split the index, and how you avoid most of the work a query implies.
 
-Write the whole answer as you would give it in sixty seconds, 200 to 300 words, standing alone.
+Split by document. Each of ~1000 leaf shards owns ~50M pages and the complete index for them, so a query is answered locally and only ~800 bytes of results crosses the network. Splitting by term looks cheaper, since a three-word query touches three machines not a thousand, but the lists you must combine now sit apart. The smallest is ~180MB compressed, and at 50k uncached queries per second that is ~9TB/s of network you cannot build. Term popularity is Zipf too, so the shard owning common words is a hotspot sharding cannot relieve.
+
+Then everything is a funnel, and you should recite the cardinalities rather than describe them: ~50B documents indexed, ~750k per shard containing at least one query term, ~5k fully scored, 20 emitted, 20,000 at the merge tree, 500 reranked by a cross-encoder, 10 shown. Retrieval is cheap per document and must consider billions, so it is pushed down. Ranking is expensive per document and needs only hundreds, so it is pulled up to one GPU tier.
+
+Scoring all 750k of those documents costs ~130ms of CPU against a ~30ms budget, so retrieval terminates early: every term carries a precomputed score ceiling, and any document that provably cannot reach the current 20th-best score is skipped unread.
+
+The index is immutable segments built offline by a distributed sort. Publishing is a pointer swap, deletes are a bitmap overlay, a bad build rolls back in seconds.
+
+What remains is the tail. With 1000 shards your p99 is roughly your leaf p99.9, so hedging, a 40ms hard deadline and returning at 99% shard coverage are the design, not the polish.
 #### Summary
-**The picture in your head:** the index at the back of a fifty-billion-page encyclopedia — except no single person could ever hold that index, so it is split across a thousand librarians, each of whom owns the complete index for their own fifty-million-page slice. Ask a question and you ask all thousand at once; each returns their twenty best pages; a supervisor merges the thousand answers into one ranked list. You do not wait for the average librarian. You wait for the *slowest* one.
+**The picture in your head:** the index at the back of a fifty-billion-page encyclopedia, except no single person could ever hold that index, so it is split across a thousand librarians, each of whom owns the complete index for their own fifty-million-page slice. Ask a question and you ask all thousand at once; each returns their twenty best pages; a supervisor merges the thousand answers into one ranked list. You do not wait for the average librarian. You wait for the *slowest* one.
 
 **The approaches people actually take:**
-TODO. Two or three things a competent engineer might reach for, in plain language and before any product name, with what each one buys and roughly when it wins.
 
-**The single-request walkthrough (read path):** a user types `coffee shops brooklyn`. Stage 1 — the Query Service normalises it (lowercase, strip punctuation, spell-correct, stem, drop or downweight stopwords), builds a canonical cache key, and checks the query result cache; on a hit (~50-60% of traffic) it returns in ~5ms and the story ends. Stage 2 — on a miss, the query goes to a root merger, which fans out through ~30 mid-tier mergers to all ~1000 leaf shards. Stage 3 — inside each leaf, the term dictionary maps each term to a posting-list offset; the three lists cover roughly 500M, 200M and 90M documents corpus-wide, so ~10M, ~4M and ~1.8M *in this shard*. Stage 4 — block-max WAND walks the three cursors together, using per-block score upper bounds to skip whole blocks that cannot beat the current 20th-best score; it fully scores ~5k documents instead of the ~100k that actually contain all three terms. Stage 5 — each leaf returns its top 20 as `(doc_id, score)` pairs, ~800B on the wire, with a 40ms deadline. Stage 6 — the merge tree collapses 1000 × 20 = 20,000 candidates to the global top ~500. Stage 7 — a cross-encoder reranker scores those 500 on a GPU batch (~50ms). Stage 8 — the snippet service fetches the ten winners' text from the document store and highlights matched terms (~30ms). Server-side p99 lands around ~250-300ms.
+*One index split by document, where every machine answers every query.* Each machine owns a slice of the corpus and the complete index for that slice, so it can answer entirely locally and return only its own best twenty. Load is uniform because documents are assigned by hash, a new document is written to exactly one machine, and the network carries kilobytes rather than megabytes. What it buys is that nothing about the query changes which machines are involved. What it costs is that all of them are involved, always, so the slowest one sets your latency. Every large engine runs this.
 
-The write path is entirely offline and never touches a serving node synchronously. A document arrives on the crawler's output stream (see #6 — document acquisition, politeness and dedup are that question's problem, not this one). The indexer strips boilerplate, extracts ~5KB of text from ~50KB of HTML, tokenises, and emits `(term, doc_id, positions, field)` tuples. A shuffle groups them by term, sorts each posting list by `doc_id`, delta- and varbyte-encodes it, and writes an **immutable segment** — a self-contained mini-index. Segments are published to the leaf owning `hash(doc_id) % 1000`, which memory-maps them and starts serving. Nothing is ever mutated in place; deletions are a bitmap overlay and segments are periodically merged in the background.
+*One index split by word, where a query touches only the machines holding its words.* A three-word query wakes three machines instead of a thousand, which is very attractive on paper. The problem is that answering it means combining lists that now sit on different machines, and the lists for common words are enormous. It wins when the corpus is small enough that the largest list is a few megabytes, or when the workload is mostly single-word lookups.
+
+*Retrieve by meaning rather than by word.* Represent every document as a vector, represent the query the same way, and return nearest neighbours. This finds documents that never use the query's words, which word matching structurally cannot do. It is weakest exactly where users are least forgiving, on a rare product code or a person's name, it gives up the ability to explain why a result appeared, and changing the model means re-processing the entire corpus. In practice it runs alongside word matching rather than instead of it, with the two candidate sets fused before ranking.
+
+**The single-request walkthrough (read path):** a user types `coffee shops brooklyn`. Stage 1: the Query Service normalises it (lowercase, strip punctuation, spell-correct, stem, drop or downweight stopwords), builds a canonical cache key, and checks the query result cache; on a hit (~50-60% of traffic) it returns in ~5ms and the story ends. Stage 2: on a miss, the query goes to a root merger, which fans out through ~30 mid-tier mergers to all ~1000 leaf shards. Stage 3: inside each leaf, the term dictionary maps each term to a posting-list offset. The three lists cover roughly 500M, 200M and 90M documents corpus-wide, so ~500k, ~200k and ~90k *in this shard*, a union of ~750k distinct documents. Stage 4: the three cursors are walked together, but only 20 results are wanted, so the engine uses precomputed score ceilings to prove that whole blocks of documents cannot beat the current 20th-best score and skips them without decoding. It fully scores ~5k documents instead of ~750k. Stage 5: each leaf returns its top 20 as `(doc_id, score)` pairs, ~800B on the wire, with a 40ms deadline. Stage 6: the merge tree collapses 1000 x 20 = 20,000 candidates to the global top ~500. Stage 7: a cross-encoder reranker scores those 500 on a GPU batch (~50ms). Stage 8: the snippet service fetches the ten winners' text from the document store and highlights matched terms (~30ms). Server-side p99 lands around 250-300ms.
+
+The write path is entirely offline and never touches a serving node synchronously. A document arrives on the crawler's output stream (see #6, where acquisition, politeness and dedup live). The indexer strips boilerplate, extracts ~5KB of text from ~50KB of HTML, tokenises, and emits `(term, doc_id, positions, field)` tuples. A shuffle groups them by term, sorts each posting list by `doc_id`, delta- and varbyte-encodes it, and writes an **immutable segment**, a self-contained mini-index. Segments are published to the leaf owning `hash(doc_id) % 1000`, which memory-maps them and starts serving. Nothing is ever mutated in place; deletions are a bitmap overlay and segments are periodically merged in the background.
 
 **The pieces (and what each one is for):**
-- **Indexing pipeline (Spark or Flink over the crawl stream)** — batch-shuffles trillions of `(term, doc)` tuples into sorted posting lists. Batch, not streaming, because sorting by term is a global operation and you want it to happen once per segment, not once per document.
-- **Inverted index** — the core structure: `term → posting list`, where a posting is `(doc_id, term_frequency, field_weights, positions[])`. Positions are what make phrase queries (`"coffee shops"` as an ordered pair) possible; they roughly double the index size, which is why many engines keep a positional tier and a cheaper non-positional tier and only consult positions when the query needs them.
-- **Term dictionary (FST — finite-state transducer)** — a compressed trie-like map from term string to posting-list byte offset. An FST shares prefixes *and* suffixes, so ~2B distinct terms compress to ~40GB, small enough to stay resident. Lucene uses exactly this.
-- **Leaf shard servers (~1000, document-partitioned)** — each owns ~50M documents and the *complete* index for them. Self-contained: a query can be answered entirely locally.
-- **Merge tree (root + ~30 mid-tier mergers)** — one root cannot issue 1000 RPCs and collect 1000 responses inside a 50ms budget, so the fan-out is two-level: root → 30 mergers → ~33 leaves each.
-- **Query result cache (Redis / in-process LRU)** — keyed on normalised query + locale + personalisation bucket. Query popularity is Zipf-distributed, which is what makes this cheap trick so effective.
-- **Ranking tiers** — BM25 (a term-frequency × inverse-document-frequency score with document-length normalisation) on many candidates, a learning-to-rank GBDT on thousands, a transformer cross-encoder on hundreds.
-- **Offline signal jobs** — PageRank over the link graph, spam classifiers, click-model aggregation. All batch, all producing small per-document scalars that get baked into the segment's doc-metadata block.
+- **Indexing pipeline.** A batch job over the crawl stream that shuffles trillions of `(term, doc)` tuples into sorted posting lists. Batch rather than streaming, because sorting by term is a global operation and you want it to happen once per segment, not once per document.
+- **Inverted index.** The core structure: `term -> posting list`, where a posting is `(doc_id, term_frequency, field_weights, positions[])`. Positions are what make phrase queries (`"coffee shops"` as an ordered pair) possible; they roughly double the index size, which is why many engines keep a positional tier and a cheaper non-positional tier and consult positions only when the query needs them.
+- **Term dictionary, stored as an FST (finite-state transducer).** A compressed trie-like map from term string to posting-list byte offset. An FST shares prefixes *and* suffixes, so ~2B distinct terms compress to ~40GB, small enough to stay resident. Lucene has used exactly this since its 4.0 release in 2012.
+- **Leaf shard servers (~1000, document-partitioned).** Each owns ~50M documents and the *complete* index for them, so a query can be answered without leaving the machine.
+- **Merge tree (root plus ~30 mid-tier mergers).** One root cannot issue 1000 RPCs and collect 1000 responses inside a 50ms budget, so the fan-out is two-level: root to 30 mergers to ~33 leaves each.
+- **Query result cache.** Keyed on normalised query plus locale plus personalisation bucket. Query popularity is Zipf-distributed, which is what makes this cheap trick so effective.
+- **Real-time tier (an in-memory index per leaf).** Holds the documents indexed since the last hourly segment publish, ~234MB per leaf, queried alongside the base segments and unioned before the local top-k. It exists because rebuilding 165TB takes days and a news story published four minutes ago cannot wait for that.
+- **Ranking tiers.** BM25 (a term-frequency times inverse-document-frequency score with document-length normalisation) on thousands per shard, a learning-to-rank GBDT on twenty thousand, a transformer cross-encoder on five hundred.
+- **Offline signal jobs.** PageRank over the link graph, spam classifiers, click-model aggregation. All batch, all producing small per-document scalars that get baked into the segment's doc-metadata block.
 
-**The thing that makes it hard:** you must partition the inverted index, and there are only two ways to do it. **Term partitioning** gives each shard a subset of *terms* — shard 7 owns everything starting with "co", so `coffee` lives entirely on one machine. A query touches only the shards holding its terms, so fan-out is 3 instead of 1000. But a multi-term query now needs a cross-shard intersection: the `coffee` list is ~500M postings ≈ ~1GB even compressed, and it lives on a different machine from the `brooklyn` list. You either ship a gigabyte per query or ship the smaller list (still tens of MB) — either way the network, not the CPU, becomes the bottleneck. Worse, term frequency is Zipf too: the shard owning `the`, `news` and `weather` serves a wildly disproportionate share of every query in the system and cannot be relieved by adding shards, because a term cannot be split. And indexing a single new document touches hundreds of shards, one per distinct term. **Document partitioning** gives each shard a subset of *documents* with a complete local index. Every query goes to every shard. Load is perfectly uniform because documents are hashed. Only ~800B of results crosses the network per shard. Indexing a document touches exactly one shard. The price is fan-out — and fan-out means your p99 is the maximum of 1000 independent latencies, not the average of one.
+**The thing that makes it hard:** you must partition the inverted index, and there are only two ways to do it. **Term partitioning** gives each shard a subset of *terms*, so shard 7 owns everything starting with "co" and `coffee` lives entirely on one machine. A query touches only the shards holding its terms, so fan-out is 3 instead of 1000. But a multi-term query now needs a cross-shard intersection: the `coffee` list is ~500M postings, roughly 1GB even compressed, and it lives on a different machine from the `brooklyn` list. You either ship a gigabyte per query or ship the smaller list, still ~180MB, and either way the network rather than the CPU becomes the bottleneck. Worse, term frequency is Zipf too: the shard owning `the`, `news` and `weather` serves a wildly disproportionate share of every query in the system and cannot be relieved by adding shards, because a term cannot be split. And indexing a single new document touches hundreds of shards, one per distinct term. **Document partitioning** gives each shard a subset of *documents* with a complete local index. Every query goes to every shard. Load is perfectly uniform because documents are hashed. Only ~800B of results crosses the network per shard. Indexing a document touches exactly one shard. The price is fan-out, and fan-out means your p99 is the maximum of 1000 independent latencies, not the average of one.
 
-**Why this design and what it costs:** essentially every large engine chooses document partitioning and then spends its engineering budget on the tail. The arithmetic is brutal and worth saying out loud: Dean and Barroso's *The Tail at Scale* (CACM, 2013) makes the canonical observation that if a leaf has a 1-in-100 chance of being slow and a query touches 100 leaves, ~63% of queries hit at least one slow leaf. At 1000 leaves it is ~99.99% — the p99 of your *service* is roughly the p99.9 of your *leaves*. The fixes are all tail-tolerance techniques rather than throughput techniques: **hedged requests** (after the p95 elapses, send the same request to a second replica and take whichever returns first — ~5% extra load buys a large p99 reduction); **tied requests** (send to two replicas immediately, each cancels the other when it starts executing); **hard deadlines with partial results** (return once 99% of shards have answered and flag the response as partial — losing 0.5% of candidates almost never changes the top 10); **micro-partitioning** (many more logical shards than machines, so a slow machine's load can be shed at fine granularity); and **latency-induced probation** (temporarily route around a replica that is consistently slow). What you buy is uniform load, local updates, and a network cost that does not grow with corpus size. What you pay is that every machine in the fleet participates in every query, so capacity scales with `QPS × shards`, not `QPS`.
+**Why this design and what it costs:** essentially every large engine chooses document partitioning and then spends its engineering budget on the tail. The arithmetic is brutal and worth saying out loud. Dean and Barroso's *The Tail at Scale* (CACM, 2013) makes the canonical observation that if a leaf has a 1-in-100 chance of being slow and a query touches 100 leaves, ~63% of queries hit at least one slow leaf. At 1000 leaves it is ~99.99%, so the p99 of your *service* is roughly the p99.9 of your *leaves*. The fixes are tail-tolerance techniques rather than throughput techniques: **hedged requests** (after the p95 elapses, send the same request to a second replica and take whichever returns first, which costs ~5% extra load and buys a large p99 reduction); **tied requests** (send to two replicas immediately, each cancelling the other when it starts executing); **hard deadlines with partial results** (return once 99% of shards have answered and flag the response as partial, since losing 0.5% of candidates almost never changes the top 10); **micro-partitioning** (many more logical shards than machines, so a slow machine's load can be shed at fine granularity); and **latency-induced probation** (temporarily routing around a replica that is consistently slow). What you buy is uniform load, local updates, and a network cost that does not grow with corpus size. What you pay is that every machine in the fleet participates in every query, so capacity scales with `QPS x shards`, not `QPS`.
 
 **If you were building it tomorrow:**
-- Lucene (or Tantivy) for the segment format, FST dictionary and block-max WAND — do not write your own posting-list codec. Kafka for the document stream from the crawler, Spark for the index build, S3 for segment storage, local NVMe on leaves for the mmapped copy. Redis for the result cache. A GBDT (XGBoost/LightGBM) for mid-tier ranking, a distilled cross-encoder on GPU for the final ~500.
+- Lucene or Tantivy for the segment format, FST dictionary and early-termination query evaluation. Do not write your own posting-list codec. Kafka for the document stream from the crawler, Spark for the index build, S3 for segment storage, local NVMe on leaves for the mmapped copy. Redis for the result cache. A GBDT (XGBoost or LightGBM) for mid-tier ranking, a distilled cross-encoder on GPU for the final ~500.
 - Leaf hot path pseudocode:
   ```
   cursors = [dict.postings(t) for t in query.terms]      // FST lookup per term
-  cursors.sort(key=lambda c: c.max_score, reverse=True)  // WAND needs bounded scores
+  cursors.sort(key=lambda c: c.max_score, reverse=True)  // needs bounded scores
   heap = TopK(20); theta = 0
   while True:
     pivot = first doc where sum(upper_bounds of cursors before it) > theta
     if pivot is None: break
-    if block_max_sum(cursors, pivot.block) <= theta:     // block-max WAND
+    if block_max_sum(cursors, pivot.block) <= theta:     // per-block ceiling
       skip_all_cursors_past(pivot.block); continue
     if all_cursors_at(pivot):
       heap.push(pivot, bm25(pivot) + w_pr*pagerank[pivot] + w_f*freshness[pivot])
@@ -20738,17 +20853,17 @@ The write path is entirely offline and never touches a serving node synchronousl
     advance_lagging_cursors_to(pivot)                     // uses skip pointers
   return heap.items()
   ```
-- Coordinator: `cache.get(key) or fanout(mergers, deadline=40ms) → merge → rerank(top 500) → snippets(top 10) → cache.put(key, ttl=10min)`.
+- Coordinator: `cache.get(key) or fanout(mergers, deadline=40ms) -> merge -> rerank(top 500) -> snippets(top 10) -> cache.put(key, ttl=10min)`.
 #### What this is really testing
-TODO
+Whether you can bound the work a single query does over a corpus you cannot enumerate per query. Everything else here is downstream of that. There is no precomputable answer for `coffee shops brooklyn`, because the space of possible queries is combinatorial, so the ten results must be produced at request time out of the ~750,000 documents in each shard that contain at least one of those words. Two mechanisms do the bounding, and a good answer names both: partitioning, which caps how much index any one machine has to look at, and early termination, which caps how many of the documents it looks at it actually scores. A candidate who describes the index layout in detail and never says how they avoid scoring every match has answered half the question. A candidate who quotes an average leaf latency as the service latency has answered the wrong half, because with a thousand shards you wait for the maximum of a thousand draws.
 
-The one insight this question exists to elicit, then the contrast with the question it most resembles and why the answers differ.
+The contrast is with search autocomplete, which looks like the same problem and is not. Autocomplete's answer space is enumerable. There are finitely many prefixes, each prefix has one correct top ten, and all of them can be computed offline and shipped as a lookup table. That single fact rewrites the entire design. Autocomplete can partition by key, because a prefix's answer is self-contained, so a request touches exactly one shard and there is no tail problem to solve. It can serve from a CDN, because the answer is identical for everyone. It can be rebuilt hourly and be immutable in between, because being an hour stale costs nothing. Search has none of these properties. It cannot precompute, so it must partition by document rather than by key, which forces the fan-out, which creates the tail, which is what the interview is actually about. The result cache is the one place search gets to borrow autocomplete's trick, and it only works for the head of the distribution: it removes work for queries that have been asked before and does nothing at all for the queries that are hard.
 
-Closest question: TODO
+Closest question: Q10
 #### Clarifying questions and how each answer forks the design
 - Open web at ~50B documents, or a bounded corpus (enterprise, single-site)?
 - Do we need phrase and proximity queries, or is bag-of-words scoring enough?
-- How fresh must new content be — seconds for breaking news, or is a daily rebuild fine?
+- How fresh must new content be: seconds for breaking news, or is a daily rebuild fine?
 - Is the result personalised per user, or is there one global ranking plus locale?
 - Do we own document acquisition, or does a crawler hand us a stream?
 - What is the latency SLO, and is a partial answer (99% of shards) acceptable within it?
@@ -20759,51 +20874,51 @@ Closest question: TODO
 |---|---|
 | Open web at ~50B docs | document-partitioned index across ~1000 shards, fan-out per query, tail-tolerance as a first-class concern |
 | Bounded corpus (millions) | a single Elasticsearch cluster with a handful of shards; none of the fan-out machinery is warranted |
-| Phrase and proximity needed | store positions in the postings (roughly 2× index size); keep a non-positional tier for cheap first-pass scoring |
+| Phrase and proximity needed | store positions in the postings (roughly 2x index size); keep a non-positional tier for cheap first-pass scoring |
 | Seconds-fresh required | split into a large periodically rebuilt base index plus a small in-memory real-time index merged at query time |
-| Personalised results | the cache key must include a personalisation bucket, which multiplies key cardinality and collapses hit rate — bucket coarsely |
+| Personalised results | the cache key must include a personalisation bucket, which multiplies key cardinality and collapses hit rate, so bucket coarsely |
 | Crawler is upstream | take a document stream as the input contract (see #6) and design only the indexing and serving halves |
-| Partial answers acceptable | hard per-leaf deadlines and a "return at 99% of shards" policy, which is the single biggest p99 lever available |
+| Partial answers acceptable | hard per-leaf deadlines and a "return at 99% of shards" policy, the single biggest p99 lever available |
 #### Requirements and scale, derived out loud
 **Requirements**
 
-- **FR:** ingest a document stream, build a positional inverted index, serve boolean + ranked free-text queries with phrase support, generate snippets, keep breaking content findable within minutes, resist spam
-- **NFR:** p99 < 300ms server-side at 100k QPS peak; index freshness ≤ 5 min for the real-time tier and ≤ 3 days for the base tier; ≥ 99.95% query availability; no single shard failure may fail a query
+- **FR:** ingest a document stream, build a positional inverted index, serve boolean and ranked free-text queries with phrase support, generate snippets, keep breaking content findable within minutes, resist spam
+- **NFR:** p99 < 300ms server-side at 100k QPS peak; index freshness ≤ 5 min via the real-time tier, ≤ 1 hour to reach a published segment, ≤ 3 days for a full base rescore; ≥ 99.95% query availability; no single shard failure may fail a query
 
 **Scale**
 
-- **Corpus:** assume ~50B servable documents (public estimates of the indexed web range 30-100B pages; 50B is the working figure). Average raw document ~50KB HTML → 50B × 50KB = ~2.5PB fetched. That is the crawler's output (#6), never stored hot by this system.
-- **Extracted text:** boilerplate stripping takes ~50KB HTML → ~5KB indexable text (~800 words). 50B × 5KB = ~250TB; gzip ~3:1 → ~85TB in the document store used for snippets; RF=3 → ~255TB.
-- **Postings:** ~800 body words → ~400 unique terms after stemming, plus title, URL and anchor-text fields → assume ~500 postings/doc. Total = 50B × 500 = ~25 trillion postings.
-- **Bytes per posting (compressed):** doc-id gap varbyte ~1.3B + term frequency ~0.4B + field-weight bitmap ~0.3B = ~2B non-positional. Positions add ~2 occurrences × ~1.2B per position delta ≈ ~2.5B → ~4.5B positional.
-- **Index size:** non-positional tier 25T × 2B = ~50TB; positional tier 25T × 4.5B = ~113TB. Term dictionary ~2B distinct terms × ~20B in an FST = ~40GB (negligible). Doc metadata (PageRank float 4B + spam score 2B + language 2B + crawl ts 8B + length 4B + flags 4B + padding ≈ 32B) × 50B = ~1.6TB. **One full copy ≈ ~165TB index + ~85TB doc store ≈ ~250TB**; RF=3 → ~750TB, ≈ ~1PB with the real-time tier, delete bitmaps and in-flight segments.
-- **Shard count from a memory budget:** assume a leaf with 512GB RAM, budgeting ~200GB for resident postings (the rest goes to doc-store cache, snippet buffers, model weights, OS page cache). 165TB ÷ 200GB = ~825 → round to **1000 shards**, ~50M docs and ~165GB of index each.
-- **Queries:** assume ~100k QPS peak; at a 3× peak-to-average multiplier that is ~33k/s average ≈ ~2.9B queries/day. For calibration, Google is commonly estimated at roughly 8.5B searches/day (~100k/s *average*) — treat our figure as one large engine or one large region.
-- **Fan-out cost:** 100k QPS × 1000 shards = **100M leaf RPCs/s** with a cold cache; at a 50% result-cache hit rate, ~50M/s. If one leaf sustains ~2k QPS (64 cores × ~30ms CPU per query ≈ 60 core-seconds/s — saturating, so 2k is the honest ceiling), you need 50M ÷ 2k = **~25,000 leaf nodes**, i.e. ~25 replicas per shard. This is the fan-out tax: capacity scales with `QPS × shards`.
-- **Merge network:** each leaf returns 20 hits × ~40B (doc_id 8B + score 4B + tier flags 4B + padding) = ~800B → 1000 leaves × 800B = ~800KB fanned in per query. At 50k uncached QPS that is ~40GB/s of intra-datacentre traffic — the reason the merge tree is two-level rather than a single root.
-- **Index build throughput:** assume ~5% of the corpus changes per day → 2.5B docs/day = ~29k docs/s sustained, ~145MB/s of extracted text into the indexer, producing ~29k × 500 × 4.5B ≈ ~65MB/s of new postings.
-- **Real-time tier:** ~50M documents published in the last 6 hours → 50M × 500 × 4.5B = ~113GB. Small enough to hold entirely in memory across the fleet (~113MB per shard) and rebuild continuously.
-- **Link graph (for PageRank):** 50B nodes × ~50 outlinks = ~2.5T edges × 8B (4B src + 4B dst after doc-id renumbering) = ~20TB edge list. ~40 power iterations × a full pass each ≈ ~800TB of I/O per recompute — weekly batch job, never on the serving path.
-- **Hot vs cold:** the top ~10% of documents by PageRank absorb the large majority of impressions; their postings stay in page cache. Documents with zero impressions in 90 days move to a cold tier served from slower storage with a relaxed deadline, and eventually leave the servable index entirely.
+- **Corpus:** assume ~50B servable documents (public estimates of the indexed web range 30-100B pages; 50B is the working figure). Average raw document ~50KB HTML, so 50B x 50KB = ~2.5PB fetched. That is the crawler's output (#6), never stored hot by this system.
+- **Extracted text:** boilerplate stripping takes ~50KB HTML down to ~5KB of indexable text (~800 words). 50B x 5KB = ~250TB; gzip at ~3:1 gives ~85TB in the document store used for snippets; RF=3 gives ~255TB.
+- **Postings:** ~800 body words yields ~400 unique terms after stemming, plus title, URL and anchor-text fields, so assume ~500 postings per document. Total = 50B x 500 = ~25 trillion postings.
+- **Bytes per posting (compressed):** doc-id gap varbyte ~1.3B, term frequency ~0.4B, field-weight bitmap ~0.3B, so ~2B non-positional. Positions add ~2 occurrences x ~1.2B per position delta, about 2.5B, giving ~4.5B positional.
+- **Index size:** non-positional tier 25T x 2B = ~50TB; positional tier 25T x 4.5B = ~113TB. Term dictionary ~2B distinct terms x ~20B in an FST = ~40GB, negligible. Doc metadata (PageRank float 4B, spam score 2B, language 2B, crawl timestamp 8B, length 4B, flags 4B, padding, so ~32B) x 50B = ~1.6TB. **One full copy is ~165TB of index plus ~85TB of doc store, so ~250TB**; RF=3 gives ~750TB, and ~1PB once the real-time tier, delete bitmaps and in-flight segments are counted.
+- **Shard count from a memory budget:** assume a leaf with 512GB RAM, budgeting ~200GB for resident postings (the rest goes to doc-store cache, snippet buffers, model weights and OS page cache). 165TB / 200GB = ~825, rounded to **1000 shards**, so ~50M docs and ~165GB of index each.
+- **Selectivity of one query, per shard:** `coffee` appears in ~500M documents corpus-wide (1%), `brooklyn` in ~200M (0.4%), `shops` in ~90M (0.18%). Divided by 1000 shards that is ~500k, ~200k and ~90k postings locally, and a union of ~750k distinct documents once pairwise overlaps are removed. Note that ~5M documents contain all three corpus-wide (~5k per shard) whereas an independence assumption would predict only ~3,600 corpus-wide. Related words co-occur far above chance, which is why engines store measured per-term statistics and estimate selectivity empirically rather than multiplying marginals.
+- **Queries:** assume ~100k QPS peak; at a 3x peak-to-average multiplier that is ~33k/s average, about 2.9B queries/day. For calibration, Google is commonly estimated at roughly 8.5B searches/day (~100k/s *average*), so treat our figure as one large engine or one large region.
+- **Fan-out cost:** 100k QPS x 1000 shards = **100M leaf RPCs/s** with a cold cache; at a 50% result-cache hit rate, ~50M/s. If one leaf sustains ~2k QPS (64 cores at ~30ms CPU per query is 60 core-seconds/s, saturating, so 2k is the honest ceiling), you need 50M / 2k = **~25,000 leaf nodes**, about 25 replicas per shard. This is the fan-out tax: capacity scales with `QPS x shards`.
+- **Merge network:** each leaf returns 20 hits x ~40B (doc_id 8B, score 4B, tier flags 4B, padding) = ~800B, so 1000 leaves x 800B = ~800KB fanned in per query. At 50k uncached QPS that is ~40GB/s of intra-datacentre traffic, which is why the merge tree is two-level rather than a single root.
+- **Index build throughput:** assume ~5% of the corpus changes per day, so 2.5B docs/day = ~29k docs/s sustained, ~145MB/s of extracted text into the indexer, producing 29k x 500 x 4.5B, about 65MB/s of new postings.
+- **Real-time tier:** incremental segments are published hourly per shard, so the in-memory tier only has to cover the gap since the last publish: 29k docs/s x 3600s = ~104M documents, x 500 postings x 4.5B = ~234GB fleet-wide, ~234MB per leaf. Full base rebuilds, which recompact segments and rescore with the latest PageRank file, run every 2-3 days per shard, staggered so the fleet is never all rebuilding at once.
+- **Link graph (for PageRank):** 50B nodes x ~50 outlinks = ~2.5T edges x 8B (4B source, 4B destination after doc-id renumbering) = ~20TB edge list. ~40 power iterations with a full pass each is ~800TB of I/O per recompute, so this is a weekly batch job and never on the serving path.
+- **Hot vs cold:** the top ~10% of documents by PageRank absorb the large majority of impressions, and their postings stay in page cache. Documents with zero impressions in 90 days move to a cold tier served from slower storage with a relaxed deadline, and eventually leave the servable index entirely.
 #### Key decisions
-TODO
+**Partition the index by document or by term**
+- Choice: document partitioning. Each of ~1000 leaves holds ~50M documents and the complete index for them, and every query goes to every leaf.
+- Alternative: term partitioning, where each shard owns a subset of the vocabulary and a query touches only the ~3 shards holding its words.
+- Decider: fan-out tail latency measured against cross-shard posting-list transfer. Term partitioning must move a posting list per query. The cheapest option is shipping the smallest list, which for `coffee shops brooklyn` is `shops` at ~90M postings x 2B = ~180MB; at 50k uncached QPS that is ~9TB/s of bisection bandwidth, which is not a number you engineer around, it is a number that ends the design. Document partitioning's cost is that p99 becomes the maximum of 1000 draws rather than one, which is severe but bounded: a 40ms hard deadline plus hedging plus partial results caps it, at ~5% extra fleet load. One cost is unbuildable and the other is a line item.
+- Alternative wins when: the largest posting list you would have to move stays under roughly 1MB, and the shard count is low enough that fan-out was never expensive anyway. Concretely, a ~10M-document corpus with ~10 shards: a 1%-frequency term is ~100k postings, about 200KB, and at 1k QPS that is 200MB/s, trivial. Below that scale term partitioning is genuinely defensible and it wins the single-term case outright. It is also the right structure when queries really are mostly one or two words, such as a product-code or SKU lookup, because then there is nothing to intersect across machines.
 
-Two or three genuine forks. For each, in this exact shape so it stays checkable:
+**Terminate retrieval early, or intersect the terms and score what matches**
+- Choice: score documents disjunctively (a document is a candidate if it contains any query term) and terminate early using precomputed score ceilings. Store, per term and per 128-posting block, the maximum contribution that term can make to any document in that block. Track θ, the current 20th-best score, and skip any document or block whose summed ceilings fall below θ. This is WAND (Broder and colleagues, 2003) and its block-max refinement (Ding and Suel, SIGIR 2011). MaxScore (Turtle and Flynn, 1995) is the close sibling and is not obsolete: it partitions terms into essential and non-essential and iterates only the essential ones, with no per-step pivot computation, so it often wins on short queries with one dominant term. Ship both and pick per query.
+- Alternative: strict conjunctive intersection. Walk the three cursors in lockstep with skip pointers, keep only documents containing all three terms, and score exactly those.
+- Decider: the size of the disjunctive union against the CPU budget, and separately whether the product can live with AND semantics. Scoring one document is a random read into the doc-metadata block for length, PageRank and spam, so call it ~175ns. The union is ~750k documents per shard, giving ~130ms of CPU against a ~30ms per-query budget at 2k QPS on 64 cores. Exhaustive disjunctive scoring is ~4x over budget on a three-term query and far worse on longer ones, so you would need ~100,000 leaf machines instead of ~25,000. Strict intersection is genuinely cheap, roughly 1ms for the ~5k documents containing all three terms, but it answers a different question: it drops a page titled "Brooklyn Coffee" with strong inbound anchor text that says "cafés" rather than "shops", and on a six-term query it drops nearly everything. Early termination scores about the same *number* of documents as strict intersection, ~5k, but a different *set*, drawn from the whole union, so it keeps strong two-term matches and skips weak three-term ones.
+- Alternative wins when: AND is the correct semantics, not a compromise. Code search, log search and legal discovery all want every term present, because a missing term means a wrong answer rather than a slightly worse one, and users there will write the query again rather than accept a fuzzy match. It also wins when the union is small enough that the distinction does not pay for itself, roughly under 100k documents per shard, which covers most enterprise and site search. And note that strict intersection is what you fall back to when early termination prunes badly, which happens on phrase-heavy queries and on terms whose score distribution is flat.
 
-**<name of the fork>**
-- Choice:
-- Alternative:
-- Decider:
-- Alternative wins when:
-
-**Raw material, from the old Common Mistakes:**
-
-- **Proposing term partitioning because the fan-out looks expensive.** It is the intuitive answer and it is wrong at web scale: multi-term queries turn into gigabyte network transfers, Zipf term popularity creates unfixable hotspots, and every indexed document writes to hundreds of shards. Choose document partitioning and spend the answer on how you handle the tail instead.
-- **Quoting an average leaf latency and calling it the service latency.** With 1000 shards you wait for the slowest, so the service p99 is roughly the leaf p99.9. Any answer that does not mention hedging, deadlines or partial results has not engaged with the actual hard problem.
-- **Scoring every matching document.** Five million documents match a three-term query; scoring all of them is thousands of times more work than necessary. Say "block-max WAND with skip pointers" and give the pruning ratio — this is the single most load-bearing algorithmic detail in the whole design.
-- **Running the expensive model on everything.** A cross-encoder over the candidate set is unaffordable by three orders of magnitude. Ranking must be a funnel: BM25 on thousands per shard, GBDT on twenty thousand, transformer on five hundred. State the cardinality at each tier.
-- **Treating the index as mutable.** Updating postings in place means locking, fragmentation and no safe rollback. Segments are immutable, deletes are a bitmap overlay, and publishing is an atomic pointer swap — which is also what makes rolling back a bad index build a seconds-long operation.
-- **Leaving spam until the "extensions" slide.** A large share of the crawlable web exists only to rank, and the adversary adapts to whatever you deploy. Anti-spam belongs in the ranking discussion (TrustRank propagation, link-graph anomalies, engagement signals, many weak signals rather than one strong one), not in a footnote.
+**Hard deadline with partial results, or wait for full shard coverage**
+- Choice: a 40ms hard deadline per leaf, and the root returns as soon as ≥99% of shards have answered, flagging the response `partial:true`.
+- Alternative: require all 1000 shards, using hedged and tied requests to bound the wait, and fail the query rather than return an incomplete answer.
+- Decider: what a missing shard costs in answer quality against what waiting costs at p99. Dropping 10 of 1000 shards loses ~0.1% of candidates. Since documents are hashed, relevance is uniformly distributed across shards, so the chance that any given member of the global top 10 lived on one of those 10 shards is ~1%, which is ~0.1 perturbed results per partial query and almost always at positions 8 to 10. Against that, waiting for the true maximum of 1000 draws from a distribution with a 20ms p99 and a fat tail routinely costs 200ms or more, which is most of a 300ms SLO spent on a statistically invisible quality gain.
+- Alternative wins when: completeness is contractual rather than aesthetic. Legal discovery, regulatory archive search and anything that reports a match count all need every shard, because "we searched 99% of the corpus" is not an answer you can certify, and a count that silently varies between identical queries is a defect. It also wins when shard count is low: at 50 shards the maximum of 50 draws is close to the p99 of one, so the deadline buys almost nothing and you may as well wait. If you take this branch, the honest consequence is that a single dead shard with no live replica fails the whole query, so replication factor stops being a cost optimisation and becomes an availability requirement.
 #### High-level design
 **must-say**
 
@@ -20883,23 +20998,31 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 </svg>
 ```
 
-**How to read the diagram:** the vertical spine is the read path — client to query service to root merger to mid-tier to leaves — and it is symmetric on the way back up. Everything hanging off the spine is a cost-avoidance device: the cache short-circuits the fan-out entirely, the reranker only ever sees the few hundred documents the fan-out already agreed were plausible, and the snippet service is the only component that touches raw document text. The indexer feeds segments in from the side and never participates in a query.
+**How to read the diagram:** the vertical spine is the read path, from client to query service to root merger to mid-tier to leaves, and it is symmetric on the way back up. Everything hanging off the spine is a cost-avoidance device: the cache short-circuits the fan-out entirely, the reranker only ever sees the few hundred documents the fan-out already agreed were plausible, and the snippet service is the only component that touches raw document text. The indexer feeds segments in from the side and never participates in a query.
 
 **Why the flow is shaped this way:** retrieval and ranking have opposite cost profiles. Retrieval is cheap per document but must consider billions, so it is pushed down to a thousand machines that each look at fifty million. Ranking is expensive per document but only needs to consider hundreds, so it is pulled up to a single central tier with a GPU. Putting the reranker on the leaves would mean running a transformer fifty million times per query; putting retrieval at the root would mean shipping the index to one machine. The merge tree exists purely because one root socket cannot service a thousand concurrent RPCs inside a 50ms budget.
 
-**What this layout buys you:** uniform load (documents are hashed, so no shard is hotter than another), local writes (a new document touches exactly one shard), and a network bill that is a function of `k`, not of corpus size. The cost is that every machine works on every uncached query, so your p99 is the slowest of a thousand draws and the cache hit rate is the single biggest capacity lever you own.
+**What this layout buys you:** uniform load, since documents are hashed and no shard is hotter than another; local writes, since a new document touches exactly one shard; and a network bill that is a function of `k` rather than of corpus size. The cost is that every machine works on every uncached query, so your p99 is the slowest of a thousand draws and the cache hit rate is the single biggest capacity lever you own.
 #### Deep dive
 **must-say**
 
-**Building the index is a giant distributed sort.** Documents arrive on the crawler's output topic (#6). Parsing strips scripts, nav chrome and footers with a boilerplate classifier, leaving ~5KB of text plus structured fields — title, URL tokens, headings, and inbound anchor text harvested from the link graph. Normalisation lowercases, folds Unicode (`café` → `cafe`), and applies a language-specific stemmer (`shops` → `shop`). Tokenisation emits `(term, doc_id, position, field)` for every token. The pipeline then does the only genuinely hard thing in indexing: a global shuffle that groups all tuples by term and sorts each group by `doc_id`. Sorted doc IDs are the precondition for both gap compression and linear-merge intersection — get this wrong and nothing downstream works. The output is an immutable segment containing the FST dictionary, the posting blocks and a doc-metadata column block. Publishing is an atomic pointer swap: the leaf mmaps the new segment, adds it to its searcher list, and the next query sees it. Background merges combine small segments into large ones (an LSM-style compaction), which is when deleted documents are physically dropped.
+Everything above the leaf is plumbing you could sketch on any fan-out system. The leaf is where this problem stops resembling other distributed systems, so this is where the drilling happens.
 
-**Document partitioning vs term partitioning is the decision that defines the system.** Concretely, with term partitioning the query `coffee shops brooklyn` touches three shards — attractive, until you have to intersect. The `coffee` posting list is ~500M postings ≈ ~1GB compressed and it does not live on the same machine as `brooklyn`. Shipping the smaller list to the larger is the standard trick, but "smaller" here is still ~90M postings ≈ ~180MB, per query, at 50k uncached QPS. And term popularity is Zipf: the shard owning the hundred most common query terms is asked to participate in most of the world's queries, and you cannot relieve it by adding shards because a term is indivisible. Indexing is equally bad — one new document with 500 distinct terms writes to up to 500 shards. Document partitioning inverts every one of these properties: local intersection (the whole posting list is on the machine doing the work), uniform load (hashing documents makes every shard statistically identical), a tiny network payload (~800B of `(doc_id, score)` per shard), and single-shard writes. Every large engine takes this trade. The one thing term partitioning genuinely wins — single-term-query efficiency — is worth almost nothing, because real queries average 3-4 terms.
+**What the leaf holds.** ~50M documents and ~165GB of index in a handful of immutable segments, memory-mapped from local NVMe with the hot parts resident. Each segment contains four things: an FST dictionary mapping each term to a byte offset plus that term's document frequency and score ceiling; the posting blocks; a columnar doc-metadata block holding PageRank, spam score, language, length and crawl timestamp in ~32 bytes per document; and a delete bitmap, the one mutable structure a leaf owns.
 
-**Compression is not an optimisation here, it is what makes the index fit.** Posting lists are the overwhelming majority of the ~165TB, so every byte per posting costs ~25TB. Doc IDs within a list are sorted, so store *gaps* rather than absolute values: a list of `[1042, 1088, 1131, 1400]` becomes `[1042, 46, 43, 269]`. Then variable-byte encode — one byte holds values up to 127, two up to 16,383 — or use PFor (Frame of Reference: encode a block of 128 gaps in a fixed bit-width chosen to fit the majority, patching the handful of outliers separately), which is SIMD-decodable at billions of integers per second. The elegant part is that this compresses *exactly the lists you most need to compress*: a term in 5M of a shard's 50M documents has an average gap of 10 and fits in one byte per posting, while a rare term in 50 documents has gaps near 1M and needs 3 bytes — but there are only 50 of them. Common terms, which dominate total index size, get the best ratio. Uncompressed, `(doc_id 4B + tf 2B + 2 positions × 2B)` would be ~10B per posting = ~250TB for the positional tier alone; compression takes it to ~113TB and, more importantly, cuts the bytes read per query by the same factor, which is what actually shows up in latency.
+**Why the bytes matter before the algorithm does.** Posting lists are the overwhelming majority of the 165TB, so one byte per posting costs ~25TB fleet-wide. Doc IDs inside a list are sorted, so segments store gaps rather than absolute values (`[1042, 1088, 1131, 1400]` becomes `[1042, 46, 43, 269]`) and pack them with variable-byte or PFor encoding, which decodes with SIMD at billions of integers per second. What makes this pay is that it compresses hardest where the volume is: a term appearing in 500k of the shard's 50M documents has an average gap of 100 and needs one or two bytes per posting, while the rare terms that need three are rare by definition. Treat it as a latency mechanism rather than a storage one, because bytes decoded per query fall by the same factor.
 
-**Query execution inside a leaf: skip pointers and block-max WAND.** Naively intersecting three posting lists means walking all of them — ~16M postings in this shard for our example query. Two mechanisms avoid that. **Skip pointers**: every 128 postings, store `(doc_id, byte_offset)` in a skip list, so advancing a cursor to "the first doc ≥ 4,200,000" is a binary search over skip entries plus one block decode, not a linear scan. **WAND** (Weak AND) exploits the fact that you only want the top 20: each term has a precomputed `max_score`, the largest BM25 contribution it can ever make. Maintain θ = the current 20th-best score. Sort cursors by current doc ID, accumulate upper bounds along that order, and the first document where the running sum exceeds θ is the *pivot* — no document before it can possibly enter the top 20, so skip every cursor straight to the pivot. **Block-max WAND** refines this by storing a max score per 128-posting block rather than per term, so it can also skip whole blocks in the middle of a list that happen to contain only low-scoring documents. Worked example: of the ~16M postings in this shard, block-max WAND fully evaluates BM25 on ~5k documents — a ~3000× reduction — and the answer is provably identical to the exhaustive scan, because WAND only prunes documents it can prove cannot make the cut.
+**The problem the leaf actually has.** `coffee shops brooklyn` matches ~500k, ~200k and ~90k documents in this shard, a union of ~750,000 distinct documents. Scoring one of them is not arithmetic-bound; it is a random read into the doc-metadata block, so call it ~175ns. 750,000 x 175ns is ~130ms of CPU for one query, against a per-query budget of ~30ms if a 64-core leaf is to sustain 2,000 QPS. Exhaustive scoring of the union is ~4x over budget on a short query and much worse on a long one.
 
-The cardinalities are worth stating as a ladder, because interviewers listen for exactly this. Corpus-wide: ~50B documents indexed → ~500M contain `coffee`, ~200M `brooklyn`, ~90M `shops` → ~5M contain all three → block-max WAND fully scores ~5M ÷ 1000 shards ≈ ~5k per leaf → each leaf emits 20 → the merge tree sees 20,000 → the reranker scores 500 → the user sees 10. Latency budget at p99: cache lookup ~2ms; fan-out RPC + leaf retrieval ~40ms (hard deadline, hedged at p95 ≈ 12ms); merge tree ~10ms; feature fetch for the reranker ~20ms; cross-encoder on 500 docs, GPU-batched ~50ms; snippet generation including doc-store reads ~40ms; serialisation and egress ~15ms. Sum ≈ ~180ms of budget with ~120ms of slack against a 300ms SLO — the slack exists entirely to absorb the tail.
+**The cheap escape and why it is not free.** Only ~5,000 of those 750,000 documents contain all three terms, and you can find them by walking the three cursors in lockstep and advancing whichever lags. Skip pointers make that fast: every 128 postings the segment stores a `(doc_id, byte_offset)` entry, so "advance to the first document ≥ 4,200,000" is a binary search over skip entries plus one block decode rather than a linear scan. About 1ms, comfortably inside budget. But requiring all three terms answers a different question. It drops a page titled "Brooklyn Coffee", heavily linked with anchor text about coffee in Brooklyn, that happens to say "cafés" instead of "shops", and on a six-term query it drops nearly everything. General web search abandoned strict conjunction long ago for exactly this reason.
+
+**So keep the disjunctive answer and pay close to the conjunctive price.** The lever is that only 20 results are wanted. If you know an upper bound on what each term can contribute to any document's score, you know an upper bound on any document's total, and any document whose bound falls below the current 20th-best score can be skipped without being scored, with no effect on the answer at all. Concretely: at index-build time, store with each term the maximum BM25 contribution it makes to any document in its list, its `max_score`. At query time keep θ, the 20th-best score found so far. Sort the cursors by their current doc ID, accumulate `max_score` in that order, and the first cursor at which the running sum exceeds θ identifies the *pivot* document. No document before the pivot can qualify, so every cursor jumps straight to it. That is WAND, from Broder and colleagues in 2003; the name is Weak AND because it behaves like an AND relaxed by exactly the amount the score bound permits.
+
+The per-term bound is loose, because it is set by the single best document anywhere in a list of half a million. **Block-max WAND** (Ding and Suel, SIGIR 2011) stores a maximum per 128-posting block instead, which is tight locally, so the engine can also skip blocks in the middle of a list that happen to hold only low-scoring documents. **MaxScore** (Turtle and Flynn, 1995) is the older alternative and remains competitive: it splits terms into essential and non-essential by `max_score`, iterates only the essential ones, and looks the rest up on demand. With no per-step pivot computation it is often faster on short queries with one clearly dominant term. Production engines implement both and choose per query.
+
+The result is ~5,000 documents fully scored out of a 750,000-document union, roughly 150x less scoring work, in ~1ms. That is the same *count* as the strict conjunctive set but not the same *membership*: it is drawn from the whole union, so it keeps the strong two-term matches and discards the weak three-term ones, which is the entire point of doing it this way rather than intersecting.
+
+**Where the guarantee stops.** Early termination is rank-safe, meaning it provably returns the identical top 20 an exhaustive scan would, but only while the score decomposes into a sum of per-term contributions each with a known ceiling. That one condition explains the shape of the whole system. PageRank, freshness decay and the spam penalty enter as bounded additive terms from the doc-metadata block, so they fold into the ceiling. Field weights are fine for the same reason. But a cross-encoder that reads query and document together produces no per-term bound at all, so it cannot participate in retrieval and must sit above it, scoring a candidate set someone else produced. The funnel is not a cost-saving convention; it is forced by what can and cannot be bounded. Phrase queries sit awkwardly for the same reason: position verification happens after a document is admitted, so the bound available during retrieval is the bag-of-words bound, which is loose, and phrase-heavy workloads prune much worse. Terms whose score distribution is flat, where every document scores about the same, also prune badly, because the ceiling never drops below θ.
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 300" role="img" aria-label="Search query narrowing pipeline: term dictionary lookup, posting lists, block-max WAND, per-leaf BM25 top 20, merge tier, cross-encoder rerank, top 10 with snippets">
@@ -20972,95 +21095,95 @@ The cardinalities are worth stating as a ladder, because interviewers listen for
 </svg>
 ```
 
-**Ranking is tiered because relevance quality and cost per document scale together.** Tier 1 is BM25, evaluated on the ~5k documents WAND admits per leaf: term frequency saturating (the tenth occurrence of `coffee` adds far less than the second), inverse document frequency (`brooklyn` is more discriminating than `shops`), and length normalisation so a 50k-word page does not win by accident. Field weights are folded in here — a term match in the title or in inbound anchor text is worth several times a body match, and anchor text is disproportionately valuable because it is *other people's* description of the page. Query-independent signals are added as a cheap linear term from the doc-metadata block: PageRank, freshness decay, and a spam penalty. Tier 2 runs at the merge tier on the 20,000 gathered candidates — a GBDT over ~200 features (the tier-1 signals plus click-through rate for this query-document pair, dwell time, host quality, language and geo match) cutting to the top 500. Tier 3 is a transformer cross-encoder that reads the query and the document's text *together* — far more accurate than any bag-of-words score because it models word order and context, and completely unaffordable above a few hundred documents. **PageRank itself is a pure offline batch job**: a power iteration over the ~2.5T-edge link graph where each page's rank is distributed evenly across its outlinks, iterated ~40 times to convergence, run weekly on a graph-parallel framework (Pregel or Spark GraphX). It never runs at query time; it produces one 4-byte float per document that gets baked into the next segment build.
-
-**Freshness is solved by splitting the index in two, not by making one index fast.** Rebuilding 165TB of segments takes hours to days, which is fine for the 95% of the web that has not changed, and unacceptable for a news story published four minutes ago. So each leaf serves two indexes and merges the results. The **base index** is the immutable segment set, rebuilt on a rolling schedule (each shard's segments regenerated every ~2-3 days, staggered so the fleet is never rebuilding all at once). The **real-time index** is an in-memory inverted index of the last ~6 hours of documents — ~50M docs fleet-wide, ~113MB per leaf — built incrementally as documents arrive off the stream, with a ~30 second lag from crawl to searchable. A query runs against both and unions the two result sets before local top-k; the real-time tier usually contributes zero documents, and for breaking-news queries it contributes nearly all of them. When the next base segment is published, the documents it contains are dropped from the real-time tier by watermark. The subtlety is scoring consistency: the real-time tier has no PageRank (the link graph has not seen these pages yet) and no click data, so it uses source-authority priors as a stand-in — otherwise fresh documents would always lose to established ones and the tier would be pointless.
-
-**Caching is the highest-leverage component in the system and it works because query popularity is Zipf-distributed.** Query frequency follows a power law: a small head of queries accounts for a large fraction of volume, while a very long tail of unique queries accounts for the rest. Google has publicly said roughly 15% of the searches it sees each day have never been seen before — which is the same statement read from the other end: ~85% have precedent. That is what makes a result cache worth building. Three caches, in order of payoff: (1) the **query result cache**, keyed on normalised query + locale + personalisation bucket, holding the serialised top 10 with a ~10 minute TTL — a hit costs ~5ms and skips 1000 leaf RPCs, so at a 50% hit rate it halves the entire fleet's work; (2) the **posting-list cache** on each leaf, which is really just the OS page cache over mmapped segments, and which naturally retains the common terms because they are touched by most queries; (3) the **document snippet cache** for the top-ranked pages. The cache-hit-rate lever is worth quantifying in the interview: each percentage point of result-cache hit rate removes ~1M leaf RPCs/s at peak, which is ~500 leaf machines. That is why personalisation is bucketed coarsely rather than per-user — a per-user cache key would take the hit rate to near zero and multiply the serving fleet several-fold. TTL is the other dial: shorter TTLs improve freshness and destroy hit rate, so news-intent queries get a 60 second TTL while navigational queries get an hour.
-
-**Spam and adversarial SEO are a first-class ranking concern, not a filter bolted on afterwards.** A meaningful fraction of the crawlable web exists solely to rank, and unlike every other subsystem here, this one has an adversary who reads your engineering blog. The attacks are well known: keyword stuffing, cloaking (serving different content to the crawler than to users, detected by re-fetching with a browser user agent from a residential IP and diffing), link farms and paid-link networks, expired-domain abuse (buying a domain with residual PageRank and repurposing it), doorway pages, and scaled generated content. The defences are structural. **TrustRank**-style propagation seeds a set of hand-verified trustworthy hosts and propagates trust along outlinks the way PageRank propagates authority, so a link farm with no path from a trusted seed accumulates nothing. **Link-graph anomaly detection** flags reciprocal-link density, sudden inbound-link spikes, and unnatural anchor-text uniformity. **Content classifiers** catch generated and templated text. **Engagement signals** are the strongest and hardest to fake in aggregate: pogo-sticking (user clicks a result, returns within seconds, clicks the next one) is a direct relevance signal, though it is itself attackable by click farms and so must be aggregated with robust statistics. Two design rules follow. First, prefer many weak signals over few strong ones — any single dominant signal will be reverse-engineered and gamed. Second, never publish the ranking function, and roll changes out gradually, because a step change tells the adversary exactly what you altered.
+**The ladder and the budget.** 50B documents indexed; ~5M contain all three terms; ~750k per leaf contain at least one; ~5k fully scored per leaf by tier-1 BM25 plus the additive metadata signals; 20 emitted per leaf; 20,000 reaching the merge tree, where a tier-2 GBDT over ~200 features cuts to 500; the cross-encoder reranks those 500; 10 are shown. At p99 the time goes: cache lookup ~2ms; fan-out RPC and leaf retrieval ~40ms behind a hard deadline with hedging at ~12ms; merge tree ~10ms; feature fetch for the reranker ~20ms; cross-encoder on 500 documents, GPU-batched, ~50ms; snippet generation including doc-store reads ~40ms; serialisation and egress ~15ms. That is ~180ms against a 300ms SLO. The remaining ~120ms is not headroom for growth. It is what absorbs the tail.
 #### Where it breaks
 **must-say**
 
 **Bottlenecks**
 
-- **Fan-out tail latency** — p99 is the max of 1000 leaf latencies, so a leaf p99 of 20ms produces a service p99 far worse than 20ms. Hedge at the p95, enforce a 40ms hard deadline, and return partial results at 99% shard coverage. The trade: hedging adds ~5% fleet load, and partial results mean the answer is no longer strictly deterministic.
-- **Result-cache hit rate collapse under personalisation** — adding user identity to the cache key takes cardinality from millions of distinct queries to billions of query-user pairs, driving the hit rate toward zero and roughly doubling the required serving fleet. Bucket personalisation coarsely (locale + a handful of interest cohorts) rather than per-user; the trade is measurably less relevant results for users with strong individual signals.
-- **Index build throughput vs freshness** — a full base rebuild over 165TB takes days, so the base index is always somewhat stale. Stagger rebuilds per shard so the fleet is never all rebuilding, and carry breaking content in the real-time tier. The trade: two indexes with two scoring regimes, and the seam between them is a permanent source of ranking inconsistency.
-- **Reranker GPU capacity** — the cross-encoder is the most expensive per-query component and GPUs are the scarcest resource; a traffic spike hits this tier first. Distil the model, batch aggressively, cut the rerank depth from 500 to 200 under load, and circuit-break to the GBDT order. The trade is a quality cliff exactly when traffic is highest.
-- **Merge-tier network fan-in** — ~800KB fanned into the merge tree per query at 50k uncached QPS is ~40GB/s, which will saturate a single root's NIC long before its CPU. Two-level merge with ~30 mid-tier nodes, and cap `k` per leaf at 20 rather than 100. The trade: a deeper tree adds a hop of latency and one more failure domain.
-- **Cold posting lists on rare terms** — a long-tail query touches lists that are not in page cache, turning a 5ms leaf query into a 50ms NVMe-bound one, and long-tail queries are exactly the ones the result cache cannot help with. Keep the term dictionary and doc metadata permanently resident, prefetch skip lists, and allow long-tail queries a longer deadline. The trade: a bimodal latency distribution that makes a single p99 SLO misleading — track head and tail queries separately.
-- **Segment merge write amplification** — LSM-style compaction rewrites the same postings repeatedly as small segments merge into large ones, and it competes with query serving for the same NVMe bandwidth. Throttle merges by IOPS budget and schedule them on replicas taken out of rotation. The trade: deferred merges mean more segments per query, and query cost grows roughly linearly in segment count.
+- **Fan-out tail latency.** p99 is the maximum of 1000 leaf latencies, so a leaf p99 of 20ms produces a service p99 far worse than 20ms. Hedge at the p95, enforce a 40ms hard deadline, and return partial results at 99% shard coverage. The trade: hedging adds ~5% fleet load, and partial results mean the answer is no longer strictly deterministic.
+- **Result-cache hit rate collapse under personalisation.** Adding user identity to the cache key takes cardinality from millions of distinct queries to billions of query-user pairs, driving the hit rate toward zero and roughly doubling the required serving fleet. Bucket personalisation coarsely, on locale plus a handful of interest cohorts, rather than per user. The trade is measurably less relevant results for users with strong individual signals.
+- **Index build throughput against freshness.** A full base rebuild over 165TB takes days, so the base index is always somewhat stale. Stagger rebuilds per shard so the fleet is never all rebuilding, publish incremental segments hourly, and carry the last hour in the real-time tier. The trade: two indexes with two scoring regimes, and the seam between them is a permanent source of ranking inconsistency.
+- **Reranker GPU capacity.** The cross-encoder is the most expensive per-query component and GPUs are the scarcest resource, so a traffic spike hits this tier first. Distil the model, batch aggressively, cut rerank depth from 500 to 200 under load, and circuit-break to the GBDT order. The trade is a quality cliff exactly when traffic is highest.
+- **Merge-tier network fan-in.** ~800KB fanned into the merge tree per query at 50k uncached QPS is ~40GB/s, which saturates a single root's NIC long before its CPU. Two-level merge with ~30 mid-tier nodes, and cap `k` per leaf at 20 rather than 100. The trade: a deeper tree adds a hop of latency and one more failure domain.
+- **Cold posting lists on rare terms.** A long-tail query touches lists that are not in page cache, turning a 5ms leaf query into a 50ms NVMe-bound one, and long-tail queries are exactly the ones the result cache cannot help with. Keep the term dictionary and doc metadata permanently resident, prefetch skip lists, and allow long-tail queries a longer deadline. The trade: a bimodal latency distribution that makes a single p99 SLO misleading, so track head and tail queries separately.
+- **Segment merge write amplification.** LSM-style compaction rewrites the same postings repeatedly as small segments merge into large ones, competing with query serving for the same NVMe bandwidth. Throttle merges by IOPS budget and schedule them on replicas taken out of rotation. The trade: deferred merges mean more segments per query, and query cost grows roughly linearly in segment count.
 
 **Failure modes**
 
 | Layer | Failure | Detection | Mitigation |
 |---|---|---|---|
-| Leaf shard | All replicas of one shard unavailable — 0.1% of the corpus is invisible | Per-shard response-rate gauge; `partial:true` rate alert | Return partial results with the flag set; re-replicate from object-storage segments onto spare capacity (~10 min for ~165GB); alert if the same shard degrades twice in a week |
-| Leaf shard | One slow replica drags the fan-out tail without failing health checks | Per-replica latency percentile vs fleet median | Hedged and tied requests route around it automatically; latency-induced probation removes it from rotation after sustained deviation; drain and reimage |
-| Query cache | Cache cluster fails or is cold after deploy — hit rate drops from ~55% to 0 | Cache hit-rate gauge; sudden leaf QPS doubling | Fleet is provisioned for a stated cache-miss headroom (not 2×, so degrade too): shed load by cutting rerank depth and widening deadlines; warm the cache from the head-query list on restart rather than cold-starting |
-| Index publish | A bad segment is published — corrupt postings or a bug in the tokeniser | Segment checksum on load; per-shard result-count and score-distribution canary vs previous generation | Segments are immutable and generation-tagged; roll back by pointer swap to the previous generation in seconds; canary a new build on 1% of shards before fleet-wide publish |
+| Leaf shard | All replicas of one shard unavailable, so 0.1% of the corpus is invisible | Per-shard response-rate gauge; `partial:true` rate alert | Return partial results with the flag set; re-replicate from object-storage segments onto spare capacity (~10 min for ~165GB); alert if the same shard degrades twice in a week |
+| Leaf shard | One slow replica drags the fan-out tail without failing health checks | Per-replica latency percentile against fleet median | Hedged and tied requests route around it automatically; latency-induced probation removes it from rotation after sustained deviation; drain and reimage |
+| Query cache | Cache cluster fails or is cold after deploy, so hit rate drops from ~55% to 0 | Cache hit-rate gauge; sudden leaf QPS doubling | Fleet is provisioned for a stated cache-miss headroom rather than a full 2x, so also shed load by cutting rerank depth and widening deadlines; warm the cache from the head-query list on restart rather than cold-starting |
+| Index publish | A bad segment is published: corrupt postings, or a bug in the tokeniser | Segment checksum on load; per-shard result-count and score-distribution canary against the previous generation | Segments are immutable and generation-tagged; roll back by pointer swap to the previous generation in seconds; canary a new build on 1% of shards before fleet-wide publish |
 | Real-time tier | Crawl stream stalls; breaking content stops appearing | Crawl-to-searchable lag gauge (SLO ≤ 5 min) | Base index continues serving everything older; page on lag > 15 min; the tier is additive, so its failure degrades freshness only, never correctness |
 | Reranker | GPU fleet unavailable or model server OOMs | Rerank call error rate and p99 | Circuit-break and serve the tier-2 GBDT order; a permanent 0.1% no-rerank holdback gives a live estimate of the quality cost |
 | Doc store | Snippet fetch fails for some results | Snippet-generation error rate per result | Serve the result with a cached or meta-description snippet rather than dropping it; a result with a poor snippet beats a missing result |
-| Merge tier | A mid-tier merger dies mid-query, silently losing ~33 shards | Shard-coverage count per response vs expected | Coverage is computed per query, not assumed; below the 99% threshold the root retries the missing subtree against a second merger within the remaining deadline |
-| Link-graph job | Weekly PageRank run fails or produces a degenerate distribution | Rank-distribution KS test against the previous run; job SLA alert | Keep serving the previous week's ranks — they are query-independent and decay slowly; never publish a rank file that fails the distribution check |
+| Merge tier | A mid-tier merger dies mid-query, silently losing ~33 shards | Shard-coverage count per response against expected | Coverage is computed per query, not assumed; below the 99% threshold the root retries the missing subtree against a second merger within the remaining deadline |
+| Link-graph job | Weekly PageRank run fails or produces a degenerate distribution | Rank-distribution KS test against the previous run; job SLA alert | Keep serving the previous week's ranks, which are query-independent and decay slowly; never publish a rank file that fails the distribution check |
 
 **Unresolved**
 
-TODO. Two or three things this design genuinely does not handle well, and what you would do about each.
+- **Word matching cannot retrieve a document that does not contain the words.** Every mechanism in this design, from the inverted index through the score ceilings that make early termination rank-safe, assumes relevance is a function of term overlap. A page that is the best answer in the world but phrases everything differently is not merely ranked low, it is never a candidate, so no amount of reranking can rescue it. Stemming, synonym expansion and query rewriting narrow the gap and each of them widens the candidate set, which costs pruning effectiveness. Dense retrieval genuinely closes it, but running a second 50B-vector index alongside the first and fusing two candidate lists is a large amount of new machinery with its own failure modes, its own staleness (a model change means re-embedding the corpus), and a fusion weight that has to be tuned per query class. We would build the hybrid, and we would not claim it is a solved problem: the fusion weight is where the unsolved part now lives.
+- **Spam is managed, not solved, because the adversary adapts.** Every other subsystem here faces a fixed opponent: hardware, physics, load. This one faces someone who reads your engineering blog and A/B tests against your ranker. There is no stable equilibrium, because any signal strong enough to move rankings is strong enough to be worth attacking, and every defence you ship tells the adversary what you were measuring. The structural response is many weak signals rather than a few strong ones, gradual rollouts so a ranking change cannot be correlated with a date, and a manual-action pipeline for the worst offenders. The honest framing in an interview is that the target is a tolerated spam rate in the top 10 as actually shown, not a clean corpus, and that the metric has to be sampled human review of served results rather than any classifier's own confidence.
+- **The base index and the real-time tier score by different functions and always will.** Documents in the real-time tier have no PageRank, because the link graph has not seen them, and no click data, because nobody has clicked them. Those signals are missing by definition, not by oversight, so no engineering closes the gap. Source-authority priors stand in for them, which means a page's rank changes when it graduates into the base index for reasons that have nothing to do with the page. Breaking-news results are therefore measurably noisier than steady-state ones. What we would do is bound the damage rather than pretend it is fixed: cap how many real-time results can enter the top 10 unless the query is classified as news-intent, and monitor the two tiers as separate quality series so a regression in one is not hidden by the other.
 #### Drill questions
 1. Why not term-partition the index and avoid the fan-out entirely?
-2. Your p99 is the max of 1000 shard latencies. How do you actually make that acceptable?
-3. A query for a single very common term — `the` — arrives. What happens?
+2. Your p99 is the maximum of 1000 shard latencies. How do you actually make that acceptable?
+3. A query for a single very common term, `the`, arrives. What happens?
 4. How do you support phrase queries like `"coffee shops"` as an exact ordered pair?
 5. A publisher discovers that pages with 400 outbound links to their own network rank better. How do you respond?
 6. Two users issue the same query one second apart and get different results. Is that a bug?
-7. How do you delete a document — a legal takedown, say — from an immutable index?
+7. How do you delete a document, a legal takedown say, from an immutable index?
 8. The reranker's GPU fleet goes down. What does the user see?
-
-TODO. Only 8 drill questions carried over, top up to at least 10.
+9. Early termination returns exactly the same top 20 as scoring every matching document. What does that guarantee rest on, and where does it stop holding?
+10. Why not replace the inverted index with dense vector retrieval?
+11. Each leaf returns its top 20. Why 20 and not 100?
 #### Answers to drill questions
-1. Because multi-term queries then require shipping posting lists between machines — the `coffee` list is ~1GB compressed — and because term frequency is Zipf, so the shards owning common terms become permanent hotspots that adding capacity cannot fix. Indexing is also bad: one document with 500 distinct terms writes to up to 500 shards. *If pushed:* there is a narrow case where term partitioning wins — very high-throughput single-term or two-term workloads over a corpus small enough that lists fit in a few MB, e.g. a product catalogue. Hybrid schemes (term-partition the rare tail, document-partition the head) have been researched but the operational complexity has never paid for itself at web scale.
+1. Because multi-term queries then require shipping posting lists between machines. The `coffee` list is ~1GB compressed and the smallest of the three is ~180MB, which at 50k uncached QPS is ~9TB/s of bisection bandwidth. Term frequency is also Zipf, so the shards owning common terms become permanent hotspots that adding capacity cannot fix, since a term cannot be split. Indexing is bad too: one document with 500 distinct terms writes to up to 500 shards. *If pushed:* there is a narrow case where term partitioning wins, namely very high-throughput single-term or two-term workloads over a corpus small enough that lists fit in a few megabytes, such as a product catalogue. Hybrid schemes that term-partition the rare tail and document-partition the head have been researched, but the operational complexity has never paid for itself at web scale.
 
-2. You cannot make it acceptable by making the average leaf fast — you have to attack the tail directly. Hedged requests (re-issue to a second replica after the p95 elapses, take the first response, ~5% extra load); hard per-leaf deadlines with partial results (return once 99% of shards answer and flag `partial:true`); micro-partitioning so a slow machine's share can be shed in small pieces; and latency-induced probation for consistently slow replicas. *If pushed:* the sharpest single lever is accepting partial results. Dropping 10 of 1000 shards loses ~0.1% of candidates, and the probability that any of the global top 10 lived on exactly those shards is negligible — you are trading a statistically invisible quality loss for the entire tail.
+2. You cannot make it acceptable by making the average leaf fast; you have to attack the tail directly. Hedged requests (re-issue to a second replica after the p95 elapses, take the first response, ~5% extra load); hard per-leaf deadlines with partial results (return once 99% of shards answer and flag `partial:true`); micro-partitioning so a slow machine's share can be shed in small pieces; and latency-induced probation for consistently slow replicas. *If pushed:* the sharpest single lever is accepting partial results. Dropping 10 of 1000 shards loses ~0.1% of candidates, and since documents are hashed the probability that any of the global top 10 lived on exactly those shards is ~1%, so you are trading a statistically invisible quality loss for the entire tail.
 
-3. Its posting list covers most of the corpus, so intersection saves nothing and WAND's pruning is weak because the max score is uniformly low. Standard handling: maintain a stopword list and either drop such terms or treat them as optional (they contribute to scoring but not to the candidate set). For genuinely single-common-term queries the answer is served almost entirely from the result cache — these are exactly the head queries the Zipf distribution predicts. *If pushed:* for terms that are common but not stopwords (`news`, `weather`), keep a precomputed static top-k list per term, refreshed offline, and short-circuit the fan-out entirely when the query is a single such term.
+3. Its posting list covers most of the corpus, so intersection saves nothing and early termination prunes weakly, because the score ceiling is uniformly low and never falls below θ. Standard handling: maintain a stopword list and either drop such terms or treat them as optional, contributing to scoring but not to the candidate set. Genuinely single-common-term queries are served almost entirely from the result cache, since these are exactly the head queries the Zipf distribution predicts. *If pushed:* for terms that are common but not stopwords, `news` or `weather`, keep a precomputed static top-k list per term, refreshed offline, and short-circuit the fan-out entirely when the query is a single such term.
 
-4. Positions in the postings. Intersect the two lists on `doc_id` as usual, then for each surviving document check whether any position of `shops` equals a position of `coffee` plus one. *If pushed:* positions roughly double index size and phrase verification is expensive on high-frequency pairs, so many engines maintain a *bigram index* for the most common adjacent pairs — treat `coffee_shops` as its own term with its own posting list, making the phrase query a single-term lookup. You cannot do this for all pairs (combinatorial explosion), so it is applied to the top few million pairs by query frequency.
+4. Positions in the postings. Intersect the two lists on `doc_id` as usual, then for each surviving document check whether any position of `shops` equals a position of `coffee` plus one. *If pushed:* positions roughly double index size, and phrase verification happens after a document is admitted, so it does not benefit from the score ceilings that make early termination effective, which is why phrase-heavy workloads prune badly. Many engines therefore maintain a *bigram index* for the most common adjacent pairs, treating `coffee_shops` as its own term with its own posting list so the phrase query becomes a single-term lookup. You cannot do this for all pairs because of combinatorial explosion, so it is applied to the top few million pairs by query frequency.
 
-5. This is the general shape of every SEO attack: a signal leaks, gets gamed, and the leak must be closed without a step change that confirms the attack worked. Damp the signal — PageRank contribution per outlink already decays with outdegree — and add link-graph anomaly detection for reciprocal density and network clustering. *If pushed:* roll the change out over weeks with a holdback, so the adversary cannot correlate a specific date with a specific ranking drop, and pair it with a manual-action pipeline for the worst offenders. Never announce which signal changed.
+5. This is the general shape of every SEO attack: a signal leaks, gets gamed, and the leak must be closed without a step change that confirms the attack worked. Damp the signal, since PageRank contribution per outlink already decays with outdegree, and add link-graph anomaly detection for reciprocal density and network clustering. *If pushed:* roll the change out over weeks with a holdback, so the adversary cannot correlate a specific date with a specific ranking drop, and pair it with a manual-action pipeline for the worst offenders. Never announce which signal changed.
 
-6. Not necessarily, and the interesting part is which causes are acceptable. Acceptable: different personalisation buckets, different locales, one hit the cache and one did not while a segment was published in between. Not acceptable: nondeterministic partial results, where one query lost a shard and dropped a result the other kept. *If pushed:* make partial results observable (`partial:true` in the response) and alert on the rate; if a shard is down, its replicas should cover it, and a sustained partial rate above ~0.1% means a capacity or hedging problem, not a transient.
+6. Not necessarily, and the interesting part is which causes are acceptable. Acceptable: different personalisation buckets, different locales, or one hit the cache and one did not while a segment was published in between. Not acceptable: nondeterministic partial results, where one query lost a shard and dropped a result the other kept. *If pushed:* make partial results observable with `partial:true` in the response and alert on the rate. If a shard is down its replicas should cover it, and a sustained partial rate above ~0.1% means a capacity or hedging problem, not a transient.
 
-7. Write its local ordinal to the segment's delete bitmap, which is the one mutable structure a leaf owns; the posting lists still contain it, but the scorer skips it. Physical removal happens at the next segment merge. *If pushed:* for a legal takedown with a deadline, the bitmap write must propagate to every replica of that shard and be acknowledged before you can certify compliance — so the delete path needs a synchronous quorum write and an audit log, unlike everything else in this system, which is happily asynchronous. Also purge the query result cache entries containing the doc, or a cached top-10 will keep serving it for the TTL.
+7. Write its local ordinal to the segment's delete bitmap, which is the one mutable structure a leaf owns. The posting lists still contain it, but the scorer skips it. Physical removal happens at the next segment merge. *If pushed:* for a legal takedown with a deadline, the bitmap write must propagate to every replica of that shard and be acknowledged before you can certify compliance, so the delete path needs a synchronous quorum write and an audit log, unlike everything else in this system, which is happily asynchronous. Also purge the query result cache entries containing the document, or a cached top 10 will keep serving it for the TTL.
 
-8. Degraded but not broken results: the merge tier's GBDT ordering of the top 500 is a perfectly serviceable ranking, just measurably worse. Circuit-break the reranker on error-rate or latency and serve the tier-2 order. *If pushed:* measure the quality gap in advance so you know what you are trading — run a permanent 0.1% holdback with the reranker disabled, and you will have a live estimate of the click-through delta at all times rather than discovering it during the incident.
+8. Degraded but not broken results: the merge tier's GBDT ordering of the top 500 is a perfectly serviceable ranking, just measurably worse. Circuit-break the reranker on error rate or latency and serve the tier-2 order. *If pushed:* measure the quality gap in advance so you know what you are trading. Run a permanent 0.1% holdback with the reranker disabled and you will have a live estimate of the click-through delta at all times, rather than discovering it during the incident.
+
+9. It rests on the score being a sum of per-term contributions, each with a precomputed ceiling. Given that, any document whose summed ceilings fall below the current 20th-best score provably cannot enter the top 20, so skipping it unread costs nothing. The guarantee stops the moment a signal is not decomposable that way. A cross-encoder reads query and document jointly and has no per-term bound at all, which is precisely why it cannot run inside retrieval and has to sit above it on a candidate set someone else produced. *If pushed:* it also degrades rather than breaks in two common cases. Phrase queries verify positions after admission, so the usable bound during retrieval is the bag-of-words bound and pruning is much weaker. And ceilings are computed at index-build time, so they must be recomputed per segment as document frequencies shift; a ceiling that is too low silently breaks rank-safety and produces a wrong answer with no error, which makes build-time validation of the ceilings more important than it looks.
+
+10. Because the two fail in opposite places. Nearest-neighbour retrieval over embeddings finds documents that never use the query's words, which word matching structurally cannot, and that is a real gap. But it is weakest exactly where users are least forgiving: a rare product code, a person's name, an error string. Those are high-IDF tokens that an inverted index nails and an embedding blurs into a neighbourhood of near-misses. It also gives up explainability, and a model change means re-embedding 50B documents, which is a multi-week job rather than a config push. *If pushed:* the real answer is not either/or. Run both, retrieve a few hundred candidates from each, fuse the lists (reciprocal rank fusion is the cheap default), and let the reranker sort it out. The costs are a second index of ~50B vectors, roughly ~38TB at 768 dimensions quantised to one byte, and a fusion weight that has to be tuned per query class, since navigational queries want the word side and exploratory ones want the vector side.
+
+11. Because `k` per leaf is a recall-against-network dial and 20 is already past the point of diminishing returns. Documents are hashed across shards, so relevance is uniformly distributed and the chance that one shard contributes more than a handful of the global top 500 is small. At k=20 the merge tree sees 20,000 candidates for a final 500; at k=100 it sees 100,000, the per-query fan-in goes from ~800KB to ~4MB, and at 50k uncached QPS that is ~200GB/s instead of ~40GB/s. *If pushed:* `k` should not be constant. Raise it when the top 500 turns out to be concentrated in few shards, which happens whenever a filter breaks the uniformity assumption. `site:example.com` is the clean example: one host lives on a handful of shards, so hashing no longer spreads the results, and that case wants either a much larger `k` or a separate index organised by host.
 #### Whiteboard script
-TODO
+**0-5, take the fork before drawing anything.** Open with the sentence the whole design hangs on: you cannot precompute the answer, so the question is how you bound the work one query does, and there are exactly two levers, how you split the index and how much of it you refuse to score. Then ask the three questions that genuinely change the answer: corpus size, because below roughly ten million documents almost none of this machinery is warranted; whether phrase queries are required, because positions roughly double the index and weaken pruning; and whether a partial answer is acceptable inside the latency budget, because that is the largest tail lever available and it is a product decision, not an engineering one. State your assumptions out loud: ~50B documents, 100k QPS peak, p99 under 300ms. Draw nothing yet.
 
-A 45 minute budget: what to cover in 0-5, 5-15, 15-35 and 35-45, what to say first, and a line starting `Cut first:`.
+**5-15, the spine and the partitioning fork.** Draw the read path top to bottom: client, query service with the result cache hanging off it, root merger, ~30 mid-tier mergers, a row of leaves. Then take the fork explicitly rather than assuming it, because assuming it is what most candidates do. Term partitioning wakes three machines instead of a thousand and dies on the network: the smallest of the three lists is ~180MB and at 50k uncached QPS that is ~9TB/s. Document partitioning pays ~800 bytes per shard instead, and its cost is a tail you can engineer down. Draw the indexer feeding segments in from the side and say it never participates in a query. Close the band by reciting the funnel as numbers, because everything after depends on it: 50B indexed, ~750k per leaf containing at least one term, ~5k scored, 20 emitted, 20,000 merged, 500 reranked, 10 shown.
 
-**Raw material, from the old Talking Points:**
+**15-35, the leaf.** This is where the interview is won, so protect the time. Start with the problem rather than the acronym: scoring all 750k union documents is ~130ms of CPU against a ~30ms budget, so most of them must not be scored. Then offer strict intersection as the cheap escape and immediately say what it costs, that it drops strong two-term matches and collapses on long queries. Then derive the bound: only 20 results are wanted, each term has a known maximum contribution, so track the current 20th-best score and skip anything whose best possible total cannot reach it. Name it only once you have derived it: WAND, with block-max WAND when the ceiling is per 128-posting block rather than per term, and mention MaxScore as the live alternative on short queries. Then say what the guarantee depends on, because this is the question behind the question: it holds only while the score is a sum of per-term contributions with known ceilings, which is exactly why the expensive models live above retrieval rather than inside it. Finish on the tail: p99 is the maximum of a thousand draws, hedge at the p95, 40ms hard deadline, return at 99% coverage. Keep compression and the freshness tier in reserve as one-liners.
 
-- **The partitioning choice is the whole design.** Say "document partitioning, because term partitioning ships gigabyte posting lists over the network and Zipf term popularity makes hotspots unfixable" in your first two minutes, then spend the rest of the time on its consequences.
-- **Fan-out converts a latency problem into a tail problem.** Waiting on 1000 shards means your p99 is their p99.9 — hedged requests, hard deadlines and partial results are the design, not the polish.
-- **Retrieval and ranking have opposite cost curves, so the system is a funnel.** ~50B documents → ~5M matching → ~5k scored per leaf → 20k merged → 500 reranked → 10 shown. Recite the ladder.
-- **Zipf shows up twice and pulls in opposite directions.** It makes term partitioning unworkable, and it makes the query result cache the cheapest capacity you will ever buy — worth ~500 machines per point of hit rate.
-- **Compression is a latency feature, not a storage feature.** Gap encoding plus PFor takes the positional index from ~250TB to ~113TB, and cuts bytes read per query by the same factor.
-- **Freshness is two indexes, not one fast one.** A slow immutable base plus a small in-memory real-time tier merged at query time, with source-authority priors standing in for the PageRank the new documents do not have yet.
+**35-45, concede and close.** Give the gaps before they are found: word matching cannot retrieve a document that does not contain the words, so you would build hybrid retrieval and the fusion weight is where the unsolved part moves to; spam is managed rather than solved because the adversary adapts to whatever you ship; and the real-time tier scores by a different function than the base index because PageRank and click data are missing by definition. Then the operational surface in two minutes: shard coverage per query, which degrades long before latency alarms fire; cache hit rate priced in machines, ~500 per point; crawl-to-searchable lag; and interleaving as the production truth on ranking quality, with offline NDCG only as the pre-deploy gate. Close on rollback, because it is the cheapest credibility in the answer: segments are immutable and generation-tagged, so a bad index build is a pointer swap back and it takes seconds.
+
+Cut first: compression, meaning gap encoding and PFor; then the spam taxonomy; then multi-region. All three are real and none of them changes the architecture. The compression detail in particular is the most common place candidates spend the ten minutes they needed for the tail. Never cut: the partitioning fork, early termination and what its guarantee rests on, and the maximum-of-a-thousand argument.
 #### Appendix
 **Data model**
 
-- **postings** (immutable segment files on local NVMe, mmapped; canonical copy in object storage) — partition key `hash(doc_id) % 1000`. Layout per term: `[skip list][doc-id gaps varbyte][tf][field bitmap][position deltas]`.
-- **term_dictionary** (FST, memory-resident, one per segment) — `term → (posting_offset, doc_freq, max_score)`. `max_score` is what makes WAND possible.
-- **doc_metadata** (columnar block inside each segment, memory-resident) — `doc_id → (pagerank, spam_score, lang, crawl_ts, length, flags)`.
-- **doc_store** (distributed KV, Bigtable-like) — partition key `doc_id`; holds URL, title and extracted text for snippet generation only. Never on the retrieval path.
-- **delete_bitmap** (per segment, mutable overlay) — a bit per local doc ordinal; the only mutable thing a leaf owns.
-- **link_graph** (columnar blob store, partition key `src_host`) — `(src_doc, dst_doc, anchor_text)`; input to the offline PageRank and anchor-text jobs.
-- **rt_index** (in-memory inverted index per leaf) — the last ~6 hours of documents, rebuilt continuously, merged into the base index on the next segment publish.
-- **query_cache** (Redis / in-process LRU) — key `sha1(normalised_query | locale | personalisation_bucket)`, value the serialised top-10 with a ~10 minute TTL.
-- **click_log** (append-only event stream → batch aggregates) — `(query_hash, doc_id, position, clicked, dwell_ms)`; feeds the learning-to-rank training set.
+- **postings** (immutable segment files on local NVMe, mmapped; canonical copy in object storage), partition key `hash(doc_id) % 1000`. Layout per term: `[skip list][doc-id gaps varbyte][tf][field bitmap][position deltas]`.
+- **term_dictionary** (FST, memory-resident, one per segment), `term -> (posting_offset, doc_freq, max_score)`. `max_score` is what makes early termination possible.
+- **doc_metadata** (columnar block inside each segment, memory-resident), `doc_id -> (pagerank, spam_score, lang, crawl_ts, length, flags)`.
+- **doc_store** (distributed KV, Bigtable-like), partition key `doc_id`; holds URL, title and extracted text for snippet generation only. Never on the retrieval path.
+- **delete_bitmap** (per segment, mutable overlay), a bit per local doc ordinal; the only mutable thing a leaf owns.
+- **link_graph** (columnar blob store, partition key `src_host`), `(src_doc, dst_doc, anchor_text)`; input to the offline PageRank and anchor-text jobs.
+- **rt_index** (in-memory inverted index per leaf), the documents indexed since the last hourly segment publish, rebuilt continuously and dropped by watermark when that publish lands.
+- **query_cache** (Redis or in-process LRU), key `sha1(normalised_query | locale | personalisation_bucket)`, value the serialised top 10 with a ~10 minute TTL.
+- **click_log** (append-only event stream feeding batch aggregates), `(query_hash, doc_id, position, clicked, dwell_ms)`; the learning-to-rank training set.
 
 **API contract**
 
@@ -21080,21 +21203,21 @@ POST /internal/index/delete
 
 **Observability**
 
-- **End-to-end query latency** (request received → top 10 serialised) — SLO p99 < 300ms, p50 < 60ms. Report head and long-tail queries as separate series; a single p99 hides the bimodality between cached head queries and cold-posting-list tail queries.
-- **Shard coverage per query** (fraction of the 1000 shards that answered within deadline) — SLO ≥ 99.9% of queries reach ≥ 99% coverage. This is the direct measure of whether fan-out is healthy, and it degrades long before latency alarms fire.
-- **Query result cache hit rate** — SLO ≥ 50%. Every point is worth ~1M leaf RPCs/s at peak, i.e. ~500 machines; a 5-point drop is a capacity incident, not a performance curiosity.
-- **Crawl-to-searchable lag** (document arrives on the stream → returned by a query) — SLO p95 ≤ 5 min for the real-time tier, ≤ 3 days for base-index inclusion. The freshness contract in one number.
-- **Leaf hedge rate** (fraction of leaf requests that triggered a hedged retry) — SLO ≤ 8%. Rising hedge rate is the earliest signal of fleet-wide slowdown, and hedging itself adds load, so it can go unstable if left unbounded.
-- **Ranking quality via interleaving** (per-query preference between the current model and a holdback) — watched continuously rather than SLO'd; a statistically significant negative shift blocks the model rollout. Offline NDCG on a judged set is the pre-deploy gate, interleaving is the production truth.
-- **Spam-classifier precision on the top 10** (sampled human review of results shown, not of the corpus) — SLO ≥ 99%. Spam in position 40 is irrelevant; spam in position 3 is the whole problem.
+- **End-to-end query latency** (request received to top 10 serialised), SLO p99 < 300ms, p50 < 60ms. Report head and long-tail queries as separate series; a single p99 hides the bimodality between cached head queries and cold-posting-list tail queries.
+- **Shard coverage per query** (fraction of the 1000 shards that answered within deadline), SLO ≥ 99.9% of queries reach ≥ 99% coverage. This is the direct measure of whether fan-out is healthy, and it degrades long before latency alarms fire.
+- **Query result cache hit rate**, SLO ≥ 50%. Every point is worth ~1M leaf RPCs/s at peak, about 500 machines; a 5-point drop is a capacity incident, not a performance curiosity.
+- **Crawl-to-searchable lag** (document arrives on the stream to returned by a query), SLO p95 ≤ 5 min for the real-time tier, ≤ 3 days for a full base rescore. The freshness contract in one number.
+- **Leaf hedge rate** (fraction of leaf requests that triggered a hedged retry), SLO ≤ 8%. A rising hedge rate is the earliest signal of fleet-wide slowdown, and hedging itself adds load, so it can go unstable if left unbounded.
+- **Ranking quality via interleaving** (per-query preference between the current model and a holdback), watched continuously rather than SLO'd; a statistically significant negative shift blocks the model rollout. Offline NDCG on a judged set is the pre-deploy gate, interleaving is the production truth.
+- **Spam-classifier precision on the top 10** (sampled human review of results shown, not of the corpus), SLO ≥ 99%. Spam in position 40 is irrelevant; spam in position 3 is the whole problem.
 
 **Multi-region and DR**
 
-- **Replication mode:** active-active. Each region holds a complete document-partitioned copy of the index — the index is immutable and query-only, so this is a straightforward broadcast of segments from object storage rather than a consensus problem. The indexing pipeline and the PageRank job run in one primary region and publish segments globally; the real-time tier is built independently per region from a globally replicated crawl stream. Query result caches are region-local; there is no benefit to sharing them.
-- **RTO:** ~0 for query serving — a region loss is a DNS/anycast withdrawal and the next-nearest region absorbs the traffic, so recovery is bounded by DNS TTL (~1-5 min) rather than by any data recovery. Losing the *indexing* region is slower: promoting a secondary and resuming the build takes ~2-4 hours, during which serving is unaffected but the index stops advancing.
-- **RPO:** ~0 for the base index (immutable segments are durable in object storage before publish). For the real-time tier, ~minutes — a region loss drops its in-memory tier, which is rebuilt from the crawl stream on restart; the failure is invisible to users because other regions carry the same content.
+- **Replication mode:** active-active. Each region holds a complete document-partitioned copy of the index. The index is immutable and query-only, so this is a straightforward broadcast of segments from object storage rather than a consensus problem. The indexing pipeline and the PageRank job run in one primary region and publish segments globally; the real-time tier is built independently per region from a globally replicated crawl stream. Query result caches are region-local, since there is no benefit to sharing them.
+- **RTO:** ~0 for query serving. A region loss is a DNS or anycast withdrawal and the next-nearest region absorbs the traffic, so recovery is bounded by DNS TTL (~1-5 min) rather than by any data recovery. Losing the *indexing* region is slower: promoting a secondary and resuming the build takes ~2-4 hours, during which serving is unaffected but the index stops advancing.
+- **RPO:** ~0 for the base index, since immutable segments are durable in object storage before publish. For the real-time tier it is minutes: a region loss drops its in-memory tier, which is rebuilt from the crawl stream on restart, and the failure is invisible to users because other regions carry the same content.
 - **Failover cadence:** automatic for region withdrawal; monthly region-drain game-days; quarterly indexing-region promotion drills, since that is the path that actually has state and therefore the one that rots.
-- **Cross-region cost:** the dominant line is segment replication — ~165TB per full copy, but only the ~5%/day delta (~8TB/day) moves after the initial seed, plus the crawl stream (~145MB/s of extracted text ≈ ~12TB/day) to every region. Ranking model weights and the PageRank file (~200GB) are trivial by comparison. Serving a region locally is far cheaper than cross-region query routing would be, since a cross-region query would pay the fan-out latency twice.
+- **Cross-region cost:** the dominant line is segment replication, ~165TB per full copy, but only the ~5%/day delta (~8TB/day) moves after the initial seed, plus the crawl stream (~145MB/s of extracted text, ~12TB/day) to every region. Ranking model weights and the PageRank file (~200GB) are trivial by comparison. Serving a region locally is far cheaper than cross-region query routing would be, since a cross-region query would pay the fan-out latency twice.
 
 ### 48. Design an E-Commerce Platform (Catalog, Cart & Flash Sales)
 #### Problem
@@ -22341,32 +22464,45 @@ GET  /eval/runs/{id}    → { recall_at_10, mrr, ndcg, faithfulness, answer_rele
 
 ### 51. Design a Content Delivery Network (CDN)
 #### Problem
-Serve customer-origin content — static assets, images, API responses and large media segments — from a global fleet of caches so that users get bytes from a nearby machine instead of from the origin.
+Serve customer-origin content (static assets, images, API responses, large media segments) from a global fleet of caches, so users get bytes from a machine a few milliseconds away instead of from the origin. The hit path is easy. The hard part is that one object now exists on thousands of machines in hundreds of datacentres, and when it changes you have to correct all of them without consensus and without being able to collect an acknowledgement.
 #### Core
-TODO
+A CDN is a global cache hierarchy plus an invalidation story, and only the second one is hard.
 
-Write the whole answer as you would give it in sixty seconds, 200 to 300 words, standing alone.
+Three tiers. Around 200 edge PoPs terminate TLS and serve roughly 95% of requests from local RAM and NVMe. About 20 regional mid-tiers sit behind them, and one origin shield per customer behind those. Each tier exists to shrink the fan-out reaching the next, which is why the mid-tier can add latency to a miss and still be correct: its job is protecting the origin, not speed.
+
+Users reach a PoP by anycast: one prefix announced from every PoP, so the internet's own routing delivers the packet and removing a PoP is a route withdrawal rather than a DNS record you wait out. DNS stays on top as a coarse steering knob.
+
+Inside a PoP the cache key is the product: host, path, allowlisted query parameters, normalised headers. Anything you fail to strip multiplies one object into thousands of entries, and one point of byte hit ratio is about $420k a month of origin egress at this scale.
+
+Then the two cliffs of the TTL dial, attacked separately. Against load: single-flight per key, one owning server per key inside the PoP, coalescing again at the mid-tier and the shield, so one hot object expiring turns 1,000,000 would-be origin fetches into one, and stale-while-revalidate means no user waited for any of it. Against staleness: where you own the URL, put a hash of the bytes in the filename and serve it immutable, so new content is a new URL and no cache anywhere is ever wrong. Purge is the escape hatch for URLs you do not own, and it is openly eventually consistent: a durable replayable log pushed to 13,000 servers in about two seconds.
 #### Summary
-**The picture in your head:** a publisher with one warehouse in Virginia and readers in 200 cities. Instead of couriering every book from Virginia, you open a shop in each city, and a regional depot serving every ten shops. Shops keep the bestsellers; the depot keeps the long tail; the warehouse is touched only when nobody in the region has a copy. The hard part is not opening the shops — it is telling all 200 of them, within five seconds, that page 41 of a book they already stocked is now wrong.
+**The picture in your head:** a publisher with one warehouse in Virginia and readers in 200 cities. Instead of couriering every book from Virginia, you open a shop in each city, and a regional depot serving every ten shops. Shops keep the bestsellers; the depot keeps the long tail; the warehouse is touched only when nobody in the region has a copy. The hard part is not opening the shops. It is telling all 200 of them, within five seconds, that page 41 of a book they already stocked is now wrong.
 
 **The approaches people actually take:**
-TODO. Two or three things a competent engineer might reach for, in plain language and before any product name, with what each one buys and roughly when it wins.
 
-**The single-request walkthrough (hit path):** a user in Lagos requests `https://cdn.acme.example/img/hero.7f3c9a2b.jpg`. The hostname resolves to an **anycast** address — one IP announced by BGP from all 200 PoPs at once — so the SYN is delivered by the internet's own routing to the Lagos PoP, ~8ms away. A load balancer inside the PoP hashes the connection to one of ~50 edge servers. TLS 1.3 resumes from a session ticket (0 extra round trips, ~10ms). The server builds the **cache key** from `(host, path, allowlisted query params, normalized Accept-Encoding)`, consistent-hashes it to find the key's owning server inside the PoP, and finds the object in that server's page cache. It returns `200` with `Age: 41283` and `X-Cache: HIT`. TTFB ~12ms; the 100KB body lands in ~25ms more on a 50 Mbps link. Origin was not involved and never learns this request happened.
+*Fetch on demand and keep a copy for a fixed time.* Each cache pulls from the origin when it misses and trusts the copy until a timer runs out. Nobody is ever told anything, so there is no coordination to build, no acknowledgements to collect, and a cache that loses contact with the control plane is still doing something reasonable. What it buys is simplicity that survives partitions. What it costs is that freshness is a guess: the timer is one dial, long means wrong content, short means the origin absorbs the whole planet every time it fires. This is the floor every CDN is built on, and it wins on its own for content that changes on a slower schedule than the timer.
 
-**The miss path:** same request, but the TTL has just expired. The server does not go to origin and make the user wait. It claims a per-key **single-flight** lock, immediately returns the stale copy under `stale-while-revalidate`, and revalidates in the background. The background fetch goes over a pooled HTTP/2 connection to the **regional mid-tier** in Johannesburg (~35ms); that misses too and goes to the **origin shield** — the single PoP designated for this customer, sitting next to their origin in Virginia (~180ms) — which finally issues one conditional `GET` to the origin object store (see #21) and gets `304 Not Modified` in ~40ms. Revalidation cost ~260ms of machine time and zero milliseconds of user-perceived latency. The 5M subsequent requests for that object worldwide are hits.
+*Put the version in the name so nothing ever needs correcting.* Make the object's identity include a fingerprint of its bytes, so changed content is a different object at a different address and every cached copy stays valid forever. Invalidation disappears rather than getting cheaper. The catch is that something still has to say which version is current, so you have concentrated the entire freshness problem into one small, short-lived pointer instead of spreading it over millions of objects. It wins wherever you own the naming, which is most of what a build pipeline emits.
+
+*Broadcast the change to every cache.* An explicit "forget this" pushed out to the fleet. It buys stable, human-meaningful URLs and correction in seconds. It costs you a global best-effort broadcast with no completion proof, because you cannot collect an acknowledgement from thousands of machines, some of which are unreachable right now. It wins for the residue you cannot rename: a home page, an API response, a takedown.
+
+Real designs layer all three rather than choosing.
+
+**The single-request walkthrough (hit path):** a user in Lagos requests `https://cdn.acme.example/img/hero.7f3c9a2b.jpg`. The hostname resolves to an **anycast** address, one IP announced by BGP from all 200 PoPs at once, so the SYN is delivered by the internet's own routing to the Lagos PoP, ~8ms away. A load balancer inside the PoP hashes the connection to one of ~50 edge servers. TLS 1.3 resumes from a session ticket (0 extra round trips, ~10ms). The server builds the **cache key** from `(host, path, allowlisted query params, normalized Accept-Encoding)`, consistent-hashes it to find the key's owning server inside the PoP, and finds the object in that server's page cache. It returns `200` with `Age: 41283` and `X-Cache: HIT`. TTFB ~12ms; the 100KB body lands in ~25ms more on a 50 Mbps link. Origin was not involved and never learns this request happened.
+
+**The miss path:** same request, but the TTL has just expired. The server does not go to origin and make the user wait. It claims a per-key **single-flight** lock, immediately returns the stale copy under `stale-while-revalidate`, and revalidates in the background. The background fetch goes over a pooled HTTP/2 connection to the **regional mid-tier** in Johannesburg (~35ms); that misses too and goes to the **origin shield**, the single PoP designated for this customer, sitting next to their origin in Virginia (~180ms), which finally issues one conditional `GET` to the origin object store (see #21) and gets `304 Not Modified` in ~40ms. Revalidation cost ~260ms of machine time and zero milliseconds of user-perceived latency. The 5M subsequent requests for that object worldwide are hits.
 
 **The pieces (and what each one is for):**
-- **Edge PoP (~200 of them)** — a rack of commodity servers with NVMe and 100 GbE NICs in a carrier-neutral facility, running an HTTP cache (nginx, Varnish, or a purpose-built one like Apple's/Fastly's Varnish fork). It terminates TLS, applies the cache key, and serves ~95% of requests without a single upstream byte.
-- **Regional mid-tier (~20 of them)** — a bigger, disk-heavy cache that ~10 edge PoPs fetch through. It exists for exactly one reason: **fan-out collapse.** Without it, an object missed at 200 edges is 200 origin requests. With it, it is 20. It is not there to be fast — it is a mid-tier hop that *adds* latency to a miss — it is there to make the origin's life survivable.
-- **Origin shield** — one PoP per customer origin, chosen for network proximity to that origin, that all mid-tiers fetch through. Collapses 20 → 1 and gives the origin a small, stable set of source IPs to allowlist.
-- **Request router (anycast BGP + GeoDNS)** — decides which PoP a user reaches. Anycast means "announce the same prefix everywhere and let the internet pick"; GeoDNS means "answer the DNS query with a different IP depending on where the resolver appears to be".
-- **Cache engine (S3-FIFO on disk, W-TinyLFU admission in RAM)** — **S3-FIFO** is three FIFO queues: a small probationary queue (~10% of capacity), a main queue, and a "ghost" queue of recently evicted keys. New objects enter the small queue; only objects hit a second time before eviction are promoted to main. **W-TinyLFU** is an admission filter: a Count-Min sketch (a compact array of counters, periodically halved so old popularity decays) estimates how often a key has been seen, and a candidate is only admitted if its estimated frequency beats the object it would evict.
-- **Purge control plane** — a globally replicated config store plus a hierarchical fan-out tree that pushes invalidations to ~13,000 edge servers, and a tag-generation table that makes bulk invalidation an O(1) counter bump rather than an enumeration.
+- **Edge PoP (~200 of them).** A rack of commodity servers with NVMe and 100 GbE NICs in a carrier-neutral facility, running an HTTP cache (nginx, Varnish, or a purpose-built one). It terminates TLS, applies the cache key, and serves ~95% of requests without a single upstream byte.
+- **Regional mid-tier (~20 of them).** A bigger, disk-heavy cache that ~10 edge PoPs fetch through. It exists for exactly one reason: **fan-out collapse.** Without it, an object missed at 200 edges is 200 origin requests. With it, it is 20. It is not there to be fast. It is a hop that *adds* latency to a miss, and it earns its place by making the origin's life survivable.
+- **Origin shield.** One PoP per customer origin, chosen for network proximity to that origin, that all mid-tiers fetch through. Collapses 20 to 1 and gives the origin a small, stable set of source IPs to allowlist.
+- **Request router (anycast BGP + GeoDNS).** Decides which PoP a user reaches. Anycast means "announce the same prefix everywhere and let the internet pick"; GeoDNS means "answer the DNS query with a different IP depending on where the resolver appears to be".
+- **Cache engine (S3-FIFO on disk, W-TinyLFU admission in RAM).** **S3-FIFO**, published in 2023, is three FIFO queues: a small probationary queue (~10% of capacity), a main queue, and a "ghost" queue of recently evicted keys. New objects enter the small queue; only objects hit a second time before eviction are promoted to main. **W-TinyLFU** (2015) is an admission filter: a Count-Min sketch, a compact array of counters periodically halved so old popularity decays, estimates how often a key has been seen, and a candidate is only admitted if its estimated frequency beats the object it would evict.
+- **Purge control plane.** A globally replicated config store plus a hierarchical fan-out tree that pushes invalidations to ~13,000 edge servers, and a tag-generation table that makes bulk invalidation an O(1) counter bump rather than an enumeration.
 
-**The thing that makes it hard:** the TTL is a single dial with a cliff at both ends, and there is no safe setting. Turn it up and content goes stale — a customer changes a price and a wrong number is served for an hour from 200 cities. Turn it down and every popular object becomes a synchronised stampede: at 5M req/s for one hot object and a 200ms origin fetch, the instant the TTL expires there are 5M × 0.2 = **1,000,000 concurrent origin requests for a single URL**, and the origin — which normally sees ~1% of traffic — is hit with a spike it was never provisioned for. The only escape from the dial is explicit invalidation, and *that* is the genuinely hard distributed problem: a consensus-free broadcast to 13,000 machines across 200 datacentres, some of which are partitioned, under a five-second deadline, that must be idempotent and replayable because you cannot ask 13,000 machines to acknowledge.
+**The thing that makes it hard:** the TTL is a single dial with a cliff at both ends, and there is no safe setting. Turn it up and content goes stale: a customer changes a price and a wrong number is served for an hour from 200 cities. Turn it down and every popular object becomes a synchronised stampede: at 5M req/s for one hot object and a 200ms origin fetch, the instant the TTL expires there are 5M × 0.2 = **1,000,000 concurrent origin requests for a single URL**, and the origin, which normally sees about 2% of delivered bytes, is hit with a spike it was never provisioned for. The only escape from the dial is explicit invalidation, and *that* is the genuinely hard distributed problem: a consensus-free broadcast to 13,000 machines across 200 datacentres, some of which are partitioned, under a five-second deadline, that must be idempotent and replayable because you cannot ask 13,000 machines to acknowledge.
 
-**Why this design and what it costs:** you attack both cliffs separately. Against the herd, a cascade of coalescers — per-server single-flight, per-PoP key ownership, mid-tier coalescing, origin shield — turns 1,000,000 concurrent fetches into 1, while `stale-while-revalidate` means nobody waited for any of them; TTL jitter (`ttl × (1 ± 10%)`) stops 200 PoPs expiring in the same second. Against staleness, you remove the need to purge wherever you control the URL: content-hash the filename (`hero.7f3c9a2b.jpg`), serve it `max-age=31536000, immutable`, and change the *reference* instead of the object. New content is a new URL, so there is nothing to invalidate and the hit ratio is effectively 100%. Purge remains for the cases where you do not own the URL — a customer's `/index.html`, an API response, a legal takedown — and there you accept eventual consistency: best-effort push in ~2s, a durable purge log that a partitioned PoP replays on reconnect, and generation counters so "purge everything tagged `product-1234`" is one small record, not ten million.
+**Why this design and what it costs:** you attack both cliffs separately. Against the herd, a cascade of four coalescers (per-server single-flight, per-PoP key ownership, mid-tier coalescing, origin shield) turns 1,000,000 concurrent fetches into 1, while `stale-while-revalidate` means nobody waited for any of them; TTL jitter (`ttl × (1 ± 10%)`) stops 200 PoPs expiring in the same second. Against staleness, you remove the need to purge wherever you control the URL: content-hash the filename (`hero.7f3c9a2b.jpg`), serve it `max-age=31536000, immutable`, and change the *reference* instead of the object. New content is a new URL, so there is nothing to invalidate and the hit ratio is effectively 100%. Purge remains for the cases where you do not own the URL, meaning a customer's `/index.html`, an API response or a legal takedown, and there you accept eventual consistency: best-effort push in ~2s, a durable purge log that a partitioned PoP replays on reconnect, and generation counters so "purge everything tagged `product-1234`" is one small record, not ten million.
 
 **If you were building it tomorrow:**
 - Edge: Linux + a Varnish/nginx-class cache, 2 × 100 GbE, 512 GB RAM, 2 × 7.7 TB NVMe. Anycast /24s announced via BGP from every PoP, with GeoDNS choosing between a handful of anycast "rings" so you retain a steering knob.
@@ -22387,15 +22523,15 @@ TODO. Two or three things a competent engineer might reach for, in plain languag
   return inflight.wait(key)                                 // losers park on the winner
   ```
 #### What this is really testing
-TODO
+Whether you notice that you have made thousands of unsupervised copies of somebody else's mutable data, and that no mechanism available to you can reliably correct them. Consensus across 200 datacentres on the request path is unaffordable, acknowledgements from 13,000 servers are uncollectable, and some of those servers are unreachable right now. So the interesting move is not designing a better invalidation broadcast. It is designing so that most content never needs one: put the version in the name, serve it immutable, change the pointer. What is left over gets a broadcast whose guarantee you state honestly as "99.9% of servers within about two seconds, and a partitioned PoP replays the log when it comes back". A candidate who opens with a purge API has quietly made a best-effort, eventually-consistent, cross-planet broadcast a required step in someone's release process.
 
-The one insight this question exists to elicit, then the contrast with the question it most resembles and why the answers differ.
+The contrast is with the distributed cache. That one is a single tier you own, in one or a few datacentres, sitting next to the code that writes the origin, so invalidation is a delete issued by the writer at the moment of the write. It is cheap, it is roughly synchronous, and the whole staleness conversation collapses into picking a TTL per class of key and layering something better on the few keys that deserve it. Every one of those properties is gone here. The writer is the customer's origin and you do not control it, so you learn about changes either by asking (revalidation) or by being told through a customer-facing API. The delete is a fan-out to 13,000 machines rather than a call to one cluster. And the failure cost inverts: in a distributed cache a lost entry costs one origin query, whereas here a cold PoP refilling against an origin provisioned for 2% of delivered bytes is how you take the customer's site down. That is why a mid-tier that *adds* latency is correct here and would be absurd there.
 
-Closest question: TODO
+Closest question: Q34
 #### Clarifying questions and how each answer forks the design
 - Static assets only, or also large media segments and partially-cacheable dynamic responses?
 - Do we control the URLs (can we mandate content-hashed, immutable filenames) or must we accept arbitrary customer origins?
-- What purge latency do customers need — single-digit seconds, or is a few minutes acceptable?
+- What purge latency do customers need: single-digit seconds, or are a few minutes acceptable?
 - Is content public, or does some of it require per-user authorization at the edge?
 - Do we run our own network (own ASN, anycast prefixes, settlement-free peering) or rent transit?
 - Is programmable edge compute in scope, or is this pure caching?
@@ -22420,39 +22556,39 @@ Closest question: TODO
 
 **Scale**
 
-- **Traffic (stated assumptions):** ~200 PoPs, ~100M req/s at global peak, average object ~100KB, Zipf popularity with α ≈ 0.9. Peak is the Americas-evening / Europe-evening overlap; assume peak = 2.5× daily average → average ≈ 100M ÷ 2.5 = **~40M req/s**, i.e. 40M × 86,400 = **~3.5 trillion requests/day**. (Large CDNs have publicly described peaks in the tens-of-millions-of-requests-per-second and tens-of-Tbps range, so this is the right order of magnitude — treat the exact figures as assumptions.)
+- **Traffic (stated assumptions):** ~200 PoPs, ~100M req/s at global peak, average object ~100KB, Zipf popularity with α ≈ 0.9. Peak is the Americas-evening / Europe-evening overlap; assume peak = 2.5× daily average → average ≈ 100M ÷ 2.5 = **~40M req/s**, i.e. 40M × 86,400 = **~3.5 trillion requests/day**. (Large CDNs have publicly described peaks in the tens-of-millions-of-requests-per-second and tens-of-Tbps range, so this is the right order of magnitude. Treat the exact figures as assumptions.)
 - **Bytes delivered:** peak 100M/s × 100KB = 10 TB/s ≈ **~80 Tbps**. Average 40M/s × 100KB = 4 TB/s ≈ 32 Tbps → 4 TB/s × 86,400 = **~345 PB/day**, ~10 EB/month.
 - **Per-PoP load:** traffic is skewed, not uniform. Assume the top 20 PoPs carry ~50% → tier-1 PoP peak = 100M × 0.5 ÷ 20 = **~2.5M req/s**; a tail PoP = 100M × 0.5 ÷ 180 ≈ ~280k req/s. Size the fleet for the tier-1 case.
 - **Per-PoP bandwidth and server count:** 2.5M req/s × 100KB = 250 GB/s = **~2 Tbps per tier-1 PoP**. With 100 GbE NICs held to 40% sustained (headroom for DDoS absorption and neighbour-PoP failover), usable is ~40 Gbps/server → 2 Tbps ÷ 40 Gbps = **~50 servers**. Modelling ~64 servers as the fleet-wide average gives **~13,000 edge servers globally**. Note what sets this number: NIC bandwidth, not disk.
-- **Per-server load:** 2.5M ÷ 50 = 50k req/s = 5 GB/s = 40 Gbps per box. If every request touched disk that is ~50k IOPS at 100KB — which is why a RAM tier is mandatory, not an optimisation.
-- **Edge working set:** assume ~5B distinct objects requested globally per day (5B × 100KB = ~500TB of unique bytes) and that one PoP sees ~10% of that catalogue → ~500M objects ≈ ~50TB. Under Zipf α ≈ 0.9 the top ~12% of objects by popularity carry ~95% of requests → 60M × 100KB = **~6TB is the 95%-hit working set per PoP**. Provision 4× for churn, multi-tenancy and TTL overlap → **~24TB usable per PoP** (~500GB per server, one NVMe drive). 200 × 24TB ≈ **~5PB of edge storage globally**.
-- **RAM tier:** the top ~1% of objects serve ~40% of requests: 600k × 100KB = ~60GB per PoP. In practice give each server ~256GB of page cache (~2.5M objects), which absorbs ~70% of hits and holds disk to ~15k IOPS.
-- **Index metadata (a real budget line):** ~200B per cached object (key hash 16B + block map ~64B + stored headers ~64B + fetched_at 8B + ttl 4B + tag generations ~32B + queue pointers ~12B). 500M objects/PoP × 200B = **~100GB of index per PoP**, ~2GB per server, all of it resident in RAM.
+- **Per-server load:** 2.5M ÷ 50 = 50k req/s = 5 GB/s = 40 Gbps per box. If every request touched disk that is ~50k IOPS at 100KB, which is why a RAM tier is mandatory rather than an optimisation.
+- **Edge working set (the number most people get wrong by an order of magnitude):** assume ~5B distinct objects requested globally per day (5B × 100KB = ~500TB of unique bytes) and that one PoP sees ~10% of that catalogue → ~500M objects ≈ **~50TB of distinct bytes per PoP per day**. Now size the cache from the popularity curve rather than by intuition. Under Zipf α ≈ 0.9, the share of requests captured by the top *k* of *N* objects is ≈ (k^0.1 − 1)/(N^0.1 − 1). With N = 500M, N^0.1 = 7.4. Top 1% (5M objects, 500GB): (4.7 − 1)/6.4 = **~58% of requests**. Top 10% (50M objects, 5TB): (5.9 − 1)/6.4 = **~77%**. To reach 95% you need k^0.1 = 1 + 0.95 × 6.4 = 7.1, so k ≈ 7.1^10 ≈ **320M objects ≈ 32TB**. There is no small hot set: at α ≈ 0.9 the tail is fat, and a 95% request hit ratio means holding roughly two thirds of everything the PoP sees in a day.
+- **Edge storage, sized from that:** since 32TB of a 50TB daily catalogue is already most of it, size for *residency* instead: 50 servers × 15TB NVMe (2 × 7.7TB) = **~750TB usable per tier-1 PoP**, which is ~15 days of the daily catalogue and lets weekly-cadence objects survive between requests. 200 PoPs × 750TB ≈ **~150PB of edge storage globally**. This looks extravagant until you price it against the miss: NVMe at ~$60/TB is ~$45k of flash per PoP, one-off, against ~$420k/month for a single point of byte hit ratio (derived below).
+- **RAM tier:** page cache is 256GB per server, 50 × 256GB = **~12.8TB per PoP**, which is ~128M objects, or 26% of the catalogue. On the same curve that is (6.5 − 1)/6.4 ≈ 85% of requests if the resident set were exactly the most popular objects. It is not, because page cache is approximately LRU over everything the box touches including scans and one-hit wonders, so assume **~70% of hits served from RAM**. Fall-through: 50k req/s × 30% = **~15k IOPS per server**, comfortable for one NVMe drive.
+- **Index metadata (a real budget line):** ~200B per cached object (key hash 16B + block map ~64B + stored headers ~64B + fetched_at 8B + ttl 4B + tag generations ~32B + queue pointers ~12B). With ~15 days of residency and heavy day-to-day overlap, assume ~2B objects resident per PoP: 2B × 200B = **~400GB of index per PoP**, ~8GB per server, all of it in RAM next to the 256GB of page cache. Index size, not disk, is what caps residency.
 - **Mid-tier:** ~20 regions, each shielding ~10 PoPs. A region's union working set ≈ ~1.5B objects × 100KB = ~150TB; provision ~250TB per region over ~10 nodes → **~5PB of mid-tier storage globally**. It costs roughly what the edge tier costs, and the next bullet is why it is worth it.
-- **Origin egress:** at a 95% edge hit ratio, 5% of 345 PB/day = **~17 PB/day** leaves the edge. The mid-tier plus shield absorb ~80% of those misses (the same object missed at 10 PoPs is fetched from origin once) → origin sees **~3.5 PB/day, ~1% of delivered bytes**.
-- **The cost of one hit-ratio point (the number to say out loud):** 95% → 94% adds 1% of 345 PB/day = **+3.5 PB/day of edge misses** (+105 PB/month across the mid-tier fabric) and, after 80% shield absorption, **+0.7 PB/day ≈ +21 PB/month of origin egress**. At an assumed blended $0.02/GB that is **~$420k/month for one point** — and ~$2.1M/month if you had no mid-tier at all. At cloud list egress ($0.05–0.09/GB) it is 2.5–4.5× worse. Cache-key hygiene is a finance problem, not a tuning problem.
+- **Origin egress:** measure this in bytes, not requests, because misses skew large. At a 90% *byte* hit ratio, 10% of 345 PB/day = **~35 PB/day** leaves the edge. The mid-tier plus shield absorb ~80% of those misses (the same object missed at 10 PoPs is fetched from origin once) → origin sees **~7 PB/day, ~2% of delivered bytes**.
+- **The cost of one hit-ratio point (the number to say out loud):** 90% → 89% byte hit ratio adds 1% of 345 PB/day = **+3.5 PB/day of edge misses** (+105 PB/month across the mid-tier fabric) and, after 80% shield absorption, **+0.7 PB/day ≈ +21 PB/month of origin egress**. At an assumed blended $0.02/GB that is **~$420k/month for one point**, and ~$2.1M/month if you had no mid-tier at all. At cloud list egress ($0.05 to $0.09/GB) it is 2.5× to 4.5× worse. Cache-key hygiene is a finance problem, not a tuning problem.
 - **Purge fan-out:** one URL purge must reach ~13,000 servers. Hierarchical: control plane → 200 PoP relays → in-PoP multicast. At 1,000 customer purges/s that is 200 × 1,000 = 200k control-plane messages/s at ~200B each ≈ ~40 MB/s leaving the control plane, with the 13M/s server-local deliveries absorbed inside each PoP.
 - **Logs:** 3.5 trillion requests/day × ~200B/line = **~690 TB/day raw**. Sample 1:100 into the real-time dashboards; ship 100% compressed ~10:1 (~70 TB/day) into a columnar warehouse with 90-day retention, because the offload metric is billed on and must be exact.
-- **Hot vs cold retention:** RAM minutes-to-hours (W-TinyLFU admission), NVMe ~1–7 days (S3-FIFO), mid-tier ~30 days, origin indefinite (see #21).
+- **Hot vs cold retention:** RAM minutes to hours (W-TinyLFU admission), NVMe ~1 to 2 weeks (S3-FIFO), mid-tier ~30 days, origin indefinite (see #21).
 #### Key decisions
-TODO
+**Anycast BGP for the data plane vs DNS-based request routing**
+- Choice: announce a small number of /24s from all 200 PoPs and let BGP deliver the packet, with GeoDNS on top selecting between a handful of independently announced anycast rings so there is still a per-customer steering knob.
+- Alternative: give each PoP its own address and steer entirely in DNS, answering each resolver with the PoP you have chosen for it. This is a real design, not a straw man: it is the only way to do capacity-aware, RTT-aware, per-customer routing, and several large CDNs run it.
+- Decider: how fast you must move traffic off a PoP, measured against how much DNS TTLs are actually obeyed. Withdrawing a BGP announcement reconverges the internet in seconds with no client-side state to wait out. A 30s DNS TTL does not mean 30s: a meaningful share of resolvers and client runtimes hold records for minutes to hours, so a drained PoP keeps taking traffic well past a 5-minute incident SLO. Anycast's price is that a mid-flow reconvergence lands packets on a PoP with no socket state and returns a RST, and with typical CDN flows lasting a few seconds the exposure window is small.
+- Alternative wins when: flows are long-lived, so the RST is expensive rather than a retry. A CDN serving multi-GB downloads, WebSockets, or live streams held open for minutes has the opposite exposure profile and should steer in DNS. It also wins if you rent transit and have no ASN or portable prefixes, which removes anycast from the menu entirely, and when routing must satisfy a per-customer constraint that BGP cannot express, such as pinning EU users to EU PoPs for data residency.
 
-Two or three genuine forks. For each, in this exact shape so it stays checkable:
+**Content-addressed immutable URLs vs eager push-based purge**
+- Choice: where you control the name, put a hash of the bytes in the filename (`app.7f3c9a2b.js`), serve `max-age=31536000, immutable`, and deploy by changing the reference in a short-TTL shell. Invalidation is not made cheaper, it is removed: 0 messages, 0 stale windows, and asset hit ratio approaching 100%.
+- Alternative: keep stable URLs and push an invalidation to all ~13,000 edge servers whenever content changes, reaching 99.9% of them in ~2s.
+- Decider: whether you own the URL. Where you do, hashing wins on every axis and the only cost is a build step. Where you do not, purge is the only lever and its guarantee is "99.9% of servers within ~2s, and a partitioned PoP replays the log when it returns", which is not a consistency guarantee at all. The second half of the decider is frequency: purge is affordable because it is rare (1,000/s costs ~200k control-plane messages/s at ~40 MB/s), and putting it in every deploy makes an eventually-consistent global broadcast a hard dependency of your release path.
+- Alternative wins when: the name is not yours to choose. A customer's `/index.html`, an API path, an RSS feed, an SEO-visible landing page and a legal takedown all have fixed URLs, and hashing is not available at any price. It also wins when the object is large and only its metadata changed: re-hashing a 4 GB video because someone edited a title forces a full global refill of ~750TB-scale caches, where a targeted purge of the affected small objects costs a few hundred bytes.
 
-**<name of the fork>**
-- Choice:
-- Alternative:
-- Decider:
-- Alternative wins when:
-
-**Raw material, from the old Common Mistakes:**
-
-- **Putting the whole query string in the cache key.** One asset shared with a million `utm_*` variants becomes a million cache entries for one object, the hit ratio collapses, and the customer's origin bill quietly multiplies. Allowlist the parameters that actually vary the response, canonicalise their order, and drop the rest before the key is computed.
-- **Caching a personalised response under a key that has no identity in it.** This is the worst failure in the system: an origin returns alice's page with `Set-Cookie: session=…` and no `Cache-Control: private`, the edge stores it, and bob is served alice's page *and her session cookie*. Never store a response carrying `Set-Cookie` or generated from an `Authorization`-bearing request unless the route has explicitly opted in and declared the identity dimension; enforce this in the cache engine so no config change can turn it off, and run a canary that asserts it continuously.
-- **Relying on purge when you could have used a versioned URL.** Where you control the filename, content-hash it and serve it immutable — new bytes are a new URL and nothing anywhere is ever stale. Reaching for purge on every deploy means you have made a global, best-effort, eventually-consistent broadcast a required step in your release path.
-- **Choosing DNS routing "because it gives you control" and ignoring TTL reality.** Resolvers and client stacks routinely over-cache, so a PoP you drained keeps taking traffic for minutes, and you see the resolver's location rather than the client's. Use anycast for the data plane and keep DNS for coarse ring selection.
-- **Using plain LRU at the edge.** CDN traffic contains scans — crawlers, bulk migrations, prefetchers — and LRU is not scan-resistant, so a workload that gets zero hits can evict the entire hot set and hurt every other tenant on the box. Use an admission policy (W-TinyLFU) and a scan-resistant eviction policy (S3-FIFO), and cap per-tenant occupancy.
-- **Deleting on purge-all instead of marking stale.** A hard purge-all takes hit ratio to zero against an origin provisioned for 1% of traffic and reliably takes the customer's site down. Soft-purge by default so `stale-while-revalidate` covers the refill, and rate-limit origin fetches per origin while the tiers repopulate.
+**Three-tier hierarchy (edge, mid-tier, shield) vs flat edge-to-origin**
+- Choice: edge → regional mid-tier → per-customer origin shield → origin, accepting that a miss now traverses three hops and roughly 270ms instead of ~180ms.
+- Alternative: every edge PoP fetches the origin directly. Simpler, one fewer component to operate and lose, and a materially faster miss.
+- Decider: miss fan-out against what a customer origin can actually absorb. With 200 PoPs and a 90% byte hit ratio, flat routing sends ~35 PB/day and a 5% share of 100M req/s at the origin, and no customer origin is provisioned for that. The tiers collapse the same object's 200 independent misses to 1, cutting origin egress ~80% to ~7 PB/day and, more importantly, converting the origin's load profile from spiky to stable. In money that is 28 PB/day avoided, or 840 PB/month at $0.02/GB, so roughly $17M/month of origin egress, against a mid-tier fleet that costs about what the edge storage tier costs.
+- Alternative wins when: fan-out is small or coalescing has nothing to coalesce. A private CDN with 5 to 10 PoPs has a fan-out of 10, not 200, and the mid-tier buys almost nothing. An origin that is already a globally replicated object store with regional endpoints is its own mid-tier. And for mostly-uncacheable traffic, an API accelerator where hit ratio is 20%, the mid-tier adds ~90ms to nearly every request while collapsing almost nothing, which is a straight loss.
 #### High-level design
 **must-say**
 
@@ -22519,21 +22655,25 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 </svg>
 ```
 
-**How to read the diagram:** requests fall down the page through three cache tiers, and only what nothing has caches reaches the origin. The dashed arrows from the left are the control plane — config and purge push *into* the caches, never through the request path.
+**How to read the diagram:** requests fall down the page through three cache tiers, and only what nothing has cached reaches the origin. The dashed arrows from the left are the control plane: config and purge push *into* the caches, never through the request path.
 
 **Why the flow is shaped this way:** each tier exists to shrink the fan-out reaching the next one. The edge exists for latency; the mid-tier and shield exist purely for origin protection and cost, which is why they are allowed to add latency to a miss.
 
-**What this layout buys you:** ~99% of bytes never touch the origin, and origin capacity can be planned against a stable ~1% of delivered traffic rather than a spiky 5%. The cost is a deeper miss path — a cold object now traverses three hops — which `stale-while-revalidate` hides from the user.
+**What this layout buys you:** ~98% of bytes never touch the origin, and origin capacity can be planned against a stable ~2% of delivered bytes rather than a spiky 10%. The cost is a deeper miss path, since a cold object now traverses three hops, which `stale-while-revalidate` hides from the user.
 #### Deep dive
 **must-say**
 
-**Request routing: anycast for the data plane, DNS as the steering knob.** DNS-based routing answers `cdn.acme.example` with the IP of the PoP nearest the client, which gives you total control — capacity-aware, RTT-aware, per-customer. It has two blind spots. First, you see the *resolver's* address, not the client's: a Lagos user on a public resolver may be mapped to a European PoP. EDNS Client Subnet (RFC 7871) partially fixes this by forwarding a /24 of the client, but adoption is incomplete. Second, TTL is a lie — you set 30s expecting fast drains, and a meaningful share of resolvers and client stacks ignore it, so a PoP you drained keeps receiving traffic for minutes. Anycast inverts the trade: announce one /24 from all 200 PoPs and let BGP deliver. Failover is instantaneous and free — withdraw the route and the internet reconverges in seconds without any client-side cache to wait out — and volumetric attacks are automatically spread across the whole fleet instead of concentrating on one target. The cost is that the routing is not yours: BGP picks by AS-path length and local policy, not latency, so the "nearest" PoP is sometimes a continent away; you cannot drain one overloaded PoP without withdrawing the whole prefix; and a mid-connection reconvergence lands packets at a PoP with no state for that TCP flow, which sends a RST. **Pick anycast for the data plane** — mid-flow flaps are rare and most CDN flows last seconds, whereas DNS TTL blindness is constant — and keep GeoDNS on top, choosing between a handful of independently-announced anycast rings so you retain a per-customer steering knob and a way to move traffic off a bad ring.
+**How a cached object stops being served.** This is the mechanism worth taking to the whiteboard, because everything else in a CDN is an HTTP proxy on good hardware. An entry has three states, and every hard problem lives on the transitions between them.
 
-**The cache key is the whole product.** The default key is `(scheme, host, path)`. Everything you add or fail to add is a hit-ratio or a security decision. Query parameters must be **allowlisted**, not passed through: `?w=800&fmt=webp` genuinely changes the response and belongs in the key; `?utm_source=…&fbclid=…` does not, and a single asset shared with a million distinct tracking suffixes becomes a million cache entries for one object — hit ratio collapses toward zero and, at $420k per hit-ratio point, so does the customer's bill. Sort and canonicalise the surviving params so `?a=1&b=2` and `?b=2&a=1` are one key. `Vary: Accept-Encoding` is fine (three values); `Vary: User-Agent` is catastrophic (thousands of strings) — normalise to a device class instead. Cookies are where it becomes a security problem: if an origin returns a personalised page carrying `Set-Cookie: session=…` and forgets `Cache-Control: private`, and the edge stores it under a session-free key, the *next* user is served alice's page and alice's session cookie. Defence in depth: never store a response carrying `Set-Cookie` unless explicitly allowlisted; bypass the cache entirely when the request carries a session cookie unless the route is explicitly marked cacheable; treat `Cache-Control: private` and `Authorization` as never-store; strip or normalise unkeyed request headers the origin might reflect (`X-Forwarded-Host` is the classic poisoning vector) *before* forwarding; and run a continuous canary that samples cached objects and asserts none carry per-user markers.
+*Fresh:* `age < ttl`, served from RAM or NVMe with no upstream contact. That is ~95% of requests and there is nothing interesting to say about it.
 
-**Admission and eviction: do not let a scan destroy the cache.** Pure LRU is a bad fit for CDN traffic because it is not scan-resistant: a crawler pulling 50M cold URLs from one origin touches each exactly once, and every one of those touches promotes a useless object to the head of the list and evicts a genuinely hot one — the cache is emptied by a workload that got zero hits from it. LFU is scan-resistant but ossifies without aging: yesterday's viral image keeps its enormous counter forever and cannot be displaced. Use two mechanisms. On the disk tier, **S3-FIFO**: new objects enter a small probationary FIFO (~10% of capacity) and are only promoted to the main FIFO if they are hit a second time before they age out; keys evicted from small are recorded in a ghost queue so a later re-request is recognised as a returning object rather than a newcomer. Because everything is FIFO, reads mutate no list and need no lock — a material win at 50k req/s per server. On the RAM tier, add **W-TinyLFU admission**: on a miss, compare the candidate's estimated frequency (from a 4-bit Count-Min sketch, halved periodically so popularity decays) against the victim's, and only admit if it wins. This matters because roughly half to two-thirds of *distinct* objects in a real CDN trace are one-hit wonders. Admitting them all would both evict useful content and burn SSD write endurance for nothing: at 5% of 2.5M req/s missing, an admit-everything policy writes 125k × 100KB = 12.5 GB/s per PoP to flash.
+*Stale but serveable:* `ttl < age < ttl + swr_window`. The entry is past its date and the right move is to serve it anyway and refresh behind the request. Making the user wait for revalidation turns a 12ms response into a 270ms one and buys no correctness, because the same bytes were being served to somebody else a millisecond earlier.
 
-**Collapsing the thundering herd.** Take a breaking-news image at 5M req/s globally — averaged over 200 PoPs, ~25k req/s each — with a 200ms origin fetch. The instant its TTL expires, the naive count of concurrent origin requests for that one URL is 25k × 0.2s × 200 PoPs = **1,000,000**. Four coalescers apply in series and each is cheap: per-server single-flight (one in-flight fetch per key per box) takes it to ~50 servers × 200 PoPs = 12,800; consistent-hashing the key to a single owning server within each PoP takes it to 200; mid-tier coalescing takes it to 20; the origin shield takes it to **1**. Latency budget for that single real fetch: edge → mid-tier ~35ms, mid-tier → shield ~180ms, shield → origin ~40ms, plus ~15ms of processing ≈ 270ms — and *no user waits any of it*, because `stale-while-revalidate` serves the expired copy to all 5M req/s while the refresh runs. Two more guards: jitter every TTL by ±10% so 200 PoPs do not expire in the same second, and refresh probabilistically as the TTL approaches rather than at the moment it fires. This is the same family of technique as the in-memory cache stampede fix (see #34); what is different here is the geographic tiering — the collapse happens across four levels of a physical hierarchy, not in one process's lock table.
+*Gone:* evicted, or explicitly invalidated. Only the second is a distributed problem.
+
+**Expiry is a synchronised global event, and that is the whole difficulty.** A TTL is not a per-object timer, it is a timer that fires at ~200 PoPs within a second or two of each other, because all 200 fetched the object from the same origin response at roughly the same time. Take a breaking-news image at 5M req/s worldwide, so ~25k req/s per PoP, against a 200ms origin fetch. The naive count of concurrent origin requests for that single URL the instant its TTL expires is 25k × 0.2s × 200 PoPs = **1,000,000**. Write that number on the board, because it is what makes everything below non-optional rather than an optimisation.
+
+Four coalescers apply in series, each one cheap, each collapsing roughly an order of magnitude. Per-server single-flight, one in-flight upstream fetch per key per box, takes 1,000,000 to ~50 servers × 200 PoPs = 12,800. Consistent-hashing the key to a single owning server inside each PoP takes that to 200. Mid-tier coalescing takes it to 20. The origin shield takes it to **1**. The latency budget of that one real fetch is edge to mid-tier ~35ms, mid-tier to shield ~180ms, shield to origin ~40ms, plus ~15ms of processing, so ~270ms, and no user waits any of it.
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 290" role="img" aria-label="Thundering herd collapse: one million concurrent origin requests reduced to one through single-flight, PoP key ownership, mid-tier coalescing and origin shield">
@@ -22602,25 +22742,35 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 </svg>
 ```
 
-**Invalidation: versioned URLs where you own the name, purge where you do not.** Where you control the URL, do not invalidate at all — content-hash the filename (`app.7f3c9a2b.js`), serve `Cache-Control: public, max-age=31536000, immutable`, and deploy by changing the *reference* in a short-TTL HTML shell. New bytes are a new URL, so no cache anywhere on earth is ever wrong, hit ratio on assets approaches 100%, and rollback is just re-pointing the shell. This is the real answer and it should be the first thing you say. Purge exists for the residue: a customer's `/index.html`, an API response, a price change, a takedown. Implement it in two forms. **Purge-by-URL** is an eager push: control plane appends to the durable purge log, fans out to 200 PoP relays, each multicasts locally, p99 to 99.9% of servers ~2s. A PoP that was partitioned replays the log from its last offset on reconnect, which is why the log must be durable and the operation idempotent — you cannot collect 13,000 acknowledgements. **Purge-by-tag** cannot be an enumeration: "everything tagged `product-1234`" may match ten million objects across the fleet. Instead every cached object records the generation counters of its tags at fetch time, and purging a tag bumps one counter in the globally replicated generation table; on the next lookup the server compares stored generation against current and treats a mismatch as a miss. That makes bulk invalidation an O(1) push of ~40B and moves the work to lazy read-time validation — the trade being that a tag-purged object still occupies disk until it is either requested or evicted.
+**What `stale-while-revalidate` actually promises, and what it costs.** It is not a way of avoiding staleness, it is a decision to be wrong on purpose for a bounded window in exchange for never making a user wait on a refill. Every expiry of every object serves at least one stale response per PoP, by construction. For a product image that is free; for an inventory count or a price it is not, so those routes opt out and pay the full 270ms miss, and that opt-out has to be per route rather than per customer. This is the same family of technique as the in-memory cache stampede fix (see #34). What is different here is that the collapse happens across four levels of a physical hierarchy spread over continents, not in one process's lock table.
 
-**Tiered fetch, origin shielding and connection reuse.** The shield is chosen per origin, not per request, and is the PoP with the best network path to that origin — which also lets the customer allowlist a handful of source IPs at their firewall. Every hop uses long-lived pooled HTTP/2 (or HTTP/3) connections. This is not a micro-optimisation: without pooling, every miss pays a fresh TCP handshake plus a TLS handshake to origin — three round trips, ~200ms across an ocean — on top of the origin's own service time, roughly tripling the miss penalty and, at 17 PB/day of misses, generating a handshake rate the origin's TLS terminator cannot absorb. Pooled and multiplexed, a miss costs one round trip on an already-warm connection. Conditional revalidation (`If-None-Match` / `If-Modified-Since`) means most refreshes return a ~200B `304` rather than 100KB, so revalidation traffic is a rounding error against fill traffic.
+**Two guards on the timer itself.** Jitter every TTL by ±10% at storage time, so 200 PoPs that fetched within the same second do not expire within the same second. Then refresh probabilistically as expiry approaches rather than at the moment it fires: as `age` nears `ttl`, each request refreshes with a small and rising probability, weighted by how long the last upstream fetch took, so expensive objects start earlier (the XFetch formulation, 2015). Expiry stops being an edge and becomes a smear, which is what the coalescers want.
 
-**Byte-range and segment caching for large media.** A 4 GB video must not be a single cache entry: storing it whole means one object can evict 40,000 small ones, a range request for the middle cannot be served until the whole file is fetched, and no single server should own 4 GB of one customer's content. Cache in fixed 2MB blocks keyed `(object_key, block_idx)`, with the object's *blocks* all hashing to one owning server (so a sequential read stays on one box and one connection) but each block admitted and evicted independently. A `Range: bytes=5242880-7340031` request maps to blocks 2–3; only those are fetched from upstream, aligned and coalesced into one upstream range request. Because media playback is sequential, prefetch the next two blocks on a hit — a cheap read-ahead that turns a seek-and-stall into a continuous stream. The ABR ladder, segment durations and player heuristics belong to the consumer of this system, not to it (see #31 and #11).
+**Revalidation is cheap only if you keep the connections.** A conditional `GET` with `If-None-Match` usually returns a ~200B `304` rather than 100KB, so refresh traffic is a rounding error against fill traffic. That holds only over pooled, long-lived HTTP/2 or HTTP/3 connections between tiers. Without pooling, every miss pays a fresh TCP plus TLS handshake to the next hop, three round trips and ~200ms across an ocean, which roughly triples the miss penalty and, at ~35 PB/day of edge misses, presents the origin's TLS terminator with a handshake rate it cannot absorb.
 
-**TLS at the edge, certificate distribution, and edge compute.** You terminate TLS for tens of thousands of customer hostnames on ~13,000 servers, so you do not ship every certificate to every box: each server resolves the SNI hostname against the control-plane KV lazily at handshake time and caches the chain in a local LRU, adding a sub-millisecond lookup to a cold handshake and nothing to a warm one. For customers who will not hand over a private key, offer keyless TLS: the private key stays in their datacentre and the edge makes an RPC for the single signing operation in the handshake — one extra round trip on connection setup, zero on resumption, and the customer keeps custody. TLS 1.3 session resumption makes most handshakes 0-RTT; allow 0-RTT early data only on idempotent `GET`s, because early data is replayable by design. Edge compute rides on the same boxes: run tenant code in V8 isolates rather than containers — an isolate is a few MB and starts in single-digit milliseconds against ~50MB and hundreds of milliseconds for a container, which is the only way per-request tenant code is affordable at 50k req/s per server — with a hard CPU-time and memory budget per request so one tenant cannot starve the cache.
+**The other way an entry dies: somebody tells you.** Where you own the name, nobody has to: content-hash the filename, serve it `immutable`, and change the reference. Source hosting has had this property for free since git addressed every object by the SHA of its contents (see #39). Purge exists for the residue, and comes in two shapes that work completely differently.
+
+*Purge by URL is an eager push.* The control plane appends to a durable log partitioned by origin, fans out to 200 PoP relays, and each relay multicasts inside its own PoP; p99 to 99.9% of edge servers is ~2s. Two properties make it work without acknowledgements. The operation is idempotent, because forgetting an object twice is the same as forgetting it once. And every PoP tracks its own offset in the log, so a PoP that was partitioned replays from that offset on reconnect instead of needing to be told again. You never collect 13,000 acks. You make the absence of an ack survivable, which is a different and much weaker claim.
+
+*Purge by tag cannot be an enumeration.* "Everything tagged `product-1234`" may match ten million objects spread across ~150PB of disk, and scanning the index for them at every PoP is minutes of work repeated 200 times. Instead, every cached object records the generation counter of each of its tags at fetch time. Purging a tag bumps one counter in the globally replicated generation table, about 40B pushed everywhere, and on the next lookup a server compares the stored generations against the current ones and treats any mismatch as a miss. Bulk invalidation becomes an O(1) push with the work deferred to read time. The trade is disk and honesty: a tag-purged object still occupies space until it is requested or evicted, so this mechanism means "will never be served again", not "deleted", which is exactly the distinction that matters for a takedown.
+
+*Purge soft by default.* A hard purge deletes, which takes that origin's hit ratio to zero and points the full request rate at an origin provisioned for ~2% of delivered bytes. That is how a customer's "purge everything" button takes their site down at 09:00 on Black Friday. Marking objects stale instead means `stale-while-revalidate` covers the refill, single-flight holds origin concurrency to one fetch per object, and a per-origin token bucket at the shield caps how fast the tiers are allowed to repopulate. Hard purge stays available, rate-limited and behind an explicit flag.
+
+The honest summary of the whole mechanism is that freshness is a promise about *when*, not *whether*: the fresh window, plus the stale window, plus ~2s of purge propagation, plus an unbounded tail for any PoP that happens to be partitioned. Say it in those terms in the room. Claiming that invalidation is instant is the answer that gets picked apart.
 #### Where it breaks
 **must-say**
 
 **Bottlenecks**
 
-- **Cache-key cardinality explosion** — tracking parameters, `Vary: User-Agent`, or cookies in the key multiply one object into thousands of entries; hit ratio falls and at ~$420k per point the bill moves immediately. Allowlist query parameters, canonicalise ordering, normalise `User-Agent` to a device class, and alert on entries-per-distinct-path per origin. Trade-off: an allowlist can break a customer whose parameter genuinely varies the response, so ship it with a shadow-mode diff before enforcing.
-- **Thundering herd on TTL expiry** — 1M concurrent origin requests for one URL when a hot object expires. Single-flight per server, consistent-hash key ownership per PoP, mid-tier and shield coalescing, plus `stale-while-revalidate` and ±10% TTL jitter. Trade-off: SWR means some users are knowingly served stale content for the length of the revalidation, which is unacceptable for a small set of correctness-critical routes that must opt out.
-- **Purge fan-out at the control plane** — a burst of purges must reach ~13,000 servers under a 5s SLO, and a naive flat fan-out is 13M messages/s from one place. Hierarchical push (control plane → 200 relays → in-PoP multicast) plus generation counters for tag purges. Trade-off: eventual consistency — a partitioned PoP serves stale content until it replays the durable log.
-- **Hot key saturating one server's NIC** — consistent hashing concentrates a viral object on one box, and 50k req/s of a 100KB object is a full 40 Gbps. Detect per-key rate and replicate hot keys to every server in the PoP. Trade-off: N copies to invalidate instead of 1, and a small amount of duplicated storage.
-- **Origin capacity during mass invalidation or cold start** — a purge-all, a new PoP turning up, or a fleet restart takes hit ratio to zero against an origin sized for 1% of traffic. Soft purge by default, per-origin fill token buckets at the shield, and staged PoP turn-up with a warm-through-mid-tier period. Trade-off: slower propagation of genuinely new content immediately after a bulk purge.
-- **SSD write amplification from one-hit wonders** — admitting every miss writes ~12.5 GB/s per tier-1 PoP to flash, most of it never read again, burning endurance and evicting useful objects. W-TinyLFU admission plus S3-FIFO's second-hit promotion. Trade-off: a genuinely new-but-about-to-be-popular object is delayed one request before being admitted — negligible at CDN request rates.
-- **BGP route flap and PoP drain** — anycast gives you no per-request steering, so an overloaded or degraded PoP cannot be selectively drained. Announce several independent anycast rings and use GeoDNS to move customers between rings; drain a PoP by de-preferencing its announcement (AS-path prepending, communities) rather than withdrawing it outright. Trade-off: more prefixes to manage and a slower, coarser drain than DNS-only routing would give.
+- **Cache-key cardinality explosion.** Tracking parameters, `Vary: User-Agent`, or cookies in the key multiply one object into thousands of entries; hit ratio falls and at ~$420k per point the bill moves immediately. Allowlist query parameters, canonicalise their order, normalise `User-Agent` to a device class, and alert on entries-per-distinct-path per origin. Trade-off: an allowlist can break a customer whose parameter genuinely varies the response, so ship it with a shadow-mode diff before enforcing.
+- **Cache poisoning through the same key.** The security face of the previous bullet, and the failure that ends careers. An origin returns alice's page with `Set-Cookie: session=...` and no `Cache-Control: private`, the edge stores it under a key with no identity in it, and bob is served alice's page and her session cookie. Enforce never-store on `Set-Cookie`, `Cache-Control: private` and `Authorization`-bearing requests inside the cache engine, where no config change can switch it off; strip unkeyed request headers the origin might reflect (`X-Forwarded-Host` is the classic vector) before forwarding. Trade-off: a customer with a legitimately cacheable cookie-bearing route has to opt in explicitly and declare the identity dimension, which is friction on purpose.
+- **Thundering herd on TTL expiry.** 1M concurrent origin requests for one URL when a hot object expires. Single-flight per server, consistent-hash key ownership per PoP, mid-tier and shield coalescing, plus `stale-while-revalidate` and ±10% TTL jitter. Trade-off: SWR means some users are knowingly served stale content for the length of the revalidation, which is unacceptable for a small set of correctness-critical routes that must opt out.
+- **Purge fan-out at the control plane.** A burst of purges must reach ~13,000 servers under a 5s SLO, and a naive flat fan-out is 13M messages/s from one place. Hierarchical push (control plane, then 200 relays, then in-PoP multicast) plus generation counters for tag purges. Trade-off: eventual consistency, since a partitioned PoP serves stale content until it replays the durable log.
+- **Hot key saturating one server's NIC.** Consistent hashing concentrates a viral object on one box, and 50k req/s of a 100KB object is a full 40 Gbps. Detect per-key rate and replicate hot keys to every server in the PoP. Trade-off: N copies to invalidate instead of 1, and a small amount of duplicated storage.
+- **Origin capacity during mass invalidation or cold start.** A purge-all, a new PoP turning up, or a fleet restart takes hit ratio to zero against an origin sized for ~2% of delivered bytes. Soft purge by default, per-origin fill token buckets at the shield, and staged PoP turn-up with a warm-through-mid-tier period. Trade-off: slower propagation of genuinely new content immediately after a bulk purge.
+- **SSD write amplification from one-hit wonders.** Admitting every miss writes ~12.5 GB/s per tier-1 PoP to flash, most of it never read again, burning endurance and evicting useful objects. W-TinyLFU admission plus S3-FIFO's second-hit promotion. Trade-off: a genuinely new but about-to-be-popular object is delayed by one request before being admitted, which is negligible at CDN request rates.
+- **Scans evicting the working set.** CDN traffic contains crawlers, bulk migrations and prefetchers, and plain LRU is not scan-resistant: 50M single-touch URLs march through the cache and evict the hot set on behalf of a workload that got zero hits from it, hurting every other tenant on the box. S3-FIFO keeps them in the probationary queue, and a per-tenant occupancy cap (no customer above ~15% of a PoP's disk) bounds the damage. Trade-off: the cap penalises a legitimately large customer whose catalogue really is that big.
+- **BGP route flap and PoP drain.** Anycast gives you no per-request steering, so an overloaded or degraded PoP cannot be selectively drained. Announce several independent anycast rings and use GeoDNS to move customers between rings; drain a PoP by de-preferencing its announcement (AS-path prepending, communities) rather than withdrawing it outright. Trade-off: more prefixes to manage and a slower, coarser drain than DNS-only routing would give.
 
 **Failure modes**
 
@@ -22630,7 +22780,7 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 | Edge server | One box in a PoP dies mid-request | In-PoP L4 health check; per-server connection error rate | Consistent-hash ring rehomes its key range to neighbours (~1/N of keys move, briefly cold); L4 balancer stops sending it new flows; in-flight requests are client-retried |
 | Edge cache | A software rollout corrupts on-disk entries or invalidates the format | Checksum mismatch rate on read; hit-ratio cliff within one PoP | Per-object checksums, treat mismatch as a miss rather than serving corruption; canary rollouts one PoP at a time with automatic rollback on hit-ratio delta |
 | Mid-tier | A regional mid-tier is lost; its 10 PoPs lose their shield | Origin fill rate for that region spikes 5× | Edges fail over to the next-nearest mid-tier (higher latency, still shielded); per-origin fill token bucket at the shield prevents the origin absorbing the spike |
-| Purge control plane | Purge fan-out stalls; stale content stays live past the SLO | Purge-propagation p99 and per-PoP ack lag on the purge log | Durable Kafka purge log with per-PoP offsets — PoPs replay on reconnect; page when any PoP's offset lag exceeds 30s; customers can re-issue idempotently |
+| Purge control plane | Purge fan-out stalls; stale content stays live past the SLO | Purge-propagation p99 and per-PoP ack lag on the purge log | Durable Kafka purge log with per-PoP offsets, so PoPs replay on reconnect; page when any PoP's offset lag exceeds 30s; customers can re-issue idempotently |
 | Cache key | A config change removes a keyed header and personalised responses become shared | Continuous canary asserting no `Set-Cookie` or per-user marker in cached bodies; sudden hit-ratio *jump* on a dynamic route | Fail-closed on the never-store rules regardless of config; auto-revert the config change and hard-purge the affected origin; treat as a security incident, not a caching bug |
 | Origin | Origin returns 5xx or times out entirely | Origin error rate and timeout rate per origin at the shield | `stale-if-error` serves expired copies for a configured window; circuit breaker at the shield; negative-cache 5xx for a few seconds so errors do not themselves stampede |
 | TLS | Control-plane KV unavailable, so SNI certificate lookup fails on cold handshakes | Handshake failure rate by PoP; KV read error rate | Per-server certificate LRU with a long stale-serve window (certificates change rarely); serve from the stale cache during a control-plane outage; only reject when the cert has genuinely expired |
@@ -22638,47 +22788,58 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 
 **Unresolved**
 
-TODO. Two or three things this design genuinely does not handle well, and what you would do about each.
+**The TTL is a single dial with a cliff at both ends, and there is no safe setting.** Everything above is an attempt to work around that fact rather than a solution to it. Turn it up and a customer's changed price is served wrong from 200 cities for an hour. Turn it down and every popular object becomes a synchronised stampede. `stale-while-revalidate` does not rescue the short end, it makes the staleness *guaranteed*: every expiry of every object serves at least one stale response per PoP by construction, so the honest description of a 60s TTL with a 24h SWR window is "this content can be up to 24 hours old". What we actually do is dodge the dial wherever the URL is ours, which is most bytes but a minority of the *decisions*, and for the rest we tune per route by hand: short TTL plus revalidation for things that change, long TTL plus purge for things that change rarely, `no-store` for the handful that cannot be wrong. That last category is pure origin load with a CDN in front of it doing nothing but adding a hop. Nobody has a mechanism that gives bounded staleness across 13,000 caches at an acceptable price, and a design that claims one is hiding a TTL somewhere.
+
+**Purge cannot be proven complete, and "purge" does not mean "deleted".** We report `servers_acked: 12987` out of ~13,000, and that number is a statement about the servers that answered, not about the fleet. A PoP that is partitioned right now will serve the old bytes until it reconnects and replays the log, and we cannot bound how long that is. Worse, the tag-purge mechanism deliberately leaves the bytes on disk and merely stops serving them, so a legal takedown or a leaked secret is not actually removed by the operation the customer just paid for. For those cases the truthful answer is that purge is the wrong tool: rotate the signing key so existing signed URLs stop validating, change the origin config so the path cannot be refetched, and treat physical deletion as a separate background job with its own completion tracking. We have not built that job, and until we do the guarantee we can defend is "not served, quickly, almost everywhere", which is not what "delete my content" means to a lawyer.
+
+**The share of traffic that a CDN cannot help with is growing, and edge compute is not an answer to it.** A cache can only serve bytes that are identical for everyone. Personalised pages, per-user authorised objects (a Drive-style share link, see #12), and API responses that read a user's own state are structurally uncacheable, and no amount of hit-ratio tuning touches them: they arrive at the edge, get proxied, and consume origin capacity while paying for a hop. The industry answer is to move the logic to the edge and run tenant code next to the cache, which is real and we support it, but it quietly reintroduces the exact problem the cache tier exists to avoid, because that code wants state, and now you have mutable state at 200 sites with no coherent story about ordering or conflict. We take the honest position that our edge compute is stateless per request and reads from a globally replicated read-mostly store, which serves personalisation-by-geography and A/B assignment well and serves anything requiring a per-user write badly. Customers who need the second thing are still going back to the origin, and we should say so rather than sell the edge as a database.
 #### Drill questions
 1. A customer clicks "purge everything" on their origin at 09:00 on Black Friday. What happens?
 2. BGP reconverges and moves a client to a different PoP mid-download. What breaks?
 3. How do you serve content that requires authorization without leaking one user's data to another?
 4. A crawler pulls 50M cold URLs from one origin overnight. What does that do to your hit ratio?
 5. The origin goes down entirely. What do users see?
-6. One object is so hot it saturates a single server's NIC. Consistent hashing put it on one box — now what?
+6. One object is so hot it saturates a single server's NIC. Consistent hashing put it on one box. Now what?
 7. A customer says their hit ratio is 60% and blames you. How do you debug it?
 8. 5 Tbps of volumetric DDoS aimed at one customer. Does the CDN survive?
-
-TODO. Only 8 drill questions carried over, top up to at least 10.
+9. You terminate TLS for tens of thousands of customer hostnames on ~13,000 servers. How, and what do you offer the customer who will not hand you a private key?
+10. A customer starts serving 4 GB video files through you. What changes inside the cache?
+11. Two PoPs disagree about a purged object for 40 seconds. Is that acceptable, and what would it take to make it never happen?
+12. Your busiest customer's hit ratio is fine but their *byte* hit ratio is 20 points lower. What is going on?
 #### Answers to drill questions
-1. Naively, every PoP's copy of that origin is invalidated at once and the next wave of traffic is a 100% miss rate straight through to an origin sized for 1% — the origin falls over and takes the customer's site down. Make purge-all a **soft** purge by default: mark objects stale rather than deleting them, so `stale-while-revalidate` keeps serving while the tiers refill gradually and single-flight holds origin concurrency to one per object. *If pushed:* rate-limit the refill explicitly — a token bucket per origin at the shield capping concurrent origin fetches, with the excess served stale and a warning surfaced in the customer's dashboard. Hard purge (delete, no stale) stays available but is rate-limited to a few thousand URLs and requires an explicit flag.
+1. Naively, every PoP's copy of that origin is invalidated at once and the next wave of traffic is a 100% miss rate straight through to an origin sized for ~2% of delivered bytes, so the origin falls over and takes the customer's site down. Make purge-all a **soft** purge by default: mark objects stale rather than deleting them, so `stale-while-revalidate` keeps serving while the tiers refill gradually and single-flight holds origin concurrency to one per object. *If pushed:* rate-limit the refill explicitly with a token bucket per origin at the shield capping concurrent origin fetches, with the excess served stale and a warning surfaced in the customer's dashboard. Hard purge (delete, no stale) stays available but is rate-limited to a few thousand URLs and requires an explicit flag.
 
 2. The TCP flow arrives at a machine with no socket state for it and gets a RST; the client sees a truncated transfer. It matters least for the common case (short-lived HTTP requests over seconds) and most for large downloads. *If pushed:* clients retry with `Range` from the last received byte, so a resumed download costs one round trip rather than restarting; QUIC helps materially because a QUIC connection is identified by a connection ID rather than a 4-tuple and survives path changes; and you keep flap rates low by preferring stable, well-peered prefixes and avoiding frequent route churn during maintenance (drain by weighting announcements, not by flapping them).
 
-3. Two safe patterns. Signed URLs: the origin mints a URL with an expiry and HMAC; the edge validates the signature and serves the same cached object to anyone holding a valid signature — the object itself is not personalised, so caching is safe. Or edge token validation: the edge checks a JWT and then serves a shared cached object. What you must never do is cache a response whose *body* differs per user under a key that does not include the user. *If pushed:* enforce it structurally, not by policy — refuse to store any response carrying `Set-Cookie`, `Cache-Control: private`, or generated from a request bearing `Authorization`, unless the origin has explicitly opted that route in and declared the identity dimension as part of the cache key.
+3. Two safe patterns. Signed URLs: the origin mints a URL with an expiry and HMAC; the edge validates the signature and serves the same cached object to anyone holding a valid signature, because the object itself is not personalised, so caching is safe. Or edge token validation: the edge checks a JWT and then serves a shared cached object. What you must never do is cache a response whose *body* differs per user under a key that does not include the user. *If pushed:* enforce it structurally rather than by policy: refuse to store any response carrying `Set-Cookie`, `Cache-Control: private`, or generated from a request bearing `Authorization`, unless the origin has explicitly opted that route in and declared the identity dimension as part of the cache key.
 
 4. Under pure LRU it is a disaster: 50M single-touch objects march through the cache and evict the entire hot working set, so the *other* customers on that PoP see their hit ratio collapse and their origins get hit. Under S3-FIFO with second-hit promotion, those objects never leave the small probationary queue and the main queue is untouched. *If pushed:* also cap per-origin cache occupancy (no tenant may exceed, say, 15% of a PoP's disk) so a single customer's long tail cannot crowd out the shared hot set, and rate-limit origin fills per customer so the crawler's misses do not saturate the shield.
 
-5. Ideally, the site. `stale-if-error` lets the edge serve an expired copy when the upstream returns 5xx or times out — configure a generous window (hours) because a stale page beats an error page for nearly all content. *If pushed:* combine with a circuit breaker at the shield so you stop hammering a dead origin, negative-cache 5xx responses for a few seconds so an error does not itself become a herd, and expose "served-stale-on-error" as a first-class metric so the customer knows they were saved rather than discovering it later.
+5. Ideally, the site. `stale-if-error` lets the edge serve an expired copy when the upstream returns 5xx or times out. Configure a generous window (hours) because a stale page beats an error page for nearly all content. *If pushed:* combine with a circuit breaker at the shield so you stop hammering a dead origin, negative-cache 5xx responses for a few seconds so an error does not itself become a herd, and expose "served-stale-on-error" as a first-class metric so the customer knows they were saved rather than discovering it later.
 
-6. At 40 Gbps usable per server, a 100KB object needs ~50k req/s to saturate one NIC, and a viral object can exceed that at a tier-1 PoP. Detect per-key request rate and, above a threshold, **replicate the hot key to all servers in the PoP** rather than routing to its owner — the object is cheap to duplicate and the fan-out benefit is what mattered, not the storage saving. *If pushed:* this is the standard hot-shard remedy; the cost is that a replicated key now has N copies to invalidate rather than 1, so the purge path must fan to the whole PoP for hot keys, which the in-PoP multicast already does.
+6. At 40 Gbps usable per server, a 100KB object needs ~50k req/s to saturate one NIC, and a viral object can exceed that at a tier-1 PoP. Detect per-key request rate and, above a threshold, **replicate the hot key to all servers in the PoP** rather than routing to its owner, because the object is cheap to duplicate and the fan-out benefit is what mattered, not the storage saving. *If pushed:* this is the standard hot-shard remedy; the cost is that a replicated key now has N copies to invalidate rather than 1, so the purge path must fan to the whole PoP for hot keys, which the in-PoP multicast already does.
 
-7. Break the miss reasons down in the logs — the answer is almost always one of five: tracking parameters in the cache key, a `Vary` on something high-cardinality like `User-Agent` or `Cookie`, the origin sending `Cache-Control: no-store` or omitting caching headers entirely, TTLs shorter than the object's request inter-arrival time at a single PoP, or genuinely long-tail content that no cache can help. Emit a per-origin `cache_status` histogram with a *reason* code (`MISS_UNCACHEABLE_HEADER`, `MISS_EXPIRED`, `MISS_COLD`, `MISS_VARY_EXPLOSION`) so this is a dashboard, not an investigation. *If pushed:* the long-tail case is real and not fixable by tuning — if an object is requested once a week at one PoP, no TTL saves you; that is where a mid-tier earns its keep, because the union of 10 PoPs' weekly requests is often frequent enough to stay resident regionally.
+7. Break the miss reasons down in the logs, and the answer is almost always one of five: tracking parameters in the cache key, a `Vary` on something high-cardinality like `User-Agent` or `Cookie`, the origin sending `Cache-Control: no-store` or omitting caching headers entirely, TTLs shorter than the object's request inter-arrival time at a single PoP, or genuinely long-tail content that no cache can help. Emit a per-origin `cache_status` histogram with a *reason* code (`MISS_UNCACHEABLE_HEADER`, `MISS_EXPIRED`, `MISS_COLD`, `MISS_VARY_EXPLOSION`) so this is a dashboard, not an investigation. *If pushed:* the long-tail case is real and not fixable by tuning: if an object is requested once a week at one PoP, no TTL saves you; that is where a mid-tier earns its keep, because the union of 10 PoPs' weekly requests is often frequent enough to stay resident regionally.
 
-8. This is where anycast earns its place: the attack traffic is delivered to whichever PoP is nearest each botnet node, so 5 Tbps spread across 200 PoPs is ~25 Gbps each — absorbable inside the headroom you already provisioned. *If pushed:* layer per-customer rate limits at the edge so the attack cannot consume the shared origin-fill path, blackhole clearly-malicious prefixes at the PoP rather than upstream, and make sure the shield enforces a hard concurrency cap on origin fetches so an attack against uncacheable URLs (the actually dangerous variant) cannot pass through as origin load.
+8. This is where anycast earns its place: the attack traffic is delivered to whichever PoP is nearest each botnet node, so 5 Tbps spread across 200 PoPs is ~25 Gbps each, absorbable inside the headroom you already provisioned. *If pushed:* layer per-customer rate limits at the edge so the attack cannot consume the shared origin-fill path, blackhole clearly-malicious prefixes at the PoP rather than upstream, and make sure the shield enforces a hard concurrency cap on origin fetches so an attack against uncacheable URLs (the actually dangerous variant) cannot pass through as origin load.
+
+9. Do not ship every certificate to every box: 40,000 hostnames across 13,000 servers is 520M certificate copies to keep rotated, and a renewal would be a fleet-wide push. Instead each server resolves the SNI hostname against the control-plane KV lazily during the handshake and caches the chain in a local LRU, which adds a sub-millisecond lookup to a cold handshake and nothing to a warm one. For the customer who will not surrender a private key, offer keyless TLS: the key stays in their datacentre and the edge makes an RPC for the single signing operation in the handshake, so it is one extra round trip on connection setup, zero on resumption, and they keep custody. *If pushed:* the failure mode is the KV being unreachable during a cold handshake, so the per-server certificate cache serves stale entries for a long window (certificates change on a 90-day cycle, not a 90-second one) and only hard-fails on genuine expiry. Separately, allow TLS 1.3 0-RTT early data on idempotent `GET`s only, because early data is replayable by design.
+
+10. Stop treating the file as one cache entry. A 4 GB object as a single entry can evict 40,000 small ones on admission, a range request for the middle of it cannot be served until the whole file has been fetched, and one server ends up owning 4 GB of a single customer's content. Cache fixed 2 MB blocks keyed `(object_key, block_idx)`, with all of an object's blocks hashing to one owning server so a sequential read stays on one box and one upstream connection, but each block admitted and evicted independently. `Range: bytes=5242880-7340031` maps to blocks 2 and 3, which are fetched as one aligned upstream range request. Because playback is sequential, prefetch the next two blocks on a hit, which turns a seek-and-stall into a continuous stream. *If pushed:* the metric that moves is byte hit ratio rather than request hit ratio, which is the one that drives the bill. The ABR ladder, segment durations and player heuristics belong to the consumer of this system (see #31 and #11), not to the CDN.
+
+11. Acceptable, and it is the contract we publish rather than a bug: purge reaches 99.9% of servers in ~2s, and a PoP that was partitioned catches up when it replays the log. Making it never happen would require every read to validate against a global authority, which is a WAN round trip added to a 12ms hit, so it would cost more than the staleness it prevents. *If pushed:* the real fix is to stop needing the operation. Where the URL is yours, content-hash it and the two PoPs can never disagree, because they are holding different objects rather than different versions of one. Where it is not, shrink the blast radius by making the disagreement be about a small short-TTL pointer instead of the content it points at, which is the same trick as the immutable-asset plus short-lived-HTML-shell pattern.
+
+12. Large objects. Byte hit ratio weights every object by its size, so a customer whose requests are mostly small assets but whose bytes are mostly video or installers will show exactly that gap: 95% of requests hit while 75% of bytes miss. Split hit ratio by object-size decile and it is usually visible immediately. *If pushed:* the fixes are block-level caching for the large objects so partial content is reusable, checking that the admission policy is not refusing large objects outright, and confirming the mid-tier is actually being used for them, since a large object that misses at 10 PoPs is exactly the case the mid-tier exists for. If it is genuinely one-shot content, a 4 GB installer downloaded a hundred times worldwide, then the honest answer is that no caching tier changes the economics much and the conversation is about origin egress pricing.
 #### Whiteboard script
-TODO
+**0-5, frame it and refuse the easy version.** Open with the thesis: "the caching is straightforward, the invalidation is the system." Then ask the three questions that actually fork the design: do we control the URLs, is large media in scope, and what purge latency customers are promised. State your assumptions out loud so every later number is anchored: ~200 PoPs, ~100M req/s peak, ~100KB average object, 95% request and 90% byte hit ratio. Draw nothing yet.
 
-A 45 minute budget: what to cover in 0-5, 5-15, 15-35 and 35-45, what to say first, and a line starting `Cut first:`.
+**5-15, the spine and the money.** Four boxes down the page: client, edge PoP, regional mid-tier, origin shield, origin. As you draw the mid-tier, say the thing that shows you know what it is for: it *adds* latency to a miss and is still correct, because its job is fan-out collapse, not speed. Then derive the number that reframes the whole conversation: 345 PB/day delivered, one point of byte hit ratio is 3.5 PB/day of extra edge misses, 0.7 PB/day of extra origin egress after shielding, about $420k a month. Cache-key design is now a finance topic rather than a tuning topic. Add anycast above the edge with one line on the hybrid: anycast for the data plane because DNS TTLs are widely ignored, GeoDNS on top for coarse steering because BGP is not yours to control.
 
-**Raw material, from the old Talking Points:**
+**15-35, the drill.** Protect this time; it is where the interview happens. Go deep on how an object stops being served. Draw the three states (fresh, stale-but-serveable, gone), then the herd: 25k req/s per PoP × 0.2s × 200 PoPs = 1,000,000 concurrent fetches for one URL at expiry, collapsed 10⁶ to 1 by four coalescers, with `stale-while-revalidate` meaning nobody waited for any of it. Then turn to invalidation and lead with the real answer: where you own the URL, content-hash it and serve it immutable, so there is nothing to invalidate. Purge is the escape hatch, eager push over a durable replayable log with per-PoP offsets, idempotent because you cannot collect 13,000 acknowledgements, and generation counters so a tag purge is a 40B counter bump rather than an enumeration of ten million objects. Say soft purge by default, and say why: a hard purge-all takes hit ratio to zero against an origin sized for 2% of bytes and takes the customer down. Keep the cache key and cache poisoning in your pocket as a 60-second block if they ask what the hard part of the key is: never-store on `Set-Cookie` and `Authorization` enforced in the engine, not in config.
 
-- **The mid-tier is not there for latency — it is there for fan-out collapse.** Saying out loud that it *adds* milliseconds to a miss and is still obviously correct shows you understand what the tier is actually for.
-- **One point of cache hit ratio is ~$420k/month of origin egress.** Deriving that number is the single most persuasive thing in the answer, and it reframes cache-key design from tuning to finance.
-- **Anycast for the data plane, DNS for the steering knob.** Name the real cost of each — BGP is not yours to control and can flap mid-flow; DNS TTLs are widely ignored — and then commit to a hybrid instead of hedging.
-- **The herd collapses 1,000,000 → 1 through four coalescers, and nobody waits for any of it.** Walk the cascade with numbers, then say `stale-while-revalidate` is what makes the whole thing invisible to users.
-- **Content-hashed immutable URLs are the real answer to invalidation.** Purge is the escape hatch for URLs you do not own, and it is explicitly eventually consistent with a durable replayable log — not a synchronous guarantee.
-- **Cache poisoning is the failure that ends careers, and it is a cache-key bug.** Enforce never-store on `Set-Cookie` and `Authorization` in the engine rather than in config, and run a continuous canary against it.
+**35-45, concede and close.** Give the gaps before they are found: the TTL is one dial with a cliff at both ends and SWR makes staleness guaranteed rather than possible; purge cannot be proven complete and does not mean deleted, which matters for takedowns; and personalised or per-user-authorised content is structurally uncacheable, with edge compute reintroducing exactly the state problem the cache tier avoids. Then two minutes of operations: hit ratio and origin egress side by side, purge propagation measured end to end with a synthetic canary rather than as a control-plane send count, and per-PoP p99 TTFB segmented by continent because a global p99 hides a country BGP is routing to the wrong side of an ocean.
+
+Cut first: byte-range and block caching for large media, then TLS certificate distribution and keyless TLS, then edge compute. All three are real and none of them changes the shape of the answer. Never cut: the mid-tier's purpose, the cost of one hit-ratio point, the herd cascade with its numbers, and content-hashed URLs as the answer to invalidation.
 #### Appendix
 **Data model**
 
@@ -22687,7 +22848,7 @@ A 45 minute budget: what to cover in 0-5, 5-15, 15-35 and 35-45, what to say fir
 - **tag generations** (globally replicated read-mostly KV, pushed to every PoP): `tag → generation_counter`; partition key `tag`.
 - **origin config** (control-plane Postgres, mirrored to a global KV): `origin_id → {cache_key rules, TTL overrides, shield_pop, cert_ref, rate limits}`; partition key `origin_id`.
 - **certificates** (control-plane KV, read lazily at SNI time with a per-server LRU): `sni_hostname → (chain, key_ref)`; partition key `sni_hostname`.
-- **purge log** (durable append-only log, e.g. Kafka, 7-day retention): `(purge_id, scope, origin_id, issued_at)`; partition key `origin_id` — replayed by any PoP that was partitioned when the purge was pushed.
+- **purge log** (durable append-only log, e.g. Kafka, 7-day retention): `(purge_id, scope, origin_id, issued_at)`; partition key `origin_id`. Replayed by any PoP that was partitioned when the purge was pushed.
 - **access logs** (streamed to a columnar warehouse): `(ts, pop, server, cache_status, bytes, ttfb_ms, origin_id)`; partition key `pop`, clustered by `origin_id`.
 
 **API contract**
@@ -22711,21 +22872,21 @@ GET  /v1/stats?origin_id=..&by=pop → [{ pop, hit_ratio, byte_hit_ratio, egress
 
 **Observability**
 
-- **Cache hit ratio / offload** (share of requests served without an upstream fetch) — SLO ≥95% by request and ≥90% by byte. Both are needed: request ratio drives user latency, byte ratio drives the bill. Byte ratio is always the lower of the two because large objects are the least cacheable.
-- **Origin egress** (bytes/day leaving the shield toward each customer origin) — track it alongside hit ratio and alert on a 10% week-over-week rise at flat traffic, because that is a cache-key regression showing up as money before it shows up anywhere else.
-- **p99 TTFB by geography and by cache status** (`HIT`, `MISS`, `STALE`) — SLO p99 <50ms for an in-region hit. Segment by continent: a global p99 hides a country whose users are being routed to the wrong continent by BGP.
-- **Purge propagation** (issue → 99.9% of edge servers applied) — SLO p99 <5s. Measure it as an end-to-end synthetic (purge a canary URL and re-fetch it from every PoP), not as a control-plane send count.
-- **Origin fill rate per PoP** (fraction of that PoP's requests that reached origin) — a per-PoP spike with a flat global average means one PoP is cold, mis-routed, or has lost its mid-tier.
-- **One-hit-wonder admission rate** (objects admitted that are never read again) — target <20%. Rising means the admission filter is mis-sized and you are burning flash endurance for nothing.
-- **Served-stale rate, split by cause** (`swr` vs `stale-if-error`) — `swr` is healthy and expected; `stale-if-error` climbing is an origin outage the customer may not know about yet.
+- **Cache hit ratio / offload** (share of requests served without an upstream fetch). SLO ≥95% by request and ≥90% by byte. Both are needed: request ratio drives user latency, byte ratio drives the bill. Byte ratio is always the lower of the two because large objects are the least cacheable.
+- **Origin egress** (bytes/day leaving the shield toward each customer origin). Track it alongside hit ratio and alert on a 10% week-over-week rise at flat traffic, because that is a cache-key regression showing up as money before it shows up anywhere else.
+- **p99 TTFB by geography and by cache status** (`HIT`, `MISS`, `STALE`). SLO p99 <50ms for an in-region hit. Segment by continent: a global p99 hides a country whose users are being routed to the wrong continent by BGP.
+- **Purge propagation** (issue to 99.9% of edge servers applied). SLO p99 <5s. Measure it as an end-to-end synthetic (purge a canary URL and re-fetch it from every PoP), not as a control-plane send count.
+- **Origin fill rate per PoP** (fraction of that PoP's requests that reached origin). A per-PoP spike with a flat global average means one PoP is cold, mis-routed, or has lost its mid-tier.
+- **One-hit-wonder admission rate** (objects admitted that are never read again). Target <20%. Rising means the admission filter is mis-sized and you are burning flash endurance for nothing.
+- **Served-stale rate, split by cause** (`swr` vs `stale-if-error`). `swr` is healthy and expected; `stale-if-error` climbing is an origin outage the customer may not know about yet.
 
 **Multi-region and DR**
 
-- **Replication mode:** the data plane is stateless and independently active everywhere — every PoP is a full, self-healing replica of nothing, because a lost cache is a cold cache, not lost data. The control plane is single-writer (Postgres in one region) with a globally replicated read-only mirror in every PoP; PoPs never write to it.
-- **RTO:** losing a PoP is ~seconds — withdraw the anycast announcement and BGP reconverges; users see one retry at worst. Losing a whole region's mid-tier is ~1 minute to reconfigure edges onto the next-nearest shield. Losing the control-plane primary is ~5 minutes to promote a replica, during which the data plane is fully functional but config changes and purges queue.
-- **RPO:** zero for cached objects (there is nothing to lose — origin is the source of truth). Zero for config and purges, because both go through the durable log before being acknowledged; a control-plane failover replays from the log offset rather than losing purges.
+- **Replication mode:** the data plane is stateless and independently active everywhere. Every PoP is a full, self-healing replica of nothing, because a lost cache is a cold cache, not lost data. The control plane is single-writer (Postgres in one region) with a globally replicated read-only mirror in every PoP; PoPs never write to it.
+- **RTO:** losing a PoP is ~seconds, since withdrawing the anycast announcement makes BGP reconverge; users see one retry at worst. Losing a whole region's mid-tier is ~1 minute to reconfigure edges onto the next-nearest shield. Losing the control-plane primary is ~5 minutes to promote a replica, during which the data plane is fully functional but config changes and purges queue.
+- **RPO:** zero for cached objects, because there is nothing to lose and the origin is the source of truth. Zero for config and purges, because both go through the durable log before being acknowledged; a control-plane failover replays from the log offset rather than losing purges.
 - **Failover cadence:** PoP withdrawal is automatic and happens many times a week as a routine health response; regional mid-tier failover is automatic; control-plane promotion is a quarterly game-day. Test purge propagation continuously with synthetic canaries rather than at failover time.
-- **Cross-region cost:** the meaningful line is origin egress (~3.5 PB/day at 95% offload) plus mid-tier-to-edge fill. Control-plane replication is negligible — config and tag generations together are a few GB globally, pushed as diffs. The interesting cost is *asymmetric*: every point of hit ratio you lose is ~$420k/month, so the mid-tier's storage cost is bought back many times over by the fan-out collapse it provides.
+- **Cross-region cost:** the meaningful line is origin egress (~7 PB/day at a 90% byte hit ratio) plus mid-tier-to-edge fill. Control-plane replication is negligible, since config and tag generations together are a few GB globally, pushed as diffs. The interesting cost is *asymmetric*: every point of byte hit ratio you lose is ~$420k/month, so the mid-tier's storage cost is bought back many times over by the fan-out collapse it provides.
 
 ### 52. Design an Authentication & Authorization Service (SSO)
 #### Problem
