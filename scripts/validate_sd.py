@@ -438,6 +438,17 @@ def main() -> int:
     else:
         rep.warn("S8", "mobile/assets/content/patterns.md missing")
 
+    # Removed diagrams are as much a regression as altered ones; the per-block
+    # hash check above only sees blocks that still exist.
+    if hashes is not None:
+        gone = sorted(set(hashes) - set(collected), key=lambda k: (int(k.split(":")[0]), k))
+        if gone:
+            rep.err(
+                "V6",
+                f"{len(gone)} svg block(s) removed vs baseline: {gone}. "
+                "Re-run with --write-svg-hashes if the removal is intended.",
+            )
+
     if args.write_svg_hashes:
         json.dump(
             collected, open(SVG_HASHES, "w", encoding="utf-8"), indent=1, sort_keys=True

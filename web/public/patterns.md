@@ -9666,48 +9666,65 @@ GET  /rank/{lb_id}/{user_id}  → { rank, score, neighbors: [...] }
 
 ### 23. Design a Payment System
 #### Problem
-Process card payments end-to-end (auth, capture, settlement, refunds) with idempotency, audit trail, and PCI compliance.
+Take a card payment end to end (authorize, capture, settle, refund, dispute) against an external processor you do not control and cannot roll back. The system must never double-charge, never lose a payment it has acknowledged, and be able to prove years later where every unit of money went.
 #### Core
-TODO
+The shape is a durable workflow in front of an external processor, an append-only double-entry ledger as the internal source of truth, and a nightly reconciliation against the processor's own settlement report.
 
-Write the whole answer as you would give it in sixty seconds, 200 to 300 words, standing alone.
+A charge arrives with a client-generated idempotency key. Before any external call, the service commits a row for that key holding a hash of the request body and a recovery point naming how far the workflow has got. It then runs the steps in order: risk score, authorize, write the paired ledger entries, capture. Each step commits its recovery point in the same database transaction as its own work, so recorded progress can lag reality but can never lead it. A retry on the same key with the same body resumes from the last recovery point or returns the stored response; the same key with a different body is a 422.
+
+Two-phase commit is not on the table, because the card network exposes no prepare or commit call and will not hold a lock while you decide. Failures therefore unwind with compensating actions: void the authorization, write a reversing ledger entry, release the risk hold. Compensations are additional entries, never edits, and are safe to run twice.
+
+The hard case is a timeout on capture, where you genuinely do not know whether money moved. Never retry blindly and never assume failure. Move the charge into a verification state, query the processor by the same idempotency key, and only then confirm or compensate.
+
+Authorization and capture stay distinct states because the networks separate a hold, valid roughly seven days, from actual movement. Reconciliation runs daily, which bounds how long a silent discrepancy can hide to 24 hours.
 #### Summary
-**The picture in your head:** a relay race where you are running the baton between your system and a bank, but the baton is real money. If you drop it — your server crashes mid-flight — you cannot just "run the leg again" because the bank may have already moved the money. And if the bank drops it, you cannot assume they did not. The entire design is about handing off the baton safely and knowing exactly which runner has it at every moment.
+**The picture in your head:** a relay race where you are running the baton between your system and a bank, and the baton is real money. If you drop it, meaning your server crashes mid-flight, you cannot simply run the leg again, because the bank may already have moved the money. If the bank drops it, you cannot assume it did not. The whole design is about handing the baton over safely and knowing at every moment which runner is holding it.
 
 **The approaches people actually take:**
-TODO. Two or three things a competent engineer might reach for, in plain language and before any product name, with what each one buys and roughly when it wins.
 
-**The single-request walkthrough:** Alice buys a $50 item. Her browser sends `POST /charge` with an **idempotency key** (a unique UUID she generates, like a serial number for this exact purchase attempt). Before calling anyone external, your service writes that key into a database with status `in_progress`. It then calls Stripe's authorize API — Stripe contacts Alice's bank, the bank places a $50 hold on her card, and Stripe returns `psp_charge_id: ch_abc123`. Your service writes a **ledger entry** (debit Alice's card account $50, credit the merchant's payable account $50) in the same database. Finally it calls Stripe again to capture (actually move) the funds. If Alice's phone dies and she retries, the same idempotency key hits your service, which finds the `in_progress` row, checks Stripe by `psp_charge_id`, sees the charge already completed, and returns the original success response — zero duplicate charge.
+Three shapes recur, and the choice between them is mostly about where you are willing to put the uncertainty.
+
+The first is a single synchronous call on the checkout request: take the order, call the processor, return the outcome. It buys the cleanest failure story, because the user is still there and can be told yes or no, and at low volume it is genuinely the right answer. What it does not survive is your own process dying between the external call and the write that records it.
+
+The second is a durable workflow that records its own progress before and after every external call, with an undo for each step. It buys crash safety: a restarted process knows which external calls already happened and does not repeat them. The cost is that half-done states become real and visible, and every step needs an undo that is itself safe to run twice.
+
+The third is to accept the order and move the money behind a queue, returning "processing" immediately. It buys tolerance of processor outages, smooths peaks, and is the only workable shape for rails that settle in days rather than seconds. The cost is user-visible: you must be able to tell someone later that their payment failed, possibly after you already shipped.
+
+Underneath all three sits a separate choice: whether money state is a running balance you overwrite, or a journal of paired entries you only ever append to.
+
+**The single-request walkthrough:** Alice buys a $50 item. Her browser sends `POST /charge` with an **idempotency key**, a UUID she generates for this exact purchase attempt, like a serial number. Before calling anyone external, your service writes that key into a database with status `in_progress`. It then calls the processor's authorize API. The processor contacts Alice's bank, the bank places a $50 hold on her card, and the processor returns `psp_charge_id: ch_abc123`. Your service writes a **ledger entry** (debit Alice's card account $50, credit the merchant's payable account $50) in the same database. Finally it calls the processor again to capture, which actually moves the funds. If Alice's phone dies and she retries, the same idempotency key reaches your service, which finds the `in_progress` row, checks the processor by that key, sees the charge already completed, and returns the original success response. No duplicate charge.
 
 **The pieces (and what each one is for):**
-- **PSP (Payment Service Provider)** — Stripe, Adyen, or similar. An external company that connects to the Visa/Mastercard/bank network on your behalf. You never touch raw card numbers; you hand the PSP a token and they handle the actual card rails. This keeps you off the most burdensome level of **PCI-DSS** (the security standard governing card data) — if your servers never see a card number, your compliance scope shrinks dramatically.
-- **Idempotency key** — a UUID the client generates once per payment attempt and sends on every retry. Your service stores `(key → cached_response)` in a database. On retry, you return the cached response instead of re-running the charge. Without this, a user on a flaky mobile connection could get charged 3 times for one purchase.
-- **Saga with compensating transactions** — a **saga** is a way to coordinate a multi-step workflow across services that cannot participate in a single database transaction. Each step (risk check, PSP authorize, ledger write, PSP capture) runs independently. If step N fails, you run "compensations" backward from step N-1: void the authorization, reverse the ledger entry, release the risk reservation. No step is left half-done.
-- **Double-entry ledger** — every money movement creates two matching entries: a debit on one account and a credit on another. The rule `sum(all debits) == sum(all credits)` holds at all times. This is how accountants have caught errors for 500 years; your system inherits the same guarantees. The ledger is append-only — you never edit or delete entries, only add new ones (including reversal entries for refunds).
-- **Reconciliation** — a nightly job that downloads Stripe's settlement report and compares it line-by-line against your own ledger. Any row in Stripe's report missing from yours means Stripe charged a card and you have no record — a serious problem requiring immediate investigation.
+- **PSP (Payment Service Provider).** Stripe, Adyen or similar: an outside company that connects to the Visa and Mastercard networks on your behalf. You never touch raw card numbers; you hand the PSP a token and it handles the card rails. That keeps you off the heaviest level of **PCI-DSS**, the security standard governing card data. If your servers never see a card number, your compliance scope shrinks dramatically.
+- **Idempotency key.** A UUID the client generates once per payment attempt and resends on every retry. Your service stores `(key -> cached_response)`. On retry you return the cached response instead of re-running the charge. Without it, a user on a flaky mobile connection can be billed three times for one purchase.
+- **Saga with compensating transactions.** A **saga** coordinates a multi-step workflow across services that cannot share one database transaction. Each step (risk check, authorize, ledger write, capture) commits independently. If step N fails, compensations run backward from N-1: void the authorization, reverse the ledger entry, release the risk reservation. No step is left half done.
+- **Double-entry ledger.** Every money movement writes two matching entries, a debit on one account and a credit on another, so `sum(debits) == sum(credits)` holds at all times. Accountants have caught errors this way for 500 years and your system inherits the same guarantee. The ledger is append only: you never edit or delete an entry, only add one, including reversals for refunds.
+- **Reconciliation.** A nightly job that pulls the processor's settlement report and compares it line by line against your ledger. A row in their report missing from yours means they charged a card and you have no record of it, which is a serious problem needing immediate investigation.
 
-**The thing that makes it hard — the ambiguous timeout:** You call Stripe's capture API. After 4 seconds, you get a network timeout. Did Stripe capture the money or not? You genuinely do not know. If you assume failure and void the authorization, but Stripe actually captured it, you have refunded money you collected. If you assume success and skip the capture, but Stripe did not capture it, you have shipped goods without payment. The only safe answer: mark the charge `requires_verification`, then query Stripe by the same idempotency key you passed them — Stripe will tell you whether the capture happened. Never retry blindly; never assume.
+**The thing that makes it hard, the ambiguous timeout:** you call the capture API. After 4 seconds you get a network timeout. Did the money move? You genuinely do not know. Assume failure and void the authorization, and if the capture actually landed you have refunded money you collected. Assume success and skip the capture, and if it did not land you have shipped goods for free. The only safe answer: mark the charge `requires_verification`, then query the processor by the same idempotency key you passed it and let it tell you whether the capture happened. Never retry blindly, never assume.
 
-**Why this design and what it costs:** the Saga pattern beats **2PC** (two-phase commit — a distributed database protocol that holds locks across all participants until every participant agrees) because external PSPs are not participants in your database transactions. You cannot tell Stripe "please lock your side while I lock mine." Saga accepts that steps are visible in intermediate states, and uses compensations to clean up failures. The cost you pay: intermediate states like `authorized-but-not-captured` are briefly visible and every compensation must be idempotent (safe to run twice).
+**Why this design and what it costs:** the saga beats **2PC** (two-phase commit, a protocol that holds locks across every participant until all of them agree) because an external PSP is not a participant in your database transaction. You cannot tell a card network to lock its side while you lock yours. A saga accepts that steps are visible in intermediate states and uses compensations to clean up. The price: states like `authorized-but-not-captured` are briefly real, and every compensation must be safe to run twice.
 
 **If you were building it tomorrow:**
-- PostgreSQL for the idempotency table, ledger, and charge records (strong consistency matters more than throughput here).
-- Temporal (a workflow orchestration service — think of it as a durable state machine) to run the Saga and automatically resume from the last completed step after a crash.
+- PostgreSQL for the idempotency table, ledger and charge records. Strong consistency matters more than raw throughput here.
+- A workflow engine such as Temporal or Step Functions, which behaves like a durable state machine, to run the saga and resume from the last completed step after a crash.
 - Hot path pseudocode:
   ```
   write idempotency_key=IN_PROGRESS to Postgres
-  call Stripe.authorize(idempotency_key=client_key)  // Stripe dedupes on their side too
+  call PSP.authorize(idempotency_key=client_key)  // PSP dedupes on its side too
   write ledger debit+credit entries (same Postgres txn)
-  call Stripe.capture(psp_charge_id)
+  call PSP.capture(psp_charge_id)
   update idempotency_key=DONE, cache response
   ```
-- On Stripe timeout: query `Stripe.get(idempotency_key)`, then decide whether to compensate or confirm.
+- On PSP timeout: query `PSP.get_by_idempotency_key(client_key)`, then decide whether to compensate or confirm.
 #### What this is really testing
-TODO
+Whether you can reason about a state change you cannot roll back, cannot lock, and cannot fully observe. Every other part of a payments answer follows from one question: what do you do when you asked an outside party to move money and you do not know whether they did it. Candidates who reach for a transaction, a retry loop, or a distributed lock are answering a different question.
 
-The one insight this question exists to elicit, then the contrast with the question it most resembles and why the answers differ.
+Closest question: Q24
 
-Closest question: TODO
+Q24 moves money between accounts you own. Both sides of a wallet transfer are your own rows, so atomicity is genuinely achievable: same shard is one ACID transaction, cross-shard is Try-Confirm-Cancel over your own columns with a reservation TTL that self-heals if the coordinator dies. The difficulty there is concurrency: double-spend under a race, hot-account throughput, and never creating or destroying a unit of value.
+
+Here the second participant is a card network reached through a processor. It will not enlist in your transaction, its undo is not free, and its side effects are visible to a bank and a cardholder within seconds. A wallet transfer that half-completes can be reversed and nobody outside ever knows. A card authorization that half-completes has already put a hold on someone's account and may already appear in their banking app. So Q24 spends its budget on internal consistency, and Q23 spends it on external idempotency, ambiguous outcomes, and reconciliation against a book somebody else wrote.
 #### Clarifying questions and how each answer forks the design
 - Card payments only or also bank transfers, wallets?
 - Multi-currency?
@@ -9730,38 +9747,41 @@ Closest question: TODO
 **Requirements**
 
 - **FR:** charge card, refund, partial capture, subscriptions, multi-currency, ledger
-- **NFR:** strong consistency on money, idempotent (at-least-once execution + PSP-side dedupe — true exactly-once across the PSP boundary is infeasible), PCI-compliant, durable audit
+- **NFR:** strong consistency on money, idempotent writes (at-least-once execution plus PSP-side dedupe; true exactly-once execution across the PSP boundary is not achievable), PCI-compliant, durable audit trail
 
 **Scale**
 
-- **Throughput:** ~1B txns/year (Stripe-mid-tier order-of-magnitude) → 1e9 / (365 × 86,400) ≈ 32/s avg; concentrated in business hours → ~3k/s steady; Black Friday × ~3 → **~10k payments/s peak**.
+- **Annual volume assumption:** 1B payments/yr, the order of magnitude of a large single-country acquirer.
+- **Average rate:** 1e9 / (365 × 86,400 = 3.15e7 s) ≈ **32 payments/s**. Daily volume = 1e9 / 365 = **2.74M/day**.
+- **Business-hours concentration:** assume 80% of a day's payments land in an 8h window. 2.74M × 0.8 / 28,800 s ≈ **76/s** in the busy hours, so the average is a poor sizing number by roughly 2.4×.
+- **Peak day:** Black Friday runs about 10× a normal day and is compressed. 2.74M × 10 = 27.4M payments; assume 60% inside a 6h window: 27.4M × 0.6 / 21,600 s ≈ **760/s** sustained. A flash-sale minute inside that runs ~3× → **~2.3k payments/s peak**. Provision 3k/s.
 - **Charge record size:** charge_id (16B) + customer_id (16B) + amount (8B) + currency (4B) + status (8B) + psp_charge_id (32B) + idempotency_key (32B) + metadata blob (~1KB) + 4 timestamps (32B) + audit fields ≈ **~2KB serialized**.
-- **Ledger entries per txn:** double-entry minimum 2 (debit + credit); auth+capture = 4; refund chain reverses each = up to 6; weighted mix ≈ **~3 entries**. Each entry (entry_id 16B + account 16B + amount 8B + balance_after 8B + ref 16B + ts 8B + envelope) ≈ **~500B**. Per-txn ledger payload ≈ 3 × 500B = **~1.5KB**.
-- **Charge volume / yr:** 1B × 2KB = **~2TB charges/yr**. Ledger: 1B × 1.5KB = **~1.5TB/yr**. Combined ~3.5TB/yr.
-- **Retention:** 7 years (PCI-DSS audit retention + IRS financial-records minimum). 7 × 3.5TB ≈ 25TB raw. RF=3 quorum store → 25 × 3 = **~75TB on hot transactional store**. After 12 months tier to columnar object archive (~5× Parquet+Snappy compression) — saves ~10TB/yr in hot.
-- **Idempotency cache:** Stripe convention 24h TTL. Sizing = peak QPS × TTL × per-entry size. 10k req/s × 86,400s = ~864M keys/day; per entry = key (32B) + cached response body (~1KB) + headers (~50B) ≈ ~1KB → 864M × 1KB = **~850GB peak**; ×2 replication factor → ~1.7TB cluster.
-- **PSP webhook volume:** every charge yields auth + capture (≈2 events); ~10–15% also yield refund/dispute → effective ratio ~1.2 events per txn → 10k × 1.2 = **~12k events/s peak**. Each event ~1KB → ~12MB/s ingest into webhook queue.
-- **Reconciliation diff:** daily 1-to-1 join of charges × PSP settlement rows; row ~200B columnar; daily file = 1B × 200B = 200GB; ~5× compression → **~300GB/day cold** Parquet, kept 7yr for audit.
-- **Durability target:** zero lost payments — every accepted charge persists to RF=3 quorum + WAL fsync + DR-region replication before ack.
+- **Ledger entries per payment:** double-entry minimum is 2 (debit + credit); auth plus capture is 4; a refund chain reverses each, up to 6; weighted mix ≈ **3 entries**. Each entry (entry_id 16B + account 16B + amount 8B + balance_after 8B + ref 16B + ts 8B + envelope) ≈ **~500B**, so ≈ 3 × 500B = **1.5KB of ledger per payment**.
+- **Storage per year:** charges 1B × 2KB = **2TB/yr**; ledger 1B × 1.5KB = **1.5TB/yr**; combined **3.5TB/yr**.
+- **Retention:** 7 years (card-scheme and tax-record minimums). 7 × 3.5TB ≈ 24.5TB raw; RF=3 quorum store → 24.5 × 3 ≈ **74TB**. Tier anything older than 12 months to columnar object storage at roughly 5× compression, which keeps the hot store near 3.5 × 3 ≈ 10TB.
+- **Idempotency store:** size it on the peak *day*, not on peak QPS held for 24h. 27.4M charges × 1.15 (retry factor) ≈ 31.5M keys/day. Entry = key (32B) + cached response (~1KB) + headers (~50B) ≈ 1KB → 31.5M × 1KB ≈ **32GB**; ×2 replicas ≈ **64GB**. TTL 24h to match what PSPs honour.
+- **PSP webhook volume:** every charge yields auth plus capture events, and 10-15% also yield a refund or dispute, so ≈ 1.2 delivered events per payment after PSP-side batching. At peak: 2.3k × 1.2 ≈ **2.8k events/s**, ~1KB each → **~2.8MB/s** into the webhook queue.
+- **Reconciliation volume:** a daily 1-to-1 join of your charges against the PSP settlement rows. Normal day 2.74M rows × 200B ≈ **550MB**, ~110MB as compressed Parquet; peak day 27.4M × 200B ≈ 5.5GB. Kept 7 years for audit, so ≈ 200GB compressed over the full window.
+- **Latency budget:** checkout p99 target 3s. PSP authorize p99 is roughly 1.2s, leaving ~1.8s for your own hops (risk, idempotency write, ledger write, serialization).
+- **Durability target:** zero lost payments. Every accepted charge must reach an RF=3 quorum with WAL fsync, plus asynchronous DR-region replication, before you ack.
 #### Key decisions
-TODO
+**Compensating saga versus two-phase commit**
+- Choice: run the charge as a durable workflow of independently committed steps, each with a compensating action that runs in reverse order on failure.
+- Alternative: two-phase commit spanning the ledger and the processor, so the charge is atomic and no intermediate state is ever externally visible.
+- Decider: the number of external participants that expose a prepare-and-commit interface, which is 0. Visa, Mastercard and every PSP layered on them offer authorize, capture and void, nothing more. Authorize p99 is around 1.2s and a hung call can sit for 30s; 2PC would need the card network to hold a lock for that whole window and to obey your coordinator, and no such API exists.
+- Alternative wins when: every participant is a datastore you own, in one region, committing in under 10ms. That is exactly the internal-transfer path in Q24 and a ledger split across your own shards, where 2PC or its TCC cousin is the better answer and the intermediate states a saga exposes buy you nothing.
 
-Two or three genuine forks. For each, in this exact shape so it stays checkable:
+**Append-only double-entry ledger versus a balance column**
+- Choice: paired debit and credit entries, append only, with account balances treated as a derived and periodically checkpointed cache.
+- Alternative: one balance column per account, updated in place inside the charge transaction, with a best-effort event log kept alongside for support queries.
+- Decider: whether you must reconstruct any account's balance as at any past instant across a 7-year retention window. Entries make that a bounded scan; a column mutated in place makes it impossible, because the intermediate values are gone. The price is about 3 entries per payment at ~500B each, so 1.5KB and 3 extra writes per charge, and 1.5TB/yr at 1B payments.
+- Alternative wins when: the balance is not money you owe anybody, such as loyalty points or in-game currency, and no external auditor will ever ask for a historical reconstruction. Then a single-row read at ~0.2ms beats summing or checkpointing and the write amplification buys nothing. This is a defensible choice, not a shortcut, and plenty of production systems make it.
 
-**<name of the fork>**
-- Choice:
-- Alternative:
-- Decider:
-- Alternative wins when:
-
-**Raw material, from the old Common Mistakes:**
-
-- **Trying to use 2PC with the PSP.** External payment providers are not participants in your distributed transaction.
-- **Storing PAN or CVV yourself.** That explodes PCI scope and operational risk.
-- **Mutable ledger rows.** Money systems want append-only facts and explicit reversals, not edits in place.
-- **Auto-fixing reconciliation drift silently.** A silent corrector is indistinguishable from a silent thief.
-- **No request-body hash on idempotency keys.** Same key with a different request must be rejected loudly.
-- **Returning success before the ledger commit.** Then a real charge can exist without internal books reflecting it.
+**Synchronous authorization with asynchronous capture**
+- Choice: authorize on the checkout request while the user waits, then capture off the request path once the order is fulfilled.
+- Alternative: accept the order, return `processing` immediately, and authorize from a queue, notifying the outcome later by push or email.
+- Decider: the checkout latency budget, roughly 3s at p99 before abandonment climbs sharply, against a PSP authorize p99 of about 1.2s. That leaves ~1.8s for your own hops, which fits with headroom. Capture has nobody waiting on it and therefore no such budget, which is why splitting the two is nearly free.
+- Alternative wins when: the rail cannot answer inside the budget at all, which is every bank-transfer rail at T+1 to T+3; or during a PSP brownout that pushes authorize p99 past 3s; or above roughly 3k charges/s, where queueing beats shedding. The catch you must own: an asynchronous accept means telling a customer their payment failed after you already said yes, so it needs a real cancel-and-notify path, not just a queue.
 #### High-level design
 **must-say**
 
@@ -9832,56 +9852,13 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 </svg>
 ```
 
-**How to read the diagram:** the user-facing API starts a workflow, but the real center of the design is the orchestrator plus the ledger. External PSP calls happen around that core, not instead of it.
+**How to read the diagram:** the user-facing API starts a workflow, but the real centre of the design is the orchestrator plus the ledger. External PSP calls happen around that core, not instead of it.
 
-**Why the flow is shaped this way:** gateways can fail, webhooks can retry, and money movement has to remain explainable even when outside dependencies misbehave. Treating the internal ledger as the source of truth gives the system a stable center.
+**Why the flow is shaped this way:** gateways fail, webhooks retry, and money movement has to stay explainable even when outside dependencies misbehave. Treating the internal ledger as the source of truth gives the system a stable centre that does not move when the processor does.
 
-**What this layout buys you:** better idempotency, traceable money state, and a cleaner path for retries and reconciliation. The tradeoff is that even charge a card becomes a multi-stage workflow rather than a single RPC.
-#### Deep dive
-**must-say**
+**What this layout buys you:** clean idempotency, traceable money state, and an obvious path for retries and reconciliation. The tradeoff is that even a plain card charge becomes a multi-stage workflow rather than a single RPC.
 
-**Idempotency:**
-
-Every write endpoint requires an `Idempotency-Key` header (typically a client-generated UUID). On request the API computes a hash of the body and checks the idempotency cache: same key + same body within the TTL window returns the cached prior response (200, with the original `charge_id`); same key + different body is a 422 because that means a programming error (the client reused a key for a different charge). The critical subtlety: write the idempotency row as `in_progress` *before* calling the PSP, finalize with the result on response. If the request crashes mid-flight, a retry sees `in_progress` and either polls the PSP by the same idempotency key (Stripe and Adyen honor it server-side, so a duplicate authorize is a no-op returning the original result) or returns 409 — never re-issues the call. Without idempotency, a phone losing signal mid-charge means the client retries and the user gets billed twice.
-
-**Saga pattern:**
-
-| Step | Action | Compensation |
-|---|---|---|
-| 1 | reserve risk score | release |
-| 2 | authorize via PSP | void auth |
-| 3 | record in ledger | reverse entry |
-| 4 | capture funds | refund |
-| 5 | notify success | (none) |
-
-The Saga executes forward through the steps; if step N fails, compensations run in reverse from N-1 down to 1. Each step is idempotent (keyed by `charge_id` + step name) so a crashed-and-resumed Saga can safely re-run the last step without double-applying. Compensations are themselves idempotent and ledger-recorded — a "void auth" creates a reversal entry, it doesn't delete the original. The PSP-bound steps (2 and 4) are the slow and unreliable ones; the orchestrator wraps them with timeouts that trigger compensation rather than hanging indefinitely. Concrete example: a successful authorize but a ledger write that times out → the Saga compensates by issuing a `void auth` to the PSP, releasing the user's hold, and marking the charge `failed_internal`; the user sees a clean failure, the card has no real charge.
-
-**Double-entry bookkeeping:**
-```
-Charge $50 to user A:
-  Debit:  user_A_card                  $50
-  Credit: merchant_payable_to_A         $50
-
-Capture (transfer to merchant):
-  Debit:  merchant_payable_to_A         $50
-  Credit: merchant_balance_A            $50
-
-Sum of all debits = sum of all credits, always.
-```
-
-The invariant — `sum(debits) == sum(credits)` across the entire ledger — is checkable in O(1) per transaction (each event is two paired entries) and in O(N) globally as a periodic audit. Balances are derived by summing entries for an account, or materialized into a balance row that's updated atomically with the entry inserts in the same transaction. Event-sourced means the entries are the truth; the materialized balance is a cache that can always be rebuilt from replay. This makes audit trivially correct: every dollar of every balance is traceable to the originating charge event, with the full chain of capture/refund/dispute reflected as additional paired entries linked by `charge_id`.
-
-**Reconciliation:**
-
-A nightly job pulls the PSP's settlement report (CSV or API export of every charge they processed for you that day) and joins it against your ledger entries on `psp_charge_id`. Three diff outcomes: rows in your ledger missing from PSP (you recorded a charge that didn't actually happen — orchestrator bug, escalate); rows in PSP missing from yours (the PSP charged a card and you have no record — you owe a customer, escalate immediately); and amount mismatches (FX rounding, fees, partial captures). Auto-resolve only sub-cent rounding diffs within tolerance; everything else freezes the affected accounts and pages ops. The point of daily cadence is to bound discovery latency to 24h — discovering a missing million at end-of-quarter is unrecoverable.
-
-**3DS / SCA:**
-
-European regulations require strong customer authentication on most card payments — the PSP returns `requires_action` instead of authorized, with a redirect URL for the user to complete a 3DS challenge with their bank. The Saga pauses at this step: charge state moves to `requires_action`, the API returns the redirect to the client, the client completes the challenge, the PSP fires a webhook with the result. The webhook handler is idempotent (PSPs retry on failure) and resumes the Saga from step 3 (record in ledger) with the now-authorized charge. The orchestrator's durable workflow state means a paused-for-3DS Saga survives process restarts indefinitely; a 24h timeout abandons stale challenges.
-
-**Multi-currency and subscriptions.** Multi-currency charges quote an FX rate at request time with a short TTL (5–30s); the ledger records the charge in the merchant's settlement currency plus an FX entry against a treasury account at the locked rate, so the merchant's accounting is single-currency even when the buyer is not. The PSP is the FX execution venue — we don't hold currency exposure on the wallet. Subscriptions are a separate scheduler service that emits a charge command on each renewal anniversary; each renewal is a normal idempotent charge through the same Saga, with the subscription_id propagated as the idempotency-key prefix. Failed renewals enter dunning (retry on a backoff schedule — typically day 1, 3, 5, 7 — then suspend). The wallet/payment-method lifecycle is decoupled from the subscription lifecycle: a card expiring doesn't cancel the subscription, it triggers a payment-method-update flow.
-
-**Charge state machine.** *[Source: Stripe API docs / Adyen]* Every charge moves through a strict state machine; transitions out-of-order are programming errors. The state is durable in the same row as the charge metadata, transitioned only by the orchestrator (not by webhook handlers — they enqueue a state-transition request that the orchestrator validates). Terminal states (`succeeded`, `failed`, `refunded`, `disputed_lost`) are sticky; `succeeded → failed` is a hard reject regardless of webhook claim because the charge has already credited the merchant ledger.
+**The charge state machine.** *[Source: Stripe API reference and Adyen docs, current as of 2026]* Every charge walks a strict state machine, and an out-of-order transition is a programming error rather than something to tolerate. The state lives on the charge row and is transitioned only by the orchestrator; webhook handlers enqueue a transition request that the orchestrator validates first. Terminal states (`succeeded`, `failed`, `refunded`, `disputed_lost`) are sticky, so a late webhook claiming `failed` on an already-succeeded charge is dropped with an alert rather than applied.
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 640" role="img" aria-label="Charge state machine for a payment system">
@@ -9987,9 +9964,38 @@ European regulations require strong customer authentication on most card payment
 </svg>
 ```
 
-`authorized` and `captured` are distinct states because most card networks separate auth (hold funds, valid ~7 days) from capture (actual money movement); delaying capture is how marketplaces handle ship-to-charge flows. `voided` is the pre-settlement free-undo path — costs nothing, leaves no card-statement footprint; `refunded` is post-settlement and traverses the card network as a separate transaction.
+`authorized` and `captured` are separate states because the card networks separate a hold, valid roughly 7 days, from actual money movement; delaying capture is how marketplaces do ship-then-charge. `voided` is the pre-settlement undo: it costs nothing and leaves no footprint on the cardholder's statement. `refunded` is post-settlement and travels the network as a fresh transaction, typically 5 to 10 business days before it lands on a statement.
+#### Deep dive
+**must-say**
 
-**Saga with compensation — full sequence.** *[Source: microservices.io Saga pattern / Temporal]* Compensations run in reverse order from the highest-numbered successful step down to step 1. Each compensation is itself idempotent and writes a ledger entry; compensations are not deletes. The diagram shows the failure branch where step 4 (capture) times out and the orchestrator unwinds.
+**Exactly-once payment across a boundary you do not control.**
+
+There is no exactly-once *execution* across a network. What you can build is exactly-once *effect*: at-least-once execution where every repeat is either skipped because you already know it happened, or absorbed because the far side deduplicates it. Payments is where the gap between those two shows up on somebody's bank statement, so be precise about which one is doing the work at each step.
+
+**The key contract.** Every write endpoint requires an `Idempotency-Key` header: a client-generated UUID scoped to one purchase attempt, not to one HTTP request. The API stores `(key, request_hash, recovery_point, response)`. Three cases on arrival:
+
+- Key unseen. Insert and proceed.
+- Key seen, `request_hash` matches, workflow finished. Return the stored response verbatim: same status code, same `charge_id`, same body.
+- Key seen, `request_hash` differs. Reject with 422. The client has reused a key for a different charge, which is a bug on their side, and quietly charging the new amount under the old key is worse than failing loudly.
+
+The body hash is the only thing that makes the third case detectable. Without it, a client that recycles keys silently receives some other charge's response and believes it succeeded.
+
+**Recovery points, not a boolean.** *[Source: stripe.com/blog/idempotency and brandur.org, published 2017; the model still matches Stripe's documented behaviour]* The naive version stores `in_progress` / `done`. A retry then knows only that somebody started, which leaves two bad options: replay everything and risk a second authorize, or poll the processor without knowing what to ask about. Store instead a recovery point naming the last committed step: `started → risk_scored → psp_authorized → ledger_recorded → captured → finished`.
+
+One rule makes it work: **each recovery point commits in the same database transaction as the work it describes.** The ledger entries and `ledger_recorded` land together or neither lands. Say the consequence out loud in the room, because it is the whole point: recorded progress can lag reality but can never lead it. A resumed workflow reading `risk_scored` knows risk definitely ran and knows nothing about authorize. That is the right amount of doubt, and it is what keeps the retry path short instead of a full replay.
+
+**The gap the transaction trick cannot close.** The one place it fails is the external call itself. The orchestrator calls authorize, the PSP succeeds, and the orchestrator dies before committing `psp_authorized`. The recovery point says `risk_scored`; a live authorization may or may not exist. Two defences, applied in order:
+
+1. Pass the *same* client key through to the PSP. Stripe and Adyen both honour a caller-supplied idempotency key for 24 hours, so a repeated authorize returns the first result instead of creating a second hold. This is the far side absorbing the repeat.
+2. Before repeating anything, query by that key. Fetch the charge from the PSP by idempotency key, learn the true state, and fast-forward the recovery point to match. This is you skipping the repeat.
+
+Defence 1 alone covers authorize against a modern PSP. It is not sufficient in general, because it depends entirely on the far side deduplicating.
+
+**When the far side does not deduplicate.** Plenty of rails do not. Older acquirer APIs, most ACH gateways and several domestic bank rails treat a resubmission as a fresh instruction. There the only handle is a deterministic reference you compute and the rail carries: an ACH trace number, a SEPA `EndToEndId`, an acquirer `RRN`. Derive it from `charge_id` so a retry regenerates a byte-identical value, then make "look it up before you send it" a mandatory workflow step rather than something the error path does. If a rail offers neither deduplication nor a queryable reference, exactly-once effect is not available: say so plainly, because what you have is at-most-once submission plus reconciliation, recovered by a human with a settlement file.
+
+**The ambiguous timeout.** Capture times out after 4s. Three possibilities: the request never arrived; it arrived and succeeded; it arrived, succeeded, and the response was lost. You cannot distinguish them, and both naive answers cost real money. Assume failure and void, and if the capture landed you have refunded funds you collected. Assume success and skip, and if it did not land you shipped for free. So the charge moves to `requires_verification`, a genuine state in the machine rather than an error bucket, and a worker polls the PSP by key on a backoff until the state is known. Only then does the workflow confirm or compensate.
+
+The sequence below is that failure branch: capture times out at step 4, the orchestrator verifies before it unwinds, then compensates from step 3 downward. *[Source: microservices.io saga pattern, Temporal docs]*
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 770" role="img" aria-label="Saga with compensation sequence for a payment system">
@@ -10100,97 +10106,99 @@ European regulations require strong customer authentication on most card payment
 </svg>
 ```
 
-The PSP-state-verification step (`GET by idempotency-key`) before compensation is critical — naively running `void` after a timeout could try to void an already-captured charge, which the PSP rejects, leaving the orchestrator wedged. Verifying first decouples the orchestrator from network ambiguity.
+The verification hop before compensation is the step people skip. Running `void` straight after a timeout can attempt to void a charge the PSP already captured, which it rejects, wedging the workflow with live money on one side and a permanently failing compensation on the other. Verify first and every compensation is issued against a state you observed. Compensations are extra ledger entries rather than deletes, each keyed on `(charge_id, step)` so running it twice is a no-op.
 
-**Stripe-style idempotency mechanics.** *[Source: stripe.com/blog/idempotency, brandur.org]* Stripe's published model uses *recovery points* on the idempotency-key row, not just `in_progress`/`finished`. Each atomic phase commits the next recovery point in the same Postgres transaction as its work; on retry, the handler reads the latest recovery point and resumes from there. Recovery points progress like `started → ran_risk → psp_authorized → ledger_recorded → finished`. This is stronger than a binary in-progress flag because a retry knows *exactly* which steps already happened and skips them, rather than re-running the saga or polling the PSP from scratch. Combined with passing the same idempotency key through to the PSP (Stripe and Adyen both honour client-supplied idempotency keys for ~24h), the semantics are: "every step is either skipped (already done) or safe to retry (PSP dedupes)." A request-body hash stored alongside the recovery point makes "same key, different body" return 422 with strong forensic data.
-
-**PCI scope reduction via tokenization.** *[Source: PCI SSC SAQ-A v4.0]* SAQ-A is the lightest PCI compliance level, applicable only when you never see, transmit, or store card data — only opaque PSP tokens. Achieving SAQ-A means the client uses Stripe Elements / Adyen Drop-in, which posts card data directly to the PSP and returns a token to your frontend; your backend only ever sees the token. The audit boundary is "is card data possible on our infrastructure?" — a single grep-match of a 16-digit number in your logs can blow you back to SAQ-D (heaviest level, ~12x audit cost). CI guard: a regex check that rejects any PR adding a field with `card`, `pan`, `cvv`, or 16-digit-pattern strings to log emitters; structured-log filters drop matching fields at runtime as defence-in-depth.
+**What the key does not cover.** The 24h TTL matches what PSPs honour, not what your liability requires. Past it the key is meaningless and the only join back to the processor is `psp_charge_id`, which is why that value goes onto the charge row the instant authorize returns and is the join column for daily reconciliation.
 #### Where it breaks
 **must-say**
 
 **Bottlenecks**
 
-- **PSP outage** — when Stripe or Adyen is down, every authorize call hangs or fails; without protection the orchestrator backs up, exhausts thread pools, and cascades the outage into your API. *Mitigation:* circuit-breaker the PSP client (open after N consecutive failures, fail fast for cooldown_sec, half-open probe), queue eligible retries (idempotent, non-time-sensitive) on a delayed-retry topic, and route to a fallback PSP for businesses that are multi-PSP integrated. The fallback path is per-merchant configurable because not every merchant has approval with a backup acquirer.
-- **Ledger contention on hot account** — a single merchant receiving thousands of charges/sec means thousands of writes to one `accounts.balance` row, which serializes on the row lock and caps throughput at a few hundred TPS. *Mitigation:* shard the merchant's ledger account into N sub-accounts (`merchant_X_shard_0..N-1`); writes pick a random shard, balance reads sum across shards. For exact-balance queries (settlement) sum at read time; for "approximate balance" UI use a periodically materialized total. The invariant `sum(debits) == sum(credits)` still holds globally; per-shard it's just a partition.
-- **Reconciliation drift** — small daily diffs accumulate silently (FX rounding, partial-capture timing, dispute fees) and what looks like a $0.03 daily noise becomes a $10k unexplained gap over a year. *Mitigation:* the daily job alerts on *any* diff above per-merchant tolerance, classifies known-pattern diffs (FX rounding within 0.5 cents auto-resolves with an audit-trailed adjustment entry), and escalates unknowns to humans within 24h; weekly trend reports catch slow-growing diffs that fall under the daily threshold.
-- **Webhook ordering / dedup** — PSPs deliver events at-least-once with no ordering guarantee, so the same charge might receive `succeeded` then `failed` (out of order, due to retry) or `succeeded` twice. Naive handlers double-update the ledger or finalize the charge in the wrong state. *Mitigation:* webhooks carry a signed payload (HMAC of body + secret), verified at the API edge. The handler is idempotent on `(charge_id, event_type, event_id)`, ignores duplicates in a Redis-backed dedupe set with 24h TTL, and uses event timestamps + a state-machine guard (cannot transition `succeeded` → `failed` after `succeeded` is final) to handle out-of-order delivery.
-- **Compliance creep** — PCI scope expands the moment you accidentally log a full PAN, retain CVV beyond authorization, or store card data in an unencrypted backup, costing months of remediation and audit. *Mitigation:* never accept raw card data — clients tokenize directly with the PSP (Stripe.js, Adyen Checkout) and only the opaque token reaches your servers, dropping you to PCI-DSS SAQ-A scope. Add structured-log redaction filters that drop any field matching a PAN regex, run a CI check that blocks PRs adding card-shaped fields to logs, and keep tokenization as the only accepted payment method input.
-- **State-machine drift between webhook source-of-truth and orchestrator** — webhooks claim `succeeded` while the orchestrator's view is still `authorized`, or `failed` after the orchestrator already finalized success; naive handlers trust the webhook and overwrite, corrupting the charge state. *Mitigation:* the orchestrator owns the state machine; webhook handlers enqueue state-transition requests that are validated against the durable charge row before applying. Illegal transitions (e.g. `succeeded → failed`) are dropped with an alert; legal-but-late transitions (`authorized → captured` from a webhook arriving after the orchestrator already captured) are no-ops. Every webhook event is persisted on receipt for forensic audit, separate from the charge state.
-- **Recovery-point gap on orchestrator crash mid-PSP-call** — the orchestrator calls PSP authorize and crashes before writing the `psp_authorized` recovery point, leaving the recovery point at `ran_risk`; a retry that doesn't know about the in-flight PSP call would re-authorize. *Mitigation:* always pass the client's idempotency key through to the PSP so the second authorize call returns the prior result rather than charging again; on resume, the orchestrator queries the PSP by idempotency-key first to detect already-completed steps and bumps the recovery point forward. The PSP's idempotency layer is a backstop that makes recovery-point gaps safe.
+- **PSP outage.** When the PSP is down, every authorize call hangs or fails; unprotected, the orchestrator backs up, exhausts thread pools, and turns their outage into yours. *Mitigation:* circuit-break the PSP client (open after N consecutive failures, fail fast for a cooldown, half-open probe), queue eligible retries on a delayed-retry topic, and route to a fallback PSP. Critically, fallback routing applies **only to charges that never reached the primary**; see Unresolved, because failing a possibly-authorized charge over to a second provider is how you double-charge.
+- **Ledger contention on a hot account.** A merchant taking thousands of charges/s means thousands of writes to one `accounts.balance` row, which serializes on the row lock and caps out at a few hundred TPS. *Mitigation:* shard that merchant's ledger account into N sub-accounts (`merchant_X_shard_0..N-1`), write to a random shard, sum across shards for a true balance. The global invariant `sum(debits) == sum(credits)` still holds; per shard it is just a partition. Approximate UI balances read a periodically materialized total.
+- **Reconciliation drift.** Small daily diffs accumulate quietly (FX rounding, partial-capture timing, dispute fees), and $0.03 of daily noise becomes a $10k unexplained gap inside a year. *Mitigation:* alert on any diff above a per-merchant tolerance, auto-resolve only known patterns such as sub-half-cent FX rounding and only with an audit-trailed adjustment entry, escalate everything else to a human within 24h, and run a weekly trend report to catch slow growth that stays under the daily threshold.
+- **Webhook ordering and duplication.** PSPs deliver at-least-once with no ordering guarantee, so a charge can receive `succeeded` then `failed` out of order, or `succeeded` twice. Naive handlers double-apply to the ledger or finalize in the wrong state. *Mitigation:* verify the HMAC signature at the edge, dedupe on `(charge_id, event_type, event_id)` in a 24h TTL set, and guard every transition against the state machine so a terminal state cannot be unwound by a late event.
+- **Compliance creep.** PCI scope expands the moment you log a full PAN, retain a CVV past authorization, or leave card data in an unencrypted backup, and remediation costs months. *Mitigation:* never accept raw card data. Clients tokenize directly with the PSP (Stripe.js, Adyen Checkout) so only an opaque token reaches your servers, which keeps you at PCI-DSS SAQ-A, the lightest level. Add structured-log redaction that drops any field matching a PAN pattern, plus a CI check that blocks PRs adding card-shaped fields to log emitters. A single 16-digit number in your logs can push you to SAQ-D, whose audit cost is roughly an order of magnitude higher.
+- **State drift between webhooks and the orchestrator.** A webhook claims `succeeded` while the orchestrator still reads `authorized`, or claims `failed` after the orchestrator finalized success. *Mitigation:* the orchestrator owns the state machine; handlers enqueue transition requests validated against the durable charge row. Illegal transitions are dropped with an alert, legal-but-late ones are no-ops, and every raw event is persisted on receipt for forensics separately from charge state.
 
 **Failure modes**
 
 | Layer | Failure | Detection | Mitigation |
 |---|---|---|---|
-| Idempotency | Key row is stuck `in_progress` after a crash | Aging in-progress rows and retry-loop detector | Use recovery points or status transitions with TTL, and resume or reconcile instead of reissuing money movement |
-| PSP integration | Timeout leaves authorize/capture outcome ambiguous | Unknown-state counter and PSP-status lookup rate | Move charge to verification state, query PSP by idempotency key, and compensate only after state is known |
-| Ledger write | PSP auth succeeds but ledger write fails | Auth-without-ledger canary and reconciliation mismatch | Ledger is on the success path; if write fails, compensate via void/refund and mark internal failure |
-| Webhook handling | PSP webhooks arrive out of order or duplicated | Duplicate-webhook and impossible-state-transition alerts | Make webhook handlers idempotent and funnel all external events through orchestrator state validation |
-| Reconciliation | Daily PSP report disagrees with internal ledger | Unmatched-row count and amount-diff alarms | Freeze affected accounts/charges, investigate manually, and correct via explicit adjustment entries only |
-| PCI boundary | Card PAN leaks into logs or storage | Secret-scanner alerts and log-scrubbing violations | Keep card entry in PSP-hosted elements only, tokenize before backend, and block suspicious fields in CI/runtime |
+| Idempotency | Key row stuck `in_progress` after a crash | Aging in-progress rows and retry-loop detector | Recovery points with a resume path; reconcile rather than reissue money movement |
+| PSP integration | Timeout leaves authorize/capture outcome ambiguous | Unknown-state counter and PSP-status lookup rate | Move to a verification state, query the PSP by idempotency key, compensate only once state is known |
+| Ledger write | PSP auth succeeds but ledger write fails | Auth-without-ledger canary and reconciliation mismatch | Ledger is on the success path; if the write fails, compensate via void and mark internal failure |
+| Webhook handling | Events arrive out of order or duplicated | Duplicate-webhook and impossible-transition alerts | Idempotent handlers; funnel all external events through orchestrator state validation |
+| Reconciliation | Daily PSP report disagrees with the ledger | Unmatched-row count and amount-diff alarms | Freeze affected accounts, investigate by hand, correct only via explicit adjustment entries |
+| PCI boundary | Card PAN leaks into logs or storage | Secret-scanner alerts and log-scrubbing violations | Card entry only in PSP-hosted elements, tokenize before the backend, block suspicious fields in CI and at runtime |
 
 **Unresolved**
 
-TODO. Two or three things this design genuinely does not handle well, and what you would do about each.
+- **Exactly-once holds per key, not per intent.** Everything above guarantees that one idempotency key produces at most one charge. It guarantees nothing about a user who taps Pay again after a cold app start and gets a *fresh* key: two valid authorizations for what the human considers one purchase, both correct by every rule in this design. The best available answer is a fuzzy duplicate detector on `(customer, merchant, amount, ~5 minute window)` that flags for review and offers instant self-serve refund, and it is a heuristic. It will occasionally flag a genuine second purchase of the same coffee, and tuning it tighter simply moves which error you make.
+- **PSP failover and idempotency are in direct conflict.** An idempotency key is namespaced to one provider. If the primary PSP is unreachable and you route a charge to a backup, your key means nothing there, and if the primary had in fact authorized, you have now authorized twice with no way to know until settlement. The honest resolution is that failover is only safe for charges that provably never left your building, so a hard PSP outage stops those already in flight rather than degrading them; they sit in verification until the PSP answers. That contradicts the appealing version of multi-PSP resilience, and it means a long outage is a full stop for the in-flight set. No mechanism here fixes that.
+- **The idempotency window is 24 hours; the liability window is 120 days.** After a day, the key is gone from both sides and the only handle on a payment is `psp_charge_id`, resolved through reconciliation and human judgement. Chargebacks under card-scheme rules arrive up to 120 days after the transaction, and disputes over partial refunds and FX differences routinely surface weeks later. There is no automatic path from a 4-month-old dispute back to the workflow that created it, only an audit trail and an operator. Extending the key TTL does not help, because the PSP's own dedupe expires regardless of what you store.
 #### Drill questions
-1. A client retries on a flaky network and the original write succeeded — how do you not double-charge?
-2. PSP returns a timeout — did the charge happen or not?
+1. A client retries on a flaky network and the original write succeeded. How do you avoid double-charging?
+2. The PSP returns a timeout. Did the charge happen or not?
 3. How do you handle refunds for a partially captured charge?
-4. What if the ledger and PSP disagree at reconciliation?
-5. How do you support adding a new payment method (e.g., Apple Pay, ACH)?
+4. What if the ledger and the PSP disagree at reconciliation?
+5. How do you support adding a new payment method such as Apple Pay or ACH?
 6. How do you scale to 100k payments/sec?
-7. How do you handle a frictionless 3DS that the issuer later challenges asynchronously?
-8. How do you use Stripe's webhook retries without double-applying a refund?
-9. How do recovery points differ from binary `in_progress`/`finished`?
-
-TODO. Only 9 drill questions carried over, top up to at least 10.
+7. How do you handle a frictionless 3DS authentication that the issuer later challenges asynchronously?
+8. How do you use webhook retries without double-applying a refund?
+9. How do recovery points differ from a binary `in_progress` / `finished` flag?
+10. Your PSP is hard down for 20 minutes. What do you do with charges already in flight versus charges not yet sent?
+11. Why is the idempotency key TTL 24 hours when chargebacks arrive up to 120 days later?
+12. A merchant takes 5,000 charges/sec. What breaks in the ledger first, and what do you do about it?
 #### Answers to drill questions
-1. Idempotency key on every write. Same key + same body returns the cached prior response; same key + different body is a 422 (programming error). Window is 24h+ in Redis with Postgres backing. *If pushed:* the PSP call is external — it can't sit in your DB transaction. Write the idempotency row as `in_progress` before calling the PSP, finalize with the result on response. A retry mid-flight sees `in_progress` and either polls the PSP by the same idempotency key (Stripe et al. honour it server-side) or returns 409 — never re-issues the charge.
+1. Idempotency key on every write. Same key with the same body returns the cached prior response; same key with a different body is a 422, because that is a client bug. The window is 24h, backed by Postgres. *If pushed:* the PSP call is external and cannot sit inside your database transaction, so write the idempotency row before calling the PSP and finalize it on response. A retry mid-flight sees an unfinished row and either resumes from the recovery point or queries the PSP by the same key, which the PSP honours server-side. It never reissues the charge.
 
-2. Don't assume either. Mark charge `requires_verification`; reconcile via PSP's GET-by-idempotency-key endpoint or via webhook. Never blindly retry — that's the double-charge path. *If pushed:* if reconciliation can't determine state in N minutes, void via PSP API; if void fails, escalate to ops with the charge frozen.
+2. Do not assume either outcome. Move the charge to `requires_verification` and resolve it by querying the PSP by idempotency key, or by waiting for the webhook. Never blindly retry, because that is the double-charge path. *If pushed:* if verification cannot determine the state within N minutes, void through the PSP API; if the void also fails, freeze the charge and escalate to ops with the full recovery-point trail.
 
-3. Refunds are first-class ledger events that compensate the capture entries — debit `merchant_balance`, credit `user_refund_payable`. Refund amount can't exceed captured amount; partial refunds tracked as separate entries linked by `refund_id`. *If pushed:* before settlement, a refund is a void on the auth (instant); after settlement it's a separate refund transaction over the card network — async, 5–10 business days to land on the cardholder's statement. UI shows "pending refund" until the PSP webhook confirms; the ledger reflects the obligation immediately so balances are correct even before the network settles.
+3. Refunds are first-class ledger events that compensate the capture entries: debit `merchant_balance`, credit `user_refund_payable`. A refund can never exceed the captured amount, and partial refunds are separate entries linked by `refund_id`. *If pushed:* before settlement a refund is a void on the authorization and is instant. After settlement it is a separate transaction over the card network, asynchronous, 5 to 10 business days before it reaches the cardholder's statement. The UI shows "pending refund" until the PSP webhook confirms, while the ledger reflects the obligation immediately so balances stay correct before the network settles.
 
-4. Block the affected accounts, page ops, do not auto-correct. Auto-correcting silent diffs is how money disappears. Investigate, decide, manually adjust with an audit trail entry. *If pushed:* per-merchant tolerance for "rounding" diffs (sub-cent FX) can auto-resolve; anything above is human-only.
+4. Block the affected accounts, page ops, and do not auto-correct. Silently correcting diffs is how money disappears without anybody noticing. Investigate, decide, then adjust manually with an audit-trail entry. *If pushed:* a per-merchant tolerance for sub-cent FX rounding may auto-resolve, still writing an adjustment entry; anything above tolerance is human-only.
 
-5. Payment method abstraction at the orchestrator layer — each method has its own authorize/capture/refund driver behind a common interface. Ledger and idempotency are method-agnostic. *If pushed:* ACH is fundamentally async (T+1 to T+3 settlement), so the Saga has long-running states; model it as a workflow (Temporal, Step Functions) rather than a synchronous orchestrator.
+5. A payment-method abstraction at the orchestrator layer, with a per-method driver behind a common authorize/capture/refund interface. The ledger and the idempotency layer stay method-agnostic. *If pushed:* ACH is fundamentally asynchronous at T+1 to T+3, so its saga has long-running states measured in days. That needs a durable workflow engine rather than a request-scoped orchestrator, and it changes the product promise, because you cannot tell the user "paid" at checkout.
 
-6. Shard charges by `customer_id`; the ledger is the bottleneck — partition by account_id with per-shard append-only log. PSP-bound steps don't need scaling on our end (PSP has its own SLA). *If pushed:* add a write-buffer in front of the ledger for hot accounts and apply entries in batches; the invariant (debits = credits) is preserved per batch.
+6. Shard charges by `customer_id`. The ledger is the real bottleneck, so partition it by `account_id` with a per-shard append-only log. The PSP-bound steps need no scaling on your side, since the PSP owns that SLA. *If pushed:* add a write buffer in front of the ledger for hot accounts and apply entries in batches. The invariant holds per batch, so `sum(debits) == sum(credits)` is never observably violated, and the cost is a bounded lag on the materialized balance.
 
-7. 3DS2 has frictionless and challenge flows; an issuer can return frictionless authentication (no user step) but later mark the transaction high-risk via a separate webhook. The Saga treats the initial frictionless ack as authorized but keeps the charge in `authorized` until capture; if a contradiction webhook arrives, the orchestrator voids the auth before capture. *If pushed:* the EMVCo 3DS spec allows liability shift only when the authentication carries a valid CAVV — store it on the charge row and audit on dispute, since chargebacks under SCA pass to the issuer when liability has shifted.
+7. 3DS2 has frictionless and challenge flows. An issuer can return frictionless authentication with no user step and later flag the transaction as high risk over a separate webhook. The saga treats the initial ack as authorized but keeps the charge in `authorized` until capture, so a contradicting webhook arriving before capture voids the authorization rather than requiring a refund. *If pushed:* the EMVCo 3DS specification grants liability shift only when the authentication carries a valid CAVV, so store it on the charge row and surface it on dispute. Under SCA, chargeback liability passes to the issuer once the shift applies.
 
-8. Webhooks are at-least-once; dedupe in Redis on `(stripe_event_id)` with 24h TTL — a duplicate webhook is a no-op. State-machine guards reject impossible transitions (cannot move `refunded → refunded` again). Refund handler reads the charge's current refunded amount, computes delta from the webhook payload, applies only the delta. *If pushed:* cumulative-refund tracking via `refund_id`s on the charge row is the source of truth — the charge's `refunded_amount` is `SUM(refunds WHERE charge_id=X)`, never updated in place.
+8. Webhooks are at-least-once, so dedupe on `event_id` in a 24h TTL set and treat a duplicate as a no-op. State-machine guards reject impossible transitions. The refund handler reads the charge's current refunded total, computes the delta implied by the payload, and applies only the delta. *If pushed:* cumulative refund tracking by `refund_id` is the source of truth. A charge's `refunded_amount` is `SUM(refunds WHERE charge_id = X)`, derived rather than updated in place, so a replayed webhook cannot inflate it.
 
-9. Binary flag means a retry only knows "someone started this" and must either replay everything (risking duplicate side effects) or poll the PSP (slow, may not even know the right state to ask about). Recovery points record exactly which atomic step was last committed (`ran_risk`, `psp_authorized`, `ledger_recorded`); the retry resumes from there. Each recovery-point write is in the same Postgres txn as the work it represents, so the recovery point can never be ahead of reality. *If pushed:* recovery points compose with PSP-level idempotency — even if a recovery point is stale (orchestrator died between PSP call and recovery-point commit), passing the same idempotency-key to the PSP returns the prior result without re-charging.
+9. A binary flag tells a retry only that somebody started, leaving two bad options: replay everything and risk duplicate side effects, or poll the PSP without knowing what to ask about. Recovery points record exactly which atomic step last committed (`risk_scored`, `psp_authorized`, `ledger_recorded`), so the retry resumes from there. Each recovery-point write commits in the same transaction as the work it represents, so it can never be ahead of reality. *If pushed:* recovery points compose with PSP-level idempotency. Even when the point is stale, because the orchestrator died between the PSP call and the commit, passing the same key to the PSP returns the prior result rather than charging again.
+
+10. Split the set. Charges never sent to the primary can be queued and retried, or failed fast with a retryable error so the client resubmits under the same key; those are also the only ones eligible for fallback routing to a second PSP. Charges already sent whose outcome is unknown must not be resent anywhere: they stay in `requires_verification` and a worker keeps polling until the PSP answers. *If pushed:* this is the uncomfortable part of multi-PSP resilience. Your idempotency key is namespaced to one provider, so failing an in-flight charge over to a backup discards the only protection you had. A 20 minute outage therefore means a partial stop, not a graceful degrade, for the in-flight set.
+
+11. The TTL matches what PSPs actually honour, which is 24 hours at both Stripe and Adyen. Holding the key longer on your side would let a client believe a retry is safe after the far side has already forgotten and would happily authorize again, which is worse than expiring in step. *If pushed:* the two windows solve different problems. The idempotency key protects against retries of an in-flight request and is measured in seconds to hours. The 120 day chargeback window is about liability on a completed one, and it is served by `psp_charge_id` on the charge row, the append-only ledger, and 7 years of settlement archive.
+
+12. The single balance row for that merchant. At 5,000 charges/s every one of them contends on the same row, and lock serialization caps throughput at a few hundred TPS well before anything else strains. Shard the account into N sub-accounts, write to a random shard, and sum across shards for an authoritative balance. *If pushed:* the cost is that an exact balance now needs all N shards available, so gate payouts on a complete checkpoint rather than paying out on a partial sum. Stalling a payout during a partial outage is recoverable; paying out on a wrong number is not.
 #### Whiteboard script
-TODO
+**0-5.** Restate the problem in one line, then ask the three clarifiers that actually fork the design: cards only or other rails too, who holds the card data, single or multi currency. Before drawing anything, say the two non-negotiables out loud, because they are what the interviewer is listening for: an idempotency key on every write, and the internal ledger as the source of truth. Close the band with the scale line: 1B payments/yr, 2.74M/day, roughly 2.3k/s at peak, provision 3k/s.
 
-A 45 minute budget: what to cover in 0-5, 5-15, 15-35 and 35-45, what to say first, and a line starting `Cut first:`.
+**5-15.** Draw six boxes: client, payment API with the idempotency store beside it, orchestrator in the middle, PSP on the left, ledger on the right, reconciliation underneath. Walk a single $50 charge through it: key committed before any external call, authorize, paired ledger entries, capture, response cached against the key. Then say "saga with compensations, not two-phase commit" and give the reason in one sentence, that the card network exposes no prepare or commit call and will not hold a lock for you.
 
-**Raw material, from the old Talking Points:**
+**15-35.** This is the band that decides the interview, so spend it on the boundary. Recovery points instead of a boolean, and the rule that each one commits in the same transaction as its own work, so progress can lag reality but never lead it. Passing the client's key through to the PSP so the far side absorbs repeats. Then the ambiguous timeout: three indistinguishable outcomes, why both naive answers cost money, `requires_verification` as a real state, and verify before you compensate. Finish with the ledger, double entry and append only, compensations as new entries, and daily reconciliation as the control that catches whatever the code missed.
 
-- **Idempotency on every write** is the first thing to say in a payments design.
-- **Saga with compensations, not 2PC** is the correct coordination model across external PSPs.
-- **Double-entry append-only ledger** is the accounting core.
-- **Tokenization and SAQ-A scope reduction** show you understand compliance boundaries, not just code paths.
-- **Unknown PSP state means verify, never blind retry.**
-- **Daily reconciliation is non-optional.** It is how you bound silent-finance bugs.
+**35-45.** Refunds and partial refunds as compensating entries. Webhooks: at-least-once, unordered, orchestrator owns the state machine. PCI: tokenize at the client so raw card data never touches your servers, which is what keeps you at SAQ-A. Then volunteer two of the Unresolved gaps before you are asked. Conceding that PSP failover and idempotency are in direct conflict lands considerably better than defending a design that pretends otherwise.
+
+Cut first: multi-currency and FX, subscriptions and dunning, and the 3DS pause. All three are real and none of them is what the question is testing, and each costs about 3 minutes you will want back for the timeout case.
 #### Appendix
 **Data model**
 
 **Idempotency:**
-- `idempotency_keys` (fast key-value cache fronted by transactional store):
-  `key → (request_hash, response, status, ttl)` — TTL 24h+
+- `idempotency_keys`: `key → (request_hash, recovery_point, response, status, ttl)`, TTL 24h, transactional store with a read-through cache.
 
 **Ledger (double-entry, event-sourced):**
 - Append-only log: `(event_id, ts, account_id, type, amount, ref)`
-- Every transaction = matching credit + debit entries
-- Account balances derived (or materialized + checkpointed)
+- Every transaction writes matching credit and debit entries
+- Account balances derived, or materialized and checkpointed
 
 **Charges:**
 - `(charge_id, customer, amount, currency, status, psp_charge_id, idempotency_key, created_at)`
 
-**Card storage:** never; only tokens from PSP. Reduces PCI scope to SAQ-A.
+**Card storage:** never. Only PSP tokens, which keeps PCI scope at SAQ-A.
 
 **API contract**
 
@@ -10206,49 +10214,58 @@ POST /payment_methods      body: { token (from PSP tokenization) }
 
 **Observability**
 
-- **Charge authorize/capture latency** — split by PSP and by step in the Saga.
-- **Idempotency hit rate and same-key-different-body rate** — catches client misuse and retry patterns.
-- **Unknown PSP-state rate** — one of the most important operational risk metrics in payments.
-- **Ledger append latency and failure rate** — direct money-correctness signal.
-- **Reconciliation unmatched rows / amount drift** — top daily finance-control metric.
-- **3DS / requires-action resume latency** — user-visible completion metric for SCA markets.
+- **Authorize and capture latency,** split by PSP and by saga step.
+- **Idempotency hit rate and same-key-different-body rate,** which catches client misuse and retry storms.
+- **Unknown PSP-state rate,** the single most important operational risk metric in payments.
+- **Ledger append latency and failure rate,** a direct money-correctness signal.
+- **Reconciliation unmatched rows and amount drift,** the top daily finance control.
+- **Requires-action resume latency,** the user-visible completion metric in SCA markets.
 
 **Multi-region and DR**
 
-- **Replication mode:** accepted payments should be durably persisted in a primary region with synchronous local replicas and asynchronous DR replication.
+- **Replication mode:** accepted payments persist in a primary region with synchronous local replicas and asynchronous DR replication.
 - **RTO:** API and orchestrator fail over quickly; payment recovery depends on restoring workflow state and replaying uncertain PSP interactions.
-- **RPO:** effectively zero for accepted payment intents and ledger entries; anything less is a finance incident.
+- **RPO:** effectively zero for accepted payment intents and ledger entries. Anything else is a finance incident.
 - **Failover cadence:** drills must include in-flight PSP timeouts and webhook replay, not just database promotion.
-- **Cross-region cost:** moderate in data volume, high in correctness complexity because duplicated or reordered money events are expensive.
+- **Cross-region cost:** moderate in data volume, high in correctness complexity, because duplicated or reordered money events are expensive to unpick.
 
 ### 24. Design a Digital Wallet
 #### Problem
-Store user balances and process transfers between users with strong consistency, no money creation/loss, and audit-grade history.
+Hold balances for 100M users and move money between them with no way to create or destroy value. Every transfer must be atomic, idempotent under retry, and reconstructible from an audit trail seven years later. Sender and receiver usually live on different database shards, so most transfers cannot be a single local transaction.
 #### Core
-TODO
+A wallet is a double-entry ledger with a cache in front of it. The ledger is append-only: every money movement writes a debit and a matching credit, and the balance a user sees is a materialised sum that can always be rebuilt from those entries. That inversion is the whole answer. Balances are never authoritative; they are a fast read of something that is.
 
-Write the whole answer as you would give it in sixty seconds, 200 to 300 words, standing alone.
+Shard accounts by user id. Same-shard transfers are one local ACID transaction: a conditional update that deducts only if the funds exist, plus the two ledger rows, committed together. That conditional update is what prevents double-spend. Read a balance, decide, then write, and two concurrent transfers both see the same balance and both proceed; `UPDATE ... WHERE available >= amount` cannot be raced, because the check and the deduction are one statement.
+
+Most transfers cross shards. With 128 shards a random pair lands together under 1% of the time, so cross-shard is the design rather than the exception. I would use reserve-then-confirm: a first phase moves the amount out of the sender's available balance into a reserved column and adds it to the receiver's pending column, each as a small local transaction; a second phase turns those holds into ledger entries. Reservations carry a TTL, so an orchestrator that dies releases the money instead of freezing it. The competing option, one distributed transaction across both shards, is less code but holds locks across a network round trip and needs an operator when the coordinator stalls.
+
+Idempotency key on every transfer, deduplicated 24 hours. Hourly per-shard reconciliation proves the sum of entries equals the balance row; drift freezes the account and pages a human rather than self-correcting, because a silent corrector is a silent thief.
 #### Summary
-**The picture in your head:** imagine two people in different bank branches trying to wire money to each other at exactly the same second. Each branch teller can only see their own drawer. If both tellers move money simultaneously without coordinating, either the money gets counted twice or it disappears entirely. A digital wallet has the same problem at millions of times per second — users on different database servers transferring to each other, with no shared ledger in the room.
+**The picture in your head:** two people in different bank branches wiring money to each other at the same second. Each teller can see only their own drawer. If both move money without coordinating, either it gets counted twice or it vanishes. A digital wallet has that problem thousands of times a second, with users on different database servers and no shared ledger in the room.
 
 **The approaches people actually take:**
-TODO. Two or three things a competent engineer might reach for, in plain language and before any product name, with what each one buys and roughly when it wins.
 
-**The single-request walkthrough:** Alice sends Bob $50. They happen to live on different database shards (shard A holds accounts with user IDs ending in 0–4, shard B holds 5–9). The transfer orchestrator runs **TCC** (Try-Confirm-Cancel) — a three-phase protocol: (1) **Try on shard A**: atomically move $50 from Alice's `available` balance to her `reserved` balance — she can no longer spend it, but it has not left yet. (2) **Try on shard B**: add $50 to Bob's `pending` balance — he cannot spend it yet. (3) If both Tries succeed: **Confirm A** (zero out Alice's reservation, write a ledger debit entry) and **Confirm B** (move Bob's pending into his actual balance, write a ledger credit entry). If either Try fails — say Alice has insufficient funds — the orchestrator runs **Cancel A** (release her reservation) and Bob's `pending` was never incremented, so nothing to cancel. Total wall-clock time: ~20ms.
+*One transaction over one store.* Keep every account in a single logically-transactional database and make a transfer an ordinary begin/commit, whether or not the two accounts sit on the same physical machine. The store does the cross-machine coordination internally. This buys the least application code and no invented protocol. It wins when the whole account set fits one cluster in one region and you are willing to let the store hold locks across machines for a few milliseconds.
+
+*Reserve, then confirm.* Split the transfer into two rounds of small local transactions. The first round marks money as held on each side; the second turns the holds into real entries. Nothing is locked between rounds, only marked, so a coordinator that dies leaves behind a row with a deadline rather than a frozen account. This buys failure recovery that needs no human. It costs an extra write per side, a sweeper process, and a state machine you have to test.
+
+*Move first, apologise later.* Debit the sender, credit the receiver, and if the credit fails, write a reversing entry. This is the only option when one side is a system you do not control, and it is the wrong one inside a wallet: there is a real window where the money is in neither account, and a user who refreshes during it sees a number that is not true. The window is short, but "short" is not a property you can put in front of a regulator.
+
+**The single-request walkthrough:** alice sends bob $50 and they sit on different shards (shard A holds user ids ending 0-4, shard B holds 5-9). Taking the reserve-then-confirm approach, the industry name for which is TCC (Try-Confirm-Cancel), the orchestrator runs three phases. (1) *Try on A*: atomically move $50 from alice's `available` into her `reserved`. She can no longer spend it, but it has not left. (2) *Try on B*: add $50 to bob's `pending`. He cannot spend it yet. (3) Both Trys succeeded, so *Confirm A* clears alice's reservation and writes a ledger debit in the same transaction, and *Confirm B* moves bob's pending into his balance and writes the matching credit. If alice's Try had failed on insufficient funds, B was never touched and there is nothing to undo. Wall clock, four small local transactions in two parallel rounds: about 20ms.
 
 **The pieces (and what each one is for):**
-- **Account shards** — the database is split ("sharded") across multiple servers, each owning a subset of user accounts. This lets the system handle millions of balance updates per second, but it means a transfer between two users may require coordinating across two separate database servers with no shared transaction.
-- **TCC (Try-Confirm-Cancel)** — a three-phase business-level protocol for cross-shard money movement. "Business-level" means the coordination happens via normal database rows (the `reserved` and `pending` columns) rather than exotic distributed locking. Compare this to **2PC (two-phase commit)**, a database protocol that holds row-level locks across both shards until a coordinator decides — if that coordinator crashes, both shards are frozen until a human intervenes. TCC avoids this: each Try acquires and releases its lock in milliseconds, leaving only a normal column value as the durable state.
-- **Reserved and pending columns** — `reserved` is money Alice has committed to send but that has not left yet; `pending` is money Bob is about to receive but cannot spend yet. These are the "in-flight" states that make cross-shard transfers safe. The visible "available" balance is `balance - reserved`.
-- **Append-only ledger** — every confirmed money movement creates two ledger entries (debit one account, credit another) that are never edited or deleted. The invariant: `sum(all credits) == sum(all debits)` at all times. If Alice's displayed balance ever disagrees with the sum of her ledger entries, something has gone wrong — the ledger is truth, the balance row is a cached view.
-- **Reservation TTL (time-to-live)** — every reservation has a deadline. If the orchestrator crashes between Try and Confirm, the reservation expires automatically after (say) 30 seconds, releasing Alice's funds. This means a crashed orchestrator never permanently freezes a user's money.
+- **Account shards.** The account table is split across servers, each owning a subset of users. That is what makes 10k transfers/s possible, and it is also what creates the problem: two users in one transfer may live on two servers with no shared transaction between them.
+- **Reserved and pending columns.** `reserved` is money the sender has committed but has not sent; `pending` is money the receiver is about to get but cannot spend. The balance shown as spendable is `balance - reserved`. These two columns are the entire cross-shard coordination mechanism. There is no distributed lock anywhere.
+- **Reservation TTL.** Every reservation carries a deadline, 30s for retail transfers. If the orchestrator dies between Try and Confirm, the reservation expires and the money returns to the sender's available balance on its own. A crashed process never permanently freezes a user's funds, which is the property that makes this approach operable at 3am.
+- **Append-only ledger.** Every confirmed movement writes two entries, a debit and a credit, never edited and never deleted. The invariant is `sum(debits) == sum(credits)`, globally and at every instant. If a user's displayed balance disagrees with the sum of their entries, the entries are right and the balance is wrong.
+- **Durable orchestrator.** The three-phase state machine has to survive its own process dying, so its state is persisted between phases and Confirm and Cancel are idempotent on `(transfer_id, side)`. The TTL is the backstop, not the recovery path.
 
-**The thing that makes it hard — the concurrent double-spend:** Alice has $100. She fires two transfers simultaneously: $80 to Bob and $70 to Carol. Both requests reach different servers at the same microsecond. Both read Alice's balance: $100. Both conclude she has enough. Both proceed. She ends up $50 overdrawn. The fix: the Try operation uses an atomic database update with a balance check in the same statement — `UPDATE accounts SET available = available - 80, reserved = reserved + 80 WHERE user_id = Alice AND available >= 80`. If `available` is already $20 when the second Try runs, zero rows are updated and the Try fails. The check and the deduction are one atomic operation; nothing can slip in between.
+**The thing that makes it hard, the concurrent double-spend:** alice has $100 and fires $80 to bob and $70 to carol at the same microsecond. Both requests land on different application servers, both read $100, both conclude she has enough, and she ends up $50 overdrawn. The fix is not a lock, it is refusing to separate the check from the deduction: `UPDATE accounts SET available = available - 80, reserved = reserved + 80 WHERE user_id = alice AND available >= 80`. When the second statement runs, `available` is $20, the predicate fails, zero rows update, and the Try fails cleanly. Nothing can slip in between because there is no "between".
 
-**Why this design and what it costs:** TCC wins over 2PC for wallets because (a) no single coordinator can hold locks across shards — if that coordinator goes down, accounts are frozen; (b) TCC's reserved/pending columns are ordinary database state with ordinary TTLs, so failures self-heal automatically. The tradeoff: you write more application code (three phases instead of one) and each cross-shard transfer costs two round-trips (Try + Confirm) instead of one.
+**What it costs:** two extra writes per cross-shard transfer, a sweeper process for expired reservations, and a three-phase state machine to test instead of a single commit. That is a real price, and the section on key decisions says when it is not worth paying.
 
 **If you were building it tomorrow:**
-- PostgreSQL or CockroachDB sharded by `user_id % N`; same-shard transfers use a single ACID transaction (fast path, ~5ms); cross-shard transfers use TCC via a durable orchestrator (Temporal).
+- PostgreSQL sharded by `user_id % 128`; same-shard transfers use a single ACID transaction (fast path, ~5ms); cross-shard transfers use TCC driven by a durable workflow engine such as Temporal.
 - Same-shard hot path:
   ```
   BEGIN;
@@ -10258,66 +10275,77 @@ TODO. Two or three things a competent engineer might reach for, in plain languag
   INSERT INTO ledger VALUES (bob, +50, ref);
   COMMIT;
   ```
-- Hourly reconciliation job: `SELECT user_id, balance FROM accounts` vs `SELECT user_id, SUM(amount) FROM ledger GROUP BY user_id` — any non-zero diff freezes the account and pages on-call.
+- Hourly reconciliation job: `SELECT user_id, balance FROM accounts` vs `SELECT user_id, SUM(amount) FROM ledger GROUP BY user_id`. Any non-zero diff freezes the account and pages on-call.
 #### What this is really testing
-TODO
+Whether you can tell internal consistency from external irreversibility, and pick machinery that matches.
 
-The one insight this question exists to elicit, then the contrast with the question it most resembles and why the answers differ.
+Every account in this problem belongs to the system. That means a transaction is available to you: you can hold a lock, you can reserve funds, you can roll back, and you can state an invariant that must hold at every instant, `sum(debits) == sum(credits)`, and then actually prove it on a schedule. So the interesting work is all internal. Make a cross-shard move atomic without a coordinator that can freeze someone's money. Make a retried request move money exactly once. Stop one popular account from serialising the whole system onto a single row.
 
-Closest question: TODO
+Closest question: Q23
+
+Q23 moves money across a boundary you do not own. A card authorisation cannot be rolled back by you, cannot be locked, and may reappear three days later as a chargeback. Its answer is therefore built out of components that survive not knowing: idempotency keys handed to a third party, a state machine that tolerates a webhook arriving twice or never, and reconciliation against a settlement file that is the counterparty's opinion of what happened. Q24 has no counterparty. Reservations are possible here and impossible there, which is exactly why hold-then-confirm is right for this question and a compensating saga is right for that one.
+
+The tell that a candidate has confused them: proposing two-phase commit for a card charge, or proposing compensating reversals inside their own ledger when a reservation was available the whole time.
 #### Clarifying questions and how each answer forks the design
 - Single currency or multi?
-- Internal transfers only or also card top-up / withdraw?
-- Cross-shard transfers? (yes — A and B may live on different shards)
+- Internal transfers only, or also card top-up and bank withdrawal?
+- Can the displayed balance ever read higher than the true balance, even for 200ms?
+- Are shards co-located by any relationship, or is placement a hash of user id?
 - Latency expectation per transfer?
+- Is there a merchant or platform account taking a large share of all credits?
 
 **How the answers shape the design**
 
 | If the answer is… | Then the design… |
 |---|---|
-| Strong consistency required | model each transfer as a double-entry, all-or-nothing DB transaction — no eventual balances |
-| Cross-shard transfers | a two-phase commit or saga since sender and receiver may live on different shards |
-| Same-shard only | a single local transaction suffices and is far simpler |
-| Internal transfers only | a closed ledger; adding top-up/withdraw pulls in external PSP rails and reconciliation |
-| Idempotency needed | a request key per transfer so retries do not move money twice |
-| Audit-grade history | append-only ledger entries; balance is derived, never overwritten |
-| Low latency per transfer | keep hot accounts in a fast store with row-level locking to serialize concurrent debits |
+| Strong consistency required | models each transfer as a double-entry, all-or-nothing transaction; no eventual balances |
+| Cross-shard transfers | needs reserve-then-confirm or a distributed transaction; a plain compensating saga is out, because it exposes money that is in neither account |
+| Same-shard only | collapses to one local transaction and is a far smaller problem |
+| Internal transfers only | is a closed ledger; adding top-up and withdrawal pulls in external rails and file-based settlement |
+| Idempotency needed | carries a request key per transfer so retries collapse to one logical movement |
+| Audit-grade history | writes append-only entries and derives the balance; nothing is ever overwritten |
+| Balance may never read high | forces authoritative reads from the shard leader and a separate non-spendable pending line in the UI |
+| One account takes >500 credits/s | splits that account into sub-balances or batches its credits; a single row cannot absorb it |
 #### Requirements and scale, derived out loud
 **Requirements**
 
 - **FR:** deposit, withdraw, transfer (P2P), balance query, transaction history
-- **NFR:** ACID on transfers, no money creation/loss, audit-grade, idempotent
+- **NFR:** ACID on transfers, no money creation or loss, audit-grade, idempotent
 
 **Scale**
 
-- **User base:** 100M users (PayPal-mid-tier / Revolut-class consumer wallet).
-- **Throughput:** assume ~2.5 transfers/user/month (conservative consumer wallet rate) → 100M × 2.5 / 30 = ~8M/day base; round-up for in-app micro-payments → **~250M transfers/day**. ÷86,400 ≈ ~3k/s avg; ×3 payday/business-hour spike → **~10k transfers/s peak**.
-- **Account state row:** user_id (16B) + currency (4B) + available (8B) + reserved (8B) + pending (8B) + version (8B) + updated_at (8B) + audit (~30B) ≈ **~500B/row**.
-- **Account state total:** 100M users × ~3 currency rows (USD + 1 home + 1 crypto/secondary) × 500B = **~150GB hot state**. RF=3 → 150 × 3 = **~450GB across sharded cluster**.
-- **Ledger entry size:** entry_id (16B) + user_id (16B) + ts (8B) + amount (8B) + type (8B) + reference (32B) + balance_after (8B) + envelope (~200B) ≈ **~300B/entry**.
-- **Ledger volume:** double-entry → 250M transfers × 2 = 500M entries/day. 500M × 300B = **~150GB/day raw**; RF=3 → **~450GB/day on hot store**.
-- **Retention:** 7 years (regulatory: AML / financial audit / KYC). 150GB × 365 × 7 ≈ **~400TB lifetime raw ledger**. After 90d in hot tier, archive to columnar object store (~5× Parquet compression, RF=2 EC) → ~400TB / 5 ≈ **~80TB cold**.
-- **Event stream:** every ledger entry emits a domain event with envelope (~100B headers) → 500M × 400B = **~200GB/day on the partitioned event log** (Kafka). 7-day hot retention for downstream consumers (notifications, fraud, analytics) = 7 × 200GB = **~1.4TB hot log**; RF=3 → ~4.2TB.
-- **TCC reservation overhead:** assume p99 cross-shard transfer settles in ~5s; in-flight = 10k/s × 5s = **~50k concurrent reservations** (~1% of any active account set). Reservation row ~100B → 50k × 100B = ~5MB — trivial.
-- **Idempotency cache (transfer-key):** 24h TTL × 10k/s × ~500B response = **~430GB peak** in fast KV (replicated).
+- **User base:** 100M registered, of which 30% are daily active = **30M DAU**. Assumption: a wallet used as a primary payment rail, not a side account.
+- **Throughput:** ~8 money movements per active user per day (transit taps, merchant payments, a couple of P2P transfers, one top-up). 30M × 8 = **240M movements/day**. 240M ÷ 86,400 = **~2.8k/s average**. Payday and lunchtime concentrate roughly 3.5× → **~10k/s peak**. Every number below hangs off these two.
+- **Cross-shard fraction:** placement is `user_id % 128`, so for a random pair P(same shard) = 1/128 ≈ 0.8%. Even with heavy co-location of predictable pairs, assume **>90% of transfers cross shards**. The reserve-then-confirm path is the normal path, not the exception.
+- **Balance reads:** each active user opens the app ~10×/day = 30M × 10 = 300M reads/day = **~3.5k/s average, ~12k/s peak**. Spread over 128 shards that is **<100 reads/s per shard leader**, which is why authoritative reads are affordable here.
+- **Account state row:** user_id (16B) + currency (4B) + balance (8B) + reserved (8B) + pending (8B) + version (8B) + updated_at (8B) ≈ 60B of fields; with tuple header, page fill factor and two indexes, budget **~500B/row** on disk.
+- **Account state total:** 100M users × 3 currency rows × 500B = **~150GB**. RF=3 → 150 × 3 = **~450GB across the sharded cluster**.
+- **Ledger entry size:** entry_id (16B) + user_id (16B) + ts (8B) + amount (8B) + type (8B) + reference (32B) + balance_after (8B) ≈ 96B of fields; with the `(user_id, ts)` and `(reference)` indexes plus tuple overhead, **~300B/entry**.
+- **Ledger volume:** double entry, so 240M × 2 = **480M entries/day**. 480M × 300B ≈ **~145GB/day raw**; RF=3 → **~435GB/day on the hot store**.
+- **Retention:** 7 years for AML and financial audit. 145GB × 365 × 7 ≈ **~370TB lifetime raw**. After 90 days hot, archive to columnar object storage at roughly 5× compression → 370TB / 5 ≈ **~75TB cold**.
+- **Event stream:** each entry emits a domain event with ~100B of headers → 480M × 400B ≈ **~190GB/day**. 7-day hot retention for downstream consumers = 7 × 190GB ≈ **1.3TB**; RF=3 → **~4TB**.
+- **In-flight reservations:** by Little's law, concurrency = rate × mean latency, not × p99. 10k/s × 20ms = **~200 reservations open at any instant** in steady state. Provision for the pathological case instead: an orchestrator fleet stall holding every reservation to its 30s TTL gives 10k/s × 30s = 300k rows × 100B = **~30MB**. Not a capacity concern in either regime; the concern is whose money it is.
+- **Idempotency cache:** 24h TTL, 10k/s × 86,400 = 864M keys/day × ~500B stored response = **~430GB peak** in a replicated key-value store.
 #### Key decisions
-TODO
+**Cross-shard coordination: hold-and-confirm, or one distributed transaction**
+- Choice: TCC. Reserve on both sides as independent local transactions, then confirm on both sides, with each reservation carrying a 30s TTL and the orchestrator's lease id.
+- Alternative: put every shard in one distributed-SQL cluster (Spanner, CockroachDB, Yugabyte) and write the transfer as a single begin/commit, letting the store run two-phase commit internally.
+- Decider: how long a lock may be held across the network, and what happens when the coordinator stalls. Single region, the store's internal 2PC adds about one consensus round trip, so a row is locked ~2-5ms; at 10k/s that is 10,000 × 0.005 = ~50 rows locked at any instant out of 300M, which is nothing. Cross-region, the same round trip is 60-150ms, so a hot row is locked 60ms per transfer and that account is capped at 1/0.06 ≈ 16 transfers/s. A stalled coordinator holds both rows until an operator intervenes. TCC holds locks only inside each Try, 1-2ms, and its durable state is a column with a deadline that cleans itself up.
+- Alternative wins when: all shards are one cluster in one region, peak is a few thousand transfers/s, and no single account exceeds a few hundred writes/s. Then the distributed transaction is strictly less code, has no sweeper to operate and no three-phase state machine to test, and the "you must not use 2PC" reflex is wrong. It stops winning the day you go multi-region or a merchant gets popular.
 
-Two or three genuine forks. For each, in this exact shape so it stays checkable:
+The third option, a plain compensating saga (debit, credit, reverse the debit if the credit fails), loses here for a reason that is not performance: between the two steps the money is in neither account, and a balance query in that window returns a number that was never true. Sagas are the right answer when one side is external and reservation is impossible, which is Q23's problem, not this one.
 
-**<name of the fork>**
-- Choice:
-- Alternative:
-- Decider:
-- Alternative wins when:
+**Balance reads: authoritative, or fast and possibly stale**
+- Choice: serve every balance read from the shard leader, and show three separate numbers: available (`balance - reserved`), pending in, and total. Pending is never spendable.
+- Alternative: serve balances from follower replicas or a cache at 100-500ms staleness, with the spend path re-checking authoritatively at write time anyway.
+- Decider: what a leader read actually costs here, and which direction the staleness error points. 30M actives × 10 checks/day = 300M reads/day ≈ 3.5k/s average and ~12k/s peak; across 128 shards that is under 100 reads/s per leader, negligible against the write load. So the usual cost argument for follower reads does not exist at this scale. What remains is direction: a stale read after a debit shows money that is already gone, and a balance that reads high is a different category of defect to users and regulators than one that reads low.
+- Alternative wins when: reads outnumber writes by more than roughly 100:1 (an embedded wallet where every page render shows a balance, or merchant dashboards polling), or the reader sits in a region 80ms from the leader and the number is decoration. It is never acceptable where the read is the decision: an offline transit gate or a terminal authorising against a cached balance will let the same money be spent twice.
 
-**Raw material, from the old Common Mistakes:**
-
-- **Using a plain Saga for money movement without reservations.** Partial visibility of spent-but-not-received money is not acceptable.
-- **Making pending funds spendable.** `pending` and `reserved` are accounting states, not user-available balance.
-- **No idempotency on transfers.** Retries on money APIs must collapse to one logical transfer.
-- **Single balance row for all currencies.** Multi-currency wallets need separate balances and treasury/FX accounting.
-- **Treating the event stream as optional.** Without it, audit, fraud, and replay all become harder and more coupled.
+**Hot accounts: split the row, or batch the writes**
+- Choice: split a hot account into N sub-balances, hash each credit onto one of them, and sum N rows on read. N is raised automatically once contention crosses a threshold.
+- Alternative: a write-behind aggregator that accumulates that account's credits in memory and flushes one transaction every 50ms.
+- Decider: the single-row write ceiling, which is roughly 1/(transaction duration). At 1-2ms per committed transaction, one row absorbs 500-1,000 writes/s, and past that optimistic retries thrash so effective throughput falls rather than plateaus. A merchant taking 3,000 payments/s at peak therefore needs N ≥ 3000/500 = 6; pick 16 for headroom, giving ~190/s per row. The aggregator gets a larger reduction (50ms of batching at 3,000/s collapses 150 writes into one) but it holds committed-to-the-user money in one process's memory and it is a second write path with its own failure modes.
+- Alternative wins when: the hot account is credit-only and rarely read, such as a platform fee or treasury float account, so nobody notices 50ms of lag and individual ledger entries are still written so the audit trail is unaffected. Splitting is actively wrong there, because a treasury account is also debited and debits spread across N sub-balances need a rebalancer nobody wants to own.
 #### High-level design
 **must-say**
 
@@ -10384,15 +10412,21 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 </svg>
 ```
 
-**How to read the diagram:** the wallet is presented as a simple balance to users, but the architecture is built around ledger entries, holds, credits, debits, and reconciliation. The visible balance is really a derived result.
+**How to read the diagram:** users are shown a single balance, but the architecture underneath is entries, holds, debits, credits and reconciliation. The visible balance is a derived result, and the orchestrator box is the only place that knows a transfer is one thing rather than two independent writes.
 
-**Why the flow is shaped this way:** direct balance mutation is easy to build and hard to trust. A ledger-based design makes every state change traceable, which matters once transfers, reversals, and audits enter the system.
+**Why the flow is shaped this way:** mutating a balance directly is easy to build and impossible to audit. Writing entries and deriving the balance makes every state change traceable, which is what you need the moment reversals, disputes and regulators show up.
 
-**What this layout buys you:** explainable balances and safer money handling. The tradeoff is that the mental model is accounting-first, even if the product UI looks like a consumer payments app.
+**What this layout buys you:** explainable balances and money handling you can prove correct after the fact. The cost is that the mental model is accounting-first even though the product looks like a consumer payments app, and every engineer touching it has to learn that the balance column is a cache.
 #### Deep dive
 **must-say**
 
-**Same-shard transfer (SQL transaction):**
+**The one mechanism: the double-entry write path, and what limits its throughput.**
+
+Two tables. `ledger_entries` is append-only: rows are inserted, never updated and never deleted, and there is no `DELETE` grant on it in any application role. `accounts.balance` is a materialised sum of those entries. The reason to materialise at all is arithmetic: at 480M entries/day, a five-year-old account holds on the order of 15,000 entries, and summing them on every one of 12k balance reads/s is 180M row reads/s for a number you could have cached. So the balance is a cache, and the design's job is to make that cache provably correct rather than hopefully correct.
+
+Every movement writes exactly two entries, a debit and a matching credit, with the same `reference`. The global invariant `sum(debits) == sum(credits)` then holds by construction, because there is no code path that writes one entry. Deposits and withdrawals are not exceptions: they are transfers against a system account (`external_rails_payable`), so no money enters or leaves the ledger without a counterparty row.
+
+**Same shard: one transaction.**
 ```sql
 BEGIN;
 UPDATE accounts SET balance = balance - 50 WHERE user_id = A AND balance >= 50;
@@ -10402,41 +10436,15 @@ INSERT INTO ledger_entries (...) VALUES (B, +50, ...);
 COMMIT;
 ```
 
-Same-shard is the fast path: one transaction, atomic via the transactional store's own ACID guarantees, ~5ms in normal operation. The `balance >= 50` predicate is enforced atomically inside the UPDATE — if A doesn't have enough funds, zero rows are updated and the transaction rolls back, preventing overdraft without explicit locking. The two ledger entries land in the same transaction as the balance updates, so the invariant (entries match balance change) is never violated.
+Two things are load-bearing here and both get drilled. First, `balance >= 50` lives inside the `UPDATE`, not in application code above it. If A is short, zero rows update, the application sees `rowcount == 0` and rolls back. There is no window between the check and the deduction because they are one statement, which is why this needs no explicit lock and why a read-then-write version of the same logic is broken under concurrency. Second, the entries and the balance change commit together, so the invariant is never observably violated, not even mid-transaction by another reader.
 
-**Cross-shard transfer — TCC (Try-Confirm-Cancel):**
-```
-Try (A):  available -= 50, reserved += 50    (atomic; predicate available >= 50)
-Try (B):  pending   += 50                    (atomic; account-active check)
-          (if either Try fails, Cancel the side that did succeed)
+**Cross shard: the entries land at Confirm, not at Try.** *[TCC as a named pattern dates to Pat Helland's "Life Beyond Distributed Transactions" (2007) and was popularised by the Eventuate and Seata implementations; the underlying reserve-then-commit idea is much older accounting practice.]* Try moves money between `available` and `reserved` on the sender and increments `pending` on the receiver. Try writes **no ledger entry**. Confirm clears the hold and inserts the entry in the same local transaction.
 
-Confirm (A): reserved -= 50; INSERT ledger debit (same txn)
-Confirm (B): pending  -= 50; balance += 50; INSERT ledger credit (same txn)
+That placement is the whole trick, and three properties fall out of it:
 
-Cancel (A):  available += 50, reserved -= 50
-Cancel (B):  pending   -= 50
-```
-
-TCC's three phases each run as small ACID transactions within their own shard, never across shards. *Try* on A atomically moves $50 from `available` into `reserved` (the predicate `available >= amount` is enforced inside the same UPDATE — if A doesn't have funds, zero rows update, Try fails, and the orchestrator never touches B); *Try* on B increments `pending` (a hold column on the receiver, not yet visible as balance). Both are persisted; the orchestrator is durable so a crash mid-flight resumes from the last persisted Try. *Confirm* on A zeroes the `reserved` hold and writes the ledger debit in the same transaction (A's `available` was already debited at Try, so no further balance change); *Confirm* on B moves `pending` into `balance` and writes the ledger credit. Nothing can fail at Confirm for business reasons — the funds are already accounted for — so only infrastructure failure causes Confirm retry, and Confirm is idempotent on `(transfer_id, side)`. *Cancel* releases reservations back. Confirm and Cancel are idempotent (keyed by `transfer_id`), so retries cannot double-apply.
-
-The contrast with 2PC: 2PC holds row-level locks across both shards waiting for a coordinator's commit decision, so coordinator failure leaves locks held until manual intervention. TCC uses *business-level* reservations — a normal Postgres column, no exotic distributed locking — and reservations have a TTL that auto-cancels if the orchestrator dies; locks are held only during the short Try transaction on each shard, never across the network. The cost is two extra writes per transfer (Try + Confirm) and slightly higher complexity in the orchestrator state machine.
-
-**Optimistic locking for hot accounts:**
-```sql
-UPDATE accounts SET balance = balance + ?, version = version + 1
-  WHERE user_id = ? AND version = ?
--- if 0 rows updated → conflict → retry
-```
-
-Optimistic locking lets concurrent transfers proceed without taking row locks; conflicts are detected at commit and the loser retries with the fresh state. For most accounts this is essentially free — collisions are rare. For hot accounts (a popular merchant receiving thousands of credits/sec) optimistic retries become a thundering herd: every retry conflicts again, throughput collapses. *Mitigation for hot accounts:* switch to pessimistic `SELECT FOR UPDATE` (slower per write but no retry storm) once a hot-account threshold is detected, or aggregate writes through a per-account write-buffer that batches N updates into a single transaction every few ms — preserving the invariant per batch.
-
-**Event sourcing for ledger:**
-
-Every state-changing operation (balance update, reservation, release, deposit, withdrawal) emits a structured event to a partitioned event log keyed by `user_id`. The transactional store and the event log are kept in sync via a transactional outbox: events are written to an `outbox` table in the same transaction as the balance update, and a relay process polls and forwards them to the event log. This guarantees events are emitted exactly when their underlying transaction commits, without dual-write inconsistency. Downstream consumers — fraud, analytics, notifications — read the stream independently. The ledger is replayable: total balance = sum of events for the account, so a corrupted materialized balance can be rebuilt from event history. Daily reconciliation per shard validates `sum(ledger_entries) == accounts.balance` and freezes any account where they diverge.
-
-**Card top-up and withdraw.** Top-ups and withdrawals bridge the wallet to external rails (the Payment System #23 for cards, ACH/SEPA for bank rails) and are modelled as transfers between the user's wallet account and a system "external rails" account, so the wallet's invariant (`sum(debits) == sum(credits)`) holds without any special-casing. A top-up is a charge through the Payment System with two ledger entries on success: debit `external_rails_payable`, credit `user_wallet`. A withdrawal is the reverse — debit `user_wallet` (with a hold via the same `reserved` column TCC uses, so we never let the user spend funds we've committed to send out), credit `external_rails_payable` — followed by an async payout via the PSP that fires a webhook on settlement. Withdrawal latency is asymmetric vs internal transfers (T+1 to T+3 for ACH); the wallet UI distinguishes "available" from "in flight" balances by reading the `reserved` column, the same primitive that powers cross-shard TCC.
-
-**TCC three-phase transfer — sequence with failure branches.** *[Source: Pat Helland "Life Beyond Distributed Transactions" / Eventuate TCC patterns]* TCC has three operations per side: Try (reserve, can fail with business-level rejection), Confirm (commit reservation, must not fail given a successful Try), and Cancel (release reservation, idempotent). The orchestrator persists state between phases so a crash mid-flight resumes from the last persisted phase. Both shards' Try must succeed for the transfer to proceed to Confirm; either Try failure triggers Cancel on whichever side did succeed.
+1. Confirm cannot fail for business reasons. The funds were checked and set aside at Try, so the only reason Confirm retries is infrastructure. Confirm is idempotent on `(transfer_id, side)`, so retrying is safe.
+2. The reconciliation invariant is `sum(ledger_entries) == accounts.balance`, not `balance + reserved`. Reserved money has no entries yet because it has not moved. A reservation is an application-level hold, not a transaction.
+3. There is never a moment where committed entries are unbalanced. A half-confirmed transfer has one entry, but the other side's reservation is still live and will either confirm or expire, and the sweeper's cancel emits nothing to the ledger because nothing was ever written.
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 800" role="img" aria-label="TCC three-phase transfer sequence with failure branches">
@@ -10563,103 +10571,111 @@ Every state-changing operation (balance update, reservation, release, deposit, w
 </svg>
 ```
 
-Critical correctness points: (1) Confirm cannot fail for business reasons because the funds are already reserved — only infrastructure failure causes Confirm retry, and Confirm is idempotent on `(transfer_id, side)`. (2) Cancel and Confirm race only if a sweeper auto-cancels a stale reservation while a delayed Confirm arrives — resolved by tagging reservations with the orchestrator's lease and letting the live lease win. (3) Multi-currency adds a third Try against a treasury account at a quoted rate; if any Try fails, all three Cancel.
+**What limits this write path: one row.** The balance update is a single-row write, so an account's ceiling is roughly one committed transaction per row per transaction duration. At 1-2ms including commit, that is 500-1,000 writes/s. Ordinary users are nowhere near it. A popular merchant at 3,000 credits/s is 3-6× over, and the failure is not a graceful plateau. Under optimistic concurrency:
 
-**TCC vs 2PC vs Saga — when to pick each.** *[Source: Pat Helland / chris-richardson microservices.io]* All three coordinate cross-shard work; the choice depends on whether reservations are possible and how partial-failure visibility is handled.
+```sql
+UPDATE accounts SET balance = balance + ?, version = version + 1
+  WHERE user_id = ? AND version = ?
+-- 0 rows updated means someone else committed first, so re-read and retry
+```
 
-| Dimension | 2PC | Saga | TCC |
-|---|---|---|---|
-| Coordination | Distributed locks held across prepare/commit | Forward steps + compensations | Reservations + Confirm/Cancel |
-| Locks | Row-level locks held until coordinator commits | None | Brief, only during Try transaction on each shard |
-| Coordinator failure | Locks held until manual recovery (catastrophic) | Saga state durable; resume forward or compensate | Reservation TTL auto-cancels (graceful) |
-| Partial-failure visibility | None — atomic at commit, all-or-nothing | Intermediate states visible (e.g. "refund pending") | Reserved/pending columns visible but funds not yet moved |
-| External system support | No (need 2PC participants) | Yes (compensation = API call) | Possible if external supports reserve/confirm idiom |
-| Latency | One prepare round-trip + one commit | N forward steps, sequential or parallel | Try (parallel) + Confirm (parallel) ≈ 2 round-trips per shard |
-| Use when | All participants tightly coupled, can hold locks briefly | External systems involved (PSP), long-running flows | Cross-shard money where reservation is meaningful and atomicity matters |
+every retry re-reads a version that has already moved again, so goodput falls as offered load rises. Pessimistic `SELECT FOR UPDATE` removes the thrash and replaces it with a queue, which at 3,000/s against a 500/s row means the queue grows without bound.
 
-Wallets pick TCC because (a) money requires no-double-spend semantics, ruling out plain Sagas where a partial-success visible balance is wrong; (b) cross-shard 2PC means the wallet's transactional store must support distributed transactions (Spanner, Yugabyte, CockroachDB), and even then a coordinator stall holds locks across both shards; (c) TCC's reservation columns are application-level state, so any shard with row-level ACID supports it.
+The fix that preserves the ledger is to stop making them the same row. Split the merchant into 16 sub-balances, `merchant_X:0` through `merchant_X:15`. Each credit hashes onto one, giving ~190 writes/s per row, comfortably inside the ceiling. The ledger is unaffected: entries are still written one per movement, still reference the logical merchant account, and the merchant's balance is `SELECT SUM(balance) WHERE account_prefix = 'merchant_X'`, a 16-row read. Debits are the awkward part, because a single large payout may exceed any one sub-balance. Route debits through a designated sub-balance and run a background rebalancer that levels the sixteen with internal transfers, which are themselves ordinary double-entry movements between accounts the merchant owns, so the invariant still holds.
 
-**Ledger reconciliation patterns.** *[Source: Square / Modern Treasury ledger patterns]* The ledger is double-entry and event-sourced; reconciliation enforces three invariants per shard, per hour: (1) `sum(debits) == sum(credits)` over all entries — a global-zero invariant enforced by every event being a paired debit+credit, checkable in O(N) full-scan or O(1) incrementally; (2) per-account `sum(ledger_entries.amount) == accounts.balance` — the materialized balance is a cache of the entry stream; (3) cross-shard `outbox` reconciliation — every entry must have a corresponding event delivered to the partitioned event stream, verified by a separate streaming consumer that diffs `outbox` entry counts against committed event-stream offsets per shard. Drift on any invariant freezes the affected account immediately and pages on-call; auto-correction is forbidden because a silent corrector is a silent thief.
+**Proving the cache is correct.** Reconciliation runs hourly, per shard, and checks three things. (1) `sum(debits) == sum(credits)` across all entries, computable incrementally from the running total rather than as a full scan. (2) Per account, `sum(ledger_entries.amount) == accounts.balance`. This is the one that catches a materialisation bug. (3) Every committed entry has a corresponding event on the downstream stream, verified by diffing outbox row counts against committed stream offsets per shard.
+
+Drift on any of the three freezes the affected account and pages. It never auto-corrects. That rule sounds excessive until you notice that an auto-corrector is a program with write access to every balance and a mandate to change them without a human in the loop, which is a description of the worst possible bug in this system. A silent corrector is a silent thief.
 #### Where it breaks
 **must-say**
 
 **Bottlenecks**
 
-- **Hot account** (popular merchant) — thousands of credits/sec hit one balance row, optimistic-lock retries thrash, throughput collapses to a few hundred TPS. *Mitigation:* a write-behind aggregator buffers credits to that account in memory, flushes every N ms or every M operations as a single transaction; the invariant (entries match balance) is preserved per batch. Alternative: shard the hot account into N sub-accounts (`merchant_X_shard_0..N-1`), credits pick a random shard, balance reads sum across.
-- **Cross-shard transfers dominant** — if shards are placed randomly, most transfers cross shard boundaries and pay TCC overhead instead of fast-path ACID. *Mitigation:* place users on shards by social-graph locality — friends/family on the same shard via a periodic graph-cut algorithm — so the common P2P case stays in-shard. Predictable pairs (employer→employee, customer→merchant) get co-located on shard creation; long-tail random transfers accept TCC cost.
-- **Long-running TCC** — an orchestrator crash between Try and Confirm leaves reservations held; without cleanup they accumulate, eventually choking accounts that have funds reserved against transfers that will never confirm. *Mitigation:* every reservation carries a TTL (e.g. 30s for retail, longer for high-value); a background sweeper auto-cancels expired reservations and emits a compensating ledger event. Tag reservations with the orchestrator's lease ID so a recovered orchestrator's late Confirm cannot race with the sweeper's auto-cancel — whoever's lease is current wins.
-- **Reconciliation** — silent corruption (a missed event, a partial write, a clock skew) accumulates undetected and the materialized balance drifts from the ledger; if discovered late, no recovery is possible because the source events have rolled out of hot retention. *Mitigation:* run continuous per-shard reconciliation jobs that diff `accounts.balance` against `sum(ledger_entries)` for every account once per hour (not just daily). Drift triggers freeze + alert + replay-from-events to determine canonical balance; the materialized balance is corrected with an audit-trailed adjustment entry, and the ledger remains truth.
-- **Fraud / abuse** — velocity attacks (many small transfers to launder funds, account-takeover sweeps) move money out before detection if fraud is on the hot path. *Mitigation:* hot path enforces only hard rules (daily limit, blocked accounts, velocity hard caps) which are O(1) lookups in Redis; soft fraud detection runs as async consumers on the event stream, computing graph anomalies, device fingerprint clusters, and velocity z-scores. High-risk scores escalate to step-up auth or temporary holds rather than blocking the transfer outright. Per-user, per-day, and per-corridor velocity limits are enforced atomically with the balance update via a `velocity_counters` table updated in the same transaction.
-- **TCC reservation TTL vs Confirm race** — orchestrator crash mid-flight leaves reservations; the sweeper auto-cancels at TTL; the recovered orchestrator tries to Confirm against a cancelled reservation, leading to inconsistent state if not guarded. *Mitigation:* every reservation row stores the orchestrator's `lease_id`; sweeper only cancels when the lease is provably expired; Confirm queries `WHERE lease_id = current_lease` so a stale orchestrator's Confirm finds zero rows and fails cleanly into the Saga's failure path. Add a `cancelled_at` audit column so post-mortem can distinguish sweeper-cancellation from explicit-cancel.
-- **Outbox-to-event-stream lag** — the relay process polls the `outbox` table and forwards to Kafka; under load the relay falls behind and downstream consumers (fraud, analytics) see stale data, breaking real-time fraud detection on the freshest transfers. *Mitigation:* use Postgres logical decoding (Debezium, pgoutput) instead of polling — every committed `outbox` write is streamed to Kafka with sub-second latency, eliminating the polling gap. The relay is replaced by a CDC pipeline bounded by Postgres WAL throughput, not poll frequency. Outbox table is truncated periodically once messages are acknowledged in Kafka.
-- **Cross-currency FX arbitrage on stale quotes** — quote locked at request time; user delays Confirm; market moves; bad actor confirms only when market moves in their favour, creating systemic loss. *Mitigation:* short quote TTL (5–30s typical); reservations on cross-currency transfers expire with the quote, not the transfer's reservation TTL; Confirm validates quote freshness inline. Treasury hedges aggregate FX exposure on a separate timeline (continuous), so the wallet doesn't bear individual quote slippage. *If pushed:* market-makers price the spread to absorb the optionality cost — explicit pricing rather than implicit loss.
+- **Sweeper versus a late Confirm.** An orchestrator stalls between Try and Confirm, the sweeper cancels the reservation at its 30s TTL, then the orchestrator wakes and confirms a reservation that no longer exists. Done naively this credits the receiver against money already returned to the sender. *Mitigation:* every reservation row carries the orchestrator's `lease_id`. The sweeper cancels only leases it can prove are expired, and Confirm runs `WHERE reservation_id = ? AND lease_id = ?`, so a stale orchestrator's Confirm matches zero rows and fails into the transfer's failure path instead of half-applying. A `cancelled_by` column keeps sweeper cancellations distinguishable from explicit ones during a post-mortem.
+- **Fraud on the hot path.** Velocity attacks and account-takeover sweeps move money out faster than a scoring model can respond, but putting a model inline adds latency to all 10k/s. *Mitigation:* split by cost. The hot path enforces only O(1) hard rules, meaning blocked-account checks and per-user daily caps read from a fast key-value store, plus a `velocity_counters` row updated in the same transaction as the balance so the count cannot drift from reality. Everything statistical (graph anomalies, device clustering, z-scores) runs as async consumers on the event stream and escalates to step-up auth or a hold rather than blocking inline. This concedes that the first few transfers of a novel attack will succeed.
+- **Outbox relay lag.** Balance changes commit but the process forwarding them to the event stream falls behind under load, so fraud and notification consumers see a stale world exactly when freshness matters. *Mitigation:* stream from the write-ahead log via logical decoding rather than polling the outbox table, which makes the delay a function of replication throughput rather than poll interval. Note this does not remove the failure, it moves the bound; a consumer that cannot keep up is still behind, so consumer lag is the alert, not relay lag.
+- **FX arbitrage on a held quote.** A cross-currency transfer locks a rate at request time. If the user controls when Confirm happens, they hold a free option: confirm when the market moved their way, abandon when it did not. *Mitigation:* bind the reservation TTL to the quote TTL (5-30s) rather than the transfer's 30s default, and revalidate quote freshness inside Confirm. Treasury hedges the aggregate exposure on its own schedule. The residual optionality is priced into the spread, which is honest rather than solved.
+- **Reconciliation at rest.** The hourly check reads every account row and every entry written in the window. At 480M entries/day, the hourly window is 20M entries and 100M account rows across 128 shards. *Mitigation:* keep a running per-account entry total updated in the same transaction as the entry insert so the check is a column comparison rather than an aggregation, and full-scan only on a nightly schedule as a check on the running total itself.
 
 **Failure modes**
 
 | Layer | Failure | Detection | Mitigation |
 |---|---|---|---|
-| Cross-shard reservation | Try succeeds on one side but orchestration dies before Confirm/Cancel | Open-reservation age and stale-transfer alarms | Reservation TTL plus durable orchestrator state and lease-aware cleanup |
-| Hot account | Optimistic locking on a very hot balance row devolves into endless retries | Retry-rate spike and per-account contention histogram | Switch hot accounts to buffered or pessimistic path and batch credits |
-| Outbox / event stream | Balance changes commit but downstream event publication lags | Outbox age and stream-offset lag | Use transactional outbox or logical decoding, and keep consumers off the OLTP path |
-| Ledger reconciliation | Materialized balance drifts from append-only ledger | Hourly drift checks and invariant-violation alerts | Freeze the account, replay ledger to canonical state, then apply explicit adjustment entry |
-| FX quote | Cross-currency reservation outlives the quoted rate | Quote-expiry mismatch and stale-FX Confirm attempts | Bind reservations to quote TTL and fail/redo expired FX transfers |
-| Escrow / pending account | Pending-recipient or invite-wallet balance is orphaned | Unclaimed-transfer age metrics | Sweep expired pending wallets back to sender via explicit reversal flow |
+| Cross-shard reservation | Try succeeds on one side but the orchestrator dies before Confirm or Cancel | Open-reservation age and stale-transfer alarms | Reservation TTL, durable orchestrator state, lease-aware cleanup |
+| Hot account | A very hot balance row degenerates into an optimistic-retry storm | Retry-rate spike and per-account contention histogram | Split into sub-balances, or batch that account's credits |
+| Outbox and event stream | Balance changes commit but downstream publication lags | Consumer lag against committed stream offsets | Log-based capture instead of polling; keep consumers off the OLTP path |
+| Ledger reconciliation | Materialised balance drifts from the append-only ledger | Hourly drift check and invariant-violation alert | Freeze, page, recompute from entries, apply an adjustment entry only with human sign-off |
+| FX quote | A cross-currency reservation outlives the rate it quoted | Quote-expiry mismatch on Confirm attempts | Bind the reservation TTL to the quote TTL and revalidate inline |
+| Escrow account | A transfer to a not-yet-registered recipient is never claimed | Unclaimed-transfer age metrics | Sweep expired escrow back to the sender as an explicit reversing pair |
 
 **Unresolved**
 
-TODO. Two or three things this design genuinely does not handle well, and what you would do about each.
+**The fast path is not the common path, and co-location does not really fix that.** Hash placement puts under 1% of random pairs on the same shard, so the single-transaction path described as the fast path handles a rounding error's worth of traffic. Co-locating by social graph is a real technique, but the graph moves, a cut computed weekly is stale by the weekend, and relocating an account between shards means either moving its ledger history or accepting a history split across two shards, which breaks the per-account reconciliation query. What I would actually do is stop treating cross-shard as the exception: budget every latency and capacity number for the TCC path, and co-locate only the pairs that are stable and high-volume enough to be worth pinning by hand, such as a merchant and its own settlement account or a payroll payer and its employees. The long tail stays cross-shard forever.
+
+**Reconciliation can detect drift but cannot safely repair it.** The invariant check works and it is cheap. The problem is what firing means: auto-correcting the balance to match the entries would give a background job unreviewed write access to every balance in the system, so the rule is freeze and page. That makes the failure mode of the safety mechanism a real person locked out of their own money for as long as the on-call takes. The false-positive rate is also not zero, because a check that races an in-flight Confirm sees a mismatch that would have resolved itself. Partial answer: re-run the check after a short delay before acting, and freeze debits only, letting credits and reads through so the account is degraded rather than dead. That shrinks the blast radius and does not eliminate it.
+
+**Everything above holds only inside the wallet.** The invariant is enforceable because both accounts are ours. Top-up and withdrawal cross into card and bank rails where it is not: a payout is submitted, the bank's answer arrives hours or days later, and in between the wallet's books and the bank's books disagree by construction. Modelling the external leg as a transfer against a system rails account keeps the internal invariant intact, but it relocates the discrepancy into that one account rather than resolving it. The honest position is that the external leg is a different problem with a different answer (file-based settlement reconciliation, which is Q23), and that the wallet's correctness guarantees stop at its own boundary.
 #### Drill questions
-1. TCC reservation succeeds but Confirm step crashes — what happens?
-2. How do you prevent double-spend when two transfers from A run concurrently?
+1. A TCC reservation succeeds but the Confirm step crashes. What happens?
+2. How do you prevent double-spend when two transfers from the same account run concurrently?
 3. How do you detect fraud without slowing down every transfer?
-4. Reconciliation finds the sum-of-ledger-entries doesn't equal current balance for one account. Now what?
-5. User wants to send money to a brand new user who hasn't signed up yet?
-6. How do you do multi-currency without arbitrage exploits?
+4. Reconciliation finds that the sum of ledger entries does not equal the current balance for one account. Now what?
+5. A user wants to send money to someone who has not signed up yet. Where does it live?
+6. How do you support multi-currency without handing users a free option?
 7. Why TCC instead of 2PC across two ACID-capable Postgres shards?
-8. How do you reconcile in-flight TCC reservations against the materialized balance?
-9. An orchestrator crash leaves a reservation; the sweeper auto-cancels at TTL; meanwhile the recovered orchestrator tries to Confirm — race condition?
-
-TODO. Only 9 drill questions carried over, top up to at least 10.
+8. How do you reconcile in-flight reservations against the materialised balance?
+9. An orchestrator crash leaves a reservation, the sweeper cancels it at TTL, and the recovered orchestrator then tries to Confirm. Race condition?
+10. Should a balance read be strongly consistent? What exactly do you show the user?
+11. Your cross-shard fraction turns out to be 99%, not 10%. Does the design change?
+12. A merchant account is taking 3,000 credits/s. What breaks first, and what do you do?
+13. Why is the balance materialised at all, rather than summing the ledger on read?
 #### Answers to drill questions
-1. Orchestrator state is durable (Temporal or Postgres-backed workflow) — a crash mid-Saga resumes from the last persisted step. Confirm and Cancel are idempotent and keyed by `transfer_id`, so retries can't double-apply. Reservation TTL is a backstop for a truly dead orchestrator, not the primary recovery path. *If pushed:* TTL auto-cancel races with a delayed Confirm — tag each reservation with the orchestrator's lease, only auto-cancel once the lease expires, and the live orchestrator's decision wins.
+1. Orchestrator state is durable, so a crash mid-flight resumes from the last persisted phase rather than restarting. Confirm and Cancel are idempotent on `(transfer_id, side)`, so a resumed orchestrator replaying Confirm cannot double-apply. The reservation TTL is a backstop for an orchestrator that is genuinely dead, not the primary recovery path. *If pushed:* the TTL cancel can race a delayed Confirm, which is question 9.
 
-2. Optimistic locking on `accounts.version` — both Try steps read version N; the second to commit fails the version check and retries with fresh state. The balance check (`balance >= amount`) is enforced atomically in the same UPDATE. *If pushed:* under heavy contention on hot accounts, switch to pessimistic `SELECT FOR UPDATE` for that account class — slower but no retry storms.
+2. The predicate lives inside the write: `UPDATE ... SET available = available - 80 WHERE user_id = ? AND available >= 80`. The second transfer finds insufficient funds, updates zero rows, and fails. There is no read-then-write window to race. `accounts.version` is incremented for optimistic concurrency, so a concurrent reader-modifier also loses cleanly. *If pushed:* under sustained contention the retries themselves become the problem, at which point that account moves to a pessimistic `SELECT FOR UPDATE` path or gets split.
 
-3. Fraud lives off the Kafka stream — async consumers compute velocity, graph anomalies, device fingerprints. Hot path only enforces hard rules (daily limit, blocked accounts). *If pushed:* introduce a fast pre-screen ML score (cached embedding lookup) on the hot path that adds <5ms; fraud score above threshold escalates to step-up auth instead of blocking.
+3. Split by cost. The hot path enforces only O(1) hard rules: blocked-account lookup, per-user daily cap, and a `velocity_counters` row bumped in the same transaction as the balance so it cannot drift. Statistical detection (graph anomalies, device clustering, velocity z-scores) runs as async consumers on the event stream and escalates to step-up auth or a temporary hold. *If pushed:* a cached-embedding pre-screen scoring under 5ms can go inline, but it changes the failure mode: now the fraud model is on the critical path for money movement and its outage becomes a wallet outage, so it needs a fail-open default.
 
-4. Freeze the account, alert ops, replay all ledger entries to compute the canonical balance, diff against current. The ledger is truth — the materialized balance is wrong and gets corrected with an audit-trailed adjustment entry. *If pushed:* run reconciliation continuously per shard (not just daily) so drift is caught in minutes, not 24 hours.
+4. Freeze the account, page, and recompute the canonical balance by summing entries. The entries are truth and the balance is a cache, so the balance is what is wrong. Correct it with an explicit adjustment entry that is itself audited, and only with human sign-off. *If pushed:* why not auto-correct? Because the corrector would be a background job with unreviewed write access to every balance, which is a worse risk than the drift it fixes. Also freeze debits only, so a false positive degrades the account rather than killing it.
 
-5. Create a "pending wallet" keyed by phone/email with the funds in escrow. When the recipient signs up and verifies, the escrow releases to their real account. If unclaimed after N days, refund sender. *If pushed:* escrow lives in a system account with its own balance; no money is ever in limbo without a ledger home.
+5. Create an escrow account keyed by the phone number or email, holding the funds as a real balance with real entries. When the recipient registers and verifies, transfer escrow to their account as an ordinary movement. Unclaimed after N days, reverse it to the sender. *If pushed:* the point is that money is never in limbo. Every cent has an account, even when that account has no legal owner yet, which is also the part your compliance team will want to talk about.
 
-6. Hold a balance per (user, currency); transfers across currencies are two ledger transactions plus an FX entry against a treasury account at a quote you locked at request time. Lock has a short TTL. *If pushed:* hedge FX exposure on the treasury side; otherwise small price moves between user-quote and market-execution drain margin over time.
+6. One balance row per `(user, currency)`, never one row with a currency field mutated. A cross-currency transfer is three legs: debit the sender's currency, credit the receiver's, and an FX entry against a treasury account at a locked quote. *If pushed:* the exploit is the held quote. If the user chooses when to confirm, they hold a free option and will exercise it only when the market moves their way. Bind the reservation TTL to the quote TTL (5-30s), revalidate freshness inside Confirm, hedge the aggregate on the treasury side, and price the residual into the spread.
 
-7. 2PC requires a distributed transaction coordinator (e.g. XA), which holds row locks on both shards from prepare to commit. A coordinator pause means both shards' rows are locked — other transfers touching those accounts queue, and a coordinator crash needs manual lock recovery. TCC moves coordination into the application: the Try is a normal local ACID write that releases its lock immediately, leaving only a `reserved` column as durable state. Reservation TTLs auto-clean up; no central coordinator holds locks. *If pushed:* if your shards happen to be one logical Spanner/CockroachDB cluster with built-in distributed txns, you can use those — but that's a different system entirely, and it pays the same coordination cost internally that TCC pays explicitly.
+7. 2PC needs a coordinator that holds row locks on both shards from prepare to commit. A coordinator pause locks both rows, queues everything touching those accounts, and a coordinator crash needs manual recovery. TCC pushes coordination into the application: Try is a normal local write that releases its lock in 1-2ms and leaves a `reserved` column as its durable state, and that column has a deadline. *If pushed:* if the shards are actually one Spanner or CockroachDB cluster in one region, use the built-in distributed transaction. It pays the same coordination cost internally but you do not have to write or operate the state machine, and at a few thousand transfers per second with no hot accounts that is the better trade. TCC earns its complexity multi-region, where the lock would be held 60-150ms.
 
-8. The balance check is `sum(ledger_entries) == accounts.balance` — *not* `accounts.balance + accounts.reserved`. Reservations don't have ledger entries yet — they're application-level holds on available balance. The reconciliation invariant only checks committed money. A separate "reservation health" job lists open reservations and their ages, alerting on any older than 5x the configured TTL (suggests sweeper or orchestrator failure). *If pushed:* on Confirm, the ledger entry is written in the same transaction as `reserved -= amount; balance -= amount` (sender) — atomicity makes the invariant hold instantly post-Confirm.
+8. The invariant is `sum(ledger_entries) == accounts.balance`, deliberately *not* `balance + reserved`. Reservations have no entries because no money has moved; they are application-level holds. A separate reservation-health job tracks open reservations by age and alerts on anything older than 5× the configured TTL, which indicates the sweeper or the orchestrator has failed. *If pushed:* Confirm writes the entry in the same transaction that clears the hold, so the instant a reservation stops existing the invariant covers it. There is no window where a reservation is gone and its entry is not yet written.
 
-9. Each reservation row carries the orchestrator's `lease_id`. On recovery the orchestrator's lease may have expired; the sweeper runs only after lease expiry, and the orchestrator's Confirm checks `WHERE reservation_id=X AND lease_id=current_lease` — if the sweeper has already cancelled, zero rows match and Confirm fails. The Saga then escalates to `failed_orchestrator_timeout`. *If pushed:* the safer pattern is a fence-token on the reservation that only the live lease can advance; the sweeper holds a different fence and only cancels reservations whose lease is provably dead.
+9. Each reservation carries the orchestrator's `lease_id`. The sweeper cancels only reservations whose lease is provably expired, and Confirm runs `WHERE reservation_id = ? AND lease_id = ?`. If the sweeper got there first, Confirm matches zero rows and fails into the transfer's failure path rather than half-applying. *If pushed:* a fencing token is the more rigorous version, where the live lease alone can advance the token and the sweeper's cancel carries an older one and is rejected. Either way the rule is the same: the losing party must fail loudly, not silently succeed.
+
+10. Strongly consistent, read from the shard leader, and show three numbers: available (`balance - reserved`), pending incoming, and total. Pending is never spendable. The reason is not cost, because 12k peak reads across 128 shards is under 100/s per leader. The reason is direction: a stale read after a debit shows money that is already gone, and a balance that reads high is a different category of defect from one that reads low. *If pushed:* follower reads are defensible when the number is decoration and every spend re-checks authoritatively, but never where the read is the authorisation, such as an offline transit gate.
+
+11. It does not change, and that is the point: the design should already assume it. With `user_id % 128`, 99% cross-shard is the expected result, not a surprise. What changes is where you spend effort: co-locating random users is futile, so pin only stable high-volume pairs, and every capacity and latency number should be quoted for the TCC path with the single-transaction path treated as a bonus. *If pushed:* if the interviewer wants the fast path to be common, the honest answer is a different partitioning scheme or a single-cluster distributed transaction, not a better graph-cut.
+
+12. The single balance row breaks first. At 1-2ms per committed transaction, one row absorbs 500-1,000 writes/s, and 3,000/s does not queue gracefully, it thrashes: every optimistic retry re-reads a version that has already moved. Split the merchant into 16 sub-balances, hash credits across them for ~190/s each, and sum 16 rows on read. Ledger entries are unchanged, one per movement, still referencing the logical account. *If pushed:* debits are the hard part, since a large payout may exceed any one sub-balance. Route debits through a designated sub-balance and rebalance in the background with internal transfers, which are just double-entry movements between accounts the merchant already owns.
+
+13. Because summing is not free at this size. A five-year-old account holds roughly 15,000 entries, and at 12k balance reads/s that is 180M row reads/s to compute a number you could have stored. Materialise it and then prove it, with hourly per-account reconciliation against the entries. *If pushed:* the middle ground is a periodic checkpoint entry recording `balance_after`, so a rebuild sums only entries since the last checkpoint rather than all of history. That makes recovery cheap without making the balance authoritative.
 #### Whiteboard script
-TODO
+**0-5, frame it.** Say first, before anything else: "the balance is a cache, the ledger is the system of record." That one sentence tells the interviewer which kind of engineer they are talking to. Then two clarifiers that actually fork the design: does money ever leave the wallet (card top-up, bank withdrawal), and may the displayed balance ever read higher than the truth. Write the invariant in a corner of the board and leave it there for the rest of the hour: `sum(debits) == sum(credits)`. Draw nothing yet.
 
-A 45 minute budget: what to cover in 0-5, 5-15, 15-35 and 35-45, what to say first, and a line starting `Cut first:`.
+**5-15, numbers and shape.** 100M registered, 30M daily active, ~8 movements each, so 240M/day, ~2.8k/s average, ~10k/s peak at 3.5× concentration. Then the number that drives the whole design: with `user_id % 128`, a random pair shares a shard under 1% of the time, so cross-shard is the normal path. Say that out loud, because most candidates present the single-transaction case as the design and the cross-shard case as an aside. Now draw: client, wallet service holding the idempotency key, transfer orchestrator, two account shards, ledger underneath. Six boxes, no more.
 
-**Raw material, from the old Talking Points:**
+**15-35, the mechanism.** Two parts and they are the reason the question exists. First the write path: a transfer is a conditional update plus a debit row plus a credit row in one transaction, and `available >= amount` lives inside the `UPDATE`. Draw the double-spend example on the board ($100 balance, simultaneous $80 and $70) and show the second statement matching zero rows. Second, cross-shard: Try reserves on both sides and writes no entry, Confirm clears the hold and writes the entry in the same local transaction. Say explicitly why that ordering matters, which is that Confirm can then only fail for infrastructure reasons. Add the reservation TTL and the lease id that stops the sweeper racing a late Confirm. This is where the interviewer will push, so protect the time.
 
-- **Same-shard ACID fast path, cross-shard TCC slow path** is the architecture in one sentence.
-- **Reserved and pending columns** are what make cross-shard transfer safe without distributed locks.
-- **TCC beats 2PC operationally** because it avoids coordinator-held locks across shards.
-- **Event-sourced ledger plus outbox** is the downstream integration story.
-- **Hot-account mitigation matters.** Many candidates forget that one merchant can become a write hotspot.
-- **Continuous reconciliation is part of the design, not an afterthought.**
+**35-45, limits and honesty.** Hot merchant account with the number attached: one row commits 500-1,000 writes/s, a 3,000/s merchant needs splitting 16 ways, reads sum the 16. Reconciliation hourly, freeze on drift, never auto-correct, and say why. Then concede the external-rails gap before being asked: the invariant is enforceable only because both accounts are yours, and top-up and withdrawal leave that world.
+
+Cut first: the event stream and its downstream consumers, then multi-currency and FX. Both are genuinely interesting and both are large enough to eat the remaining time without demonstrating anything the ledger discussion has not already shown. If fraud comes up, answer in one sentence (hard rules inline as O(1) lookups, scoring async off the stream) and get back to the ledger.
 #### Appendix
 **Data model**
 
-- **accounts** (transactional store, sharded by user_id):
-  `(user_id, currency, balance, version, updated_at)` — version for optimistic locking
-- **ledger_entries** (transactional store, append-only):
-  `(entry_id, user_id, ts, amount, type, reference, balance_after)`
-- **transfers** (transactional store):
-  `(transfer_id, from_user, to_user, amount, currency, status, idempotency_key, created_at)`
+- **accounts**, sharded by `user_id`, one row per `(user_id, currency)`:
+  `(user_id, currency, balance, reserved, pending, version, updated_at)`. `version` drives optimistic concurrency; `balance - reserved` is what the user may spend.
+- **ledger_entries**, append-only, no update or delete grant:
+  `(entry_id, user_id, ts, amount, type, reference, balance_after)`. Paired rows share a `reference`.
+- **reservations**:
+  `(reservation_id, transfer_id, side, user_id, amount, lease_id, expires_at, cancelled_by)`.
+- **transfers**:
+  `(transfer_id, from_user, to_user, amount, currency, status, idempotency_key, created_at)`.
 
 **API contract**
 
@@ -10673,12 +10689,12 @@ GET  /history/{user_id}?cursor             → [transactions]
 
 **Observability**
 
-- **Same-shard vs cross-shard transfer mix** — determines how much TCC overhead the system is actually paying.
-- **Try/Confirm/Cancel latency** — core operational metric for cross-shard correctness.
-- **Open reservation count and age** — quickly reveals orchestration failures.
-- **Optimistic-lock retry rate** — leading indicator for hot-account contention.
-- **Ledger-to-balance drift** — should be zero; any non-zero value is incident-grade.
-- **Outbox / CDC lag** — fraud, analytics, and notifications depend on it staying low.
+- **Same-shard versus cross-shard transfer mix.** Tells you how much of the TCC overhead you are actually paying, and whether co-location work is achieving anything.
+- **Try, Confirm and Cancel latency, separately.** Confirm latency rising without Try latency rising means an orchestrator problem, not a database one.
+- **Open reservation count and age histogram.** Anything older than 5× the TTL means the sweeper or the orchestrator has failed.
+- **Optimistic-lock retry rate per account.** The leading indicator for hot-account contention; alert before goodput falls, not after.
+- **Ledger-to-balance drift.** Should be exactly zero. Any non-zero value is incident-grade regardless of magnitude.
+- **Downstream consumer lag against committed stream offsets.** Measured at the consumer, not at the relay, because the relay being healthy proves nothing.
 
 **Multi-region and DR**
 
@@ -10690,34 +10706,47 @@ GET  /history/{user_id}?cursor             → [transactions]
 
 ### 25. Design a Stock Exchange (Matching Engine)
 #### Problem
-Match buy/sell orders for financial instruments with deterministic, microsecond-latency, audit-grade execution.
+Run a venue that accepts orders from member firms, matches them into trades under published priority rules, and publishes the resulting market data to every subscriber at the same instant. Latency is measured in microseconds, the execution order must be provable years later, and a wrong or unreproducible fill is a regulatory event rather than a bug.
 #### Core
-TODO
+Everything in a venue follows from one decision: where you assign the total order. Matching is the easy part.
 
-Write the whole answer as you would give it in sixty seconds, 200 to 300 words, standing alone.
+Orders arrive from member firms at gateways that authenticate, validate, and run pre-trade risk: max size, max notional, buying power, kill switch. Risk sits here, before sequencing, because a rejected order must never enter the official record. Survivors go to the sequencer, a single pinned thread that stamps a global sequence number and appends to a replicated durable log before acknowledging. That log is the system of record; everything downstream is derived state.
+
+Matching engines consume the log, one single threaded engine per symbol, each holding sorted price levels with a FIFO queue at each level. Single threading is not a performance compromise, it is the correctness property. The engine is a pure function of its input log, so a standby replaying that log is byte identical to the primary, failover is a redirect rather than a state migration, and any trading day can be reproduced on demand.
+
+Outputs pass through an output sequencer and go out on reliable multicast, so every subscriber receives the same bytes at the same instant. Fairness is physical rather than logical.
+
+The engineering budget goes on jitter, not throughput. C++ or Rust, pools preallocated at startup, no allocation on the hot path, cores isolated from the scheduler, kernel bypass at the NIC. A 50ms garbage collection pause at the open is an outage.
+
+Scale comes from partitioning by symbol. One tuned core handles far more than any single symbol sends. The sequencer is the only shared component and the only real ceiling.
 #### Summary
-**The picture in your head:** a human auctioneer at a livestock market calling out prices and matching buyers to sellers — except this auctioneer handles 50,000 bids per second on a single stock, must process them in the exact order they arrived (not the order they were shouted), and if they miss one or get the order wrong, regulators will fine the exchange millions of dollars. The only way to guarantee that order is to have one auctioneer per stock, processing one card at a time, with no interruptions.
+**The picture in your head:** a human auctioneer at a livestock market calling out prices and matching buyers to sellers, except this auctioneer handles 50,000 bids per second on a single stock, must process them in the exact order they arrived rather than the order they were shouted, and if they miss one or get the order wrong, regulators will fine the exchange millions of dollars. The only way to guarantee that order is to have one auctioneer per stock, processing one card at a time, with no interruptions.
 
 **The approaches people actually take:**
-TODO. Two or three things a competent engineer might reach for, in plain language and before any product name, with what each one buys and roughly when it wins.
 
-**The single-request walkthrough:** a trader submits a buy order for 300 shares of AAPL at $100.10. The order hits a **gateway server** (validates the format, checks the trader's risk limits — "do they have enough cash?"). The gateway passes the order to a **sequencer**, a single-threaded process that stamps it with a global sequence number (say, seq=1234) and writes it to a durable log before anything else happens. The **matching engine for AAPL** — a separate process that reads from this log — sees seq=1234: "buy 300 @ $100.10." It checks the order book: there is a sell order for 100 shares at $100.05 (cheaper than the buyer is willing to pay, so it matches). The engine generates a **trade** (buy order filled 100 shares @ $100.05), removes that sell from the book, then checks the next best sell: 150 shares at $100.08 — also matches, another trade. Next sell is at $100.12 — above the buyer's $100.10 limit, no match. The remaining 50 shares go into the bid side of the book. The engine emits market data updates over a multicast network so all subscribers see the new book state simultaneously.
+*One ordering point for the whole venue, then one worker per instrument.* A single thread stamps arrival order for every message, and each instrument's book is rebuilt by one worker reading that tape. It buys an indisputable answer to "what happened first" across symbols as well as within one, and it makes the standby a second reader of the tape rather than a replica to keep in sync. It costs a venue-wide throughput ceiling of one thread. It wins whenever peak inbound fits in one core, which for a national equities venue it comfortably does.
+
+*Order per instrument only, with no global ordering point.* Gateways write straight into each instrument's own stream and only that stream is ordered. This scales linearly with no shared ceiling. You lose any venue-wide notion of before and after, so you cannot answer a regulator asking whether an order in one symbol preceded one in another, and anyone trading two symbols as a single position sees skew between the legs. It wins where instruments are genuinely independent: crypto pairs, or a single-product derivatives venue.
+
+*Batch the order instead of racing it.* Collect arrivals into short discrete windows, a few milliseconds each, and clear each as a uniform-price auction. This removes the value of being a microsecond earlier, and determinism becomes trivial because nothing is ordered within a batch. It costs continuous liquidity and needs participants and the regulator to accept a change in market structure. It wins where the arms race itself is the problem, which is the case periodic-auction venues make and the argument in the frequent-batch-auction literature from 2015 onwards.
+
+**The single-request walkthrough:** a trader submits a buy order for 300 shares of AAPL at $100.10. The order hits a **gateway server**, which validates the format and checks the trader's risk limits ("do they have enough cash?"). The gateway passes the order to a **sequencer**, a single-threaded process that stamps it with a global sequence number (say, seq=1234) and writes it to a durable log before anything else happens. The **matching engine for AAPL**, a separate process that reads from this log, sees seq=1234: "buy 300 @ $100.10." It checks the order book: there is a sell order for 100 shares at $100.05, cheaper than the buyer is willing to pay, so it matches. The engine generates a **trade** (buy order filled 100 shares @ $100.05), removes that sell from the book, then checks the next best sell: 150 shares at $100.08, also a match, another trade. The next sell is at $100.12, above the buyer's $100.10 limit, so no match. The remaining 50 shares go into the bid side of the book. The engine emits market data updates over a multicast network so all subscribers see the new book state simultaneously.
 
 **The pieces (and what each one is for):**
-- **Order gateway** — the entry point for member firms (banks, brokers). Validates syntax, authenticates the trader, and runs **pre-trade risk checks** (is the order size within limits? does the firm have enough buying power?). Risk checks happen here, before sequencing, because a bad order must never enter the official record.
-- **Sequencer** — a single-threaded process that assigns a global sequence number to every order and writes it to a **replicated durable log** (think of it like a journal that survives server crashes). The sequencer never matches orders itself; it just creates an authoritative, timestamped record. "What happened, in what order" is the sequencer's only job.
-- **Matching engine (one per symbol)** — reads the sequencer's log and updates the **order book** for its symbol. It is intentionally single-threaded: if two threads processed orders concurrently, the outcome could differ depending on which thread ran first, making the system non-deterministic and impossible to audit by replaying the log. Single-threaded means "given the same log, always produce the same trades" — which is what regulators require.
-- **Order book** — an in-memory data structure with two sorted lists: bids (buy orders, highest price first) and asks (sell orders, lowest price first). Each price level holds a FIFO queue of orders at that price. Implemented as a red-black tree of price levels with a queue at each level; inserting or removing an order takes O(log P) where P is the number of distinct price levels (typically in the hundreds, so this is very fast).
-- **Market data publisher** — sends trade reports and book updates over **reliable multicast** (a network delivery mechanism that sends one packet and the network fans it to all subscribers simultaneously, so every subscriber gets the same bytes at the same time — fairness is physical, not logical).
-- **Hot standby** — a second matching engine process that reads the same sequencer log in real-time. If the primary crashes, the standby is already at the latest sequence number and takes over in under a second — no state migration needed because the log is the state.
+- **Order gateway.** The entry point for member firms (banks, brokers). Validates syntax, authenticates the trader, and runs **pre-trade risk checks**: is the order size within limits, does the firm have enough buying power? Risk checks happen here, before sequencing, because a bad order must never enter the official record.
+- **Sequencer.** A single-threaded process that assigns a global sequence number to every order and writes it to a **replicated durable log**, a journal that survives server crashes. The sequencer never matches orders itself; it creates an authoritative, timestamped record. "What happened, in what order" is its only job.
+- **Matching engine (one per symbol).** Reads the sequencer's log and updates the **order book** for its symbol. It is intentionally single-threaded: if two threads processed orders concurrently, the outcome could differ depending on which thread ran first, making the system non-deterministic and impossible to audit by replaying the log. Single-threaded means "given the same log, always produce the same trades", which is what regulators require.
+- **Order book.** An in-memory structure with two sorted lists: bids (buy orders, highest price first) and asks (sell orders, lowest price first). Each price level holds a FIFO queue of orders at that price. A red-black tree of price levels with a queue at each level gives O(log P) insert and remove, where P is the number of distinct price levels, typically in the hundreds.
+- **Market data publisher.** Sends trade reports and book updates over **reliable multicast**, a delivery mechanism that sends one packet and lets the network fan it out to all subscribers at once, so every subscriber gets the same bytes at the same time. Fairness is physical, not logical.
+- **Hot standby.** A second matching engine process reading the same sequencer log in real time. If the primary crashes, the standby is already at the latest sequence number and takes over in under a second, with no state migration because the log is the state.
 
-**The thing that makes it hard — GC pauses:** if you write a matching engine in Java, the **garbage collector** (the JVM's automatic memory manager) will periodically pause the program to reclaim unused memory. Even a 50-millisecond GC pause during market open on a stock like AAPL means tens of thousands of orders arrive at the sequencer but the engine is frozen — they pile up, and when the engine resumes it processes them in a burst that distorts the time-ordering that price-time priority requires. At microsecond targets, even a 1-millisecond pause is catastrophic. This is why matching engines are written in C++ or Rust, pre-allocate every data structure at startup (so the GC has nothing to collect), and pin the matching thread to a dedicated CPU core with interrupts routed elsewhere.
+**The thing that makes it hard, pauses rather than throughput:** if you write a matching engine in Java, the **garbage collector** will periodically pause the program to reclaim memory. A 50-millisecond pause during market open on a stock like AAPL means tens of thousands of orders arrive at the sequencer while the engine is frozen; they pile up, and when the engine resumes it processes them in a burst that distorts the time ordering that price-time priority depends on. At microsecond targets even a 1-millisecond pause is severe. This is why matching engines are written in C++ or Rust, preallocate every data structure at startup so there is nothing to collect, and pin the matching thread to a dedicated CPU core with interrupts routed elsewhere.
 
-**Why this design and what it costs:** the single-threaded-per-symbol design is the right answer even though it feels like an artificial constraint. The alternative — a multi-threaded engine with locks — adds lock contention (stalls) and non-determinism (two threads acquiring locks in different orders produce different outcomes on identical input). The recovery story also collapses: you cannot replay a multi-threaded history deterministically. Single-threaded means "the engine is a pure function of its input log," which makes replay, audit, and hot-standby failover trivial. The tradeoff is that throughput is capped at one thread's speed — which on modern hardware is ~500,000 operations per second per symbol, more than enough for any single stock.
+**Why this design and what it costs:** the single-threaded-per-symbol design is right even though it feels like an artificial constraint. A multi-threaded engine with locks adds contention (stalls) and non-determinism (two threads acquiring locks in different orders produce different outcomes on identical input), and the recovery story collapses because you cannot replay a multi-threaded history deterministically. Single-threaded means the engine is a pure function of its input log, which makes replay, audit, and hot-standby failover straightforward. The cost is a throughput cap of one thread, roughly 500,000 operations per second per symbol on current hardware, which exceeds what any single stock generates.
 
 **If you were building it tomorrow:**
-- C++ or Rust matching engine, pre-allocated object pools (no heap allocation on the hot path), thread pinned to an isolated CPU core with `isolcpus`.
-- Sequencer uses memory-mapped files (Aeron Archive or Chronicle Queue) for the log — sub-microsecond append, durable on NVMe.
+- C++ or Rust matching engine, preallocated object pools (no heap allocation on the hot path), thread pinned to an isolated CPU core with `isolcpus`.
+- Sequencer uses memory-mapped files (Aeron Archive or Chronicle Queue) for the log: sub-microsecond append, durable on NVMe.
 - Matching hot path:
   ```
   read next order from sequencer log
@@ -10729,11 +10758,11 @@ TODO. Two or three things a competent engineer might reach for, in plain languag
   ```
 - Market data goes out via Aeron multicast to all subscriber NICs in the same data center rack.
 #### What this is really testing
-TODO
+Whether you understand that a venue's product is a verifiable total order, not speed. Every other property follows from one placement decision: where in the pipeline the sequence number is assigned, and what is permitted to happen before it and after it. Risk before sequencing, because the official record must contain no rejects. Durability before visibility, because a trade that exists in the market data feed but not in the log cannot be unwound. Nothing but the log inside the engine, because that is what makes replay, standby failover, and the regulator's reconstruction the same mechanism. A candidate who leads with "single-threaded per symbol for speed" has the right answer for the wrong reason and will not survive the follow-ups.
 
-The one insight this question exists to elicit, then the contrast with the question it most resembles and why the answers differ.
+The contrast is with the limit order book question. That one is bounded by a single instrument: pick the data structure, walk the price levels, keep FIFO within a level, shard by instrument id and route so the same symbol always lands on the same thread. You can answer it well with a price-level array, an intrusive list per level, and a single-writer worker, and the whole discussion stays inside one process. This question starts where that one stops. The book is assumed and gets five minutes. The interview is spent on everything that surrounds it: who assigns order across symbols and what that costs, what is rejected before entering the record, how identical bytes reach every subscriber at the same instant, what happens at 09:30 and at 16:00 when the algorithm changes to a uniform-price auction, what a halt does to resting orders, and what the venue can prove to a regulator seven years later. Give the book answer here and you have answered a smaller question.
 
-Closest question: TODO
+Closest question: Q42
 #### Clarifying questions and how each answer forks the design
 - Order types? (market, limit, stop, etc.)
 - Venue rules: price-time priority? pro-rata?
@@ -10754,38 +10783,41 @@ Closest question: TODO
 #### Requirements and scale, derived out loud
 **Requirements**
 
-- **FR:** place / cancel / modify orders; match (price-time priority); market data feed; trade reporting
-- **NFR:** μs-level latency; deterministic ordering; 100% audit trail; fault-tolerant; no GC
+- **FR:** place / cancel / modify orders; match under the venue's priority rule; market data feed; trade reporting; opening and closing auctions.
+- **NFR:** single-digit μs in the engine; total order provable years later; 100% audit trail; sub-second failover; no unbounded pauses on the hot path.
 
 **Scale**
 
-- **Throughput:** NYSE+Nasdaq consolidated tape peaks ~10M msgs/s; assume our exchange handles ~10% as inbound orders → **~1M orders/s peak** across symbols (open/close auctions and FOMC drive peaks). Per-symbol: long-tail — illiquid ~10/s, tier-1 names (AAPL, SPY, TSLA) ~50k/s.
-- **Symbol count:** **~10k symbols** (NYSE ~2.4k + Nasdaq ~3.7k + ETFs/ADRs/cross-listings → round to 10k).
-- **Order message size:** binary FIX/proprietary fixed-width frame: order_id (8B) + client_id (8B) + symbol_id (4B) + side (1B) + price (8B fixed-point) + qty (4B) + type (1B) + tif (1B) + ts (8B) + padding/flags ≈ **~80B/msg**.
-- **Order arrival volume:** 1M/s × 86,400s = ~85B msgs/day. 85B × 80B = **~7TB/day raw input log** (single sequenced stream preserves audit order).
-- **Input log replication:** 3× hot standby + DR → 7TB × 3 = **~21TB/day**. 7-day hot retention on local NVMe = 7 × 21TB = **~150TB hot**. SEC Rule 17a-4 / CAT mandates **7-year retention**; columnar archive (~10× compression on object store, EC RF≈1.5) → 7TB / 10 ≈ **~250GB/day cold**; lifetime 250GB × 365 × 7 ≈ **~640TB cold**.
-- **Order book depth:** liquid symbols carry ~5k–20k resting orders; entry = order_id ref (8B) + qty (4B) + intrusive prev/next pointers (16B) + price-level link (8B) + flags ≈ **~100B/book entry**. Per symbol ~10k × 100B = ~1MB → round to **~2MB/symbol** for hot-path padding. 10k symbols × 2MB = **~20GB total book state** sharded by symbol; one engine host trivially holds its shard in RAM.
-- **Trade reports:** ~100M trades/day (US-equities order-of-magnitude). Trade rec = trade_id (8B) + buy_oid (8B) + sell_oid (8B) + symbol (4B) + qty (4B) + price (8B) + ts (8B) + envelope ≈ **~200B**. Daily = 100M × 200B = **~20GB/day**. Multicast feed peak (book-update + trade) ≈ **~5M msgs/s**.
-- **Market-data feed:** each match cascades through ~10 price-level deltas (level-2 cancels/updates) → 1M orders/s × ~10 = **~10M book-update events/s peak**. Each delta ~50B (level + side + price + qty + ts) → 10M × 50B = **~500MB/s peak multicast** outbound.
-- **Latency:** match = O(log P) skip-list/red-black price-level lookup (P ≈ 10²–10³ → ~10ns memory ops) + O(1) FIFO pop. Target **single-digit μs in the engine**; gateway-to-ack including kernel-bypass NIC + sequencer + drop-copy: **~10–100μs end-to-end**.
+- **Session length:** continuous trading 09:30 to 16:00 is 6.5h = 23,400s; adding pre-open and post-close order acceptance gives **~8h = 28,800s** of message intake per day.
+- **Peak throughput:** the consolidated US tape peaks around 10M msgs/s; assume our venue takes ~10% of that as inbound order traffic, so **~1M msgs/s peak**, hit at the open, the close, and on FOMC prints. Per-symbol the distribution is long-tailed: illiquid names ~10/s, tier-1 names (AAPL, SPY, TSLA) **~50k/s**.
+- **Average throughput:** intraday average runs at roughly 15% of peak once the open and close bursts are excluded, so 0.15 × 1M = **~150k msgs/s average**.
+- **Daily message volume:** 150k/s × 28,800s = 4.32B, round to **~4B inbound msgs/day**. Sanity check against trades below: this is 40 inbound messages per executed trade, which matches the order-to-trade ratios published for top US venues (most messages are cancels and replaces, not new orders).
+- **Message size:** binary fixed-width frame: order_id (8B) + client_id (8B) + symbol_id (4B) + side (1B) + price (8B fixed-point) + qty (4B) + type (1B) + tif (1B) + ts (8B) + padding/flags ≈ **~80B/msg**.
+- **Input log:** 4B × 80B = 320GB, round to **~350GB/day raw**. Two synchronous local replicas plus one DR copy gives 350GB × 3 = **~1TB/day replicated**. Seven-day hot retention on local NVMe = 7 × 1TB = **~7TB hot**, which is one NVMe shelf.
+- **Cold retention:** SEC Rule 17a-4 and CAT require **7-year** retention. Columnar archive at ~10× compression gives 350GB / 10 = 35GB/day; 35GB × 252 trading days × 7 years ≈ **~62TB cold**, call it 100TB with erasure-coding overhead. Cheap enough that retention is never the constraint; the constraint is that the artifact stays executable.
+- **Order book depth:** liquid symbols carry 5k to 20k resting orders. Entry = order_id ref (8B) + qty (4B) + intrusive prev/next pointers (16B) + price-level link (8B) + flags ≈ **~100B**. Per symbol 10k × 100B = 1MB, round to **~2MB/symbol** with hot-path padding. **~10k symbols** (NYSE ~2.4k + Nasdaq ~3.7k + ETFs, ADRs and cross-listings) × 2MB = **~20GB total book state**, sharded by symbol, so any engine host holds its shard in RAM with room to spare.
+- **Trade reports:** ~100M trades/day. Record = trade_id (8B) + buy_oid (8B) + sell_oid (8B) + symbol (4B) + qty (4B) + price (8B) + ts (8B) + envelope ≈ **~200B**, so 100M × 200B = **~20GB/day**.
+- **Market data:** each aggressive order touches ~10 price-level deltas on average (fills plus the cancels and replaces around them), so at peak 1M msgs/s × 10 = **~10M book-update events/s**. Each delta ~50B (level + side + price + qty + ts), so 10M × 50B = **~500MB/s peak multicast egress**, which is 4Gbps and fits one 10GbE feed per channel with headroom for gap-fill.
+- **Latency:** a match is an O(log P) price-level lookup (P ≈ 10² to 10³, so ~10ns of memory operations) plus an O(1) FIFO pop. Target **single-digit μs inside the engine**; gateway-to-ack including kernel-bypass NIC, risk, sequencer commit and drop-copy is **~10 to 100μs end to end**.
+- **Sequencer headroom:** a tuned single-threaded sequencer sustains 1M to 5M msgs/s. Peak inbound of 1M/s sits at the bottom of that band, which is the number that decides the first fork below.
 #### Key decisions
-TODO
+**Single global sequencer vs a sequencer sharded by symbol**
+- Choice: one sequencer thread linearising every message in the venue, with a second sequencer in the same rack as a synchronous hot replica.
+- Alternative: shard the sequencer by symbol, each shard assigning its own sequence numbers, with a periodic global epoch message broadcast to all shards to bound cross-shard skew.
+- Decider: peak inbound against the single-thread ceiling. A tuned sequencer sustains 1M to 5M msgs/s; our peak is ~1M msgs/s, so one thread carries the venue with 5x headroom and there is no reason to buy the cross-symbol ordering loss. The second half of the decider is whether any participant needs cross-symbol total ordering, which for a listed equities venue with basket trades and ETF arbitrage they do.
+- Alternative wins when: sustained peak exceeds ~5M msgs/s (a large crypto or FX venue with thousands of independently active pairs), or the product set has no cross-instrument dependency at all. Above the ceiling this is not a preference, it is the only option, and the honest answer is that participants trading multiple symbols get epoch-bounded skew rather than a total order, so they must design around a stated skew bound (say 50μs) instead of assuming atomicity.
 
-Two or three genuine forks. For each, in this exact shape so it stays checkable:
+**Price-time priority vs pro-rata allocation**
+- Choice: price-time priority, FIFO within each price level, as the venue default.
+- Alternative: pro-rata, where an incoming aggressive order is allocated across all resting orders at the matched price in proportion to their size, usually with a minimum-allocation floor and a small time-priority component for the first order at the level.
+- Decider: instrument class, specifically how deep the queue at the touch is relative to what actually trades there. On an interest-rate future whose front month quotes a 1-tick spread with 10,000+ lots resting at the touch and a few thousand lots trading at that level per session, a new order joining the back of the queue has effectively zero chance of filling, so the entire economics collapse into a race for queue position rather than a competition on price. When resting size at the touch exceeds roughly 10x the volume that clears at that level per session, FIFO stops allocating on any economically meaningful basis and pro-rata wins.
+- Alternative wins when: the instrument is a large-notional, tick-constrained contract (short-term interest rate futures, some energy contracts) where the tick is wide relative to the true spread. Pro-rata is genuinely better there: it lets a large participant get a proportional share without fully consuming small resting orders, and it removes the incentive to spend money purely on being earlier. The cost is that it weakens the incentive to quote first and invites size inflation, so venues typically run a hybrid with a FIFO component and a maximum allocation cap. The data structure is unchanged either way; only the per-level allocation function differs, so this is a per-symbol config flag read at engine startup, not a different engine.
 
-**<name of the fork>**
-- Choice:
-- Alternative:
-- Decider:
-- Alternative wins when:
-
-**Raw material, from the old Common Mistakes:**
-
-- **Shared multi-threaded matching book.** Locks and scheduling jitter are unacceptable at microsecond targets.
-- **Treating snapshots as the primary durability mechanism.** The sequenced input log is the truth; snapshots only shorten cold recovery.
-- **Using wall-clock time inside the match loop.** Determinism matters more than convenience.
-- **Risk after sequencing.** Rejected orders should not enter the official input log.
-- **TCP-only market-data assumptions.** One-to-many dissemination is a multicast/replay problem, not a normal REST/WebSocket problem.
+**CPU with kernel bypass vs FPGA matching**
+- Choice: matching on a pinned CPU core with kernel-bypass networking, and FPGA used only for the fixed parts of the path: wire-format decode and the static pre-trade risk checks (max order size, max notional).
+- Alternative: implement the matching loop itself in FPGA, so the tick-to-trade path never reaches a CPU.
+- Decider: rule-change frequency against the latency target. CPU matching lands at 1 to 5μs tick-to-trade; FPGA matching lands under 1μs, so the gain is a few microseconds. Against that, an FPGA respin for a matching-rule change is weeks of engineering and verification rather than days, and a listed venue ships several matching-rule changes a year (new order types, tick-size pilots, auction tweaks, regulator-mandated behaviour). If the target is above ~1μs and the ruleset changes more than about twice a year, CPU wins on every axis that matters.
+- Alternative wins when: the ruleset is effectively frozen and the target really is sub-microsecond, which describes a single-product proprietary venue or an FX ECN more than a listed equities exchange. Those exist and they are not wrong. Note the split is not CPU or FPGA but where the boundary sits, and decode is on the FPGA side in both designs because a wire format is fixed by specification and changes on a multi-year cycle.
 #### High-level design
 **must-say**
 
@@ -10861,49 +10893,40 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 </svg>
 ```
 
-**How to read the diagram:** the outer system receives and validates orders, but the matching engine itself stays narrow and deterministic. For each symbol, orders are processed in a strict sequence so price-time priority remains unambiguous.
+**How to read the diagram:** everything above the sequencer exists to keep bad input out of the record, and everything below it exists to derive state from the record. The sequencer is the only point where "what happened first" is decided, and once decided it is never revisited.
 
-**Why the flow is shaped this way:** fairness and correctness are more important here than fancy distribution in the center. The closer you get to the actual match, the less concurrency magic you want.
+**Why the flow is shaped this way:** risk sits above the sequencer so a rejected order leaves no trace in the official log. The matching engines sit below it and read rather than receive, which is what lets a standby be an extra reader instead of a replica. Market data leaves through a single output sequencer so subscribers can detect a gap by counting.
 
-**What this layout buys you:** predictable execution and easier reasoning about market behavior. The tradeoff is that scale comes from partitioning across symbols and from pushing supporting work outward, not from making the core engine more parallel.
+**What this layout buys you:** the failure and audit stories are the same story. Recovery, hot standby, forensic reconstruction and regression testing of a rule change are all the same operation, which is replaying a log. The cost is that venue throughput is bounded by the sequencer, and scale has to come from partitioning symbols across hosts rather than from adding concurrency inside the core.
 #### Deep dive
 **must-say**
 
-**Why single-threaded matching:**
+**The single-writer sequencer, and why replay is the product.**
 
-A locked, multi-threaded matching engine adds two costs that are fatal at microsecond targets: lock contention adds tail-latency variance (one in 10k matches stalls hundreds of ns waiting on a lock) and non-determinism in the order of lock acquisition makes replay-based recovery impossible — two replays of the same input might match orders in different orders if threads race. Single-threaded matching pins one CPU core per symbol with no shared state, no locks, no atomics, just a tight loop consuming the sequenced input stream. The CPU is also isolated from kernel scheduling (`isolcpus`), kernel interrupts are routed to other cores, and the L1/L2 caches stay hot with the order book. Concrete impact: the median match takes ~500ns on a tuned engine; a locked design would push that to several μs with worse tail.
+The sequencer is one thread on one isolated core doing exactly three things per message: assign the next sequence number, copy the message into a preallocated slot in a memory-mapped append-only log, and publish the slot index to readers. No parsing, no business logic, no branching on message content. That loop sustains 1M to 5M messages per second on tuned hardware, and that number is the venue's throughput ceiling; every capacity conversation comes back to it.
 
-**Matching algorithm (price-time priority):**
-```
-On NewOrder(buy, price=P, qty=Q):
-  while Q > 0 and best_ask <= P:
-    fill = min(Q, best_ask_order.qty)
-    create_trade(buy_order, best_ask_order, fill, best_ask_price)
-    Q -= fill
-    decrement best_ask_order.qty
-    if best_ask_order.qty == 0: pop from book
-  if Q > 0: insert (price, Q) into bid book
-```
+**Durability before visibility.** A slot is not published to any matching engine until it is durable: fsync to NVMe behind a battery-backed cache, replicated synchronously over RDMA to a second sequencer in the same rack, committed when both have it, roughly 5 to 10μs. The ordering of those two steps matters more than the latency. If an engine could see an order before it was committed, a crash between the match and the commit would leave a trade that exists in the market data feed and on a member firm's blotter but not in the official record, and there is no clean way to unwind that. Commit first and the worst case is an order that was never acknowledged, which the firm simply retries.
 
-The book is a sorted structure of price levels (red-black tree or skip list, O(log P) where P is distinct price levels — typically thousands), with a FIFO queue per level holding orders in arrival order. A buy order matches against the lowest ask first, walking the queue in arrival order at that price (price-time priority); when a price level empties, it's removed from the tree and the next-best ask becomes the head. The trade event includes both order IDs, the fill quantity, the price, and a deterministic trade ID derived from the sequencer offset. Modify orders are typically modeled as cancel + new (preserving FIFO fairness — keeping queue position on a price increase would break price-time priority).
+**What determinism actually forbids.** The claim "the engine is a pure function of its input log" only holds if the engine reads nothing else. In practice that rules out four things, and people break them in this order:
 
-**Pro-rata matching as an alternative to price-time priority.** Some venues (notably futures markets like CME for some products, and ICE) use pro-rata or hybrid pro-rata-price-time at certain price levels: an aggressive incoming order is allocated across all resting orders at the matched price proportionally to their size, rather than walking a strict FIFO queue. The trade-off is throughput-fairness vs queue-position incentives — pro-rata reduces the value of being first in the queue (which encourages quoting at tight spreads) but lets larger participants absorb a proportional share without fully filling smaller resting orders. The matching engine is parameterized per symbol with the venue rule; the data-structure (sorted price levels) is identical, only the per-level allocation algorithm changes (proportional split + tiebreak by minimum-allocation rules vs FIFO pop). For this design we default to price-time priority because it's the most common and the simplest to reason about under replay; pro-rata symbols carry a flag in the symbol metadata that the engine reads at startup.
+- *Wall-clock reads.* The engine has no clock. Time enters the log as sequenced tick events emitted by the sequencer at a fixed cadence, say every 100μs, and every time-dependent rule reads those instead: IOC expiry, good-till-time, the auction cutoff, the timer that ends a halt. The first violation is almost always someone timestamping a trade with `now()`.
+- *Randomness and hash iteration order.* Any container whose iteration order depends on pointer values or a seed will order fills differently on replay. Books use intrusive lists with explicit ordering, never iteration over a hash map.
+- *Anything the allocator can influence.* Preallocated pools are usually justified as a latency measure. They are equally a determinism measure: identical memory layout on every run is the difference between output that is byte identical and output that is merely logically equivalent, and only the first can be diffed mechanically.
+- *External lookups.* Reference data (tick size, price bands, lot size, halt state, the pro-rata flag from the second fork above) is loaded at startup and afterwards changed only by a sequenced control message on the same log. A config push that bypasses the log is a determinism bug that stays invisible until a replay disagrees months later.
 
-**Single venue vs multi-venue.** This design covers a single venue (one exchange, one set of symbols, one matching engine cluster). Real markets are fragmented across many venues (NYSE, NASDAQ, BATS, IEX in US equities), with smart-order-routers (SORs) at member firms splitting orders across venues to capture best available prices. Multi-venue coordination is *outside* the matching engine — each venue runs its own independent sequencer + engines, and inter-venue arbitrage is a member-firm responsibility, not the venue's. The relevant infra link between venues is the SIP (Securities Information Processor) consolidated tape that publishes a unified best-bid-offer across all US venues for retail price-display purposes. If we ever needed to design a multi-venue group as a single logical exchange, we'd federate via a router-tier that routes per-symbol to the venue holding that symbol's primary listing — but that's out of scope here.
+**Hot standby.** The standby is not a replica that receives state. It is a second engine process on another host reading the same log and running the same binary, so it stays within microseconds of the primary because it is doing identical work at the same rate. Failover has no state-migration step: detect, stop routing to the primary, start routing to the standby. The hard part is entirely detection. Two engines that both believe they are primary is worse than a halt, because both will emit trades against the same sequence numbers with different order ids on the receiving side, and market data subscribers will have accepted both. The correct shape is a separate quorum-based failover controller that fences the old primary, revoking its ability to publish to the output sequencer, before promoting the standby, with a deliberate sub-second pause while that happens. Choosing a short halt over a possible split brain is the right trade for a venue, and an interviewer will push on it.
 
-**Persistence pattern:**
+**Snapshots are not the durability mechanism.** A periodic serialisation of the order book exists only to bound cold-start replay time. The test is blunt: delete every snapshot and the venue must still reconstruct the day from the log alone. If it cannot, someone has quietly made a snapshot load-bearing, which typically happens the first time a snapshot carries a field that is not derivable from the log.
 
-The sequencer writes each order to a replicated input log (Aeron archive, Chronicle, or a custom mmap'd append-only file) and waits for fsync + replication to N replicas before acknowledging the order to the gateway. Only then does the matching engine see the order. This means every input the engine processes is durable, and every state change in the engine is a *deterministic function* of the input log. Recovery from crash = start a new engine process, replay the log from the last checkpoint, resume at the latest sequence. Hot standby = a second engine continuously replaying the same log on a different host, always within microseconds of the primary; on primary failure the standby is already at the latest sequence and takes over without state migration. State checkpointing (periodic order-book snapshots) only exists to bound replay time on cold start — it is not on the hot path.
+**Replay as a product, not a recovery path.** Once the engine is a pure function, replay stops being only the failover mechanism:
 
-**Performance engineering:**
+- *Forensics.* A firm disputes a fill from 10:04:22. Replay from the open to that sequence number and show the exact book state that produced it, including every order that was ahead of theirs in the queue.
+- *Regression.* A rule change is tested by replaying the last thirty trading days through both the old and the new engine and diffing the two output streams. The diff is exactly the behaviour change, at real volumes and real microstructure, with no synthetic load generator getting the order mix wrong.
+- *Regulation.* Retention under 17a-4 and CAT is cheap in bytes. The useful property is that the retained artifact is executable, so "why did this trade happen at this price" is answered by a rerun rather than by an argument.
 
-The combined latency budget is tens of microseconds end-to-end, and every layer matters. *Language*: C++ or Rust because the JVM's stop-the-world GC pauses (even with low-pause collectors like ZGC, sub-ms but still measurable) are catastrophic; if Java is required, off-heap memory + Disruptor-style ring buffers + zero-allocation hot path. *Object pools*: every Order, Trade, ExecutionReport is pre-allocated at startup; the hot path never allocates, never frees, never touches the heap. *CPU pinning*: matching threads run on isolated cores with kernel interrupts routed elsewhere; NUMA-local memory only. *Kernel bypass*: DPDK or Solarflare Onload skips the kernel TCP/UDP stack (which adds μs of overhead per packet) — packets land directly in user-space ring buffers. *Cache-friendly structures*: order book entries are laid out for sequential cache-line access; pointer chasing is avoided. None of this is optional at microsecond targets.
+The one thing replay does not give you is timing. It reproduces which trades happened and in what order, never how long each took, so latency regressions are invisible to an output diff. The replay harness has to be paired with a separate latency benchmark on production-identical hardware. Conflating the two is a common and expensive mistake.
 
-**Market data publication:**
-
-Trades and book updates are published via reliable multicast (Aeron, LBM, or proprietary) so all subscribers receive the same bytes simultaneously — one-to-many delivery at line rate. Separate logical channels carry trades, book deltas, and aggregated statistics so subscribers can subscribe selectively (a market-maker wants book deltas; a retail price feed wants trades only). Multicast is essential for fairness: every subscriber receives the same data with cable-length parity if their connections terminate in the same physical rack, so no subscriber gets a competitive advantage from early notification. Sequence numbers on every market-data message let subscribers detect gaps and request gap-fill via a separate retransmission channel.
-
-**Sequencer → matching → multicast pipeline.** *[Source: NASDAQ INET / NYSE Pillar architecture papers]* The pipeline is deterministic by construction: every input is sequenced before it becomes visible to any matching engine, and every output is sequenced for downstream replay. Each box is a CPU-pinned process on isolated cores, communicating over kernel-bypass shared memory (Aeron, Chronicle Queue) or RDMA — never through the kernel network stack on the hot path.
+**Sequencer to matching to multicast, end to end.**
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 620" role="img" aria-label="Stock exchange sequencer, matching and multicast pipeline">
@@ -11007,115 +11030,17 @@ Trades and book updates are published via reliable multicast (Aeron, LBM, or pro
 </svg>
 ```
 
-Each matching engine consumes only its symbol's slice of the sequenced stream, so ME-AAPL never sees GOOG inputs and the symbols cannot interfere. The output sequencer reassembles per-symbol outputs into a globally-sequenced market-data stream so subscribers can detect gaps. The hot standby is a separate process replaying the same input log, always within microseconds of the primary; failover is detection + redirect, not state migration.
-
-**Limit-order matching against the book — sequence.** *[Source: matching-engine engineering blogs (CME, LMAX Disruptor)]* A new aggressive limit order (buy at price >= best ask) walks the ask side of the book in price-time priority, filling against resting orders until quantity is exhausted or no further crosses are possible. Each fill emits a TradeReport; book deltas are emitted per affected price level.
-
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 520" role="img" aria-label="Limit-order matching against the book sequence">
-  <defs>
-    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
-    </marker>
-  </defs>
-  <style>
-    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
-    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
-    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
-    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
-    .dash{ stroke-dasharray:5 4; }
-    .acc{ stroke:var(--accent); }
-    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
-    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
-    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
-    .life{ stroke:currentColor; stroke-opacity:0.4; stroke-width:1.2; stroke-dasharray:4 4; }
-    text{ dominant-baseline:middle; text-anchor:middle; }
-  </style>
-
-  <!-- lifelines -->
-  <line class="life" x1="90" y1="70" x2="90" y2="505"/>
-  <line class="life" x1="300" y1="70" x2="300" y2="505"/>
-  <line class="life" x1="500" y1="70" x2="500" y2="505"/>
-  <line class="life" x1="680" y1="70" x2="680" y2="505"/>
-
-  <!-- participants -->
-  <rect class="box" x="15" y="30" width="150" height="40" rx="8"/>
-  <text class="sub" x="90" y="51">Sequencer (seq#=1234)</text>
-  <rect class="box acc" x="215" y="30" width="170" height="40" rx="8"/>
-  <text class="sub" x="300" y="51">Matching Engine (AAPL)</text>
-  <rect class="box" x="420" y="30" width="160" height="40" rx="8"/>
-  <text class="sub" x="500" y="51">Order Book (in-mem)</text>
-  <rect class="box" x="615" y="30" width="130" height="40" rx="8"/>
-  <text class="sub" x="680" y="51">Output sequencer</text>
-
-  <!-- messages -->
-  <text class="edge" x="195" y="90">NewOrder(buy, qty=300, price=100.10, seq=1234)</text>
-  <path class="flow acc" d="M90,100 L296,100"/>
-
-  <text class="edge" x="400" y="120">best_ask = 100.05 (qty 100, order_5)</text>
-  <path class="flow" d="M300,130 L496,130"/>
-
-  <text class="edge" x="400" y="150">fill 100 vs order_5 @ 100.05</text>
-  <path class="flow" d="M300,160 L496,160"/>
-
-  <text class="edge" x="488" y="180">Trade(buy=new, sell=order_5, qty=100, price=100.05)</text>
-  <path class="flow" d="M300,190 L676,190"/>
-
-  <text class="edge" x="488" y="210">BookDelta(ask 100.05 removed)</text>
-  <path class="flow" d="M300,220 L676,220"/>
-
-  <text class="edge" x="400" y="240">best_ask = 100.08 (qty 150, order_7)</text>
-  <path class="flow" d="M300,250 L496,250"/>
-
-  <text class="edge" x="400" y="270">fill 150 vs order_7 @ 100.08</text>
-  <path class="flow" d="M300,280 L496,280"/>
-
-  <text class="edge" x="488" y="300">Trade(buy=new, sell=order_7, qty=150, price=100.08)</text>
-  <path class="flow" d="M300,310 L676,310"/>
-
-  <text class="edge" x="488" y="330">BookDelta(ask 100.08 removed)</text>
-  <path class="flow" d="M300,340 L676,340"/>
-
-  <text class="edge" x="400" y="360">best_ask = 100.12 (qty 200, order_9) &#8212; no cross (&gt;100.10)</text>
-  <path class="flow" d="M300,370 L496,370"/>
-
-  <text class="edge" x="400" y="390">insert remaining 50 @ 100.10 into bid book</text>
-  <path class="flow" d="M300,400 L496,400"/>
-
-  <text class="edge" x="488" y="420">BookDelta(bid 100.10 +50)</text>
-  <path class="flow" d="M300,430 L676,430"/>
-
-  <text class="edge" x="488" y="450">ExecutionReport(new_order: filled 250/300, resting 50)</text>
-  <path class="flow acc" d="M300,460 L676,460"/>
-
-  <!-- output sequencing self -->
-  <path class="flow" d="M680,482 L730,482 L730,498 L684,498"/>
-  <text class="edge" x="670" y="490" text-anchor="end">Sequence outputs as out#=5678,5679,5680...</text>
-</svg>
-```
-
-All operations are O(log P) on the price-level tree plus O(1) FIFO ops at each level; fills emit trades in the order they happen, preserving per-trade time priority. Modify orders are typically `cancel + new` to preserve FIFO fairness — keeping queue position on a price improvement would let aggressive modifiers jump the line.
-
-**Kernel bypass — DPDK, Solarflare Onload, AF_XDP.** *[Source: DPDK docs, OpenOnload, kernel.org AF_XDP]* The kernel TCP/UDP stack adds 5–15μs per packet under load: syscall overhead, copy-to-user, scheduler decisions, NIC interrupt handling. Kernel-bypass libraries map the NIC's RX/TX rings directly into user-space memory; the matching engine polls the rings in a tight loop and processes packets without ever entering the kernel. DPDK is the heavyweight option (full poll-mode driver, requires dedicated cores and hugepages); Solarflare Onload preserves BSD-socket API while bypassing kernel TCP; AF_XDP is the Linux-mainline option with comparable performance on supported NICs. Per-packet latency drops from ~10μs to ~1μs with much lower variance — the variance reduction matters more than the median, because tail latency is what loses races.
-
-**FPGA acceleration of the hot path.** *[Source: HFT FPGA papers (UCSC), NASDAQ ITCH FPGA implementations]* Wire-protocol decode (FAST or FIX-binary) and the simplest pre-trade risk checks (max-order-size, position limits) are implemented directly in FPGA hardware sitting between the NIC and the CPU. Decoding ITCH/FIX in FPGA cuts ~3μs vs CPU; complete tick-to-trade pipelines (decode → risk → cancel-if-stale logic) achieve sub-100ns latency in pure FPGA, with the CPU only seeing decisions, not packets. Fully-FPGA matching engines exist for proprietary venues but most exchanges keep matching in CPU because the matching algorithm changes more often than physics — FPGA is for the parts that don't change (decode, fixed risk rules).
-
-**Multicast — TCP-replay vs PIM-SM.** *[Source: Aeron docs, IETF PIM-SM RFC 7761]* Reliable multicast for market data uses one of two delivery models. *Source-specific multicast (SSM) over PIM-SM* is the IP-layer model: the publisher emits packets to a multicast group; routers fan out using PIM-SM with explicit source filtering. Network-layer fan-out is most efficient but requires multicast-capable routing (typically only inside the venue's data center). *Application-layer reliable multicast* (Aeron, 29West LBM) sits over UDP unicast or IP-multicast; gap-fill is via a separate retransmission channel with NAK-based recovery. *TCP-replay* fallback is used by subscribers outside the multicast domain (cloud subscribers) — a TCP unicast feed that replays the same sequenced stream with bounded extra latency. The choice is operational: PIM-SM is faster and more efficient at scale but tied to physical network topology; application-layer is portable but pays per-subscriber bandwidth costs.
-
-**Opening and closing auctions.** *[Source: NYSE / NASDAQ auction rulebooks]* The auction is a different algorithm from continuous matching. During pre-open (e.g. 30 minutes before market open), orders are accepted into a separate auction book — they don't match continuously. Imbalance and indicative-match-price feeds publish what the price *would* be if the auction crossed now, letting participants modify their orders. At the auction time (e.g. 09:30:00), the engine finds the price `P*` that maximises matched volume given the standing book; all matchable orders at that price (or better) cross at exactly `P*`, regardless of their original limit prices. Closing auctions work the same way at end-of-day. The output is a single "opening print" or "closing print" trade per symbol, used as the official reference price for index calculation, settlement, and option exercise — so the algorithm's correctness is regulatorily mandatory, not just commercially desirable. Because the auction is deterministic given the auction book at the cutoff, it shares the same replay-from-input-log property as continuous matching.
+Each matching engine consumes only its symbol's slice of the sequenced stream, so the AAPL engine never sees GOOG input and two symbols cannot interfere. The output sequencer reassembles per-symbol outputs into one globally sequenced market-data stream so subscribers detect gaps by counting rather than by timing out. Every box is a pinned process on an isolated core communicating over shared memory or RDMA; the kernel network stack appears nowhere on the hot path.
 #### Where it breaks
 **must-say**
 
 **Bottlenecks**
 
-- **GC pause = death** — a 50ms stop-the-world GC during market open on AAPL is hundreds of thousands of orders' worth of latency; trades execute on the standby (which also pauses, eventually) or get rejected, and the venue's reputation takes a permanent hit. *Mitigation:* use C++ or Rust with explicit memory management; pre-allocate every Order, Trade, and message buffer at engine startup into object pools; the hot path never calls `new`/`malloc`. If JVM is mandated, use Azul Zen or off-heap structures with Aeron's lock-free buffers and verify zero-allocation under load.
-- **Network jitter** — kernel TCP/UDP stack adds microseconds of unpredictable latency per packet (especially under syscall pressure), and any jitter directly impacts time-priority fairness. *Mitigation:* kernel-bypass networking (DPDK or Solarflare Onload) maps NIC ring buffers directly into user space, eliminating syscalls and reducing per-packet latency from ~10μs to ~1μs with much lower variance. Co-located member-firm racks with cable-length parity equalize physical-layer latency; microwave or millimeter-wave links between geographically separated exchanges minimize inter-venue arb latency.
-- **DR (disaster recovery)** — a primary site loss must not lose any sequenced input, otherwise audited trades disappear and the regulator imposes existential penalties. *Mitigation:* the input log is shipped continuously to a geographically distant DR site, where a standby engine replays in lockstep with bounded lag (sub-second). On primary site loss, DNS/connection-routing flips to DR, the DR engine is at the latest acknowledged sequence, and trading resumes. The cost is the sequencer's ack latency (must wait for cross-region replication) — typically run with a tier of synchronous local replicas + asynchronous DR shipping to balance latency and DR strictness.
-- **Slow client affecting venue** — a single firm sending malformed orders, refusing to consume execution reports, or holding TCP windows open backs up the gateway's send queues and impacts other firms sharing infrastructure. *Mitigation:* per-firm quotas on order rate, open-order count, and message backlog; gateways disconnect a firm whose unread-acks queue exceeds threshold. Per-firm gateway sharding (each firm pinned to one gateway instance) contains the blast radius — one slow firm cannot stall others. Hard kill switches cut a misbehaving firm's connectivity within ms.
-- **Hot symbol** (Tesla on earnings day, GameStop short-squeeze) — order arrival rate spikes 100x; the symbol's matching engine CPU saturates, latency degrades, and the queue of sequenced-but-unmatched orders grows. *Mitigation:* the per-symbol architecture already isolates the impact (only TSLA suffers, not the rest of the venue); move hot symbols to dedicated hosts with the most performant hardware, and pre-emptively rebalance the symbol-to-host mapping based on observed activity. For genuinely extraordinary load, fall back to widening the spread tolerance and circuit-breaker halts that pause matching for seconds to let the queue drain — these are regulatory tools, not just engineering ones.
-- **Sequencer single-thread cap** — the sequencer is one CPU-pinned thread linearising every input; venue-wide throughput is capped at one sequencer's rate, around 1–5M msgs/s on tuned hardware. Spikes beyond that back the gateways up. *Mitigation:* for extreme scale, shard the sequencer by symbol with periodic global epoch anchors so cross-symbol ordering is bounded but per-symbol ordering is exact. The trade-off is that basket-trade and ETF-arbitrage participants must accept epoch-bounded cross-symbol skew; for most venues a single sequencer suffices and the simpler design wins.
-- **Multicast feed gap recovery** — subscribers occasionally miss a multicast packet (UDP loss); naive request-replay over TCP doubles bandwidth and adds variable latency, so a dropped packet during a fast market becomes a competitive disadvantage. *Mitigation:* a separate gap-fill channel with cached recent messages (last N seconds) lets subscribers request specific sequence ranges via TCP unicast; the publisher serves from a ring buffer with bounded retention. Subscribers with chronic packet loss are flagged for network-side investigation rather than absorbing infinite gap-fill; per-subscriber gap-fill rate limits prevent one bad client from impacting others.
-- **DR replication latency bound** — synchronous DR replication adds the cross-region RTT (10s of ms across continents) to every order's ack latency; the venue must choose between fast acks and DR strictness. *Mitigation:* tiered durability — local synchronous replica (sub-ms RTT, intra-rack) is on the ack path; cross-region DR ships asynchronously with bounded lag (sub-second target, alerted at 5s). On a primary-site loss, the DR site loses up to lag-window of orders, which is the explicit recovery-point objective; documented to participants and accepted as a regulatory trade-off.
+- **Any unbounded pause on the hot path.** A 50ms stop-the-world garbage collection during the open on AAPL is tens of thousands of orders of backlog; the burst that follows distorts the arrival ordering that price-time priority depends on, and the standby will eventually pause too. *Mitigation:* C++ or Rust with explicit memory management, every Order, Trade and message buffer preallocated into pools at startup, and no `new` or `malloc` on the hot path. If a JVM is mandated, off-heap structures with lock-free buffers and an enforced zero-allocation check under load. The same rule covers page faults (lock the working set with hugepages) and interrupts (route them off the matching cores).
+- **Hot symbol.** Tesla on earnings, or a short squeeze: arrival rate for one symbol spikes 100x, that symbol's engine saturates, and its queue of sequenced-but-unmatched orders grows. *Mitigation:* the per-symbol architecture already contains the blast radius, so only that symbol degrades. Move known-hot symbols to dedicated hosts and rebalance the symbol-to-host map from observed activity. Beyond that, the tools are regulatory rather than engineering: limit-up-limit-down bands and circuit-breaker halts pause matching for seconds and let the queue drain, which is a designed behaviour rather than a failure.
+- **A slow or hostile member firm.** One firm sending malformed orders, refusing to consume execution reports, or holding TCP windows open backs up gateway send queues and can affect other firms on shared infrastructure. *Mitigation:* per-firm quotas on order rate, open-order count and unread-ack backlog, with disconnection above threshold; per-firm gateway pinning so one firm's backlog cannot stall another's; a kill switch that cuts a firm's connectivity in milliseconds. Note this interacts with fairness: pinning firms to gateways means gateway load is unequal, which is the second Unresolved item below.
+- **Multicast gap recovery.** Subscribers occasionally lose a UDP packet, and during a fast market a naive replay request over TCP adds variable latency exactly when it hurts most. *Mitigation:* a dedicated gap-fill channel serving specific sequence ranges from a ring buffer holding the last N seconds, with per-subscriber rate limits so one lossy client cannot degrade the publisher. Chronic requesters get a network investigation rather than unlimited retransmission.
+- **DR replication is a latency tax on every order.** Synchronous replication to a distant site adds the cross-region round trip, tens of milliseconds, to every acknowledgement, which is three orders of magnitude above the engine budget. *Mitigation:* tiered durability. The ack path waits only for the synchronous intra-rack replica, sub-millisecond. The DR site ships asynchronously with a sub-second lag target and an alert at 5s. On loss of the primary site the venue loses up to the lag window of orders; that is the stated recovery point objective, published to participants, and it is a deliberate trade rather than an oversight.
 
 **Failure modes**
 
@@ -11130,51 +11055,58 @@ All operations are O(log P) on the price-level tree plus O(1) FIFO ops at each l
 
 **Unresolved**
 
-TODO. Two or three things this design genuinely does not handle well, and what you would do about each.
+**There is no cross-symbol atomicity, and the single sequencer does not provide one.** A global sequence number gives cross-symbol *ordering*, which is not the same thing as cross-symbol *execution*. A basket trade, an ETF create or redeem against its constituents, and a two-leg spread all have the same failure: fill on one leg, miss on the other, and the participant is left with unintended exposure. This design pushes that problem entirely onto the member firm's smart order router, which is what most equities venues do, and it is a real gap rather than a clean boundary. Native multi-leg support, of the kind CME runs for spreads, needs an implied-order engine that matches a spread against the outright books, and that reintroduces exactly the cross-book coupling the single-writer-per-symbol model exists to avoid. If we had to support it, the only shape that preserves determinism is a dedicated combined engine that owns every constituent book on one thread, accepting that the throughput ceiling for that product family is one core. We have not built it, and I would not pretend the router-side workaround is equivalent.
+
+**Fairness is only physical up to the edge of our own rack.** Cable-length parity inside the co-location facility equalises the physical path, but the sequencer's arrival order still encodes which gateway happened to be least loaded at that microsecond. Gateway queueing contributes a few hundred nanoseconds to a few microseconds of jitter, it is invisible to participants, and it is not auditable, so we can demonstrate fairness per gateway but not per order. Every honest remedy is unattractive: randomised batching or an IEX-style speed bump changes market structure and needs regulatory approval, and enforcing rate parity across gateways caps throughput at the slowest one. What we actually do is publish per-gateway queue telemetry and define fairness as the absence of systematic advantage rather than as a provable ordering by wire arrival. A sophisticated participant will notice the difference.
+
+**Determinism stops at the edge of the deterministic core.** Replay reproduces the engine exactly, but it does not reproduce the gateway. Risk decisions read mutable per-firm position and buying-power state, and that state changes with fills, so replaying a day against a different risk snapshot produces different rejects and therefore a different input log. "We can reproduce any trading day" is true of the engine and false of the venue. The fix is partial and it has a cost: journal each risk verdict into a separate gateway log so replay consumes the recorded decision rather than recomputing it. The verdict log has to stay separate from the sequenced input log, because rejects must never enter the official record, which means the two logs are only approximately interleaved and a venue-level replay inherits that imprecision. It also means the faithful replay can no longer answer the counterfactual "would this order have been rejected under the current risk rules?", because it is replaying a decision rather than making one. Faithful replay and counterfactual replay are two different artifacts and you have to pick which one you are building.
 #### Drill questions
-1. A matching engine crashes mid-day — how do you fail over without losing trades?
-2. How do you guarantee fairness — no front-running by someone with faster fiber?
-3. What happens if a market participant sends a "fat finger" 1B-share order?
+1. A matching engine crashes mid-day. How do you fail over without losing trades?
+2. How do you guarantee fairness, given that one participant has faster fiber than another?
+3. What happens if a member firm sends a "fat finger" 1B-share order?
 4. How do you scale to 10x more symbols?
-5. How do you handle market open / close auctions where everything happens at once?
-6. What about cancel/replace ordering — can a cancel arrive after the fill?
+5. How do you handle market open and close auctions, where everything happens at once?
+6. Can a cancel arrive after the fill it was trying to prevent, and what does the engine do?
 7. How does the sequencer itself stay sub-microsecond?
 8. How does opening-auction price discovery work in practice?
 9. Why use FPGA for decode but CPU for matching?
 10. Can you replay the input log on a brand-new machine and reach byte-identical state?
+11. A symbol is halted mid-session. What happens to resting orders, and to orders that arrive during the halt?
+12. Two orders from the same firm cross each other. Should the engine match them?
 #### Answers to drill questions
-1. Hot standby is already replaying the same sequenced input log in lockstep. On primary failure, the standby is at the latest sequence and takes over; the gateway redirects new orders. No state to migrate, no race — the log is the truth. *If pushed:* failover detection itself is a race; use a separate quorum-based failover controller and accept a brief halt (sub-second) over a split-brain.
+1. The hot standby is already replaying the same sequenced input log in lockstep. On primary failure it is at the latest sequence and takes over; the gateway redirects new orders. There is no state to migrate and no race, because the log is the truth. *If pushed:* the detection is the race, not the takeover. Use a separate quorum-based failover controller that fences the old primary's ability to publish before promoting the standby, and accept a sub-second halt in preference to a split brain.
 
-2. Strict FIFO at the sequencer based on arrival timestamp at a single hardware point; all gateway connections terminate in the same physical rack so cable-length parity is achievable. Some venues add a randomized "speed bump" (IEX) to neutralize sub-ms speed advantages. *If pushed:* fairness is also a regulatory question (Reg NMS in US) — auditable timestamps are mandatory, not optional.
+2. Strict FIFO at the sequencer on arrival at a single hardware point, with all gateway connections terminating in the same rack so cable-length parity is achievable. Some venues add a randomised or fixed speed bump (IEX) to neutralise sub-millisecond advantages. *If pushed:* concede the limit. Fairness is provable per gateway, not per order, because gateway queueing adds unobservable jitter ahead of the sequencer. It is also a regulatory question (Reg NMS) as much as an engineering one, and auditable timestamps are mandatory.
 
-3. Pre-trade risk checks at the gateway reject it before sequencing — per-firm position limits, max order size, max notional, kill switch. Risk sits before the engine because risk failures must not pollute the input log. *If pushed:* even after the engine, exchanges have "obvious error" rules that can bust trades within minutes; this is operational/regulatory, not algorithmic.
+3. Pre-trade risk at the gateway rejects it before sequencing: per-firm position limits, max order size, max notional, kill switch. Risk sits before the engine because a reject must not pollute the input log. *If pushed:* after the fact, exchanges have "clearly erroneous execution" rules that can bust trades within a defined window. That is operational and regulatory rather than algorithmic, and it is the reason the engine never needs to un-match anything.
 
-4. Symbols are independent; add more matching-engine hosts and shard symbols across them. The sequencer is the only shared component — it can also be sharded by symbol with a coarser global timestamp anchor. *If pushed:* cross-symbol orders (basket trades, ETF arbitrage) cross shard boundaries and need careful coordination — usually handled outside the matching engine in a smart-order-router layer.
+4. Symbols are independent, so add matching-engine hosts and reshard the symbol-to-host map; book state is ~2MB per symbol, so 10x symbols is 200GB spread across hosts, not a problem. The sequencer is the only shared component. *If pushed:* 10x symbols at the same peak rate does not move the sequencer, because the sequencer's load is messages per second, not symbol count. It is 10x the *rate* that forces the sharded-sequencer fork, and that costs cross-symbol total ordering.
 
-5. Different algorithm: collect orders during pre-open in a separate book, compute the equilibrium price that maximizes matchable volume, cross all matching orders at that single price. Different code path from continuous matching, same engine. *If pushed:* the auction is also a trust event — opening prints set reference values for the day, so audit/replayability matters even more than steady-state.
+5. A different algorithm on the same engine. During pre-open, orders accumulate in a separate auction book and do not match continuously. At the cutoff, the engine finds the price that maximises matched volume and crosses every eligible order at that single price. *If pushed:* the auction is also a trust event, because the opening and closing prints set reference values for index calculation, settlement and option exercise, so replay verification matters more here than in continuous trading, not less.
 
-6. Yes, and it's just a no-op (already filled). The sequencer linearizes everything; the engine's view is "process this cancel" → "order doesn't exist or is fully filled" → reply with reject. Idempotent by client_order_id. *If pushed:* clients hate "cancel rejected because filled" even though it's correct — UX often shows it as "cancel acknowledged but trade also occurred", which is a presentation choice, not a system one.
+6. Yes, and the engine treats it as an ordinary no-op reject. The sequencer linearises everything, so the engine's view is "process this cancel", "the order is already fully filled", "emit a cancel reject". It is idempotent by client order id. *If pushed:* clients dislike "cancel rejected because filled" even though it is correct, so the presentation layer usually shows "cancel acknowledged, trade also occurred". That is a display choice and must not become an engine behaviour.
 
-7. Single-threaded, pinned to one isolated core; hot path does sequence-assign + memcpy + AOF append; durability is fsync to NVMe with battery-backed cache, replicated synchronously to a second sequencer in the same rack via RDMA (writes commit when both fsync, ~5–10μs). The sequencer never blocks on the matching engines; it publishes to an Aeron ring buffer and they catch up. *If pushed:* the sequencer's single-threadedness is a hard cap on venue throughput — sharding by symbol relaxes this but loses cross-symbol total ordering, which basket trades and ETFs may need; some venues run a sharded sequencer with periodic global anchors (an "epoch" message) to bound cross-shard skew.
+7. Single-threaded on one isolated core; the hot path is sequence assign, memcpy into a preallocated slot, append. Durability is fsync to NVMe with a battery-backed cache plus synchronous RDMA replication to a second sequencer in the same rack, committing when both have it, roughly 5 to 10μs. The sequencer never blocks on the matching engines; it publishes to a ring buffer and they catch up. *If pushed:* the single-threadedness is a hard venue-wide cap at 1M to 5M msgs/s. Sharding by symbol relaxes it and loses cross-symbol total ordering, which basket and ETF participants need, so sharded designs broadcast periodic epoch messages to bound cross-shard skew.
 
-8. Pre-open accepts buy and sell orders into a separate auction book. Continuously, an indicative-match-price calculator finds the price `P` that maximises matched volume — sweeping prices, computing matched-volume = `min(sum of buy qty at >=P, sum of sell qty at <=P)`. Imbalance feeds publish (indicative price, imbalance side, imbalance qty) every few seconds so participants can react. At the cutoff time the engine fixes `P*` from the final book and crosses every matchable order at that single price. *If pushed:* tie-breaking when two prices yield equal matched volume uses secondary criteria (closer to last trade, or price favouring lower imbalance) defined in the venue rulebook, not the engine's discretion.
+8. Pre-open accepts orders into a separate auction book. An indicative-match-price calculator continuously finds the price `P` maximising matched volume, where matched volume at `P` is `min(sum of buy qty at >= P, sum of sell qty at <= P)`. Imbalance feeds publish the indicative price, imbalance side and imbalance quantity every few seconds so participants can react. At the cutoff the engine fixes `P*` from the final book and crosses every matchable order at that one price. *If pushed:* ties, where two prices yield equal matched volume, are broken by rulebook criteria such as proximity to the last trade or the price minimising residual imbalance, never by engine discretion, because two implementations must agree.
 
-9. FPGA wins for fixed pipelines: wire-format decode (ITCH bits → typed message) is fixed by spec and changes rarely, perfect for hardware. Matching algorithms evolve (new order types, regulatory tweaks like IEX-style speed bumps, bespoke auction logic) and re-spinning FPGA images for every protocol change is impractical. CPU matching with object pools and pinned cores hits single-digit-μs latency; FPGA matching hits sub-μs but at 100x the engineering cost per change. *If pushed:* some prop venues do run all-FPGA matching for niche markets (FX ECNs); the trade-off is engineering velocity vs latency, and most exchanges optimise for the former.
+9. FPGA wins where the pipeline is fixed. Wire-format decode (ITCH bits to a typed message) is defined by a specification that changes on a multi-year cycle, so it belongs in hardware, and it saves ~3μs against a CPU decode. Matching rules change several times a year, and respinning an FPGA image per change is weeks rather than days. CPU matching with pooled memory and pinned cores reaches 1 to 5μs; FPGA matching reaches under 1μs at roughly 100x the engineering cost per change. *If pushed:* some proprietary venues and FX ECNs do run all-FPGA matching, and for a frozen single-product ruleset that is the right call. The trade is engineering velocity against a few microseconds, and a listed venue optimises for velocity.
 
-10. Yes — that's the entire correctness property. The matching engine takes only sequenced inputs (no wall clock, no random, no external lookups); given the same input log it produces the same outputs. This is what makes hot-standby replay correct, what makes audit reproducible, and what enables "replay from yesterday's open with this morning's bug fix" forensic reconstruction. *If pushed:* any non-determinism (e.g. GC scheduling, memory allocator order) breaks byte-identity even if logical state matches; this is why pre-allocated object pools and explicit memory layout matter beyond just performance.
+10. Yes, and that is the whole correctness property. The engine reads only sequenced inputs: no wall clock, no randomness, no external lookups, no allocator-dependent iteration. Given the same log it produces the same outputs, which is what makes standby replay correct, audit reproducible, and "replay yesterday from the open with this morning's fix" a real forensic tool. *If pushed:* byte identity is stricter than logical equivalence and is worth insisting on, because only byte identity can be checked by diffing two output streams. It is also why the reference data path has to be a sequenced control message rather than a config push.
+
+11. Resting orders survive a halt by default on most venues, but the engine stops matching and stops accepting the order types that assume continuous trading. Orders arriving during the halt are accepted into the book, so participants can reposition, and cancels are always accepted. The halt itself enters the engine as a sequenced control message rather than as an operator action on a live process, so the halt boundary is at an exact sequence number and replays identically. Reopening runs the auction algorithm rather than resuming continuous matching, because the fair reopening price is a price-discovery problem, not a queue problem. *If pushed:* the tricky part is time-based order attributes across the halt boundary, such as a good-till-time order expiring while trading is paused. The rule has to be in the rulebook and implemented from sequenced clock ticks, not from the engine reading a clock at reopen.
+
+12. It depends on the venue rule, and the engine must implement it rather than infer it. Self-trade prevention is a per-firm or per-trading-group flag: cancel the resting order, cancel the incoming order, or cancel both, decided at the matching moment. Venues offer it because a firm crossing itself creates wash-trade exposure and distorts reported volume, and because a firm's own two desks racing each other is not price discovery. *If pushed:* self-trade prevention is a determinism hazard if the group membership is looked up externally. The mapping from account to prevention group has to arrive as a sequenced control message like all other reference data, or a replay months later will make different cancellation decisions.
 #### Whiteboard script
-TODO
+**0-5, frame it and take the fork.** Open with the thesis, not the components: "a venue is a machine for producing a verifiable total order, and matching is the easy part." Then ask the two questions that actually change the design: which priority rule (price-time or pro-rata, which is an instrument-class question), and what the peak inbound rate is, because that decides whether one sequencer carries the venue. State the numbers you are assuming out loud: ~10k symbols, ~1M msgs/s peak, single-digit μs in the engine. Draw nothing yet.
 
-A 45 minute budget: what to cover in 0-5, 5-15, 15-35 and 35-45, what to say first, and a line starting `Cut first:`.
+**5-15, the spine.** Draw five boxes top to bottom: member firms, gateway, sequencer, matching engines (one per symbol), market data. Say the three placement rules as you draw each arrow, because they are the answer: risk sits *above* the sequencer so a reject never enters the record; the log is committed *before* it is visible to any engine; engines *read* the log rather than receive it, which is what makes the standby an extra reader instead of a replica. Add the standby as a second arrow off the log, not as a new box with state in it. Say "single-threaded per symbol" and immediately say why: not speed, determinism.
 
-**Raw material, from the old Talking Points:**
+**15-35, the drill.** This is where the interview happens, so protect the time. Go deep on the sequencer and on replay: durability before visibility, what determinism forbids (no clock, no randomness, no allocator dependence, no config push outside the log), timers arriving as sequenced tick events, snapshots bounding cold start and nothing more. Then failover, and volunteer that detection is the hard part and that you would take a sub-second halt over a split brain. Then take the sharded-sequencer fork on your own terms: 1M against a 1M to 5M ceiling, so one thread wins here, and name what sharding would cost. Then the auctions, since 09:30 and 16:00 run a different algorithm on the same engine and most candidates never mention them. Keep pro-rata and the FPGA boundary in reserve as one-liners you can expand if asked.
 
-- **Single-threaded engine per symbol** is the core latency and determinism story.
-- **Durable sequenced input log** is the recovery and audit story.
-- **Hot standby by replay** is the failover story.
-- **Kernel bypass and no-GC runtime** are not premature optimization here; they are table stakes.
-- **Price-time priority and deterministic replay** are the fairness story.
-- **Risk before sequencing** is a sharp differentiator from hand-wavy exchange answers.
+**35-45, concede and close.** Give the gaps before they are found: no cross-symbol atomicity, so baskets and ETF arbitrage are pushed to the member firm's router; fairness is provable per gateway rather than per order; replay reproduces the engine but not the gateway's risk decisions. Then the operational surface in two minutes: the metrics you would page on (sequencer append latency, per-symbol backlog, primary-to-standby sequence gap, gap-fill rate), and DR as tiered durability with a stated non-zero recovery point objective.
+
+Cut first: the market-data transport comparison (PIM-SM against application-layer reliable multicast against TCP replay), then multi-venue routing and the SIP, then the language and allocator detail. All three are real, none of them changes the architecture, and the market-data detail in particular is a rabbit hole that eats the sequencer discussion. Never cut: risk before sequencing, determinism and replay, and the auctions.
 #### Appendix
 **Data model**
 
@@ -11205,22 +11137,24 @@ Acks:
   TradeReport     { trade_id, buy_order, sell_order, qty, price, ts }
 ```
 
+Modify is implemented as cancel plus new, because keeping queue position across a price change would break time priority.
+
 **Observability**
 
-- **Sequencer append latency** — the whole venue is downstream of this one number.
-- **Per-symbol match latency and backlog** — isolates hot-symbol stress from venue-wide health.
-- **Primary/standby sequence gap** — direct failover readiness metric.
-- **Multicast gap-fill rate** — early sign of market-data delivery problems.
-- **Gateway risk reject counts** — sudden drops or spikes usually mean a control-plane issue.
-- **End-to-end order-to-ack latency** — external customer-facing SLO across gateway, sequencer, and engine.
+- **Sequencer append latency.** The whole venue is downstream of this one number.
+- **Per-symbol match latency and backlog.** Isolates hot-symbol stress from venue-wide health.
+- **Primary-to-standby sequence gap.** The direct failover-readiness metric; block failover above tolerance.
+- **Multicast gap-fill rate, per subscriber.** Early sign of market-data delivery problems, and it identifies the lossy subscriber.
+- **Gateway risk reject counts.** A sudden drop usually means risk is failing open, which is worse than rejecting everything.
+- **End-to-end order-to-ack latency, at p99.9 rather than median.** Tail is the customer-facing number; the median hides exactly the jitter that matters.
 
 **Multi-region and DR**
 
-- **Replication mode:** synchronous local durability for the sequenced log, asynchronous geographic DR replay for site loss.
-- **RTO:** hot-standby failover should be sub-second inside the primary site; cross-site DR is slower and typically involves a controlled venue pause.
-- **RPO:** ideally zero within the primary durability domain; bounded non-zero only if the venue explicitly accepts async DR lag.
+- **Replication mode:** synchronous local durability for the sequenced log, asynchronous geographic shipping for site loss.
+- **RTO:** sub-second for hot-standby failover inside the primary site; cross-site failover is slower and involves a controlled venue pause.
+- **RPO:** zero within the primary durability domain, bounded non-zero across regions, with the bound published to participants.
 - **Failover cadence:** disaster drills must include replay validation and market-data continuity, not just process restarts.
-- **Cross-region cost:** tiny in bytes compared with consumer apps, but enormous in latency sensitivity and correctness impact.
+- **Cross-region cost:** trivial in bytes at ~350GB/day, dominated entirely by latency sensitivity and correctness risk.
 
 ### 26. Design Twitter / X
 #### Problem
@@ -17451,72 +17385,83 @@ POST /play_event                  body: { track_id, ts, duration_played }
 
 ### 41. Design a Stock Price Notification System
 #### Problem
-Let users subscribe to price rules on financial instruments ("AAPL crosses above $200", "BTC drops 5% in 1h") and deliver push/email alerts within seconds of the condition firing, at broker scale.
+Let users subscribe to price rules on financial instruments ("AAPL crosses above $200", "BTC drops 5% in 1h") and deliver a push or email alert within seconds of the condition firing. Broker scale: millions of users, tens of thousands of instruments, hundreds of thousands of price ticks a second.
 #### Core
-TODO
+This is a predicate matching problem wearing a notification costume. Ten million standing rules, fifty thousand instruments, a quarter of a million ticks a second: the only question that matters is how a tick finds the handful of rules it could trigger without touching the other ten million.
 
-Write the whole answer as you would give it in sixty seconds, 200 to 300 words, standing alone.
+The answer is to invert the loop. Do not iterate rules and look up prices; that costs one lookup per rule per poll and floors latency at the poll interval. Iterate ticks and look up rules. Route the tick stream by instrument so each evaluator process owns a fixed set of instruments, and keep those instruments' rules in that same process's memory. At roughly 500 bytes a rule, all 10M rules are about 5GB, so they fit across sixteen shards with room to spare. Inside a shard, hold the threshold rules sorted by trigger price, so a tick moving AAPL from 199.95 to 200.05 range-scans only the rules whose threshold lies in that interval rather than scanning every AAPL rule.
+
+Two correctness details do most of the remaining work. Fire on the crossing, not the level: `prev < 200 && now >= 200`, or every subsequent tick above 200 refires. And carry an arm epoch on each rule that increments when it re-arms, so a tick replayed after a crash produces a fired event the dispatcher recognises as a duplicate and drops.
+
+Everything downstream is an ordinary notification pipeline and it is the easy half. The hard half is one instrument holding 500,000 rules and moving 8% in a minute.
 #### Summary
-**The picture in your head:** a financial trading floor with 50,000 price boards, each flickering with numbers every second. Millions of customers have each pinned a sticky note to one or more boards saying "call me when AAPL crosses $220" or "text me if BTC drops 5% in one hour." The job: watch every board constantly, check every sticky note on every update, and make phone calls when conditions are met — at a rate of 200,000 price updates per second across all boards. The naive solution (an employee scanning all 10 million sticky notes every time any board updates) is immediately obviously wrong. The insight: assign boards to employees. Each employee owns a set of boards and has already read all the sticky notes for their boards into their own notebook. When a board flickers, only the responsible employee checks their notebook — no scanning required.
+**The picture in your head:** a trading floor with 50,000 price boards, each flickering every second. Millions of customers have pinned sticky notes to boards: "call me when AAPL crosses $220", "text me if BTC drops 5% in an hour". The job is to watch every board and honour every note, at 250,000 board updates a second. One employee rescanning all 10 million notes on every flicker is obviously wrong. Assign boards to employees instead: each one owns a set of boards and has already copied that set's notes into their own notebook, sorted by price. When a board moves from 199.95 to 200.05, the responsible employee reads only the notes filed between those two numbers.
 
 **The approaches people actually take:**
-TODO. Two or three things a competent engineer might reach for, in plain language and before any product name, with what each one buys and roughly when it wins.
 
-**The single-request walkthrough:** AAPL is trading around $199. A market-data tick arrives: `{ instrument: "AAPL", price: 200.05, ts: "14:32:01.342", seq: 10422 }`. The Market Data Gateway receives this from the exchange feed, deduplicates it (two vendor feeds may send the same tick), encodes it in binary (Protobuf/Avro — a compact binary format, not JSON, because at 200k ticks/second even 100 extra bytes per tick is 20MB/second of avoidable overhead), and publishes it to a Kafka partition keyed by `instrument_id`. This means every AAPL tick goes to the same Kafka partition, and therefore to the same Rule Evaluator process. That Evaluator has in memory: `last_price["AAPL"] = 199.95` and a list of armed subscriptions for AAPL, including `{ alert_id: "a77", user: "u42", rule: cross_above(200.00) }`. It runs: `prev=199.95 < 200.00 && now=200.05 >= 200.00` — threshold crossed. It emits a `fired_alert` event, sets the local flag `alert_a77.state = FIRED` (so the next AAPL tick at $200.10 does not fire again), and continues to the next subscription. Total time from tick arriving to `fired_alert` emitted: under 50ms. The Dispatcher picks up the event, checks a Redis deduplication key (`idem:a77:arm_epoch_7`), looks up the user's notification preferences, and delivers a push notification. End-to-end: tick → push notification in under 3 seconds.
+Strip the delivery layer away and the question is how you evaluate ten million standing predicates against a quarter of a million events per second.
+
+*Re-evaluate everything on a timer.* Every minute, walk the rule table, fetch each rule's instrument price, compare. Trivial to build and to reason about, and genuinely correct while you have tens of thousands of rules and a tolerance measured in minutes. Its cost scales with the number of rules rather than the number of price changes, which is backwards once rules outnumber ticks, and the poll interval is a hard floor under latency.
+
+*Wake only the rules a tick could touch.* Route rules and ticks by instrument so the process receiving an instrument's ticks already holds that instrument's rules, then order those rules by trigger price so a move from 199.95 to 200.05 examines only the rules sitting in that interval. Cost now scales with ticks and with rules actually crossed, not with rules held. This is the standard answer above a few hundred thousand rules, and it buys single-digit-millisecond evaluation.
+
+*Index the price line itself.* The same idea taken further: a rule is a point or a range on the price axis, so a price move is a range query, and structures built for that (interval trees, segment trees over bucketed price levels) handle two-sided rules and bulk reloads naturally. Worth the machinery when many rules are two-sided bands. Overkill when 80% of rules are one-sided crosses that a sorted list already serves.
+
+**The single-request walkthrough:** AAPL is trading around $199. A tick arrives from the exchange feed: `{ instrument: "AAPL", price: 200.05, ts: "14:32:01.342", seq: 10422 }`. The gateway drops it if it has already seen `(AAPL, seq 10422)` from the second vendor, stamps an ingest timestamp, encodes it in a compact binary format rather than JSON (at 250k ticks/s, 100 wasted bytes per tick is 25MB/s of pure overhead), and puts it on the tick stream. Ticks are routed by instrument, so every AAPL tick reaches the same evaluator process, and that process already holds AAPL's state: `last_price = 199.95` and a threshold-sorted list of armed rules including `{ alert_id: "a77", user: "u42", cross_above: 200.00 }`. The evaluator range-scans the rules with thresholds in [199.95, 200.05], finds a77, confirms `prev < 200.00 <= now`, emits a fired event, and flips a77 to FIRED in local state so the next tick at $200.10 does not refire it. Tick to fired event: under 50ms. The dispatcher picks the event up, finds no `idem:a77:epoch7` key, applies u42's channels and quiet hours, records the fire against the triggering sequence number for audit, and sends the push. Tick to phone: under 3 seconds.
 
 **The pieces (and what each one is for):**
-- **Market Data Gateway** — receives raw price feeds from exchanges and data vendors (Refinitiv, Bloomberg), deduplicates ticks using the exchange's own sequence numbers, normalizes into a uniform binary format, stamps an ingest timestamp, and publishes to Kafka partitioned by `instrument_id`. Acts as a reliability buffer: if the exchange feed drops for 30 seconds, the gateway reconnects, requests a snapshot of current prices, and fills the gap.
-- **Kafka (partitioned tick stream)** — a durable log that routes ticks to evaluators. Keyed by `instrument_id` so all ticks for the same instrument always go to the same partition and therefore the same evaluator process. Kafka retains 24 hours of ticks so a crashed evaluator can replay from its last checkpoint without missing any market data.
-- **Rule Evaluator (stateful stream processor, e.g. Apache Flink)** — the core of the design. Each evaluator process owns a set of Kafka partitions (and therefore a set of instruments) and maintains two kinds of local state: (1) `last_price[instrument_id]` — the last seen price for each instrument it owns; (2) `subscriptions[instrument_id]` — the list of armed alert rules for that instrument, loaded from the subscriptions database and kept in sync via CDC (Change Data Capture — a stream of database changes published as events, so when a user creates or deletes an alert, the evaluator receives a corresponding event and updates its in-memory index within about 1 second). When a tick arrives, the evaluator does a local hashmap lookup — no network hop.
-- **Cross vs level detection** — the evaluator tracks the previous price and fires only when the price transitions across the threshold (`prev < threshold && now >= threshold`), not when the price is merely above the threshold. Without this distinction, every subsequent tick above $200 would re-fire the alert.
-- **Alert Dispatcher** — receives `fired_alert` events, checks a Redis deduplication cache (`idem:{alert_id}:{arm_epoch}`), applies user preferences (quiet hours, preferred channels), updates the alert's persistent state in Postgres to `FIRED`, and calls the downstream notification service (push/email/SMS).
-- **Idempotency layer (Redis)** — the evaluator can crash and replay ticks from its last checkpoint, potentially re-emitting a `fired_alert`. The `arm_epoch` counter increments every time an alert re-arms after a cooldown. Two fired events with the same `{alert_id, arm_epoch}` are duplicates — the dispatcher drops the second one.
+- **Market data gateway.** Receives raw feeds from exchanges and vendors, deduplicates on the exchange's own sequence numbers, normalises to one binary tick format, stamps ingest time, and publishes onto the tick stream. Also the reliability buffer: if a feed drops for 30 seconds it reconnects, pulls a price snapshot, and marks the gap so downstream knows not to trust a jump across it.
+- **Partitioned tick log.** A durable append-only stream keyed by instrument, so all of an instrument's ticks land on one partition and therefore one evaluator. Retaining 24 hours lets a crashed evaluator replay from its checkpoint instead of losing market data, and gives compliance a same-day replay.
+- **Rule evaluator.** A stateful stream processor holding, per instrument it owns: last price, the rules indexed by threshold, and window buffers for percent-change rules. Rules arrive from the transactional store as a change stream keyed the same way, so a new AAPL alert lands on the shard that evaluates AAPL, typically within a second. Evaluation is a local memory operation with no network hop, and it fires on the crossing edge rather than the level.
+- **Alert dispatcher.** Consumes fired events, checks the idempotency key, applies user preferences and quiet hours, writes the audit record, moves the rule's durable state to FIRED, and hands off to the notification service.
+- **Idempotency layer.** A short-TTL key-value store holding `idem:{alert_id}:{arm_epoch}`. The evaluator can replay ticks after a crash and re-emit a fire; the dispatcher drops the second one.
 
-**The thing that makes it hard:** NVIDIA reports blowout earnings. In the 60 seconds after the announcement, NVDA's price jumps 8%. Every user who set a "notify me if NVDA crosses $X" alert at any threshold between the old price and the new price fires simultaneously. Say there are 500,000 such subscriptions. All 500,000 are in the same Kafka partition (same instrument). The single evaluator process assigned to that partition gets a tsunami of work: 200 ticks per second, each requiring a scan of 500,000 subscription rules. Even at 10 nanoseconds per rule check, 500,000 checks per tick × 200 ticks/second = 10 billion operations per second. The evaluator's CPU saturates, the Kafka consumer lag builds, alerts arrive minutes late, and users have already sold or bought before the alert even delivers.
+**The thing that makes it hard:** NVIDIA reports blowout earnings and NVDA jumps 8% in 60 seconds. Every rule with a threshold between the old price and the new one fires at once. Say 500,000 rules sit on NVDA. By construction they are all on one partition, handled by one process, because that is what made the cheap local lookup possible. A flat scan of 500,000 rules against 200 ticks/s is 100 million comparisons a second, which at 10ns a comparison is a fully saturated core doing nothing but compares, before deserialisation, state updates, or emitting anything. During the actual event the tick rate on that one name goes to 1,000/s, so it needs five cores that the partitioning model will not give it. Consumer lag builds, alerts land minutes late, and the move is over.
 
-**Why this design and what it costs:** two mitigations. First, for threshold rules, don't scan all 500,000 subscriptions — store them in a sorted data structure (a skip list or balanced tree) indexed by threshold value. When a tick arrives moving price from $125 to $135, only subscriptions with `threshold ∈ [125, 135]` can possibly fire. A range scan on a sorted structure finds exactly those subscriptions in O(log N + matches). If 5,000 subscriptions are in that range and 495,000 are outside it, you just avoided 495,000 pointless checks per tick. Second, for pathologically hot instruments (BTC during a crypto crash), fan the instrument across sub-partitions using a secondary hash on `alert_id` — publish each tick to N sub-partitions, each handled by a separate evaluator process. The tick is evaluated N times (once per sub-partition), but each evaluator handles only 1/N of the subscriptions. CPU distributes across N cores.
+**Why this design and what it costs:** two mitigations, both with a real price. First, the threshold index. Rules sorted by trigger price turn "scan 500,000" into "range-scan [prev, now]"; a tick moving 0.01% wakes single digits instead of half a million. The cost is a sorted structure to maintain on every rule create, delete, and re-arm, and the fact that it only covers rules with a fixed numeric trigger. Second, for pathologically hot instruments, split the instrument across N sub-shards by hashing `alert_id`, publishing each tick to all N. Each sub-shard holds 1/N of the rules and CPU spreads across N cores. The cost is that the tick is now written and read N times, and last-price state has to be maintained identically in every sub-shard, so the "one owner per instrument" invariant that made this simple is gone for exactly the instruments where you can least afford confusion.
 
 **If you were building it tomorrow:**
-- Kafka (partitioned by `instrument_id`), Apache Flink (stateful stream processor with RocksDB-backed local state and 10-minute checkpoints to S3). Postgres for alert definitions (source of truth). Debezium for CDC (streams Postgres changes to Kafka). Redis for the dedup cache. Existing push/email notification service for delivery.
-- Core evaluator pseudocode (per tick):
+- Kafka for the tick stream, partitioned by `instrument_id`. Apache Flink for evaluators, with RocksDB local state and 10-minute checkpoints to S3. Postgres as the source of truth for rules, Debezium streaming its changes onto a co-partitioned topic. Redis for the dedupe cache. The existing notification service for delivery.
+- Core evaluator loop per tick:
   ```
   on tick(instrument_id, price, ts):
     prev = state.last_price.get(instrument_id)
     state.last_price[instrument_id] = price
-    # only scan rules in the crossed range (sorted by threshold)
     for alert in state.subs[instrument_id].range(prev, price):
-      if alert.state == ARMED and crosses_threshold(prev, price, alert.rule):
+      if alert.state == ARMED and crosses(prev, price, alert.rule):
         emit(fired_alert(alert.id, alert.arm_epoch, price, ts))
-        alert.state = FIRED   # local flag — prevents re-fire on next tick
+        alert.state = FIRED
   ```
-- On evaluator restart: restore from Flink checkpoint (last saved state) + replay Kafka from checkpoint offset. Cold start (no checkpoint): replay 24h of ticks after loading all subscriptions from Postgres. RTO target: <90 seconds.
+- On restart: restore the Flink checkpoint and replay the tick log from its offset. Cold start with no checkpoint: load rules from Postgres, then replay. RTO target under 90 seconds.
 #### What this is really testing
-TODO
+Whether you notice that the notification is the easy half. The system's cost is set entirely by how a price change locates the rules it could trigger. A candidate who spends the first ten minutes on push tokens, provider retries, and quiet hours has answered a different question. The insight to reach for is the inversion: stop iterating rules times price lookups, start iterating ticks times rules that could fire, then make "rules that could fire" small by ordering rules along the same axis the price moves along.
 
-The one insight this question exists to elicit, then the contrast with the question it most resembles and why the answers differ.
+The second thing being tested is smaller and missed more often: fire on an edge, not a state. `price >= 200` is a level. A rule is a crossing.
 
-Closest question: TODO
+Q7 looks like the same problem from the outside and is a different one underneath. There, the input is already one notification per recipient, and the work is fan-out and delivery: per-channel isolation so a push-provider outage does not block email, idempotency keys so a client retry does not double-send, smearing a 10M-user broadcast so you stay under a provider rate limit. Nothing in Q7 decides *whether* to notify; that decision arrived with the request. Here the decision is the entire design, and the volumes invert with it. Ten million rules produce on the order of twenty notifications a second in normal markets, which is small enough that the delivery tier is a dependency you reuse rather than a thing you design. Answer this question with Q7's answer and you get the classic failure: a beautifully isolated per-channel delivery tier fed by an evaluator that cannot keep up with NVDA.
+
+Closest question: Q7
 #### Clarifying questions and how each answer forks the design
 - What rule types? (threshold cross, % change over window, volume spike, custom expression)
-- How fresh do alerts need to be? (seconds p99? or is a minute fine?)
+- How fresh do alerts need to be? (seconds p99, or is a minute fine?)
 - Per-user subscription limit? (retail brokers: ~50 alerts/user typical)
 - Fire once and disable, or re-arm after cooldown?
 - Market hours only, or 24/7 (crypto)?
-- Do we also show alerts in-app, or only push/email?
-- Are rules allowed to reference derived data (moving avg, RSI) or only raw price?
+- Do we also show alerts in-app, or only push and email?
+- Are rules allowed to reference derived data (moving average, RSI) or only raw price?
 - Regulatory: audit trail required? (yes, for a broker)
 
 **How the answers shape the design**
 
 | If the answer is… | Then the design… |
 |---|---|
-| Simple threshold-cross rules | index subscriptions by (instrument, threshold) so a price tick range-queries only the rules that could fire |
-| Percent-change or windowed rules | maintain per-window state (rolling reference price) per rule, evaluated on each tick |
+| Simple threshold-cross rules | index rules by (instrument, threshold) so a tick range-queries only the rules that could fire |
+| Percent-change or windowed rules | maintain per-window state (rolling reference price) per rule, scanned in full on each tick |
 | Derived-data rules (moving average, RSI) | a precompute layer publishing indicator streams the evaluator subscribes to, not raw price only |
 | Seconds-p99 freshness | an in-memory streaming evaluator keyed by instrument; a per-minute tolerance allows cheaper batch checks |
-| Fire-once vs re-arm | a per-rule state machine (armed, fired, cooling-down) so a crossing does not spam repeatedly |
+| Fire-once vs re-arm | a per-rule state machine (armed, fired, cooling down) so one crossing does not spam repeatedly |
 | Per-user subscription cap | shard rule storage by instrument and enforce the cap at subscribe time |
-| 24/7 (crypto) vs market-hours | a session/calendar service gating evaluation windows per instrument |
+| 24/7 (crypto) vs market hours | a session and calendar service gating evaluation windows per instrument |
 | Audit trail required | append-only log of rule fires and deliveries for the broker's compliance |
 #### Requirements and scale, derived out loud
 **Requirements**
@@ -17525,45 +17470,47 @@ Closest question: TODO
     - Users CRUD price rules on any instrument in the catalogue
     - Rule types: threshold cross (above/below), % change over window (1h/1d), volume spike
     - Fire within a few seconds of the triggering tick
-    - Fire-once-then-disarm with optional re-arm cooldown
-    - Respect user notification preferences / quiet hours
-    - Audit trail of every fire with triggering tick
+    - Fire once then disarm, with optional re-arm cooldown
+    - Respect user notification preferences and quiet hours
+    - Audit trail of every fire with the triggering tick
 - **NFR:**
-    - p99 end-to-end latency tick → push < 5s
-    - Handle 10M active subscriptions, 50k instruments, 1M ticks/s peak
-    - 99.9% alert delivery within SLA; no duplicate alert for same cross
-    - Survive market-data feed disconnect without losing armed-state
+    - p99 end-to-end latency, tick to push, under 5s
+    - Handle 10M active rules, 50k instruments, 1M ticks/s peak
+    - 99.9% of alerts delivered within SLA; no duplicate alert for the same crossing
+    - Survive a market-data feed disconnect without losing armed state
 
 **Scale**
 
-- **Subscriptions:** retail broker (Trade Republic-class) ~4M active users. Per-user alert quota: free tier ~50, observed avg usage ~2.5 alerts/user (most users set 1-2 alerts on instruments they own + 1-2 watchlist alerts). 4M × 2.5 = 10M active subscriptions.
-- **Instruments:** EU broker catalogue — ~10k equities + ~5k ETFs + ~10k bonds + ~20k derivatives + ~5k crypto + ~5k FX pairs ≈ ~50k instruments tickable.
-- **Market-data rate:** sustained ~200k ticks/s during open-market overlap (EU + US sessions). Open-bell volatility burst (first 60s after US open or ECB announcement) reaches ~1M ticks/s as quote updates flood across all liquid names. Daily avg blending market-hours + off-hours quiet: ~300k ticks/s. Derivation: 50k instruments × ~5 ticks/instrument/sec during active trading × ~6h overlap window → ~5.4B ticks/6h ≈ ~250k/s sustained, rounded to 200k.
-- **Alert fires:** baseline ~0.1% tick-fire ratio (most ticks are tiny price moves that don't cross any subscribed threshold). 200k ticks/s × 0.001 = 200/s steady; round up to ~1k/s with bursts. Spike scenarios (index drops 3%, 100k alerts trigger in <10s): ~10k/s peak fires.
-- **Subscription state in memory:** per-sub ~500B (alert_id 16B + user_id 16B + instrument_id 16B + rule_type enum 4B + rule_value 8B + window_sec 4B + state 4B + cooldown_sec 4B + last_fired_at 8B + arm_epoch 4B + channels list ~64B + indexed-field padding ~352B). 10M × 500B = ~5GB total → comfortably fits across ~10-20 evaluator shards (~250-500MB/shard).
-- **Tick size:** ~150B serialised (instrument_id 16B + price 8B + bid 8B + ask 8B + ts 8B + volume 4B + vendor_id 4B + exchange_seq_no 8B + flags 4B + Avro/Protobuf headers ~30B + padding ~52B). JSON would be ~3-4x larger; binary encoding mandatory at this rate.
-- **Tick volume:** avg 300k/s × 86400s = ~26B ticks/day × 150B = ~4TB/day raw; partitioned event-stream RF=3 → ~12TB/day on hot Kafka cluster.
-- **Hot retention** (24h replay window — covers evaluator restart + regulatory same-day audit): ~12TB on SSD, sized for tier-1 liquid instruments only. Long-tail illiquid instruments (~80% by count, ~5% by volume) downsampled to 1s OHLC bars at the gateway → ~10x compression → ~1.2TB realistic.
-- **Cold archive** (regulatory MiFID II 7yr retention): Parquet on object store, dictionary encoding on `instrument_id`/`vendor_id` + delta encoding on price/ts within partition → 5-10x compression. 4TB/day ÷ ~8x avg = ~500GB/day compressed × 365 = ~1.3PB/yr × 7yr ≈ ~9PB total; tier to glacial after 90d.
+- **Rules:** retail broker of roughly Trade Republic class, ~4M active users. Free-tier quota 50 alerts, observed average usage ~2.5 (one or two on instruments held, one or two on the watchlist). 4M × 2.5 = 10M active rules.
+- **Instruments:** ~10k equities + ~5k ETFs + ~10k bonds + ~20k derivatives + ~5k crypto + ~5k FX pairs = ~55k, call it 50k tickable.
+- **Rules per instrument:** 10M / 50k = 200 average, but the distribution is what matters. Heavily skewed: the top 20 names plausibly carry 5% of all rules each at peak interest, so 10M × 0.05 = 500k on a single instrument is the number to design against.
+- **Tick rate, sustained:** ~5k liquid names quoting ~40 updates/s = 200k/s, plus ~45k long-tail names at ~1/s = 45k/s, so ~250k ticks/s during the EU and US overlap.
+- **Tick rate, peak:** the first 60s after a US open or an ECB decision runs ~4x sustained, so ~1M ticks/s.
+- **Tick rate, daily average:** 8h active at 250k/s = 8 × 3600 × 250k = 7.2B ticks, plus 16h of crypto and FX only at ~20k/s = 16 × 3600 × 20k = 1.15B. Total ~8.4B ticks/day, so 8.4B / 86400 = ~97k/s averaged over the day. Note this is well below the 250k/s sustained figure: sizing the evaluator fleet uses 250k, sizing storage uses 97k.
+- **Fire rate:** if 5% of rules fire on a given day, that is 10M × 0.05 = 500k fires, almost all inside the 8h active window: 500k / 28800 = ~17/s average. The burst is what sizes the dispatcher: an index dropping 3% in ten seconds can trip 100k rules, so 100k / 10 = 10k fires/s, roughly 600x the average.
+- **Rule state in memory:** ~100B of fields (ids 48B, rule type and value 12B, window 4B, state and epoch 8B, timestamps 16B, channels ~16B) plus index and object overhead (sorted-structure pointers ~32B, per-entry map and header overhead ~150B, channel list indirection ~64B, safety margin) = ~500B per rule loaded. 10M × 500B = ~5GB. Across 16 evaluator shards that is ~310MB each, comfortably in RAM alongside window buffers.
+- **Tick size:** ~150B serialised (instrument_id 16B + price 8B + bid 8B + ask 8B + ts 8B + volume 4B + vendor_id 4B + exchange_seq 8B + flags 4B + schema header ~30B + padding ~52B). JSON would be 3 to 4 times larger; binary encoding is not optional at this rate.
+- **Tick volume:** 8.4B/day × 150B = ~1.3TB/day logical. At replication factor 3 that is ~3.8TB/day on the hot log cluster.
+- **Hot retention:** 24h of replay covers evaluator restart plus same-day audit, so ~3.8TB on SSD. Twelve brokers with 1TB SSD each sits at ~32% utilisation, which leaves headroom for a peak day.
+- **Cold archive:** MiFID II requires 7 years. Columnar files on object storage with dictionary encoding on `instrument_id` and `vendor_id` and delta encoding on price and timestamp gives roughly 8x, so 1.3TB / 8 = ~160GB/day, × 365 = ~58TB/yr, × 7 = ~410TB. Tier to glacial storage after 90 days.
 #### Key decisions
-TODO
+**Where the rules live relative to the ticks**
+- Choice: co-partition. Route ticks and rule-change events by the same `instrument_id` key so an evaluator holds every rule for every instrument it consumes, and evaluate against local memory with no network call on the tick path.
+- Alternative: keep rules in a shared low-latency store (Redis, Aerospike) and query per tick. Evaluators become stateless and horizontally trivial, rule changes take effect immediately rather than after change-stream lag, and rule count stops being bounded by evaluator RAM. This is a genuinely reasonable design, not a straw man.
+- Decider: total rule footprint against fleet RAM, and the per-tick latency budget. 10M rules × 500B = 5GB fits in 16 shards at 310MB each. A shared store adds ~0.3ms per lookup, and 250k ticks/s of blocking lookups is 75 core-seconds of wait per wall second, which needs a large fleet purely to absorb network latency.
+- Alternative wins when: rules outgrow RAM, roughly past 100M rules or 50GB, or rule churn is high enough that a 1s change-stream lag is a correctness problem (institutional clients programmatically arming and disarming rules), or you need any evaluator to answer for any instrument during a partial outage.
 
-Two or three genuine forks. For each, in this exact shape so it stays checkable:
+**Scan every rule on the instrument, or index by threshold**
+- Choice: keep the fixed-threshold rules in a sorted structure per instrument and range-scan `[min(prev, now), max(prev, now)]` on each tick.
+- Alternative: a flat list scanned in full per tick. No structure to maintain on create, delete, or re-arm; no pointer chasing; handles every rule type uniformly, including the windowed ones an index cannot hold anyway.
+- Decider: rules on the hottest single instrument. At the 200-per-instrument average a flat scan is ~200 compares, about 0.4µs per tick, which is free. At 500k rules and 200 ticks/s it is 100M compares/s, one saturated core, and at the 1,000 ticks/s an earnings print produces it is five cores on a partition that cannot be split. The crossover is around 10k rules on one instrument.
+- Alternative wins when: no instrument accumulates more than a few thousand rules, or the rule mix is dominated by windowed and expression rules that have no fixed point on the price axis to sort by, in which case the index covers a minority of the work and you pay its maintenance for little return.
 
-**<name of the fork>**
-- Choice:
-- Alternative:
-- Decider:
-- Alternative wins when:
-
-**Raw material, from the old Common Mistakes:**
-
-- **Polling prices on a cron.** That sounds simple but scales with subscriptions instead of with instrument ticks, and it bakes in minute-level latency. The stream processor keyed by `instrument_id` is the right mental model.
-- **Checking levels instead of crossings.** If the rule is "AAPL above $200" and you do `price >= 200`, every subsequent tick above $200 re-fires. You need `prev < 200 && now >= 200`.
-- **Forgetting feed unreliability.** Real broker systems need a story for stale, divergent, or gapped vendor data; otherwise you will confidently notify users about phantom crosses.
-- **Exactly-once across the whole pipeline by default.** End-to-end exactly-once through Kafka, stateful evaluation, dedupe cache, and third-party notification providers is disproportionate here. At-least-once plus idempotent delivery is the practical answer.
-- **No hysteresis or dwell-time.** Raw threshold checks flap badly on noisy liquid symbols; without a re-arm margin or dwell gate users get spammed on every micro-oscillation.
-- **Treating alert delivery and auditability as the same thing.** Provider acceptance is not your canonical record; the canonical record is the fired-alert event tied to the triggering tick, exchange sequence number, and rule snapshot.
+**At-least-once with idempotent dispatch, or end-to-end exactly-once**
+- Choice: at-least-once through the pipeline, with duplicates absorbed at the dispatcher by `{alert_id, arm_epoch}`, where the epoch increments on every re-arm.
+- Alternative: transactional exactly-once from ingest through the stream processor to the sink, which removes a whole class of "why did I get two alerts" tickets and simplifies the audit story.
+- Decider: the last hop. Push and email providers are plain HTTP with no transaction to enlist in, so the pipeline can be exactly-once and the user still gets two pushes; meanwhile transactional commits push evaluator checkpoint latency from tens of milliseconds into the hundreds, against a 5s end-to-end budget where the 10k/s burst is the real risk. A dedupe key costs one Redis GET per fire, at 17/s average and 10k/s peak.
+- Alternative wins when: the fire triggers something that is not idempotent. A conditional order or stop-loss that places a real trade cannot be deduped after the fact, and at that point you are not building a notification system; you route it through the order path with its own transactional guarantees.
 #### High-level design
 **must-say**
 
@@ -17635,69 +17582,41 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 </svg>
 ```
 
-**How to read the diagram:** ticks come in on one side, rules and last-known prices live in local processor state, and fired alerts go out through a delivery pipeline on the other side. The center of the system is the stateful evaluator, not the notifier.
+**How to read the diagram:** ticks come in at the top, rules and last-known prices live in the evaluator's local state, and fired alerts leave through a delivery pipeline at the bottom. The centre of the system is the stateful evaluator, not the notifier.
 
-**Why the flow is shaped this way:** polling every alert against every price would be far too expensive. Co-partitioning prices and subscriptions means the worker handling an instrument already has the rules it needs in memory when a tick arrives.
+**Why the flow is shaped this way:** polling every rule against every price is the thing being avoided. Routing prices and rules by the same key means the worker handling an instrument already has the rules it needs in memory when a tick arrives.
 
-**What this layout buys you:** low-latency evaluation at very high tick volume. The tradeoff is that partitioning becomes the defining design decision, because the whole approach depends on the right data meeting on the same worker.
+**What this layout buys you:** low-latency evaluation at very high tick volume. The tradeoff is that partitioning becomes the defining decision of the design, because the whole approach depends on the right data meeting on the same worker.
 #### Deep dive
 **must-say**
 
-**Partitioning strategy.** Ticks and subscriptions are both keyed by `instrument_id`. That's the whole trick: the evaluator consumes from a tick partition and already has _all subscriptions for every instrument in that partition_ in its local state. No distributed join, no network hop per tick — pure local hashmap lookup. Partition count sized so each evaluator task handles <5k instruments and its subscription set fits comfortably in RAM.
+**Matching a tick to the rules it can fire.** Everything else in this design exists to put the right rules in the same process as the right ticks so that this loop is a local memory operation.
 
-**Rule evaluation logic (threshold cross).**
+Per instrument the evaluator holds three things: the last price with its timestamp, a threshold index (rules sorted by trigger price, in a skip list or balanced tree), and a flat list of rules whose trigger level is not a fixed number (percent change over a window, volume spikes). A tick runs:
 
 ```
 on tick(instrument, price, ts):
-  prev = state.last_price[instrument]          # might be null
+  prev, prev_ts = state.last_price.get(instrument)
   state.last_price[instrument] = (price, ts)
-  for alert in state.subs[instrument]:
-    if alert.state != ARMED: continue
-    if alert.type == "cross_above":
-      if prev and prev < alert.value and price >= alert.value:
-        emit(alert_fired)
-        alert.state = FIRED                    # local flag
-    # ...analogous for cross_below, pct_change (uses window_buffer)
+  if prev is None or ts - prev_ts > GAP: return     # seed only, do not fire
+  lo, hi = min(prev, price), max(prev, price)
+  for rule in state.threshold_idx[instrument].range(lo, hi):
+    if rule.state != ARMED: continue
+    if rule.dir == UP   and prev <  rule.value <= price: fire(rule, price, ts)
+    if rule.dir == DOWN and prev >  rule.value >= price: fire(rule, price, ts)
+  for rule in state.windowed[instrument]:           # no index, full scan
+    if rule.state == ARMED and rule.eval(price, ts, state.window_buf): fire(...)
 ```
 
-Cross detection (not level) is what stops one breach generating a fire on every subsequent tick.
+Three things in that loop earn their place.
 
-**Rule types — cost and complexity:**
+*The range scan.* A flat scan costs one comparison per rule on the instrument per tick. At the 200-rules-per-instrument average that is nothing: 250k ticks/s over 16 shards is ~15k ticks/s per shard, times 200 compares at ~2ns, is about 6ms of CPU per second. The index exists entirely for the tail. On NVDA with 500k rules a flat scan is 100M compares/s at 200 ticks/s, and five times that during the earnings print. With the index, a tick that moves the price 0.01% touches only the rules whose thresholds sit in that sliver, typically single digits, and the 8% earnings jump touches only the rules in that 8% band rather than all rules on the name. Range scan is O(log N + matched). Skip lists and balanced trees have had that bound since the 1970s and 1990 respectively; the choice between them here is about concurrent update cost, not asymptotics, because rules are created and re-armed while ticks are being evaluated.
 
-|Rule type|State needed|Cost per tick|Notes|
-|---|---|---|---|
-|Cross above/below|last_price only|O(subs for instrument)|cheapest; covers ~80% of use cases|
-|% change over window|ring buffer of ticks|O(subs) + ring lookup|window ≤ 1d keeps buffer small|
-|Moving average cross|rolling sum|O(1) update|precompute per-instrument, not per-sub|
-|Custom expression|full expression engine|variable|out of scope for v1|
+*The half-open comparison.* `prev < value <= price` fires exactly once, at the moment the boundary is crossed, and still fires when a tick jumps clean over the threshold (199.00 to 201.00 on a gap open, where no tick ever lands on 200). Writing `price >= value` instead is the most common wrong answer in this question: it is a level test, so every subsequent tick above 200 refires the rule, and the user gets an alert on every tick for the rest of the session.
 
-**Subscription propagation.** Subscriptions DB → Debezium CDC → `subs.changes` topic, also keyed by `instrument_id`. Evaluator consumes this topic co-partitioned with ticks, so a new sub for AAPL lands on the same shard that evaluates AAPL ticks. Add/remove latency: typically <1s, which is plenty for retail alerts.
+*The gap guard.* After a checkpoint restore, `prev` is whatever the checkpoint held, possibly ten minutes stale. Without the guard, the first tick after restore looks like one enormous price move and fires every rule between the two prices simultaneously. The same guard covers a market-data feed outage: treat the first tick after any gap beyond a few seconds as a reseed rather than a crossing. This is a deliberate choice to miss real crossings that happened during the blind window rather than to invent a crossing that did not happen, which is the right way round for a regulated broker.
 
-**Idempotency / de-duplication.**
-
-- The evaluator's `state = FIRED` flag is the primary guard — one fire per arm.
-- But the evaluator can crash and reprocess ticks from the last checkpoint, which could re-emit. So the dispatcher also checks Redis `idem:{alert_id}:{arm_epoch}` before calling the notification service.
-- `arm_epoch` increments each time the alert re-arms after cooldown. Two fires with the same epoch = duplicate → drop.
-
-**At-least-once, not exactly-once.** End-to-end exactly-once across ingest → Kafka → stream processor → Redis → notification provider is theoretically achievable with Kafka transactions + transactional outboxes, but in practice: complex, slow, and alerts are idempotent at the dispatcher anyway. At-least-once + dedupe on delivery is the pragmatic choice.
-
-**Fault tolerance.**
-
-|Failure|Behaviour|
-|---|---|
-|Evaluator pod crash|Flink checkpoint → new pod restores state + last offset; gap is seconds|
-|Market-data gateway disconnect|Reconnect + gap-fill from snapshot; evaluator continues from last tick (stale alerts possible — tag with `stale: true` if gap > threshold)|
-|Subscription DB down|CDC buffered on Kafka; evaluator keeps evaluating on last-known subs|
-|Kafka partition rebalance|Flink pauses, rebuilds state from RocksDB snapshot, resumes|
-|Redis dedup outage|Dispatcher fails closed — better to miss a dup than double-alert a user; fall back to in-memory LRU with wider window|
-
-**Re-arm / cooldown.** After a fire, the alert goes to `FIRED` state. A small re-arm service reads `alerts.fired` topic and — for alerts with `cooldown_sec` — schedules a delayed re-arm event (via a cron / Kafka delayed topic). When it fires, the state flips back to `ARMED` in both Postgres and (via CDC) the evaluator's local state.
-
-**Market hours vs 24/7.** Equities evaluator skips tick eval when the instrument's market is closed (attribute on instrument catalogue). Crypto and FX evaluators run continuously. Same code path, data-driven behaviour.
-
-**Why not "poll prices + cron check rules"?** That's the naive v0: every minute, for every alert, fetch current price, compare, decide. It works at 10k alerts. At 10M alerts × 50k instruments it's 10M Postgres reads/min and the latency floor is the poll interval (minutes, not seconds). The streaming design inverts the problem: you iterate ticks × subs-for-that-instrument, not alerts × price-lookups. That's the whole insight.
-
-**Alert state machine — armed → fired → cooldown → re-armed.** Each alert is a small state machine with strict transitions; the state is the source of truth for "should this alert fire on the next matching tick." `ARMED` is the only state in which a tick can fire the alert; `FIRED` is reached on first crossing and persists until the cooldown window elapses (and, if hysteresis is configured, until price moves the configured margin back below threshold). After cooldown the system transitions to `RE_ARMING` (a brief intermediate to let the dispatcher confirm any in-flight delivery), then back to `ARMED`. `DISABLED` is user-controlled (the alert is paused but not deleted). `STALE` is set when the market-data gateway has gapped beyond threshold — fires from this state are tagged `stale: true` and the dispatcher suppresses or downgrades them. *[Source: Trade Republic / Robinhood alert architecture writeups]*
+**The rule state machine.** Matching is only half of correctness. Each rule is a small state machine, and `ARMED` is the only state in which a tick can fire it. A crossing moves it to `FIRED`. If the user asked for fire-once, that is terminal. If they configured a cooldown, it moves to `COOLDOWN` for the configured window, then through a brief `RE_ARMING` state (which lets the dispatcher confirm any in-flight delivery) back to `ARMED` with `arm_epoch` incremented. `DISABLED` is user-controlled pause. `STALE` is set when the feed has gapped beyond threshold, and fires from that state are tagged and suppressed.
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 410" role="img" aria-label="Stock alert state machine: armed, fired, cooldown, re-arming, stale, disabled">
@@ -17777,189 +17696,95 @@ Cross detection (not level) is what stops one breach generating a fire on every 
 </svg>
 ```
 
-**Vendor disagreement resolution.** Brokers typically subscribe to two market-data vendors (e.g. Refinitiv + Bloomberg, or primary exchange feed + backup) for resilience and cross-validation. Both feeds carry exchange sequence numbers when available — these are authoritative, and the gateway dedupes on `(instrument_id, exchange_seq_no)`. When sequence numbers are missing or vendors disagree on price within the same sequence (a vendor glitch, not an exchange disagreement), the gateway picks the *primary* vendor for evaluation and uses the secondary purely for cross-check and gap-fill. If the vendors diverge in price beyond a threshold (e.g. >0.5% mismatch on a quoted price), the gateway marks subsequent ticks `unreliable` and the evaluator suppresses level-cross fires until they reconverge — better to delay an alert than fire on a vendor glitch and tell a user "AAPL crossed $200" when it actually didn't. *[Source: Trade Republic engineering, Robinhood crypto feed disagreement post]*
+Two gates hang off the re-arm transition, because raw crossing detection flaps badly on a price oscillating around the threshold. A *hysteresis margin* holds the rule out of `ARMED` until price moves a configured distance back through the threshold, defaulting to 0.5% on equities and 1% on crypto. A *dwell gate* requires price to stay on the new side for N seconds before the crossing counts at all, which kills spike-and-revert noise in thin hours. Both are per-rule parameters, so "notify me when AAPL crosses $200 and stays above for 60s" is expressible, and both trade latency for quiet: a 60s dwell means a real move is reported 60s late.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 655" role="img" aria-label="Vendor disagreement resolution sequence between two market-data vendors, gateway and evaluator">
-  <defs>
-    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
-    </marker>
-  </defs>
-  <style>
-    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
-    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
-    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
-    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
-    .dash{ stroke-dasharray:5 4; }
-    .acc{ stroke:var(--accent); }
-    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
-    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
-    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
-    text{ dominant-baseline:middle; text-anchor:middle; }
-  </style>
+**Idempotency across replay.** The local `FIRED` flag is the primary guard and handles the normal case for free. It does not survive the abnormal one: the evaluator crashes, restores a checkpoint taken before the fire, replays the tick log from that offset, and emits the same fire again with the rule's state restored to `ARMED`. That is why the epoch exists. `{alert_id, arm_epoch}` identifies a specific arming of a specific rule, and any second fired event carrying that pair is a replay artefact, not a second crossing. The dispatcher checks the key before calling the notification service and drops on hit. Because the epoch only advances on a genuine re-arm, a rule that legitimately fires twice in one session produces two distinct keys and both alerts get through.
 
-  <!-- lifelines -->
-  <line x1="100" y1="73" x2="100" y2="632" class="flow dash" style="marker-end:none" stroke-opacity="0.5"/>
-  <line x1="300" y1="73" x2="300" y2="632" class="flow dash" style="marker-end:none" stroke-opacity="0.5"/>
-  <line x1="500" y1="73" x2="500" y2="632" class="flow dash" style="marker-end:none" stroke-opacity="0.5"/>
-  <line x1="680" y1="73" x2="680" y2="632" class="flow dash" style="marker-end:none" stroke-opacity="0.5"/>
-
-  <!-- participant headers -->
-  <rect class="box" x="25" y="27" width="150" height="46" rx="9"/>
-  <text class="sub" x="100" y="42"><tspan x="100">Primary Vendor</tspan><tspan x="100" dy="16">(Refinitiv)</tspan></text>
-  <rect class="box" x="225" y="27" width="150" height="46" rx="9"/>
-  <text class="sub" x="300" y="42"><tspan x="300">Secondary Vendor</tspan><tspan x="300" dy="16">(Bloomberg)</tspan></text>
-  <rect class="box" x="425" y="27" width="150" height="46" rx="9"/>
-  <text class="sub" x="500" y="42"><tspan x="500">Market Data</tspan><tspan x="500" dy="16">Gateway</tspan></text>
-  <rect class="box" x="605" y="27" width="150" height="46" rx="9"/>
-  <text class="lbl" x="680" y="52">Rule Evaluator</text>
-
-  <!-- messages -->
-  <path class="flow" d="M100,108 L500,108"/>
-  <text class="edge" x="300" y="99">tick AAPL seq=1042 px=199.95</text>
-  <path class="flow" d="M300,142 L500,142"/>
-  <text class="edge" x="400" y="133">seq=1042 px=199.96</text>
-
-  <!-- note over G -->
-  <rect class="box" x="415" y="160" width="170" height="34" rx="6"/>
-  <text class="edge" x="500" y="171"><tspan x="500">same seq_no</tspan><tspan x="500" dy="14">dedupe to V1's tick</tspan></text>
-
-  <path class="flow" d="M500,224 L680,224"/>
-  <text class="edge" x="590" y="215">px=199.95 conf=high</text>
-
-  <path class="flow" d="M100,258 L500,258"/>
-  <text class="edge" x="300" y="249">tick AAPL seq=1043 px=200.05</text>
-  <path class="flow" d="M300,292 L500,292"/>
-  <text class="edge" x="400" y="283">seq=1043 px=199.50</text>
-
-  <!-- note over G: divergence -->
-  <rect class="box acc" x="405" y="310" width="190" height="34" rx="6"/>
-  <text class="edge" x="500" y="321"><tspan x="500">same seq, divergence &gt; 0.5%</tspan><tspan x="500" dy="14">mark unreliable</tspan></text>
-
-  <path class="flow acc" d="M500,374 L680,374"/>
-  <text class="edge" x="590" y="365">px=200.05 stale=true</text>
-
-  <!-- note over E -->
-  <rect class="box" x="595" y="392" width="160" height="34" rx="6"/>
-  <text class="edge" x="675" y="403"><tspan x="675">suppress fires</tspan><tspan x="675" dy="14">buffer ticks</tspan></text>
-
-  <path class="flow" d="M100,456 L500,456"/>
-  <text class="edge" x="300" y="447">tick AAPL seq=1044 px=200.04</text>
-  <path class="flow" d="M300,490 L500,490"/>
-  <text class="edge" x="400" y="481">seq=1044 px=200.03</text>
-
-  <!-- note over G: reconverged -->
-  <rect class="box" x="415" y="508" width="170" height="34" rx="6"/>
-  <text class="edge" x="500" y="519"><tspan x="500">vendors reconverged</tspan><tspan x="500" dy="14">clear unreliable flag</tspan></text>
-
-  <path class="flow" d="M500,572 L680,572"/>
-  <text class="edge" x="590" y="563">px=200.04 conf=high</text>
-
-  <!-- note over E: resume -->
-  <rect class="box" x="595" y="590" width="160" height="34" rx="6"/>
-  <text class="edge" x="675" y="601"><tspan x="675">resume eval</tspan><tspan x="675" dy="14">fire pending crossings</tspan></text>
-</svg>
-```
-
-**Hysteresis and dwell-time gates.** A naive cross-detection fires the moment `prev < threshold && now >= threshold`, which causes flapping when price oscillates around the threshold ($199.95 ↔ $200.05) — every cross fires another alert. Two complementary mitigations: (1) *Hysteresis margin* — after a fire, the alert only re-arms once price moves a configurable margin (e.g. 0.5%) back below threshold, so a price hovering at $200.00 doesn't re-fire on every tick; (2) *Dwell-time gate* — the cross only counts if price stays on the new side for N seconds (e.g. 60s), suppressing momentary spike-and-revert noise common in low-liquidity hours. Both are exposed as per-rule parameters ("notify when AAPL crosses $200 and stays above for 60s") so power users tune; default values suppress noise without delaying obvious moves.
-
-**Market hours handling.** Equities and ETFs only tick during exchange market hours (e.g. NYSE 09:30-16:00 ET); crypto and FX run 24/7. The instrument catalog carries a `market_hours` attribute keyed to exchange and timezone; the evaluator reads this on tick processing and *skips* level-cross detection when the market is closed for that instrument. This prevents firing on stale closing-price ticks that the gateway might re-emit during weekends, and avoids confusion when corporate actions (dividends, splits) artificially adjust opening price. % change rules over windows that span market closures are computed on *trading-time*, not wall-clock — so "BTC drops 5% in 1h" runs continuously, but "AAPL drops 5% in 1d" means "5% relative to previous trading-day close." Pre-market and after-hours sessions are configurable per user (most retail users don't want alerts at 4am).
-
-**Delivery channels (push, email, in-app).** All three. Push and email use the existing notification system (#7). In-app is a first-class surface: every fired alert also writes a row to a per-user `alerts_inbox` wide-column table (key = `(user_id, fired_at desc)`, retention 90d, paginated), which the mobile app reads when the user opens the alerts tab — fresh ticks update an unread badge via the same WebSocket session that powers in-app price refresh. The user toggles channels per alert at create time (`channels: [push, email, in_app]`); the dispatcher applies each channel independently with its own retry/idempotency, so a flaky push provider doesn't suppress the in-app or email copy. In-app delivery never goes to the notification service — the dispatcher writes directly to `alerts_inbox` and pushes a lightweight WebSocket frame to active sessions. Quiet hours apply to push and email only; in-app is always written so the user catches up on reopen.
+**When one instrument is too hot for one process.** The partitioning that makes evaluation cheap also makes an instrument unsplittable, and the threshold index is the first answer: it converts "500k rules on NVDA" from a throughput problem into a non-problem for ordinary ticks. When even that is not enough, split the instrument across N sub-shards by hashing `alert_id`, publishing every tick for that instrument to all N. Each holds 1/N of the rules. The costs are real and worth stating aloud: the tick is written and read N times, and `last_price` is now maintained independently in N places, so a sub-shard that lags produces crossings computed against a different `prev` than its siblings. Keep N small, apply it only to instruments that trip a lag SLO, and treat it as a mitigation rather than the default topology.
 #### Where it breaks
 **must-say**
 
 **Bottlenecks**
 
-- **Hot instrument** (e.g. NVDA during earnings: huge tick rate, millions of subs) → the partition gets overloaded. Mitigation: detect hot keys, split into sub-partitions with a secondary hash on `alert_id`; the tick is fanned out to all sub-partitions for that instrument.
-- **Thundering herd on a sharp move** (index drops 3% → 100k alerts fire at once) → dispatcher rate-limits per downstream channel; notification system already has per-channel queues; smear delivery over seconds if not time-critical.
-- **Stale state after gateway disconnect** → tag alerts fired on first tick after a gap as `stale` and suppress % change rules that span the gap; resume normal after window refills.
-- **Subscription fan-out on popular instruments** (BTC: a million subs) → subs-for-instrument list gets huge; keep it as a sorted structure by rule value so for threshold rules we only scan subs whose threshold is between `prev_price` and `current_price` (tree or skip list — reduces O(all subs) to O(subs in the crossed range)).
-- **Cold start after full outage** → evaluator rebuilds state from CDC topic replay; can take minutes for 10M subs. Mitigation: periodic state snapshots to S3, restore from latest + replay delta.
-- **Regulatory replay** → all ticks retained 24h on Kafka + archived to S3; can replay a specific instrument/window to reproduce any fire decision for audit.
-- **Rule abuse** (user creates 10k alerts on every instrument) → per-user subscription quota enforced at the API; soft-limit 50, hard-limit 500.
-- **Vendor disagreement glitches** → primary feed flickers a wrong price for 1-2 ticks (vendor encoding bug, transient corruption); alert fires on a phantom cross. Cross-validate against secondary vendor on every tick; if disagreement > 0.5% beyond known bid-ask spread, mark `unreliable` and suppress level-cross fires until reconvergence; never auto-cancel a fire once dispatched, but emit a correction notification if the fire was based on confirmed-bad data.
-- **DST transitions on market hours** → spring-forward / fall-back across exchanges in different jurisdictions can shift open/close by an hour relative to evaluator's stored schedule. Store market hours in the exchange's local tz with a current tz database; recompute open/close on every DST boundary; alert on instruments whose first tick of the session arrives more than 5 min before/after expected open as a regression signal.
-- **Hysteresis tuning vs delay** → too-tight hysteresis (no margin) flaps; too-loose (5% margin) delays alerts on real moves. Make hysteresis per-rule-type-defaulted (0.5% for equities, 1% for crypto, 0% with dwell-time-only for high-precision FX), expose per-alert override; monitor alert flap-rate cohort-wide and tune defaults if drift detected.
+- **Hot instrument.** NVDA at earnings: huge tick rate against millions of rules on one unsplittable partition. Threshold index first, sub-shard split by `alert_id` hash second, with the duplicated last-price state that implies.
+- **Thundering herd on a sharp move.** An index dropping 3% trips 100k rules in ten seconds, 600x the average fire rate. The dispatcher rate-limits per downstream channel and smears delivery over seconds. Note this makes some users later than others on a move where seconds matter, which is a fairness question the design does not answer.
+- **Windowed rules escape the index.** Percent-change rules are scanned in full on every tick because they have no fixed point on the price axis. On a hot instrument they, not the threshold rules, are what saturates the core.
+- **Cold start after a full outage.** Rebuilding 10M rules from a change-stream replay takes minutes. Periodic state snapshots plus delta replay bring restore back under 90 seconds.
+- **Rule abuse.** A user creating 10k alerts across every instrument. Per-user quotas at the API, soft limit 50, hard limit 500, plus a per-instrument cap so nobody parks 1,000 rules on AAPL.
+- **Vendor glitches.** A primary feed flickering a wrong price for one or two ticks fires phantom crossings. Cross-check against the secondary vendor per tick; when they diverge more than 0.5% beyond the known spread, mark ticks unreliable and suppress crossing fires until they reconverge. Never retract a dispatched alert silently; send a correction if the fire is confirmed bad.
+- **DST and exchange calendars.** Spring-forward across jurisdictions shifts open and close relative to a stored schedule. Store hours in the exchange's local timezone against a maintained tz database, and alert when a session's first tick lands more than 5 minutes off the expected open.
 
 **Failure modes**
 
 | Layer | Failure | Detection | Mitigation |
 |---|---|---|---|
-| Market-data gateway | Primary vendor disconnects or starts replaying stale ticks | Feed watermark lag; vendor-heartbeat gap; stale-sequence alert | Fail over to secondary vendor, mark incoming ticks `stale/unreliable`, and suppress fresh fires until the gap is backfilled or the vendors reconverge |
-| Evaluator shard | Hot partition crashes or lags under a single instrument storm | Per-partition consumer lag; shard CPU saturation; checkpoint-age alert | Restore from checkpoint, replay the tick delta, and hot-split the instrument via secondary hash on `alert_id` if lag stays above SLA |
-| CDC subscription stream | Alert create/delete updates stop propagating to evaluators | CDC topic lag; DB-to-topic replication health; "alert missing on shard" synthetic check | Keep the transactional store as source of truth, replay CDC from the last good offset, and temporarily route alert CRUD acknowledgements through a "pending activation" state until the evaluator confirms load |
-| Dispatcher dedupe cache | Redis or the dedupe layer is unavailable, raising duplicate-send risk | Dedupe-cache error rate; duplicate-fire synthetic; channel send spike | Fail closed for external push/email sends if the idem layer is unavailable for too long; still persist to in-app inbox; recover by replaying fired events through the dedupe layer after cache recovery |
-| Notification provider | Push or email provider outage delays delivery after correct rule evaluation | Provider webhook error rate; queue-depth growth by channel | Queue channel retries independently, keep the fired alert in the user inbox immediately, and downgrade channel SLA while preserving the audit record of the trigger time |
-| Audit sink | Fired-alert archive write fails, risking regulatory evidence gaps | Sink write failures; object-store commit lag | Buffer to a durable stream first, replay to object storage when available, and block archive-retention deletion until the sink is fully caught up |
-| Market-hours calendar | Exchange schedule or DST table is stale, causing alerts during closed markets | First-tick-vs-expected-open drift alert; calendar version mismatch | Version exchange calendars, refresh tz data automatically, and treat unexpected session openings as `manual-review` until schedule data is corrected |
+| Market-data gateway | Primary vendor disconnects or replays stale ticks | Feed watermark lag; vendor heartbeat gap; stale-sequence alert | Fail over to the secondary vendor, mark incoming ticks unreliable, and suppress fresh fires until the gap is backfilled or the vendors reconverge |
+| Evaluator shard | Hot partition crashes or lags under a single-instrument storm | Per-partition consumer lag; shard CPU saturation; checkpoint-age alert | Restore from checkpoint, replay the tick delta, hot-split the instrument by `alert_id` hash if lag stays above SLA |
+| Rule change stream | Alert create and delete stop propagating to evaluators | Change-topic lag; replication health; a synthetic "alert missing on shard" check | Transactional store stays the source of truth; replay from the last good offset; hold alert CRUD in a "pending activation" state until the shard confirms load |
+| Dispatcher dedupe cache | Idempotency store unavailable, raising duplicate-send risk | Dedupe error rate; duplicate-fire synthetic; channel send spike | Fail closed on external push and email if the layer stays down; still write the in-app record; replay fired events through the cache once recovered |
+| Notification provider | Provider outage delays delivery after correct evaluation | Provider webhook error rate; queue depth by channel | Retry per channel independently, surface the alert in-app immediately, keep the audit record pinned to trigger time not delivery time |
+| Audit sink | Fired-alert archive write fails, risking a regulatory evidence gap | Sink write failures; object-store commit lag | Buffer to a durable stream first, replay to object storage when available, block retention deletion until the sink is caught up |
 
 **Unresolved**
 
-TODO. Two or three things this design genuinely does not handle well, and what you would do about each.
+- **Windowed rules have no good index.** "BTC drops 5% in 1h" has a trigger price that moves every second as the reference window rolls, so it cannot live in a structure sorted by threshold, and every one of them is scanned on every tick. On an instrument with hundreds of thousands of such rules this is the actual ceiling, and the threshold index makes it worse by comparison rather than better. The direction I would take is to recompute each windowed rule's implied trigger price once a second when its reference rolls and insert that into the same sorted index, accepting a rule that can be up to a second stale and bounding the error against the instrument's volatility. I have not built it and the staleness bound is the part I am unsure of.
+- **Corporate actions have no correct automatic behaviour.** A 4:1 split makes "AAPL crosses $200" meaningless overnight. Rescaling every threshold silently changes what the user asked for; not rescaling fires every rule at once on the adjusted open. The current answer is to suspend affected rules on the ex-date and prompt the user, which has poor completion rates and leaves people with alerts they think are live and are not. There is no version of this that is both automatic and honest.
+- **The alert is structurally late for anyone trying to trade the move.** Under 5 seconds tick to phone is the design target, and then the user unlocks their phone, opens the app, and places an order maybe thirty seconds later at a price that has moved. Nothing in this system closes that gap, and adding capacity does not either. The honest product answer is a conditional order sitting at the broker rather than a notification, which is a different system with different guarantees, and the risk here is that users read speed claims as a promise the notification cannot keep.
 #### Drill questions
-1. Push (stream) vs poll for price evaluation — when would polling actually win?
+1. Push (stream) vs poll for price evaluation, and when would polling actually win?
 2. How do you guarantee no duplicate alerts when an evaluator pod restarts?
-3. A breaking news event spikes ticks 100x on one instrument — what fails first?
-4. How do you handle a stale or gapped market data feed without firing wrong alerts?
-5. A user creates a "BTC drops 5% in 1h" rule — how is the window state stored without blowing memory?
-6. How do you prevent abuse — someone creating millions of cheap alerts to DoS the evaluator?
-7. Two market-data vendors (e.g. Refinitiv + Bloomberg) disagree on the same instrument by a few ms — which tick is canonical?
-8. A price oscillates around the threshold ($199.95 ↔ $200.05) — how do you stop it firing every cooldown cycle?
+3. A breaking news event spikes ticks 100x on one instrument. What fails first?
+4. How do you handle a stale or gapped market-data feed without firing wrong alerts?
+5. A user creates a "BTC drops 5% in 1h" rule. How is the window state stored without blowing memory?
+6. How do you prevent abuse, such as someone creating millions of cheap alerts to overload the evaluator?
+7. Two market-data vendors disagree on the same instrument by a few milliseconds. Which tick is canonical?
+8. A price oscillates around the threshold ($199.95 to $200.05). How do you stop it firing every cooldown cycle?
 9. How do you handle market hours for an alert on a US stock when the user is in Asia?
-10. Snapshot vs replay on evaluator restart — which do you choose?
-11. How do you prove to a regulator that an alert correctly fired (or didn't)?
+10. Snapshot vs replay on evaluator restart. Which do you choose?
+11. How do you prove to a regulator that an alert correctly fired, or correctly did not?
+12. A tick jumps from $199 to $201 with nothing in between. Does the $200 rule fire?
 #### Answers to drill questions
-1. Polling wins only at small scale (<100k alerts) or when feed cost dominates and latency is loose (hourly digests). Streaming wins everywhere else because cost scales with ticks-per-instrument, not alerts. *If pushed:* hybrid — stream the top 1k liquid instruments, poll the long tail on a 1-min cron to amortise feed cost.
+1. Polling wins only at small scale (under ~100k rules) or when feed cost dominates and latency is loose, such as hourly digests. Streaming wins everywhere else because cost scales with ticks per instrument rather than with rule count. *If pushed:* hybrid, stream the top 1k liquid names and poll the long tail on a one-minute cron to amortise feed cost.
 
-2. Two-layer dedupe: evaluator's local `FIRED` flag is restored from the Flink checkpoint, and the dispatcher checks Redis `idem:{alert_id}:{arm_epoch}` before sending. *If pushed:* if Redis is down, fall back to a per-pod in-memory LRU sized wider than the checkpoint interval — accept higher dup risk over double-paging users.
+2. Two layers. The evaluator's local `FIRED` flag is restored from the checkpoint, and the dispatcher checks `idem:{alert_id}:{arm_epoch}` before sending. *If pushed:* if the dedupe store is down, fall back to a per-pod in-memory LRU sized wider than the checkpoint interval and accept higher duplicate risk rather than double-paging users.
 
-3. The hot partition's evaluator. CPU saturates, lag builds, alerts arrive minutes late. *If pushed:* detect hot keys via per-partition lag SLO; secondary-hash by `alert_id` to fan the instrument across sub-partitions; the cost is each tick is published N times instead of once.
+3. The hot partition's evaluator. CPU saturates, consumer lag builds, alerts land minutes late. *If pushed:* detect it via per-partition lag SLO, then hash by `alert_id` to fan the instrument across sub-shards; the cost is that each tick is published N times and last-price state exists in N copies.
 
-4. Tag ticks with `received_at` and the gateway watermark. If gap > threshold, evaluator marks downstream emits with `stale: true` and the dispatcher suppresses or downgrades them. *If pushed:* dual-source the feed (primary + secondary vendor); cross-check on disagreement and prefer the slower-but-trusted source for cross detection.
+4. Stamp ticks with `received_at` and the gateway watermark. If the gap exceeds threshold, treat the next tick as a reseed rather than a crossing, and tag anything emitted as stale so the dispatcher can suppress or downgrade it. *If pushed:* dual-source the feed and prefer the slower trusted source for crossing detection when the two disagree.
 
-5. Per-instrument ring buffer of (ts, price) sized to the longest active window for that instrument, shared across all percent-change subs on it. *If pushed:* downsample to 1-sec OHLC bars for windows > 5 min; for windows > 1d, evaluate off a separate batch path (hourly aggregates) and accept coarser firing granularity.
+5. One ring buffer of (ts, price) per instrument, sized to the longest active window on that instrument and shared by every percent-change rule on it, rather than one buffer per rule. *If pushed:* downsample to 1-second OHLC bars for windows over 5 minutes; for windows over a day, evaluate off hourly aggregates on a separate path and accept coarser firing granularity.
 
-6. Per-user subscription quotas enforced at the API tier; tiered limits (free 50, paid 5000). *If pushed:* per-instrument cap on subs per user (no "1000 alerts on AAPL"); rate-limit subscription creation; flag accounts whose alert fan-out is anomalous vs cohort.
+6. Per-user quotas at the API tier, tiered by plan (free 50, paid 5,000), plus a per-instrument cap per user. *If pushed:* rate-limit rule creation, and flag accounts whose alert fan-out is anomalous against their cohort; the real risk is not one user's 10k rules but a script creating them across every instrument, which defeats the per-instrument cap.
 
-7. Pick a primary vendor for evaluation, keep the secondary purely for crosscheck and gap-fill. Dedupe at the gateway via `(instrument_id, exchange_seq_no)` — exchange sequence numbers are authoritative when both vendors carry them. *If pushed:* if vendors diverge in price (not just timing) beyond a threshold, mark ticks `unreliable` and have the evaluator suppress level-cross fires until they reconverge — better to delay an alert than fire on a vendor glitch.
+7. Neither, by timing. Dedupe at the gateway on `(instrument_id, exchange_seq_no)`, which is authoritative when both vendors carry it, and designate one vendor primary for evaluation with the secondary used for cross-check and gap-fill. *If pushed:* if they diverge on price rather than timing beyond a threshold, mark ticks unreliable and suppress crossing fires until they reconverge. Delaying an alert beats telling a user AAPL crossed $200 when it did not.
 
-8. Hysteresis band: re-arm only after price moves a configurable margin (say 0.5%) below the threshold. Alternatively a dwell-time gate — price must stay on the new side for N seconds before counting as a "real" cross. *If pushed:* expose this as a per-rule param ("notify when AAPL crosses $200 and stays above for 60s") so power users can tune; default to a sensible band that suppresses noise without delaying obvious moves.
+8. A hysteresis band: the rule re-arms only after price moves a configured margin, say 0.5%, back through the threshold. Or a dwell gate: price must hold the new side for N seconds for the crossing to count. *If pushed:* expose both per rule so power users can tune, and default by asset class, since 0.5% is noise on crypto and a real move on a large-cap equity.
 
-9. Market hours are an attribute of the instrument (NYSE: 09:30-16:00 ET), not the user. The evaluator skips eval when the instrument's market is closed regardless of where the user is. The user's notification preferences (quiet hours in their local tz) are applied later by the dispatcher — the alert fires correctly based on market data, but delivery may be deferred to the user's morning. *If pushed:* expose pre/post-market opt-in for power users who actually want alerts during extended-hours sessions on instruments that trade then; default off because retail users don't want 4am pings.
+9. Market hours are an attribute of the instrument, not the user. The evaluator skips crossing detection when that instrument's market is closed, wherever the user is. The user's quiet hours are applied later by the dispatcher, so the rule fires correctly on market data and delivery may be deferred to their morning. *If pushed:* offer pre-market and after-hours opt-in for users who want it, default off, because most retail users do not want a 4am ping.
 
-10. Both. Periodic state snapshots (e.g. every 10 min) to S3 give a fast warm restore — restore from latest snapshot, replay only the delta from the snapshot's offset. CDC replay alone would take minutes for 10M subs at cold start; snapshot+delta restores in seconds. *If pushed:* snapshot frequency is a tradeoff against snapshot IO cost; tune so cold-start RTO < 30s and snapshot pressure < 5% of evaluator IO budget.
+10. Both. Periodic snapshots, every ten minutes, give a warm restore, and you replay only the delta from the snapshot's offset. Change-stream replay alone takes minutes to rebuild 10M rules at cold start; snapshot plus delta restores in seconds. *If pushed:* snapshot frequency trades against IO cost, so tune for cold-start RTO under 30s while keeping snapshot IO under ~5% of the evaluator's budget.
 
-11. Audit log keyed by `(alert_id, triggered_at, trigger_price, rule_snapshot, vendor_id, exchange_seq_no)`. The triggering tick's exchange sequence number lets the regulator cross-reference against the exchange's own audit feed. Every alert state transition is logged with timestamps and the input event that caused it. *If pushed:* tick retention is 24h on Kafka + archived to columnar object store for 7 years; replaying a specific instrument/window from cold archive reproduces the exact eval decision deterministically (the evaluator code is versioned and checkpointed alongside).
+11. An append-only record per fire: `(alert_id, triggered_at, trigger_price, rule_snapshot, vendor_id, exchange_seq_no)`. The exchange sequence number lets a regulator cross-reference the exchange's own audit feed, and the rule snapshot proves what the rule said at the time rather than what it says now. Every state transition is logged with the input event that caused it. *If pushed:* ticks live 24h on the hot log and 7 years in cold columnar archive, and because evaluator code is versioned alongside checkpoints, replaying an instrument and window reproduces the decision deterministically.
+
+12. Yes, and that is why the comparison is `prev < 200 <= price` rather than an equality or a level test. Gap opens and thin books routinely skip price levels entirely, so a crossing has to be defined on the interval between two consecutive ticks, not on the ticks themselves. *If pushed:* the same reasoning is why a stale `prev` after a restart is dangerous. The interval becomes enormous and every rule inside it fires at once, which is what the gap guard prevents.
 #### Whiteboard script
-TODO
+**0-5. Frame it.** Lead with the sentence that decides the interview: "The delivery half is a solved problem and I would reuse the existing notification service. The design is in how a price tick finds the rules it could fire." Put four numbers on the board: 10M rules, 50k instruments, 250k ticks/s sustained against 1M peak, alerts wanted in seconds. Ask only the clarifiers that change the picture: which rule types beyond threshold cross, fire-once or re-arm, and whether there is an audit obligation. At a broker the answer to the last one is yes.
 
-A 45 minute budget: what to cover in 0-5, 5-15, 15-35 and 35-45, what to say first, and a line starting `Cut first:`.
+**5-15. Establish the inversion.** Draw the naive loop first and price it out loud: 10M rules polled every minute is 167k price lookups/s and a 60-second latency floor. Then invert it. Ticks in, rules routed by the same instrument key, evaluator owns both. Draw gateway, partitioned tick log, evaluator, dispatcher, notification service, plus the rule-change arrow from the transactional store into the evaluator. Say the memory arithmetic aloud, 10M × 500B = 5GB across 16 shards, because that number is what makes co-partitioning legal rather than wishful.
 
-**Raw material, from the old Talking Points:**
+**15-35. The two things they will drill.** Matching first: threshold index per instrument, range-scan `[prev, now]`, and the NVDA arithmetic for why a flat scan dies (500k rules × 200 ticks/s = 100M compares/s, one saturated core, five during the print). Then the hot-key split and its cost, stated as a cost. Correctness second: crossing not level, the half-open comparison, the ARMED to FIRED to COOLDOWN to ARMED machine, hysteresis for flapping, and `arm_epoch` for replay dedupe. Draw the state machine; it is cheap to draw and it is the thing that separates candidates. Say "at-least-once plus idempotent dispatch, not exactly-once" and give the one-line reason: the last hop to the push provider has no transaction to join.
 
-These are the things a Trade Republic interviewer will be listening for — surface them unprompted:
+**35-45. Concede and close.** Feed reliability: two vendors, dedupe on exchange sequence number, suppress crossings while they diverge beyond 0.5%, and reseed rather than fire after a gap. Audit: every fire pinned to a sequence number and a rule snapshot, 7 years. Then name what you have not solved, unprompted. Windowed rules escape the index and are the real ceiling on a hot name. Corporate actions have no correct automatic behaviour. The alert is structurally late for anyone trying to trade the move, and the honest answer there is a conditional order, not a notification. Close on the 10x question: rules outgrow evaluator RAM long before ticks outgrow the log, and the fix is a shared low-latency rule store bought at the price of a network hop per tick.
 
-- **Co-partitioning ticks and subscriptions by `instrument_id`** is the key insight. State it early.
-- **Cross vs level** — fires once on the crossing edge, not on every tick above threshold. A surprising number of candidates miss this.
-- **At-least-once + idempotent delivery** is the right consistency choice; explicitly reject exactly-once and explain why.
-- **Hot-key mitigation** for popular instruments (NVDA, BTC) — shows you've operated this kind of system.
-- **Stale / gap handling** — regulated broker, you need a story for "what happens when market data is late or missing".
-- **Audit trail** — every fire traceable to the exact tick. For a broker this isn't optional.
-- **Trade-off you'd revisit at 10× scale:** moving the sub index from in-memory-per-shard to a shared low-latency store (Redis / Aerospike) if sub count outgrows RAM; accept a network hop per tick in exchange for unbounded sub scale.
+Cut first: multi-region and DR, the in-app inbox surface, and the rule-type cost comparison. If time collapses, cut hysteresis too. Never cut crossing-versus-level or the hot-instrument split, because those two are what the question exists to ask.
 #### Appendix
 **Data model**
 
-- **alerts** (transactional store, source of truth): `(alert_id, user_id, instrument_id, rule_type, rule_value, window_sec, state, cooldown_sec, last_fired_at, created_at, updated_at)`
-    - Indexed on `(user_id)` for "my alerts", `(instrument_id, state)` for bulk load on evaluator startup
-- **Subscription view in evaluator** (durable local state per shard):
-    - Keyed by `instrument_id` → list of `(alert_id, user_id, rule)` for that instrument
-    - Built from CDC stream replay; kept in sync incrementally
-- **Per-instrument tick state** (evaluator local state): `(instrument_id) → { last_price, last_price_ts, window_buffer[] }`
-    - `window_buffer` is a ring buffer of recent ticks for % change rules (size = max window / sample rate)
-- **Idempotency** (fast key-value cache, TTL 1h): `idem:{alert_id}:{floor(trigger_ts / cooldown_window)}` → alert_id
-- **Fired alerts audit** (columnar archive on object store, partitioned by date): `(alert_id, user_id, instrument_id, trigger_price, rule_snapshot, triggered_at, delivered_at)`
+- **alerts** (transactional store, source of truth): `(alert_id, user_id, instrument_id, rule_type, rule_value, window_sec, state, arm_epoch, cooldown_sec, last_fired_at, created_at, updated_at)`, indexed on `(user_id)` for "my alerts" and `(instrument_id, state)` for bulk load on evaluator startup.
+- **Rule view in the evaluator** (durable local state per shard): `instrument_id` to a threshold-sorted structure of `(alert_id, user_id, rule)`, plus a flat list for windowed rules. Built from change-stream replay and kept in sync incrementally.
+- **Per-instrument tick state** (evaluator local): `instrument_id` to `{ last_price, last_price_ts, window_buffer[] }`, where the ring buffer is sized to the longest active window on that instrument.
+- **Idempotency** (key-value cache, TTL 1h): `idem:{alert_id}:{arm_epoch}`.
+- **Fired-alert audit** (columnar archive, partitioned by date): `(alert_id, user_id, instrument_id, trigger_price, rule_snapshot, exchange_seq_no, triggered_at, delivered_at)`.
 
 **API contract**
 
@@ -17970,7 +17795,8 @@ POST   /alerts
     rule: { type: "cross_above" | "cross_below" | "pct_change",
             value: float, window_sec?: int },
     channels: [push, email],
-    cooldown_sec?: int
+    cooldown_sec?: int,
+    dwell_sec?: int
   }
   → { alert_id, state: "armed" }
 
@@ -17979,40 +17805,51 @@ DELETE /alerts/{alert_id}
 PATCH  /alerts/{alert_id}           body: { enabled: bool }
 
 Internal event: alerts.fired
-  { alert_id, user_id, instrument_id, triggered_at,
-    trigger_price, rule_snapshot, idempotency_key }
+  { alert_id, arm_epoch, user_id, instrument_id, triggered_at,
+    trigger_price, exchange_seq_no, rule_snapshot }
 ```
 
 **Observability**
 
-- **Tick-to-fire latency** (ingest timestamp → `alerts.fired` event) — SLO p99 < 1s on liquid names; this isolates evaluator performance from downstream provider noise.
-- **End-to-end alert latency** (triggering tick → provider accepted push/email or inbox write) — SLO p99 < 5s during normal market conditions.
-- **Per-partition consumer lag** on both tick and CDC topics — hard alert if any shard exceeds a few seconds during open-market hours; this is the earliest hot-key signal.
-- **Alert flap rate** (same alert re-fires within a short wall-clock window after re-arm) — tracks bad hysteresis defaults, stale feed oscillation, or broken crossing logic.
-- **Vendor divergence rate** (same `(instrument_id, seq_no)` but price mismatch above tolerance) — leading indicator for bad input data and should suppress trust in the fire stream.
-- **Dedupe suppression count** (dispatcher drops due to existing `idem` key) — should be low and explainable; spikes mean evaluator replay or checkpointing issues.
-- **Missed-vs-expected synthetic alerts** — canary subscriptions on liquid symbols verify that obvious test thresholds fire during market hours and do not fire when the market is closed.
+- **Tick-to-fire latency** (ingest timestamp to fired event), SLO p99 under 1s on liquid names. Isolates evaluator performance from downstream provider noise.
+- **End-to-end alert latency** (triggering tick to provider acceptance), SLO p99 under 5s in normal market conditions.
+- **Per-partition consumer lag** on the tick and rule-change streams. The earliest hot-key signal; hard alert above a few seconds during market hours.
+- **Alert flap rate**, the same rule refiring shortly after re-arm. Catches bad hysteresis defaults, feed oscillation, and broken crossing logic.
+- **Vendor divergence rate**, same `(instrument_id, seq_no)` with a price mismatch above tolerance. Leading indicator that the fire stream should not be trusted.
+- **Dedupe suppression count**. Should be low and explainable; a spike means replay or checkpoint trouble.
+- **Synthetic canary alerts** on liquid symbols, verifying that obvious thresholds fire during market hours and do not fire when the market is closed.
 
 **Multi-region and DR**
 
-- **Replication mode:** active-active market-data gateways per region, but each instrument has a home evaluator region to avoid split-brain alerting. Subscription source-of-truth replicates cross-region; fired-alert audit stream is mirrored globally.
-- **RTO:** ~30-90 seconds for evaluator shard failover inside a region (checkpoint restore + partition reassignment). Cross-region failover for a full region loss is operator-triggered and typically ~5-15 minutes including route flips for the affected instrument set.
-- **RPO:** ~0s for committed subscription CRUD in the source store. For in-flight tick evaluation, up to a few seconds of replay from the event stream; replay is acceptable because delivery is idempotent by `alert_id + arm_epoch`.
-- **Failover cadence:** automatic shard failover continuously; cross-region game-days during market-closed windows monthly or quarterly because the correctness bar is higher than a generic notification system.
-- **Cross-region cost:** mirrored tick streams are expensive on peak trading days, so keep evaluation region-local and replicate raw ticks + fired-alert audit mainly for DR, replay, and compliance rather than active multi-region parallel evaluation.
+- **Replication:** active-active gateways per region, but each instrument has one home evaluator region so there is no split-brain firing. The rule store replicates cross-region; the fired-alert audit stream mirrors globally.
+- **RTO:** 30 to 90 seconds for an evaluator shard inside a region (checkpoint restore plus partition reassignment). Full region loss is operator-triggered, 5 to 15 minutes including route flips for the affected instruments.
+- **RPO:** ~0s for committed rule CRUD. Up to a few seconds of tick replay for in-flight evaluation, which is acceptable because delivery is idempotent on `{alert_id, arm_epoch}`.
+- **Failover cadence:** shard failover is automatic and continuous; cross-region game days run monthly or quarterly during market-closed windows, because the correctness bar here is higher than for a generic notification system.
+- **Cross-region cost:** mirrored tick streams are expensive on peak trading days, so keep evaluation region-local and replicate raw ticks and the fired-alert audit for DR, replay, and compliance rather than running parallel evaluation everywhere.
 
 ### 42. Design a Matching Engine / Limit Order Book
 #### Problem
-Process a continuous stream of inbound events (new orders, cancels and cancel/replaces, and market-data ticks) and match buy and sell orders in strict price-time priority, deterministically, at very high throughput and very low (microsecond) latency, producing a stream of fills and execution reports plus a published top-of-book.
+Process a continuous stream of new orders, cancels, and cancel/replaces for a set of instruments, and match buys against sells in strict price-time priority at microsecond latency. Output is a stream of fills and execution reports plus a published top-of-book. The same ordered input must produce byte-identical output every time it is replayed.
 #### Core
-TODO
+One book per instrument, one thread per book. Everything else follows from those two sentences.
 
-Write the whole answer as you would give it in sixty seconds, 200 to 300 words, standing alone.
+The book is two sorted sides, bids descending and asks ascending, with a FIFO queue of resting orders at each price level, so price-time priority falls out of the layout instead of being enforced by a comparator. An inbound order walks the opposite side from the best price, fills `min(incoming, resting)` against the oldest order at each level, and stops when it no longer crosses. A limit remainder rests and becomes new liquidity; a market or IOC remainder is cancelled.
+
+The interesting part is not the algorithm, which is a while loop, but the memory layout. Access is extremely skewed: nearly every event touches the best price or one level in from it, and cancels outnumber fills by 10 to 20 to one. So you index price levels by tick into a flat array: a price is a subscript, not a tree walk. Each level is an intrusive doubly linked list, so an order carries its own pointers and unlinks in O(1). A dense slot table from order id to node makes a cancel one load, not a hash probe. The best-price pointer nudges rather than searches. Every hot operation is O(1) and touches a handful of cache lines.
+
+You never parallelise a single book. Concurrent matching reorders fills and destroys time priority, and trades are money, so replay has to agree to the byte. Throughput comes from sharding across instruments: route by `hash(instrumentId)` so a symbol always lands on the same thread, sequence every event into an ordered log before matching, and recover by replaying that log from a snapshot. The cost you accept is that one hot symbol is bounded by one core.
 #### Summary
 **The picture in your head:** a single, extremely disciplined auctioneer standing at one desk for one stock. On the desk are two sorted stacks of paper slips: buyers on the left (highest price they will pay on top) and sellers on the right (lowest price they will accept on top). When a new slip arrives, the auctioneer checks whether the best buyer and the best seller now agree on a price; if they cross, the auctioneer matches them, tears up the filled slips, and keeps going until nobody crosses any more. One desk, one stock, one auctioneer, and everything happens in the exact order the slips landed. Speed matters (the queue behind the desk is enormous) and determinism matters even more (two auditors replaying the same slips in the same order must reach byte-identical results).
 
 **The approaches people actually take:**
-TODO. Two or three things a competent engineer might reach for, in plain language and before any product name, with what each one buys and roughly when it wins.
+
+There are three ways to hold the price levels, and which one is right depends on how dense the tradable price range is.
+
+*A sorted map of levels, one FIFO queue at each.* A balanced tree (or a skip list, which is the same trade with simpler code and looser constants) keyed by price, holding the queue of resting orders at each node. Best price is the leftmost node; insert and delete are logarithmic. It buys generality: it costs nothing for an instrument nobody trades, it does not care how wide or sparse the price range is, and it is the obviously correct thing to write first. It wins when the price range is unbounded, or when the venue lists thousands of thinly traded instruments.
+
+*A flat array of levels indexed by tick, with a moving best-price pointer.* Prices are discrete, so a price is an array subscript and there is no comparison at all. Every hot operation becomes O(1) and the top of the book stays in a few cache lines. It buys the last few microseconds. You pay memory proportional to the whole price band, allocated whether or not anyone trades in it, and you owe an answer for what happens when the market moves outside the band you sized.
+
+*A hybrid: dense near the touch, sparse in the tail.* A small ring of levels around the current best, backed by a tree for everything far away. It gets most of the array's speed at close to the tree's memory, and costs you two code paths and a spill boundary that has to be exactly right.
 
 **The single-request walkthrough:** an order for symbol `AAPL` arrives at the feed handler. It is validated, stamped with a monotonic sequence number, and routed, by hashing `instrumentId`, to the one worker thread that owns the `AAPL` book. That worker takes the order off its ring buffer and runs the matching loop: a buy limit at 190.05 walks down the ask side from the best (lowest) ask; at each price level it fills `min(incoming_qty, resting_qty)` against the oldest resting order first (FIFO, which is time priority), emits a fill for each match, removes fully-consumed resting orders, and continues while the incoming price still crosses the level. When the incoming order is exhausted it stops; if quantity remains and it is a limit, the remainder rests on the bid side at 190.05 and becomes new liquidity; if it is IOC, FOK, or market, the remainder is cancelled. Each fill produces an execution report to both parties and an update to the published top-of-book. The whole path is a few microseconds and touches no locks.
 
@@ -18035,17 +17872,18 @@ TODO. Two or three things a competent engineer might reach for, in plain languag
 - Route by `hash(instrumentId) % shards`; at the infrastructure edge, partition the Kafka ingest topic by instrument key so all events for a symbol sit on one partition and are consumed in offset order, which is the same single-writer guarantee one layer down.
 - Bounded queues everywhere with an explicit rejection policy; cross-instrument events (basket, portfolio) handled on a separate boundary, never inside a single book.
 #### What this is really testing
-TODO
+Whether you understand that an order book is a memory-layout problem wearing a data-structures costume. Every candidate can write the match loop; it is a while loop with a `min()` in it. The signal is whether you know the access pattern (overwhelmingly at the touch, overwhelmingly cancels) and let it dictate the layout, and whether you know that the one optimisation everybody reaches for, adding threads, is a correctness bug here rather than a speed-up.
 
-The one insight this question exists to elicit, then the contrast with the question it most resembles and why the answers differ.
+The contrast is with Q25, the stock exchange. Q25 is the venue around the engine: member gateways, pre-trade risk checks, the sequencer as an organisation-wide source of truth, multicast market data, halts and circuit breakers, regulatory reporting. You can answer Q25 well and never say the words "cache line". Q42 is the box in the middle of Q25's diagram, opened up. If Q25's answer is "single-threaded per symbol, sequenced durable log, multicast out", Q42's answer starts there and then has to say what the book is actually made of, how a cancel finds its order in one load, why the best-price pointer never binary-searches, and what the tick array costs in megabytes. Answering Q42 with Q25's architecture diagram is the classic miss: everything you say is true, and none of it touches the question.
 
-Closest question: TODO
+Closest question: Q25
 #### Clarifying questions and how each answer forks the design
 - Which order types must we support? (assume market, limit, IOC, FOK, plus cancel and cancel/replace)
 - Continuous matching, or auction/call phases (open, close)? (assume continuous; note auctions as a mode)
 - Single venue, or multi-venue routing? (assume one matching venue per instrument)
 - Is self-trade prevention required for a participant trading both sides? (assume yes)
 - What are the tick size and price range per instrument? (drives the array-vs-tree choice)
+- Is allocation at a price level strict FIFO, or pro-rata? (assume FIFO; pro-rata changes the inner loop)
 - Latency target: internal matching budget in microseconds? (assume single-digit to tens of micros p99)
 - Durability and regulatory replay requirements? (assume full event-sourced audit and deterministic replay)
 - Do we need basket / cross-instrument orders? (flag: different boundary)
@@ -18056,12 +17894,13 @@ Closest question: TODO
 |---|---|
 | Market, limit, IOC, FOK plus cancel/replace | a per-instrument book with a matching state machine per order type; cancel/replace is a cancel then insert keeping or losing time priority per rule |
 | Continuous matching | a single-threaded per-instrument matching loop; auction phases add a separate uncross algorithm |
-| Single venue per instrument | no routing layer — the book is authoritative; multi-venue would add a smart order router |
+| Single venue per instrument | no routing layer, because the book is authoritative; multi-venue would add a smart order router |
 | Self-trade prevention required | check participant IDs at match time and cancel or decrement one side |
 | Small tick range | a price-indexed array of levels (O(1) best-price) instead of a tree; wide ranges favor a tree/skiplist |
+| Pro-rata allocation | the inner loop walks every order at the level instead of the head, and needs byte-stable rounding rules |
 | Single-digit microsecond p99 | in-memory, lock-free, cache-friendly structures, no allocation on the hot path, kernel bypass |
 | Deterministic replay required | event-source every inbound message so the book replays bit-for-bit |
-| Basket/cross-instrument orders | flagged out of the single-book boundary — needs a coordinating layer above the engines |
+| Basket/cross-instrument orders | flagged out of the single-book boundary, needing a coordinating layer above the engines |
 #### Requirements and scale, derived out loud
 **Requirements**
 
@@ -18082,42 +17921,33 @@ Closest question: TODO
 
 Derive from a liquid equities / derivatives venue.
 - **Peak message rate ~1-3M msg/s:** a top exchange (order entry plus cancels, and cancels dominate at 10-20x fills in modern markets) runs ~1M msg/s sustained with multi-million bursts on open, close, and news. Take 2M msg/s as the planning peak.
+- **Message mix:** if cancels and replaces run at 15x fills, then fills are 2M / (1 + 15) = 125k/s and cancel-type messages are ~1.875M/s. The cancel path, not the fill path, carries ~90% of traffic, which is what justifies spending structure on it.
 - **Instruments ~10k:** a single venue lists O(1e4) symbols (equities plus listed derivatives). Spread evenly that is 2M / 1e4 = 200 msg/s per instrument on average, but the distribution is heavily skewed: the top 10 symbols can take 30-40% of traffic (the hot-key problem below).
 - **Shards ~16-64 cores:** at ~1-5M matches/sec achievable per single-threaded core for a lean in-memory book, 2M msg/s needs only a handful of cores for raw throughput; you run more (16-64) to isolate hot instruments and leave headroom, routing by `hash(instrumentId)`.
+- **Tick band per instrument ~7,600 levels:** a $190 equity on a $0.01 tick, banded at +/-20% around the reference price, spans (228.00 - 152.00) / 0.01 = 7,600 ticks. A level header padded to one 64B cache line gives 7,600 x 64B = 486KB per book side-pair. Dense-banding only the top 500 symbols costs 500 x 486KB = 243MB; dense-banding all 10k would cost 10,000 x 486KB = 4.9GB of mostly-empty headers, which is why the tail stays on a tree.
 - **Resting order state ~64-128 B/order:** an order record holds id (8B), participant (8B), side (1B), price as a tick (4-8B), quantity plus remaining (8-16B), timestamp/sequence (8-16B), and intrusive list pointers (16B), which is ~64-96B logical; round to 128B with padding and headers.
 - **Book depth ~1e4-1e5 resting orders for a liquid symbol:** memory per hot book = 1e5 x 128B = ~12.8MB; across 10k instruments with a long tail (most books tiny), total resting-order memory is order O(1-10GB), comfortably RAM-resident per matching host. Crucially this is bounded by outstanding liquidity, not by uptime.
 - **Latency budget:** wire-in to match to wire-out target ~5-20 microseconds internal; the matching loop for a typical marketable order touches 1-3 price levels, so the arithmetic is trivial and the budget is spent on queueing, serialisation, and cache misses, which is exactly why the design forbids locks and hot-path allocation.
 - **Journal write rate:** 2M events/s x ~64B framed = ~128MB/s sequential append to the durable log; well within an NVMe logging tier, and sequential so it does not compete with random book access.
 - **Market-data fanout:** top-of-book updates published at up to the tick rate to thousands of subscribers; this is stateless snapshot fanout (latest wins), scaled by a separate publisher tier, not by the matching core.
 #### Key decisions
-TODO
+**How price levels are stored**
+- Choice: a flat array of level headers indexed by tick, with a moving best-price pointer, for the instruments that matter. A price is an array subscript, best-price access is a pointer read, and inserting at a level is O(1) with no rebalancing.
+- Alternative: a sorted map of levels, `TreeMap<Price, Deque<Order>>` or a skip list, allocating only levels that actually have orders. Genuinely defensible, and it is what most venues outside the top tier ship, because it is correct by construction, costs nothing for an untraded instrument, and O(log P) over a few hundred distinct price levels is roughly 8 comparisons.
+- Decider: the number of ticks in the tradable band. A $190 equity on a $0.01 tick banded at +/-20% is 7,600 levels at 64B = 486KB, which is cheap enough to hold in RAM for the top 500 symbols (243MB). An option on a $0.0001 tick over a $0 to $500 range is 5,000,000 levels = 320MB per contract, which is not. Rule of thumb: dense array under ~100k ticks per book, tree above it.
+- Alternative wins when: the tick range is wide or sparse (options chains, crypto pairs with 8 decimal places, any instrument with no price band), or when the venue's long tail of thinly traded symbols means most allocated levels would never hold an order. In practice you run both: dense bands for the hot list, trees for the tail.
 
-Two or three genuine forks. For each, in this exact shape so it stays checkable:
+**How a cancel finds its order**
+- Choice: the gateway assigns a dense internal order id, and the engine keeps a flat slot table `orders[internal_id] -> node`. A cancel is one array subscript plus an O(1) unlink from the intrusive list, with no hashing and no probe sequence.
+- Alternative: a hash map from client order id to node, which is what you write first and what avoids maintaining an id-translation table at the edge.
+- Decider: cancels are ~90% of the 2M msg/s peak (1.875M/s at a 15:1 cancel-to-fill ratio), so anything on that path is paid on nine messages in ten. A hash lookup is typically two dependent cache misses at ~100ns each against ~4ns for a predictable array load, which is 2-4% of a 5 microsecond p99 budget, and worse, the probe length is data-dependent so it shows up as tail variance rather than a constant.
+- Alternative wins when: order ids are externally assigned and sparse, for example multi-day GTC orders that survive a restart or a multi-tenant id space you do not control. Then a dense slot table needs its own map to populate it and you have paid the hash anyway.
 
-**<name of the fork>**
-- Choice:
-- Alternative:
-- Decider:
-- Alternative wins when:
-
-**Raw material, from the old Algorithm Comparison:**
-
-| Structure | Best-price access | Insert / cancel at level | Memory | Best for |
-|---|---|---|---|---|
-| `TreeMap<Price, Deque<Order>>` | O(log n) | O(log n) + O(1) FIFO | compact, sparse-friendly | wide or sparse tick ranges, general venues |
-| Price-level array indexed by tick + best pointer | O(1) | O(1) | O(price range), can be large if sparse | HFT hot books with a bounded, dense tick range |
-| Skip list of levels | O(log n) expected | O(log n) expected | pointer overhead | ordered levels without rebalancing, simpler than a balanced tree |
-
-The production HFT answer is the tick-indexed array: prices are discrete ticks in a bounded range, so a level is an O(1) array index and best-price is an O(1) pointer walk, with an intrusive linked list per level for O(1) FIFO. Use the TreeMap when the tick range is wide or sparse enough that a dense array wastes too much memory.
-
-**Raw material, from the old Common Mistakes:**
-
-- **Accumulating market-data ticks** - treating ticks as an ever-growing list instead of a latest-wins snapshot; ticks are stateless, only the book accumulates, and only resting orders at that. Conflating the two is the classic conceptual error.
-- **Parallelising a single book** - trying to speed up one hot instrument by matching it on multiple threads, which reorders fills and destroys price-time priority. One book is one writer, always; you scale across instruments, not within one.
-- **Unbounded input queues** - letting a worker's inbound queue grow without limit so a burst becomes unbounded memory and latency; the queue must be bounded with an explicit rejection / backpressure policy.
-- **Non-deterministic ordering** - reading wall-clock time, relying on hash-map iteration order, or using floating-point prices, any of which make replay diverge; use integer tick prices and sequence numbers for tie-breaking.
-- **Failing to sequence** - matching before assigning a gap-free monotonic sequence, which leaves you with no source of truth, no deterministic replay, and no audit trail; sequence first, then match.
-- **Resting a crossing order** - a marketable order that should have matched being placed on the book, leaving a crossed book (bid >= ask); the loop must fully match while it crosses and only rest a genuine remainder.
+**Allocation at a price level: FIFO or pro-rata**
+- Choice: strict price-time FIFO. The fill is always the list head, so it is O(1) per fill, the tie-break is unambiguous for replay, and queue position becomes a real economic asset that participants can reason about and compete for.
+- Alternative: pro-rata, allocating each resting order a share of the incoming quantity proportional to its size, usually as a hybrid with a small FIFO allocation to the first order in the queue.
+- Decider: this is a venue rule rather than an engineering preference, but the engineering cost is concrete. Pro-rata touches every order at the level rather than the head, so a level holding 2,000 resting orders costs 2,000 pointer chases per fill instead of 1, and it needs rounding and remainder rules that produce byte-identical output on replay. Choose FIFO unless the product requires otherwise.
+- Alternative wins when: the instrument is one where a handful of large participants would otherwise monopolise the front of the queue and quoting collapses. Most listed short-term interest-rate futures allocate pro-rata or FIFO/pro-rata hybrid for exactly this reason, and it is the correct choice there.
 #### High-level design
 **must-say**
 
@@ -18202,6 +18032,19 @@ The production HFT answer is the tick-indexed array: prices are discrete ticks i
 #### Deep dive
 **must-say**
 
+**The access pattern, before the structure.** Three facts about the traffic decide the layout. First, almost every event touches the best price or one level in from it, because that is where the liquidity and the information are; depth beyond a few levels is read for market data and rarely matched. Second, cancels and replaces outnumber fills by 10 to 20 to one, so the cancel path is the hot path, not the fill path. Third, an order's whole life is arrival, zero or more partial fills, then departure. The structure needs cheap append at a tail, cheap remove from anywhere, and cheap read of one end. Nothing in that list asks for search, which is why a general-purpose sorted container is more than you need.
+
+**The layout.** Per instrument, per side:
+
+- **A flat array of price levels indexed by tick.** `level = levels[(price - band_low) / tick_size]`. An integer price is an array subscript, so there is no comparison and no tree walk. Prices are integer ticks everywhere: a floating-point price makes replay diverge on a different CPU or compiler, and it is the single most common correctness bug in a first implementation.
+- **An intrusive doubly linked list per level.** The order record carries its own `prev` and `next`, so a level header is just `(price_tick, total_qty, head, tail, count)` and an order unlinks in O(1) from anywhere without the container being involved. Append at the tail is arrival order, which is time priority. The head is the next order to fill.
+- **A dense slot table for cancels.** The gateway assigns a dense internal id at admission; `orders[internal_id]` is the node. A cancel is one subscript and one unlink.
+- **A best-price pointer per side.** When the best level empties, walk inward until a non-empty level is found. In a liquid book that walk crosses one or two empty ticks, and each step reads adjacent memory that the prefetcher already has.
+
+Level headers are padded to 64 bytes so a level is exactly one cache line, and the top few levels of an active book stay resident in L1 and L2. A marketable order sweeping two levels touches roughly four cache lines: two level headers and two order records. That is the entire justification for the design, because the arithmetic inside the loop is a subtraction and a comparison.
+
+This layout is not novel and has been the standard exchange book since the mid-2000s; LMAX described the surrounding single-writer machinery publicly in 2011. Nothing has superseded it because the binding constraint is the CPU cache hierarchy rather than the algorithm. If that constraint changes, so does the answer.
+
 **The matching loop (incoming order against the opposite side):**
 ```
 match(order):
@@ -18230,26 +18073,22 @@ match(order):
       else:                                    # MARKET / IOC leftover / FOK miss
           cancel_remainder(order)
 ```
-`crosses(buy, ask_price)` is `buy.price >= ask_price`; for a sell it is `sell.price <= bid_price`. FOK is a two-pass variant: first walk to confirm the full quantity is available at acceptable prices, and only then execute, otherwise reject with no fill at all.
 
-**Keyed-executor dispatch (the single-writer invariant):**
+`crosses(buy, ask_price)` is `buy.price >= ask_price`; for a sell it is `sell.price <= bid_price`. The trade always prints at the resting order's price, never the incoming one, which is what makes an aggressive limit a price ceiling rather than a bid.
+
+The order types bend this loop rather than replace it. A market order crosses with no price bound, so it needs a collar (reject or halt beyond N ticks from the last trade) or one order sweeps a thin book to an absurd print. IOC runs the loop once and cancels the remainder instead of resting it. FOK is the only genuinely two-pass case: walk the opposite side accumulating available quantity at acceptable prices, and only if the full quantity is there run the loop for real, otherwise reject with zero fills. The two passes must observe identical state, which is free here because the thread that owns the book cannot be interrupted by another writer.
+
+Self-trade prevention sits inside the inner loop, checked before the fill is emitted, because it has to compare the two specific orders about to trade. Which policy applies (cancel the incoming, cancel the resting, or decrement both) is a venue rule; what matters structurally is that it removes a resting order from the middle of a level, which the intrusive list already does in O(1).
+
+Two invariants are worth asserting after every apply, in production, because they are a handful of comparisons: the book is not crossed (`best_bid < best_ask`), and quantity is conserved across each fill. They catch the class of bug that otherwise surfaces as a regulatory incident.
+
+**Why any of this is safe without a lock.** Every operation above mutates shared state with no synchronisation on it. That is only sound because of one dispatch rule: events are stamped with a gap-free sequence number and routed by `hash(instrumentId)` to a fixed worker, so a book has exactly one writer for the life of the process. The loop is not lock-free because someone wrote clever compare-and-swap code; it is lock-free because nothing else can be inside it.
+
 ```
 // N single-threaded workers; same instrument always -> same worker
 int shard = Math.floorMod(instrumentId.hashCode(), workers.length);
 workers[shard].submit(event);        // bounded queue per worker
-
-// each worker:
-while (running) {
-    Event e = queue.take();          // in-order for this shard
-    Book book = books.get(e.instrumentId);
-    book.apply(e);                   // lock-free: only this thread touches this book
-}
 ```
-Same instrument -> same thread -> in-order, lock-free book access, parallel across books. You never split one book across threads; you shard across instruments.
-
-**The lower-latency evolution (LMAX Disruptor):** replace the `ExecutorService` plus bounded queue with a per-shard Disruptor ring buffer. It is a pre-allocated ring with a single writer per shard, so there is no lock contention and no hot-path allocation; consumers track a sequence and the producer never overwrites unconsumed slots, which is the backpressure. Mechanical sympathy (contiguous memory, cache-friendly, no garbage) is where the microseconds come from. The partitioning model is unchanged, one writer per shard, just a tighter implementation.
-
-**Sequencing and event sourcing:** the sequencer assigns a gap-free monotonic sequence number to every event and appends it to the durable log before matching. Because matching is a deterministic function of the ordered log, replaying the log from a snapshot reconstructs the exact book. Output execution reports carry their own monotonic sequence so a participant can detect a gap and request replay.
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 350" role="img" aria-label="Matching engine sequencer with ordered log, router and per-shard single writers">
@@ -18438,7 +18277,9 @@ Same instrument -> same thread -> in-order, lock-free book access, parallel acro
 
 **Unresolved**
 
-TODO. Two or three things this design genuinely does not handle well, and what you would do about each.
+- **A single symbol that outgrows one core has no fix inside this design.** Splitting a book across threads is a correctness bug, not a scaling lever, so every escape hatch is a constant factor: a dedicated shard, core pinning with NUMA-local memory, C++ instead of a managed runtime, zero allocation. Together those buy maybe 3-5x, not 100x. Past that the only honest answer is to change the product, listing the instrument on two independent books and letting a router split flow, which means there is no longer one price-time queue and participants must consolidate two feeds themselves. We would take the constant factors and, at the limit, the halt, rather than pretend the split is free.
+- **The dense tick array has no graceful answer to a price move outside its band.** We size the band around a reference price, 7,600 ticks for a $190 equity at +/-20%. A limit-up move, a corporate action, or a resumption after a long halt puts the market outside it. Rebasing a 486KB array mid-session is precisely the hot-path allocation the rest of the design forbids, so today we pause the instrument, reband, and resume. That means the structure choice forces a brief halt at the exact moment volatility is highest, which is the worst possible time. Double-buffering the band and having the owning thread swap pointers would fix it; we have not built it.
+- **Auctions are a second matching algorithm bolted onto the same structure.** The open and close uncross maximises executed volume at a single clearing price, which is a scan across the whole band rather than a walk from the touch, with its own tie-break rules for imbalance and reference price. It runs on the same thread and the same data, but it is a separate implementation, and the continuous-to-auction-to-continuous mode transitions are where exchange bugs actually live. We cover it with replay tests and accept that it gets a small fraction of the drilling the continuous loop gets.
 #### Drill questions
 1. Will the order book not just grow forever, like an unbounded queue?
 2. Why not just keep the latest price per instrument and fill against that?
@@ -18449,8 +18290,9 @@ TODO. Two or three things this design genuinely does not handle well, and what y
 7. How do you guarantee determinism?
 8. How do you test it?
 9. How do you handle a hot instrument that saturates one core?
-
-TODO. Only 9 drill questions carried over, top up to at least 10.
+10. Why is a cancel a harder operation than a new order, and how fast is yours?
+11. Walk me through the top of the book in memory. What does a marketable order actually touch?
+12. When would you not use a tick-indexed array?
 #### Answers to drill questions
 1. No, and this is the key distinction. The book accumulates only resting orders, and every resting order leaves on fill, cancel, or expiry; a crossing order never rests. Book size tracks genuine outstanding liquidity, which is bounded by market participation, not by how long the process has been running. *If pushed:* the thing you must bound explicitly is the input queue per worker (bounded ring plus rejection policy), and per-participant order caps to stop one account inflating the book.
 
@@ -18469,20 +18311,22 @@ TODO. Only 9 drill questions carried over, top up to at least 10.
 8. Deterministic replay: capture a production log, replay it, and assert bit-identical fills and book state. Property-based tests assert invariants (price-time priority never violated, quantity conserved, no crossed book left resting). *If pushed:* a reference model (a slow, obviously-correct matcher) run in shadow against the fast engine on the same input is the strongest correctness check.
 
 9. First accept it: a single book is deliberately one core for determinism, so you cannot thread it. You mitigate by giving hot symbols their own dedicated shard and core, pinning threads with NUMA-local memory, and shedding with backpressure if a burst exceeds the bounded queue. *If pushed:* if one symbol genuinely exceeds a core, the answer is a faster core and tighter code (Disruptor, no allocation), not parallelising the book; splitting a book is a correctness bug, not a scaling option.
+
+10. A new order arrives with its price, so it goes straight to a known level and appends at the tail. A cancel arrives with an id and has to find a node that could be anywhere in any level, then remove it from the middle of a queue. Two things make it O(1): a dense slot table from internal order id to node, so the lookup is one array subscript rather than a hash probe, and an intrusive doubly linked list, so the node unlinks itself without the container being consulted. That matters because cancels are roughly 90% of traffic, about 1.875M/s of a 2M msg/s peak at a 15:1 cancel-to-fill ratio. *If pushed:* a cancel racing a fill is the interesting case. Because one thread owns the book, there is no race: the events are already totally ordered, and a cancel that arrives after the fill was applied returns TOO_LATE deterministically.
+
+11. Two arrays of 64-byte level headers, one per side, indexed by tick, plus a best-bid and best-ask pointer. Each header is `(price_tick, total_qty, head, tail, count)`, and `head` points at the oldest resting order, which carries its own `prev`/`next` pointers. A marketable buy sweeping two ask levels reads the best-ask header, follows `head` to an order record, decrements, possibly unlinks, then advances the pointer to the next level and repeats. That is about four cache lines for the whole match, and on an active symbol they are already in L1 or L2. *If pushed:* the padding to a full cache line is deliberate. Two adjacent levels sharing a line means a write to one invalidates the other, and on a hot book you touch adjacent levels constantly.
+
+12. When the tick band is wide or sparse enough that most of the array would never hold an order. The array costs memory proportional to the price range, not to the orders in it: 7,600 levels at 64B is 486KB for a $190 equity on a penny tick, which is fine, but an option on a $0.0001 tick over a $0 to $500 range is 5,000,000 levels at 320MB per contract, which is not. Above roughly 100k ticks per book, use a tree or skip list keyed by price and allocate only occupied levels. *If pushed:* real venues run both. Dense bands for a hot list of a few hundred symbols, trees for the long tail, chosen per instrument at listing time from tick size and price band.
 #### Whiteboard script
-TODO
+**0-5, frame it.** Open with the sentence the whole design hangs on: "One book per instrument, one thread per book, and price-time priority comes out of the layout rather than a comparator." Then ask the four clarifications that actually change the structure: tick size and whether there is a price band, which order types, FIFO or pro-rata allocation at a level, and whether replay has to be byte-identical. Draw nothing but the two sides of one book, bids on the left and asks on the right.
 
-A 45 minute budget: what to cover in 0-5, 5-15, 15-35 and 35-45, what to say first, and a line starting `Cut first:`.
+**5-15, the book and the loop.** Fill in three price levels per side with a queue at each. Walk one marketable buy through it out loud: cross check, fill against the FIFO head at the best level, consume it, advance to the next level, stop when it no longer crosses, rest the remainder. State the invariant while you draw: you never leave a crossed book. Cover market, IOC, and FOK as variations of the same loop in about thirty seconds, and note that FOK is the two-pass one.
 
-**Raw material, from the old Talking Points:**
+**15-35, the part being tested.** This is the budget. Say the access pattern first (everything at the touch, cancels 10-20x fills), then derive the layout from it. Put the memory arithmetic on the board: 7,600 ticks x 64B = 486KB per book, so dense arrays for the top 500 symbols and trees for the tail. Then the cancel path, dense slot table plus intrusive list, one load and one unlink. Then the single-writer invariant, `hash(instrumentId)` to a fixed worker, and say plainly that splitting a book across threads is a correctness bug and not a scaling option.
 
-- **Determinism is the product, not a nice-to-have** - lead with single-writer-per-book plus a total input order, and explain that trades are money so replay must be byte-identical; this is the first thing a trading-firm interviewer listens for.
-- **State you overwrite vs state you accumulate** - articulate that ticks are latest-wins snapshots while the book accumulates only self-bounding resting orders; naming this distinction unprompted signals you understand the domain, not just data structures.
-- **You shard across instruments, never within a book** - the keyed-executor, same-instrument-same-thread invariant is the whole scaling story, and knowing that splitting a book is a correctness bug rather than a scaling lever is the senior tell.
-- **The tick-indexed array is the HFT answer** - being able to say why (discrete bounded tick prices give O(1) best-price and O(1) level access) and when you would fall back to a TreeMap distinguishes shipped from studied.
-- **Disruptor over a lock queue for the last few microseconds** - single-writer ring, mechanical sympathy, no hot-path allocation; cite it as the implementation that keeps the same partitioning model but buys the latency.
-- **Event sourcing gives you recovery and audit for free** - the ordered log is the source of truth, snapshots keep replay short, and a hot standby replaying the same log makes failover a promotion.
-- **Flag cross-instrument orders as a different boundary** - basket and portfolio operations break shared-nothing per-book isolation and need a separate coordinating layer; recognising this rather than jamming it into one book shows architectural judgement.
+**35-45, what you cannot do.** Recovery in two lines: sequenced durable log, snapshot plus replay, hot standby replaying the same log. Then concede the three real gaps unprompted, because the interviewer is going to find them: the hot symbol nothing can parallelise, the tick array that needs a halt to reband when the price leaves its window, and auctions being a second matching algorithm with all the mode-transition risk that implies. Finish on observability: p99 match latency per shard, sequence-gap alarms, and a continuous shadow comparison against a slow reference matcher.
+
+Cut first: the auction/uncross mode and the multi-region DR discussion. Both are real, and neither is what this question is asking. If you are running short, protect the memory arithmetic and the cancel path, because that is the material that separates people who have built one from people who have read about one.
 #### Appendix
 **Data model**
 
@@ -18491,8 +18335,9 @@ A 45 minute budget: what to cover in 0-5, 5-15, 15-35 and 35-45, what to say fir
   - Each **price level** is a FIFO queue (intrusive doubly linked list) of resting orders in arrival order (time priority).
   - `best_bid` and `best_ask` pointers are the tops of the two sides.
 - **Order record:** `(order_id, participant_id, side, price_tick, quantity, remaining_qty, tif, enqueue_seq, prev_ptr, next_ptr)`.
-- **Price level:** `(price_tick, total_resting_qty, head_ptr, tail_ptr, order_count)`.
-- **Instrument state:** latest top-of-book snapshot (published), last-applied sequence number.
+- **Price level:** `(price_tick, total_resting_qty, head_ptr, tail_ptr, order_count)`, padded to 64 bytes.
+- **Order slot table:** `orders[internal_id] -> node`, a flat array sized to the per-session order cap, so a cancel is one subscript.
+- **Instrument state:** latest top-of-book snapshot (published), last-applied sequence number, tick size and band bounds.
 - **Not stored / overwritten:** market-data ticks are the latest snapshot per instrument, not an accumulating list. The book accumulates only resting orders, which leave on fill, cancel, or expiry.
 
 **API contract**
@@ -18524,6 +18369,7 @@ ExecutionReport {
 - **`match.latency_p99_micros`**: wire-in to fill wire-out per event, per shard - alert if p99 exceeds the budget (e.g. > 20 micros) for 1min; this is the core product SLO.
 - **`shard.queue_depth`**: inbound ring depth per worker - alert as it approaches capacity (backpressure imminent), watched per shard because one hot instrument moves independently.
 - **`sequence.gap_detected`**: any gap or duplicate in the input or output sequence - page immediately; determinism and audit both depend on gap-free sequencing.
+- **`book.band_utilisation`**: how close the best price is to the edge of an instrument's allocated tick band - alert before a reband is forced, because a reband costs a halt.
 - **`match.fill_rate` and `book.depth`**: fills/sec and resting-order count per instrument - a baseline for anomaly detection (a book that stops leaving orders, or depth growing unbounded, signals a bug).
 - **`journal.append_latency_p99`**: durable write latency - alert if it starts dominating the critical path.
 - **`stp.trigger_rate`**: self-trade-prevention activations - a spike can indicate a misconfigured participant or a probing strategy.
@@ -18540,14 +18386,29 @@ ExecutionReport {
 #### Problem
 Absorb many independent high-rate inbound streams (market-data ticks plus order flow, one stream per instrument, venue, or feed handler), normalise them into one canonical event format, stamp them into a single totally-ordered sequence, and fan them out to per-instrument consumers deterministically, at millions of messages per second, without dropping order flow, losing per-instrument ordering, or exhausting memory. This pipeline stops at "hands events to the per-instrument processing layer"; the matching cores of question 42 are the downstream sink.
 #### Core
-TODO
+Fan in, sequence, fan out, plus one rule about what you are allowed to drop.
 
-Write the whole answer as you would give it in sixty seconds, 200 to 300 words, standing alone.
+Fan in: one thin handler per inbound stream whose only job is to drain the socket and decode the venue's wire format into a canonical event. No business logic: if the reader blocks, the kernel receive buffer fills, and on UDP that is silent packet loss at the worst possible place.
+
+Sequence: every normalised event converges on a single-writer stage that stamps it with the next monotonic number and appends it to a journal. That gives one total order for the whole venue, gap-free by construction, and a replayable log that is the source of truth for recovery. One writer is not a compromise, it is what makes the order deterministic without locks.
+
+Fan out: dispatch by `hash(instrumentId)` to per-instrument consumer shards. Ordering only has to hold within a book and books are independent, so this is linear parallelism that keeps the guarantee. Never round-robin, which interleaves one book across consumers and destroys its order.
+
+The rule: under overload the two message classes are not equal. Market-data ticks are snapshots you overwrite, so you conflate, keeping the latest per instrument and binning the stale intermediates. Order flow accumulates and can never be silently dropped, so you apply backpressure to the producer or return an explicit reject. Every inter-stage buffer is bounded, so overload has a defined outcome instead of an out-of-memory.
+
+What gets drilled is what happens when the feed has a hole: an application-level sequence number on every inbound feed, gap detection against it, an arbitration or retransmit path to fill it, and per-instrument staleness while you wait. This pipeline stops at handing ordered events to the matching cores of question 42.
 #### Summary
 **The picture in your head:** a sorting mailroom behind a busy exchange. Couriers (venues, feed handlers) back their vans up to many loading bays at once and dump sacks of letters. Runners at each bay do one thing only, empty the van fast so it can leave, and drop everything onto one numbered conveyor belt. The belt stamps every letter with the next number in sequence, so from here on there is a single, undeniable order of arrival. Further down, the belt sorts letters into pigeonholes by destination desk (instrument), and each desk is worked by one clerk who processes its letters strictly in belt order. If the mailroom gets flooded, junk mail (stale price ticks) is binned because only the latest flyer matters, but cheques (order flow) are never binned, the mailroom instead tells the courier to slow down.
 
-**The approaches people actually take:**
-TODO. Two or three things a competent engineer might reach for, in plain language and before any product name, with what each one buys and roughly when it wins.
+**The approaches people actually take:** three shapes, and real systems blend them.
+
+*A durable ordered log in the middle.* Producers append to a replicated, partitioned log on disk; every consumer reads it at its own pace from its own offset. You get replay for free, consumers that can crash and catch up, and new consumers added without touching the producers. You pay a network hop and a disk commit per message, so the floor is milliseconds. This wins when consumers are many and heterogeneous, when teams other than yours need the data, and when the latency budget is measured in seconds.
+
+*A single-writer shared-memory ring inside one process.* One thread assigns the sequence and writes a pre-allocated slot; consumers follow their own cursor and batch-drain whatever is available. Hand-off is sub-microsecond with no copy, no syscall, and no allocation. You pay for it in reach: everything must fit on one machine and one runtime, and growing means cloning the whole pipeline per instrument range. This wins when the budget is microseconds and you control the deployment.
+
+*No middle at all.* Publish each event once onto the network and let every subscriber receive the same bytes, pushing ordering, loss detection, and recovery up into the application. Egress does not multiply by consumer count and there is no shared broker to saturate or fail. You now own reliability yourself, which is most of the engineering in this question.
+
+The usual answer is the third for the wire, the second inside the box, and the first for anything another team has to replay.
 
 **The single-request walkthrough:** trace two messages. A price tick for `AAPL` arrives on a UDP multicast feed. The feed handler drains it from the socket immediately (it never blocks on anything downstream), the normaliser decodes the venue's binary frame into a pre-allocated canonical event struct, and the sequencer stamps it with the next monotonic sequence number and writes it into the ring buffer. The fan-out hashes `instrumentId` and routes it to the `AAPL` consumer shard; if the consumer is momentarily behind, the tick is conflated (the latest `AAPL` tick overwrites the previous queued one). Now an order to buy `AAPL` arrives on the order-entry stream. Same path to the sequencer, same hash to the same `AAPL` shard, but this one cannot be dropped: if the shard is saturated the pipeline applies backpressure (slow the producer, or NACK an external client with "system busy") rather than lose it. Both are handed to the matching core in sequence order; question 42 takes it from there.
 
@@ -18571,11 +18432,15 @@ TODO. Two or three things a competent engineer might reach for, in plain languag
 - Fan-out by `hash(instrumentId) % shards`; conflation map for ticks, NACK/backpressure for order flow.
 - Shard the whole pipeline by instrument range when one sequencer hits its ceiling; keep cross-instrument events (basket, portfolio risk) on a separate coordinating boundary.
 #### What this is really testing
-TODO
+Whether you classify traffic before you size buffers. Under overload the interesting decision is not how big the queue is, it is which messages are state you overwrite and which are state you accumulate. Get that split right and the system degrades; get it wrong and it either loses trades or dies of memory exhaustion, and no amount of tuning saves either. The second half of the insight is that this pipeline has no second chance: the ordering decision is made once, at the sequencer, and every downstream consumer inherits it as fact.
 
-The one insight this question exists to elicit, then the contrast with the question it most resembles and why the answers differ.
+The nearest question is ad click aggregation, and the contrast is sharp because the two pipelines look identical on the whiteboard and are built for opposite failure economics.
 
-Closest question: TODO
+Ad click aggregation publishes a real-time number that is explicitly approximate, then recomputes the authoritative number overnight from raw events kept in object storage. A click counted twice, counted late, or missed entirely becomes correct at T+1, so the design spends its complexity on watermarks, allowed lateness, and a batch path that overwrites the streaming estimate. Here there is no T+1. The consumer is a matching engine whose output is an executed trade, so a message dropped or reordered is not an estimate that gets fixed, it is a wrong trade. The complexity goes instead into gap-free sequencing, gap detection on every inbound feed, and replay that is deterministic to the byte.
+
+The second difference decides how each one handles its hot key. Ad aggregation's unit of correctness is a count over a window, and addition commutes, so a Super Bowl ad can be sub-keyed across ten partitions and merged. This pipeline's unit of correctness is the relative order of two messages in one book, which does not decompose, so a hot instrument cannot be split at all. Ad aggregation solves its skew problem. This one concedes it and buys a faster core.
+
+Closest question: Q18
 #### Clarifying questions and how each answer forks the design
 - Data plane or control plane, or both? (assume both: a tick firehose plus an order-entry/control path)
 - Which venues and protocols must we ingest? (FIX, ITCH-style binary, proprietary; assume several)
@@ -18592,7 +18457,7 @@ Closest question: TODO
 |---|---|
 | Both data and control plane | split into a lossy high-rate tick path and a lossless order-entry path with different guarantees |
 | Multiple venue protocols (FIX, ITCH, proprietary) | per-feed handler adapters normalising into one canonical internal event format |
-| Ticks may be dropped under load | conflation — keep only the latest per instrument when a consumer falls behind |
+| Ticks may be dropped under load | conflation, keeping only the latest per instrument when a consumer falls behind |
 | Order flow must not be lost | bounded queues with explicit NACK/backpressure on overload, never silent drop |
 | UDP multicast available | fan out market data via multicast with a sequence-gap recovery/replay channel |
 | Microsecond ingest-to-dispatch at 1-3M msg/s | lock-free ring buffers, sharding per instrument, and busy-polling threads pinned to cores |
@@ -18625,36 +18490,32 @@ Derive from a liquid multi-venue feed.
 - **Sequencer throughput ceiling:** a single-writer sequencer doing only "assign sequence, write slot" sustains tens of millions of ops/sec on one core (LMAX published ~6M+ msg/s on 2011 hardware), so 2M msg/s fits one sequencer with headroom; shard the pipeline only when a single sequencer is genuinely the ceiling.
 - **Network bandwidth:** ~50-80 MB/s binary ingress at 2M msg/s; multicast fan-out publishes once and reaches N consumers without N copies, so egress does not multiply by consumer count the way unicast would (a key reason multicast is used for market-data distribution).
 #### Key decisions
-TODO
+**Transport chosen per traffic class, not once for the whole system**
+- Choice: three transports placed by class. Connectionless binary multicast for the tick firehose, a long-lived reliable multiplexed stream (server-streaming over HTTP/2, Protobuf-shaped) for service-to-service feeds that want schemas and free retransmit, and plain request/response for the control plane. Resist the pressure to name one winner: the honest answer is that each occupies a different point and the skill is placing them.
+- Alternative: one reliable streaming transport for both the firehose and the service feeds, keeping request/response only for control. This is genuinely defensible and it is what most teams should do: one wire format, one client library, flow control and retransmit you do not have to write, and it deletes the entire gap-detection subsystem described in the deep dive.
+- Decider: the egress multiplier and the tail latency. At 2M msg/s and 32 bytes per event, one multicast publish is 2e6 × 32 = 64 MB/s regardless of how many consumers subscribe; the same feed unicast to 20 consumers is 20 × 64 = 1280 MB/s, past a 10 GbE line rate. The reliable path also pays head-of-line blocking, because a single lost segment stalls every message queued behind it for one retransmit round trip, roughly 100-200 microseconds even colocated, against a p99 budget of tens of microseconds.
+- Alternative wins when: consumers number in the single digits, or the deployment is not colocated. Multicast does not cross the public internet and is not natively available inside most cloud VPCs, so a cloud-hosted pipeline usually has no choice, and if the budget is milliseconds rather than microseconds the head-of-line cost disappears into the noise anyway.
 
-Two or three genuine forks. For each, in this exact shape so it stays checkable:
+Where each one sits, so you can place all three rather than rank them:
 
-**<name of the fork>**
-- Choice:
-- Alternative:
-- Decider:
-- Alternative wins when:
+| Transport | Backpressure mechanism | Ordering and reliability | Belongs on |
+|---|---|---|---|
+| Request/response over HTTP | none native, you build it | ordered per response, reliable | control plane, external APIs, low rate |
+| Server-streaming over HTTP/2 | per-stream flow control, free | ordered and reliable, but head-of-line blocked | service-to-service feeds wanting schemas and tooling |
+| Binary multicast | none, shed or conflate in the application | application-level sequence plus gap detection, transport unreliable | colocated, lowest-latency market data |
 
-**Raw material, from the old Algorithm Comparison:**
+**One sequencer for the venue, or one per instrument shard**
+- Choice: a single global sequencer per pipeline, giving one total order across every instrument. Shard the whole pipeline only once that sequencer is measurably the ceiling.
+- Alternative: sequence independently inside each instrument shard from day one and never claim a global order.
+- Decider: measured headroom against the actual peak. A single-writer stage that only assigns a number and writes a pre-allocated slot sustains millions of operations per second on one core (the LMAX Disruptor work published 6M+ msg/s on 2011 commodity hardware, and single-core throughput has improved since), against a 2M msg/s planning peak. That is about 3x headroom, so the global order is effectively free. Below roughly 2x, stop relying on it.
+- Alternative wins when: peak exceeds about half the single-writer ceiling, or the deployment already spans machines so no one writer could see every event, or audit rules require each shard to be independently recoverable. The cost is real: per-shard sequencing means you can no longer answer "what was the state of the venue at sequence N", which is the first thing asked about a basket order or a cross-instrument risk check.
 
-| Transport | Connection model | Streaming | Serialisation | Backpressure | Latency | Ordering / reliability | Best for |
-|---|---|---|---|---|---|---|---|
-| REST / HTTP/1.1 | new request/response per call (or keep-alive), header overhead per message | none (poll) | JSON text, allocation-heavy parse | none native | highest | ordered per response, reliable (TCP) | control plane, external APIs, low-rate |
-| gRPC / HTTP/2 streaming | one long-lived multiplexed connection, server-streaming | yes (one subscribe -> unbounded stream) | Protobuf binary, parse into pre-allocated structs | per-stream via HTTP/2 flow control | low, but TCP head-of-line blocking | ordered, reliable (TCP), schema-typed | service-to-service streams wanting schemas/tooling/reliability |
-| UDP multicast + binary | connectionless, one publish reaches N subscribers | yes (continuous) | compact binary (ITCH-style) | none (shed/conflate at app layer) | lowest | app-level sequence + gap detection; unreliable transport | exchange-grade, colocated, lowest-latency market data |
+**Filling a feed gap: redundant A/B arbitration, or detect and request retransmit**
+- Choice: subscribe to both of the venue's redundant multicast copies and arbitrate, keeping whichever arrives first and discarding the duplicate, with retransmit as the second line.
+- Alternative: subscribe to one copy, detect gaps against the feed sequence, and request a retransmit when one appears.
+- Decider: recovery latency against NIC and CPU cost. Arbitration hides any loss confined to one network path, and hides it within the arrival-time difference between the two copies, typically tens of microseconds, with no round trip at all. A retransmit request costs a round trip plus the venue's recovery queue, commonly 5-50 ms, during which that instrument is stale and unpublishable. The price is 2x ingress and a second decode: another 64 MB/s and roughly one more core per feed at 2M msg/s.
+- Alternative wins when: the second path is not genuinely independent (same switch, same NIC, same cloud AZ), in which case arbitration buys almost nothing, or when the observed single-path loss rate is low enough that expected staleness is inside budget. At one gap per hour with 20 ms recovery that is 0.0006% stale time, which no one will fund a second NIC to remove.
 
-The honest hierarchy: UDP multicast plus binary is the lowest-latency path for internal/exchange market data (one publish fans out to N with no per-consumer copy, and no TCP head-of-line blocking or retransmit latency); gRPC server-streaming is the right choice for service-to-service streams where you want schemas, tooling, and reliability and can tolerate TCP; REST/HTTP is for the control plane and external-facing APIs. Name all three and place each rather than declaring a single winner. Do not overclaim gRPC as the fastest path; because it is TCP it has head-of-line blocking and is not what colocated market data uses.
-
-**Raw material, from the old Common Mistakes:**
-
-- **Using REST/HTTP for the data plane** - request/response with per-message header overhead, no native streaming, and JSON parse cost cannot carry a multi-million-message firehose; REST belongs on the low-rate control plane, streaming transports on the data plane.
-- **Unbounded queues** - an unbounded buffer under sustained overload converts dropped packets into an out-of-memory crash; every inter-stage buffer must be bounded with a defined full behaviour.
-- **Round-robin load balancing across per-instrument consumers** - spreading one instrument's events across consumers interleaves and destroys per-instrument order; you partition by instrument, not round-robin, and only stateless edges load-balance freely.
-- **Dropping order flow silently** - shedding a buy or sell without telling anyone loses trades; order flow gets backpressure or an explicit NACK, never a silent drop.
-- **Not conflating ticks and treating them as durable events** - queueing every stale tick like a durable message backs up the pipeline; ticks are latest-wins snapshots and must be conflated under load.
-- **Per-message allocation** - a fresh object per message causes GC pauses that blow the latency budget; parse into pre-allocated pooled structs and ring slots.
-- **Assuming even load and ignoring skew** - sizing for the average when a few hot instruments carry most of the traffic; plan for skew, measure per-instrument load, and dedicate resources to whales.
-- **Blocking the feed handler on downstream work** - if the socket reader waits on the matcher, the kernel buffer fills and you drop or backpressure at the worst possible place; the reader must always drain first and hand off to a bounded buffer.
 #### High-level design
 **must-say**
 
@@ -18762,43 +18623,50 @@ The honest hierarchy: UDP multicast plus binary is the lowest-latency path for i
 #### Deep dive
 **must-say**
 
-**Feed handler drain loop (never block on downstream):**
-```
-loop:
-    n = socket.recv(buf)          # drain the socket first, always
-    if n <= 0: continue
-    event = normalise(buf, n)     # decode into a pre-allocated struct
-    if not ring.try_publish(event):   # bounded ring; do NOT block the reader
-        if event.kind == TICK:
-            conflation[event.instrument] = event   # overwrite latest, shed stale
-        else:
-            nack(event, reason = "system_busy")    # order flow: explicit reject
-    # the reader never waits on the matcher; a stalled consumer must never
-    # cause the socket buffer to fill (TCP backpressure / UDP packet loss)
-```
+**Sequencing, gap detection, and recovery.** This is the mechanism that gets drilled, because it is the one place where the pipeline's correctness claim is either true or a bluff.
 
-**Allocation-free normalisation:** each venue decoder reads the wire frame field by field into a reused canonical struct drawn from a pre-allocated pool, so steady-state allocation is zero and there is no per-message garbage to collect. FIX is tag=value ASCII, ITCH-style is fixed-offset binary; both map onto the same canonical `Event`.
+**Two sequence spaces, and they are not the same thing.** Every serious venue stamps its own monotonic number on each message it publishes, per feed. That number is the only reason you can know a packet went missing, because multicast will never tell you. Separately, our sequencer stamps an internal number when the event enters our ordered log. The venue's sequence can have holes. Ours cannot, by construction, because one writer assigns it. Gap detection runs entirely on the inbound venue sequence; the internal sequence is what recovery replays.
 
-**Single-writer sequencer (fan-in to one order):**
+**The internal sequencer:**
 ```
-// exactly one thread writes the ring; it does almost nothing
 seq = 0
 loop:
-    event = inbound.poll()        # from the normaliser stage
+    event = inbound.poll()      # from the normaliser
     if event == null: continue
     seq += 1
-    event.seq = seq               # assign the total order
-    slot = ring.claim()           # single writer, no lock
-    ring.write(slot, event)       # publish; consumers advance their own cursor
-    journal.append(event)         # durable, sequential, source of truth
+    event.seq = seq             # the total order, gap-free by construction
+    slot = ring.claim()         # single writer: no lock, no CAS contention
+    ring.write(slot, event)     # consumers advance their own cursor
+    journal.append(event)       # sequential append, the source of truth
 ```
-Because one writer assigns the sequence, the order is total and gap-free with no locking, and the journal is the replay source of truth.
+One writer means no locking and no ambiguity about which of two near-simultaneous events came first. It also means the sequencer must do nothing else: no parsing, no risk checks, no formatted logging. Every microsecond spent here comes straight off the venue's throughput ceiling.
 
-**Conflation for ticks vs backpressure for order flow:** the two message classes are handled differently under load. Ticks flow through the conflation map (latest overwrites stale) so a slow consumer receives the newest book, not a backlog. Order flow is never conflated: if its bounded path is full, apply backpressure to the producer (flow control) or return an explicit NACK to an external client, so nothing is lost silently.
+**Detecting a gap.** Per feed, hold an `expected` counter and a small reorder buffer:
+```
+on_message(m):                        # m.feed_seq comes from the venue
+    if m.feed_seq == expected:
+        emit(m); expected += 1
+        drain_reorder_buffer()        # a fill may unblock buffered successors
+    elif m.feed_seq < expected:
+        drop(m)                       # duplicate: the B copy, or a retransmit
+    else:
+        reorder_buf[m.feed_seq] = m   # hole below this one
+        if not gap_timer.running:
+            gap_timer.start(GAP_MS)   # a gap may only be reordering
+```
+Size the reorder buffer for the largest plausible burst behind a hole, not for the average: 1024 slots at 64 bytes is 1024 × 64 = 64 KB per feed, which is free. The timer is the number worth arguing about. Too short and you fire retransmit requests for packets that were merely reordered, loading the venue's recovery service at exactly the moment every other participant is loading it too. Too long and you sit stale. On a colocated link where one-way jitter is single-digit microseconds, 5-10 ms is generous; across a WAN it has to clear the observed reordering window.
 
-**Batched draining (mechanical sympathy):** a consumer drains everything currently available between its cursor and the producer cursor in one pass and processes it as a batch, amortising per-message overhead and staying cache-friendly. This batching is a large part of how the pipeline reaches millions of messages/sec on modest hardware.
+**The recovery ladder,** attempted in this order, fastest first:
 
-**Sharding the pipeline (the scale-out evolution):** when a single sequencer is the ceiling, shard the whole pipeline by instrument range; each shard has its own feed handlers, sequencer, and consumers and shares nothing. Global ordering is only required within a book, and books are independent, so per-shard sequencing suffices. The exception is cross-instrument events (basket orders, portfolio risk checks) that span shards; they break shared-nothing and need a separate coordinating boundary (a two-phase reservation), never a lock across shards.
+1. *The other copy.* Venues publish two identical multicast streams on separate groups over separate network paths. Arbitration keeps whichever copy of a given feed sequence lands first and discards the second. Because loss on the two paths is largely independent, this repairs most gaps within the arrival spread between the copies, tens of microseconds, with no request and no round trip. It repairs nothing when the loss happened at your own NIC or your own kernel buffer, which is precisely why the rest of the ladder still exists.
+2. *Retransmit.* Ask the venue's recovery service for the missing range over a reliable connection. That costs a round trip plus its queue, commonly 5-50 ms, and venues cap both how much they will resend and how often you may ask. Fine for a hole of tens of messages, useless for thousands.
+3. *Snapshot refresh.* Venues publish periodic full state per instrument on a separate channel, each snapshot labelled with the feed sequence it is current as of. Join it, take the next snapshot for the affected instruments, discard every buffered incremental at or below the snapshot's sequence, and apply the rest. This is the only rung that recovers from an unbounded gap, and it costs one snapshot interval, typically 1-30 seconds.
+
+**What downstream does while a gap is open.** Mark the affected instruments stale and stop publishing their book. This is the part people skip and interviewers ask about: a book you know is missing messages is worse than no book, because a consumer will trade on it. Staleness is per instrument and never global, so a hole in one symbol must not blind the other 9,999. Order flow arriving for a stale instrument is rejected explicitly rather than matched against a book you do not trust.
+
+**Our own replay.** The journal plus periodic snapshots of consumer state is the entire recovery story. A consumer resumes by loading the newest snapshot and replaying the log forward from that snapshot's sequence. Snapshot every 30 seconds and a crash costs at most 30 seconds of replay, which reads far faster than line rate because it is sequential and mostly warm.
+
+Replay is only useful if it is deterministic, and that is a discipline rather than a property you get for free. No wall-clock reads on the processing path, only the timestamps carried in the event. No iteration over hash maps whose order depends on insertion sequence or address layout. No randomness, no branching on thread identity or on arrival timing. The test is that replaying a captured session produces byte-identical output to the live run, and it belongs in CI, because determinism regressions stay silent until the day you actually need to recover.
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 450" role="img" aria-label="Sharded market-data ingest: feeds, handlers, normaliser, sequencer, log, partition, shard consumers, matching">
@@ -18903,6 +18771,19 @@ Because one writer assigns the sequence, the order is total and gap-free with no
   <path class="flow" d="M693,330 L693,380"/>
 </svg>
 ```
+#### Where it breaks
+**must-say**
+
+**Bottlenecks**
+
+- **Sequencer single-writer ceiling** - one thread assigns the total order, so its throughput bounds the shard. Keep it doing almost nothing (assign sequence, write slot, sequential journal append), and shard the whole pipeline by instrument range when one sequencer is genuinely saturated.
+- **Hot instrument / skew** - a few symbols carry most of the load, and one instrument's stream cannot be split without breaking ordering. Assign shards by measured load, give whales dedicated cores with NUMA-local memory, and accept that a single hot book is bounded by one consumer (as in question 42).
+- **Unbounded queue OOM** - an unbounded queue under sustained overload just moves the failure from dropped packets to out-of-memory. Bound every inter-stage buffer, size for burst, and define the full behaviour (conflate ticks, NACK/backpressure order flow).
+- **GC pauses from per-message allocation** - allocating a fresh object per message causes pauses that blow the microsecond budget. Parse into pre-allocated pooled structs and use pre-allocated ring slots so steady-state allocation is zero.
+- **Network saturation** - JSON on the firehose is 6-10x the bytes of packed binary, and unicast fan-out multiplies egress by consumer count. Use compact binary on the data plane and UDP multicast for fan-out so one publish reaches N consumers.
+- **Slow consumer stalling the pipeline** - a lagging consumer must never back up the sequencer or the socket drain. Decouple with bounded rings, conflate its tick stream to the latest, and for order flow apply backpressure at the producer rather than letting the stall propagate to the edge.
+
+Which of the three overload responses applies is decided per message, not per system:
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 520" role="img" aria-label="Backpressure decision: conflate ticks, NACK external clients, or slow the producer">
@@ -18977,17 +18858,6 @@ Because one writer assigns the sequence, the order is total and gap-free with no
   <path class="flow" d="M660,392 L660,478 L447,478"/>
 </svg>
 ```
-#### Where it breaks
-**must-say**
-
-**Bottlenecks**
-
-- **Sequencer single-writer ceiling** - one thread assigns the total order, so its throughput bounds the shard. Keep it doing almost nothing (assign sequence, write slot, sequential journal append), and shard the whole pipeline by instrument range when one sequencer is genuinely saturated.
-- **Hot instrument / skew** - a few symbols carry most of the load, and one instrument's stream cannot be split without breaking ordering. Assign shards by measured load, give whales dedicated cores with NUMA-local memory, and accept that a single hot book is bounded by one consumer (as in question 42).
-- **Unbounded queue OOM** - an unbounded queue under sustained overload just moves the failure from dropped packets to out-of-memory. Bound every inter-stage buffer, size for burst, and define the full behaviour (conflate ticks, NACK/backpressure order flow).
-- **GC pauses from per-message allocation** - allocating a fresh object per message causes pauses that blow the microsecond budget. Parse into pre-allocated pooled structs and use pre-allocated ring slots so steady-state allocation is zero.
-- **Network saturation** - JSON on the firehose is 6-10x the bytes of packed binary, and unicast fan-out multiplies egress by consumer count. Use compact binary on the data plane and UDP multicast for fan-out so one publish reaches N consumers.
-- **Slow consumer stalling the pipeline** - a lagging consumer must never back up the sequencer or the socket drain. Decouple with bounded rings, conflate its tick stream to the latest, and for order flow apply backpressure at the producer rather than letting the stall propagate to the edge.
 
 **Failure modes**
 
@@ -19002,7 +18872,9 @@ Because one writer assigns the sequence, the order is total and gap-free with no
 
 **Unresolved**
 
-TODO. Two or three things this design genuinely does not handle well, and what you would do about each.
+- **Cross-instrument events have no home.** A basket order, a portfolio-level risk check, or a cross-venue arbitrage all need a consistent view spanning shards, and partitioning by instrument gives them none. While there is still one sequencer the total order covers them; the moment the pipeline shards, it does not. What I would do: keep cross-instrument traffic on a separate, far lower-rate coordinating path with its own sequencer, reserving against the instrument shards in two phases and never taking a lock across them. That path runs at millisecond latency, not microsecond. This is a capability gap rather than a tuning problem: the venue ends up with two latency tiers and clients have to know which one they are on.
+- **The sequence number is arrival order, not market order.** Events are stamped in the order our NICs saw them. For two venues quoting the same instrument, that ordering reflects the difference in network path length between us and each venue, not the order in which the two markets actually moved. Any consumer reasoning about cross-venue causality (consolidated best bid and offer, latency-arbitrage surveillance) will sometimes be wrong, and nothing inside this pipeline fixes it. What I would do: carry both timestamps on every event (`source_ts` from the venue, `ingest_ts` from us), publish measured per-feed path latency so consumers can apply their own correction, and state plainly that the total order is ours and not the market's. Hardware timestamping at the NIC narrows the error to the venue clock's own accuracy; it does not remove it.
+- **Sustained order-flow overload has no graceful answer.** Conflation only helps the class of traffic we are permitted to lose. If order flow alone exceeds what a shard can absorb, say one participant's algo unwinding in a cancel-and-replace storm, the only correct responses are backpressure, which penalises everyone sharing that producer connection, or an explicit reject, which is a visible failure to a paying client. Buffering just relocates the failure and makes it larger. What I would do: per-participant message-credit quotas at the order-entry gateway, so one client's burst is rejected at the edge before it consumes shard capacity, plus a documented busy reject code clients are expected to handle. This keeps the gateway thin (it counts, it does not parse business logic) and leaves the market-data path untouched, but it is rationing, not extra capacity.
 #### Drill questions
 1. How do you deal with many ticker streams and load coming in from all of them at once?
 2. Do you load balance across the consumers?
@@ -19012,8 +18884,10 @@ TODO. Two or three things this design genuinely does not handle well, and what y
 6. How do you recover or replay after a crash?
 7. How do you guarantee ordering across many streams?
 8. How do you test it under overload?
-
-TODO. Only 8 drill questions carried over, top up to at least 10.
+9. A packet goes missing on the multicast feed. Walk me through what happens.
+10. What does the downstream consumer do while an instrument is gapped?
+11. Two venues quote the same instrument. What order do those two ticks end up in, and is that the right order?
+12. Your sequencer is at 80% of one core. What do you do?
 #### Answers to drill questions
 1. Thin feed handlers, one per stream, whose only job is to drain the socket so the kernel buffer never fills; they do zero business logic and hand off to a shared normaliser and a single sequencer that fans the streams into one ordered log. *If pushed:* pin feed handlers to cores, size the per-stream ring for burst, and shard the whole pipeline by instrument range once one sequencer is the ceiling.
 
@@ -19029,21 +18903,28 @@ TODO. Only 8 drill questions carried over, top up to at least 10.
 
 7. The single-writer sequencer is the one place that assigns order; many streams fan in and leave with a total, gap-free sequence. Downstream, partitioning by instrument preserves that order per book. *If pushed:* there is no wall-clock tie-breaking and no concurrent writer on the sequencing path, because either would make the order non-deterministic.
 
-8. Replay a captured production log at 1x, 2x, and 10x speed and assert: zero order-flow loss, ticks conflated (not backlogged), per-instrument order preserved, and bounded memory. Chaos-test by stalling a consumer and killing the sequencer mid-flight to verify backpressure and replay. *If pushed:* a slow reference consumer run in shadow validates that fan-out ordering matches the sequenced log exactly.
+8. Replay a captured production log at 1x, 2x, and 10x speed and assert: zero order-flow loss, ticks conflated (not backlogged), per-instrument order preserved, and bounded memory. Chaos-test by stalling a consumer and killing the sequencer mid-flight to verify backpressure and replay. *If pushed:* a slow reference consumer run in shadow validates that fan-out ordering matches the sequenced log exactly, and a byte-for-byte replay equality check belongs in CI because determinism regressions are silent until you need to recover.
+
+9. The venue's own per-feed sequence number is what makes it visible; multicast will not tell you. Each feed keeps an `expected` counter, and a message above it means a hole, so the message goes into a small reorder buffer (1024 slots is plenty) and a timer starts, because a gap is often just reordering. Then the ladder: wait for the B copy, which usually lands within tens of microseconds and needs no request; after the timer, ask the venue's recovery service for the missing range, costing 5-50 ms; if the hole is too large for that, refresh from the snapshot channel and discard buffered incrementals at or below the snapshot's sequence. *If pushed:* set the timer to clear the observed reordering window, 5-10 ms colocated, and do not set it aggressively, because a venue-wide burst means every participant retransmits at once.
+
+10. Marks those instruments stale and stops publishing their book. A book you know is incomplete is worse than no book, because someone will trade on it. Staleness is per instrument, never global, so a hole in one symbol must not blind the other 9,999. Order flow arriving for a stale instrument is rejected explicitly rather than matched. *If pushed:* the stale flag has to be visible in the published event stream, otherwise downstream consumers silently inherit a book they cannot tell is wrong.
+
+11. They are ordered by when our NICs saw them, which reflects the path length from each venue to us, not the order the two markets actually moved. For a consolidated quote or any cross-venue causality claim, that is sometimes the wrong order and this pipeline cannot fix it. *If pushed:* carry `source_ts` alongside `ingest_ts`, publish measured per-feed path latency so consumers can correct, and hardware-timestamp at the NIC to shrink the error down to the venue clock's own accuracy. Be explicit that the total order is ours, not the market's.
+
+12. Take work off it before sharding. It should only assign a number, write a pre-allocated slot, and append to the journal; anything else on that thread (parsing, risk checks, formatted logging, metrics with allocation) moves upstream or to a side consumer. If it is genuinely at 80% doing only those three things, shard the whole pipeline by instrument range, since one writer that saturates has no incremental fix. *If pushed:* say what sharding costs, which is the global total order across instruments, and therefore the ability to answer "what did the venue look like at sequence N" for basket orders and portfolio risk.
 #### Whiteboard script
-TODO
+Say first, before drawing anything: "This is a fan-in, sequence, fan-out pipeline, and the interesting part is what it is allowed to drop." That one sentence tells the interviewer you know which question you are actually answering.
 
-A 45 minute budget: what to cover in 0-5, 5-15, 15-35 and 35-45, what to say first, and a line starting `Cut first:`.
+**0-5, frame and bound.** Establish the two traffic classes, because the whole design forks on them: a lossy tick firehose and a lossless order-entry path. Confirm the boundary out loud, that this stops at handing ordered events to the matching cores of question 42. Write four numbers in the corner of the board and leave them there: 2M msg/s planning peak, ~10k instruments, ~32 bytes per event, p99 ingest-to-dispatch in tens of microseconds. Ask whether the deployment is colocated, because that single answer decides the transport discussion later.
 
-**Raw material, from the old Talking Points:**
+**5-15, the spine.** Draw it left to right and do not embellish: feeds, thin handlers, normaliser, sequencer, ordered log, `hash(instrumentId)`, shards, matching cores. Justify the shape with the two constraints that force it. The socket reader must never block, or the kernel buffer fills and UDP loss lands at the worst possible place. Ordering only has to hold within a book and books are independent, which is what makes fan-out linear. Say explicitly that this is partitioning, not round-robin load balancing, and that round-robin would interleave one book across consumers and destroy it. Do the arithmetic aloud: 2e6 x 32 = 64 MB/s as packed binary against 300-500 MB/s as JSON, which is why the data plane is binary and the control plane need not be.
 
-- **Data plane vs control plane is the framing** - split transport by traffic class: a streaming binary data plane for the firehose, REST for the low-rate control plane, and say why request/response cannot carry millions of messages/sec.
-- **Backpressure for orders, conflation for ticks** - lead with the overwrite-vs-accumulate consequence: ticks are snapshots you conflate under load, order flow accumulates and is never silently dropped; this is the senior signal and it ties straight to question 42.
-- **Partitioning is the load balancing, and skew is the real problem** - you partition by instrument to preserve ordering, not round-robin; the hard part is hot instruments, not even spread, and you cannot split one hot stream.
-- **The single-writer sequencer and why ordering forces it** - one writer assigns a total, gap-free order cheaply and produces the replayable log; concurrency on that path would make ordering non-deterministic.
-- **UDP multicast beats gRPC beats REST for progressively lower latency** - name the honest hierarchy and place each; do not overclaim gRPC as the fastest path, since TCP head-of-line blocking is why colocated market data uses multicast.
-- **Bounded everything** - bounded rings between every stage with a defined full behaviour is what turns overload into graceful degradation instead of an OOM.
-- **This pipeline is the front half of the matching engine** - it stops at handing ordered, per-instrument events to the matching cores of question 42, which is the downstream sink; being explicit about that boundary shows you see the whole system.
+**15-35, the two mechanisms that earn the offer.** Overload first, and quickly: conflate ticks because they are snapshots you overwrite, backpressure or explicitly reject order flow because it accumulates, bound every buffer so overload has a defined outcome instead of an out-of-memory. Draw the small decision, which is event ready, downstream full, what kind of message. Then spend most of this band on gaps, where the real drilling happens. Draw the two sequence spaces, the venue per-feed number that can have holes and your internal one that cannot. Then the recovery ladder: the B copy at tens of microseconds, retransmit at 5-50 ms, snapshot refresh for anything unbounded. Finish with what downstream does meanwhile, which is mark the instrument stale and refuse to publish a book you know is wrong. If they push on scale, shard the whole pipeline by instrument range, and volunteer the cross-instrument caveat before they ask for it.
+
+**35-45, concede, then place the transports.** Three real gaps: cross-instrument events do not fit shared-nothing, your sequence is arrival order and not market order so two venues are ranked by your NICs, and sustained order-flow overload is a reject rather than a queue. Then place all three transports rather than ranking them, in one breath: multicast for the colocated firehose, a reliable stream for service-to-service feeds that want schemas and tooling, request/response for the control plane. Do not claim the reliable stream is the fastest path; it is TCP, it head-of-line blocks, and that is precisely why colocated market data does not use it. Close on the contract, which is that the pipeline is deterministic on replay, so the journal plus a snapshot is the entire recovery story.
+
+Cut first: the scale derivation beyond the four numbers already on the board, and multi-region, which compresses to one line anyway (pipeline and hot standby in one low-latency region, asynchronous replication to a distant DR region). If still over, reduce the transport placement to a single sentence and keep the gap-recovery ladder. The transport comparison is something an interviewer can read off anyone's CV; the ladder is what tells them you have run one of these.
+
 #### Appendix
 **Data model**
 
@@ -23500,33 +23381,44 @@ GET  /metrics/dora?service=&window=  → { deploy_freq, lead_time_p50, cfr, mttr
 
 ### 55. Design an Online Auction System
 #### Problem
-Run millions of concurrent timed auctions — one seller, one item, many bidders, a published deadline — accepting bids under a strict monotonicity invariant, resolving proxy maxima server-side, determining a single winner at close, and settling payment.
+Run millions of concurrent timed auctions, each with one seller, one item, a published deadline and a crowd of bidders. Bids must be accepted under a strict monotonicity invariant with proxy maxima resolved server-side, and at the deadline exactly one winner must be determined unambiguously. Payment settles afterwards and can fail.
 #### Core
-TODO
+An auction is one mutable row per item and an ordered stream of events against it. Route every bid by `hash(auction_id)` to a single owning writer, resolve the proxy maxima in memory, and commit price, leader, secret maximum and bid count in one conditional write fenced on `version` and `state = 'OPEN'`. Never read the price, compute the next one in application code, and write it back: that loses bids and can leave two people believing they lead.
 
-Write the whole answer as you would give it in sixty seconds, 200 to 300 words, standing alone.
+The deadline is the hard part, and it is not a clock comparison. `end_ts` is one value in the database and N slightly different values across the API fleet, because ordinary NTP skew is 1 to 10ms while bids arrive milliseconds apart. Remove the comparison. Sequence a `CLOSE` event into the auction's own stream, or let the fence do it: every bid carries `AND state = 'OPEN'` and the close sets `state = 'CLOSED'`, so the store's serialisation order is the sequencer. Position decides, not wall clock.
+
+Proxy bidding makes this approximately a second price auction, where the winner pays one increment above the runner-up's maximum. That works only while maxima stay secret, and the cascade must commit in one write so nobody observes an intermediate price.
+
+Then choose the closing rule out loud, because it is a product decision. A hard close preserves sniping and a load spike at a published timestamp. Auto-extension pushes `end_ts` to `bid_ts + 120s` on late bids and dissolves both, at the cost of an end time you must cap.
+
+Size the read path separately: 50 watchers per bidder, coalesced to four snapshots a second, fanned out per gateway node rather than per connection.
 #### Summary
-**The picture in your head:** a village hall with ten million tables running at once. At each table there is one item, one seller, and a crowd; a clock on the wall says when that table stops. Most tables are silent for six days. Then, in the last ten seconds before a clock strikes, forty people shout at once and the auctioneer has to decide, unambiguously and for money, which shouts landed before the bell and which landed after. Crucially, most people in the crowd are not shouting — they handed the auctioneer a sealed slip saying "go up to £40 for me, but no higher, and don't tell anyone the number."
+**The picture in your head:** a village hall with ten million tables running at once. At each table there is one item, one seller, and a crowd; a clock on the wall says when that table stops. Most tables are silent for six days. Then, in the last ten seconds before a clock strikes, forty people shout at once and the auctioneer has to decide, unambiguously and for money, which shouts landed before the bell and which landed after. Crucially, most people in the crowd are not shouting. They handed the auctioneer a sealed slip saying "go up to £40 for me, but no higher, and don't tell anyone the number."
 
 **The approaches people actually take:**
-TODO. Two or three things a competent engineer might reach for, in plain language and before any product name, with what each one buys and roughly when it wins.
 
-**The single-request walkthrough (bid path):** bob taps *Bid £30* on a phone. The request carries `max_amount = 3000` (minor units), an idempotency key, and the price the client last rendered. Stage 1 — the Bid API validates auth, currency, tick, and that bob is not the seller (~2ms). Stage 2 — the request is routed by `hash(auction_id)` to the one partition that owns this auction, so every bid for this item is serialised by a single writer; cross-network hop ~1ms. Stage 3 — the partition reads the auction row: `state=OPEN`, `current_price=1000`, `high_bidder=alice`, `high_max=4000` (secret). Stage 4 — proxy resolution: bob's 3000 beats the displayed 1000 but loses to alice's hidden 4000, so the new displayed price becomes `min(4000, 3000 + increment(3000)) = 3100` and alice keeps the lead. Stage 5 — one conditional update writes `current_price=3100, high_bidder=alice, version=v+1` **only if** `version` is unchanged and `state='OPEN'`; two history rows are appended (bob's 3000, alice's auto-bid to 3100). Stage 6 — bob gets `OUTBID` in the same HTTP response, ~40ms server-side, ~120ms wall-clock on a cell network. Stage 7 — a price tick goes to the pub/sub bus for the ~1,500 people watching this item.
+*Let the store be the sequencer.* Keep one row per auction and make every price change a conditional write that carries the version it read and the requirement that the auction is still open. Nothing coordinates. The store's own serialisation decides who was first, and losers re-read and retry. This buys simplicity and no new moving parts, and it wins whenever contention on a single item stays low, which is true of almost the whole catalogue and dramatically untrue in the last ten seconds of a hot lot.
 
-**The read path is a different shape entirely.** For every person bidding there are roughly fifty watching a countdown. Those watchers hold a WebSocket, not a polling loop, and they receive a *coalesced* snapshot — price, bid count, end time — at most four times a second no matter how fast bids arrive. The countdown itself is rendered client-side from a server-supplied `end_ts` plus a one-time clock-offset handshake; we never stream seconds.
+*Give each item one owner.* Route every event for an auction to a single process that owns it, so bids for one item are handled one at a time by construction and the conditional write becomes a backstop rather than the mechanism. This buys a predictable tail under burst and a place to keep per-item state, at the cost of leases, ownership handover and a failover story you now have to defend.
+
+*Append every bid and compute the price later.* Treat a submission as an append to the item's log, which never conflicts, and derive the price by folding the log through the proxy rules. This buys the cheapest write path, a natural audit trail, and a close that is trivially correct because the log already has an order. What it costs is that "am I winning?" becomes a computation rather than a read: either you fold on every read, or you keep a cached projection that can be stale, and stale is exactly the number the next bidder is about to bid against.
+
+**The single-request walkthrough (bid path):** bob taps *Bid £30* on a phone. The request carries `max_amount = 3000` (minor units), an idempotency key, and the price the client last rendered. Stage 1: the Bid API validates auth, currency, tick, and that bob is not the seller (~2ms). Stage 2: the request is routed by `hash(auction_id)` to the one partition that owns this auction, so every bid for this item is serialised by a single writer; cross-network hop ~1ms. Stage 3: the partition reads the auction row, finding `state=OPEN`, `current_price=1000`, `high_bidder=alice`, `high_max=4000` (secret). Stage 4: proxy resolution. bob's 3000 beats the displayed 1000 but loses to alice's hidden 4000, so the new displayed price becomes `min(4000, 3000 + increment(3000)) = 3100` and alice keeps the lead. Stage 5: one conditional update writes `current_price=3100, high_bidder=alice, version=v+1` **only if** `version` is unchanged and `state='OPEN'`; two history rows are appended (bob's 3000, alice's auto-bid to 3100). Stage 6: bob gets `OUTBID` in the same HTTP response, ~40ms server-side, ~120ms wall-clock on a cell network. Stage 7: a price tick goes to the pub/sub bus for the ~1,500 people watching this item.
+
+**The read path is a different shape entirely.** For every person bidding there are roughly fifty watching a countdown. Those watchers hold a WebSocket, not a polling loop, and they receive a *coalesced* snapshot of price, bid count and end time at most four times a second no matter how fast bids arrive. The countdown itself is rendered client-side from a server-supplied `end_ts` plus a one-time clock-offset handshake; we never stream seconds.
 
 **The pieces (and what each one is for):**
-- **Bid API tier (stateless, autoscaled)** — validation, authentication, idempotency-key dedupe. Rejects cheaply so garbage never reaches the ordered path.
-- **Auction partition (single writer per `auction_id`)** — a keyed executor: every event for one item lands on one owner, so contention on the price row is structural, not incidental. Same pattern as the per-instrument matching core in #42, but for a *different reason* — there, it buys microsecond determinism; here, it buys a contended row that almost never actually contends.
-- **Auctions table (`PostgreSQL` or `DynamoDB`, partition key `auction_id`)** — the mutable state: `current_price`, `high_bidder`, the secret `high_max`, `end_ts`, `version`. One row per item, updated by conditional write only.
-- **Bid log (append-only, wide-column, partition key `auction_id`)** — every submission, accepted or rejected, with provenance. Append-only because fraud remediation means *recomputing* the price from surviving bids, which you cannot do if bids were mutations of a field.
-- **Close scheduler (timer wheel over a sharded sorted set, see #36)** — 10M pending deadlines. At `end_ts` it does not "close the auction"; it *enqueues a `CLOSE` event onto the same partition log as the bids*. That distinction is the whole design.
-- **Pub/sub bus + WebSocket gateway (`NATS` or Redis Streams in front of ~48 gateway nodes)** — topic per auction. The bus delivers one message per *gateway node*, not per connection, so a 15,000-watcher item costs the bus 48 deliveries.
-- **Settlement (see #23) and notifications (see #7)** — order creation, charge, escrow for high-value lots, outbid/won/second-chance messages.
+- **Bid API tier (stateless, autoscaled).** Validation, authentication, idempotency-key dedupe. Rejects cheaply so garbage never reaches the ordered path.
+- **Auction partition (single writer per `auction_id`).** A keyed executor: every event for one item lands on one owner, so contention on the price row is structural rather than incidental. Same pattern as the per-instrument matching core in #42, for a different reason: there it buys microsecond determinism, here it buys a contended row that almost never actually contends.
+- **Auctions table (`PostgreSQL` or `DynamoDB`, partition key `auction_id`).** The mutable state: `current_price`, `high_bidder`, the secret `high_max`, `end_ts`, `version`. One row per item, updated by conditional write only.
+- **Bid log (append-only, wide-column, partition key `auction_id`).** Every submission, accepted or rejected, with provenance. Append-only because fraud remediation means *recomputing* the price from surviving bids, which you cannot do if bids were mutations of a field.
+- **Close scheduler (timer wheel over a sharded sorted set, see #36).** 10M pending deadlines. At `end_ts` it does not "close the auction"; it *enqueues a `CLOSE` event onto the same partition log as the bids*. That distinction is the whole design.
+- **Pub/sub bus and WebSocket gateway (`NATS` or Redis Streams in front of ~48 gateway nodes).** Topic per auction. The bus delivers one message per *gateway node*, not per connection, so a 15,000-watcher item costs the bus 48 deliveries.
+- **Settlement (see #23) and notifications (see #7).** Order creation, charge, escrow for high-value lots, outbid, won and second-chance messages.
 
-**The thing that makes it hard — the deadline is contested money at a precisely known instant.** A consumer auction is quiet for six days and then takes a large share of its bids in the final ten seconds, because sniping is *rational*: bidding late denies the incumbent's proxy time to respond and reveals nothing. So load is not a smooth peak, it is a spike at a timestamp everyone can read off the page. Worse, correctness at the boundary is adversarial. If each API node decides "was this in time?" by comparing its local clock to `end_ts`, then a node whose NTP has drifted 40ms accepts a bid that an adjacent node rejects — two users, identical timing, different outcomes, and one of them has a legal claim. Wall-clock comparison distributed across N nodes is not a deadline; it is N slightly different deadlines.
+**The thing that makes it hard is that the deadline is contested money at a precisely known instant.** A consumer auction is quiet for six days and then takes a large share of its bids in the final ten seconds, because sniping is *rational*: bidding late denies the incumbent's proxy time to respond and reveals nothing. Load is therefore not a smooth peak, it is a spike at a timestamp everyone can read off the page. Worse, correctness at the boundary is adversarial. If each API node decides "was this in time?" by comparing its local clock to `end_ts`, then a node whose NTP has drifted 40ms accepts a bid that an adjacent node rejects: two users, identical timing, different outcomes, and one of them has a legal claim. Wall-clock comparison distributed across N nodes is not a deadline, it is N slightly different deadlines.
 
-**Why this design and what it costs:** you stop asking "what time is it?" and start asking "where in the log is it?". The `CLOSE` event is sequenced into the same per-auction stream as the bids, so *everything ordered before it is in and everything after is out* — a total order, decided once, by one writer. Without a sequencer you get the same property from a fenced conditional write: every bid carries `AND state = 'OPEN'` and the close carries `WHERE state = 'OPEN'`, so the database's own serialisation order is the sequencer. Then, on top of that, **auto-extension**: if an accepted bid lands within the final `W = 120s`, push `end_ts` to `bid_ts + W` and repeat until a full quiet window passes. This dissolves both problems at once — latency stops deciding the winner because there is always another two minutes, and the spike flattens into a decaying tail instead of a wall. It is a product decision, not just an engineering one: eBay ends standard auctions at the stated time with no extension, Amazon's auction platform extended until ten minutes passed without a bid, and Roth & Ockenfels (*American Economic Review*, 2002) found significantly more late bidding on the hard-close venue. Hard close preserves the sniping game and the load spike; auto-extension removes both and usually raises final prices, at the cost of an unbounded end time you must cap.
+**Why this design and what it costs:** you stop asking "what time is it?" and start asking "where in the log is it?". The `CLOSE` event is sequenced into the same per-auction stream as the bids, so everything ordered before it is in and everything after is out, a total order decided once by one writer. Without a sequencer you get the same property from a fenced conditional write: every bid carries `AND state = 'OPEN'` and the close carries `WHERE state = 'OPEN'`, so the database's own serialisation order is the sequencer. On top of that, **auto-extension**: if an accepted bid lands within the final `W = 120s`, push `end_ts` to `bid_ts + W` and repeat until a full quiet window passes. This dissolves both problems at once. Latency stops deciding the winner because there is always another two minutes, and the spike flattens into a decaying tail instead of a wall. It is a product decision as much as an engineering one, and the evidence is in `Key decisions`.
 
 **If you were building it tomorrow:**
 - PostgreSQL (or DynamoDB with conditional writes) for the auction row; Cassandra for the bid log; Redis sorted sets sharded by `auction_id` for the close timer; NATS JetStream for price ticks; a WebSocket gateway tier in Go.
@@ -23548,11 +23440,11 @@ TODO. Two or three things a competent engineer might reach for, in plain languag
   append_bid_log(...); publish_tick(...); notify_outbid(...)
   ```
 #### What this is really testing
-TODO
+Whether you can see that a published deadline is not an instant. `end_ts` is a single value in the database and N slightly different values across the API fleet, and the gap is larger than the thing being decided: 1 to 10ms of ordinary NTP skew against bids arriving milliseconds apart, on money that ends up with a legal owner. The answer the question wants is that acceptance stops being a comparison and becomes a position, either a `CLOSE` event ordered into the item's own stream or a fenced conditional write where the store's serialisation order *is* the order. Everything else here, proxy resolution, fan-out, settlement, is ordinary engineering once that is right. The secondary insight is that the price is a mechanism rather than a number: proxy maxima make this a second price auction, which is why the maxima must be secret and why the closing rule changes what bidders do.
 
-The one insight this question exists to elicit, then the contrast with the question it most resembles and why the answers differ.
+Closest question: Q49
 
-Closest question: TODO
+Both are contention at a deadline, and they resolve it in opposite directions. Ticketmaster has ~60,000 near-interchangeable units, a publicly announced on-sale instant, and a funded adversary whose business is beating real users to row 5. Its design work is admission control, one shared immutable picture of the seat map, and bot risk scoring, and its deadline is the *start* of the sale. Here there is exactly one unit with no substitute, and the deadline is the *end*. Nothing can be queued for, because the contention is not a rush for a scarce object at a moment but price discovery on a single object over days. So Ticketmaster's central move, throttling arrivals so the write path never sees the crowd, is unavailable: you cannot make a bidder wait past the close, which is the only moment their bid is worth anything. Ticketmaster spends its budget keeping people out; an auction spends it ordering the ones who arrive, and, if you choose auto-extension, on refusing to let network latency be the thing that decides.
 #### Clarifying questions and how each answer forks the design
 - Hard close at the stated time, or auto-extension when a bid lands in the final window?
 - Proxy (maximum) bidding, or explicit bid-per-tap only?
@@ -23569,48 +23461,47 @@ Closest question: TODO
 | Hard close at the stated time | the boundary must be a sequenced `CLOSE` event, and you must plan for a load spike at a known instant |
 | Proxy maximum bidding | store a secret `high_max` per auction, resolve cascades server-side in one atomic step, and never expose maxima |
 | Reserve + Buy-It-Now + scheduled start | a listing state machine (`SCHEDULED → OPEN → CLOSED → SETTLED`) with reserve checked only at winner determination |
-| Binding contract, charge after close | settlement is asynchronous and can fail after the auction concluded — you need strikes and second-chance offers (#23) |
-| Live streamed lots | a wholly different latency regime — sub-second, persistent connections, closer to #33 than to this design |
+| Binding contract, charge after close | settlement is asynchronous and can fail after the auction concluded, so you need strikes and second-chance offers (#23) |
+| Live streamed lots | a wholly different latency regime, sub-second and persistent, closer to #33 than to this design |
 | 50:1 watchers to bidders | fan-out, not bid throughput, sizes the fleet: coalesced pub/sub with per-node fan-out (#7, #41) |
 #### Requirements and scale, derived out loud
 **Requirements**
 
 - **FR:** create/schedule a listing; open bidding; validated bids with proxy maxima; strict monotonic price; anti-sniping extension; deterministic close and winner determination; reserve and Buy-It-Now; real-time price to watchers; settlement, second-chance offers, and fraud remediation.
-- **NFR:** bid accept-or-reject p99 < 250ms end-to-end; **zero lost accepted bids and zero double-leaders** (the monotonicity invariant is absolute); close decision unambiguous to the millisecond regardless of node clock skew; ≥ 5M concurrent WebSocket watchers; 3-year auditable bid history.
+- **NFR:** bid accept-or-reject p99 < 250ms end-to-end; **zero lost accepted bids and zero double-leaders** (the monotonicity invariant is absolute); close decision unambiguous to the millisecond regardless of node clock skew; at least 5M concurrent WebSocket watchers; 3-year auditable bid history.
 
 **Scale**
 
 All figures are stated assumptions unless marked; the platform's real numbers are not public at this granularity.
-- **Users and close rate:** assume ~500M registered, ~120M MAU (24% — most marketplace accounts are dormant buyers). ~10M concurrently live auctions at a ~3-day average duration → 10M ÷ 3 = **~3.3M closes/day = ~39 closes/s average**.
-- **Close clustering (peak multiplier 12×):** sellers pick end times deliberately ("ends Sunday 8pm"). Assume ~15% of the week's 23M closes land in one 2-hour evening window in the largest market → 3.5M ÷ 7,200s ≈ **~485 closes/s**, ~12× the daily average. Closes are bursty *before* any bid arrives.
+- **Users and close rate:** assume ~500M registered, ~120M MAU (24%, because most marketplace accounts are dormant buyers). ~10M concurrently live auctions at a ~3-day average duration gives 10M ÷ 3 = **~3.3M closes/day = ~39 closes/s average**.
+- **Close clustering (peak multiplier 12×):** sellers pick end times deliberately ("ends Sunday 8pm"). Assume ~15% of the week's 23M closes land in one 2-hour evening window in the largest market: 3.5M ÷ 7,200s ≈ **~485 closes/s**, about 12× the daily average. Closes are bursty *before* any bid arrives.
 - **Bid submissions (heavily skewed, not uniform):** 90% of auctions (3.0M/day) × ~8 submissions = 24M; the next 9% (300k) × ~200 = 60M; the top 1% (33k) × ~2,000 = 66M. Total ≈ **~150M submissions/day ≈ ~1.7k/s** average.
-- **Bid-path write budget ~5k/s:** each accepted bid costs ~3 writes — a history row, the price CAS, and an outbid/tick event — plus rejected attempts and retries. 1.7k/s × ~3 = **~5k/s planning budget**; global evening peak ~2× → **~10k/s**.
-- **The spike is per-key, not global (multiplier ~5,000×):** a top-1% auction takes ~20% of its ~2,000 bids in the final 10s → 400 bids ÷ 10s = **~40 bids/s on one row**, against that auction's own lifetime average of 2,000 ÷ (3 × 86,400) ≈ 0.008 bids/s. That is a ~5,000× spike on a single partition key. The fleet is fine; the row is not.
-- **Bid record ~120B:** bid_id 16B + auction_id 16B + bidder_id 16B + amount 8B + max_amount 8B + ts 8B + seq 8B + flags 4B + ip_hash 8B + idempotency_key 16B + padding ~12B. History = ~100M accepted + ~30M proxy auto-bid rows = ~130M rows/day × 120B = **~16GB/day raw**; RF=3 → **~47GB/day ≈ ~17TB/yr**; 3-year audit retention → **~50TB**.
-- **Auction record ~1KB:** auction_id 16B + seller_id 16B + title 80B + category 4B + start/reserve/current price 24B + high_bidder 16B + high_max 8B + increment_band 2B + bid_count 4B + start/end ts 16B + extension_count 2B + state 1B + currency 3B + shipping ~64B + item specifics ~600B + padding ~64B ≈ ~920B. Live working set 10M × 1KB = **~10GB** — small enough to hold entirely in a RAM tier per region, which is why the CAS is cheap. Closed archive: 3.3M/day × 1KB × 365 × 3 = ~3.6TB; RF=3 → **~11TB**.
-- **Watch subscriptions:** ~48B/row (user_id 16B + auction_id 16B + created_ts 8B + prefs 2B + padding 6B); ~10 watches × 120M MAU = 1.2B rows × 48B = ~58GB; RF=3 → **~175GB**. Cheap — watching is free, so plan for it to be abundant.
-- **WebSocket tier:** assume ~4% of MAU concurrently connected at evening peak → **~5M concurrent connections**, ~8 auction subscriptions each = ~40M subscriptions. At ~10KB/connection (trimmed socket buffers + TLS state + subscription set) = **~50GB** across the tier; at ~150k connections/node → ~33 nodes, round to **~48 with headroom**.
-- **Fan-out cost (watcher:bidder = 50:1, assumed):** baseline 1.7k accepted bids/s × 50 = **~85k msgs/s ≈ ~17MB/s** at ~200B framed. A single hot auction at 40 bids/s × 15k watchers would be **600k msgs/s ≈ ~120MB/s from one item**. Coalescing to ≤4 updates/s per auction cuts that to 60k msgs/s ≈ ~12MB/s — a 10× reduction — and the *bus* only pays 4 msgs/s × 48 nodes = ~192 deliveries/s, with each node fanning out to its local ~310 connections.
-- **Media (see #21, #48):** ~8 photos × ~150KB (200px ~15KB + 800px ~120KB + 1600px ~400KB, averaged) = ~1.2MB/listing → 3.3M new listings/day ≈ **~4TB/day ingest**. Hot 90 days at full ladder ≈ ~360TB; thereafter keep only the 800px derivative (~1MB/listing) → 3-year cold ≈ ~3.6PB, erasure-coded at ~1.5× → **~5.4PB**.
+- **Bid-path write budget ~5k/s:** each accepted bid costs ~3 writes, being a history row, the price CAS, and an outbid/tick event, plus rejected attempts and retries. 1.7k/s × ~3 = **~5k/s planning budget**; global evening peak ~2× gives **~10k/s**.
+- **The spike is per-key, not global (multiplier ~5,000×):** a top-1% auction takes ~20% of its ~2,000 bids in the final 10s, so 400 bids ÷ 10s = **~40 bids/s on one row**, against that auction's own lifetime average of 2,000 ÷ (3 × 86,400) ≈ 0.008 bids/s. That is a ~5,000× spike on a single partition key. The fleet is fine; the row is not.
+- **Bid record ~120B:** bid_id 16B + auction_id 16B + bidder_id 16B + amount 8B + max_amount 8B + ts 8B + seq 8B + flags 4B + ip_hash 8B + idempotency_key 16B + padding ~12B. History = ~100M accepted + ~30M proxy auto-bid rows = ~130M rows/day × 120B = **~16GB/day raw**; RF=3 gives **~47GB/day ≈ ~17TB/yr**; 3-year audit retention gives **~50TB**.
+- **Auction record ~1KB:** auction_id 16B + seller_id 16B + title 80B + category 4B + start/reserve/current price 24B + high_bidder 16B + high_max 8B + increment_band 2B + bid_count 4B + start/end ts 16B + extension_count 2B + state 1B + currency 3B + shipping ~64B + item specifics ~600B + padding ~64B ≈ ~920B. Live working set 10M × 1KB = **~10GB**, small enough to hold entirely in a RAM tier per region, which is why the CAS is cheap. Closed archive: 3.3M/day × 1KB × 365 × 3 = ~3.6TB; RF=3 gives **~11TB**.
+- **Watch subscriptions:** ~48B/row (user_id 16B + auction_id 16B + created_ts 8B + prefs 2B + padding 6B); ~10 watches × 120M MAU = 1.2B rows × 48B = ~58GB; RF=3 gives **~175GB**. Cheap, and watching is free, so plan for it to be abundant.
+- **WebSocket tier:** assume ~4% of MAU concurrently connected at evening peak, giving **~5M concurrent connections**, ~8 auction subscriptions each = ~40M subscriptions. At ~10KB/connection (trimmed socket buffers, TLS state, subscription set) that is **~50GB** across the tier; at ~150k connections/node that is ~33 nodes, round to **~48 with headroom**.
+- **Fan-out cost (watcher:bidder = 50:1, assumed):** baseline 1.7k accepted bids/s × 50 = **~85k msgs/s ≈ ~17MB/s** at ~200B framed. A single hot auction at 40 bids/s × 15k watchers would be **600k msgs/s ≈ ~120MB/s from one item**. Coalescing to at most 4 updates/s per auction cuts that to 60k msgs/s ≈ ~12MB/s, a 10× reduction, and the *bus* only pays 4 msgs/s × 48 nodes = ~192 deliveries/s, with each node fanning out to its local ~310 connections.
+- **Media (see #21, #48):** ~8 photos × ~150KB (200px ~15KB, 800px ~120KB, 1600px ~400KB, averaged) = ~1.2MB/listing, so 3.3M new listings/day ≈ **~4TB/day ingest**. Hot 90 days at full ladder ≈ ~360TB; thereafter keep only the 800px derivative (~1MB/listing), so 3-year cold ≈ ~3.6PB, erasure-coded at ~1.5× giving **~5.4PB**.
 #### Key decisions
-TODO
+**The closing rule: hard close or auto-extension**
+- Choice: auto-extend. An accepted bid inside the final `W = 120s` sets `end_ts = bid_ts + 120s` under the same conditional write as the price, repeating until a full quiet 120s passes, capped at 30 extensions or `original_end + 1h`, whichever comes first.
+- Alternative: hard close at the published time, no extension. Genuinely defensible, and it is what the largest consumer auction platform does. The end time is a promise sellers and buyers can plan around, the endgame is a game bidders understand, and there is no unbounded tail to cap.
+- Decider: what share of an auction's bids land in the final 10 seconds. Above roughly 20% to 30%, network latency rather than valuation is deciding outcomes. The top 1% of our lots take ~400 of ~2,000 bids in the last 10s, which is 20% and right at the line. The operational number points the same way: that behaviour is a ~5,000× spike on one partition key, from a 0.008 bids/s lifetime average to ~40 bids/s.
+- Alternative wins when: the end time is a contractual or logistical commitment, as in timed liquidations or anything feeding a scheduled settlement or dispatch window; or when the catalogue is many near-identical lots, so a sniped loser simply bids on the next one and the sniping costs nobody anything. Note the dated evidence: eBay ends standard auctions at the stated time with no extension, Amazon's auction platform extended until ten minutes passed with no bid, and Roth and Ockenfels (*American Economic Review*, 2002) found significantly more late bidding on the hard-close venue. Amazon's auction business has since closed, so treat that as a finding about closing rules rather than about either company today.
 
-Two or three genuine forks. For each, in this exact shape so it stays checkable:
+**Where bids for one item get ordered**
+- Choice: version-fenced conditional write on the auction row, plus routing by `hash(auction_id)` so one process usually owns the item. The conditional write is the correctness mechanism; the routing is the performance mechanism whose job is to make the conditional write almost never fail.
+- Alternative: the conditional write alone, with any API node writing the row. This is fine for most of the catalogue and it is one fewer subsystem: no leases, no ownership handover, no split-brain question, no keyed executor to operate.
+- Decider: peak accepted bids per second on the hottest single item in its final seconds, weighed against retry cost. At ~40 bids/s on one row with ~3ms per resolve-and-commit, uncoordinated writers collide often enough to matter, and the retry storm lands on the most valuable lot at the worst moment. Below roughly 5 bids/s per item the plain conditional write never notices. Instrument it: alert when the zero-rows-affected rate passes 0.1%.
+- Alternative wins when: your store gives cheap serialisable single-row transactions and your p99 item stays under ~5 bids/s, or when you cannot afford the operational surface of a leased-ownership tier. Be honest about what the choice does not fix either way: one item is one key by construction, so a hot lot is a hot key and the ceiling is one writer's serial throughput. There is no sharding your way out of a single price.
 
-**<name of the fork>**
-- Choice:
-- Alternative:
-- Decider:
-- Alternative wins when:
-
-**Raw material, from the old Common Mistakes:**
-
-- **Reading the current price, computing the next one in application code, then writing it.** This loses bids under concurrency and can leave two users believing they lead. Every price change must be a single conditional write guarded by `version` and `state='OPEN'`; if zero rows are affected, re-read and re-resolve.
-- **Deciding "did this bid make the deadline?" with `now() < end_ts` on each API node.** That is N deadlines, one per clock. Sequence a `CLOSE` event into the auction's own ordered stream, or fence every bid with `AND state='OPEN'` so the database's serialisation order decides. Clock skew must never be able to change who owns an item.
-- **Showing the leader's maximum, or leaking it through outbid deltas.** Proxy bidding is only rational for the bidder if maxima stay secret — reveal them and truthful bidding becomes a losing strategy, everyone reverts to incremental sniping, and final prices fall. Display the resolved price only, and rate-limit probing.
-- **Treating a proxy cascade as a loop of separate transactions.** Writing the counter-bids one at a time means an observer can see an intermediate price, and a crash mid-cascade leaves the auction in a state no bidder authorised. Resolve the whole cascade in memory and commit one CAS with the history rows appended alongside it.
-- **Broadcasting every bid to every watcher.** At a 50:1 ratio that is 50× the write volume, and 600k msgs/s from one hot item. The public auction state is a snapshot, not a stream — coalesce to a few updates per second, fan out per gateway node, and keep per-user state (outbid, am-I-winning) off the broadcast channel.
-- **Assuming the auction is finished when the clock stops.** The winner's payment can fail days later, and it fails often enough to be a designed-for path rather than an exception. Model unpaid items, strikes, second-chance offers priced at the runner-up's stored maximum, and relisting from the start (#23).
+**Where proxy maxima get resolved**
+- Choice: resolve the whole cascade server-side in memory, then commit price, leader and new maximum in one write. No observer sees an intermediate price, and a crash cannot leave the auction in a state no bidder authorised.
+- Alternative: store bids as an append-only log and fold them into a price lazily, on read or on a schedule. The cheapest possible write path, trivially correct at close because the log already carries the order, and honestly how you would build this if the displayed price did not matter.
+- Decider: how many people read the price, and how stale it may be. At 50 watchers per bidder, roughly 1,500 on a typical live lot and ~15,000 on a hot one, the price is read four orders of magnitude more often than it is written, so paying at write time is the cheap side of the trade. The correctness half matters more: `min_next_bid` is derived from the displayed price, so a stale price means users bidding against a number that no longer exists.
+- Alternative wins when: nobody is watching. Sealed-bid tenders where the price is revealed only at close, and B2B or wholesale auctions with a handful of invited bidders and no live audience. There, folding at close is simpler and you skip the secret-maximum machinery entirely.
 #### High-level design
 **must-say**
 
@@ -23705,32 +23596,41 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 </svg>
 ```
 
-**How to read the diagram:** the left column is the write path — a bid enters the stateless API, is routed to the one partition that owns this auction, and mutates a single row by conditional write. The close scheduler feeds that *same* partition rather than mutating state itself. The right column is the read path — a coalesced price tick leaves the partition once, hits the bus once per gateway node, and fans out locally to watchers.
+**How to read the diagram:** the left column is the write path. A bid enters the stateless API, is routed to the one partition that owns this auction, and mutates a single row by conditional write. The close scheduler feeds that *same* partition rather than mutating state itself. The right column is the read path: a coalesced price tick leaves the partition once, hits the bus once per gateway node, and fans out locally to watchers.
 
 **Why the flow is shaped this way:** bidding and watching have nothing in common except the number on the screen. Bidding is a low-volume, high-consequence, strictly ordered write; watching is a high-volume, low-consequence, lossy broadcast. Forcing them through one path would make either the write path slow or the read path expensive. Routing `CLOSE` into the bid stream is the one deliberate coupling: the deadline must be ordered against bids, so it must travel on the same wire.
 
-**What this layout buys you:** an unambiguous close and a fan-out bill that scales with gateway nodes rather than with viewers. The trade is that one auction is one partition — a hot item has a hot key by construction, and you must be able to defend a single row at ~40 writes/s rather than shard your way out.
+**What this layout buys you:** an unambiguous close and a fan-out bill that scales with gateway nodes rather than with viewers. The trade is that one auction is one partition, so a hot item has a hot key by construction and you must be able to defend a single row at ~40 writes/s rather than shard your way out.
 #### Deep dive
 **must-say**
 
-**The bid write path is one conditional update, never a read followed by a write.** The naive implementation reads `current_price = 100`, computes `105` in application code, and writes it. Run that concurrently: alice and bob both read `100`, both compute `105`, both write. The second write wins and the first is silently erased — the platform now shows one high bidder at `105` when two people validly bid, one of whom was told they were leading. Worse, `bid_count` computed the same way loses a bid outright, so the audit log and the price disagree. The fix is a single statement that carries the precondition: `UPDATE auctions SET current_price = :p, high_bidder = :b, high_max = :m, bid_count = bid_count + 1, version = version + 1 WHERE auction_id = :id AND state = 'OPEN' AND version = :v`. Zero rows affected means someone moved the price between your read and your write; re-read, re-resolve, retry, bounded at three attempts. The crucial rule on retry: **never silently raise the user's maximum**. If their max no longer clears the new price, the answer is `OUTBID`, not an auto-increase — that is their money and they did not authorise it. Routing by `hash(auction_id)` to a single writer means the CAS almost never actually fails; the CAS is the correctness backstop, the partitioning is the performance mechanism.
+**One conditional update, never a read followed by a write.** The naive implementation reads `current_price = 100`, computes `105` in application code, and writes it back. Run that concurrently and it is a lost update: alice and bob both read `100`, both compute `105`, both write, the second wins, the first is silently erased. The platform now shows one high bidder at `105` when two people validly bid, and one of them has been told they are leading. `bid_count` computed the same way loses a bid outright, so the audit log and the price disagree, which is the version of this bug that surfaces in a chargeback rather than on a dashboard.
 
-**Proxy bidding, resolved server-side in one atomic step.** A bidder submits the *maximum* they will pay; the system bids only enough on their behalf to stay ahead. Concretely, with an increment table of £0.50 below £25, £1 to £99.99, £2.50 to £249.99, £5 above:
+The fix is one statement that carries its own precondition:
 
-- Start price £10. **alice** submits max £40 → displayed price £10, alice leads, `high_max = 40` (secret).
-- **bob** submits max £30. One atomic resolution: bob's £30 clears the displayed £10, so he is a contender; but £30 < £40, so alice's proxy holds. New displayed price = `min(alice_max, bob_max + increment(bob_max)) = min(40, 30 + 1) = £31`. alice still leads at £31. bob receives `OUTBID` **in the response to his own bid** — he never held the lead for a single millisecond.
-- **carol** submits max £60. Now `60 > 40`, so the lead flips: new price = `min(60, 40 + increment(40)) = £41`, carol leads, `high_max = 60`. alice is outbid at £41 even though she offered £40 — correct, because £41 is above her ceiling.
-- **Tie:** dave submits exactly £60. Rule: earlier bid wins ties (time priority, exactly as FIFO-within-a-price-level works in #42). Price goes to £60, carol keeps the lead, dave is outbid at the same number he offered. It feels wrong to dave and it is the only rule that stops a later bidder free-riding.
+```sql
+UPDATE auctions
+   SET current_price = :p, high_bidder = :b, high_max = :m, end_ts = :e,
+       bid_count = bid_count + 1, version = version + 1
+ WHERE auction_id = :id AND state = 'OPEN' AND version = :v
+```
 
-Two things fall out. First, the "cascade" is not N transactions — it is one CAS, with two history rows appended. Second, this makes the auction approximately a **second-price (Vickrey) auction**: the winner pays one increment above the runner-up's maximum, not their own. That is the entire point of the mechanism, and it only works if maxima stay secret. If the displayed price were the leader's maximum, bidding your true value would be strictly irrational and everyone would revert to incremental sniping.
+Zero rows affected means one of exactly two things happened between the read and the write: someone else moved the price, or the auction closed. Re-read, re-resolve, retry, bounded at three attempts. The rule that matters on retry is that you **never silently raise the user's maximum**. If their max no longer clears the new minimum, the answer is `OUTBID`. Auto-raising spends money they did not authorise, and that is a regulatory conversation rather than a bug report.
 
-**Keeping maxima secret is an active defence, not a schema property.** The obvious attack is a binary search: bob bids £31, £35, £38, £39 in sequence and reads the displayed price after each to converge on alice's ceiling to within one increment. Defences, in order of value: rate-limit bids per bidder per auction (a genuine bidder does not need eight bids in ninety seconds); detect the monotone-probe signature (strictly increasing sub-increment bids from one account, all losing) and start rejecting; never expose "you were outbid by X" or any delta; and mask bidder identities in public history. Note the honest limit — once the leader is actually beaten, their maximum is revealed by the price, and that is unavoidable. The mechanism only requires secrecy *while the leader is still leading*.
+Routing by `hash(auction_id)` to a single owning writer sits underneath this, and the division of labour is worth stating precisely: the conditional write is correct with no routing at all, and the routing exists so the conditional write almost never fails. If the measured zero-rows rate climbs above ~0.1%, routing is broken and multiple writers are reaching one auction. Notice what the fence also gives you for free. Because every bid carries `AND state = 'OPEN'` and the close carries `WHERE state = 'OPEN'`, the store's serialisation order is itself the close sequencer, and no node ever compares a clock to `end_ts` to decide whether a bid was in time.
 
-**The deadline is a log position, not a wall-clock comparison.** `end_ts = 2026-08-09T20:00:00.000Z` looks like an instant, but on a fleet of API nodes it is not one. NTP-disciplined servers typically hold ~1-10ms of skew; a node with a failing sync can drift 100ms+ without alerting. PTP gets you to microseconds but needs hardware support end to end. If each node evaluates `now() < end_ts` locally, a bid at true T−20ms is accepted by the fast node and rejected by the slow one. The design must remove the comparison entirely: the scheduler enqueues `CLOSE(auction_id)` onto the auction's own ordered stream, and every event's fate is decided by its position relative to that message. Where you do not have a per-key log, the fenced conditional write gives the same guarantee at the cost of one hot row: the close does `UPDATE ... SET state = 'CLOSED', closed_seq = :s WHERE auction_id = :id AND state = 'OPEN'`, and every bid CAS carries `AND state = 'OPEN'`. The database's serialisation order *is* the sequencer. This is the same "one writer defines the order" idea as #25 and #42, but the requirement is different: there it exists to make microsecond matching deterministic and replayable for regulators; here throughput is trivial and what we need is a single unambiguous boundary.
+**Proxy resolution is one in-memory computation, not a loop of transactions.** A bidder submits the maximum they will pay and the system bids only enough on their behalf to stay ahead. With an increment table of £0.50 below £25, £1 to £99.99, £2.50 to £249.99, and £5 above:
 
-**The 3ms-before-close bid, and anti-sniping auto-extension.** bob's phone shows 3 seconds remaining and he taps. Mobile RTT is p50 ~80ms and p99 ~900ms on a congested cell network, so his bid reaches the sequencer at T+40ms — after `CLOSE`. It is rejected. He is furious, and he is not wrong: he pressed the button in time. But we cannot accept it. A client-supplied timestamp is trivially forged, and even signed it would mean reopening a settled auction and unwinding a notified winner. So we reject, and we return the **server receive timestamp** in the response so the dispute has a fact in it rather than a feeling. Auto-extension is the mechanism that makes this whole class of complaint disappear: if an accepted bid lands within the final `W = 120s`, set `end_ts = bid_ts + W` under the same CAS, and repeat until a full quiet `W` elapses. Three consequences. (1) Fairness: network latency stops deciding outcomes, because there is always another window. (2) Load: the spike at a known instant becomes a decaying tail — the ~40 bids/s on one row spread across minutes. (3) Revenue: it converts a sealed-bid-with-deadline game into a genuine ascending auction, which typically raises final prices. The cost is an unbounded end time — a two-bidder war can run all night, the seller cannot plan dispatch, and the close scheduler must rewrite the timer entry on every extension. Cap it: at most 30 extensions or a hard stop at `original_end + 1h`, whichever comes first. And be clear in the interview that this is a **product decision with real consequences** — snipers hate it, sellers love it, and the empirical evidence (Roth & Ockenfels, AER 2002, comparing eBay's hard close against Amazon's ten-minute extension) is that hard-close venues see substantially more last-minute bidding.
+- Start price £10. **alice** submits max £40. Displayed price stays £10, alice leads, `high_max = 40`, secret.
+- **bob** submits max £30. One resolution: bob clears the displayed £10 so he is a contender, but £30 < £40 so alice's proxy holds. New price = `min(alice_max, bob_max + increment(bob_max)) = min(40, 31) = £31`. bob receives `OUTBID` in the response to his own bid. He never held the lead for a millisecond.
+- **carol** submits max £60. Now `60 > 40`, so the lead flips: price = `min(60, 40 + increment(40)) = £41`, carol leads, `high_max = 60`. alice is outbid at £41 despite offering £40, which is correct, because £41 is above her ceiling.
+- **Tie.** dave submits exactly £60. Earlier bid wins, on time priority, exactly as FIFO-within-a-price-level works in #42. Price goes to £60, carol keeps the lead, dave is outbid at the number he offered. It feels wrong to dave and it is the only rule that stops a later bidder free-riding on an earlier one's ceiling.
 
-**The bid path near the deadline, stage by stage.** Cardinalities and budget for the p99 case on a hot auction in its final minute: ~40 bid submissions/s arrive at the edge → ~35/s survive validation (the rest are below the minimum increment or from the seller) → all 35 route to **one** partition → the partition's single writer processes them serially at ~3ms each, so ~35/s consumes ~105ms of a 1,000ms second, leaving ~10× headroom before the row itself becomes the bottleneck → each accepted bid emits 1 unicast outbid message and contributes to a tick that is coalesced to ≤4/s → the ≤4 ticks fan out to 48 gateway nodes → ~310 connections each. End-to-end budget: ~2ms validate, ~1ms route, ~1ms sequence, ~3ms resolve-and-CAS, ~5ms publish, ~120ms mobile network → **p99 target 250ms** wall-clock, of which the server owns ~12ms.
+Two consequences. First, the cascade is one commit with two history rows appended, not two transactions. Writing the counter-bids one at a time lets an observer read an intermediate price, and a crash mid-cascade leaves the auction in a state no bidder authorised. Second, this makes the auction approximately a **second price (Vickrey) auction**, in which the winner pays one increment above the runner-up's maximum rather than their own. That is the entire point of the mechanism, and it holds only while maxima stay secret. If the displayed price were the leader's maximum, bidding your true value would be strictly irrational and everyone would revert to incremental sniping.
+
+Secrecy is therefore an active defence, not a schema property. The attack is a binary search: bob bids £31, £35, £38, £39 in sequence and reads the displayed price after each to converge on alice's ceiling within one increment. Defences in order of value: rate-limit bids per bidder per auction, because a genuine bidder does not need eight bids in ninety seconds; detect the monotone-probe signature, meaning strictly increasing bids from one account that all lose; never expose an outbid delta or a "you were beaten by" amount; mask bidder identity in public history. The honest limit is that once the leader is actually beaten, their maximum is revealed by the price itself. The mechanism only needs secrecy while the leader is still leading.
+
+**What this costs in the final minute.** Cardinalities and budget for the p99 case on a hot auction: ~40 bid submissions/s arrive at the edge, ~35/s survive validation (the rest are below the minimum increment or from the seller), all 35 route to **one** partition, and the single writer processes them serially at ~3ms each, so ~35/s consumes ~105ms of a 1,000ms second and leaves ~10× headroom before the row itself becomes the bottleneck. Each accepted bid emits one unicast outbid message and contributes to a tick coalesced to at most 4/s; those ticks fan out to 48 gateway nodes at ~310 connections each. End-to-end budget: ~2ms validate, ~1ms route, ~1ms sequence, ~3ms resolve-and-CAS, ~5ms publish, ~120ms mobile network, against a **p99 target of 250ms** wall-clock of which the server owns ~12ms.
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 320" role="img" aria-label="Bid path near the deadline: arrival, validation, routing, sequencing, proxy resolve and CAS, auto-extension check, publish, and the CLOSE event that bounds the log">
@@ -23806,88 +23706,91 @@ Two things fall out. First, the "cascade" is not N transactions — it is one CA
   <text class="edge" x="380" y="288">server budget ~12ms · end-to-end p99 target 250ms</text>
 </svg>
 ```
-
-**Watcher fan-out is where the volume actually is.** At a 50:1 watcher-to-bidder ratio the broadcast path carries ~50× the messages of the write path, and on a hot item it carries ~15,000× that item's bid rate. Three mechanisms keep it affordable. First, **coalescing**: the auction's public state is a snapshot, not a stream of events, so last-write-wins at ≤4 updates/s is indistinguishable to a human and cuts a 600k msg/s item to 60k. Second, **topic-per-auction with node-level fan-out**: the bus delivers once per gateway node that has at least one subscriber, so bus cost is O(nodes) not O(connections); the node expands to its local set. Third, **split broadcast from unicast**: "price is now £31" is identical for everyone and is broadcast; "you are no longer the high bidder" is per-user and goes on the user's own channel (and to push, see #7). Do not try to compute per-user state in the broadcast path — that is what turns a 4 msgs/s topic into 15,000 distinct messages. The countdown never travels the wire: the client renders it from `end_ts` and a clock-offset handshake, and only an *extension* pushes a new `end_ts`. Cross-reference #41 for the same coalesced-tick fan-out pattern applied to price alerts, and #8 for the general push-vs-pull fan-out trade.
-
-**Winner determination and the payment that fails after the hammer.** When `CLOSE` is processed: if `bid_count > 0` and `current_price ≥ reserve`, the winner is `high_bidder` at `current_price`; otherwise the auction ends unsold ("reserve not met") and no order is created. The winner event creates an order (#48) and a payment intent (#23). Critically, **money moves after the auction is legally over** — in most jurisdictions and under most platform terms, the winning bid forms a binding contract at close, but the card is charged seconds to days later and can decline. So the settlement path must model failure as normal: a 48-hour payment window, reminders, then an unpaid-item case that issues a strike, relists or offers a **second-chance offer** to the runner-up. The second-chance price is capped at *the runner-up's stored maximum* — you cannot charge someone more than they bid, and this is precisely why maxima are persisted rather than discarded once beaten. For high-value lots, pre-qualify: take a card pre-authorisation hold at bid time above a threshold (say £1,000) so the winner is known-good. That is real friction and it depresses bid counts, so apply it only in the tail. Escrow is the same trade — safer settlement, slower payout, and a seller-experience cost.
-
-**Shill bidding is a graph problem, and remediation is a replay.** A shill is the seller bidding on their own item through a colluding account to inflate the price. It is the most corrosive fraud on an auction platform because it makes the price signal a lie, and it is invisible to any per-bid rule — every individual shill bid is perfectly valid. Detect it over a bipartite bidder↔seller graph built from 12 months of `bidder_index`: (a) a bidder whose bid rate on one seller's listings is far above base rate and whose **win rate is near zero** — the defining signature, because a shill must lose; (b) shared device fingerprints, payment instruments, shipping addresses, IP /24s, or tightly correlated session times; (c) timing patterns — bids arriving minutes after a genuine bid, always in the minimum increment, always just enough to trip the leader's proxy. Score with gradient-boosted trees or a GNN over those features and route high scores to **manual review, not auto-ban** — households legitimately share devices and addresses, and a false ban on a good buyer is expensive. Remediation is where the append-only bid log earns its keep: to remove a shill you must recompute what the price *would have been* from the surviving bids, replaying proxy resolution in sequence order. If bids had been modelled as mutations of a price field rather than as an event log, that computation is simply not available and the only remedy is cancelling the sale.
 #### Where it breaks
 **must-say**
 
 **Bottlenecks**
 
-- **Single hot auction row** — a top-1% item takes ~40 bids/s on one partition key in its final seconds, and you cannot shard a price. Serialise on one writer (~3ms per resolution gives ~10× headroom at 40/s), keep the auction row in a RAM tier so the CAS is microseconds, and use auto-extension to spread the burst over minutes. Trade-off: the ceiling is one core's serial throughput per auction — acceptable here, and the reason this design would not survive as a matching engine.
-- **Close-time clustering** — ~485 closes/s in the Sunday-evening window against a ~39/s average is a 12× burst of winner determination, order creation and notification, all at once. Shard the close scheduler by `hash(auction_id)` and jitter execution by ±2s within the shard; make everything downstream of `CLOSE` asynchronous (the close itself is one conditional write; orders and emails come off a queue). Trade-off: the "you won" email lands seconds late, which nobody notices.
-- **Watcher fan-out** — the broadcast path carries ~50× the write path and up to 15,000× on a hot item; naive per-bid broadcast is 600k msgs/s from one auction. Coalesce to ≤4 snapshots/s, fan out per gateway node rather than per connection, and split per-user outbid messages onto unicast channels. Trade-off: the displayed price can lag reality by ~250ms, which matters to snipers and to nobody else.
-- **Timer-set churn under auto-extension** — every extension rewrites the auction's entry in the close-timer sorted set; a 30-extension bidding war on 33k hot auctions is a burst of index writes at exactly the wrong moment. Keep timers in a sharded Redis sorted set (O(log n) rewrite) and cap total extensions. Trade-off: capping reintroduces a hard close at the cap, so the last two minutes of a capped war have the original fairness problem back.
-- **Notification amplification at close** — one close generates messages to the winner, the seller, and every losing bidder and watcher; 485 closes/s × ~50 recipients ≈ 24k notifications/s. Route through the notification system (#7) with per-user coalescing and priority tiers — "you won" is transactional and immediate, "an auction you watched ended" is digestible. Trade-off: batching the low-priority tier delays it by minutes.
-- **Fraud review queue** — the shill-detection model surfaces far more candidates than humans can review, and auto-banning on graph features produces expensive false positives on shared households. Tier the response: score-only for the long tail, friction (verification challenge) in the middle, human review at the top. Trade-off: confirmed shills stay live for hours during review, so pair it with post-hoc replay-based remediation rather than relying on prevention alone.
+- **Single hot auction row.** A top-1% item takes ~40 bids/s on one partition key in its final seconds, and you cannot shard a price. Serialise on one writer (~3ms per resolution gives ~10× headroom at 40/s), keep the auction row in a RAM tier so the CAS is microseconds, and use auto-extension to spread the burst over minutes. Trade-off: the ceiling is one core's serial throughput per auction, which is acceptable here and is the reason this design would not survive as a matching engine.
+- **Close-time clustering.** ~485 closes/s in the Sunday-evening window against a ~39/s average is a 12× burst of winner determination, order creation and notification, all at once. Shard the close scheduler by `hash(auction_id)` and jitter execution by ±2s within the shard; make everything downstream of `CLOSE` asynchronous, so the close itself is one conditional write and orders and emails come off a queue. Trade-off: the "you won" email lands seconds late, which nobody notices.
+- **Watcher fan-out.** The broadcast path carries ~50× the write path and up to 15,000× on a hot item; naive per-bid broadcast is 600k msgs/s from one auction. Coalesce to at most 4 snapshots/s, fan out per gateway node rather than per connection, and split per-user outbid messages onto unicast channels. Trade-off: the displayed price can lag reality by ~250ms, which matters to snipers and to nobody else.
+- **Timer-set churn under auto-extension.** Every extension rewrites the auction's entry in the close-timer sorted set, so a 30-extension bidding war across 33k hot auctions is a burst of index writes at exactly the wrong moment. Keep timers in a sharded Redis sorted set (O(log n) rewrite) and cap total extensions. Trade-off: capping reintroduces a hard close at the cap, so the last two minutes of a capped war have the original fairness problem back.
+- **Notification amplification at close.** One close generates messages to the winner, the seller, and every losing bidder and watcher; 485 closes/s × ~50 recipients ≈ 24k notifications/s. Route through the notification system (#7) with per-user coalescing and priority tiers: "you won" is transactional and immediate, "an auction you watched ended" is digestible. Trade-off: batching the low-priority tier delays it by minutes.
+- **Fraud review queue.** The shill-detection model surfaces far more candidates than humans can review, and auto-banning on graph features produces expensive false positives on shared households. Tier the response: score-only for the long tail, a verification challenge in the middle, human review at the top. Trade-off: confirmed shills stay live for hours during review, so pair it with post-hoc replay-based remediation rather than relying on prevention alone.
 
 **Failure modes**
 
 | Layer | Failure | Detection | Mitigation |
 |---|---|---|---|
 | Auction partition | Partition owner dies mid-bid; ownership moves while bids are in flight | Lease-expiry alert; per-partition write-gap detector | New owner reads the row's `version` and the tail of the bid log before accepting writes; in-flight bids fail closed and clients retry with the same idempotency key |
-| Auction row CAS | CAS-failure rate spikes — routing is broken and multiple writers are contending | CAS-retry rate per partition; alert above 0.1% | Fall back to full serialisable isolation on the row (slower but correct) while routing is repaired; never relax to read-then-write |
+| Auction row CAS | CAS-failure rate spikes, meaning routing is broken and multiple writers are contending | CAS-retry rate per partition; alert above 0.1% | Fall back to full serialisable isolation on the row (slower but correct) while routing is repaired; never relax to read-then-write |
 | Close scheduler | Shard stalls (auctions blow past `end_ts` and keep taking bids) or fires early on a fast clock | Per-shard "overdue closes" gauge, alert past 5s; at settlement compare `closed_seq` time against `end_ts` | Independent sweeper scans `state='OPEN' AND end_ts < now - 5s`; the close is idempotent (`WHERE state='OPEN'`) so double-fire is harmless; an early close is caught at settlement and reopened *before* the winner is notified |
-| Clock / NTP | A node's clock drifts 100ms+, silently changing bid acceptance | Per-node NTP offset metric; alert above 25ms | No node compares clocks to decide acceptance — the sequenced `CLOSE` does; drift degrades only the countdown display |
+| Clock / NTP | A node's clock drifts 100ms+, silently changing bid acceptance | Per-node NTP offset metric; alert above 25ms | No node compares clocks to decide acceptance, the sequenced `CLOSE` does; drift degrades only the countdown display |
 | Pub/sub bus | Bus partition down; watchers see a frozen price and a running countdown | Per-topic publish-to-deliver lag; client-side staleness heartbeat | Clients fall back to polling `GET /auctions/{id}` at 2s; the UI marks the price "reconnecting" rather than showing a stale number as live |
 | WS gateway | Node loss drops ~150k connections at once, all reconnecting together | Connection-churn rate; reconnect thundering-herd detector | Jittered exponential reconnect with a 0-30s spread; on reconnect the client fetches a snapshot rather than replaying a stream |
-| Settlement | Payment declines after the auction legally concluded | Unpaid-item aging queue; win-to-capture conversion metric | 48h window, reminders, strike, second-chance offer to the runner-up at their stored max, then relist — never silently cancel (#23) |
-| Fraud | Shill ring inflates prices for weeks before detection | Bidder win-rate ≈ 0 with high bid volume on one seller; account-linkage graph | Cancel the shill bids and replay the surviving bid log to recompute the true price; refund the delta and the final-value fee; link and suspend the ring |
+| Settlement | Payment declines after the auction legally concluded | Unpaid-item aging queue; win-to-capture conversion metric | 48h window, reminders, strike, second-chance offer to the runner-up at their stored max, then relist; never silently cancel (#23) |
+| Fraud | Shill ring inflates prices for weeks before detection | Bidder win-rate near zero with high bid volume on one seller; account-linkage graph | Cancel the shill bids and replay the surviving bid log to recompute the true price; refund the delta and the final-value fee; link and suspend the ring |
 
 **Unresolved**
 
-TODO. Two or three things this design genuinely does not handle well, and what you would do about each.
+- **The last-tap complaint does not actually go away.** Auto-extension moves the boundary, it does not remove one. At the cap of 30 extensions or `original_end + 1h`, the auction ends hard, and the final two minutes of a capped bidding war have exactly the fairness problem the extension was introduced to fix, now with more money on the table. A bid tapped at T-3s that arrives at T+40ms on a 900ms p99 cell network is rejected, and returning the server receive timestamp gives the dispute a fact instead of a feeling, which is honesty rather than a fix. Nothing short of client-attested time closes it, and client time is forgeable. What I would actually do is set a generous cap, show remaining extensions in the UI so the endgame is legible, and budget for a residual dispute rate rather than claim zero.
+- **Shill detection is post-hoc, and remediation only repairs the accounting.** Every individual shill bid is valid; the signal exists only in months of graph structure, and high scores go to human review because banning on shared devices and addresses punishes households. So a ring can inflate prices for weeks before anyone notices. Replaying the append-only log recomputes the price honest bidders would have reached, and we refund the delta and the final-value fee, but the buyer has already paid and already received the item, and every other bidder valued their own bids against a price signal that was a lie for that whole period. The log makes the money recoverable; it does not undo the harm.
+- **Regional homing is a single point of failure we chose deliberately.** An auction is written in one region only, because the single-writer invariant does not survive multi-master and a price row with two masters is a lost-bid generator. Bidders elsewhere pay 80 to 150ms on every bid against a 250ms budget. Worse, losing a region during the Sunday close window means auctions ending inside the async replication lag are suspended and extended by 15 minutes rather than closed, which is right for correctness and visibly bad for every bidder in the endgame of a lot they have watched for three days. I have no better answer than homing auctions near their expected bidder population and treating a cross-region failover at peak as a business incident rather than an ops one.
 #### Drill questions
-1. Two bidders hit the same auction row in the same millisecond — walk me through it.
-2. A bid is accepted but the response is lost — does the user bid twice?
+1. Two bidders hit the same auction row in the same millisecond. Walk me through it.
+2. A bid is accepted but the response is lost. Does the user bid twice?
 3. What stops a bidder binary-searching the leader's maximum?
 4. A bid arrives 3ms before the deadline but lands after the CLOSE event. What do you do?
 5. The winner's card declines two days later.
 6. One auction has 200,000 watchers in its final minute. What melts first?
 7. How is this different from the stock exchange in #25 or the matching engine in #42?
 8. A shill bid is removed a week after close. What is the price now?
-
-TODO. Only 8 drill questions carried over, top up to at least 10.
+9. The seller set a reserve of £500 and the auction ends at £480 after 40 bids. What happens, and what do the bidders see?
+10. Auto-extension is on and two bidders keep each other alive for three hours. What breaks first?
+11. The region hosting 2M live auctions fails at 8pm on a Sunday. What do you do with the auctions closing in the next 60 seconds?
+12. A watcher's WebSocket has been silently dead for 90 seconds. What do they see, and how do you catch it?
 #### Answers to drill questions
-1. Both read `version = 7`; the first CAS succeeds and bumps to 8, the second affects zero rows and re-reads. On the retry the loser re-runs proxy resolution against the new price and is told `LEADING` or `OUTBID` accordingly. No bid is lost and no bid is silently escalated. *If pushed:* bound retries at 3, and note that with single-writer routing by `hash(auction_id)` the CAS should almost never fail — if your CAS-failure rate is above ~0.1% your routing is broken, not your database.
+1. Both read `version = 7`; the first CAS succeeds and bumps to 8, the second affects zero rows and re-reads. On the retry the loser re-runs proxy resolution against the new price and is told `LEADING` or `OUTBID` accordingly. No bid is lost and no bid is silently escalated. *If pushed:* bound retries at 3, and note that with single-writer routing by `hash(auction_id)` the CAS should almost never fail. If your CAS-failure rate is above ~0.1%, your routing is broken, not your database.
 
-2. No. The client generates an idempotency key per tap; the key is stored with the bid row and a replay returns the original outcome rather than creating a second bid. Without it, a mobile client retrying a timed-out request would submit a second, higher max. *If pushed:* the key must be scoped to `(bidder_id, auction_id, max_amount)` and expire after the auction closes — reusing a stale key across auctions is worse than the bug it fixes.
+2. No. The client generates an idempotency key per tap; the key is stored with the bid row and a replay returns the original outcome rather than creating a second bid. Without it, a mobile client retrying a timed-out request would submit a second, higher max. *If pushed:* the key must be scoped to `(bidder_id, auction_id, max_amount)` and expire after the auction closes. Reusing a stale key across auctions is worse than the bug it fixes.
 
-3. Per-bidder-per-auction rate limits, detection of the monotone-probe pattern (strictly increasing losing bids from one account), and never exposing outbid deltas. *If pushed:* the leak is bounded, not eliminated — the price reveals the loser's max by construction. The mechanism only needs secrecy while the leader still leads, so the real defence is making probing slow and visible rather than impossible.
+3. Per-bidder-per-auction rate limits, detection of the monotone-probe pattern (strictly increasing losing bids from one account), and never exposing outbid deltas. *If pushed:* the leak is bounded, not eliminated, because the price reveals the loser's max by construction. The mechanism only needs secrecy while the leader still leads, so the real defence is making probing slow and visible rather than impossible.
 
-4. Reject it, and return the server receive timestamp so the user sees the actual fact. Accepting client timestamps would let anyone forge a winning bid, and reopening a closed auction after a winner is notified is worse than the original unfairness. *If pushed:* this is exactly the complaint auto-extension exists to eliminate — if you keep a hard close, you are choosing to own this dispute forever.
+4. Reject it, and return the server receive timestamp so the user sees the actual fact. Accepting client timestamps would let anyone forge a winning bid, and reopening a closed auction after a winner is notified is worse than the original unfairness. *If pushed:* this is exactly the complaint auto-extension exists to eliminate. If you keep a hard close, you are choosing to own this dispute forever.
 
-5. The sale was already legally concluded, so this is a recovery flow, not a rollback: payment window → reminders → unpaid-item strike → second-chance offer to the runner-up at *their* stored maximum, or relist. *If pushed:* second-chance offers are themselves an abuse vector — a seller with a colluding account can "win", not pay, then second-chance the real underbidder at their revealed max. So the platform, never the seller, initiates the offer; the price is capped at the underbidder's max; and repeated non-payment on a seller's own listings links the accounts.
+5. The sale was already legally concluded, so this is a recovery flow rather than a rollback: payment window, reminders, unpaid-item strike, then either a second-chance offer to the runner-up at *their* stored maximum or a relist. *If pushed:* second-chance offers are themselves an abuse vector, because a seller with a colluding account can "win", not pay, then second-chance the real underbidder at their revealed max. So the platform, never the seller, initiates the offer; the price is capped at the underbidder's max; and repeated non-payment on a seller's own listings links the accounts.
 
-6. Not the bid path — 40 writes/s on one row is nothing. The fan-out melts: 200k × 40 ticks/s would be 8M msgs/s from one item. Coalescing to 4/s and fanning out per gateway node reduces the bus to 4 × 48 = ~192 deliveries/s. *If pushed:* if a single gateway node ends up with a disproportionate share of that auction's watchers, shed the topic across more nodes by refusing new subscriptions on hot nodes at subscribe time; and drop to a 1Hz polled snapshot for that auction as a load-shed valve rather than dropping connections.
+6. Not the bid path: 40 writes/s on one row is nothing. The fan-out melts, because 200k × 40 ticks/s would be 8M msgs/s from one item. Coalescing to 4/s and fanning out per gateway node reduces the bus to 4 × 48 = ~192 deliveries/s. *If pushed:* if a single gateway node ends up with a disproportionate share of that auction's watchers, shed the topic across more nodes by refusing new subscriptions on hot nodes at subscribe time, and drop to a 1Hz polled snapshot for that auction as a load-shed valve rather than dropping connections.
 
-7. Structurally similar (single writer, ordered log, price-time tie-breaking), operationally opposite. Those are continuous double auctions — many buyers, many sellers, fungible instruments, no deadline, microsecond latency, colocated participants. This is one seller, one item, many buyers, a deadline, and participants on phones with 900ms p99 networks. Throughput is trivial here (~5k/s versus millions); the deadline and the human latency are the whole problem. *If pushed:* the borrowed idea is the keyed single writer; the discarded ideas are kernel bypass, GC-free hot paths, and multicast market data — none of which matter when your slowest hop is a cell tower.
+7. Structurally similar (single writer, ordered log, price-time tie-breaking), operationally opposite. Those are continuous double auctions: many buyers, many sellers, fungible instruments, no deadline, microsecond latency, colocated participants. This is one seller, one item, many buyers, a deadline, and participants on phones with 900ms p99 networks. Throughput is trivial here (~5k/s against millions), and the deadline plus the human latency are the whole problem. *If pushed:* the borrowed idea is the keyed single writer; the discarded ideas are kernel bypass, GC-free hot paths, and multicast market data, none of which matter when your slowest hop is a cell tower.
 
-8. Replay the surviving bids through proxy resolution in sequence order and recompute what the price would have been; if the winner changes, the sale is voided and the legitimate underbidder gets a second-chance offer at the recomputed price. *If pushed:* this only works because the bid log is append-only with per-bid provenance. If you also charged a final-value fee on the inflated price, the refund path has to be driven from the same recomputation, so make the replay a first-class service rather than a one-off script.
+8. Replay the surviving bids through proxy resolution in sequence order and recompute what the price would have been. If the winner changes, the sale is voided and the legitimate underbidder gets a second-chance offer at the recomputed price. *If pushed:* this only works because the bid log is append-only with per-bid provenance. If you also charged a final-value fee on the inflated price, the refund path has to be driven from the same recomputation, so make the replay a first-class service rather than a one-off script.
+
+9. Nothing was invalid: bids above the start price are legitimate, the price simply never reached the reserve, so at winner determination the auction ends unsold and no order is created. The bidders should have seen "reserve not met" next to the price throughout, because discovering it only at the close reads as the platform moving the goalposts. *If pushed:* the reserve *value* stays secret for the same reason maxima do, since revealing it turns the auction into a fixed-price sale at the reserve. The usual remedy is a platform-initiated offer to the high bidder at the reserve, which the seller can accept or decline.
+
+10. The close-timer index first, then the people. Every extension rewrites that auction's entry in the sharded sorted set, which is O(log n) and individually cheap but arrives while 485 closes/s are also firing. Then the cap bites at 30 extensions or `original_end + 1h`. *If pushed:* the cap recreates a hard close at the worst possible moment, so show remaining extensions in the UI rather than letting the cap arrive as a surprise, and concede that this is residual unfairness the mechanism did not remove.
+
+11. Suspend them, do not close them. An auction whose `end_ts` falls inside the async replication lag window cannot be closed correctly, because the promoted region may be missing bids the failed region already acknowledged as `LEADING`. Freeze the state, promote, then extend by 15 minutes and reopen once the new region is authoritative. *If pushed:* this is why RPO is zero in-region, with the bid log quorum-committed before the client is told `LEADING`, and seconds cross-region. A 15-minute delay is recoverable; a wrong winner is not.
+
+12. They see a frozen price under a countdown that keeps ticking, which is the worst possible failure mode because it looks alive. Catch it client-side: the gateway sends a keepalive at a known cadence, and after two missed intervals the client marks the price "reconnecting" and falls back to polling `GET /auctions/{id}` every 2s. *If pushed:* never render a stale price as live during an endgame. A user bidding against a number 90 seconds old will lose and will be right to complain, so the UI must degrade visibly rather than silently.
 #### Whiteboard script
-TODO
+**0-5, frame it and kill the wrong problem.** Say first: "one seller, one item, one deadline, and humans on phones. This is not a matching engine." Put three numbers on the board: ~10M live auctions, ~1.7k bid submissions/s globally, ~40 bids/s on the hottest single item in its final ten seconds. Then ask the clarifying question that actually forks everything, hard close or auto-extension, plus proxy bidding yes or no and whether the winning bid is binding.
 
-A 45 minute budget: what to cover in 0-5, 5-15, 15-35 and 35-45, what to say first, and a line starting `Cut first:`.
+**5-15, the write path and the invariant.** Draw the bid API, routing by `hash(auction_id)`, the one auction row, the append-only bid log. State the invariant out loud: the price is monotonic and exactly one bidder leads at any instant. Then show why read-modify-write breaks it with the concrete failure, alice and bob both reading 100 and both computing 105, one write silently erased and one of them already told they were leading. Write the conditional update on the board including `AND state = 'OPEN' AND version = :v`. Say why the bid log is events and not a mutable price column: fraud remediation is a replay.
 
-**Raw material, from the old Talking Points:**
+**15-35, the two things you are here to demonstrate.** First, proxy resolution, spoken as numbers: alice max £40, bob max £30, price goes to £31, alice still leads, bob is outbid in the response to his own bid and never held the lead for a millisecond. Draw the second price consequence and say that it is why maxima are secret. Second, the deadline. Say "`end_ts` is one number in the database and N numbers across the fleet", size the problem at 1 to 10ms of NTP skew, then convert acceptance into a position: `CLOSE` sequenced into the item's stream, or the fenced write as the sequencer. Land the closing rule here with the evidence, eBay's hard close against Amazon's ten-minute quiet-window extension and Roth and Ockenfels 2002 finding significantly more late bidding under the hard close, then state your choice and your cap.
 
-- **Say early that this is not a matching engine.** One seller, one item, one deadline, humans on phones — versus the continuous double auction of #25 and #42. Borrow their single-writer idea; discard their microsecond machinery.
-- **The deadline is the design.** "The auction closed at 12:00:00.000" is meaningless across nodes with clock skew; the close has to be a position in an ordered log or a fenced conditional write, decided once.
-- **Anti-sniping auto-extension solves the fairness complaint and the load spike with one mechanism** — and it is a product decision with revenue consequences, backed by the eBay-versus-Amazon closing-rule evidence.
-- **Proxy bidding makes it a second-price auction, which is why the maxima must be secret.** State the numeric example out loud: alice max £40, bob max £30 → price £31, alice still leads, bob outbid before he ever led.
-- **Write path and read path have nothing in common.** ~5k/s of strictly ordered, high-consequence writes against ~5M coalesced, lossy, fan-out connections — size and design them separately.
-- **The bid log is append-only because fraud remediation is a replay.** Removing shill bids means recomputing the price from the survivors, which is impossible if bids were mutations of a field.
+**35-45, everything that is not the item.** Read path in ninety seconds: 50 watchers per bidder, coalesce to at most 4 snapshots/s, fan out per gateway node rather than per connection, countdown rendered client-side from `end_ts`. Then close and settlement: reserve checked only at winner determination, payment failing two days later as a designed path, unpaid-item strikes, second-chance offer capped at the runner-up's stored maximum. Concede one gap unprompted, most usefully that the cap on auto-extension recreates the hard-close problem. Leave three minutes for questions.
+
+Cut first: the shill-detection graph and the media pipeline. Then multi-region and DR. Do not cut the proxy numeric example or the clock-skew argument, and if you can only land one of those two, keep the clock.
 #### Appendix
 **Data model**
 
-- **auctions** (transactional store, partition key `auction_id`): `(auction_id, seller_id, state, start_price, reserve, current_price, high_bidder, high_max, increment_band, bid_count, start_ts, end_ts, extensions_used, version)` — `high_max` is never returned by any external endpoint.
-- **bids** (wide-column, partition key `auction_id`, clustering key `seq`): `(auction_id, seq, bid_id, bidder_id, amount, max_amount, kind, ts, source_ip_hash, idempotency_key)` — append-only; `kind ∈ {MANUAL, PROXY_AUTO, REJECTED}`.
-- **bidder_index** (wide-column, partition key `bidder_id`): `(bidder_id, auction_id, last_bid_ts, outcome)` — powers "my bids" and the shill-graph feature extraction.
+- **auctions** (transactional store, partition key `auction_id`): `(auction_id, seller_id, state, start_price, reserve, current_price, high_bidder, high_max, increment_band, bid_count, start_ts, end_ts, extensions_used, version)`. `high_max` is never returned by any external endpoint.
+- **bids** (wide-column, partition key `auction_id`, clustering key `seq`): `(auction_id, seq, bid_id, bidder_id, amount, max_amount, kind, ts, source_ip_hash, idempotency_key)`. Append-only; `kind ∈ {MANUAL, PROXY_AUTO, REJECTED}`.
+- **bidder_index** (wide-column, partition key `bidder_id`): `(bidder_id, auction_id, last_bid_ts, outcome)`. Powers "my bids" and the shill-graph feature extraction.
 - **watches** (KV, partition key `user_id`; secondary index by `auction_id`): `(user_id, auction_id, created_ts, notify_prefs)`.
-- **close_timers** (Redis sorted set, sharded by `hash(auction_id)`, score = `end_ts`): the pending-deadline index; rewritten on every auto-extension.
+- **close_timers** (Redis sorted set, sharded by `hash(auction_id)`, score = `end_ts`): the pending-deadline index, rewritten on every auto-extension.
 - **orders / payments** (see #23), **listings media** (object store + CDN, see #21).
 
 **API contract**
@@ -23907,18 +23810,19 @@ POST /internal/auctions/{id}/second-chance   body: { to_bidder, price }   (platf
 
 **Observability**
 
-- **Bid decision latency** (tap → LEADING/OUTBID/REJECTED returned) — SLO p99 < 250ms end-to-end, of which the server owns < 20ms. Above this, snipers lose bids they should have won and dispute volume rises.
-- **CAS retry rate per partition** (conditional writes affecting zero rows ÷ attempts) — SLO < 0.1%. This is the canary for broken key routing; a rising rate means multiple writers are reaching one auction.
-- **Overdue closes** (auctions with `state='OPEN'` and `end_ts` in the past) — SLO zero above 5s, alert on one. Every second overdue is a bid accepted after the published deadline, which is a legal problem, not a latency problem.
-- **Late-bid share** (fraction of each auction's bids in its final 10s) — not an SLO but the health signal for the closing rule: if it climbs above ~30% you have a hard-close sniping regime and should be discussing auto-extension.
-- **Tick delivery lag** (partition publish → client render, p99) — SLO < 500ms. Beyond that the displayed price is misleading during the endgame and users bid against a number that no longer exists.
-- **Win-to-capture conversion** (auctions won ÷ auctions paid within 48h) — SLO > 97%. A drop means either a payment-provider incident (#23) or a non-paying-bidder ring.
-- **Shill-score distribution and review SLA** (candidates scored above threshold, and time-to-decision) — SLO median review < 24h; a growing backlog means the model threshold is mistuned, not that fraud is rising.
+- **Bid decision latency** (tap to `LEADING`/`OUTBID`/`REJECTED` returned): SLO p99 < 250ms end-to-end, of which the server owns < 20ms. Above this, snipers lose bids they should have won and dispute volume rises.
+- **CAS retry rate per partition** (conditional writes affecting zero rows ÷ attempts): SLO < 0.1%. This is the canary for broken key routing; a rising rate means multiple writers are reaching one auction.
+- **Overdue closes** (auctions with `state='OPEN'` and `end_ts` in the past): SLO zero above 5s, alert on one. Every second overdue is a bid accepted after the published deadline, which is a legal problem rather than a latency problem.
+- **Late-bid share** (fraction of each auction's bids in its final 10s): not an SLO but the health signal for the closing rule. Above ~30% you have a hard-close sniping regime and should be discussing auto-extension.
+- **Tick delivery lag** (partition publish to client render, p99): SLO < 500ms. Beyond that the displayed price is misleading during the endgame and users bid against a number that no longer exists.
+- **Win-to-capture conversion** (auctions won ÷ auctions paid within 48h): SLO > 97%. A drop means either a payment-provider incident (#23) or a non-paying-bidder ring.
+- **Shill-score distribution and review SLA** (candidates scored above threshold, and time-to-decision): SLO median review < 24h. A growing backlog means the model threshold is mistuned, not that fraud is rising.
 
 **Multi-region and DR**
 
-- **Replication mode:** an auction is **homed to one region** and written only there — the single-writer invariant does not survive multi-master, and a price row with two masters is a lost-bid generator. Other regions serve reads from async replicas and proxy writes to the home region (adds ~80-150ms cross-Atlantic on the bid path, acceptable against a 250ms budget). Media and closed-auction archives are multi-region object store + CDN (#21).
-- **RTO:** ~30s for in-region leader promotion (lease expiry plus log-tail catch-up). Cross-region failover is a deliberate, human-approved operation: ~10 minutes, because promoting a lagging replica to owner of a live price row can lose accepted bids.
-- **RPO:** zero for accepted bids in-region (the bid log is synchronously quorum-committed before the client is told `LEADING`). Cross-region RPO is ~seconds of async lag; on a forced regional failover, auctions closing within the lag window are **suspended, not closed**, and extended by 15 minutes once the new region is authoritative — better a delayed close than a wrong winner.
+- **Replication mode:** an auction is **homed to one region** and written only there, because the single-writer invariant does not survive multi-master and a price row with two masters is a lost-bid generator. Other regions serve reads from async replicas and proxy writes to the home region, adding ~80-150ms cross-Atlantic on the bid path, acceptable against a 250ms budget. Media and closed-auction archives are multi-region object store plus CDN (#21).
+- **RTO:** ~30s for in-region leader promotion (lease expiry plus log-tail catch-up). Cross-region failover is a deliberate, human-approved operation taking ~10 minutes, because promoting a lagging replica to owner of a live price row can lose accepted bids.
+- **RPO:** zero for accepted bids in-region, since the bid log is synchronously quorum-committed before the client is told `LEADING`. Cross-region RPO is ~seconds of async lag; on a forced regional failover, auctions closing within the lag window are **suspended, not closed**, and extended by 15 minutes once the new region is authoritative. A delayed close beats a wrong winner.
 - **Failover cadence:** automatic within region; quarterly cross-region game-days deliberately scheduled *outside* the Sunday-evening close window. Close-scheduler shards fail over independently of the data tier so a stalled scheduler never blocks bidding.
-- **Cross-region cost:** bid log replication is small (~47GB/day RF=3 replicated once cross-region ≈ ~16GB/day egress). Media dominates and is served from regional CDN edges, not replicated on the write path. Price ticks are never cross-region — a watcher connects to their nearest gateway, which subscribes to the home region's bus for that auction only.
+- **Cross-region cost:** bid log replication is small (~47GB/day at RF=3, replicated once cross-region ≈ ~16GB/day egress). Media dominates and is served from regional CDN edges rather than replicated on the write path. Price ticks are never cross-region: a watcher connects to their nearest gateway, which subscribes to the home region's bus for that auction only.
+
