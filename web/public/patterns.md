@@ -4,45 +4,56 @@ type: interview-prep
 
 ### 1. Design a Rate Limiter
 #### Problem
-Throttle client requests over a time window to prevent abuse, fairly distribute resources, and protect backends from overload.
+Throttle client requests over a time window to prevent abuse, share a backend fairly between callers, and keep one caller from exhausting capacity everyone depends on. The limiter runs on the hot path of every request, so its own latency and its own availability are part of the design rather than afterthoughts.
 #### Core
-TODO
+A rate limiter is three decisions, and the algorithm is the least interesting of them.
 
-Write the whole answer as you would give it in sixty seconds, 200 to 300 words, standing alone.
+First, what you count against. The key is `(identity, scope)`, where identity is a user id, an API key or a caller IP, and scope is usually a class of endpoints rather than one route. IP keying is cheap and works before authentication, but a NAT gateway puts thousands of users in one bucket. Key on the account wherever an authenticated identity exists.
+
+Second, where the count lives, which is the real engineering. Every gateway node needs the same view of a number that changes a million times a second. A shared store gives one authoritative count per key, and the read and the update have to be one indivisible operation executed inside the store, not a read followed by a write from the caller. Local per-node counters remove the network hop and multiply the effective limit by the node count.
+
+Third, what happens when the counter store is unreachable. Fail open for protective limits: a limiter must never be a bigger outage than the thing it protects. Fail closed only where the limit guards something genuinely scarce, an order throttle in front of a broker's exchange session or a risk gate at the point a position can move.
+
+The algorithm is a thirty second discussion. Token bucket, or GCRA which is the same semantics stored as one timestamp, for general APIs; sliding window counter where a boundary spike matters; fixed window when nobody cares. On rejection return 429 with `Retry-After` plus jitter, because a million clients obeying the same backoff retry in the same instant.
 #### Summary
 **The picture in your head:** a bouncer at a club door, but the bouncer has a tiny notebook. Every time you walk up, they look up your name, check how many times you've come in this hour, and either let you in or say "you've been in 100 times already, come back later." The bouncer has to be **fast** (can't slow down the queue) and **correct** (can't miscount), even when 50 bouncers are working the same door for the same crowd.
 
 **The approaches people actually take:**
-TODO. Two or three things a competent engineer might reach for, in plain language and before any product name, with what each one buys and roughly when it wins.
 
-**The single-request walkthrough:** A request hits your API. *Before* it reaches your business logic, a tiny piece of code (the "limiter") asks: who is this caller? It pulls out a key — usually `user_id`, `ip`, or `api_key`. It then asks a shared store (typically Redis) "how many requests has `user_42` made in the last minute?" If below the limit → increment the counter, let the request through. If over → reject with HTTP `429 Too Many Requests` and a `Retry-After: 30` header so the client knows when to try again. Whole check takes <5ms.
+*One shared count per key, checked on every request.* Every node asks the same place, where the check and the update happen as one operation so two nodes cannot both see room for one more. This buys enforcement that matches the number you promised a customer, and it is the only option if the limit is billed. It costs a round trip on every request, half a millisecond inside a datacenter, and a hot-path dependency you now need an answer for.
+
+*Every node counts on its own, with no coordination at all.* No hop, no shared dependency, nothing to fail. What you give up is the number: with N nodes each enforcing the full limit, a client spread across the fleet gets up to N times the intended rate, and dividing the limit by N instead throttles anyone whose traffic does not spread evenly. Wins when the limit is a coarse ceiling, large relative to the fleet, that nobody reads off an invoice.
+
+*Local counting against a share of a global budget, reconciled periodically.* Each node enforces locally, broadcasts what it consumed every hundred milliseconds, and gets its share resized. A close cousin is reserving tokens in blocks, so one round trip buys twenty requests of allowance. Both keep most of the accuracy without paying the hop per request, and both bound the overshoot at a number you can state rather than at N times the limit. The cost is a much more complicated failure story, and they earn their keep mainly where the round trip has stopped being affordable.
+
+**The single-request walkthrough:** A request hits your API. *Before* it reaches your business logic, a tiny piece of code (the "limiter") asks: who is this caller? It pulls out a key, usually `user_id`, `ip`, or `api_key`. It then asks a shared store (typically Redis) "how many requests has `user_42` made in the last minute?" If below the limit, increment the counter and let the request through. If over, reject with HTTP `429 Too Many Requests` and a `Retry-After: 30` header so the client knows when to try again. The whole check takes under 5ms.
 
 **The pieces (and what each one is for):**
-- **The limiter itself** — a small library or middleware that runs inside every API server (or at the edge in an API gateway like Kong/Envoy). Holds the rules ("100 req/min per user") in local memory.
-- **The shared counter store** — almost always Redis. Has to be *shared* because your API runs on, say, 50 servers behind a load balancer; if each server kept its own counter, a user would get 50× their limit. Redis is the single source of truth.
-- **The algorithm** — the math that turns "request arrived" into "allow or deny." Default is **token bucket**: imagine a bucket with capacity N (say 100 tokens) that refills at rate R (say 10/sec). Each request takes 1 token. No tokens? Reject. Bucket full? Refill stops. Two numbers in storage per user: current token count + last-refill timestamp. On each request you lazily compute new tokens = `(now - last_refill) × rate`, cap at capacity, deduct 1 if any, save back. *Alternatives:* fixed window (count per minute — simpler, but allows 2× burst at boundaries); sliding window (more accurate, more memory).
-- **The rules config** — "what counts as too much" can vary per endpoint, per user tier, per region. Loaded from a config service so you can tweak limits without redeploying.
+- **The limiter itself.** A small library or middleware that runs inside every API server, or at the edge in an API gateway like Kong or Envoy. Holds the rules ("100 req/min per user") in local memory.
+- **The shared counter store.** Almost always Redis. It has to be *shared* because your API runs on, say, 200 nodes behind a load balancer; if each node kept its own counter, a user would get 200 times their limit.
+- **The algorithm.** The arithmetic that turns "request arrived" into "allow or deny". The usual default is **token bucket**: a bucket with capacity B (say 100 tokens) refilling at rate R (say 10/sec). Each request takes a token, no tokens means reject, and a full bucket stops refilling. Two fields in storage per key, current token count and last-refill timestamp, with the refill computed lazily as `(now - last_refill) × rate` on each request. GCRA stores the same behaviour in a single timestamp.
+- **The rules config.** "What counts as too much" varies per endpoint, per user tier, per region. Loaded from a config service so limits change without a redeploy.
 
-**The thing that makes it hard — race conditions:** Imagine `user_42` is at 99/100 and fires two requests in the same millisecond. Server A reads "99," Server B reads "99," both go "yep, room for one more," both increment to 100. You've actually allowed 101 — and you do this all day, every day, across millions of users. The fix: **the read-and-increment must be atomic** — one indivisible operation the database does internally so no other request can sneak in between the read and the write. In Redis you do this with a Lua script (Redis runs scripts atomically) or with `INCR`+`EXPIRE` for the simple cases.
+**The thing that makes it hard, the race on the counter:** `user_42` is at 99/100 and fires two requests in the same millisecond. Node A reads 99, node B reads 99, both conclude there is room for one more, both write 100. You allowed 101, and you do it all day across millions of users. The fix is that the read and the update must be **one indivisible operation** performed inside the store, so nothing can interleave between them. In Redis that is a Lua script, which the shard runs to completion on a single thread, or `INCR` plus `EXPIRE` for the trivial cases.
 
-**Why this design and what it costs:** If your rate limiter itself dies — Redis goes down, the network blips — you have a choice: reject every request (your whole API goes down because the *limiter* broke), or allow every request through (you're temporarily unprotected but the API still works). The right answer is almost always **fail open**. The limiter is a guardrail, not load-bearing infrastructure. A guard that locks everyone *out* when it has a heart attack is a worse guard than one that briefly lets everyone in.
+**Why this design and what it costs:** the shared counter store is now a dependency of every request, so the interesting question is not how accurate the limiter is but what it does when the store is gone. For a protective limit the answer is fail open, because a guard that locks everyone out when it has a heart attack is a worse guard than one that briefly lets everyone in. That default inverts when the limit is the only thing keeping a scarce resource from being oversubscribed, which is the third fork below.
 
 **If you were building it tomorrow:**
-- Redis cluster (6 nodes, sharded by `user_id`) holding token bucket state.
-- Limiter middleware in your API gateway runs this Lua script on every request:
+- Redis cluster, 16 primaries sharded by `(identity, scope)`, sized by request rate rather than by memory.
+- Limiter middleware in the API gateway runs this on every request as one script (token bucket shown; the GCRA form in the deep dive is the same decision in one field):
   ```
   tokens = min(CAP, stored_tokens + (now - last_ts) * RATE)
   if tokens >= 1: tokens -= 1; save; return ALLOW
   else: return DENY
   ```
-- On Redis timeout (>5ms) → log it, return `ALLOW` anyway (fail open).
-- Return `429` with `Retry-After`, `X-RateLimit-Limit`, `X-RateLimit-Remaining` headers on deny.
+- On store timeout (over 5ms), log it and return `ALLOW` for quota limits; the scarce-resource limits on the same gateway reject instead.
+- Return `429` with `Retry-After`, `X-RateLimit-Limit` and `X-RateLimit-Remaining` on deny.
 #### What this is really testing
-TODO
+Whether you treat the limiter as protective infrastructure rather than as an accounting system. Everything that matters follows from admitting that the number is approximate on purpose: you choose how much inaccuracy to buy, from whom, and in exchange for what. Accuracy is bought with a round trip on every request and a hard dependency on a store; looseness is bought with `N × limit` overshoot; and the only question the interviewer is really waiting for is what the system does when the counter is unavailable, because that is where a candidate reveals whether they think the limiter is load-bearing.
 
-The one insight this question exists to elicit, then the contrast with the question it most resembles and why the answers differ.
+The contrast is with the distributed lock question. On the surface they are the same system: a small piece of shared coordination state, read and written on the hot path, usually on Redis, where the whole correctness argument rests on the read and the write being one atomic operation. Every conclusion is inverted. A lock exists to guarantee a safety property, so an approximate lock is not a lock, an unavailable lock service has to fail closed, and the hard part of the question is what happens when a holder is paused past its lease, which is why the answer is fencing tokens enforced at the resource. A rate limiter has no safety property. Allowing 105 requests against a limit of 100 is a rounding error; rejecting all traffic because the counter store failed over is an outage you caused. So the limiter fails open, tolerates drift deliberately, publishes bounds like `regions × limit` instead of pretending they are exact, and shards perfectly by key because no two keys ever need a consistent view of each other. If you reach for consensus, leases or fencing tokens here, you have imported the lock answer into a question that does not need it. The one place the two converge is a limit with money or a regulator behind it, and that is exactly the case where a limiter should be failing closed.
 
-Closest question: TODO
+Closest question: Q35
 #### Clarifying questions and how each answer forks the design
 - Server-side or client-side? (assume server)
 - Throttle by user ID, IP, API key, or all three?
@@ -50,20 +61,22 @@ Closest question: TODO
 - What does the client see when throttled? (HTTP 429 + headers)
 - Should rules be hot-configurable without restart?
 - Strict accuracy required or is slight over-allow acceptable?
+- What is the limit actually protecting: a scarce resource, or a commercial quota?
 - Multi-region deployment?
 
 **How the answers shape the design**
 
 | If the answer is… | Then the design… |
 |---|---|
-| Throttle by IP (not user) | pre-auth & cheap, but NATs share one IP (collateral throttling) and IPv6 rotation evades it — prefer user or API-key keying when auth exists |
-| Throttle by user ID or API key | per-account fairness, but identity must be resolved first — place the limiter after auth or use a signed key |
-| Distinct rules per endpoint | key counters by (identity, route) and load a rule map, not one global counter |
-| Slight over-allow acceptable | fixed-window or approximate counters in Redis — fast, cheap, no strict coordination |
-| Strict accuracy required | sliding-window log or token bucket with an atomic Redis Lua script — higher cost per call |
-| Rules hot-configurable | externalise rules to a watched config store — adds a control plane but no redeploys |
-| Multi-region | per-region local counters (fast, lenient) or a global counter (accurate, cross-region latency) — usually local plus async reconciliation |
-| Client must know limits | return 429 with Retry-After and X-RateLimit-* headers so clients back off |
+| Throttle by IP (not user) | is pre-auth and cheap, but a NAT gateway shares one IP across thousands of users and IPv6 rotation evades it; prefer user or API-key keying wherever auth exists |
+| Throttle by user ID or API key | gives per-account fairness, but identity has to be resolved first, so the limiter sits behind auth or reads a signed key |
+| Distinct rules per endpoint | keys counters by (identity, route) and loads a rule map rather than one global counter |
+| Slight over-allow acceptable | can use per-node local counters or fixed windows, with no shared store on the hot path |
+| Strict accuracy required | needs a shared store with an atomic check-and-update per request, at one round trip of added latency |
+| Rules hot-configurable | externalises rules to a watched config store, which adds a control plane but removes redeploys |
+| Limit protects a scarce resource | fails closed when the counter store is unreachable, inverting the usual default and needing its own failure domain |
+| Multi-region | enforces per region and publishes the `regions × limit` bound, or pins identities to a home region when that bound is unacceptable |
+| Client must know limits | returns 429 with Retry-After and X-RateLimit-* headers so clients can back off |
 #### Requirements and scale, derived out loud
 **Requirements**
 
@@ -74,50 +87,41 @@ Closest question: TODO
   - Multiple scopes: per-user, per-IP, per-API-key, per-endpoint, global
 - **NFR:**
   - <10ms p99 overhead per request
-  - 99.99% availability — fail-open if rate limiter dies
+  - 99.99% availability, fail-open for quota limits if the limiter dies
   - Horizontally scalable to thousands of API gateway nodes
   - Memory-efficient: millions of active identities
 
 **Scale**
 
-- **Global request rate ~1M req/s (≈10B req/day):** matches a top-tier API edge (Stripe/Twilio class). Derivation: 10B/day ÷ 86,400s ≈ 116k avg req/s; assume 8–10× peak-to-mean ratio for diurnal + viral traffic → round to 1M req/s peak. 1M × 86,400 ≈ 86B/day theoretical, but daily volume is the diurnal-averaged 10B.
-- **Identity cardinality 100M:** rate-limit key = (user OR API key OR caller IP). Reddit-/Shopify-tier active set: 50M DAU + ~10M API keys + 40M distinct caller IPs at peak (post-CGNAT) → 100M. For Twitter/Stripe scale plan 1B; 100M is the senior-eng default.
-- **Per-identity state ~200B:** token bucket holds `tokens` (8B float) + `last_refill_ts` (8B i64) + `version` (8B i64) = 24B logical, plus key-string (~40B), Redis hash bookkeeping/ziplist overhead (~130B observed via `MEMORY USAGE`) → ~200B total.
-- **Hot working set ~20GB:** 100M × 200B = 2 × 10¹⁰ B = 20 GB. Fits across a 6-node Redis cluster: ~3.3GB/node + 50% headroom for fragmentation/replication buffers.
-- **Counter ops ~2M/s:** every request does 1 read + 1 atomic increment ≈ 2 ops → 1M req/s × 2 = 2M ops/s. Sharded ~16 ways → 125k ops/s/shard, well within Redis single-shard ceiling (~200k ops/s).
-- **Network ~200MB/s:** each op ~100B on the wire (RESP framing: command verb + key + value + CRLF ≈ 80–120B). 2M ops/s × 100B = 2 × 10⁸ B/s = 200 MB/s aggregate ingress to counter tier.
-- **Rules budget ~10MB:** assume ~1000 distinct endpoints (typical for a large API surface) × ~10 rules/endpoint (per-tier, per-method, per-window) = 10k compiled rules; each compiled rule ≈ 1KB (predicates, window, limit, scope) → 10⁴ × 10³ = 10⁷ B = 10MB. Fits in every node's local config cache; pushed via config bus.
-- **Hot tier:** all counters in-memory across N shards, sized for peak QPS × headroom; eviction by TTL = window length (most counters disappear within seconds)
-- **Cold tier — decision logs ~250GB/day:** sample at 1% to keep cost bounded → 1M req/s × 1% = 10k events/s. Each event ~300B (identity ~40B + endpoint ~50B + decision/limit/remaining ~40B + ts/region/version ~40B + serialisation overhead ≈ 130B). 10⁴ × 300 = 3 × 10⁶ B/s = 3 MB/s. Daily: 3MB/s × 86,400s ≈ 260GB ≈ 250 GB/day to columnar archive; 30d retention → ~7.5TB rolling. Used for abuse forensics.
+- **Global request rate ~1M req/s (≈10B req/day):** matches a top-tier API edge (Stripe/Twilio class). Derivation: 10B/day ÷ 86,400s ≈ 116k avg req/s; assume 8 to 10× peak-to-mean for diurnal plus viral traffic → round to 1M req/s peak. 1M × 86,400 ≈ 86B/day theoretical, but daily volume is the diurnal-averaged 10B.
+- **Enforcement fleet ~200 nodes:** 1M req/s across API gateway nodes each comfortably handling 5k req/s = 1M ÷ 5k = 200 nodes. This is the number that decides the second fork below, so it is worth stating early.
+- **Identity cardinality 100M:** rate-limit key = (user OR API key OR caller IP). Reddit/Shopify-tier active set: 50M DAU + ~10M API keys + 40M distinct caller IPs at peak (post-CGNAT) → 100M. For Twitter/Stripe scale plan 1B; 100M is the senior-eng default.
+- **Per-identity state ~200B:** token bucket holds `tokens` (8B float) + `last_refill_ts` (8B i64) = 16B logical (GCRA holds 8B), plus key-string (~40B) and Redis hash bookkeeping (~140B observed via `MEMORY USAGE`) → ~200B total. The store overhead dominates by an order of magnitude, which is why the choice of counter is not a memory decision.
+- **Hot working set ~20GB:** 100M × 200B = 2 × 10¹⁰ B = 20 GB.
+- **Counter ops ~1M round trips/s:** each request makes exactly one call to the store, a script that reads the key, computes, and writes it back. 1M req/s peak = 1M round trips/s, roughly 3 internal operations each = 3M internal ops/s.
+- **Shard count is set by throughput, not memory:** one Redis primary serves ~200k plain GET/SET per second and roughly half that for a small script, so ~100k limiter checks/s per primary. 1M ÷ 100k = 10 primaries minimum → round to **16 primaries** for headroom and rebalancing room, one replica each = 32 nodes. Memory would have needed only 20GB ÷ 3.3GB ≈ 6 nodes, so throughput sizes the cluster and memory comes free at 20GB ÷ 16 = **1.25GB per primary**.
+- **Network ~160MB/s:** each check is ~100B of request (script hash + key + args) and ~60B of reply. 1M/s × 160B = 1.6 × 10⁸ B/s = 160 MB/s aggregate, 10MB/s per primary, negligible on a 10GbE NIC.
+- **Rules budget ~10MB:** ~1000 distinct endpoints (typical for a large API surface) × ~10 rules/endpoint (per-tier, per-method, per-window) = 10k compiled rules; each compiled rule ≈ 1KB (predicates, window, limit, scope) → 10⁴ × 10³ = 10⁷ B = 10MB. Fits in every node's local config cache; pushed via config bus.
+- **Hot tier:** all counters in memory across the 16 shards, sized for peak QPS with headroom; eviction by TTL = window length, so most counters disappear within seconds.
+- **Cold tier, decision logs ~250GB/day:** sample at 1% to keep cost bounded → 1M req/s × 1% = 10k events/s. Each event ~300B (identity ~40B + endpoint ~50B + decision/limit/remaining ~40B + ts/region/version ~40B + serialisation ≈ 130B). 10⁴ × 300 = 3 × 10⁶ B/s = 3 MB/s. Daily: 3MB/s × 86,400s ≈ 260GB → **~250 GB/day** to columnar archive; 30d retention → ~7.5TB rolling. Used for abuse forensics and for the over-allow metric, which cannot be computed from the counters themselves.
 #### Key decisions
-TODO
+**Which counter you keep per key**
+- Choice: token bucket, or GCRA which is the same semantics stored as one timestamp instead of two fields. Capacity is the burst you are willing to permit, refill rate is the sustained rate you actually promised.
+- Alternative: sliding window counter, a weighted blend of the previous and current fixed window.
+- Decider: burst tolerance against bytes per key. Token bucket hands out a full bucket instantly, so with capacity 100 and refill 10/s a client that idled 10 seconds can fire 100 requests in one millisecond, which is exactly what a paginating batch client or a market-open order burst looks like. Sliding window counter holds the instantaneous rate near 1.1× the limit and cannot express "burst to 100, then sustain 10". On memory the two are indistinguishable at ~200B per key and 20GB at 100M keys, because store overhead dominates the payload; what the numbers do exclude is the sliding window log, at ~60B per retained request, so 6KB per key at a 100/min limit and 600GB across the fleet, 30× the cost for accuracy nobody asked for.
+- Alternative wins when: a 10× instantaneous spike is precisely what the downstream cannot absorb, for example a limit sized to a fixed pool of 200 database connections or to a third party that bills per second. It also wins when the limit is contractual and a customer will read the boundary doubling off a graph. Fixed window remains defensible for coarse limits where 2× at the boundary changes nothing, such as 1000 logins per hour; picking it for a payments endpoint does not.
 
-Two or three genuine forks. For each, in this exact shape so it stays checkable:
+**One shared counter store against per-node local counters**
+- Choice: one shared store, sharded 16 ways, with an atomic check-and-update per request.
+- Decider: fleet size against tolerated overshoot, and the arithmetic settles it. With 200 gateway nodes each enforcing the full limit, a "100 req/min" limit permits up to 200 × 100 = 20,000 req/min, which is not a limit. Dividing instead gives each node limit/N = 100 ÷ 200 = 0.5 requests per minute, so any client that does not spread perfectly across all 200 nodes is throttled to a fraction of what it was promised. Local counters only work when limit/N stays comfortably above 1 per window per node, roughly limit > 10 × N: at 200 nodes that means limits above ~2000 per window, and a per-user limit of 100 misses it by a factor of 20.
+- Alternative: per-node local counters with no shared store, each node enforcing limit/N.
+- Alternative wins when: the limit is large relative to the fleet, which is the normal case for a fleet-wide protective ceiling (500k req/s over 200 nodes is 2,500/s per node, and the division is harmless), or when the round trip is unaffordable, which is the case at a CDN edge where the nearest counter store is 80ms away and 80ms cannot go in front of every request. There is a middle option worth naming: reserve blocks of W tokens in one round trip and spend them locally, which amortises the hop W to one and bounds worst-case overshoot at N × W rather than N × limit. At N=200 and W=20 that is 4,000 in-flight tokens, a number you can put in a contract.
 
-**<name of the fork>**
-- Choice:
-- Alternative:
-- Decider:
-- Alternative wins when:
-
-**Raw material, from the old Algorithm Comparison:**
-
-| Algorithm              | Memory       | Smoothness     | Burst        | Best For               |
-| ---------------------- | ------------ | -------------- | ------------ | ---------------------- |
-| Fixed Window           | low          | jagged at edge | up to 2×     | simple counters        |
-| Sliding Window Log     | high (1/req) | perfect        | none         | strict accuracy        |
-| Sliding Window Counter | low          | smooth         | ~1.1×        | **default choice**     |
-| Token Bucket           | low          | bursty allowed | configurable | API w/ burst tolerance |
-| Leaky Bucket           | low          | smoothed       | none         | shaping outbound       |
-
-**Raw material, from the old Common Mistakes:**
-
-- **Reading and incrementing in two separate calls** — candidates often describe `GET counter; INCR counter` as the algorithm, but the read-modify-write window allows two concurrent requests to both see "below limit" and both proceed. The correct answer is an atomic Lua script (or a Redis-Cell module) that performs the check-and-increment as one indivisible operation.
-- **Promising exact cross-region consistency** — saying "the limit is 1000/s globally" without qualifying it implies synchronous cross-region coordination, which would add 100ms+ to every request. The senior answer states the bound up front: each region enforces locally, the global worst case is `regions × limit`, and that's a deliberate trade — pin identities to home regions if exact global enforcement is required.
-- **Failing closed instead of fail-open** — a candidate who says "if Redis is down, return 503" turns a single-system outage into a full site outage. The right posture is fail-open with a circuit breaker; the limiter is protective infrastructure and must never be a bigger SPOF than what it protects.
-- **Ignoring the synchronized-retry problem** — emitting `429 Retry-After: 60` to a million clients and assuming they'll politely re-spread is naive; without jitter every client retries at the same instant and re-triggers the limit. The correct answer adds `random(0, base/2)` jitter to `Retry-After` and requires SDKs to implement exponential backoff on top.
-- **Picking sliding-window-log as the default** — accurate but O(N) memory per identity makes it unsuitable for millions of active users; candidates pick it because it sounds rigorous, but production systems use sliding-window-counter or token-bucket with sub-100B per identity.
-- **Treating the rate limiter as one global service** — an interviewer wants to hear "rate limiting at multiple layers": L4 (DDoS, packet rate at the LB), L7 protective limits at the API gateway, application-level fairness limits, and per-tenant quotas. Conflating them all into one component misses that they protect against different failure modes.
+**Fail open against fail closed when the counter store is unreachable**
+- Choice: fail open, behind a circuit breaker that trips after 5 consecutive timeouts against a 5ms budget, degrading to coarse per-node local counters rather than to no limiting at all.
+- Alternative: fail closed, rejecting while the store is unreachable.
+- Decider: whether the limit protects a scarce resource or enforces a commercial quota. A quota limit exists to bill and to be polite, so 30 seconds of unmetered traffic during a failover is 30 ÷ 2,592,000 of a month's volume, about 0.001%, while failing closed for those 30 seconds is a total API outage. A scarce-resource limit is the opposite: if the number is 200 database connections, or a broker's exchange session capped by the venue at 50 orders per second, then failing open during the outage destroys the exact thing the limiter exists to protect, and in the venue case gets the session disconnected. The test to apply out loud: what does the protected resource do at 10× nominal load? Degrades gracefully means fail open; falls over, or breaks a rule with legal weight, means fail closed.
+- Alternative wins when: the limiter is really a risk gate. Order throttles, per-desk notional caps and venue message-rate allocations are the same mechanism as an API rate limiter with the default inverted, and a candidate who says "always fail open" without qualification is wrong in front of a trading firm. In practice you run both postures at once, which is the argument for keeping the layers as separate components with separate stores: the quota limiter fails open, the risk gate fails closed, and the risk gate must not share a failure domain with the counters serving 1M req/s of ordinary API traffic.
 #### High-level design
 **must-say**
 
@@ -188,17 +192,27 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 #### Deep dive
 **must-say**
 
-**Atomic Lua** (single round-trip):
-```lua
-local count = redis.call('INCR', KEYS[1])
-if count == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end
-return count
+**The check itself: one atomic operation, whose clock decides it, and what happens to a key that cannot be split.**
+
+Every decision above eventually lands on one function: given a key and the current time, return allow or deny and update the stored state. It runs a million times a second in front of every request, and it is the only part of the system that can be quietly wrong for months.
+
+**It has to be one indivisible operation.** The failure is banal and it is what interviewers listen for. Read the counter, see 99 against a limit of 100, decide allow, write 100. Between the read and the write another node does the same thing, and the key ends at 100 having allowed 101. At 1M req/s with a 0.5ms round trip there are hundreds of requests in flight against a popular key at any instant, so this is not a rare interleaving, it is the normal case. The unit of atomicity has to be the whole read, compute and write, executed inside the store. In Redis that is a Lua script or a module command, and it works because a shard executes commands and scripts one at a time on a single thread: while the script runs, nothing else on that shard can observe or modify the key. A store that serves one shard from several threads gives you no such guarantee and needs a compare-and-swap retry loop instead, which is correct but has unbounded latency under contention, on exactly the hot keys where you can least afford it.
+
+**The arithmetic, in its cheapest form.** GCRA keeps one field per key, the theoretical arrival time (TAT), meaning the instant at which the next perfectly on-rate request would arrive. With emission interval `T = 1/rate` and burst tolerance `τ = (B - 1) × T` for a permitted burst of B:
+
+```
+tat = max(stored_tat or now, now)
+if tat - τ <= now:  allow;  store tat + T
+else:               deny;   retry_after = tat - τ - now
 ```
 
-**Distributed strategies:**
-- **Centralized Redis** — every middleware node hits one logical counter store (sharded internally by identity); accurate to the request, one extra hop per request, default choice for most APIs.
-- **Per-node local + sync** — each gateway maintains its own counters and syncs deltas every ~100ms; lower latency (no network hop), but a noisy client routed to two nodes can over-allow by up to `nodes × limit / sync_interval` until syncs converge — fine for soft limits, not for billing.
-- **Sticky routing** (LB pins identity to one node) — counters stay local because the same user always hits the same node; works perfectly for evenly distributed traffic but breaks under skew (one whale on one node) and complicates failover (sticky session must follow the node).
+Allow or deny is one comparison, and the deny path yields the exact `Retry-After` rather than a guess, which matters because a wrong `Retry-After` is what synchronises client retries. Token bucket computes the same decision from two fields by lazily crediting `(now - last_refill) × rate` and capping at B. They are the same algorithm with the two fields folded into one instant, a framing that goes back to the ATM cell-rate literature and was popularised for API limiting by brandur.org and the Redis Cell module. Choose GCRA for the single compare and the free `Retry-After`, not for the bytes: at ~200B per key the payload difference is invisible.
+
+**Whose clock.** If the gateway passes its own `now` into the script, the decision depends on which of 200 nodes the request landed on. NTP-disciplined clocks in one datacenter sit within single-digit milliseconds of each other and can be seconds apart after a bad sync, so a client routed to the node whose clock runs fast is credited allowance it has not earned, and a request arriving at a slow-clocked node after one at a fast-clocked node can drag the stored TAT backwards. Read the clock inside the script from the store, so one clock decides for every caller. In Redis that is `redis.call('TIME')`, which older guidance forbids in scripts because a non-deterministic script could not be replicated verbatim; effects replication has been the default since Redis 5 in 2018, so the script replicates its writes rather than its code and `TIME` is allowed. Check that against the version you actually run, because this is exactly the kind of property that gets superseded.
+
+**Sharding, and the key that cannot be split.** The key is `(identity, scope)` and hashes to one of the 16 primaries, so ordinary traffic spreads evenly and 100M keys of 200B sit at 1.25GB each. What does not spread is a single hot key. One API key doing 200k req/s puts 200k script executions on one primary, twice its ~100k/s ceiling, and resharding does not help because the key is the unit of placement. Two fixes, both of which spend accuracy. Split the key into `k` sub-counters, `key:0` through `key:k-1`, chosen at random per request, each allowing `limit/k`: shard load divides by `k` and enforcement becomes statistical, tight for a client whose requests distribute evenly and loose for one that does not. Or let the gateway reserve a block of `W` tokens per round trip and spend them locally, turning 200k round trips per second into 200k/W and bounding worst-case overshoot at `N × W` rather than `N × limit`. Blocks are the better answer when the hot key belongs to one large customer, because the overshoot is bounded and explainable to them. Sub-counters are better for a fleet-wide endpoint ceiling, where no single customer owns the number and statistical enforcement offends nobody.
+
+**The timeout is part of the design, not an operational detail.** The store call sits in front of everything, so its timeout must be smaller than the budget of what it protects: 5ms against a 10ms p99 target, not the 1s that client libraries ship by default. During a partition a 1s timeout means each of 1M requests per second blocks for a second, the gateway's connection and thread budget is gone within the first tick, and a degraded counter store has become a total outage without ever returning an error. Set the timeout first, then decide what to do when it fires, which is the third fork above.
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 650" role="img" aria-label="Three rate-limiter counter-placement strategies: centralized Redis, per-node local plus gossip sync, and sticky routing">
@@ -271,9 +285,7 @@ return count
 </svg>
 ```
 
-**Multi-region:** each region runs its own counter store and limits independently. A client hitting `us-east` and `eu-west` simultaneously can be allowed `2 × limit` total. Cross-region sync (gossip or async replication) brings the regions into agreement within seconds but never instantly — which is why we document the bound (`regions × limit`) rather than pretend it's exact. For most APIs this is acceptable; for billing or quota enforcement, pin a user to a home region via geo-DNS so their counter is single-region.
-
-**Algorithm dynamics — visual.** The four common counters behave very differently under a burst. Token bucket fills passively at rate `r`; each request drains a token; spare capacity stockpiles for legitimate bursts. Leaky bucket is the same shape inverted — requests fill the bucket, a steady drain at rate `r` empties it; bursts queue rather than being rejected at the edge. Fixed window resets a counter at boundary `t=0,t=W,t=2W,...` — cheapest, but a client can fire `2 × limit` straddling a boundary. Sliding window counter blends the previous and current bucket weighted by elapsed-window proportion, recovering most of the smoothness without per-request memory. *[Source: ByteByteGo "System Design Interview" Ch.4 + brandur.org "Rate Limiting, Cells, and GCRA"]*
+**Where the counters can live.** Centralised store: every node hits one logical store, sharded internally by key, accurate to the request at one hop per request. Per-node local plus periodic sync: no hop, overshoot bounded by what accumulates within the sync interval, fine for soft limits and wrong for anything billed. Sticky routing: the load balancer pins an identity to one node so its counter is local and exact, which works under even traffic and breaks under skew, because one whale then owns one node, and it complicates failover since the counter has to move with the identity.
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 730" role="img" aria-label="Four rate-limiting algorithms compared: token bucket, leaky bucket, fixed window, and sliding window counter">
@@ -379,90 +391,95 @@ return count
 </svg>
 ```
 
-**GCRA (Generic Cell Rate Algorithm).** A leaky-bucket variant that stores only one timestamp — the "theoretical arrival time" (TAT) of the next allowed request. On each request, compare `now` to `TAT - burst_tolerance`: if `now ≥ that`, the request is allowed and TAT advances by the emission interval `T = 1/rate`; otherwise reject. Half the storage of token bucket (no separate `tokens` and `last_refill_ts` — just one `tat` field) and the same correctness properties, plus the rate-limit decision is a single arithmetic compare rather than a refill computation. Production-popular at SlashID, Stripe-style ID-based limiters, and the Redis Cell module. *[Source: brandur.org "Rate Limiting, Cells, and GCRA"; Tony Finch "GCRA: leaky buckets without the buckets" (2024)]*
-
-**Algorithm picker — concrete recommendations.** Token bucket for general APIs (matches client behaviour, allows bursts). GCRA when you want token-bucket semantics on minimum storage. Sliding window counter for endpoints where billing or fairness matters and a 2× boundary spike is unacceptable. Sliding window log only for low-QPS strict cases (auth retries, password resets) where the per-request memory cost is negligible. Fixed window only for trivial coarse limits ("max 1000 logins per hour, who cares about boundary spikes").
+**Reference figure for the counters named in the first fork.** Token bucket fills passively at rate `r` and each request drains a token, so unused capacity stockpiles into a permitted burst. Leaky bucket is the same shape inverted: requests fill it and a steady drain at `r` empties it, so bursts queue rather than being rejected at the edge. Fixed window resets at `t = 0, W, 2W` and is the cheapest of the four, at the cost of letting a client straddle a boundary for `2 × limit`. Sliding window counter blends the previous and current bucket by elapsed proportion, holding the instantaneous rate near 1.1× the limit with no per-request memory. *[Source: ByteByteGo "System Design Interview" Ch.4; brandur.org "Rate Limiting, Cells, and GCRA"]*
 #### Where it breaks
 **must-say**
 
 **Bottlenecks**
 
-- **Race on shared counter** — two requests reading the counter in the same microsecond both see "99 < 100" and both increment, pushing real usage above the limit. A Lua script wrapping `INCR` + `EXPIRE` runs as one indivisible op on the Redis side, eliminating the read-modify-write window.
-- **Single Redis bottleneck** — at millions of req/s, one Redis instance can't keep up on CPU or network. Shard the keyspace by identity using consistent hashing so each node owns a slice; a noisy user concentrates load on one shard but other shards stay cool.
-- **Cross-region drift** — independent regional counters can't agree in real time without paying a cross-region RTT per request (10s of ms). Accept eventual sync and publish the bound: worst case a client gets `regions × limit` across the fleet, which is fine for protective rate limiting and unacceptable only for hard quotas.
-- **Redis outage** — if every request blocks on a dead Redis, you turn a counter outage into a full-site outage. A circuit breaker on the middleware trips after consecutive failures and switches to fail-open; the limiter degrades to "no limiting" rather than "no traffic."
-- **Rule hot reload** — pushing a new rule via a deploy is too slow when an attacker is mid-attack. The config service publishes invalidation events on a pub/sub channel; every middleware node drops its cached rule and refetches lazily, propagating changes in under a second.
-- **Cardinality explosion** (botnet IPs) — a botnet of millions of unique IPs creates millions of unique counter keys, blowing up memory in the counter store. Add a coarser global per-endpoint limit upstream so the aggregate is capped regardless of identity, and pre-filter unknown IPs through a reputation tier that bucket-shares them into one shared counter.
-- **Synchronized client retry stampede** — when many clients all hit a 429 at once and obey the same `Retry-After`, they retry simultaneously and re-trigger the limit at the next boundary, creating an oscillation. Add jitter to `Retry-After` (e.g., `retry_after = base + random(0, base/2)`) and require client SDKs to apply exponential backoff on top, so the retries spread across time rather than synchronizing.
-- **Boundary spike on fixed window** — a client firing `limit` requests in the last 100ms of a window and another `limit` in the first 100ms of the next effectively gets `2 × limit` over a 200ms span. Use sliding-window-counter or GCRA on any endpoint where this matters (billing, login attempts); accept the spike on coarse protective limits where the doubling doesn't change blast radius materially.
+- **Race on the shared counter.** Two requests reading the counter in the same microsecond both see "99 < 100" and both proceed. *Mitigation:* the check and the update run as one script inside the store, never as a read from the caller followed by a write. This is the mechanism in the deep dive and it is not optional.
+- **A single hot key.** Sharding spreads keys, not one key, so one identity at 200k req/s saturates one primary at twice its ~100k/s ceiling. *Mitigation:* sub-counters at `limit/k` for ceilings nobody owns, block reservation of W tokens for a large named customer. Both trade exactness for placement, and both are better than the alternative of a shard at 100% CPU making everyone's decisions slowly.
+- **Cross-region drift.** Independent regional counters cannot agree without paying a 50 to 150ms WAN round trip per request. *Mitigation:* accept eventual sync and publish the bound, worst case `regions × limit`. Acceptable for protective limiting, unacceptable for a hard quota, where the identity is pinned to a home region via geo-DNS so its counter is single-region.
+- **Counter store outage.** If every request blocks on a dead store, a counter outage becomes a full-site outage. *Mitigation:* a 5ms timeout and a circuit breaker that trips after 5 consecutive failures, then fail open to coarse per-node counters for quota limits. Note this is the quota posture only; the scarce-resource limits described in the third fork reject during the same outage, by design.
+- **Rule hot reload.** Pushing a rule change through a deploy is too slow when an attacker is mid-attack. *Mitigation:* the config service publishes invalidation events on a pub/sub channel, nodes drop the cached rule and refetch lazily, and changes propagate in under a second. Every new rule runs in shadow mode first, computing the decision without enforcing it.
+- **Cardinality explosion.** A botnet of millions of unique IPs creates millions of unique keys and grows the working set well past the 20GB the cluster was sized for. *Mitigation:* a coarse per-endpoint ceiling upstream that caps the aggregate regardless of identity, plus a reputation tier that shares one counter across unknown IPs. TTL eviction at window length already reclaims most of it, so the failure is a memory spike rather than a permanent leak.
+- **Synchronised client retry.** A million clients that receive the same `Retry-After` retry in the same instant and re-trigger the limit at the next boundary, oscillating. *Mitigation:* `retry_after = base + random(0, base/2)`, and exponential backoff in the client SDK on top. The GCRA form gives the exact base for free.
 
 **Failure modes**
 
 | Layer | Failure | Detection | Mitigation |
 |---|---|---|---|
-| Counter store | Redis primary crashes mid-traffic | health-check failures, `CONNECTION REFUSED` on middleware | Sentinel/Cluster failover within seconds; circuit breaker on middleware switches to fail-open until the new primary is hot |
-| Network | Partition between gateway and counter store | spike in op-timeout rate, p99 > 50ms | per-region counter store with regional fail-open; document `regions × limit` worst-case over-allow |
-| Correctness | Lua script bug double-increments | counter drift vs request count, billing reconciliation alerts | shadow-mode every new rule for 24h before enforcement; checksum the loaded Lua against a known hash |
-| Resource | Cardinality explosion (botnet, unique IPs) | counter-store memory growth rate, eviction rate spike | coarse global per-endpoint limit upstream; bucket-share unknown IPs through a reputation tier |
-| Resource | Hot-shard CPU saturation on a popular tenant | per-shard CPU at 100%, op latency climbing on one shard only | rebalance vnodes to spread the tenant; client-side jittered backoff on 429 to dampen feedback |
+| Counter store | Redis primary crashes mid-traffic | health-check failures, `CONNECTION REFUSED` on middleware | Sentinel/Cluster failover within seconds; circuit breaker switches quota limits to fail-open until the new primary is hot, scarce-resource limits reject |
+| Network | Partition between gateway and counter store | spike in op-timeout rate, p99 > 5ms | per-region counter store with regional fail-open; document `regions × limit` worst-case over-allow |
+| Correctness | Script bug double-decrements | counter drift vs sampled request count, billing reconciliation alerts | shadow-mode every new rule for 24h before enforcement; checksum the loaded script against a known hash |
+| Resource | Cardinality explosion (botnet, unique IPs) | counter-store memory growth rate, eviction rate spike | coarse per-endpoint ceiling upstream; bucket-share unknown IPs through a reputation tier |
+| Resource | Hot-shard CPU saturation on one popular key | per-shard CPU at 100%, op latency climbing on one shard only | sub-counters or block reservation for that key; jittered client backoff on 429 to dampen the feedback loop |
 | Upstream | Config service down, no rule refreshes | rule-cache age metric > N minutes | serve last-known-good rules from local cache; alert ops; refuse new rule-create operations until config service recovers |
-| Process | Middleware OOM under sudden load | container restarts, p99 latency spikes | bounded per-identity memory caps, request-level timeouts (5ms), drop-and-fail-open before OOM-killer fires |
+| Process | Middleware OOM under sudden load | container restarts, p99 latency spikes | bounded per-identity memory caps, 5ms request-level timeouts, shed before the OOM killer fires |
 
 **Unresolved**
 
-TODO. Two or three things this design genuinely does not handle well, and what you would do about each.
+**Per-key limits enforce contracts; they do not protect capacity, and the two get conflated.** Each key gets its own budget, so the budgets sum to far more than the backend can serve: 100M identities at 100 req/min is six orders of magnitude above any real capacity. The design only protects the backend because the number of simultaneously active keys usually stays in a narrow band. When that assumption breaks, at a market open, or during a retry storm after an incident, ten thousand tenants can each be comfortably inside their limit while the backend falls over, and the limiter will report a healthy allow rate throughout. The honest fix is a different mechanism with a different input signal: concurrency-based admission control that sheds by priority when the backend's own latency degrades. We add a coarse per-endpoint ceiling as a partial backstop, but it fires on total volume and cannot tell the tenant it should shed from the tenant it should protect, so during a genuine overload it throttles the wrong callers.
+
+**The fail-open and fail-closed layers disagree during the same outage, and the client sees both.** The third fork makes the posture a per-limit choice, which is correct in isolation. During a counter-store failure it means the quota layer waves everything through while the risk gate rejects everything, and both verdicts land on the same request from the same client, which reads as the platform failing selectively rather than failing. The mitigation is to give the fail-closed limits their own store so a correlated failure is at least unlikely, and that doubles the operational surface for the one limit that most needs to be simple to reason about. Today both sit on the same cluster. That is a known gap, not a design we would defend, and the sequencing argument is that the second store is worth building on the day the first risk gate goes in front of real money.
+
+**`Retry-After` is advice, and the clients that matter ignore it.** Jitter fixes the well-behaved SDK, which was never the problem. A 429 is cheaper to serve than the request it replaced and cheaper for the attacker to receive, so for a hostile client the most economical strategy is to keep hammering, and the polite reply subsidises it. The only response that actually costs the sender is refusing at the connection level and returning nothing, and that breaks error handling for legitimate clients and removes the diagnosis for the paying customer who is merely misconfigured. What we do is tier it: 429 with headers for the first burst over the limit, connection-level drop for a sustained offender. The cost of that is a support story where the same customer sometimes gets a clean 429 and sometimes gets a timeout, which is genuinely harder to debug than either alone. This boundary, between rate limiting and abuse handling, is where this design has the least to say.
 #### Drill questions
-1. What if Redis dies mid-traffic?
+1. What if the counter store dies mid-traffic?
 2. How do you handle a botnet hammering with millions of unique IPs?
-3. Token bucket vs sliding window — why default to token bucket?
+3. Token bucket vs sliding window: why default to token bucket?
 4. How do you keep counters consistent across regions?
 5. How do you test it?
 6. How do clients know they're being throttled fairly?
-7. GCRA vs token bucket — when do you pick GCRA?
+7. GCRA vs token bucket: when do you pick GCRA?
 8. How do you implement client-side rate limiting that respects `Retry-After`?
 9. How do you handle tiered limits (free vs paid users)?
-
-TODO. Only 9 drill questions carried over, top up to at least 10.
+10. Whose clock decides whether a token has refilled?
+11. The limiter sits in front of a broker's exchange session, capped by the venue at 50 orders per second. What changes?
+12. One API key is doing 200k req/s on its own. What breaks first, and what do you do?
 #### Answers to drill questions
-1. Circuit-break on the middleware and fail open — letting traffic through beats a 503 cascade. *If pushed:* run a cluster with replicas + Sentinel; per-node local fallback counters bound the blast radius until Redis recovers.
+1. Circuit-break in the middleware and fail open for quota limits, because letting traffic through beats a 503 cascade, and degrade to coarse per-node counters rather than to nothing. *If pushed:* the posture is per-limit, not global. Anything guarding a scarce resource rejects during the same outage, which is the third fork, and those limits should not share a store with the quota counters.
 
-2. Cardinality explosion blows up the counter store. Add a coarse global per-endpoint limit upstream and an IP-reputation pre-filter so unknown IPs share a bucket. *If pushed:* HyperLogLog (a probabilistic counter that estimates "how many unique values have I seen?" using a few KB of memory regardless of input cardinality) for cheap approximate cardinality on the hot path; offload reputation scoring to an async pipeline.
+2. Cardinality explosion blows up the working set: millions of new keys against a cluster sized for 100M × 200B. Add a coarse per-endpoint ceiling upstream so the aggregate is capped regardless of identity, and pre-filter unknown IPs through a reputation tier that shares one counter. *If pushed:* HyperLogLog gives cheap approximate cardinality on the hot path, a few KB regardless of input size, which is enough to alarm on; reputation scoring itself belongs in an async pipeline, not in front of the request.
 
-3. Token bucket matches real API usage (clients burst then idle). Sliding window is smoother but rejects legitimate bursts and uses more memory per identity. *If pushed:* sliding-window-counter for strict-fairness endpoints (auth, payments); token bucket for general API.
+3. Token bucket matches how clients actually behave, bursting then idling, and it lets you state the burst and the sustained rate as two separate numbers. Sliding window is smoother but rejects legitimate bursts and cannot express "burst 100, sustain 10". *If pushed:* switch to sliding window counter wherever a 10× instantaneous spike is what the downstream cannot absorb, such as a limit sized to a fixed connection pool, or where the boundary doubling is visible on a customer's invoice.
 
-4. You don't — accept eventual sync and document the bound: worst-case over-allow is `regions × limit`. *If pushed:* CRDTs (G-Counters) for monotonic per-identity counters; or pin identity to home region via geo-DNS so the counter is local.
+4. You don't. Accept eventual sync and publish the bound: worst-case over-allow is `regions × limit`, because a cross-region round trip is 50 to 150ms and cannot sit in front of every request. *If pushed:* G-Counter CRDTs work for monotonic per-identity counters and converge without coordination; where the bound is genuinely unacceptable, pin the identity to a home region via geo-DNS so its counter is single-region and pay the cross-region latency only for that minority of traffic.
 
-5. Load-test with synthetic clients at 1.1× and 10× the limit; assert allow rate matches expected. Chaos-test by killing Redis mid-flight to verify fail-open. *If pushed:* shadow-mode in prod (compute decision, don't enforce) before flipping enforcement on a new rule.
+5. Load-test with synthetic clients at 1.1× and 10× the limit and assert the allow rate matches the expected shape, including the burst. Chaos-test by killing the store mid-flight to verify fail-open and the 5ms timeout. *If pushed:* shadow mode in production, computing the decision without enforcing it, for 24 hours before any new rule enforces; the interesting bugs are in rule matching, not in the arithmetic.
 
-6. `X-RateLimit-{Limit,Remaining,Reset}` headers on every response, `Retry-After` on 429s. *If pushed:* expose per-key debug endpoints for support; emit per-identity 429-rate metrics so you can spot a noisy neighbor or misconfigured rule.
+6. `X-RateLimit-{Limit,Remaining,Reset}` on every response and `Retry-After` on 429s. *If pushed:* per-key debug endpoints for support, and a per-identity 429-rate metric so a noisy neighbour or a misconfigured rule shows up before the customer opens a ticket. Note fairness across keys is not something headers can deliver: budgets are per key and they sum to more than capacity.
 
-7. GCRA stores one timestamp (TAT) instead of `(tokens, last_refill_ts)` — half the memory and the decision is a single arithmetic compare. Same semantics. *If pushed:* Redis-Cell module gives you GCRA atomically in one round-trip with no Lua; Stripe and SlashID use this in production for per-identity limits.
+7. GCRA stores one timestamp instead of `(tokens, last_refill_ts)`, the decision is a single comparison, and the deny path yields the exact `Retry-After` instead of an estimate. *If pushed:* not for the memory, which is dominated by ~176B of key and store overhead either way. Redis Cell gives GCRA atomically in one round trip with no script to maintain.
 
-8. Client SDK reads `Retry-After` on 429, schedules its next attempt at `now + retry_after + jitter`, and exponentially backs off thereafter. Without jitter, every throttled client retries at the same instant and creates a synchronized stampede. *If pushed:* client maintains a local token bucket synced from `X-RateLimit-Remaining` headers and pre-throttles before the server has to send 429s — saves a round trip on the rejection.
+8. The client SDK reads `Retry-After` on a 429 and schedules its next attempt at `now + retry_after + jitter`, backing off exponentially thereafter. Without the jitter every throttled client retries in the same instant and re-triggers the limit. *If pushed:* the better SDK keeps a local token bucket seeded from `X-RateLimit-Remaining` and pre-throttles, saving the round trip that produces the rejection. Also concede that none of this binds a client that chooses to ignore it.
 
-9. Rule lookup includes user tier; the rule store keys on `(scope, identifier_pattern, tier)` and the middleware joins user→tier from a fast cache. Tier change is a cache invalidation, not a rule rewrite. *If pushed:* burst-and-sustained tiers (e.g., free=10/s burst + 100/min sustained) require two stacked counters per identity — both must pass.
+9. Rule lookup includes the user tier: the rule store keys on `(scope, identifier_pattern, tier)` and the middleware joins user to tier from a fast cache, so a tier change is a cache invalidation rather than a rule rewrite. *If pushed:* burst-and-sustained tiers, say free = 10/s burst plus 100/min sustained, need two stacked counters per identity and both must pass, which doubles the store round trips unless both live in one key and one script.
+
+10. The store's clock, read inside the script, never the caller's. With 200 gateway nodes, NTP drift of a few milliseconds means the same request gets a different verdict depending on where it landed, and a client routed to a fast-clocked node is credited allowance it did not earn. *If pushed:* in Redis this means `redis.call('TIME')`, which older guidance forbids because a non-deterministic script could not be replicated verbatim; effects replication has been the default since Redis 5 in 2018, so it replicates writes rather than code and this is fine. Verify against the version you run.
+
+11. The default inverts. This is a risk gate wearing a rate limiter's clothes: exceeding 50 orders per second does not degrade a backend, it gets the session disconnected by the venue, so the limiter fails closed and rejects when it cannot verify the count. It also wants a real counter rather than a statistical one, so no sub-counters and no block reservation across nodes. *If pushed:* the clean shape is a single owner for that session's counter, since the throughput is trivially small at 50/s, plus a separate store so it shares no failure domain with the counters serving 1M req/s of ordinary API traffic. Order throttles, per-desk notional caps and venue message-rate allocations are all the same mechanism with this inverted default.
+
+12. The shard holding that key saturates first, at roughly twice a primary's ~100k script/s ceiling, and because the key is the unit of placement no resharding helps. Every other key on that shard gets slow decisions as collateral. *If pushed:* block reservation is the better fix for a single large customer, one round trip per W requests with worst-case overshoot bounded at `N × W`, which is a number you can put in their contract. Sub-counters at `limit/k` are the fix when the hot key is a fleet-wide ceiling that nobody owns. Both spend exactness; doing nothing spends everyone's latency.
 #### Whiteboard script
-TODO
+**0-5, frame it and get the two numbers.** Open with the thesis, not the components: "a rate limiter is three decisions, and the algorithm is the least interesting one." Then ask the two questions that actually change the design: what is this limit protecting, a scarce resource or a commercial quota, and how many nodes enforce it. The first settles fail open against fail closed, the second settles shared store against local counters. State your assumptions out loud: 1M req/s peak, 100M identities, 200 gateway nodes, 10ms p99 budget. Draw nothing yet.
 
-A 45 minute budget: what to cover in 0-5, 5-15, 15-35 and 35-45, what to say first, and a line starting `Cut first:`.
+**5-15, the spine.** Four boxes: client, gateway with the limiter inside it, backend, and off to the side the counter store and the rule config. Say the key is `(identity, scope)` and why you key on the account rather than the IP wherever auth exists. Say the check is one round trip and one atomic script, and say the wrong version out loud, read then increment, so the interviewer knows you know why it is wrong. Put the sizing on the board while you draw: 16 primaries because 1M/s over a ~100k/s per-shard ceiling, 1.25GB each, so throughput sized the cluster and memory came free. Name the algorithm once, token bucket or GCRA, and move on. Do not spend the middle band on algorithms.
 
-**Raw material, from the old Talking Points:**
+**15-35, the drill.** This is the interview, so protect the time. Take the second fork with the arithmetic visible: 200 nodes each allowing the full limit is 200× the intended rate, dividing instead gives 0.5 requests per node per window, so a shared store unless the limit is large relative to the fleet. Then the third fork, and give both sides: fail open for a customer quota, fail closed for an order throttle in front of a venue session capped at 50 orders per second, and say plainly that they are the same mechanism with opposite defaults. Then go deep on the counter path: atomicity inside the store and why single-threaded execution is what provides it, whose clock decides, the 5ms timeout and why a 1s timeout turns a degradation into an outage, and the hot key that sharding cannot help. Keep multi-region as a one-liner ready to expand: regions enforce locally, the bound is `regions × limit`, and you state the bound rather than pretending it is exact.
 
-- **Fail-open is non-negotiable** — state explicitly that the limiter must never be a bigger outage than what it's protecting; senior interviewers listen for this within the first two minutes.
-- **The counter store is the bottleneck, not the algorithm** — algorithm choice (token bucket vs sliding window) is a 30-second discussion; sharding the counter store, atomic ops, and circuit breakers are the real engineering surface.
-- **GCRA is the production-grade default** — citing Stripe/SlashID and the Redis-Cell module signals you've operated rate limiters and not just read about them; it's the answer that distinguishes "studied" from "shipped".
-- **Cross-region consistency is bounded, not exact** — naming the bound (`regions × limit`) and explaining why exact-global is uneconomic is a senior-level move; candidates who hand-wave it lose credibility.
-- **Two clients with the same shape behave very differently** — a coordinated attacker hitting one identity vs a botnet across millions of identities require different mitigations (sharded counter vs cardinality-cap + reputation), and conflating them is a junior tell.
-- **Header design is part of the contract** — `X-RateLimit-{Limit,Remaining,Reset}` plus `Retry-After` with jitter is what the client SDK needs to back off correctly; talking about headers shows you've thought about the full feedback loop.
-- **Layered limits are the real architecture** — L4 packet rate at the LB, L7 protective limits at the gateway, application-level fairness, per-tenant quotas — each layer protects a different failure mode and a senior answer enumerates them rather than designing one monolithic limiter.
+**35-45, concede and close.** Give the gaps before they are found: per-key limits enforce contracts and do not protect capacity, so ten thousand tenants inside their limits can still take the backend down and the real answer there is concurrency-based admission control; the fail-open and fail-closed layers contradict each other during the same outage; `Retry-After` is advice and a hostile client ignores it. Then the operational surface in two minutes: fail-open rate as the metric you page on, allow-rate-by-rule to catch a bad config push, cardinality growth as the botnet signal, and shadow mode for every rule before it enforces.
+
+Cut first: the four-algorithm comparison, then the GCRA arithmetic, then the header contract. All three are easy to say, all three are in every write-up of this question, and none of them changes the architecture. Never cut: fail open against fail closed with a stated reason, the node-count arithmetic behind the shared store, and the admission-control concession.
 #### Appendix
 **Data model**
 
 - **Rules** (transactional config store):
-  `(rule_id, scope, identifier_pattern, endpoint_pattern, algorithm, limit, window_sec, priority)`
-- **Counter store** (sharded in-memory cache, atomic check-and-increment):
+  `(rule_id, scope, identifier_pattern, endpoint_pattern, algorithm, limit, window_sec, priority, on_store_failure)`
+- **Counter store** (sharded in-memory, atomic check-and-update):
   - Window: `key = rl:{scope}:{id}:{endpoint}:{window_start}`, INT counter, TTL = window
   - Token bucket: `key = rl:bucket:{id}:{endpoint}`, HASH `{tokens, last_refill_ts}`
+  - GCRA: `key = rl:tat:{id}:{endpoint}`, single `tat` field, TTL = window + burst
 
 **API contract**
 
@@ -475,20 +492,21 @@ is_allowed(identity, endpoint) →
 
 **Observability**
 
-- **`rate_limiter.decision_latency_p99`**: time from request entry to allow/deny decision — emitted by middleware — alert if > 5ms for 5min (budget is 10ms total)
-- **`rate_limiter.counter_op_latency_p99`**: round-trip time to the counter store including Lua execution — emitted by middleware on every op — alert if > 2ms for 5min
-- **`rate_limiter.fail_open_rate`**: fraction of requests bypassing the limiter due to circuit-breaker trip — emitted on every fail-open path — alert immediately if > 0.1%
-- **`rate_limiter.allow_rate_by_rule`**: per-rule allow/deny ratio — emitted as labelled counters — alert on sudden inversions (rule that was 99% allow flips to 99% deny indicates a bad config push)
-- **`rate_limiter.cardinality_active_keys`**: distinct identity keys with non-zero counters — sampled every minute via HLL — alert if 24h growth > 5× (botnet signal)
-- **`rate_limiter.over_allow_rate`**: actual req-rate per identity vs configured limit — computed offline from sampled decision logs — alert if any identity exceeds 1.2× its limit
-- **SLOs:** p99 decision latency 10ms, availability 99.99% (with fail-open absorbing the rest), error budget 4.3min/month of fail-open before paging on the limiter itself.
+- **`rate_limiter.decision_latency_p99`**: time from request entry to allow/deny decision, emitted by middleware, alert if over 5ms for 5min against a 10ms budget.
+- **`rate_limiter.counter_op_latency_p99`**: round trip to the counter store including script execution, emitted on every op, alert if over 2ms for 5min. The 5ms client timeout sits above this.
+- **`rate_limiter.fail_open_rate`**: fraction of requests bypassing the limiter on a circuit-breaker trip, alert immediately above 0.1%.
+- **`rate_limiter.fail_closed_rejects`**: the same event on the scarce-resource limits, which reject rather than bypass; a spike here and in fail_open_rate together means one store outage is producing both behaviours.
+- **`rate_limiter.allow_rate_by_rule`**: per-rule allow/deny ratio, alert on inversions, since a rule that was 99% allow flipping to 99% deny is a bad config push.
+- **`rate_limiter.cardinality_active_keys`**: distinct keys with non-zero counters, sampled per minute via HLL, alert if 24h growth exceeds 5×.
+- **`rate_limiter.over_allow_rate`**: actual request rate per identity against the configured limit, computed offline from the 1% sampled decision logs, alert above 1.2×. It cannot be computed from the counters themselves, which is why the sampled log exists.
+- **SLOs:** p99 decision latency 10ms, availability 99.99% with fail-open absorbing the rest, error budget 4.3min/month of fail-open before the limiter itself pages.
 
 **Multi-region and DR**
 
-- **Replication mode:** regional-isolation by default — each region runs its own counter store with no cross-region sync on the hot path; the WAN RTT (50–150ms) cannot live on a per-request limiter. Active-active across regions with periodic gossip is the alternative when soft global enforcement is needed.
-- **RTO / RPO:** RTO 30s (failover to fail-open if regional Redis dies, then to a hot-standby cluster); RPO is non-applicable for the counter state itself — counters are ephemeral and rebuild as traffic flows. The rule store has RPO 0 (synchronously replicated config).
-- **Failover trigger & cadence:** automatic on circuit-breaker trip per region; tested monthly via game-day exercises that kill the regional Redis primary in production and verify fail-open + standby promotion. Quarterly chaos drill drops an entire region.
-- **Cross-region cost trade-off:** independent regional counters cost ~zero cross-region bandwidth but accept up to `regions × limit` over-allow at the global level — fine for protective limiting (DDoS, abuse) and unacceptable for billing quotas, where you pin identities to home regions via geo-DNS so the counter is single-region.
+- **Replication mode:** regional isolation by default. Each region runs its own counter store with no cross-region sync on the hot path, because a 50 to 150ms WAN round trip cannot live in front of every request. Active-active with periodic gossip is the alternative when soft global enforcement is needed.
+- **RTO / RPO:** RTO 30s, failing open to local counters while the regional store fails over to a hot standby. RPO is not applicable to counter state, which is ephemeral and rebuilds as traffic flows. The rule store is synchronously replicated at RPO 0.
+- **Failover trigger and cadence:** automatic on circuit-breaker trip per region; tested monthly with a game day that kills the regional primary in production and verifies both the fail-open path and standby promotion. Quarterly drill drops an entire region.
+- **Cross-region cost trade-off:** independent regional counters cost almost no cross-region bandwidth and accept up to `regions × limit` over-allow globally. That is fine for protective limiting and unacceptable for billing quotas, where identities are pinned to a home region so the counter is single-region.
 
 ### 2. Design Consistent Hashing
 #### Problem
@@ -843,53 +861,69 @@ add_node(server_id) / remove_node(server_id)
 
 ### 3. Design a Distributed Key-Value Store (Dynamo-style)
 #### Problem
-Build a partitioned, replicated KV store with tunable consistency, high availability, and horizontal scale.
+Build a partitioned, replicated key-value store that stays writable when nodes, racks and whole regions fail, and that lets each caller choose per request how much consistency it is willing to pay for. Values are small and mutable, every node is interchangeable, and no key has a leader. The interesting question is not how to store bytes; it is where you pay for the disagreement that leaderlessness permits.
 #### Core
-TODO
+Everything follows from one refusal: no key has a leader. Give that up and availability stops depending on any particular machine being alive, but you now allow two clients to write the same key at once, and every remaining decision is about where you pay for that.
 
-Write the whole answer as you would give it in sixty seconds, 200 to 300 words, standing alone.
+Any node can serve any request. It hashes the key onto a consistent hashing ring, finds the N nodes that own that range, and fans the request to all of them. It answers the client after W acknowledgements on a write and R responses on a read. Set W plus R greater than N and those two sets must share a member, so a read always reaches at least one replica that took the last acknowledged write. With N of 3, W and R of 2 is the cheapest pair that holds, and it tolerates one dead or slow replica on each path.
+
+Locally each replica is a log structured merge tree: writes append to a commit log and a sorted in-memory table, flush to immutable files, compact in the background. Writes are sequential and cheap. Point reads cost one or two file opens once a Bloom filter per file rules the rest out.
+
+Divergence is the normal state, because W of 2 leaves one replica behind on every write. Three mechanisms converge it on three timescales: read repair fixes what a read happens to notice, hinted handoff parks writes for a node that is down and replays them within hours, Merkle tree anti-entropy sweeps whatever is left.
+
+The residue is concurrent writes to one key. Timestamps alone lose data under clock skew. Version vectors detect concurrency honestly, but they only detect it. Something above the store has to merge.
 #### Summary
-**The picture in your head:** a library with copies of every book split across 1000 branches. You walk into any branch (that is your coordinator), ask for a book (your key), and the librarian knows which other branches hold copies. Most of the time the branches agree on which edition they have. Occasionally one branch closed for a week and missed a new edition — the librarian still gives you an answer, but might quietly go update the stale branch afterward.
+**The picture in your head:** a library with copies of every book split across 1000 branches. You walk into any branch (that is your coordinator), ask for a book (your key), and the librarian knows which other branches hold copies. Most of the time the branches agree on which edition they have. Occasionally one branch closed for a week and missed a new edition. The librarian still gives you an answer, and might quietly go update the stale branch afterward.
 
 **The approaches people actually take:**
-TODO. Two or three things a competent engineer might reach for, in plain language and before any product name, with what each one buys and roughly when it wins.
 
-**The single-request walkthrough:** a client writes `PUT user_42 → {"name":"Alice"}` with N=3, W=2. Any node in the cluster can be the coordinator. The coordinator hashes `user_42` using the ring from Pattern 2, finds the 3 replica nodes (R1, R2, R3), and sends the write in parallel. R1 and R2 respond within 5ms. That satisfies W=2, so the coordinator acks the client: "write succeeded." R3 is slow (maybe a GC pause) and responds at 30ms — the client has already moved on. Later, a `GET user_42` comes in. The coordinator reads from R1 and R2 (R=2 again). If both return the same value, done. If one returns an older version, the coordinator silently writes the newer value back to the stale replica in the background — that is read repair, fixing drift on the read path without any scheduled job.
+*Every copy accepts writes, and the caller says how many copies must answer.* No node is special, so a request is served by whoever is reachable, and one deployment serves a strict caller and a sloppy one at once because the count is a per-request argument, not a cluster setting. It buys availability that survives any single machine, rack or region, with no failover step and no election pause. It costs the guarantee that a key has one value: two clients can write it in the same instant and both succeed, so the store hands back the mess and something above it cleans up.
+
+*One elected writer per key range, streaming an ordered log to its followers.* All writes for a range pass through one point, so there is one order and no conflicts to reconcile, ever. Reads come from the writer for a linearizable answer or from a follower for a cheap stale one. It costs seconds of unavailability while a replacement writer is elected, and it pins the write path to wherever that writer lives, which hurts once callers span regions. It wins whenever a value carries an invariant: a balance, a stock count, anything conditionally updated.
+
+*Restrict what a value may be to types that merge themselves.* Sets that only grow, counters that only add, maps with a defined tie-break per field. Concurrent writes still both succeed, but the merge is a property of the type, so replicas converge with no coordination and no conflict ever reaches the caller. It costs expressiveness: no arbitrary blobs, no conditional update. It wins for carts, presence, view counts, and for multi-region writes where a coordination round trip is unaffordable.
+
+**The single-request walkthrough:** a client writes `PUT user_42 → {"name":"alice"}` with N=3, W=2. Any node in the cluster can be the coordinator. The coordinator hashes `user_42` using the ring from Pattern 2, finds the 3 replica nodes (R1, R2, R3), and sends the write in parallel. R1 and R2 respond within 5ms. That satisfies W=2, so the coordinator acks the client: "write succeeded." R3 is slow (maybe a GC pause) and responds at 30ms, by which point the client has moved on. Later, a `GET user_42` comes in. The coordinator reads from R1 and R2 (R=2 again). If both return the same value, done. If one returns an older version, the coordinator silently writes the newer value back to the stale replica in the background. That is read repair, fixing drift on the read path without any scheduled job.
 
 **The pieces (and what each one is for):**
-- **Coordinator** — any node that receives a client request. Not a dedicated machine; any replica can play this role. It fans reads and writes to the key's replica set and waits for quorum.
-- **W and R quorum values** — W is the number of replicas that must acknowledge a write before the client gets a success. R is the number that must respond to a read. The invariant `W + R > N` (where N is total replicas, typically 3) guarantees that any read overlaps with any write by at least one node, so a read can never miss the latest write. Default is W=R=2, N=3.
-- **LSM-tree storage engine** — the local storage format on each replica. LSM stands for "Log-Structured Merge tree." Writes go first to an in-memory buffer (fast), then get flushed to immutable sorted files on disk. Reads might need to check several files. The tradeoff: writes are very cheap (sequential), reads are slightly more expensive. Cassandra uses this; MySQL's B-tree is the alternative (reads are cheap, writes are more random).
-- **Vector clocks (conflict detection)** — when two clients write the same key concurrently (say `user_42` from Paris and Tokyo in the same millisecond), both writes succeed, but they are flagged as concurrent. A vector clock is a small counter tuple like `{A:3, B:5}` — each replica increments its own counter on every write. If one dominates (every component is greater-or-equal), it is newer. If neither dominates, the writes are concurrent and the application gets both values to merge.
-- **Hinted handoff** — if R3 is unreachable when a write arrives, the coordinator writes to a healthy neighbor instead and leaves a note ("this write was intended for R3, deliver it when R3 comes back"). When R3 recovers, the neighbor replays the buffered write. Bridges the gap between a short outage and a full repair scan.
-- **Anti-entropy with Merkle trees** — a Merkle tree is a tree of hashes: leaves hash small key ranges, parents hash their children. Two replicas compare root hashes. If they match, everything is identical — done. If they differ, recurse into the differing subtrees. This finds exactly which key ranges diverged in O(log n) comparisons rather than comparing every key.
+- **Coordinator.** Any node that receives a client request. Not a dedicated machine; any replica can play this role. It fans reads and writes to the key's replica set and waits for quorum.
+- **W and R quorum values.** W is the number of replicas that must acknowledge a write before the client gets a success. R is the number that must respond to a read. The invariant `W + R > N` (where N is total replicas, typically 3) guarantees that any read overlaps with any acknowledged write by at least one node, so a read can never miss the latest acknowledged write. Default is W=R=2, N=3.
+- **LSM-tree storage engine.** The local storage format on each replica. LSM stands for "log-structured merge tree." Writes go first to an in-memory buffer (fast), then get flushed to immutable sorted files on disk. Reads might need to check several files. The trade: writes are very cheap because they are sequential, reads are slightly more expensive. Cassandra uses this; a B-tree is the alternative, where reads are cheap and writes are random.
+- **Version vectors (conflict detection).** When two clients write the same key concurrently (say `user_42` from Paris and Tokyo in the same millisecond), both writes succeed, but they are flagged as concurrent. A version vector is a small counter tuple like `{A:3, B:5}`, one counter per writer, incremented on every write. If one dominates (every component is greater or equal), it is newer. If neither dominates, the writes are concurrent and the application gets both values to merge.
+- **Hinted handoff.** If R3 is unreachable when a write arrives, the coordinator writes to a healthy neighbour instead and leaves a note: this write was intended for R3, deliver it when R3 comes back. When R3 recovers, the neighbour replays the buffered write. Bridges the gap between a short outage and a full repair scan.
+- **Anti-entropy with Merkle trees.** A Merkle tree is a tree of hashes: leaves hash small key ranges, parents hash their children. Two replicas compare root hashes. If they match, everything is identical and there is nothing to do. If they differ, recurse into the differing subtrees. This finds exactly which key ranges diverged in O(log n) *comparisons* rather than comparing every key, though it still reads every key to build the tree.
 
-**The thing that makes it hard:** two clients write the same key at the same millisecond. Client A (from New York) writes `{"balance": 100}`. Client B (from London) writes `{"balance": 200}`. Both hit different coordinators. Both satisfy W=2. Both writes succeed. Now replica R1 has `{balance:100}` and R2 has `{balance:200}`. The next read might return either value depending on which replicas respond first. Last-Write-Wins (the simpler fix) breaks under clock skew — if New York's clock is 2 seconds ahead of London's, the newer write by wall time might actually be the older write by real-world order. Vector clocks detect this as a true conflict and hand both versions to the application.
+**The thing that makes it hard:** two clients write the same key at the same millisecond. Client A (from New York) writes `{"balance": 100}`. Client B (from London) writes `{"balance": 200}`. Both hit different coordinators. Both satisfy W=2. Both writes succeed. Now replica R1 has `{balance:100}` and R2 has `{balance:200}`. The next read might return either value depending on which replicas respond first. Last-write-wins, the simpler fix, breaks under clock skew: if New York's clock is 2 seconds ahead of London's, the newer write by wall time can be the older write by real-world order, and the loss is silent. Version vectors detect this as a true conflict and hand both versions to the application.
 
-**Why this design and what it costs:** quorum reads and writes with W+R>N is the default because it gives you strong consistency at the cost of one replica: if any one of the three is down, writes still succeed (W=2 of 3) and reads still work (R=2 of 3). The tradeoff you accept is that with W=R=2 N=3, a minority of requests will see slightly stale data before read repair catches up — eventual consistency, not strict consistency.
+**Why this design and what it costs:** N=3 with W=R=2 is the default because it is the cheapest setting that satisfies `W + R > N` while tolerating one dead or slow replica on both paths. Be precise about what that buys. Any read intersects any acknowledged write in at least one replica, so the latest acknowledged value is always among the responses. It does not follow that the store is strongly consistent. A write that reached one replica and then failed can still be read later, two successive reads can return different values, and a read-modify-write can lose an update no matter how W and R are set. What you get is a store that never stops accepting writes and converges quickly, in exchange for an application that has to be written to tolerate a value it did not expect.
 
 **If you were building it tomorrow:**
-- Cassandra with N=3, W=2 (`LOCAL_QUORUM`), R=2, LRU compaction per keyspace.
-- LSM storage with Bloom filters per SSTable (a Bloom filter is a tiny probabilistic structure that says "this key is definitely not in this file" — eliminates ~99% of unnecessary disk reads).
+- Cassandra with N=3, W=2 (`LOCAL_QUORUM`), R=2, leveled compaction per keyspace. Note this picks last-write-wins for you: Cassandra resolves at cell granularity by timestamp and never returns siblings. If a keyspace needs true sibling merge, that keyspace goes on a Riak-lineage store or carries an application-level version vector inside the value.
+- LSM storage with Bloom filters per SSTable. A Bloom filter is a tiny probabilistic structure that says "this key is definitely not in this file", which eliminates roughly 99% of unnecessary disk reads at a 1% false-positive setting.
 - Hot path pseudocode for a write:
   ```
   replicas = ring.get_replicas(key, n=3)
-  futures = [r.write(key, value, vector_clock) for r in replicas]
+  futures = [r.write(key, value, version_vector) for r in replicas]
   wait_for(futures, count=W)  # return to client after W acks
   background: hinted_handoff for any unreachable replica
   ```
 #### What this is really testing
-TODO
+Whether you understand that a leaderless store does not remove the need to agree about a key. It moves the agreement from write time to read time, and someone still pays. `W + R > N` is the line that separates a candidate who read the 2007 Dynamo paper from one who understood it, but only if they state what it actually says: the set of replicas that acknowledged a write and the set that answers a read must intersect, so a read is guaranteed to reach at least one replica holding the last acknowledged write. That is an overlap property and nothing more. It does not order concurrent writes, it does not make two successive reads agree, and it does not make read-modify-write safe at any W and R. Everything an interviewer pushes on lives in that gap: which of the returned versions is later, what happens when neither is, who decides, and what the store does with a delete when a replica that missed it is still allowed to answer reads. Saying "Cassandra is eventually consistent" classifies the system instead of describing the knob. Consistency here is per request, not per system: one keyspace serves a W=R=2 caller and a W=R=1 caller in the same second.
 
-The one insight this question exists to elicit, then the contrast with the question it most resembles and why the answers differ.
+The contrast is with the object store question. Both partition and replicate durable bytes across a fleet with no single point of failure, and both have to answer how many copies and where. They diverge on two facts about the payload, and the divergence is total. Objects there are immutable and megabytes to gigabytes; values here are mutable and about 1KB.
 
-Closest question: TODO
+Immutability deletes the whole conflict problem. An overwrite in an object store writes fresh fragments that no reader has ever seen and then swaps one pointer in a metadata service, so the data plane never races and all the consistency lives in a small strongly consistent index. That is why S3 could turn on read-after-write consistency in December 2020 with no data-plane change: the bytes were already consistent, only the metadata read path was exposing a window. There is no equivalent move here, because the metadata *is* the value. Putting a pointer indirection in front of a 1.2KB record doubles the request count and leaves the same coordination problem one level down, in a store that is now on the critical path for everything.
+
+Payload size decides the durability arithmetic the same way. Reed-Solomon 6+3 on a 1MB fragment costs 1.5x storage instead of 3x and is obviously right. The same code on a 1.2KB record yields 200B fragments, so per-fragment headers and six network hops dominate the payload, and every read has to gather six pieces and reconstruct, at 800k reads/s. Full 3x replication is the correct answer for small mutable values and the wrong one for a petabyte of blobs. Answer this question with an object store's design and you have answered a question about cold bytes when you were asked about hot state.
+
+Closest question: Q21
 #### Clarifying questions and how each answer forks the design
 - Read-heavy or write-heavy?
 - Consistency model? (strong / eventual / tunable)
 - Geo-replication? (single-region or multi)
 - Value size range? (KB? MB?)
 - Need range scans or just point lookups?
+- Does any value carry an invariant that must hold (a balance, a stock count)?
 
 **How the answers shape the design**
 
@@ -897,47 +931,54 @@ Closest question: TODO
 |---|---|
 | Write-heavy | LSM storage for fast writes, plus sloppy quorum and hinted handoff for write availability |
 | Read-heavy | add read replicas and a cache tier; raise R for freshness |
-| Strong consistency | require R+W greater than N (quorum) or a Raft leader per partition — costs latency and availability |
-| Eventual or tunable | let the client pick R and W per call; reconcile with vector clocks or last-write-wins |
+| Strong consistency | `W+R>N` buys read/write overlap, not linearizability; anything conditional needs a consensus round per key (four round trips instead of one) or a leader per partition |
+| Eventual or tunable | let the client pick R and W per call; reconcile with version vectors or last-write-wins |
 | Multi-region | async replication with conflict resolution (LWW or CRDTs); accept cross-region staleness |
 | Large values (MB) | store blobs in an object store and keep only a pointer in the KV to avoid bloating the log |
 | Range scans needed | order-preserving range partitioning (risks hot shards) instead of pure hashing |
 | Point lookups only | hash partitioning for even key spread |
+| A value carries an invariant | that value does not belong here; put it behind a per-key leader or a consensus round |
 #### Requirements and scale, derived out loud
 **Requirements**
 
 - **FR:** `get(k)`, `put(k,v)`, `delete(k)`; tunable W/R quorum; replication
-- **NFR:** HA across DCs (no single point of failure), low p99 (<10ms), 99.99% availability, eventual consistency OK
+- **NFR:** HA across DCs (no single point of failure), p99 under 10ms, 99.99% availability, eventual consistency acceptable
 
 **Scale**
 
-- **Petabytes of data, ~10⁹–10¹⁰ keys:** Dynamo/Cassandra-tier deployment (e.g. Amazon shopping cart, Netflix user state). Anchor: 10B keys (10¹⁰).
-- **Avg value ~1KB (range 100B–1MB):** typical KV mix — JSON blobs, session state, small docs. Stored record = value (1KB) + key (~32B) + vector clock (16B/replica × 3 ≈ 48B) + TTL/version header (~16B) + framing ≈ 1.2KB.
-- **Logical ~36TB, on-disk ~50TB:** 10¹⁰ keys × 1.2KB × RF 3 = 3.6 × 10¹³ B = 36 TB logical. LSM compaction overhead is typically 1.3–1.5× during tier merges (extra SSTable copies in flight) → ~50TB physical.
-- **Throughput 1M ops/s aggregate:** Dynamo-class workload. Read:write ratio ~4:1 (typical KV — sessions, profiles read-heavy) → 800k reads/s, 200k writes/s. Distributed over 1000 nodes → ~1k ops/s/node — comfortable per node, leaves headroom for compaction/repair.
-- **Write amplification → ~6 GB/s disk:** LSM with leveled compaction WA ≈ 10–30×, use 10× for steady state. 200k writes/s × 1.2KB × RF 3 × 10× WA = 7.2 × 10⁹ B/s ≈ **6–7 GB/s** aggregate sustained disk write across the cluster (~6 MB/s/node — well within NVMe ~2 GB/s/device).
-- **Hot tier ~95% hit rate:** memtable cap ~64MB/node (Cassandra default tunable) + recent SSTables on local NVMe; OS page cache fronts reads. Working-set fits in RAM (typical 5–10% of data is hot) → ~95% page-cache hit rate.
-- **Cold tier:** older SSTables migrate to slower local disk or remote object store; tombstones GC'd after `gc_grace_seconds` (default ~10 days — must exceed worst-case repair window so deleted data isn't resurrected by a lagging replica).
-- **Topology 100s–1000s nodes/region × 2–3 regions:** 1000-node region keeps blast radius bounded and gossip O(N) tractable. 2–3 regions = standard global posture (e.g. us-east + eu-west + ap) with async cross-region sync.
+Everything below is per region. Each region holds a full RF 3 replica set and serves its own local quorum.
+
+- **Key count and record size:** anchor at 10¹⁰ keys. Stored record = value (1KB average, range 100B to 1MB) + key (~32B) + version vector (16B per writer entry × 3 ≈ 48B) + TTL and version header (~16B) + framing ≈ **1.2KB**.
+- **Bytes on disk:** 10¹⁰ × 1.2KB × RF 3 = 3.6 × 10¹³ B = **36TB logical**. Leveled compaction keeps extra SSTable copies in flight at 1.3 to 1.5×, so **~50TB physical**. Note this is tens of terabytes, not petabytes. A Dynamo-style ring is often described as petabyte scale, but at 1KB values that needs 10¹¹ to 10¹² keys, which is a different sizing exercise and a different node count.
+- **Throughput:** 1M client ops/s aggregate; read:write ratio 4:1 (sessions and profiles are read-heavy), so **800k reads/s and 200k writes/s**. Every op touches all N=3 replicas (a write fans to 3 and waits for W; a read sends a full read to one and a digest request to the other two), so **3M replica operations/s**.
+- **Node count, from two independent constraints, take the larger:**
+  - *Throughput:* a tuned node on NVMe sustains ~30k ops/s with compaction and repair running underneath. 3 × 10⁶ / 3 × 10⁴ = **100 nodes**.
+  - *Capacity:* keep each node under ~1TB of data so a replacement bootstrap streams in a few hours and compaction always has free space. 50TB / 1TB = **50 nodes**.
+  - Throughput binds. Round to **128 nodes**, which puts data at 50TB / 128 = **~400GB/node**, replica work at 3 × 10⁶ / 128 = **~23k ops/s/node** (inside the 30k ceiling), and coordinator work at 10⁶ / 128 = **~8k coordinations/s/node** on top.
+- **Sustained disk writes:** leveled compaction write amplification is 10 to 30×; take 10× for steady state. 200k × 1.2KB × RF 3 × 10 = 7.2 × 10⁹ B/s = **~7GB/s cluster-wide**, which is 7.2GB/s / 128 = **~56MB/s per node**, roughly 4% of one NVMe device's write bandwidth. Bandwidth is not the constraint; compaction competing with reads for queue depth is.
+- **Working set:** typical KV workloads keep 5 to 10% of data hot. 5% × 36TB = 1.8TB / 128 = **~14GB/node of hot bytes**, which fits the page cache on a 128GB node once the heap is subtracted. That is where the **~95% cache hit rate** assumption comes from. It is an assumption about access skew, not a property of the store, and it is the first thing to re-derive if the access pattern is uniform.
+- **Hint volume during an outage:** each node is a replica for 3/128 of the keyspace, so its share is 200k × 3 / 128 = **4.7k writes/s**. A 3 hour outage (the default hint TTL) parks 4.7k × 10,800 = 5.1 × 10⁷ hints × 1.2KB = **~60GB of hints** spread over the surviving nodes, replayed as a burst the moment it rejoins. That burst is why hint replay is throttled.
+- **Repair cost:** building a Merkle tree reads every key in the range. At 400GB/node and repair throttled to ~100MB/s, one full pass is 4 × 10¹¹ / 10⁸ = **~4,000s, about 1.1 hours**. That has to stay well inside `gc_grace_seconds` (default 10 days = 864,000s), which it does with roughly two orders of magnitude of margin at this size.
+- **Tombstones:** deletes write markers rather than removing rows, and they survive `gc_grace_seconds`. At a 1% delete rate, 200k × 0.01 × 864,000s = 1.7 × 10⁹ tombstones resident × ~100B = **~170GB per region** of pure deletion bookkeeping, which is 0.5% of logical bytes and cheap. At a 50% delete rate, which is what a queue-shaped workload looks like, the same arithmetic gives ~8TB and the read path collapses long before that.
+- **Topology:** 128 nodes × 2 to 3 regions, asynchronous cross-region replication, local quorum inside each region.
 #### Key decisions
-TODO
+**LSM tree vs B-tree for the local store**
+- Choice: an LSM tree, with a Bloom filter per SSTable and leveled compaction.
+- Alternative: a page-oriented B-tree updated in place, with a write-ahead log for durability.
+- Decider: the write:read ratio and whether reads are point lookups or ordered scans. Point reads are near parity: a 1% false-positive Bloom filter puts an LSM lookup at 1 to 2 file opens against a B-tree's 1, since interior pages stay cached. Range scans are not, and no filter helps: a scan must merge every level that overlaps the range, so a 5-level LSM does roughly 5× the I/O of a B-tree leaf walk. Our reads are point lookups with intra-partition ranges only, and sustained writes are 200k/s × 1.2KB × RF 3, which at 10× write amplification is ~56MB/s per node of sequential I/O and comfortable. Below roughly 5% of reads being cross-level scans, LSM.
+- Alternative wins when: reads are dominantly ordered scans, or the workload is read-mostly with a working set in memory, where write amplification stops mattering and you delete compaction as an operational surface entirely. Concede the hardware shift too, because the property is dated. The LSM case was strongest when a random write meant a 10ms seek; that was the framing of the LSM literature from the 1990s and of the storage-engine comparisons through the 2010s. On NVMe a random 4KB write runs at hundreds of thousands of IOPS, so the sequential-versus-random gap has narrowed by orders of magnitude and B-tree engines with group commit are competitive at write rates that would once have settled the argument outright.
 
-Two or three genuine forks. For each, in this exact shape so it stays checkable:
+**Where the quorum sits on the W/R spectrum**
+- Choice: N=3, W=2, R=2, satisfied within a single region.
+- Alternative: W=1, R=1, letting read repair converge in the background; or the asymmetric settings, W=3/R=1 and W=1/R=3.
+- Decider: whether the caller can tolerate reading a value it did not just write, and the p99 budget. State the condition explicitly rather than asserting it: `W + R > N` means the acknowledging set and the responding set must intersect, so with N=3 you need W+R ≥ 4, and W=R=2 is the cheapest pair. The cost is order statistics on latency. Waiting for the fastest of 3 replicas lands near a single replica's median; waiting for the second of 3 lands near its p90. On a store with per-replica p50 of 1ms and p99 of 10ms, that is roughly 1 to 2ms at R=1 against 4 to 6ms at R=2. Our budget is 10ms p99, so R=2 fits with margin. At a 2ms p99 budget it does not, and the design has to change rather than the knob.
+- Alternative wins when: reads are advisory. Telemetry, view counts, feature flags, recommendation inputs, a session record whose loss means one re-login. W=1/R=1 there is not a compromise, it is correct, and it roughly halves both latencies. The asymmetric settings win at the extremes of the ratio: W=3/R=1 for configuration written weekly and read a million times a second, W=1/R=3 for an append-heavy log read rarely. What no setting buys is safety for read-modify-write. Two clients can both read a value and both write a successor, and every quorum setting will accept both. Compare-and-set needs a consensus round per key, four round trips instead of one, and it does not compose across keys.
 
-**<name of the fork>**
-- Choice:
-- Alternative:
-- Decider:
-- Alternative wins when:
-
-**Raw material, from the old Common Mistakes:**
-
-- **Confusing consistency-per-request with consistency-of-the-system** — saying "Cassandra is eventually consistent" misses that W and R are per-request knobs; a single keyspace can serve `W=R=N` reads (strong) and `W=1, R=1` reads (eventual) simultaneously. Senior candidates explain the W+R>N invariant rather than labelling the whole system.
-- **Treating last-write-wins as safe** — LWW is unsafe under clock skew and silently loses data; candidates default to it because vector clocks "sound complicated", but the complexity is exactly the point. Name vector clocks or CRDTs for any workload where data loss is unacceptable.
-- **Ignoring tombstones in capacity planning** — delete-heavy workloads (queues, TTL'd data) accumulate tombstones in SSTables that cost read-time scan work even after the data is logically gone. Candidates who design queue-on-Cassandra without naming tombstone GC misunderstand the storage engine.
-- **Picking quorum without thinking about partial failure** — `W=N` sounds strong but means a single replica being slow (not even down) drags every write to the slowest replica's latency, and one dead replica blocks all writes. The default `W=⌈N/2⌉+1` tolerates one slow/dead replica per write.
-- **Glossing over the "concurrent writes" case** — "vector clocks resolve conflicts" is incomplete; vector clocks *detect* conflicts, the application layer or a CRDT *resolves* them. Candidates who don't explain who resolves the conflict miss a full layer of design.
-- **Using anti-entropy as the primary repair mechanism** — anti-entropy is the safety net; the hot-path repairs are read-repair (inline during reads) and hinted handoff (during transient outages). Candidates who say "we just run repair every week" miss that production systems repair continuously through the read path.
+**Last-write-wins vs version vectors with reconciliation above the store**
+- Choice: version vectors, return all concurrent siblings to the caller, reconcile in the application or in a self-merging type.
+- Alternative: last-write-wins on a timestamp, highest wins, exactly one value ever returned.
+- Decider: whether the value type has a merge that is commutative, associative and idempotent, and whether silently discarding one of two concurrent writes is acceptable. A cart, a tag set, a presence set, an add-only counter all merge. A display name, a document body, a balance do not. The second half is clock skew against write interarrival: LWW is only safe when the gap between two writes to one key reliably exceeds the fleet's clock error. A well-run fleet holds NTP within 1 to 10ms, but a VM live migration or an NTP step can move a clock by seconds. So if two writes to one key can land within ~100ms of each other, LWW will sometimes pick the wrong one, and you will never find out.
+- Alternative wins when: the value is a cache entry, a recomputable projection, or a session record, so "take one and move on" genuinely is correct behaviour. LWW is then cheaper on every axis: one value per key rather than a sibling set, no sibling explosion (a key written repeatedly by many actors accumulates versions the application must resolve on every read), no reconciliation code, no vector bytes on every record. Date this one carefully. The 2007 Dynamo paper called these vector clocks and keyed them by coordinator node, which grew without bound under coordinator churn and needed pruning, and pruning can falsely report concurrency. The correction, in Riak from around 2013, keys the vector by client actor instead, which bounds it by the number of writers touching the key; "version vector" is the accurate term for the per-key form and "vector clock" for the general causality mechanism. Meanwhile Cassandra, by far the most deployed member of this family, offers only LWW at cell granularity and no siblings at all, which is a real signal about what most teams choose when the merge is not obvious.
 #### High-level design
 **must-say**
 
@@ -1012,39 +1053,17 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 
 **How to read the diagram:** any node can receive the client request and act as coordinator. It does not need to store the key itself. Its job is to locate the key's replica set, fan the request out to those replicas, and wait for enough responses to satisfy the read or write quorum.
 
-**Why the flow is shaped this way:** separating the coordinator role from the storage role makes the system flexible. Clients can talk to a nearby node, while the replicas stay wherever the partitioning scheme says they belong. Background repair keeps replicas converging without forcing every request to wait for every copy.
+**Why the flow is shaped this way:** separating the coordinator role from the storage role makes the system flexible. Clients talk to a nearby node, while the replicas stay wherever the partitioning scheme says they belong. Background repair keeps replicas converging without forcing every request to wait for every copy.
 
-**What this layout buys you:** low-latency access, no single primary, and tunable consistency. The tradeoff is that you now have to reason about stale replicas, quorum sizes, and conflict resolution as normal parts of the design.
+**What this layout buys you:** low-latency access, no single primary, and tunable consistency. The cost is that stale replicas, quorum sizes and conflict resolution are now normal parts of the design rather than exceptional cases.
 #### Deep dive
 **must-say**
 
-**Quorum tuning:**
+**How replicas converge, and why deletes make it hard.**
 
-| Setting | Reads | Writes | Consistency | Use Case |
-|---|---|---|---|---|
-| W=1, R=N | slow | fast | weak (read repairs) | write-heavy logs |
-| W=N, R=1 | fast | slow | strong-ish | read-heavy, rare writes |
-| W=R=⌈N/2⌉+1 | balanced | balanced | strong (W+R>N) | **default** |
+Divergence here is the steady state, not a failure. With N=3 and W=2, every acknowledged write leaves one replica behind by design; at 200k writes/s that is 200k newly stale copies per second before anything has gone wrong. Convergence is therefore a continuous background process with a throughput requirement of its own, and the question that matters is whether the mechanisms running it cover the whole keyspace. Three of them run, on three timescales, and each has a coverage hole that the next one fills.
 
-**Conflict resolution:**
-- **Last-Write-Wins** (timestamps) — every write carries a wall-clock timestamp; on conflict, the later one wins. Simple to implement but unsafe under clock skew: if node A's clock is 5s ahead of node B, a write on B that's actually newer can be silently overwritten by an older write on A. Acceptable for cache-like workloads where occasional data loss doesn't matter.
-- **Vector clocks** — each replica increments its own counter on every write, producing a tuple like `{A:3, B:5, C:2}`. Two version vectors can be compared: if one strictly dominates the other (every component ≥), the dominant one is newer; otherwise the writes are concurrent and the read returns both for the application to merge. Detects true conflicts but pushes resolution to the app layer.
-- **CRDTs** — data types (G-Counter, OR-Set, LWW-Map) whose merge function is mathematically commutative, associative, and idempotent. Replicas can apply writes in any order and converge to the same state without coordination. Solves automatic merge for shopping carts, vote counts, presence sets, but not for arbitrary application semantics.
-
-**Failure handling:**
-- **Hinted handoff:** if a replica is unreachable when a write arrives, the coordinator picks a healthy neighbour and stores the write there as a "hint" tagged with the intended owner. When the dead replica recovers, the neighbour replays the buffered hints to it. Bounded by hint TTL (typically hours) — if a node is down longer, full anti-entropy repair takes over.
-- **Read repair:** during a read, the coordinator notices version vector divergence between the responses (replica B returned an older version than A and C). It transparently writes the latest version back to B in the background, healing the drift on the read path with no extra work for the client.
-- **Anti-entropy:** each replica builds a Merkle tree over its key range — leaves are hashes of value ranges, internal nodes are hashes of their children. Two replicas compare root hashes; if they match, all data is identical and no work is needed. If they differ, the comparison recurses only into the subtrees that actually differ, finding the precise diverged ranges in O(log n) work and syncing only those deltas instead of the full dataset.
-
-**LSM vs B-tree:**
-
-| Aspect | LSM (Cassandra) | B-tree (MySQL) |
-|---|---|---|
-| Writes | sequential, fast | random, slower |
-| Reads | check memtable + N SSTables | direct |
-| Compaction | yes (I/O bursts) | no |
-
-**Quorum read repair — sequence walkthrough.** With N=3, W=2, R=2, watch what happens when one replica is stale. The coordinator fans the read to all three replicas; the first two responses (R=2) determine the answer returned to the client, but the coordinator continues processing the third response in the background and reconciles divergence asynchronously. If the third replica returned an older version vector, the coordinator writes the merged latest value back to it — that's read repair, fixing drift on the read path with no separate cron.
+**Read repair, on the timescale of the next read.** The coordinator sends the read to all N replicas but returns to the client after R responses. To keep bandwidth down it asks one replica for the value and the others for a digest, a hash over the value plus its version metadata. Matching digests mean the replicas agree. A mismatch triggers a second round that pulls full values from all N, picks the winner by version, and writes it back to whoever was behind. Background read repair does that writeback off the response path, so it costs the client nothing and promises nothing about when the stale replica is fixed; blocking read repair waits for the repair write to be acknowledged before answering, which raises p99 and is what you enable where a client reading twice must not go backwards. The coverage hole is structural: read repair only touches keys somebody reads. Under the Zipfian access skew these workloads always have, the head of the distribution is repaired constantly and a long tail can go months without a single read.
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 560" role="img" aria-label="Quorum read repair sequence: coordinator fans a read to three replicas, responds after R equals 2, then repairs the stale replica">
@@ -1131,96 +1150,97 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 </svg>
 ```
 
+**Hinted handoff, seconds to hours.** When a replica is unreachable at write time, the coordinator stores the record on another node tagged with the intended owner, and that node replays the backlog when the owner returns. The subtlety worth volunteering is that a hint must not count toward W under a strict quorum. If it did, W=2 could be satisfied by two nodes that are not replicas of the key at all, and the intersection argument collapses: a later R=2 read of the canonical replicas would overlap none of the acknowledgers. Sloppy quorum is precisely the mode that does count them, deliberately, and the honest description is that a sloppy quorum has no consistency invariant, only good odds. The bound is a TTL, typically three hours; past it hints are dropped and the problem is handed to anti-entropy. Volume matters at our size: a node owning 3/128 of the ring at 200k writes/s takes 4.7k writes/s, so three hours down parks roughly 60GB of hints on its neighbours, replayed as a burst the moment it rejoins. Replay has to be throttled, and the metric to watch is hint-buffer growth rather than node up or down, because a node that flaps produces more hints than one that stays down.
+
+**Anti-entropy, hours to days.** Each replica builds a Merkle tree over its token ranges: leaves hash small key ranges, parents hash their children. Two replicas compare roots, and if the roots differ they recurse only into subtrees that disagree, so the message cost is logarithmic. The disk cost is not. Building the tree reads every key in the range, so a pass over 400GB per node at a 100MB/s repair throttle takes about an hour whether one key diverged or a million did. Granularity is the second cost: a tree with 2¹⁵ leaves over a range holding 10⁷ keys puts about 300 keys under each leaf, so one diverged key resyncs about 300. Over-repair is the normal case and it is tolerable, but it means repair traffic is not proportional to damage, which is the third Unresolved item below.
+
+**Then deletes, which break all three.** A delete cannot remove the row. Every mechanism above compares versions, and an absent row loses to a present row in every comparison, so a replica that missed the delete would reintroduce the data at the next read repair or repair pass. A delete therefore writes a tombstone: a marker carrying a version that dominates what it replaces. Tombstones can only be purged once every replica has certainly seen them, and `gc_grace_seconds`, default ten days, is where that assumption is written down. The invariant is that the grace period must exceed the worst-case interval between repairs of any range, including the coldest one and including whatever the last incident did to the repair schedule. Violate it and the failure is silent data resurrection, which for a deletion made under a right-to-erasure request is a compliance event rather than a bug. Note the direction of the fix: if repair falls behind, you raise the grace period. You do not run repair harder, because repair is the thing already saturated.
+
+Tombstones are also a read cost that outlives the data. A scan over a partition whose rows were mostly deleted still reads every tombstone to prove the rows are gone. Queue-shaped workloads are the pathological case: write, read, delete in order, and the scan for the next unconsumed item walks the tombstone of every item already consumed, so read latency grows with cumulative throughput until the grace window expires. The fix is not tuning. It is modelling: bucket by time and drop whole partitions, which is a metadata operation, instead of deleting rows one at a time.
+
+Every production cluster runs all three, because each covers the previous one's hole, and the whole arrangement reduces to one sizing comparison: does the repair cycle time for the coldest range stay comfortably inside `gc_grace_seconds`?
+
 *[Source: DeCandia et al. "Dynamo: Amazon's Highly Available Key-Value Store" SOSP 2007; Cassandra docs]*
-
-**W/R/N tuning — consistency vs availability.** The invariant `W + R > N` guarantees any read overlaps with any write by at least one replica, so a read can't miss the latest write. Pushing W or R up the spectrum trades latency or availability — `W=N` means a single dead replica blocks every write, `R=N` means a single slow replica drags every read to the slowest tail.
-
-| N | W | R | Property | Failure tolerance | Use case |
-|---|---|---|---|---|---|
-| 3 | 1 | 1 | weak (read repair only) | 2 nodes can be down | logs, telemetry |
-| 3 | 2 | 2 | strong (`W+R>N`) | 1 node can be down | **default** |
-| 3 | 3 | 1 | strong, slow writes | 0 writes survive 1 down | read-heavy archives |
-| 3 | 1 | 3 | strong, slow reads | 0 reads survive 1 down | rare-write configs |
-| 5 | 3 | 3 | strong, more headroom | 2 nodes can be down | high-availability KV |
-
-**Sloppy quorum + LOCAL_QUORUM (multi-DC).** Cassandra distinguishes strict quorum (must use canonical replicas) from sloppy quorum (any N healthy nodes count). Sloppy quorum trades strict consistency for AP under partition: during a network split, the coordinator accepts the write to the next-closest healthy node and stores a hint targeted at the rightful owner; the owner replays it on recovery. In multi-DC clusters, `LOCAL_QUORUM` (`⌈local_RF/2⌉+1` within the local DC) keeps reads/writes local to one DC for latency, while `EACH_QUORUM` (write-only) requires a quorum *in every DC* for cross-DC strong consistency at the cost of WAN RTT. Production default for most multi-region Cassandra is `LOCAL_QUORUM` reads + writes, with async cross-DC replication catching up the rest. *[Source: Datastax "Cassandra Consistency Level Guide"; Pythian blog]*
-
-**Bloom filters in LSM.** Each SSTable carries a small Bloom filter of its keys; on read, the storage layer checks the filter before going to disk. A point lookup only opens SSTables whose Bloom said "maybe contains this key" — at typical 1% false-positive sizing, ~99% of SSTables that don't contain the key are skipped without a disk read. The filter is the difference between LSM reads being usable (1-2 SSTable opens per read) versus catastrophic (`SSTables_per_level × levels` opens).
-
-**Point lookups vs range scans.** This design optimises for point `get(k)` — the dominant access pattern for KV workloads. Range scans are supported within a single partition (clustering-key ranges in Cassandra-style schemas) because LSM SSTables store keys sorted, so a contiguous range inside one partition reads sequentially. Cross-partition range scans (e.g., "all keys between X and Y" globally) require fan-out to every shard and aggregation — expensive and rarely worth the effort; if the workload genuinely needs global ordered scans, pick an ordered-partitioned store (HBase, Bigtable) instead of hash-partitioned Dynamo-style. The default assumption here is point lookups + intra-partition ranges; we accept that arbitrary range queries are not a first-class operation.
 #### Where it breaks
 **must-say**
 
 **Bottlenecks**
 
-- **Hot key** — consistent hashing places one key on N replicas, but one celebrity post can drive 100× normal traffic to those N. Coordinator-side request coalescing (single in-flight read per key, fan responses to all waiters) absorbs the burst, and replicating the hot key beyond N spreads load further.
-- **Compaction I/O spikes** — LSM tier compaction periodically rewrites SSTables, generating sustained disk writes that compete with foreground traffic. Throttle compaction bandwidth (e.g., 50MB/s) and put compaction I/O on a dedicated disk (or NVMe namespace) so reads don't share queue depth.
-- **Wide-row blow-up** — a single partition key with millions of clustering-key entries (e.g., one user with 10M events) makes a single row larger than memory and skews shard load. Enforce per-key and per-value size limits at the API layer; if the data model genuinely needs wide rows, sub-partition the key (`user:1`, `user:2`).
-- **Cross-DC latency** — a quorum that spans DCs adds the cross-DC RTT (~70ms transatlantic) to every request. `LOCAL_QUORUM` in Cassandra waits only for replicas in the local DC, satisfying the W+R>N invariant within DC and crossing the WAN asynchronously.
-- **Repair traffic** — a full Merkle-tree repair across petabytes of data can saturate the network for hours. Build the tree at multiple granularities (coarse first, then deeper only into diverging subtrees) and run subrange repair so any single repair pass touches a small fraction of the keyspace at a time.
-- **Tombstone accumulation** — deletes write a tombstone marker rather than removing the row, so SSTables fill up with deleted-but-not-yet-purged entries. Tombstones can't be GC'd before `gc_grace_seconds` (default 10 days) because doing so could resurrect data on a replica that missed the delete. Keep the delete rate low; for queue-like workloads (TTL'd events), use a separate keyspace and run `nodetool repair` more aggressively, then drop the whole partition rather than deleting row by row.
-- **Read amplification under hot partitions** — a partition with many overwrites accumulates versions across SSTables that all need merging on read. Watch read-amp metrics; if a hot partition is hitting >10 SSTables per read, force a compaction on it or model the data with append-only clustering keys instead of overwrites.
+- **Hot key.** Consistent hashing places one key on N replicas, but one celebrity post can drive 100× normal traffic to those N. Coordinator-side request coalescing (single in-flight read per key, fan responses to all waiters) absorbs the burst, and replicating the hot key beyond N spreads load further.
+- **Compaction I/O spikes.** LSM tier compaction periodically rewrites SSTables, generating sustained disk writes that compete with foreground traffic. Throttle compaction bandwidth (say 50MB/s) and put compaction I/O on a dedicated device or NVMe namespace so reads do not share queue depth.
+- **Wide-row blow-up.** A single partition key with millions of clustering-key entries (one user with 10M events) makes a row larger than memory and skews shard load. Enforce per-key and per-value size limits at the API layer; if the data model genuinely needs wide rows, sub-partition the key (`user:1`, `user:2`).
+- **Cross-DC latency.** A quorum spanning DCs adds the cross-DC round trip (~70ms transatlantic) to every request. `LOCAL_QUORUM` waits only for replicas in the local DC, satisfying the intersection property within the DC and crossing the WAN asynchronously.
+- **Repair traffic.** A full Merkle-tree pass reads every key: 400GB per node at a 100MB/s throttle is about an hour, and it is an hour regardless of how little diverged. Build the tree at multiple granularities and run subrange repair so any single pass touches a small fraction of the keyspace at a time.
+- **Tombstone accumulation.** Deletes write markers rather than removing rows, so SSTables fill with deleted-but-not-purged entries. Tombstones cannot be collected before `gc_grace_seconds` (default 10 days) without risking resurrection on a replica that missed the delete. Keep the delete rate low; for queue-like workloads use a separate keyspace, repair it aggressively, and drop whole partitions rather than deleting row by row.
+- **Read amplification under hot partitions.** A partition with many overwrites accumulates versions across SSTables that all merge on read. Watch read-amp metrics; above 10 SSTables per read, force a compaction on that partition or remodel with append-only clustering keys instead of overwrites.
 
 **Failure modes**
 
 | Layer | Failure | Detection | Mitigation |
 |---|---|---|---|
-| Crash | Replica dies during a write quorum | coordinator times out waiting for ACK | hinted handoff to a healthy neighbor; retry-with-different-replicas; sloppy quorum if W threshold still reachable |
-| Crash | Entire region offline (DC failure) | LOCAL_QUORUM unavailable, cross-DC failover trigger | promote secondary DC (active-passive) or accept partition (active-active with last-writer-wins or CRDT merge on rejoin) |
+| Crash | Replica dies during a write quorum | coordinator times out waiting for ACK | hinted handoff to a healthy neighbour; retry against different replicas; sloppy quorum if W is still reachable |
+| Crash | Entire region offline (DC failure) | LOCAL_QUORUM unavailable, cross-DC failover trigger | promote secondary DC (active-passive) or accept partition (active-active with LWW or CRDT merge on rejoin) |
 | Network | Long-running partition between two DCs | hint-buffer growth past TTL, divergent version vectors | full anti-entropy repair on partition heal; surface conflict count to ops |
-| Correctness | Vector clock pruning loses history | "concurrent" reads where one should dominate | bound clock size by retiring oldest entries with explicit conflict markers; alert on prune-rate |
-| Correctness | Tombstone resurrection (deleted data reappears) | reads return values that were deleted N days ago | enforce `gc_grace_seconds > max_repair_window`; never run unsafe disable-tombstone-checks in prod |
-| Resource | Compaction I/O storm during peak traffic | foreground p99 latency climbs, disk queue depth saturated | throttle compaction bandwidth (50MB/s); leveled compaction for read-heavy; dedicate compaction to separate disk |
-| Resource | Wide row exceeds memory (millions of clustering keys) | OOM on single node, single-row read latency climbing | enforce per-key/per-value size limits; sub-partition the key |
+| Correctness | Version vector pruning loses history | "concurrent" reads where one should dominate | bound vector size by retiring oldest entries with explicit conflict markers; alert on prune rate |
+| Correctness | Tombstone resurrection (deleted data reappears) | reads return values that were deleted N days ago | enforce `gc_grace_seconds > max_repair_window`; never disable tombstone checks in prod |
+| Resource | Compaction I/O storm during peak traffic | foreground p99 climbs, disk queue depth saturated | throttle compaction bandwidth (50MB/s); leveled compaction for read-heavy; separate device for compaction |
+| Resource | Wide row exceeds memory (millions of clustering keys) | OOM on a single node, single-row read latency climbing | enforce per-key and per-value size limits; sub-partition the key |
 | Upstream | OS-level descriptor exhaustion under high connection count | `EMFILE` on accept, gossip flapping | bound coordinator-side connection pool size; raise `ulimit`; enable connection pooling per client |
 
 **Unresolved**
 
-TODO. Two or three things this design genuinely does not handle well, and what you would do about each.
+**There is no compare-and-set, and no quorum setting creates one.** Two clients read a value, both compute a successor, both write. Version vectors will correctly report the two writes as concurrent, but reporting is all they do: the store cannot refuse the second write, and for a balance or a stock count "here are two values, you decide" is not an answer. The workarounds are both real and both unattractive. A consensus round per key (Cassandra's lightweight transactions, a Paxos ballot) costs four round trips instead of one and does not compose across keys, so a two-key invariant is still unprotected. Or you move that value out to a system with a per-key leader, which is what we do, and it means this store is not the system of record for anything carrying an invariant. That is a genuine boundary rather than a clean layering: teams will put a counter in here because it is convenient, and the loss will be invisible in the metrics.
+
+**Sloppy quorum voids the invariant we advertise, and it is on by default.** During a partition the coordinator counts hinted writes on non-replica nodes toward W. That is the whole point, and it is why the store stays available, but it means `W + R > N` no longer implies that a read intersects an acknowledged write: the acknowledging nodes may not be replicas of the key at all. So the guarantee is conditional on no partition being in progress, and a caller cannot tell when the condition is violated. The partial fix is to expose it: return a per-request flag when any acknowledgement came from a non-replica, and let a latency-tolerant caller retry at strict quorum. Most callers will ignore the flag, and a read during a partition still cannot detect that the value it received predates a hinted write parked elsewhere.
+
+**Repair cost scales with data volume, not with divergence.** Merkle comparison is cheap; building the tree reads everything. A cluster where 0.001% of keys diverged still reads 400GB per node to establish that. At our size a full pass is about an hour against a ten-day grace window, so the coupling is not currently painful, but it means the safe deletion window is tied to total bytes rather than to anything about deletions, and it binds at roughly 10× this data on the same node count. The intended answer is incremental repair, which tracks which SSTables have already been repaired so a pass touches only new data. Its Cassandra implementation had correctness bugs that kept it off by default for years after the 2016 to 2018 period, and its operational reputation has not fully recovered. What we actually do is scale node count with data volume to hold repair time flat, which means buying CPU we do not need for throughput purely to keep the repair cycle short.
 #### Drill questions
 1. What happens during a network partition?
-2. Two clients update the same key simultaneously — what does a reader see?
+2. Two clients update the same key simultaneously. What does a reader see?
 3. How do you handle a hot key getting 100× normal traffic?
 4. How do you tune W and R in practice?
 5. How does the system recover from a multi-hour node outage?
 6. How do you bound compaction I/O impact?
-7. LOCAL_QUORUM vs EACH_QUORUM — when do you use which?
+7. LOCAL_QUORUM vs EACH_QUORUM: when do you use which?
 8. How does a Bloom filter on each SSTable change LSM read amplification?
-9. A sloppy quorum write goes to the wrong-DC neighbor — how does the data eventually reach the right owners?
-
-TODO. Only 9 drill questions carried over, top up to at least 10.
+9. A sloppy quorum write goes to the wrong-DC neighbour. How does the data eventually reach the right owners?
+10. Why can you not store a bank balance in this system, and what would you have to add?
+11. Why does a delete write a tombstone instead of removing the row, and what breaks if tombstones are purged early?
+12. Does `W + R > N` give you linearizability? Prove it or find the counterexample.
 #### Answers to drill questions
-1. Sloppy quorum — coordinator accepts writes from any N healthy nodes (not just the canonical replicas) and stores hints. When the partition heals, hints replay to the rightful owners. *If pushed:* you trade strict consistency for availability (AP side of CAP); apps requiring strict can configure `LOCAL_QUORUM` and refuse on partition.
+1. Sloppy quorum: the coordinator accepts writes from any N healthy nodes, not just the canonical replicas, and stores hints. When the partition heals, hints replay to the rightful owners. *If pushed:* you trade the intersection property for availability. During the partition `W + R > N` no longer implies overlap, because the acknowledging nodes may not be replicas at all. An application that needs the guarantee must use strict quorum and accept unavailability, and there is no per-request signal today that tells it which mode it got.
 
-2. Both writes succeed, vector clocks mark them concurrent, the read returns both versions. Client-side merge (CRDTs, LWW, or app-defined) resolves. *If pushed:* if you can't tolerate conflict-resolution code in clients, layer a transactional engine on top (Spanner-style) — but you pay in latency and lose AP.
+2. Both writes succeed, version vectors mark them concurrent, and the read returns both versions. Client-side merge (a CRDT, LWW, or application code) resolves them. *If pushed:* the resolution layer is the part candidates skip. Version vectors detect; they never resolve. If you cannot put reconciliation code in clients, either restrict values to self-merging types or move the key to a system with a per-key leader, and pay the latency.
 
-3. Coordinator-side request coalescing collapses concurrent reads of the same key into one in-flight call and fans the response out to all waiters, so a 100× spike on a single key still results in one backend roundtrip per coordinator. A client-side cache with a short TTL (1–5s) absorbs the next layer of repeats, and replicating the hot key beyond the standard N spreads the residual load across more replicas. *If pushed:* shard the key itself at the application layer into `key:1`..`key:k` and aggregate at read time — expensive in code complexity but turns one hot partition into k cold ones.
+3. Coordinator-side request coalescing collapses concurrent reads of the same key into one in-flight call and fans the response to all waiters, so a 100× spike still costs one backend round trip per coordinator. A client-side cache with a 1 to 5s TTL absorbs the next layer, and replicating the hot key beyond the standard N spreads the residual. *If pushed:* shard the key at the application layer into `key:1`..`key:k` and aggregate at read time. Expensive in code, but it turns one hot partition into k cold ones.
 
-4. Start with `W=R=⌈N/2⌉+1` so `W+R>N` (strong). Drop W to 1 for high-throughput logs that tolerate read repair; drop R to 1 for read-heavy + rare writes. *If pushed:* per-keyspace tuning in Cassandra; track p99 read latency and stale-read rate to find the right point.
+4. Start at `W=R=⌈N/2⌉+1` so `W+R>N` holds. Drop W to 1 for high-throughput logs that tolerate read repair; drop R to 1 for read-heavy workloads with rare writes. *If pushed:* the real inputs are the p99 budget and the read-your-writes requirement. Waiting for the second of 3 replicas lands near a single replica's p90, so R=2 roughly triples R=1 latency at the same percentile. Track p99 read latency and stale-read rate together; tuning one without the other is guessing.
 
-5. Hinted handoff buffers writes during the outage; on recovery, hints replay first. Anti-entropy via Merkle tree diff catches anything missed. *If pushed:* if hint TTL expired, full subrange repair from a healthy replica; throttle to avoid I/O storms during business hours.
+5. Hinted handoff buffers writes during the outage and replays them on recovery, throttled: at 4.7k writes/s per node a three-hour outage parks about 60GB of hints. Anti-entropy via Merkle diff catches anything the hints missed. *If pushed:* past the hint TTL, hints are dropped and full subrange repair from a healthy replica is the only mechanism left. Throttle it, and make sure `gc_grace_seconds` still exceeds the resulting repair interval or the returning node can resurrect deleted rows.
 
-6. Throttle compaction bandwidth, run on a separate disk, schedule major compactions off-peak. Use leveled compaction for read-heavy workloads (tighter SSTable count). *If pushed:* size-tiered for write-heavy; monitor read amplification (`SSTables per read`) as the leading indicator of compaction debt.
+6. Throttle compaction bandwidth, run it on a separate device, and schedule major compactions off-peak. Leveled compaction for read-heavy workloads keeps the SSTable count tight. *If pushed:* size-tiered for write-heavy. Monitor read amplification (SSTables per read) as the leading indicator of compaction debt, because it degrades before disk saturation shows up.
 
-7. LOCAL_QUORUM keeps reads/writes inside one DC, satisfying `W+R>N` locally; cross-DC sync is async. EACH_QUORUM requires a quorum in *every* DC per write — strong cross-DC consistency, but every write pays the WAN RTT and any DC outage stalls writes. *If pushed:* default to LOCAL_QUORUM for both reads and writes; reach for EACH_QUORUM only on rare cross-region-coordination operations (account creation in a multi-region SaaS) where the latency cost is acceptable.
+7. LOCAL_QUORUM keeps reads and writes inside one DC and satisfies the intersection property locally; cross-DC sync is asynchronous. EACH_QUORUM requires a quorum in every DC per write, giving strong cross-DC consistency at the price of the WAN round trip on every write, and any DC outage stalls writes entirely. *If pushed:* default to LOCAL_QUORUM for both. Reach for EACH_QUORUM only on rare cross-region operations, such as account creation in a multi-region product, where 70ms is acceptable.
 
-8. Without it, a point read opens every SSTable in the level until found — `O(levels × SSTables_per_level)` disk seeks worst case. With a per-SSTable Bloom (~1% FPR), only the SSTable that actually contains the key is opened (plus ~1% false-positive opens). Difference between 10+ disk seeks and 1-2. *If pushed:* tune the Bloom bits-per-key against memory budget — Cassandra's `bloom_filter_fp_chance` defaults to 0.01 for size-tiered, 0.1 for leveled (which already has fewer SSTables to check).
+8. Without it, a point read opens every SSTable in the level until the key is found: `O(levels × SSTables_per_level)` seeks worst case. With a per-SSTable Bloom at 1% false-positive rate, only the SSTable actually holding the key is opened, plus about 1% spurious opens. The difference is 10+ seeks versus 1 to 2, which is what makes an LSM competitive with a B-tree on point reads at all. *If pushed:* tune bits per key against the memory budget. Cassandra's `bloom_filter_fp_chance` defaults to 0.01 for size-tiered and 0.1 for leveled, which already has fewer SSTables to check. Note the filter does nothing for range scans.
 
-9. The neighbor stores a hinted handoff entry tagged with the intended owner's node ID. On recovery, the original owner gossips itself back as alive; the hint-holder dials it directly and replays buffered writes in arrival order. Bounded by hint TTL (default 3hr in Cassandra). *If pushed:* if the owner stays down past the TTL, hints are dropped and full anti-entropy repair takes over the eventual reconciliation — slower, but unbounded.
+9. The neighbour stores a hinted handoff entry tagged with the intended owner's node ID. On recovery the owner gossips itself back as alive, the hint holder dials it directly and replays the buffered writes in arrival order. Bounded by hint TTL, three hours by default. *If pushed:* if the owner stays down past the TTL, hints are dropped and anti-entropy repair takes over the reconciliation. Slower, but unbounded in time and complete in coverage.
+
+10. Because a balance has an invariant and this store cannot enforce one. Two clients both read 100, both write 90, and both writes are accepted at every W and R setting. Version vectors will report them concurrent, which tells you a debit was lost without preventing it. To add it you need a consensus round per key (four round trips instead of one, roughly quadrupling write latency) and even that does not compose across keys, so a transfer touching two balances is still unprotected. *If pushed:* the honest answer is that the balance belongs in a system with a per-key leader and real transactions, and this store holds the things around it: session state, profile, notification preferences, the read model.
+
+11. Because an absent row loses to a present row in every version comparison, so a replica that missed the delete would reintroduce the data at the next read repair or repair pass. A tombstone is a marker with a dominating version, so it wins those comparisons and the delete propagates. Purge it too early and a replica that was down longer than the purge window resurrects the row on rejoin. `gc_grace_seconds` (default 10 days) is that window, and the invariant is that it exceeds the worst-case interval between repairs of any range. *If pushed:* the failure is silent and it is a compliance problem, not just a data problem, when the delete was a right-to-erasure request. And if repair falls behind, the correct move is to raise the grace period, not to push repair harder, because repair is what is already saturated.
+
+12. No. `W + R > N` guarantees the acknowledging set and the responding set share a member, so a read reaches at least one replica holding the last *acknowledged* write. It says nothing about ordering. Counterexample: a write to N=3 with W=2 reaches replica 1 and then the coordinator dies before reaching replica 2, so the write is never acknowledged. A subsequent R=2 read hitting replicas 1 and 3 returns the value; the next R=2 read hitting replicas 2 and 3 does not. Two reads, no intervening write, different answers, which linearizability forbids. *If pushed:* the same argument kills read-modify-write, since the store has no way to reject a write conditioned on a version it did not see. If you need either property, you need consensus per key, and that is a different system with a different latency profile.
 #### Whiteboard script
-TODO
+**0-5, frame it and take the fork.** Open with the thesis, not the components: "this is a store with no leader anywhere, and every hard part follows from that one choice." Then ask the three questions that actually change the answer: does any value carry an invariant that has to hold, what is the p99 budget, and are reads point lookups or ordered scans. State the numbers you are assuming out loud: 10¹⁰ keys at 1KB, 1M ops/s at 4:1 read to write, 10ms p99, 128 nodes per region. Draw nothing yet.
 
-A 45 minute budget: what to cover in 0-5, 5-15, 15-35 and 35-45, what to say first, and a line starting `Cut first:`.
+**5-15, the spine.** Four boxes: client, coordinator, the N=3 replica set on the ring, an LSM store under each replica. Say immediately that the coordinator is a role and not a machine, because that is the whole reason there is no single point of failure. Draw the fan-out and label the arrows W and R. Write `W + R > N` on the board and read it as a set statement: the acknowledgers and the responders must share a member. Then say the thing most candidates skip, that this is overlap and not ordering, so it is not linearizability and it does not make read-modify-write safe. Name the three repair mechanisms as you draw one dashed arrow between replicas.
 
-**Raw material, from the old Talking Points:**
+**15-35, the drill.** Protect this block; it is the interview. Go deep on convergence, because it is where the failure reasoning lives: read repair fixes hot keys instantly and cold keys never, hinted handoff covers three hours completely and the fourth hour not at all, anti-entropy covers everything and reads the whole dataset to do it. Then deletes, which most candidates never reach: why a delete must be a tombstone, why `gc_grace_seconds` exists, and that purging early resurrects data silently. Then take the conflict fork on your own terms: version vectors detect and never resolve, last-write-wins is correct for a cache and lossy for anything else, and the decider is whether the type has a merge. Keep LSM against B-tree as a one-liner ready to expand: point reads are near parity once Bloom filters are in, range scans are not.
 
-- **The W+R>N invariant is the central insight** — stating it explicitly and explaining why it gives any-read-overlaps-any-write is what distinguishes "read the Dynamo paper" from "got lost in the weeds".
-- **Vector clocks detect, applications resolve** — this two-layer separation is what makes the system general-purpose; candidates who name it surface a senior-level mental model.
-- **LOCAL_QUORUM is the production multi-DC default** — naming it with the rationale (intra-DC strong, inter-DC async) shows you've seen real Cassandra deployments rather than just the theory.
-- **Compaction is the hidden tax** — write-amplification 10–30× is the LSM trade-off you make for fast writes; candidates who don't surface it haven't operated one of these systems.
-- **Hinted handoff bridges the gap between "transient" and "anti-entropy"** — naming it as the bounded-TTL middle layer shows you understand why production has three repair mechanisms (read-repair, HH, anti-entropy) instead of one.
-- **Bloom filters per SSTable change LSM economics** — point reads go from O(SSTables) seeks to ~1 seek; without surfacing this the LSM design looks worse than B-tree, with it the design is justified.
-- **CRDTs are the answer when conflict resolution must be automatic** — for shopping carts, presence sets, vote counts; naming the data type (G-Counter, OR-Set, LWW-Map) is more credible than handwaving "CRDTs".
+**35-45, concede and close.** Give the gaps before they are found: no compare-and-set at any W and R; sloppy quorum voids the invariant you just wrote on the board and it is on by default; repair cost tracks data volume rather than divergence, which couples the safe deletion window to total bytes. Then the operational surface in two minutes: the metrics you would page on (repair lag per range against the grace window, hint-buffer growth, read amplification, stale-read rate), and multi-region as local quorum plus asynchronous cross-region shipping with a stated non-zero recovery point objective.
+
+Cut first: Bloom filter sizing and the compaction-strategy comparison, then the consistency levels beyond naming LOCAL_QUORUM, then Merkle tree granularity arithmetic. All three are real, none of them changes the architecture, and the compaction detail in particular eats the convergence discussion. Never cut: what `W + R > N` does and does not buy, the three repair mechanisms with their coverage holes, and who resolves a conflict.
 #### Appendix
 **Data model**
 
@@ -1229,7 +1249,7 @@ A 45 minute budget: what to cover in 0-5, 5-15, 15-35 and 35-45, what to say fir
   - Memtable (in-memory sorted map)
   - WAL (durability)
   - SSTables (immutable on disk, compacted in tiers)
-- **Per-key state:** `(value, vector_clock, ttl?)`
+- **Per-key state:** `(value, version_vector, ttl?)`, plus tombstones as versioned delete markers
 
 **API contract**
 
@@ -1238,53 +1258,65 @@ PUT /kv/{key}        body = value     opts: w_quorum
 GET /kv/{key}                          opts: r_quorum
 DELETE /kv/{key}
 ```
-Returns version vector + value.
+Returns version vector plus value. A read that finds concurrent siblings returns all of them with their vectors; the caller must merge and write back the result with the merged vector as its parent.
 
 **Observability**
 
-- **`kvstore.read_latency_p99`**: end-to-end coordinator read including quorum wait — emitted per request — alert if > 50ms (typical SLA target is 10ms)
-- **`kvstore.write_latency_p99`**: end-to-end coordinator write including quorum wait — emitted per request — alert if > 30ms
-- **`kvstore.read_amplification`**: SSTables opened per read (after Bloom filtering) — emitted by storage layer — alert if median > 3 (compaction debt signal)
-- **`kvstore.compaction_pending`**: queued compaction jobs per node — emitted by storage daemon — alert if > 100 for 1hr (write-amp climbing)
-- **`kvstore.hint_buffer_size`**: outstanding hinted-handoff entries — emitted per node — alert if > N or growing for > 1hr (replica down too long)
-- **`kvstore.repair_lag_hours`**: time since last successful anti-entropy repair per range — emitted by repair scheduler — alert if > `gc_grace_seconds / 2` (tombstone resurrection risk)
-- **SLOs:** p99 read 10ms, p99 write 30ms, availability 99.99% (LOCAL_QUORUM with N=3, tolerates 1 node down per DC), zero data loss within RPO window (hinted handoff TTL).
+- **`kvstore.read_latency_p99`:** end-to-end coordinator read including quorum wait, emitted per request, alert above 50ms against a 10ms SLA target.
+- **`kvstore.write_latency_p99`:** end-to-end coordinator write including quorum wait, emitted per request, alert above 30ms.
+- **`kvstore.read_amplification`:** SSTables opened per read after Bloom filtering, emitted by the storage layer, alert if the median exceeds 3, which is the compaction-debt signal.
+- **`kvstore.compaction_pending`:** queued compaction jobs per node, emitted by the storage daemon, alert above 100 for an hour.
+- **`kvstore.hint_buffer_size`:** outstanding hinted-handoff entries, emitted per node, alert if growing for more than an hour, because a flapping node produces more hints than a dead one.
+- **`kvstore.repair_lag_hours`:** time since the last successful anti-entropy pass per range, emitted by the repair scheduler, alert above `gc_grace_seconds / 2`. This is the tombstone-resurrection early warning and it is the single most important metric here.
+- **`kvstore.sibling_count`:** concurrent versions returned per read, emitted per request, alert on any sustained rise, which means reconciliation is not keeping up or an actor is writing without reading first.
+- **SLOs:** p99 read 10ms, p99 write 30ms, availability 99.99% (LOCAL_QUORUM at N=3 tolerates one node down per DC), zero data loss inside the RPO window set by the hint TTL.
 
 **Multi-region and DR**
 
-- **Replication mode:** active-active with LOCAL_QUORUM reads/writes per DC plus async cross-DC replication; each DC has its own RF=3 quorum and serves locally. Active-passive is the alternative when strong cross-region consistency is required (every write goes to the primary DC, secondary tails).
-- **RTO / RPO:** RTO 1–5min for client failover after a DC outage (geo-DNS or client-side region pinning); RPO 1–60s of inflight cross-DC replication lag — writes accepted in DC1 in the last few seconds may not be visible in DC2 until catch-up.
-- **Failover trigger & cadence:** automatic on health-check failure of an entire DC (geo-load-balancer pulls the unhealthy region); tested quarterly via simulated DC isolation. Per-DC failovers (single rack, single AZ) test monthly.
-- **Cross-region cost trade-off:** async cross-DC replication costs WAN bandwidth proportional to write rate × payload size × RF (typically 5–50% of intra-DC traffic on the WAN); EACH_QUORUM is available for explicit strong-cross-DC writes but pays the WAN RTT (~70ms transatlantic) per write — reserve for rare cross-region operations like account creation.
+- **Replication mode:** active-active, LOCAL_QUORUM reads and writes per DC plus asynchronous cross-DC replication, each DC holding its own RF 3 set. Active-passive is the alternative when strong cross-region consistency is required, with every write going to the primary DC and the secondary tailing.
+- **RTO / RPO:** RTO 1 to 5 minutes for client failover after a DC outage via geo-DNS or client-side region pinning; RPO 1 to 60 seconds of in-flight cross-DC lag, so writes accepted in DC1 in the last few seconds may not be visible in DC2 until catch-up.
+- **Failover trigger and cadence:** automatic on health-check failure of a whole DC (the geo load balancer pulls the unhealthy region), tested quarterly by simulated DC isolation. Single-rack and single-AZ failovers are tested monthly.
+- **Cross-region cost:** asynchronous cross-DC replication costs WAN bandwidth proportional to write rate × payload × RF, typically 5 to 50% of intra-DC traffic. EACH_QUORUM is available for explicit strong cross-DC writes but pays ~70ms transatlantic per write; reserve it for rare operations such as account creation.
 
 ### 4. Design a Unique ID Generator (Snowflake)
 #### Problem
-Generate globally unique, roughly time-sortable 64-bit IDs across thousands of machines without coordination per request.
+Generate globally unique, roughly time-sortable 64-bit identifiers across a fleet of thousands of machines, with no coordination on the request path. These IDs become primary keys, so a duplicate is silent corruption rather than a visible error, and they become sort keys, so they have to increase with time closely enough that inserts land at the right edge of a B-tree index.
 #### Core
-TODO
+An ID is a 64-bit integer cut into three fields: when it was made, who made it, and a counter within that instant. Uniqueness comes from the second field, sortability from the first sitting in the high bits, burst capacity from the third. Everything else in this question is an argument about where to draw those boundaries and what to do when the clock lies.
 
-Write the whole answer as you would give it in sixty seconds, 200 to 300 words, standing alone.
+The standard cut is 41 bits of milliseconds since a custom epoch, giving 69 years of runway; 10 bits of worker id, giving 1024 slots; 12 bits of sequence, giving 4096 IDs per millisecond per worker. The sign bit stays zero so the value is a positive BIGINT everywhere.
+
+The only coordination is assigning the worker id, and it happens once at boot. A machine claims an exclusive slot from a small consistent store and refuses to start if it cannot get one. After that, generating an ID is two shifts and an OR against process-local state: no network call, no lock across machines, tens of nanoseconds. That is the actual design decision. The hot path has no dependency that can be slow, throttled, or down.
+
+Which means the failure mode that matters is not throughput, it is the wall clock going backwards. NTP steps, VM live migration, a container starting before time sync. If the clock rewinds and you keep generating, you reissue IDs you already handed out, and nothing downstream notices until a foreign key points at the wrong row months later. So compare against the last timestamp you used, and if it moved backwards, stop issuing and page someone. A node silent for three seconds is recoverable. Duplicate primary keys are not.
+
+Scale by adding workers. The ceiling is the 1024 slots, not the rate.
 #### Summary
-**The picture in your head:** a ticket machine at a deli counter, except there are 1000 ticket machines running simultaneously. If each machine just handed out sequential numbers starting at 1, they would all collide. Snowflake's insight: give each machine a unique machine ID at startup, then build every ticket from three ingredients — the current millisecond, the machine's ID, and a tiny per-millisecond counter. Even if two machines generate a ticket in the exact same millisecond, different machine IDs make them distinct. The whole generation happens locally with no network call.
+**The picture in your head:** a ticket machine at a deli counter, except there are 1000 ticket machines running simultaneously. If each machine just handed out sequential numbers starting at 1, they would all collide. Snowflake's insight: give each machine a unique machine ID at startup, then build every ticket from three ingredients, the current millisecond, the machine's ID, and a tiny per-millisecond counter. Even if two machines generate a ticket in the exact same millisecond, different machine IDs make them distinct. The whole generation happens locally with no network call.
 
 **The approaches people actually take:**
-TODO. Two or three things a competent engineer might reach for, in plain language and before any product name, with what each one buys and roughly when it wins.
 
-**The single-request walkthrough:** machine 42 needs to generate an ID. It reads the current time: `1740000000100` (a Unix timestamp in milliseconds). It checks: is that later than the last timestamp it used? Yes. So it resets the sequence counter to 0. It packs the 64-bit integer as: timestamp bits in the high positions, machine ID `42` in the middle, sequence `0` at the low end. Result: one 64-bit integer that is globally unique, because no other machine is machine 42, and machine 42 won't reuse this timestamp+sequence combination. The entire operation takes under 1 microsecond with no network hop.
+*Cut the number space into private slices and let each generator work alone.* Every machine gets a slice it alone can mint from, so no two machines can produce the same value even in the same instant. It buys the smallest possible ID, a request path with no network call on it, and ordering by time for free if you put the clock in the high bits. It costs a bit budget you can never renegotiate without a flag day, a way to hand out slices exclusively, and a hard dependency on the clock moving forward. It wins when the ID has to fit an existing integer column and stays inside your systems.
+
+*Make the ID wide enough that collision is a probability argument rather than a guarantee.* Put a coarse timestamp at the front for ordering and fill the rest with randomness. No slices, no boot-time claim, nothing to allocate, and any process anywhere can mint one offline. It costs double the width in every index, every foreign key, and every log line. It wins on greenfield systems, on anything that mints IDs on a client you do not control, and anywhere the ID crosses a trust boundary, because random bits are not enumerable.
+
+*Ask a central counter for a block and hand the block out locally.* One authority owns a single increasing number and leases ranges of it. This gives dense, genuinely sequential IDs with no clock involvement at all, and it is the only option that survives a machine with a broken clock. It costs a service that has to be up when a block runs out, and gaps whenever a process dies holding one. It wins where an accountant or an auditor needs contiguous numbering, which is a real requirement in finance and is not satisfiable any other way.
+
+**The single-request walkthrough:** machine 42 needs to generate an ID. It reads the current time: `1740000000100` (a Unix timestamp in milliseconds). It checks: is that later than the last timestamp it used? Yes. So it resets the sequence counter to 0. It packs the 64-bit integer as: timestamp bits in the high positions, machine ID `42` in the middle, sequence `0` at the low end. Result: one 64-bit integer that is globally unique, because no other machine is machine 42, and machine 42 will not reuse this timestamp and sequence combination. The entire operation takes under 1 microsecond with no network hop.
 
 **The pieces (and what each one is for):**
-- **41-bit timestamp (milliseconds since a custom epoch)** — the epoch is just the launch date, say Jan 1, 2020. Storing milliseconds since that date instead of since 1970 gives 41 bits ~69 years of runway rather than ~3 years. Putting the timestamp in the high bits means that sorting these integers as ordinary numbers also sorts them by creation time — new IDs go to the end of a database index, which is efficient for B-tree inserts.
-- **10-bit machine ID** — a number 0–1023, unique across the fleet. This is the only part that requires coordination, and it only happens at boot time (see below). Different machines produce IDs in the same millisecond without collision because the machine ID is different.
-- **12-bit sequence counter** — counts from 0 to 4095 within a single millisecond on a single machine. If a machine generates more than 4096 IDs in one millisecond (rare), it spins waiting for the clock to tick to the next millisecond.
-- **Coordination service (ZooKeeper or etcd) for machine ID leases** — at boot, a machine atomically claims a slot: "I want machine ID 42." If that slot is taken, it tries 43, 44, etc. The claim is a short-lived lease that expires if the machine dies — the slot gets recycled. This is the only network call in the system. After boot, the hot path is entirely local.
+- **41-bit timestamp, milliseconds since a custom epoch.** The epoch is just the launch date, say Jan 1 2020. Storing milliseconds since that date instead of since 1970 gives 41 bits about 69 years of runway rather than about 19. Putting the timestamp in the high bits means sorting these integers as ordinary numbers also sorts them by creation time, so new IDs go to the end of a database index, which keeps B-tree inserts cheap.
+- **10-bit machine ID.** A number from 0 to 1023, unique across the fleet. This is the only part that requires coordination, and it only happens at boot. Two machines can generate in the same millisecond without colliding because this field differs.
+- **12-bit sequence counter.** Counts 0 to 4095 within a single millisecond on a single machine. If a machine wants more than 4096 IDs in one millisecond, it spins until the clock ticks over.
+- **Worker-id allocation.** At boot a machine claims a slot exclusively, either from a coordination service that hands out expiring leases or from an orchestrator that already assigns stable ordinals. Either way it is one claim per process lifetime, not one per ID, and the process must refuse to start rather than guess.
 
-**The thing that makes it hard:** clocks lie. A virtual machine gets migrated to different hardware and its clock jumps backward by 3 seconds. Machine 42 was happily generating IDs with timestamp `1740000003000` and suddenly the clock reads `1740000000000` — 3 seconds in the past. If the machine keeps generating, it will reissue IDs it already handed out 3 seconds ago. Those IDs are now used twice in the system. Every database row, every order, every event that used one of those IDs is now silently pointing at the wrong thing. The fix is brutal but correct: detect `now < last_timestamp` and halt entirely. Refuse to generate any IDs until the clock recovers. One machine going silent for a few seconds is far better than years of corrupted primary keys.
+**The thing that makes it hard:** clocks lie. A virtual machine gets migrated to different hardware and its clock jumps backward by 3 seconds. Machine 42 was happily generating IDs with timestamp `1740000003000` and suddenly the clock reads `1740000000000`, three seconds in the past. If the machine keeps generating, it reissues IDs it already handed out three seconds ago. Those IDs are now used twice. Every row, every order, every event keyed on one of them is silently pointing at the wrong thing. The fix is blunt but correct: detect `now < last_timestamp` and halt. Refuse to generate anything until the clock recovers. One machine going silent for a few seconds beats years of corrupted primary keys.
 
-**Why this design and what it costs:** the design puts the only coordination at boot time (machine ID assignment), making the hot path purely local. At 1 million IDs per second per machine across a 1000-machine fleet, hitting a coordination service for every ID would be the bottleneck. Local generation with a pre-assigned machine ID gives sub-microsecond generation with zero network dependency on the hot path.
+**Why this design and what it costs:** the design puts the only coordination at boot time, making the hot path purely local. Hitting a coordination service per ID at even a fraction of the per-node ceiling would make that service the bottleneck and the availability floor for every write in the system. Local generation with a pre-assigned worker id gives sub-microsecond issuance with no network dependency at all. The cost is that correctness now rests on a hardware clock and on nobody else holding your worker id, and neither of those can be checked at issue time.
 
 **If you were building it tomorrow:**
-- ZooKeeper or etcd holds ephemeral leases at `/snowflake/leases/{0..1023}`; each machine does `CREATE_OR_FAIL` at boot to claim a slot.
-- Per-machine generator is a ~20-line class:
+- Worker id from the orchestrator ordinal if you have one, otherwise expiring leases at `/snowflake/leases/{0..1023}` claimed with create-if-absent. Refuse to boot on failure; never fall back to a guess.
+- Per-machine generator is about 20 lines:
   ```
   def next_id():
     ts = now_ms()
@@ -1296,65 +1328,75 @@ TODO. Two or three things a competent engineer might reach for, in plain languag
     last_ts = ts
     return (ts << 22) | (machine_id << 12) | seq
   ```
-- Custom epoch = your launch date; burn no bits on ancient history.
-- On clock rewind > 0ms: log it, alert ops, return error to callers — never silently reissue.
+  Everything it reads is process-local. That is the property to protect.
+- Custom epoch set to the launch date; burn no bits on ancient history.
+- Leap-smearing time source fleet-wide, so a leap second is a slow slew rather than a one-second rewind.
 #### What this is really testing
-TODO
+Whether you notice what this design actually did. It did not solve distributed uniqueness, it removed the need to solve it. No two generators can produce the same triple of worker, millisecond and sequence, because the number space was cut into disjoint slices before the first request was served. Nothing is verified at runtime, and there is no code path that detects a collision, because a collision is supposed to be structurally impossible. The price is that a guarantee by construction is only as strong as its premises, and one premise is that a wall clock moves forward. So the interview converges on a hardware fact. A candidate who recites 41 / 10 / 12 has memorised a layout. One who says "I traded a coordination problem for a clock problem, and here is what happens when the trade goes bad" has understood the design.
 
-The one insight this question exists to elicit, then the contrast with the question it most resembles and why the answers differ.
+The contrast is with the Dynamo-style key-value store. That system also refuses to coordinate on the write path, and it also has to survive two nodes acting at the same instant, but it cannot pre-partition its way out of the problem: the keys belong to the client, any replica may be asked to write any key, and two writes to the same key during a partition are legitimate. So it takes the opposite branch. Allow the conflict, detect it after the fact with version vectors, and reconcile through read repair, last-writer-wins, or an application merge function. Coordination-free writes there cost you sibling values, version metadata on every object, and a consistency model your callers have to reason about. Here the namespace is ours to carve, so we spend 10 bits at boot and get uniqueness with no reconciliation, no version metadata, and no read path at all. Same goal, opposite mechanism, and the question that decides which one you are in is whether you own the namespace. If you do, partition it in advance. If you do not, plan to merge.
 
-Closest question: TODO
+Closest question: Q3
 #### Clarifying questions and how each answer forks the design
-- Need sortability by creation time?
-- Max ID rate per node?
-- Tolerance to clock skew?
-- 64-bit constraint (DB column type) or 128-bit OK?
+- Need sortability by creation time, or just uniqueness?
+- Peak fleet size, and peak IDs per second on a single node?
+- Does the ID ever reach a user, a URL, or a third party?
+- 64-bit constraint (existing BIGINT columns) or is 128-bit acceptable?
+- What is the tolerance for a node refusing to issue during a clock anomaly?
 
 **How the answers shape the design**
 
 | If the answer is… | Then the design… |
 |---|---|
 | Sortable by creation time | put the timestamp in the high bits (Snowflake layout: time, then machine, then sequence) |
+| Uniqueness only, no ordering | drop the whole clock problem and use random 128-bit IDs |
 | 64-bit constraint | 41 bits time plus 10 bits machine plus 12 bits sequence, fitting a BIGINT column |
 | 128-bit acceptable | UUIDv7 is simpler and time-ordered with no machine coordination |
-| Very high per-node rate | widen the sequence bits or run multiple logical workers per host |
-| Low clock-skew tolerance | use a monotonic clock and wait or borrow on a backwards jump; NTP the fleet |
-| No per-request coordinator | lease machine IDs at startup via ZooKeeper or config, never per ID |
+| Fleet above ~1000 live workers | widen the machine field and narrow the sequence, or coarsen the clock to 10ms ticks |
+| ID is user-facing | never expose the raw value; carry a second opaque identifier at the boundary |
+| No tolerance for a halted node | you cannot use a wall clock as the sole ordering source; add a persisted watermark or a ticket server |
 #### Requirements and scale, derived out loud
 **Requirements**
 
-- **FR:** unique IDs across fleet, sortable by time
-- **NFR:** >10k IDs/s/node, no external dependency on hot path, monotonic-ish
+- **FR:** unique 64-bit IDs across the fleet; ordered by creation time across milliseconds; decodable back to a creation timestamp without a lookup.
+- **NFR:** no network call on the issue path; sub-microsecond issuance; zero duplicates as a hard correctness bound. Note what is *not* promised: within a single millisecond, IDs from different workers have no meaningful order.
 
 **Scale**
 
-- **Fleet 1k–10k machines, ~4M IDs/s aggregate:** Twitter-tier (~1k generators) up to hyperscaler (10k). Per-node ceiling = 2¹² IDs/ms = 4096 IDs/ms = 4.096M IDs/s/node, but realistic steady-state is ~4k IDs/s/node × 1000 nodes = ~4M/s aggregate (any single node could burst to 4M/s if needed).
-- **ID size 8B (int64):** Snowflake layout = 1 sign + 41 ts_ms + 10 machine + 12 sequence = 64 bits = 8 bytes by definition.
-- **ID byte volume ~32MB/s:** 4 × 10⁶ IDs/s × 8B = 3.2 × 10⁷ B/s ≈ 32 MB/s of pure ID bytes if logged. Storage cost per ID is dominated by the row keyed on it (typically 100B+), not the ID itself.
-- **vs UUID savings ~50%:** UUID = 16B, Snowflake = 8B → every index entry, foreign key, and join column halves. On a table with a 32B index entry (key + RID), 8B ID → 24B vs 16B → 32B = 25–50% smaller index depending on layout.
-- **Machine-ID space 1024 slots:** 10 bits = 2¹⁰ = 1024. With a 1k-node fleet you're at saturation — assumption above is "1k machines using full bits"; 10k fleet requires stealing bits from sequence (12→9, capping per-node QPS at 512/ms ≈ 512k/s, still ample) or using zone+machine encoding.
-- **Epoch range ~69 years:** 41 bits of milliseconds = 2⁴¹ ms = 2.2 × 10¹² ms ÷ (1000 × 86400 × 365.25) ≈ 69.7 years. Pick epoch close to launch date to maximise remaining runway.
-- **Hot tier <1MB:** machine-id leases in coordination service (ZooKeeper/etcd). 10k entries × ~50B (node_id + lease_ts + host) = ~500KB total. Heartbeat ~1KB/s/node × 10k nodes = 10 MB/s aggregate to coordinator — easily handled.
-- **Cold tier none:** ID-to-creation-time decoding is `(id >> 22) + epoch_ms` — pure compute, no lookup. No historical store needed for the generator itself.
+- **Fleet 1k to 10k machines, ~4M IDs/s aggregate:** Twitter-tier (~1k generators) up to hyperscaler (10k). Per-node ceiling is 2¹² IDs/ms = 4096 IDs/ms × 1000 ms = **4.096M IDs/s/node**. Realistic steady state is far below that: 4k IDs/s/node × 1000 nodes = **~4M/s aggregate**, with any single node able to burst to the ceiling.
+- **ID size 8B:** 1 sign + 41 ts_ms + 10 machine + 12 sequence = 64 bits = 8 bytes, by definition.
+- **ID byte volume ~32MB/s:** 4 × 10⁶ IDs/s × 8B = 3.2 × 10⁷ B/s ≈ **32 MB/s** of pure ID bytes if logged. Storage cost per ID is dominated by the row keyed on it, typically 100B or more, not by the ID.
+- **Index cost versus a 128-bit ID:** the key is stored once per index it appears in. A table with a primary key plus three secondary indexes stores it four times, so 8 extra bytes per key on 10¹⁰ rows is 8B × 4 × 10¹⁰ = 3.2 × 10¹¹ B ≈ **320GB of extra index**. Below about 10⁹ rows the same arithmetic gives ~32GB, which nobody will notice. This one number decides the first fork below.
+- **Machine-ID space 1024 slots:** 10 bits = 2¹⁰ = 1024. A 1k-node fleet is already at saturation, and dead workers hold slots until their lease expires, so usable headroom is lower than the raw count. A 10k fleet needs 14 bits of machine (2¹⁴ = 16,384), which leaves 8 sequence bits: 2⁸ = 256 IDs/ms = **256k IDs/s/node**, still an order of magnitude above any realistic single-process rate.
+- **Epoch range ~69 years:** 41 bits of milliseconds = 2⁴¹ ms = 2.2 × 10¹² ms ÷ (1000 × 86400 × 365.25) ≈ **69.7 years**. Anchored at 1970 the same 41 bits expire in 2039, which is why the custom epoch exists. Set it at launch date to keep the full runway.
+- **Lease store, under 1MB:** at most 1024 slots × ~50B (worker id, holder, expiry) ≈ **51KB**; even the 14-bit variant is 16,384 × 50B ≈ 820KB. Heartbeats at ~1KB/s/node × 1000 nodes = **~1MB/s** to the coordination service, or ~10MB/s for a 10k fleet. Trivial for any consistent store, and none of it is on the issue path.
+- **No historical store:** decoding an ID to its creation time is `(id >> 22) + epoch_ms`, pure arithmetic. The generator keeps no durable state beyond its lease and, if you add the restart guard below, one small watermark file.
 #### Key decisions
-TODO
+**A 64-bit partitioned ID versus a 128-bit self-contained one**
+- Choice: Snowflake-style 64-bit, timestamp in the high bits, worker id claimed at boot.
+- Alternative: UUIDv7, standardised in RFC 9562 in 2024, which is 128 bits of 48-bit millisecond prefix plus 74 bits of randomness. Time-ordered like Snowflake, but with no worker id, no boot-time claim, and no clock-rewind logic, because two generators colliding requires the same millisecond *and* a 1-in-2⁷⁴ random draw.
+- Decider: whether the columns carrying this ID are already BIGINT, and what 8 extra bytes cost at your row count. At 10¹⁰ rows across four indexes that is ~320GB of extra index and the memory to keep the hot part of it resident; at 10⁹ rows it is ~32GB and irrelevant.
+- Alternative wins when: you are starting fresh, rows are under roughly 10⁹, and you do not already run a coordination service for something else. Then UUIDv7 is the better engineering call and it is not close: no allocation scheme, no halt logic, no bit budget to regret in five years, native `uuidv7()` in PostgreSQL 18 (2025) and in most standard libraries. It also wins outright when the ID crosses a trust boundary, since 74 random bits are not enumerable and a Snowflake is.
 
-Two or three genuine forks. For each, in this exact shape so it stays checkable:
+| Format | Bits | Ordered by time | Coordination | Column type | Guessable |
+|---|---|---|---|---|---|
+| **Snowflake** | 64 | yes, as an integer | worker-id claim at boot | BIGINT | yes |
+| **UUIDv7** | 128 | yes, as binary | none | UUID | partially |
+| **UUIDv4** | 128 | no | none | UUID | no |
+| **ULID** | 128 | yes, as text | none | text or binary | partially |
+| **Ticket server** | any | yes, and dense | one per block | BIGINT | yes |
 
-**<name of the fork>**
-- Choice:
-- Alternative:
-- Decider:
-- Alternative wins when:
+**Worker id from static configuration versus a lease from a coordination service**
+- Choice: an exclusive expiring lease claimed at boot from a small strongly consistent store, with the process refusing to start if no slot is available.
+- Alternative: the worker id comes from the deployment itself, as a StatefulSet ordinal, an ECS task index, or a value baked in by the provisioning system.
+- Decider: fleet churn against the 1024 slots. Static assignment is safe exactly when the orchestrator guarantees a stable unique ordinal *and* the fleet cannot exceed the slot count. A StatefulSet gives both. An autoscaling group of interchangeable pods gives neither, and once you are replacing more than about 100 instances a day, or running any deploy that starts the new instance before the old one stops, hand-managed configuration drifts and two hosts eventually share an id.
+- Alternative wins when: the orchestrator already assigns ordinals. Then the ordinal *is* the lease, and it is stronger than anything you would build, because the scheduler enforces exclusivity and keeps enforcing it during a network partition, which an expiring lease does not. It also deletes a boot-time dependency on a service that tends to be unhealthy at exactly the moment you are trying to scale up. This is the better answer wherever it is available; the coordination service exists for fleets whose scheduler makes no such promise.
 
-**Raw material, from the old Common Mistakes:**
-
-- **Treating "the clock moves forward" as a given** — the entire design rests on monotonic time, but NTP step adjustments, VM live-migration, and leap seconds all violate it. Candidates who don't name a clock-rewind handler aren't designing for production; the silent-corruption failure mode is the canonical Snowflake gotcha.
-- **Allocating machine_id at boot via random selection** — "pick a random number 0–1023, hope no one else picked it" collides with high probability above ~32 nodes (birthday paradox). Use an ephemeral coordination-service lease with `CREATE_OR_FAIL`; never fall back to a guess.
-- **Picking UUIDv4 because it's simpler** — UUIDv4 is unsortable and 128-bit; using it for primary keys causes B-tree page splits everywhere on insert and doubles index size. Senior answer: UUIDv7 if you need 128-bit, Snowflake if 64-bit and time-sortability matter.
-- **Exposing raw Snowflake IDs externally as opaque tokens** — they're not opaque; the timestamp + machine_id + sequence are decodable, leaking traffic patterns and enabling enumeration. Hash-encode or pair with a session token before exposing.
-- **Designing the bit layout without future capacity in mind** — picking a custom epoch that's 5 years old at launch leaves only 64 years of runway; picking it at launch date gives the full 69. Trivially optimisable, often missed.
-- **Confusing sortability with monotonicity within the same ms** — IDs are sortable across ms boundaries but are NOT strictly monotonic within a single ms (sequence is unique but doesn't enforce ordering across processes); candidates who claim "monotonically increasing IDs" overstate the guarantee.
+**Where the bits go**
+- Choice: 41 timestamp / 10 worker / 12 sequence, sign bit unused.
+- Alternative: shift bits toward the worker field, say 41 / 14 / 8, or coarsen the clock and buy bits back. Sonyflake takes the second route: 39 bits of 10ms ticks, which is 174 years, plus a 16-bit machine field and an 8-bit sequence.
+- Decider: peak concurrently-held worker slots against peak per-worker rate. 10/12 gives 1024 workers at 4.096M IDs/s each. 41/14/8 gives 16,384 workers at 2⁸ = 256 IDs/ms = 256k IDs/s each. You have both numbers; pick the split that clears them with margin. Under ~700 live workers and no process needing more than 4M IDs/s, the default has headroom on both axes.
+- Alternative wins when: the fleet exceeds roughly 1000 concurrently-held slots, which arrives earlier than the instance count suggests because dead workers keep their slot until the lease expires. Treat this as near-irreversible: existing IDs were minted under the old split and decoding them requires knowing which split applied, so changing it means a flag day or spending a bit as an encoding marker. Decide once against a five-year fleet projection, not against today's fleet.
 #### High-level design
 **must-say**
 
@@ -1419,143 +1461,135 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 </svg>
 ```
 
-**How to read the diagram:** the coordination service is only used when a machine starts up. It hands out a unique machine ID, and from that point onward the server generates IDs locally with no network hop on the hot path.
+**How to read the diagram:** both arrows leaving the generator are dashed, and that is the whole point. Neither is on the request path. The coordination service is touched once at boot to obtain a worker id, and the clock source is a background daemon adjusting the host clock. The solid arrow, the one that runs millions of times a second, never leaves the process.
 
-**Why the flow is shaped this way:** per-request coordination would turn ID generation into a bottleneck immediately. Snowflake avoids that by doing the one shared step at boot time, then letting each machine combine time, machine ID, and sequence locally.
+**Why the flow is shaped this way:** per-request coordination would make the ID service the availability floor for every write in the system, and its p99 would be added to every insert. Moving the one shared step to boot time converts a distributed problem into a local one.
 
-**What this layout buys you:** very fast ID creation and roughly time-ordered IDs that work well in databases. The sensitive part is clock handling: once generation is local, time correctness matters more than algorithmic complexity.
+**What this layout buys you, and what it moves:** issuance becomes as available as the process itself, and IDs sort by creation time so inserts stay at the right edge of the index. The cost is that the two dashed arrows are now load-bearing in a way that is easy to miss. Correctness depends on a clock the generator does not control and on an exclusivity guarantee it cannot re-check at issue time.
 #### Deep dive
 **must-say**
 
-**Approach comparison:**
+**Trusting the clock, and what it costs.**
 
-| Approach | Pros | Cons |
-|---|---|---|
-| **Snowflake** | sortable, compact (64b), no per-call coord | clock-sensitive, machine_id allocation |
-| **UUID v4** | trivially unique, no coord | 128b, unsortable, bad for index locality |
-| **UUID v7** | sortable, no coord | 128b |
-| **DB auto-increment** | simple | single point of failure, range allocation needed |
-| **Ticket server** (single counter DB) | simple, sortable | SPOF, scaling cap |
-| **MongoDB ObjectId** | similar to Snowflake | 96b |
+The uniqueness guarantee decomposes into two claims: no two live processes hold the same worker id, and within one process the pair `(timestamp, sequence)` never repeats. The second claim is not a statement about software. It is a statement about a hardware oscillator and the daemon disciplining it, and it is false more often than people expect.
 
-**Clock skew handling:**
-- Reject backward jumps > Xms; halt + alert. If `now < last_ts`, refuse to issue any further IDs and surface a hard error to the operator. The cost (one node out of rotation for a few seconds) is vastly preferable to silent ID re-issuance, which corrupts every system that uses these IDs as primary keys. Set X to 0 in strict mode; in lenient mode (e.g., NTP step adjustments), a few-millisecond rewind is absorbed by waiting.
-- Stretch forward small jumps (queue requests). If the clock leaps forward by 100ms, naively you'd skip 100ms of IDs — fine, that's wasted but harmless. But if the leap is huge (multi-second), some Snowflake implementations cap the jump and gradually catch up over the next several ms to keep the timestamp axis monotonic and dense, which matters for systems doing time-range scans on IDs.
+**Why wall clocks go backwards,** roughly in order of how often you will see it. An NTP client steps rather than slews when the offset is large: `chrony` with the common `makestep 1.0 3` steps if the offset exceeds one second in its first three updates, which fires on almost every fresh container. A VM that is live-migrated, suspended, or restored from a snapshot resumes with a stale clock until the guest agent corrects it, and the correction is a step. A host that boots with a dead RTC battery starts in 1970 and jumps forward by decades on first sync, which is harmless, and then any later correction can go the other way. A positive leap second re-runs the same UTC second on hosts that do not smear. Leap seconds are on the way out: in 2022 the CGPM resolved to stop inserting them by 2035, and none has been inserted since 2016, but "no longer scheduled" is not "cannot happen" for the next decade.
 
-**Detailed comparison: Snowflake vs UUIDv7 vs ULID vs KSUID.** All four are time-sortable, coordination-free IDs but they're not interchangeable. Snowflake is 64 bits, requires a machine-ID lease, and packs ms+machine+seq for tight integer sortability. UUIDv7 (RFC 9562, IETF-standardized 2024) is 128 bits with 48-bit ms timestamp + 74 bits of randomness — no machine-ID needed because the random bits cover collision space, and PostgreSQL 18 (2025) ships a native `uuidv7()` function. ULID is 128 bits encoded as a 26-char Crockford Base32 string (`01ARZ3NDEKTSV4RRFFQ69G5FAV`), which sorts correctly as a string — wins where IDs flow through systems that prefer text. KSUID is 27 bytes, 32-bit second-precision timestamp + 16 bytes random — cheaper than UUIDv7 in entropy collection but coarser timestamps.
+**Detection is one comparison, but the clock you compare matters.** `if now < last_ts` costs nothing on the hot path. The subtlety is which clock `now` reads. `CLOCK_REALTIME` is the one that can step. `CLOCK_MONOTONIC` cannot go backwards by contract, but it has no epoch and resets on reboot, so it cannot be the timestamp field directly. It can be the *source of advance*: read realtime once at startup, then derive every subsequent timestamp as `base_realtime + (monotonic_now - base_monotonic)`. Now a step from NTP cannot rewind you at all, and the field drifts from true UTC by the host's crystal error, typically 10 to 50 parts per million, so about 1 to 4 seconds per day. That is fine, because this field is a sort key, not a clock. If it drifts too far, correct it forward only, never backward. Whether you want this depends on whether anyone downstream treats the decoded timestamp as an accurate event time. Many teams do, usually without saying so, which is why the naive realtime read plus a halt on rewind remains the common answer.
 
-| Format | Bits | Sortable | Coord-free | DB type | Predictable? | Best for |
-|---|---|---|---|---|---|---|
-| **Snowflake** | 64 | yes (int) | machine-ID lease | BIGINT | yes (don't expose) | tight column width, internal IDs |
-| **UUIDv4** | 128 | no | yes | UUID | no | non-leaky external IDs |
-| **UUIDv7** | 128 | yes (binary) | yes | UUID | partial | new projects, IETF-standard, PG18 native |
-| **ULID** | 128 | yes (string) | yes | varies | partial | text-heavy pipelines, log IDs |
-| **KSUID** | 160 | yes | yes | varies | partial | second-precision is enough |
-| **MongoDB ObjectId** | 96 | yes | machine+pid | special | yes | MongoDB ecosystem |
+**The three responses to a detected rewind, in order of how much you give up.** Wait it out: sleep until the clock passes `last_ts` and continue. Correct for rewinds of a few milliseconds, and the caller sees a latency blip rather than an error. Halt: refuse to issue and page someone. Correct for anything larger, and it converts silent corruption into a visible, bounded outage on one node behind a load balancer. Sidestep it: derive from monotonic as above, so the case rarely arises. What you must never do is clamp the timestamp to `last_ts` and keep incrementing the sequence, which looks like the graceful option and is exactly how duplicates get minted, because the sequence is only 4096 wide and a multi-second rewind will exhaust it and wrap into values already used.
 
-*[Source: Authgear "Time-Sortable Identifiers Explained" (2025); RFC 9562; PostgreSQL 18 release notes]*
+**The hole none of that closes: process restart.** `last_ts` lives in memory and dies with the process. A generator that crashes and restarts in 200ms, on a host whose clock stepped back 5 seconds a moment earlier, has no memory of what it issued and will cheerfully reissue it. Persisting `last_ts` per ID is not available to you: an fsync is tens to hundreds of microseconds and you are issuing at up to 4M/s. The trick that does work is to reserve time forward. On startup, fsync a watermark of `now + 10s` to local disk, refuse to issue below the persisted watermark, and only re-fsync when you cross it. That is one fsync every 10 seconds instead of 4 × 10⁷. A crash restart inside the reserved window sleeps until the wall clock passes the watermark, so the cost lands entirely on restart latency, up to 10 seconds. Tune the window against restart frequency, and log the sleep loudly, because a crash-looping process with this guard looks like a hang rather than a crash. Note the guard is per host and dies with the disk, so a replacement host inherits nothing; that gap is covered by the worker id being new, not by the watermark.
 
-**Why "halt" is the right clock-rewind policy.** Most Snowflake bugs in the wild aren't ID-generation bugs, they're clock-management bugs that the ID generator silently absorbed. NTP step adjustments, VM live migration, leap-second smearing on hosts that don't smear, container restarts with `chrony` re-sync — all can rewind a wall clock. Halting on rewind makes the failure mode loud (one node rejects writes for a few seconds) instead of silent (years of slowly-corrupted primary keys). The Twitter Snowflake announcement (2010) explicitly called this out: silent ID re-issuance corrupts every system that uses these as foreign keys, and recovery is forensic archaeology. *[Source: Twitter "Announcing Snowflake" (2010)]*
+**And the hole the clock work cannot touch.** If two live processes hold the same worker id, none of the above matters. They will collide inside the same millisecond by construction, no local check can see it, and the clock is irrelevant. That is why the worker-id claim has to be an exclusive lock rather than a registration, and why the correct response to "I cannot reach the lease service at boot" is to not start.
+
+**How you actually find out.** You cannot detect a duplicate by inspecting IDs, so the detector has to live in the sinks: a unique constraint on the ID column, everywhere it is a primary key, which is free and is the only thing that will catch a real incident. The cheaper leading indicator is operational, not data-level. Have every generator report its worker id with its metrics and alarm on any worker id reported by two hosts, plus a counter of detected rewinds that pages on the first non-zero value. Both fire before the duplicates reach anything durable.
 #### Where it breaks
 **must-say**
 
 **Bottlenecks**
 
-- **Clock backward** — wall-clock can rewind on NTP step, VM live-migration, or leap-second insertion, and any rewind risks re-issuing IDs that already exist. Halt issuance immediately and alert ops; the node can rejoin once `now > last_ts` without ever overlapping its earlier output.
-- **Sequence overflow within ms** — at 4096 IDs/ms/node the sequence wraps; without protection you'd issue duplicates within the same millisecond. Spin in a tight loop until the wall clock ticks to the next ms (microseconds of stall) — 4M IDs/sec/node is enough headroom for nearly any workload, and the spin makes the cap a soft slowdown rather than a correctness bug.
-- **Machine ID collision** — two nodes with the same machine_id will collide every ID they generate in the same ms. An ephemeral ZK/etcd lease on `/snowflake/leases/{id}` (CREATE_OR_FAIL) ensures each ID is held by exactly one process; on node death the lease auto-expires and the slot is reusable.
-- **NTP unavailable** — if NTP fails, the clock can drift seconds-per-day and eventually cause a backward step at recovery. Fall back to the OS monotonic clock for the duration of the outage and track accumulated skew so the system can correct gracefully when NTP returns rather than experiencing a sudden rewind.
-- **Leap second insertion** — a positive leap second inserts 23:59:60 UTC, which `time()` on naive systems re-issues as 23:59:59 (a one-second rewind). Run hosts on a leap-smear NTP source (Google/AWS smear over 24h, no rewind ever happens) instead of trying to handle the discontinuity in the generator.
-- **Predictability leaking traffic patterns** — exposing raw Snowflake IDs externally lets adversaries enumerate (`/order/12345 → /order/12346` reveals next order) and infer business volume from ID gaps over time. Hash-encode external IDs (HMAC + base62) or pair with an opaque session token; keep raw Snowflakes as internal primary keys only.
+- **Clock backward.** Wall clocks rewind on NTP step, VM live migration, and unsmeared leap seconds, and any rewind risks reissuing IDs that already exist. Halt issuance and alert; the node rejoins once `now > last_ts` without ever overlapping its earlier output. See the restart hole in the deep dive: halting alone does not cover a process that dies and comes back.
+- **Sequence overflow within a millisecond.** At 4096 IDs/ms/node the sequence wraps, and without protection you issue duplicates inside the same millisecond. Spin until the wall clock ticks over, which turns the ceiling into a microsecond-scale stall rather than a correctness bug. It shows up in latency graphs as micro-spikes, which is the intended signal.
+- **Worker-id collision.** Two processes holding the same worker id collide on every ID they issue in the same millisecond. An exclusive claim with create-if-absent semantics, or an orchestrator ordinal, is the only defence; a random pick collides with better than even odds above about 38 nodes out of 1024 by the birthday bound.
+- **NTP unavailable.** With no time source the clock drifts at the crystal's rate, 1 to 4 seconds per day, and the correction on recovery is a step in whichever direction the drift went. Deriving the timestamp from a monotonic base makes the recovery step harmless; otherwise the recovery is exactly the rewind event you are trying to avoid.
+- **Leap second insertion.** A positive leap second re-runs 23:59:59 on hosts that do not smear, which is a one-second rewind. Run a smearing time source (Google and AWS spread it over 24 hours) rather than handling the discontinuity in the generator.
+- **Predictability leaking business data.** Raw IDs decode to time, worker and sequence, so two IDs a day apart measure your throughput and consecutive IDs enumerate your orders. Keep raw IDs internal and carry a separate opaque identifier at any boundary a customer or partner can see.
 
 **Failure modes**
 
 | Layer | Failure | Detection | Mitigation |
 |---|---|---|---|
-| Correctness | Wall clock rewinds (NTP step, VM live-migration, leap second) | per-call check `now < last_ts` | halt issuance immediately; alert ops; rejoin after `now > last_ts` |
-| Correctness | Two nodes assigned same machine_id (lease race) | duplicate IDs in downstream sink | ephemeral coordination-service lease with `CREATE_OR_FAIL`; refuse boot on collision |
-| Crash | Coordination service (ZK/etcd) unavailable at boot | lease acquisition times out | refuse to start; never fall back to a guessed ID — silent collision is worse than not booting |
-| Crash | Node OOM during ID issuance | process restart | stateless generator; on restart re-acquire lease; first ID issued with `now > last_ts_recovered_from_disk_or_warmup` |
-| Resource | Sequence overflow in same ms (>4096 IDs) | spin-wait observable as latency micro-spikes | tight spin until next ms; cap is soft slowdown not correctness bug |
-| Network | Partition isolates node from clock-sync (NTP) | `ntpd` peer offset growing | fall back to OS monotonic clock for offset accumulation; resync gracefully on NTP recovery |
-| Upstream | Epoch rollover approaching (year ~69 from custom epoch) | timestamp bits saturating | scheduled migration to new epoch with high-bit "post-rollover" marker, well before saturation |
-| Process | External consumer assumes ID is unguessable | scraping/enumeration of `/order/12345` increments | hash-encode external IDs (HMAC + base62); never expose raw Snowflakes as user-facing identifiers |
+| Correctness | Wall clock rewinds (NTP step, VM live migration, leap second) | per-call check `now < last_ts` | halt issuance immediately, alert, rejoin after `now > last_ts` |
+| Correctness | Two processes hold the same worker id | two hosts reporting the same worker id in metrics; unique constraint violations downstream | exclusive create-if-absent lease or orchestrator ordinal; refuse to boot on failure |
+| Correctness | Process restarts after a rewind with no memory of `last_ts` | duplicate-key errors clustered around a restart | fsync a watermark 10s ahead of the clock; refuse to issue below it |
+| Crash | Coordination service unavailable at boot | lease acquisition times out | refuse to start; never guess a worker id |
+| Resource | Sequence overflow in the same ms (>4096 IDs) | spin-wait visible as latency micro-spikes | tight spin to the next ms; soft slowdown, not a correctness bug |
+| Resource | Worker-id slots exhausted during a rolling deploy | free-slot gauge approaching zero | release the lease on SIGTERM; alarm on free slots, not on boot failures |
+| Upstream | Epoch rollover approaching (about 69 years from the custom epoch) | timestamp bits saturating | scheduled migration to a wider format, decided decades ahead of saturation |
+| Process | External consumer treats the ID as unguessable | enumeration patterns in access logs | opaque external identifier; never expose the raw value |
 
 **Unresolved**
 
-TODO. Two or three things this design genuinely does not handle well, and what you would do about each.
+**Halting on a clock rewind is an availability hole, and every alternative costs something real.** A 5-second NTP step means that node issues nothing for 5 seconds, which behind a load balancer is a partial outage and during a fleet-wide time event is a full one. The options are all compromised. Deriving the timestamp from a monotonic base avoids most rewinds but lets the decoded timestamp drift a few seconds a day from true UTC, which silently breaks anyone treating it as event time. Spending a sequence bit as a rewind generation counter keeps issuance alive across a rewind, at the cost of halving the per-millisecond ceiling and breaking time-ordering across the boundary, and the counter itself then needs to survive restart, so it inherits the same fsync problem. What we do instead is make the event rare and loud: smearing time source, PTP where the hardware supports it, drain before live migration, and the forward watermark for restarts. We do not have a way to keep issuing correctly through an arbitrary backwards step, and I would not claim otherwise.
+
+**The lease is checked at boot and never again, so exclusivity is asserted rather than enforced.** A generator that loses its lease, through a long GC pause, a network partition to the coordination service, or a clock skew that expires the TTL early, keeps issuing under a worker id that has been handed to someone else. Fencing it properly means the generator consults something outside itself before issuing, which destroys the property the whole design exists for. The partial fix is a background watcher that kills issuance on observed lease loss, and it is genuinely partial: it is asynchronous, so there is a window of overlap bounded by the watcher's poll interval rather than closed, and it means the process can stop issuing for reasons unrelated to the request path. Orchestrator ordinals are strictly better here because the scheduler enforces uniqueness rather than expiring a claim, which is the real argument for the alternative in the second fork.
+
+**These IDs leak, and de-leaking them costs the property we built them for.** Timestamp, worker and sequence are all recoverable from the integer, so a competitor with two order IDs a day apart knows your daily volume, and consecutive IDs make enumeration trivial. Hashing at the boundary works but destroys ordering, so cursor pagination over the external identifier stops working and you need a separate sort field or a signed cursor. Keeping two identifiers per row, one internal and one opaque, is what we actually do, and it costs an extra indexed column on the hot tables plus a recurring class of bug where the wrong one is logged, returned, or joined on. There is no version of this where a compact, time-ordered, locally-generated ID is also unguessable, because the bits that make it sortable are the bits that make it readable.
 #### Drill questions
-1. A VM gets live-migrated and the clock jumps backward 5s — what happens?
-2. How does machine_id allocation avoid races at boot?
-3. What's wrong with UUIDv7? Why not just use that?
-4. 4M IDs/s/node — what if you need more?
+1. A VM gets live-migrated and the clock jumps backward 5s. What happens?
+2. How does worker-id allocation avoid races at boot?
+3. What is wrong with UUIDv7? Why not just use that?
+4. 4M IDs/s/node. What if you need more?
 5. How do you test that IDs are actually unique across the fleet?
 6. Can someone guess the next ID and exploit it?
-7. New project in 2026 — Snowflake or UUIDv7?
-8. How do you handle an epoch rollover (year ~69 from your custom epoch)?
+7. New project today. Snowflake or UUIDv7?
+8. How do you handle an epoch rollover, about 69 years from your custom epoch?
 9. Why is the 41-bit timestamp at the *high* end of the layout?
-
-TODO. Only 9 drill questions carried over, top up to at least 10.
+10. A rolling deploy replaces all 700 instances in 10 minutes. Does the lease scheme survive it?
+11. Why not just persist the last issued timestamp to disk so a restart can never go backwards?
 #### Answers to drill questions
-1. Halt and refuse to issue IDs until `now > last_ts`; alert ops. Silent corruption (re-issuing IDs) is catastrophic; a 5-second outage on one node is recoverable. *If pushed:* burn a few high bits as a "generation" counter that bumps on every clock-rewind detection — keeps issuing without overlap, at the cost of strict time-sortability.
+1. Halt and refuse to issue until `now > last_ts`, and alert. Silent reissuance is catastrophic; a 5-second outage on one node behind a load balancer is recoverable. *If pushed:* the alternative is to spend a sequence bit as a rewind generation counter, incremented on every detected rewind so the two eras occupy disjoint ID space. That keeps you issuing, halves the per-millisecond ceiling to 2048, breaks time-ordering across the boundary, and the counter itself has to survive a restart, so it needs the same durable watermark as `last_ts`. There is no free version.
 
-2. Ephemeral lease in ZK/etcd: node creates `/snowflake/leases/{id}` with `CREATE_OR_FAIL`; if it exists, try the next ID. Lease auto-deletes when the node dies. *If pushed:* if ZK is unavailable, refuse to start — never fall back to a guessed ID.
+2. An exclusive claim, not a registration: create `/snowflake/leases/{id}` with create-if-absent against a strongly consistent store, walking to the next id on failure, with a TTL so a dead node's slot returns. Better, if your orchestrator assigns stable ordinals, use the ordinal and skip the service entirely. *If pushed:* if the store is unreachable at boot, refuse to start. A guessed worker id is silent corruption; a pod that will not start is a page.
 
-3. UUIDv7 is sortable and coordination-free, but 128 bits doubles your index size and BIGINT-typed columns can't hold it. *If pushed:* if you control the schema and don't care about column width, UUIDv7 is genuinely simpler — no machine_id allocation, no clock-halt logic.
+3. Nothing is wrong with it, and for most new systems it is the better default. The objection is width: 128 bits doubles the key in every index it appears in, and it will not fit a BIGINT column, so adopting it in an existing schema is a migration rather than a change. *If pushed:* the cost only bites at scale. At 10¹⁰ rows across four indexes the extra 8 bytes is roughly 320GB; at 10⁹ rows it is 32GB and not worth a conversation.
 
-4. Genuine sustained needs above 4M IDs/sec/node are rare, but the bit layout is the knob: steal bits from `machine_id` (giving you more sequence bits per millisecond at the cost of fewer machines), or shorten the timestamp epoch (giving more sequence bits at the cost of years of remaining range). Either trade is reversible only by re-encoding existing IDs, which is painful — so pick the bit layout once with a 5-year horizon in mind. *If pushed:* go to a 128-bit format (UUIDv7) and stop fighting the budget; alternatively shard the namespace by tenant so each tenant gets its own machine-ID + sequence space and the per-tenant ceiling stops mattering.
+4. Rare in practice, but the bit layout is the knob: take bits from the worker field to widen the sequence, or coarsen the clock to 10ms ticks and spend the freed bits on sequence, which is what Sonyflake does. Both trades are near-irreversible, because IDs already minted decode under the old split. *If pushed:* the honest answer above the ceiling is to stop fighting a 64-bit budget and move to 128 bits, or to shard the namespace so each tenant has its own worker and sequence space and the per-process ceiling stops being the binding constraint.
 
-5. Generate billions in a load test across N nodes, sink to a dedup job (Spark distinct count). In prod, sample a small fraction of IDs into a Bloom filter for live collision detection. *If pushed:* invariant alarm — monotonic-per-node counter on emitted IDs, reconciled against expected rate, catches a stuck-clock node early.
+5. Not by inspecting IDs. The real detector is a unique constraint on the ID column wherever it is a primary key, which catches an incident for free. For pre-production, generate billions across N nodes into a distinct-count job. For live signal, the leading indicators are operational: alarm on any worker id reported by two hosts, and page on the first detected clock rewind. *If pushed:* a sampled Bloom filter over emitted IDs gives probabilistic live detection, but it lags the damage. The unique index is what actually saves you.
 
-6. Snowflake IDs are predictable (timestamp + machine + counter). Don't use them as security tokens. *If pushed:* hash or HMAC the snowflake before exposing externally, or pair with an opaque session token.
+6. Yes. Timestamp, worker and sequence are all decodable, so consecutive IDs are enumerable and two IDs a day apart reveal your volume. Never use one as a capability or a security token. *If pushed:* carry a separate opaque external identifier rather than hashing the Snowflake at the boundary, because hashing destroys the ordering that cursor pagination depends on.
 
-7. UUIDv7 unless you have a hard 64-bit constraint. It's IETF-standardized (RFC 9562), Postgres 18 ships native `uuidv7()`, no machine-ID allocation, no clock-halt logic, ecosystem support is everywhere. The 128-bit cost is real (~50% bigger indexes, doubled FK columns) but matters mainly at petabyte scale. *If pushed:* Snowflake still wins when the ID is internal-only, the column type is BIGINT throughout, and you already run a coordination service for other things — don't introduce ZK/etcd just for machine-ID leases.
+7. UUIDv7 unless you have a hard 64-bit constraint. RFC 9562 standardised it in 2024, PostgreSQL 18 ships a native `uuidv7()`, and it removes worker-id allocation and clock-halt logic entirely. The 128-bit cost is real but bites only at very large row counts. *If pushed:* Snowflake still wins when the ID is internal-only, the schema is BIGINT throughout, and you already run a coordination service or an ordinal-assigning orchestrator. Do not introduce ZooKeeper solely to hand out worker ids.
 
-8. Forty-one bits of ms gives ~69 years; pick an epoch close to launch so you have full runway. When you eventually approach the boundary, migrate to a new epoch + 1 high bit reserved for "post-rollover" marker, or expand to a 128-bit ID format. *If pushed:* it's the Y2K of distributed systems — schedule the migration when you cross 50 years from epoch, not 65.
+8. Forty-one bits of milliseconds gives about 69 years, so pick the epoch at launch to keep the full runway. The migration when you approach it is a flag day: a marker bit distinguishing old encoding from new, or a move to a wider format. *If pushed:* this is a real answer only because it is far away. Anyone designing today should notice that a 69-year horizon on a decision that is irreversible without a flag day is not actually a comfortable margin, and that a 128-bit format has no such horizon.
 
-9. Lexicographic-by-time sortability. Sorting two int64s as integers also sorts them by creation time, which gives you free index locality (recent rows clustered) and lets you use the ID itself as a pagination cursor. Reversing the layout (timestamp at the low end) breaks both. *If pushed:* this is also why DB primary keys benefit — B-tree inserts at the right edge are cheap; UUIDv4's random insertion causes page splits everywhere.
+9. Because sorting the integers then sorts by creation time. That gives index locality (recent rows cluster and B-tree inserts land at the right edge instead of splitting pages all over the tree) and lets the ID double as a pagination cursor. Put the timestamp anywhere else and both properties vanish. *If pushed:* be precise about what is guaranteed. IDs are ordered across milliseconds, not within one, because two workers issuing in the same millisecond are ordered by worker id, which is arbitrary. Anything requiring a strict total order needs a different mechanism.
+
+10. Only if the slot count clears live plus not-yet-expired workers. With 1024 slots, 700 instances, a 30-second lease TTL and a deploy that starts new instances before draining old ones, peak concurrent slots is roughly 700 plus the in-flight batch plus slots still held by drained instances: at a batch of 100 that is 800 to 900, inside 1024 but without much room. Two cheap fixes: release the lease explicitly on SIGTERM so the slot returns in milliseconds rather than after the TTL, and alarm on the free-slot gauge rather than on boot failures, because by the time a boot fails you already have an outage. *If pushed:* explicit release is best-effort and a hard kill skips it, so the TTL is still the backstop. The number to graph is peak concurrently-held slots, not instance count.
+
+11. Because you cannot fsync per ID. An fsync is tens to hundreds of microseconds against an issue rate of up to 4M/s. Reserve time forward instead: fsync a watermark of `now + 10s`, refuse to issue below it, and re-fsync only when you cross it, which is one fsync per 10 seconds. A crash restart inside the window sleeps until the clock passes the watermark. *If pushed:* the cost is startup latency of up to 10 seconds, and it turns a crash loop into something that looks like a hang, so log the sleep loudly and size the window against restart frequency. It also does nothing for a rewind larger than the window, which still needs the halt.
 #### Whiteboard script
-TODO
+**0-5, frame it and say what is actually hard.** Open with the trade, not the layout: "this design does not solve distributed uniqueness, it removes the need to, by cutting the number space into private slices before any request arrives. The bill arrives as a dependency on the wall clock." Then ask the four questions that change the answer: does the ID ever reach a user, is there a hard 64-bit column constraint, what is peak concurrent fleet size, and what is peak per-process rate. State your assumptions out loud: ~1000 workers, ~4k IDs/s/node steady, internal-only IDs. One caveat worth knowing: this is rarely a standalone 45 minutes. It usually appears as a 10-minute component inside a larger design, and if it does, compress everything below into the 5-15 band and go straight to the clock.
 
-A 45 minute budget: what to cover in 0-5, 5-15, 15-35 and 35-45, what to say first, and a line starting `Cut first:`.
+**5-15, the layout and the one arrow that matters.** Draw a single 64-bit bar split into three fields and write the numbers on it: 41 bits of milliseconds is 69 years from a custom epoch, 10 bits is 1024 workers, 12 bits is 4096 per millisecond, so 4.096M/s per worker. Then draw the generator box with exactly two arrows leaving it, both dashed: one to whatever hands out worker ids, one to the time source. Say the sentence that carries the design: "neither of these is on the request path; the claim happens once at boot." Write the five-line generation loop. Do not draw a service, a load balancer, or a database. There is no request path to draw, and candidates who draw one have missed the point.
 
-**Raw material, from the old Talking Points:**
+**15-35, the clock.** This is the interview, so protect the time. Why wall clocks rewind, in order of frequency: NTP step on container start, live migration, unsmeared leap second. Detection is one comparison, but say which clock you are reading and why `CLOCK_MONOTONIC` cannot be the timestamp field on its own but can be the source of advance. Give the three responses ranked (wait it out, halt, derive from monotonic) and name the one that looks graceful and is wrong: clamping to `last_ts` and letting the sequence absorb it. Then volunteer the restart hole before you are asked, because it is the follow-up that separates candidates: `last_ts` is in memory, an fsync per ID is impossible at 4M/s, so reserve time forward with a 10-second watermark and pay for it in restart latency. Then take the worker-id fork on your own terms: an ordinal from the scheduler beats a lease from a service, because the scheduler enforces exclusivity during a partition and a TTL does not.
 
-- **The clock check is the entire correctness story** — leading with "halt on backward jump" before discussing the bit layout shows you've internalized which failure mode actually matters.
-- **Snowflake vs UUIDv7 in 2026 is a real conversation** — saying "UUIDv7 for new projects, Snowflake when 64-bit is mandatory" shows currency with RFC 9562 and PostgreSQL 18's native uuidv7().
-- **Machine-id allocation is the only coordination, and it's off the hot path** — emphasizing this surface area distinguishes Snowflake's design philosophy from ticket servers.
-- **Bit ordering is a sortability decision, not just a layout** — timestamp in high bits = lexicographic-by-time, which gives free index locality and pagination cursor support; reversing it breaks both.
-- **Stable IDs are not security tokens** — surface this proactively; many candidates discover the predictability problem only when prompted.
-- **Sequence overflow is a soft cap, not a hard one** — naming the spin-wait behavior shows you've thought through the per-ms ceiling rather than just citing "4M IDs/sec/node".
-- **Leap-smear NTP solves leap seconds for free** — citing Google/AWS leap-smear as the production answer to a textbook horror story signals operational depth.
+**35-45, concede and close.** Give the gaps before they are found: halting is an availability hole and every alternative costs ordering, bit budget, or timestamp accuracy; the lease is checked at boot and never again, so exclusivity is asserted rather than enforced; the IDs leak time and volume, and de-leaking them costs the ordering you built them for. Then two minutes of operations: a unique constraint on the ID column is the only real duplicate detector, alarm on two hosts reporting the same worker id, page on the first clock rewind, graph peak concurrently-held slots. Close on the format fork: if this were greenfield and there were no BIGINT constraint, you would use UUIDv7 and none of the last 30 minutes would be your problem.
+
+Cut first: the epoch rollover, which is 69 years out and resolves to a flag day, so it is one sentence. Then the sequence-overflow spin, which is a soft cap and a one-liner. Then leap seconds, which collapse to "run a smearing time source" and, since the CGPM voted in 2022 to retire them by 2035, are a shrinking problem. Never cut: the rewind handling including the restart hole, worker-id exclusivity, and the fact that these IDs are not opaque.
 #### Appendix
 **Data model**
 
-- **Machine ID lease** (coordination service): ephemeral entry `/snowflake/leases/{machine_id}` → host
-- **Snowflake config:** epoch (custom, e.g. 2020-01-01)
+- **Worker-id lease** (coordination service): entry `/snowflake/leases/{worker_id}` holding host, process start time and expiry. Ephemeral, released on SIGTERM, expiring on heartbeat loss.
+- **Generator config:** custom epoch (a fixed date, e.g. 2020-01-01), bit split, watermark window.
+- **Restart watermark** (local disk, one small file): the highest timestamp the process has promised not to go below.
 
 **API contract**
 
 ```
-next_id() → int64    # in-process call, sub-microsecond
+next_id() -> int64      # in-process call, tens of nanoseconds, never blocks on the network
+decode(id) -> (timestamp_ms, worker_id, sequence)
 ```
 
 **Observability**
 
-- **`snowflake.gen_latency_p99`**: time per `next_id()` call — emitted by generator — alert if > 1µs (spin-wait or contention signal)
-- **`snowflake.clock_rewind_events`**: count of detected backward clock jumps — emitted on detection — alert immediately on any non-zero (per-node investigate)
-- **`snowflake.sequence_overflow_per_ms`**: count of ms where sequence saturated to 4096 — emitted per second — alert if sustained > 100/s (capacity ceiling approaching)
-- **`snowflake.lease_age_seconds`**: time since machine-id lease was last renewed — emitted by lease holder — alert if > 2× heartbeat interval (lease-loss risk)
-- **`snowflake.ntp_offset_ms`**: clock offset to NTP peers — sampled every 10s — alert if > 100ms (skew threatening clock-rewind)
-- **`snowflake.id_collision_check`**: sampled IDs cross-checked for collisions in a Bloom filter — emitted by audit pipeline — alert immediately on any collision
-- **SLOs:** p99 generator latency 1µs, availability 99.999% (in-process, only depends on local clock + already-acquired lease), zero ID collisions ever — this is a hard correctness SLO, not a soft latency one.
+- **`snowflake.clock_rewind_events`.** Count of detected backward jumps. Page on the first non-zero value, per node. This is the metric that matters.
+- **`snowflake.workers_reporting_id{worker_id}`.** Distinct hosts reporting each worker id. Any value above 1 is an active correctness incident and pages immediately.
+- **`snowflake.free_lease_slots`.** Slots not currently held. Alert below 15% of the space, because exhaustion surfaces as boot failures during a deploy, which is too late.
+- **`snowflake.ntp_offset_ms`.** Offset to peers, sampled every 10s. Alert above 100ms; a growing offset predicts the step that causes the rewind.
+- **`snowflake.sequence_overflow_per_ms`.** Milliseconds where the sequence saturated. Sustained above 100/s means the per-node ceiling is approaching.
+- **`snowflake.gen_latency_p99`.** Time per `next_id()`. Alert above 1µs, which indicates spin-wait or lock contention rather than normal operation.
+- **SLOs:** p99 issuance 1µs; availability tracks the host process, since there is no remote dependency after boot; zero duplicates, which is a hard correctness bound rather than a budgeted objective.
 
 **Multi-region and DR**
 
-- **Replication mode:** regional-isolation — each region runs its own coordination service for machine-id leases, with disjoint machine-id ranges (e.g., us-east: 0-340, eu-west: 341-680, ap: 681-1023). No cross-region coordination on the hot path (the generator is in-process). Disjoint ranges guarantee uniqueness across regions without sync.
-- **RTO / RPO:** RTO < 30s for a single-node failure (lease auto-expires; standby acquires); RTO < 5min for a coordination-service failover (ZK/etcd ensemble election). RPO is non-applicable — no state to lose; generators are stateless beyond the lease and the last-issued timestamp.
-- **Failover trigger & cadence:** lease auto-expiration on heartbeat miss (< 30s); coordination-service failover via ensemble election. Tested monthly via lease-revocation drills and quarterly via full-region coordination-service kill.
-- **Cross-region cost trade-off:** disjoint machine-id ranges cost zero cross-region bandwidth and zero coordination; the trade-off is that the machine-id space is partitioned (1024 slots split across regions, so 3 regions = ~340 nodes/region max). For larger fleets, steal bits from sequence to expand machine-id space, accepting lower per-node QPS ceiling.
+- **Replication mode:** regional isolation. Each region runs its own lease authority over a disjoint slice of the worker-id space (for example us-east 0 to 340, eu-west 341 to 680, ap 681 to 1023). Disjoint ranges give cross-region uniqueness with zero cross-region traffic and no shared failure domain.
+- **RTO / RPO:** RTO under 30s for a single node, since the lease expires and a replacement claims a slot. RTO of minutes for a lease-authority failover via ensemble election, and note that an existing generator keeps issuing throughout, because it only needed the service at boot. RPO is not applicable; there is no durable state to lose beyond the lease and the local watermark.
+- **Failover trigger and cadence:** lease expiry on heartbeat loss under 30s; authority failover via ensemble election. Drill lease revocation monthly and a full regional authority kill quarterly, checking that already-running generators are unaffected.
+- **Cross-region cost:** zero bandwidth and zero coordination, paid for by partitioning the slot space. Three regions over 10 bits leaves about 340 workers per region, which is the binding constraint long before the ID rate is. Widening the worker field is the fix, and it costs per-node sequence headroom.
 
 ### 5. Design a URL Shortener (TinyURL, bit.ly)
 #### Problem
@@ -6452,33 +6486,46 @@ WS /navigate                           ← turn-by-turn updates
 
 ### 16. Design a Distributed Message Queue (Kafka)
 #### Problem
-Decouple producers and consumers with durable, ordered, replayable, partitioned message streams at very high throughput.
+Move events from many producers to many independent consumers, durably, ordered per key, at gigabytes per second. A consumer that died an hour ago must resume exactly where it stopped, and a new consumer must be able to start from the beginning of history. Messages are retained for a fixed window rather than until someone has read them.
 #### Core
-TODO
+The product is a partitioned, replicated, append only log, not a mailbox. Every other property follows from that.
 
-Write the whole answer as you would give it in sixty seconds, 200 to 300 words, standing alone.
+A topic splits into partitions, and a partition is the unit of both ordering and parallelism. Producers hash the message key to a partition, so every event for one account lands in one log in send order, and events for different accounts have no relative order at all. Partition count is therefore the ceiling on consumer parallelism, and it is close to irreversible: lowering it remaps keys and silently reorders history.
+
+Each partition has a leader and two followers. The leader appends, followers fetch from it using the same protocol consumers use, and the producer's ack setting decides what durability it bought. `acks=all` with `min.insync.replicas=2` and replication factor 3 survives one broker loss with nothing lost, and refuses writes rather than losing them when two are gone. `acks=1` is roughly twice the throughput and drops the last batch on every leader crash.
+
+The broker holds almost no per consumer state: one committed offset per group per partition. Consumers pull, so a slow one lags and the broker never notices. That is why a single cluster serves thousands of independent readers, and why replay is nothing more exotic than committing a lower offset.
+
+Retention is by time or size, never by consumption. Throughput is hardware rather than cleverness: sequential appends, the page cache serving hot reads, zero copy from file to socket, and batching. Roughly 1GB/s per broker on NVMe.
+
+Delivery is at least once by default. Make consumers idempotent and stop there unless someone can price a duplicate.
 #### Summary
-**The picture in your head:** a newspaper printing press, but instead of one edition everyone reads, each section of the newspaper is printed on a separate conveyor belt (a partition), and every reader keeps a bookmark in their own copy of the belt. The press keeps printing — it never waits for readers, and it never removes old editions just because someone has already read them. A slow reader just falls behind; a new reader can start from the beginning or jump to today.
+**The picture in your head:** a newspaper printing press, but instead of one edition everyone reads, each section of the newspaper is printed on a separate conveyor belt (a partition), and every reader keeps a bookmark in their own copy of the belt. The press keeps printing. It never waits for readers, and it never removes old editions just because someone has already read them. A slow reader just falls behind; a new reader can start from the beginning or jump to today.
 
 **The approaches people actually take:**
-TODO. Two or three things a competent engineer might reach for, in plain language and before any product name, with what each one buys and roughly when it wins.
 
-**The single-request walkthrough:** a payment service publishes a message: `producer.send("payments", key="user_42", value="{amount: 99}")`. Kafka hashes the key (`user_42`) to decide which partition to write to — let's say partition 2 on Broker 1. Broker 1 appends the message to its local append-only log file, assigns it offset 1042 (a sequential number that is its position in partition 2's log), and forwards it to Broker 2 and Broker 3, which hold replicas of partition 2 (a replica is a copy of the partition's log on a different machine, kept for durability). Because the producer used `acks=all`, Broker 1 waits until both Broker 2 and 3 have written the message before sending the ack. The fraud-detection consumer, part of consumer group "fraud-service," later issues a fetch: "give me messages from partition 2, starting at offset 1042." It processes the message, then commits offset 1043 — "I've processed everything up to 1042, start me at 1043 next time." If the consumer crashes at offset 1043, it restarts and finds its last committed offset (1043) from Kafka's internal tracking topic and resumes without re-processing or losing anything.
+*A shared append only log where each reader tracks its own position.* Writes go to the end of a per key ordered file, nothing is deleted when it is read, and every reader remembers where it got to. It buys replay for nothing, fan out that costs the broker almost nothing, and strict ordering per key. It costs per message control: you cannot retry one record without holding up everything behind it, and reader parallelism is capped by the partition count you chose on day one. It wins when the same data feeds several unrelated consumers and someone will eventually reprocess it.
+
+*A broker managed mailbox with per message acknowledgement.* The broker tracks each message through delivered, acknowledged, redelivered and dead lettered, then deletes it. It buys per message retry with backoff, delayed delivery, priority, and any number of workers on one queue with no partition ceiling. It costs broker state proportional to messages in flight, and there is no rewind, because an acknowledged message is gone. It wins for work queues: wildly varying task durations, one consumer, no replay requirement.
+
+*The same log, but with the bytes in shared object storage.* Brokers become near stateless routers batching writes into a shared store instead of owning local disks. It buys elasticity, since scaling and rebalancing move no data, and roughly an order of magnitude off retention cost. It costs latency: a few hundred milliseconds to commit rather than a few. Established from 2023 onwards, it wins when the workload is analytical and cross zone network charges dominate the bill.
+
+**The single-request walkthrough:** a payment service publishes a message: `producer.send("payments", key="user_42", value="{amount: 99}")`. Kafka hashes the key (`user_42`) to decide which partition to write to, say partition 2 on Broker 1. Broker 1 appends the message to its local append-only log file, assigns it offset 1042 (a sequential number that is its position in partition 2's log), and forwards it to Broker 2 and Broker 3, which hold replicas of partition 2 (a replica is a copy of the partition's log on a different machine, kept for durability). Because the producer used `acks=all`, Broker 1 waits until both Broker 2 and 3 have written the message before sending the ack. The fraud-detection consumer, part of consumer group "fraud-service," later issues a fetch: "give me messages from partition 2, starting at offset 1042." It processes the message, then commits offset 1043, meaning "I have processed everything up to 1042, start me at 1043 next time." If the consumer crashes at offset 1043, it restarts and finds its last committed offset (1043) from Kafka's internal tracking topic and resumes without re-processing or losing anything.
 
 **The pieces (and what each one is for):**
-- **Topic** — a named stream of messages (e.g. "payments," "user-events"). A topic is split into partitions for parallelism. Think of a topic as the newspaper, partitions as separate conveyor belts carrying sections of it.
-- **Partition** — the fundamental unit of ordering and parallelism. Messages within one partition are strictly ordered by their offset (a sequential integer). Messages across different partitions have no order guarantee. The number of partitions sets the maximum number of consumers that can read a topic in parallel — you cannot have more consumers than partitions doing useful work simultaneously.
-- **Broker** — a server that stores partition log segments on disk and serves reads and writes. A partition has one leader broker (all reads and writes go here) and N-1 follower brokers holding replicas (ISR — In-Sync Replicas — the set of followers caught up within 30 seconds). If the leader dies, a follower is elected leader and takes over with zero data loss.
-- **Offset** — a monotonically increasing integer assigned to each message within a partition. Consumers track their position by committing their current offset. This is what makes replay trivial: reprocessing from scratch means resetting your committed offset to 0 and reading again.
-- **Consumer group** — a set of consumers that coordinate to share a topic's partitions. Kafka assigns each partition to exactly one consumer in the group — so a group of 3 consumers processing a 6-partition topic each gets 2 partitions. Adding a 7th consumer to a 6-partition topic does nothing useful; the extra consumer sits idle.
-- **KRaft (replacing ZooKeeper)** — the cluster metadata system (which brokers exist, which broker is the leader for each partition). The old system stored this in ZooKeeper (a separate distributed coordination service), which hit a ceiling of ~200,000 partitions per cluster. KRaft embeds the metadata directly in Kafka itself using the Raft consensus algorithm, lifting the ceiling to ~2 million partitions and cutting leader-election time from minutes to milliseconds.
+- **Topic.** A named stream of messages (e.g. "payments," "user-events"). A topic is split into partitions for parallelism. Think of a topic as the newspaper, partitions as separate conveyor belts carrying sections of it.
+- **Partition.** The fundamental unit of ordering and parallelism. Messages within one partition are strictly ordered by their offset (a sequential integer). Messages across different partitions have no order guarantee. The number of partitions sets the maximum number of consumers that can read a topic in parallel: you cannot have more consumers than partitions doing useful work at the same time.
+- **Broker.** A server that stores partition log segments on disk and serves reads and writes. A partition has one leader broker (all reads and writes go here) and N-1 follower brokers holding replicas (the in-sync replica set, or ISR, being the followers caught up within 30 seconds). If the leader dies, a follower is elected leader and takes over with zero data loss.
+- **Offset.** A monotonically increasing integer assigned to each message within a partition. Consumers track their position by committing their current offset. This is what makes replay trivial: reprocessing from scratch means resetting your committed offset to 0 and reading again.
+- **Consumer group.** A set of consumers that coordinate to share a topic's partitions. Kafka assigns each partition to exactly one consumer in the group, so a group of 3 consumers on a 6-partition topic each gets 2 partitions. Adding a 7th consumer to a 6-partition topic does nothing useful; the extra consumer sits idle.
+- **Metadata quorum.** The record of which brokers exist and which broker leads each partition. Kafka held this in ZooKeeper, a separate coordination service that topped out around 200,000 partitions per cluster; KRaft embeds it in Kafka itself as a Raft-replicated internal log, lifting the ceiling to roughly 2 million partitions and cutting controller failover from minutes to milliseconds. The third fork below is when each is the right call.
 
-**The thing that makes it hard:** imagine `user_42` is responsible for 10% of all payment events. All messages with key `user_42` hash to partition 2. Partition 2's consumer is now processing 10x the load of any other partition. You can't split partition 2 — partitions are indivisible. Your options: add a "salt" to the key (`user_42:bucket_0`, `user_42:bucket_1`, ...) to spread across multiple partitions (but you lose strict per-user ordering), or accept the hotspot and vertically scale the consumer for that partition. Partition count is also irreversible downward — you can add partitions but never remove them, because removing a partition would break the `hash(key) → partition` mapping and reorder previously-ordered messages. Pre-plan with extra partitions (50-100 for any important topic) to avoid a painful migration later.
+**The thing that makes it hard:** imagine `user_42` is responsible for 10% of all payment events. All messages with key `user_42` hash to partition 2. Partition 2's consumer is now processing 10x the load of any other partition. You cannot split partition 2, because partitions are indivisible. Your options: add a "salt" to the key (`user_42:bucket_0`, `user_42:bucket_1`, ...) to spread across multiple partitions (but you lose strict per-user ordering), or accept the hotspot and vertically scale the consumer for that partition. Partition count is also irreversible downward: you can add partitions but never remove them, because removing one breaks the `hash(key)` to partition mapping and reorders messages that were previously ordered. Pre-plan with extra partitions (50-100 for any important topic) to avoid a painful migration later.
 
-**Why this design and what it costs:** append-only sequential disk writes are among the fastest I/O patterns available — faster than random access to RAM in many benchmarks, because the hardware can predict the next sector. Kafka exploits this: brokers never update records in place, so the disk head never seeks. The OS page cache (a region of RAM the kernel uses to buffer disk reads and writes) holds recent log segments automatically; consumer reads on "hot" partitions hit RAM without any extra code. Zero-copy `sendfile()` (a kernel syscall that pipes log-file bytes directly to the network socket) skips the JVM heap entirely. These three tricks are why a single Kafka broker can sustain 1GB/s throughput.
+**Why this design and what it costs:** append-only sequential disk writes are among the fastest I/O patterns available, faster than random access to RAM in many benchmarks, because the hardware can predict the next sector. Kafka exploits this: brokers never update records in place, so the disk head never seeks. The OS page cache (a region of RAM the kernel uses to buffer disk reads and writes) holds recent log segments automatically; consumer reads on "hot" partitions hit RAM without any extra code. Zero-copy `sendfile()` (a kernel syscall that pipes log-file bytes directly to the network socket) skips the JVM heap entirely. These three tricks are why a single Kafka broker can sustain 1GB/s throughput.
 
 **If you were building it tomorrow:**
-- Kafka cluster: 10 brokers on NVMe SSDs, RF=3, `acks=all` + `min.insync.replicas=2` on financial topics; KRaft mode (no ZooKeeper).
+- Kafka cluster: 60 brokers on NVMe across 3 racks, RF=3 with rack-aware placement, `acks=all` + `min.insync.replicas=2` on financial topics, KRaft mode.
 - Producer hot path:
   ```
   producer.send(topic="payments",
@@ -6487,25 +6534,31 @@ TODO. Two or three things a competent engineer might reach for, in plain languag
                 acks="all")        # wait for ISR confirmation
   # ack = offset assigned by leader broker
   ```
-- Consumer hot path: `poll()` → process message → `commit(offset + 1)`. Use `acks=at-least-once` by default (process then commit); add idempotency key in payload so re-processing duplicates is safe.
-- For 30-day retention on a 1GB/s topic: enable tiered storage (KIP-405) so closed segments upload to S3 automatically — keeps local NVMe small while retaining the full log for replay.
+- Consumer hot path: `poll()`, process, then `commit(offset + 1)`. Committing after processing is at-least-once, which is the right default; carry an idempotency key in the payload so a duplicate is harmless.
+- For 30-day retention on a 1GB/s topic: tiered storage (KIP-405) uploads closed segments to object storage automatically, keeping local NVMe small while the full log stays replayable.
 #### What this is really testing
-TODO
+Whether you can tell a log from a queue, and whether you know that one placement decision, where the read position lives, settles everything else. Put it in the consumer and you get replay, fan out that costs the broker a sequential read, ordering per key, a broker that tracks nobody, and no way at all to retry a single message. Put it in the broker and you get per message retry, backoff, priority and dead lettering, and you lose rewind and cheap fan out. A candidate who reaches for a log because it is fast has answered the wrong question. Sequential I/O is not a property of any one product, and throughput is the least interesting thing on the list.
 
-The one insight this question exists to elicit, then the contrast with the question it most resembles and why the answers differ.
+The closest question is the distributed job scheduler, and from a distance they look like the same system: work fans out to a pool of workers, everything must be durable, and things have to still happen when a worker dies. They differ on who owns time. A queue delivers a stream that already exists and the consumer decides where in it to stand, so a consumer an hour behind is not broken, it just reads faster. A scheduler owns the moment: the 02:00 job runs at 02:00, once, whether or not any worker was alive at 02:00, and being an hour behind *is* the failure.
 
-Closest question: TODO
+That flips three answers. The unit of state here is one monotonic offset per group per partition, written after the work; there it is one row per execution carrying a lease, a status and a deadline, written before the work starts, or you cannot tell a crashed run from a slow one. Here at least once plus idempotent consumers is a complete answer; there you need a fenced lease, so a stalled worker's late write cannot land after its replacement has already run. And here a poison record gets moved aside so the cursor can advance, because the stream is the point; there a job that fails is a missed run, so you need per item retry counts, backoff and a maximum attempt limit. If you find yourself wanting per item deadlines, per item retries, or the ability to cancel item 900 while item 899 is still running, you are building the scheduler and the log is the wrong shape.
+
+Closest question: Q36
 #### Clarifying questions and how each answer forks the design
-- Throughput target?
-- Ordering guarantees? (per-partition, global)
+- Is this a stream several consumers read at their own pace, or a work queue?
+- Does anything replay, ever?
+- Throughput target, and mean message size?
+- Ordering guarantees? (per key, per partition, global)
 - Delivery semantics? (at-least-once / exactly-once)
-- Retention? (time, size)
+- Retention? (time, size, compaction)
 - Single-DC or multi-region?
 
 **How the answers shape the design**
 
 | If the answer is… | Then the design… |
 |---|---|
+| A work queue with per-message retry | broker-tracked acknowledgement, not a log; the log cannot express per-message retry at all |
+| Replay is required | consumer-tracked offsets over retained segments; the broker deletes on a clock, never on read |
 | Very high throughput | an append-only commit log with sequential disk writes, zero-copy sendfile, and batching |
 | Per-partition ordering | hash the key to a partition; ordering holds only within a partition, never globally |
 | At-least-once | consumers commit offsets after processing and dedup downstream |
@@ -6520,32 +6573,34 @@ Closest question: TODO
 
 **Scale**
 
-- **Throughput:** target a LinkedIn-tier multi-tenant cluster. ~3M msg/s avg ingress (audit, click, change-data, app logs all funnel through), 10M/s peak during deploys/incidents. Mean message ~1KB (Confluent benchmark; CDC rows + JSON events). 3M × 1KB = ~3GB/s avg, 10GB/s peak.
-- **Per-broker:** modern NVMe sustains ~1GB/s sequential write under Kafka's append-only segment model (Confluent / Kafka 2.x benchmarks). 3GB/s avg / 1GB/s ≈ 3 brokers minimum; with RF=3 and headroom for compaction, leader-skew tolerance, and rolling restarts → ~10–30 brokers (also driven by partition count, see below).
-- **Retention 7 days at avg load:** default broker config retention.ms=7d. 3GB/s × 86,400s/day × 7d = 1.81PB raw single-replica.
-- **Replication factor 3** (typical for durability across racks): 1.81PB × 3 = 5.43PB. Index files (.index, .timeindex) ≈ 1% of log size → ~55TB extra → ~5.5PB total live disk.
-- **Topic/partition count:** rule of thumb is ≤4k partitions/broker (controller failover time scales with this). 30 brokers × 4k = 120k cap; large orgs run 100k–1M cluster-wide via federation. Each partition = directory of 1GB segment files (segment.bytes default).
-- **Consumer offsets topic:** internal `__consumer_offsets`. ~100k consumer groups × ~10 topics × ~50 partitions = ~50M rows × 64B (key+value+overhead) ≈ 3GB. Write rate dominated by commit cadence (default 5s) → ~10k commits/s.
-- **Cross-DC mirror:** MirrorMaker 2 typically replicates a subset (~30% of topics) to a DR region; budget +30% network egress and account for replication lag adding to RPO.
+- **Ingress:** one multi-tenant cluster carrying audit events, clickstream, change data capture and application logs. Assume 3M msg/s average and 10M msg/s peak during deploys and incidents, mean message 1KB (CDC rows plus JSON events). 3M × 1KB = **3GB/s average**, 10M × 1KB = **10GB/s peak**.
+- **Disk write is 3x ingress, not 1x.** Replication factor 3 means every byte is written once by the leader and once by each of two followers. 3GB/s × 3 = 9GB/s average, 10GB/s × 3 = **30GB/s peak of cluster-wide disk write**. This is the number that sizes the fleet, and skipping it is how people arrive at a cluster a third the size it needs to be.
+- **Broker count:** NVMe sustains ~1GB/s of sequential append under the segment model. Budget 50% of that so there is room for replica catch-up after a restart, consumer reads that miss page cache, and tiered-storage uploads, so 0.5GB/s usable per broker. 30GB/s / 0.5GB/s = **60 brokers**, deployed 20 per rack across 3 racks so a rack loss never takes two replicas of the same partition.
+- **Network cross-check:** write traffic per broker is 30GB/s / 60 = 500MB/s = 4Gbps at peak. Assume 3 consumer groups per topic on average, so read egress is 3 × 3GB/s = 9GB/s across 60 brokers = 150MB/s = 1.2Gbps each, most of it served from page cache. Total stays under 10Gbps, so 25GbE leaves headroom for a catch-up storm.
+- **Retention at 7 days:** 3GB/s × 86,400s = 259TB/day single replica; × 7 = **1.81PB**; × RF 3 = 5.43PB. Index and time-index files add ~1%, so **~5.5PB of live log**.
+- **Which is 92TB per broker, and that is the argument for tiered storage.** 5.5PB / 60 = 92TB of NVMe per broker, roughly 24 drives, and every rebalance would copy a slice of it. Keep 12 hours local instead: 3GB/s × 43,200s × 3 = 389TB / 60 = **6.5TB per broker**, one drive, with the closed segments in object storage. Storage cost drops about 10x and rebalances stop moving history.
+- **Partitions:** the working limit is ~4k partitions per broker, set by open file handles and by how much metadata a controller has to carry. 60 × 4k = **240k cluster ceiling**; budget ~50k in use, which leaves room for growth without approaching it.
+- **Consumer offsets:** 5k consumer groups × 10 topics × 50 partitions = 2.5M rows in `__consumer_offsets`, × 64B = **160MB**, trivially cached. Commit load is per consumer instance rather than per partition: 5k groups × 20 instances = 100k consumers, committing every 5s = **20k commits/s**, each one small.
+- **Produce latency:** `acks=all` waits for both followers to fetch. Same-AZ round trip ~0.5ms, cross-AZ ~1ms, plus `linger.ms=5` of batching, so **p99 produce ack ~10ms**. End to end producer to consumer is that plus one fetch wait, so **~20 to 50ms** with `fetch.max.wait.ms` tuned down to 10.
+- **Cross-region mirror:** replicate the ~30% of topics with a consumer in the peer region. 0.3 × 3GB/s = 900MB/s sustained egress = 78TB/day. At $0.02/GB that is **~$1,550/day, ~$47k/month**, which is usually the single largest line item and the reason the 30% figure gets audited quarterly.
 #### Key decisions
-TODO
+**Log with consumer-tracked offsets vs broker-tracked per-message acknowledgement**
+- Choice: an append-only log where the only consumption state is one committed offset per (group, partition). Nothing is deleted when it is read; a retention clock deletes it later.
+- Alternative: the broker owns a state machine per message (delivered, acknowledged, redelivered, dead-lettered) and removes the message when every subscriber has acknowledged it.
+- Decider: fan-out count, and whether replay is a requirement. Under the log, consumption state is a 64B row per (group, partition), so 5k groups over 50k partitions is under 200MB total and the 20th consumer group costs the broker one more sequential read that mostly hits page cache. Under per-message tracking, state scales with messages in flight times subscribers: at 3M msg/s with 30s of processing time that is 90M records to track, before any fan-out multiplier. The second half of the decider is granularity. A cursor advances or it does not, so one unprocessable record at offset N holds up every record behind it on that partition, and if the requirement includes per-message retry, per-message delay or priority, the log cannot express it at all.
+- Alternative wins when: it is a work queue rather than a data stream. Task durations vary by more than about 100x so head-of-line blocking dominates, there is a single consumer group, and nobody will ever replay. Then broker-tracked acknowledgement is straightforwardly the better tool: retry with backoff, dead-letter after N attempts, delayed delivery, and a worker count not capped by a partition number someone chose a year ago. Teams do run the log for this workload, and they pay for it with a dead-letter topic, a separate service to re-inject delayed retries, and a partition count they cannot reduce.
 
-Two or three genuine forks. For each, in this exact shape so it stays checkable:
+**Consumers pull vs the broker pushes**
+- Choice: pull. Consumers issue `fetch(topic, partition, offset, max_bytes)` with a bounded wait, and the broker returns whatever is available.
+- Alternative: the broker pushes records to consumers against a per-consumer credit window (a prefetch count), stopping when credit runs out.
+- Decider: the end-to-end latency budget against reader count. Pull adds up to one long-poll wait; at `fetch.max.wait.ms=10` that is ~5ms on average, invisible against a 50ms budget and ruinous against a 5ms one. Against that, pull means the broker holds no flow-control state per consumer, so a reader that stalls for an hour costs the cluster one stale offset rather than a growing outstanding-delivery table. This fork is orthogonal to the first one: you can push a log. What it turns on is whether the broker is prepared to model each consumer's capacity.
+- Alternative wins when: p99 delivery must be under ~5ms with reader counts in the tens rather than the thousands, or when the broker needs to choose *which* consumer receives a message. Least-busy dispatch and priority routing are only possible in the push model, because a puller takes what it asked for and a pusher can be steered. The cost is that the broker now holds an opinion about consumer health, and every wrong opinion is either a stall or an unbounded buffer.
 
-**<name of the fork>**
-- Choice:
-- Alternative:
-- Decider:
-- Alternative wins when:
-
-**Raw material, from the old Common Mistakes:**
-
-- Picking partition count to match today's traffic — you cannot decrease partitions without breaking key ordering, so under-provisioning forces a topic-rekey migration later.
-- Using `acks=1` on a financial or audit topic to boost throughput — saves milliseconds, loses the last batch on every leader crash.
-- Enabling unclean leader election on a critical topic to "improve availability" — it's a synonym for accepting silent data loss.
-- Confusing exactly-once-within-Kafka with end-to-end exactly-once — a side effect like an email send will be sent twice if the broker ack is lost.
-- Sharing a topic across many independent producers without quotas — one runaway producer evicts everyone else's data via retention.
-- Forgetting that consumer parallelism is capped by partition count — adding the 51st consumer to a 50-partition topic does nothing useful.
+**Cluster metadata in an external coordination service vs an embedded consensus quorum**
+- Choice: an embedded Raft quorum. Three or five controller nodes replicate one internal metadata log that every broker tails, so a broker's view of leadership and topic config is a subscription rather than a poll.
+- Alternative: an external ZooKeeper ensemble holding topic configs, partition assignments, ACLs and broker registrations, with the active controller reading from it.
+- Decider: partition count against controller failover time. A ZooKeeper-backed controller reloads the whole metadata set on election, which is a few seconds at 10k partitions and runs into minutes near the ~200k-partition ceiling where the ensemble is itself the bottleneck. Controllers that tail a metadata log are already current, so failover is a Raft election in the hundreds of milliseconds and the ceiling moves to roughly 2M partitions. Our 50k partitions sit inside ZooKeeper's ceiling, but a multi-minute metadata freeze during a rack failure is not something to buy back with a config flag.
+- Alternative wins when: for a new cluster in 2026, it does not. Kafka 4.0 (2025) removed ZooKeeper support outright, so this is a migration schedule rather than an architecture choice. The defensible version of the alternative is "stay on ZooKeeper this quarter": below about 30k partitions the failover difference is seconds rather than minutes, the ensemble is already operated and monitored, and an online dual-write cutover competing with other risk in the same quarter is a reasonable thing to defer. Say that out loud as a scheduling call, because presenting it as a design preference is what gets picked apart.
 #### High-level design
 **must-say**
 
@@ -6610,59 +6665,39 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 </svg>
 ```
 
-**How to read the diagram:** producers append messages to partitioned logs, brokers replicate those logs, and consumers read by offset. Nothing is removed from the queue in the classic sense; consumers just advance their own position through the log.
+**How to read the diagram:** producers append to partitioned logs, brokers replicate those logs to each other, and consumers read by offset. Nothing is removed on consumption; a consumer only advances its own position. The box on the right is the metadata quorum, which knows which broker leads which partition and nothing about message content. It is labelled with both options because the third fork above is which one you run.
 
-**Why the flow is shaped this way:** ordered append-only logs are efficient for disks, networks, and replication. Letting consumers own offsets also makes replay natural, because reading again just means seeking to an older position.
+**Why the flow is shaped this way:** the same append-only file serves the write path, the replication path and the read path, so there is one data structure to make fast and one to make durable. Consumers owning their offsets is what makes replay a seek rather than a feature.
 
-**What this layout buys you:** high throughput, durable ordered streams, and flexible consumption patterns. The tradeoff is that the product behaves more like a replicated log than a simple work queue, which surprises people expecting mailbox semantics.
+**What this layout buys you:** durable ordered streams at high throughput, and fan-out that costs the broker a sequential read rather than a copy per subscriber. What it costs is everything that needs per-message state: no retry of one record, no delayed delivery, no priority, and a consumer parallelism ceiling fixed by the partition count. People expecting mailbox semantics are surprised by all four.
 #### Deep dive
 **must-say**
 
-**Why partitions.** A partition is the unit of *both* parallelism and ordering. Producers select partition by `hash(key) % partition_count` (or round-robin if no key) — same key always lands on the same partition, preserving order for that key. Consumer groups assign one consumer per partition; partition count is therefore the ceiling on consumer parallelism. Re-partitioning is expensive because it changes the `key → partition` mapping, breaking ordering — pre-plan generously (e.g. 50–100 partitions for a topic that might one day need them) since adding partitions later forces a re-keyed migration.
+**What "committed" actually means, and every place a message can still be lost.**
 
-**Replication & ISR.** N replicas per partition; one leader, others followers. The ISR (in-sync replicas) is the set of followers caught up within `replica.lag.time.max.ms` (default 30s). `acks=all` blocks the producer until every ISR member has the message — a single broker loss survives without data loss. `acks=1` returns once the leader has it; faster (~2× throughput) but the last batch is lost if the leader crashes before replicating. `acks=0` is fire-and-forget — used for high-volume telemetry where a small loss is acceptable. The combination `acks=all` + `min.insync.replicas=2` + RF=3 is the standard durable setup: tolerates one failure cleanly, refuses writes (rather than losing them) on two simultaneous failures.
+This is the mechanism that gets drilled, because it is where a message queue either loses money or does not. Everything else in Kafka is a variation on "append to a file"; this is the part with the sharp edges.
 
-**Push vs pull.**
+**The write path.** The producer accumulates records into per-partition batches, releasing a batch when it reaches `batch.size` (16KB default) or `linger.ms` elapses. The batch goes to that partition's leader as a single `ProduceRequest`. The leader appends it to the tail of the active segment file, assigns each record an offset, and updates a sparse index that maps every few kilobytes of log to a byte position.
 
-| Aspect | Push (RabbitMQ) | Pull (Kafka) |
-|---|---|---|
-| Back-pressure | broker must track | consumer self-paces |
-| Slow consumer | broker buffers | consumer reads when ready |
-| Latency | lower | slightly higher (poll interval) |
+That append goes to the page cache, not to a platter. Kafka does not fsync per batch; `log.flush.interval.messages` is effectively unbounded by default and the flush is left to the kernel. Durability comes from replication, not from fsync, and this is the single most misunderstood property of the system. Say it out loud in the interview before you are asked, because the follow-up is always some version of "so what is actually on disk when the producer's call returns?"
 
-Pull-based: consumers issue `fetch` requests with `(topic, partition, offset, max_bytes)` and the broker returns whatever is available up to that limit. Slow consumer simply lags — its `consumer_lag` (latest offset minus committed offset) grows but the broker is unaffected. No broker-side state per consumer beyond the committed offset, so a Kafka cluster can serve thousands of consumers without flow-control complexity. The latency cost is one poll interval (~tens of ms typical), which is negligible for streaming workloads.
+**Followers fetch; there is no separate replication wire.** A follower issues the same `FetchRequest` a consumer issues, asking for offset N+1 on the partition it replicates. That request is an implicit acknowledgement of everything up to N. Using one protocol for both paths is why a follower catching up and a consumer catching up look identical to the broker, and it is also why an aggressive backfill and a rebuilding replica compete for exactly the same resource.
 
-**Delivery semantics.**
-- **At-most-once:** commit offset *before* processing → if processing crashes, the message is gone but never re-delivered. Used for "fire and forget" metrics.
-- **At-least-once:** process, *then* commit → crashes mean re-delivery, so consumers must be idempotent. This is the default and covers ~95% of real workloads.
-- **Exactly-once:** transactional producer (PID + monotonic sequence number per partition for broker-side dedup) + transactional offset commits + `isolation.level=read_committed` on consumers so aborted transactions are invisible. Throughput drops ~20–30% but the consume-transform-produce loop is exactly-once *within Kafka*.
+**The high watermark.** The leader tracks each follower's log-end-offset and advances the high watermark to the minimum across the in-sync set. Consumers may not read past the high watermark, and a producer using `acks=all` is released when the watermark passes its batch. So "committed" means present in the page cache of every in-sync replica. Not durable on any disk. Not necessarily readable yet on the followers themselves.
 
-**Performance tricks.**
-- *Sequential disk writes* are faster than random RAM access at the hardware level (no seek time on the head, prefetching predicts the next sector). Append-only design exploits this — Kafka can sustain ~1 GB/s sustained write per broker on modern NVMe.
-- *OS page cache* — Kafka doesn't manage its own buffer pool; recent log segments live in the kernel page cache, so consumer reads on hot partitions hit RAM without any user-space copying. This is why Kafka uses 80% of system RAM as cache and runs the JVM heap small.
-- *Zero-copy `sendfile()`* — when serving consumers, the kernel pipes log-file bytes directly to the network socket. No copy into JVM heap, no serialization. Saves CPU and memory bandwidth on the read path.
-- *Batching* — producers buffer up to `batch.size` (default 16KB) or `linger.ms` (default 0); consumers fetch up to `fetch.max.bytes` (default 50MB). Batching amortizes per-message overhead (network roundtrip, broker CPU) over thousands of messages, which is why throughput is measured in MB/s, not msg/s.
+**What that buys, and what it does not.** Replication factor 3 with `min.insync.replicas=2` survives one broker loss cleanly, because two other machines hold the bytes and will flush eventually. It does not survive simultaneous power loss across all three, because none of them has fsynced. Whether that matters is entirely a question of correlated failure: if all three replicas sit in one rack behind one power distribution unit, the correlated case is a Tuesday. Rack-aware placement (`broker.rack`) puts the three replicas in three failure domains, which is the right answer and costs you cross-AZ traffic on every single produce, both in latency and on the bill. Forcing fsync per batch is the other answer and costs an order of magnitude in throughput. Pick one deliberately and name the cost; the wrong answer is not knowing there was a choice.
 
-**KRaft replaces ZooKeeper.** *[Source: Confluent / KIP-500, Kafka 4.0]* Pre-2024 Kafka stored cluster metadata (topic configs, partition assignments, ACLs, broker registrations) in ZooKeeper, which was a separate ensemble with its own quorum, ops burden, and a hard ceiling around ~200k partitions per cluster (controller failover read all metadata from ZK on startup, taking minutes). KRaft mode (KIP-500, GA in 3.3, default in 4.0) embeds a Raft-based metadata quorum *inside* Kafka itself — three or five `controller` brokers form the metadata quorum and replicate a single internal `__cluster_metadata` topic via Raft. Brokers tail this topic instead of polling ZK.
+**ISR membership is a durability knob wearing an availability costume.** A follower is in the in-sync set while it has fetched within `replica.lag.time.max.ms` (30s default). Fall behind and it is ejected, the set shrinks, and the watermark stops waiting for it. Drop below `min.insync.replicas` and the leader refuses writes with `NotEnoughReplicas` rather than acknowledging something only one machine holds. Producers see an outage. That outage is the durability guarantee working, and treating it as a bug (by lowering `min.insync.replicas` to 1 under pressure) converts a visible incident into an invisible data loss.
 
-| Aspect | ZooKeeper | KRaft |
-|---|---|---|
-| External ensemble | yes (3-5 ZK nodes) | no — embedded |
-| Controller failover | seconds to minutes (full ZK read) | hundreds of ms (already tailing) |
-| Partition ceiling | ~200k/cluster | ~2M+ partitions |
-| Recovery semantics | snapshot + replay | Raft log + periodic snapshot |
-| Pre-vote (KIP-996) | n/a | reduces unnecessary elections under network blips |
+**Leader election.** The controller elects the new leader from the in-sync set, which by construction holds everything up to the old watermark, so nothing committed is lost. If the in-sync set is empty because every replica is gone, there are two options: wait for one to return, or set `unclean.leader.election.enable=true` and promote an out-of-sync replica. The second silently truncates every record after that replica's log-end-offset. On a payments topic that is a payment that vanished with no error anywhere in the system. Leave it false and take the outage.
 
-Migration is online: dual-write to ZK and KRaft, brokers cut over one at a time, ZK ensemble shut down last. Once on KRaft, a controller-only failover is a Raft leader election (sub-second) instead of a metadata reload.
+**Truncation and leader epochs.** A failed leader that comes back may hold records past the new leader's watermark that were never committed. It truncates them and rejoins as a follower. The mechanism matters: truncating on the high watermark alone allowed divergence between replicas in edge cases, which is why leader epochs were introduced in KIP-101 (Kafka 0.11, 2017). A returning replica now compares its epoch history with the leader's and truncates to the first divergent epoch's start offset. If someone asks how you know two replicas cannot silently disagree, that is the answer, and it is worth knowing it was a fix rather than an original property.
 
-**Tiered storage.** *[Source: KIP-405 / Confluent]* Historical Kafka coupled retention to local disk — keeping 30d of a 1GB/s topic meant 2.6PB of NVMe per replica × RF=3, and brokers held all of it forever. Tiered storage (KIP-405, GA in 3.6) splits each partition log into two tiers:
+**Where `acks=1` loses data, concretely.** Leader appends, acknowledges, and crashes before any follower has fetched. A new leader is elected from the in-sync set without that batch. The producer already got a success and moved on. There is no error, no metric, and no way to reconstruct what was in the gap. That is the price of roughly 2x throughput, and it is fine for telemetry and never fine for anything anyone reconciles.
 
-- **Local tier** — recent segments on broker NVMe, sized for the active fetch working set (~hours, sometimes minutes).
-- **Remote tier** — closed segments uploaded to object storage (S3, GCS) and removed from local disk. The `RemoteLogManager` handles the upload, indexes the segment offsets in remote, and routes consumer fetches that drop below the local-retention boundary to the remote tier transparently.
+**Retries create duplicates; idempotence removes them.** With `acks=all` and retries enabled, an acknowledgement lost on the way back makes the producer resend a batch the broker already has. `enable.idempotence=true` gives the producer a Producer ID and a per-partition sequence number, so the broker recognises the resend and drops it. It has been the default since Kafka 3.0 (2021), the cost is negligible, and it should never be off. It does not dedupe across producer restarts or across partitions, which is where transactions start.
 
-Reads from remote add ~50-200ms vs local NVMe's <1ms, which is fine for replay/backfill workloads but means real-time consumers should never lag past the local tier. Storage cost drops ~10× for long-retention topics; rebalances no longer copy historical data because each broker only holds the local working set.
-
-**Producer → leader → ISR replication with `acks=all`.** *[Source: Apache Kafka design]*
+**Producer, leader and in-sync followers under `acks=all`.**
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 576" role="img" aria-label="Kafka acks=all replication sequence: producer to leader, parallel follower fetch loops on two brokers, high-watermark advance, then produce response">
@@ -6758,86 +6793,18 @@ Reads from remote add ~50-200ms vs local NVMe's <1ms, which is fine for replay/b
 </svg>
 ```
 
-Followers use the same fetch protocol as consumers — there's no separate replication wire. The leader advances the high-water mark (HW) only when `min.insync.replicas` followers have caught up; the producer's ack waits for HW advance, not just leader append. If `acks=1`, the leader acks immediately on local append — fast, but the last batch is lost if the leader crashes before any follower fetches it. `acks=all` + `min.insync.replicas=2` + RF=3 = standard durable mode: tolerates one broker loss with zero loss; refuses writes (rather than losing them) on two simultaneous failures.
-
-**Cooperative consumer rebalance.** *[Source: KIP-429]* The classic eager rebalance (pre-2.4) was a stop-the-world: any consumer joining or leaving a group revoked *all* partitions from *all* members, then reassigned. A 100-consumer group churned 100 consumers' worth of state on each event. Cooperative rebalance (KIP-429) is incremental — only the partitions that need to move are revoked, and the rest keep flowing.
-
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 650" role="img" aria-label="Kafka cooperative consumer rebalance flow">
-  <defs>
-    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
-    </marker>
-  </defs>
-  <style>
-    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
-    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
-    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
-    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
-    .dash{ stroke-dasharray:5 4; }
-    .acc{ stroke:var(--accent); }
-    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
-    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
-    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
-    text{ dominant-baseline:middle; text-anchor:middle; }
-  </style>
-
-  <rect class="box" x="200" y="17" width="360" height="46" rx="9"/>
-  <text class="sub" x="380" y="40"><tspan x="380" dy="-7">Rebalance triggered</tspan><tspan x="380" dy="16">member join / leave</tspan></text>
-
-  <rect class="box" x="200" y="97" width="360" height="46" rx="9"/>
-  <text class="sub" x="380" y="120"><tspan x="380" dy="-7">Members rejoin group</tspan><tspan x="380" dy="16">send current assignment</tspan></text>
-
-  <rect class="box" x="200" y="177" width="360" height="46" rx="9"/>
-  <text class="sub" x="380" y="200"><tspan x="380" dy="-7">Coordinator computes</tspan><tspan x="380" dy="16">target assignment</tspan></text>
-
-  <rect class="box acc" x="200" y="257" width="360" height="46" rx="9"/>
-  <text class="lbl" x="380" y="282">Diff: revocations only</text>
-
-  <rect class="box" x="200" y="337" width="360" height="46" rx="9"/>
-  <text class="sub" x="380" y="360"><tspan x="380" dy="-7">Revoke partitions</tspan><tspan x="380" dy="16">that need to move</tspan></text>
-
-  <rect class="box" x="200" y="417" width="360" height="46" rx="9"/>
-  <text class="sub" x="380" y="440"><tspan x="380" dy="-7">Affected consumers</tspan><tspan x="380" dy="16">commit offsets</tspan></text>
-
-  <rect class="box" x="200" y="497" width="360" height="46" rx="9"/>
-  <text class="sub" x="380" y="520"><tspan x="380" dy="-7">Second rebalance round</tspan><tspan x="380" dy="16">assigns revoked partitions to new owners</tspan></text>
-
-  <rect class="box" x="200" y="577" width="360" height="46" rx="9"/>
-  <text class="sub" x="380" y="600"><tspan x="380" dy="-7">Steady state</tspan><tspan x="380" dy="16">unaffected consumers never paused</tspan></text>
-
-  <path class="flow" d="M380,63 L380,97"/>
-  <path class="flow" d="M380,143 L380,177"/>
-  <path class="flow" d="M380,223 L380,257"/>
-  <path class="flow" d="M380,303 L380,337"/>
-  <path class="flow" d="M380,383 L380,417"/>
-  <path class="flow" d="M380,463 L380,497"/>
-  <path class="flow" d="M380,543 L380,577"/>
-</svg>
-```
-
-The two-phase nature (revoke round, then assign round) costs an extra coordinator hop but means a 99-of-100 consumer group keeps consuming on its 99 partitions while one member's 1 partition migrates. For large groups this is the difference between seconds of pause and minutes.
-
-**Exactly-once semantics — what it actually means.** *[Source: KIP-98, KIP-129]* "Exactly-once" in Kafka is exactly-once *within Kafka* — that is, across the consume-transform-produce loop, every input record produces its output records exactly once even under retries, restarts, and broker failovers. The guarantee does not extend to side effects outside Kafka. Four mechanisms compose to deliver it:
-
-1. **Idempotent producer (`enable.idempotence=true`).** When the producer connects, the broker assigns it a Producer ID (PID) and tracks the last sequence number written per `(PID, partition)`. If the producer retries a batch (say after a network blip ate the ack), it resends with the same sequence numbers — the broker sees the duplicate sequence and silently dedupes rather than writing the batch twice. This eliminates *duplicates from producer retries* on a single partition but does not span multiple partitions or producer restarts on its own.
-2. **Transactional producer (`transactional.id=...`).** A durable transactional ID (kept across restarts) lets the producer atomically commit writes spanning many partitions. The internal `__transaction_state` topic tracks open transactions, and each data partition gets a commit or abort marker that consumers honour for visibility. A concrete case: a stream processor reads from input topic A and writes to output topics B and C; with a transactional producer, B and C either both reflect the input record or neither does, even if the processor crashes between the two writes.
-3. **Transactional offset commits.** The consumer's *source* offset commit (recording "I processed up to offset N on input topic A") is sent through the same transaction as the output writes to B and C. The transaction coordinator commits source-offset advance and output writes atomically — so on restart, either the new outputs are visible and the offset has advanced, or neither happened and the processor retries from the previous offset. This closes the gap where the processor could write outputs successfully but crash before committing the offset (which would otherwise reprocess and emit duplicates).
-4. **`isolation.level=read_committed` on consumers.** Without this, downstream consumers see uncommitted writes from in-flight transactions and would read records that later get aborted. With `read_committed`, the consumer skips records inside aborted transactions and refuses to read past the *Last Stable Offset* (LSO — the highest offset where every preceding transaction has either committed or aborted). The cost is increased read latency under contention because the consumer waits for transaction resolution.
-
-Throughput drops ~20-30% under exactly-once compared to plain at-least-once because each transaction adds coordinator hops (begin, commit), marker writes to every touched partition, and consumers stall behind in-flight transactions. End-to-end exactly-once across the full pipeline still requires the terminal sink to either be idempotent (upsert-by-key into a database) or participate in the same transaction (a Kafka Connect sink that supports 2PC); a side-effect like sending an email or charging a credit card is never exactly-once because the external system can succeed and the ack can be lost, leaving the producer to retry and double-charge.
+Read the diagram for the ordering, not the boxes. The leader appends and assigns the offset first, but it does not respond. Both followers then fetch through the ordinary consumer protocol, and their next fetch at N+1 is what tells the leader they have N. Only then does the watermark advance, and only then does the producer hear anything. Reverse any two of those steps and you have built `acks=1` with extra latency.
 #### Where it breaks
 **must-say**
 
 **Bottlenecks**
 
-- **Hot partition** (one key dominates traffic, e.g. `user_42` in a multi-tenant app) → one partition saturates while others idle; mitigation is re-keying with a salt (`user_42:bucket_N`) which sacrifices strict per-key ordering for fan-out, or scaling partition count up-front (you can't decrease later without breaking ordering).
-- **Consumer lag** (downstream slower than producers) → measured as `latest_offset - committed_offset`; autoscale consumers up to partition count. Beyond that ceiling you must repartition the topic — adding a 51st consumer to a 50-partition topic does nothing.
-- **Disk I/O ceiling** (segment writes + replica fetches + consumer reads compete) → dedicated NVMe disks per broker (one per partition group); separate filesystems for log dirs vs. OS; throttle replication during catch-up so a slow replica doesn't starve the leader's write path.
-- **Rebalance storms** (one consumer joins/leaves and the whole group pauses while partitions are reassigned) → cooperative rebalancing (KIP-429) does incremental reassignment so unaffected partitions keep flowing; also tune `session.timeout.ms` so a transient hiccup doesn't trigger a full rebalance.
-- **Cross-DC replication lag** (multi-region clusters need data in both DCs) → MirrorMaker 2.0 or Confluent Cluster Linking copies topics asynchronously; eventual consistency across DCs (typically <1s lag in the same continent, seconds across continents). Active-active multi-region requires CRDT-style conflict resolution at the application layer.
-- **Metadata scale ceiling on ZooKeeper** (controller failover took minutes once you crossed ~200k partitions; ZK ensemble itself became a bottleneck) → KRaft replaces ZK with an embedded Raft quorum, lifts the ceiling to ~2M partitions/cluster, and cuts controller-failover to sub-second; new clusters default to KRaft on Kafka 4.0+.
-- **Local disk cost for long retention** (30d of a 1GB/s topic = 2.6PB × RF=3 of NVMe) → tiered storage offloads closed segments to S3/GCS; brokers keep only the working set on local disk; storage cost drops ~10× for long-retention topics, rebalances no longer copy historical data.
+- **Hot partition.** One key dominates, say a single tenant generating 10% of a topic's traffic, so its partition saturates while its siblings idle. *Mitigation:* salt the key (`tenant_42:bucket_N`) to spread it across N partitions and give up strict per-tenant ordering, or leave it and scale that consumer vertically. Note the interaction with the first fork: partitions are the parallelism unit, so there is no version of this where you split the hot partition itself.
+- **Consumer lag.** Measured as `latest_offset - committed_offset`. Autoscale consumers up to the partition count and no further, because the 51st consumer on a 50-partition topic is a process that polls nothing. Past that ceiling the only move is a repartition, which is the one-way door in the first Unresolved item below.
+- **Disk contention.** Segment appends, replica fetches and consumer reads all hit the same devices, and at 500MB/s of write per broker there is not much slack. *Mitigation:* dedicated NVMe for log dirs, separate from the OS filesystem, and `replica.alter.log.dirs.io.max.bytes.per.second` throttling on catch-up. That throttle is a real trade rather than a free win: throttling a rebuilding replica keeps it out of the in-sync set for longer, and if the set falls below `min.insync.replicas` the leader stops accepting writes. Throttle to protect latency and you can throttle your way into a produce outage.
+- **Rebalance churn.** A consumer joining or leaving triggers reassignment, and under the classic eager protocol every member of the group stops for the duration. *Mitigation:* cooperative rebalancing (KIP-429, Kafka 2.4) revokes only the partitions that actually move, so 99 of 100 consumers keep flowing while one partition migrates; raise `session.timeout.ms` past your GC pauses so a hiccup does not look like a death.
+- **Cross-region lag.** Asynchronous mirroring runs under 1s within a continent and seconds across one, and that lag is the recovery point objective, not a performance detail. Active-active on the same topic needs conflict resolution in application code, because two clusters both accepting writes to the same logical key have no ordering between them.
+- **Local disk cost for long retention.** 30 days of a 1GB/s topic is 2.6PB per replica before RF. *Mitigation:* tiered storage keeps only the local working set on NVMe and puts closed segments in object storage, cutting cost ~10x and stopping rebalances from copying history. The catch is that a consumer which lags past the local boundary starts fetching from remote at 50 to 200ms instead of under 1ms, so recovery from a lag incident gets slower exactly when it matters.
 
 **Failure modes**
 
@@ -6853,53 +6820,58 @@ Throughput drops ~20-30% under exactly-once compared to plain at-least-once beca
 
 **Unresolved**
 
-TODO. Two or three things this design genuinely does not handle well, and what you would do about each.
+**Partition count is a one-way door and there is no clean way through it.** You can add partitions; you can never remove them. Adding them changes `hash(key) % partition_count`, so a key that has lived on partition 7 for a year starts landing on partition 23, and the strict per-key ordering the whole design is sold on breaks exactly once, at the moment of the change, in a way nothing in the data records. Every route around it is unattractive. Over-provisioning at 50 to 100 partitions on any topic that might one day matter means carrying metadata and file handles forever on topics that never grow, and it only moves the ceiling rather than removing it. The dual-write plus reshuffle migration is real but for a 100TB topic it is days of a stream job and a window where two topics are both authoritative and consumers must pick. A static key-to-partition routing table decouples the mapping from the count, and then you own a routing table that every producer in the company must agree on, which is a consensus problem you have just invented. In practice we over-provision and accept the ceiling, and I would say that plainly rather than present the migration as a solved path.
+
+**A dead-letter topic relocates head-of-line blocking, it does not remove it.** The standard answer, catch the error, publish the record elsewhere, commit, continue, is correct for a record that fails deterministically: bad schema, unparseable payload. It is wrong for the far more common case, a record that fails because a downstream dependency has been down for four minutes. Then the dead-letter topic absorbs several million records that were all perfectly fine, their order relative to the main topic is gone, and re-injecting them later replays them against state that has since moved past them. The alternatives are no better: retrying inside the consumer blocks the partition by definition, and retry topics with staged delays break ordering by definition. There is no arrangement that keeps per-key ordering and per-message retry at the same time, and any design that claims both is quietly doing one of those two things. We pause the partition on retriable errors and dead-letter only on deterministic ones, which puts the classification in application code that no central component can verify.
+
+**Exactly-once stops at the cluster boundary, and most consumers are on the boundary.** Transactions make the consume-transform-produce loop atomic as long as both ends are Kafka. The moment the output is a payment API call, an email, or a write to a database that is not enrolled in the transaction, the guarantee reverts to at-least-once and the only real remedy is an idempotency key the sink honours. That pushes the hardest part of the problem onto every consuming team, and there is no way to enforce it from the platform: a consumer with a non-idempotent sink is indistinguishable from a correct one until the day a rebalance replays 200 records and someone gets charged twice. The best we have is a mandatory idempotency-key field in the schema plus contract tests at the sink, which is a convention with good intentions, not a guarantee.
 #### Drill questions
 1. How do you guarantee exactly-once?
 2. What happens when a broker dies mid-write?
 3. How do you handle a hot partition you can't re-key?
 4. How would you migrate a 100TB topic to a new partitioning scheme?
-5. Consumers are lagging — how do you triage?
+5. Consumers are lagging. How do you triage?
 6. How do you stop a poison-pill message blocking a consumer group forever?
 7. When would you choose KRaft vs ZooKeeper today?
 8. How does tiered storage change consumer behaviour?
-9. A consumer group has 100 consumers and one is slow. What's the blast radius under cooperative rebalance vs eager?
-
-TODO. Only 9 drill questions carried over, top up to at least 10.
+9. A consumer group has 100 consumers and one is slow. What is the blast radius under cooperative rebalance versus eager?
+10. When the producer's `acks=all` call returns successfully, where exactly is the data?
+11. Producers are failing with `NotEnoughReplicasException`. Walk through what happened and what you do.
+12. The requirement is per-message retry with exponential backoff and a dead letter after five attempts. Would you still reach for a log?
 #### Answers to drill questions
-1. Idempotent producer (PID + monotonic sequence per partition dedupes broker-side retries) plus a transactional producer that writes output records and the source offset commit atomically; consumer reads with `isolation.level=read_committed` so aborted writes are never visible. *If pushed:* this is exactly-once *within Kafka* (consume-transform-produce). End-to-end needs the terminal sink to be idempotent (upsert by key) or participate in the transaction — a side-effect like sending an email is never exactly-once.
+1. Idempotent producer (PID + monotonic sequence per partition dedupes broker-side retries) plus a transactional producer that writes output records and the source offset commit atomically; consumer reads with `isolation.level=read_committed` so aborted writes are never visible. *If pushed:* this is exactly-once *within Kafka* (consume-transform-produce). End to end needs the terminal sink to be idempotent (upsert by key) or to participate in the transaction. A side effect like sending an email is never exactly-once.
 
-2. Replicas in the ISR take over; producer retries against the new leader. `acks=all` + `min.insync.replicas=2` means committed messages survive a single broker loss. *If pushed:* unclean leader election trades durability for availability — disable on finance / billing topics.
+2. Replicas in the ISR take over; producer retries against the new leader. `acks=all` + `min.insync.replicas=2` means committed messages survive a single broker loss. *If pushed:* unclean leader election trades durability for availability, so leave it off on finance and billing topics. Also note where the acknowledged data actually was at the moment of the crash: page cache on the in-sync replicas, not disk.
 
-3. Add a sub-key salt (`key + hash(timestamp) % N`) to spread, reassemble downstream — accept loss of strict per-key ordering. *If pushed:* if ordering is required, scale vertically (faster broker, more cores) and keep consumer parallelism at 1 for that key.
+3. Add a sub-key salt (`key + hash(timestamp) % N`) to spread the load and reassemble downstream, accepting the loss of strict per-key ordering. *If pushed:* if ordering is required, scale vertically (faster broker, more cores) and keep consumer parallelism at 1 for that key.
 
-4. Create the new topic with the target partition count; producers dual-write old + new; a Kafka Streams (or Flink) reshuffle job reads the old topic and re-keys into the new one to backfill history; consumers migrate one group at a time after verifying parity; deprecate the old topic. *If pushed:* if the topic has bounded retention (e.g. 7d) and downstream doesn't need history, skip the backfill — start dual-writing, wait one retention cycle, cut over. Cheaper than a 100TB reshuffle.
+4. Create the new topic with the target partition count; producers dual-write old + new; a Kafka Streams (or Flink) reshuffle job reads the old topic and re-keys into the new one to backfill history; consumers migrate one group at a time after verifying parity; deprecate the old topic. *If pushed:* if the topic has bounded retention (7 days, say) and nothing downstream needs history, skip the backfill entirely. Start dual-writing, wait one retention cycle, cut over. Cheaper than a 100TB reshuffle.
 
-5. Check partition skew first (one slow partition = code/data issue), then consumer CPU/GC, then downstream sink throughput. *If pushed:* if all partitions lag equally and the sink is fine, scale consumers up to partition count — beyond that you must repartition.
+5. Check partition skew first (one slow partition = code/data issue), then consumer CPU/GC, then downstream sink throughput. *If pushed:* if all partitions lag equally and the sink is fine, scale consumers up to the partition count, and past that the only move is a repartition.
 
 6. Catch deserialization errors, route to a DLQ, commit offset, move on. *If pushed:* track DLQ depth as an SLO; replay tooling lets you fix and re-ingest after a code patch.
 
-7. KRaft for any new cluster — Kafka 4.0 makes KRaft the default and ZK is being removed entirely. Existing ZK clusters can run online migration. *If pushed:* the only reason to stay on ZK in 2026+ is a frozen managed offering that hasn't shipped KRaft support yet, and even those (MSK, Confluent Cloud) have completed migration.
+7. KRaft for any new cluster: Kafka 4.0 makes it the default and removes ZooKeeper support entirely. Existing ZK clusters can run online migration. *If pushed:* the only defensible reason to stay on ZooKeeper is scheduling, not architecture. Below ~30k partitions the failover difference is seconds rather than minutes, so deferring a dual-write migration out of a quarter that already carries risk is reasonable. Say it that way.
 
-8. Reads stay transparent — fetch resolves against local first, falls through to remote. Latency cost is ~50-200ms for remote vs <1ms local, so a consumer that lags into the remote tier sees fetch latency jump. *If pushed:* size local retention so 99.9th-percentile lag stays in local; alert on local-tier-miss rate as a consumer health signal.
+8. Reads stay transparent: a fetch resolves against local first and falls through to remote. Latency cost is ~50-200ms for remote vs <1ms local, so a consumer that lags into the remote tier sees fetch latency jump. *If pushed:* size local retention so 99.9th-percentile lag stays in local; alert on local-tier-miss rate as a consumer health signal.
 
-9. Eager: every join/leave stops all 100 consumers for the rebalance duration (seconds). Cooperative: only the partitions that need to move are revoked, the other 99 consumers never pause. *If pushed:* cooperative trades two rebalance rounds for the incremental property — slightly higher steady-state coordinator load, much lower tail latency under churn.
+9. Eager: every join or leave stops all 100 consumers for the duration of the rebalance, typically seconds. Cooperative: only the partitions that actually move are revoked, so the other 99 consumers never pause. *If pushed:* cooperative buys the incremental property with two rebalance rounds instead of one, so slightly higher steady-state coordinator load in exchange for much lower tail latency under churn. It also does not help with the underlying problem, which is a consumer that flaps; quarantine that one.
+
+10. In the page cache of the leader and of every in-sync follower, and not necessarily on any disk. Kafka does not fsync per batch by default; durability is replication, not flush. Be precise about the two settings: the high watermark advances to the minimum log-end-offset across the whole in-sync set and that advance is what releases an `acks=all` producer, while `min.insync.replicas` is the separate gate on whether the write is accepted at all. *If pushed:* the exposure is correlated power loss across all replicas before the kernel flushes, so the mitigation is failure-domain separation via `broker.rack`, not a stronger ack setting. That costs cross-AZ traffic on every produce. Forcing fsync per batch is the other option and it costs roughly an order of magnitude of throughput.
+
+11. The in-sync set for some partition has shrunk below `min.insync.replicas`, so the leader is refusing writes rather than acknowledging data only it holds. Find the cause: a broker down, a network partition isolating a rack, a follower throttled during catch-up, or a disk that has stopped keeping up. Fix the replica; the writes resume by themselves. *If pushed:* the wrong reflex is to drop `min.insync.replicas` to 1 to clear the alert, which converts a loud outage into a silent data-loss window that nobody will find later. This is also the case where somebody proposes unclean leader election, which does the same thing more permanently. Take the outage.
+
+12. No, not on its own, and I would push back on wrapping a log in enough machinery to fake it. Per-message retry, backoff and attempt counts are broker-tracked state, and the log's whole economy is that the broker tracks one cursor. Doing it with a log means a chain of retry topics with staged delays, an attempt counter in the header, and a scheduler to re-inject, which gives up ordering anyway and is three moving parts where a broker-managed queue has zero. *If pushed:* the deciding question is whether anything else consumes the same stream and whether replay is ever needed. If yes, keep the log as the system of record and put a task queue downstream of one consumer, so the log carries the events and the queue carries the work. If no, the log was never the right tool.
 #### Whiteboard script
-TODO
+**0-5, establish that this is a log and not a queue.** First sentence: "I want to check whether you want a durable stream that several consumers read at their own pace and can rewind, or a work queue with per-message retry, because those are different systems." That question is the whole interview compressed, and asking it first is worth more than any diagram. Then get the numbers on the board: throughput, mean message size, retention, ordering scope, and whether anything downstream ever replays. State your assumptions out loud: 3M msg/s average, 10M peak, 1KB messages, 7 days retention, ordering per key. Draw nothing yet.
 
-A 45 minute budget: what to cover in 0-5, 5-15, 15-35 and 35-45, what to say first, and a line starting `Cut first:`.
+**5-15, the spine and the one loaded sentence.** Five boxes: producers, a partitioned topic across brokers, replicas, consumer groups, and the metadata quorum off to one side. Say "a partition is the unit of both ordering and parallelism" within the first two minutes, then unpack it immediately, because it is doing three jobs at once: it is why `hash(key)` gives you ordering, it is why consumer parallelism has a ceiling, and it is why the count is close to irreversible. Then do the sizing on the board, and make sure the 3x replication multiplier is visible: 10GB/s peak ingress is 30GB/s of disk write, which is 60 brokers at half a gigabyte each, not the 10 you get if you forget replication. Say that the broker keeps one offset per group per partition and nothing else, and that this is why fan-out is free.
 
-**Raw material, from the old Talking Points:**
+**15-35, the drill: durability.** Protect this block, it is where the interview actually is. Walk the write path end to end: batch, leader append, followers fetch on the ordinary consumer protocol, high watermark advances to the minimum across the in-sync set, only then does the producer get its acknowledgement. Then volunteer the uncomfortable part before you are asked, that "committed" means page cache on every in-sync replica and not disk anywhere, and that the exposure is correlated failure, so `broker.rack` placement matters more than the ack setting. Then walk the ways data is lost: `acks=1` and a leader crash before any fetch, unclean leader election truncating an out-of-sync promotion, and `min.insync.replicas` lowered under pressure during an incident. Say leader epochs fixed replica divergence in KIP-101 rather than being an original property, which shows you know the difference. Keep pull-versus-push and the metadata quorum in your pocket as ninety-second answers if asked.
 
-These are what a Kafka-fluent interviewer will be listening for — surface them unprompted:
+**35-45, concede and close.** Give the gaps before the interviewer finds them: partition count is a one-way door and over-provisioning only moves the ceiling; a dead-letter topic relocates head-of-line blocking rather than removing it, and is actively wrong when the failure is a downstream outage; exactly-once ends at the cluster boundary and every non-idempotent sink is a duplicate waiting for a rebalance. Then the operations in two minutes: `UnderMinIsrPartitionCount` and consumer lag as the two pages you would actually take, tiered storage as the answer to long retention, and cross-region mirroring as an asynchronous copy whose lag is your recovery point objective, with the ~$47k/month egress number attached so it is clear you have priced it.
 
-- **Partition is the unit of both parallelism and ordering** — name this within the first two minutes; it's the single most-loaded sentence in Kafka design.
-- **`acks=all` + `min.insync.replicas=2` + RF=3 is the standard durable mode** — explicitly state the tradeoff with `acks=1`.
-- **Pull-based consumers, not push** — explain why the broker doesn't track downstream pressure; this is what lets one cluster serve thousands of independent consumers.
-- **Sequential disk + page cache + zero-copy `sendfile()`** — the three hardware-level tricks that make a JVM service hit 1GB/s/broker; cite specifically rather than hand-waving.
-- **Exactly-once is `enable.idempotence` + transactional producer + transactional offset commits + `read_committed`** — name all four; missing one breaks the chain.
-- **KRaft replaced ZooKeeper** — call out the partition-count ceiling lift (200k → 2M+) and sub-second controller failover; signals you're current.
-- **Tiered storage decouples retention from local disk** — if asked about "30 days of a 1GB/s topic", reach for KIP-405 rather than sizing a 2.6PB disk shelf per replica.
+Cut first: the exactly-once mechanism in detail, then tiered storage internals, then the cooperative rebalance protocol. All three are real and none changes the architecture. Never cut: the log-versus-queue question at minute zero, the partition sentence, and what `acks=all` actually guarantees.
 #### Appendix
 **Data model**
 
@@ -6932,46 +6904,57 @@ admin.create_topic(name, partitions, replication_factor)
 
 - `UnderReplicatedPartitions` and `UnderMinIsrPartitionCount` per broker (target: 0)
 - `BytesInPerSec`, `BytesOutPerSec`, `MessagesInPerSec` per broker and per topic
-- `RequestQueueTimeMs` p99 — request-handler queueing; >100ms means broker overload
+- `RequestQueueTimeMs` p99, which is request-handler queueing; above 100ms means the broker is overloaded
 - `ConsumerLag` per group/partition; lag past the local-tier retention boundary triggers tiered-storage reads
-- `ControllerActiveCount` — must be exactly 1 cluster-wide
+- `ControllerActiveCount`, which must be exactly 1 cluster-wide
 - `RemoteLogManagerCopyLagBytes` for tiered-storage upload backlog
 
 **SLOs:** 99.99% of `acks=all` produce calls succeed within 100ms p99; cluster availability 99.95% per quarter; ISR shrink-and-recover within 60s; rolling broker restart causes zero produce-side errors with `acks=all` + `min.insync.replicas=2` + RF=3.
 
 **Multi-region and DR**
 
-- **Replication mode:** active-active for shared topics via Confluent Cluster Linking (or MirrorMaker 2 for OSS), with consumer-group state replicating alongside data. Async by default — synchronous cross-region writes cost too much latency for general-purpose topics.
+- **Replication mode:** active-active for shared topics via Confluent Cluster Linking (or MirrorMaker 2 for OSS), with consumer-group state replicating alongside data. Asynchronous by default, because synchronous cross-region writes cost far too much latency for general-purpose topics.
 - **RTO:** ~5min for consumer cutover (DNS plus group-state sync). Producers can target the peer cluster within seconds of failure detection.
 - **RPO:** seconds to ~1min depending on replication lag at the moment of failure. Financial topics ride a tighter tier with synchronous mirror or 2-region acks for zero-RPO at much higher cost.
 - **Failover cadence:** quarterly DR drill; monthly partial-cluster failover on a non-critical topic to keep tooling exercised.
-- **Cross-region cost:** typically replicate ~30% of topics (the ones with a downstream consumer in the peer region). Cross-region egress is the dominant line — model it as `replicated_GB/s × egress_$/GB × 86400 × 30`.
+- **Cross-region cost:** typically replicate ~30% of topics (the ones with a downstream consumer in the peer region). Cross-region egress is the dominant line: model it as `replicated_GB/s × egress_$/GB × 86400 × 30`, which at 900MB/s and $0.02/GB is ~$47k/month.
 
 ### 17. Design a Metrics Monitoring & Alerting System
 #### Problem
-Collect, store, query, visualize, and alert on time-series metrics from thousands of services in real time.
+Collect numeric time series from thousands of services, store them cheaply for a year, answer dashboard queries in under a second, and page a human when a number stays bad long enough to matter. The scarce resource is not the sample rate but the number of distinct series, which is set by the label sets application teams choose and is therefore outside your control. A monitoring system that falls over is worse than no monitoring, because everyone reads silence as healthy.
 #### Core
-TODO
+A metrics system is priced per series, not per sample, and every decision follows from that.
 
-Write the whole answer as you would give it in sixty seconds, 200 to 300 words, standing alone.
+Collection: an agent per host or per pod either scrapes a target's endpoint on a fixed schedule or accepts what the target pushes. Scrape wherever targets are enumerable from a service registry, because the collector then owns the cadence and a failed scrape is itself a signal. Push exists for what scraping cannot reach: jobs shorter than a scrape interval, anything behind a network boundary you cannot poll into.
+
+Storage: an append-only store keyed by series and timestamp. Timestamps arrive at a near-fixed cadence and values move slowly, so delta-of-delta encoding on timestamps and XOR on floats take a 16 byte sample down to roughly 1.5 bytes. Recent data lives in memory and on local SSD; every couple of hours it is sealed into an immutable time-ranged block, shipped to object storage, then compacted and downsampled into coarser resolutions.
+
+Read: one query path serves dashboards and alert rules both. An evaluator runs each rule on a fixed interval, holds per-rule state, and fires only once the condition has held for its configured duration. A router groups, silences, and inhibits before anything reaches a person, because 200 pages for one database failure is the same as none.
+
+What kills it is cardinality. Every distinct label combination is a new series, and series cost index memory that samples do not. So the write path has to be able to refuse: per-metric and per-tenant series budgets enforced at ingest, every rejection counted and attributed to a team.
 #### Summary
 **The picture in your head:** a hospital vital-signs monitor for your entire engineering infrastructure. Every machine takes its own pulse (CPU, memory, error rate) every 10 seconds and reports the number. A central system records all those numbers in a time-ordered list per "patient." Nurses (alert rules) watch for readings that stay dangerously high for more than 5 minutes, then page an on-call doctor. Old readings are kept but at lower resolution: 10-second readings for the past week, 1-minute averages for the past 3 months, hourly summaries for the past year.
 
 **The approaches people actually take:**
-TODO. Two or three things a competent engineer might reach for, in plain language and before any product name, with what each one buys and roughly when it wins.
 
-**The single-request walkthrough:** 10,000 servers each scrape 100 metrics every 10 seconds and push them to the ingest tier — that's 10 million data points per second. Each data point looks like: `http_requests_total{method="GET", status="200", host="api-01"} = 4521 @ ts=1700000000`. The metric name plus its labels (the key-value pairs in curly braces) form a unique "time series" — think of it as a column in a spreadsheet, where each row is a timestamp and value. The data point lands in the Write Workers, which compress it using delta-of-delta encoding on timestamps (if you know the last timestamp was T and the gap is usually 10 seconds, you only store the deviation from 10 seconds, not the full timestamp — this cuts 8 bytes to 1-2 bytes) and XOR encoding on floats (consecutive float values often differ by tiny amounts; XOR of similar floats has many leading zeros and compresses well). The compressed point lands in the hot-tier TSDB (Time-Series Database — a database specialized for sequential timestamped values). An alert rule runs every 30 seconds: `avg_over_time(error_rate[5m]) > 0.05` — if the 5-minute average error rate exceeds 5%, it fires a PagerDuty alert.
+*Scrape a registry of targets on a fixed schedule.* Something central holds the list of what should exist, walks it every few seconds, and pulls current values. Failure detection comes free: a target that does not answer is a fact the collector observed, not an absence it has to infer. You also own the cadence globally instead of inheriting whatever each team configured. It needs targets that are enumerable and that outlive a couple of intervals.
+
+*Let producers push into an ingest gateway.* Producers send when they have something; the gateway authenticates, rate-limits, and forwards. This is the only thing that works for a job that runs for eight seconds, for anything behind a network boundary you cannot reach into, and for client-side or third-party telemetry. The cost is that silence now means nothing, so liveness becomes a separate explicit signal, and the gateway inherits whatever rate producers choose, so it needs real backpressure.
+
+*Split the retention problem away from the ingest problem.* Ingest nodes hold only a short recent window, seal it periodically into immutable time-ranged blocks, and push those to object storage where a background job merges and coarsens them. Queries fan out across both halves. This turns a year of retention into a storage-cost question rather than a capacity-planning one, at the price of considerably more machinery than one node with a big disk.
+
+**The single-request walkthrough:** 10,000 hosts each expose about 1,000 series, so 10M series are scraped every 10 seconds, which is 1M samples per second. One sample looks like `http_requests_total{method="GET", status="200", host="api-01"} = 4521 @ ts=1700000000`. The metric name plus its labels (the key-value pairs in braces) identify a unique time series; think of it as one column in a spreadsheet whose rows are timestamp and value. The sample reaches the write tier, which compresses it with delta-of-delta encoding on the timestamp (the gap is almost always exactly 10s, so store the deviation from 10s rather than the full 8-byte timestamp, which usually costs 1 bit) and XOR encoding on the float (consecutive values differ slightly, so the XOR has many leading zeros). It lands in the hot tier of the TSDB, a store specialised for sequential timestamped values. Separately, an alert rule evaluates every 30 seconds: `avg_over_time(error_rate[5m]) > 0.05`, and if the 5-minute average error rate has exceeded 5% for the rule's hold duration, it fires into the router.
 
 **The pieces (and what each one is for):**
-- **Collector/Agent** — a process running on each host (or as a sidecar next to each service) that either scrapes metrics from the service's HTTP endpoint (pull model, like Prometheus) or accepts metrics pushed by the service (push model, like StatsD). Pull is preferred for infrastructure because the collector controls the schedule and detects silent failures (no scrape = alert).
-- **TSDB (Time-Series Database)** — a database optimized for append-heavy sequential writes and time-range queries. Unlike a general database, it stores data in fixed-size chunks ordered by time and compresses them aggressively (Gorilla compression, from Facebook's paper, achieves ~1.5 bytes per sample vs 16 bytes uncompressed). Examples: Prometheus (single-node), VictoriaMetrics, InfluxDB, Grafana Mimir (horizontally scalable, stores long-term data in S3).
-- **Downsampling tiers** — the same metric stored at three resolutions: 10-second samples for the last 7 days (hot tier, SSD), 1-minute averages for the last 90 days (warm tier, HDD), 1-hour averages for the last year (cold tier, object store). A query asking "show me CPU over the last year" uses the 1-hour tier; a query asking "what happened during the outage 3 hours ago" uses the 10-second tier. This keeps storage manageable — a year of 10-second data is 3 million samples per series, but a year of 1-hour data is only 8,760.
-- **Alert Evaluator** — a service that runs each alert rule on a schedule (typically every 30s), queries the TSDB, and tracks per-rule state: `pending` (condition is true, but not for long enough yet), `firing` (condition has been true for the configured `for` duration), `resolved`. Fires into an Alert Manager.
-- **Alert Manager** — receives raw alert firings and applies three transformations before notifying humans: grouping (100 pods all alerting on the same database failure → one "database down" notification), silencing (don't page during a planned maintenance window), and inhibition (if "cluster down" is firing, suppress all the per-pod alerts that are downstream effects).
+- **Collector or agent.** A process on each host, or a sidecar beside each service, that scrapes the service's endpoint on a schedule (pull) or accepts what the service sends (push). Pull is the default for infrastructure because the collector controls the schedule and a failed scrape is an observation rather than an ambiguity.
+- **TSDB.** A store optimised for append-heavy sequential writes and time-range reads. It keeps data in fixed-size chunks ordered by time and compresses them hard: Gorilla encoding, from Facebook's 2015 paper and adopted by Prometheus's v2 TSDB in 2017, reaches roughly 1.5 bytes per sample against 16 uncompressed.
+- **Retention tiers.** The same metric at three resolutions: 10-second samples for 7 days on SSD, 1-minute aggregates for 90 days, 1-hour aggregates for a year on object storage. "CPU over the last year" reads the hourly tier; "what happened three hours ago" reads the 10-second tier. A year of 10-second data is 3.15M samples per series against 8,760 hourly, which is the whole argument.
+- **Alert evaluator.** Runs each rule on a fixed interval, queries the TSDB, and holds per-rule state: `pending` (condition true but not yet for long enough), `firing` (true for the configured `for` duration), `resolved`.
+- **Alert router.** Takes raw firings and applies three transformations before any human sees them: grouping (100 pods alerting on one database failure becomes one notification), silencing (no pages during a declared maintenance window), and inhibition (while "cluster down" is firing, suppress the per-pod alerts that are its downstream effects).
 
-**The thing that makes it hard:** cardinality. Each unique combination of label values creates a new time series. The metric `http_requests_total` with 3 labels — `method` (5 values), `status` (10 values), `host` (1000 servers) — creates 50,000 time series. That's manageable. But if someone adds a `user_id` label with 10 million distinct users, that one metric explodes to 50 billion time series. The inverted index (a data structure mapping each label value to the list of matching series) grows to hundreds of GB. Queries time out. The TSDB crashes on ingest. Alerts go silent. This actually happens in production — a deploy adds `request_id` as a label "for debugging" and the monitoring stack falls over within minutes.
+**The thing that makes it hard:** cardinality. Every distinct combination of label values is a new series. `http_requests_total` with `method` (5 values), `status` (10), and `host` (1,000) is 5 × 10 × 1,000 = 50,000 series, which is fine. Add a `user_id` label and even 10,000 active users takes that one metric to 500M series. The in-memory index that maps each label value to its matching series grows past what the node has, ingest starts failing, queries time out, and alerts go quiet at exactly the moment you need them. This is not hypothetical: a deploy adds `request_id` "for debugging" and the monitoring stack is down inside minutes.
 
-**Why this design and what it costs:** the Gorilla compression algorithm (encoding timestamps as deltas-of-deltas and float values as XOR with the previous value) turns a 16-byte raw sample into ~1.5 bytes on average, which is what makes storing millions of metrics for months affordable. Downsampling discards precision for old data that nobody queries at second-granularity anyway. And alerting on the *symptom* (user-facing error rate > 5%) rather than the *cause* (database CPU > 80%) means you page people when users are actually affected, not when a metric crosses a threshold that might not matter. Cardinality limits at ingest are the guardrail — enforcing a hard cap of 1 million series per metric name prevents a single mislabeled deploy from taking down the entire monitoring stack.
+**Why this design and what it costs:** Gorilla encoding is what makes a year of millions of series affordable at all, and downsampling throws away precision on old data that nobody queries at second granularity. Alerting on the symptom (user-facing error rate above 5%) rather than the cause (database CPU above 80%) means you wake people when users are actually affected, and it survives refactors, because causes change and symptoms do not. Ingest-side cardinality caps are the guardrail: a hard limit of 1M series per metric name stops one mislabelled deploy from taking the stack down. The cost of that guardrail is real, and it is data loss. A rejected series is gone, and if it was the label that would have explained the incident, the limiter took the answer with it.
 
 **If you were building it tomorrow:**
 - Prometheus for scraping; Grafana Mimir for long-term storage (ingesters flush 2h blocks to S3; compactor merges and downsamples); Alertmanager for grouping/routing.
@@ -6986,24 +6969,29 @@ TODO. Two or three things a competent engineer might reach for, in plain languag
   ```
 - Cardinality guard at ingest: reject any new series that would push a metric past 1M unique label combinations; increment `metric_dropped_total{reason="per_metric_limit"}` and page the owning team.
 #### What this is really testing
-TODO
+Whether you can name the thing that is actually scarce. Sample rate is linear and cheap; the number of distinct series is multiplicative in label values and is chosen by application teams rather than by you. At 1M samples per second the wire carries about 29MB/s, which is a quarter of a 1GbE link, and the same system falls over anyway because one deploy added a label. A candidate who spends the hour on ingest throughput and compression ratios has optimised the axis that was never going to break. The corollary is the part most people will not say out loud: the write path has to be able to refuse a write, and the refusal has to be loud, counted, and attributable to a named team.
 
-The one insight this question exists to elicit, then the contrast with the question it most resembles and why the answers differ.
+The nearest question is the market data ingest pipeline. The two look nearly identical on the whiteboard, with many producers, a normalising tier, a fan-out, per-key handling, and bounded buffers, and they are built for opposite failure economics.
 
-Closest question: TODO
+That pipeline's consumer is a matching engine, so a dropped message is a wrong trade. It cannot be fixed later and it cannot be inferred, which is why most of that design is gap detection against a per-feed sequence number, a recovery ladder running from the redundant multicast copy through retransmit to snapshot refresh, and marking an instrument stale rather than publishing a book known to be incomplete. Here, a dropped sample costs one point on a graph. The next scrape lands in 10 seconds, and a rule with `for: 5m` is looking at roughly 30 samples, so losing one changes nothing an operator can perceive. There is no gap detection anywhere in this design, and that is deliberate rather than an oversight: building one would spend the engineering budget on the axis that already tolerates loss.
+
+The second axis is ordering. There, the unit of correctness is the relative order of two messages in one book, which is why a single writer assigns a total order and why a hot instrument cannot be split. Here a sample is identified by its series and its timestamp, so a duplicate is a no-op and a late arrival is a fill-in rather than a reordering. Early TSDBs simply rejected anything older than a series' newest sample, and bounded out-of-order ingestion became configurable in Prometheus 2.39 (2022); either way the worst case is a rejected sample, never a wrong answer. That property is what lets you run two collectors scraping the same target and deduplicate at compaction, which would be an incoherent thing to do to order flow.
+
+Closest question: Q43
 #### Clarifying questions and how each answer forks the design
-- Push or pull collection?
-- Cardinality (# unique time series)?
-- Retention by tier?
-- Alert delivery channels?
+- How long do the workloads live, and are they enumerable from a registry?
+- Active series count, and is it one tenant or many?
+- Retention, and at what resolution at each age?
+- Alert delivery channels, and who owns which rules?
 - Self-hosted or SaaS-like?
 
 **How the answers shape the design**
 
 | If the answer is… | Then the design… |
 |---|---|
-| Pull collection | scrape targets on a schedule (Prometheus-style) with service discovery |
-| Push collection | an ingestion gateway with backpressure, better for short-lived or serverless jobs |
+| Long-lived, enumerable targets | scrape on a schedule with service discovery, and treat a failed scrape as the liveness signal |
+| Short-lived or unreachable targets | an ingest gateway with backpressure, plus a separate explicit liveness signal per workload |
+| Many tenants | per-tenant series caps and separate reader pools, so one team cannot degrade another |
 | High cardinality | a purpose-built TSDB with an inverted label index, and cardinality limits to prevent blow-ups |
 | Retention by tier | downsample and roll up old data (raw for days, rollups for months) |
 | Alerting | an evaluation engine on recording rules plus a router (dedupe, group, silence) to channels |
@@ -7011,40 +6999,43 @@ Closest question: TODO
 #### Requirements and scale, derived out loud
 **Requirements**
 
-- **FR:** ingest, store TSDB, query (PromQL), dashboards, alerts with grouping/silencing
-- **NFR:** millions of metrics/s, sub-second dashboard latency, durable, retention tiers
+- **FR:** scrape or receive samples; store under retention tiers; a query language over instant and range selectors; dashboards; alert rules with a hold duration; grouping, silencing and inhibition before delivery.
+- **NFR:** 1M samples/s steady and 3M/s peak; p99 dashboard query under 1s; a fired alert delivered within 60s; no single tenant able to degrade another; alerting survives the TSDB it monitors.
 
 **Scale**
 
-- **Ingest:** mid-large tech co: 10k hosts × 100 metrics/host scraped at 10s = 100k samples/s per app dimension; with 100 apps/services and sidecars → 10M samples/s steady. Deploys / incident storms (extra debug series) → 3× burst = 30M/s peak.
-- **Active series (cardinality):** 10M concurrent series (host × metric × labels). Churn from rolling deploys (pods rotate, label values change) accumulates to ~100M unique series seen over 13-month retention window.
-- **Sample size:** raw point = 8B float64 + 8B int64 ts = 16B. Facebook Gorilla paper / Prometheus TSDB report 1.3–2B/sample after delta-of-delta + XOR float compression → ~8× ratio. Use 1.5B avg.
-- **Hot tier (10s resolution, 7d):** samples/day per series = 86,400 / 10 = 8,640. 10M series × 8,640 × 7d × 1.5B = 907GB compressed. RF=3 + index overhead → ~3TB SSD.
-- **Warm tier (1m, 90d):** downsampled 6× from 10s. 10M × 1,440 samples/day × 90d × 1.5B = 1.94TB. RF=3 → ~6TB HDD.
-- **Cold tier (1h, 1y after warm):** 10M × 24 × 365 × 1.5B = 131GB. RF=3 → ~400GB on object store (cheap; S3-class).
-- **Index size:** Prometheus TSDB inverted-index posting lists run ~10–20% of label-set bytes. 10M series × ~100B labels × 0.15 ≈ 150MB per shard; with replication and overhead per replica ~1–2GB.
-- **Query load:** ~1k engineers × ~10 dashboard panels open × refresh 30s = ~300 q/s steady; peak (incident, all-hands open dashboards) ~10k/s. Alert eval = ~10k rules × evaluated/min = 10k/60 ≈ 170/s, with multi-window expansion ~100k evals/min.
-- **Cardinality budget:** label explosions (user_id, request_id) blow up storage non-linearly; enforce hard cap ~1M series per metric name (Prometheus `sample_limit` / Mimir guard) — reject at ingest.
+Everything below is derived from one anchor: active series.
+
+- **Active series.** 10,000 hosts. Each contributes a node agent plus a handful of containers, and one instrumented service exposes 500 to 2,000 series once histogram buckets are counted, so take 1,000 series per host. 10,000 × 1,000 = **10M active series**.
+- **Ingest rate.** One sample per active series per scrape interval. At 10s: 10M / 10 = **1M samples/s steady**. A rolling deploy roughly doubles active series while new pods and retiring pods are both in the head block, and an incident adds debug series, so plan **3M samples/s peak**.
+- **Wire cost, and why it is not the constraint.** A remote-write request resends the label set per series per request, roughly 100B, plus 16B per sample. At one sample per series per request that is 116B/sample; snappy takes off about 4x, so 1M × 116 / 4 = **~29MB/s, about 250Mbps**. Remote-write 2.0 (Prometheus 2.54, 2024) interns label strings into a per-request symbol table and cuts it further. One quarter of a 1GbE link carries the whole firehose.
+- **Sample on disk.** Raw is 8B float64 + 8B int64 timestamp = 16B. Delta-of-delta plus XOR reports 1.3 to 2B/sample in practice; use **1.5B**.
+- **Hot tier, 10s for 7 days.** Samples per series per day = 86,400 / 10 = 8,640. 10M × 8,640 × 7 × 1.5B = **907GB compressed**. Replication factor 3 plus index and write-ahead-log overhead gives **~3TB of local SSD**.
+- **Warm tier, 1 minute for 90 days.** Downsampled 6x. 10M × 1,440 × 90 × 1.5B = **1.94TB**; RF 3 gives **~6TB**.
+- **Cold tier, 1 hour for a year.** 10M × 24 × 365 × 1.5B = **131GB**; RF 3 gives **~400GB** on object storage. At $0.023/GB-month that is under **$10/month**, which is why nobody argues about the cold tier.
+- **What raw-for-a-year would cost instead.** 8,640 / 24 = 360x the samples: 10M × 8,640 × 365 × 1.5B = **47TB**. On object storage that is roughly $1,100/month; on the SSD the hot tier uses it is not a conversation. That 360x is the whole downsampling argument and the decider in the third fork.
+- **Ingester memory, which is the real capacity limit.** The head block holds an in-memory index entry and an open chunk per active series; budget **3 to 4KB per active series** (Prometheus's own sizing guidance, unchanged in shape since the v2 TSDB in 2017). 10M × 4KB = **40GB**, more than one node should hold, so shard: 1M series per ingester at ~4GB of head, **10 ingesters**, RF 3 = **30 ingester replicas**. This is the number that settles the cardinality fork.
+- **Index on disk.** Inverted postings run 10 to 20% of label bytes: 10M × 100B × 0.15 = **~150MB per replica set**. Small in absolute terms, which is the point: the cost of cardinality is the per-series head memory above, not the postings file.
+- **Query load.** 1,000 engineers × 10 open panels / 30s refresh = **~330 queries/s** steady, and roughly 10x that during a company-wide incident when everyone opens every dashboard. Alert evaluation: 10,000 rules / 30s = **~330 rule evaluations/s**, each a range query over a 5-minute window. Dashboards and alerting therefore generate comparable read load, which is exactly why alerting gets its own reader pool instead of sharing one with humans.
+- **Cardinality budget.** Per-metric hard cap **1M series**. Per-tenant cap **2M active series**, which is 20% of the 10M the ingester tier can hold, so no single team can consume more than a fifth of the head memory everyone shares.
 #### Key decisions
-TODO
+**Scrape discoverable targets, or accept pushes**
+- Choice: scrape by default. The collector reads its target list from service discovery and pulls every 10s. Anything that cannot be scraped pushes to a gateway that is explicitly the exception path, not the front door.
+- Alternative: push for everything. Every process ships its own samples to an ingest gateway on its own schedule and the collector tier disappears, along with all the service-discovery plumbing.
+- Decider: whether targets are discoverable and outlive a couple of scrape intervals. At 10s a process must survive ~20s to be sampled twice and ~30s to produce a usable rate; a CI job, a function invocation, or a 5-second cron cannot be scraped at all, and no tuning fixes it because the process is gone before the next poll. The second half is failure detection: with scraping, `up == 0` is an observation, while with push, absence is ambiguous, so every pushed workload needs its own liveness signal and that work scales with the number of teams.
+- Alternative wins when: the fleet is mostly short-lived or serverless, or the network will not let a central collector reach the targets (customer-deployed agents, mobile clients, a partner's VPC). It is also simply the only option for client-side telemetry, where there is nothing to poll. Most real deployments run both, so the question is only which is the default, and the default decides where the discovery machinery and the liveness convention live.
 
-Two or three genuine forks. For each, in this exact shape so it stays checkable:
+**Enforce the cardinality limit at write time, or at query time**
+- Choice: refuse at ingest. A new series that would push its metric past 1M, or its tenant past 2M active series, is rejected with an HTTP error, counted under `metric_dropped_total{tenant, metric, reason}`, and attributed to the owning team.
+- Alternative: accept every write and defend the read path instead. Cap the series a single query may touch, cap its memory, and kill it when it exceeds either. Storage stays complete and nobody loses data they later wanted.
+- Decider: the series count the ingester tier can actually hold, which is a memory number and not a disk number. At 3 to 4KB of head memory per active series, 10 ingesters with 32GB each gives roughly 8 to 10M series of headroom. Cardinality does not degrade gracefully past that: the ingester OOMs, write-ahead-log replay then takes minutes, and while a replica replays, alerting is reading from a shrunken quorum. Query-time limits cannot help, because the memory was spent on the write path before any query ran.
+- Alternative wins when: the storage engine keeps its index on disk rather than in a head block, so the ceiling is disk and disk degrades gracefully. It is also right for a single-tenant deployment where the team that blows up cardinality is the team that gets paged, since the feedback loop closes without the system enforcing anything. And the criticism of the choice is fair: a rejected series is gone forever, and if that label was the one that would have explained the incident, the limiter cost you the answer.
 
-**<name of the fork>**
-- Choice:
-- Alternative:
-- Decider:
-- Alternative wins when:
-
-**Raw material, from the old Common Mistakes:**
-
-- Letting a `user_id` or `request_id` label slip into a high-volume metric — single biggest cause of monitoring-stack outages, every prod team has the war story.
-- Querying raw resolution over a year's range — should be rejected by the query frontend, not silently allowed to time out.
-- Page-on-cause rather than page-on-symptom — wakes engineers for problems that don't actually affect users; symptoms are stable, causes change.
-- Running alerting on the same TSDB you monitor with — when it goes down, you don't know.
-- Using the same recording rule output for both dashboards and alerts without versioning — a rule change silently moves both, masking regressions.
-- Picking Datadog/New Relic at 10M samples/sec without modeling cardinality — per-tenant caps + per-host pricing make the bill unbounded.
-- Conflating logs and metrics — logs go in a log store, metrics in a TSDB; mixing forces one of them to be wrong by orders of magnitude.
+**Downsample into retention tiers, or keep raw and buy cheaper bytes**
+- Choice: three resolutions. 10s for 7 days, 1 minute for 90 days, 1 hour for a year, with the query planner selecting a tier from the requested step and refusing raw queries beyond the hot window rather than letting them time out.
+- Alternative: one resolution forever. Keep every raw sample for the full retention and spend the saved complexity on a denser storage engine and cheaper disk.
+- Decider: cost per series per day against how far back anyone actually queries at fine resolution. A year of 10s data is 47TB against 131GB downsampled, a factor of 360 (8,640 samples/day against 24). Then measure the query mix: if under 5% of queries have a range beyond 7 days, downsampling costs nothing anyone notices and pays for itself immediately. Downsampling is irreversible, so the honest form of the question is whether anyone will ever need the exact shape of a 30-second spike from four months ago.
+- Alternative wins when: retention is short enough that 360x of a small number is still small. 30 days at 10s is 10M × 8,640 × 30 × 1.5B = 3.9TB, which one dense engine holds on local disk. Engines reaching ~0.4B/sample rather than 1.5B move the arithmetic another 4x, and choosing one deletes the compactor, the downsampling jobs, and the tier-selection logic in the query planner outright. Deleting three subsystems is worth real money, and a team that cannot staff them should take this option.
 #### High-level design
 **must-say**
 
@@ -7127,41 +7118,19 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 #### Deep dive
 **must-say**
 
-**Push vs pull collection:**
+**What a series costs, and where.**
 
-| Aspect | Push (StatsD, OpenTelemetry) | Pull (Prometheus scrape) |
-|---|---|---|
-| Discovery | clients send blindly | server discovers targets |
-| Behind NAT | works | needs proxy |
-| Failure detection | hard (silence = problem? or just no metrics?) | scrape fails → alert |
-| Use | apps emit when convenient | infra-style, scheduled |
+A **series** is one distinct `(metric_name, label_set)`. A **sample** is one `(timestamp, value)` appended to a series. Their marginal costs differ by three orders of magnitude, and conflating the two is the root of every cardinality incident.
 
-**Cardinality is the killer.** Each unique combination of `(metric_name, tag_set)` is a distinct time series, which costs RAM (the inverted index over labels), disk (one chunk file per series), and query time (a query touching a metric scans every series matching its label selectors). A label like `user_id` with 100M values means 100M series — index alone might be 10s of GB and queries time out. Mitigations stack: per-metric series budgets enforced at ingest (reject `up{user_id=...}` past 1M unique series), CI checks that flag PRs introducing unbounded labels, and runtime cardinality alerts that page the owning team when a metric's series count grows >2× day-over-day.
+A sample costs 1.5 bytes on disk and essentially nothing in memory. It lands in the open chunk of a series that already exists; chunks are sealed and written out on a fixed schedule regardless.
 
-**Downsampling tiers.**
+A series costs, at creation: an entry in the in-memory index holding the label set itself, postings entries mapping every one of its label key-value pairs to this series id, a fresh open chunk, and a write-ahead-log record. Budget 3 to 4KB of ingester memory. It then keeps costing that for as long as it stays active, and keeps costing index space in every sealed block it appears in for as long as those blocks are retained.
 
-| Age | Resolution | Storage |
-|---|---|---|
-| 0–7d | 10s | SSD hot |
-| 7–90d | 1min | HDD warm |
-| 90d–1y | 1hr | Object store cold |
+So doubling scrape frequency doubles the sample cost, which is linear and small: 2M samples/s instead of 1M, and 6TB of hot tier instead of 3TB. Adding one label with 1,000 distinct values to one metric multiplies that metric's series count by up to 1,000, which is multiplicative and lands entirely on the expensive axis. A metric at 100,000 series and 4KB each is 400MB of head; the same metric after someone adds `request_id` is unbounded, and the ingester dies before anyone opens a dashboard.
 
-A background rollup job reads each series from the hot tier, computes per-window aggregates (avg, min, max, count, sum — enough to reconstruct any common operator), and writes them to the next tier. Storage drops 6× from 10s → 1min, then 60× from 1min → 1hr; a year of 10s data would be 3.15M samples per series, which is 3.15M × 1.5B Gorilla-compressed = ~5MB *per series* before downsampling and 100KB after. With 10M series, that's 50TB compressed at full resolution vs. 1TB downsampled. The query engine picks the right tier based on requested step size: PromQL `step=1h` over a year reads cold tier directly.
+That asymmetry is why the control lives on the write path. By the time a query runs, the memory has already been spent.
 
-**Alerts.** A rule is `(PromQL_expr, threshold, for_duration)` — e.g. `avg_over_time(cpu[5m]) > 0.8 for 5m`. The evaluator runs each rule on a 30s schedule, queries the TSDB, and tracks state per rule: pending (matching but `for` not yet elapsed), firing, resolved. Firing alerts are forwarded to the router (Alertmanager). The router groups by labels (one `{job="api", severity="critical"}` notification instead of 50 per-pod alerts), applies silences (regex-matched mute windows for known maintenance), and applies inhibition rules ("if `cluster_down` is firing, suppress all per-pod alerts in that cluster"). Routes deliver to channels — PagerDuty for critical, Slack for warnings, email for digests.
-
-**Long-term storage architectures.** *[Source: Grafana Mimir docs, Cortex/Thanos design, VictoriaMetrics]* Plain Prometheus tops out around 10M active series per node and stores locally — fine for one team, useless for an org with 1000 services. Four production architectures solve "Prometheus-at-scale + long retention":
-
-| System | Approach | Storage | Strength | Weakness |
-|---|---|---|---|---|
-| **Thanos** | Sidecar attaches to each Prometheus, ships TSDB blocks to object storage; Querier fans out across sidecars + Store Gateway (object) | S3 + each Prom's local | Easy to bolt onto existing Prom | Query fan-out latency; sidecar tightly coupled to Prom lifecycle |
-| **Cortex** | Push-based: Prom remote-writes to a horizontally-scaled receive cluster (distributors → ingesters); ingesters flush to object store | S3-only (after blocks v2) | True horizontal write scale | Operationally heavy (many components); largely subsumed by Mimir |
-| **Mimir** | Cortex fork by Grafana; same shape (distributor → ingester → store-gateway → compactor → ruler → querier) but optimised for billion-series and operational simplicity | S3 (blocks) | 1B+ active series proven; query sharding | Many moving parts; needs object store |
-| **VictoriaMetrics** | `vminsert / vmstorage / vmselect` cluster; MergeTree-style local storage per `vmstorage`, no object store dependency | local disk per shard | High compression (~0.4B/sample), simpler ops, fast queries | No native object-store tier; data lives on `vmstorage` disks |
-
-Mimir's component graph: `distributor` (auth, hash-ring partition by series) → `ingester` (in-memory + WAL, flushes 2h blocks) → object store. `compactor` merges blocks across time and de-duplicates HA pairs. `store-gateway` serves block reads. `query-frontend` splits + caches; `querier` fans out across ingesters (recent) and store-gateways (historical). `ruler` evaluates recording + alerting rules.
-
-**Cardinality control / drop pipeline.** *[Source: Grafana Mimir, VictoriaMetrics cardinality limiter]* One bad deploy adds `user_id` as a label and series count goes 10M → 100M; the index blows out, queries time out, alerts go silent. Production systems enforce a multi-stage drop pipeline at ingest:
+**The ingest drop pipeline.** Five stages, cheapest first, all of them before the sample touches storage.
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 825" role="img" aria-label="Metrics ingest cardinality drop pipeline">
@@ -7260,26 +7229,35 @@ Mimir's component graph: `distributor` (auth, hash-ring partition by series) →
 </svg>
 ```
 
-Every drop is *counted*, not silent — `metric_dropped_total{reason="per_metric_limit"}` is itself a metric, alertable, attributable to the offending tenant/team. Mimir and VictoriaMetrics both ship cardinality explorers (`/api/v1/cardinality/...`) that surface "top 10 metrics by series count" and "top 10 label values" so an on-call can find the offender in seconds.
+1. **Relabel drop.** A static rule set: drop this metric entirely, strip this label from every metric, keep only this allowlist for this job. One map lookup, no state, so it goes first. This is where you delete `pod` from metrics that only ever need `deployment`, which is the single most effective churn reduction available.
+2. **Known series?** Hash the label set and look up the series id. At steady state this hits: 10M series producing 1M samples/s means essentially every sample belongs to a series that already exists, and the miss path runs only at the churn rate, a few thousand per second during a deploy and near zero otherwise. A hit skips every remaining stage and appends. This is why a limiter is affordable at 1M samples/s: the expensive checks run on creation, not on every sample.
+3. **Per-metric series budget.** Reject the new series if `metric_name` is already at its 1M cap. Bounds the blast radius of one bad metric to that metric.
+4. **Per-tenant active-series cap.** Reject if the tenant is at 2M, and return an explicit HTTP error rather than dropping quietly, so the sender's remote-write queue surfaces it. Bounds the blast radius of one bad team to that team.
+5. **Label-value cardinality cap.** A heuristic, and the only stage that inspects values: a single label key that has seen more distinct values than its threshold in a rolling window is almost always a UUID, a request id, an email address, or a raw URL path. It has real false positives, since a legitimate 50,000-customer dimension looks identical, so it should warn before it drops and the threshold has to be configurable per label key.
 
-**Compactor and downsampling jobs.** *[Source: Mimir / Thanos compactor]* Background compactors merge 2h blocks into 12h, 24h, then weekly blocks; same pass deduplicates HA-pair samples (two Prometheus instances scraping the same target both push, dedupe at compaction). Downsampling produces 5m and 1h resolution blocks alongside raw — query frontend picks the resolution by requested step size. `compactor` jobs run at ~10% of cluster CPU; `store-gateway` lazily memory-maps block index headers (~1GB per 100GB of blocks) so a query plan can prune blocks by time + label without loading data.
+Only after all five does the series get indexed and the sample appended.
 
-**Cardinality math.**
-- Active series = unique `(metric_name, label_set)` combinations.
-- 1M active series × 10 samples/min × 60 × 24 × 7 = ~100B samples/wk; Gorilla-compressed at 1.5B/sample = 150GB raw plus ~15GB index per replica.
-- Adding one unbounded label (10K user_ids) on one metric → 10K× series for that metric. A 100K-series metric becomes 1B-series. The index alone is now multiple GB, queries on it are seconds, and the system is degraded.
+**Every drop is counted, never silent.** `metric_dropped_total{tenant, metric, reason}` is itself a metric, alertable and attributable. A silent limiter is worse than no limiter: the team sees a flat graph, concludes the service is idle, and files a bug against monitoring three weeks later. The rejection also has to travel back to the sender as an error, because a remote-write client that receives a 200 for a dropped sample will never retry it and never tell anyone.
+
+**Finding the offender in the first two minutes.** The limiter says a cap was hit; it does not say what to do. What the on-call needs is a cardinality explorer over the index: top metrics by series count, top label keys by distinct value count, and both lists diffed against 24 hours ago. The diff is the useful one. Absolute counts are dominated by metrics that have legitimately been large forever, while the delta points straight at the deploy that did it. Mimir and VictoriaMetrics both expose this over the head index, which is the only place the answer is cheap, because those postings lists are already in memory.
+
+**What the limiter cannot fix: churn.**
+
+Caps bound *concurrent* series. They do nothing about the *cumulative* count over a retention window. A pod name is perfectly bounded at any instant, say 200 pods, and unbounded over time: deploy twice a day for 13 months and that one label has produced 200 × 2 × 395 = ~158,000 distinct values, no two generations of which ever coexisted. Active series stays flat at 10M, the head-memory alarm never fires, and every cap stays green. But each sealed block carries its own index over the series alive during that block, so a query spanning a year fans out across blocks whose series sets are nearly disjoint, and the work is proportional to cumulative series rather than active ones. Downsampling shrinks samples; it does not shrink an index.
+
+The only real fix is upstream at stage 1: strip identity labels that rotate (`pod`, `instance`, `container_id`, `replicaset`) from anything you intend to query historically, and re-derive the aggregate from the labels that do not rotate. That is a genuine loss of information, and it is the first Unresolved item below.
 #### Where it breaks
 **must-say**
 
 **Bottlenecks**
 
-- **High cardinality** (one bad deploy ships `user_id` as a label, series count goes 1M → 100M) → ingest-side cardinality limiter rejects new series past per-metric budget; CI analyzer blocks PRs that introduce unbounded labels; runtime alerts on series-count growth catch what slips through.
-- **Long-range query** (1 year of 10s data = 3.15M points × series, times out) → query planner detects step size and routes to downsampled tier (5m or 1h rollups for ranges > 7d); raw queries beyond hot retention are rejected outright with a clear error.
-- **Alert storm** (database fails, every service alert fires, on-call gets 200 pages) → grouping collapses similar alerts into one notification; inhibition rules suppress symptom alerts when a known cause is firing (`db_down` → mute all `api_5xx` alerts).
-- **Ingest spike on outage** (every service retries metrics during a partial outage, 10× normal write volume) → Kafka buffer in front of write workers absorbs the spike for ~5 minutes; workers drain at steady rate so the TSDB never sees the burst.
-- **Tag drift / schema change** (someone renames a label, breaking dashboards silently) → metadata DB tracks `metric → seen_labels` over time; alerts when a label disappears or appears unexpectedly; dashboards and rules use canonical label sets validated at deploy.
-- **Long-term storage on local disk** (Prometheus stores blocks locally; 1y of 10M series = ~50TB per replica, single node won't fit) → push to a horizontally-scaled object-store-backed system (Mimir, Thanos, Cortex) or a sharded TSDB cluster (VictoriaMetrics) — query frontend handles the fan-out across blocks in S3 + recent in-memory data in ingesters.
-- **HA pair sample duplication** (two Prom replicas scrape every target, double the storage and double-counted in `rate()` queries) → compactor deduplicates at block compaction time using the `cluster` + `replica` external labels; store-gateway returns one copy per `(series, ts)` to the querier.
+- **High cardinality** (one deploy ships `user_id` as a label and series count goes 10M to 100M). The ingest limiter rejects new series past the per-metric budget; a CI analyser blocks pull requests that introduce unbounded labels; runtime alerts on series-count growth above 2x day-over-day catch what slips through.
+- **Long-range query** (a year of 10s data is 3.15M points per series, and it times out). The query planner reads the requested step and routes to the downsampled tier for ranges beyond 7 days; raw queries past hot retention are rejected outright with a clear error rather than allowed to run and fail.
+- **Alert storm** (a database fails, every service alert fires, on-call takes 200 pages). Grouping collapses alerts sharing a label set into one notification; inhibition suppresses symptom alerts while a known cause is firing, so `db_down` mutes every dependent `api_5xx`.
+- **Ingest spike during an outage** (services retry, write volume goes to 10x normal). A bounded buffer in front of the write workers absorbs roughly 5 minutes of burst and the workers drain at a steady rate, so the TSDB never sees the spike. The buffer is bounded on purpose: past its capacity the correct behaviour is to shed samples, because unbounded buffering just converts a spike into an out-of-memory later.
+- **Label drift** (someone renames a label and dashboards silently go blank). A metadata store tracks `metric -> seen_labels` over time and alerts when a label appears or disappears unexpectedly; dashboards and rules reference canonical label sets validated at deploy.
+- **Long-term storage on local disk** (a year of 10M series is 47TB raw per replica, which no single node holds). Ship sealed blocks to object storage and let a query frontend fan out across recent data in ingesters and historical blocks in the store gateway, or run a sharded dense-local-disk cluster instead, which is the third fork above.
+- **Duplicate samples from a redundant collector pair** (two collectors scrape every target, doubling storage and inflating `rate()`). The compactor deduplicates by `(series, timestamp)` at compaction using the `cluster` and `replica` external labels, and the store gateway returns one copy per `(series, timestamp)` to the querier. This is safe here precisely because samples are idempotent by timestamp, which is not true of the order flow in Q43.
 
 **Failure modes**
 
@@ -7295,53 +7273,60 @@ Every drop is *counted*, not silent — `metric_dropped_total{reason="per_metric
 
 **Unresolved**
 
-TODO. Two or three things this design genuinely does not handle well, and what you would do about each.
+**Every cardinality cap in this design bounds concurrent series and none of them bounds churn.** A rotating pod name is bounded at any instant and unbounded over 13 months, so active series holds flat at 10M while the cumulative count reaches roughly 100M, and a long-range query fans out across blocks whose series sets barely overlap. The alarms stay green throughout, which is what makes it nasty. What I would do is strip rotating identity labels at the relabel stage and re-derive from the workload label, and cap a query's series fan-out rather than only its time range. Both are partial. Stripping `pod` means the historical query you most want during a post-incident review, which pod was the bad one, becomes unanswerable once the block rotates out of the hot tier, so the fix trades the outage for a permanent loss of forensic resolution. Nobody has a version of this that keeps both.
+
+**A monitoring system cannot honestly observe its own partial failure.** The dead-man's-switch in the failure table covers total silence, and total silence is the easy case. The failures that matter are self-concealing: the limiter drops a tenant's series, so that tenant's alert rule now returns no data, and a rule that returns no data does not fire. Absent is not the same as healthy, but wrapping every rule in an `absent()` clause doubles the rule count from 10,000 to 20,000, adds 330 more evaluations per second, and produces its own false pages every time a service legitimately scales to zero. What I would do is make no-data a distinct rule state routed to a low-urgency channel, and page only on the aggregate, say more than 2% of rules in no-data state. The concession is explicit: one service disappearing silently is then a warning rather than a page, and sometimes you will find out late.
+
+**Symptom alerting needs a user-facing indicator, and internal components do not have one.** "Page on symptoms, not causes" is the right rule and it assumes every paging-worthy failure has a visible user effect. For a nightly batch pipeline, a cache warmer, or a reconciliation job, there is no user-facing symptom for hours, so cause alerts on CPU and queue depth are the only available signal and they are exactly the noisy ones the rule exists to eliminate. What I would do is alert on output freshness instead, a `last_successful_run_timestamp` gauge compared against the expected cadence, which converts a cause alert into a symptom alert one level down the dependency chain. That works only for components whose output has a natural freshness. Anything without one keeps its noisy resource-threshold alerts, and I have not found a principled way to make those quiet.
 #### Drill questions
-1. Cardinality just exploded — a deploy added `user_id` as a label. What do you do?
+1. Cardinality just exploded after a deploy added `user_id` as a label. What do you do?
 2. How do you keep alerting working when the metrics system itself is down?
-3. Long-range query (1 year at 10s resolution) is timing out. Solution?
+3. A one-year query at 10s resolution is timing out. Solution?
 4. How do you avoid double-counting when a service is double-deployed (blue/green)?
-5. What's your alerting philosophy — page on cause or symptom?
+5. What is your alerting philosophy, page on cause or on symptom?
 6. How do you migrate from Prometheus to a hosted TSDB without losing data?
-7. When do you pick Mimir vs VictoriaMetrics?
+7. When do you pick Mimir over VictoriaMetrics?
 8. How does Thanos differ from Mimir architecturally?
-9. What's the practical limit on per-metric cardinality?
-
-TODO. Only 9 drill questions carried over, top up to at least 10.
+9. What is the practical limit on per-metric cardinality?
+10. Ingest rate has been flat for a week but ingester memory has climbed 30%. What is happening?
+11. A team wants per-customer metrics and there are 50,000 customers. What do you tell them?
+12. How do you choose the `for` duration on an alert rule?
 #### Answers to drill questions
-1. Block at ingest with a cardinality limiter (per-metric series cap), drop the offending series, page the owning team. *If pushed:* run a pre-prod cardinality analyzer in CI; reject metrics PRs that introduce unbounded labels.
+1. Block at ingest with the per-metric series cap, reject the offending series with an explicit error, count the rejection under `metric_dropped_total`, and page the owning team rather than the monitoring team. *If pushed:* run a cardinality analyser in CI so unbounded labels are rejected in review, and be honest that the limiter is data loss, so the reject has to be visible to the sender or the team will debug a flat graph for weeks.
 
-2. Run alerting on a separate, simpler stack (e.g. dead-man's-switch alerts + a second region). *If pushed:* meta-monitor the monitoring — heartbeat alerts via a third-party (PagerDuty, Healthchecks.io) if the primary stops emitting.
+2. Run alerting on a stack that does not depend on the TSDB it monitors: a second, simpler evaluator in another region, plus a dead-man's-switch. *If pushed:* the heartbeat has to terminate outside your infrastructure entirely (a third-party paging or cron-monitoring service that fires when the beat stops), otherwise the meta-monitor shares a failure domain with the thing it monitors. Note this only covers total silence, and the partial failures are the ones that hide.
 
-3. Query downsampled tiers (5m/1h rollups) for ranges past 7d; reject raw queries beyond that window. *If pushed:* recording rules pre-compute common aggregations; expensive queries route to a separate reader pool to protect alerting.
+3. Route by requested step: ranges beyond 7 days go to the 1-minute or 1-hour tiers, and raw queries past hot retention are rejected with a clear error instead of being allowed to time out. *If pushed:* pre-compute common aggregations as recording rules, and give expensive ad hoc queries their own reader pool so a capacity-planning query cannot starve the 330 alert evaluations per second that share the read path.
 
-4. Include `instance` label; aggregate with `sum without(instance)` only after a deploy stabilizes. *If pushed:* during cutover, scrape both but use a `version` label to attribute correctly in dashboards.
+4. Keep the `instance` label so the two deployments are distinct series, and aggregate with `sum without(instance)` at query time rather than dropping the dimension at write time. *If pushed:* during a cutover, carry a `version` label so dashboards can attribute either way, and delete it once the old version is gone, because a version label is a rotating identity label and contributes to exactly the churn problem in the deep dive.
 
-5. Page on symptoms (user-facing SLOs), not causes — causes change, symptoms don't. *If pushed:* cause alerts go to a non-paging channel for investigation; reserve paging for "users are unhappy right now".
+5. Page on symptoms, meaning user-facing service level indicators, not on causes. Causes change with every refactor and symptoms do not. *If pushed:* cause alerts still exist, they just route to a non-paging channel for investigation. And concede the limit: internal components with no user-facing symptom have nothing to alert on but causes, and the best available substitute is output freshness.
 
-6. Dual-write via remote-write for a retention cycle; backfill historical via export/import; flip dashboards once parity is confirmed. *If pushed:* keep the old stack read-only for the original retention window so historical incident analysis still works.
+6. Dual-write with remote-write for one full retention cycle, backfill history by exporting blocks and importing them, and cut dashboards over only once you have compared query results between the two for a week. *If pushed:* keep the old stack readable for its original retention window, because the first real incident after a migration is when someone needs a comparison against last quarter.
 
-7. Mimir if you need cheap object-store retention (years of metrics on S3), have multi-tenant isolation as a requirement, and can operate ~8 microservices. VictoriaMetrics if you want operational simplicity, a single binary or 3-component cluster, and can pay for local disk at retention scale. Both clear 1B+ active series. *If pushed:* in regulated environments where object-store immutability + compliance is required, Mimir's blocks-on-S3 model wins; in cost-sensitive Kubernetes-native shops, VictoriaMetrics is materially cheaper to run.
+7. Mimir when you want long retention priced as object storage, need per-tenant isolation and quotas as a first-class feature, and can operate roughly eight interacting components. VictoriaMetrics when operational simplicity matters more, since it is a single binary or a three-component cluster, and you are willing to pay for local disk at retention scale. Both clear a billion active series. *If pushed:* the real decider is staffing. Mimir's component count is a permanent operational tax; if you cannot fund a team to run it, its cheaper storage is not cheaper.
 
-8. Thanos is sidecar-pull: each Prometheus stays the source of truth and a sidecar uploads its blocks; Querier fans out across sidecars and a Store Gateway. Mimir is push-based: Prometheus remote-writes to a centralised distributor, ingesters own the write path. Thanos preserves Prometheus-as-the-system; Mimir replaces it. *If pushed:* Thanos is the right migration path if you have 100s of existing Prom instances; Mimir is the right greenfield choice for a single, big, multi-tenant stack.
+8. Thanos is sidecar-pull: each Prometheus stays the source of truth, a sidecar uploads its sealed blocks, and a querier fans out across sidecars and a store gateway. Mimir is push-based: Prometheus remote-writes into a central distributor and ingesters own the write path. Thanos preserves Prometheus as the system; Mimir replaces it. *If pushed:* that difference decides the migration path more than the steady state. With hundreds of existing Prometheus instances Thanos is additive and Mimir is a rewrite of everyone's scrape config.
 
-9. Hard cap ~1M series per metric name in production deployments (Mimir's default is configurable); soft cap at the per-metric budget enforced at ingest. Above 1M and a single PromQL `rate(metric[5m])` becomes unaffordable. *If pushed:* if you legitimately need higher cardinality (per-customer SaaS metrics), use exemplars + traces for the high-cardinality dimension and keep the metric itself low-cardinality.
+9. About 1M series per metric name as a hard cap. Past that, a single `rate(metric[5m])` has to touch a million postings entries and the query stops being affordable, which matters most because alert rules run those queries 330 times a second. *If pushed:* if the high-cardinality dimension is genuinely needed, do not put it in the metric. Keep the metric low-cardinality and attach exemplars pointing at traces, so the drill-down exists without the dimension living in the index.
+
+10. Churn, almost certainly. Active series counts series with a recent sample, and that is flat, but the head block keeps index entries for a series until head compaction retires them, so memory tracks series *created* per compaction window rather than series currently reporting. A deploy cadence that rotates pod names faster than the 2-hour head compaction retires them makes memory a function of deploy frequency, which is a number nobody in the monitoring team controls. *If pushed:* check the rate of series created against series removed directly, and if that is the cause, drop the rotating label at the relabel stage rather than raising the memory limit. Raising the limit only moves the date.
+
+11. Not as a label on a high-volume metric: 50,000 customers times whatever else is on that metric is the entire cardinality budget. Three things do work. Keep the metric low-cardinality and attach exemplars linking to traces for the per-customer drill-down. Or emit one deliberately narrow metric carrying only the customer dimension and nothing else, capped and monitored. Or accept that per-customer analytics is an analytics question and belongs in a columnar store over event data, not in a TSDB. *If pushed:* this is also the question that decides build against buy, because a vendor priced per custom metric or per series turns a 50,000-value label into an unbounded bill, and per-host pricing does not save you either. Model the bill against the label set before signing.
+
+12. It is the trade between page latency and false pages, and it should be set from the rule's own history rather than by taste. Start from how long the condition can persist without user harm, then replay the candidate rule against the last 30 days of data and count how many times it would have fired and how many of those resolved by themselves inside the window. A `for: 5m` at a 10s scrape means the condition held across roughly 30 samples, which removes essentially all single-scrape noise; `for: 30s` does not. *If pushed:* `for` interacts with the evaluation interval, since a rule evaluated every 30s with `for: 5m` needs 10 consecutive true evaluations, so a slow query on the alert path silently lengthens the effective hold and can reset pending state. That is one more reason alerting gets its own reader pool.
 #### Whiteboard script
-TODO
+Say this before drawing anything: "This system is priced per series, not per sample, so the design question is where it is allowed to say no."
 
-A 45 minute budget: what to cover in 0-5, 5-15, 15-35 and 35-45, what to say first, and a line starting `Cut first:`.
+**0-5, frame and bound.** Put five numbers in the corner and leave them there: 10,000 hosts, 10M active series, a 10s scrape interval, 1M samples/s steady, 10,000 alert rules. Then say what this is not, in one sentence: metrics are pre-aggregated numeric series, logs are unaggregated text, traces are per-request, and forcing all three into one store makes at least one of them wrong by orders of magnitude. Ask the single clarifying question that changes the shape of the answer: are the targets long-lived and enumerable, because that decides scrape against push and nothing else in the interview depends on it.
 
-**Raw material, from the old Talking Points:**
+**5-15, the spine.** Seven boxes: targets, collector, ingest gateway, TSDB with three tiers, query engine, dashboards, and then a second arrow off the TSDB into evaluator, router, notification. Make the point while drawing that second arrow, because it is the one people skip: alerting is not a feature bolted onto dashboards, it is an independent reader of the same data with a different latency budget and a different failure mode, which is why it gets its own reader pool. Give the compression numbers once (16B down to ~1.5B via delta-of-delta and XOR) and move on. That is a fact, not a decision, and it is not what they are testing.
 
-These are what a metrics-system interviewer wants to hear unprompted:
+**15-35, cardinality, which is the actual interview.** Protect this band. Define series against sample and give the asymmetry as two numbers: 1.5 bytes per sample on disk, 3 to 4KB of ingester memory per series. Draw the five-stage drop pipeline: relabel, known-series lookup, per-metric budget, per-tenant cap, label-value heuristic. Say that the known-series hit is the fast path and everything below it runs only on creation, because that is the reason a limiter is affordable at 1M samples/s. Then the two things most candidates miss. Every drop is counted and returned to the sender as an error, never silent, or the team debugs a flat graph for three weeks. And the caps bound concurrent series while doing nothing about churn, which is the failure that arrives with every alarm green. If the band is running long, take the query side as one line: route by step size, and reject a raw one-year query rather than letting it time out.
 
-- **Cardinality is the killer** — call it out within the first minute; it's what every production deployment fights.
-- **Push vs pull is workload-dependent** — pull for infra (you can enumerate targets), push for short-lived jobs/clients behind NAT; most real systems do both.
-- **Downsampling tiers, not one resolution** — 10s/1min/1hr buckets so a year-of-data query doesn't have to scan 3M raw points per series.
-- **Page on symptoms (SLOs), not causes** — name this philosophy explicitly; it shows you've been on-call.
-- **Alerting must survive the metrics stack going down** — independent evaluator + dead-man's-switch from a third party.
-- **Mimir (object-store tier) vs VictoriaMetrics (local-disk dense) vs Thanos (sidecar-pull)** — pick one and explain the tradeoff; signals you've operated at scale.
-- **Gorilla compression details** — delta-of-delta on timestamps, XOR on floats; gets you from 16B/sample to ~1.5B; cite Facebook's paper if pressed.
+**35-45, alerting, then concede.** Alerting in three minutes: the rule state machine (pending, firing, resolved) with its hold duration, then the router doing grouping, silencing and inhibition, because 200 pods failing on one database has to become one notification. Say "page on symptoms, not causes" and give the reason rather than the slogan: causes change with every refactor and symptoms do not. Then hand over the gaps before they are found. Churn defeats every cap. No-data is not healthy, and a tenant the limiter silenced produces no alerts at all. Symptom alerting needs a user-facing indicator that internal platform components do not have. Close on the meta-monitoring line: the alert evaluator cannot run on the TSDB it monitors, so there is a dead-man's-switch terminating outside your own infrastructure.
+
+Cut first: the storage-system comparison (Thanos against Mimir against VictoriaMetrics), then multi-region and DR, then everything about Gorilla beyond the single number. The system comparison in particular reads as vendor recall, and it will eat the cardinality band; keep it as one sentence you can offer if asked. Never cut: the series-against-sample cost asymmetry, the ingest limiter with counted and attributable drops, and the fact that alerting has to survive the metrics stack.
 #### Appendix
 **Data model**
 
@@ -7356,7 +7341,8 @@ Series → list of (ts, value)
 
 **Storage (Gorilla compression):**
 - Delta-of-delta encoding for timestamps
-- XOR encoding for floats → typically 1-3 bytes/sample (was 16)
+- XOR encoding for floats, giving 1.3 to 2 bytes/sample against 16 raw
+- Cardinality caps: 1M series per metric name, 2M active series per tenant, both enforced at ingest
 
 **Schema:**
 ```
@@ -7378,9 +7364,11 @@ POST /alerts/rules    body: { name, query, threshold, for, channels }
 - `tsdb_head_chunks_storage_size_bytes` and `tsdb_wal_segment_current_size_bytes` (head-block pressure)
 - `cortex_request_duration_seconds` p99 by route (write vs read)
 - `prometheus_remote_storage_samples_pending` and `..._samples_failed_total` (remote-write health)
-- `metric_dropped_total{reason}` (cardinality limiter, relabel drops)
+- `metric_dropped_total{tenant, metric, reason}` (cardinality limiter, relabel drops); the attribution labels are the point, since a bare counter tells you nothing actionable
+- Series created against series removed per compaction window, which is the churn signal the active-series gauge hides
 - `alertmanager_notifications_failed_total` per receiver
-- Heartbeat: external dead-man's-switch alert that fires if the primary stops emitting
+- Fraction of alert rules in the no-data state, aggregated; page above 2%
+- Heartbeat: external dead-man's-switch that fires if the primary stops emitting
 
 **SLOs:** 99.9% of samples ingested within 5s of scrape; 99% of dashboard queries <1s; 100% of fired alerts delivered within 60s of trigger; cardinality-limiter rejection rate visible per tenant.
 
@@ -7390,101 +7378,121 @@ POST /alerts/rules    body: { name, query, threshold, for, channels }
 - **RTO:** alerting fails over in <5min via DNS to the peer region's evaluator stack; query path may be degraded (store-gateway warming) for 10-15min after region loss.
 - **RPO:** <5min for hot data (last unflushed ingester block can be lost); 0 for blocks already shipped to object store with cross-region replication.
 - **Failover cadence:** monthly evaluator-stack failover drill; quarterly full-region cutover including dashboards.
-- **Cross-region cost:** dominated by remote-write egress (every sample written twice when fanning out) and object-store cross-region replication bandwidth — model as `samples/s × ~2B/sample × 2 × egress_$/GB`.
+- **Cross-region cost:** dominated by remote-write egress, since fanning out writes every sample twice. 1M samples/s compresses to ~29MB/s on the wire, doubled is ~58MB/s = ~150TB/month; at $0.02/GB of cross-region egress that is ~$3,000/month, several hundred times the entire cold-tier storage bill. Cross-region is a bandwidth decision, not a storage one.
 
 ### 18. Design Ad Click Event Aggregation
 #### Problem
-Aggregate ad click events in near-real-time for billing dashboards, advertiser-facing analytics, and fraud detection.
+Aggregate ad click events into per-ad, per-minute counts that feed advertiser dashboards in near real time and advertiser invoices at T+1. Events arrive out of order, duplicated, and sometimes fraudulent, and the totals are money, so every count has to be reproducible from the raw events long after the window closed.
 #### Core
-TODO
+Two things separate this from ordinary analytics: the numbers get invoiced, and the events arrive out of order. Everything follows from those.
 
-Write the whole answer as you would give it in sixty seconds, 200 to 300 words, standing alone.
+Clicks land in a durable, partitioned, replayable log before anything computes on them. That log is the source of truth and every number downstream is derived and disposable. The client stamps each click with an id it reuses on retry, so a duplicate is detectable rather than a fact.
+
+A stream job keys by ad, buckets by event time into one-minute tumbling windows, and writes each closed bucket into a columnar store under `(ad_id, ts_minute)` as the primary key. Event time rather than arrival time, because a phone that was offline for twenty minutes must still count in the minute the human clicked, and at a day boundary arrival time puts the click on the wrong invoice. Watermarks decide when a window is done. Late events inside a five-minute grace period rewrite their bucket; anything later goes to a side stream rather than being dropped, because each one is money.
+
+The same raw events also land in an immutable columnar archive, and a nightly job recomputes the day from scratch and overwrites the streaming rows key by key. That path exists for one reason: when someone finds an aggregation bug three weeks later, you have to be able to restate a closed period, and replay alone will not do it once the log has aged out.
+
+Dashboards read the stream, billing reads the recompute, and the difference between them is published rather than hidden.
 #### Summary
-**The picture in your head:** a national vote-counting operation. Ballot boxes (clicks) pour in from polling stations (browsers, apps) at 500,000 per second. You can't just dump them into a single spreadsheet — you have to sort them by district (ad ID) and time period (1-minute windows), tally each pile, and produce authoritative totals that are legally binding (billing). If someone drops a ballot box, you need to know exactly which ballots to recount. The tally on election night is approximate; the certified count three days later is what actually matters.
+**The picture in your head:** a national vote-counting operation. Ballot boxes (clicks) pour in from polling stations (browsers, apps) at 500,000 per second. You cannot just dump them into a single spreadsheet. You have to sort them by district (ad ID) and time period (1-minute windows), tally each pile, and produce authoritative totals that are legally binding (billing). If someone drops a ballot box, you need to know exactly which ballots to recount. The tally on election night is approximate; the certified count three days later is what actually matters.
 
 **The approaches people actually take:**
-TODO. Two or three things a competent engineer might reach for, in plain language and before any product name, with what each one buys and roughly when it wins.
 
-**The single-request walkthrough:** a user clicks an ad for "running shoes" (ad_id=789) at 2:47:32pm. The Click API receives the event, writes it to a Kafka topic (a durable, ordered log) partitioned by `ad_id` — all events for ad 789 land on the same partition, in order. A Flink stream processor (Flink is a framework for processing event streams in real time) maintains a 1-minute tumbling window (a fixed, non-overlapping time bucket — "2:47:00–2:47:59") for each `ad_id`. When the window closes (at 2:48:00), Flink emits the aggregate: `{ ad_id: 789, window: "2:47:00", clicks: 247, unique_users: 191 }`. This result is written to ClickHouse (a columnar database optimized for analytics queries) under the primary key `(ad_id, window_start)`. The advertiser's dashboard showing clicks in the last 5 minutes pulls from ClickHouse and reflects a count within ~1 minute of each click happening. Meanwhile, the raw click events are also archived to S3 as Parquet files (a compressed columnar format). Every night, a Spark batch job re-reads the full day's raw events from S3, recomputes the authoritative click counts, and overwrites the ClickHouse rows — this corrects for any late-arriving events that the streaming path may have missed. The billing system reads only from this batch-corrected data.
+*One durable log and one streaming aggregator, nothing else.* Clicks append to a replayable log, partitioned so all events for one ad land in order in one place. A stateful job holds a bucket per ad per minute and writes each closed bucket into a store the dashboard reads. Buys one codebase, one set of semantics, freshness in seconds. Costs you your correction story: fixing history means replaying, so the log must retain everything you could ever need to recompute, and any correction that cannot be expressed as "the same code over the same events" has nowhere to live. Wins when the numbers are advisory.
+
+*The same streaming path, plus a slower recomputation over an immutable archive that overwrites it.* Raw events also go to cheap compressed columnar files, and a periodic job reads whole days back, recomputes the same aggregates, and overwrites the streaming rows key by key. Buys the ability to fix a bug three weeks later, and a home for corrections that settle after the fact, such as fraud verdicts. Costs two implementations of one piece of arithmetic that can quietly disagree. Wins when the numbers are money.
+
+*Push the aggregation into the query.* Do not precompute buckets. Land raw events in a store that scans billions of rows per second and aggregate when someone asks. No windowing, no watermark, no late-event problem, because a late event is just another row the next query picks up. Costs query time proportional to raw events rather than buckets, and roughly 100x the storage. Wins when query patterns are not known in advance and query volume is low relative to ingest.
+
+**The single-request walkthrough:** a user clicks an ad for "running shoes" (ad_id=789) at 2:47:32pm. The browser generates `click_id` locally and sends it; the Click API writes the event to a Kafka topic (a durable, ordered log) partitioned by `ad_id`, so all events for ad 789 land on the same partition in order. A Flink stream processor maintains a 1-minute tumbling window ("2:47:00 to 2:47:59") for each `ad_id`, dropping any `click_id` it has already seen in the last 10 minutes. When the watermark passes the window end (shortly after 2:48:00), Flink emits `{ ad_id: 789, ts_minute: "2:47:00", clicks: 247, unique_users: 191 }`, written to ClickHouse (a columnar store) under the primary key `(ad_id, ts_minute)`. The advertiser's dashboard reads that table and sees the click within about a minute. Meanwhile the raw events are archived to S3 as Parquet. Every night a Spark job re-reads the full day, deduplicates it exactly, joins the fraud verdicts that have settled since, recomputes the counts, and overwrites the same `(ad_id, ts_minute)` rows with a new `run_id`. Billing reads only the recomputed rows.
 
 **The pieces (and what each one is for):**
-- **Kafka (partitioned by `ad_id`)** — the raw event log. Every click lands here first, before any processing. Because each partition is an ordered append-only log with configurable retention (7 days), the entire pipeline is replayable: if the stream processor crashes, restarts, or has a bug, you can replay from offset 0 and recompute correct results from scratch. Partitioning by `ad_id` means all events for one ad are co-located on one partition, so a stream processor can aggregate them locally without shuffling data across the network.
-- **Flink (stream processor)** — reads from Kafka, groups events by `(ad_id, 1-minute window)`, computes running counts and HLL sketches (HyperLogLog — a probabilistic data structure that estimates the number of unique users using ~2KB of memory instead of storing each user ID, which would cost gigabytes), and emits aggregated results when windows close. Uses RocksDB (an embedded key-value store) to maintain window state durably on local SSD, plus checkpoints (periodic snapshots of operator state + Kafka offset, written atomically to S3) for fault tolerance.
-- **Watermarks** — Flink's mechanism for tracking "how late can events arrive before I declare a window done?" A watermark is a timestamp that says "I believe all events with ts < watermark have been seen." Kafka partitions report their maximum observed event timestamp; Flink takes the minimum across all partitions (the "straggler" partition defines global progress). If a mobile app retries a click from 10 minutes ago, that event arrives late relative to the watermark. Flink keeps a 5-minute "allowed lateness" window: late events within 5 minutes trigger a window correction; events more than 5 minutes late are routed to a side output topic that the batch job picks up. No billable click is silently dropped.
-- **Lambda architecture** — the design pattern of running both a real-time streaming pipeline (fast, approximate) and a batch pipeline (slow, authoritative) over the same raw data. The stream provides the advertiser dashboard's 5-minute freshness; the batch provides billing-grade accuracy. The two pipelines agree at T+1 day after the batch reconciliation overwrites the streaming estimates. Published SLA: ±1% real-time, ±0.01% by T+1.
-- **Fraud detection layer** — a parallel consumer off the same Kafka topic that applies layered checks: deterministic blocklists (known datacenter IP ranges, bot user-agent strings), rate limits (more than 10 clicks per minute from the same IP on the same ad), behavioral signals (click with no subsequent page load). Fraud is flagged, not blocked in real time — false positives cost more revenue than fraud you eventually refund. The batch reconciliation removes flagged clicks from billing totals and generates advertiser refunds.
+- **Kafka, partitioned by `ad_id`.** The raw event log. Every click lands here first, before any processing. Each partition is an ordered append-only log with 7-day retention, so the pipeline is replayable: if the stream processor crashes or ships a bug, you replay and recompute. Partitioning by `ad_id` co-locates all events for one ad, so aggregation is local and needs no shuffle, and it also means a retry of a click lands on the same partition as the original, which is what makes dedup possible in keyed state.
+- **Flink, the stream processor.** Reads from Kafka, groups by `(ad_id, 1-minute window)`, computes counts and HyperLogLog sketches (a probabilistic structure that estimates distinct users in about 2KB instead of storing every user id), and emits when windows close. State lives in RocksDB on local SSD, with incremental checkpoints (operator state plus Kafka offsets, written atomically to S3) for fault tolerance.
+- **Watermarks.** Flink's answer to "how late can an event arrive before I call this window done". A watermark is a timestamp asserting that everything older has been seen. Each partition reports its maximum observed event time; the global watermark is the minimum across partitions, so the slowest partition governs progress. Events inside the 5-minute allowed lateness reopen and correct their window. Events later than that go to a side output topic the batch path consumes.
+- **The batch path.** An immutable Parquet archive on object storage plus a recompute job: hourly passes over the last few hours for freshness, and one full-day pass after midnight that is the run billing reads. It exists to restate history, not to be faster.
+- **Fraud detection.** A parallel consumer off the same topic running layered checks: deterministic blocklists (datacenter IP ranges, known-bad user agents), rate limits (more than 10 clicks per minute from one IP on one ad), and behavioural signals (a click with no subsequent landing-page event). Fraud is flagged, not blocked, because a false positive costs more revenue than a fraudulent click you refund. The nightly recompute removes flagged clicks from billable totals.
 
-**The thing that makes it hard:** the Super Bowl ad problem. Ad_id=12345 (a major brand's Super Bowl spot) receives 50,000 clicks per second at peak — 100x the normal load for any single ad. All those events hash to the same Kafka partition (because partitioning is by `ad_id`). That partition's Flink task gets 100x the work of any other task. Its state (the in-memory window for ad 12345) gets huge. The task manager runs out of memory and the checkpoint fails. The window processor falls behind, the stream lags, and the advertiser's dashboard freezes. The fix: sub-key the hot ad: `(ad_id=12345, hash(user_id) % 10)` fans out across 10 partitions. Each shard counts independently; a downstream merge operator sums the 10 shards. This loses strict per-ad ordering within a window but keeps counts correct, which is all billing needs.
+**The thing that makes it hard:** the Super Bowl ad problem. Ad 12345 receives 50,000 clicks per second at peak, 100x the load of any other single ad. Every one of those events hashes to the same Kafka partition, so one Flink task gets 100x the work, its window state balloons, its checkpoints start failing and the whole pipeline's watermark stalls behind it. The fix is to sub-key: `(ad_id, hash(user_id) % 10)` fans the ad across 10 shards that count independently, with a downstream operator summing them. Note what the fix is not allowed to be. Sub-keying round-robin, or by `hash(click_id)`, would balance perfectly and silently break dedup, because two copies of the same click could land on different shards. Sub-keying by user keeps retries co-located, so the load fix and the correctness mechanism stay compatible.
 
-**Why this design and what it costs:** the Lambda architecture's key insight is that the raw event log is the source of truth, not the aggregated results. Because raw events are immutable and retained for 7 days in Kafka (plus indefinitely in S3), you can always recompute any aggregate from scratch. This means bugs in the aggregation logic are recoverable — fix the bug, replay from the beginning, get the right answer. The tradeoff is operational complexity: two codebases (stream and batch), two pipelines to maintain, and a reconciliation job that must correctly overwrite stream estimates without introducing its own bugs.
+**Why this design and what it costs:** the raw event log, not the aggregate, is the source of truth. Because raw events are immutable and retained (7 days hot, indefinitely as Parquet), any aggregate can be recomputed from scratch, so bugs in aggregation logic are recoverable rather than permanent. The cost is honest and large: two codebases computing the same numbers, a reconciliation job that can introduce its own errors, and a permanent drift metric somebody has to watch.
 
 **If you were building it tomorrow:**
-- Kafka (partitioned by `ad_id`, 7-day retention); Flink with RocksDB state backend + S3 checkpoints; ClickHouse for real-time aggregates; Spark on S3 Parquet for nightly batch reconciliation.
+- Kafka partitioned by `ad_id` with 7-day retention; Flink with RocksDB state and S3 checkpoints; ClickHouse for the served aggregates; Spark over S3 Parquet for the recompute.
 - Flink hot path per window:
   ```
   stream.keyBy(event -> event.ad_id)
+        .process(new DedupByClickId(Time.minutes(10)))
         .window(TumblingEventTimeWindows.of(Time.minutes(1)))
+        .allowedLateness(Time.minutes(5))
+        .sideOutputLateData(late_tag)
         .aggregate(new ClickCountAggregator())  # count + HLL
-        .addSink(clickhouse_sink)               # upsert by (ad_id, window_start)
+        .addSink(clickhouse_sink)               # absolute upsert on (ad_id, ts_minute)
   ```
-- Late events: `.sideOutputLateData(late_tag)` → publish to `late-clicks` Kafka topic → Spark batch picks up nightly.
+- Late data: `late_tag` publishes to a `late-clicks` topic that the nightly recompute reads alongside the archive.
 #### What this is really testing
-TODO
+Whether you design the correction path before the happy path. An analytics pipeline is easy until someone bills off it. The moment the output is an invoice, three ordinary streaming shortcuts become defects: processing-time windows put a click on the wrong day, a dropped late event is theft in one direction and a duplicate is theft in the other, and "we will just replay the log" stops working the day your retention is shorter than your dispute window. A candidate who reaches for windows, watermarks and exactly-once has the vocabulary. A candidate who says "the batch path exists so I can restate January in March" has the point.
 
-The one insight this question exists to elicit, then the contrast with the question it most resembles and why the answers differ.
+The contrast is with the trending topics question. Both are streaming aggregations over a click-like firehose and they look nearly identical on the whiteboard. They are opposites. Trending is approximate by design over an unbounded, adversarial key space: you never learn the true count of every hashtag, you use a sketch with a stated error bound, you accept that rank 9 and rank 10 sometimes swap, and nobody gets refunded when they do. This one is exact over a bounded key space: 5M active ads fits comfortably in a keyed state backend, every count must be reproducible from raw events years later, and the acceptable error is not a confidence interval but zero after reconciliation. Bring a Count-Min Sketch to this question and you have answered the wrong one. Bring exactly-once semantics and a nightly reconciliation to trending and you have built something 50x more expensive than the problem needs, to produce a leaderboard nobody audits.
 
-Closest question: TODO
+The same shape recurs in trade and P&L reconciliation, which is the fintech version of this question: a fast intraday number the desk watches, a slower official number the books close on, and a monitored, explained difference between them. In both cases the interesting engineering is the difference, not either number.
+
+Closest question: Q53
 #### Clarifying questions and how each answer forks the design
-- Granularity needed (per minute? hour?)
-- Billing-grade accuracy?
-- Anti-fraud requirements?
-- How fresh do dashboards need to be?
+- Is the aggregate billed, or only reported?
+- What granularity, and what is the freshness target?
+- How late do events actually arrive, and from which clients?
+- How far back must a number be restatable?
+- Anti-fraud requirements, and who absorbs the cost of a false positive?
 
 **How the answers shape the design**
 
 | If the answer is… | Then the design… |
 |---|---|
-| Per-minute granularity | tumbling-window aggregation in a stream processor keyed by (ad, minute) |
-| Billing-grade accuracy | exactly-once processing plus a batch reconciliation layer (lambda architecture) to correct the stream |
-| Dashboards can be slightly stale | a pure streaming path is fine; skip the batch layer |
-| Anti-fraud required | a separate scoring stage before aggregation, dropping or flagging suspicious clicks |
-| Late events expected | watermarks plus allowed-lateness so late clicks still land in the right window |
-| High event rate | partition by ad ID so hot advertisers spread across workers |
+| Billed, not just reported | needs a recomputable batch path over an immutable archive, plus published accuracy bands per freshness tier |
+| Reported only | a single streaming path is enough; drop the batch layer and the reconciliation job with it |
+| Per-minute granularity | tumbling windows keyed by (ad_id, minute), with absolute upserts so replays are no-ops |
+| Mobile clients with offline buffering | event-time windows, watermarks and allowed lateness; processing time would misattribute across day boundaries |
+| Restatable back one billing month | the archive holds the month, not the log; 31 days of hot log is roughly 50x the storage bill |
+| Something irreversible reads the live number | online dedup in a bounded window, because pacing decisions cannot be un-made by a nightly correction |
+| Anti-fraud required | a parallel scoring consumer that flags rather than blocks, with the verdict applied in the recompute |
+| One ad can be 100x the rest | sub-key the hot ad by user, never round-robin, so retries stay co-located and dedup survives |
 #### Requirements and scale, derived out loud
 **Requirements**
 
-- **FR:** ingest clicks; aggregate by (ad_id, advertiser, time bucket); top-N queries; billing rollups
-- **NFR:** 10B clicks/day, ≤1min freshness, exactly-once for billing, fraud-resistant
+- **FR:** ingest clicks and the post-click events they are joined against; aggregate by `(ad_id, ts_minute)`; roll up to hour and day; serve advertiser dashboards and top-N; produce billing rollups; flag fraud and remove it from billable totals.
+- **NFR:** 10B events/day; dashboard freshness under 1 minute for the closed window; counts reproducible from raw events for 7 years; T+1 authoritative totals; no billable event silently discarded inside the dispute window.
 
 **Scale**
 
-- **Volume:** Google Ads / Meta scale: ~1B DAU × ~10 clicks/user/day across the network → 10B clicks/day. 10B / 86,400 ≈ 115k/s avg; primetime (US+EU evening overlap) ~4× → 500k/s peak.
-- **Event size:** click record fields (ad_id 8B, advertiser_id 8B, user_id 16B, ts 8B, geo 32B, ip 16B, user_agent ~200B, referrer URL ~100B, misc ~100B) ≈ 500B raw JSON/protobuf. 10B × 500B = 5TB/day raw ingest.
-- **Stream retention 7d** (Kafka hot tier for replay/recovery): 5TB/day × 7d = 35TB single-replica × RF=3 = 105TB on the click stream.
-- **Cold raw archive:** Parquet + Snappy/ZSTD on click data hits ~5× ratio (high-cardinality strings dictionary-encode well). 5TB/day / 5 = 1TB/day → 365TB/yr per copy on object store.
-- **Aggregate granularity (per-minute OLAP):** active-ad universe ≈ 5M ads/day (Google Ads reports millions of advertisers × handful of active creatives each). 5M × 1,440 min/day = 7.2B (ad_id, minute) buckets/day. Row payload: count int64 (8B) + HLL sketch for unique users (~12KB if full, but typically ~2KB sparse + dense compressed; budget 50B amortised across sparse rows) + fraud_count (8B) + dims ≈ 50B. 7.2B × 50B ≈ 360GB/day. (Most ads have <1,440 active minutes → real footprint lower; this is the upper bound.)
-- **Hourly rollup:** 5M ads × 24 hours = 120M rows/day × 50B = 6GB/day; trivial.
-- **Daily rollup:** 5M ads × 1 row = 5M rows/day × 50B = 250MB/day; 1y = 90GB — fits in a single OLAP node.
-- **OLAP query load:** ~1M advertisers × 1 dashboard load/min during business hours / 86,400 = ~12 q/s avg, peak ~1k/s when reports generate at top-of-hour. Top-N (best-performing ads) served from hourly/daily pre-aggregated rollups.
+- **Volume, anchored on revenue rather than a guess:** a top-tier network books on the order of $700M/day in ad revenue. At a blended $0.50 cost per click that is 700M / 0.5 = 1.4B billable clicks/day, round to **1.5B clicks/day**. The pipeline carries more than clicks, because the fraud signal "click with no landing page load" is a join against the post-click events: budget the click itself plus a landing-page ping plus up to two conversion postbacks plus retries, roughly 6 events per click. 1.5B × 6 ≈ 9B, round to **10B events/day**. Clicks are 15% of the stream; the rest is what makes the clicks judgeable.
+- **Rates:** 10B / 86,400 ≈ **115k events/s average**. The US and EU evening overlap runs about 4x the daily mean, so 115k × 4 ≈ 460k, round to **500k events/s peak**.
+- **Event size:** ad_id 8B + advertiser_id 8B + click_id 16B + user_id 16B + ts 8B + geo 32B + ip 16B + user_agent ~200B + referrer ~100B + misc ~100B ≈ **500B**. 10B × 500B = **5TB/day raw ingest**.
+- **Hot log retention (7d, for replay and recovery):** 5TB × 7 = 35TB per replica, × RF=3 = **105TB**.
+- **Cold archive:** Parquet with ZSTD hits about 5x on this shape (high-cardinality strings dictionary-encode well). 5TB / 5 = **1TB/day**, so 365TB/year per copy on object storage.
+- **Aggregate cardinality:** about **5M active ads/day**. Cross-check against clicks: 1.5B / 5M = 300 clicks per ad per day on average, which is the right order for a long-tailed advertiser population. Upper bound on minute rows is 5M × 1,440 = 7.2B/day, but an ad is not active every minute; at an observed mean of ~200 active minutes per ad, 5M × 200 = **1B minute-rows/day**. Row payload: count int64 8B + sparse HLL sketch ~30B amortised + fraud_count 8B + dims ≈ **50B**, so 1B × 50B = **50GB/day** (upper bound 7.2B × 50B = 360GB/day if every ad ran continuously).
+- **Rollups:** hourly is 5M × 24 = 120M rows × 50B = **6GB/day**. Daily is 5M × 50B = **250MB/day**, so a year is 365 × 250MB ≈ **90GB**, which fits on one OLAP node and is why top-N is served from the daily table.
+- **Dedup state:** the online window must cover the retry tail, measured at p99.9 = 8 minutes, so size it at **10 minutes**. 500k/s × 600s = **300M click_ids** in flight, at 24B per entry (16B id + hash overhead) = **7.2GB** across the operator fleet, under 1GB per task at parallelism 10.
+- **Lateness:** web clicks arrive at p50 200ms, p99 2s. Mobile SDKs batch across connectivity gaps: p99 45s, p99.9 22 min. At 60% mobile share, the ~3% of mobile events later than 60s is 10B × 0.6 × 0.03 = **180M events/day** that processing-time windows would put in the wrong minute. Mean lateness works out around 40s, so the fraction crossing a fixed instant such as midnight is roughly 40 / 86,400 = **0.046%**, which on 1.5B clicks is **~700k clicks/day** landing on the wrong invoice day, about $350k/day of revenue moved between periods at $0.50/click.
+- **OLAP query load:** ~1M advertisers, of whom ~5% open a dashboard on a given day, each loading ~20 times: 1M × 0.05 × 20 = 1M queries/day / 86,400 ≈ **12 q/s average**. Scheduled reports cluster at the top of the hour at roughly 100x the mean, so **~1k q/s peak**.
 #### Key decisions
-TODO
+**A recomputable batch path beside the stream, or the stream alone**
+- Choice: run both. The stream serves freshness; a periodic job recomputes each day from the immutable columnar archive and overwrites the streaming rows key by key. Billing reads only the recomputed rows.
+- Alternative: stream only, with every correction expressed as a replay of the event log through a new version of the same job. One codebase, one definition of the arithmetic, no drift by construction.
+- Decider: how far back you must restate, against what that retention costs on the hot log. Advertiser disputes and tax restatements reach back a full billing month, so the recompute window is 31 days. Thirty-one days on the hot log is 5TB × 31 × RF=3 = 465TB of replicated block storage, roughly $37k/month at $0.08/GB-month; the same span as compressed columnar files on object storage is 31TB, roughly $700/month at $0.023/GB-month. Paying 50x on storage to avoid a second codebase is not a trade anyone makes, and the recompute is doing work a replay cannot express anyway: fraud verdicts that settle days after the click, and an exact whole-day dedup that a bounded stream window cannot perform.
+- Alternative wins when: the numbers are not billed (product analytics, ops dashboards), or the log itself has tiered storage so old segments already sit on object storage (Kafka's KIP-405 tiered storage, marked production-ready in 3.9 in late 2024) and every correction genuinely is the same code over the same events. Then the single implementation is better, and it is better for a real reason: two implementations of the same arithmetic will drift, and reconciling that drift is a permanent tax rather than a one-off. The honest framing is that this fork buys a restatement capability at the price of a correctness problem you now have to monitor. It is the same argument as an intraday P&L feed against an overnight official close, and it is resolved the same way.
 
-Two or three genuine forks. For each, in this exact shape so it stays checkable:
+**Deduplicate online in a bounded window, or accept duplicates and remove them in the recompute**
+- Choice: dedup online. The client stamps a `click_id` that survives retry, and the aggregation operator holds a per-key set of ids seen in the last 10 minutes and drops repeats.
+- Alternative: at-least-once end to end with no online dedup, letting the nightly recompute do an exact whole-day dedup while the streaming numbers run hot.
+- Decider: the window's memory cost against the reconciliation lag finance will accept. Measured retry lateness is p99.9 at 8 minutes, so 10 minutes catches essentially all of it: 500k/s × 600s = 300M ids at 24B = 7.2GB across the fleet, under 1GB per task. That is cheap. Against it, the measured duplicate rate is 0.2%, so without online dedup the streaming count runs 0.2% high, comfortably inside the published real-time band, and the invoice is untouched because the invoice comes from the recompute. If finance closes monthly and disputes are handled at T+1, a 26-hour lag on the corrected number is not a problem, and the alternative is genuinely defensible.
+- Alternative wins when: the streaming number is display-only. It stops winning the moment something irreversible reads it. Budget pacing is the case that settles it here: a broken client retry loop that turns 0.2% duplicates into 30% for an hour will auto-pause campaigns that still had budget, and no nightly correction un-pauses an ad that already missed its auctions. The rule is not "dedup is correct", it is "dedup wherever something acts". Note also that the online dedup is bounded and therefore incomplete, so the whole-day dedup in the recompute is needed either way; the fork is only about whether you additionally pay for the online one.
 
-**<name of the fork>**
-- Choice:
-- Alternative:
-- Decider:
-- Alternative wins when:
-
-**Raw material, from the old Common Mistakes:**
-
-- Picking Kappa over Lambda for billing-grade accuracy — replays are great for re-deriving streams, but they don't naturally express late-event side-paths or fraud reconciliation.
-- Blocking fraud in real time rather than flagging it — false positives cost more revenue than the fraud you'd have caught and refunded.
-- Forgetting watermarks and using processing time — deferred mobile retries arrive minutes late and silently inflate (or deflate) the wrong bucket.
-- Partitioning by user_id rather than ad_id — kills the local-aggregation property; every event needs a shuffle to find its ad's bucket.
-- Sliding windows for billing — 5× the state cost of tumbling for no billing benefit; use sliding only for the "trending now" widget.
-- Not publishing the streaming-vs-batch SLA — advertisers will notice ±0.3% drift and you need a documented "real-time is approximate, T+1 is authoritative" story ready.
+**Event-time windows with watermarks, or processing-time windows**
+- Choice: event time. One-minute tumbling windows, watermark at max observed event time minus 30s of out-of-orderness, 5 minutes of allowed lateness with in-place correction, side output beyond that.
+- Alternative: processing-time windows that bucket on arrival. No watermark, no window held open past its width, no retractions, no side output, and state that lives for exactly one window.
+- Decider: the measured mass of the lateness distribution beyond one window width. For web clicks at p99 2s the two schemes are identical and event time is pure overhead. Mobile is what decides it: p99 45s, p99.9 22 minutes, so roughly 3% of mobile events, 180M events/day at 60% mobile share, land more than 60 seconds late and processing time puts every one of them in the wrong minute. The number that actually settles it is the day boundary. With mean lateness around 40s, the fraction crossing midnight is 40 / 86,400 = 0.046%, which is ~700k clicks/day on the wrong invoice, about $350k/day moved between two advertisers' bills in a way neither can reconcile against their own logs.
+- Alternative wins when: nothing downstream cares which minute an event belongs to, only how many arrived. That covers most operational monitoring, and the right answer is to run arrival-time counters alongside the event-time ones rather than instead of them. Event-time windows fail silently when a partition goes idle: the watermark stops advancing, windows stop closing, and the dashboard flatlines in a way indistinguishable from "no clicks". The arrival-time counter is the only thing that tells those two apart, so this is a both, with each answering a question the other cannot.
 #### High-level design
 **must-say**
 
@@ -7573,44 +7581,25 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 </svg>
 ```
 
-**How to read the diagram:** click events first land in a durable stream, not directly in a database table. Stream processors then group, window, and aggregate those events for the reporting and billing systems that sit downstream.
+**How to read the diagram:** events land in a durable stream before anything writes to a database, and two readers consume that stream at different speeds. The left branch is fast and provisional, the right branch is slow and authoritative, and the arrow into the billing system comes from the right branch only.
 
-**Why the flow is shaped this way:** raw event capture and business aggregation are different responsibilities. Keeping the raw log means you can replay if the aggregation logic changes, the processor crashes, or billing rules need to be corrected later.
+**Why the flow is shaped this way:** raw capture and business aggregation are different responsibilities with different lifetimes. The raw log has to outlive every aggregate computed from it, because the aggregate is what changes: a fraud verdict settles, a rounding rule is corrected, an ad's attribution window is redefined. Keeping the events immutable and the aggregates disposable is what makes all of those a recompute rather than a migration.
 
-**What this layout buys you:** resilience, replayability, and clearer boundaries between ingestion and analytics. The tradeoff is eventual rather than instant finality for many downstream views.
+**What this layout buys you:** any number in the system can be re-derived, and the two derivations of it can be diffed. The cost is that finality is eventual for every view a human looks at, and you have taken on a second implementation of the same arithmetic whose disagreement with the first is now a metric you have to watch.
 #### Deep dive
 **must-say**
 
-**Stream processing (Flink):**
-```
-KafkaSource(clicks)
-  → keyBy(ad_id)
-  → Tumbling window (1 min)
-  → aggregate(count, distinct_users)
-  → KafkaSink(agg_topic) → write to ClickHouse
-```
+**From click to invoice: where exactness actually comes from.**
 
-**Exactly-once:** Kafka transactional producer + Flink checkpoints (snapshot of state + offsets to S3 atomically).
+Exactly-once is not a checkbox on a stream processor. It is a property of five specific places, and it fails at whichever one you skipped.
 
-**Lambda vs Kappa:**
+**1. The idempotency key comes from the client, or it is useless.** Each click carries a `click_id` generated in the browser or SDK at click time and reused verbatim on every retry. A server-generated id defeats the purpose, because a retry arrives as a fresh request and gets a fresh id. UUIDv7 (standardised in RFC 9562, May 2024) is the right shape here: it is time-ordered, so the id sorts usefully in the Parquet archive and carries a coarse event time even if the explicit timestamp field is corrupt. The client also stamps the event time; a client clock can be wrong, so the ingest tier records its own receipt time alongside it and rejects events whose claimed time is more than 24 hours in the future, which is the only clock-skew case that can poison a window that has not opened yet.
 
-| Aspect | Lambda (stream + batch) | Kappa (stream only) |
-|---|---|---|
-| Architecture | two pipelines | one |
-| Reconciliation | batch corrects stream | replay Kafka |
-| Complexity | high (two codebases) | lower |
-| Best for | when batch is authoritative | if Kafka retention covers replay |
+**2. Dedup lives in keyed state, and it constrains how you shard.** Because the topic is partitioned by `ad_id` and a retry carries the same `ad_id`, both copies of a click reach the same key, so dedup can be a per-key set of recently seen `click_id`s with a 10-minute time-to-live, held in the same RocksDB state backend as the window. No shuffle, no external store, no network call per event. The constraint this creates is easy to miss and expensive to discover: when a hot ad is fanned out across shards, the sub-key must be a function of something stable across retries. `(ad_id, hash(user_id) % N)` is safe because a retry carries the same `user_id`. Round-robin or `hash(click_id)` would balance better and silently break dedup, because the two copies of one click would land on different shards, each of which would count it once. The load-balancing fix and the correctness mechanism are coupled, and saying so unprompted is most of what this question is looking for.
 
-**Fraud signals.** Click fraud is a primary cost center — datacenters click on competitor ads to drain budgets, click farms inflate publisher revenue, bots impersonate users. Real-time signals: per-IP token bucket (~10 clicks/min/IP, anything above is suspicious), per-device click rate (>5 ads in 60s on the same device), known-bad UA strings and datacenter ASN ranges from a curated blocklist, and the kill signal — "click without subsequent landing-page event" (a real human almost always loads the destination page; a bot just clicks). Fraud is *flagged*, not blocked, in real time — false-positives cost more revenue than fraud does, so flagged clicks pass through to billing and are reconciled out in the batch path with explicit advertiser refunds.
+**3. Windows close on a watermark, and lateness has three tiers.** The watermark is the maximum observed event time minus a 30-second out-of-orderness allowance, taken as the minimum across partitions so the slowest partition governs. Tier one is events that arrive before the watermark passes the window end: ordinary, counted, nothing special. Tier two is events inside the 5-minute allowed lateness: the window reopens, the aggregate is recomputed and re-emitted, and the sink absorbs the correction. Tier three is everything later: routed to a side-output topic, never dropped in the stream, and consumed by the recompute.
 
-**Window types.**
-- *Tumbling* (non-overlapping fixed-width): the default; one bucket per `ad_id` per minute. State per ad scales O(active_ads), cheapest option.
-- *Sliding* (overlapping, e.g. 5-min window stepping every 1 min): smoother for trend detection; state is 5× the tumbling cost because each event is in 5 windows simultaneously.
-- *Session* (gap-based — close window when no event for N seconds): for "user sessions" or "campaign bursts"; state is per-key and unbounded until the gap closes, so use carefully.
-
-We use tumbling for billing aggregates (cheap, exact, naturally aligned to billing periods); sliding for the dashboard's "trending right now" widget; session is irrelevant for click counting.
-
-**Lambda architecture in detail.** *[Source: Nathan Marz / industry practice]* The split between "fast but approximate" stream output and "slow but authoritative" batch output is the defining property — billing reconciles to batch, dashboards read stream. Both consume the same immutable raw event log so they can disagree only by lateness, not by data loss.
+**4. The sink writes absolute values, not increments.** This is the difference between exactly-once and nearly-once. If the sink does `SET count = count + delta`, then a checkpoint restore that replays the last few seconds double counts, and no amount of transactional plumbing upstream saves you. If it does `SET count = <the window's total>` under the primary key `(ad_id, ts_minute)`, a replay is a no-op by construction and the sink needs no transaction at all. Two-phase-commit sinks exist and work, but they are a heavier and more fragile way to buy a property you can get from the shape of the write.
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 525" role="img" aria-label="Ad click aggregation lambda architecture">
@@ -7688,192 +7677,133 @@ We use tumbling for billing aggregates (cheap, exact, naturally aligned to billi
 </svg>
 ```
 
-Reconciliation overwrites by `(ad_id, ts_minute)` primary key, so the dashboard's "today so far" silently corrects to billing-grade by T+1. Late events past the streaming lateness window flow into a side topic that the batch path picks up, so nothing is silently dropped — every billable click survives somewhere.
+**5. The recompute overwrites by run, and never in place.** Rows carry `(ad_id, ts_minute, count, unique_users, fraud_count, run_id, computed_at)`. The stream writes `run_id = 0`. The hourly incremental pass writes `run_id = 1`, the full-day pass after midnight writes `run_id = 2`, and the read path selects the highest `run_id` per key. The streaming row is never deleted, because the difference between run 0 and run 2 is the drift metric, and overwriting in place destroys your own evidence. That difference is monitored per ad decile rather than in aggregate, because a total that nets to zero happily hides two ads that are each 5% wrong in opposite directions.
 
-**Real-time fraud detection sub-system.** *[Source: industry practice — Google Ads, Meta Audience Network]* Click fraud is the single largest cost line in ad networks. Detection runs as a parallel consumer off the same Kafka topic, with stacked sub-systems each dropping different fraud classes:
+The recompute reads three inputs: the day's Parquet archive, the previous day's late tail, and the side-output topic. It deduplicates the whole day exactly rather than in a bounded window, joins fraud verdicts that have settled since the click, and emits an absolute value for every key it touched. It is authoritative by declaration, not by construction, which is a real weakness and is conceded below.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 635" role="img" aria-label="Ad click fraud detection layered pipeline">
-  <defs>
-    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
-    </marker>
-  </defs>
-  <style>
-    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
-    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
-    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
-    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
-    .dash{ stroke-dasharray:5 4; }
-    .acc{ stroke:var(--accent); }
-    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
-    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
-    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
-    text{ dominant-baseline:middle; text-anchor:middle; }
-  </style>
+**6. Closed periods are frozen, and this is where the ad pipeline and a trading book converge.** Once an invoice ships, a later recompute must not silently change a billed number. It emits an adjustment against an open period and a credit memo, because a changed historical total that has already been invoiced is an accounting event, not a data update. A P&L book behaves identically: the official close is frozen and restatements post as explicit adjustments rather than as mutations of the closed day. Build the pipeline so that the recompute's write path checks period state, or someone will eventually fix a bug and change last quarter's revenue.
 
-  <rect class="box" x="280" y="17" width="200" height="46" rx="9"/>
-  <text class="lbl" x="380" y="42">Kafka clicks topic</text>
-
-  <rect class="box acc" x="280" y="97" width="200" height="46" rx="9"/>
-  <text class="lbl" x="380" y="122">Fraud Detector pipeline</text>
-
-  <!-- four layers -->
-  <rect class="box" x="10" y="215" width="167" height="90" rx="9"/>
-  <text class="sub" x="94" y="260"><tspan x="94" dy="-30">Layer 1:</tspan><tspan x="94" dy="15">deterministic blocks</tspan><tspan x="94" dy="15">datacenter ASNs,</tspan><tspan x="94" dy="15">known-bad UAs,</tspan><tspan x="94" dy="15">IP/device blocklists</tspan></text>
-
-  <rect class="box" x="201" y="215" width="167" height="90" rx="9"/>
-  <text class="sub" x="285" y="260"><tspan x="285" dy="-30">Layer 2: rate / velocity</tspan><tspan x="285" dy="15">per-IP token bucket,</tspan><tspan x="285" dy="15">per-device CTR,</tspan><tspan x="285" dy="15">per-(ad,IP)</tspan><tspan x="285" dy="15">frequency caps</tspan></text>
-
-  <rect class="box" x="392" y="215" width="167" height="90" rx="9"/>
-  <text class="sub" x="476" y="260"><tspan x="476" dy="-30">Layer 3: behavioural</tspan><tspan x="476" dy="15">click-without-landing,</tspan><tspan x="476" dy="15">dwell time,</tspan><tspan x="476" dy="15">mouse-move entropy,</tspan><tspan x="476" dy="15">viewport</tspan></text>
-
-  <rect class="box" x="583" y="215" width="167" height="90" rx="9"/>
-  <text class="sub" x="667" y="260"><tspan x="667" dy="-30">Layer 4: ML scoring</tspan><tspan x="667" dy="15">graph features:</tspan><tspan x="667" dy="15">shared-device clusters,</tspan><tspan x="667" dy="15">temporal coactivity,</tspan><tspan x="667" dy="15">embedding distance</tspan></text>
-
-  <rect class="box acc" x="260" y="367" width="240" height="46" rx="9"/>
-  <text class="sub" x="380" y="390"><tspan x="380" dy="-7">fraud_flags topic</tspan><tspan x="380" dy="16">(click_id, reason, score)</tspan></text>
-
-  <rect class="box" x="140" y="467" width="200" height="46" rx="9"/>
-  <text class="sub" x="240" y="490"><tspan x="240" dy="-7">Streaming agg</tspan><tspan x="240" dy="16">increments fraud_count</tspan></text>
-
-  <rect class="box" x="420" y="467" width="200" height="46" rx="9"/>
-  <text class="sub" x="520" y="490"><tspan x="520" dy="-7">Batch reconciliation</tspan><tspan x="520" dy="16">removes from billable</tspan></text>
-
-  <rect class="box" x="410" y="567" width="220" height="46" rx="9"/>
-  <text class="lbl" x="520" y="592">Advertiser refund / credit</text>
-
-  <!-- edges -->
-  <path class="flow" d="M380,63 L380,97"/>
-
-  <path class="flow" d="M340,143 L94,215"/>
-  <path class="flow" d="M365,143 L285,215"/>
-  <path class="flow" d="M395,143 L476,215"/>
-  <path class="flow" d="M420,143 L667,215"/>
-
-  <path class="flow" d="M94,305 L300,367"/>
-  <path class="flow" d="M285,305 L345,367"/>
-  <path class="flow" d="M476,305 L415,367"/>
-  <path class="flow" d="M667,305 L460,367"/>
-
-  <path class="flow" d="M340,413 L240,467"/>
-  <path class="flow" d="M420,413 L520,467"/>
-  <path class="flow" d="M520,513 L520,567"/>
-</svg>
-```
-
-Critical design choice: fraud is *flagged*, not blocked, in real time. False-positive rejection costs advertisers more than fraud they pay for once and refund — so the fast path lets the click through, tags it, and the batch reconciliation removes flagged clicks from billable totals. Hard blocks (Layer 1 deterministic) are the only ones that fire pre-billing because they have near-zero false-positive rate.
-
-**ML scoring loop.** Features per click include `(IP_reputation, device_fingerprint, ASN, UA_anomaly_score, recent_velocity_per_IP, shared_device_graph_degree, click_to_landing_ms, dwell_time_seconds, viewport_visibility, mouse_entropy)`. Model is typically a gradient-boosted tree retrained nightly on labelled data (advertiser disputes + manual review + IVT — Invalid Traffic Detection — feedback). Scored output `fraud_score ∈ [0,1]` with thresholds tuned per advertiser tier. Scoring is async (~50ms p99) so the click ingest stays at 500k/s without ML in the hot path.
-
-**Watermarks and lateness — concrete behaviour.** *[Source: Apache Flink event-time semantics]* Watermark = `max(observed_event_time) - allowed_out_of_orderness` (typically 30s) — Flink emits one per-partition based on observed event timestamps. When watermark crosses window-end + allowed-lateness (5min), the window is finalised. Inside the lateness window, late events trigger *retraction* — Flink emits a corrected aggregate to the OLAP sink which upserts by `(ad_id, ts_minute)`. Past the lateness window, events go to a side output (a separate Kafka topic) that the batch path consumes during nightly reconciliation. The system never silently drops a billable event — each one is real money.
+The property this mechanism does not give you is timing. A recompute reproduces which clicks counted and where, never how long anything took, so a latency regression is invisible to an output diff and needs its own benchmark. Conflating the two is a common and expensive mistake.
 #### Where it breaks
 **must-say**
 
 **Bottlenecks**
 
-- **Hot ad** (Super Bowl ad: 100× normal volume on one `ad_id`) → that partition's Flink slot saturates while others idle; sub-key by `(ad_id, hash(user_id) % N)` to fan-out to N sub-partitions, then merge counts in a downstream operator. Loses strict per-ad ordering for that minute, gains horizontal scale.
-- **Late-arriving events** (mobile retries arriving 30 min late) → watermarks define "no events older than T expected"; allowed lateness window (5 min) updates past buckets in-place; beyond that, side output to a "very late" topic that the batch path picks up — never silently dropped because each event is billable.
-- **Reconciliation drift** (streaming says 1.0M clicks, batch says 1.003M) → expected and explicit; daily batch over the immutable raw event log is authoritative and overwrites the streaming aggregate. SLA published as ±1% real-time, ±0.01% by T+1.
-- **State size in Flink** (10M unique ads × 24 hours of windows × HLL = GB of state per slot) → RocksDB state backend stores state on local SSD instead of heap; incremental checkpointing only writes deltas to S3; periodic compaction merges sstables to control read amplification.
-- **Click fraud waves** (botnet campaign starts at midnight, 100k fake clicks/min on one ad) → per-IP token bucket and per-ASN rate limits at the API; anomaly detection ML scores each click against historical patterns; scored clicks pass through but are tagged so batch reconciliation removes them from billing.
-- **Fraud detection latency budget** (synchronous ML inference per click at 500k/s would need huge GPU fleet) → Layer 1 deterministic checks inline (<2ms, blocks obvious bots); Layers 2-4 run async off the Kafka stream and tag clicks within ~1-5s; batch reconciliation cleans up the tagged clicks from billable totals overnight.
+- **Hot ad.** A Super Bowl spot takes one `ad_id` to 100x normal volume, saturating one task while the rest idle, and because the global watermark is the minimum across partitions, one lagging task freezes window emission for every ad. Sub-key by `(ad_id, hash(user_id) % N)` and merge downstream. This costs strict per-ad ordering within the minute, which billing does not need, and it must not be done round-robin, which would break dedup.
+- **Late arrivals.** Mobile retries land 30 minutes after the click. Watermarks plus 5 minutes of allowed lateness correct the bucket in place; beyond that the side-output topic carries them into the recompute. Nothing is dropped inside the dispute window, with one exception conceded below.
+- **Reconciliation drift.** The stream says 1.000M clicks and the recompute says 1.003M. This is expected and published rather than fixed: the freshest closed minute can be 3% low while the mobile tail lands, anything older than 10 minutes is within 0.5%, and T+1 is within 0.01%. Alert on the drift distribution per ad decile, not the network total.
+- **Operator state size.** Window state plus dedup sets plus HLL sketches across millions of keys does not fit on heap. RocksDB on local NVMe with incremental checkpointing keeps only deltas going to object storage, and dedup entries carry a 10-minute TTL so the set does not grow without bound.
+- **Fraud is billed first and refunded later.** Flagging rather than blocking is the right call, because a false positive denies an advertiser a real customer while a false negative costs them one click they get back. The cost is that reported revenue is systematically overstated by the flagged-but-not-yet-refunded amount, typically 1% to 3% of gross, and finance has to carry a reserve against it. Only the layer-one deterministic blocks fire pre-billing, because those are the only ones with a near-zero false-positive rate.
+- **Fraud scoring cannot be synchronous.** Model inference on 500k events/s in the ingest path would need a fleet sized for peak and would put a model rollback in the availability path of click ingestion. Layer one runs inline in under 2ms; layers two through four run as an async consumer and land a verdict within 1 to 5 seconds, which is fast enough for the stream and irrelevant to the recompute.
 
 **Failure modes**
 
 | Layer | Failure | Detection | Mitigation |
 |---|---|---|---|
-| Click API | Spike from a viral campaign overruns the API tier | p99 ingestion latency climbs; HTTP 503 rate jumps | Auto-scale on RPS; Kafka buffer in front absorbs short spikes; per-advertiser quotas reject obvious abuse |
-| Stream processor (Flink) | Operator OOM on hot-ad partition with millions of subs | Checkpoint failure rate climbs; partition lag isolated to one ad | Sub-key by `(ad_id, hash(user_id) % N)` to fan-out; tune RocksDB block cache; vertically scale slot for unfan-outable ads |
-| Watermark | Vendor feed gap stalls watermark, freezing window emission | `currentOutputWatermark` flatlines; downstream OLAP rows stop arriving | Idle-source detection emits synthetic watermarks after timeout; route stalled-partition events to side topic; alert on watermark lag |
-| OLAP store | ClickHouse merge backlog grows when minute-rows arrive faster than parts merge | `parts_to_merge` climbs; SELECT latency degrades | Bigger merge tree parts via increased `min_bytes_for_wide_part`; throttle inserts; pre-aggregate to hour-grain in Flink before write |
-| Batch reconciler | Spark job runs out of memory on a 5TB/day input | Job retries hit max attempts; SLA misses T+1 | Repartition by date+ad-prefix; switch to Flink-batch for incremental; increase executor count linearly with input |
-| Exactly-once | Flink checkpoint to S3 fails | `numberOfFailedCheckpoints` climbs; processor restarts from older checkpoint, replays | Cross-region S3 replica for checkpoints; alert on 2 consecutive checkpoint failures; manual savepoint before risky operations |
-| Fraud loop | Layer-1 deterministic blocklist gets a false-positive entry | Legitimate advertiser sees impressions but zero clicks | Daily blocklist diff review; per-advertiser unblock override; fraud is *flagged*, not blocked, except Layer 1 |
+| Click API | Viral campaign overruns the ingest tier | p99 ingest latency climbs; 503 rate jumps | Autoscale on RPS; the log absorbs short spikes; per-advertiser quotas reject obvious abuse |
+| Stream processor | Operator OOM on a hot-ad partition | Checkpoint failure rate climbs; lag isolated to one key | Sub-key by user hash and merge downstream; tune RocksDB block cache; isolate the key on its own task manager |
+| Watermark | A partition goes idle and stalls the global watermark | `currentOutputWatermark` flatlines while the arrival-time counter keeps moving | Idle-source detection emits synthetic watermarks after a timeout; alert on watermark lag per partition, never on the global minimum alone |
+| Dedup | A client ships a bug that regenerates `click_id` per retry | Dedup hit rate collapses toward zero while ingest rate rises | Fall back to a secondary key of `(user_id, ad_id, ts rounded to 1s)` in the recompute; the online path cannot recover this and the day is corrected at T+1 |
+| Served store | Merge backlog grows when minute rows arrive faster than parts merge | `parts_to_merge` climbs; SELECT latency degrades | Pre-aggregate to a coarser grain before the write; larger parts; throttle inserts |
+| Recompute | The daily job OOMs on 5TB of input | Retries hit max attempts; T+1 SLA missed | Repartition by date and ad prefix; run incrementally by hour and merge; scale executors with input |
+| Checkpointing | Checkpoint to object storage fails repeatedly | `numberOfFailedCheckpoints` climbs; restarts replay further back | Cross-region replica for checkpoints; page on two consecutive failures; manual savepoint before any risky deploy |
+| Fraud loop | A deterministic blocklist entry is a false positive | An advertiser sees impressions and zero clicks | Daily blocklist diff review; per-advertiser override; everything above layer one flags rather than blocks |
 
 **Unresolved**
 
-TODO. Two or three things this design genuinely does not handle well, and what you would do about each.
+**The very-late tail has no honest home, and the claim that nothing is dropped is not quite true.** A phone that is offline for three days uploads its clicks when it reconnects. By then the window closed, the day closed, and the invoice shipped. The side-output topic catches these and the recompute picks them up, but the recompute cannot post to a closed period, so today we discard events older than 7 days. That is roughly 0.002% of events, small but not zero, and it is a silent discard of billable money despite the design telling advertisers otherwise. The correct fix is an adjustment ledger that can post a charge or a credit against a closed period, with the ordinary accounting controls around it. That is a finance system, not a data pipeline, and we have not built it. Until then the accurate statement is "nothing is dropped inside 7 days", and we should say that rather than the stronger version.
+
+**Two implementations of the same arithmetic will drift, and we detect drift rather than prevent it.** The recompute is authoritative because we declared it so, not because anything proves it right. When the two disagree we have no independent third number, so investigating a 0.3% gap means reading both codebases and arguing. The obvious fix, generating both engines from one definition, works for counts and sums and breaks on anything stateful, which distinct-user counting and sessionised attribution both are. What we actually do is run the recompute code over a recent day and diff it key by key against what the stream produced, then treat any systematic (rather than lateness-shaped) difference as a bug in one of them. That catches divergence, it does not prevent it, and the cost of the Lambda fork above is exactly this ongoing tax.
+
+**We are exact on counts and approximate on cardinality, sitting side by side on the same dashboard.** HyperLogLog at 2KB per sketch (2,048 registers) has a standard error of 1.04 / sqrt(2048) ≈ 2.3%, and we use it because sketches merge across windows and exact distinct counting over 5M ads × 1,440 minutes does not fit anywhere affordable. The problem is presentational and then contractual: a dashboard reading "247 clicks, 191 unique users" invites an advertiser to treat both as exact, and any product that prices on reach or frequency would make the approximate number billable. We currently refuse to bill on unique counts, which is a policy holding back a product the sales team wants. Doing it properly means exact distinct counting for a much smaller set of high-value campaigns on a separate path, and accepting that the two numbers on the same screen come from different systems with different guarantees.
 #### Drill questions
 1. How do you guarantee exactly-once for billing?
-2. What happens when the stream pipeline is down for 2 hours?
-3. How do you detect click fraud in real time?
-4. Hot ad takes a Flink slot to 100% CPU — fix?
-5. Advertiser claims their counts don't match yours by 0.3%.
-6. How do you scale to 10x events/sec?
-7. Why not Kappa (stream-only) for billing?
-8. How fresh can fraud signals be in real time?
-9. How do you prevent a single attacker burning budget by clicking once but at peak volume per second?
-
-TODO. Only 9 drill questions carried over, top up to at least 10.
+2. The stream pipeline is down for two hours. What happens?
+3. How do you detect click fraud in real time, and why would you not block it?
+4. A Super Bowl ad takes one task to 100% CPU. Fix it, then tell me what your fix could break.
+5. An advertiser says their count is 0.3% above yours. What do you tell them?
+6. How do you scale to 10x events per second?
+7. Why not stream-only, using replay as the correction mechanism?
+8. Where exactly do you deduplicate, and what does the dedup window cost?
+9. An attacker sends 100k clicks a minute at one ad from a botnet. What stops the budget draining?
+10. Your recompute and your stream disagree by 0.3% on one day. How do you work out which is wrong?
+11. An aggregation bug has overcharged one advertiser vertical for three weeks. Walk me through the fix.
+12. One partition goes idle for 20 minutes. What does the dashboard show, and how do you know it is wrong?
 #### Answers to drill questions
-1. Flink checkpoints + idempotent sink (write `(ad_id, window_start)` as primary key). *If pushed:* daily batch reconciliation over the immutable raw event log is the source of truth; stream output is "fast but approximate" until batch confirms.
+1. Three things together, not one. The client supplies a `click_id` that survives retry so duplicates are detectable; the aggregation operator deduplicates in keyed state over a 10-minute window; and the sink writes an absolute value under the primary key `(ad_id, ts_minute)` rather than an increment, so a checkpoint restore that replays a few seconds is a no-op. *If pushed:* none of that is exactly-once over unbounded time. The 10-minute window is bounded, so the real guarantee comes from the nightly recompute doing an exact whole-day dedup over the immutable archive. Streaming is "approximately once with a known error"; batch is where exactness lives.
 
-2. Events pile up in Kafka (sized for 7d retention); on recovery, Flink resumes from last checkpoint and catches up. *If pushed:* if recovery takes too long, parallel-replay from a different consumer group into a backfill topic to avoid blocking real-time output.
+2. Events accumulate in the log, which is sized for 7 days, so nothing is lost. On recovery the processor resumes from its last checkpoint and catches up, throttled so the catch-up burst does not overwhelm the served store. *If pushed:* the catch-up is not free. Two hours of backlog at 500k/s is 3.6B events, and during catch-up the watermark advances at whatever rate the slowest partition manages, so window emission stays behind real time even after ingest recovers. If the recovery would take longer than the dashboard SLA allows, run a second consumer group replaying into a backfill topic so the real-time path can start at the live offset and be filled in behind.
 
-3. Per-IP / per-device rate limits, behavioural features (CTR anomalies, bot fingerprints) scored by an ML model in the stream. *If pushed:* don't reject in real time — flag and reconcile in batch, refund advertisers afterwards. Real-time false positives hurt revenue more than fraud does.
+3. Layered. Deterministic checks inline in the ingest path (datacenter ASN ranges, known-bad user agents), then async off the same topic: per-IP and per-device velocity, behavioural signals such as a click with no landing-page event within 30 seconds, and a model score. *If pushed:* everything above the deterministic layer flags rather than blocks, because the error costs are asymmetric. A false positive denies an advertiser a genuine customer they never learn about; a false negative costs them one click that the recompute refunds. Blocking makes the expensive error the silent one.
 
-4. Sub-key by `(ad_id, hash(user_id) % N)` to fan out, merge in a downstream operator. *If pushed:* if you can't fan out (need exact per-ad state), vertically scale that slot's task manager and isolate it.
+4. Sub-key by `(ad_id, hash(user_id) % N)`, count each shard independently, and merge in a downstream operator. What it could break is dedup, and this is the part that matters: the sub-key has to be stable across retries. `hash(user_id)` is, so both copies of a click land on the same shard. Round-robin or `hash(click_id)` would balance better and let the two copies land on different shards, each counting it once. *If pushed:* it also gives up strict ordering within the ad's minute, which billing does not care about, and it makes the merge operator a new place a duplicate can be introduced if a shard re-emits after a restart. The merge must therefore consume absolute per-shard values, not deltas.
 
-5. That's expected — late events past the lateness window were dropped. Show the daily batch reconciliation number, which closes the gap. *If pushed:* publish an SLA on click counting accuracy (e.g. ±1% real-time, ±0.01% by T+1 day) and document the difference.
+5. That their number is probably right and ours will agree by tomorrow. Above, not below, is the interesting direction: it usually means they are counting their landing-page hits, which include organic and repeat arrivals, against our billable clicks, which exclude flagged fraud. *If pushed:* show them the three numbers separately, raw clicks, billable clicks, and the fraud deduction, and the published bands: the freshest minute can be 3% low, anything past 10 minutes is within 0.5%, T+1 is within 0.01%. If the gap survives T+1 reconciliation it is a bug, and we replay their ad's key range through both paths and diff.
 
-6. Add Kafka partitions and Flink parallelism in lockstep; ensure key distribution stays balanced. *If pushed:* the bottleneck shifts to RocksDB state I/O — move to SSD-backed task managers and tune incremental checkpointing.
+6. Add log partitions and stream parallelism together, and check that the key distribution stays balanced as you do, because adding partitions rehashes keys and can move a hot ad onto an already-hot task. *If pushed:* the bottleneck moves before the CPU does. First to state I/O, since dedup sets and HLL sketches at 10x are RocksDB working set rather than heap, which means NVMe-backed task managers and incremental checkpointing. Second to the served store, where 10x minute rows is a merge problem, answered by pre-aggregating to a coarser grain before the write rather than by scaling the store.
 
-7. Kappa works if Kafka retention covers your worst-case replay (e.g. 30d retention to recompute a billing month). For ad clicks at 5TB/day, 30d retention on Kafka is 150TB × RF=3 = 450TB hot — possible but expensive. Cold archive in Parquet on S3 is ~20× cheaper for the same retention. *If pushed:* with tiered Kafka storage (KIP-405) Kappa becomes more viable because cold segments live in S3 anyway, but Lambda's batch path also cleans up late events and fraud reconciliation, which Kappa replays don't naturally express.
+7. Stream-only works if your log retains everything you might need to recompute. For a full billing month that is 5TB/day × 31 × RF=3 = 465TB of replicated hot storage, roughly $37k/month, against 31TB of columnar files on object storage at roughly $700/month. It is a 50x storage bill to avoid a second codebase. *If pushed:* the cost argument weakens with tiered log storage (KIP-405, production-ready in Kafka 3.9 in late 2024) because old segments already live on object storage. The argument that survives is different: the recompute does work replay cannot express, namely joining fraud verdicts that settle days after the click and deduplicating a whole day rather than a bounded window. Concede the real cost too, which is that two implementations of the same arithmetic drift and you now monitor the drift forever.
 
-8. Layer 1 (deterministic) runs in the click API path itself, blocking ~5-10% of obvious bot traffic with <2ms overhead. Layers 2-4 run async; the fraud_score lands within ~1-5s of the click and the streaming agg picks up the flag in the next window. *If pushed:* the dashboard counter shows "raw clicks" and "billable clicks" separately so advertisers see both numbers; billable is what they're charged for.
+8. In keyed state in the aggregation operator, on `click_id`, with a 10-minute TTL. It works there because the topic is keyed by `ad_id` and a retry carries the same `ad_id`, so both copies reach the same key with no shuffle and no external lookup. The cost is 500k/s × 600s = 300M ids at 24B ≈ 7.2GB across the fleet, under 1GB per task at parallelism 10. *If pushed:* a Bloom filter would cut that to about 360MB at a 1% false-positive rate, but a false positive here discards a real billable click, so the filter can only be a fast negative check in front of an exact set, never a replacement for it.
 
-9. Per-(advertiser, IP) and per-(advertiser, ASN) token buckets at the click API; daily per-advertiser frequency cap per unique IP; auto-pause campaigns that exceed an unusual hourly spend rate (>3σ above 7d trailing). *If pushed:* coordinate with the advertiser's daily budget cap — if a campaign approaches budget exhaustion in <10% of expected time, throttle aggressively and alert the advertiser before the budget zeroes.
+9. Per-(advertiser, IP) and per-(advertiser, ASN) token buckets at the ingest tier, a daily per-unique-IP frequency cap, and auto-pause when hourly spend exceeds 3 standard deviations above the 7-day trailing rate for that campaign. *If pushed:* auto-pause is the dangerous control, because it is irreversible in the way that matters: an ad paused during its best hour does not get that auction back. That is exactly why the online dedup exists, so pacing decisions are never made on an inflated number. Coordinate with the budget cap too: if a campaign is on track to exhaust its daily budget in under 10% of the expected time, throttle and alert before zeroing it.
+
+10. Do not start with the total, start with the shape of the difference. Diff the two runs key by key and look at the distribution. Lateness-shaped drift is concentrated in the last minutes of the day and in mobile-heavy ads, and it is one-directional with batch higher. A bug is systematic: it clusters on a dimension (one advertiser, one creative type, one region), or it goes both directions, or it shows up on days with no lateness. *If pushed:* if the diff is genuinely ambiguous, we have no independent third number, and I would say so. The tiebreak is a targeted replay: take one ad's key range, recompute it with a third, deliberately slow and simple implementation over the raw Parquet, and see which of the two it matches.
+
+11. Fix the code, then decide separately what to do about the money, because those are different problems. The fix is a recompute: rerun the batch job over the affected date range from the immutable archive with the corrected logic, writing a new `run_id`, and the read path picks it up. That part is routine and is the reason the batch path exists. *If pushed:* the money is the hard part. Those three weeks are invoiced, so the recompute must not silently rewrite billed totals. It writes the corrected rows, the diff against the billed run becomes an adjustment posted to an open period, and each affected advertiser gets a credit memo with the corrected figures. Anything else means historical revenue changed without an accounting entry, which is the kind of thing that ends in a restatement.
+
+12. The dashboard flatlines, and it looks exactly like the ad receiving no clicks, which is the problem. The global watermark is the minimum across partitions, so an idle partition stops the watermark advancing and no window anywhere closes. *If pushed:* this is why arrival-time counters run alongside the event-time aggregates rather than being replaced by them: if the arrival counter is moving and the event-time output is not, the pipeline is stalled rather than the traffic. The mitigation is idle-source detection emitting a synthetic watermark after a timeout, and the alert is on per-partition watermark lag, never on the global minimum, which is by definition the last thing to tell you.
 #### Whiteboard script
-TODO
+**0-5, frame it so the correction path is on the table from the start.** Open with the sentence that changes the question: "this is an analytics pipeline whose output is an invoice, so the interesting part is not the aggregation, it is how I restate a number after the fact." Then ask the two things that actually fork the design: is the number billed or only reported, and how late do events genuinely arrive, because mobile and web are different problems. State the assumptions out loud: 10B events/day of which 1.5B are billable clicks, 500k/s peak, 5M active ads, one-minute grain, T+1 invoicing. Draw nothing yet.
 
-A 45 minute budget: what to cover in 0-5, 5-15, 15-35 and 35-45, what to say first, and a line starting `Cut first:`.
+**5-15, the spine.** Draw the log in the middle and two readers off it. Left branch: stream aggregator, served columnar store, dashboard. Right branch: immutable columnar archive, recompute job, the same served store, billing. Say the three placement rules as you draw the arrows, because they are the answer: the log is the source of truth and every aggregate is derived and disposable; the stream writes absolute values under `(ad_id, ts_minute)` so a replay is a no-op; billing reads the recomputed rows only, dashboards read the stream, and the difference between them is published rather than hidden. Say "partition by ad_id" and immediately give the second reason for it, which is that a retry lands on the same key and makes dedup local.
 
-**Raw material, from the old Talking Points:**
+**15-35, the drill, and protect this time.** Event time against processing time first, with the day-boundary number: 0.046% of clicks cross midnight, which is ~700k clicks a day on the wrong invoice. Then the three tiers of lateness and the concession that "never dropped" has a 7-day edge. Then dedup: why the `click_id` must come from the client, why it lives in keyed state, and the coupling with hot-ad sub-keying, which is that you must sub-key by user and never round-robin or you break it. Then absolute writes rather than increments as the actual source of exactly-once. Then take the batch-path fork on your own terms, with 465TB against 31TB, and name what it costs you, which is two implementations that drift. Keep fraud and HLL in reserve as one-liners you expand only if asked.
 
-These are what an ad-tech-savvy interviewer wants to hear surfaced unprompted:
+**35-45, concede and close.** Give the three gaps before they are found: the very-late tail is discarded past 7 days despite what we tell advertisers, the recompute is authoritative by declaration rather than by proof, and unique counts are approximate sitting next to counts that are exact. Then the operational surface in two minutes: what you page on (per-partition watermark lag, side-output rate, dedup hit rate, stream-versus-recompute drift by ad decile, checkpoint failures), the published accuracy bands per freshness tier, and multi-region as active-active ingest with single-region aggregation.
 
-- **Lambda over Kappa for billing-grade accuracy** — name this and the reason: late-event side-paths, fraud reconciliation, immutable raw event log as source of truth.
-- **Partition by `ad_id`, tumbling 1-min windows** — this is the load-bearing decision; everything else is detail.
-- **Watermarks + allowed lateness + side output** — never silently drop a billable event; events past lateness flow to a side topic the batch path picks up.
-- **Fraud flagged, not blocked** — false positives are more expensive than fraud you refund; only Layer-1 deterministic checks fire pre-billing.
-- **Exactly-once via Flink checkpoint + idempotent OLAP sink** — write `(ad_id, ts_minute)` as PK so retries are upserts.
-- **Hot-ad sub-keying** — Super Bowl ad gets fanned out by `(ad_id, hash(user_id) % N)`; lose strict per-ad ordering for that minute, gain horizontal scale.
-- **Daily reconciliation overwrites streaming aggregates** — published SLA: ±1% real-time, ±0.01% by T+1.
+Cut first: the fraud ML detail (features, model choice, retraining cadence), then the window-type comparison of sliding against session, then multi-region and DR. All three are real and none changes the architecture, and the fraud material in particular is a rabbit hole that will eat the reconciliation discussion. Never cut: event time against processing time, where dedup lives and what it constrains, and why a batch path exists at all.
 #### Appendix
 **Data model**
 
-- **raw_clicks** (event stream, 7d retention): `(click_id, ad_id, advertiser_id, user_id, ts, geo, ip, ua)`
-- **agg_minute** (OLAP store): `(ad_id, ts_minute, count, unique_users, fraud_count)` — partition by day
-- **agg_hour** / **agg_day**: same shape, different granularity
-- **fraud_flags**: `(click_id, reason, ts)`
+- **raw_clicks** (log, 7d retention): `(click_id, ad_id, advertiser_id, user_id, event_ts, received_ts, geo, ip, ua)`
+- **raw archive** (object storage, Parquet, partitioned by `dt`/`hour`): the same records, immutable, 7-year retention
+- **agg_minute** (served store): `(ad_id, ts_minute, count, unique_users_hll, fraud_count, run_id, computed_at)`, primary key `(ad_id, ts_minute, run_id)`, read path takes the max `run_id`
+- **agg_hour** / **agg_day**: same shape, coarser grain; top-N is served from `agg_day`
+- **fraud_flags**: `(click_id, layer, reason, score, verdict_ts)`
+- **billing_period**: `(advertiser_id, period, state)` where state is open, closed or invoiced; the recompute checks this before writing
 
 **API contract**
 
 ```
-POST /click          body: { ad_id, user_id, ts, ip, ua }
-GET  /agg            params: ad_id, start, end, granularity → counts
-GET  /topN           params: window, dim (ad/advertiser), n
+POST /click     body: { click_id, ad_id, user_id, event_ts, ip, ua }
+                → 204; retried with the same click_id is a no-op
+
+GET  /agg       params: ad_id, start, end, granularity
+                → [{ ts, clicks, unique_users, fraud_count, run_id }]
+
+GET  /topN      params: window, dim (ad | advertiser), n
 ```
 
 **Observability**
 
-- `clicks_ingested_per_sec` and per-partition skew (alert >2× ratio between hottest and median)
-- Flink: `currentInputWatermark`, `numberOfFailedCheckpoints`, `lastCheckpointDuration`, `bufferUsage` per operator
-- OLAP store: `parts_to_merge`, p99 SELECT latency for the dashboard query class
-- `late_events_side_topic_rate` (events arriving past lateness window)
-- `streaming_vs_batch_drift_pct` per day (target <1%, alert >5%)
-- `fraud_flag_rate` per layer per advertiser (sudden shifts indicate ML drift)
+- `watermark_lag_seconds` per partition, alerted individually; the global minimum is the last signal to move and therefore useless as a leading indicator
+- `arrival_rate` alongside `event_time_output_rate`; the two diverging is how a stall is distinguished from quiet traffic
+- `dedup_hit_rate`; a collapse means a client stopped reusing `click_id`, which the online path cannot recover from
+- `late_events_side_output_rate` and the age distribution of what lands there
+- `stream_vs_recompute_drift_pct` per ad decile, not per network; alert on the shape, target under 1% before reconciliation
+- Checkpoint duration and `numberOfFailedCheckpoints`; served-store `parts_to_merge` and p99 dashboard query latency
+- `fraud_flag_rate` per layer per advertiser; sudden shifts usually mean model drift rather than a fraud wave
 
-**SLOs:** 99.9% of clicks ingested within 1s; dashboard freshness ≤5min p95; daily reconciliation closes streaming-batch drift to ≤0.01% by T+1; fraud scoring within 5s of click.
+**SLOs:** 99.9% of events durably logged within 1s; the freshest closed minute within 3% and any window older than 10 minutes within 0.5%; T+1 recompute within 0.01%; fraud verdict within 5s of the click.
 
 **Multi-region and DR**
 
-- **Replication mode:** ingest API is multi-region active-active; clicks land in the nearest region's Kafka, mirrored cross-region with seconds lag. Streaming aggregation runs in one region; failover region warm-stands with checkpoints replicated.
-- **RTO:** 10-15min for streaming aggregation cutover (Flink savepoint restore from cross-region S3); ingest API failover is sub-minute via global load balancer.
-- **RPO:** <5min for streaming output (events between checkpoints replayed from Kafka mirror); 0 for raw events (mirrored synchronously from Kafka).
-- **Failover cadence:** quarterly drill including a forced Flink savepoint restore from the peer region; monthly Kafka mirror failover for one topic.
-- **Cross-region cost:** Kafka mirror egress + S3 cross-region replica for checkpoints + Parquet archive replication. The batch reconciliation path runs single-region against the home archive.
+- **Replication:** ingest is active-active, clicks land in the nearest region's log and are mirrored cross-region with seconds of lag. Aggregation runs in one region; the standby holds replicated checkpoints.
+- **RTO:** sub-minute for ingest via the global load balancer; 10 to 15 minutes for aggregation cutover via savepoint restore from the peer region.
+- **RPO:** zero for raw events, which are mirrored; up to 5 minutes for streaming output, replayed from the mirrored log on recovery.
+- **Drills:** quarterly forced savepoint restore from the peer region; monthly mirror failover for one topic.
+- **Cost:** mirror egress plus cross-region checkpoint and archive replication. The recompute runs single-region against the home archive, which is the cheap half of the pipeline to keep regional.
 
 ### 19. Design a Hotel Reservation System
 #### Problem
@@ -9259,97 +9189,117 @@ GET  /{bucket}?prefix=&marker=&max-keys=  → list
 
 ### 22. Design a Real-Time Gaming Leaderboard
 #### Problem
-Show global / regional / friends rankings updated in real-time as scores update, with sub-100ms reads.
+Rank 100M players across daily, weekly, all-time, regional and friends boards, with a finished match visible in the standings within seconds and rank reads under 100ms. The read that defines the problem is not the top 100; it is an arbitrary player, somewhere in the middle, asking where they sit among everyone else.
 #### Core
-TODO
+The question turns on one read. Top-N is easy in anything with an index on score. An arbitrary player's rank is the query that picks the data structure, because it is a counting question, not a lookup.
 
-Write the whole answer as you would give it in sixty seconds, 200 to 300 words, standing alone.
+So the board is an ordered in-memory structure that maintains, on every node, how many entries hang below it. That turns "what position is this player" into a walk down the structure rather than a count of everyone above them. A Redis sorted set is the commodity version of exactly this: `ZADD` to write, `ZREVRANGE` for top-N, `ZREVRANK` for a player's position, all logarithmic, all one round trip, all tens of microseconds.
+
+The board is not the system of record. Scores are computed server side from match events on a durable log, and the sorted set is a derived index rebuildable from that log. That is what makes an in-memory store acceptable here: a crash costs the last second of writes plus a rebuild, not the game's history.
+
+Lifecycle is naming, not migration. Daily, weekly, all-time and per-region boards are separate keys with TTLs, so a reset is a key expiring, and rollover works because tomorrow's key exists before midnight rather than being raced into existence.
+
+Two concessions I would make before being asked. Exact rank for player 50,000,000 costs the same as for player 1 and is worth nothing, so serve exact rank in the head and a bucketed percentile below it. And ties are undefined unless you define them, so pack the tiebreaker into the score itself.
+
+Scale reads with replicas, since rank reads are read-only. Shard by score band only when one board's write rate approaches a single thread's ceiling, which at these numbers it does not.
 #### Summary
-**The picture in your head:** a scoreboard at a bowling alley — but instead of 8 people it has 100 million, and someone's score changes every millisecond. The challenge: every time a score changes you need to instantly know "now where does this player rank among all 100 million?" That's not the same as just storing a number; you need to know how many people are ahead of them.
+**The picture in your head:** a scoreboard at a bowling alley, but instead of 8 people it has 100 million, and someone's score changes every millisecond. The challenge: every time a score changes you need to instantly know "now where does this player rank among all 100 million?" That is not the same as storing a number. You need to know how many people are ahead of them.
 
 **The approaches people actually take:**
-TODO. Two or three things a competent engineer might reach for, in plain language and before any product name, with what each one buys and roughly when it wins.
 
-**The single-request walkthrough:** A player finishes a match. Their score — say 12,500 — gets sent to the Leaderboard Service. The service runs one Redis command: `ZADD leaderboard:daily:2026-04-27 12500 user_42`. Redis stores this in a **sorted set** (a data structure that keeps all members sorted by score at all times, using a combination of a skip list and a hash table). Now when the player asks "what's my rank?", the service runs `ZREVRANK leaderboard:daily:2026-04-27 user_42`, which Redis answers in roughly 50 microseconds by counting how many entries are above `user_42` in the skip list. The whole round-trip is under 5ms.
+*An ordered structure in memory that counts as it goes.* Keep every player in a structure that stays sorted and records, at each node, how many entries sit below it. Writes and rank lookups are both logarithmic and both land in one machine's RAM. It buys exact rank for anybody, at any moment, at a few tens of microseconds. It costs you the whole board resident in memory, durability that has to be bolted on rather than assumed, and one thread's worth of write throughput.
+
+*An indexed table, plus a rank column recomputed on a schedule.* The index on score makes top-N trivial. Arbitrary rank is answered by a job that walks the board on a cadence and writes each player a rank number, which reads then fetch by primary key. It buys durability, transactions and no second system to operate. It costs an O(N) pass per refresh and a rank that is exactly as stale as the schedule.
+
+*Bucketed counting.* Do not order players at all. Keep one counter per narrow score bucket. A player's rank is the sum of counters above their bucket, plus their position inside it. Writes become two counter updates, rank becomes a fixed number of reads regardless of player count, and it shards trivially because counters merge by addition. It costs exactness inside a bucket, and counters cannot enumerate anybody, so the head of the board still needs a real ordered structure.
+
+The first wins for a board under roughly 100M entries taking under roughly 100k writes per second. The second wins when the board moves on a human cadence, or when the data already lives in a relational store and a second system is not worth it. The third wins once write rate or player count puts a single ordered structure out of reach.
+
+**The single-request walkthrough:** a player finishes a match. Their score, say 12,500, reaches the Leaderboard Service, which runs one command: `ZADD lb:daily:2026-04-27 12500 user_42`. Redis holds that in a **sorted set**, a structure that keeps members ordered by score at all times using a skip list paired with a hash table. When the player asks for their rank, the service runs `ZREVRANK lb:daily:2026-04-27 user_42`, which Redis answers in roughly 50 microseconds by summing span counts down the skip list rather than counting entries. Round trip under 5ms.
 
 **The pieces (and what each one is for):**
-- **Redis Sorted Set (ZSET)** — an in-memory data structure that keeps all entries sorted by score at all times. Every `ZADD` (insert or update a score) costs O(log N) time; every `ZREVRANK` (what position is this player?) costs O(log N); every `ZREVRANGE` (give me the top 100 players) is O(log N + 100). Redis keeps the whole structure in RAM, which is why reads are measured in microseconds rather than milliseconds.
-- **Score-range sharding** — when one sorted set holds more than ~10 million entries it saturates one server's CPU and RAM. The fix: split the sorted set into bands by score (e.g., shard A handles scores 0–1,000; shard B handles 1,000–10,000; shard C handles 10,000+). Top-N queries only ever need to hit the highest shard. "My rank" queries sum up how many entries exist in each shard above yours, plus your position within your own shard.
-- **Append-only log (AOF) + replicas** — Redis is in-memory, so a server crash loses everything. **AOF** (append-only file) is Redis's way of writing every command to disk before confirming it — like a journal. Replicas are second Redis servers that receive a copy of every write. Together they mean a crash loses at most ~1 second of scores, and a backup server can take over immediately.
-- **Leaderboard Service** — the application layer that translates product requests ("get the top 100 for today's leaderboard") into Redis commands, handles authentication, and routes between shards when the board is sharded.
+- **Sorted set (Redis ZSET).** An in-memory structure keeping entries ordered by score. `ZADD` (write or update a score) is O(log N); `ZREVRANK` (what position is this player) is O(log N); `ZREVRANGE` (top 100) is O(log N + 100). Everything is in RAM, which is why reads are microseconds rather than milliseconds.
+- **Event log in front of it.** Match results land on a durable, partitioned log before anything writes the board. This is the system of record and the reason the board can be an index rather than a database.
+- **Read replicas.** Rank and top-N are read-only, so replicas serve them. This is how read volume scales, and it is a different axis from write sharding.
+- **Append-only file plus snapshots.** The AOF writes every command to disk before acknowledging, bounding loss to about a second. Hourly snapshots to a blob store bound cold-start time. Neither is the durability story on its own; the event log is.
+- **Quantile snapshots.** A small periodic summary of the score distribution, used to answer "top 3%" for players too far down the board for an exact number to matter.
+- **Leaderboard Service.** Translates product requests into commands, resolves a logical board id to a concrete key by date and region, enforces server-authoritative scoring, and owns the batching window on the write path.
 
-**The thing that makes it hard — the score-at-the-top boundary:** Imagine the daily leaderboard resets at midnight UTC. For 5 minutes before midnight, players are writing thousands of scores per second into `leaderboard:daily:2026-04-27`. At exactly 00:00:00, you need a brand new key `leaderboard:daily:2026-04-28` to exist and be ready to accept writes. If you create it lazily, the first writes of the new day race against the key creation: two servers might both try to create it simultaneously, and depending on timing, some writes get dropped. Fix: pre-create tomorrow's key 5 minutes before midnight with a dummy entry, so it already exists when the clock ticks over.
+**The thing that makes it hard, the midnight boundary:** the daily board resets at 00:00 UTC. For the five minutes before, thousands of writes per second are going into `lb:daily:2026-04-27`. At the tick, `lb:daily:2026-04-28` has to already exist and already accept writes. Create it lazily and the first writes of the new day race the key's creation across every service instance at once, which is also the worst possible moment for a thundering herd of reads against a key that is empty and therefore returns rank `nil`. Pre-create tomorrow's key five minutes early with a sentinel member, and treat the rollover as a naming event rather than a state change.
 
-**Why this design and what it costs:** Redis ZSET is the default because it is the only widely-deployed data structure that supports O(log N) insert AND O(log N) rank lookup simultaneously. A plain SQL `ORDER BY score` can do top-100 cheap, but "how many rows have a score higher than mine?" requires `SELECT COUNT(*) WHERE score > X` — which is a full-table scan unless you build a custom rank-tracking index that SQL does not natively maintain. Redis's skip list internally maintains "how many entries are to the left of me" as a pointer field on every node, which is what makes `ZREVRANK` O(log N) instead of O(N). The tradeoff you accept: the entire leaderboard must fit in RAM, and horizontal scaling requires explicit sharding by the application layer.
+**Why this design and what it costs:** the sorted set is the default because it is the only widely deployed structure that gives O(log N) insert and O(log N) *rank* at the same time. A relational `ORDER BY score LIMIT 100` matches it on top-N and loses badly on rank: `COUNT(*) WHERE score > mine` has to scan every index entry above the player, which for a median player on a 100M board is 50M tuples. The skip list avoids that by storing a span on every forward pointer, so the count is accumulated during the descent. What you accept: the board lives in RAM, durability is a separate concern, and horizontal write scaling is the application's job rather than the store's.
 
 **If you were building it tomorrow:**
-- Redis Cluster (6 nodes, 3 primary + 3 replica), sharded by leaderboard ID for boards up to 10M entries; score-range shards within each leaderboard for the 100M-player all-time board.
-- Score update hot path:
+- One Redis primary per board with 6 to 8 read replicas on the contest board, sized from read volume rather than data size. Score-range shards only for a board that outgrows a single primary's write ceiling.
+- Score update hot path, batched in 50ms windows so one round trip carries hundreds of updates:
   ```
-  ZADD leaderboard:{lb_id} {score} {user_id}
-  EXPIRE leaderboard:{lb_id} {ttl}  // daily boards auto-expire after 30 days
+  ZADD lb:{board} {packed_score} {user_id}
+  EXPIRE lb:{board} {ttl}
   ```
-- Rank query for tail users (rank > 10,000): return bucketed rank ("top 0.5%") computed from precomputed quantiles refreshed every 5 minutes — exact rank for position 50,000,007 costs the same as for position 1 but provides zero value to the user.
+- Tiebreaker packed into the score, not stored beside it: `packed = points * 2^31 + (2^31 - 1 - t)`, where `t` is seconds since a game epoch. 20 bits of points and 31 bits of inverted time is 51 bits, inside the 53 bits of integer precision an IEEE-754 double carries.
+- Rank below the top 10,000 served as a percentile bucket from quantile snapshots refreshed every 60s.
 #### What this is really testing
-TODO
+Whether you notice that "give me the top 100" and "give me *this* player's rank" are different queries, and that only the second one constrains the design. Almost every candidate reaches for a sorted structure immediately and cannot say what it buys, because the example they have in their head is top-N, which any index does. The follow-up that separates people is "now do it for the player at position 4,812,004", and the useful answer names the property doing the work: the structure keeps a count on every pointer, so position falls out of the descent instead of requiring a scan. Everything downstream, whether you can shard, whether you can use the database you already have, whether approximation is acceptable, is decided by that one requirement.
 
-The one insight this question exists to elicit, then the contrast with the question it most resembles and why the answers differ.
+The nearest neighbour is trending topics, and the two look identical from a distance: a firehose of events, a ranked list at the end. They diverge on two axes and both divergences flip the answer. First, key space. Trending discovers its keys from the data, roughly 100M distinct strings a day that nobody enumerated in advance, so per-key state is impossible and a sketch is the only option. A leaderboard's keys are player ids that existed in a users table before the first match; 100M of them at 90 bytes is 9GB, which is one machine, so exact per-player state is simply affordable. Second, what the answer includes. Trending only ever publishes the head, so throwing away the tail is free. A leaderboard is asked about the tail by name, and the tail is most of the players. That is why approximation shows up in both questions but means opposite things: in trending it is the mechanism, in a leaderboard it is a product concession you make for the long tail after establishing that you could have been exact. Add that trending ranks by how unusual a rate is against a learned baseline, while a leaderboard ranks by the raw number with no modelling at all, and the two systems share a shape and nothing else.
 
-Closest question: TODO
+Closest question: Q53
 #### Clarifying questions and how each answer forks the design
-- Number of players?
-- Multiple leaderboards (daily, weekly, all-time)?
-- Per-game or per-region?
-- Real-time updates or eventual?
-- "My rank" + neighbors needed?
+- Number of players, and how many are active on any given day?
+- Multiple boards (daily, weekly, all-time), or one?
+- Per-game or per-region segmentation?
+- Is an arbitrary player's rank a requirement, or only the top N?
+- Does anything downstream pay out against a rank, or is it cosmetic?
+- Real-time updates, or is a minute of staleness fine?
 
 **How the answers shape the design**
 
 | If the answer is… | Then the design… |
 |---|---|
-| Real-time updates | a Redis sorted set (ZADD/ZREVRANK) giving O(log n) score updates and rank reads |
-| Multiple leaderboards | one sorted set per (scope, period) with TTL for daily/weekly resets |
-| Per-region boards | shard sorted sets by region and merge only for a global view |
-| Huge player counts | approximate distant ranks (bucketed) and keep exact ranks only near the top |
-| "My rank plus neighbors" | ZREVRANK for position then ZRANGE around it — cheap on a sorted set |
-| Eventual is acceptable | batch-update the board from a stream instead of per-score writes |
+| Only top-N is needed | drops the sorted set; an index on score in the existing database is enough |
+| Arbitrary rank is needed | needs a structure that counts during traversal, which is the whole question |
+| Real-time updates | writes the board on the hot path, batched in short windows, rather than from a periodic job |
+| Minute-level staleness is fine | recomputes ranks in a scheduled pass and serves them as a plain column |
+| Multiple boards | one key per (scope, period) with a TTL, so a reset is an expiry rather than a migration |
+| Per-region boards | separate keys per region, merged only when a global view is asked for |
+| Tens of millions of players | exact rank in the head, bucketed percentile in the tail |
+| Rank drives payouts | exact rank at every paid position, computed from the event log at a sequence boundary, not read off the board |
 #### Requirements and scale, derived out loud
 **Requirements**
 
-- **FR:** record score, top-N, my rank, neighbors, multiple leaderboards (period-based + segmented)
-- **NFR:** <100ms reads, real-time updates, scale to 100M+ players
+- **FR:** record a score; top-N; an arbitrary player's rank; neighbours around a rank; multiple boards by period and segment; a friends board.
+- **NFR:** rank reads p99 under 100ms; a finished match visible in under 5s; correct and deterministic ordering under ties; survive the loss of any single node.
 
 **Scale**
 
-- **Player base:** 100M registered players globally (assumption: top-tier mobile game, Clash Royale / PUBG-class).
-- **Boards per player:** ~10 active boards on average (daily / weekly / all-time / regional / friends × a couple of game-modes) — typical product surface.
-- **Score updates/s:** 100M players × ~1 match/day × ~10 score events/match = ~1B events/day ÷ 86,400s ≈ 12k/s avg → 10k/s steady; ×5 spike during contests → ~50k/s peak.
-- **Reads/s:** every active player polls rank ~100× per session (post-match, leaderboard tab, friend compare); 10k writes/s × 100 read-amp → ~1M reads/s peak.
-- **Sorted-set entry size:** Redis ZSET node = 8B score (double) + ~16B member id (compact user-id string) + ~16B skip-list/dict pointer overhead ≈ **~40B/entry**.
-- **Per-leaderboard size:** all-time global = 100M × 40B = **~4GB**. Daily boards bounded by DAU (assume 10% of MAU = 10M) → 10M × 40B = **~400MB** each.
-- **Total in-memory footprint:** daily × 30-day retention (30 × 400MB = 12GB) + weekly × 12 (12 × ~1GB = 12GB) + all-time (4GB) + regional × 200 countries (~50MB avg = 10GB) + friends/segment variants ≈ **~40–50GB** total. ×2 for replicas → ~100GB; fits 6 nodes × 32GB.
-- **Append-only log volume:** 10k writes/s × ~100B/op (op-type + lb_id + uid + score + ts) × 86,400s = **~85GB/day** raw; snapshot hourly to blob; 30-day retention → 30 × 85GB ≈ **~2.5TB cold** (compresses 3–5× on object store).
-- **Friends-leaderboard cache:** ~5KB blob/user (≤150 friends × ~32B per row); 5-min TTL; 10M concurrent active sessions × 5KB = **~50GB hot cache**.
-- **Concurrency at contest end:** all 10M daily-active players poll `/rank` within ~60s → 10M / 60 ≈ ~170k reads/s burst on top of steady-state, absorbed inside the 1M/s read budget.
+- **Population:** 100M registered players. Assume a 10% daily-active ratio, so **10M DAU**. Sessions average 30 minutes, so average concurrency is 10M × (30 / 1440) ≈ **210k**, and with a 3× diurnal peak, **~600k concurrent** at prime time.
+- **Write rate:** 10M DAU × 5 matches/day = 50M match completions/day. Each completion updates 5 boards (daily, weekly, all-time, regional, mode) = 250M writes/day. 250M / 86,400 = **~2.9k writes/s average**; × 4 for the diurnal peak = **~12k/s peak hour**; a contest close concentrates another 5× onto one board = **~60k/s burst on a single key**.
+- **Read rate:** ~40 rank or board views per session × 10M sessions/day = 400M reads/day = **~4.6k/s average**, ~19k/s at the diurnal peak. The number that matters is the contest close: 600k concurrent players polling every 2s = 600k / 2 = **~300k reads/s**, and that burst is almost entirely per-player rank, which cannot be shared between users.
+- **Entry size:** a Redis ZSET member costs a skip-list node (score 8B + backward pointer 8B + level array averaging ~1.33 levels × 16B ≈ 21B + member pointer 8B ≈ 45B), a dict entry (~32B with bucket overhead), and the member string itself (an 8-char id in an sds header rounds to 16B). Total **~90B/entry**, not the ~40B people quote from the score-plus-id arithmetic.
+- **Board sizes:** all-time global = 100M × 90B = **~9GB**. A daily board is bounded by DAU: 10M × 90B = **~900MB**. A weekly board is bounded by WAU, assume 30M, so 30M × 90B = **~2.7GB**.
+- **Resident total:** 7 daily (7 × 0.9 = 6.3GB) + 4 weekly (4 × 2.7 = 11GB) + all-time (9GB) + regional boards, which partition the same 100M players, so another 9GB in aggregate ≈ **~35GB of primaries**. One replica each doubles it to 70GB; the contest board carries 6 extra read replicas at 9GB = 54GB. Total **~125GB**, which is 8 nodes × 32GB with room.
+- **Read fan-out:** one Redis instance serves ~100k ops/s of O(log N) work. 300k rank reads/s / 100k = 3 instances minimum, so **6 to 8 replicas** on the contest board for headroom and failure tolerance. Top-N does not enter this budget: it is one shared object, so a 1s edge cache collapses any read rate to ~1 backend read/s.
+- **Write headroom:** the same ~100k ops/s ceiling applies to the single primary taking writes. The 60k/s contest burst is **60% of one primary**, which is why sharding by score band is not needed at this size, and batching writes in 50ms windows moves the ceiling to a few hundred thousand per second by amortising the syscall away.
+- **Durability volume:** 2.9k writes/s × ~100B/op × 86,400 = **~25GB/day** of AOF. 30-day retention at ~4× compression on object storage is **~190GB cold**, which is nothing and means retention is never the constraint.
+- **Friends board cache:** ~150 friends × ~32B per row ≈ 5KB per user. 600k peak concurrent × 5KB = **~3GB**, held in the API tier cache at a 5-minute TTL.
 #### Key decisions
-TODO
+**An ordered in-memory set against an indexed relational query**
+- Choice: a sorted set as a derived index, with the authoritative score history in the event log and a relational store.
+- Alternative: keep scores in Postgres with a B-tree on `(board_id, score DESC)`, serve top-N with `ORDER BY score DESC LIMIT 100`, and serve arbitrary rank from a `rank` column recomputed by a periodic `ROW_NUMBER()` pass.
+- Decider: whether arbitrary rank is a requirement, then the write rate. Top-100 off a B-tree is a handful of index leaf reads and is genuinely fine at any rate in this question. `COUNT(*) WHERE board = X AND score > mine` is a range count with no rank stored in the index, so it walks every entry above the player: 50M index tuples for a median player on a 100M board, hundreds of milliseconds at best against a 100ms budget. The batch alternative replaces that with one O(100M) pass per refresh, and at 60k writes/s the ordering moves faster than a 60s job can republish it.
+- Alternative wins when: rank is only ever served for the top few hundred, or the board moves on a human cadence. A 200k-row company board recomputed hourly is a materialised view and a cron job, and adding Redis to that is a second system to run for no gain. It also wins when the board must be transactionally consistent with something else, a prize ledger paying out against final standings, because the sorted set gives you no transaction with the money.
 
-Two or three genuine forks. For each, in this exact shape so it stays checkable:
+**Exact rank everywhere against an exact head and a bucketed tail**
+- Choice: exact rank for roughly the top 10,000, and below that a percentile bucket ("top 3%", "about 4.2M") derived from quantile snapshots refreshed every 60s.
+- Alternative: exact rank for every player on every read, paying the fan-out.
+- Decider: what the exact path costs once the board is sharded, and the size of a rank the player can actually perceive. On one unsharded primary exact rank is a single O(log N) call and this fork does not exist, so do not raise it. Across S shards, exact rank becomes 1 rank call plus S-1 count calls; at S = 8 and 300k rank reads/s that is 2.4M ops/s to answer a question whose bucketed form is one lookup in a 200-entry array already in the API process. The other half is product: the difference between rank 4,812,004 and 4,812,051 is 47 places out of 100M and no player can tell.
+- Alternative wins when: the board is small enough never to shard, under roughly 10M entries on one primary, so exactness is free and there is no reason to approximate. Or when rank carries money or status at every position: a tournament that pays down to rank 50,000, a competitive ladder where the exact number feeds matchmaking. Then a bucket is not a simplification, it is a wrong answer, and you pay for the round trips.
 
-**<name of the fork>**
-- Choice:
-- Alternative:
-- Decider:
-- Alternative wins when:
-
-**Raw material, from the old Common Mistakes:**
-
-- **Treating Redis as the source of truth.** Redis ZSET is a fast-path index; if you don't keep the upstream game-event log authoritative, an AOF gap is unrecoverable rather than a 1-second blip.
-- **Using one giant ZSET for the all-time global leaderboard at 100M+ entries** — saturates a single event loop and the host's memory. Score-range shard before the box melts.
-- **Returning exact rank for every user, including #50,000,007.** Wasted compute the user does not care about; bucket tail ranks via quantile sketches.
-- **Sharding by `user_id` hash** — splits sorted order across all N shards, so `top-N` requires fanning out to every shard. Score-range sharding keeps top-N on one shard.
-- **Forgetting tiebreaker semantics** — equal scores in float-encoded ZSETs surface in undefined member order, causing flapping ranks; pack a tiebreaker (e.g. `points * 1e10 + (MAX_TS - ts)`) into the score.
-- **Synchronous RDB snapshots on the serving primary** — the fork stalls writes for hundreds of ms; snapshot from a dedicated replica.
+**One sorted set per board against score-range shards with a count rollup**
+- Choice: one sorted set per board, replicated for reads, up to the single-thread write ceiling.
+- Alternative: split each board into score bands on separate primaries, with a coarse per-band counter layer so rank is a sum of the counts above plus a local rank inside the player's own band.
+- Decider: peak write rate on the busiest single board against one primary's ceiling, roughly 100k `ZADD`/s for an O(log N) insert into a 100M-entry set on current commodity hardware, memory-latency bound across about 27 skip-list levels. Our contest burst is 60k/s on one key, 60% of that, and batching pushes the ceiling higher still, so one primary holds and sharding buys nothing but merge logic. Memory is explicitly not the decider: 100M × 90B = 9GB fits on any modern box.
+- Alternative wins when: sustained writes on one board exceed roughly 200k/s even batched, which is a title an order of magnitude larger or a board written on every in-match event rather than on completion. It also wins on recovery time rather than throughput: reloading a 9GB board from AOF is tens of minutes of single-threaded replay, where eight 1.1GB shards reload in parallel and only an eighth of the board is unavailable at once. If the shard key is ever chosen, it must be the score and not the player id, because hashing by player scatters sorted order across every shard and turns top-100 into a fan-out to all of them.
 #### High-level design
 **must-say**
 
@@ -9426,43 +9376,21 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 </svg>
 ```
 
-**How to read the diagram:** score updates enter on one side, an in-memory ordered structure keeps the live ranking, and reads come out as top-N lists or around-me slices. A backing store sits underneath so the board survives cache loss or restarts.
+**How to read the diagram:** writes enter from the service at the top, land in one ordered in-memory structure per logical board, and are persisted underneath. Reads come back out of the same structures as top-N slices or single-player positions. The dashed box at the bottom is the scale-out path, not the starting point.
 
-**Why the flow is shaped this way:** leaderboards are not just key lookups. The product lives or dies on ordered reads, so the hot structure must support fast insertions and fast retrieval by rank at the same time.
+**Why the flow is shaped this way:** the ordering is the product, so the hot structure has to support fast insertion and fast retrieval *by position* at the same time. Almost every other system in this list can separate the write structure from the read structure. Here they are the same object, which is why the design has so few boxes and so much riding on one of them.
 
-**What this layout buys you:** live rankings with low-latency reads. The tradeoff is that horizontal partitioning becomes trickier than in ordinary key-value systems, because global order is the feature users actually see.
+**What this layout buys you, and what it costs:** microsecond reads on both query shapes, and a reset that is a key expiring. The cost is that horizontal partitioning is harder than in an ordinary key-value system, because global order is the feature users can see. Splitting the board splits the order, and every read then has to put it back together.
 #### Deep dive
 **must-say**
 
-**Leaderboard variations:**
+**Serving an arbitrary player's rank, on one node and then on several.**
 
-| Type | Key pattern | Lifecycle |
-|---|---|---|
-| Daily | `lb:daily:{YYYY-MM-DD}` | TTL 30d |
-| Weekly | `lb:weekly:{YYYY-WW}` | TTL 90d |
-| All-time | `lb:alltime` | persistent |
-| Friends | computed on-read from friend list | cached 5min |
-| Regional | `lb:region:{country}` | persistent |
+On one node this is solved, and being precise about why is the answer to the question. A Redis sorted set is a skip list plus a hash table. The hash table maps member to score in O(1), which makes an update cheap: find the old score, delete, reinsert. The skip list is a tower of forward pointers, and every forward pointer carries a **span**, the number of nodes it jumps over. Rank is computed by descending from the top level and accumulating spans on the way down, so `ZREVRANK` is O(log N) rather than a count of everything above the player. That span field is the entire reason this structure is chosen over any other sorted container. It has been in Redis since sorted sets gained `ZRANK` in the 1.2 series around 2010 and has not materially changed since, though sets under 128 entries use a flat listpack encoding with a linear rank path.
 
-Each variant is independent — a daily reset is a TTL expiry, not a state migration. Naming is part of the contract: clients pass a logical leaderboard ID and the service maps to the correct key by current date or region. Pre-create tomorrow's daily key 5 minutes before midnight UTC so the rollover is seamless and no writes race against a missing key.
+The cost of maintaining spans is real and shows up on the write path, not the read path. An insert that changes rank has to fix the span on every pointer that jumps over the new node, all the way up the tower. At 60k writes per second into a 100M-entry set that is a measurable fraction of the single event loop, and it is the reason writes are batched into 50ms windows: one round trip carrying 500 `ZADD`s pays the syscall once and the span maintenance 500 times, rather than paying both 500 times.
 
-**Scaling beyond single ZSET (>10M users):**
-
-Score-range sharding splits the ZSET into N bands (e.g. 0–1k, 1k–10k, 10k–100k, 100k+) on different Redis shards. The shard a player lives on is determined by their current score, so writes route directly without a directory lookup. *Top-N* is cheap — read from the highest band only and stop when N entries are returned. *My rank* requires summing `ZCARD` of every band above the user's band plus `ZREVRANK` within the user's own band; that's typically 2-4 cross-shard reads, parallelizable. The trade-off is that score-band boundaries must be chosen so bands stay balanced; static bands work for stable distributions, but a dynamic rebalancer (split a band when it exceeds 10M entries) is needed once the score distribution drifts.
-
-**Friends leaderboard:**
-
-Friend lists are small (~200 entries) so the friends leaderboard is materialized per-request, not stored. The service fetches the user's friend list, issues a single `ZMSCORE` (multi-score-lookup) against the all-time leaderboard for those friend IDs, sorts in memory, returns. Cache the resulting blob per user with a 5-minute TTL — friends-leaderboard reads dominate (everyone checks their friends' rank constantly) and the underlying scores don't change rank-relative ordering quickly. Cost is one `ZMSCORE` (O(log N) per friend, batched as a single network round-trip) plus an in-memory sort.
-
-**Approximate ranks for tail users:**
-
-Exact rank for a user ranked 50,000,000 is computationally wasteful and product-irrelevant — nobody cares about being #50,000,003 vs #50,000,007. Top 1000 is served exact via `ZREVRANK`; below that, return bucketed ranks ("top 0.5%", "rank ~50M ± 5k") computed from precomputed quantiles refreshed every few minutes. This collapses what would be expensive `ZCARD`-summing across shards into a single quantile lookup, and the user-facing UX is identical or better.
-
-**Persistence and recovery:**
-
-Redis writes go to the AOF log (fsync every second by default) and propagate to replicas asynchronously. A primary crash promotes the replica with at most ~1s of lost writes; missing writes are recoverable from the upstream game-event stream that fed the `ZADD`s in the first place. Periodic RDB snapshots to a blob store (e.g. S3) every hour give point-in-time restore for the rare case of total cluster loss; for a daily leaderboard the worst case is recomputing today from the game-event log, which is bounded.
-
-**Single-ZSET vs score-range-sharded layouts.** *[Source: Redis docs + Discord scaling patterns]* Below ~10M entries one ZSET on one primary is the right answer — single network round-trip, no merge logic, exact rank in O(log N). Beyond that the single-shard event loop becomes the throughput ceiling (~150k ZADD/s on commodity hardware with AOF every-sec) and memory pressure forces fragmentation. Score-range sharding splits scores into N bands routed by the score itself, so writes hit exactly one shard with no directory; the cost is `ZREVRANK` becoming a sum of `ZCARD`s across higher bands. Discord's sharding pattern for chat shards by `(guild_id, channel_id)` rather than score band — same idea, different key — to avoid the rebalance burden when a band saturates.
+**What sharding does to it.** Suppose the board outgrows one primary and we split by score band, each band holding roughly N/S entries. Top-N gets *cheaper*: it is always the top band, one shard, regardless of board size. Rank gets worse in a specific way. It becomes `Σ ZCARD(every band above the player) + ZREVRANK(their own band)`, S round trips instead of one. They parallelise, so latency holds, but the op count multiplies by S at exactly the read rate that hurts.
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 540" role="img" aria-label="Single ZSET versus score-range sharded leaderboard layouts">
@@ -9547,122 +9475,140 @@ Redis writes go to the AOF log (fsync every second by default) and propagate to 
 </svg>
 ```
 
-The asymmetry is the point: top-N hits exactly one shard regardless of total size (always the top band), while "my rank" pays cross-shard fan-out proportional to bands above the user. Static bands work for stable score distributions; dynamic rebalancing splits a band when it crosses a configured entry threshold, with a brief read-only window during the split to copy entries to the new shard.
+The asymmetry is the point and it is worth saying out loud in the room: top-N is invariant to sharding and rank is linear in the number of shards.
 
-**Discord-style ZSET patterns.** *[Source: Discord engineering / Redis patterns]* Discord's realtime infrastructure uses Redis ZSETs heavily for ordered presence and message-recency lists with the same "sharded sorted set + application-side merge" pattern. The lesson transfers: never trust one ZSET to be both the working set and the durable store. The ZSET is a fast-path index; the durable record (ScyllaDB in Discord's case, Cassandra/wide-column for game leaderboards) is the truth, and the ZSET can always be rebuilt from it. This separation is what makes "AOF lost the last 1s" survivable — the upstream event log is authoritative.
+**Bands cannot be equal width.** Score distributions in games are heavily skewed, usually something close to a power law, so slicing the score range into equal intervals puts 90% of the population in the bottom band and leaves the top bands nearly empty. Bands have to be cut on the *quantiles* of the observed distribution and recomputed as it drifts, typically daily. That has a consequence people miss: a score increase can move a player across a band boundary, and that write is a `ZREM` on the old shard plus a `ZADD` on the new one, with no transaction spanning the two. Order it deliberately. Add to the new band first, then remove from the old, so a failure between the two leaves the player counted twice, which makes one rank off by one, rather than counted zero times, which makes a player vanish from the board they are looking at. A background reconciler sweeps for members present in two bands and drops the stale copy.
+
+**Collapsing the fan-out with a counter layer.** The S round trips are avoidable. Maintain, alongside the shards, a coarse histogram: a fixed array of counters, one per score bucket, say 4,096 buckets laid out on the same quantile cuts. Every write increments the new bucket and decrements the old. Rank becomes a prefix sum over the buckets above the player, plus one exact `ZREVRANK` inside their own shard. Keep the prefix sums in a Fenwick tree and both the update and the query are O(log B) over 4,096 buckets, which is 12 steps on an array small enough to sit in the API process's L2 cache. Two operations replace S round trips, and the answer is still exact as long as the histogram is exact.
+
+It is not exact, and that is the part to concede rather than gloss. The histogram is fed asynchronously from the same write stream, so it lags, and the rank error is bounded by the writes in flight: at 60k/s and 200ms of lag, up to 12,000 entries are uncounted. At rank 4.2M that is invisible. In the top 100 it is fatal, because 12,000 unplaced entries could rewrite the podium. So the counter layer serves the tail and never the head, and top-K is always read off the top band's sorted set directly. That is the same boundary as the exact-head decision above, reached from the other direction, which is a good sign it is real.
+
+**Ties, since rank is meaningless without them.** Equal scores surface in an order determined by member byte ordering, which is arbitrary and, worse, *stable*, so the same player permanently wins every tie against the same opponent. Encode the tiebreaker into the score: `packed = points * 2^31 + (2^31 - 1 - t)`, `t` in seconds since a game epoch. Points up to about 1M take 20 bits, inverted time takes 31, and 51 bits sits inside the 53 bits of integer precision an IEEE-754 double carries exactly. Past 53 bits the encoding silently rounds and ties reappear as flapping ranks, so the bit budget is a hard constraint on how many tiebreak levels you can stack, not a detail.
+
+**Reads scale on a different axis from writes.** Rank and top-N are read-only, so they go to replicas, and replicas are the answer to 300k reads/s. Sharding is the answer to write rate. Conflating the two is the most common mistake in this question: people shard a board that has a read problem and end up with S times the round trips and no more read capacity than they started with.
 #### Where it breaks
 **must-say**
 
 **Bottlenecks**
 
-- **Single ZSET >10M users** — a single Redis instance has bounded memory and one event loop, so a 100M-entry all-time leaderboard saturates one box on memory and contends on the loop. *Mitigation:* score-range shard across N Redis nodes, each owning a score band; top-N hits only the top shard, "my rank" sums `ZCARD` of higher bands.
-- **Write storm at contest end** — last-second score flurries (everyone submitting just before the deadline) hit one ZSET hard; the single-threaded Redis loop becomes the choke point. *Mitigation:* batch `ZADD`s at the leaderboard service in 50–100ms windows so each network round-trip carries hundreds of updates, and accept eventual consistency for ranks below the top-100 (only the leaderboard tail moves; the top is stable).
-- **Replica lag during snapshot** — RDB snapshotting forks the Redis process and stalls write propagation to replicas, so reads from replicas show stale top-N during the fork. *Mitigation:* serve top-N reads from the primary during snapshot windows, or use diskless replication to remove the fork; snapshots run on dedicated read-only replicas in a chained-replication setup.
-- **Leaderboard sprawl** (millions of small lbs e.g. per-game-room) — each leaderboard as its own Redis key has minor per-key overhead, but millions of nearly-empty ZSETs explode the keyspace and break key-distribution math. *Mitigation:* pack many small leaderboards into shared Redis instances using consistent-hash routing on `(game_id, room_id)`; for very small ones, denormalize into a single ZSET with composite member keys (`{room_id}:{user_id}`) and filter on read.
-- **Player checking own rank constantly** — every client polling for their rank multiplies read load 100x over actual rank changes; a player refreshing every 2s sends 30 reads/min when one would do. *Mitigation:* per-user response cache with 1–5s TTL at the API tier, plus push notifications via WebSocket when their rank actually moves so the client doesn't need to poll at all.
-- **Cross-shard top-N merge cost (under user_id hash sharding)** — naively hashing the leaderboard by user_id splits the sorted order across all N shards, so `top-100` requires fanning out to every shard, fetching `top-100` from each, and merging client-side at O(N×100). On 32 shards that's 3,200 entries pulled to return 100. *Mitigation:* prefer score-range sharding for read patterns dominated by top-N; keep user_id hashing only when writes dominate or top-N is rare. If both paths needed, maintain dual indexes (score-range primary, user-id shadow) synchronized via a single write-ahead log and route by query.
-- **Skip-list rank-span maintenance under write storm** — Redis ZSET's `ZREVRANK` uses span counts on skip-list pointers; every `ZADD` that changes rank rewrites span fields up the skip-list tower. At 50k ZADDs/s on one ZSET the span maintenance becomes a measurable fraction of the event-loop time. *Mitigation:* batch ZADDs in 50–100ms windows so each insertion replays span updates once instead of N times; for variants where exact rank below the top-K is unused, switch to a non-rank-tracking secondary index (just a sorted set without span maintenance) and serve `my rank` from precomputed quantiles.
+- **Rank-poll storm at contest close.** 600k concurrent players polling every 2s is ~300k rank reads/s, and unlike top-N these cannot be shared between users, so no cache collapses them. *Mitigation:* 6 to 8 read replicas on the contest board, sized from the 100k ops/s per-instance figure. Then remove the polling entirely: push a rank update over the existing WebSocket when the player's rank actually changes, so a client that is not moving sends nothing. A 1 to 2s per-user response cache is a weak second line, because a client polling every 2s barely hits it.
+- **Span maintenance under a write burst.** Every rank-changing `ZADD` rewrites span fields up the skip-list tower, and at 60k/s on one key that is a real share of the single event loop, on top of the ordinary insert cost. *Mitigation:* batch writes in 50 to 100ms windows so one round trip carries hundreds of updates. This is safe here because the board's freshness budget is 5s, and it interacts correctly with the counter layer above, which is fed from the same batches.
+- **Fork-based snapshots on the serving primary.** An RDB snapshot forks the process; the copy-on-write page faults that follow stall the event loop for hundreds of milliseconds on a 9GB board, and replication to replicas backs up behind it. *Mitigation:* snapshot from a dedicated replica that serves no traffic, never from the primary, and use diskless replication for the initial sync so a replica joining does not trigger a fork on the primary either.
+- **Board sprawl.** A per-room or per-match board means millions of near-empty keys, and the per-key overhead plus the keyspace itself starts to dominate what the actual data costs. *Mitigation:* small boards go into a shared key with a composite member (`{room}:{user}`) and are filtered on read, or are not stored at all and are computed on demand from the event log, which for 20 players is trivial.
+- **Friends board on a hot account.** A streamer's friend list is requested by every viewer at once, and a cache miss sends the same `ZMSCORE` from thousands of requests simultaneously. *Mitigation:* per-key request coalescing so one miss does one backend call, plus TTL jitter so the whole population does not expire together.
 
 **Failure modes**
 
 | Layer | Failure | Detection | Mitigation |
 |---|---|---|---|
-| Redis primary | Process crash mid-contest | Sentinel/Cluster gossip detects in <1s; client sees connection error | Failover to replica with up to ~1s of lost ZADDs (AOF every-sec); replay missing writes from upstream Kafka game-event log |
-| AOF disk | fsync fails (disk full, IO error) | Redis logs an error and `aof_last_write_status` flips | Page on-call; freeze writes via maintenance flag rather than serve un-durable acks; fail open for reads |
-| Replica | Replication lag spikes during RDB fork snapshot | `master_repl_offset - slave_repl_offset` exceeds threshold | Serve top-N reads from primary during the fork window; switch to diskless replication to remove the fork |
-| Score-range shard | Band saturates entries (>10M); rebalance needed | Per-band `ZCARD` exceeds threshold | Brief read-only window; split band into two shards; rebalance entries via SCAN+ZADD into new shard |
-| Cache (friends-leaderboard) | Stampede on hot user (streamer's friend list) | Cache miss rate spike on a single key | Per-key request coalescing + 5-min TTL with jitter; fall back to ZMSCORE under rate-limit |
-| API tier | Rank-poll storm at contest end | `/rank` QPS > 500k/s | 1–5s response cache per `(user, lb)`; WebSocket push when rank actually moves so clients stop polling |
-| Cheat detection | Bypassed via client-trusted score | Z-score on score deltas detects implausible jumps | Server-authoritative scoring; shadow-ban suspected cheaters into a parallel ZSET so legitimate boards stay clean |
+| Primary | Process crash mid-contest | Cluster gossip detects in under 1s; clients see connection errors | Promote a replica, losing up to ~1s of writes at AOF every-sec, then replay the gap from the event log |
+| AOF | fsync fails on a full or failing disk | `aof_last_write_status` flips and the error surfaces in the log | Page immediately, and stop acknowledging writes rather than acknowledge writes that are not durable; reads stay up |
+| Replica | Replication lag spikes during a snapshot fork | `master_repl_offset` minus the replica offset crosses a threshold | Snapshot only from a non-serving replica; route reads away from any replica past the lag threshold |
+| Counter layer | Histogram drifts from the sorted sets after a partial failure | Periodic `ZCARD` sum compared against the histogram total | Rebuild the histogram from the sorted sets; it is derived and cheap to recompute |
+| Band boundary | A cross-band move leaves a member in two bands | Reconciler finds a member id present in more than one shard | Add-then-remove ordering makes the failure a duplicate rather than a disappearance; the sweep drops the stale copy |
+| API tier | Rank QPS exceeds 300k/s | `/rank` request rate and replica CPU | Shed to bucketed ranks for everyone outside the top 10,000; exact ranks stay up for the head |
+| Scoring | A client-trusted score reaches the board | Score-delta anomaly detection against the player's own history | Server-authoritative scoring, and suspected accounts write to a shadow board so the visible one stays clean |
 
 **Unresolved**
 
-TODO. Two or three things this design genuinely does not handle well, and what you would do about each.
+**There is no consistency across boards, and nothing here provides it.** One match result writes five keys, and there is no transaction spanning them. Because the write path is at-least-once from the event log, a player can be rank 12 on the daily board and absent from the regional board for as long as a retry takes, and during a contest that is visible to them. The boards converge, but they are never simultaneously correct, and there is no moment you can point at and call a consistent snapshot. The consequence is a rule rather than a fix: anything that pays out has to be computed from the event log at a sequence boundary, never read off a board. Making the boards themselves consistent means a single writer per player, ordering all five updates, which costs the write parallelism the whole write path exists to buy. I would not do it, and I would not claim the boards are more than eventually right.
+
+**We call the board a derived index, and the rebuild is slower than anyone has agreed to.** Rebuilding the all-time board means replaying 250M writes at maybe 100k/s, so tens of minutes with no reads served, and it requires the event log to retain the board's whole lifetime rather than the 24 hours everyone assumes. In practice we lean on the hourly snapshot to avoid that, which quietly makes the snapshot load-bearing: delete every snapshot and the honest recovery time for the all-time board is hours, not the 30s in the appendix. So the recovery point is about a second, while the recovery time is one of two very different numbers depending on which failure you had, and only the small one ever gets quoted. The fix that would actually work is continuous background rebuild into a warm standby structure, and we have not built it.
+
+**Cheating is detected after the fact, and the board displays it in the meantime.** Server-authoritative scoring stops a client asserting a number it did not earn. It does nothing about a bot that plays well, a collusion ring farming each other, or an exploit the server accepts as legitimate play. Anomaly detection catches those in minutes to days, and the correction is a retroactive removal that shifts everyone below by one and has to be explained to them. Through the contest itself, the standings can be wrong and known to be wrong. The only stronger option is a review gate before publication, which trades away the real-time property that is the whole requirement, so this is a gap the design accepts rather than closes.
 #### Drill questions
-1. How do you prevent score tampering / cheating?
+1. How do you prevent score tampering and cheating?
 2. What if Redis goes down mid-contest?
 3. How do you scale 10x to 1B players?
-4. How do you serve "my rank" for a user ranked 50,000,000?
-5. Tied scores — how to break ties?
-6. How do you handle leaderboard rollover at midnight UTC?
-7. When does score-range sharding outperform consistent-hash sharding by user_id?
-8. Why not use Postgres `ORDER BY score LIMIT 100` with an index?
-
-TODO. Only 8 drill questions carried over, top up to at least 10.
+4. How do you serve "my rank" for a player ranked 50,000,000?
+5. Tied scores: how do you break ties, and why is the default not acceptable?
+6. How do you handle the leaderboard rollover at midnight UTC?
+7. When does score-range sharding beat hashing by player id?
+8. Why not Postgres `ORDER BY score LIMIT 100` with an index?
+9. Rank reads hit 300k/s at contest close. Where do they go, and why does adding write shards not help?
+10. A player's score crosses a shard band boundary. What is the write, and what can go wrong?
+11. Total cluster loss. Reconstruct the all-time board and say what it costs.
+12. Why is `ZREVRANK` O(log N) rather than O(N), and what does that cost you on writes?
 #### Answers to drill questions
-1. Scores are server-authoritative — the client sends event facts (kills, lap times) and the server computes the score, signs it, and `ZADD`s. Validate plausibility (no 1000-point jumps in 2s) and rate-limit submissions per user. *If pushed:* second-line defenses are anomaly detection on score deltas (z-score vs the player's history) and shadow-banning suspected cheaters into a parallel leaderboard.
+1. Scores are server-authoritative: the client sends event facts (kills, lap times, checkpoints) and the server computes the score and writes it. Validate plausibility against the player's own history, rate-limit submissions, and reject anything that implies a physically impossible rate of progress. *If pushed:* second line is anomaly detection on score deltas and writing suspected accounts into a shadow board, so the visible board stays clean while the case is built. Concede that this catches bots and collusion after the fact, not during.
 
-2. AOF + replicas means a primary failure promotes a replica with at most ~1s of lost writes. Recent writes also live in Kafka (or the app event log), so we can replay missing `ZADD`s on recovery. *If pushed:* during failover, accept eventual consistency on rank reads — show a "ranks updating" banner rather than serve stale top-100 with confidence.
+2. A replica is promoted, losing at most ~1s of writes at AOF every-sec. Those writes are still in the event log, so replay the gap by sequence number rather than accepting the loss. *If pushed:* during the window, serve reads with a staleness indicator rather than serving a confident top-100 that is wrong, and be honest that the failover is fast but the cold rebuild is not.
 
-3. Score-range sharding becomes mandatory: top-N hits only the top shard, "my rank" sums counts from higher shards. Friends leaderboard scales with friend count, not total users, so it's already fine. *If pushed:* segment leaderboards by skill bracket so 99% of users compete in their own ZSET; only the elite bracket needs the big global structure.
+3. Reads and writes scale on different axes, so answer them separately. Reads go to more replicas, which is linear and boring. Writes go to score-range shards once one board passes roughly 200k/s, with a counter layer so rank stays two operations instead of S. *If pushed:* the better product answer at 1B is skill-bracket segmentation, so 99% of players compete inside a board of a few million and only the elite bracket needs the large structure at all.
 
-4. Don't. Bucket tail ranks ("top 0.5%", "rank ~50M ± 5k") computed from approximate quantiles. Exact rank below the top 10k is wasted compute. *If pushed:* HyperLogLog or t-digest sketches give cheap approximate quantiles per leaderboard, refreshed every few minutes.
+4. Do not. Return a percentile bucket from quantile snapshots refreshed every 60s. Exact rank costs the same as rank 1 and conveys nothing, because the player cannot distinguish 50,000,003 from 50,000,007. *If pushed:* the snapshots come from a t-digest or a simple bucket histogram over the score range; either gives the bucket in a single lookup against an array small enough to hold in the API process.
 
-5. Encode tiebreaker into the ZSET score: `score = points * 1e10 + (MAX_TS - earliest_achieved_ts)`. Earlier achiever wins on ties. *If pushed:* multi-level tiebreakers (points, then wins, then time) bit-pack into a 64-bit float — works until precision runs out around 2^53.
+5. Equal scores order by member bytes, which is arbitrary and permanently stable, so the same player wins every tie forever against the same opponent. Pack the tiebreaker into the score: `packed = points * 2^31 + (2^31 - 1 - t)`. *If pushed:* the bit budget is the constraint. A double carries 53 bits of exact integer precision, 20 bits of points plus 31 of inverted time is 51, and a third tiebreak level does not fit. Past 53 bits the encoding rounds silently and the ties come back as flapping ranks.
 
-6. Pre-create tomorrow's ZSET key 5 min before rollover; clients hitting "today" after midnight write to the new key. Old key keeps its TTL and serves historical reads until expiry. *If pushed:* for "user's local day" semantics, key by `(user_tz_offset, date)` or accept that "daily" means UTC and document it.
+6. Pre-create tomorrow's key five minutes before the boundary with a sentinel member, so the first write after midnight finds an existing key rather than racing every other instance to create one. The old key keeps its TTL and serves historical reads until it expires. *If pushed:* "daily" means UTC and that has to be documented, because keying by the player's local day means a player in Auckland and one in Los Angeles are on different boards and cannot be compared.
 
-7. For leaderboard reads it almost always does, because `ZREVRANGE 0 99` against a hash-sharded set requires fanning out to *every* shard and merging top-K from each (Redis cluster's CLUSTER-aware client does this client-side). Score-range sharding makes top-N a single-shard query. The trade is that score-range needs band rebalancing as the score distribution drifts; user-id hashing distributes load uniformly without rebalancing but loses single-shard top-N. *If pushed:* hybrid — primary copy is score-range (read-optimised), shadow copy is hash-sharded (write-optimised), with a write-ahead log keeping them in sync; pick the read path per query type.
+7. Almost always, for reads. Hashing by player id scatters sorted order across every shard, so top-100 fans out to all S shards, pulls 100 from each, and merges S × 100 entries to return 100. Score-range sharding makes top-N a single-shard read regardless of board size. The genuine cost of score-range is rebalancing: bands are cut on quantiles and the distribution drifts, so they need periodic recutting, where hashing never does. *If pushed:* if writes truly dominate and top-N is rare, hashing is defensible; you are choosing uniform write distribution over cheap ordered reads, and that is a real trade rather than a mistake.
 
-8. B-tree on `score DESC` makes top-N cheap, but `ZREVRANK user_42` (count rows where score > user's score) is `SELECT COUNT(*) WHERE score > X` which is O(N) without a special index, or requires a separately maintained rank column updated on every write — defeats the index. Redis ZSET's skip-list maintains rank as part of the structure (`ZREVRANK` is O(log N) using span counts on skip-list pointers) which Postgres cannot match without custom extensions. *If pushed:* Postgres is fine for "top-100 daily" if you never serve "my rank" for non-top-100 users.
+8. The index handles top-N fine. It cannot handle rank. `COUNT(*) WHERE score > mine` walks every index entry above the player, which is 50M tuples for a median player on a 100M board, hundreds of milliseconds against a 100ms budget. A maintained rank column moves that cost to a full pass on every refresh. The skip list wins because it stores a span on every forward pointer, so the count accumulates during the descent it was doing anyway. *If pushed:* Postgres is genuinely the right answer for a board that only serves top-N, or one that refreshes on a schedule; the sorted set earns its place only because arbitrary rank is a requirement.
+
+9. To read replicas, 6 to 8 of them at roughly 100k ops/s each. Write shards do not help because every shard still has to answer rank queries and each read now touches several of them, so sharding multiplies the op count while leaving read capacity unchanged. *If pushed:* the structural fix is to stop polling: push over the WebSocket that already exists when a rank actually moves, which removes most of the 300k/s rather than serving it.
+
+10. It is a `ZREM` on the old band's shard plus a `ZADD` on the new one, with no transaction across them. Order it add-first, remove-second, so a crash in between double-counts the player (rank off by one) instead of dropping them (missing from the board). A reconciler sweeps for members in two bands and removes the stale one. *If pushed:* the counter layer has to be updated from the same batch or it drifts, and its total is periodically checked against the sum of `ZCARD`s to detect that drift.
+
+11. Replay the event log: roughly 250M writes for the all-time board at maybe 100k/s of replay is tens of minutes, and it requires log retention covering the board's whole life rather than 24 hours. The hourly snapshot is what actually bounds this in practice, which means the snapshot is load-bearing despite the design calling it optional. *If pushed:* the honest numbers are a recovery point of about a second and a recovery time in the tens of minutes for the largest board, and the way to fix it is a continuously rebuilt warm standby rather than a faster replay.
+
+12. Because every forward pointer in the skip list carries a span, the count of nodes it jumps. Rank accumulates spans during the descent the lookup performs anyway, so no counting pass is needed. This is in Redis from the 1.2-era introduction of `ZRANK` around 2010 and unchanged since, other than a flat listpack encoding for sets under 128 entries with a linear rank path. *If pushed:* the cost lands on writes, since an insert that changes rank rewrites spans up the whole tower, which is why writes are batched at 60k/s and why an unbatched write burst shows up as event-loop saturation rather than as slow reads.
 #### Whiteboard script
-TODO
+**0-5, take the fork before drawing anything.** Open with the distinction, not the components: "top-N and an arbitrary player's rank are different queries, and only the second one constrains this design." Then ask the two questions that change the answer: is arbitrary rank actually required, and how many players. State your assumptions out loud, 100M registered, 10M DAU, ~12k writes/s peak hour with a 60k/s contest burst, ~300k rank reads/s at close, p99 under 100ms. Draw nothing.
 
-A 45 minute budget: what to cover in 0-5, 5-15, 15-35 and 35-45, what to say first, and a line starting `Cut first:`.
+**5-15, the spine.** Four boxes: clients, leaderboard service, one ordered in-memory structure per board, event log underneath. Say the three rules as you draw the arrows, because they are the design. Scores are computed server-side, so the client never asserts a number. The board is a derived index and the log is the record, which is what makes an in-memory store acceptable. Boards are keys with TTLs, so a daily reset is an expiry rather than a migration. Then name the mechanism explicitly: the structure keeps a span on every pointer, so rank falls out of the descent. Say why that matters in one line, that this is what a B-tree cannot do.
 
-**Raw material, from the old Talking Points:**
+**15-35, the drill, and protect this time.** Go deep on rank. Single node first, spans and the O(log N) descent, and the write-side cost of maintaining them, which is why writes are batched. Then take the sharding fork on your own terms rather than being pushed into it: state that at 60k/s against a ~100k/s ceiling one primary holds and you would not shard, then describe what sharding *would* cost, because that is the interesting part. Top-N becomes cheaper and invariant; rank becomes S round trips. Then the counter layer that collapses it back to two operations, and immediately concede its lag, so the head is always served exactly and only the tail is bucketed. Then ties, and the 53-bit budget, which is concrete and few candidates have it. Keep the friends board and the midnight rollover in reserve as one-liners.
 
-These are the things an interviewer will be listening for — surface them unprompted:
+**35-45, concede and close.** Give the gaps before they are found: no consistency across the five boards a single match writes, so payouts come from the log and not the board; the rebuild is tens of minutes and the snapshot is quietly load-bearing; cheating is caught after the board has already shown it. Then two minutes of operations: what you page on (rank p99 per replica, write batch depth, replication lag, histogram drift against the sorted sets) and the split between recovery point and recovery time.
 
-- **Redis ZSET (skip list + hash) is the design** — say it in the first 60 seconds. The data-structure choice is the architecture; everything else is detail.
-- **Hybrid lifecycle via TTL'd keys** — daily/weekly/all-time as separate ZSETs with naming conventions and pre-creation 5min before rollover, so resets are key deletes not state migrations.
-- **Score-range sharding is a read-pattern optimisation, not a write-pattern one** — explicitly contrast with user-id hashing and explain why top-N collapses to a single-shard read.
-- **Approximate ranks for the long tail** — top-K exact, below that bucket via quantile sketches; shows product judgement, not just engineering.
-- **Friends leaderboard is materialised on-read, cached briefly** — `ZMSCORE` over the friend list, in-memory sort, 5-min cache; explain why it avoids per-friendship denormalised storage.
-- **Recovery model is "ZSET is a cache, the upstream event log is truth"** — AOF + replicas bound loss to ~1s and the missing writes are reconstructable.
-- **Tiebreaker encoding** — pack a secondary key (earlier-achieved-time) into the float score so ties resolve deterministically without a separate column or read-side sort.
+Cut first: the friends board, then the multi-region section, then the leaderboard-sprawl case for per-room boards. All three are real and none of them changes the structure. Never cut: the difference between top-N and rank, spans as the reason the structure was chosen, and the exact-head/bucketed-tail boundary.
 #### Appendix
 **Data model**
 
-**Sorted Set (skip list + hash; Redis ZSET shown):**
+Sorted set per logical board, keyed by scope and period:
+
 ```
-ZADD leaderboard:daily:2026-04-14 12500 user_42
-ZREVRANGE leaderboard:daily:2026-04-14 0 99 WITHSCORES   # top 100
-ZREVRANK  leaderboard:daily:2026-04-14 user_42           # user's rank
-ZRANGEBYSCORE ... limit ...                              # neighbors
+lb:daily:{YYYY-MM-DD}     TTL 7d
+lb:weekly:{YYYY-WW}       TTL 30d
+lb:alltime                persistent
+lb:region:{country}       persistent
 ```
 
-**Internals:** skip list + hash → O(log N) ops, O(1) score lookup.
+```
+ZADD      lb:daily:2026-04-14 {packed} user_42
+ZREVRANGE lb:daily:2026-04-14 0 99 WITHSCORES
+ZREVRANK  lb:daily:2026-04-14 user_42
+ZRANGEBYSCORE lb:daily:2026-04-14 ... LIMIT ...
+```
 
-**Persistence:**
-- Append-only log → durable writes
-- Replicas for HA
-- Snapshot to blob store hourly for archival
+Skip list plus hash table: O(log N) write and rank, O(1) score lookup, spans on forward pointers. `packed = points * 2^31 + (2^31 - 1 - t)`. Friends boards are not stored; they are one `ZMSCORE` over the friend list plus an in-memory sort, cached 5 minutes.
 
 **API contract**
 
 ```
-POST /score          body: { user_id, score, leaderboard_id }
-GET  /top/{lb_id}?n=100   → [{user_id, score, rank}]
-GET  /rank/{lb_id}/{user_id}  → { rank, score, neighbors: [...] }
+POST /score                   { user_id, board_id, event_facts }   -> 202
+GET  /top/{board}?n=100                                            -> [{user_id, score, rank}]
+GET  /rank/{board}/{user_id}                                       -> { rank | percentile, score, exact: bool, neighbours: [...] }
 ```
+
+`exact` is part of the contract, not an implementation detail: clients render a number or a band depending on it.
 
 **Observability**
 
-- **Read latency p50/p99** per ZSET op (`ZREVRANGE`, `ZREVRANK`, `ZMSCORE`). SLO: p99 <50ms within-region, <100ms cross-region.
-- **Write latency p99 for `ZADD`** including AOF fsync. SLO: p99 <20ms; alert at >50ms (event-loop saturation).
-- **AOF replication lag** (master_repl_offset minus slave_repl_offset). SLO: <500ms steady state, <5s during snapshot windows.
-- **Per-leaderboard `ZCARD`** trended hourly to predict band-split timing on score-range-sharded boards.
-- **Rank-read freshness** = wall-time minus the score's `ZADD` timestamp for the top-100. SLO: <5s from score submission to rank visibility.
-- **Cheat-detection signal volume** (z-score outliers per minute) as a leading indicator of abuse waves.
+- Rank read p99 per replica. SLO under 50ms in-region.
+- Write batch depth and `ZADD` p99 including AOF fsync. Alert above 50ms, which means event-loop saturation.
+- Replication lag per replica; route reads away above 500ms.
+- Histogram total against the sum of `ZCARD` across shards, hourly. Any divergence means a lost counter update.
+- Score visibility: wall time from match completion to the score appearing in a rank read. SLO under 5s.
+- Anomaly-detection volume per minute, as a leading indicator of an abuse wave.
 
 **Multi-region and DR**
 
-- **Replication mode:** primary Redis cluster in one region; per-region read replicas chained via async replication, sub-second lag in steady state.
-- **RTO (Recovery Time Objective):** ~30s — Sentinel/Cluster failover promotes the regional replica.
-- **RPO (Recovery Point Objective):** up to 1s of writes (the AOF fsync interval); recoverable from the upstream Kafka game-event log so effective RPO is zero.
-- **Failover cadence:** quarterly game-day exercises rotate primary region; auto-failover on health-check failure for unplanned events.
-- **Cross-region cost:** asynchronous replication is cheap (one TCP stream per replica); the dominant cost is hourly RDB snapshot egress to a regional blob store (~hundreds of GB/day per region).
+- Primaries in one region; per-region read replicas over async replication, sub-second lag in steady state.
+- Recovery point about 1s, the AOF fsync interval, and effectively zero given the event log can replay the gap.
+- Recovery time about 30s for a replica promotion. Total loss of the all-time board is tens of minutes of replay, which is a different number and is the one that matters. See the second Unresolved item.
+- Quarterly failover exercises rotate the primary region.
 
 ### 23. Design a Payment System
 #### Problem
@@ -14524,103 +14470,119 @@ WebRTC: media plane (UDP)      ← actual audio/video frames
 
 ### 34. Design a Distributed Cache (Memcached / Redis at scale)
 #### Problem
-Provide a low-latency, in-memory cache layer in front of databases or computed results, distributed across many nodes.
+Put an in-memory tier in front of a database or a computed result so the common read never reaches the origin. It has to hold a working set measured in terabytes across many machines, answer in well under a millisecond, and stay useful while nodes are added, removed and lost. Nothing in it is authoritative, which is what makes it cheap to run and what makes invalidation the hard part.
 #### Core
-TODO
+A cache is a hint store. Nothing in it has to be correct for the system to be correct, and everything follows from that. The hit path is trivial. The engineering is all on the miss path and the invalidation path.
 
-Write the whole answer as you would give it in sixty seconds, 200 to 300 words, standing alone.
+The default shape: the application reads the cache, loads from the origin on a miss, and writes the value back with a TTL. Writes go to the origin first and then delete the key rather than update it, because a delete is idempotent and an update lets a slow reader replace a newer value with an older one.
+
+Keys map to shards by consistent hashing with roughly 150 virtual positions per shard, so adding capacity moves 1/N of the keyspace instead of nearly all of it. Hashing modulo the node count empties the cache on every resize and hands the full read load to the origin.
+
+Three numbers drive the rest. Hit rate is a capacity constraint: at 5M reads per second, slipping from 99% to 98% doubles origin load from 50k to 100k queries per second. Residency, how long a key survives before eviction, falls out of the miss rate and the memory you bought, and it tells you whether TTLs matter. And one hot key lives on one shard, so a million reads per second of a 2KB value is 16 Gbps arriving at a single NIC while the rest of the cluster idles.
+
+The defences are layered and boring: one loader per key on a miss, jittered TTLs, an in process copy of the hottest keys, and a backstop TTL on everything so no staleness is unbounded.
+
+Then say what happens if the whole cache vanishes. If the answer is that the site goes down, it is not a cache.
 #### Summary
 **The picture in your head:** a sticky-note board next to a slow filing cabinet. Every time someone needs a document, they first check the sticky notes. If the note is there, they read it in one second. If not, they go to the filing cabinet (maybe 30 seconds), read the document, slap a sticky note on the board, and put the document back. The sticky notes are limited in number, so old ones fall off when new ones are added. The trick: most people ask for the same documents, so the board gets hot fast and the cabinet sits mostly idle.
 
 **The approaches people actually take:**
-TODO. Two or three things a competent engineer might reach for, in plain language and before any product name, with what each one buys and roughly when it wins.
 
-**The single-request walkthrough:** a user loads their Twitter profile page. The API server asks: "do I have `user:42:profile` in Redis?" Redis is an in-memory key-value store — a program that keeps a giant dictionary in RAM and responds to GET/SET in under 1ms. If the key exists (a "cache hit"), Redis returns the blob and the database is never touched. If not (a "cache miss"), the server reads from Postgres (say, 20ms), stores `user:42:profile` in Redis with a TTL of 300 seconds (TTL = time-to-live, an expiry timer so stale data ages out), then returns the result. The next 10,000 requests for that profile in the next 5 minutes hit Redis each time. The Postgres database handles one read instead of 10,001.
+*The application drives it, and the cache is allowed to be empty.* Read the cache, fall back to the store on a miss, write back what you found, and delete the key whenever you write to the store. This buys the property that matters most: the store stays the only truth, so an empty cache is slow rather than wrong, and losing the cache tier is a capacity event rather than a correctness incident. It costs you invalidation logic scattered across every write path in the codebase, where one forgotten delete is a stale value that survives until its TTL. It wins on read heavy workloads that tolerate seconds of staleness, which is most of them.
+
+*Put the cache in the write path.* Writes go to the cache, which forwards them to the store, either waiting for the store before acknowledging or acknowledging immediately and draining a queue behind it. Waiting buys a cache that is never behind the store and one place where writes to a key are ordered. Not waiting buys write absorption, which is the point for counters and telemetry, and costs you a window of acknowledged writes that a crash loses. It wins when writes are frequent and concentrated on a small set of keys, so the cache is absorbing repeated updates rather than paying an extra hop per unique write.
+
+*Derive invalidation from the store's change log instead of asking writers to remember.* A consumer of the committed change stream deletes the affected keys. There is then one implementation of invalidation, its ordering is the store's commit ordering, and nothing is forgotten because nothing is hand written per call site. The propagation lag becomes the staleness bound you quote to everyone else. It wins once more than a handful of services write the same tables, which is when the first approach quietly stops being correct.
+
+**The single-request walkthrough:** a user loads their profile page. The API server asks the cache for `user:42:profile`. On a hit it gets a 2KB blob back in about 0.3ms and the database is never touched. On a miss it reads the row from Postgres, which costs about 20ms, writes `user:42:profile` back with a TTL of 300 seconds plus a random 0 to 30 seconds of jitter, and returns. The next 10,000 reads of that profile inside those five minutes are hits. The origin served one query instead of 10,001. When the user edits their bio, the write path commits to Postgres first and then deletes `user:42:profile`, so the next reader repopulates it. It does not update the key in place, for reasons the deep dive is entirely about.
 
 **The pieces (and what each one is for):**
-- **Cache cluster (Redis or Memcached)** — a set of servers holding data entirely in RAM. Redis supports rich data types (sorted sets, lists, hashes) and has built-in replication. Memcached is simpler — flat key-to-string only, multi-threaded, slightly faster for pure string caching. Both answer GET/SET in under 1ms.
-- **Consistent hashing ring** — the method for deciding which cache node owns which key. Instead of `hash(key) % N` (which reassigns almost every key when you add or remove a node, emptying the cache), consistent hashing places keys and nodes on a circular ring. Adding a node only moves ~1/N of keys. Without this, every time you scale the cluster, the cache effectively empties and your database gets hammered.
-- **Cache-aside (lazy loading)** — the most common access pattern. The application code checks the cache, reads from the database on a miss, and writes to the cache itself. The cache is allowed to be wrong or empty — it is a performance optimization, not the source of truth. The alternative, write-through, keeps cache and database perfectly in sync by writing to both synchronously on every write, but this slows writes.
-- **TTL + LRU eviction** — two separate mechanisms that remove data. TTL expires a key after a fixed time (good for session data, pricing data that changes hourly). LRU (Least Recently Used) eviction kicks in when the cache is full: the key that was least recently accessed is removed to make room for new data.
-- **Twemproxy / mcrouter** — proxy servers that sit between your application servers and the cache nodes. Without them, if you have 10,000 app servers and 100 cache nodes, you need 10,000 × 100 = 1 million persistent TCP connections. The proxy multiplexes many app server connections onto a much smaller set of backend connections.
+- **Cache cluster.** Servers holding data entirely in RAM, answering GET and SET in well under a millisecond. Redis carries rich types (hashes, sorted sets, streams) and native replication; Memcached is flat string to string, multi threaded, and has no persistence or replication primitive at all. The choice is about which features you need, not about which is faster.
+- **Consistent hashing ring.** Decides which shard owns which key. Hashing modulo the node count reassigns nearly every key when the node count changes, which empties the cache and sends the whole read load to the origin at exactly the moment you were trying to add capacity. On a ring, adding a shard moves only the keys between the new position and its predecessor, about 1/N of the keyspace.
+- **Virtual nodes.** Each physical shard occupies about 150 positions on the ring rather than one. With a single position per shard, hash placement luck produces 2x to 3x load imbalance between shards; with 150, the imbalance falls into the low percent.
+- **TTL and eviction.** Two different mechanisms that both remove data. A TTL bounds how stale a value can be, and it is the only bound whose enforcement does not depend on another system being reachable. Eviction is what happens when memory is full, and it decides which keys survive, which is a completely separate question from which keys are still fresh.
+- **Proxy tier.** With 10k application servers connecting directly to 60 shards, each shard terminates 20k sockets. A proxy fleet multiplexes those onto a few hundred backend connections per shard and gives you one place to change topology, at the cost of an extra hop of roughly 100 to 500 microseconds.
 
-**The thing that makes it hard:** a popular cache key expires — say `trending:homepage` — and at exactly that moment 10,000 simultaneous web requests all miss the cache, all read from the database at the same time, all try to write the result back to the cache, and the database buckles under 10,000 queries instead of the usual 1. This is called a cache stampede (or thundering herd). Concrete scenario: it is 12:00:00.000. TTL was set to 3600 seconds, set at 11:00:00. 10,000 users load the homepage simultaneously. Each one gets a cache miss, each fires a database query, the database goes from handling 10 queries/second to 10,000 in the same instant.
+**The thing that makes it hard:** a popular key expires and 10,000 concurrent requests miss it in the same millisecond. Each one queries the origin, each one writes the result back, and the origin goes from 10 queries per second on that key to 10,000. This is the cache stampede, and the same shape shows up whenever a cache empties: after a deploy that changes the key format, after a failover to a cold region, after an operator flush. The mechanism is identical, only the trigger differs, and the version of it that happens at the edge of a CDN is Q51.
 
-**Why this design and what it costs:** three layered defences, all applied together. First, **single-flight**: only the first thread that detects a miss actually queries the database; the other 9,999 wait on a per-key in-memory lock and read the freshly-populated cache value when it completes. Second, **probabilistic early refresh**: as a key approaches its TTL, randomly choose one request to refresh it before it actually expires — so the stampede never happens. Third, **jittered TTL**: instead of setting TTL to exactly 3600 for every key, set it to `3600 + random(0, 360)`. This breaks synchronization so keys from the same batch write don't all expire at the same millisecond. Use all three; picking just one leaves gaps.
+**Why this design and what it costs:** three defences layered together, because each leaves a gap the others cover. First, one loader per key: the first request that detects a miss takes a short lived per key lock, queries the origin, populates the cache and releases it, while everyone else waits and reads what it wrote. Second, refresh before expiry: as a key approaches its TTL, each read has a small and rising chance of triggering a refresh, so the value is replaced while it is still being served and the expiry never actually arrives. Third, jittered TTLs: set 3600 plus a random 0 to 360 rather than exactly 3600, so keys written in the same batch do not expire in the same millisecond. The first defence limits the damage of an expiry, the second and third stop the expiry from being synchronised in the first place, and none of them helps at all with a cache that starts empty.
 
 **If you were building it tomorrow:**
-- Redis Cluster (6 nodes: 3 primary + 3 replica, sharded by consistent hash). Memcached if you only need plain string values and want simpler failure semantics.
-- Cache-aside for reads, write-then-delete-cache (not write-then-update-cache) on writes — deleting forces the next reader to re-fetch, avoiding a race where a slow writer overwrites a fresh value.
-- Hot-key mitigation: replicate `trending:homepage` across 5 shards, pick one at random per read:
-  ```
-  key = f"trending:homepage:{random(0, 5)}"
-  val = redis.get(key)
-  if not val:
-    val = db.query(...)
-    redis.setex(key, ttl=3600 + random(0,360), value=val)
-  ```
-- On Redis timeout (>5ms): log, return stale or partial data, never block the request indefinitely.
+- Redis Cluster, 60 primary shards with one replica each, 180GB maxmemory per shard, persistence off. Memcached if plain string values are genuinely all you need and you want the simpler failure model.
+- Cache aside on reads. On writes: commit to the origin, then delete the key. Never update the key.
+- Backstop TTL on every key, no exceptions, jittered by 10%.
+- Hot key handling: an explicit allowlist of keys that get a per process L1 with a 1 second TTL, plus key level replication across 8 shards for anything above the NIC threshold.
+- On a cache timeout above 5ms: treat it as a miss, count it, and go to the origin. Never block the request waiting for the cache.
 #### What this is really testing
-TODO
+Whether you can hold two ideas at once: the cache may lose any value at any moment with no correctness consequence, and it may not serve a wrong value for an unbounded time. Most candidates hold one of them. Hold only the first and the cache becomes free in your head, and you ship a system that shows a customer a price that changed twenty minutes ago. Hold only the second and you reach for replication, persistence and quorum reads, and rebuild a slow database that happens to live in RAM. The actual work is picking the staleness bound in seconds, per class of key, and then choosing the cheapest mechanism that enforces it, which is almost always a TTL with something better layered on top for the few keys that deserve it.
 
-The one insight this question exists to elicit, then the contrast with the question it most resembles and why the answers differ.
+The contrast is with the distributed lock. Both are shared mutable state that a fleet reads and writes, both get treated as a small operational component rather than a system, and both are routinely built on the same Redis box. They diverge entirely on what a lost write costs. If the cache loses a SET, a later reader takes a miss and reloads: the price is one origin query. If the lock service loses a grant, two workers believe they hold the same lock, they both write the protected resource, and the data is corrupted in a way no retry repairs. That single difference decides everything downstream. The lock needs consensus, a monotonically increasing fencing token, and a resource that checks the token, and it pays tens of milliseconds for them. The cache needs none of that, and paying for it would destroy the only reason it exists.
 
-Closest question: TODO
+The trap is the case that looks like both. The per key lock that stops 10,000 requests stampeding the origin is a lock, and it is correct to build it out of the cache with no consensus and no fencing at all, because the worst outcome of losing it is a duplicate query. Say that out loud and you have shown you understand the axis rather than the pattern.
+
+Closest question: Q35
 #### Clarifying questions and how each answer forks the design
-- Read-through, write-through, write-behind, or cache-aside?
-- TTL or LRU eviction?
-- Strong consistency between cache and DB?
+- Cache aside, read-through, write-through, or write-behind?
+- What staleness is acceptable, in seconds, and is it the same for every class of key?
+- Read to write ratio?
+- Is anything cached derived from more than one source row?
+- What is the origin's read capacity, in queries per second?
+- Eviction by time, by recency, or by something scan resistant?
 - Multi-region?
-- Cache size target?
 
 **How the answers shape the design**
 
 | If the answer is… | Then the design… |
 |---|---|
-| Cache-aside | the app reads cache, loads the DB on miss, and writes back — simplest and most common |
-| Write-through or write-behind | the cache sits in the write path (consistent, or async and faster but riskier on crash) |
-| TTL eviction | expire by time — good for freshness-bounded data |
-| LRU eviction | evict by recency when memory-bound — good for hot-set workloads |
-| Strong cache/DB consistency | invalidate on write and accept the extra coordination; otherwise tolerate brief staleness |
-| Multi-region | per-region cache clusters with independent invalidation, not one global cache |
-| Large cache size | shard across nodes with consistent hashing and replicate hot keys |
+| Cache aside | the app reads cache, loads the origin on a miss, and deletes the key on write; simplest and the default |
+| Write-through or write-behind | the cache sits in the write path: consistent but slower per write, or fast but losing a crash window |
+| Staleness budget in minutes | a TTL alone carries it and invalidation becomes an optimisation rather than a requirement |
+| Staleness budget under a second | versioned values or leases, no per process L1, and the propagation lag becomes the thing you engineer |
+| Read to write ratio above 100:1 | cache aside; putting the cache in the write path buys nothing on 99% of operations |
+| Derived / composite cached values | a mapping from source row to cache key that nothing generates for you, so short TTLs on that key class |
+| Origin capacity known | the required hit rate is arithmetic, not a target: misses per second must stay under it |
+| Scan-heavy access | an admission policy in front of the cache, not a bigger cache |
+| Multi-region | independent per-region pools with delete broadcast, never one global cache |
 #### Requirements and scale, derived out loud
 **Requirements**
 
-- **FR:** GET, SET, DELETE with TTL; eviction; (optionally) data structures (lists, sets)
-- **NFR:** sub-ms p99, distributed across hundreds of nodes, partition tolerance, partial restart OK
+- **FR:** GET, SET with TTL, DELETE, bulk GET; eviction under memory pressure; optionally atomic counters and the richer types.
+- **NFR:** sub-millisecond p99 at the cache; a hit rate high enough that the origin stays inside its own capacity; a single node loss visible only as extra misses; topology changes without a cluster wide flush.
 
 **Scale**
 
-- **Cluster size:** hyperscale deployment 100s of nodes; multi-TB RAM (see derivation); millions of ops/s aggregate
-- **Cache entry size:** typical 1–10 KB per value (serialised user profile, rendered page fragment, query result); ~2 KB avg = (key ~64 B + value ~1.8 KB + LRU pointers ~32 B + TTL ~24 B + slab/hash overhead ~80 B) → ~2 KB
-- **Total key count:** ~5B keys at fleet scale (Twitter/Facebook-class workloads, public engineering posts); 5B × 2 KB = 10 × 10⁹ KB ≈ ~10 TB working set across the pool
-- **Memory per node:** large RAM nodes ~256 GB each (typical r-class instance); 10 TB / 256 GB = 40 → ≈ 40 primary nodes minimum to hold working set
-- **Replication factor:** 1 master + 1–2 replicas per shard for HA → 3× memory footprint = 10 TB × 3 = ~30 TB total RAM provisioned across the fleet
-- **Throughput per node:** modern Redis/Memcached commodity-hardware ceiling ~200k ops/s (single-thread Redis pegged at ~1 CPU); 100 nodes × 200k = ~20M ops/s aggregate headroom
-- **Network per node:** 200k ops/s × 2 KB avg payload = 400 MB/s = 400 × 8 = ~3.2 Gbps per node → drives 25 GbE NIC choice; hot keys saturate this single-key first → forces replication-by-key
-- **TTL heap overhead:** ~24 B per key for expiry tracking (timer-wheel/skiplist node); 5B × 24 B = ~120 GB across the fleet, non-trivial
-- **Connection footprint:** 10k app servers × ~20 connections each (per-app connection pool) × 100 cache nodes / 100 nodes = ~200k persistent TCP connections per cache node → drives FD limits + Twemproxy/mcrouter proxy-tier choice
+- **Read volume:** 10k app servers × 100 requests/s × 5 cache gets per request = **5M gets/s peak**. Writes run at roughly 1% of reads, so **50k writes/s**, giving the 100:1 read to write ratio that decides the first fork below.
+- **Entry size:** key ~64B + serialised value ~1.8KB + eviction list pointers ~32B + expiry metadata ~24B + allocator and hash overhead ~80B ≈ **2KB per entry**.
+- **Working set:** ~5B keys actively worth caching × 2KB = 10 × 10⁹ KB = **~10TB**. This is the working set and not the corpus; the corpus behind it is more than an order of magnitude larger and is never all cached, which is the whole point.
+- **Shards:** 256GB boxes with maxmemory capped at 180GB (70%, leaving room for fragmentation, client buffers and any fork). 10TB / 180GB = 56, round to **60 primary shards**. One replica each gives **120 processes**, so 120 × 256GB = **~30TB of RAM provisioned** to hold a 10TB working set.
+- **Per shard throughput:** 5M / 60 = **~83k ops/s per shard**, against a practical single threaded ceiling of 150k to 200k ops/s for simple GETs on current hardware. That is roughly 2x headroom, which is what absorbs one shard inheriting a failed peer's traffic.
+- **Per shard network:** 83k × 2KB = 166 MB/s = **~1.3 Gbps**, trivial on 25 GbE. The NIC only becomes the constraint for a single key: 1M reads/s × 2KB = 2 GB/s = **16 Gbps on one node**, which is 64% of one 25 GbE port consumed by one key while 59 shards sit idle.
+- **Origin capacity and the hit rate that follows:** 50 read replicas × 2k QPS = **100k QPS available**. Misses must fit inside it: 5M × (1 − h) < 100k, so **h > 98%**. Hit rate is therefore a capacity constraint rather than a target. At 99% there are 50k misses/s and half the origin is spare; at 97% there are 150k misses/s and the origin is 50% over.
+- **Residency:** in steady state admissions equal misses, so 5M × 2% = **100k admissions/s**, which is 100k × 2KB = 200 MB/s of churn. A 10TB cache therefore turns over in 10TB / 200MB/s = 50,000s ≈ **14 hours**. That is how long an unread key survives, and it is the number TTLs get compared against.
+- **TTL driven refresh:** total key count does not drive refresh load; only keys read more often than their own TTL do. Assume ~10M such keys on a 300s TTL: 10M / 300 = **33k refreshes/s**, comfortably inside the 100k origin budget and a subset of the 100k misses/s above. Cut that TTL to 60s and it becomes 10M / 60 = 166k/s, which the origin cannot serve. The affordable TTL is set by the size of the actively read set, not by the total key count.
+- **Connections:** 10k app servers × 2 connections per shard × 60 shards = **1.2M sockets**, which is **20k per shard**. At ~20KB of socket and reply buffer per client that is 20k × 20KB = **400MB per shard**, about 0.2% of its 180GB, plus the cost of polling 20k descriptors. A tier of 200 proxies at 4 connections per shard cuts it to **800 per shard**.
+- **Expiry metadata:** 24B × 5B keys = **~120GB fleet wide**, 1.2% of the working set. Small, but it is why putting a TTL on everything is not literally free at this key count.
 #### Key decisions
-TODO
+**Cache aside, or the cache in the write path**
 
-Two or three genuine forks. For each, in this exact shape so it stays checkable:
+- Choice: cache aside for reads. On a write, commit to the origin and then delete the key.
+- Alternative: write-through, where the application writes the cache and the cache writes the origin, acknowledging only when both are committed; or write-behind, where the cache acknowledges immediately and drains to the origin asynchronously.
+- Decider: the read to write ratio, and what one lost acknowledged write costs. At 100:1 (5M reads/s against 50k writes/s) write-through changes nothing for 99% of operations while adding a hop and a new failure mode to the 1%, and it caches values nobody has asked for. Below roughly 10:1, and especially where the same key is written repeatedly, that arithmetic flips. Write-behind is a separate question with one number: at 50k writes/s and a 200ms flush interval, a process crash loses up to 10,000 acknowledged writes, so it is only available where losing them is acceptable.
+- Alternative wins when: write-through wins where the cache is the read path for a value that must never lag the origin and there is one writer per key, so the cache can order writes for that key itself. Write-behind wins for counters, view tallies, session heartbeats and telemetry, where writes are dense, repeated on the same key, and individually worthless. Both are genuinely better than cache aside in those cases and it is worth saying so rather than dismissing them: what makes cache aside the default is the ratio, not any inherent superiority.
 
-**<name of the fork>**
-- Choice:
-- Alternative:
-- Decider:
-- Alternative wins when:
+**LRU, or an admission policy in front of the cache**
 
-**Raw material, from the old Common Mistakes:**
+- Choice: LRU with a backstop TTL, which is the default in every cache server and is right for a workload whose popularity is stable.
+- Alternative: an admission policy that decides whether a newly fetched key deserves to displace what is already resident. W-TinyLFU (2015) keeps a counting sketch of recent frequency and admits a new key only if it looks more popular than the victim; S3-FIFO (SOSP 2023) reaches a similar result with no sketch, by putting every new key into a small probationary FIFO queue and promoting it only if it is read a second time before leaving.
+- Decider: whether the workload scans, measured as the share of admissions evicted having been read exactly once. Below about 20% one hit wonders, LRU is fine and the extra machinery is not worth it. Above about 50%, at 100k admissions/s and a 14 hour residency, half of a 10TB cache is holding keys nobody will read again, and admission control recovers that space directly. The second half of the decider is whether eviction is even the binding mechanism: if median TTL is 300s and residency is 14 hours, keys expire long before eviction reaches them, the eviction policy is nearly irrelevant, and this fork can be skipped entirely.
+- Alternative wins when: the workload sweeps a large key range once. Search result caches, feed backfills, analytics jobs reading a table end to end, and anything driven by crawlers all do this, and a single nightly batch can flush a day of warm state through LRU in minutes. The concession is that admission control is not free: a sketch costs a few bytes per tracked key, and both schemes are hostile to a genuine sudden shift in popularity, since a newly popular key has no history and gets refused. W-TinyLFU carries a small LRU admission window for exactly that case, and both need a decay or windowing scheme so yesterday's popularity stops counting.
 
-- *Invalidate-then-write ordering.* Race-prone — a slow concurrent writer reads, the invalidator deletes, the slow writer SETs stale data, and the cache is now poisoned. Write-then-delete is the correct ordering, with leases or CDC-driven invalidation for tighter consistency.
-- *Updating the cache on write rather than deleting.* Lets a slow concurrent writer overwrite with stale data — DELETE forces re-read on next miss, which is the correct repair.
-- *Mod-N hashing for sharding.* Adding one node remaps almost every key; consistent hashing with virtual nodes is non-negotiable at any real scale.
-- *Treating Redis-with-persistence-on as a cache.* Durability adds latency the cache doesn't need; if you need durability, you need a database.
-- *Writing cache + DB synchronously without thinking through write-through cost.* Write-through serialises every write through the cache — slow writes; pick cache-aside unless the access pattern justifies it.
-- *Ignoring stampede protection on hot endpoints.* One expired key can take down the DB; single-flight + probabilistic early refresh + jittered TTL must all be on by default for popular keys.
-- *Picking Memcached then needing atomic counters / sorted sets.* Bolting Redis-style features onto Memcached is brittle — choose Redis upfront if any roadmap feature needs the rich types.
+**In process L1 for hot keys, or key level replication**
+
+- Choice: an explicit allowlist of hot keys cached inside each application process with a 100ms to 1s TTL.
+- Alternative: replicate the hot key across N shards under suffixed names (`trending:home:0` through `:7`) and have each read pick a suffix at random.
+- Decider: the staleness budget against the fanout arithmetic. Reads reaching the cache tier for one key fall to P/T, where P is the number of application processes and T the L1 TTL. At P = 10k and T = 1s that is 10k/s instead of 1M/s, a 100x cut that takes the key from 16 Gbps on one NIC to 160 Mbps. What it costs is exact: the key's staleness floor is now T, and no delete can shorten it, because there is no path from the invalidator to 10,000 process heaps. Key level replication across 8 shards divides the same 16 Gbps into 2 Gbps each and keeps delete working, at the cost of 8 SETs per fill and 8 deletes per invalidation.
+- Alternative wins when: the value gates money or access, so it must be invalidatable inside the staleness budget: prices, entitlements, feature flags, rate limit state. It also wins when the fanout arithmetic stops working, which happens with many short lived processes: at P = 100k with T = 100ms, P/T is 1M/s and the L1 has bought nothing at all. The two are not exclusive and the honest answer at real hot key volume is both, with the L1 restricted to a key class whose staleness budget genuinely exceeds its TTL.
 #### High-level design
 **must-say**
 
@@ -14693,41 +14655,41 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 </svg>
 ```
 
-**How to read the diagram:** requests always try the cache before the database. On a hit, the request is cheap. On a miss, the application loads the value from the backing store and repopulates the cache for the future.
+**How to read the diagram:** reads try the cache before the origin. On a hit the request is cheap and the origin never learns it happened. On a miss the application loads from the origin and repopulates, so the miss path is also the fill path and every miss is a small write.
 
-**Why the flow is shaped this way:** the cache exists to absorb read pressure, not to become a second database you reason about independently. That is why the miss path, expiry behavior, and invalidation strategy matter as much as the in-memory lookup itself.
+**Why the flow is shaped this way:** the cache absorbs read pressure and is deliberately not a second database you reason about independently. The application, not the cache, knows which origin row a key came from and when it changed, so invalidation lives in the application or in a consumer of the origin's change log, never inside the cache.
 
-**What this layout buys you:** lower latency and lower database load when the cache is healthy. The tradeoff is consistency complexity, especially around stampedes and stale data.
+**What this layout buys you:** low latency and an origin sized for misses rather than for reads. The cost is that correctness now depends on invalidation you wrote by hand, and that availability quietly depends on the cache staying warm, since the origin is provisioned for 100k QPS against a peak read load of 5M/s.
 #### Deep dive
 **must-say**
 
-**Caching strategies:**
+**Invalidation: keeping a cache that is allowed to be empty from also being wrong forever.**
 
-| Strategy | Read | Write | Pros | Cons |
-|---|---|---|---|---|
-| **Cache-aside** (lazy) | check cache → DB on miss → set cache | write to DB; invalidate cache | simple, only cache what's needed | inconsistent on race |
-| **Read-through** | cache fetches from DB on miss | write to DB | clean app code | requires loader |
-| **Write-through** | check cache | write cache + DB sync | consistent | slow writes |
-| **Write-behind** | check cache | write cache; async to DB | fast writes | data loss risk |
+This is the part that gets drilled, because it is where a cache stops being a performance optimisation and becomes able to show a customer the wrong number.
 
-**Cache-aside is the default.**
+**The ordering, and why only one of the four combinations survives.** You have two operations, writing the origin and mutating the cache, and two ways to mutate: delete the key or overwrite it. Three of the four combinations are broken.
 
-**Eviction policies:**
+*Delete the cache first, then write the origin.* Between the delete and the commit, any reader misses, reads the pre-write value from the origin, and caches it. The window is the duration of the origin write, single digit milliseconds under load, and on a key being read thousands of times per second that window is not a risk, it is a certainty.
 
-| Policy | How | Best for |
-|---|---|---|
-| **LRU** | evict least recently used | recency-biased access |
-| **LFU** | evict least frequently used | popular items dominate |
-| **TTL** | expire after time | session, time-bound data |
-| **Random** | random pick | simplest; surprisingly OK |
+*Write the origin, then overwrite the cache.* Two concurrent writers can commit in one order and apply their cache SETs in the opposite order, leaving the cache holding the older value with nothing but the TTL to dislodge it. Deletes do not have this problem because deletes commute: any interleaving of two deletes leaves the key absent, and absent is always safe.
 
-**Sharding (consistent hashing).** Each cache node owns ~150 virtual positions on a 2^32 hash ring; a key's owner is the next virtual node clockwise from `hash(key)`. Adding a node creates 150 new ring positions; only keys whose hash falls between the new node and its predecessor move — about 1/N of the keyspace. Removing a node redistributes its keys to the next clockwise nodes, again only 1/N moving. Without virtual nodes, lucky/unlucky hash placement creates 2-3× load imbalance; with them, load is near-uniform. Clients can compute shards locally (every client has the ring topology) or go through a proxy (Twemproxy, Redis Cluster's smart client) — direct-from-client is one less hop.
+*Write the origin, then delete the cache.* This is the one to name. It is correct in every case above, and it is what the rest of this section is defending.
 
-**Cache stampede (thundering herd on miss).** A popular key expires; 10,000 concurrent requests miss simultaneously and all hit the DB in the same millisecond. Three layered defences. *Single-flight*: first requester acquires a per-key in-cache lock, loads from DB, populates cache, releases; others wait on the lock and read the freshly-cached value. *Probabilistic early refresh*: each get computes a probability proportional to proximity to expiry and a random one-in-N requester triggers an early refresh — one client takes the hit instead of all 10k. *Jittered TTL*: when setting, add `±10%` random jitter so synchronised expiries never happen in the first place. Use all three for hot endpoints.
+**The race that write then delete does not fix.** A reader misses and reads v1 from the origin. It then stalls: a garbage collection pause, a descheduled thread, a retried RPC. Meanwhile a writer commits v2 and deletes the key, which is a no-op because the key is already absent. The reader wakes and SETs v1. The cache now holds a value the origin has already superseded, and it holds it until the TTL expires. The window is the reader's stall, not the write duration, so it is unbounded in principle. Per request it is rare; at 100k misses/s a one in a million race poisons a key every ten seconds, and it will be a popular key, because popular keys miss most often in absolute terms.
 
-**Replication (Redis Cluster).** Each shard has a master plus N replicas (typically 1-2). Writes go to the master; async replication ships the change to replicas with sub-millisecond lag. Failover is gossip-driven: nodes detect master death via missing heartbeats, elect a replica, promote it, propagate the new topology to all clients. Failover takes ~10s; during that window, keys on the failing shard return errors. Replicas can serve reads for read-heavy workloads but you accept eventual consistency — a write that hit the master might not be visible on the replica for a moment. For correctness-sensitive reads, route to the master only.
+Three fixes, in increasing order of cost.
 
-**Read/write strategy comparison.**
+*A backstop TTL.* It bounds the damage and does nothing else. Its value is that it is the only mechanism whose correctness does not depend on another system being reachable: the invalidation pipeline can be down, the writer can have forgotten the delete, the broadcast can have been dropped, and the key still expires. Everything below layers on top of a TTL, never instead of one. The affordable value comes from the refresh arithmetic above: 10M keys read more often than a 300s TTL is 33k refreshes/s inside a 100k QPS budget, where a 60s TTL would be 166k/s and take the origin down.
+
+*Versioned values.* Store the payload with a version taken from the origin, a row version column or the log sequence number of the commit, and reject a SET carrying a version lower than the one present. This closes the race completely: the stalled reader's v1 SET loses to the resident v2. It also composes, since a per process L1 can compare versions and a cross region pool can reject an out of order replicated write. The costs are real. SET becomes a compare and set, a Lua script on Redis or the CAS token on Memcached. Every value grows 8 bytes, so 5B × 8B = 40GB fleet wide. And a value derived from several source rows has no single version to compare, which is where this stops working.
+
+*Leases.* On a miss the cache issues a token and records it against the key; only a SET carrying a live token is accepted, and a DELETE invalidates outstanding tokens so the stalled reader's SET is rejected on arrival. This is the mechanism from Facebook's memcache work (NSDI 2013), and it does double duty: the cache grants one lease per key per interval and tells every other misser to wait or take the last known value, which is the stampede defence for free. The cost is that the cache is no longer a plain key value store. Memcached implements leases; Redis does not, so it becomes a Lua script plus a second key per outstanding lease.
+
+**A delete is only as good as its fanout.** It has to reach the primary shard, every replica serving reads, every region's pool, and every process level L1. The first two are cheap and ordered. Cross region broadcast is best effort by construction, and there is no acknowledgement worth waiting on without making a local write depend on a remote region. The L1 is worse: the delete cannot reach it at all, which is why the L1 fork above is an explicit allowlist. Putting an L1 in front of a key whose invalidation you rely on silently converts that invalidation into a TTL.
+
+**What write-through does and does not fix.** For a single writer it removes this whole class of problem. With N application servers writing one key concurrently, the cache still has to order two cache writes against two origin commits, so the problem has moved rather than gone, unless the cache is the origin's only writer. That is a strong commitment and not one you get to make retroactively.
+
+**The four write paths and what each one leaves you to solve.**
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 790" role="img" aria-label="Cache read/write strategy comparison: cache-aside, read-through, write-through, write-back">
@@ -14859,134 +14821,163 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 </svg>
 ```
 
-Cache-aside is the default because the app code holds the truth — only what's read gets cached, only what's written is invalidated; the cache is allowed to be lossy and stupid. Read-through hides the loader inside the cache library — cleaner app code, requires you to teach the cache how to read the DB. Write-through is the only one that gives strong cache-DB consistency but pays a sync DB write on every write. Write-behind is fast on writes but loses anything queued at the moment of crash — only acceptable for telemetry/counter workloads where eventual loss is fine. *[Source: Memcached/Redis docs, common cache-strategy literature]*
+Cache aside leaves you the race above and a store that is always authoritative. Read-through hides the loader inside the cache library: cleaner call sites, identical invalidation problem. Write-through orders writes at the cache and pays an origin commit on every one. Write-behind acknowledges before the origin has the data, which is a different guarantee rather than a faster version of the same one.
 
-**Twemproxy / mcrouter: proxy-based sharding.** Client-side hashing puts the consistent-hash ring inside every app server — fast, but every app server holds N persistent connections to N cache nodes (the "N×M connection mesh"). Twitter's *Twemproxy* (nutcracker) and Facebook's *mcrouter* sit between clients and cache nodes: app servers connect to a small proxy fleet, the proxy holds the connections to backends, multiplexes many client requests over fewer backend connections, and runs the consistent hash on the proxy side. Wins: dramatically fewer TCP connections per backend, central place for routing/observability/online reconfig, transparent topology changes (move a shard without redeploying clients). Mcrouter at Facebook serves ~5 B requests/sec at peak and adds prefix routing (`route by key prefix`), replicated pools (writes to multiple regions), shadow traffic for safe testing, and cold-cache warmup. Cost: extra hop (~100-500 µs), proxy is a SPOF if not carefully replicated. *[Source: github.com/twitter/twemproxy, github.com/facebook/mcrouter]*
-
-**Memcached vs Redis trade-offs (the actual decision).** Memcached: flat string-only key→value, multi-threaded (one process saturates many cores), LRU only, no persistence, no replication primitive, simpler failure model. Redis: rich data types (lists, sets, sorted sets, streams, hashes, bitmaps), single-threaded per process (run multiple per box for cores), TTL + LRU + LFU eviction, optional AOF/RDB persistence, native replication and cluster mode. Pick Memcached when you want a pure cache and the simplest possible failure semantics — a string blob keyed by string is enough, and no persistence means restart-as-empty is the design, not a bug. Pick Redis when you need the data structures (rate limiter counters, leaderboards via sorted sets, dedupe via SET, pub/sub) or you want the cluster mode and replication built in. Both can be put behind Twemproxy or mcrouter; Redis Cluster ships its own smart-client sharding instead. *[Source: Memcached & Redis docs]*
+**The gap none of these close.** Driving invalidation off the origin's change log gives ordering for free and one implementation instead of one per call site. What it cannot give you is the mapping from a changed row to the keys derived from it. A rendered fragment built from a user row, a settings row and three feed rows has no key a row level change event can name, nothing generates that mapping, and it drifts every time someone adds a cached view. That is the first Unresolved item below, and it is the same problem a CDN has invalidating derived objects (Q51).
 #### Where it breaks
 **must-say**
 
 **Bottlenecks**
 
-- **Hot key** (viral tweet: 100k req/s on one node, saturates its NIC) — single-shard ownership becomes the bottleneck. Replicate the hot key across multiple shards (key-level replication, not shard-level) and have clients pick a shard at random per read; alternatively, a client-side L1 cache with 10ms TTL absorbs most reads in-process before the network is touched.
-- **Cache stampede** (10k concurrent misses on the same expired key) — naive miss handling stampedes the DB. Single-flight (first miss locks, others wait) reduces it to one DB hit; probabilistic early refresh + jittered TTL prevent synchronised expiries upstream.
-- **Cache invalidation race** (DB update committed, cache invalidation delayed, slow reader populates cache with pre-write value) — readers can re-cache stale data. Canonical pattern is write-DB-then-delete-cache (delete, not update). For tight consistency, drive invalidation off a CDC stream so cache mutations are ordered by the DB commit log; or use Facebook-style leases (only the leaseholder can SET the key); short backstop TTL bounds the staleness window.
-- **Memory pressure** — once memory hits the cap, the node either crashes (OOM) or evicts. Enforce max memory; LRU is the default eviction policy because recency is the simplest predictor of future access; LFU when popularity dominates; allkeys-vs-volatile chooses whether non-TTL keys are evictable.
-- **Network saturation** (200k ops/s × 2KB = 3.2 Gbps per node, hits 25 GbE NIC) — at high op rates, the wire becomes the limit before CPU does. Client-side L1 caching reduces ops to the network; payload compression reduces bytes per op; for pathological hot keys, replicate across shards so the load splits.
-- **N×M connection mesh** (10k app servers × 100 cache nodes = 1M persistent TCP connections) — direct client-to-node hashing scales the connection count by clients × backends, exhausting backend file descriptors and inflating per-node memory. Mitigation is a proxy tier (Twemproxy / mcrouter): app servers connect to a small proxy fleet, proxies multiplex onto backend connections. Pays one extra hop (~100-500 µs) for an order-of-magnitude reduction in connection count plus central observability. *[Source: Twemproxy, mcrouter]*
-- **Memcached vs Redis mismatch** (chose Memcached then later need atomic counter / leaderboard / pub-sub) — Memcached is flat KV by design; bolting on rate-limit counters via INCR-style hacks is brittle. Choose Redis upfront if any roadmap feature needs the richer types. Conversely, Redis-with-persistence-on as a cache is a self-inflicted wound — durability adds latency the cache doesn't need.
-- **Multi-region cache divergence** (writer in us-east invalidates `user:42`; readers in eu-west still see stale value until invalidation propagates) — mcrouter-style replicated pools with delete-broadcast handle this for write-then-delete-cache patterns; for cross-region atomic invalidation, route reads through a single primary or accept eventual cross-region consistency with a short backstop TTL. *[Source: Facebook mcrouter multi-region]*
+- **Hot key.** A single key is owned by a single shard, so 1M reads/s of a 2KB value is 16 Gbps on one NIC while the other 59 shards run at 1.3 Gbps. Mitigation is the third fork above: an L1 allowlist where the staleness budget allows it, key level replication across 8 shards where it does not. Neither engages until the key is detected as hot, which is the third Unresolved item.
+- **Cache stampede.** A popular key expires and 10k concurrent misses hit the origin in the same millisecond. One loader per key reduces it to a single origin query; probabilistic refresh before expiry and jittered TTLs stop the synchronised expiry happening at all. Note the loader lock is a distributed lock built on the cache with no fencing, and that is correct here, because losing it costs a duplicate query (Q35).
+- **Invalidation race.** Covered in the deep dive: commit then delete, with a backstop TTL always, plus versioned values or leases for the key classes whose staleness budget is tight.
+- **Memory pressure.** At the memory cap a node either evicts or dies. Set maxmemory to 70% of RAM so fragmentation and client buffers have somewhere to live, and choose explicitly whether keys without a TTL are evictable, because the default in most deployments is that they are not, which turns a memory cap into an out of memory kill.
+- **Connection count.** 10k app servers × 60 shards at 2 connections each is 1.2M sockets, 20k per shard and 400MB of buffers. A proxy tier cuts it to 800 per shard for an extra 100 to 500 microseconds per operation, and gives one place to change topology without redeploying every client. It also becomes a component that can fail, so it needs enough instances that losing one is not a thundering reconnect.
+- **Cross region divergence.** A writer in one region deletes a key; readers in another see the old value until the delete arrives. Delete broadcast between regional pools handles the common case; the residual is bounded only by the backstop TTL, and that bound is what you publish rather than pretending the pools are coherent.
+- **Replica lag on reads.** Serving reads from replicas multiplies read capacity and means a read can return a value the primary has already deleted. Route anything whose staleness budget is under the replication lag to the primary, and be explicit that "read from replicas" is a second staleness source stacked on top of the TTL.
 
 **Failure modes**
 
 | Layer | Failure | Detection | Mitigation |
 |---|---|---|---|
-| Cache node | Process crash / OOM | Health probe + miss-rate spike on owning shard | Replica promotion (Redis Cluster) within ~10 s; clients miss-through to DB during failover |
-| Sharding | Topology change remaps almost every key (mod-N hash) | Cluster-wide miss-rate spike on resize | Consistent hashing with virtual nodes — only 1/N of keys move when adding/removing |
-| Stampede | Hot key expires, 10k concurrent misses | DB latency spike correlated with cache miss | Single-flight per-key lock; probabilistic early refresh; jittered TTL |
-| Hot key | Single key saturates a node's NIC | Per-node bandwidth + per-key request count | Replicate the hot key across N shards (key-level replication); client-side L1 with 10 ms TTL |
-| Invalidation race | Writer invalidates after slow reader has set stale value | Stale data symptoms in app logs | Write-DB-then-delete-cache (delete, not update); CDC-driven invalidation; leases (only leaseholder may SET) |
-| Connection mesh | N×M client→backend TCP exhausts FDs | FD exhaustion alerts on backends | Twemproxy / mcrouter proxy tier multiplexes connections |
-| Cross-region | Stale cross-region after write in another region | Cross-region read inconsistency | Replicated pools with delete-broadcast (mcrouter); short backstop TTL accepts bounded staleness |
-| Replica lag | Read-from-replica returns pre-write value | Per-shard replication lag p99 | Route correctness-sensitive reads to master only; tolerate eventual consistency on read replicas |
+| Cache node | Process crash or out of memory kill | Health probe plus a miss rate spike confined to one shard | Replica promotion in roughly 10s; clients treat the gap as misses and the origin absorbs 1/60 of read load |
+| Sharding | Topology change remaps nearly every key | Cluster wide miss rate spike on resize | Consistent hashing with ~150 virtual nodes per shard, so only 1/N of keys move |
+| Stampede | Hot key expires, 10k concurrent misses | Origin latency spike correlated with cache miss rate | One loader per key; refresh before expiry; jittered TTLs |
+| Hot key | One key saturates a shard's NIC at 16 Gbps | Per node egress plus sampled per key request counts | L1 allowlist where staleness allows; key level replication across 8 shards where it does not |
+| Invalidation race | Stalled reader writes a superseded value | Stale value reports; version mismatch counter if values are versioned | Commit then delete; backstop TTL; versioned values or leases on tight budget keys |
+| Connection mesh | 1.2M client sockets exhaust descriptors and buffers | Descriptor and buffer alarms on shards | Proxy tier multiplexing to ~800 connections per shard |
+| Cross region | Read in region B is stale after a write in region A | Cross region read comparison canary | Delete broadcast between pools; publish the backstop TTL as the real bound |
+| Cold cache | Cache empty after flush, failover, or key format change | Hit rate collapse, origin saturation | Rate limited fill, load shedding, staged key format migrations |
 
 **Unresolved**
 
-TODO. Two or three things this design genuinely does not handle well, and what you would do about each.
+**We cannot invalidate what we cannot name.** Every mechanism above assumes a change event can name the cache keys it invalidates. That holds for a key that is one row. It fails for everything derived: a rendered page fragment built from a user row, a settings row and three feed rows; a search result set; an aggregate. Nothing produces the reverse mapping from a source row to the keys derived from it, and every way of getting one is unattractive. Maintaining a reverse index is a second cache with the same invalidation problem one level down. Tagging keys with their inputs and deleting by tag requires a tag index that grows without bound and that Redis does not implement, so you build and operate it. We take the third option, which is a short TTL on the derived key class and no invalidation at all. The consequence is that the freshness guarantee we quote is per key class rather than global, and the derived keys, which are the ones users actually look at, are quietly the stalest thing in the system.
+
+**Cold start is not survivable on the origin capacity we have bought.** The whole design assumes a warm cache. The origin is sized for 100k QPS against a peak read load of 5M/s, which is a factor of 50. An empty cache, after a regional failover, an operator flush, or a deploy that changed a key format, presents the origin with 50x its capacity, and it will fall over long before the cache refills. The partial fixes are real but partial: shed load rather than queue it, admit fills through a rate limiter so the cache warms at a speed the origin can actually serve, stage key format changes so no large key class is invalidated at once, and pre-warm a new region from a snapshot before routing to it. None of these makes a cold start uneventful; they turn an outage into several minutes of controlled degradation. The uncomfortable conclusion is that availability is now a function of cache availability, which directly contradicts "the cache is only a performance optimisation", and this is the single most common gap between how a cache is described and how it behaves.
+
+**Hot key detection lags the hot key.** Both hot key mitigations assume we know which key is hot. Exact per key counters at 5M ops/s are not affordable, so detection is sampled or a heavy hitters sketch over a window, and a window long enough to be trustworthy is on the order of ten seconds. A key can go from cold to a million reads per second inside that window, so the first seconds of every hot key are served with no mitigation at all and the owning shard saturates before anything engages. Client side detection reacts faster, because a process sees its own repeated reads immediately, but each process only sees its own slice and a key that is hot across the fleet may be lukewarm anywhere. What we actually do is accept a saturation window of a few seconds, size shards so one saturated NIC degrades one shard rather than the cluster, and keep a manual promotion path for keys we can predict in advance. The general version of this detection problem is Q53.
 #### Drill questions
 1. A cache node dies. What happens to traffic targeting its keys?
-2. A viral tweet's key gets 100k req/s on one node. How do you fix it?
-3. 10,000 requests miss on the same expired key simultaneously and stampede the DB. Defenses?
-4. A DB write happens, then its cache invalidation message is delayed. Stale reads. How do you handle it?
-5. Why consistent hashing instead of just `hash(key) % N`?
-6. Cache size hits the memory limit. Eviction policy choice?
-
-TODO. Only 6 drill questions carried over, top up to at least 10.
+2. A viral post's key gets 1M reads/s on one node. How do you fix it, and what does the fix cost?
+3. 10,000 requests miss on the same expired key simultaneously. What are the defences, and which one covers which gap?
+4. A write commits to the database, then the cache delete is delayed. Walk me through what a reader sees and how you bound it.
+5. Why consistent hashing instead of hashing modulo the node count?
+6. Memory is full. Which eviction policy, and what would you measure to decide?
+7. What hit rate do you need? Justify the number.
+8. Someone flushes the cache by accident at 09:00. What happens, and what would have made it survivable?
+9. Should the cache be in the write path?
+10. Someone proposes turning on Redis persistence so restarts come back warm. What do you say?
+11. A read replica returns a value the primary already deleted. Is that acceptable?
+12. How do you invalidate a cached page fragment built from five different rows?
 #### Answers to drill questions
-1. With Redis Cluster: replica gets promoted via gossip + Sentinel; keys briefly unavailable during the ~10s failover. Without replicas: 1/N of keys disappear; clients miss → DB load spikes proportional to that shard's traffic. *If pushed:* consistent hashing means surviving nodes don't take over the dead node's keys, they just see misses. Pre-warm the replacement node from a snapshot if the keyset is large.
+1. Its keys become misses. With a replica, the replica is promoted in roughly 10 seconds and the shard's keys are unavailable for that window. Without one, 1/60 of the keyspace disappears permanently and the origin takes that shard's miss traffic, which at 5M reads/s is 83k QPS arriving at an origin with 100k of total capacity. Surviving nodes do not inherit the dead node's keys, because consistent hashing only reassigns ownership, it does not move data. *If pushed:* the interesting number is not the failover time, it is whether the origin survives the shard's traffic during it. One shard's worth is survivable here; two simultaneous is not, which is the argument for replicas and for spreading a shard's replica onto a different failure domain.
 
-2. Replicate the hot key across multiple shards (key-level replication, not shard-level); client picks one at random. Alternatively, in-process L1 cache (10ms TTL) absorbs most reads before they hit the network. *If pushed:* L1 introduces a second layer of staleness on writes; pair with pub/sub invalidation if cross-instance freshness matters; for ultra-hot keys, accept eventual consistency and reconcile lazily.
+2. Two options and they trade different things. A per process L1 with a 1 second TTL: at 10k processes the cache tier sees 10k/s instead of 1M/s, a 100x cut, but the key's staleness floor becomes 1 second and no delete can reach it. Or key level replication across 8 shards with a random suffix per read, which divides 16 Gbps into 2 Gbps and keeps delete working, at 8 SETs per fill and 8 deletes per invalidation. *If pushed:* pick by whether the value gates money. A trending list gets the L1; a price or an entitlement gets replication. And note the L1's leverage is P/T, so it collapses if processes are numerous and short lived.
 
-3. Single-flight: first miss acquires a per-key lock, loads from DB, populates cache, releases; others wait on the lock and read the freshly-cached value. *If pushed:* probabilistic early refresh — refresh before expiry with probability proportional to proximity to expiry, so one request takes the hit instead of 10k; jittered TTLs prevent synchronized expiries in the first place.
+3. One loader per key means the first misser takes a short lived lock, loads, populates and releases while the rest wait and read what it wrote, so 10k misses become one origin query. Refresh before expiry gives each read a rising probability of refreshing the value as its TTL approaches, so the expiry never actually arrives on a hot key. Jittered TTLs stop keys written in the same batch from expiring in the same millisecond. They cover different gaps: the first limits the damage of an expiry, the other two stop expiries being synchronised. *If pushed:* none of them helps with a cache that starts empty, which is a different failure with the same symptom, and the loader lock is a distributed lock with no fencing, which is correct here because losing it costs a duplicate query rather than corruption.
 
-4. Cache-aside accepts brief staleness as a trade. Canonical pattern is write-DB-then-delete-cache (delete, not update — updating lets a slow concurrent writer overwrite with stale data). Readers re-fetch on next miss. *If pushed:* the nasty race is reader-misses-then-writer-commits-then-reader-sets-cache, populating cache with the pre-write value. Fixes: short TTL as a backstop, Facebook-style leases (only the leaseholder may set the key), or drive invalidation off a CDC stream so cache mutations are ordered by the DB commit log. Version/etag on the value lets readers detect staleness against the authoritative version.
+4. The reader sees the pre-write value until the delete lands or the TTL expires, whichever is first. That is the ordinary case and it is fine if the staleness budget covers it. The nasty case is different: a reader misses and reads v1, stalls, the writer commits v2 and deletes nothing because the key is absent, and then the reader writes v1 back. That value survives the full TTL. *If pushed:* bound it with a backstop TTL always, and close it with versioned values, where a SET carrying an older version loses, or with leases, where the delete invalidates the reader's token so its SET is rejected. Versioning costs 8 bytes per value and makes SET a compare and set; leases cost the cache being more than a key value store.
 
-5. Adding/removing a node with mod-N remaps almost every key, evicting the cache and crushing the DB. Consistent hashing only moves 1/N of keys when the ring changes. *If pushed:* virtual nodes (each physical node = ~150 ring positions) smooth load distribution; otherwise lucky/unlucky placement creates 2-3x load imbalance.
+5. Because hashing modulo the node count reassigns nearly every key when the count changes. Adding one node to a 60 node cluster remaps about 98% of keys, which empties the cache and sends the full 5M reads/s at an origin sized for 100k. Consistent hashing moves only 1/N. *If pushed:* virtual nodes matter as much as the ring itself. With one position per shard, placement luck gives 2x to 3x load imbalance; with ~150 positions per shard the imbalance falls into the low percent. Neither fixes the fact that the 1/N that does move arrives at the origin as a miss burst, so a resize is still a scheduled event rather than a free one.
 
-6. LRU by default — recency is the simplest predictor of future access and matches most workloads. *If pushed:* LFU is better when a small set of keys dominates traffic (popular items stay regardless of recency); TTL-only when data has natural expiry (sessions); Redis offers `allkeys-lru`, `volatile-lru`, `allkeys-lfu` — pick based on whether all keys are evictable or only TTL'd ones.
+6. LRU with a backstop TTL by default. What to measure first is whether eviction is even the binding mechanism: compare the median TTL against the residency time, which here is 10TB / 200MB per second ≈ 14 hours. If TTLs are 300 seconds, keys expire long before eviction reaches them and the policy is nearly irrelevant. If it is binding, measure the share of admissions evicted having been read exactly once. *If pushed:* above roughly 50% one hit wonders the workload is scanning and an admission policy is the fix rather than more memory. W-TinyLFU (2015) uses a frequency sketch; S3-FIFO (2023) gets a similar result with a small probationary FIFO queue and no sketch. Both punish a genuine sudden rise in popularity, which is why W-TinyLFU keeps a small admission window.
+
+7. 98%, and it is arithmetic rather than a target. The origin has 50 replicas at 2k QPS, so 100k QPS. Peak reads are 5M/s. Misses must stay under the origin's capacity: 5M × (1 − h) < 100k gives h > 98%. *If pushed:* the sensitivity is what matters. Every point of hit rate is 50k QPS, so 99% leaves half the origin spare and 97% is 50% over capacity. That is why a change to the key format or the TTL is a capacity change, and why hit rate belongs on the same dashboard as origin QPS rather than in a cache-only view.
+
+8. The origin sees 5M QPS against 100k of capacity, saturates, and cannot serve fills fast enough for the cache to refill, so it stays down rather than recovering. What makes it survivable is deciding in advance that the origin is protected: a fill rate limiter that lets the cache warm at a speed the origin can serve, load shedding that returns errors or degraded responses to a fraction of traffic instead of queueing everything, and one loader per key so the refill is 1 query per key rather than thousands. *If pushed:* the same shape shows up without anyone touching the cache. A deploy that changes a key prefix invalidates a whole key class atomically, which is why key format changes get staged with dual reads rather than shipped in one release.
+
+9. Not at 100:1 reads to writes. Write-through would change nothing for 99% of operations while adding a hop and a failure mode to the other 1%, and it populates keys nobody has read. *If pushed:* it is the right answer when the ratio is under about 10:1 and the same keys are written repeatedly, or when the cache is the read path for a value that must never lag and there is one writer per key. Write-behind is a different question again: at 50k writes/s and a 200ms flush window, a crash loses up to 10,000 acknowledged writes, so it is available for counters and telemetry and nothing else.
+
+10. No, for two reasons. Persistence adds fsync latency and, on Redis, a fork whose copy on write can double the process's memory at exactly the moment it is under pressure, which is why maxmemory is at 70% in the first place. More fundamentally, a warm restart restores values whose freshness you can no longer reason about: they were written under an invalidation regime that was running before the restart and not during it. *If pushed:* if you genuinely need durability you need a database, and the cache is a poor one. The legitimate version of the goal is pre-warming, which is a controlled fill from the origin at a rate the origin can serve, with the current TTL applied on write.
+
+11. It depends on the key class, and the answer must be per class rather than global. Serving reads from replicas multiplies read capacity, and the price is that a read can return a value the primary has already deleted, for as long as the replication lag. That is fine for a profile blob and not fine for an entitlement check. *If pushed:* the mistake is treating replica lag as covered by the TTL. It is a second staleness source stacked on top, so the bound you quote is the TTL plus the lag, not the larger of the two. Route anything whose budget is under the lag to the primary and accept the reduced read capacity for that class.
+
+12. Honestly: mostly you do not, and that is the biggest gap in this design. A change event names a row; nothing names the derived keys built from that row. Maintaining a reverse index from row to key is a second cache with the same problem one level down. Deleting by tag needs a tag index that grows without bound and that the cache server does not provide. *If pushed:* the option we take is a short TTL on the derived key class and no invalidation, which means the freshness guarantee is per class rather than global and the derived keys are the stalest thing users see. Where a specific fragment genuinely matters, the workable pattern is to make its key contain the versions of its inputs, so a change to any input produces a different key and the old one simply ages out. That converts invalidation into key naming and costs a read of the input versions before every lookup.
 #### Whiteboard script
-TODO
+**0-5, frame it and get the two numbers.** Open with the thesis rather than the components: "a cache is a hint store, so the hit path is trivial and the whole design is the miss path and the invalidation path." Then ask the two questions that actually change the answer: what staleness is acceptable in seconds, and what read capacity the origin has. Say why you are asking the second one: the required hit rate is arithmetic from it, not a target you pick. State your assumptions out loud: 5M reads/s, 50k writes/s, 10TB working set, origin good for 100k QPS. Draw nothing yet.
 
-A 45 minute budget: what to cover in 0-5, 5-15, 15-35 and 35-45, what to say first, and a line starting `Cut first:`.
+**5-15, the spine.** Four boxes: application, cache tier sharded by consistent hash, origin, and a dashed line for the fill path from origin back into the cache. Say the three rules as you draw: keys map to shards by consistent hashing with ~150 virtual positions so a resize moves 1/N; reads are cache aside; writes commit to the origin and then delete the key, never update it. Then do the capacity arithmetic on the board, because it justifies everything after: 10TB over 180GB shards is 60 shards, 5M over 60 is 83k ops/s each, and 5M × (1 − h) < 100k gives 98%. Two minutes, and it converts the rest of the interview from opinion into consequence.
 
-**Raw material, from the old Talking Points:**
+**15-35, the drill.** Protect this time and spend it on invalidation. Walk the four orderings and why only commit then delete survives. Then volunteer the race that commit then delete does not fix, the stalled reader writing a superseded value, before being asked, and give the three fixes in cost order: backstop TTL always, versioned values, leases. Say the TTL number and where it comes from: 10M actively read keys over 300s is 33k refreshes/s inside a 100k budget, and 60s would be 166k/s and would not fit. Then hot keys as arithmetic rather than a pattern: one key at 1M reads/s of 2KB is 16 Gbps on one NIC, L1 cuts it to P/T, key replication divides it by 8, and the choice between them is the staleness budget. Keep the stampede triad and the eviction fork as one liners you can expand: eviction only matters if residency is shorter than the TTL, which here it is not.
 
-- **Cache-aside as the default** — app code holds the truth, cache is allowed to be lossy. Read-through, write-through, write-behind exist for narrower cases.
-- **Consistent hashing with virtual nodes** — non-negotiable; mod-N hashing kills the cache on resize and floods the DB.
-- **Three-layered stampede defence** — single-flight, probabilistic early refresh, jittered TTL. Pair them; don't pick one.
-- **Write-then-delete-cache, not update or invalidate-then-write** — the canonical race-free invalidation order. Mention leases / CDC for tighter consistency.
-- **Hot-key replication is key-level, not shard-level** — replicate the hot key across N shards; clients pick at random.
-- **Twemproxy / mcrouter as the connection-mesh fix** — N×M TCP exhausts FDs; proxy tier multiplexes for an extra hop of 100-500 µs.
-- **Memcached vs Redis is a feature decision, not a perf decision** — Memcached is simpler and multi-threaded; Redis has data types, replication, persistence. Pick by what you need.
+**35-45, concede and close.** Give the gaps before they are found. Derived keys cannot be invalidated because nothing maps a row to the keys built from it, so that class gets a short TTL and is the stalest thing users see. Cold start is not survivable on 100k QPS of origin against 5M/s of reads, so availability really does depend on the cache being warm and the mitigations are rate limited fill and load shedding, not a fix. Hot key detection lags the hot key by seconds. Then two minutes of operations: the metrics you would page on, which are hit rate against origin QPS on one graph, evictions per second, p99 at the cache, and per shard egress. Finish on multi-region as independent pools with delete broadcast and a published staleness bound, not one global cache.
+
+Cut first: the proxy tier and the connection mesh arithmetic, then Redis against Memcached, then the cross region section. All three are real, none of them changes the shape of the answer, and the Redis against Memcached comparison in particular is a trap that eats ten minutes and demonstrates nothing. Never cut: the write ordering and the race it leaves open, the hit rate arithmetic, and the concession that a cold cache is an availability problem.
 #### Appendix
 **Data model**
 
-- Flat key → value (or typed structures in Redis)
-- Each node: hashmap + LRU/LFU list for eviction + per-key TTL heap
+- Flat key to opaque value, or typed structures where the richer server is used.
+- Per node: a hash table, an eviction structure (an intrusive LRU list, or the probationary and main queues of a FIFO based policy), and per key expiry metadata at ~24B.
+- Where values are versioned, the stored form is `(version, payload)` and writes are compare and set against the resident version.
+- Key naming carries the schema version, so a format change is a new key class rather than an in place reinterpretation: `v3:user:42:profile`.
 
 **API contract**
 
 ```
-GET key                  → value | NULL
-SET key value [TTL]      → OK
-DEL key                  → OK
-INCR / DECR / EXPIRE     (Redis)
+GET key                  -> value | NULL
+MGET key...              -> values
+SET key value [TTL]      -> OK
+CAS key value version    -> OK | STALE
+DEL key                  -> OK
+INCR / DECR / EXPIRE     (richer servers only)
 ```
 
 **Observability**
 
-- `cache_hit_rate` per pool — drops indicate bad invalidation / TTL / sharding regression.
-- `op_latency_p99_us` per node — target < 1,000 µs for SETs / GETs.
-- `evictions_per_sec` per node — sustained high evictions = undersized memory.
-- `stampede_db_load` — DB QPS correlated with cache misses; spikes mean stampede defences are off.
-- `consistent_hash_ring_churn` — should be near-zero except during planned topology change.
-- `proxy_hop_added_ms` (Twemproxy/mcrouter) — target < 500 µs.
-- `replica_lag_ms` per shard — target sub-millisecond.
-- SLO: cache pool sub-ms p99 GET; > 95% hit rate on intended hot workloads; failover < 10 s.
+- `hit_rate` per pool, plotted on the same graph as origin QPS. They are one metric: a point of hit rate is 50k QPS at the origin.
+- `origin_qps` against origin capacity. This is the number that turns a cache regression into an incident.
+- `op_latency_p99_us` per shard, target under 1,000μs including the network hop.
+- `evictions_per_sec` and derived residency. Sustained eviction with residency below the median TTL means eviction, not expiry, is deciding what you keep.
+- `admissions_read_once_ratio`. The one metric that says whether the workload scans, and therefore whether the eviction fork is live.
+- `stale_set_rejected` where values are versioned. Counts the invalidation race actually happening rather than assuming it does not.
+- `per_shard_egress_gbps` and sampled per key request counts. Hot key detection, with the known lag.
+- `replica_lag_ms` per shard, since it stacks on top of the TTL for anything read from a replica.
+- SLO: p99 GET under 1ms; hit rate above 98% on the main pool; shard failover under 10s.
 
 **Multi-region and DR**
 
-- **Replication mode:** per-region cache pools with mcrouter-style replicated pools for cross-region delete-broadcast on invalidations. Redis Cluster shards have 1-2 async replicas per shard within region. Cache is a derived store — not the source of truth — so DR is "warm from DB" rather than "restore the cache".
-- **RTO:** ~10 s for shard-replica failover within region; ~2 min for cross-region failover (DNS + ring update). Cold-warm of a fresh region can take minutes during which DB load spikes.
-- **RPO:** N/A for cache (derived); snapshot-based pre-warm reduces cold-start DB hammering.
-- **Failover cadence:** continuous chaos kills nodes; weekly drills on shard failover.
-- **Cross-region cost:** delete-broadcast traffic (small) plus replication lag accepted as eventual cross-region consistency.
+- **Replication mode:** independent per region pools with delete broadcast on invalidation. Within a region, one async replica per shard. The cache is derived state, so disaster recovery is refilling from the origin rather than restoring the cache.
+- **RTO:** ~10s for a shard replica promotion inside a region. Cross region is limited by how fast a cold pool can be filled without killing the origin, which at a rate limited fill is minutes, not seconds.
+- **RPO:** not applicable, since nothing here is authoritative. The equivalent risk is the cold start cost, and that is measured in origin capacity rather than lost data.
+- **Failover cadence:** continuous node kills in production; a scheduled cold pool fill drill, because that is the path that actually hurts and the only one where the rate limiter and shedding get exercised.
+- **Cross-region cost:** delete broadcast traffic is negligible in bytes. What it costs is a staleness bound you have to publish and cannot enforce, because a dropped broadcast is invisible and the backstop TTL is the only real guarantee.
 
 ### 35. Design a Distributed Lock
 #### Problem
-Allow only one process at a time to hold a lock identified by a key, across machines, with safety in the presence of failures.
+Allow only one process at a time to act on a resource identified by a key, across machines that can crash, pause, or be partitioned from one another. The lock must release itself when a holder dies, and must stay safe when a holder is merely slow rather than dead. Safety here means no two holders write, which is a stronger claim than no two holders believe they hold the lock.
 #### Core
-TODO
+A distributed lock is two mechanisms, and most designs build only the first. The lock service grants time-bounded ownership of a key. The protected resource enforces that grant. Build only the service and you have reduced contention, not achieved safety.
 
-Write the whole answer as you would give it in sixty seconds, 200 to 300 words, standing alone.
+The grant side is a small consensus cluster, three or five nodes, that does not acknowledge a write until a majority holds it durably. That is what stops two grants being recorded across a leader change or a partition. Every grant carries a TTL so a crashed holder does not wedge the key, and a holder still working renews at about TTL/3.
+
+The enforcement side is what candidates skip. A lease expiring does not stop the previous holder. A process paused 35 seconds by garbage collection under a 20 second lease wakes believing it still owns the lock, because nothing told it otherwise, and by then the next holder has written. No lock service prevents that, because the conflict happens at the resource. So each grant returns a fencing token, a number that strictly increases across grants, taken from the consensus log index. The holder attaches it to every write, the resource remembers the highest token it has accepted, and rejects anything lower. The late write is refused on arrival.
+
+The fast alternative is a single in-memory server holding a key with an expiry: sub-millisecond instead of tens of milliseconds, but asynchronous replication means a failover can forget a grant. Right where two holders is waste, wrong where two holders is corruption.
+
+If one key is hot, the lock is the wrong tool. Shard it, or move to compare-and-swap on a version column.
 #### Summary
-**The picture in your head:** a bathroom key hanging on a hook at a gas station. Only one person can take the key at a time. If you take it, you go use the bathroom, then hang it back up. The key expires if you keep it too long (imagine a timer: after 10 minutes the attendant can give it to someone else). Now imagine the gas station is distributed across 10 cities — the "key" is a database record, and the "bathroom" is something like a bank ledger row you want to update without anyone else touching it simultaneously.
+**The picture in your head:** a bathroom key hanging on a hook at a gas station. Only one person can take the key at a time. If you take it, you go use the bathroom, then hang it back up. The key expires if you keep it too long (imagine a timer: after 10 minutes the attendant can give it to someone else). Now imagine the gas station is distributed across 10 cities: the "key" is a database record, and the "bathroom" is something like a bank ledger row you want to update without anyone else touching it simultaneously.
 
 **The approaches people actually take:**
-TODO. Two or three things a competent engineer might reach for, in plain language and before any product name, with what each one buys and roughly when it wins.
 
-**The single-request walkthrough:** two payment workers (Worker A and Worker B) both try to process the same $500 refund for order #9981. Each calls `acquire("order:9981:refund", ttl=30s)`. The lock service is etcd — a strongly-consistent distributed key-value store (similar to a tiny database that uses the Raft consensus algorithm, meaning a write is only confirmed after a majority of its nodes agree). Worker A gets there first. etcd writes the lock record, assigns it a fencing token of `42` (a monotonically increasing number from the Raft log — this number strictly goes up every time a lock is granted, across all lock keys). Worker A does its work and calls the payment database: `UPDATE refunds SET status='paid' WHERE id=9981 IF fence_token > 41`. The IF check ensures only the most recent lock holder can write. Worker B's acquire returns null — lock is held, come back later. Worker A releases. Worker B acquires with token `43`. Token `42` will never be used again.
+*A small cluster that agrees with itself before it answers.* Three or five nodes running a consensus protocol, so a grant is acknowledged only once a majority has it on disk. Nothing is lost when the leader dies, and the position in that agreed log doubles as a strictly increasing number you can hand to the resource as proof of who is current. It buys safety that survives failover. It costs a majority round trip on every acquire, so tens of milliseconds rather than a fraction of one, plus a write ceiling in the low tens of thousands per second. It wins whenever a duplicate holder corrupts data.
+
+*One fast in-memory server holding a key with an expiry.* Set the key if absent, delete it when done, let it expire if you die. Sub-millisecond, one hop, trivial to run. Replication is asynchronous, so a failover can promote a replica that never heard about the grant and hand the same key to a second caller. It wins where a duplicate holder is waste rather than damage: refilling a cache, deduplicating a scheduled job, collapsing a stampede.
+
+*No lock at all.* Attach a version to the row and make the write conditional on the version you read; losers are told they lost and retry. There is no lease to size, nothing to renew, no service in the availability path, and no way to hold a lock you no longer own. It works only when the critical section ends in a single conditional write to one store, and it degrades once contention is high enough that most attempts lose.
+
+**The single-request walkthrough:** two payment workers (Worker A and Worker B) both try to process the same $500 refund for order #9981. Each calls `acquire("order:9981:refund", ttl=30s)`. The lock service is etcd, a strongly-consistent distributed key-value store (similar to a tiny database that uses the Raft consensus algorithm, meaning a write is only confirmed after a majority of its nodes agree). Worker A gets there first. etcd writes the lock record, assigns it a fencing token of `42` (a monotonically increasing number from the Raft log, which strictly increases every time a lock is granted, across all lock keys). Worker A does its work and calls the payment database: `UPDATE refunds SET status='paid', fence_token=42 WHERE id=9981 AND fence_token < 42`. The extra condition is what makes the lock safe: the row remembers the highest token it has accepted, so a write carrying an older token matches zero rows and is refused. Worker B's acquire returns null, meaning the lock is held and it should come back later. Worker A releases. Worker B acquires with token `43` and its write passes the same check, because 42 < 43. Token `42` is never issued again.
 
 **The pieces (and what each one is for):**
-- **Lock service (etcd or ZooKeeper)** — a small cluster (typically 3 or 5 nodes) that runs a consensus algorithm (Raft in etcd, ZAB in ZooKeeper — both work by requiring a majority of nodes to agree before any write is acknowledged). This makes it impossible to grant the same lock to two holders simultaneously, even during network hiccups. The trade: a write needs a round-trip to a majority, so latency is in the tens of milliseconds range, not sub-millisecond.
-- **TTL (lease)** — every lock grant includes an expiry time. If the holder crashes without releasing, the lock auto-expires after the TTL. Long-running holders must renew the TTL before it expires, at roughly TTL/3 cadence (a "heartbeat"). ZooKeeper implements this via "ephemeral nodes" — a lock node that automatically disappears when the client's session dies, no explicit TTL needed.
-- **Fencing token** — a monotonically increasing number returned with every lock grant. The holder includes this number in every write to the protected resource. The resource stores the highest token it has ever accepted and rejects writes with a lower token. This is the only mechanism that actually prevents corruption — the lock service alone cannot.
-- **Redis SETNX (best-effort alternative)** — `SET key value NX EX 30` sets a key only if it does not exist, with a 30-second expiry, in a single atomic Redis operation. Sub-millisecond, simple, but Redis uses async replication: if the master crashes before replication completes, the replica that becomes the new master does not know the lock was granted. Two workers could both believe they hold the lock. Use only for non-critical mutual exclusion (cache stampede prevention, rate-limit deduplication) where a duplicate is an annoyance, not data corruption.
+- **Lock service (etcd or ZooKeeper).** A small cluster (typically 3 or 5 nodes) running a consensus algorithm (Raft in etcd, ZAB in ZooKeeper), both of which work by requiring a majority of nodes to agree before any write is acknowledged. This makes it impossible to grant the same lock to two holders simultaneously, even during network hiccups. The trade: a write needs a round-trip to a majority, so latency is in the tens of milliseconds range, not sub-millisecond.
+- **TTL (lease).** Every lock grant includes an expiry time. If the holder crashes without releasing, the lock auto-expires after the TTL. Long-running holders must renew the TTL before it expires, at roughly TTL/3 cadence (a "heartbeat"). ZooKeeper implements this via "ephemeral nodes", a lock node that disappears automatically when the client's session dies, with no explicit TTL to manage.
+- **Fencing token.** A monotonically increasing number returned with every lock grant. The holder includes this number in every write to the protected resource. The resource stores the highest token it has ever accepted and rejects writes with a lower token. This is the only mechanism that actually prevents corruption, and the lock service alone cannot supply it.
+- **Redis SETNX (best-effort alternative).** `SET key value NX EX 30` sets a key only if it does not exist, with a 30-second expiry, in a single atomic Redis operation. Sub-millisecond, simple, but Redis uses async replication: if the master crashes before replication completes, the replica that becomes the new master does not know the lock was granted. Two workers could both believe they hold the lock. Use only for non-critical mutual exclusion (cache stampede prevention, rate-limit deduplication) where a duplicate is an annoyance, not data corruption.
 
-**The thing that makes it hard:** Worker A acquires the lock with a 20-second TTL. Then the Java garbage collector kicks in and pauses Worker A for 35 seconds — a "stop-the-world GC pause" where nothing in the process runs. While Worker A is frozen, its 20-second TTL expires. Worker B acquires the lock with token `34`. Worker B writes to the database. Worker A's GC finishes. Worker A resumes, still believing it holds the lock (it received no notification that the TTL expired). Worker A writes to the database with token `33`. Without a check at the database, both writes succeed. You now have corrupted data — the second write overwrote the first with stale values. No amount of careful lock-service design prevents this. Only the resource itself can.
+**The thing that makes it hard:** Worker A acquires the lock with a 20-second TTL. Then the Java garbage collector kicks in and pauses Worker A for 35 seconds, a "stop-the-world GC pause" in which nothing in the process runs. While Worker A is frozen, its 20-second TTL expires. Worker B acquires the lock with token `34`. Worker B writes to the database. Worker A's GC finishes. Worker A resumes, still believing it holds the lock (it received no notification that the TTL expired). Worker A writes to the database with token `33`. Without a check at the database, both writes succeed. You now have corrupted data, because the later write was overwritten with stale values. No amount of careful lock-service design prevents this. Only the resource itself can.
 
-**Why this design and what it costs:** the fencing token at the resource is the canonical fix because the corruption happens at the resource, not at the lock service. The resource maintains one counter (`max_seen_token`) and rejects any write with a token less than that counter. The lock service supplies a strictly increasing token by using its consensus log index — the Raft log in etcd means every committed grant has a higher index than every previous one, globally, for all locks. This is why Redis-based Redlock is controversial: Redis has no consensus log, so it cannot supply fencing tokens that are guaranteed monotonic across failover, making the "lock" advisory rather than safe.
+**Why this design and what it costs:** the fencing token at the resource is the canonical fix because the corruption happens at the resource, not at the lock service. The resource maintains one counter (`max_seen_token`) and rejects any write with a token less than that counter. The lock service supplies a strictly increasing token by using its consensus log index: in etcd the Raft log guarantees every committed grant has a higher index than every previous one, globally, for all locks. This is why Redis-based Redlock is controversial: Redis has no consensus log, so it cannot supply fencing tokens that are guaranteed monotonic across failover, making the "lock" advisory rather than safe.
 
 **If you were building it tomorrow:**
 - etcd cluster (3 nodes) for correctness-critical locks. Redis SETNX for best-effort stampede prevention.
@@ -14995,20 +14986,21 @@ TODO. Two or three things a competent engineer might reach for, in plain languag
   token = etcd.acquire("order:9981:refund", ttl=30)
   if not token: return RETRY
   try:
-    db.execute("UPDATE ... WHERE fence_token > ?", token - 1)
+    db.execute("UPDATE ... SET fence_token = ? WHERE id = ? AND fence_token < ?", token, id, token)
   finally:
     etcd.release("order:9981:refund", token)
   ```
 - Renewal thread runs every 10 seconds while work is ongoing, calling `etcd.renew(key, token, ttl=30)`.
-- If the lock ever gets hot (1000 workers fighting for one key), that's a design smell — shard by sub-key or switch to optimistic concurrency (a `version` column + compare-and-swap update) instead.
+- If the lock ever gets hot (1000 workers fighting for one key), that is a design smell, so shard by sub-key or switch to optimistic concurrency (a `version` column + compare-and-swap update) instead.
 #### What this is really testing
-TODO
+Whether you know that mutual exclusion is not the deliverable. The deliverable is that a process which has lost the lock cannot still do damage, and no lock service can provide that alone, because the damage happens at the resource rather than at the lock. Everything else follows from accepting it. The token has to be monotonic, so it has to come from a log with a single agreed order. The resource has to check it, so every writer to that resource has to participate, including the batch job and the operator running a manual fix. The check has to sit in the same transaction as the write, or the race has moved rather than closed. A candidate who designs a flawless consensus-backed lock and never mentions the resource has built contention control and called it safety.
 
-The one insight this question exists to elicit, then the contrast with the question it most resembles and why the answers differ.
+The contrast is with the distributed cache. Both questions put a small stateful cluster in front of a real system, both have the same tempting first answer, and in both that answer is an in-memory key-value store with a TTL. What differs is the price of being wrong. A cache is allowed to be wrong: a miss costs one extra database read, a stale entry costs one stale render, and the design is tuned around hit rate and stampedes because those are the failures that actually hurt. A lock that is wrong costs two concurrent writers and a record that no longer reconciles. So the cache question is answered by making the common path cheap and the worst path survivable, and the lock question is answered by deciding who verifies the grant and conceding that the lock service is not that party. The detection story diverges too, and that is the part interviewers push on: a bad cache shows up in hit rate within minutes, while a bad lock shows up as a support ticket three weeks later about a balance that does not add up, unless you built the fenced-write rejection counter that makes it visible.
 
-Closest question: TODO
+Closest question: Q34
 #### Clarifying questions and how each answer forks the design
 - Strict mutual exclusion or "best-effort"?
+- How many systems does the critical section mutate? Just one row in one store?
 - Lock timeouts?
 - Re-entrancy needed?
 - Multi-region?
@@ -15018,12 +15010,13 @@ Closest question: TODO
 
 | If the answer is… | Then the design… |
 |---|---|
-| Best-effort exclusion | a single Redis SET-NX with TTL is fine — simple and fast |
-| Correctness-critical exclusion | a consensus-backed lock (ZooKeeper/etcd) with fencing tokens, since a single Redis lock is unsafe under partitions |
+| Best-effort exclusion | a single Redis SET-NX with TTL is fine, simple and sub-millisecond |
+| Correctness-critical exclusion | a consensus-backed lock (ZooKeeper/etcd) with fencing tokens, since a single Redis lock is unsafe under failover |
 | Lock timeouts | a TTL to release a dead holder, plus a fencing token so a stalled holder cannot act after expiry |
-| Re-entrancy | store the owner and a hold count in the lock value |
-| Multi-region | a regional lock service; a globally consistent lock costs cross-region latency |
-| Low acquire latency | keep the lock service close to clients and cache negative results briefly |
+| Re-entrancy | store the owner and a hold count in the lock value, with the owner bound to a session rather than a process name |
+| The critical section is one row in one store | drop the lock entirely and use a version column with a conditional update |
+| Multi-region | a regional lock service, with the resource homed in the same region; one global quorum costs a WAN round trip per acquire |
+| Low acquire latency | keep the lock service in the same datacentre as its clients and cache negative results for a few hundred milliseconds |
 #### Requirements and scale, derived out loud
 **Requirements**
 
@@ -15032,34 +15025,38 @@ Closest question: TODO
 
 **Scale**
 
-- **Throughput / lock count:** typical large microservice deployment ~thousands of acquire/release per second; lock count thousands (named resources) to millions (per-row / per-user sharded locks)
-- **Lock record size:** ~200 B per active lock = (key ~64 B + owner_id 16 B + fence_token 8 B + ttl 8 B + acquired_at 8 B + lease metadata ~32 B + ZK znode/etcd kv overhead ~64 B) → ~200 B
-- **Active lock memory:** 1M concurrent locks × 200 B = 200 × 10⁶ B ≈ ~200 MB total — trivial for any coordination service (etcd/ZK fits comfortably in single-node RAM)
-- **Acquire/release throughput:** ~10k ops/s steady (one big service ~1k QPS × ~10 services); 10× contention spike (release storm at deploy/leader-election) → ~100k/s peak
-- **Coordination service write QPS:** each acquire = 1 Raft/ZAB log append + majority commit (1 fsync round-trip); etcd/ZooKeeper benchmarks show ~10–30k writes/s per cluster (limited by fsync latency on leader's WAL disk) → sized to absorb 100k/s peak only via batching/sharding
-- **Consensus log volume:** 10k ops/s × ~300 B per log entry (op header ~80 B + key/value/metadata ~200 B + Raft term/index/CRC ~20 B) × 86,400 s ≈ ~260 GB/day raw on leader's WAL → compaction + snapshot every ~10k entries cuts steady-state to ~10s of GB on disk
-- **Redis-based locks:** single-instance Redis sustains ~100k ops/s at sub-ms latency (in-memory + no consensus); throughput ~5–10× etcd/ZK but loses safety on async-replicated failover (see Detailed Design table)
-- **Watch/notification fan-out:** N waiters per contended lock × release events; ZK ephemeral-sequential nodes wake only the next-in-line watcher (sequence number+1) → O(1) wake per release, bounds fan-out cost regardless of waiter count
-- **Lease renewal traffic:** long-running holders renew at TTL/3 cadence (e.g. 10 s renew on 30 s TTL); 100k active long locks × 1 renewal / 10 s = 10k renewals/s baseline → renewal traffic dominates acquire/release at steady state
+Sizing only works if the two lock classes are counted separately, because they land on different backends and only one of them is near a ceiling.
+
+- **Traffic split:** assume a fleet of ~200 services. Ten of them take correctness locks (money movement, ledger posting, state-machine transitions) at ~100 acquires/s each = 10 × 100 = **1k correctness acquires/s**. The rest take best-effort locks (cache refill, cron dedupe, stampede collapse) at ~45/s each = 190 × 45 ≈ **9k best-effort acquires/s**. Total **~10k acquires/s steady**.
+- **Peak:** the spike is a release storm, not organic growth. A fleet-wide deploy or a leader-election cascade restarts everything at once and every holder reacquires: 10× for a few seconds → **~10k/s correctness, ~90k/s best-effort, ~100k/s total peak**.
+- **Consensus write load:** every acquire and every release is one Raft/ZAB log append plus a majority commit, so one leader fsync round trip each. Steady = 1k acquire + 1k release = **2k writes/s**. Peak = **20k writes/s**.
+- **Renewals on top:** most correctness holds are short. Assume mean hold 2 s, and 5% of holds run long (mean 60 s). Long holders in flight = 1,000/s × 0.05 × 60 s = **3,000 concurrent long holders**, each renewing once per 10 s (TTL 30 s at TTL/3) = 3,000 / 10 = **300 renewals/s**. Renewals are ~13% of steady consensus load, not the dominant term.
+- **Headroom against the ceiling:** etcd's own published 3-node benchmarks have sat around **10k to 30k writes/s** since the v3 storage engine, bounded by fsync latency on the leader's WAL disk rather than by CPU. Steady 2.3k/s is ~8% of a 30k ceiling. Peak 20.3k/s is ~68%, which is under 1.5× headroom, and that single number is what decides whether the correctness keyspace stays on one cluster or gets sharded across three.
+- **Redis side:** a single instance sustains ~100k ops/s at sub-millisecond latency. Best-effort peak of 90k/s against a 100k ceiling is too tight to run, so shard the best-effort keyspace by key hash across 3 instances → 90k / 3 = **30k/s each at peak**, comfortable.
+- **Lock record size:** ~200 B per active lock = key ~64 B + owner_id 16 B + fence_token 8 B + ttl 8 B + acquired_at 8 B + lease metadata ~32 B + znode/kv overhead ~64 B.
+- **Active lock memory:** concurrent locks = correctness (1,000/s × 2 s = 2,000) + best-effort (9,000/s × 0.5 s = 4,500) ≈ **6.5k concurrent**, so 6,500 × 200 B ≈ **1.3 MB**. Even the pathological variant, per-row locks at 1M concurrent, is 1M × 200 B = **200 MB**, which fits in one node's RAM. Memory is never the constraint here; write throughput is.
+- **Consensus log volume:** 2.3k writes/s × ~300 B per entry (op header ~80 B + key/value/metadata ~200 B + term/index/CRC ~20 B) = 690 kB/s; × 86,400 s = **~60 GB/day of raw WAL**. Compaction with a snapshot every ~10k revisions holds steady-state disk in the low single-digit GB.
+- **Acquire latency:** one majority fsync round trip inside a datacentre is **1 to 10 ms**, p99 nearer **20 to 30 ms** when the leader's disk is loaded. Redis is **sub-1 ms**. That 20× to 30× gap, not safety, is what pushes hot paths onto the best-effort tier.
+- **Fence check cost at the resource:** one extra predicate on a row already being updated by primary key, and one extra column write. No additional round trip, because the comparison rides inside the same UPDATE. The cost of fencing is organisational, not computational.
+- **Watch fan-out:** N waiters on one contended key. ZooKeeper ephemeral-sequential nodes wake only the waiter whose sequence number is one below the departing holder, so the wake cost per release is O(1) rather than O(waiters).
 #### Key decisions
-TODO
+**Consensus-backed grant against a single in-memory key with a TTL**
+- Choice: two lock classes with two backends, picked per call site. Correctness locks go to a 3-node consensus store (etcd or ZooKeeper) and return fencing tokens. Best-effort locks go to sharded single-instance Redis and return nothing.
+- Alternative: one backend for everything, Redis, with fencing bolted on by an `INCR` counter serving as the token.
+- Decider: acquire rate against the consensus write ceiling, crossed with what a duplicate holder costs. etcd's published 3-node benchmarks have sat at roughly 10k to 30k writes/s since the v3 storage engine, bounded by leader WAL fsync, at 1 to 10 ms per acquire in one datacentre; Redis does ~100k ops/s sub-millisecond. Correctness traffic is 1k acquires/s steady and 10k/s at peak, and since each acquire is paired with a release that is 20k writes/s at peak, or 68% of a single cluster's ceiling, which one cluster carries. Best-effort traffic is 9k/s steady and 90k/s at peak, which it does not. The split is forced by those two numbers, not by taste.
+- Alternative wins when: nothing you lock is correctness-critical, or there is no consensus store in the organisation and no appetite to operate one. Bolting `INCR` onto Redis is not worthless: within one instance's lifetime the counter is genuinely monotonic and the resource-side fence genuinely works. It fails only across a failover to a replica whose counter lagged, which is also the exact moment you needed it. If your operational reality is one Redis and no etcd, take Redis plus `INCR` plus a resource-side fence and write the failover gap down as a known exposure. That is strictly better than Redis with no fence, and pretending otherwise pushes teams toward doing nothing.
 
-Two or three genuine forks. For each, in this exact shape so it stays checkable:
+**A lock at all, against optimistic concurrency**
+- Choice: no lock when the critical section ends in one conditional write to one store. Read the row with its version, do the work, `UPDATE ... SET version = v+1 WHERE id = ? AND version = v`, retry when zero rows are affected.
+- Alternative: acquire a distributed lock around the section, as in the fork above.
+- Decider: how many systems the section mutates, and the conflict rate. One store with under ~10% conflicts and optimistic wins on every axis: no lease to size, no renewal thread, no token to retrofit, no lock service in the availability path, and no way to hold something you have already lost. Above roughly 30% conflicts the retry loop burns more work than the lock would have cost, and at two or more mutated systems there is no single conditional write left to hang correctness on.
+- Alternative wins when: the section has external side effects that cannot be cheaply redone (moving money at a payment provider, delivering a file to a bank's SFTP endpoint), or it runs long enough that losing the race is expensive, such as a 5 minute report regenerated on every conflict. Note this is not really lock against no-lock. Optimistic concurrency is the fencing token with the lock deleted, so once you have committed to a resource-side version check the honest question is whether the lock is still earning its place.
 
-**<name of the fork>**
-- Choice:
-- Alternative:
-- Decider:
-- Alternative wins when:
-
-**Raw material, from the old Common Mistakes:**
-
-- **Equating "I acquired the lock" with "I can safely write."** The safe write only exists once the resource enforces fencing tokens; everything else is just advisory mutual exclusion.
-- **Using Redis SETNX for money-moving or correctness-critical work.** Redis single-instance locks are fast, not durable enough under failover. If two holders corrupt data, Redis is the wrong primitive.
-- **Skipping the paused-holder scenario.** If you cannot explain the GC-pause / expired-TTL / late-writer case, the design is incomplete. Interviewers use this as the standard safety test.
-- **Stretching one lock quorum across regions.** The latency is terrible and the failure modes get worse. Region-local quorums plus resource homing are the pragmatic answer.
-- **Relying on wall-clock time for correctness.** Wall-clock TTL reasoning is exactly where Redlock criticism lands; logical monotonic sequencing from a consensus log is the safer mental model.
-- **Using one global lock for throughput problems.** If every request needs the same lock, the architecture is already serialised; shard, redesign, or use optimistic concurrency instead.
+**Redlock against picking one of the other two**
+- Choice: do not use Redlock. Consensus store where safety matters, one Redis where it does not.
+- Alternative: Redlock, acquiring the same key on a majority of N independent Redis masters (N = 5 in the reference description) and treating the lock as held if a majority answered within a bounded time.
+- Decider: whether you need a fencing token, and whether you will depend on a wall-clock drift bound. Redlock computes remaining validity as TTL minus elapsed acquire time minus a drift allowance, and the reference specification sets that allowance at 1% of TTL, so 300 ms on a 30 s lease. Any clock event larger than that, an NTP step or a VM live migration or a resumed hypervisor, breaks the bound on whichever nodes it hits. Separately, five independent masters share no log, so there is no value they can agree is monotonic, which is the core of Kleppmann's 2016 critique and the reason a resource-side fence cannot be retrofitted onto it. Antirez's rebuttal, also 2016, is that bounded drift plus monotonic clocks make it safe in practice, and the exchange was never settled. Treat it as open rather than decided, and route around it.
+- Alternative wins when: you already run several independent Redis instances, the locks are best-effort, and what you actually want is for the lock to survive one master dying. Redlock does deliver that, and on availability it is a real improvement over single-instance Redis. It is wrong only when it is sold as safety. If you cannot say which of the two you are buying, you should not be reaching for it.
 #### High-level design
 **must-say**
 
@@ -15131,25 +15128,36 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 #### Deep dive
 **must-say**
 
-**Fencing tokens (the only thing that actually makes locking safe).** The lock service returns a monotonically increasing token (a sequence number from the consensus log, in ZK/etcd terms) on every acquire. The holder includes this token in *every* write to the protected resource — DB row update, S3 PUT, whatever. The resource maintains its own "highest token I've accepted" and rejects any write with a token less than that. The classic Kleppmann scenario: client A holds lock with token 33, hits a 30s GC pause, lock TTL expires at 20s, client B acquires with token 34 and writes; A wakes up still believing it holds the lock and writes with token 33 — the resource sees 33 < 34 and rejects. Without fencing, both writes succeed and data corrupts. Fencing belongs at the resource because the resource is where the actual conflict happens; a perfect lock service still can't prevent this.
+**Fencing tokens, the only mechanism that makes a distributed lock safe.**
 
-**Comparison:**
+Start from the failure, because the mechanism is only legible once you accept the failure is unavoidable. Client 1 acquires a 20 second lease and begins work. Its runtime enters a stop-the-world garbage collection pause of 35 seconds, during which nothing in the process runs, including the renewal thread. At t=20 the lease expires and the lock service, correctly, releases the key. At t=22 Client 2 acquires and writes. At t=35 Client 1 resumes in the middle of a function, having received no notification that anything happened, and issues its write. Both writes are accepted, and the newer one is silently replaced by stale data.
 
-| Aspect | ZooKeeper / etcd | Redis (single) | Redlock |
-|---|---|---|---|
-| Safety | strong (Paxos/Raft consensus log) | weak on failover (async replication) | debated; weak under clock skew |
-| Fencing tokens | yes (consensus seq) | no native; bolt on with INCR | no — no consensus log |
-| Latency | tens of ms (consensus quorum) | sub-ms | sub-ms × N parallel acquires |
-| Complexity | high | low | medium |
-| Best for | leader election, critical sections, anything money-touching | rate-limit dedupe, best-effort mutex, cache stampede locks | controversial; avoid if either of the others fits |
+Nothing at the lock service fixes this. The service behaved correctly at every step. The problem is that "I hold the lock" is something the client learned in the past and cannot re-verify at the instant of the write, because any check it performs can be followed by another pause before the write lands. That is not an implementation weakness. With no bound on process pauses and no bound on message delay, a holder cannot know it is still the holder. The only party positioned to know is the resource, because the resource is the one thing that sees both writes.
 
-**Beware split-brain.** Network partition splits the lock service quorum. The minority side fails closed (rejects acquires) so it doesn't grant locks; the majority side keeps granting. If both sides instead failed open, you'd have two clients believing they hold the same lock on opposite sides of the partition — guaranteed corruption. The downstream protection is still fencing tokens at the resource: even if some lock service somehow grants two holders, the resource only accepts writes from the highest-token holder, so corruption is bounded.
+**What the token must be.** Each grant returns a number that strictly increases across successive grants of the same key. Global monotonicity across all keys is not required, though you get it free and it makes incident debugging easier. It has to come from something that already has a single agreed order, which in practice means the consensus log. etcd exposes the `mod_revision` of the lock key, the Raft revision at which that key was created; ZooKeeper exposes the `czxid` of the znode, the ZAB transaction id. Both are log positions, so monotonicity is a property of the log rather than a feature someone implemented and could get subtly wrong. A token minted by a separate counter service is a second consensus problem that you now own.
 
-**Auto-release.** Crashed holders must not hold locks forever, so every lock has a TTL. Pick TTL longer than worst-case work duration (with safety margin) — too short and a slow process loses its lock mid-work, too long and crash recovery waits unnecessarily. Long-running holders renew the TTL at TTL/3 cadence (heartbeat); if heartbeat stops, the lock expires naturally and the next acquirer takes over. ZK ephemeral nodes do this automatically via session — no explicit TTL, the lock is alive iff the client's session is alive.
+**What the resource must do.** Keep, per protected object, the highest token it has accepted, and compare and advance it inside the same transaction as the write:
 
-**Multi-region.** Lock services don't stretch cleanly across regions because consensus protocols (Raft/ZAB) require a majority round-trip on every write — a 5-node ZK cluster spread us-east/eu-west/ap-south pays cross-region latency on every acquire (100-300ms), making the lock unusable for hot paths. The pragmatic answer is *region-local lock services* with the lock domain scoped per region — locks on `user:42` in us-east never need to coordinate with eu-west because the *resource* (user 42's home shard) is also region-pinned. For genuinely global resources, route the lock acquire to the resource's home region (the holder pays cross-region latency, but only for that one resource) and let fencing tokens at the resource enforce safety. Cross-region active-active locking with strong safety is unsolved at acceptable latency; cross-region eventual consistency on best-effort locks (Redis with async replication across regions) is fine where two holders is an annoyance, not corruption.
+```sql
+UPDATE refunds
+   SET status = 'paid', fence_token = :token
+ WHERE id = 9981
+   AND fence_token < :token
+```
 
-**Fencing-token resolution under a paused holder (Kleppmann's scenario).**
+Zero rows affected means fenced out, and the caller must treat that as a terminal failure rather than something to retry. The single-statement form matters more than it looks. Reading `max_seen_token`, comparing in application code, then writing reopens exactly the gap the fence exists to close, because the process can pause between the check and the write. The comparison has to sit inside the store's atomic unit.
+
+**Granularity.** The counter belongs to the protected object, not to the lock. If one lock key guards three rows, all three carry a fence column and all three take the same token in the same transaction, otherwise a partially fenced writer updates some and not others. If the mapping between lock keys and objects is unstable, false rejects appear: an object guarded by lock A on Monday and lock B on Tuesday sees two independent sequences, and the lower one is refused for no good reason. One lock key to one fenced object keeps it comprehensible.
+
+**Renewals do not mint tokens.** A holder renewing its lease keeps the same token. If renewal issued a fresh one, an in-flight write carrying the previous token would be rejected by your own fence, and you would have built a mechanism that fires on the correct holder. Only losing the lock and reacquiring it produces a new token. Say this out loud in the room, because it is a natural wrong turn and interviewers notice when a candidate walks past it.
+
+**Resources you can fence, and resources you cannot.** A relational row is easy: one column, one predicate. Object storage became workable when S3 added conditional writes with `If-None-Match` in August 2024 and conditional overwrite with `If-Match` on the ETag in November 2024, which gives compare-and-swap without a separate token column. A queue, a third-party payment API, an SFTP drop, an outbound email: none of these are fenceable, because there is no counter you can add to something you do not own. For those the honest position is that the lock is advisory and the safety property has to come from somewhere else, normally an idempotency key that the receiver deduplicates, which depends on their cooperation and their retention window rather than on your design.
+
+**What fencing costs.** Computationally nothing: an extra predicate on a row already being written by primary key. The real cost is that the guarantee is only as strong as the least disciplined writer. One nightly batch job, one admin console, one operator applying a manual fix, and the fence is bypassed for that write with no signal anywhere. So enforce it in the storage layer rather than requesting it of clients: a NOT NULL fence column plus a trigger or check constraint that refuses a non-increasing update, so a writer that has never heard of the lock fails loudly instead of quietly winning.
+
+**What fencing does not give you.** It makes each individual write safe. It does not make the critical section atomic. A holder that writes A, pauses, is fenced out, and then fails on B leaves the resource half updated. That is a smaller problem than silent corruption and it is still a problem, and it is the first Unresolved item below.
+
+**Fencing-token resolution under a paused holder (Kleppmann's scenario, from his 2016 critique of Redlock).**
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 700" role="img" aria-label="Fencing-token resolution under a paused holder: sequence between two clients, lock service and resource">
@@ -15249,24 +15257,22 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 </svg>
 ```
 
-The lock service alone *cannot* prevent the late writer; only the resource enforcing a monotonically increasing token can. The token comes from the consensus log sequence (ZK's `czxid`, etcd's `mod_revision`) so it's strictly monotonic across all acquires of any key. Every write to the protected resource carries the token; the resource maintains `max_seen_token` per logical resource and rejects anything less. This is the *only* design that survives stop-the-world pauses, network partitions, and (critically) Redlock's clock-skew failure modes. *[Source: Martin Kleppmann — How to do distributed locking]*
+Read the diagram as an argument about placement rather than a sequence of messages. Every arrow into the lock service is correct in isolation, and the corruption in the counterfactual note at the bottom right still happens, which is the point: correctness at the lock service is not sufficient, so the check has to live at the last hop. The lock service reduced contention, saving Client 2 from racing Client 1 in the normal case; the resource is what made the abnormal case safe. Those are two different jobs and only one of them is optional.
 
-**Kleppmann vs antirez on Redlock's safety.** Kleppmann's critique has two prongs. *No fencing tokens*: Redlock doesn't have a consensus log, so it has no monotonically-increasing sequence to hand the resource — even if you bolt fencing on, Redlock can't supply a correct token under failover (a new majority can grant a lower token than what was previously granted on a different majority). *Wall-clock dependence*: Redis uses `gettimeofday()`, not a monotonic clock, to compute TTL; an NTP step or VM live-migrate that jumps the clock forward on a majority of nodes expires the lock early on those nodes while the holder still believes it's valid → two holders, both in the right per their local view. Antirez argues bounded clock drift + monotonic-clock patches make this safe in practice. The pragmatic conclusion: Redlock occupies a narrow "use-only-if" zone; for correctness use ZK/etcd + fencing, for best-effort use single-node Redis SETNX, and stay away from Redlock for anything where two holders corrupts data. *[Source: Kleppmann; antirez rebuttal]*
-
-**etcd lease primitive.** etcd's lock primitive is a *lease* (a TTL'd grant identified by a `lease_id`) plus a key bound to that lease. Acquire = create a key with `lease_id`; the key auto-deletes when the lease expires or is revoked. The lock holder uses the *lease keep-alive* RPC to renew the TTL while still working — same pattern as ZK's session, but explicit. Fencing tokens come for free from etcd's `mod_revision` on the lock key, which is the monotonic Raft log index. Compared to ZK ephemeral-sequential nodes, etcd is conceptually thinner (no node hierarchy) and has a simpler API (`Lock(name)` returns a key + revision); behaviour and safety guarantees are equivalent. *[Source: etcd docs]*
+The mechanics of the grant are deliberately thin by comparison. In etcd a lock is a lease, a TTL'd grant identified by a `lease_id`, plus a key bound to it that disappears when the lease is revoked or expires, with a keep-alive RPC to extend it. In ZooKeeper it is an ephemeral znode tied to the client's session, which vanishes when the session dies with no explicit TTL to manage. The two give equivalent safety, and the choice between them is an operational preference, not a design fork. What is not interchangeable is the token: it exists only because the underlying log has an agreed order, which is precisely what a system without consensus cannot supply. *[Source: Martin Kleppmann, How to do distributed locking, 2016; etcd documentation]*
 #### Where it breaks
 **must-say**
 
 **Bottlenecks**
 
-- **Lock contention** (10k workers fighting for one lock) — naive Redis SETNX has no fairness; everyone polls and the lucky winner gets it next, leading to wasted retries and unbounded wait times. ZK ephemeral sequential nodes give a fair FIFO queue — each waiter watches only the znode immediately before its own, so wake-up traffic per release is O(1), not O(waiters). Even so, contention this high is a smell — shard the lock by sub-key, or move to a single-leader-pulls-from-queue pattern.
-- **Lock service outage** — has to fail one way: fail-closed (no acquires granted, work stops, correctness preserved) or fail-open (acquires granted on minority side, work continues, correctness sacrificed). Always fail-closed for correctness locks; for "best-effort" locks (rate-limit dedupe), fail-open + idempotent work + reconciliation is acceptable.
-- **Long GC pause holding lock** (30s pause with 20s TTL) — lock expires while holder thinks it's still active; second process acquires; both write. This *cannot* be fixed at the lock service. Fencing tokens at the resource reject the late writer's request. Without fencing, no distributed lock implementation is safe.
-- **Clock skew (Redlock)** — Redlock measures TTL via each node's wall clock. A forward NTP step on a majority of nodes expires locks early, letting a second client acquire while the first thinks it still holds — two holders. ZK/etcd use logical clocks via consensus, immune to wall-clock skew; use them when correctness matters.
-- **Hot lock** (every request needs the same lock) — turns the lock service into a serialisation bottleneck regardless of implementation. Re-design: shard by sub-key (lock per user, not global), use optimistic concurrency (CAS on a version column, retry on conflict), or change the workflow entirely so a single leader pulls work from a queue rather than N workers fighting.
-- **Missing fencing tokens at the resource** — every distributed lock implementation, no matter how careful, can grant two holders under sufficiently bad conditions (GC pause, partition, clock skew). The *only* defence is the resource itself maintaining `max_seen_token` and rejecting writes from lower tokens. Without it, the lock is theatre — it can prevent contention in the happy path but cannot prevent corruption in the failure path. *[Source: Kleppmann]*
-- **Redlock failover monotonicity** — Redlock has no consensus log, so a sequence of acquires across different majorities of N nodes can produce non-monotonic "tokens" (whatever proxy you bolt on). Even *with* fencing at the resource, the resource may see token 34 then later token 33 from a new acquirer because the new majority disagreed with the old one. This is what Kleppmann means when he says "Redlock cannot supply correct fencing tokens." Use ZK/etcd whose Raft/ZAB log gives you a single global sequence. *[Source: Kleppmann; antirez]*
-- **etcd lease keep-alive storm** (100k long-running holders all renewing at TTL/3 cadence) — keep-alive RPCs hit the leader's consensus log, so a flood of renewals at the same instant saturates Raft. Mitigation: jitter renewal timing across holders (each picks a random offset within `[TTL/4, TTL/2]`); lease grouping (one keep-alive renews many leases) on the etcd v3 client.
+- **The release storm, not steady state.** Peak load here is 10k correctness acquires plus 10k releases per second against an etcd ceiling near 30k writes/s, which is 68% and arrives all at once during a fleet-wide deploy. Mitigation: stagger restarts so reacquisition spreads over 30 to 60 seconds instead of landing in one second, and shard the correctness keyspace across three clusters by key hash if a single cluster crosses 70% sustained.
+- **Hot lock.** Every request needing the same key turns the lock service into a serialisation point no matter which implementation you picked, and no tuning fixes it. Redesign: shard by sub-key (lock per user, not one global lock), switch to optimistic concurrency on a version column, or restructure so one leader pulls from a queue instead of N workers racing. Treat a single key above roughly 100 acquires/s as a design defect rather than a capacity problem.
+- **Contention without fairness.** Redis SETNX has no queue: everyone polls, an arbitrary winner takes it, and wait times are unbounded for the unlucky. ZooKeeper ephemeral-sequential nodes give FIFO with each waiter watching only its immediate predecessor, so wake cost per release is O(1) rather than O(waiters). That fixes fairness, not throughput, and it interacts with the previous bullet: a fair queue in front of a hot lock just makes the wait predictable.
+- **Lock service outage.** It has to fail one way. Fail closed and acquires stop, work stops, correctness holds. Fail open and work continues on both sides of a partition, which is guaranteed corruption. Correctness locks fail closed, always; the minority side of a split quorum rejects acquires while the majority keeps granting, and existing holders keep their leases until expiry. Best-effort locks may fail open, on the condition that the work is idempotent and something reconciles afterwards.
+- **A paused holder.** A 35 second pause under a 20 second lease expires the lock while the holder still believes it is active. This cannot be fixed at the lock service at any price, because a client cannot verify ownership at the instant of the write. Fencing at the resource rejects the late write. Without it, no lock implementation is safe, however carefully built.
+- **Clock skew on wall-clock TTLs.** Redlock derives validity from each node's wall clock, so a forward NTP step or a resumed VM on a majority of nodes expires the lock early there while the holder still counts it valid, producing two holders who are each locally correct. etcd and ZooKeeper order by consensus log position rather than time, so a clock jump costs latency instead of safety.
+- **Keep-alive storms.** Renewals commit through the leader's log like any other write, so synchronised renewal is a self-inflicted write spike. Jitter each holder's renewal into a random offset in `[TTL/4, TTL/2]`, and use lease grouping so one keep-alive covers many leases. At our numbers renewals are 300/s and not the problem; at 100k long holders they would be 10k/s and would dominate.
+- **The fence column becomes the new hot row.** Fencing moves the serialisation point from the lock service to the protected object, which is correct but not free: every write to that object now touches the same counter. For a per-user or per-order object that is fine. For a single global object it converts a lock bottleneck into a row-lock bottleneck, which is the hot lock bullet wearing a different hat.
 
 **Failure modes**
 
@@ -15282,7 +15288,11 @@ The lock service alone *cannot* prevent the late writer; only the resource enfor
 
 **Unresolved**
 
-TODO. Two or three things this design genuinely does not handle well, and what you would do about each.
+**Fencing makes writes safe and does not make the critical section atomic.** A holder that writes A, pauses past its lease, and is fenced out before writing B leaves the resource half updated. The fence did its job: no stale value overwrote a fresh one. But the invariant the lock was protecting spans A and B, and it is now broken in a way no token check can see. If A and B are in one database, put them in one transaction and the problem disappears, which is why single-store critical sections are the easy case and why the optimistic-concurrency fork above is so often the better answer. Across two systems there is no clean fix available at this layer. You either make every step idempotent and replayable so a recovery pass can finish the interrupted section, or you accept a saga with explicit compensations, and both are a different design from "take a lock and do the work". We have not built either, and the current honest statement is that multi-system critical sections are protected against corruption but not against partial completion.
+
+**Some resources cannot be fenced at all.** The mechanism assumes you can add a monotonic check to the thing being written. That is true of a row you own and of object storage with conditional writes; it is false of a third-party payment API, a partner's SFTP endpoint, an outbound email, or a mainframe nobody will modify. For those the lock is genuinely advisory and we do not claim safety, because there is no party downstream that can reject the late writer. The best available substitute is an idempotency key that the receiver deduplicates, which is not our mechanism and depends entirely on their retention window and their definition of duplicate. Where the counterparty offers nothing, the remaining option is at-least-once delivery plus a reconciliation job, meaning the failure is detected after the fact rather than prevented. Anyone who tells you a distributed lock protects an external API is describing a hope.
+
+**Cross-region active-active locking with strong safety is unsolved at acceptable latency.** One quorum stretched across regions pays a WAN round trip on every acquire, 100 to 300 ms, which is 10× to 100× the in-region cost and unusable on any hot path; per-region quorums are fast but two quorums can each grant the same logical lock. What we actually do is dodge the problem: home each resource in one region, route acquires for it to that region so the holder rather than everyone else pays the latency, and let fencing enforce safety at the resource, which is also region-homed. That works and it is not active-active. Moving a resource's home is a coordinated procedure with a quiesce step, not a failover, and during a region outage the resources homed there are unavailable rather than served from elsewhere. Best-effort locks can be replicated across regions asynchronously and are fine, because two holders there is waste. For correctness locks we have a workaround with a stated limitation, not a solution.
 #### Drill questions
 1. A holder hits a 30s GC pause while holding a lock with 20s TTL. Lock expires, second process acquires, both write. How do you prevent corruption?
 2. Why pick ZooKeeper/etcd over Redis SETNX for critical locks?
@@ -15290,33 +15300,46 @@ TODO. Two or three things this design genuinely does not handle well, and what y
 4. How does Redlock's safety break under clock skew?
 5. 10,000 workers all trying to acquire the same lock. Bottleneck?
 6. How do you handle re-entrancy (same holder wants to acquire its own lock again)?
-
-TODO. Only 6 drill questions carried over, top up to at least 10.
+7. The lock service is healthy and every metric on it looks clean, yet two workers demonstrably wrote the same record. Where do you look?
+8. Does a lease renewal mint a new fencing token? Why does the answer matter?
+9. The protected resource is a third-party payment API you do not control. How do you make this safe?
+10. How do you size the TTL, and what goes wrong at each end of the range?
+11. When would you not use a distributed lock at all?
+12. Does choosing etcd over ZooKeeper change any of the safety argument?
 #### Answers to drill questions
-1. Fencing tokens at the resource level — every write carries a monotonically increasing token; resource rejects writes with a token less than the last accepted. The first process's late write gets rejected. *If pushed:* the lock service alone cannot fix this; any design without resource-side fencing is unsafe under pause/partition. Canonical Kleppmann critique of Redlock.
+1. Fencing tokens at the resource level. Every write carries a monotonically increasing token; resource rejects writes with a token less than the last accepted. The first process's late write gets rejected. *If pushed:* the lock service alone cannot fix this; any design without resource-side fencing is unsafe under pause/partition. Canonical Kleppmann critique of Redlock.
 
-2. ZK/etcd use Raft/ZAB consensus — a write isn't acknowledged until a majority commits, so failover preserves lock state. Redis async replication can lose recently-acquired locks if the master dies before replication. *If pushed:* Redis is 10-100x faster and fine for non-critical use (rate limit dedupe, cache stampede); use ZK/etcd only when a wrong answer corrupts data.
+2. ZK/etcd use Raft/ZAB consensus, so a write is not acknowledged until a majority commits, so failover preserves lock state. Redis async replication can lose recently-acquired locks if the master dies before replication. *If pushed:* Redis is 10-100x faster and fine for non-critical use (rate limit dedupe, cache stampede); use ZK/etcd only when a wrong answer corrupts data.
 
-3. Minority side rejects acquires (fails closed); majority side keeps granting. On heal, minority side re-syncs from majority log. *If pushed:* this trades availability for safety — fail-open on partition would let two holders coexist on either side. Always fail-closed for correctness locks; for "best-effort" locks, fail-open and rely on idempotent work + reconciliation.
+3. Minority side rejects acquires (fails closed); majority side keeps granting. On heal, minority side re-syncs from majority log. *If pushed:* this trades availability for safety, since failing open on a partition would let two holders coexist on either side. Always fail-closed for correctness locks; for "best-effort" locks, fail-open and rely on idempotent work + reconciliation.
 
-4. Each Redis node measures TTL via its own wall clock. A forward jump on a majority of nodes (NTP step, VM live-migrate) expires those locks early, letting a second client acquire while the first still believes it holds the lock — two holders. Symmetric problem: a process pause longer than (TTL − elapsed) lets the lock expire on every node before the holder finishes. *If pushed:* Kleppmann's deeper critique is that Redlock has no consensus log, so it cannot produce monotonic fencing tokens — meaning even if you bolt fencing onto the resource, Redlock can't supply the token correctly under failover. Antirez argues bounded clock drift + monotonic clocks make it safe in practice. For correctness-critical work, use ZK/etcd; Redlock is fine for best-effort mutual exclusion.
+4. Each Redis node measures TTL against its own wall clock, and the protocol's validity calculation subtracts a drift allowance set at 1% of TTL in the reference specification, so 300 ms on a 30 second lease. A forward jump larger than that on a majority of nodes, from an NTP step or a VM live migration, expires those locks early and lets a second client acquire while the first still counts itself valid. Two holders, each locally correct. The symmetric problem is a process pause longer than the remaining validity, which expires the lock everywhere before the holder finishes. *If pushed:* the clock argument is the shallow half. Kleppmann's deeper point, from his 2016 critique, is that five independent Redis masters share no log, so there is no value they can agree is monotonic, and a resource-side fence therefore cannot be retrofitted: the resource can legitimately see token 34 and then token 33 because a different majority granted the second one. Antirez's rebuttal the same year is that bounded drift plus monotonic clocks make it safe in practice, and the exchange was never resolved. Use ZK or etcd where two holders corrupt data, single Redis where they do not, and treat Redlock as unsettled rather than as either proven or debunked.
 
-5. ZK ephemeral sequential nodes give you a fair queue — each waiter watches only the znode immediately before theirs (not all of them), so wake-up traffic is O(1) per release. *If pushed:* even so, contention this high suggests redesign — shard the lock by sub-key, use optimistic concurrency (CAS on a version), or change the workflow to a single-leader pull from a queue rather than N workers fighting for one resource.
+5. ZK ephemeral sequential nodes give you a fair queue, since each waiter watches only the znode immediately before theirs (not all of them), so wake-up traffic is O(1) per release. *If pushed:* even so, contention this high suggests redesign: shard the lock by sub-key, use optimistic concurrency (CAS on a version), or change the workflow to a single-leader pull from a queue rather than N workers fighting for one resource.
 
-6. Store `(owner_id, refcount)` instead of just `owner_id`; acquire bumps refcount if same owner, release decrements. *If pushed:* re-entrancy across process restarts is unsafe (different instance, same logical owner) — bind owner_id to a session/lease ID that dies with the process; ZK ephemeral nodes do this naturally via session.
+6. Store `(owner_id, refcount)` instead of just `owner_id`; acquire bumps refcount if the owner matches, release decrements and only frees the key at zero. *If pushed:* re-entrancy across process restarts is unsafe, because a new instance presenting the same logical owner id would inherit a lock it never took. Bind owner_id to a session or lease id that dies with the process, which ZooKeeper ephemeral nodes give you for free.
+
+7. At the resource, not the lock service. A clean lock service is consistent with two accepted writes, because the lock service cannot see writes. The order to check: is there a fence column on that object at all; is the comparison inside the same statement as the update rather than a read-then-write in application code; is there a writer bypassing the fence entirely, which in practice is a batch job, an admin tool, or a manual fix. *If pushed:* this is why the fenced-write rejection counter matters. If it sits at exactly zero forever, that is not proof the design works, it is the absence of evidence either way. A chaos test that deliberately pauses a holder past its lease should make the counter tick, and if it does not, fencing is not actually wired up.
+
+8. No. A renewal extends the lease and keeps the existing token. If renewal minted a new one, an in-flight write carrying the old token would be rejected by your own resource, so the fence would fire on the legitimate holder and the system would fail correct requests under normal operation. Only losing the lock and reacquiring produces a higher token. *If pushed:* the deeper reason is what the token identifies. It marks a period of uninterrupted ownership, not a moment in time. Renewal does not interrupt ownership; expiry followed by reacquisition does, and that is exactly the boundary the resource needs to detect.
+
+9. You cannot, not at this layer. There is no counter you can add to a system you do not own, so the API has no way to reject the late writer, and the lock is advisory. What you do instead: attach an idempotency key derived from the business operation rather than from the lock, and rely on the provider deduplicating it, which most payment APIs support with a retention window measured in hours or days. Then reconcile: pull their ledger and compare against yours on a schedule, because your safety property is now detection rather than prevention. *If pushed:* state the residual risk plainly rather than papering over it. If two of your workers submit the same charge with the same idempotency key inside the provider's window, they deduplicate and you are fine; outside the window, or with keys derived differently by the two workers, you have double-charged a customer and will find out from reconciliation or from them. The lock reduces how often that happens and does not make it impossible.
+
+10. TTL must exceed worst-case work duration including the pauses you actually observe, with margin, so measure the p99.9 of the critical section and multiply by 3 to 5. Too short and healthy holders lose their locks mid-work, which converts a latency blip into a correctness event you now have to fence out constantly. Too long and a crashed holder blocks the key for the full TTL, so a 300 second lease means five minutes of stalled work after every crash. A 30 second TTL with renewal every 10 seconds suits most sections; renewal is what lets you keep the TTL short without penalising slow work. *If pushed:* the choice is less important once fencing exists. Fencing turns an expired-lease overlap from corruption into a rejected write, so TTL becomes a liveness and throughput tuning parameter rather than a safety one. Anyone agonising over TTL for safety reasons has not built the fence.
+
+11. Whenever the critical section ends in one conditional write to one store, which is more often than people expect. A version column and `UPDATE ... WHERE version = v` gives mutual exclusion where it actually matters, at the write, with no lease, no renewal, no token, and no lock service in the availability path. Also skip the lock when the work is naturally idempotent, since running it twice costs only compute, and when the real problem is ordering rather than exclusion, where a partitioned queue with one consumer per partition gives you serialisation for free. *If pushed:* optimistic concurrency degrades badly under high contention, since above roughly 30% conflict rate the retry loop wastes more work than the lock would have cost, and it does not help at all when the section mutates two systems or has non-retryable external effects. That is the boundary between the two, and it is a question about the workload rather than about the lock.
+
+12. Not the safety argument, only the ergonomics. Both commit through a majority before acknowledging, both expose a log position you can use as a fencing token (`mod_revision` in etcd, `czxid` in ZooKeeper), and both auto-release on session or lease expiry. etcd is conceptually thinner with a flat keyspace, an explicit lease you manage with keep-alive, and a gRPC API; ZooKeeper has a node hierarchy, an implicit session, and ephemeral-sequential nodes that hand you a FIFO wait queue with predecessor watches without you building one. *If pushed:* pick on what you already operate, because the running cost of a coordination cluster you are unfamiliar with dwarfs any difference between them. The one genuine functional gap is that fair queueing under contention is a native ZooKeeper idiom and something you assemble yourself on etcd, so a workload with deep wait queues leans ZooKeeper.
 #### Whiteboard script
-TODO
+**0-5, take the thesis before anyone draws a box.** Open with the sentence the whole answer hangs on: "a lock service gives you mutual exclusion, and mutual exclusion is not safety, so I am going to design two things." Then ask the three questions that actually fork it: what does a duplicate holder cost, waste or corruption; how many systems does the critical section mutate; and what is the acquire latency budget. State the numbers you will assume: ~10k acquires/s total of which ~1k need to be safe, 30 second leases, tens of milliseconds acceptable on the safe path. Draw nothing yet.
 
-A 45 minute budget: what to cover in 0-5, 5-15, 15-35 and 35-45, what to say first, and a line starting `Cut first:`.
+**5-15, the spine, four boxes.** Client, lock service, protected resource, and a second client. Draw the acquire arrow, the grant arrow carrying a token, and the write arrow carrying the same token, then write `max_seen_token` inside the resource box and circle it, because that circle is the answer to the question. Say why the lock service is a consensus cluster of three or five nodes in one sentence (majority commit means a leader change cannot forget a grant, and the log position is the token) and do not linger, because that part is not contested. Say TTL and renewal at TTL/3 in one more sentence. If they have not asked about the paused holder by minute 15, introduce it yourself.
 
-**Raw material, from the old Talking Points:**
+**15-35, the drill, and protect this time.** Walk the pause scenario with real numbers on the board: 20 second lease, 35 second pause, second holder acquires at t=22 and writes, first holder resumes at t=35 and writes stale. Then land the general claim: a client cannot verify ownership at the instant of the write, so the check has to be at the resource. Write the conditional UPDATE out, and point at the fact that comparison and write are one statement, because a read-then-write reopens the same gap. Then volunteer the three things that make this real rather than tidy: renewal keeps the token, the fence has to be enforced by the storage layer or one batch job voids it, and some resources cannot be fenced at all. If they push on Redis, take the fork properly: two lock classes on two backends, 1k/s of correctness traffic on etcd and 90k/s of best-effort on sharded Redis, with the ceiling numbers to justify it. Keep Redlock in reserve as a two-line answer, and date it: Kleppmann's critique and antirez's reply are both from 2016 and the argument was never settled.
 
-- **Fencing tokens are the real answer.** Say this early. The lock service reduces contention; the fencing token at the resource prevents corruption.
-- **ZooKeeper/etcd for correctness, Redis for best-effort.** This trade is crisp and interviewers expect you to name it rather than hand-wave over "a distributed cache."
-- **The paused-holder / GC scenario is the canonical failure test.** Walk through it proactively and show how stale writes get fenced out.
-- **Fairness under contention matters.** Ephemeral sequential nodes with predecessor watches give you a clean FIFO queue and O(1) wake-up fan-out.
-- **Auto-release via TTL or session expiry is mandatory.** Otherwise crashed holders wedge the system forever.
-- **If the lock is hot, redesign the workload.** The best distributed lock answer is often "this should be partitioned or converted into queue ownership instead."
+**35-45, concede, then operate.** Give the three gaps before they are found: fencing makes writes safe and not critical sections atomic, so a multi-system section can be left half done; external resources cannot be fenced and there the lock is advisory; cross-region active-active with strong safety is unsolved at usable latency, and what we run is resource homing plus regional quorums, which is a workaround. Then two minutes of operations: the metrics you page on (acquire p99, quorum write success, renewal lateness, wait-queue depth per key, fenced-write rejections), and the chaos test that pauses a holder past its lease to prove the rejection counter can actually move.
+
+Cut first: the ZooKeeper against etcd comparison, because it changes nothing in the safety argument. Then re-entrancy, then the fair-queue mechanics of ephemeral-sequential nodes with predecessor watches, then the multi-region section, which is genuinely interesting and eats ten minutes. Never cut: the paused holder walked with numbers, the fence check being in the same statement as the write, and the honest split between correctness locks and best-effort locks.
 #### Appendix
 **Data model**
 
@@ -15334,12 +15357,12 @@ renew(key, fence_token, ttl_ms)
 
 **Observability**
 
-- **Acquire latency** (request start → lock granted or denied) — SLO p99 depends on lock class, but should stay in the low tens of milliseconds for uncontended correctness locks.
-- **Quorum write success ratio** on the coordination service — primary safety signal for etcd/ZooKeeper-based locks; persistent dips mean the lock service itself is the incident.
-- **Lease-renewal lateness** (actual renew time vs planned renew deadline) — catches GC pauses, overloaded runtimes, and network jitter before holders start losing locks.
-- **Wait-queue depth per lock key** — identifies hot locks and fairness problems; one key going pathological is usually a design smell, not just a capacity issue.
-- **Fenced-write rejection count** at the protected resource — this should be non-zero occasionally in chaos tests and near-zero in steady state; a sudden spike means holders are pausing or renewing badly.
-- **Duplicate-holder canary results** — synthetic workloads intentionally pause a holder past TTL and verify the stale token is rejected; this is the proof that the end-to-end design is actually safe.
+- **Acquire latency** (request start to lock granted or denied). SLO p99 depends on lock class, but should stay in the low tens of milliseconds for uncontended correctness locks.
+- **Quorum write success ratio** on the coordination service. The primary safety signal for etcd/ZooKeeper-based locks; persistent dips mean the lock service itself is the incident.
+- **Lease-renewal lateness** (actual renew time against planned renew deadline). Catches GC pauses, overloaded runtimes, and network jitter before holders start losing locks.
+- **Wait-queue depth per lock key.** Identifies hot locks and fairness problems; one key going pathological is usually a design smell, not just a capacity issue.
+- **Fenced-write rejection count** at the protected resource. This should be non-zero occasionally in chaos tests and near-zero in steady state; a sudden spike means holders are pausing or renewing badly.
+- **Duplicate-holder canary results.** Synthetic workloads deliberately pause a holder past TTL and verify the stale token is rejected; this is the proof that the end-to-end design is actually safe.
 
 **Multi-region and DR**
 
@@ -15351,48 +15374,68 @@ renew(key, fence_token, ttl_ms)
 
 ### 36. Design a Distributed Job Scheduler / Cron
 #### Problem
-Schedule and reliably execute jobs across a fleet of workers — one-shot, recurring (cron), with retries, observability, and exactly-once semantics where required.
+Run a service that fires jobs at the times their owners asked for, one-shot and recurring, across a worker fleet that is constantly being restarted underneath it. Retries, dependencies and status history are part of the product, and so is the promise that a nightly batch which was supposed to run at 02:00 either ran or someone was told it did not.
 #### Core
-TODO
+Three stores and one invariant. A jobs table holds definitions and a `next_run_at`. A ticking scheduler reads what is due and, for each due job in a single transaction, inserts a run row keyed on `(job_id, scheduled_at)` under a unique constraint and advances `next_run_at`. That constraint is the entire exactly-once story for the decision: a duplicated tick, two processes that both believe they lead, or a leader change halfway through a tick all collapse to one run row. Leader election is therefore a load optimisation, not a correctness requirement, which is the opposite of how the design is usually presented.
 
-Write the whole answer as you would give it in sixty seconds, 200 to 300 words, standing alone.
+The run row publishes to a durable queue after it commits, never before; a sweeper republishes rows that never reached the queue. Workers pull, lease the same tuple with a TTL, execute, and write a terminal status.
+
+Three separate guarantees, which people collapse into one: exactly one run record per calendar occurrence, at least one execution attempt per record, at most one accepted completion. Execution is at-least-once, so idempotency lives in the job, normally a ledger row on the same tuple checked before any side effect.
+
+Scale is easy in the wrong dimension. 10M definitions averaging 4 fires a day is 460 runs/s, which is nothing. The problem is 2.5M of them are set for midnight and fire in the same second, so jitter the real fire time by a stable hash of the job id while keeping the cron line the user typed.
+
+The hard parts, in order: a run that never fires produces no error, catch-up after an outage runs jobs for the wrong period, and the calendar generates duplicate and missing occurrences twice a year.
 #### Summary
-**The picture in your head:** a cooking timer on a restaurant kitchen wall, with a team of chefs. The timer board tracks every dish that needs to cook and when to pull it. When a timer fires, a notecard gets placed on the chef's station ("pull the salmon in oven 3 at 7:15pm — table 12"). The chef picks up the notecard, does the work, and marks it done. If a chef drops the card and forgets, the card goes back in the queue and another chef picks it up. The key insight: the timer board (scheduler) and the kitchen work (workers) are completely separate, and each notecard is a physical artifact you can track and retry independently.
+**The picture in your head:** a cooking timer on a restaurant kitchen wall, with a team of chefs. The timer board tracks every dish that needs to cook and when to pull it. When a timer fires, a notecard goes on the chef's station ("pull the salmon in oven 3 at 7:15pm, table 12"). The chef picks up the notecard, does the work, and marks it done. If a chef drops the card and forgets, the card goes back in the queue and another chef picks it up. The key insight: the timer board (scheduler) and the kitchen work (workers) are completely separate, and each notecard is a physical artifact you can track and retry independently.
 
 **The approaches people actually take:**
-TODO. Two or three things a competent engineer might reach for, in plain language and before any product name, with what each one buys and roughly when it wins.
 
-**The single-request walkthrough:** an analytics platform has a cron job defined as `0 2 * * *` (run at 2am daily), which triggers a report-generation function. At 2:00:00am, the Scheduler Service (a single elected leader running on a 3-node coordination cluster) wakes up, queries the jobs database for all entries where `next_run_at <= NOW()`, finds this job, and creates a run record: `run_id=abc123, job_id=report-daily, scheduled_at=2am, attempt=1`. It pushes this record to a durable queue (Kafka or SQS — a log that persists messages to disk and delivers them to consumers reliably, even if a consumer crashes). A worker from the worker pool pulls the record. Before touching anything, the worker calls `SETNX lease:abc123 → worker-07` with a 300-second TTL in Redis — "SETNX" means "set if not exists," an atomic Redis operation that succeeds for only one caller. Worker-07 wins the lease, runs the report generation (writes output to S3), marks the run `SUCCEEDED` in the status store, and releases the lease. Total end-to-end: job fires within ~30 seconds of 2am, runs for ~120 seconds, status shows `SUCCEEDED` with a link to the S3 output.
+*A ticking clock over a table of due work.* One process wakes on a fixed interval, asks which rows are due, writes a run record for each, and hands the records off. It buys one place to reason about time and a receipt for every decision, which is what makes retries and audit tractable. It costs a tick's worth of imprecision and a write burst whenever a lot of jobs share a round time. It wins below a few thousand fires per second, which covers almost every real deployment.
+
+*A structure ordered by future fire time.* Keep pending occurrences in a priority order on their fire timestamp and sleep until the head is due, so a wake-up costs one operation instead of a scan. It buys sub-second precision and removes the scan entirely. It costs a second durable structure that must be kept in step with the definitions and rebuilt after a restart, and it makes "what is due" no longer a plain query anyone can run. It wins when a job genuinely needs to fire on a business boundary, or when the definition table is large enough that scanning dominates.
+
+*No central scheduler: every worker evaluates the calendar itself.* Each worker holds the schedule definitions, works out what is due from its own clock, and claims the occurrence in a shared store keyed on job plus occurrence time. It removes the leader and the single point of stall. It costs a hard dependence on clock agreement and on the claim store being linearizable, and it makes fire time a property of the fleet rather than of one host. It wins in small fleets and in per-tenant deployments where isolation matters more than precision.
+
+**The single-request walkthrough:** an analytics platform has a cron job defined as `0 2 * * *` (run at 2am daily), which triggers a report-generation function. At 02:00:00, the Scheduler Service (a single elected leader running on a 3-node coordination cluster) wakes up, queries the jobs database for all entries where `next_run_at <= NOW()`, finds this job, and in one transaction creates a run record (`run_id=abc123, job_id=report-daily, scheduled_at=2am, attempt=1`) and advances the job's `next_run_at` to tomorrow. After that transaction commits it pushes the record to a durable queue, a log that persists messages to disk and delivers them to consumers reliably even if a consumer crashes. A worker pulls the record. Before touching anything, the worker calls `SETNX lease:report-daily:2026-08-03T02:00Z` with a 300-second TTL, an atomic set-if-not-exists that succeeds for only one caller. Worker-07 wins the lease, runs the report generation, writes output to object storage, marks the run `SUCCEEDED` in the status store with a compare-and-set on the attempt number, and releases the lease. End to end: the job fires within about 30 seconds of 02:00, runs for about 120 seconds, and the status page shows `SUCCEEDED` with a link to the output.
 
 **The pieces (and what each one is for):**
-- **Jobs store (transactional database)** — stores job definitions: cron expression, payload (what to run and with what arguments), retry policy, DAG dependencies. This is the source of truth for "what should run." Separate from run history.
-- **Scheduler Service (leader-elected)** — a process that polls the jobs store every ~30 seconds for due work and enqueues run records. It runs as a single elected leader (using a distributed lock so two schedulers never both enqueue the same job) with standbys ready to take over on failure. It does NOT execute jobs — only decides when they are due.
-- **Durable job queue (Kafka or SQS)** — the handoff between scheduler and workers. Durable means messages survive crashes: if all workers go down at 2am, the run records sit in the queue and workers drain them when they recover. The queue decouples scheduling throughput from execution throughput.
-- **Worker pool** — a fleet of stateless processes that pull run records, acquire leases, execute, and report status. Each worker is replaceable — if one crashes, another picks up the lease when it expires.
-- **Lease (Redis SETNX with TTL)** — the mechanism that prevents two workers from executing the same run simultaneously. The `(job_id, scheduled_at)` pair is the dedup key. Whoever wins SETNX runs the job; everyone else who accidentally receives the same run record from the queue (queues can redeliver) sees the existing lease and skips.
-- **Status/history store** — an append-only log of every run record: attempt number, start time, end time, status, error snippet. Used for debugging, alerting, and DAG dependency resolution.
+- **Jobs store (transactional database).** Job definitions: cron expression, payload (what to run and with what arguments), retry policy, DAG dependencies, `next_run_at`. Source of truth for what should run, and deliberately separate from run history, which has completely different write and retention characteristics.
+- **Scheduler Service (leader-elected).** A process that polls the jobs store every 30 seconds for due work and materialises run records. It runs as a single elected leader per shard with standbys ready to take over. It never executes a job. Its only output is run records.
+- **Run record.** The unit that everything else attaches to. Identified by `(job_id, scheduled_at)`, under a unique constraint, so every component downstream can ask "is this the same fire?" and get the same answer.
+- **Durable job queue.** The handoff between scheduler and workers. If every worker is down at 02:00 the run records sit in the queue and drain when workers recover. It decouples scheduling throughput from execution throughput and absorbs the top-of-hour burst.
+- **Worker pool.** Stateless processes that pull run records, acquire leases, execute, heartbeat, and report status. Any worker is replaceable, which is the point.
+- **Lease (in-memory store with TTL).** Prevents two workers executing the same run at the same time in the common case. Note carefully what it is not: a TTL lease cannot prevent a stalled worker from waking up and continuing, which is why the terminal status write is a compare-and-set rather than a blind update.
+- **Status and history store.** Append-only record of every attempt: number, start, end, status, error snippet. Feeds debugging, alerting, and DAG dependency resolution.
 
-**The thing that makes it hard:** every company with any scheduled jobs ends up scheduling a huge number of them at round times — midnight, 1am, 2am, the top of every hour. Imagine 2 million jobs all configured as `0 * * * *` (run at the top of every hour). At 03:00:00, the scheduler tries to enqueue 2 million run records in the same 30-second window. The durable queue gets a burst of 2 million messages at once, the worker pool tries to start 2 million jobs simultaneously, and the downstream systems those jobs write to (databases, S3, email APIs) all get hit simultaneously. This is the "thundering herd at the top of the hour" problem, and it can take down healthy systems.
+**The thing that makes it hard:** every company ends up scheduling a large fraction of its jobs at round times. In our fleet about 840k jobs are hourly and about 1.68M daily jobs are set to midnight, so at 00:00:00 roughly 2.5M runs come due in the same second. The queue takes 2.5M messages at once, the worker pool tries to start 2.5M jobs, and the downstream systems those jobs write to (a data warehouse, an object store, an email API) all get hit simultaneously. This is the thundering herd at the top of the hour, and it takes down healthy systems that had nothing wrong with them.
 
-**Why this design and what it costs:** add `±jitter_seconds` to every job's scheduled time at creation — a random offset sampled from a window (e.g. ±60 seconds for hourly jobs). The 2 million jobs that were all at 03:00:00 now fire spread across 02:59:00 to 03:01:00. The queue gets ~33k messages/second for 120 seconds instead of 2 million at once. Combined with per-job idempotency (the job checks a ledger row before doing work, so a retry after a crash doesn't double-send an email or double-charge a card), at-least-once delivery becomes safe at scale. "Exactly once" is not realistically achievable end-to-end when the job communicates with external systems (Stripe, SendGrid) — instead, you achieve "idempotent at-least-once," which is practically equivalent.
+**Why this design and what it costs:** add a stable per-job jitter at registration, an offset derived from `hash(job_id)` inside a configurable window, for example plus or minus 5 minutes for a midnight job. The 2.5M jobs now spread across 600 seconds, so the queue sees about 4,200 messages per second instead of 2.5M at once, and the scheduler emits at a rate a single database primary can commit. The cron line the user typed still reads `0 0 * * *`, which matters because they will read it back and expect it to mean midnight. The cost is that "scheduled for midnight" now means "within 5 minutes of midnight", which has to be documented and has to be overridable for the handful of jobs where the boundary is real. Combined with per-job idempotency, at-least-once delivery becomes safe at this scale. Exactly-once is not achievable end to end when a job talks to an external system, so what you build is idempotent at-least-once, which is practically equivalent and honestly named.
 
 **If you were building it tomorrow:**
-- Postgres for the jobs store (small — 10M jobs × 1KB = ~10GB). Kafka for the durable queue (24h retention, handles replay if workers fall behind). Redis for leases (300k concurrent leases × 200B = 60MB — trivially small). Wide-column store (Cassandra) for run history if run volume is high.
-- Core scheduler tick pseudocode:
+- Postgres for the jobs store (10M jobs at 1KB each is 10GB, so one primary with read replicas). A partitioned log for the queue with 24h retention. Redis for leases (300k concurrent at 200B is 60MB). A wide-column store for run history, which is the only component with real volume.
+- Core scheduler tick:
   ```
-  every 30s (on elected leader only):
-    runs = db.query("SELECT * FROM jobs WHERE next_run_at <= NOW()")
-    for job in runs:
-      queue.push({ run_id: uuid(), job_id: job.id, scheduled_at: job.next_run_at, attempt: 1 })
-      db.update(job, next_run_at = compute_next(job.cron, now()))
+  every 30s (on the elected leader for this shard only):
+    due = SELECT * FROM jobs
+          WHERE next_run_at <= NOW() AND state='active' AND shard=:s
+          LIMIT 10000
+    for job in due:
+      BEGIN
+        INSERT INTO job_runs (job_id, scheduled_at, attempt, status)
+        VALUES (job.id, job.next_run_at, 1, 'QUEUED')
+        ON CONFLICT (job_id, scheduled_at) DO NOTHING
+        UPDATE jobs SET next_run_at = compute_next(job.cron, job.next_run_at)
+        WHERE id = job.id AND next_run_at = job.next_run_at
+      COMMIT
+      publish(run)          -- after commit, never before
   ```
-- Workers: pull → `SETNX lease:{job_id}:{scheduled_at}` → execute → write status → release. Heartbeat every 30s to extend lease while running. On crash: lease TTL expires, next worker re-runs.
+- Workers: pull, `SETNX lease:{job_id}:{scheduled_at}`, execute, compare-and-set the terminal status on `(run_id, attempt)`, release. Heartbeat every 30s to extend the lease. On crash the TTL expires and the run is reclaimed.
 #### What this is really testing
-TODO
+Whether you understand that the product is a decision about time, and that the decision is the only thing you can make exactly-once. Everything downstream of the run record is ordinary at-least-once distributed work, and any queue-and-worker system already knows how to do it. Candidates spend the interview on the worker pool, the retry policy and the DAG engine, which are the easy half. The hard half is that nobody produces the input. Time produces it, and time is the one input you do not control. It drifts between hosts. It is not uniform: 02:00 does not exist on one Sunday in March and happens twice on one Sunday in October, so a naive implementation both skips a run and emits a duplicate every year. And its failure mode is silence. A run that never fires raises no error, generates no retry, and consumes no capacity, so nothing in the system is aware that anything is missing.
 
-The one insight this question exists to elicit, then the contrast with the question it most resembles and why the answers differ.
+The contrast is with the message queue question. There a message exists because a producer created it, and the producer is on the other end of a connection waiting for an ack, so the guarantee under discussion is delivery of something that already exists and whose identity the producer supplied. The hard problems are throughput, per-partition ordering, replica sets and consumer group rebalancing, and they are all problems of moving bytes fast without losing them. A scheduler has to manufacture its own input from a calendar, so its hard problems are identity (what makes two fires the same fire, and the answer has to survive a leader change and a timezone), absence detection (proving something did not happen), and calendar semantics. Throughput barely features: 460 runs per second is a rounding error for a broker, and the queue is a component inside this design rather than the subject of it. Answer this one with partitions, offsets and idempotent producers and you have described the plumbing while skipping the product, which is a promise that at 16:30 something happens.
 
-Closest question: TODO
+Closest question: Q16
 #### Clarifying questions and how each answer forks the design
 - One-shot or recurring? Both?
 - Exactly-once or at-least-once OK?
@@ -15404,48 +15447,54 @@ Closest question: TODO
 
 | If the answer is… | Then the design… |
 |---|---|
-| Recurring (cron) | a schedule store plus a ticker that enqueues due jobs; one-shot uses a delay queue |
-| Exactly-once execution | a lease or lock per job run plus an idempotency key so two workers cannot both run it |
-| At-least-once acceptable | simpler at-least-once dispatch with idempotent job handlers |
-| Failure handling | retries with backoff, a dead-letter queue, and alerting on exhaustion |
-| DAG dependencies | a dependency graph and a scheduler that only enqueues a job when parents succeed |
-| Tight latency to scheduled time | a fine-grained timer wheel and enough warm workers; loose tolerance allows batch polling |
+| Recurring (cron) | a schedule store plus a ticker that materialises due runs; one-shot uses the same run record with no `next_run_at` advance |
+| Exactly-once execution | a unique constraint on the run tuple for the decision, a lease plus an idempotency key for the execution, and an honest statement that the second is not exactly-once |
+| At-least-once acceptable | simpler dispatch with idempotent job handlers and no distributed transaction anywhere |
+| Failure handling | retries with backoff, a dead-letter queue, and alerting on exhaustion rather than per attempt |
+| DAG dependencies | a separate reconciler on `task_completed` events; the scheduler stays a pure function of the calendar |
+| Tight latency to scheduled time | an ordered structure on fire time and enough warm workers; loose tolerance allows batch polling and jitter |
 #### Requirements and scale, derived out loud
 **Requirements**
 
-- **FR:** schedule one-shot at time T; recurring (cron expr); retries with backoff; DAGs; cancel; status
-- **NFR:** scale to millions of jobs, no single point of failure, no double-execution (when configured), durable
+- **FR:** schedule one-shot at time T; recurring (cron expr); retries with backoff; DAGs; cancel; status and history.
+- **NFR:** millions of definitions; no single point of failure; at most one accepted completion per occurrence; durable enough that a fire decision survives any single host loss.
 
 **Scale**
 
-- **Active scheduled jobs:** hyperscaler-internal cron (Google's reportedly 10M+) is the upper bound; mid-sized SaaS scheduler ~100k. Use 10M as platform-tier default — covers Airflow + business cron + ML pipelines for a Fortune-500 fleet. Mix: ~70% recurring (cron lines, daily/hourly ETL), ~30% one-shot (delayed user actions, scheduled emails) inferred from public Airflow / Temporal usage breakdowns.
-- **Run rate:** assume avg recurring job fires ~5×/day (mix of hourly + daily + weekly). 10M jobs × 5 fires = 50M runs/day → 50M ÷ 86400s ≈ 580/s steady. Round to ~2k/s steady to account for ad-hoc one-shots. Peak at top-of-hour (every `0 * * * *` lines up): assume 30% of recurring jobs are hourly → 0.3 × 7M ≈ 2.1M jobs all firing in the first 60s → ~35k/s burst; jitter-smoothed to ~10k/s peak sustained over a few minutes.
-- **DAG depth:** public Airflow examples show data-platform DAGs at 50-300 tasks; deepest production DAGs (chained backfills, multi-stage ML training) ~1k tasks. Use "100s of tasks" with p99 ~1k.
-- **Job record size:** `job_id` (16B UUID) + cron expr (~32B) + payload pointer (~64B URL) + retry policy (~32B JSON) + DAG parent list (~10 IDs × 16B = 160B) + state/timestamps (~100B) + headers/labels (~600B padding) → ~1KB. 10M jobs × 1KB = 10GB metadata; RF=3 → ~30GB on the transactional store.
-- **Job-runs append log:** each run ~500B (run_id 16B + job_id 16B + scheduled_at 8B + started_at 8B + finished_at 8B + status 4B + attempt 4B + error snippet ~200B + output URL ~100B + worker_id 16B + padding ~120B). 10M jobs × 5 fires/day = 50M runs/day × 500B = 25GB/day raw; RF=3 → ~75GB/day.
-- **Hot retention** (90d for debug dashboards — covers a quarter of incident review): 50M × 90 × 500B = ~2.25TB on the wide-column store (RF=1 hot copy; replicas archived); SSD-backed for sub-100ms history queries.
-- **Cold archive** (1yr+ for compliance / audit): columnar Parquet on object store, dictionary encoding on `status`/`worker_id` → ~5-10x compression. 25GB/day ÷ 7x avg ≈ 3.5GB/day; with field pruning (drop output URL on archive) → ~250GB/yr compressed; tier to glacial after 180d.
-- **Queue throughput:** 10k jobs/s peak × ~1KB envelope (job_id 16B + payload pointer ~100B + scheduled_at 8B + attempt 4B + DAG context ~200B + Kafka/RabbitMQ headers ~700B) = ~10MB/s sustained; 24h retention buffer (stuck consumer can drain) = 10MB/s × 86400 ≈ ~864GB on the durable queue cluster.
-- **Lease cache footprint:** in-flight runs = peak × avg exec = 10k/s × 30s = ~300k concurrent leases. Per entry: key `lease:{job_id}:{scheduled_at}` (~40B) + worker_id (16B) + TTL metadata (~20B) + Redis overhead (~120B) ≈ ~200B. 300k × 200B = ~60MB; fits in a single Redis node.
+- **Active definitions:** hyperscaler-internal cron is the upper bound (Google's is reportedly 10M+); a mid-sized SaaS scheduler is nearer 100k. Take **10M** as the platform-tier default, which covers Airflow DAG tasks plus business cron plus ML pipelines for a large fleet. Mix: **70% recurring** (7M) and **30% one-shot** (3M), inferred from published Airflow and Temporal usage breakdowns.
+- **Fire frequency mix:** of the 7M recurring, assume 12% hourly (24 fires/day), 60% daily (1), 27.5% weekly (0.14), 0.5% every 5 minutes (288). Weighted: 0.12 × 24 + 0.60 × 1 + 0.275 × 0.14 + 0.005 × 288 = 2.88 + 0.60 + 0.04 + 1.44 = **~5 fires/day per recurring job**.
+- **Run rate:** 7M × 5 = 35M recurring runs/day, plus 3M one-shots = 38M, round to **~40M runs/day**. 40M ÷ 86,400s = **~460 runs/s steady**.
+- **Peak:** hourly jobs are 0.12 × 7M = **840k**, and assume 40% of the 4.2M daily jobs are set to midnight = **1.68M**, so 00:00 nominally brings **~2.5M runs in one second**. Jittered over a ±5 minute window (600s), that is 2.5M ÷ 600 = **~4,200 runs/s**. Design the queue and worker pool for **10k/s peak** so a hot shard or a shorter jitter window has headroom.
+- **Scheduler write load, the number that decides the sharding fork:** each fire is one run insert plus one `next_run_at` update, so the midnight window costs 4,200 × 2 = **~8,400 write ops/s** on the jobs store. A single Postgres primary with batched commits does 10k to 20k small writes/s, so one primary carries this with under 2x headroom. That is the trigger to shard the jobs store by `hash(job_id)`, not the read query.
+- **DAG depth:** public Airflow examples run 50 to 300 tasks; the deepest production DAGs (chained backfills, multi-stage ML training) reach ~1k. Use hundreds of tasks with a p99 of 1k.
+- **Job record size:** `job_id` (16B UUID) + cron expr (~32B) + payload pointer (~64B URL) + retry policy (~32B JSON) + DAG parent list (10 IDs × 16B = 160B) + state and timestamps (~100B) + labels and padding (~600B) = **~1KB**. 10M × 1KB = **10GB**; RF=3 gives **~30GB** on the transactional store, which is small enough that the jobs store is never a capacity problem, only a write-rate problem.
+- **Run record size:** run_id (16B) + job_id (16B) + scheduled_at (8B) + started_at (8B) + finished_at (8B) + status (4B) + attempt (4B) + error snippet (~200B) + output URL (~100B) + worker_id (16B) + padding (~120B) = **~500B**. 40M × 500B = **20GB/day raw**; RF=3 gives **~60GB/day**.
+- **Hot retention** (90 days, a quarter of incident review): 40M × 90 × 500B = **~1.8TB** on one SSD-backed copy of the wide-column store, replicas archived separately. Sized for sub-100ms history queries from the dashboard.
+- **Cold archive:** prune the error snippet and output URL on archive, leaving ~200B per record, so 40M × 200B = 8GB/day. Parquet with dictionary encoding on `status` and `worker_id` gives about 7x, so 8GB ÷ 7 = **~1.1GB/day**, and 1.1GB × 365 = **~400GB/year**. Tier to glacial storage after 180 days. Retention is never the constraint here.
+- **Queue sizing:** envelope is job_id (16B) + payload pointer (~100B) + scheduled_at (8B) + attempt (4B) + DAG context (~200B) + broker headers (~700B) = ~1KB. Steady state is 460/s × 1KB = **0.5MB/s**, so a full day of steady traffic is only 40GB. Peak is 10k/s = 10MB/s. Size retention for the bad case rather than the average: a fully stalled consumer for 24h at peak would be 864GB, so provision **~1TB** and the queue can absorb a full day of outage without dropping the head of the backlog.
+- **Lease footprint:** in-flight runs at peak = 10k/s × 30s average execution = **~300k concurrent leases**. Per entry: key `lease:{job_id}:{scheduled_at}` (~40B) + worker_id (16B) + TTL metadata (~20B) + store overhead (~120B) = ~200B. 300k × 200B = **~60MB**, which fits in a single node with room to spare. Steady state is 460/s × 30s = 14k leases, so the lease store is provisioned entirely for the midnight minute.
+- **Duplicate-execution rate, for the first fork below:** 14k concurrent executions running continuously is 14k × 24 = **336k worker-hours/day**. Assume one unplanned worker termination per 500 worker-hours (rolling deploys, evictions, OOM kills, spot reclaim), giving **~670 interrupted runs/day**, about **1 in 60,000**. That is the number that decides whether at-least-once is acceptable.
 #### Key decisions
-TODO
+**At-least-once with idempotent jobs, or at-most-once**
 
-Two or three genuine forks. For each, in this exact shape so it stays checkable:
+- Choice: at-least-once execution, with the job responsible for idempotency, normally a ledger row keyed on `(job_id, scheduled_at)` written in the same transaction as the side effect or an idempotency key passed to the external API.
+- Alternative: at-most-once. Mark the run as attempted before executing, never retry automatically, and turn every interrupted run into a page and a manual decision.
+- Decider: whether the side effect can carry a deduplication key that the receiving system honours. If it can, at-least-once costs nothing and the ~670 interrupted runs/day are absorbed silently. If it cannot, at-least-once converts those 670 into 670 genuine duplicates per day, and the question becomes which is cheaper, a duplicate or a miss.
+- Alternative wins when: the side effect is externally visible and cannot be deduplicated, and a duplicate is more expensive than a gap. Submitting a market order at the open is the clean example: a duplicated 10,000 share buy is a real loss with no clean unwind, whereas a missed one is a page and a manual re-run 90 seconds later. The same applies to a settlement file dropped on a counterparty's SFTP endpoint, where the counterparty's loader has no notion of a duplicate batch. Note this is a per-job attribute and not a system-wide one. Running both modes in one scheduler is the right answer, and the mode has to be declared at registration rather than inferred.
 
-**<name of the fork>**
-- Choice:
-- Alternative:
-- Decider:
-- Alternative wins when:
+**A database-backed claim, or a dedicated queue between scheduler and workers**
 
-**Raw material, from the old Common Mistakes:**
+- Choice: a durable queue. The scheduler commits the run row then publishes; workers consume from the queue and never poll the database.
+- Alternative: no queue at all. Workers poll a claim table directly with `SELECT ... FOR UPDATE SKIP LOCKED`, take the row, and update it in place. The run record and the claim are then the same row in the same transaction, which removes an entire class of "the record says QUEUED but nothing is on the queue" bug and removes the sweeper.
+- Decider: sustained dispatch rate and worker count against polling cost. The claim table holds up to roughly 1k dispatches/s and a couple of hundred pollers; above that, empty polls dominate and the hot rows at the head of the `next_run_at` index become a lock-contention point. Our midnight window is 4,200/s across a fleet that autoscales past 1,000 workers, which is comfortably over the line. Below the line the alternative is genuinely better, and most schedulers in production are below the line.
+- Alternative wins when: sustained dispatch is under about 1k/s and the worker fleet is under a few hundred, which describes the large majority of internal schedulers. It also wins when operational simplicity is the dominant concern, because one datastore with one transaction is easier to reason about, easier to back up consistently, and removes the ordering hazard between commit and publish entirely. The honest cost of choosing the queue is that you have introduced a second durable system that can disagree with the first, and the sweeper exists solely to reconcile them.
 
-- **"Cron implies exactly-once" — wrong.** A naive interpretation of cron is "the job runs once at the scheduled time," but the practical guarantee a distributed scheduler delivers is *at-least-once with idempotent steps*. Conflating the two leads candidates to under-design retries, omit lease-based dedup, or skip the idempotency-key conversation. State the at-least-once contract explicitly and design jobs around it.
-- **"Single-leader scheduler" without HA leader election.** Just running one scheduler pod is not HA — when it dies, no jobs fire until someone notices. The leader must be elected via a coordination service (etcd/ZooKeeper/Consul) with a short-lived lease so a standby can take over within one tick. Candidates often hand-wave "we'll have failover" without naming the lease/lock primitive that enforces single-writer.
-- **Polling for `next_run_at <= NOW()` at all scales.** Polling works fine to ~100k jobs but degrades sharply once the scan saturates the jobs DB. The right answer at scale is a delay-queue (Redis ZSET keyed on `next_run_at` woken by the imminent fire) so wake-ups are O(1) per fire — mention this as the natural 10× evolution.
-- **Treating DAG failure handling as out-of-scope.** Real DAGs fail in the middle constantly; without an explicit policy (`fail_dependents` / `retry_with_backoff` / `manual_override`) downstream tasks queue indefinitely and on-call gets one alert per dependent. Make the policy a per-DAG attribute and route dead-lettered runs to a clear DLQ.
-- **Ignoring DST and tz handling.** Cron expressions evaluated naively against local time double-fire on fall-back and miss spring-forward. The fix is to store schedules with the original tz, compute `scheduled_at_utc` with a current tz database, and dedupe runs on the UTC tuple.
-- **No backpressure between scheduler and queue.** When workers stall, naive schedulers keep enqueuing, blowing past queue retention and losing the head of the backlog. The scheduler should observe queue depth and pause emission past a threshold rather than overrun.
+**One elected scheduler per shard, or every worker computing its own schedule**
+
+- Choice: a single elected leader per shard evaluating the calendar, with a 15 to 30 second coordination lease and standbys that take over inside one tick.
+- Alternative: no scheduler process. Every worker holds the definitions, evaluates the calendar against its own clock, and races to insert the run row for the occurrence it computes. The unique constraint on `(job_id, scheduled_at)` means only one wins.
+- Decider: how much clock skew the correctness argument tolerates. Because the run identity comes from the calendar and not from `now()`, skew does not cause duplicates; it only changes *when* the fire happens. Chrony against an in-datacenter stratum-1 source holds hosts within about 1ms, a fleet on the public NTP pool drifts to 50ms, and a host with broken sync can sit seconds out with nothing complaining. Against a ±60s fire-delay SLO, any of those is fine and the alternative is the simpler system. Against a job that must snapshot the book at 09:30:00 within 100ms, or an end-of-day cut at 16:30:00 where a run 200ms early excludes a trade that belongs in the file, one disciplined clock beats a thousand approximately-agreeing ones.
+- Alternative wins when: the tightest job's tolerance exceeds measured fleet skew by a comfortable margin, the fleet is small, or the deployment is per-tenant and you would rather have no shared coordination service at all. It also wins if you are running on infrastructure with no reliable coordination primitive. What it costs is the ability to answer "what is due right now" from one place, because that answer is now distributed across every worker's local evaluation, and it makes a bad tz-database rollout a fleet-wide divergence rather than a single-process bug.
 #### High-level design
 **must-say**
 
@@ -15530,36 +15579,33 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 </svg>
 ```
 
-**How to read the diagram:** the scheduler is responsible for deciding when a run should happen, but workers are responsible for actually doing the work. A durable queue sits in the middle so the system can survive crashes and scale execution separately from timing.
+**How to read the diagram:** the scheduler decides when a run should happen; workers do the work. The durable queue in the middle lets the system survive crashes and scale execution independently of timing. The arrow from scheduler to queue hides the most important detail in the design, which is that the run row commits to the jobs store before that arrow is taken.
 
-**Why the flow is shaped this way:** mixing scheduling and execution makes failure handling much harder. By materializing each due run as its own record, the system gets a clean place to attach leases, retries, and state transitions.
+**Why the flow is shaped this way:** mixing scheduling and execution makes failure handling much harder, because there is no artifact to attach a retry to. Materialising each due occurrence as its own record gives leases, retries, dependency resolution and audit a single thing to key on, and it is the reason the coordination service is an optimisation rather than the correctness mechanism.
 
-**What this layout buys you:** better durability, cleaner retries, and clearer ownership of execution state. The tradeoff is that jobs must be written with at-least-once behavior in mind.
+**What this layout buys you:** durability of the decision, clean retries, and unambiguous ownership of execution state. The cost is that jobs must be written for at-least-once, and that two durable systems (the jobs store and the queue) can disagree, which is why a sweeper exists.
 #### Deep dive
 **must-say**
 
-**Scheduler tick:**
-```
-Every 30s:
-  jobs_due = SELECT * FROM jobs WHERE next_run_at <= NOW() AND state='active'
-  for each:
-    enqueue job_run record
-    UPDATE jobs SET next_run_at = compute_next(cron, NOW())
-```
+**Materialising the run: making the decision exactly-once when the execution cannot be.**
 
-**Avoiding double-execution.** Every scheduled run gets a unique `(job_id, scheduled_at)` tuple — that tuple is the de-dup key end-to-end. Before executing, a worker does `SETNX lease:{tuple} → worker_id` with a TTL equal to the job's max execution timeout. Whichever worker wins the SETNX runs the job; any other worker that pulled the same envelope from the queue (e.g. after a queue redelivery) sees the existing lease and skips. The lease TTL is critical: if the worker crashes mid-execution, the TTL expires and another worker can claim and re-run, which is why jobs must be idempotent. Concrete example: a "send invoice email" job at 09:00 lands twice on the queue; worker A claims the lease, sends, releases; worker B sees the lease was held and the run is finished, drops the envelope.
+The invariant is one line: for a given `(job_id, scheduled_at)` there is at most one run record, and the run record exists before anything else knows about the fire. Every other property in the design is derived from that.
 
-**At-least-once vs exactly-once.** Default is at-least-once: simpler infra, worker can crash and a retry will run the same logic again. Jobs are expected to be idempotent — usually via a per-`(job_id, scheduled_at)` ledger row in the job's own DB consulted before side effects. Exactly-once requires a distributed transaction across queue ack + lease + side effect + status update, which in practice means a transactional outbox in the job's DB plus careful queue acknowledgement protocols. The cost is throughput and operational complexity. Concrete example: a payment-disbursement job uses an idempotency key in Stripe; even if the worker crashes after Stripe charged, the retry hits Stripe's idempotent endpoint and gets the same charge_id back.
+**Why the identity comes from the calendar.** `scheduled_at` is the occurrence time computed from the cron expression, never `now()` at the moment of firing. That single choice is what makes the identity stable across a retried tick, a leader change, a clock that is 400ms fast, and a worker that redelivers an envelope four minutes later. If identity came from the wall clock, two schedulers 50ms apart would generate two identities for the same occurrence and the unique constraint would accept both. It is also why timezone handling is a correctness problem rather than a cosmetic one: a naive local-time evaluation produces `02:30` twice on the fall-back Sunday, two genuinely different fires colliding on one key. Compute the occurrence in UTC against a current tz database and key on `scheduled_at_utc`, so the two 02:30s are distinct and the occurrence that does not exist in spring is never generated.
 
-**DAG support (Airflow-style).** Each task declares its parent task IDs; the scheduler emits a task only after every parent has reached `COMPLETED` for the same DAG-run instance. Implementation: when a task finishes, the worker writes its status and publishes a `task_completed` event; a DAG reconciler subscribes, looks up which downstream tasks are now satisfied, and enqueues them. Failure modes are policy: `fail_dependents` (skip everything downstream), `retry_with_backoff` (retry the failing parent N times before failing), or `manual_override` (operator marks parent as success). Concrete example: an ETL DAG with extract → transform → load; if `transform` fails after 3 retries, the `load` step is marked SKIPPED and an alert fires; the operator can mark `transform` success once they've fixed the data manually.
+**The tick, transactionally.** For each due job the scheduler runs one transaction: insert the run row with `ON CONFLICT DO NOTHING`, and advance `next_run_at` with a guard on its current value. Both, or neither. Split them and you get one of two bugs, and both are silent. Advance first, crash before the insert, and the occurrence is skipped forever, with no error anywhere because the job's next fire looks perfectly normal. Insert first, crash before the advance, and the next tick re-reads the same due row, hits the conflict, and never makes progress, so the job fires once and then appears to hang. The guard on `next_run_at` in the update is what makes two concurrent leaders safe: the second one's update matches zero rows and its insert conflicts, so it does nothing and knows it did nothing.
 
-**Cron scheduling.** Parse cron expression once per job, store `next_run_at`; on each scheduler tick, compute next from current `last_run_at` using a tz-aware library (handles DST, leap seconds). Catch-up policy is per-job: `catch_up=skip` (jump to the next future fire and forget missed) for things like "send daily summary," `catch_up=run_all` for things like billing aggregation that must process every period. Compute `next_run_at` immediately after enqueueing (not after the worker finishes) so a long-running job doesn't block subsequent schedules. Concrete example: a job set to `*/5 * * * *` whose worker takes 8 minutes — with skip policy, you get one run every 8 minutes; with run-all, the queue stacks until throughput catches up.
+**Leader election is a load optimisation.** Say this explicitly, because it inverts how the design is normally presented. With the unique constraint in place, two schedulers both ticking produce one run record and one wasted transaction. Leader election does not buy correctness; it avoids N times the load on the jobs store and N-1 discarded envelopes per fire. Take a coordination lease with a 15 to 30 second TTL, short enough that failover lands inside one tick and long enough that a garbage collection pause does not thrash leadership, and then build nothing that depends on the lease being correct. A scheduler that wrongly believes it still leads does no damage.
 
-**Latency tolerance vs scheduled time.** Default budget is `tick_interval + queue_drain_time` — with a 30s tick on a healthy queue, jobs fire within ~30-60s of their scheduled second. That covers the bulk of cron workloads (nightly ETLs, hourly reports). Sub-second precision is not promised by a polling-tick architecture; jobs that genuinely need it (timed market-data snapshots, second-precision timers) route through an event-driven delay-queue path (Redis ZSET on `next_run_at` woken by the imminent fire), trading scheduler simplicity for tighter precision. Per-job SLO: `actual_fire_at - scheduled_at < 60s` for tick-driven, `< 1s` for delay-queue-driven; the tick-lag alert (now − last successful tick > 2× tick interval) catches lagging schedulers before users see late jobs.
+**Commit before publish, and the sweeper that covers the gap.** The run row commits, then the queue publish happens. Never the reverse. Publishing first and crashing leaves a run that exists on the queue and in a worker's hands but not in the record, and there is no clean way to reconcile that afterwards, because the status write has nothing to write to. Committing first leaves the opposite and much better failure: a row in `QUEUED` with no queue message. A sweeper scans for rows in `QUEUED` older than 60 seconds with no recorded publish receipt and republishes them. That makes the queue at-least-once by construction, which is fine, because the lease deduplicates the common case and the job's own idempotency covers the rest.
 
-**Long-running jobs.** Worker heartbeats — extends the lease TTL by a fixed delta every N seconds (e.g. extend by 60s every 30s). If the worker process dies, OS kills it, or pod is evicted, heartbeats stop and the lease naturally expires; the run becomes claimable by a replacement worker. The job itself should checkpoint progress (rows processed, intermediate result IDs) so a retry can resume rather than restart from scratch. Concrete example: a 4-hour data backfill job heartbeats every 30s with a 90s TTL; if the worker dies at the 2-hour mark, within 90s another worker picks up and reads the checkpoint to resume from row 1.5M instead of row 0.
+**The lease, and what it does not do.** A worker takes `lease:{job_id}:{scheduled_at}` with a TTL equal to the job's timeout, heartbeating every 30 seconds against a 90 second TTL so a dead worker's run is reclaimable within 90 seconds. The hazard people miss is not the crashed worker, which is handled; it is the worker that stalls. A long garbage collection pause, a blocked syscall, or a network partition to the lease store means the TTL expires while the process is alive and still holding open connections to whatever it was mutating. A second worker claims the run and starts, and now two live processes are executing the same occurrence. A TTL lease cannot prevent this: it is a hint, not a lock, unless the resource being protected checks a fence token.
 
-**Job-run state machine.** A run progresses through a small set of well-defined states; every transition is durable so a crashed scheduler/worker can pick up without ambiguity. `QUEUED` (scheduler emitted run, sitting on durable queue) → `LEASED` (worker won SETNX, lease key in Redis with TTL = job timeout) → `RUNNING` (worker started side-effects, heartbeats renewing lease) → terminal `SUCCEEDED` / `FAILED` / `TIMED_OUT`. Failures within the retry budget loop back to `QUEUED` with `attempt+1` and exponential backoff; failures past budget land in `DEAD_LETTER` and page on-call. Lease expiry mid-`RUNNING` (worker died) transitions to `ORPHANED` and is reclaimed by the next puller. *[Source: Temporal docs, Airbnb Dynein blog]*
+Two defences, and they cover different things. First, the terminal status write is a compare-and-set on `(run_id, attempt)`, so the stalled worker's eventual `SUCCEEDED` is rejected and the run history stays coherent. Second, and this is the one that matters, the job's own side effect is keyed on `(job_id, scheduled_at)` rather than on the attempt, so the stalled worker and its replacement collide in the job's ledger or in the external system's idempotency key and only one of them takes effect. The compare-and-set protects the record; only the ledger protects reality. A 4-hour backfill renews its lease about 160 times, and any single 90 second blip to the lease store loses it while the job is perfectly healthy, so this is not a rare path.
+
+**What you can promise.** Three guarantees, and the whole answer is refusing to collapse them: exactly one run record per calendar occurrence, guaranteed by the unique constraint; at least one execution attempt per run record, guaranteed by the queue plus the sweeper plus the lease TTL; at most one accepted completion per run record, guaranteed by the compare-and-set. Exactly-once execution is not on the list, and cannot be, because the last thing a job does is talk to a system you do not control.
+
+**Job-run state machine.** Every transition below is durable, so a crashed scheduler or worker resumes without ambiguity. `QUEUED` (run row committed, message on the queue) to `LEASED` (a worker won the lease) to `RUNNING` (side effects started, heartbeats renewing) to a terminal `SUCCEEDED`, `FAILED` or `TIMED_OUT`. Failures inside the retry budget loop back to `QUEUED` with `attempt+1` and exponential backoff; failures past the budget land in `DEAD_LETTER` and page. Lease expiry during `RUNNING` is reclaimed by the next puller, which is the path that produces the two-live-workers case above.
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 580" role="img" aria-label="Job-run state machine: QUEUED, LEASED, RUNNING, terminal states, retry loops and dead-letter">
@@ -15644,114 +15690,120 @@ Every 30s:
   <text class="edge" x="622" y="422" text-anchor="start">orphan reclaim</text>
 </svg>
 ```
-
-**Airflow vs Argo vs Temporal — three different idempotent step models.** The orchestrator zoo collapses into three camps with very different opinions about where state lives. *Airflow* (Python DAGs, central scheduler + Celery/Kubernetes executors) keeps DAG state in a relational DB; tasks are idempotent at the DAG-run level keyed by `(dag_id, execution_date)`. Operator/sensor abstractions encourage external-system idempotency (S3 sensors, idempotent SQL). Strength: rich operator library, mature ecosystem; weakness: scheduler is a singleton bottleneck, sub-minute scheduling is awkward. *Argo Workflows* (Kubernetes CRDs, container-per-step) stores workflow state in etcd via Kubernetes — every step is a pod, idempotency is just "container exited 0 with the same input artefact"; retries restart pods. Strength: cloud-native, perfect for ML pipelines that already containerise; weakness: etcd object size limits cap workflow complexity (~1MB per CR). *Temporal* (formerly Cadence — Uber's invention) flips the model: workflow code is *durable* — the runtime captures every effect (activity call, timer, signal) into an event-sourced history, and replays history on recovery to reconstruct local variables. Activities are the unit of side-effect, retried with exponential backoff and idempotency keys. Strength: write workflows as ordinary code with no DAG DSL, sub-second scheduling, decade-long workflows survive arbitrary process restarts; weakness: replay-based determinism is subtle (no `time.now()` outside activities, no random without seeding). *[Source: Temporal docs, Argo Workflows GH, Airflow docs]*
-
-**Idempotent step model.** All three orchestrators converge on the same contract: a step receives `(workflow_id, step_id, attempt)` and is expected to be safe to invoke multiple times. Standard patterns: (a) external idempotency keys passed to the side-effect (Stripe, SendGrid, Snowflake `MERGE`); (b) write-your-own ledger row in the step's own DB consulted before mutating state; (c) content-addressed outputs (Argo artefacts) so a re-run produces the same hash and downstream tasks short-circuit on cache hit. The orchestrator never promises exactly-once side-effects — it promises *at-least-once with deterministic step identity*, and pushes idempotency to the step author.
 #### Where it breaks
 **must-say**
 
 **Bottlenecks**
 
-- **Scheduler is bottleneck** — single leader's `WHERE next_run_at <= NOW()` query saturates the jobs DB once it has to scan and update millions of rows per tick. Shard the jobs store by `hash(job_id)` and elect one leader per shard so each scheduler only sees a slice; for ultra-scale, switch to an event-driven delay-queue (Redis ZSET on `next_run_at`) so wake-ups are O(1) per fire.
-- **Thundering herd at midnight** — every "0 0 * * *" job fires the same wall-clock second, overwhelming workers and downstream APIs. Apply jitter at schedule registration: spread within a configurable window (`±5min`), or accept the cron line as-is but jitter the actual fire time per job using a stable hash, so the user-visible schedule still reads "midnight."
-- **Dead worker holding lease** — without expiry the run sits forever and dependent DAG tasks stall. Keep the heartbeat interval short relative to the lease TTL (heartbeat 30s, TTL 90s) so a crashed worker frees its lease in under 2 minutes; pair with `runs_in_progress` SLO alerting.
-- **Failed job blocking dependents** — repeated failures wedge an entire DAG. Bound retries (`max_retries` with exponential backoff), then route to a DLQ for inspection; downstream tasks are marked SKIPPED with a parent_failed reason rather than queued indefinitely; on-call gets one alert, not one per dependent.
-- **Time zone bugs** — DST transitions either skip a fire (spring-forward 02:00 doesn't exist) or double-fire (fall-back 02:00 happens twice). Store schedules in UTC plus original tz; compute fires in the user tz at evaluation time using a current tz database; dedupe on `(job_id, scheduled_at_utc)` so wall-clock duplicates collapse to one run.
-- **Replay storm on Temporal-style restart** — a worker fleet restart triggers history replay for all in-flight workflows simultaneously, hammering the history store. Stagger worker restarts (rolling 10% at a time), cap concurrent histories per worker; for very long histories, use continue-as-new to truncate after N events into a fresh workflow with carry-over state.
-- **Etcd object size limit (Argo)** — workflow CR exceeds the 1MB etcd value limit on long-running pipelines. Move large step outputs to artefact stores (S3, MinIO) and reference by URL; checkpoint long workflows into multiple sub-workflows; archive completed workflow CRs out of etcd to an external store within minutes of completion.
+- **Scheduler write rate, not the query.** The `WHERE next_run_at <= NOW()` read is an index range scan and returns only due rows, so it is cheap. What saturates is the write: 8,400 inserts and updates per second in the midnight window against a primary that does 10k to 20k. Shard the jobs store by `hash(job_id)` and elect one leader per shard so each scheduler owns a slice of both the reads and the writes. At the next order of magnitude, replace the scan with an ordered structure on fire time so wake-ups cost one operation per fire, accepting that you now have a second durable structure to rebuild on restart.
+- **Thundering herd at round times.** 2.5M runs come due at 00:00:00, overwhelming workers and every downstream API at once. Apply a stable per-job jitter derived from `hash(job_id)` within a configurable window, so the user-visible cron line still reads `0 0 * * *` while actual fires spread over 600 seconds. Jobs whose boundary is real, such as an end-of-day cut, opt out of jitter explicitly and are the only ones that pay the burst.
+- **Dead worker holding a lease.** Without expiry the run sits forever and dependent DAG tasks stall behind it. Heartbeat every 30 seconds against a 90 second TTL so a crashed worker frees its lease inside 2 minutes. The residual risk is the stalled rather than crashed worker, covered by the compare-and-set on the terminal write and by the job's own ledger, not by the lease.
+- **Failed job blocking dependents.** Repeated failures wedge an entire DAG. Bound retries with exponential backoff, then route to a dead-letter queue; downstream tasks are marked `SKIPPED` with a `parent_failed` reason rather than queued indefinitely, so on-call gets one alert rather than one per dependent.
+- **Timezone transitions.** Naive local-time evaluation skips the spring-forward hour and double-fires the fall-back hour. Store the original timezone, compute occurrences in UTC against a current tz database, and key runs on `(job_id, scheduled_at_utc)` so the two wall-clock 02:30s are distinct occurrences and the nonexistent one is never generated. The tz database itself is a moving dependency and needs a weekly refresh with a canary.
+- **No backpressure between scheduler and queue.** When workers stall, a naive scheduler keeps emitting, overruns queue retention, and loses the head of the backlog, which is the oldest and most likely to matter. The scheduler watches consumer lag and pauses emission above a threshold. Note the interaction with the catch-up policy: paused emission means missed occurrences accumulate as un-inserted rows, so on resume the `next_run_at` guard replays them in order rather than skipping to now.
 
 **Failure modes**
 
 | Layer | Failure | Detection | Mitigation |
 |---|---|---|---|
-| Scheduler leader | Leader pod dies mid-tick; standby has not yet acquired the lease | `time_since_last_tick` exceeds 2× tick interval; coordination-service watch on the lease key | Short lease TTL (15-30s) so failover happens within one tick; standbys poll the lease and acquire on expiry; on takeover, reconcile from `next_run_at` to skip already-emitted runs |
-| Durable queue | Broker partition unavailable, ack stalls and producers block | Producer-side enqueue latency p99 alert; broker ISR-shrink alerts | Multi-AZ broker cluster with `min.insync.replicas≥2`; scheduler buffers a small in-memory backlog and replays once the broker recovers; consumer-lag SLO triggers worker autoscale |
-| Lease cache | Redis primary fails before the lease is set, or split-brain produces two holders | Redis sentinel/cluster failover events; duplicate-execution alarm from the job-side ledger | Redis-with-Sentinel + 2s SETNX timeout; jobs are idempotent (per-`(job_id, scheduled_at)` ledger row in the job's own DB) so a duplicate is absorbed; dead-letter on persistent contention |
-| Worker | Worker process killed mid-execution (OOM, pod evicted) | Heartbeat stops; lease TTL expires within 90s | Heartbeat 30s/TTL 90s so reclaim is bounded; workers checkpoint progress so retries resume; bounded `max_retries` then DLQ |
-| Jobs DB | Transactional store unavailable for `next_run_at` updates | Connection-pool saturation; query-timeout alarms | Read-replica fallback for `WHERE next_run_at <= NOW()`; queue scheduler ticks until the primary recovers (catch-up policy decides whether to fire missed runs) |
-| DAG reconciler | Crash leaves child tasks unscheduled despite the parent reaching COMPLETED | DAG-stuck SLO: any DAG with no progress for 2× p95 task duration | Reconciler is stateless — restart re-reads `task_completed` events from a durable topic and is idempotent on `(dag_run_id, task_id)` |
-| Cron tz library | Stale tz database miscomputes the DST boundary | Drift between `expected_fire_at` and actual fires across the fleet at DST cutover | Auto-update tz data weekly via a package mirror; fleet-wide canary on DST weekends; dedupe on `(job_id, scheduled_at_utc)` to absorb wall-clock duplicates |
+| Scheduler leader | Leader pod dies mid-tick, standby has not yet acquired the lease | `time_since_last_tick` exceeds 2x tick interval; coordination watch on the lease key | 15 to 30s lease TTL so failover lands inside one tick; the new leader re-reads `next_run_at <= NOW()` and the unique constraint absorbs any overlap with what the old leader already emitted |
+| Durable queue | Broker partition unavailable, publish stalls | Producer-side enqueue latency p99; broker replica-set shrink alerts | Multi-AZ brokers with at least 2 in-sync replicas; the run rows are already committed, so the sweeper republishes when the broker recovers and nothing is lost |
+| Lease store | Primary fails before the lease is set, or a failover leaves two holders | Lease-store failover events; duplicate-execution counter from the job-side ledger | Treat the lease as advisory: correctness comes from the ledger keyed on `(job_id, scheduled_at)` and the compare-and-set on the terminal write, so a duplicate is absorbed rather than prevented |
+| Worker | Process killed mid-execution (OOM, eviction) | Heartbeat stops, lease TTL expires within 90s | Bounded reclaim at 90s; workers checkpoint progress so a retry resumes; bounded `max_retries` then dead-letter |
+| Jobs DB | Transactional store unavailable for the tick transaction | Connection-pool saturation, query-timeout alarms | The tick simply does not run; occurrences are not lost because `next_run_at` was never advanced, and the catch-up policy decides on recovery whether to fire the missed ones. Do not fail over reads to a replica, because the tick is a write transaction and a stale read would re-emit already-advanced jobs |
+| DAG reconciler | Crash leaves child tasks unscheduled despite the parent completing | DAG-stuck SLO: no progress for 2x p95 task duration | Reconciler is stateless: on restart it re-reads `task_completed` events from a durable topic and is idempotent on `(dag_run_id, task_id)` |
+| Cron tz library | Stale tz database miscomputes a DST boundary | Divergence between `expected_fire_at` and actual fires across the fleet at cutover | Weekly tz refresh from a package mirror, fleet canary on DST weekends, and `(job_id, scheduled_at_utc)` keying so a wall-clock duplicate collapses to one run |
 
 **Unresolved**
 
-TODO. Two or three things this design genuinely does not handle well, and what you would do about each.
+**A run that never happens produces no signal, and the watchdog shares our failure modes.** The system can tell you a run failed. It cannot tell you a run was never created, because a missing run consumes nothing, errors nowhere, and leaves no row. Detecting absence needs an independent model of what should have happened, which means every job declares an expected cadence and a separate watchdog alerts when a fire does not appear inside a grace window. That watchdog is itself a scheduler with the same clock, the same tz database, and, in our build, the same jobs store, so exactly the class of bug most likely to cause a silent miss (a bad tz rollout, a shard whose leader never took over, a `next_run_at` advanced without an insert) blinds the detector too. The honest fix is a third layer on a different stack reading a different replica, with its own liveness proven by an external pinger, and we have not built it. Today someone still has to look at a dashboard, and that is a real gap rather than a rough edge.
+
+**Catch-up assumes jobs are parameterised by time, and most are not.** `catch_up=run_all` after an outage replays every missed occurrence, which is correct only if the job actually processes the period it was scheduled for. Most jobs do not: they read current state at run time. So a 02:00 aggregation replayed at 08:00 recomputes with 08:00's data and silently produces a different answer from the one that was missed, and nothing outside the job can detect the difference. The partial fix is to make `scheduled_at` a mandatory argument and refuse to register a `run_all` job whose entrypoint does not consume it, but that is a lint rule on job authors enforced at registration, not a property of the system. It also gets worse with scale: a 6-hour outage on 840k hourly jobs with `run_all` produces 5M backlogged runs, which is our peak sustained for 8 minutes, on top of whatever else is due.
+
+**Jitter spreads fires in time but is blind to what jobs contend for.** Two hundred jobs jittered across a 10 minute window that all query the same warehouse still queue behind each other. The scheduler sees a healthy dispatch rate, the warehouse sees a sustained overload, and neither component holds the concept that those jobs share a resource. The right answer is per-resource concurrency pools declared by the job author, which is what Airflow pools do, and their weakness is the same: a job that forgets to declare its pool is invisible to admission control and consumes capacity nobody accounted for. We cannot infer a job's resource usage from outside the job, so the guard is voluntary, and the failure it does not prevent looks like a downstream incident rather than a scheduler one.
 #### Drill questions
-1. At-least-once vs exactly-once — how do you decide?
-2. 10x scale — millions of jobs scheduled per minute. What breaks first?
-3. A worker crashes 30 min into a 1-hour job — does it run twice?
-4. Cron expression fires "every minute" but the previous run is still going — what's the policy?
+1. At-least-once or exactly-once? How do you decide, per job?
+2. 10x scale, millions of jobs due per minute. What breaks first?
+3. A worker crashes 30 minutes into a 1-hour job. Does it run twice?
+4. A job fires every minute but the previous run is still going. What is the policy?
 5. How do you handle DST transitions for cron schedules?
-6. How do you monitor a scheduler that fires millions of jobs?
-7. Airflow vs Argo vs Temporal — which would you actually pick?
-8. How does Temporal achieve "exactly-once" workflow execution if exactly-once is impossible?
-
-TODO. Only 8 drill questions carried over, top up to at least 10.
+6. How do you know a job that should have fired never fired?
+7. Two schedulers both believe they are leader for 5 seconds. What actually goes wrong?
+8. A 6-hour outage ends at 08:00. What should have run at 02:00, 03:00 and 04:00?
+9. An end-of-day batch must complete before an 18:00 regulatory cut-off. How does that change the design?
+10. Why does the run insert and the `next_run_at` advance have to be one transaction?
+11. Airflow, Argo or Temporal? Which would you actually pick?
+12. How does Temporal achieve exactly-once workflow execution if exactly-once is impossible?
 #### Answers to drill questions
-1. Default to at-least-once and require jobs to be idempotent — exactly-once across queue + worker + side-effect needs distributed transactions and is rarely worth it. *If pushed:* exactly-once is achievable for self-contained jobs (transactional outbox + idempotency key in the worker's own DB); for jobs that hit external APIs, you can't guarantee it without their cooperation.
+1. Default to at-least-once with idempotent jobs, because exactly-once across queue, worker and side effect needs a distributed transaction and is rarely worth it. Make the mode a per-job attribute set at registration. The test is whether the side effect can carry a deduplication key the receiver honours. *If pushed:* for a side effect that cannot be deduplicated, such as a settlement file dropped on a counterparty's SFTP endpoint, switch that job to at-most-once, which means mark before executing, never auto-retry, and page on interruption. At our numbers that is about 670 pages a year across the fleet, which is only tolerable because it applies to a small named set of jobs.
 
-2. The single scheduler's `SELECT WHERE next_run_at <= NOW()` query — it scans more rows than it can fire. Shard jobs by `hash(job_id)` across N schedulers, each with its own slice. *If pushed:* move from polling to a delay-queue (Redis ZSET keyed on next_run_at) so the scheduler is event-driven instead of polling.
+2. Not the read. The `WHERE next_run_at <= NOW()` query is an index range scan returning only due rows. What breaks is the write rate: two write operations per fire, so 4,200 fires/s in the midnight window is 8,400 writes/s against a primary that does 10k to 20k. Shard the jobs store by `hash(job_id)` with one leader per shard. *If pushed:* the next step is replacing the scan with an ordered structure on fire time so wake-ups cost one operation per fire, which is worth the extra durable state past roughly 10M active rows.
 
-3. Yes, once the lease TTL expires another worker grabs the tuple. That's why jobs must be idempotent. *If pushed:* expose a checkpoint API so long jobs can resume mid-run; if the work isn't naturally idempotent, wrap it in a per-`(job_id, scheduled_at)` ledger row that the job consults before doing side-effects.
+3. Yes, once the lease TTL expires another worker claims the tuple, which is why jobs must be idempotent. *If pushed:* the interesting case is not the crash, it is the stall. A garbage collection pause or a network partition to the lease store expires the TTL while the process is alive, so two live workers execute the same occurrence. The compare-and-set on `(run_id, attempt)` keeps the run history coherent but does not undo side effects; only a ledger row in the job's own database keyed on `(job_id, scheduled_at)` does that.
 
-4. Per-job concurrency setting: `allow_overlap=false` (default) skips the new run; `allow_overlap=true` lets them stack. Encode this in the lease check. *If pushed:* a queue-with-cap mode (max 3 in flight) for jobs that benefit from parallelism but shouldn't fan out unbounded.
+4. Per-job concurrency policy. `allow_overlap=false` is the default and skips the new occurrence, recording it as `SKIPPED` rather than dropping it silently so the gap is visible in history. `allow_overlap=true` lets runs stack. Encode it in the lease check, not in the scheduler, so the decision is made with knowledge of what is actually running. *If pushed:* a bounded mode with a maximum in flight, say 3, for jobs that benefit from parallelism but must not fan out without limit. Also note that advancing `next_run_at` at emission rather than at completion is what makes this a policy question at all; advance at completion and a slow job silently changes its own schedule.
 
-5. Store schedules in the user's timezone for display, but compute next-fire by converting to UTC at evaluation time using a current tz database. On spring-forward "0 2 * * *" has no 02:00 local — most schedulers skip (or fire at 03:00 if configured to catch up missed runs). On fall-back 02:00 occurs twice in wall-clock; naive cron will double-fire unless you dedupe on `(job_id, scheduled_at_utc)`. *If pushed:* per-job policy flag — `dst_skip` (default, suppress the duplicate fall-back hour) vs `dst_double` for jobs that genuinely want both wall-clock occurrences.
+5. Store the schedule in the user's timezone for display, compute the occurrence in UTC at evaluation time against a current tz database, and key the run on `(job_id, scheduled_at_utc)`. On spring-forward, `0 2 * * *` has no local 02:00, so the occurrence is simply never generated; a per-job flag can shift it to 03:00 instead. On fall-back, local 02:00 happens twice, and because the two map to distinct UTC instants they are two distinct occurrences, so the default policy suppresses the second. *If pushed:* make it explicit rather than implicit, with `dst_skip` as the default and `dst_double` for jobs that genuinely want both wall-clock occurrences, such as an hourly reconciliation that must cover every real elapsed hour.
 
-6. Per-job: success/fail/duration/lease-acquire-latency, all tagged. System-level: scheduler tick lag (now − last successful tick) is the SLO; alert if > 2× tick interval. *If pushed:* heartbeat in reverse — every job declares an expected next-run, page if it doesn't fire within a grace window.
+6. You cannot from inside the normal path, which is the honest answer. A missing run raises no error and consumes no capacity. Every job declares an expected cadence, and a separate watchdog alerts when a fire does not appear inside a grace window. *If pushed:* concede that the watchdog shares the jobs store, the clock and the tz database with the scheduler, so the failures most likely to cause a silent miss also blind the detector. A genuinely independent check runs on a different stack against a different replica with its own external liveness proof, and most teams, including this design as built, do not have that.
 
-7. Airflow for batch ETL with mature operators and minute-granularity (data team default). Argo for ML/CI pipelines that already containerise (every step is a pod with content-addressed inputs/outputs). Temporal for long-running stateful workflows (e.g. order saga that spans days, includes human approval, survives any restart) — the durable-execution model is uniquely powerful when control flow is complex and long-lived. *If pushed:* the orchestrators don't compose well across the same workload — pick by the dominant axis of the problem (data freshness vs container artifacts vs control-flow complexity).
+7. Almost nothing, and that is the point. The unique constraint on `(job_id, scheduled_at)` means both leaders' inserts collapse to one run row, and the `next_run_at` guard means the second update matches zero rows. You get one wasted transaction per job and possibly a duplicate queue message, which the lease absorbs. Leader election exists to avoid N times the load, not to prevent duplicates. *If pushed:* the real damage from split leadership is load, not correctness: at 4,200 fires/s a second leader doubles the write pressure on a store already at 8,400 writes/s, which is how a leadership flap turns into a database incident.
 
-8. It doesn't promise exactly-once *side-effects* — it promises deterministic *workflow logic replay*. Workflow code is captured as event-sourced history (`activity_started`, `activity_completed`, `timer_fired`); on worker restart the runtime replays history to reconstruct local variables, then resumes from the next undecided point. Activities (the side-effect units) are still at-least-once, retried with exponential backoff, and the activity author is on the hook for idempotency keys. *If pushed:* the determinism contract forbids non-deterministic primitives in workflow code (no `time.now()`, no random) — these must move to activities.
+8. It is a per-job policy and the default should be skip, not replay. `catch_up=skip` jumps to the next future occurrence, which is right for anything that reads current state, such as a daily summary. `catch_up=run_all` replays every missed occurrence, which is right only for jobs parameterised by the period they process, such as a billing aggregation over a fixed window. *If pushed:* `run_all` is dangerous twice over. The job usually recomputes with current data rather than the data of the period it missed, producing a silently wrong answer, and the volume is brutal: 6 hours of missed hourly jobs is 5M backlogged runs, which is our peak sustained for 8 minutes on top of everything already due. Rate-limit the replay and refuse to register a `run_all` job whose entrypoint does not take `scheduled_at`.
+
+9. It inverts the scheduling model. Everything above schedules a start time; a regulatory cut-off is a deadline, and the two need different machinery. Work backwards from 18:00 using the p99 duration of the job and of every upstream dependency, and schedule the start so the whole chain has headroom, typically 2x measured p99. Then alert on the derived latest-safe-start rather than on failure, because by the time the job fails there is no time left to fix anything. Exempt the chain from jitter, since a boundary is exactly the case where spreading fires is wrong. *If pushed:* the deadline should be a first-class attribute on the DAG rather than a comment, so the reconciler can compute remaining slack after each task completes and page while there is still time to act. A cut-off missed by 10 minutes with 40 minutes of warning is an operational event; the same miss discovered at 18:01 is a regulatory one.
+
+10. Because splitting them produces two silent bugs. Advance `next_run_at` first and crash before the insert, and the occurrence never happens, with nothing anywhere indicating a problem because the job's next fire looks normal. Insert first and crash before the advance, and every subsequent tick re-reads the same due row, hits the conflict, and makes no progress, so the job fires once and then appears to hang. *If pushed:* the guard `WHERE next_run_at = :old_value` on the update is the other half. It is what makes two concurrent leaders safe, because the loser's update matches zero rows and it knows it lost rather than assuming it won.
+
+11. Airflow for batch ETL with mature operators and minute granularity, which is the data team default. Argo for ML and CI pipelines that already containerise, where every step is a pod with content-addressed inputs and outputs. Temporal for long-running stateful workflows, such as a settlement saga spanning days with a human approval step, where the durable-execution model is genuinely without substitute. *If pushed:* they do not compose well over the same workload, so pick on the dominant axis: data freshness, container artifacts, or control-flow complexity. All three still make you own idempotency at the step, so none of them removes the work this question is about.
+
+12. It does not promise exactly-once side effects; it promises deterministic replay of workflow logic. Workflow code is captured as an event-sourced history of activity starts, completions, timers and signals, and on restart the runtime replays that history to reconstruct local variables and resume from the next undecided point. Activities, which are the units of side effect, remain at-least-once and are retried with backoff, and the activity author owns the idempotency key. *If pushed:* the determinism contract forbids non-deterministic primitives inside workflow code, so no wall-clock reads and no unseeded randomness. It is the same rule as the deterministic matching engine in the exchange question, applied to application code, and it is violated in the same way: someone calls `now()` where they should have called a timer.
 #### Whiteboard script
-TODO
+**0-5, frame it and take the fork.** Lead with the thesis rather than the components: "the product is a decision about time, and the decision is the only thing that can be exactly-once." Then ask the two questions that actually change the design: does any job have a side effect that cannot carry a deduplication key, and what precision does the tightest job need. State the assumptions out loud: 10M definitions, about 40M runs a day, 460/s steady, 2.5M due at midnight, a ±60 second fire-delay SLO except for a named handful. Draw nothing yet.
 
-A 45 minute budget: what to cover in 0-5, 5-15, 15-35 and 35-45, what to say first, and a line starting `Cut first:`.
+**5-15, the spine.** Five boxes: jobs store, scheduler with leader election, durable queue, worker pool, status store. Draw the run record as its own object between scheduler and queue, and say the tuple `(job_id, scheduled_at)` out loud, because that is the sentence the whole design hangs on. Say three rules as you draw the arrows: the run insert and the `next_run_at` advance are one transaction; the row commits before the publish, never the reverse; a sweeper republishes rows that committed but never reached the queue. Then say the line that separates a good answer from a rehearsed one: leader election is a load optimisation, not the correctness mechanism, because the unique constraint already does correctness.
 
-**Raw material, from the old Talking Points:**
+**15-35, the drill.** Protect this time. Start with the three guarantees and refuse to collapse them: exactly one run record per occurrence, at least one attempt per record, at most one accepted completion. Then the lease lifecycle: 30 second heartbeat, 90 second TTL, and the hazard that matters, which is the stalled rather than crashed worker, with a compare-and-set on `(run_id, attempt)` for the record and a ledger row for reality. Then the midnight herd and the stable-hash jitter, and be specific about what it costs, which is that "midnight" now means "within 5 minutes of midnight" unless the job opts out. Then timezones and catch-up, because that is where the expensive bugs live and where the finance version of this question sits. Keep the DAG reconciler as a two-line answer in reserve.
 
-- **Hot scheduler tick → leader election with a short lease** is the load-bearing HA story. The scheduler is logically a singleton (only one tick at a time, otherwise duplicate enqueues at every cron boundary), and the standby acquires a coordination-service lease (etcd/ZooKeeper) with a 15-30s TTL — short enough that recovery is bounded, long enough to absorb GC pauses without thrashing leadership.
-- **At-least-once + idempotent steps is the consistency contract.** Exactly-once across queue + worker + side-effect is impractical at scale; idempotency keys and per-`(job_id, scheduled_at)` ledger rows let retries be safe, and lease-based dedup keeps the steady-state honest.
-- **`(job_id, scheduled_at)` is the dedup key end-to-end.** Mention it explicitly — it tells the interviewer you've thought about how queue redelivery, scheduler restart, and worker crash all collapse to one logical run.
-- **Decoupling scheduler from execution unlocks independent scaling.** The scheduler is CPU-light (in-memory `next_run_at` heap, single-leader-per-shard), the worker pool scales on job-CPU/memory; the durable queue between them is the bulkhead.
-- **Jitter and exposure caps tame midnight thundering herds.** Stable per-job hash jitter within a window keeps the user-visible cron line ("0 0 * * *") while spreading actual fires over minutes — the difference between a melting downstream API and a healthy one.
-- **Trade-off you'd revisit at 10× scale:** moving from polling tick to event-driven delay-queue (Redis ZSET on `next_run_at`) so wake-ups are O(1) per fire instead of O(rows-scanned). Worth the operational complexity once the jobs table crosses ~10M active rows.
-- **DAG semantics belong to a reconciler, not the scheduler.** Keep the scheduler dumb (emit due jobs); a separate reconciler subscribes to `task_completed` events and decides which downstream tasks become eligible — this keeps the scheduler tick fast and DAG failure policy explicit.
+**35-45, concede and close.** Volunteer the gaps before they are found: a run that never fires is silent and the watchdog shares our blind spots; catch-up replays jobs that were never parameterised by time; jitter is blind to what jobs contend for. Then the operational surface in two minutes: tick lag as the primary SLO, fire delay at p99, dead-letter growth rate, and the missing-run watchdog. Finish with the deadline case, because it inverts the model: an 18:00 regulatory cut-off is scheduled backwards from p99 duration and alerts on latest-safe-start rather than on failure.
+
+Cut first: the orchestrator comparison, since Airflow against Argo against Temporal is a tooling conversation that eats ten minutes and changes no boxes. Then the DAG reconciler internals, which are a straightforward event-driven eligibility check. Then the multi-region section, which is conventional active-passive and nothing here makes it interesting. Never cut: the dedup tuple, the transaction ordering, and the fact that a missed run is silent.
 #### Appendix
 **Data model**
 
 - **jobs** (transactional store):
-  `(job_id, schedule (cron or run_at), payload, max_retries, dag_parent[], state)`
-- **job_runs** (append-only, wide-column store):
-  `(job_id, run_id, scheduled_at, started_at, finished_at, status, attempt, error)`
-- **leases** (fast in-memory cache): `job_run_id → worker_id`, TTL = job timeout
+  `(job_id, schedule (cron or run_at), timezone, jitter_window, payload, max_retries, catch_up_policy, dag_parent[], next_run_at, shard, state)`
+- **job_runs** (append-only, wide-column store), unique on `(job_id, scheduled_at)`:
+  `(job_id, scheduled_at, run_id, started_at, finished_at, status, attempt, worker_id, error)`
+- **leases** (fast in-memory store): `lease:{job_id}:{scheduled_at} -> worker_id`, TTL = job timeout. Advisory only.
 
 **API contract**
 
 ```
-POST /jobs           body: { cron|run_at, payload, max_retries, dependencies? }
-                     → { job_id }
-GET  /jobs/{id}      → status, history, next_run
+POST /jobs           body: { cron|run_at, timezone, payload, max_retries,
+                             catch_up, jitter_window, dependencies? }
+                     -> { job_id }
+GET  /jobs/{id}      -> definition, next_run, recent runs
 DELETE /jobs/{id}
-POST /jobs/{id}/run  (manual trigger)
+POST /jobs/{id}/run  (manual trigger, allocates scheduled_at = now)
 ```
 
 **Observability**
 
-- **Scheduler tick lag** (`now − last_successful_tick`) — SLO p99 < 2× tick interval; page if > 5×. This is the clearest leading indicator of scheduler health.
-- **Job fire delay** (`actual_fire_at − scheduled_at`) — SLO p99 < 60s for tick-driven, < 1s for delay-queue-driven; per-job breakdown to catch single-tenant regressions.
-- **Run-state distribution** (counts of `QUEUED / LEASED / RUNNING / SUCCEEDED / FAILED / DEAD_LETTER` per minute) — sudden DLQ growth means a downstream API broke.
-- **Lease-acquire success ratio** — SLO > 99.9%; sustained dips signal Redis contention or duplicate-pull from queue redelivery.
-- **Worker concurrency utilisation** (in-flight runs ÷ worker capacity) — SLO < 80% during steady state, with autoscale headroom for top-of-hour bursts.
-- **DAG end-to-end latency** (DAG-run start → terminal task) — SLO per DAG class; alert on p99 regression versus a 7-day baseline.
+- **Scheduler tick lag** (`now - last_successful_tick`). SLO p99 under 2x the tick interval, page above 5x. The clearest leading indicator of scheduler health.
+- **Fire delay** (`actual_fire_at - scheduled_at`). SLO p99 under 60s, broken down per job so one tenant's regression is visible.
+- **Missing-run alerts.** Per job, from a declared expected cadence. The only metric that catches the silent failure, and the one with the known blind spot described in Unresolved.
+- **Run-state distribution per minute.** Sudden dead-letter growth means a downstream dependency broke, not that the scheduler did.
+- **Lease-acquire success ratio.** SLO above 99.9%. Sustained dips mean lease-store contention or excessive queue redelivery.
+- **Worker concurrency utilisation.** SLO under 80% in steady state, with autoscale headroom sized for the midnight window rather than the average.
 
 **Multi-region and DR**
 
-- **Replication mode:** active-passive per region. Each region has its own scheduler-leader, worker pool, and Redis lease cache; the jobs DB and `job_runs` log replicate cross-region (synchronous within a metro AZ-pair, async across continents) with one canonical write region per shard.
-- **RTO:** ~5 minutes for scheduler-leader failover within a region (lease expiry + standby takeover + state warm-up). Cross-region failover is operator-triggered: ~30 minutes including DNS cutover and warm-pool stand-up.
-- **RPO:** ~0s for scheduler decisions in the same region (sync-replicated jobs DB). For cross-region failover, up to ~5s of in-flight `job_runs` records (async replication lag); replay is idempotent so duplicate runs are caught by the lease layer.
-- **Failover cadence:** automatic for scheduler-leader within a region (continuous via lease election). Manual game-days quarterly for cross-region failover; chaos drills monthly for worker-pool drain.
-- **Cross-region cost:** mainly egress on `job_runs` log streaming (~75GB/day raw, ~10GB compressed) and snapshot replication of jobs metadata (~30GB nightly delta). Worker fleet is duplicated standby in the passive region — typically run at 20% capacity, scaled out on cutover.
+- **Replication mode:** active-passive per region. Each region runs its own scheduler leaders, worker pool and lease store; the jobs store and run log replicate cross-region, synchronous within a metro AZ pair and asynchronous across continents, with one canonical write region per shard.
+- **RTO:** about 5 minutes for scheduler-leader failover within a region. Cross-region failover is operator-triggered at roughly 30 minutes including DNS cutover and warm-pool stand-up.
+- **RPO:** effectively zero for fire decisions in-region, since the jobs store is synchronously replicated. Cross-region failover can lose up to about 5 seconds of run records to async lag; the unique constraint means a replayed occurrence is absorbed rather than duplicated.
+- **Failover cadence:** automatic within a region via lease election. Quarterly game days for cross-region, monthly chaos drills for worker-pool drain.
+- **Cross-region cost:** mostly run-log streaming at 20GB/day raw and about 3GB compressed, plus a nightly jobs-metadata delta of roughly 30GB. The passive region runs at 20% worker capacity and scales out on cutover.
 
 ### 37. Design Google Docs (Real-Time Collaborative Editor)
 #### Problem
@@ -22578,33 +22630,46 @@ GET  /.well-known/openid-configuration                           → discovery d
 
 ### 53. Design Trending Topics / Top-K in a Stream
 #### Problem
-From a firehose of keyed events, continuously maintain the approximate top K keys over 5-minute, 1-hour and 24-hour sliding windows, globally and per geography, and rank them by how *unusual* their current rate is rather than by raw volume.
+From a firehose of keyed events, continuously maintain the approximate top K keys over 5-minute, 1-hour and 24-hour sliding windows, globally and per geography. The keys are arbitrary strings discovered from the traffic rather than a registered list, so whatever counts them has to be sized by the error you accept, not by how many keys exist. Rank by how unusual a key's current rate is against its own history, because a volume ranking returns the same famous terms every day.
 #### Core
-TODO
+Two problems share one name: counting a key space you cannot enumerate, and deciding which counts are interesting.
 
-Write the whole answer as you would give it in sixty seconds, 200 to 300 words, standing alone.
+Counting first, and a memory number settles it. Roughly 100M distinct keys arrive per day, most seen once, and a sliding window needs each minute's deltas resident so you know what to subtract when a minute ages out. That is ~1.4M keys per minute at ~106B per map entry over 1,440 minutes, so ~216GB per geography. Exact counting is gone before you have chosen anything. What fits is a fixed grid of counters, each key addressed by several hash functions, sized from the error you are willing to accept. It stores no keys, so memory is independent of cardinality, and collisions only ever add, so an estimate is never below the truth. It also cannot list its own keys, so each worker keeps a bounded heap of strings it has seen: the heap supplies candidates, the counters rank them.
+
+Everything rests on those grids adding cell by cell exactly. Sixty minute grids sum to an hour, 64 shard grids sum to the global one, and a region ships 917KB a minute instead of its events. Merge the grids, never the shards' local top lists, because a key ranked eleventh on every shard can be globally first.
+
+Then ranking, which is the actual product. Score each key against its own baseline, an exponentially weighted rate and variance, and publish deviation rather than volume. That creates one hard failure mode, a key with no history, handled by an absolute floor, a prior and an age damper.
+
+All expensive work runs once a minute for everyone. The read is a single cache GET.
 #### Summary
-**The picture in your head:** a newsroom with a wall of radio scanners tuned to every frequency in the country. Nobody can transcribe every broadcast — there are millions of them and most are one person talking to themselves. What the editor actually needs is a wall of needles that twitch when a frequency gets *louder than it normally is*. A station that always blares at full volume is background noise; a station that was silent an hour ago and is now shouting is the story. You keep a rough loudness meter per frequency, not a transcript, and you keep a memory of what "normal" sounds like for each one.
+**The picture in your head:** a newsroom with a wall of radio scanners tuned to every frequency in the country. Nobody can transcribe every broadcast, because there are millions of them and most are one person talking to themselves. What the editor actually needs is a wall of needles that twitch when a frequency gets *louder than it normally is*. A station that always blares at full volume is background noise; a station that was silent an hour ago and is now shouting is the story. You keep a rough loudness meter per frequency, not a transcript, and you keep a memory of what "normal" sounds like for each one.
 
 **The approaches people actually take:**
-TODO. Two or three things a competent engineer might reach for, in plain language and before any product name, with what each one buys and roughly when it wins.
 
-**The single-request walkthrough (write path):** at 14:32:07 a user in London posts something containing `#eclipse`. The ingest tier normalises the key (lowercase, strip punctuation, collapse unicode confusables) and emits `{key:"#eclipse", user_id, ts, geo:"GB-LND"}` onto the event stream, partitioned by `hash(key)` (see #16). A sketch worker consumes it. First it checks a rotating Bloom filter for the tuple `(user_id, key)` in the current 5-minute generation — if this account already counted for `#eclipse` this window, the event is dropped. Otherwise the worker computes 7 independent hashes of `#eclipse`, each mod 32,768, and increments one counter in each of 7 rows of its current-minute Count-Min sketch: 7 memory writes, ~50ns total. It also probes those same 7 cells, takes the minimum as the running estimate, and offers `("#eclipse", 41,207)` to a local min-heap of the shard's top 500. At the minute boundary the worker seals the sketch, ships ~917KB to the merger, and starts a fresh one.
+*Keep a counter per key.* A map from key to count, one map per minute so the window can slide. Exact, and what you would write first. It fails on the tail, not the head: keys are discovered from the traffic and most are seen once, so a sliding day means holding every minute's map at once, hundreds of gigabytes per geography. It wins when the key set is small or can be made small, which is why the first question is whether the keys are registered anywhere.
+
+*Keep only as many keys as you have room for.* Fix a number of slots, each holding a key and a count. A monitored key increments; an unmonitored one takes the weakest slot, inherits its count as a starting bid, and records how much of that count might not be its own. Memory is a constant you choose, the ranking falls out with no separate index, and the error is total volume over slots. The strongest single-machine answer.
+
+*Throw the keys away and keep only counters.* A fixed grid, each key addressed by several hashes, one counter incremented per row, the estimate read back as the smallest addressed counter. Memory now depends on the error you accept rather than on how many keys exist, and two grids of the same shape add together exactly. You lose the ability to name a key, so a small candidate list travels alongside.
+
+The choice is not accuracy; at equal memory the last two sit within an order of magnitude. It is how many times a partial result must be combined with another.
+
+**The single-request walkthrough (write path):** at 14:32:07 a user in London posts something containing `#eclipse`. The ingest tier normalises the key (lowercase, strip punctuation, collapse unicode confusables) and emits `{key:"#eclipse", user_id, ts, geo:"GB-LND"}` onto the event stream, partitioned by `hash(key)` (see #16). A sketch worker consumes it. First it checks a rotating Bloom filter for the tuple `(user_id, key)` in the current 5-minute generation, and if this account already counted for `#eclipse` this window the event is dropped. Otherwise the worker hashes `#eclipse` once per row of its current-minute counter grid and increments the addressed counter in each row: 7 memory writes, ~50ns total. The grid's shape, 7 rows of 32,768 counters, is derived from the error target under *Requirements and scale* rather than picked; nothing above depends on the specific numbers. The worker also probes those same cells, takes the minimum as the running estimate, and offers `("#eclipse", 41,207)` to a local min-heap of the shard's top 500. At the minute boundary it seals the grid, ships ~917KB to the merger, and starts a fresh one.
 
 **The single-request walkthrough (read path):** a client opens the trending panel and issues `GET /trending?window=1h&geo=GB`. This does not touch a sketch. The merger has already, at the last minute boundary, summed the 64 shard sketches cell-wise, added the result to the 60-minute ring, unioned the 64 local heaps into ~32,000 candidate keys, re-estimated each against the merged 1-hour sketch, joined the top 500 against the baseline store, computed a z-score per key, and written a 50-entry JSON blob to `trending:GB:1h` in Redis. The API is one `GET` against that key: ~2ms p99, no computation. The list is at most ~10s stale.
 
 **The pieces (and what each one is for):**
-- **Event stream (Kafka, partitioned by `hash(key)`)** — durable, replayable transport at 1M events/s (see #16). Partitioning by key hash means all occurrences of one key land on one shard, so a shard's counts for that key are complete without a network shuffle. 24-hour retention covers the longest window plus recovery.
-- **Count-Min Sketch (Cormode & Muthukrishnan, 2005)** — a `d × w` array of integer counters plus `d` independent hash functions. To count key K you increment `cell[i][h_i(K) mod w]` for every row `i`; to read K you probe the same `d` cells and take the **minimum**. It never stores K itself, so its memory is fixed regardless of how many distinct keys arrive — which is the whole point when the key space is unbounded.
-- **Per-shard min-heap of the local top ~500** — the sketch answers "how many of K?" but cannot enumerate keys, because it has thrown the keys away. The heap is the only place actual key strings live. Capped at 10× K per shard so the merge has slack.
-- **Sketch ring (60 minute-sketches + 24 hour-sketches per geo)** — sliding windows are built by summing consecutive sketches and dropping the tail. This works only because Count-Min sketches are **linearly mergeable**: `sketch(A ∪ B) = sketch(A) + sketch(B)` cell by cell, exactly, with no loss. Same property makes shard-then-merge work.
-- **Baseline store (Redis/KV, keyed by `hash(key)`)** — per key, an EWMA of its rate, an EWMA of its variance, and a 1440-slot minute-of-day profile for the top keys. This is what converts "high" into "unusually high".
-- **Abuse scorer** — per-user de-duplication, per-ASN and per-account-age concentration checks, and follower-graph clustering. Without it, 10,000 cheap accounts posting in lockstep is indistinguishable from a real event.
-- **Top-K cache (Redis)** — 3 windows × ~200 geo partitions × ~5KB = ~3MB total, rewritten every 5s. The read path must be a single `GET`; anything else and the trending panel becomes the most expensive query in the product.
+- **Event stream (Kafka, partitioned by `hash(key)`).** Durable, replayable transport at 1M events/s (see #16). Partitioning by key hash means all occurrences of one key land on one shard, so a shard's counts for that key are complete without a network shuffle. 24-hour retention covers the longest window plus recovery.
+- **Count-Min sketch** (the counter grid above; introduced by Cormode and Muthukrishnan in 2005). A `d × w` array of integer counters plus `d` independent hash functions. To count key K, increment `cell[i][h_i(K) mod w]` for every row `i`; to read K, probe the same `d` cells and take the **minimum**. It never stores K itself, so memory is fixed regardless of how many distinct keys arrive, which is the whole point when the key space is unbounded.
+- **Per-shard min-heap of the local top ~500.** The sketch answers "how many of K?" but cannot enumerate keys, because it threw them away. The heap is the only place actual key strings live. Capped at 10× K per shard so the merge has slack.
+- **Sketch ring (60 minute tiles + 24 hour tiles per geo).** Sliding windows are built by summing consecutive tiles and dropping the tail. This works only because Count-Min sketches are **linearly mergeable**: `sketch(A ∪ B) = sketch(A) + sketch(B)` cell by cell, exactly, with no loss. The same property makes shard-then-merge work.
+- **Baseline store (Redis/KV, keyed by `hash(key)`).** Per key, an EWMA of its rate, an EWMA of its variance, and a 1440-slot minute-of-day profile for the top keys. This is what converts "high" into "unusually high".
+- **Abuse scorer.** Per-user de-duplication, per-ASN and per-account-age concentration checks, and follower-graph clustering. Without it, 10,000 cheap accounts posting in lockstep is indistinguishable from a real event.
+- **Top-K cache (Redis).** 3 windows × ~200 geo partitions × ~5KB = ~3MB total, rewritten every 5s. The read path must be a single `GET`; anything else and the trending panel becomes the most expensive query in the product.
 
-**The thing that makes it hard:** the key set is not known in advance and does not fit in memory. This is precisely where it diverges from #18 (Ad Click Event Aggregation), which looks superficially identical — both aggregate a huge event stream into windowed counts. But #18 counts a **bounded, enumerable** universe of ~5M ad IDs that exist in a database before the first click arrives, and its counts are **billable**, so exactness and T+1 reconciliation are the design centre. Here the keys are arbitrary strings *discovered from the data* — new hashtags, misspellings, phrases nobody has typed before — ~100M distinct per day, dominated by a long tail seen exactly once. There is no reconciliation target and nobody is invoiced. Derive the exact map: ~1.4M distinct keys per minute × ~106B per hash-map entry ≈ ~150MB *per minute*, and a 24-hour sliding window needs all 1,440 of those minute-deltas resident so you know what to subtract when a minute falls off the tail: ~216GB, per geo, in RAM. Multiply by ~200 geo partitions and you are at ~40TB of hot memory to answer "what's trending". Exact counting is not a tuning problem; it is off the table.
+**The thing that makes it hard:** the key set is not known in advance and does not fit in memory. This is precisely where it diverges from #18 (Ad Click Event Aggregation), which looks superficially identical, since both aggregate a huge event stream into windowed counts. But #18 counts a **bounded, enumerable** universe of ~5M ad IDs that exist in a database before the first click arrives, and its counts are **billable**, so exactness and T+1 reconciliation are the design centre. Here the keys are arbitrary strings *discovered from the data*, new hashtags, misspellings, phrases nobody has typed before, ~100M distinct per day and dominated by a long tail seen exactly once. There is no reconciliation target and nobody is invoiced. Derive the exact map: ~1.4M distinct keys per minute × ~106B per hash-map entry ≈ ~150MB *per minute*, and a 24-hour sliding window needs all 1,440 of those minute-deltas resident so you know what to subtract when a minute falls off the tail, so ~216GB per geo in RAM. Multiply by ~200 geo partitions and you are at ~40TB of hot memory to answer "what's trending". Exact counting is not a tuning problem; it is off the table.
 
-**Why this design and what it costs:** you stop trying to count everything and accept a bounded, one-sided error. The Count-Min sketch's guarantee is `est(K) ≥ true(K)` always, and `est(K) ≤ true(K) + ε·N` with probability `1 − δ`, where `N` is the total volume in the sketch. Every hash collision only ever *adds* another key's increments to a cell, so no cell can be too low, and the minimum across `d` rows is the least-contaminated of the `d` estimates. Since the error is absolute (`ε·N`) while heavy hitters are enormous under Zipf skew, the sketch is precise where you care and worthless in the tail — which is exactly the shape of the problem. The costs: you can never prove a count, you cannot enumerate keys from the sketch (hence the heap), and you must resist the temptation to use the "conservative update" optimisation, which tightens estimates but destroys linear mergeability and therefore breaks both the window ring and the shard merge.
+**Why this design and what it costs:** you stop trying to count everything and accept a bounded, one-sided error. The Count-Min guarantee is `est(K) ≥ true(K)` always, and `est(K) ≤ true(K) + ε·N` with probability `1 − δ`, where `N` is the total volume in the sketch. Every hash collision only ever *adds* another key's increments to a cell, so no cell can be too low, and the minimum across `d` rows is the least contaminated of the `d` estimates. Since the error is absolute (`ε·N`) while heavy hitters are enormous under Zipf skew, the sketch is precise where you care and worthless in the tail, which is exactly the shape of the problem. The costs: you can never prove a count, you cannot enumerate keys from the sketch (hence the heap), and you must resist the "conservative update" optimisation, which tightens estimates but destroys linear mergeability and therefore breaks both the window ring and the shard merge.
 
 **If you were building it tomorrow:**
 - Kafka (partition by `hash(key)`, 24h retention) → Flink or a bespoke Rust/Java consumer holding sketches on heap → merger service → Redis for baselines and the served top-K → Parquet on object store for the audit trail of every published list.
@@ -22628,16 +22693,16 @@ TODO. Two or three things a competent engineer might reach for, in plain languag
   redis.set("trending:{geo}:{window}", top_k(scored, 50))
   ```
 #### What this is really testing
-TODO
+Whether you can choose a lossy structure deliberately and say precisely what the loss buys and what it costs. Nobody is checking that you can name a sketch. They are checking the order of your reasoning: cardinality of the key space, the memory that implies for a window that has to slide, the error you are willing to trade for it, and only then a structure whose dimensions fall out of that error. Opening with "Count-Min, 7 rows, 32,768 columns" skips the entire part of the question being marked, and it also skips the check that follows, which is whether you know what the error does at the place it is visible. Being 8% high on a count nobody reads is free. Being 8% high at the rank-50 cutoff makes the published list reshuffle between refreshes, and that is a product defect a user can see.
 
-The one insight this question exists to elicit, then the contrast with the question it most resembles and why the answers differ.
+The contrast is with ad click aggregation. Both aggregate a huge event stream into windowed counts and the pipelines look alike on a whiteboard, and almost everything else is inverted. There the key space is registered before the first event arrives, roughly 5M ad IDs sitting in a database, so exact per-key state is affordable and the design centre is exactly-once: idempotent event ids, late clicks against a watermark, and a T+1 batch recomputation the streaming numbers must reconcile against, because the output is an invoice and a wrong number is a refund. Here nobody is billed, and more importantly there is nothing to reconcile against: a key that appeared four minutes ago has no ground truth anywhere except the stream itself, so there is no batch job that could tell you your streaming answer was wrong. That absence is what buys the freedom to pick the error first. The mirror image of the freedom is the concession: the ad system can tell an advertiser exactly how many clicks it charged for, and this system can never tell a newsroom exactly how many people said a word.
 
-Closest question: TODO
+Closest question: Q18
 #### Clarifying questions and how each answer forks the design
 - Must counts be exact, or is a bounded approximation acceptable for a ranked list?
 - Is the key space known in advance, or discovered from the events themselves?
 - Does "trending" mean highest volume, or fastest-rising relative to normal?
-- Which windows and which geo granularity — country, metro, both?
+- Which windows, and which geo granularity: country, metro, both?
 - Do we need per-user de-duplication and bot resistance?
 - How stale may the served list be?
 
@@ -22662,34 +22727,33 @@ Closest question: TODO
 - **Event volume:** assume ~1M events/s peak. Peak-to-average ~3× (US evening overlapping EU evening) → avg ≈ 333k/s → 333k × 86,400 ≈ **~29B events/day**.
 - **Event size:** ~72B (key string ~24B + user_id 8B + ts 8B + geo_id 4B + event_type 1B + lang 2B + framing/padding ~25B). 29B × 72B ≈ ~2.1TB/day raw; RF=3 → ~6.3TB/day on the stream; 24h retention → ~6.3TB hot (see #16).
 - **Distinct keys:** assume ~100M distinct keys/day with Zipf skew `s ≈ 1`. Average key is active in ~20 minutes of the day → distinct keys per minute ≈ 100M × 20 ÷ 1440 ≈ **~1.4M/min**.
-- **Exact-map cost (the number that kills the naive design):** per entry = key bytes ~24B + string header 16B + count 8B + last_seen 8B + bucket pointer 8B + cached hash 8B + chain pointer 8B = 80B, × 1.33 at a 0.75 load factor ≈ **~106B/key**. A single 24h map: 100M × 106B ≈ ~10.6GB — already too large per geo, and it cannot *slide*. Proper sliding needs the per-minute deltas resident: 1,440 × 1.4M × 106B ≈ **~216GB per geo**, ×~200 geo partitions ≈ ~40TB RAM.
+- **Exact-map cost (the number that kills the naive design):** per entry = key bytes ~24B + string header 16B + count 8B + last_seen 8B + bucket pointer 8B + cached hash 8B + chain pointer 8B = 80B, × 1.33 at a 0.75 load factor ≈ **~106B/key**. A single 24h map: 100M × 106B ≈ ~10.6GB, already too large per geo, and it cannot *slide*. Proper sliding needs the per-minute deltas resident: 1,440 × 1.4M × 106B ≈ **~216GB per geo**, ×~200 geo partitions ≈ ~40TB RAM.
 - **Count-Min dimensions:** target ε = 0.01% = 1×10⁻⁴, δ = 0.001. `w = ⌈e/ε⌉ = ⌈2.71828 × 10⁴⌉ = 27,183` → round up to **32,768 (2¹⁵)** so the modulo is a bit-mask; actual ε = e/w = 8.3×10⁻⁵, slightly better than target. `d = ⌈ln(1/δ)⌉ = ⌈ln 1000⌉ = ⌈6.908⌉ = **7**`.
-- **Sketch footprint:** 32,768 × 7 = 229,376 cells. Minute sketches use 4B counters (max per-minute count ≈4M < 2³²) → **~917KB**; hour/day tiers use 8B → **~1.8MB**.
+- **Sketch footprint:** 32,768 × 7 = 229,376 cells. Minute tiles use 4B counters (max per-minute count ≈4M < 2³²) → **~917KB**; hour/day tiers use 8B → **~1.8MB**.
 - **Ring per geo:** 60 minute-sketches + 24 hour-sketches ≈ 84 sketches × ~1.8MB ≈ **~150MB**, and that one ring serves all three windows (5m = sum of 5, 1h = sum of 60, 24h = sum of 24 hour-tiles). Fleet: ~200 geos × ~150MB ≈ ~30GB, ~150MB resident per aggregator.
-- **The contrast:** **~150MB of sketch versus ~216GB of exact map** for identical window coverage — a **~1,400× reduction**, in exchange for an estimate that is never low and at most ~0.008% of window volume high.
-- **What that error means at rank K:** under Zipf, `count(rank K) ≈ N / (K · H(D))`, so relative error at rank K ≈ `e·K·H(D)/w`, *independent of N*. Minute window: `2.718 × 50 × 14.7 / 32,768 ≈ 6.1%`. Day window: `2.718 × 50 × 19.0 / 32,768 ≈ 7.9%`. Enough to shuffle ranks 45–55; nowhere near enough to promote a tail key at ~50 counts into the top 50. Widening the day tier to `w = 2¹⁸` cuts it to ~1.0% at ~14.7MB per sketch.
+- **The contrast:** **~150MB of sketch versus ~216GB of exact map** for identical window coverage, a **~1,400× reduction**, in exchange for an estimate that is never low and at most ~0.008% of window volume high.
+- **What that error means at rank K:** under Zipf, `count(rank K) ≈ N / (K · H(D))`, so relative error at rank K ≈ `e·K·H(D)/w`, *independent of N*. Minute window: `2.718 × 50 × 14.7 / 32,768 ≈ 6.1%`. Day window: `2.718 × 50 × 19.0 / 32,768 ≈ 7.9%`. Enough to shuffle ranks 45 to 55; nowhere near enough to promote a tail key at ~50 counts into the top 50. Widening the day tier to `w = 2¹⁸` cuts it to ~1.0% at ~14.7MB per sketch.
 - **Heap and HLL:** 500 entries × (key ~36B + count 8B + slot 8B) ≈ ~26KB per `(geo, window)`; unique-user HLLs run only on those 500 candidates at 3KB each (p=12, ~1.6% error) ≈ 1.5MB per `(geo, window)`, ~900MB fleet-wide.
 - **De-dup filter:** 5-min generation at 1M/s = 300M `(user, key)` tuples; 1% FPR → 9.6 bits/element → ~360MB, ×2 rotating generations ≈ ~720MB, spread over 64 shards ≈ **~11MB/shard**.
-- **Serving:** 3 windows × ~200 geos × ~5KB ≈ ~3MB in Redis, 600 writes per 5s = 120 writes/s. Reads: assume ~500M DAU × 3 panel loads/day ≈ 1.5B/day ≈ ~17k/s avg, ~60k/s peak — one Redis cluster, or a CDN with a 5s TTL.
+- **Serving:** 3 windows × ~200 geos × ~5KB ≈ ~3MB in Redis, 600 writes per 5s = 120 writes/s. Reads: assume ~500M DAU × 3 panel loads/day ≈ 1.5B/day ≈ ~17k/s avg, ~60k/s peak, which is one Redis cluster, or a CDN with a 5s TTL.
 #### Key decisions
-TODO
+**Counter grid plus a candidate heap, or Space-Saving**
+- Choice: a Count-Min sketch per `(shard, minute, geo)` at `d = 7, w = 32,768`, with a bounded min-heap of the shard's top 500 key strings beside it. Merge the sketches cell-wise, then re-estimate every candidate against the merged sketch before sorting.
+- Alternative: Space-Saving over a Stream-Summary (Metwally, Agrawal and El Abbadi, 2005). Keep `m` monitored counters; a monitored key increments, an unmonitored key evicts the current minimum, inherits its count as a starting bid, and records that inherited count as its own maximum overestimate. Top-K falls straight out of the structure, with no heap and no re-estimation pass.
+- Decider: how many times a partial result is combined before it is published. One published 1-hour list is the sum of 64 shard summaries across 60 minute tiles, so 3,840 combining operations. Count-Min adds exactly, so all 3,840 are lossless. Space-Saving summaries do not add; each merge is a heuristic that can drop a key sitting just below the monitored set on every input but above the cutoff in the union, and 3,840 of those compound with no error signal anywhere. Accuracy at equal memory is not what separates them: at `m = 10,000` counters Space-Saving's `N/m` bound over a 60M-event minute is 6,000 counts against Count-Min's `ε·N` of 4,980 at 917KB, the same order.
+- Alternative wins when: the answer is produced on one machine, or per shard with no cross-shard merge, which covers per-tenant trending and roughly anything under 100k events/s. It also wins when you need only the top K and never a count for a named key, because Space-Saving carries the strings and a per-key error bound for free, whereas the sketch needs a heap that can only ever contain keys some worker already believed were heavy. If our deployment shrank to a single aggregator, Space-Saving would be the better structure and the heap would be dead weight.
 
-Two or three genuine forks. For each, in this exact shape so it stays checkable:
+**A ring of per-minute sketches, or one exponentially decayed sketch**
+- Choice: 60 minute tiles plus 24 hour tiles per geo, ~150MB, with each window maintained by adding the new tile and subtracting the one that fell off the tail.
+- Alternative: one sketch per geo whose cells are all multiplied by `λ = 0.98` every minute, giving a `ln 0.5 / ln 0.98 ≈ 34`-minute half-life and no ring at all.
+- Decider: 84 tiles × 1.8MB ≈ 150MB per geo against 1.8MB for the decayed sketch, an 83× difference, measured against a stated budget of 2GB per aggregator. The ring uses 7.5% of that budget, so memory is not scarce enough to pay for it with a structure that cannot answer "the last 5 minutes" as a defined interval. The product ships three named windows and a `rank_delta` between consecutive refreshes, and both need crisp boundaries.
+- Alternative wins when: the dimension you multiply by is large. 200 geographies is comfortable; 50,000 tenants, or one sketch per `(geo, language, platform)`, is not, and there 1.8MB against 150MB decides it immediately. Decay is also the better model where no window is defined at all and the question is only "what is hot now", and it has no boundary artefact, since a key decays away instead of dropping off a cliff when a minute ages out. Its costs are real but narrow: a past window cannot be recomputed after the fact, and two decayed sketches merge only if they were decayed on the same tick schedule.
 
-**<name of the fork>**
-- Choice:
-- Alternative:
-- Decider:
-- Alternative wins when:
-
-**Raw material, from the old Common Mistakes:**
-
-- **Reaching for an exact hash map or a Redis sorted set because it worked at small scale.** It fails on the long tail, not on the head: ~100M distinct keys per day, most seen once, is ~216GB per geo for a proper sliding window. Derive that number out loud before proposing sketches — the derivation is the answer, the sketch is just the consequence.
-- **Merging the shards' local top-K lists instead of their sketches.** A key ranked 11th on every shard can be globally top-10, and merging lists loses it silently with no error signal anywhere. Merge sketches, then re-estimate every candidate against the merged sketch before sorting.
-- **Using conservative update because it improves accuracy.** It does — and it breaks linear mergeability, which silently corrupts both your sliding window and your shard merge. Mergeability is the property the whole topology rests on; do not trade it for a tighter constant.
-- **Ranking by raw count and calling it trending.** The top of a volume-ranked list is the same handful of perennially-huge terms every day, which is not news and is not a product. Score by deviation from each key's own baseline, and be ready with the cold-start guards for keys that have no baseline.
-- **Ignoring per-user de-duplication.** Without it, one script with 10,000 posts costs nothing and buys the top slot. De-dupe at ingest so a count means a distinct participant, then add ASN and account-age concentration checks for the distributed case.
-- **Computing the list on the read path.** Summing 60 sketches and re-ranking 32k candidates per request is a self-inflicted outage the first time the panel goes viral. Materialise the answer on a timer and make the read a single cache `GET`.
+**Score against a per-key baseline, or against the key's own long window**
+- Choice: per-key EWMA of rate and variance at a 7-day half-life, plus a 1,440-slot minute-of-day profile for the top ~100k keys, scored `z = (r_short − μ) / max(σ, σ_floor)`. A steady celebrity term at `μ = 10,000/min, σ = 1,500` reading 10,500 this minute scores `z = 0.33` and is ignored; a term at `μ = 10/min, σ = 4` reading 500/min scores `z = 122`.
+- Alternative: pure sketch arithmetic, `(count_5m / 5) ÷ (count_24h / 1440)`, which is two probes per candidate, no baseline store, no state to keep warm and nothing to rebuild after an outage.
+- Decider: what the ratio does to a key born inside the window. Its 24-hour count equals its 5-minute count, so the ratio is `1440 / 5 = 288` exactly, the arithmetic maximum, for every new key regardless of size. A key with 500 counts and a key with 500,000 tie at the top of the list, and the expression has nowhere to put a prior that would separate them. The baseline form has an explicit slot for one (`μ₀ = 1/min, σ₀ = 2`). The price is a store of ~100k profiled keys × ~2.9KB ≈ 290MB plus an EWMA row for every key that has ever cleared the floor.
+- Alternative wins when: the baselines would be mostly empty anyway. Inside a live event, or in a market launched last week, most candidates are hours old, their stored baselines are the prior rather than a measurement, and you are paying 290MB and a join to read back a constant. Ship the ratio with the absolute floor and the age damper, which do most of the cold-start work in either design, and add baselines when the key population is old enough to have a history worth reading. The scorer needs the ratio as a fallback for baseline-store outages regardless, so it is code you write either way.
 #### High-level design
 **must-say**
 
@@ -22773,19 +22837,19 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 
 **Why the flow is shaped this way:** counting and ranking are different problems with different cost profiles. Counting must survive 1M events/s and an unbounded key space, so it uses fixed-memory sketches. Ranking needs actual key strings and historical context, so it runs once a minute over ~32k candidates where a database join is affordable.
 
-**What this layout buys you:** the expensive work happens once per minute for everyone, not once per request. The trade is staleness — the published list lags reality by up to ~10s — and the loss of any ability to answer "exactly how many" from the serving tier.
+**What this layout buys you:** the expensive work happens once per minute for everyone, not once per request. Two things are traded for it. The published list lags reality by up to ~10s, and the serving tier loses any ability to answer "exactly how many".
 #### Deep dive
 **must-say**
 
-**Why the minimum, and why the error is one-sided.** A cell `sketch[i][c]` holds the sum of increments from *every* key that hashes to `c` in row `i`. It therefore contains your key's true count plus zero or more foreign contributions — never less. Each of the `d` rows gives you an independent over-estimate, and the minimum is the row where fewest other keys happened to collide with yours. So `est(K) ≥ true(K)` unconditionally, which is the property that makes the structure safe for ranking: you can never *miss* a heavy hitter by under-counting it, you can only occasionally over-promote a light one. Worked example: `#eclipse` truly occurred 41,000 times this minute; its 7 cells read `[41,207 · 43,880 · 41,940 · 52,110 · 41,033 · 46,720 · 44,201]`. The reported estimate is 41,033 — 33 counts high, against a guaranteed bound of `ε·N = 8.3×10⁻⁵ × 60M = 4,980`. Taking the mean (44,441) or the median (43,880) would be *worse*, because every sample is biased upward; only the minimum is an extremum of the contamination.
+**The counting structure, end to end.** This is the mechanism that gets drilled, so it is the one worth taking apart. Everything else in the question is scoring on top of it or plumbing around it.
 
-**Linear mergeability is the crux.** Two sketches built with the same `(d, w)` and the same hash functions satisfy `sketch(A) + sketch(B) = sketch(A ∪ B)`, cell by cell, **exactly** — no approximation is introduced by merging, because each cell is a plain sum and addition is associative. Everything else in this design is a consequence. Sliding windows: keep one sketch per minute, and the 1-hour window is the cell-wise sum of the last 60. Shard-then-merge: 64 workers each count a disjoint slice and the global sketch is their sum. Expiry: maintain a running `window_sketch` and, when minute `m−60` falls off, subtract its sketch cell-wise. Subtraction is safe here — no cell can go negative, because you are only ever removing increments you previously added. This is also why the tempting **conservative-update** optimisation (increment only the cells currently equal to the row minimum, which measurably tightens estimates) is off the table: it makes the counters path-dependent, so two conservatively-updated sketches no longer sum to the sketch of the union. You must choose one or the other, and mergeability is worth more.
+**Why the minimum, and why the error is one-sided.** A cell `sketch[i][c]` holds the sum of increments from *every* key that hashes to `c` in row `i`, so it contains your key's true count plus zero or more foreign contributions, never less. Each of the `d` rows gives an independent over-estimate, and the minimum is the row where fewest other keys happened to collide with yours. `est(K) ≥ true(K)` holds unconditionally, and that is what makes the structure safe for ranking: you cannot *miss* a heavy hitter by under-counting it, you can only occasionally over-promote a light one. Worked example: `#eclipse` truly occurred 41,000 times this minute and its 7 cells read `[41,207 · 43,880 · 41,940 · 52,110 · 41,033 · 46,720 · 44,201]`. The estimate is 41,033, which is 33 counts high against a guaranteed bound of `ε·N = 8.3×10⁻⁵ × 60M = 4,980`. Mean (44,441) and median (43,880) are both *worse*, because every sample is biased upward in the same direction; only the minimum is an extremum of the contamination rather than an average of it.
 
-**The sketch cannot enumerate — hence sketch + heap.** Ask the sketch "what are the top 50 keys?" and it has no answer: it stores no keys, only counters, and inverting a hash to recover candidate strings is not possible. So every worker keeps a bounded min-heap of `(key, current_estimate)` and offers each key it sees; the heap is where the strings live. Cap at 10× K = 500 per shard, not K, so the merge has slack. The alternative family is **Space-Saving / Stream-Summary** (Metwally et al., 2005) and **Lossy Counting** (Manku & Motwani, 2002): keep exactly `m` counters, and on seeing an unmonitored key, evict the current minimum and hand its count to the newcomer as a starting bid. This gives an integrated top-K with error bounded by `N/m` (at `m = 10,000` and `N = 60M`, that is 6,000 — the same order as the sketch), needs no separate heap, and is often the better single-node choice. Its weakness is exactly the sketch's strength: two Space-Saving summaries do not merge losslessly, so a sharded deployment loses accuracy at every merge boundary. Sketch + heap for distributed, Space-Saving for single-node.
+**Linear mergeability is the crux.** Two sketches built with the same `(d, w)` and the same hash functions satisfy `sketch(A) + sketch(B) = sketch(A ∪ B)` cell by cell, **exactly**. Merging introduces no approximation at all, because each cell is a plain sum and addition is associative. Three things in this design are consequences of that one fact and nothing else. Sliding windows: keep one sketch per minute and the 1-hour window is the cell-wise sum of the last 60. Shard-then-merge: 64 workers each count a disjoint slice and the global sketch is their sum. Expiry: maintain a running `window_sketch`, and when minute `m−60` falls off the tail, subtract its sketch cell-wise. Subtraction is safe because you are only ever removing increments you previously added, so no cell can go negative. It is also why the tempting **conservative-update** optimisation, incrementing only the cells currently equal to the row minimum, is off the table despite measurably tightening estimates: it makes counters path-dependent, so two conservatively-updated sketches no longer sum to the sketch of the union. Pick one, and mergeability is worth more than the constant.
 
-**Sharding and the merge-the-sketches-not-the-lists trap.** Partitioning by `hash(key)` gives each shard complete counts for its keys, which is why the local estimates are meaningful. But if you then merge only the 64 *local top-50 lists*, you lose keys. A shard that happens to own three globally-enormous keys will push a key with 900k counts down to rank 51 locally, while a shard owning only mid-weight keys promotes a 40k-count key into its local top 50. Merge the lists and the 900k key vanishes from the global answer entirely. Two fixes, used together: keep `c·K` per shard with `c ≈ 10` so the local cutoff sits far below the global one, and — the real fix — **merge the sketches, then re-estimate every candidate against the merged sketch** before the global sort. The candidate set can be lossy; the counts used to rank it must not be. Note also that key-hash partitioning creates its own hot-shard problem: a single viral key at 200k events/s pins one worker. Because sketches are mergeable, you can fall back to round-robin partitioning for the sketch path and rely on the cell-wise merge to reassemble the truth — this is the second thing mergeability buys you.
+**The sketch cannot enumerate, hence sketch plus heap.** Ask it "what are the top 50 keys?" and it has no answer: it holds counters, not keys, and a hash cannot be inverted to recover candidate strings. So every worker keeps a bounded min-heap of `(key, current_estimate)` and offers each key it processes. The heap is the only place a string exists anywhere in the counting tier. Cap it at 10× K, so 500 per shard rather than 50, so the merge has slack. The structural consequence is that the candidate set and the counts are produced by two different mechanisms with different failure modes, which sets up the next trap.
 
-The per-minute publish cycle, with cardinalities and a latency budget: 1M events/s ÷ 64 shards = ~15.6k events/s per shard → ×7 rows = ~110k counter writes/s/shard (trivially in L2 cache). At the minute boundary each shard seals and ships ~917KB (64 × 917KB ≈ 59MB/min ≈ ~1MB/s of merge traffic). The merger sums 64 × 229,376 cells = ~14.7M integer adds (~20ms), unions 64 heaps into ~32,000 candidates, re-estimates each against the merged window sketch (32,000 × 7 = 224k probes, ~2ms), sorts, takes the top 500, joins those against the baseline store (500 KV gets, ~5ms pipelined), scores, and writes 50 entries to Redis (~10ms). Budget from minute boundary to published list: seal 200ms + ship 300ms + merge 20ms + re-estimate 2ms + baseline 5ms + score 10ms + write 10ms ≈ **~550ms**, against a 10s staleness SLO.
+**Merge the sketches, not the lists.** Partitioning by `hash(key)` gives each shard complete counts for its keys, which is what makes local estimates meaningful. Merge only the 64 *local top-50 lists*, though, and you lose keys. A shard that happens to own three globally enormous keys pushes a 900k-count key down to rank 51 locally, while a shard owning only mid-weight traffic promotes a 40k-count key into its local top 50. Merge the lists and the 900k key vanishes from the global answer with no error signal anywhere. Two fixes used together: `c·K` per shard with `c ≈ 10` so the local cutoff sits far below the global one, and, the real fix, **merge the sketches and re-estimate every candidate against the merged sketch** before the global sort. The candidate set is allowed to be lossy, because a key outside the top 500 on every shard cannot plausibly be globally top-50 under Zipf skew. The counts used to rank that set are not allowed to be lossy. Note that key-hash partitioning brings its own problem: one viral key at 200k events/s pins a single worker. Mergeability pays for that too. Fall the sketch path back to round-robin partitioning and the cell-wise merge reassembles the counts, at the cost of local heaps becoming advisory rather than authoritative, since no shard now holds a complete count for anything.
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 470" role="img" aria-label="Count-Min sketch mechanics: seven hashes increment seven cells, estimate is the minimum, and per-minute sketches merge cell-wise into a window">
@@ -22859,24 +22923,18 @@ The per-minute publish cycle, with cardinalities and a latency budget: 1M events
 </svg>
 ```
 
-**Trending is not most-frequent.** A globally famous name is high-volume every single minute of every day; publishing it as "trending" is publishing that the sun rose. The score must measure *departure from that key's own normal*. Maintain per key an EWMA of its per-minute rate `μ` and of its variance `σ²` (half-life ~7 days, with a 1440-slot minute-of-day profile for the top ~100k keys so that "busy at 8pm" is not itself a signal), then score `z = (r_short − μ) / max(σ, σ_floor)`. Worked example: a steady celebrity term sits at `μ = 10,000/min, σ = 1,500`; this minute it reads 10,500 → `z = 0.33`, ignored. A term that has averaged `μ = 10/min, σ = 4` and now reads 500/min → `z = 122`, top of the list. The cheaper variant when you cannot afford per-key variance is a ratio of short-window to long-window rate: `(count_5m / 5) ÷ (count_24h / 1440)`, which needs only two sketch probes and no baseline store, at the cost of being noisy for low-count keys. Rank by `z`, but keep the raw estimate in the response so the UI can show both.
-
-**Cold start, and why it is the failure mode of z-scoring.** A brand-new key has no baseline: `μ = 0, σ = 0`, so any occurrence divides by zero and every hashtag invented in the last minute is infinitely trending. Three guards, all needed. (1) An absolute floor: a key must exceed a minimum count in the short window — say 500 in 5 minutes, ~0.0002% of window volume — before it is eligible at all, which also keeps it above the sketch's error band. (2) A Bayesian prior for unseen keys: treat a new key as if it had a pseudo-history of `μ₀ = 1/min, σ₀ = 2` drawn from the global distribution of new-key rates, so a key going 1 → 20 scores modestly while 1 → 5,000 still scores enormously. (3) Dampen by age: multiply the score by `min(1, age_minutes / 15)` so a key must sustain its rate for a quarter of an hour before it can take the top slot. Together these turn "no history" from a divide-by-zero into a defensible prior.
-
-**Spam, brigading, and per-user de-duplication.** Without defences the list is trivially purchasable: 10,000 accounts posting the same string once each looks identical to 10,000 real people reacting to news. Layered, cheap to expensive. (1) **De-duplicate at ingest** — a rotating Bloom filter over `(user_id, key)` per 5-minute generation means one account contributes at most one count per key per window, so volume becomes a proxy for *distinct participants*. (2) **Re-rank the top 500 by unique users** — run an HLL per candidate and demote any key whose event-to-unique-user ratio is far above the population median. (3) **Concentration checks** — a term where >30% of contributors share one ASN, or where the median account age is under 48 hours, or whose contributors form a dense cluster in the follow graph, is suppressed and routed to a review queue rather than hard-deleted. (4) **Publish the audit trail** — every list served is written to Parquet with its inputs, so a suppression decision can be re-examined later. Suppression is deliberately soft: like #18's "flag, don't block" stance on click fraud, a false positive here silently kills a real story, which is more costly than briefly surfacing a manipulated one.
-
-**The serving path must be boring.** Nothing on the read path computes anything. The scorer writes `trending:{geo}:{window}` as a single serialised blob every 5 seconds; the API does one Redis `GET` and returns it, p99 ~2ms. Geo fallback is a static chain (`GB-LND → GB → EU → global`) resolved at write time, not read time, so a sparse metro always has a populated key. Per-key drill-down (`/trending/key/{key}`) is the only endpoint that probes a sketch, and it is rate-limited and served from the merger's replica, never from the workers. This is the opposite of #22's leaderboard, where a Redis sorted set is queried live because the key space is small and bounded — here the ranked structure is far too large to hold, so you materialise the answer instead of the data.
+**The per-minute cycle, with a latency budget.** 1M events/s ÷ 64 shards = ~15.6k events/s per shard, ×7 rows = ~110k counter writes/s/shard, which stays inside L2. At the minute boundary each shard seals and ships ~917KB, so 64 × 917KB ≈ 59MB/min ≈ ~1MB/s of merge traffic. The merger sums 64 × 229,376 cells = ~14.7M integer adds (~20ms), unions 64 heaps into ~32,000 candidates, re-estimates each against the merged window sketch (32,000 × 7 = 224k probes, ~2ms), sorts, truncates to the top 500, joins those against the baseline store (500 KV gets, ~5ms pipelined), scores, and writes 50 entries to Redis (~10ms). Minute boundary to published list: seal 200ms + ship 300ms + merge 20ms + re-estimate 2ms + baseline 5ms + score 10ms + write 10ms ≈ **~550ms** against a 10s staleness SLO. Note where the budget actually goes: 500ms of the 550ms is sealing and shipping, and none of it is arithmetic. If the cycle ever needs to be faster, the answer is staggered seals and incremental merging, not a faster merge.
 #### Where it breaks
 **must-say**
 
 **Bottlenecks**
 
-- **Hot key pins one shard** — key-hash partitioning sends a viral term's 200k events/s to a single worker, whose CPU saturates while 63 idle. Switch that key (or the whole sketch path) to round-robin partitioning and rely on cell-wise merge to reassemble the counts; the cost is that per-shard estimates are no longer complete, so local heaps become advisory and the merged sketch must do all the ranking.
-- **Sketch memory × geo cardinality** — 200 geos × 84 sketches is fine, but adding language and platform dimensions multiplies combinatorially and 30GB becomes 3TB. Materialise only the dimension combinations that are actually served, and compute rarer slices on demand from the raw archive with a minutes-latency SLA rather than keeping them hot.
-- **Merge fan-in at the minute boundary** — all 64 shards ship ~917KB simultaneously, a 59MB burst into one merger every 60s, with the whole publish cycle blocked on the slowest shard. Stagger shard seal times across the minute and merge incrementally as sketches arrive; the trade is that the window boundary becomes fuzzy by a few hundred milliseconds.
-- **Baseline store lookups** — joining 32k candidates against the baseline store every minute would be 32k KV gets/minute per geo, ~100k/s fleet-wide. Join only after truncating to the top 500, and cache the baselines for keys that have trended recently; the trade is that a key rising from deep in the tail waits one extra cycle for its baseline.
-- **De-dup Bloom saturation** — a traffic spike pushes the 5-minute generation past its sized element count, the false-positive rate climbs above 1%, and real users get silently dropped. Size for 2× peak and monitor the fill ratio, rotating a generation early when it crosses 80%; the trade is a slightly shorter effective de-dup window during spikes.
-- **Ranking instability near the cutoff** — with ~6% relative error at rank 50, keys near the boundary flicker in and out between refreshes, which reads as a broken product. Apply hysteresis: a key must beat the rank-50 score by 10% to enter and fall 10% below to leave. The trade is a slightly slower reaction to genuinely new entrants.
+- **Hot key pins one shard.** Key-hash partitioning sends a viral term's 200k events/s to a single worker, whose CPU saturates while 63 idle. Switch that key, or the whole sketch path, to round-robin partitioning and rely on cell-wise merge to reassemble the counts; the cost is that per-shard estimates are no longer complete, so local heaps become advisory and the merged sketch must do all the ranking.
+- **Sketch memory × geo cardinality.** 200 geos × 84 tiles is fine, but adding language and platform dimensions multiplies combinatorially and 30GB becomes 3TB. Materialise only the dimension combinations that are actually served, and compute rarer slices on demand from the raw archive with a minutes-latency SLA rather than keeping them hot.
+- **Merge fan-in at the minute boundary.** All 64 shards ship ~917KB simultaneously, a 59MB burst into one merger every 60s, with the whole publish cycle blocked on the slowest shard. Stagger shard seal times across the minute and merge incrementally as sketches arrive; the trade is that the window boundary becomes fuzzy by a few hundred milliseconds.
+- **Baseline store lookups.** Joining 32k candidates against the baseline store every minute would be 32k KV gets/minute per geo, ~100k/s fleet-wide. Join only after truncating to the top 500, and cache the baselines for keys that have trended recently; the trade is that a key rising from deep in the tail waits one extra cycle for its baseline.
+- **De-dup Bloom saturation.** A traffic spike pushes the 5-minute generation past its sized element count, the false-positive rate climbs above 1%, and real users get silently dropped. Size for 2× peak and monitor the fill ratio, rotating a generation early when it crosses 80%; the trade is a slightly shorter effective de-dup window during spikes.
+- **Ranking instability near the cutoff.** With ~6% relative error at rank 50, keys near the boundary flicker in and out between refreshes, which reads as a broken product. Apply hysteresis: a key must beat the rank-50 score by 10% to enter and fall 10% below to leave. The trade is a slightly slower reaction to genuinely new entrants.
 
 **Failure modes**
 
@@ -22893,51 +22951,62 @@ The per-minute publish cycle, with cardinalities and a latency budget: 1M events
 
 **Unresolved**
 
-TODO. Two or three things this design genuinely does not handle well, and what you would do about each.
+**Nothing this system publishes can be proved, and the obvious fix produces two numbers for one thing.** The sketch returns an upper bound; the heap returns candidates some worker already thought were heavy. Neither supports the question every serious consumer eventually asks, which is "how many, exactly". The partial fix is real: the ~500 published candidates are a bounded key set by construction, so an exact recount over just those keys off the raw archive is affordable, and that is what we would build for a newsroom or an advertiser. It does not close the gap. The recount lands minutes after the list it describes, it counts a slightly different event set because it runs after late arrivals have landed, and it will disagree with the published estimate often enough to notice. We would then be shipping an estimate that ranks and an exact number that does not, for the same key at the same timestamp, with no principled story about which one is "the" count. The same hole affects appeals: a user asking why their term was demoted cannot be given the counts behind the decision, only the decision.
+
+**De-duplication undercounts, the sketch overcounts, and the two errors do not compose into a bound.** The whole error story rests on `est ≥ true`, but the Bloom filter sits upstream of the sketch and deletes events: at a 1% false-positive rate roughly 1% of genuine `(user, key)` pairs never reach a counter, and the loss is not uniform, since it concentrates late in a generation when the filter is fullest and on keys whose users overlap with already-counted keys. So the published estimate is an upper bound on a quantity that is itself a lossy sample of reality, and the clean one-sided guarantee we sell in the deep dive does not survive contact with the filter. Nothing cheap fixes this. Exact per-user sets are unaffordable at 300M tuples per generation, and shrinking the false-positive rate to 0.1% costs 50% more memory for a bias we cannot measure anyway. We monitor fill ratio, we state the guarantee as holding over de-duplicated events rather than over reality, and we accept that the distinction is invisible to everyone downstream.
+
+**Coordinated inflation by real accounts is made expensive, not prevented.** ASN concentration, account age and follow-graph density catch cheap botnets, which is the attack from ten years ago. They do not catch 10,000 aged, geographically spread, genuinely human accounts organised somewhere this system cannot see. Worse, the signals we do have are the same signals a real grassroots event produces: contributors in one region, dense follow clustering, a burst of accounts created *because* of the event. Every threshold that catches the first case also catches the second, and we have no content signal and no off-platform signal in this pipeline to separate them. The operational answer is soft suppression plus a human review queue plus a full audit trail, which converts a detection problem into a staffing problem and a measurable override rate. It leaves a false-negative rate we cannot estimate, because a manipulation we did not catch produces no artifact anywhere.
 #### Drill questions
 1. Why the minimum across rows, and not the mean or median?
-2. A key is 11th in every shard's local top-10 — do you lose it?
+2. A key is 11th in every shard's local top-10. Do you lose it?
 3. How do you expire the tail of a 1-hour window without corrupting counters?
 4. A brand-new hashtag appears with no baseline. What score does it get?
 5. 10,000 bot accounts each post a term once. What stops it trending?
 6. Why not just use a Redis sorted set, like the leaderboard in #22?
 7. This looks like #18. Why not run the same Flink tumbling-window aggregation?
 8. An advertiser or newsroom asks for the exact count behind a trending entry.
-
-TODO. Only 8 drill questions carried over, top up to at least 10.
+9. Why is the grid 7 rows of 32,768 and not 3 rows of 1,000,000, which is far more memory?
+10. Two regions each count their own traffic. How do you produce one global list without shipping the events?
+11. Partitioning by `hash(key)` guarantees a hot shard on a viral term. Why do it at all?
+12. Between two consecutive refreshes the published list changes almost completely. Bug or not?
 #### Answers to drill questions
-1. Every row's cell contains the true count plus non-negative contamination from colliding keys, so every one of the `d` samples is biased upward. Averaging averages the noise in; the minimum picks the row with the least collision, which is the only estimator that preserves the one-sided `est ≥ true` guarantee. *If pushed:* the Count-Mean-Min variant subtracts each row's estimated noise floor (`(row_sum − cell) / (w − 1)`) before taking the median, which reduces the bias on light keys — but it can now under-estimate, which is unacceptable if downstream logic assumes counts are upper bounds.
+1. Every row's cell contains the true count plus non-negative contamination from colliding keys, so every one of the `d` samples is biased upward. Averaging averages the noise in; the minimum picks the row with the least collision, which is the only estimator that preserves the one-sided `est ≥ true` guarantee. *If pushed:* the Count-Mean-Min variant subtracts each row's estimated noise floor (`(row_sum − cell) / (w − 1)`) before taking the median, which reduces the bias on light keys, but it can now under-estimate, which is unacceptable if downstream logic assumes counts are upper bounds.
 
 2. Yes, if you merge only the local lists, and this is the classic bug. Keep `10×K` per shard so the local cutoff is far below the global one, and merge the *sketches*, then re-estimate all ~32k candidates against the merged sketch before the global sort. *If pushed:* the candidate set is allowed to be lossy because a key that is outside the top 500 on every shard cannot plausibly be globally top-50 under Zipf; the counts used to rank the candidates are not allowed to be lossy, which is why re-estimation is mandatory.
 
-3. Ring of per-minute sketches; maintain a running window sketch, add the new minute, subtract the sketch that fell off. Cell-wise, exactly, no negatives possible. *If pushed:* the cheaper alternative is exponentially decayed counters — multiply every cell by `λ = 0.98` each tick — which is one pass over 229k cells and no ring at all, but it has no crisp window boundary, so you cannot answer "top 50 in the last exactly 5 minutes" and the decayed counts are no longer mergeable with undecayed ones.
+3. Ring of per-minute sketches; maintain a running window sketch, add the new minute, subtract the sketch that fell off. Cell-wise, exactly, no negatives possible. *If pushed:* the cheaper alternative is exponentially decayed counters, multiplying every cell by `λ = 0.98` each tick, which is one pass over 229k cells and no ring at all. It has no crisp window boundary, so you cannot answer "top 50 in exactly the last 5 minutes", a past window cannot be recomputed, and decayed counts merge only with counts decayed on the same schedule.
 
-4. Not infinity. It must clear an absolute floor (≥500 counts in 5 minutes) to be eligible, is scored against a global prior for new keys (`μ₀ = 1/min`), and its score is damped by `min(1, age/15min)`. *If pushed:* the floor also serves a statistical purpose — it keeps every ranked key well above the sketch's `ε·N` error band, so ranking noise never dominates the signal.
+4. Not infinity. It must clear an absolute floor (≥500 counts in 5 minutes) to be eligible, is scored against a global prior for new keys (`μ₀ = 1/min, σ₀ = 2`), and its score is damped by `min(1, age_minutes / 15)` so it must sustain the rate for a quarter of an hour before taking the top slot. *If pushed:* the floor also does statistical work. It keeps every ranked key well above the sketch's `ε·N` error band of ~4,980 counts per minute-window, so ranking noise never dominates the signal.
 
-5. Per-`(user, key)` de-duplication caps each account at one count, so raw volume already equals distinct participants — but 10,000 real distinct accounts is the attack. The unique-user HLL re-rank does not help; the ASN concentration, account-age median, and follow-graph density checks do. *If pushed:* suppression is soft (demote and queue for review, not delete) because a false positive silently kills a genuine grassroots story, and you keep the full audit trail so the decision is reviewable.
+5. Per-`(user, key)` de-duplication caps each account at one count, so raw volume already means distinct participants, but 10,000 real distinct accounts is exactly the attack that survives it. The unique-user HLL re-rank does not help either, since the users genuinely are unique. What is left is ASN concentration, median account age and follow-graph density. *If pushed:* suppression is soft, meaning demote and queue for review rather than delete, because a false positive silently kills a genuine grassroots story; every decision goes to the audit trail so it is reviewable. Note this is the third Unresolved item: the heuristics catch cheap botnets and not organised humans.
 
-6. A sorted set stores every member. #22 works because the player universe is bounded and enumerable; here it is 100M new keys a day with a long tail seen once, so `ZINCRBY` per event at 1M/s builds a structure that does not fit in memory and cannot be windowed. *If pushed:* a sorted set is still the right tool *downstream* — for the ~500 candidates, where the key set is tiny and you want exact ordering with cheap rank queries.
+6. A sorted set stores every member. #22 works because the player universe is bounded and enumerable; here it is 100M new keys a day with a long tail seen once, so `ZINCRBY` per event at 1M/s builds a structure that does not fit in memory and cannot be windowed. *If pushed:* a sorted set is still the right tool *downstream*, over the ~500 candidates, where the key set is tiny and you want exact ordering with cheap rank queries.
 
-7. Because #18 keys by `ad_id` from a bounded, pre-registered universe of ~5M ads, and its counts are billable, so it pays for exact state plus a T+1 batch reconciliation. Here the key set is discovered from the data and unbounded, so `keyBy(key)` would allocate managed state per distinct key — 100M keyed states per day, most touched once. *If pushed:* the shapes converge if you first *restrict* the key space; some deployments run a cheap pass that promotes keys crossing a floor into a registered set, then aggregate those exactly with #18's machinery, using sketches only as the admission filter.
+7. Because #18 keys by `ad_id` from a bounded, pre-registered universe of ~5M ads, and its counts are billable, so it pays for exact state plus a T+1 batch reconciliation. Here the key set is discovered from the data and unbounded, so `keyBy(key)` allocates managed state per distinct key: 100M keyed states per day, most touched once. *If pushed:* the shapes converge if you first *restrict* the key space. Some deployments run a cheap pass that promotes keys crossing a floor into a registered set, then aggregate those exactly with #18's machinery, using sketches only as the admission filter.
 
-8. You cannot give it from the sketch — only an upper bound with a stated error band, which the API returns as `error_bound`. *If pushed:* for the ~500 published candidates you can afford exact counting, so run a second, narrow exact aggregation over just those keys off the raw archive; it is a bounded key set by construction, which is exactly #18's problem again.
+8. Not from the sketch. It returns an upper bound with a stated error band, which the API exposes as `error_bound`. *If pushed:* for the ~500 published candidates exact counting is affordable, so run a narrow second aggregation over just those keys off the raw archive; it is a bounded key set by construction, which is #18's problem again. Be honest about what that buys: the recount lands minutes later, over a slightly different event set, and will sometimes disagree with the published estimate, so you end up with two numbers for one key.
+
+9. They buy different things. `w` sets the size of the error (`ε = e/w`); `d` sets the probability the bound holds (`δ = e^−d`). Three rows of 1,000,000 gives a beautiful `ε = 2.7×10⁻⁶` and a `δ = e⁻³ ≈ 0.05`, so one estimate in twenty is outside the bound entirely. Re-estimating ~32,000 candidates per cycle, that is ~1,600 keys a minute with no guarantee at all, some of which land in the top 50. It also costs 3 × 10⁶ × 8B = 24MB against 1.8MB, so it is 13× the memory for a worse answer where it matters. *If pushed:* `d` is not free either. Each row is an independent random memory access on every increment, so 7 rows is 7 likely cache misses per event; past ~10 rows the update cost starts to show at 1M events/s and the confidence gain is `e⁻ᵈ`, already negligible.
+
+10. Ship sketches, not events. Each region seals its own minute tile built with identical `(d, w, seed)` and sends ~917KB/min to a designated aggregator, which sums cell-wise. Because the sum is exact, the global list is not an approximation stitched from regional lists, it is the true sketch of the union. Regions also ship their 500-entry candidate heaps (~26KB) and the union of those is re-estimated against the merged global sketch. Cost: ~917KB × 60 × 24 × 6 regions ≈ 8GB/day, against ~2.1TB/day if you replicated raw events. *If pushed:* the hash seeds and dimensions must be pinned to a version in every sketch header and the merger must refuse to sum across versions. Sketches with mismatched seeds still add arithmetically and produce a plausible-looking, entirely meaningless result, and there is no symptom except rankings that quietly stop making sense.
+
+11. Not for the counts. The merge would fix those under any partitioning, because cell addresses depend on the key and not on which worker incremented them. It is for candidate discovery. The heap is the only place key strings exist, and a shard can only nominate a key it believes is heavy, which requires seeing enough of it to know. Under round robin a key's traffic is split 64 ways, every shard's local estimate is 1/64th of the truth, and nomination gets much weaker in the mid-range where the cutoff actually sits. *If pushed:* the right answer is hybrid. Hash-partition by default, and when the skew monitor sees hottest-shard rate over median above 2×, round-robin just that key. A key hot enough to trigger it is still enormous at 1/64th of its volume, so it is nominated by whichever shard sees it, and nothing about the counts changes.
+
+12. Almost certainly a bug, and the metric is Jaccard distance between consecutive published lists: expect 5-15% churn per refresh, and treat a sustained figure above 40% as ranking noise dominating. Three causes in order of likelihood: hysteresis is off, so with ~6% relative error at rank 50 the boundary keys flicker; a shard failed to deliver its tile and the merged sketch is missing a slice of traffic; or a rolling deploy summed sketches with mismatched dimensions or seeds. *If pushed:* high churn in the 5-minute window during breaking news is correct behaviour, not a fault, so the alert has to fire on churn relative to that geo's own baseline rather than an absolute threshold. Otherwise the system pages you during precisely the event it exists to surface.
 #### Whiteboard script
-TODO
+**0-5, split the problem before touching a structure.** First sentence: "this is two problems, counting a key space I cannot enumerate and deciding which counts are interesting, and they have different answers." Then the three questions that actually fork the design: are the keys registered anywhere or discovered from the traffic, does trending mean volume or rate of change, and how stale may the list be. State your assumptions out loud: ~1M events/s, ~100M distinct keys/day, three windows, ~200 geos, 10s staleness. Draw nothing yet, and do not say "Count-Min" in this band even if you know it is where you are going.
 
-A 45 minute budget: what to cover in 0-5, 5-15, 15-35 and 35-45, what to say first, and a line starting `Cut first:`.
+**5-15, derive the number, then draw the spine.** Put the arithmetic on the board before any box: ~1.4M distinct keys per minute × ~106B per map entry ≈ ~150MB per minute, a sliding day needs all 1,440 minute-deltas resident so you know what to subtract, so ~216GB per geo, and ~40TB across ~200 geos. That derivation earns everything that follows; naming a sketch without it does not. Then walk the three plain options in one line each (exact map, a fixed set of monitored slots, a fixed grid of counters) and say the choice is about how many times results get combined, not about accuracy. Now draw: producers, stream partitioned by key hash, sketch workers each holding a grid plus a small heap, merger with a ring of minute tiles, scorer joined to a baseline store, cache, API. Say "sketch plus heap" and immediately say why the heap exists: the grid stores no keys and cannot enumerate.
 
-**Raw material, from the old Talking Points:**
+**15-35, the drill, and protect this time.** Go deep on the counting structure. Why the minimum and not the mean, with the seven-cell worked example, and why that makes the error one-sided. Then linear mergeability as the crux, naming all three things it buys: sliding windows, shard-then-merge, and 8GB/day of cross-region sketch traffic instead of 2.1TB/day of events. Then the trap, that merging the shards' top-50 lists silently loses a key ranked 51st everywhere, and the fix, merge the grids and re-estimate the candidates. Volunteer what the error costs where it is visible: ~6% relative at rank 50, enough to reshuffle ranks 45 to 55, which is why hysteresis exists. Then pivot deliberately to ranking, because a candidate who only counts has answered half: a steady term at 10,000/min scores `z = 0.33` while 10/min going to 500/min scores `z = 122`. Follow that yourself with cold start, since it is the next question anyway, and give all three guards: floor, prior, age damper. Keep Space-Saving and decayed counters as one-liners in reserve.
 
-- **Lead with the memory derivation, not the data structure.** "~1.4M distinct keys per minute × ~106B = ~150MB/min, and a sliding 24h window needs 1,440 of those = ~216GB per geo" earns the sketch; naming Count-Min first without it does not.
-- **Say why the minimum.** Collisions only ever inflate a counter, so every row is an over-estimate and the min is the least-contaminated one — which is why the error is strictly one-sided and heavy hitters can never be missed.
-- **Name linear mergeability as the crux.** It is simultaneously what makes sliding windows work (ring of per-minute sketches), what makes sharding work (cell-wise sum across workers), and what makes multi-region cheap (~8GB/day of sketches instead of ~2.1TB/day of events).
-- **Sketch plus heap, and say why the sketch alone is insufficient.** It can score a key you name but cannot enumerate keys, because it stores no keys — mention Space-Saving as the single-node alternative and that it does not merge losslessly.
-- **Distinguish this from #18 explicitly.** Bounded, billable, exact, reconciled versus unbounded, discovered, approximate, unreconciled — that contrast shows you picked sketches for a reason rather than reciting them.
-- **Trending is rate-of-change.** A term at a steady 10k/min scores `z = 0.33`; one going 10/min → 500/min scores `z = 122`. Then immediately volunteer the cold-start problem, because that is the follow-up.
+**35-45, concede and close.** Give the gaps before they are found: no published number can be proved and the exact-recount fix produces two numbers for one key; the de-dup filter undercounts upstream of a structure that overcounts, so the clean one-sided guarantee does not survive end to end; coordinated inflation by real accounts is made expensive rather than prevented, because the signals that catch it also catch genuine grassroots events. Then two minutes of operations: the metrics you would page on (publish lag, list churn as Jaccard distance, hottest-shard skew, de-dup fill ratio, suppression override rate), and the multi-region story, which is the design's best property, since only sealed sketches cross regions.
+
+Cut first: the geo fallback chain and the dimension explosion into language and platform, then the unique-user HLL re-rank, then the API and WebSocket surface. All three are real and none changes the architecture. Never cut: the memory derivation, linear mergeability, and trending as rate of change with its cold-start guards. Those three are the question.
 #### Appendix
 **Data model**
 
-- **events** (log, partition by `hash(key)`, 24h retention): `(key, user_id, ts, geo_id, source, lang)` — see #16
+- **events** (log, partition by `hash(key)`, 24h retention): `(key, user_id, ts, geo_id, source, lang)`, see #16
 - **sketch_ring** (in-process memory, snapshotted to object store), key `(geo_id, tier, bucket_ts)`: a `7 × 32768` counter array
 - **local_topk** (in-process min-heap, per `(shard, geo_id, window)`): `(key, est_count)`, capped at 500
 - **baselines** (KV store, partition by `hash(key)`): `(key, ewma_rate, ewma_var, minute_of_day[1440], first_seen, last_seen)`
@@ -22958,21 +23027,21 @@ WS   /trending/stream?geo=GB-LND   ← top-K deltas pushed every 5s
 
 **Observability**
 
-- **Publish lag** (minute boundary → list written to cache) — SLO p99 < 3s against a 10s staleness budget; the merge fan-in and the baseline join are the two components that move it.
-- **Top-K churn rate** (Jaccard distance between consecutive published lists) — expect 5-15% per refresh; a sustained jump above 40% means ranking noise is dominating and the sketch is under-sized or hysteresis is off.
-- **Estimated relative error at rank K** (`e·K·H(D)/w`, recomputed from observed distinct-key cardinality) — SLO ≤ 8%; rising `H(D)` from a cardinality explosion silently degrades accuracy with no other symptom.
-- **Shard contribution skew** (hottest shard's event rate ÷ median) — alert above 2×; this is the leading indicator that a viral key is pinning one worker before its CPU alerts fire.
-- **De-dup filter fill ratio** — alert above 80% of sized capacity; past that the false-positive rate climbs and real events are silently discarded.
-- **Suppression rate and override rate** — suppressed terms as a fraction of candidates (expect ~1-3%) and the fraction later overridden by review (target <5%); a rising override rate means the abuse model is eating real stories.
-- **Read path** — SLO p99 < 20ms and cache hit rate > 99.9%; any miss means the write path stopped, so alert on the miss, not the latency.
+- **Publish lag** (minute boundary → list written to cache). SLO p99 < 3s against a 10s staleness budget; the merge fan-in and the baseline join are the two components that move it.
+- **Top-K churn rate** (Jaccard distance between consecutive published lists). Expect 5-15% per refresh; a sustained jump above 40% means ranking noise is dominating and the sketch is under-sized or hysteresis is off.
+- **Estimated relative error at rank K** (`e·K·H(D)/w`, recomputed from observed distinct-key cardinality). SLO ≤ 8%; rising `H(D)` from a cardinality explosion silently degrades accuracy with no other symptom.
+- **Shard contribution skew** (hottest shard's event rate ÷ median). Alert above 2×; this is the leading indicator that a viral key is pinning one worker before its CPU alerts fire.
+- **De-dup filter fill ratio.** Alert above 80% of sized capacity; past that the false-positive rate climbs and real events are silently discarded.
+- **Suppression rate and override rate.** Suppressed terms as a fraction of candidates (expect ~1-3%) and the fraction later overridden by review (target <5%); a rising override rate means the abuse model is eating real stories.
+- **Read path.** SLO p99 < 20ms and cache hit rate > 99.9%; any miss means the write path stopped, so alert on the miss, not the latency.
 
 **Multi-region and DR**
 
-- **Replication mode:** active-active ingest — events land in the nearest region and are counted into region-local sketches. Because sketches are linearly mergeable, the *global* list is produced by shipping sealed regional sketches (~917KB/min/region) to a designated aggregator and summing them; only the small sketches cross regions, never the 2.1TB/day event stream. Per-geo lists are computed entirely in-region.
+- **Replication mode:** active-active ingest, so events land in the nearest region and are counted into region-local sketches. Because sketches are linearly mergeable, the *global* list is produced by shipping sealed regional sketches (~917KB/min/region) to a designated aggregator and summing them; only the small sketches cross regions, never the 2.1TB/day event stream. Per-geo lists are computed entirely in-region.
 - **RTO:** ~2 minutes. A region losing its aggregator publishes stale lists from cache while a peer region's aggregator takes over its geo slices; sketches are already replicated as part of the global merge, so there is nothing to rebuild.
-- **RPO:** up to one minute of counts — the in-flight unsealed sketch. Recoverable by replaying that minute from the stream, which is worth doing for the audit trail but usually not worth delaying publication for.
+- **RPO:** up to one minute of counts, the in-flight unsealed sketch. Recoverable by replaying that minute from the stream, which is worth doing for the audit trail but usually not worth delaying publication for.
 - **Failover cadence:** monthly aggregator failover drill per region; quarterly full-region evacuation exercise including a global-merge cutover to a secondary aggregator.
-- **Cross-region cost:** trivially small and this is the design's best property — ~917KB × 60 min × 24h × ~6 regions ≈ ~8GB/day of sketch traffic, versus ~2.1TB/day if you replicated raw events. Baselines (~140MB) replicate hourly; the raw archive stays region-local with a single cross-region copy for DR.
+- **Cross-region cost:** trivially small, and this is the design's best property. ~917KB × 60 min × 24h × ~6 regions ≈ ~8GB/day of sketch traffic, versus ~2.1TB/day if you replicated raw events. Baselines (~140MB) replicate hourly; the raw archive stays region-local with a single cross-region copy for DR.
 
 ### 54. Design a CI/CD & Code Deployment System
 #### Problem
