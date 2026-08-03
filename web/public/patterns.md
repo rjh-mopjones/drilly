@@ -1593,34 +1593,45 @@ decode(id) -> (timestamp_ms, worker_id, sequence)
 
 ### 5. Design a URL Shortener (TinyURL, bit.ly)
 #### Problem
-Generate short aliases for long URLs and serve fast HTTP redirects on lookup.
+Take a long URL, hand back a short one, and serve an HTTP redirect every time anyone clicks the short one. Creation is rare; clicks are not, and the mapping is immutable and identical for every reader. The whole design is an argument about how far from your database that mapping is allowed to live.
 #### Core
-TODO
+The mapping from short code to long URL never changes and is the same for every reader, so it can be cached end to end. Every decision below is about how far out you push it and what you give up.
 
-Write the whole answer as you would give it in sixty seconds, 200 to 300 words, standing alone.
+Creation: take an id from a generator that needs no coordination on the request path (Q4's Snowflake, or a block of 1000 leased from a central counter), encode it in base62, insert the row, return the code. Seven base62 characters covers 62^7, about 3.5 trillion aliases. No collision check and no read before the write. If codes must instead be unguessable, roll random characters and pay one conditional insert per create.
+
+Reads: three layers, each there to stop the request. A CDN holding the redirect response serves the large majority. Behind it an in-memory cache holds the recent working set, which is small, because clicks concentrate on links created in the last few days: roughly 75 GB. Behind that a key-value store partitioned by hash of the alias, never by alias range, because time-ordered codes would put every insert on one partition.
+
+The decision an interviewer will actually push on is 301 versus 302. A permanent redirect is cached by the browser, so repeat clicks never reach you at all. That is the cheapest possible answer, and it destroys click analytics and makes the link impossible to edit or retract for anyone who already has it. A temporary redirect with a short explicit max-age keeps the edge involved and lets you count clicks from CDN logs. Pick on whether click data is the product.
+
+Click events go onto a queue fire-and-forget. The redirect never waits on analytics, and the analytics pipeline is allowed to be down.
 #### Summary
 **The picture in your head:** a coat-check at a venue. You hand in a heavy coat (the long URL) and get a small ticket with a number (the short alias). Later you show the ticket and get your coat back. The clever part: the coat-check counter gets hit once per coat, but the ticket gets used hundreds of times. Build the system optimized for handing back coats fast, not for taking them in.
 
 **The approaches people actually take:**
-TODO. Two or three things a competent engineer might reach for, in plain language and before any product name, with what each one buys and roughly when it wins.
 
-**The single-request walkthrough:** a user submits `https://www.example.com/blog/2026/a-very-long-post-about-system-design-interviews`. The server takes a Snowflake ID (see Pattern 4) — say `120398476` — and encodes it in base62 (the 62-character alphabet of a–z, A–Z, 0–9, no special characters), getting `8xK3j`. It writes `8xK3j → https://www.example.com/...` to the alias database and returns `https://tinyurl.com/8xK3j` to the user. Now a reader clicks that link. The request hits a CDN (a global network of caches, like Cloudflare, that stores redirect rules close to users). The CDN has `8xK3j` cached and immediately returns HTTP `302 Found` with `Location: https://www.example.com/...`. The browser follows the redirect. The whole thing takes ~15ms and never touched the alias database.
+*Mint a number and spell it in a short alphabet.* Draw from a source of increasing ids and encode the result in the 62 characters that are safe in a URL. Collisions are structurally impossible, so there is no read before the write and the whole create path is a single insert, and the codes are as short as they can be for the volume. What it costs is secrecy: codes minted close together in time are close together in the alphabet, so anyone can walk the space, dump the corpus, and measure your creation rate from the gaps.
+
+*Roll random characters and check.* Same table, but the code comes from a random source and you retry on conflict. This buys unguessability, at the price of a read before every write and a retry loop whose cost rises as the space fills. It wins whenever links are shared privately and are effectively unlisted URLs.
+
+*Derive the code from the destination.* Hash the long URL and truncate. The same URL always produces the same code, so repeat submissions collapse for free and creation becomes idempotent under retry, which API clients genuinely appreciate. Truncation reintroduces collisions, so you still need the check, and you lose the ability to give two owners independent links, independent expiry, or independent analytics for one destination.
+
+**The single-request walkthrough:** a user submits `https://www.example.com/blog/2026/a-very-long-post-about-system-design-interviews`. The server takes a Snowflake id (see Q4), say `120398476`, and encodes it in base62 (the 62-character alphabet of a to z, A to Z, 0 to 9, no special characters), getting `8xK3j`. It writes `8xK3j` mapped to the long URL into the alias store and returns `https://tinyurl.com/8xK3j`. Now a reader clicks that link. The request hits a CDN, a global network of caches that stores the redirect response close to users. The CDN has `8xK3j` cached and immediately returns HTTP `302 Found` with `Location: https://www.example.com/...`. The click is counted later from the CDN's own log stream, not from an origin hit. The browser follows the redirect. The whole thing takes about 15ms and never touched the alias store.
 
 **The pieces (and what each one is for):**
-- **Alias generator** — uses Snowflake IDs encoded in base62. Snowflake guarantees uniqueness across the fleet with no central coordination per request (see Pattern 4). Base62 is URL-safe (no `+`, `/`, or `=` that would need percent-encoding) and produces short strings: 7 characters covers 3.5 trillion aliases.
-- **Alias database** — a simple key-value table: `alias (VARCHAR) → long_url (TEXT)`. Sharded by `hash(alias)` across many nodes, not by alias alphabetically — this matters because Snowflake aliases are time-ordered, so alphabetical sharding would send every new write to one shard.
-- **In-memory cache (Redis)** — holds the hot `alias → long_url` mappings. The alias database sees only cache misses, which are maybe 5% of reads. LRU eviction naturally drops old viral posts as they cool.
-- **CDN** — a global network of edge servers that caches redirect responses. A `302` response can be cached with `Cache-Control: public, max-age=3600`. Most read traffic never reaches your servers at all.
-- **Async click event pipeline** — when a redirect happens, a click event (timestamp, country, referrer) is dropped onto a message queue (Kafka — a durable log that decouples producers from consumers). A separate analytics consumer processes clicks in batches. The redirect itself does not wait for the click to be recorded.
+- **Alias generator.** Snowflake ids encoded in base62. Snowflake guarantees uniqueness across the fleet with no coordination per request (see Q4). Base62 is URL-safe, avoiding the `+`, `/`, and `=` that would need percent-encoding, and it is short: 7 characters covers 3.5 trillion aliases.
+- **Alias store.** A key-value table, `alias (VARCHAR)` to `long_url (TEXT)`, partitioned by `hash(alias)` rather than alphabetically. This matters because Snowflake-derived aliases are time-ordered, so range partitioning would send every new insert to one partition.
+- **In-memory cache.** Holds the hot `alias` to `long_url` mappings. The alias store sees only what misses the cache, roughly 1% of the reads that reach origin. LRU eviction drops old viral posts as they cool.
+- **CDN.** A global network of edge servers caching the redirect response itself. A `302` is cacheable only with explicit freshness information, so it carries `Cache-Control: public, max-age=60`. Most read traffic never reaches your servers.
+- **Async click pipeline.** On redirect, a click event (timestamp, country, referrer) is dropped onto a durable log that decouples producers from consumers, and a separate consumer processes clicks in batches. The redirect does not wait for the click to be recorded.
 
-**The thing that makes it hard:** a tweet goes viral. One link goes from 0 to 100,000 requests per second in two minutes. If that alias is not in the CDN cache yet (first-time viral moment), all 100,000 requests arrive simultaneously at your app servers, all see a cache miss, all go to the database at once. The database gets 100,000 identical queries for the same key in one second — a "thundering herd." The fix: request coalescing, where all simultaneous requests for `8xK3j` collapse into a single database call, and all waiters get the same answer when it comes back.
+**The thing that makes it hard:** a tweet goes viral. One link goes from 0 to 100,000 requests per second in two minutes, which on its own is comparable to the entire steady read rate of the service. If that alias is not yet in the edge cache, all 100,000 requests arrive at your app servers simultaneously, all miss, and all query the alias store for the same key in the same second. That is a thundering herd. The fix is request coalescing: all simultaneous requests for `8xK3j` collapse into a single store read, and every waiter gets the same answer when it returns.
 
-**Why this design and what it costs:** the read:write ratio is around 100:1 (100 clicks per URL created). The entire architecture flows from that asymmetry — put the work at write time (generate alias, write to DB), make reads nearly free (CDN cache, Redis, then DB). The CDN in particular is essential because 302 responses for the same alias are identical across all users and can be served from edge nodes worldwide.
+**Why this design and what it costs:** the read to write ratio is about 100:1. The entire architecture flows from that asymmetry. Do the work at write time (generate the alias, insert the row) and make reads nearly free (edge cache, memory cache, then the store). The CDN in particular is essential because the redirect for a given alias is byte-identical for every user on earth, which is the rare property that makes a response fully edge-servable.
 
 **If you were building it tomorrow:**
-- Postgres (sharded by `hash(alias)`) for the alias table; Redis cluster for the hot cache.
-- CDN (Cloudflare or Fastly) with `max-age=3600` on 302 responses; explicit purge API for safety takedowns.
-- Async click pipeline on Kafka; fire-and-forget from the redirect handler:
+- Postgres partitioned by `hash(alias)` for the alias table; a Redis cluster for the hot working set.
+- CDN (Cloudflare or Fastly) with `max-age=60` on 302 responses, click counting off the CDN log stream, and a purge API for safety takedowns.
+- Async click pipeline on Kafka, fire-and-forget from the redirect handler:
   ```
   def handle_redirect(alias):
     url = redis.get(alias) or db.get(alias)
@@ -1628,15 +1639,16 @@ TODO. Two or three things a competent engineer might reach for, in plain languag
     kafka.fire_and_forget("clicks", {alias, ts, country, referrer})
     return 302, url
   ```
-- Use 302 (not 301) if click analytics are part of the product — browsers cache 301 responses permanently, so repeat visits never get counted.
+- Use 301 only if you are certain the destination is permanent and nobody is paying for click reports.
 #### What this is really testing
-TODO
+Whether you notice that the thing being served is immutable and identical for every reader, and that this is what makes the read path cacheable all the way to the browser. Once you see it, the remaining engineering is a single trade repeated at three layers: each step further from the origin is cheaper and faster, and each step costs you fidelity in what you can measure and speed in what you can retract. A candidate who treats this as a database question, and spends the hour on sharding and collision probability, has missed that the database is barely in the read path at all.
 
-The one insight this question exists to elicit, then the contrast with the question it most resembles and why the answers differ.
+The contrast is with the Snowflake question. That one is entirely inside the generator: the bit layout, how a worker claims its slot, and what to do when the clock steps backwards. This question consumes that generator and should spend about thirty seconds on it. Say "Snowflake or a leased counter block, base62 encoded, no collision check" and move on, because the interesting work starts after the code exists: caching a redirect you may later need to retract, counting clicks you have deliberately chosen not to block on, and partitioning a table whose keys are time-ordered by construction. There is also an inversion worth naming. Snowflake ids are internal, so their enumerability costs nothing. Here the identifier is handed to the public, so enumerability becomes a product decision and, for some customers, a security one.
 
-Closest question: TODO
+Closest question: Q4
 #### Clarifying questions and how each answer forks the design
 - Custom aliases allowed?
+- Do links need to be unguessable, or is public enumeration acceptable?
 - Expiry? (TTL or permanent)
 - Analytics required? (clicks, geo, referrer)
 - Auth required to create?
@@ -1646,48 +1658,49 @@ Closest question: TODO
 
 | If the answer is… | Then the design… |
 |---|---|
-| Custom aliases allowed | need a uniqueness check and collision handling on write — store explicit alias-to-URL rows and reject dupes, so it can't be a pure hash |
-| No custom aliases | base62-encode an ID-generator counter for collision-free codes with no read-before-write |
-| Expiry or TTL | add an expiry column plus background purge (or a TTL index); expired codes redirect to 410 |
-| Analytics required | emit a click event to a queue asynchronously on redirect — never block the redirect on a write |
-| Auth required to create | gate creation behind auth while reads stay public and cacheable |
-| Read-heavy (about 100 to 1) | cache hot codes at the CDN or Redis and serve 301/302 with long cache TTL; the DB is just the source of truth |
+| Custom aliases allowed | needs a uniqueness check and collision handling on write, so it stores explicit alias-to-URL rows and rejects duplicates; it cannot be a pure hash |
+| No custom aliases | base62-encodes an id from a coordination-free generator, giving collision-free codes with no read before write |
+| Links must be unguessable | rules out counter-derived codes entirely; random codes with a conditional insert, and long enough that scanning is not viable |
+| Expiry or TTL | adds an expiry column plus background purge (or a TTL index); expired codes return 410 |
+| Analytics required | emits a click event to a queue asynchronously on redirect and never blocks the redirect on that write; edge caching then has to be short-TTL, or counted from CDN logs |
+| Auth required to create | gates creation behind auth while reads stay public and cacheable |
+| Read-heavy (about 100 to 1) | caches hot codes at the CDN and in memory, and treats the store as the source of truth rather than as a read path |
 #### Requirements and scale, derived out loud
 **Requirements**
 
 - **FR:** shorten, redirect, custom alias, expiry, basic analytics
-- **NFR:** <100ms redirect p99, 99.99% availability, read-heavy (~100:1 R:W)
+- **NFR:** redirect p99 under 100ms, 99.99% availability on the redirect path, read-heavy at roughly 100:1
 
 **Scale**
 
-- **Writes ~100M/day → ~1.2k/s:** bit.ly-tier (publicly disclosed: ~600M/month historical, 100M/day = ~3B/month for a top-3 shortener). 10⁸ ÷ 86,400 ≈ 1157 ≈ 1.2k writes/s avg.
-- **Reads ~12k/s steady, 100k/s peak; R:W ≈ 100:1:** each created link gets ~100 clicks lifetime average → ratio 100:1. 1.2k writes/s × 100 = 12k reads/s steady. Peak 100k/s during viral events (10× burst is conservative; major virals hit 50–100×).
-- **Per-URL row ~500B:** alias (7 chars + null = ~10B) + long_url (mean ~200B — most URLs are 80–300 chars; p99 ~2KB) + owner_id (i64 = 8B) + created_ts (8B) + flags/expiry/click_count (~16B) + row framing (~250B for B-tree page, padding, transactional headers) ≈ 500B serialised on disk.
-- **10y retention ~540TB physical:** 100M/day × 365d × 10y = 3.65 × 10¹¹ ≈ 365B rows. 365B × 500B = 1.825 × 10¹⁴ B ≈ 180 TB logical × RF 3 ≈ 540 TB on the alias store.
-- **Alias space 62⁷ ≈ 3.5T:** base62 (a–z, A–Z, 0–9) ⁷ = 62⁷ = 3.52 × 10¹². 365B used ÷ 3.5T = ~10% saturation after 10y → ample headroom; bump to 8 chars (62⁸ = 218T) before exhaustion.
-- **Click events ~12k/s steady, 100k/s peak:** every read = 1 click event → mirrors read rate. Per event = alias (10B) + ts (8B) + country code (2B) + referrer hash (8B) + ua hash (8B) + ip hash (8B) + framing (~150B) ≈ 200B. Peak: 100k × 200B = 2 × 10⁷ B/s = 20 MB/s peak into click stream (note: prior "200MB/s" figure was off — corrected here).
-- **Click storage ~25 GB/day:** steady 12k/s × 86,400s × 200B = 2.07 × 10¹¹ B ≈ 200 GB/day raw. Columnar (Parquet/ORC, dictionary + RLE) compresses repeat-heavy fields (country, ua_hash) ~5–10× → ~25 GB/day in warehouse.
-- **Hot tier — top 1% in CDN/cache:** Zipfian access — top 20% of aliases serve ~80% of reads. Top 20% = 73B × 500B = 36 TB (too large for RAM cluster). Top 1% = 3.6B × 500B = 1.8 TB — fits across a sharded edge cache (e.g. 30 × 64GB nodes with replication). Achieves >90% hit rate on the redirect path.
-- **Cold tier ~50GB/day:** aliases unread >12mo (~60% of corpus by row count, but tiny fraction of read traffic) migrate to compressed columnar archive on object store. ~100M new × 500B/day × 1.5× compaction × 0.6 cold-fraction ≈ 50 GB/day net to archive; accessed only on the rare "old link" lookup.
+- **Writes 100M/day, about 1.2k/s:** bit.ly-tier volume (publicly disclosed at roughly 600M links/month historically; 100M/day is 3B/month, so this sizes a top-tier shortener with headroom). 10^8 / 86,400 = 1157, call it 1.2k creates/s average.
+- **Reads about 120k/s steady, about 1M/s peak:** each link averages 100 clicks over its life, so R:W is 100:1. 1.2k writes/s x 100 = 120k reads/s steady. Peak is roughly 8x steady, from diurnal concentration plus a handful of simultaneously viral links, so about 1M/s.
+- **Origin sees about 6k/s, the alias store about 60/s:** at a 95% CDN hit rate, origin takes 0.05 x 120k = 6k reads/s. The in-memory cache serves about 99% of those, leaving 0.01 x 6k = 60 reads/s hitting the alias store in steady state. That number is the whole point of the architecture.
+- **Per-row about 500B:** alias (7 chars plus null, about 10B) + long_url (mean about 200B, since most URLs run 80 to 300 chars, p99 around 2KB) + owner_id (8B) + created_ts (8B) + flags/expiry/click_count (about 16B) + row framing (about 250B for B-tree page overhead, padding, and transactional headers) = about 500B on disk.
+- **10-year retention about 550TB physical:** 100M/day x 365 x 10 = 3.65 x 10^11, so 365B rows. 365B x 500B = 1.8 x 10^14 B, about 180 TB logical, x3 replication = about 550 TB.
+- **Alias space 62^7 = 3.5T:** base62 to the 7th = 3.52 x 10^12. 365B used / 3.52T = 10% saturation after ten years, so ample headroom; an 8th character takes it to 62^8 = 218T long before exhaustion.
+- **Click events 120k/s steady, 1M/s peak:** one event per read. Per event: alias (10B) + ts (8B) + country (2B) + referrer hash (8B) + ua hash (8B) + ip hash (8B) + framing (about 150B) = about 200B. Steady 120k x 200B = 2.4 x 10^7 B/s = 24 MB/s; peak 1M x 200B = 200 MB/s.
+- **Click storage about 260 GB/day:** 120k/s x 86,400 = 1.04 x 10^10 events/day. x 200B = 2.1 x 10^12 B, about 2.1 TB/day raw. Columnar storage with dictionary and run-length encoding on the repetitive fields (country, ua hash) compresses roughly 8x, landing about 260 GB/day in the warehouse. At that rate you will end up sampling the long tail, which is one reason click counts are approximate.
+- **Hot working set about 75 GB:** clicks concentrate on recent links. Assume a link takes 80% of its lifetime clicks in its first three days, so the working set is three days of creations: 3 x 100M = 300M aliases. A cache entry is alias (7B) + long_url (about 200B) + overhead (about 45B) = about 250B, so 300M x 250B = 7.5 x 10^10 B = 75 GB. That fits comfortably in a small replicated memory cluster, which is why the cache tier is cheap.
+- **Cold archive about 8 GB/day:** roughly 60% of links get no click after twelve months. 100M/day x 0.6 = 60M rows x 500B = 30 GB/day logical, compressed about 4x in columnar form on object storage, so about 8 GB/day. These are only read on the rare old-link lookup.
 #### Key decisions
-TODO
+**How the alias is generated**
+- Choice: base62 over an id from a coordination-free generator, either Snowflake per Q4 or a block of 1000 ids leased from a central counter. Seven characters gives 62^7 = 3.5 x 10^12 codes, and there is no collision check and no read before the write.
+- Alternative: random 7-character codes with a conditional insert to catch duplicates.
+- Decider: whether an unlisted link has to be unguessable, and what the read-before-write costs at your write rate. At 1.2k creates/s a conditional insert is not expensive; the retry rate is what matters, and it equals occupancy. At 10% saturation one create in ten retries, which is fine. At 50% every other create retries, and by then you are lengthening the code anyway.
+- Alternative wins when: links are treated as secrets, which is the case for shared documents, invite links, and password resets, so enumerability is a security property rather than a curiosity. Counter-derived codes cannot deliver that at any length, because knowing one code tells you roughly where its neighbours are, so if the requirement exists at all it settles the fork on its own. Note the alternative is also the honest default for a general-purpose public shortener, since the corpus of every link your users ever created is a more sensitive asset than it first appears.
 
-Two or three genuine forks. For each, in this exact shape so it stays checkable:
+**301 permanent versus 302 temporary**
+- Choice: 302 with `Cache-Control: public, max-age=60`, with clicks counted off the CDN log stream rather than from origin hits.
+- Alternative: 301 with a long max-age, hours to a year, and no per-click counting.
+- Decider: whether click data and later editability are worth the load. A 60-second edge TTL already collapses a link taking 100k clicks/s down to one origin fetch per PoP per minute, so the load argument for 301 is mostly gone. What 301 actually buys is the clicks that never leave the browser: a user who visits a link 10 times sends 1 request instead of 10. What it costs is that the same browser will never ask you again, so that link cannot be edited or retracted for that user by any mechanism you control.
+- Alternative wins when: the shortener is infrastructure rather than a product. Permanent canonical links (DOIs, documentation short links, QR codes printed on physical objects) have destinations that genuinely never change, nobody is paying for click reports, and search engines pass link equity through a 301 but not through a 302, which is a real reason publishers pick it.
 
-**<name of the fork>**
-- Choice:
-- Alternative:
-- Decider:
-- Alternative wins when:
-
-**Raw material, from the old Common Mistakes:**
-
-- **Synchronous click logging on the redirect path** — writing to the analytics warehouse before returning the 301 dominates latency and couples redirect availability to warehouse health. The senior answer fires-and-forgets onto Kafka and accepts at-least-once with dedup downstream.
-- **Random alias generation with collision check** — a DB roundtrip per shorten makes the write path 10× slower; Snowflake-derived base62 has no collision possibility (Snowflake guarantees uniqueness) and skips the check entirely.
-- **Range-partitioning the alias store by alias** — Snowflake-derived aliases are time-ordered, so range-partitioning puts every new write on the most recent shard. Hash-partitioning by alias spreads writes uniformly.
-- **Defaulting to 301 because "it's faster"** — 301s are CDN-cacheable but lose repeat-visit analytics; bit.ly defaults to 302 because click data is the product. The right answer states the trade-off and picks based on whether analytics is a feature.
-- **Conflating CDN cache TTL with deletion latency** — saying "we'll just delete from the DB" without addressing the cached 301s at the edge means takedowns stay visible for hours. Senior answer: explicit CDN purge API for safety-critical takedowns, lower default TTL for non-critical.
-- **Not handling viral URLs explicitly** — saying "we have a CDN" handles steady-state but not the cache miss stampede when a viral URL is first accessed. Request coalescing on the app server (single-flight per alias) and pre-warming on click-rate threshold are the explicit hot-key answers.
+**Where the lookup runs**
+- Choice: origin app servers holding the alias store, with the redirect response cached at the CDN. The edge caches responses; it does not hold the data.
+- Alternative: run the redirect at the edge, with the alias table replicated into an edge key-value store, so a request never leaves the PoP even on a cache miss.
+- Decider: p99 on the cold-alias path against the per-invocation bill. A miss on the origin design costs a cross-continent round trip, roughly 150ms Sydney to us-east, against 5 to 10ms served entirely at the edge. That only matters if misses are common, and at a 95% edge hit rate 5% of 120k reads/s, so 6k/s, takes the slow path. Against an SLO of p99 under 100ms, a 5% slow path fails outright, and edge compute is the fix.
+- Alternative wins when: traffic is genuinely global and the tail is long, which describes this workload at scale better than most. The cost is real though: an edge key-value store is eventually consistent, so a newly created link can 404 in a distant PoP for a few seconds, and a takedown propagates on the same delay, which is the wrong direction for a phishing link. The usual resolution is both, with the edge serving reads and the origin remaining the write authority and the purge authority.
 #### High-level design
 **must-say**
 
@@ -1772,39 +1785,29 @@ Two or three genuine forks. For each, in this exact shape so it stays checkable:
 </svg>
 ```
 
-**How to read the diagram:** the write path creates a short alias and stores it. The read path is much more important: ideally a request for an alias is answered by the CDN, otherwise by a cache, and only rarely by the backing store.
+**How to read the diagram:** the write path creates a short alias and stores it. The read path matters far more: a request for an alias should be answered by the CDN, failing that by the memory cache, and only rarely by the backing store. The diagram labels the cached response `301`, which is the variant that trades analytics for maximum cacheability. Substitute `302` with a short `max-age` wherever click data is the product, as it is here; the boxes and arrows are otherwise identical.
 
-**Why the flow is shaped this way:** writes are low-volume and can afford a database hit. Reads are hot and latency-sensitive, so the system is built to stop as far left as possible. Analytics are deliberately split off asynchronously so a click log never blocks the redirect itself.
+**Why the flow is shaped this way:** writes are low volume and can afford a store hit. Reads are hot and latency-sensitive, so the system is built to terminate as far left as possible. Analytics are deliberately split off asynchronously so a click log never blocks a redirect.
 
-**What this layout buys you:** very fast redirects, good behavior during viral spikes, and independent scaling of redirect traffic versus analytics. The tradeoff is that analytics become best-effort during outages, while redirects remain the first-class priority.
+**What this layout buys you:** fast redirects, sane behaviour during viral spikes, and independent scaling of redirect traffic against analytics. The cost is that analytics become best-effort during an outage, while redirects stay first-class.
 #### Deep dive
 **must-say**
 
-**Alias generation:**
+**The redirect path, and what happens when it misses.** This is the mechanism that gets drilled, because every other component in the design exists to keep requests out of it. Three layers, each with a job, and each with a specific failure that only shows up under load.
 
-| Method | Pros | Cons |
-|---|---|---|
-| **base62(snowflake_id)** | unique, no collision check | predictable (URLs scrapable) |
-| **MD5(url)[:7]** | content-addressable | collision → check + retry |
-| **Random + collision check** | unpredictable | DB roundtrip per check |
-| **Pre-generated pool** | fast write, unpredictable | maintenance overhead |
+**Layer 1, the CDN.** The redirect response for a given alias is byte-identical for every user on earth, which is rare and is what makes full edge caching possible at all. A 302 is not cacheable by default under RFC 9111, so it must carry explicit freshness: `Cache-Control: public, max-age=60`. That TTL is not a performance knob, it is three things at once. It sets the granularity of click counting, since repeat clicks inside the window are invisible to origin and have to come from the CDN's own log stream instead. It sets the upper bound on takedown latency, because a purge is the only way to beat it. And it sets origin load: a link taking 100k req/s across 200 PoPs generates at most 200 origin fetches per minute at a 60-second TTL, which is nothing. Sixty seconds is chosen from the takedown requirement, not the load one.
 
-**301 vs 302:**
+**Layer 2, the memory cache.** Origin sees about 6k reads/s at a 95% edge hit rate. The working set is small because clicks concentrate on new links: three days of creations is 300M aliases at about 250B each, so 75 GB, which is a handful of replicated nodes rather than a fleet. LRU eviction handles the decay naturally as viral posts cool. On a miss the app server reads the store and back-fills the cache on the way out, so the second request for a cold alias is already warm.
 
-| Aspect | 301 (Permanent) | 302 (Temporary) |
-|---|---|---|
-| Browser caches | yes (skips server) | no |
-| Analytics | misses repeat visits | every hit logged |
-| Speed | faster on repeat | every hit roundtrips |
+**Layer 3, the alias store.** It sees about 60 reads/s in steady state. Partition by `hash(alias)`, never by alias range. Snowflake-derived aliases are time-sortable, so `aaaaaaB` was created immediately after `aaaaaaA`; range partitioning puts 100% of inserts on the most recent partition while the rest sit idle. Hashing spreads consecutive aliases uniformly, at the cost of cheap range scans that this workload never needs.
 
-Use 302 when click analytics are part of the product (bit.ly defaults to 302 because every hit must be logged); use 301 when raw redirect speed and CDN cacheability matter more than per-click telemetry. The choice is a product decision dressed up as an HTTP-status decision: a 301 is effectively uncacheable analytics, while a 302 is uncacheable speed.
+**Failure one: the herd on a cold hot key.** The dangerous moment is not steady state, it is the instant a link goes viral before any edge has it. 100,000 requests arrive across the fleet in the same second, every one misses the cache, and every one issues the same store read for the same key. The store now receives 100,000 identical point queries in a second for a row it could have returned once. The fix is request coalescing, sometimes called single-flight: per app server, keep a map of alias to in-flight future, and a request that finds an entry already there waits on it instead of issuing its own read. With 200 app servers that turns 100,000 reads into 200. Layer a probabilistic early refresh on top, where an entry within the last 10% of its TTL is refreshed by one request while the rest keep serving the old value, and you avoid the synchronised expiry that otherwise recreates the herd every 60 seconds for the hottest keys.
 
-**Cache strategy:**
-- 80/20: top 20% of URLs get 80% of traffic. URL traffic follows a heavy power law — a small set of viral links dominates totals, while the long tail (corporate emails, niche shares) has minimal repeat traffic. Caching only needs to fit the hot ~1–5% to capture >90% of read volume.
-- Edge CDN caches 301 with `Cache-Control: public, max-age=3600`. Each PoP holds the redirect for an hour; on cache miss the PoP fetches from origin. The trade-off is that a deleted or updated alias takes up to the TTL to propagate — set the TTL based on how often you expect aliases to mutate.
-- Redis L2 cache fronts the alias store; size to fit the hot working set (~36GB for top 1% in our scale estimate). LRU eviction handles the natural decay as posts cool off; on miss, the app server reads the alias store and back-fills Redis on the way out so the next request is hot.
+**Failure two: misses that will never hit.** Coalescing only helps when the answer exists. An enumeration scan walking the alias space generates a stream of distinct 404s, each one a guaranteed cache miss that lands on the store, and because the keys are all distinct, coalescing does nothing. This is the path that actually takes the store down. Negative-cache the misses: store a tombstone for a nonexistent alias with a short TTL, 30 seconds or so, so a repeated scan cannot amplify, and rate-limit 404s per source IP at the edge. Keep the negative TTL well below the positive one, because a newly created alias that landed on a tombstone would otherwise 404 for its own creator, which is the worst possible first impression.
 
-**Redirect path — CDN hit vs miss.** The whole point of the architecture is that 99% of redirects never reach origin. A diagram makes the layered terminate-as-early-as-possible structure visible.
+**Failure three: the answer you can no longer take back.** Deletion propagates at the speed of the slowest cache that holds a copy. Origin deletion is instant, the memory cache clears on the same write, the edge waits out its TTL, and a browser that cached a 301 waits out whatever max-age it was given, potentially forever. For a phishing link that is a live exploit rather than a stale cache. So takedowns issue an explicit purge to the CDN, which propagates in seconds and is billed per call, which is why it is reserved for safety cases rather than used as the general invalidation mechanism. After deletion the alias returns 410 Gone rather than 404, which tells crawlers and clients the difference between "never existed" and "deliberately removed".
+
+The diagram below shows the three layers and the two places a click event is emitted, both fire-and-forget.
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 680" role="img" aria-label="URL shortener redirect path terminating as early as possible: CDN edge cache, then Redis L2, then alias store, with fire-and-forget click events to Kafka">
@@ -1888,139 +1891,139 @@ Use 302 when click analytics are part of the product (bit.ly defaults to 302 bec
 </svg>
 ```
 
+The three latency figures on the right are the budget: about 10ms served from the edge, about 30ms from the memory cache, about 80ms from the store. The p99 target of 100ms is met only because the third case is rare, which is why the miss rate, not the miss latency, is the number to watch.
+
 *[Source: hellointerview.com "Bitly" breakdown; ByteByteGo "URL Shortener" video]*
-
-**Edge-compute alternative architecture.** Instead of just caching at the CDN, run the redirect logic itself at the edge — Cloudflare Workers, Lambda@Edge, or Fastly Compute. The flow becomes: client → edge worker → look up alias in an edge KV store (Workers KV, DynamoDB Global Tables) → 301 inline. Every redirect terminates at the closest PoP without ever touching the origin region; latency drops to single-digit ms globally. The trade-off is the edge KV is eventually-consistent vs the origin DB (writes propagate within seconds, not instantly), and you pay per-request edge-compute fees that can dwarf origin-server costs at scale. Best fit when the read:write ratio is very high (100k:1+) and global latency matters more than write-to-read consistency. *[Source: hellointerview.com "Bitly" breakdown — Cloudflare Workers / Lambda@Edge approach]*
-
-**Counter-batch alias generation.** An alternative to Snowflake is a centralized 64-bit counter where each app server leases a *range* (e.g., 1000 IDs) at a time. Each lease is a single `INCRBY 1000` against a Redis counter; the server burns through its range locally before fetching the next. Saves coordination-per-request like Snowflake does, doesn't need machine-ID allocation, and the counter store sees `total_writes / 1000` ops instead of `total_writes`. Loss-on-crash of an unused range is acceptable (gaps in the alias space don't matter). *[Source: hellointerview.com — counter-batching technique]*
-
-**Sequential vs hash partitioning — why the alias table partitions on `hash(alias)`.** Snowflake-derived aliases are time-sortable: `aaaaaaB` was created right after `aaaaaaA`. If you range-partition the alias table by alias, every new write lands on the most recent shard — that shard sees 100% of write traffic while the others sit idle. Hash-partitioning by alias spreads consecutive aliases uniformly across all shards, eliminating the write hotspot at the cost of giving up cheap range scans (which you don't need for this workload anyway).
-
-**Auth on create.** Anonymous shorten is allowed by default (matches bit.ly/TinyURL UX) but heavily rate-limited per source IP and routed through the safety-check pipeline. Custom aliases require authentication — they're a finite namespace and a brand-abuse vector, so the cost of accountability (a logged-in user) is justified. High-volume API integrations (>1k/day) require an API key tied to an account; the key carries per-account quotas and billing. The trade-off: anonymous creation is the friction-free funnel for the product, but every anonymous link is a potential phishing vector, so the safety-check on submit is non-negotiable for that path.
 #### Where it breaks
 **must-say**
 
 **Bottlenecks**
 
-- **Viral URL spike** — a viral link can go from 0 to 100k req/s in minutes; without caching, every click would slam the alias store on one shard. The CDN absorbs the spike (cached 301s are fully edge-servable), and pre-warming Redis when an alias crosses a click-rate threshold prevents the first viral wave from causing a cache miss stampede.
-- **ID counter contention** — a centralised auto-increment counter becomes a write bottleneck above a few thousand inserts/sec. Snowflake (#4) generates IDs locally on each node with no coordination per call; alternatively, each node leases a range of 1000 IDs from a central counter and burns through them locally before fetching the next range.
-- **Click write storm** — at 100k clicks/s, every click writing synchronously to the analytics warehouse would either crush the warehouse or block redirects. Fire-and-forget the click event onto Kafka; the analytics pipeline consumes asynchronously and drops on overload without affecting redirect availability.
-- **DB hot shard** (sequential alias inserts) — Snowflake IDs are time-sortable, so naively partitioning the alias store by ID range puts every new write on the most recent shard. Partition by `hash(alias)` instead so consecutive inserts spread across all shards.
-- **Custom alias squatting** — without controls, users can grab `/login`, `/admin`, brand names, or trademarked terms. Reserve a static dictionary of common words and brand-protected names, require authentication for custom aliases (so abusers are accountable), and rate-limit custom-alias creation per account.
-- **CDN cache invalidation lag on takedowns** — a phishing or malware short link cached at the CDN keeps redirecting victims for the full TTL even after you delete the alias from origin. Issue an explicit CDN purge (Cloudflare/Fastly API) on takedown for safety-critical aliases, and tune the public default TTL down (e.g., 1hr instead of 24hr) so non-purged deletions still drain quickly.
-- **Click event loss during analytics outage** — fire-and-forget click events go to Kafka, but a Kafka outage means lost clicks and silently degraded analytics. Buffer click events on the app server's local disk during broker outages (a small bounded ring buffer) and flush on recovery; never block the redirect on click-pipeline health.
+- **Viral link before the edge is warm.** A single alias at 100k req/s that is not yet cached anywhere sends a herd of identical reads at one partition. Request coalescing at the app server collapses it to one read per server, and probabilistic early refresh stops the herd re-forming at every TTL boundary. Covered in the deep dive; it is the first thing to volunteer.
+- **Insert hotspot from time-ordered keys.** Snowflake-derived aliases sort by creation time, so any range partitioning scheme puts every insert on the newest partition. Partition on `hash(alias)`. This is a design-time decision that is expensive to undo, which is why it is worth saying before being asked.
+- **Click write storm.** At 1M clicks/s peak, a synchronous write to the warehouse would either crush it or serialise the redirect behind it. Fire-and-forget onto a durable log; the consumer batches, and drops on sustained overload without touching redirect availability.
+- **Id generator as a single point.** A centralised auto-increment counter caps out around a few thousand inserts/s and takes writes down with it. Snowflake removes the dependency entirely (see Q4); a leased block of 1000 ids reduces counter traffic by 1000x and loses at most one unused block per crash, which is harmless because gaps in the alias space cost nothing.
+- **Custom alias squatting.** Without controls, users take `/login`, `/admin`, and brand names. Reserve a dictionary of common paths and protected marks, require authentication for custom aliases so abusers are accountable, and rate-limit custom creation per account.
 
 **Failure modes**
 
 | Layer | Failure | Detection | Mitigation |
 |---|---|---|---|
-| Crash | Alias store primary unavailable | read errors on cache miss, write errors on shorten | replicas serve reads (RF=3); writes block until quorum recovers; CDN absorbs hot reads |
-| Crash | Click event stream (Kafka) outage | broker connection failures from app servers | local ring buffer on each app server (bounded) buffers events; flush on recovery; never block redirects |
-| Network | CDN-to-origin partition | edge cache hit rate stays high but origin sees zero new traffic | CDN serves from cache through partition (typical ~1hr TTL); origin reads served from secondary region's CDN |
-| Correctness | Custom alias collision (squatting on `/login`) | collision rate spike in the alias store | reserved-word list at API layer; require auth for custom aliases; rate-limit per account |
-| Correctness | Phishing/malware short-link still redirects after takedown | safety-pipeline flag flipped but cache stale | CDN purge API for safety-critical takedowns; track deletion ts in alias DB; return 410 Gone post-deletion |
-| Resource | Viral URL hot-shard saturation | one shard CPU pegged, p99 redirect latency climbing | extra-replicate viral aliases; pre-warm Redis when click-rate crosses threshold; request coalescing on app server |
-| Resource | Click write storm overwhelms warehouse | analytics-pipeline lag growing, broker backlog climbing | drop-on-overload at consumer side; analytics is best-effort, redirect availability is non-negotiable |
-| Upstream | Safety-check API (Google Safe Browsing) down | shorten requests blocking on validator | bypass with stale safety verdict (cached); flag URLs for re-check on validator recovery; never block redirects |
+| Crash | Alias store primary unavailable | read errors on cache miss, write errors on shorten | replicas serve reads at RF 3; writes block until quorum recovers; the CDN absorbs hot reads meanwhile |
+| Crash | Click event log outage | broker connection failures from app servers | bounded local ring buffer on each app server, flushed on recovery; never block redirects |
+| Network | CDN to origin partition | edge hit rate holds but origin sees no new traffic | the CDN serves from cache through the partition, bounded by the 60s TTL; origin reads shift to the secondary region |
+| Correctness | Custom alias collision or reserved-path squat | collision rate spike at the write API | reserved-word list at the API layer; auth required for custom aliases; per-account rate limit |
+| Correctness | Phishing link still redirecting after takedown | safety flag flipped at origin but edge copy still fresh | explicit CDN purge for safety-critical takedowns; record deletion timestamp; return 410 Gone thereafter |
+| Resource | Enumeration scan driving distinct 404s into the store | 404 rate spike with near-zero cache hit ratio | negative cache with a 30s TTL; per-IP 404 rate limiting at the edge |
+| Resource | Click pipeline lag growing | consumer lag and broker backlog climbing | drop at the consumer on sustained overload; analytics is best-effort, redirect availability is not |
+| Upstream | Safety-check API unavailable | shorten requests blocking on the validator | serve from the cached verdict, flag the URL for re-check on recovery, and never let this path touch redirects |
 
 **Unresolved**
 
-TODO. Two or three things this design genuinely does not handle well, and what you would do about each.
+**Deleting a link is best-effort, and no version of this design makes it otherwise.** We can purge the CDN in seconds and return 410 from origin immediately, but a browser that cached a 301 will not ask again until its max-age expires, and there is no protocol mechanism to reach it. That is the real reason to default to 302 with a short TTL, and it is a genuine cost: we pay continuous edge and origin traffic to retain the ability to retract. Even then, link previewers and archive services will have copied the destination, so a takedown removes our redirect and not the reach the link already had. For anything with a legal deadline, the honest answer is that we control minutes at the edge and nothing at all downstream of it.
+
+**Click counts are approximate and we cannot state the error bar.** Three separate sources of drift, none of them individually fixable. Fire-and-forget onto the queue means a broker outage loses whatever exceeds the local ring buffer, and we do not know how much because the events that would tell us are the ones we lost. Edge-served redirects are counted from CDN logs on a delivery delay of minutes, and CDN log sampling is a vendor behaviour rather than ours. And bots, link unfurlers in chat clients, and security scanners all fetch a link without a human seeing it, which inflates counts by an amount that varies by referrer. We dedupe on IP plus user-agent within a short window and filter a known-bot list, which helps and does not close the gap. If a customer bills on clicks, this design is not good enough and needs a separate reconciled counting path with its own durability guarantees.
+
+**The alias space is walkable and seven characters is not enough entropy to stop it.** Counter-derived codes are trivially enumerable by construction. Random codes are better, but 7 base62 characters is about 41.7 bits, so at 10% occupancy roughly one guess in ten hits a real link and a distributed scanner can harvest a meaningful slice of the corpus. Per-IP 404 rate limiting raises the cost without changing the arithmetic. The proper fix is a longer, genuinely random code for links marked private, say 16 characters at about 95 bits, so the link functions as a capability. We have not built the two-tier scheme, and until we do the correct thing to tell users is that a short link is public, not secret.
 #### Drill questions
-1. A URL goes viral — 100k req/s in two minutes. What breaks?
-2. How do you prevent abuse — phishing links, malware redirects?
-3. Custom aliases — how do you prevent collisions and squatting?
+1. A URL goes viral, 100k req/s in two minutes. What breaks?
+2. How do you prevent abuse, phishing links, and malware redirects?
+3. Custom aliases: how do you prevent collisions and squatting?
 4. Why base62 instead of base64?
-5. How do you scale to 365B URLs?
-6. What's the migration path if you outgrow the 7-char alias?
-7. Where would you put the redirect logic — origin servers, CDN cache, or edge compute?
-8. 301 vs 302 — what does this *actually* cost in observed click counts?
+5. How do you scale to 365B rows?
+6. What is the migration path if you outgrow the 7-character alias?
+7. Where would you put the redirect logic: origin servers, CDN cache, or edge compute?
+8. What does 301 versus 302 actually cost in observed click counts?
 9. How do you deactivate or delete a short URL given the CDN may have cached it?
-10. How do you batch-allocate IDs without a centralized counter being a SPOF?
+10. How do you batch-allocate ids without a central counter being a single point of failure?
+11. An enumeration scan is walking your alias space. What does that do to the system, and what do you do about it?
+12. If a link is meant to be private, is a 7-character code good enough?
 #### Answers to drill questions
-1. Ideally nothing: CDN absorbs the spike since 301s are cacheable. Worst case the origin sees a thundering herd on cache miss. *If pushed:* request coalescing (single-flight) at the app layer so only one DB read per alias; pre-warm Redis when an alias crosses a click-rate threshold.
+1. Ideally nothing: the edge absorbs the spike because the response is identical for every user. Worst case is the first wave, before any PoP has it, when every request misses and hits the store together. *If pushed:* request coalescing at the app layer so one read per server rather than one per request, and probabilistic early refresh so the herd does not reform at each TTL boundary.
 
-2. URL submission goes through a safety check (Google Safe Browsing, internal blocklist) before the alias is issued. Periodic re-scan of stored URLs for newly flagged domains. *If pushed:* rate-limit shorten-API per user/IP; require auth for high-volume creators; "preview" page for suspicious destinations.
+2. Submission goes through a safety check (Google Safe Browsing plus an internal blocklist) before the alias is issued, with periodic re-scan of stored URLs against newly flagged domains. *If pushed:* rate-limit the shorten API per user and IP, require auth for high-volume creators, and put an interstitial preview page in front of destinations with a poor reputation score rather than blocking outright.
 
-3. Custom aliases live in the same table; insert with `IF NOT EXISTS`. Reserve dictionary words and brand names. Require auth for custom (rate limit + accountability). *If pushed:* per-user quotas on custom aliases; trademarked terms get an explicit allowlist with an appeal flow.
+3. Custom aliases live in the same table, inserted with `IF NOT EXISTS` so the uniqueness constraint does the work. Reserve dictionary words and protected marks. Require auth so an abuser is accountable. *If pushed:* per-account quotas on custom aliases, and an allowlist with an appeal flow for trademarked terms.
 
-4. Standard base64 has `+` and `/` which need URL-encoding. Base64url (RFC 4648, `-_` substitutes) fixes that, but its strings still carry `=` padding. Base62 (`0-9a-zA-Z`) needs neither — URL-safe, double-click-selectable, no padding. The length difference vs base64 is <1% per char, negligible at 7 chars. *If pushed:* drop ambiguous chars (`0/O`, `1/l`) for human-readable aliases — base58 (Bitcoin); slightly longer but copy-paste and read-aloud friendly.
+4. Standard base64 uses `+` and `/`, which need percent-encoding in a path. Base64url (RFC 4648) substitutes `-` and `_` and fixes that, but its output still carries `=` padding. Base62 needs neither, and it double-click-selects as a single token in most browsers, which base64url does not. The length penalty is under 1% per character, negligible at 7. *If pushed:* base58 drops the ambiguous `0/O` and `1/l` pairs, which is worth it for codes that get read aloud or printed on physical media.
 
-5. Hash-partition the alias table by `alias` so consecutive Snowflake-derived aliases scatter across all shards; range-partitioning by ID would put every new write on the most recent shard and create a sustained write hotspot. Cassandra or sharded Postgres both work — the key requirement is that the partition key is uniformly distributed, not the primary index ordering. *If pushed:* archive aliases unread for over a year to cold storage (S3 plus a lookup index) so the active working set on the hot tier stays small; the long tail of dormant aliases doesn't need to live on expensive NVMe.
+5. Partition on `hash(alias)` so time-ordered codes scatter uniformly, rather than range-partitioning and putting every insert on the newest partition. Cassandra or a sharded relational store both work; the requirement is a uniformly distributed partition key, not a particular engine. *If pushed:* archive links with no click in twelve months to columnar files on object storage with a lookup index, roughly 8 GB/day, so the hot tier stays on fast storage and the dormant long tail does not.
 
-6. Add an 8th char silently — old aliases keep working since the schema accepts variable length. Snowflake IDs already support it; base62 length grows naturally. *If pushed:* announce in advance; SDKs and analytics dashboards may have hard-coded length assumptions.
+6. Add the eighth character silently. Old aliases keep resolving because the column is variable-length and lookup is by exact key, so there is no migration of existing rows at all. *If pushed:* announce ahead of time anyway, because SDKs, regex-based link detectors, and analytics dashboards accumulate hard-coded length assumptions.
 
-7. CDN cache by default — 301s are static once written, fully cacheable, and the CDN's PoP network gives global low-latency for free. For the highest read:write ratios (100k:1+) where global p99 matters, push the lookup itself to edge compute (Cloudflare Workers + Workers KV) so origin is involved only on cache miss. *If pushed:* origin-only is fine for an internal short-link service — operational simplicity beats edge complexity when traffic is regional and modest.
+7. CDN caching by default: the response is static once written, identical for all users, and the PoP network gives global reach for free. Push the lookup itself to edge compute with a replicated edge key-value store when the miss path is common enough that a cross-continent round trip breaks the p99 target. *If pushed:* origin-only is entirely reasonable for an internal short-link service where traffic is regional and modest, and the operational simplicity is worth more than the latency.
 
-8. With 301, browsers and CDNs cache the redirect indefinitely; a user visits the link 10 times, your analytics see 1 hit (the first one). With 302, every click round-trips to your server. bit.ly defaults to 302 because the click data is the product. *If pushed:* a 301 with `Cache-Control: public, max-age=600` strikes a middle ground — repeat clicks within 10 minutes don't log, longer-spaced clicks do; tune the TTL against accuracy requirements.
+8. With 301 the browser caches indefinitely, so a user who visits a link 10 times shows up in your data once. With 302 plus `max-age=60`, repeat clicks inside a minute are also invisible to origin and have to be recovered from CDN logs. There is no setting that gives both cheap serving and exact counts; you are choosing a sampling interval. *If pushed:* bit.ly defaults to 302 because click data is the product, and publishers using shorteners for SEO prefer 301 because link equity passes through it.
 
-9. Two options: (1) wait for the cache TTL to expire (set TTL based on how often you expect to delete — 1hr is typical), or (2) issue a CDN purge for the alias key, which invalidates it across PoPs in seconds. Option 2 has a per-purge cost; reserve it for safety-critical takedowns (phishing, malware). *If pushed:* track deletion timestamps in the alias DB; on cache miss after deletion, return 410 Gone instead of 404 — clearer signal to clients and crawlers.
+9. Delete at origin, drop the memory cache entry, and issue an explicit CDN purge, which propagates across PoPs in seconds. Purges are billed per call, so reserve them for safety-critical takedowns and let ordinary deletions drain with the TTL. *If pushed:* return 410 Gone rather than 404 afterwards, so crawlers and clients can tell a removed link from a nonexistent one, and accept that browsers holding a cached 301 are unreachable.
 
-10. Each app server leases a 1000-ID range from Redis on startup and refills when its current range nears exhaustion. Redis runs in HA mode (Sentinel or Cluster); a Redis failover loses at most one in-flight lease (1000 unused IDs — gaps are harmless). *If pushed:* if Redis is also a SPOF risk, use Snowflake instead — pure local generation, no central counter to break.
+10. Each app server leases a 1000-id block from a central counter at startup and refills as it nears exhaustion, so the counter sees one operation per thousand ids rather than one per id. Run it in HA mode; a failover loses at most one in-flight block, and gaps in the alias space are harmless. *If pushed:* if the counter being up at all is unacceptable, use Snowflake instead (Q4), which is purely local generation with nothing central to fail.
+
+11. A scan produces a stream of distinct nonexistent aliases. Every one is a guaranteed cache miss, and because the keys are all different, request coalescing does nothing for them, so the load lands directly on the store. Negative-cache the misses with a short TTL, around 30 seconds, and rate-limit 404s per source IP at the edge. *If pushed:* keep the negative TTL well under the positive one, or a freshly created alias that happened to be probed first will 404 for its own creator.
+
+12. No. Seven base62 characters is about 41.7 bits, and at 10% occupancy about one random guess in ten resolves, so a distributed scan harvests real links cheaply. Counter-derived codes are worse still, because knowing one tells you where its neighbours are. *If pushed:* private links need a separate tier with a genuinely random code of 16 characters or so, roughly 95 bits, treated as a capability, plus `noindex` headers and no listing in any public API.
 #### Whiteboard script
-TODO
+**0-5, name the asymmetry and take the fork.** Open with the property, not the components: "the mapping never changes and is identical for every reader, so the entire read path is cacheable and the database barely appears in it." Then ask the two questions that actually change the design: does anyone pay for click analytics, and do links have to be unguessable. State your assumptions out loud, 100M creates a day, 100:1 reads to writes, so about 120k reads/s steady. Draw nothing yet.
 
-A 45 minute budget: what to cover in 0-5, 5-15, 15-35 and 35-45, what to say first, and a line starting `Cut first:`.
+**5-15, the spine.** Four boxes left to right: client, CDN, app server plus memory cache, alias store. Then a fifth hanging off the app server with a dashed line for the click log, and say why it is dashed before anyone asks. Cover creation in about ninety seconds: id from a coordination-free generator, base62 encoded, seven characters for 3.5 trillion codes, one insert, no collision check, cross-reference Q4 and move on. Do not let the generator eat the interview. Then say `hash(alias)` partitioning and immediately say why: the codes are time-ordered, so range partitioning is a permanent write hotspot.
 
-**Raw material, from the old Talking Points:**
+**15-35, the drill.** This is the interview, so protect the time. Take 301 versus 302 on your own terms rather than waiting to be asked, because it is the fork most candidates get wrong by defaulting to "301 is faster". Then go deep on the redirect path: the three layers and their hit rates, the herd when a viral link is cold and single-flight as the fix, the enumeration scan that coalescing cannot help and negative caching can, and the TTL as a takedown SLA rather than a performance knob. Give the arithmetic as you go, 95% edge hit rate leaving 6k/s at origin and 60/s at the store. Keep edge compute in reserve as a one-liner you can expand if the interviewer pushes on global p99.
 
-- **The read:write ratio is the architecture** — 100:1 means the redirect path is 99% of the engineering surface; candidates who balance write and read complexity equally miss the asymmetry.
-- **Snowflake + base62 + hash-partition is the production-grade combination** — naming all three together signals you've seen this design in practice, not just read about it.
-- **Click write must be fire-and-forget** — surface this proactively; coupling redirect availability to analytics health is the most common junior mistake.
-- **301 vs 302 is a product decision dressed up as HTTP** — explaining bit.ly's choice (302 for analytics) shows you understand why "faster" isn't the only criterion.
-- **Edge compute is the asymptote of this architecture** — Cloudflare Workers + Workers KV puts the redirect at the closest PoP globally, and at high read:write ratios it pays for itself; mentioning it shows currency.
-- **Phishing safety is non-optional, not a feature** — every public URL shortener is a phishing vector; safety-check on submit and CDN-purge on takedown are non-negotiable, and surfacing them signals product maturity.
-- **The event stream is the analytics SLA boundary** — shorten and redirect have hard SLAs; clicks are best-effort. Saying this explicitly defines what the system promises and what it doesn't.
+**35-45, concede and close.** Give the gaps before they are found: deletion is best-effort and a cached 301 is unreachable; click counts are approximate with an unknown error bar across three independent sources of drift; a 7-character code is walkable and private links need a separate longer tier. Then the operational surface in two minutes: what you page on (edge hit rate, redirect p99 at edge and origin, click pipeline lag, takedown propagation time), and the safety pipeline on submit, which is not optional for a public shortener.
+
+Cut first: the data model and API contract, then multi-region DR, then the base62 versus base64 comparison. All three are real and none of them changes the architecture, and the encoding question in particular is a trivia rabbit hole that eats the redirect-path discussion. Never cut: the read-to-write asymmetry stated up front, 301 versus 302 with a reason, and fire-and-forget click logging.
 #### Appendix
 **Data model**
 
-**urls (alias store — wide-column or sharded relational):**
+**urls (alias store, wide-column or hash-partitioned relational):**
 ```
-alias       VARCHAR(10)  PRIMARY KEY
+alias       VARCHAR(16)  PRIMARY KEY   -- partition on hash(alias)
 long_url    TEXT
 created_by  BIGINT
 created_at  TIMESTAMP
 expires_at  TIMESTAMP NULL
+deleted_at  TIMESTAMP NULL             -- present means 410, not 404
 INDEX(created_by), INDEX(expires_at)
 ```
 
-**clicks (analytics — event stream → columnar warehouse):**
+**clicks (event stream to columnar warehouse):**
 ```
-alias, ts, ip, country, referrer, ua
+alias, ts, ip_hash, country, referrer_hash, ua_hash
 ```
 
-**Cache:** in-memory KV `alias → long_url`, LRU, TTL 1h.
+**Cache:** in-memory key-value, `alias` to `long_url`, LRU, positive TTL 1h, negative TTL 30s.
 
 **API contract**
 
 ```
 POST /shorten
   body: { long_url, custom_alias?, ttl_sec? }
-  → { short_url, alias, expires_at }
+  -> { short_url, alias, expires_at }
 
 GET /{alias}
-  → 301 (or 302 if click analytics required) Location: <long_url>
+  -> 302 Found, Location: <long_url>, Cache-Control: public, max-age=60
+  -> 410 Gone if deleted_at is set
 
 GET /api/{alias}/stats
-  → { clicks, top_countries, referrers, ts_first, ts_last }
+  -> { clicks, top_countries, referrers, ts_first, ts_last }
 ```
 
 **Observability**
 
-- **`shortener.redirect_latency_p99`**: end-to-end client-observed redirect time — emitted from CDN logs + origin metrics — alert if > 50ms at edge or > 200ms at origin
-- **`shortener.cdn_hit_rate`**: fraction of redirect requests served from CDN cache — emitted from CDN logs — alert if < 90% sustained (cache miss storm or invalidation bug)
-- **`shortener.shorten_latency_p99`**: time to create a new short URL — emitted by shortener API — alert if > 200ms
-- **`shortener.click_pipeline_lag_seconds`**: lag between click event and warehouse availability — emitted by analytics consumer — alert if > 60s sustained
-- **`shortener.dlq_growth_rate`**: rate of click events landing in dead-letter (parsing errors, safety re-check failures) — emitted by consumer — alert on non-zero growth
-- **`shortener.takedown_propagation_seconds`**: time from origin-flag-flip to CDN purge confirmation — emitted by takedown pipeline — alert if > 30s for safety-critical takedowns
-- **SLOs:** redirect p99 50ms (edge), shorten p99 200ms, availability 99.99% on redirect (CDN absorbs origin outages within TTL), click-pipeline best-effort with 99.9% delivery target.
+- **`shortener.cdn_hit_rate`**: fraction of redirects served from the edge, from CDN logs. Alert below 90% sustained, which means either a cache-miss storm or an invalidation bug.
+- **`shortener.redirect_latency_p99`**: client-observed redirect time, from CDN logs plus origin metrics. Alert above 50ms at edge or 200ms at origin.
+- **`shortener.store_read_rate`**: reads reaching the alias store. Alert on a step change, since this is the number the whole cache hierarchy exists to keep near 60/s.
+- **`shortener.notfound_rate`**: 404s per second by source IP prefix. Alert on a spike, which is an enumeration scan.
+- **`shortener.click_pipeline_lag_seconds`**: click event to warehouse availability. Alert above 60s sustained.
+- **`shortener.takedown_propagation_seconds`**: origin flag flip to CDN purge confirmation. Alert above 30s for safety-critical takedowns.
+- **SLOs:** redirect p99 50ms at edge, shorten p99 200ms, 99.99% availability on redirect (the edge covers origin outages within the TTL), click pipeline best-effort at a 99.9% delivery target.
 
 **Multi-region and DR**
 
-- **Replication mode:** active-active edge serving + active-passive origin DB — CDN PoPs serve every region from the closest edge cache; origin alias store is active-passive across two regions (writes go to primary, secondary tails async). Edge KV (Workers KV / DynamoDB Global Tables) is an alternative for fully-active-active reads.
-- **RTO / RPO:** RTO 30s for redirect availability (CDN survives origin outages within TTL); RTO 5min for write availability (origin DB failover); RPO < 60s of pending writes lost on primary-DB failure (acceptable for shorten — a retry creates a new alias).
-- **Failover trigger & cadence:** automatic origin failover on health-check fail; CDN failover is implicit (multi-PoP routing). Tested monthly via origin-DB primary-kill drill; quarterly via full-region origin isolation.
-- **Cross-region cost trade-off:** edge-cache architecture cost is per-request CDN egress (~$0.01/GB) and edge-compute fees if using Workers; trade-off is global p99 of single-digit ms vs origin-only p99 of regional-RTT (50–200ms transcontinental). At read:write ratios above 100k:1, edge-compute pays for itself in latency and origin offload.
+- **Replication mode:** active-active edge serving with an active-passive origin. Every region is served from its nearest PoP; the alias store has a primary region with an async-tailing secondary. A replicated edge key-value store is the fully active-active alternative, at the cost of eventually-consistent reads.
+- **RTO and RPO:** RTO 30s for redirect availability, since the edge survives an origin outage for the length of the TTL. RTO 5 minutes for writes, bounded by store failover. RPO under 60s of pending writes, which is acceptable here because a failed shorten is retried and produces a new alias rather than corrupting anything.
+- **Failover trigger and cadence:** automatic origin failover on health-check failure; edge failover is implicit in PoP routing. Tested monthly with a primary-kill drill and quarterly with full origin-region isolation.
+- **Cross-region cost trade-off:** the edge-cache design costs CDN request and egress fees, with 302 responses at a few hundred bytes each making egress negligible and request count the real bill. Edge compute adds a per-invocation charge that at 10^10 redirects a day is a material line item, which is why it is justified by the p99 target rather than by cost.
 
 ### 6. Design a Web Crawler
 #### Problem
