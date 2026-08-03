@@ -410,7 +410,7 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/java-katas-cheatsheet.html",
-      "itemCount": 20
+      "itemCount": 21
     },
     {
       "id": "go-katas",
@@ -426,7 +426,7 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/go-katas-cheatsheet.html",
-      "itemCount": 17
+      "itemCount": 18
     },
     {
       "id": "rust-katas",
@@ -442,7 +442,7 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/rust-katas-cheatsheet.html",
-      "itemCount": 11
+      "itemCount": 15
     },
     {
       "id": "postgres",

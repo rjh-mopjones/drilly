@@ -198,12 +198,15 @@ def check_migrated(
     if present != [s for s in SECTIONS if s in present]:
         rep.err("S5", f"Q{rid}: sections out of canonical order")
 
+    # A section is "unfinished" if it has a line that is exactly TODO. The
+    # mechanical transform emits those, sometimes above seed material carried
+    # over from a dissolved section, so authoring has the raw text to hand.
     def stub(name: str) -> bool:
-        return by_name.get(name, "").strip() == STUB
+        return bool(re.search(r"^TODO\b", by_name.get(name, ""), re.M))
 
     # C1 Core word cap
     core = by_name.get("Core", "")
-    if core and not stub("Core"):
+    if core and not (allow_stub and stub("Core")):
         wc = word_count(core)
         if wc > 300:
             rep.err("C1", f"Q{rid}: Core is {wc} words, cap is 300")
@@ -228,17 +231,17 @@ def check_migrated(
 
     # C6 Unresolved
     wb = by_name.get("Where it breaks", "")
-    if wb and not stub("Where it breaks") and "**Unresolved**" not in wb:
+    if wb and "**Unresolved**" not in wb:
         rep.err("C6", f"Q{rid}: 'Where it breaks' has no **Unresolved** subsection")
 
     # C3/C4 drill questions and matching answers
     dq = by_name.get("Drill questions", "")
     ans = by_name.get("Answers to drill questions", "")
-    if dq and not stub("Drill questions"):
+    if dq and not (allow_stub and stub("Drill questions")):
         qn = [int(m.group(1)) for m in re.finditer(r"^(\d+)\.\s", dq, re.M)]
         if not 10 <= len(qn) <= 15:
             rep.err("C3", f"Q{rid}: {len(qn)} drill questions, want 10-15")
-        if ans and not stub("Answers to drill questions"):
+        if ans and not (allow_stub and stub("Answers to drill questions")):
             an = [int(m.group(1)) for m in re.finditer(r"^(\d+)\.\s", ans, re.M)]
             if set(qn) != set(an):
                 rep.err(
@@ -247,18 +250,18 @@ def check_migrated(
 
     # C7 fork table
     cq = by_name.get("Clarifying questions and how each answer forks the design", "")
-    if cq and not stub(cq) and "|---" not in cq.replace(" ", ""):
+    if cq and not (allow_stub and stub("Clarifying questions and how each answer forks the design")) and "|---" not in cq.replace(" ", ""):
         rep.warn("C7", f"Q{rid}: clarifying section has no markdown table")
 
     # C8 arithmetic shown
     rs = by_name.get("Requirements and scale, derived out loud", "")
-    if rs and rs.strip() != STUB:
+    if rs and not (allow_stub and stub("Requirements and scale, derived out loud")):
         if not re.search(r"\d.*[×*/+].*=", rs):
             rep.warn("C8", f"Q{rid}: scale section shows no arithmetic")
 
     # C9 Key decisions micro-schema
     kd = by_name.get("Key decisions", "")
-    if kd and kd.strip() != STUB:
+    if kd and not (allow_stub and stub("Key decisions")):
         choices = re.findall(r"^- Choice:", kd, re.M)
         alts = re.findall(r"^- Alternative:", kd, re.M)
         deciders = re.findall(r"^- Decider:(.*)$", kd, re.M)
@@ -277,7 +280,7 @@ def check_migrated(
 
     # C10 nearest-question contrast
     wt = by_name.get("What this is really testing", "")
-    if wt and wt.strip() != STUB:
+    if wt and not (allow_stub and stub("What this is really testing")):
         m = re.search(r"^Closest question: Q(\d+)\b", wt, re.M)
         if not m:
             rep.err(
@@ -289,7 +292,7 @@ def check_migrated(
 
     # C11 whiteboard budget
     ws = by_name.get("Whiteboard script", "")
-    if ws and ws.strip() != STUB:
+    if ws and not (allow_stub and stub("Whiteboard script")):
         for band in ("0-5", "5-15", "15-35", "35-45"):
             if band not in ws:
                 rep.err("C11", f"Q{rid}: whiteboard script missing the {band} band")
@@ -298,7 +301,7 @@ def check_migrated(
 
     # C12 appendix contents
     ap = by_name.get("Appendix", "")
-    if ap and ap.strip() != STUB:
+    if ap and not (allow_stub and stub("Appendix")):
         for want in (
             "**Data model**",
             "**API contract**",
@@ -309,7 +312,7 @@ def check_migrated(
                 rep.warn("C12", f"Q{rid}: appendix missing {want}")
 
     if not allow_stub:
-        stubs = [n for n in SECTIONS if by_name.get(n, "").strip() == STUB]
+        stubs = [n for n in SECTIONS if stub(n)]
         if stubs:
             rep.err("S9", f"Q{rid}: unfilled stubs {stubs}")
 
@@ -401,11 +404,19 @@ def main() -> int:
         if is_migrated:
             migrated.append(rid)
             check_migrated(rid, secs, rep, args.allow_stub and not args.strict)
-            if em:
+            # The em-dash rule applies to authored prose, not to text the
+            # mechanical transform merely relocated. A question still carrying
+            # a TODO has not been through the style pass yet.
+            unfinished = any(
+                re.search(r"^TODO\b", c, re.M) for _, c in secs
+            )
+            if em and not (unfinished and not args.strict):
                 rep.err(
                     "C2",
-                    f"Q{rid}: {em} em dashes outside fences (migrated questions must have none)",
+                    f"Q{rid}: {em} em dashes outside fences (authored questions must have none)",
                 )
+            elif em and unfinished:
+                rep.warn("C2", f"Q{rid}: {em} em dashes, still to do in the style pass")
         else:
             legacy.append(rid)
             if args.strict:
