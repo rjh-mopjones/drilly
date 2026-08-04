@@ -94,6 +94,10 @@ def build_graph(adj):
         nodes[i].neighbors = [nodes[j - 1] for j in nbrs]
     return nodes[0]
 
+def build_list_of_lists(arrs):
+    """[[1,4,5],[1,3,4]] -> a list of ListNode heads (merge-k-lists shape)."""
+    return [build_list(a) for a in (arrs or [])]
+
 def dump_graph(n):
     if n is None:
         return []

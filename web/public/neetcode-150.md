@@ -320,13 +320,53 @@ Given two sorted arrays `nums1` and `nums2`, return the median of the combined s
 
 #### Examples
 
-TODO
+```text
+Input: nums1 = [1,3], nums2 = [2]
+Output: 2.0
+Explanation: merged is [1,2,3], middle element 2.
+
+Input: nums1 = [1,2], nums2 = [3,4]
+Output: 2.5
+
+Input: nums1 = [], nums2 = [1]
+Output: 1.0
+
+Constraints:
+- 0 <= nums1.length, nums2.length <= 1000
+- 1 <= nums1.length + nums2.length <= 2000
+- -10^6 <= nums1[i], nums2[i] <= 10^6
+```
 
 #### Recognition
-**Binary search on partition.** **O(log(min(m, n)))** time, **O(1)** space.
+**Signals.** Two already sorted inputs plus a required `O(log(min(m, n)))`. The bound is the tell and it is an unusually strong one: a logarithmic budget forbids even touching every element, which kills merging and kills any two-pointer walk to the midpoint. Sorted input plus a log bound is binary search by elimination; the only real question left is what you search over, and it is not a value, it is a *split point*. **Therefore.** Binary search on `i`, the number of elements taken from the shorter array into the left half, which forces `j = half - i` from the other. The split is right when `a[i-1] <= b[j]` and `b[j-1] <= a[i]`, and that predicate is monotonic in `i`, so whichever comparison fails tells you which way to move. **Not merging** to the midpoint, the `O(m + n)` baseline this problem exists to beat. **O(log(min(m, n)))** time, **O(1)** space.
 
 #### Explanation
-A naive approach merges both arrays and picks the middle element — `O(m + n)` time. The key insight is that the median is determined by a partition: split both arrays so that every element on the left of the partition is at most every element on the right, and the left half contains exactly `(m + n + 1) / 2` elements. Binary search on the shorter array's partition index `i`; the partner index `j = half - i` follows automatically. At each midpoint, check whether `left1 <= right2` and `left2 <= right1`; if so, the partition is correct. If `left1 > right2`, move `i` left; otherwise move it right. Use `-∞` and `+∞` as sentinels for out-of-bounds accesses. For even total length, the median is the average of the two middle values.
+**Brute force.** Merge the two arrays, then index the middle.
+
+```python
+def findMedianSortedArrays(nums1, nums2):
+    merged, i, j = [], 0, 0
+    while i < len(nums1) and j < len(nums2):
+        if nums1[i] <= nums2[j]:
+            merged.append(nums1[i])
+            i += 1
+        else:
+            merged.append(nums2[j])
+            j += 1
+    merged += nums1[i:] + nums2[j:]
+    n = len(merged)
+    if n % 2:
+        return float(merged[n // 2])
+    return (merged[n // 2 - 1] + merged[n // 2]) / 2.0
+```
+
+`O(m + n)` time, `O(m + n)` space.
+
+**Wasteful because.** The merge produces the full ordering of every element when the answer depends on at most two of them. Everything below the midpoint is placed correctly and then never read again.
+
+**Optimal.** Search for the split rather than building it. The median is defined by a partition of the combined array into a left and a right half of fixed sizes where every left element is at most every right element. Pin the left half at `(m + n + 1) // 2` elements; choosing `i` of them from the shorter array `a` then forces exactly `j = half - i` from `b`, so there is a single free variable ranging over `0..m`. The partition is valid exactly when the two cross comparisons hold, `a[i-1] <= b[j]` and `b[j-1] <= a[i]`. If `a[i-1] > b[j]` you took too much from `a` and must shrink `i`; otherwise you took too little. That predicate is monotonic, which is what makes binary search over `i` legal and gives `O(log m)`. Once valid, the median is `max(a[i-1], b[j-1])` for an odd total, or the mean of that and `min(a[i], b[j])` for an even one. Searching the *shorter* array is what turns the bound into `log(min(m, n))` and keeps `j` inside `b`.
+
+**Edge cases.** Either array may be empty, and one may lie entirely below the other; both are absorbed by the `-inf` and `+inf` sentinels standing in for missing boundary elements, which is why the code needs no explicit branch. Odd versus even total length is the only genuine case split. The `+ 1` before the floor division in `half` puts the extra element on the left for odd totals, which is why the odd case reads only left-side values.
 
 #### Python
 
@@ -902,13 +942,43 @@ Given an integer array `nums`, return `true` if any value appears at least twice
 
 #### Examples
 
-TODO
+```text
+Input: nums = [1,2,3,1]
+Output: true
+
+Input: nums = [1,2,3,4]
+Output: false
+
+Input: nums = [1,1,1,3,3,4,3,2,4,2]
+Output: true
+
+Constraints:
+- 1 <= nums.length <= 10^5
+- -10^9 <= nums[i] <= 10^9
+```
 
 #### Recognition
-**Hashset membership check.** **O(n)** time, **O(n)** space.
+**Signals.** "Return `true` if any value appears at least twice" asks exactly one thing: has this value been seen before. There is no index to report, no ordering to preserve, no count to compare, so it is a pure membership question and nothing about the input has to survive the scan. The bound `n <= 10^5` rules out the pairwise scan on its own, since that is 5 billion comparisons at the top end. **Therefore.** Stream the array into a hash set and return the moment an insert finds the value already present, which stops on the first duplicate instead of always paying full cost. **Not sorting**, which does make duplicates adjacent and needs no extra structure, but costs `O(n log n)` and reorders the caller's array; take it only when memory rather than time is the binding constraint. **Not a nested loop**, the `O(n^2)` baseline this exists to beat. **O(n)** time, **O(n)** space.
 
 #### Explanation
-The brute-force approach compares every pair in `O(n²)`. Sorting reduces this to `O(n log n)` by making duplicates adjacent, but the hashset approach is the fastest: insert each element into a set and stop as soon as an insertion would create a duplicate (the element is already present). The Python one-liner compares lengths before and after set conversion, which is equivalent but processes all elements before short-circuiting. In other languages, the explicit loop version short-circuits on the first duplicate found, which can be significantly faster in practice. Edge case: an empty or single-element array always returns false.
+**Brute force.** Compare every pair.
+
+```python
+def containsDuplicate(nums):
+    for i in range(len(nums)):
+        for j in range(i + 1, len(nums)):
+            if nums[i] == nums[j]:
+                return True
+    return False
+```
+
+`O(n^2)` time, `O(1)` space.
+
+**Wasteful because.** For each `i` the inner loop rescans the entire suffix to answer "does this value occur later?" That is a membership query answered by a linear walk, and it is re-answered from scratch `n` times.
+
+**Optimal.** Keep a hash set of everything seen so far and the walk collapses to one `O(1)` lookup. Test-and-insert in a single call is the idiom in most languages: `HashSet.add` in Java, `insert` in Rust and C++ all report whether the value was new, so one pass suffices and the function returns on the first repeat. Python's `len(nums) != len(set(nums))` says the same thing more compactly but builds the whole set before comparing lengths, so it cannot exit early. On an array whose first two elements match, the explicit loop does two inserts and the one-liner does `n`. Sorting is the alternative worth naming out loud when `O(1)` extra space is required, since it swaps the set for an `O(n log n)` time bill.
+
+**Edge cases.** A single-element array has no pair and returns false. An array of identical values returns true at the second element. Negative values and zero hash like any other integer, so no special casing.
 
 #### Python
 
@@ -1269,13 +1339,47 @@ Given an integer array `nums` and an integer `k`, return the `k` most frequent e
 
 #### Examples
 
-TODO
+```text
+Compare: any-order
+
+Input: nums = [1,1,1,2,2,3], k = 2
+Output: [1,2]
+
+Input: nums = [1], k = 1
+Output: [1]
+
+Input: nums = [4,4,-1,-1,3], k = 2
+Output: [4,-1]
+
+Constraints:
+- 1 <= nums.length <= 10^5
+- -10^4 <= nums[i] <= 10^4
+- 1 <= k <= number of distinct values in nums
+- the answer is guaranteed to be unique
+```
 
 #### Recognition
-**Bucket sort by frequency.** **O(n)** time, **O(n)** space.
+**Signals.** "Most frequent" means you need a count per value, so a frequency map is forced before anything else can happen. "Top `k`" is a selection layered on that map, and "returned in any order" says the output is a set rather than a ranking, so the counts never need to be fully ordered. The last signal is a bound hiding in the data: no value can occur more than `n` times, so every count is an integer in `[1, n]`. **Therefore.** Count in one pass, then bucket by count into an array of `n + 1` lists and walk it from the back until `k` values are collected. Indexing by a bounded integer replaces comparison entirely. **Not a size-`k` min-heap**, which is the answer most people give and is genuinely good at `O(n log k)`; it loses only because the counts are bounded here, which is what makes the log disappear. Reach for it when the counts are unbounded or the data arrives as a stream. **O(n)** time, **O(n)** space.
 
 #### Explanation
-The obvious approach uses a max-heap: count frequencies in `O(n)`, then extract the top `k` in `O(k log n)` — overall `O(n log n)`. Bucket sort beats this: since no element can appear more than `n` times, create `n + 1` buckets indexed by frequency. Place each element in its frequency bucket, then scan buckets from high to low, collecting elements until you have `k`. Because the bucket index is bounded by `n`, filling and scanning is `O(n)`. This approach works even when `k = n`. Edge case: ties in frequency are handled naturally since the bucket at the same index holds multiple elements.
+**Brute force.** Count, sort the counts, take the first `k`.
+
+```python
+def topKFrequent(nums, k):
+    count = {}
+    for n in nums:
+        count[n] = count.get(n, 0) + 1
+    pairs = sorted(count.items(), key=lambda p: -p[1])
+    return [val for val, _ in pairs[:k]]
+```
+
+`O(n log n)` time, `O(n)` space.
+
+**Wasteful because.** Sorting puts every distinct value into total frequency order when only the `k`th boundary matters. The relative order of everything below that boundary is computed in full and then thrown away.
+
+**Optimal.** A size-`k` min-heap is the standard fix and reaches `O(n log k)`: push each value keyed by its count and evict the smallest whenever the heap grows past `k`. That is a good answer, and it is the one to say first. Bucket sort beats it because the sort key is not arbitrary. A count is an integer in `[1, n]`, so it can be an array index rather than something to compare. Allocate `n + 1` empty lists, drop each value into `buckets[count]`, then scan from index `n` downward, appending until `k` values are in hand. Filling costs one step per distinct value and the scan costs `O(n)`, so the whole thing is linear with no log factor anywhere. The heap wins back the moment counts are not bounded by `n`, for instance over an unbounded stream where you cannot size the bucket array.
+
+**Edge cases.** Ties at the `k` boundary are why the problem guarantees a unique answer; a single bucket holds every value sharing that count. `k` equal to the number of distinct values drains every bucket. Bucket 0 is never filled, so the walk stops before reaching it.
 
 #### Python
 
@@ -1558,13 +1662,47 @@ Given an integer array `nums`, return an array `output` where `output[i]` equals
 
 #### Examples
 
-TODO
+```text
+Input: nums = [1,2,3,4]
+Output: [24,12,8,6]
+
+Input: nums = [-1,1,0,-3,3]
+Output: [0,0,9,0,0]
+
+Input: nums = [0,0]
+Output: [0,0]
+
+Constraints:
+- 2 <= nums.length <= 10^5
+- -30 <= nums[i] <= 30
+- every prefix and suffix product fits in 32 bits
+```
 
 #### Recognition
-**Prefix and suffix products.** **O(n)** time, **O(1)** extra space (output array not counted).
+**Signals.** "The product of all elements except `nums[i]`", asked for every `i`, is a range query over everything but one position, and the explicit ban on division removes the one-line shortcut of dividing the total by `nums[i]`. Two more tells: the required `O(n)` forbids recomputing a product per index, and "except self" splits cleanly into everything left of `i` times everything right of `i`. **Therefore.** Two accumulation passes. Sweep left to right writing the running prefix product into `output[i]`, then sweep right to left multiplying in the running suffix product, which needs one scalar and no second array. **Not the division trick**, and not merely because it is banned: one zero in the array makes every other index divide by zero, and two zeros zero the whole answer, so you end up branching on a zero count anyway and the "simple" version stops being simple. Counting the returned array as required output rather than working space, **O(n)** time, **O(1)** space.
 
 #### Explanation
-Division would be simple (`total_product / nums[i]`), but division is disallowed and zeros complicate it anyway. The insight is that `output[i]` is the product of everything to the left of `i` times the product of everything to the right. First pass: store running left products in the output array. Second pass (right to left): multiply each position by the running right product. This is two linear scans and uses only a single running variable (`suffix`), so auxiliary space is `O(1)`. No zeros require special handling because the prefix/suffix approach naturally produces 0 when needed.
+**Brute force.** For each index, multiply everything else.
+
+```python
+def productExceptSelf(nums):
+    res = []
+    for i in range(len(nums)):
+        p = 1
+        for j in range(len(nums)):
+            if i != j:
+                p *= nums[j]
+        res.append(p)
+    return res
+```
+
+`O(n^2)` time, `O(1)` extra space.
+
+**Wasteful because.** Index `i` and index `i + 1` multiply almost exactly the same numbers. Every element is re-multiplied `n - 1` times, and the running product built for one index is discarded before the next one starts.
+
+**Optimal.** Carry the running product forward instead of rebuilding it. The answer at `i` factorises into the product of everything before `i` times the product of everything after `i`, and each of those is a prefix scan, one from each end. First pass: walk forward with a `prefix` scalar, writing it into `res[i]` before folding `nums[i]` in, so `res[i]` ends up holding the left product. Second pass: walk backward with a `suffix` scalar, multiplying it into `res[i]` before folding `nums[i]` in. Reusing the output array as the prefix buffer is what keeps auxiliary space at `O(1)`. The same shape with `+` in place of `*` is the ordinary prefix sum; the technique needs only an associative operation, and unlike the division trick it never needs the inverse, which is why the ban costs nothing.
+
+**Edge cases.** A single zero produces the product of the rest at that index and zero everywhere else, and this falls out with no branch. Two or more zeros give all zeros. Negative values need nothing special since sign propagates through multiplication.
 
 #### Python
 
@@ -1823,13 +1961,51 @@ Given an unsorted integer array `nums`, return the length of the longest sequenc
 
 #### Examples
 
-TODO
+```text
+Input: nums = [100,4,200,1,3,2]
+Output: 4
+Explanation: the run is 1,2,3,4.
+
+Input: nums = [0,3,7,2,5,8,4,6,0,1]
+Output: 9
+
+Input: nums = []
+Output: 0
+
+Constraints:
+- 0 <= nums.length <= 10^5
+- -10^9 <= nums[i] <= 10^9
+- must run in O(n) time
+```
 
 #### Recognition
-**Hashset with sequence-start detection.** **O(n)** time, **O(n)** space.
+**Signals.** "Longest sequence of consecutive integers" over an **unsorted** array, plus an explicit `O(n)` requirement. That requirement is the tell and it is the whole problem: consecutiveness is trivially found by sorting and scanning, so stating a linear bound is the statement telling you sorting is off the table and that adjacency has to come from lookups instead. "Consecutive" also fixes the only question you ever ask about a value, which is whether `n - 1` or `n + 1` exists, and that is membership. **Therefore.** Load every value into a hash set, then start a walk only at values `n` whose predecessor `n - 1` is absent, since only those begin a run, and extend while `n + 1`, `n + 2` and so on are present. **Not sort and scan**, which is correct, shorter and needs no extra structure, but is `O(n log n)` and so is exactly what the stated bound forbids. **O(n)** time, **O(n)** space.
 
 #### Explanation
-Sorting would solve this in `O(n log n)`. To reach `O(n)`, dump all numbers into a set for `O(1)` lookups. For each number `n`, check whether `n - 1` is in the set; if not, `n` is the start of a consecutive sequence. Only from sequence starts do you walk forward counting `n + 1`, `n + 2`, … — this ensures each element is visited at most twice total (once to check start, at most once while extending). Duplicates are eliminated by the set, so they don't affect correctness or complexity. Edge case: empty input returns 0.
+**Brute force.** Sort, then scan for the longest run.
+
+```python
+def longestConsecutive(nums):
+    if not nums:
+        return 0
+    s = sorted(set(nums))
+    best, length = 1, 1
+    for i in range(1, len(s)):
+        if s[i] == s[i - 1] + 1:
+            length += 1
+            best = max(best, length)
+        else:
+            length = 1
+    return best
+```
+
+`O(n log n)` time, `O(n)` space.
+
+**Wasteful because.** Sorting establishes a total order over all `n` values when the algorithm only ever asks whether one specific neighbour exists. Full ordering is far more information than the question needs, and the `log n` factor is the price of computing it.
+
+**Optimal.** Trade order for membership. A hash set answers "is `n + 1` present?" in `O(1)`, so runs can be walked directly with no ordering at all. The trap is that walking from every value is `O(n^2)` on input `[1, 2, ..., n]`, because the run starting at 1 gets re-walked from 2, then from 3, and so on. The guard fixes it: walk from `n` only when `n - 1` is absent, so each run is walked exactly once, from its own start. Total work is one membership check per value to test whether it is a start, plus one step per value summed across all walks, so `2n` probes and `O(n)` overall. The set also deduplicates, so repeats cost nothing. Sorting is still the better answer when the input arrives sorted or when `O(1)` extra space is mandated.
+
+**Edge cases.** An empty array returns 0, so the running best must start at 0 rather than 1. Duplicates collapse into the set and cannot lengthen a run. A lone value is a run of length 1, found because its predecessor is absent.
 
 #### Python
 
@@ -1944,13 +2120,45 @@ A phrase is a palindrome if, after converting all uppercase letters to lowercase
 
 #### Examples
 
-TODO
+```text
+Input: s = "A man, a plan, a canal: Panama"
+Output: true
+Explanation: cleaned it is "amanaplanacanalpanama".
+
+Input: s = "race a car"
+Output: false
+
+Input: s = " "
+Output: true
+
+Constraints:
+- 1 <= s.length <= 2 * 10^5
+- s contains printable ASCII only
+```
 
 #### Recognition
-**Two pointers (in-place skip).** **O(n)** time, **O(1)** space.
+**Signals.** "Reads the same forward and backward" is symmetry about a centre, and the only comparison that ever matters is first remaining character against last remaining character. That is a converging pair, so the working state is two indices, not a copy. The filtering clause, "ignoring case and non-alphanumeric characters", does not change the shape at all; it only means each pointer may have to step several times before it lands on something comparable. **Therefore.** A left index at 0 and a right index at `n - 1`, each skipping past non-alphanumeric characters, then compare lowercased and step both inward, returning false on the first mismatch. **Not building a cleaned copy** and testing it against its reverse, which is correct, shorter and the answer most people give, but costs `O(n)` extra space; on a 200000-character input that is a second buffer bought for nothing. **O(n)** time, **O(1)** space.
 
 #### Explanation
-The naive approach filters the string into a clean array first (`O(n)` extra space), then compares from both ends. The two-pointer approach avoids the copy: start a left pointer at the beginning and a right pointer at the end; skip non-alphanumeric characters on each side, then compare the remaining characters case-insensitively. If any pair mismatches, return false immediately. Empty string and single-character strings are trivially palindromes. Using `isalnum()` (or equivalent) handles all ASCII alphanumeric characters uniformly.
+**Brute force.** Filter into a clean string, then compare it with its reverse.
+
+```python
+def isPalindrome(s):
+    clean = []
+    for c in s:
+        if c.isalnum():
+            clean.append(c.lower())
+    clean = "".join(clean)
+    return clean == clean[::-1]
+```
+
+`O(n)` time, `O(n)` space.
+
+**Wasteful because.** The repeated work here is not time, it is allocation. Every kept character is copied into a second buffer and the reversal builds a third, purely to line up characters that were already addressable by index in the original string.
+
+**Optimal.** Compare in place. Put `l` at 0 and `r` at the last index and walk them toward each other. Before each comparison, advance `l` past anything non-alphanumeric and retreat `r` the same way, guarding both inner loops with `l < r` so a string of pure punctuation cannot run either pointer off its end. Then compare `s[l]` against `s[r]` lowercased, return false on any mismatch, and step both inward. Each character is examined at most once and by exactly one pointer, so it is still a single linear pass, but nothing is allocated. The cleaned-copy version wins when the same string is queried repeatedly, since the filter is then paid once instead of the skips being redone per query.
+
+**Edge cases.** A string with no alphanumeric characters at all, such as `" "` or `",."`, is a palindrome; the `l < r` guards return true without ever running a comparison. An odd number of kept characters leaves a middle one that is never compared against anything, which is correct. Digits count as alphanumeric, so `"0P"` is false.
 
 #### Python
 
@@ -2164,13 +2372,51 @@ Given an integer array `nums`, return all unique triplets `[a, b, c]` such that 
 
 #### Examples
 
-TODO
+```text
+Compare: any-order-nested
+
+Input: nums = [-1,0,1,2,-1,-4]
+Output: [[-1,-1,2],[-1,0,1]]
+Explanation: those are the only two distinct triplets.
+
+Input: nums = [0,1,1]
+Output: []
+
+Input: nums = [0,0,0]
+Output: [[0,0,0]]
+
+Constraints:
+- 3 <= nums.length <= 3000
+- -10^5 <= nums[i] <= 10^5
+- triplets are unique as multisets of values
+```
 
 #### Recognition
-**Sort + two pointers.** **O(n²)** time, **O(1)** extra space (excluding output).
+**Signals.** "All unique triplets" that "sum to zero", and the answer is a set of *values*, not indices. Values rather than indices is the permission slip: you are free to sort, and sorting is what turns a search into a scan. `nums.length <= 3000` puts `O(n²)` comfortably in budget and `O(n³)` out of it. "Must not contain duplicate triplets" is a second, separate problem hiding in the statement. **Therefore.** Sort, fix the first element, and converge two pointers over the suffix, skipping equal neighbours at both levels. **Not the Two Sum hashmap** applied to each suffix, which also reaches `O(n²)` but produces triplets in arbitrary internal order, so every hit must be normalised and pushed through a hashset to dedupe; after sorting, duplicates are adjacent and the skip is one comparison. Excluding the output list, **O(n²)** time, **O(1)** space.
 
 #### Explanation
-Checking all triplets naively is `O(n³)`. Sorting first unlocks a two-pointer scan: fix the first element `nums[i]` and use two pointers on the subarray to its right, reducing the inner search to `O(n)`. To eliminate duplicate triplets without a hashset, skip over equal values of `nums[i]` (outer loop) and skip over equal values of `nums[l]` after finding a valid triplet (inner loop). Since the array is sorted, duplicates are adjacent and easy to skip. If the current sum is negative, advance the left pointer; if positive, retreat the right pointer. Sorting costs `O(n log n)`, dominated by the `O(n²)` scan.
+**Brute force.** Try every triple, dedupe with a set.
+
+```python
+def threeSum(nums):
+    found = set()
+    n = len(nums)
+    for i in range(n):
+        for j in range(i + 1, n):
+            for k in range(j + 1, n):
+                if nums[i] + nums[j] + nums[k] == 0:
+                    t = (nums[i], nums[j], nums[k])
+                    found.add(tuple(sorted(t)))
+    return [list(t) for t in found]
+```
+
+`O(n³)` time, `O(n)` space for the set.
+
+**Wasteful because.** For each fixed pair `(i, j)` the innermost loop scans the whole remaining suffix to answer one question: does the value `-(nums[i] + nums[j])` appear later? That is a lookup, re-answered by linear search `O(n²)` times.
+
+**Optimal.** Sort first, at `O(n log n)`, which disappears against `O(n²)` and is allowed because the output is values. Now fix `i` and run `l = i + 1`, `r = n - 1` inwards. Sortedness makes the sum monotone in each pointer, so a sum below zero can only be repaired by raising `l` and a sum above zero only by lowering `r`; no pair is ever skipped, and each suffix costs one linear pass. Sorting also dissolves the deduplication problem: equal values are adjacent, so `continue` when `nums[i] == nums[i-1]` kills repeated outer elements and advancing `l` past equal values after a hit kills repeated inner ones. No hashset, no normalising.
+
+**Edge cases.** All zeros must yield `[[0,0,0]]` exactly once, which is what both skips buy you. Input with no valid triplet returns an empty list, not null. `[-1,-1,-1,2]` must emit `[-1,-1,2]` once even though two distinct index pairs produce it. Arrays shorter than three never enter the inner loop.
 
 #### Python
 
@@ -2422,13 +2668,45 @@ Given an array `height` representing an elevation map where the width of each ba
 
 #### Examples
 
-TODO
+```text
+Input: height = [0,1,0,2,1,0,1,3,2,1,2,1]
+Output: 6
+Explanation: 6 units settle in the dips between bars.
+
+Input: height = [4,2,0,3,2,5]
+Output: 9
+
+Input: height = [3,3]
+Output: 0
+
+Constraints:
+- 1 <= height.length <= 2 * 10^4
+- 0 <= height[i] <= 10^5
+```
 
 #### Recognition
-**Two pointers tracking running max on each side.** **O(n)** time, **O(1)** space.
+**Signals.** "Trapped after raining" means water at index `i` is held in place by a taller bar on *each* side, so the amount is `min(maxLeft, maxRight) - height[i]`. An answer that depends on one boundary from the left and one from the right is the converging-pointer shape. Bar width is fixed at 1, so the total is a plain sum over indices with no geometry. **Therefore.** Two pointers carrying a running maximum each; the side with the smaller maximum is provably the limiting one, so its water is already determined and that pointer can step inwards. **Not prefix and suffix maximum arrays**, the answer most people give: also `O(n)` time, but it materialises two length-`n` arrays holding information each index consumes exactly once, and the two scalars carry the same thing. **O(n)** time, **O(1)** space.
 
 #### Explanation
-The classical approach precomputes prefix-max and suffix-max arrays, then subtracts the bar height at each position — `O(n)` time but `O(n)` space. The two-pointer approach eliminates the extra arrays. Water above position `i` is `min(maxLeft, maxRight) - height[i]`. Move from whichever side has the smaller maximum: if `maxL <= maxR`, the water at the left pointer is determined by `maxL` (the right side is at least as tall), so advance left and accumulate `maxL - height[l]` after updating `maxL`. Mirror logic applies for the right side. This works because we process from the side whose bound is already known to be the limiting factor.
+**Brute force.** For each bar, scan both directions for the tallest bar on each side.
+
+```python
+def trap(height):
+    total = 0
+    for i in range(len(height)):
+        left = max(height[: i + 1])
+        right = max(height[i:])
+        total += min(left, right) - height[i]
+    return total
+```
+
+`O(n²)` time, `O(1)` space.
+
+**Wasteful because.** Both maxima are recomputed from scratch at every index, and the scan at `i` overlaps almost entirely with the scan at `i - 1`. A running maximum changes at most once per step, so the rescan reproduces a value it already had.
+
+**Optimal.** Carry `maxL` and `maxR` as scalars and step inwards from whichever side is smaller. If `maxL <= maxR` then whatever lies to the right of the left pointer, the right bound is at least `maxR >= maxL`, so `min(maxL, maxR)` at the left pointer equals `maxL` no matter what has not been seen yet. That is the key: you never need the true right maximum, only the guarantee that it is not the binding constraint. Add `maxL - height[l]` and advance. The prefix and suffix arrays are the better answer when you need the per-index water depths themselves, or must answer repeated queries on the same profile, since the pointers throw those intermediate values away.
+
+**Edge cases.** A single bar, or a monotone array in either direction, traps nothing. A flat array contributes `maxL - height[l] == 0` at every step. The empty array is excluded by the constraints, which matters because the code reads `height[0]` and `height[n-1]` before the loop. Interior zeros are the ordinary case and need no guard.
 
 #### Python
 
@@ -2775,13 +3053,49 @@ Given a string `s` and an integer `k`, return the length of the longest substrin
 
 #### Examples
 
-TODO
+```text
+Input: s = "ABAB", k = 2
+Output: 4
+Explanation: replace both "A"s with "B"s.
+
+Input: s = "AABABBA", k = 1
+Output: 4
+
+Input: s = "A", k = 0
+Output: 1
+
+Constraints:
+- 1 <= s.length <= 10^5
+- s is uppercase English letters only
+- 0 <= k <= s.length
+```
 
 #### Recognition
-**Sliding window tracking max-frequency character.** **O(n)** time, **O(1)** space.
+**Signals.** "Longest substring" plus an explicit budget `k`. Substring means contiguous, so a window applies; "longest" plus a budget that only gets harder to satisfy as the window grows is the shrink-while-invalid variant. The cost of a window is `size - maxFreq`, where `maxFreq` is the count of its most common character, because every other character has to be replaced. That cost never decreases when you extend, which is what licenses a single left pointer that only moves forward. **Therefore.** One window, a 26-slot count array, and a running `maxFreq`. **Not 26 separate passes**, one per target letter, keeping the longest window whose non-target count stays within `k`. That is correct and easier to argue, but it is `O(26n)` and rebuilds the same window logic 26 times; tracking `maxFreq` folds all 26 into one pass. **O(n)** time, **O(1)** space.
 
 #### Explanation
-Within any window `[l, r]`, the minimum replacements needed equals `window_size - max_freq`, where `max_freq` is the count of the most common character. If this exceeds `k`, the window is invalid. Expand right on every step; shrink left only when the window becomes invalid. The trick: `max_freq` is never decreased — we only update it upward. This is correct because any valid window must have a higher `max_freq` than any previously seen valid window to be longer, and a window with a lower `max_freq` can never beat the current best. The character count array has 26 entries, so auxiliary space is `O(1)`.
+**Brute force.** Count characters for every substring and test the budget.
+
+```python
+def characterReplacement(s, k):
+    best = 0
+    for i in range(len(s)):
+        count = {}
+        for j in range(i, len(s)):
+            count[s[j]] = count.get(s[j], 0) + 1
+            size = j - i + 1
+            if size - max(count.values()) <= k:
+                best = max(best, size)
+    return best
+```
+
+`O(n²)` time, `O(1)` space (the dict holds at most 26 keys).
+
+**Wasteful because.** The counts restart at every left endpoint, so each character is counted again for every `i` before it. And once a window is invalid, extending `j` can never rescue it, yet the inner loop keeps going.
+
+**Optimal.** Extending a window by one raises `size` by exactly 1 and `maxFreq` by 0 or 1, so the cost `size - maxFreq` is non-decreasing. Invalidity is therefore permanent until the left edge moves, which is exactly the condition for a two-pointer sweep: grow `r` every step, and advance `l` only while the window is invalid. Each pointer crosses the string once. The subtlety is that `maxFreq` is never recomputed when `l` moves, so it can be stale-high. That is harmless: the recorded answer only improves when the window genuinely widens, and widening requires some character to actually reach a higher count, so no unachievable length is ever reported.
+
+**Edge cases.** `k = 0` degenerates to the longest run of a single character. `k >= len(s)` returns the whole string. A one-character string returns 1. Because `l` advances at most one slot per step, the window never shrinks below the best length seen, which is why the final `r - l + 1` is also the answer.
 
 #### Python
 
@@ -2902,13 +3216,45 @@ Given strings `s1` and `s2`, return `true` if any permutation of `s1` is a conti
 
 #### Examples
 
-TODO
+```text
+Input: s1 = "ab", s2 = "eidbaooo"
+Output: true
+Explanation: s2 contains "ba", a permutation of s1.
+
+Input: s1 = "ab", s2 = "eidboaoo"
+Output: false
+
+Input: s1 = "abc", s2 = "ab"
+Output: false
+
+Constraints:
+- 1 <= s1.length, s2.length <= 10^4
+- both strings are lowercase English letters
+```
 
 #### Recognition
-**Fixed-size sliding window with frequency array comparison.** **O(n)** time, **O(1)** space.
+**Signals.** "Permutation" pins the length: any rearrangement of `s1` has exactly `len(s1)` characters, so the window size is fixed, not variable. "Contiguous substring" makes it a window rather than a subsequence. And a permutation is entirely characterised by its character counts, so equality of two 26-slot tallies is the whole test. **Therefore.** Slide a window of exactly `len(s1)` over `s2`, adding the entering character and removing the leaving one, comparing counts at each stop. **Not generating the permutations of `s1`** and searching for each, which is the reflex answer and is `k!` candidates: `k = 10` already means 3.6 million searches for a problem that is one linear pass. **O(n)** time, **O(1)** space.
 
 #### Explanation
-A permutation of `s1` is any rearrangement, so the window only needs to contain the same character frequencies. Maintain a fixed-size window of length `len(s1)` over `s2` and a 26-element frequency array for the window. Compare it against `s1`'s frequency array at each position. Slide the window one step at a time: add the incoming character and remove the outgoing character. Comparing two 26-element arrays is `O(1)`, so the total cost is `O(|s2|)`. Edge case: if `s1` is longer than `s2`, no permutation can fit.
+**Brute force.** Sort `s1`, then sort every window of that length in `s2`.
+
+```python
+def checkInclusion(s1, s2):
+    k = len(s1)
+    target = sorted(s1)
+    for i in range(len(s2) - k + 1):
+        if sorted(s2[i:i + k]) == target:
+            return True
+    return False
+```
+
+`O(n * k log k)` time, `O(k)` space.
+
+**Wasteful because.** Consecutive windows differ in exactly two characters, one entering and one leaving, yet each is copied and re-sorted from scratch. Sorting also computes a total ordering when only the multiset matters, which is strictly more information than the question needs.
+
+**Optimal.** Replace the sort with a 26-slot count array, the canonical form of a multiset over a fixed alphabet. Build one for `s1` and one for the first window, then slide: one increment for the entering character and one decrement for the leaving one, both `O(1)`. Array equality over 26 fixed slots is constant work, so the whole scan is `O(|s2|)`. If you want each step to be genuinely constant rather than 26 comparisons, keep a `matches` counter of how many slots currently agree and adjust it only for the two slots that changed. At an alphabet of 26 that rarely shows up in a benchmark, but it is the answer when the interviewer asks whether you can do better.
+
+**Edge cases.** `len(s1) > len(s2)` returns false up front; without the guard, the seeding loop reads past the end of `s2`. Equal lengths leave exactly one window, so the problem reduces to a plain anagram check. Repeated letters in `s1` work because counts are compared, not sets: `s1 = "aab"` is not satisfied by a window holding one `a`.
 
 #### Python
 
@@ -3042,13 +3388,52 @@ Given strings `s` and `t`, return the minimum window substring of `s` that conta
 
 #### Examples
 
-TODO
+```text
+Input: s = "ADOBECODEBANC", t = "ABC"
+Output: "BANC"
+Explanation: the shortest window holding A, B and C.
+
+Input: s = "a", t = "a"
+Output: "a"
+
+Input: s = "a", t = "aa"
+Output: ""
+
+Constraints:
+- 1 <= s.length, t.length <= 10^5
+- s and t are upper and lower case English letters
+- the answer is unique when one exists
+```
 
 #### Recognition
-**Sliding window, shrink when valid.** **O(|s| + |t|)** time, **O(|t|)** space.
+**Signals.** "Minimum window" plus "contains all characters of `t`, including duplicates". Contains-all is a validity predicate that only gets easier as the window grows, and minimum means you want the tightest valid window, so the pattern is expand until valid, then shrink while still valid. "Including duplicates" says the state is counts, not a set of seen characters. **Therefore.** A `need` map of outstanding counts plus one scalar counting unfilled requirements, so validity is the test `missing == 0`. **Not comparing the two count maps for equality** at each step, which is the reflex and is simply wrong: a window holding three `A`s when `t` needs one is still valid, so equality rejects correct answers. The right test is per-character `>=`, and rescanning the alphabet to evaluate it turns every index into 52 comparisons over state that changed in one slot. **O(|s| + |t|)** time, **O(|t|)** space.
 
 #### Explanation
-A brute-force check of all substrings is `O(|s|² * |t|)`. The sliding window approach keeps a `need` map of required character counts and a `missing` counter. Expand the right pointer: decrement `need[c]`; if `need[c]` drops from 1 to 0 (a required character just became satisfied), decrement `missing`. When `missing == 0` the window is valid — record it if it's the shortest so far, then shrink from the left: increment `need[s[l]]` and if it returns above 0 (a required character is no longer satisfied) increment `missing`. Using `need[c] > 0` to detect "needed" rather than a separate set keeps the logic compact and handles duplicates in `t` naturally.
+**Brute force.** Check every substring against a count of `t`.
+
+```python
+from collections import Counter
+
+def minWindow(s, t):
+    need = Counter(t)
+    best = ""
+    for i in range(len(s)):
+        for j in range(i + 1, len(s) + 1):
+            have = Counter(s[i:j])
+            if all(have[c] >= need[c] for c in need):
+                if not best or j - i < len(best):
+                    best = s[i:j]
+                break
+    return best
+```
+
+`O(n³)` time in the worst case, `O(1)` space beyond the counters.
+
+**Wasteful because.** `Counter(s[i:j])` recounts a string that differs from the previous one by a single character, and restarting at each `i` discards a window already known to be valid. The same prefix is counted `n` times.
+
+**Optimal.** Keep one window and two numbers. `need[c]` starts at the required count for characters in `t` and drifts negative for surplus copies; `missing` starts at `len(t)` and counts required slots still unfilled. Expanding right always decrements `need[c]`, but decrements `missing` only when `need[c]` was still positive, which is exactly the tick where a genuinely required copy arrives, so surplus characters are ignored for free. When `missing` hits zero the window is valid, and the left pointer walks forward over every character whose `need` is negative, which is every removable surplus, until it rests on one the window cannot spare. That is the minimal window ending at this `r`. Record it, give one required character back, and continue. Every index enters and leaves once, so the sweep is `O(|s|)`.
+
+**Edge cases.** When no window exists the code returns `""`, detected by `end == 0`, which is safe because a valid window always has length at least 1. `t` longer than `s`, or `t` containing a character absent from `s`, both exit through that same path. `t = "aa"` against `s = "a"` is the case that fails if `need` holds a set instead of counts.
 
 #### Python
 
@@ -3203,13 +3588,48 @@ Given an integer array `nums` and an integer `k`, return an array of the maximum
 
 #### Examples
 
-TODO
+```text
+Input: nums = [1,3,-1,-3,5,3,6,7], k = 3
+Output: [3,3,5,5,6,7]
+Explanation: one maximum per window of width 3.
+
+Input: nums = [1], k = 1
+Output: [1]
+
+Input: nums = [7,2,4], k = 2
+Output: [7,4]
+
+Constraints:
+- 1 <= nums.length <= 10^5
+- -10^4 <= nums[i] <= 10^4
+- 1 <= k <= nums.length
+```
 
 #### Recognition
-**Monotonic decreasing deque (indices).** **O(n)** time, **O(k)** space.
+**Signals.** A fixed window width `k`, one extremum query per shift, and `n` up to `10^5` so the `O(n * k)` rescan is out at `k` near `n`. The structural tell is that elements leave the window in the order they entered, oldest first, while the query asks for a maximum: that pairing of FIFO eviction with an order statistic is what a monotonic deque exists for. **Therefore.** Hold indices in decreasing value order, pop dominated indices from the back, pop the expired index from the front, and read the front. **Not a max-heap** of `(value, index)` with lazy eviction of stale tops, which is correct and usually accepted, but costs `O(n log n)` and can hold all `n` entries at once, since a small value is only discarded when it happens to surface. The deque discards it the moment a larger later value appears, and never exceeds `k`. **O(n)** time, **O(k)** space.
 
 #### Explanation
-Checking the maximum of every window naively is `O(n * k)`. A monotonic deque stores indices in decreasing order of their values: before appending index `i`, pop all indices from the back whose values are less than or equal to `nums[i]` — they can never be a future window maximum while `i` is still in the window. Pop from the front when the front index falls outside the window (`dq[0] == i - k`). The front of the deque is always the index of the current window's maximum. Each index is added and removed at most once, giving `O(n)` total. Start emitting results once the first full window is formed (`i >= k - 1`).
+**Brute force.** Rescan each window for its maximum.
+
+```python
+def maxSlidingWindow(nums, k):
+    res = []
+    for i in range(len(nums) - k + 1):
+        best = nums[i]
+        for j in range(i + 1, i + k):
+            if nums[j] > best:
+                best = nums[j]
+        res.append(best)
+    return res
+```
+
+`O(n * k)` time, `O(1)` space beyond the output.
+
+**Wasteful because.** Adjacent windows share `k - 1` elements and the rescan re-examines all of them. Worse, it keeps consulting elements already known to be irrelevant: once a larger value appears to the right of a smaller one, the smaller can never be the maximum of any window containing both.
+
+**Optimal.** That last observation is the algorithm. Keep a deque of indices whose values decrease from front to back. Before pushing `i`, pop from the back every index whose value is `<= nums[i]`: each is dominated by a value that is both larger and later, so it is dead for every remaining window. Pop from the front when it expires, which the fixed width makes a single test, `dq[0] == i - k`. The front is then the current window's maximum by construction and is read in `O(1)`. Each index is pushed once and popped at most once, so although one step can pop many, total work is `O(n)` amortised.
+
+**Edge cases.** `k = 1` returns the input unchanged and the deque never holds more than one index. `k = len(nums)` yields a single entry, the global maximum. All-equal input relies on the `<=` in the pop test to keep the deque at length 1; with a strict `<` it stays correct but grows to `k`. Output starts only at `i >= k - 1`, giving `n - k + 1` entries.
 
 #### Python
 
@@ -3871,13 +4291,48 @@ Given an array `temperatures`, return an array `answer` where `answer[i]` is the
 
 #### Examples
 
-TODO
+```text
+Input: temperatures = [73,74,75,71,69,72,76,73]
+Output: [1,1,4,2,1,1,0,0]
+Explanation: day 2 (75) waits until day 6 (76), so 4.
+
+Input: temperatures = [30,40,50,60]
+Output: [1,1,1,0]
+
+Input: temperatures = [90,80,80,70]
+Output: [0,0,0,0]
+Explanation: never warmer, and 80 does not beat 80.
+
+Constraints:
+- 1 <= temperatures.length <= 10^5
+- 30 <= temperatures[i] <= 100
+```
 
 #### Recognition
-**Monotonic decreasing stack (indices).** **O(n)** time, **O(n)** space.
+**Signals.** "How many days **until** a warmer temperature" asks for a *distance* to the next qualifying element, not its value, so what you carry has to be indices rather than temperatures. "Next warmer" is next-greater-element phrasing, and the structural hint is that a cool day wedged between two warmer ones can never be anybody's answer once a warmer day passes it. **Therefore.** One left-to-right pass over a stack of indices whose temperatures are non-increasing: each new day resolves every waiting day it beats, recording `i - j`. **Not sort by temperature** and query a sorted set for the nearest later index, which is correct but costs `O(n log n)` plus a balanced-tree structure, where the stack answers the same queries for free in one pass. **Not a forward scan per day**, the `O(n^2)` baseline this exists to beat. **O(n)** time, **O(n)** space.
 
 #### Explanation
-For each day, the naive approach scans forward until a warmer day — `O(n²)` worst case. The monotonic stack processes each day at most twice (once pushed, once popped). Walk left to right: while the current temperature is greater than the temperature at the index on top of the stack, that top index has found its "next warmer day" — pop it and record the difference. Then push the current index. Indices remaining in the stack at the end have no warmer future day and stay 0 (the default). The stack stays in non-increasing temperature order, enforcing the monotonic property.
+**Brute force.** For each day, walk forward until a warmer day appears.
+
+```python
+def dailyTemperatures(temperatures):
+    n = len(temperatures)
+    res = [0] * n
+    for i in range(n):
+        for j in range(i + 1, n):
+            if temperatures[j] > temperatures[i]:
+                res[i] = j - i
+                break
+    return res
+```
+
+`O(n^2)` time, `O(1)` space.
+
+**Wasteful because.** Every scan re-walks the same run of cool days. Once day `j` is known to be cooler than day `k > j`, day `j` can never be the answer for anything to its left, yet each fresh scan from an earlier index steps over it again.
+
+**Optimal.** Keep a stack of the indices still waiting for an answer, ordered so their temperatures are non-increasing from bottom to top. When day `i` arrives, every waiting day it beats has just found its answer, so pop those and write `i - j`. Then push `i`, which is now the newest unanswered day and is no warmer than anything left beneath it, preserving the order. Indices still on the stack at the end never saw a warmer day and keep the `0` the result array was initialised with. The inner `while` looks nested but each index is pushed once and popped once, so the total work is `O(n)` amortised, and saying "amortised" out loud is the point of the exercise.
+
+**Edge cases.** A strictly decreasing input pops nothing until the end, so the stack holds all `n` indices and the `O(n)` space is real, not a bound you never hit. Equal temperatures must not resolve each other, which is why the comparison is strict `>`; `80` after `80` yields `0`. A single day returns `[0]`.
 
 #### Python
 
@@ -4121,13 +4576,48 @@ Given an array of bar heights in a histogram where each bar has width 1, return 
 
 #### Examples
 
-TODO
+```text
+Input: heights = [2,1,5,6,2,3]
+Output: 10
+Explanation: bars 5 and 6 give height 5 over width 2.
+
+Input: heights = [2,4]
+Output: 4
+
+Input: heights = [5,4,3,2,1]
+Output: 9
+Explanation: height 3 over the first three bars.
+
+Constraints:
+- 1 <= heights.length <= 10^5
+- 0 <= heights[i] <= 10^4
+```
 
 #### Recognition
-**Monotonic stack (increasing).** **O(n)** time, **O(n)** space.
+**Signals.** "Largest rectangle" over bars of width 1 means every candidate rectangle is pinned by a single number, the shortest bar inside it. So each bar anchors exactly one maximal rectangle, stretching left and right until it meets a strictly shorter bar, and the problem reduces to finding "previous smaller" and "next smaller" for every index. That pair of queries is the monotonic-stack fingerprint. **Therefore.** One pass with a stack of `(start, height)` in increasing height order; a shorter incoming bar evicts every taller entry and scores it with the current index as its right boundary. **Not two pointers** as in Container With Most Water: there you may discard the shorter wall because water only needs the two walls, but here every bar between the boundaries caps the height, so a short interior bar invalidates the move. **Not divide and conquer** on the minimum bar, which degrades to `O(n^2)` on an already-sorted histogram unless you bolt on a range-minimum structure. **O(n)** time, **O(n)** space.
 
 #### Explanation
-The brute-force approach tries every pair of left and right boundaries — `O(n²)`. The monotonic stack insight: a bar at height `h` can extend leftward only as long as bars to its left are at least as tall. Maintain a stack of `(start_index, height)` pairs in increasing height order. When you encounter a bar shorter than the stack top, pop bars that can no longer extend rightward — compute their rectangle using the current index as the right boundary, and carry their start index leftward for the new (shorter) bar. After the loop, every remaining bar in the stack extends to the end of the array. The `start` variable tracks how far left the current bar's rectangle can reach.
+**Brute force.** Fix a left edge, extend right, tracking the running minimum height.
+
+```python
+def largestRectangleArea(heights):
+    n = len(heights)
+    res = 0
+    for i in range(n):
+        h = heights[i]
+        for j in range(i, n):
+            h = min(h, heights[j])
+            res = max(res, h * (j - i + 1))
+    return res
+```
+
+`O(n^2)` time, `O(1)` space.
+
+**Wasteful because.** The double loop rediscovers, once per left edge, the same fact about each bar: where the first strictly shorter bar to its left and right sits. Those two boundaries are properties of the bar alone, not of the pair, so computing them `n` times is the whole overhead.
+
+**Optimal.** Score each bar once, as the shortest bar in its own rectangle. Push bars while heights rise, keeping the stack in increasing height order. When a shorter bar arrives at index `i`, every taller entry has just met its right boundary, so pop it and score `height * (i - start)`. The incoming bar inherits the `start` of the last entry it evicted, because it can stretch back over everything shorter-than-it just removed. Entries surviving the loop never met a shorter bar on the right, so a second pass scores them out to `n`. Each index is pushed and popped at most once, which is why the nested-looking `while` still totals `O(n)`.
+
+**Edge cases.** A strictly increasing input pops nothing during the loop, so the entire answer comes from the post-loop drain, which is the part that is easy to forget. Equal heights push separate entries rather than popping, and the deeper one carries the earlier `start`, so the full width is still scored. Zero-height bars are legal and simply flush everything taller while contributing area 0.
 
 #### Python
 
@@ -4274,13 +4764,43 @@ Given a sorted array of integers and a target value, return the index of the tar
 
 #### Examples
 
-TODO
+```text
+Input: nums = [-1,0,3,5,9,12], target = 9
+Output: 4
+
+Input: nums = [-1,0,3,5,9,12], target = 2
+Output: -1
+
+Input: nums = [5], target = -5
+Output: -1
+
+Constraints:
+- 1 <= nums.length <= 10^4
+- -10^4 < nums[i], target < 10^4
+- nums is sorted ascending, all values distinct
+```
 
 #### Recognition
-**Binary search.** **O(log n)** time, **O(1)** space.
+**Signals.** Three phrases decide this before you write anything: "sorted array", "return the index", and an explicit `O(log n)` requirement in the statement. Sorted plus a log-time demand is the halving signal, and "return the index" tells you the array itself is the search space rather than some derived quantity. **Therefore.** The textbook template: hold a closed candidate range `[l, r]`, compare the middle, and discard the half the ordering rules out. **Not a hash map** from value to index, which does answer lookups in `O(1)` but needs an `O(n)` pass and `O(n)` memory to build, so for one query it is strictly worse than an `O(log n)` search that allocates nothing. Build one only if you must answer many queries against the same fixed array. **Not a linear scan**, the `O(n)` baseline that ignores the single structural fact you were handed. **O(log n)** time, **O(1)** space.
 
 #### Explanation
-A linear scan finds the target in `O(n)` time. Binary search exploits the sorted order: at every step, compare the middle element to the target. If it matches, return the index; if the middle is less than the target, the target must be in the right half — advance `l`; if greater, search the left half — retreat `r`. The loop invariant `l <= r` ensures we don't skip a single-element range. Computing the midpoint as `l + (r - l) // 2` avoids integer overflow: `(l + r)` can exceed the maximum value in a fixed-width integer language even when both indices are valid, whereas `(r - l)` is bounded by the array length. Python integers are arbitrary-precision so `(l + r) // 2` is safe there, but the subtraction form is the habit worth keeping. Edge cases: empty array (returns -1 immediately), duplicate values (any match is acceptable), single element.
+**Brute force.** Walk the array and compare each element.
+
+```python
+def search(nums, target):
+    for i, n in enumerate(nums):
+        if n == target:
+            return i
+    return -1
+```
+
+`O(n)` time, `O(1)` space.
+
+**Wasteful because.** Each comparison throws away everything it just learned. In sorted data, `nums[i] < target` rules out index `i` *and every index left of it* in one shot; the scan uses that comparison to eliminate exactly one candidate.
+
+**Optimal.** Keep `[l, r]` as the closed range that could still hold the target. Compare `nums[m]` at the middle: equal ends it, less means the target sits strictly right of `m` so `l = m + 1`, greater means `r = m - 1`. Every iteration halves the range, so the loop runs at most `ceil(log2 n)` times. The condition is `l <= r`, not `l < r`, because a one-element range is still a live candidate and `<` would skip it. Compute the midpoint as `l + (r - l) // 2` rather than `(l + r) // 2`: in a fixed-width integer language `l + r` can overflow when both indices are large and perfectly valid, whereas `r - l` is bounded by the array length and cannot. Python integers are arbitrary precision so both forms are safe here, but the subtraction form is the habit worth carrying, and it is what the Java, Rust, Go and C++ versions below use.
+
+**Edge cases.** A target below everything drives `r` to `-1` and exits; a target above everything drives `l` past `r`. Both fall out to the same `-1` with no special branch. A single-element array is handled by the `<=`. An empty array would start with `r = -1`, so the loop body never runs, though the constraints here rule it out.
 
 #### Python
 
@@ -4509,13 +5029,48 @@ Given `n` piles of bananas and `h` hours, find the minimum eating speed `k` (ban
 
 #### Examples
 
-TODO
+```text
+Input: piles = [3,6,7,11], h = 8
+Output: 4
+
+Input: piles = [30,11,23,4,20], h = 5
+Output: 30
+Explanation: h equals the pile count, so one pile per
+hour, so k must reach the largest pile.
+
+Input: piles = [1,4,3,2], h = 9
+Output: 2
+Explanation: speed 1 needs 10 hours; speed 2 needs 6.
+
+Constraints:
+- 1 <= piles.length <= 10^4
+- piles.length <= h <= 10^9
+- 1 <= piles[i] <= 10^9
+```
 
 #### Recognition
-**Binary search on answer.** **O(n log m)** time, **O(1)** space (where `m = max(piles)`).
+**Signals.** The array is never sorted and sorting it would change nothing, since the total hours sums over all piles regardless of order. The ask is "the **minimum** `k` such that" a condition holds, and the bounds pair a tiny `n` (`10^4`) with an enormous value range (`piles[i]` up to `10^9`). A "minimum such that" objective over a huge numeric range, with a check that is cheap to run for any single candidate, is the binary-search-on-the-answer fingerprint: the thing with sorted structure is the answer axis, not the input. **Therefore.** Search `k` over `[1, max(piles)]` under the predicate `can_finish(k) = sum(ceil(p / k)) <= h`, which is monotone because a faster Koko is never slower. **Not a linear scan over candidate speeds**, which is correct but tests `k = 1, 2, 3, ...` up toward `10^9` where 30 probes suffice. Writing `m` for `max(piles)`: **O(n log m)** time, **O(1)** space.
 
 #### Explanation
-The answer lies somewhere in `[1, max(piles)]`: speed 1 is the slowest possible; at speed `max(piles)` each pile is finished in one hour. The feasibility function — "can Koko finish at speed `k`?" — is monotone: if `k` works, any larger speed also works. That monotonicity makes binary search applicable. For a given speed `k`, the hours needed for a pile `p` is `ceil(p / k)`, computed without floating point as `(p + k - 1) // k`. Binary search finds the smallest `k` where total hours ≤ `h`. Using the strict `l < r` loop with `r = m` (not `m - 1`) on success ensures convergence to the minimum valid speed. Edge case: if `h >= len(piles)`, speed 1 may still not work if a single pile is very large — the binary search handles this correctly.
+**Brute force.** Try every speed from 1 upward and return the first that fits.
+
+```python
+def minEatingSpeed(piles, h):
+    for k in range(1, max(piles) + 1):
+        hours = 0
+        for p in piles:
+            hours += (p + k - 1) // k
+        if hours <= h:
+            return k
+```
+
+`O(n * m)` time, `O(1)` space, with `m = max(piles)`.
+
+**Wasteful because.** Every failed candidate costs a full `O(n)` pass to learn one bit, "too slow", and that bit was already implied by the previous failure. The predicate is monotone: once a speed finishes in time, so does every larger speed, so the sequence of answers is `False, False, ..., False, True, True, ...`.
+
+**Optimal.** That shape is a sorted boolean array, so binary search it. The recognition leap is that you are not searching `piles`, you are searching the answer axis `[1, max(piles)]`, where speed 1 is the slowest legal speed and `max(piles)` always works whenever `h >= len(piles)`. Each probe evaluates the predicate in one `O(n)` pass, and the range collapses in about `log2(10^9)`, roughly 30 probes. Use `while l < r` with `r = m` on success and `l = m + 1` on failure: that converges on the *smallest* feasible speed rather than any feasible one, and on exit `l == r` is the answer. Write `ceil(p / k)` as `(p + k - 1) // k` to stay in integers, since float division loses precision at `10^9`.
+
+**Edge cases.** A feasible speed always exists inside the range, so no not-found branch is needed. When `h` equals the pile count every pile gets exactly one hour and the answer is `max(piles)`, the top of the range. `k` starts at 1, never 0, so nothing divides by zero. A single huge pile with a huge `h` collapses to speed 1 on the first probes.
 
 #### Python
 
@@ -4729,13 +5284,44 @@ Given a sorted array of unique integers rotated at an unknown pivot, search for 
 
 #### Examples
 
-TODO
+```text
+Input: nums = [4,5,6,7,0,1,2], target = 0
+Output: 4
+
+Input: nums = [4,5,6,7,0,1,2], target = 3
+Output: -1
+
+Input: nums = [1], target = 0
+Output: -1
+
+Constraints:
+- 1 <= nums.length <= 5000
+- -10^4 <= nums[i], target <= 10^4
+- all values are distinct
+- nums is an ascending array rotated once
+```
 
 #### Recognition
-**Binary search (determine which half is sorted).** **O(log n)** time, **O(1)** space.
+**Signals.** "Sorted" and "rotated at an unknown pivot" together say the order is broken in exactly one place, not scrambled. The statement then demands `O(log n)` outright, which forbids both the scan and any pass that rebuilds the ordering. One break point plus a halving requirement is the whole setup: wherever you cut, the pivot lands on one side only, so the other side is a clean ascending run whose endpoints you can read off directly. **Therefore.** Binary search, but each step first identifies the sorted half with a single comparison of `nums[l]` to `nums[m]`, then tests whether the target lies inside that half's known range, going there or into its complement. **Not a plain binary search**, which assumes global order and fails concretely: on `[4,5,6,7,0,1,2]` with `target = 1`, the middle is `7 > 1` so it turns left and never reaches the `1`. **O(log n)** time, **O(1)** space.
 
 #### Explanation
-The rotation means the array has two sorted subarrays joined at a pivot. At each binary search step, one of the two halves — `[l, mid]` or `[mid, r]` — must be fully sorted. Determine which: if `nums[l] <= nums[mid]`, the left half is sorted. Check whether the target falls within that sorted range; if yes, search left, otherwise search right. Otherwise the right half is sorted — apply the same logic. This two-case analysis narrows the search space by half each iteration, preserving `O(log n)`. Edge case: the condition `nums[l] <= nums[m]` uses `<=` to handle the case where `l == m` (single element in left half).
+**Brute force.** Ignore the ordering and scan.
+
+```python
+def search(nums, target):
+    for i, n in enumerate(nums):
+        if n == target:
+            return i
+    return -1
+```
+
+`O(n)` time, `O(1)` space.
+
+**Wasteful because.** Each comparison eliminates one index. Rotation looks like it destroys the order that would let a comparison eliminate half, but it only moves the break to a single point, so nearly all of that order survives and the scan discards it.
+
+**Optimal.** Cut anywhere at `m`. The pivot, the one place where the order breaks, lies on exactly one side of the cut, so the other side is a clean ascending run. Which one costs a single comparison: if `nums[l] <= nums[m]` the left side never wrapped, so `[l, m]` is sorted; otherwise `[m, r]` is. Because you know both endpoints of the sorted side, `nums[l] <= target < nums[m]` settles membership exactly. If the target is inside, recurse into that side; if not, it can only be in the other one. Either branch halves the range, so the log-time bound survives the broken total order. The comparison is `<=` rather than `<` so that `l == m`, a one-element left half, counts as sorted.
+
+**Edge cases.** A rotation of zero leaves the array plainly sorted, `nums[l] <= nums[m]` is always true, and the code degrades into an ordinary binary search. A single element is decided by the first comparison. Duplicates would break the invariant, since `nums[l] == nums[m]` no longer proves the left is sorted, and force an `O(n)` worst case; this problem guarantees distinct values, LeetCode 81 does not.
 
 #### Python
 
@@ -5058,13 +5644,49 @@ Given the head of a singly linked list, reverse it in-place and return the new h
 
 #### Examples
 
-TODO
+```text
+Input: head = [1,2,3,4,5]
+Output: [5,4,3,2,1]
+
+Input: head = [1,2]
+Output: [2,1]
+
+Input: head = [1]
+Output: [1]
+
+Constraints:
+- 0 <= number of nodes <= 5000
+- -5000 <= Node.val <= 5000
+- must run in O(1) extra space
+```
 
 #### Recognition
-**Iterative pointer reversal.** **O(n)** time, **O(1)** space.
+**Signals.** The input is a `head` pointer, not an array, so there is no random access and no index arithmetic available. "Return the new head" says the head moves, so the caller's handle becomes the tail and you cannot keep using it. The classic follow-up asking for both an iterative and a recursive version is the tell that the interviewer cares about stack space, not elegance. **Therefore.** Three-pointer in-place reversal: `prev` starts at `None`, and for each node you save `nxt = curr.next` *before* writing `curr.next = prev`, then advance both. **Not copying the values into a list** and writing them back reversed, which is `O(n)` extra space and sidesteps the pointer surgery the question exists to test. **Not the recursive version** as your only answer, since it costs `O(n)` stack frames to do what one loop does in `O(1)`. **O(n)** time, **O(1)** space.
 
 #### Explanation
-A recursive approach reverses elegantly but uses `O(n)` stack space. The iterative approach uses three pointers: `prev` (initially `None`), `curr` (the current node), and a temporary `nxt`. At each step, save `curr.next` before overwriting it, redirect `curr.next` to `prev`, then advance both `prev` and `curr` forward. When `curr` becomes `None`, `prev` points to the new head. Edge case: an empty list or single-node list is handled correctly because the loop never executes (or executes once), returning `prev = head` unchanged.
+**Brute force.** Copy the values out, then write them back in reverse.
+
+```python
+def reverseList(head):
+    vals = []
+    node = head
+    while node:
+        vals.append(node.val)
+        node = node.next
+    node = head
+    for v in reversed(vals):
+        node.val = v
+        node = node.next
+    return head
+```
+
+`O(n)` time, `O(n)` space.
+
+**Wasteful because.** The list already holds every value; only the arrows point the wrong way. Moving `n` integers through a buffer to avoid rewriting `n` pointers is the same amount of work plus the buffer.
+
+**Optimal.** Reverse the arrows in place. Walk `curr` down the list while `prev` holds the head of the already-reversed prefix, starting at `None` so the original head naturally ends up as the new tail with a null `next`. The one ordering rule that matters: `curr.next` is your only route to the unvisited remainder, so save it in `nxt` before overwriting it with `prev`. Swap those two lines and the rest of the list becomes unreachable, which is the bug this problem is really testing for. Then advance `prev = curr` and `curr = nxt`. When `curr` reaches `None` every node has been rewired and `prev` is the new head.
+
+**Edge cases.** An empty list runs the loop zero times and returns `prev`, which is already `None`, so no guard clause is needed. A single node runs once, sets its `next` to `None`, and returns the same node. The old head becoming a proper tail comes free from initialising `prev` to `None` rather than to `head`.
 
 #### Python
 
@@ -5177,13 +5799,50 @@ Given the heads of two sorted linked lists, merge them into a single sorted link
 
 #### Examples
 
-TODO
+```text
+Input: l1 = [1,2,4], l2 = [1,3,4]
+Output: [1,1,2,3,4,4]
+
+Input: l1 = [], l2 = [0]
+Output: [0]
+
+Input: l1 = [5], l2 = [1,2,3]
+Output: [1,2,3,5]
+
+Constraints:
+- 0 <= length of each list <= 50
+- -100 <= node value <= 100
+- both lists are already sorted non-decreasing
+```
 
 #### Recognition
-**Iterative merge with dummy head.** **O(n + m)** time, **O(1)** space.
+**Signals.** "The heads of two *sorted* linked lists" plus "return its head" gives you three tells. The inputs are already ordered, so no two elements of the same list ever need comparing. The output is a list of nodes, not values, so you can relink what you were handed instead of allocating anything. And the returned head may come from either input, which is the standard cue for a dummy sentinel. **Therefore.** Walk both lists with a tail pointer, always splicing on whichever front node is smaller, then attach the surviving remainder in one move. **Not concatenate and sort**, which throws away the ordering you were given and pays `O((n + m) log(n + m))` to rediscover it, plus a full second copy. **Not a min-heap**, which is correct but pointless at `k = 2`: a heap of two items is a single comparison wearing a costume. **O(n + m)** time, **O(1)** space.
 
 #### Explanation
-This mirrors the merge step of merge sort. A dummy head node eliminates the special case of initializing the result's first node — you always append to `curr.next` and advance `curr`. At each step, compare the front nodes of both lists and attach the smaller one. When one list is exhausted, `curr.next = l1 or l2` attaches the remaining non-empty list in one shot, since it's already sorted. Edge cases: one or both lists empty (handled by the loop condition and the final tail attachment).
+**Brute force.** Copy every value out, sort it, build a fresh list.
+
+```python
+def mergeTwoLists(l1, l2):
+    vals = []
+    for node in (l1, l2):
+        while node:
+            vals.append(node.val)
+            node = node.next
+    vals.sort()
+    dummy = curr = ListNode()
+    for v in vals:
+        curr.next = ListNode(v)
+        curr = curr.next
+    return dummy.next
+```
+
+`O((n + m) log(n + m))` time, `O(n + m)` space.
+
+**Wasteful because.** The sort compares pairs that were never out of order: every element of `l1` already sits correctly relative to the rest of `l1`. Half the information in the input is discarded and then paid for again. It also allocates a duplicate of every node you were already holding.
+
+**Optimal.** The only comparison that can matter is between the two front nodes, because everything behind a front node is at least as large as it. So keep a tail pointer, compare the two heads, splice the smaller one on, and advance that list. When one list runs out, the other is a sorted suffix entirely larger than what you have emitted, so it attaches whole in `O(1)` rather than node by node. A dummy node in front of the result deletes the "is this the first node?" branch, which is where the off-by-one bugs live: you always write `curr.next`. Using `<=` rather than `<` keeps equal values in `l1`-before-`l2` order, which matters when the nodes carry a payload.
+
+**Edge cases.** Either list empty, or both: the loop never runs and the tail attach returns the other list or `None`. Equal values at the two fronts. One list entirely smaller than the other, where the loop drains it and the tail attach does all the rest.
 
 #### Python
 
@@ -5792,13 +6451,51 @@ Given the head of a linked list, return `true` if the list has a cycle (some nod
 
 #### Examples
 
-TODO
+```text
+Input: head = [3,2,0,-4]
+Output: false
+Explanation: written as an array the list simply ends.
+LeetCode's own case relinks the tail to index 1, and
+that wiring is what makes the answer true.
+
+Input: head = [1,2]
+Output: false
+
+Input: head = []
+Output: false
+
+Constraints:
+- 0 <= number of nodes <= 10^4
+- -10^5 <= node value <= 10^5
+- a cycle is made by relinking the tail to an earlier
+  node, which a plain JSON array cannot express
+```
 
 #### Recognition
-**Floyd's cycle detection (fast/slow pointers).** **O(n)** time, **O(1)** space.
+**Signals.** A bare `head` pointer, the word "cycle", and the follow-up asking for `O(1)` memory. A linked list gives you no random access, no length, and no index, so the only move available is to walk it. The space bound is what forbids the obvious visited-set. "Cycle" also means the walk may never terminate on its own, so whatever you write needs its own termination argument. **Therefore.** Two pointers over the same list, `slow` one node per step and `fast` two. If a cycle exists, `fast` gains exactly one position on `slow` per step, so inside a cycle of length `L` it closes any gap within `L` steps and they coincide; if not, `fast` or `fast.next` reaches `None`. **Not a hash set** of visited node identities, which is correct and shorter to write but costs `O(n)` space, which is the exact thing the follow-up exists to take away. **O(n)** time, **O(1)** space.
 
 #### Explanation
-The simple approach stores visited nodes in a hash set — `O(n)` space. Floyd's algorithm uses two pointers: `slow` advances one step at a time, `fast` advances two. If there is a cycle, `fast` laps `slow` and they meet inside the cycle; if there is no cycle, `fast` reaches `None`. The loop condition `while fast and fast.next` ensures we don't dereference a null pointer when advancing `fast` two steps. The meeting of the two pointers is guaranteed because in each iteration the gap between them decreases by exactly one (modulo cycle length).
+**Brute force.** Remember every node you have already stood on.
+
+```python
+def hasCycle(head):
+    seen = set()
+    node = head
+    while node:
+        if id(node) in seen:
+            return True
+        seen.add(id(node))
+        node = node.next
+    return False
+```
+
+`O(n)` time, `O(n)` space.
+
+**Wasteful because.** Nothing is recomputed here; the cost is pure storage. The set grows to `n` node references in order to answer one bit of output, and it stores identities you will never look at again once the walk moves past them. That is the waste the `O(1)` follow-up is aimed at.
+
+**Optimal.** Trade memory for relative speed. Run both pointers from `head`, advancing `slow` one node and `fast` two. Their separation, measured forward along the walk, grows by exactly one per step, and inside a cycle of length `L` that separation is taken modulo `L`, so it must hit zero within `L` steps. No cycle can be missed and none can be invented, since on an acyclic list `fast` falls off the end first. The guard is `while fast and fast.next` rather than `while fast` because a two-node hop dereferences twice. Compare after the move, never before, or both pointers sitting on `head` at step zero report a cycle that is not there. Keep the set version when the answer needed is more than one bit, for instance which node repeated.
+
+**Edge cases.** Empty list: `fast` is `None`, the loop never runs, false. A single node with `next = None`: false on the same guard. A single node pointing at itself: both pointers land back on it in one step, true.
 
 #### Python
 
@@ -5916,13 +6613,44 @@ Given an array of `n + 1` integers where each integer is in `[1, n]`, find the o
 
 #### Examples
 
-TODO
+```text
+Input: nums = [1,3,4,2,2]
+Output: 2
+
+Input: nums = [3,1,3,4,2]
+Output: 3
+
+Input: nums = [3,3,3,3,3]
+Output: 3
+
+Constraints:
+- 1 <= n <= 10^5 and nums.length == n + 1
+- 1 <= nums[i] <= n
+- exactly one value repeats, one or more times
+- the array must not be modified, O(1) extra space
+```
 
 #### Recognition
-**Floyd's cycle detection (array as implicit linked list).** **O(n)** time, **O(1)** space.
+**Signals.** Three clauses that only ever show up together for one reason: `n + 1` integers each in `[1, n]`, "without modifying the array", and `O(1)` extra space. The range clause is the load-bearing one, because every value is a legal index into the same array, which makes `i -> nums[i]` a function from the array into itself. The no-modify clause kills index marking, where you negate `nums[v - 1]` to record a visit, and kills cyclic sort. The space clause kills a set or a count array. That pairing leaves essentially one technique. **Therefore.** Read `nums` as an implicit linked list whose next pointer at `i` is `nums[i]`. Pigeonhole forces a repeat, a repeat means two indices share a successor, and that is a cycle whose entrance is the duplicate, so Floyd's two phases find it. **Not sorting** and scanning for adjacent equals, which modifies the array and costs `O(n log n)`. **O(n)** time, **O(1)** space.
 
 #### Explanation
-Think of the array as a function `f(i) = nums[i]`; since values are in `[1, n]` they act as indices into the same array, forming an implicit linked list. The duplicate means two indices point to the same "next" node, creating a cycle. Phase 1: run slow/fast pointers (`slow = nums[slow]`, `fast = nums[nums[fast]]`) until they meet inside the cycle. Phase 2: reset one pointer to `nums[0]` (the "start") and advance both by one step at a time; they meet at the cycle entrance, which is the duplicate. This works because of Floyd's mathematical guarantee that the entrance distance from the start equals the distance from the meeting point. Sorting-based (`O(n log n)`) or set-based (`O(n)` space) solutions are both inferior.
+**Brute force.** Compare every pair.
+
+```python
+def findDuplicate(nums):
+    for i in range(len(nums)):
+        for j in range(i + 1, len(nums)):
+            if nums[i] == nums[j]:
+                return nums[i]
+```
+
+`O(n^2)` time, `O(1)` space.
+
+**Wasteful because.** For each `i` the inner loop re-walks the entire suffix to ask "does this value appear again?", so the same suffix is traversed `n` times. A hash set answers that question in one pass instead, but it buys the speedup with `O(n)` space, which the problem has already ruled out.
+
+**Optimal.** Follow the pointers instead of comparing values. Start both cursors at `nums[0]` and advance `slow` by one hop and `fast` by two until they meet, which they must, because the walk is confined to a finite set and index 0 is never a target: values are at least 1, so nothing points back to the start, and the cycle entrance therefore sits strictly inside. Phase 2 resets one cursor to `nums[0]` and advances both one hop at a time; the distance from the start to the entrance equals the distance from the meeting point to the entrance, so they collide exactly at the entrance, and that index is the repeated value. Nothing is written, so the no-modify rule holds. If the cycle argument deserts you under pressure, binary search on the *value* (count how many entries are `<= mid`) is a safe `O(n log n)` fallback obeying both constraints.
+
+**Edge cases.** A value repeated more than twice, as in `[3,3,3,3,3]`, still yields one cycle with the same entrance. The smallest case `nums = [1,1]` terminates on the first phase-1 step. Values are guaranteed inside `[1, n]`, so `nums[nums[fast]]` never needs a bounds check.
 
 #### Python
 
@@ -6037,13 +6765,61 @@ Design a data structure that supports `get(key)` and `put(key, value)` in `O(1)`
 
 #### Examples
 
-TODO
+```text
+Input: ["LRUCache","put","put","get","put","get",
+"put","get","get","get"],
+[[2],[1,1],[2,2],[1],[3,3],[2],[4,4],[1],[3],[4]]
+Output: [null,null,null,1,null,-1,null,-1,3,4]
+
+Input: ["LRUCache","put","put","get","get"],
+[[1],[1,1],[2,2],[1],[2]]
+Output: [null,null,null,-1,2]
+
+Input: ["LRUCache","put","put","get"],
+[[2],[2,1],[2,3],[2]]
+Output: [null,null,null,3]
+
+Constraints:
+- 1 <= capacity <= 3000
+- 0 <= key <= 10^4, 0 <= value <= 10^5
+- up to 2 * 10^5 calls to get and put combined
+- get returns -1 when the key is absent
+```
 
 #### Recognition
-**Hashmap + doubly linked list.** **O(1)** get/put.
+**Signals.** The word "design", an explicit `O(1)` bound on *both* `get` and `put`, and an eviction rule that depends on a recency *ordering* which changes on every single access, reads included. Those requirements pull in opposite directions: `O(1)` lookup by key is a hash map, and `O(1)` "which entry is oldest, and promote this one to newest" is a linked list. Neither structure does both, and the `O(1)` bound is what stops you settling for one of them. **Therefore.** Run both over the same nodes: a hash map from key to a node *reference*, and a doubly linked list holding those nodes in recency order with a sentinel at each end. **Not an array or list of keys in access order**, where promoting a key costs an `O(n)` search plus an `O(n)` shift, which is the version that quietly makes every operation linear. **O(1)** time, **O(capacity)** space.
 
 #### Explanation
-A hashmap alone gives `O(1)` access but can't efficiently track usage order. A doubly linked list alone tracks order in `O(1)` but doesn't support `O(1)` lookup. Combining them: the hashmap maps keys to list nodes (giving `O(1)` find), while the list maintains recency order (MRU at the right, LRU at the left) with `O(1)` remove-and-reinsert. Two sentinel nodes (left/right dummies) eliminate all edge cases for empty or single-element lists — you never check for null neighbors. On `get`, move the node to the MRU end. On `put`, if the key exists, update its value and move it to MRU; if new and over capacity, remove the LRU node (left sentinel's neighbor) and delete it from the hashmap.
+**Brute force.** A dict for the values, plus a plain list holding the keys oldest-first.
+
+```python
+class LRUCache:
+    def __init__(self, capacity):
+        self.cap = capacity
+        self.data = {}
+        self.order = []
+    def get(self, key):
+        if key not in self.data:
+            return -1
+        self.order.remove(key)
+        self.order.append(key)
+        return self.data[key]
+    def put(self, key, value):
+        if key in self.data:
+            self.order.remove(key)
+        elif len(self.data) >= self.cap:
+            del self.data[self.order.pop(0)]
+        self.data[key] = value
+        self.order.append(key)
+```
+
+`O(n)` per operation, `O(capacity)` space.
+
+**Wasteful because.** `order.remove(key)` scans the list to find where the key currently sits, and `order.pop(0)` shifts every surviving element down one slot. Both are `O(n)`, so a 3000-entry cache does thousands of moves on a hit that should have cost four pointer writes. The position of a key is rediscovered on every touch even though the map was already holding the key.
+
+**Optimal.** Store the position rather than searching for it. Every entry becomes a node in a doubly linked list ordered least-recent to most-recent, and the hash map maps the key to that node instead of to the value. Now "find the key" is a dict lookup, and "promote it" is unlinking it from its two neighbours and relinking it before the tail. Unlinking needs the node's *predecessor* in `O(1)`, which is the entire reason the list must be doubly linked rather than singly. Two sentinel nodes at the ends mean no insertion or removal ever inspects a null neighbour, so both helpers are branch-free. Eviction reads the node just after the left sentinel, and deletes `node.key` from the map, which is why each node has to carry its own key: without it you would have to scan the map to find what to delete.
+
+**Edge cases.** Capacity 1, where any new key evicts on the very next `put`. Re-putting an existing key must refresh recency without growing the cache, so the size check belongs on the else branch. A `get` miss returns -1 and must leave the ordering untouched.
 
 #### Python
 
@@ -6288,13 +7064,54 @@ Given an array of `k` sorted linked lists, merge all of them into one sorted lin
 
 #### Examples
 
-TODO
+```text
+Input: lists = [[1,4,5],[1,3,4],[2,6]]
+Output: [1,1,2,3,4,4,5,6]
+
+Input: lists = [[],[0],[]]
+Output: [0]
+
+Input: lists = [[1],[1],[1]]
+Output: [1,1,1]
+
+Constraints:
+- 0 <= k <= 10^4 and 0 <= total nodes <= 10^4
+- 0 <= length of each list <= 500
+- -10^4 <= node value <= 10^4
+- each list is already sorted non-decreasing
+```
 
 #### Recognition
-**Min-heap (priority queue).** **O(n log k)** time, **O(k)** space (where `n` = total nodes).
+**Signals.** "An array of `k` sorted linked lists" and a single merged output. Because each list is sorted, the global minimum is always sitting at one of the `k` heads and never deeper, so the whole problem reduces to "repeatedly take the smallest of `k` candidates, then replace it". That sentence is the definition of a priority queue. The second tell is that `k` and the total node count `n` are given as separate quantities, which is how a problem hints that `k` belongs inside a logarithm rather than as a multiplier. **Therefore.** Push all `k` heads into a min-heap, then pop the smallest, append it to the tail, and push that node's successor. **Not rescanning all `k` heads** on every step to find the minimum, which is `O(n * k)` and redoes `k - 1` comparisons whose answers did not change since the last pop. **O(n log k)** time, **O(k)** space.
 
 #### Explanation
-Merging `k` lists naively by repeatedly scanning all `k` front nodes costs `O(n * k)`. A min-heap always gives the globally smallest front node in `O(log k)`. Initialize the heap with each list's head node; pop the minimum, append it to the result, and push its successor (if any). The tie-breaking index `i` prevents the heap from comparing `ListNode` objects directly when two values are equal. Total work: `n` pops and up to `n` pushes, each `O(log k)` — giving `O(n log k)` overall. Edge cases: empty list of lists, or individual lists that are `None`.
+**Brute force.** Fold the lists into a running result, one pairwise merge at a time.
+
+```python
+def mergeKLists(lists):
+    def merge(a, b):
+        dummy = curr = ListNode()
+        while a and b:
+            if a.val <= b.val:
+                curr.next, a = a, a.next
+            else:
+                curr.next, b = b, b.next
+            curr = curr.next
+        curr.next = a or b
+        return dummy.next
+    res = None
+    for node in lists:
+        res = merge(res, node)
+    return res
+```
+
+`O(n * k)` time, `O(1)` space.
+
+**Wasteful because.** Each merge re-walks everything accumulated so far. After `j` folds the result already holds roughly `j * n / k` nodes and every one of them is compared again in fold `j + 1`, so the first list is traversed `k` times, the second `k - 1` times, and so on. The pairwise merge itself is fine; doing it left to right is what makes the total quadratic in `k`.
+
+**Optimal.** Hold only the `k` current front nodes and let a heap answer "which is smallest" in `O(log k)` instead of `O(k)`. Seed it with every non-null head, then pop, splice the popped node onto the tail, and push its successor if it has one. Each of the `n` nodes is pushed and popped exactly once against a heap that never exceeds size `k`, giving `O(n log k)` time and `O(k)` space. Divide and conquer reaches the same bound by merging lists pairwise in rounds, halving `k` each round, and it wins when a priority queue is unavailable or comparisons are expensive, since it needs no auxiliary structure. In Python the heap entries are `(val, i, node)` triples and the index is load-bearing: it settles ties before the comparison can reach the `ListNode`, which defines no ordering and would raise.
+
+**Edge cases.** `lists` empty, so the heap never fills and the dummy's `next` stays `None`. `lists` containing empty lists, filtered at seed time by the `if node` guard rather than inside the pop loop. Every head carrying the same value, which is the case that exercises the tie-breaker and crashes any implementation that pushed bare nodes.
 
 #### Python
 
@@ -6749,17 +7566,55 @@ TreeNode* invertTree(TreeNode* root) {
 ### 50. Maximum Depth of Binary Tree
 
 #### Problem
-Given the root of a binary tree, return its maximum depth — the number of nodes along the longest path from root to leaf.
+Given the root of a binary tree, return its maximum depth: the number of nodes along the longest path from root to leaf.
 
 #### Examples
 
-TODO
+```text
+Input: root = [3,9,20,null,null,15,7]
+Output: 3
+
+Input: root = [1,null,2]
+Output: 2
+
+Input: root = []
+Output: 0
+
+Constraints:
+- 0 <= number of nodes <= 10^4
+- -100 <= node value <= 100
+- depth counts nodes on the path, not edges
+```
 
 #### Recognition
-**DFS (recursive).** **O(n)** time, **O(h)** space.
+**Signals.** A `TreeNode` root, and a quantity whose value at any node is fully determined by the same quantity at its two children: the depth below a node is one more than the deeper of its subtrees. That self-similarity is the tell, and it points at bottom-up recursion specifically, because nothing has to be passed *down* and everything is returned *up*. The second signal is negative: there is no pruning available, since the deeper side could be either one, so every node must be visited and `O(n)` is the floor rather than a compromise. **Therefore.** Postorder recursion, with `None` returning 0 and a node returning `1 + max(left, right)`. **Not level-order BFS**, which is equally correct at the same `O(n)` time but holds an entire tree level in a queue, up to `O(n)` nodes on a wide tree, against `O(h)` stack frames here; it earns its place only when the tree is deep enough to blow the call stack. **O(n)** time, **O(h)** space.
 
 #### Explanation
-The depth of any node is 1 plus the maximum depth of its two subtrees. The base case — a `None` node contributes depth 0 — makes the recursion self-terminating and handles empty trees. Both left and right subtrees must be explored because the maximum can be on either side; we can't prune. An iterative BFS approach counting levels is equally valid but requires a queue. For very deep trees (linear chains), recursion can cause a stack overflow; an iterative DFS using an explicit stack avoids this. The space complexity is `O(h)` — the recursion depth equals the tree height, which ranges from `O(log n)` for balanced trees to `O(n)` for skewed ones.
+**Brute force.** Enumerate every root-to-leaf path and take the longest.
+
+```python
+def maxDepth(root):
+    best = 0
+    def walk(node, path):
+        nonlocal best
+        if not node:
+            return
+        path = path + [node.val]
+        if not node.left and not node.right:
+            best = max(best, len(path))
+        walk(node.left, path)
+        walk(node.right, path)
+    walk(root, [])
+    return best
+```
+
+`O(n * h)` time, `O(h^2)` space.
+
+**Wasteful because.** `path + [node.val]` builds a fresh copy on every call, so a node at depth `d` pays `d` list writes and the prefix shared by two siblings is copied once for each of them. The contents of the path are then never read: only `len(path)` is. The whole accumulator exists to carry a number that could have been carried as a number.
+
+**Optimal.** Ask each subtree for its own answer instead of threading state through the walk. `maxDepth(None)` is 0, and `maxDepth(node)` is `1 + max(maxDepth(node.left), maxDepth(node.right))`. Because the null case returns 0, an empty tree and a missing child are the same case, and the leaf test disappears entirely: a leaf is just a node whose two children both answer 0. Every node is asked exactly once, so the time is `O(n)` with a constant of two calls per node. The space is the call stack, `O(h)`, which is `O(log n)` on a balanced tree and `O(n)` on a chain. That worst case is the one to name aloud in an interview, and it is where an explicit stack or a level-counting BFS becomes the safer implementation.
+
+**Edge cases.** An empty tree returns 0 through the base case, with no null check anywhere else. A single node returns 1. A fully skewed chain of `n` nodes returns `n` and recurses `n` deep, which is where CPython's default recursion limit of about 1000 frames bites first.
 
 #### Python
 
@@ -7481,13 +8336,50 @@ Given the root of a binary tree, return the node values grouped by level — lef
 
 #### Examples
 
-TODO
+```text
+Input: root = [3,9,20,null,null,15,7]
+Output: [[3],[9,20],[15,7]]
+Explanation: three levels, read left to right.
+
+Input: root = [1]
+Output: [[1]]
+
+Input: root = []
+Output: []
+
+Constraints:
+- 0 <= number of nodes <= 2000
+- -1000 <= Node.val <= 1000
+```
 
 #### Recognition
-**BFS (queue with level-size snapshot).** **O(n)** time, **O(n)** space.
+**Signals.** "Grouped by level" and "top to bottom" say the output is indexed by distance from the root, and the grouping is part of the answer rather than a side effect. Any structure that hands you nodes in distance order is a queue, and the only missing piece is knowing where one level stops. **Therefore.** BFS from a queue, taking `len(q)` as a snapshot before each level and popping exactly that many nodes; every child enqueued during that inner loop belongs to the next level by construction. **Not recursive DFS in visit order**, because a preorder walk reaches depth 3 down the left spine before it ever sees the root's right child, so appending as you go interleaves levels. You can repair it by passing a depth and writing into `res[depth]`, but that is simulating the queue rather than using one. **O(n)** time, **O(n)** space.
 
 #### Explanation
-DFS can produce level groupings with an extra depth parameter, but BFS maps more naturally to level-by-level processing. The key trick: snapshot `len(q)` at the start of each while-loop iteration. That count tells you how many nodes belong to the current level — process exactly that many before moving on. Children enqueued during this inner loop belong to the next level and won't be processed until the next outer iteration. Space is `O(n)` in the worst case because the last level of a complete binary tree has `n/2` nodes all queued simultaneously.
+**Brute force.** Measure the height, then collect each depth with its own full traversal.
+
+```python
+def levelOrder(root):
+    def height(node):
+        if not node:
+            return 0
+        return 1 + max(height(node.left), height(node.right))
+    def at(node, d):
+        if not node:
+            return []
+        if d == 0:
+            return [node.val]
+        return at(node.left, d - 1) + at(node.right, d - 1)
+    return [at(root, d) for d in range(height(root))]
+```
+
+`O(n * h)` time, `O(h)` space.
+
+**Wasteful because.** Every level restarts from the root, so the path down to depth `d` is retraced once for each of the `d` levels above it. On a skewed tree that is `O(n^2)`.
+
+**Optimal.** Visit each node once and let a FIFO queue do the ordering: pop the root, push its children, and the queue always holds nodes in nondecreasing depth. The only thing a plain queue loses is the level boundary, and reading `len(q)` before the inner loop recovers it exactly, since at that instant the queue holds the current level and nothing else. Pop that many, emit them as one group, and the pushes from this pass form the next level. A DFS carrying a depth argument and appending into `res[depth]` is equally `O(n)` and wins when you also need parent or path state, which recursion tracks for free.
+
+**Edge cases.** A null root returns `[]`, not `[[]]`. A single node is one level of one value. A left-skewed chain of `n` nodes gives `n` groups of one. Queue space peaks at the widest level, which is `n/2` for a complete tree, so `O(n)` space is tight.
 
 #### Python
 
@@ -7937,13 +8829,52 @@ Given the root of a binary tree, return `true` if it is a valid BST — every no
 
 #### Examples
 
-TODO
+```text
+Input: root = [2,1,3]
+Output: true
+
+Input: root = [5,1,4,null,null,3,6]
+Output: false
+Explanation: 4 sits right of 5 but is smaller than 5.
+
+Input: root = [5,4,6,null,null,3,7]
+Output: false
+Explanation: 3 is left of 6, yet 3 is in 5's right subtree.
+
+Constraints:
+- 1 <= number of nodes <= 10^4
+- -2^31 <= Node.val <= 2^31 - 1
+```
 
 #### Recognition
-**DFS with min/max bounds.** **O(n)** time, **O(h)** space.
+**Signals.** "Every node's value is greater than all values in its left subtree" is a claim about whole subtrees, not about neighbours, and the word "all" is the tell: the constraint on a node comes from every ancestor, not just its parent. That is a range, and ranges compose as you descend. **Therefore.** DFS carrying `(lo, hi)`, rejecting unless `lo < node.val < hi`, tightening `hi` to `node.val` when you go left and `lo` to `node.val` when you go right. **Not comparing each node against its parent only**, because `[5,4,6,null,null,3,7]` passes every parent test (4 is left of 5, 3 is left of 6) yet 3 lives in the root's right subtree while being smaller than 5. The parent check is local and the property is global. **O(n)** time, **O(h)** space.
 
 #### Explanation
-A common mistake is only comparing a node to its direct parent — that misses cases like a right child of a left subtree being too large relative to an ancestor. The correct approach threads allowed bounds `(lo, hi)` down the tree: for the root, bounds are `(-∞, +∞)`; going left, the upper bound tightens to `node.val`; going right, the lower bound tightens to `node.val`. At each node, `lo < node.val < hi` must hold strictly (BSTs don't allow duplicates). Using `float('-inf')` and `float('inf')` (or `i64::MIN`/`i64::MAX` in typed languages) avoids special-casing the root bounds. An inorder traversal approach works too — a valid BST produces a strictly increasing sequence.
+**Brute force.** At each node, collect both subtrees in full and check their extremes.
+
+```python
+def isValidBST(root):
+    def vals(node):
+        if not node:
+            return []
+        return vals(node.left) + [node.val] + vals(node.right)
+    if not root:
+        return True
+    lo, hi = vals(root.left), vals(root.right)
+    if lo and max(lo) >= root.val:
+        return False
+    if hi and min(hi) <= root.val:
+        return False
+    return isValidBST(root.left) and isValidBST(root.right)
+```
+
+`O(n^2)` time, `O(n)` space.
+
+**Wasteful because.** `vals` is rebuilt from scratch at every node, so a node at depth `d` is collected `d + 1` times, once per ancestor. The entire subtree is materialised to extract a single min and a single max.
+
+**Optimal.** Push the constraint down instead of pulling the data up. The only thing a node needs from its ancestors is the open interval it must fall in, and that interval is two numbers. Start at `(-inf, +inf)`, and each step replaces exactly one endpoint with the current value: going left everything below must stay under `node.val`, going right everything must stay above it. One visit per node, `O(h)` stack. The equivalent recognition is that inorder on a valid BST is strictly increasing, so a single inorder pass comparing against the previous value also works; reach for that one when the interviewer presses on overflow at the sentinel bounds, since it never invents a value.
+
+**Edge cases.** A single node is always valid. Equal values fail, because the comparison is strict on both sides. A node holding `-2^31` or `2^31 - 1` breaks int-typed sentinels, which is why the typed solutions widen the bounds to 64 bits. A null child returns true and stops the recursion.
 
 #### Python
 
@@ -8384,13 +9315,51 @@ Given a binary tree, find the maximum path sum where a path is any sequence of n
 
 #### Examples
 
-TODO
+```text
+Input: root = [1,2,3]
+Output: 6
+Explanation: 2 -> 1 -> 3 sums to 6.
+
+Input: root = [-10,9,20,null,null,15,7]
+Output: 42
+Explanation: 15 -> 20 -> 7; the root is not on the path.
+
+Input: root = [-3]
+Output: -3
+
+Constraints:
+- 1 <= number of nodes <= 3 * 10^4
+- -1000 <= Node.val <= 1000
+```
 
 #### Recognition
-**Post-order DFS with global maximum tracking.** **O(n)** time, **O(h)** space.
+**Signals.** "Any sequence of nodes connected by edges", "need not pass through the root", and "values can be negative". The first two say the answer is anchored nowhere, so there is no single starting point to recurse from; the third kills every greedy accumulate-as-you-go idea, since extending a path can lower the sum. **Therefore.** The two-values-up idiom: one post-order pass where `dfs(node)` returns the best *downward* path ending at `node`, clamped at 0, while a running best absorbs `node.val + left + right`, the path that turns at this node. **Not returning the subtree's best path to the parent**, which is the natural single-value recursion and is wrong: a best path may bend at some node inside the subtree, and a bent path has no free end for the parent to attach to. The value you report up and the value you record are different quantities. **O(n)** time, **O(h)** space.
 
 #### Explanation
-A path can start and end at any node, so the root need not be on it — this rules out any top-down greedy approach. The trick is to think of each node as a potential "peak" of a path: the best path through `node` is `node.val + gainLeft + gainRight`, where `gainLeft` and `gainRight` are the best gains achievable going down each subtree (clamped to 0 if negative, meaning "don't go there"). After updating the global maximum with this "through" sum, the function must return only `node.val + max(gainLeft, gainRight)` to the parent, because a path passed up to the parent can extend in only one direction. Initialising `res` with `root.val` rather than negative infinity handles single-negative-node inputs correctly. The `max(..., 0)` clamping elegantly skips entire subtrees whose best gain would reduce the sum.
+**Brute force.** Treat every node as the turning point and recompute both downward arms.
+
+```python
+def maxPathSum(root):
+    def down(node):
+        if not node:
+            return 0
+        return max(node.val + max(down(node.left),
+                                  down(node.right)), 0)
+    def nodes(node):
+        if not node:
+            return []
+        return [node] + nodes(node.left) + nodes(node.right)
+    return max(n.val + down(n.left) + down(n.right)
+               for n in nodes(root))
+```
+
+`O(n^2)` time, `O(n)` space.
+
+**Wasteful because.** `down` is called fresh at every node, so it re-walks that node's whole subtree; a leaf gets summed once for each of its ancestors. The same downward gains are recomputed `h` times over.
+
+**Optimal.** One post-order pass computes each `down` value exactly once, and the trick is to harvest the answer on the way back up rather than in a second sweep. At `node`, the children have already returned their best downward gains `l` and `r`. Two different numbers come out of that: `node.val + l + r` is the best path that *turns* here, which is a candidate for the answer, and `node.val + max(l, r)` is what the parent can extend, because a path leaving through the parent uses at most one child. Clamping each gain with `max(gain, 0)` is how a subtree gets skipped for free: a negative arm contributes 0 instead of dragging the sum down. Seed the running best with `root.val` rather than 0, or an all-negative tree wrongly answers 0.
+
+**Edge cases.** A single node returns its own value, negative or not. An all-negative tree answers with its largest single value, since both arms clamp to 0. A node with one child is handled by the null branch returning 0. The best path may exclude the root entirely, as in `[-10,9,20,null,null,15,7]`.
 
 #### Python
 
@@ -8761,13 +9730,55 @@ Implement a trie with `insert(word)`, `search(word)` (exact match), and `startsW
 
 #### Examples
 
-TODO
+```text
+Input: ["Trie","insert","search","search",
+"startsWith","insert","search"],
+[[],["apple"],["apple"],["app"],["app"],["app"],["app"]]
+Output: [null,null,true,false,true,null,true]
+Explanation: "app" is a prefix of "apple" but not yet a word.
+
+Input: ["Trie","search","startsWith","insert","startsWith"],
+[[],["a"],["a"],["a"],["ab"]]
+Output: [null,false,false,null,false]
+
+Input: ["Trie","insert","insert","startsWith","search"],
+[[],["dog"],["do"],["d"],["do"]]
+Output: [null,null,null,true,true]
+
+Constraints:
+- 1 <= word.length, prefix.length <= 2000
+- word and prefix are lowercase English letters
+- at most 3 * 10^4 calls across all three methods
+```
 
 #### Recognition
-**Trie with per-node children dict and end-of-word flag.** **O(n)** time per operation, **O(n)** space per inserted word.
+**Signals.** The problem names the structure, but the real tell is `startsWith` sitting next to `search`. Exact membership is a hash set's whole job; a prefix is not a stored value, so there is no key to hash and no lookup to perform. A structure that answers prefix questions has to store the prefixes themselves, which means one node per distinct prefix and characters on the edges. **Therefore.** A tree where each node holds a child map keyed by character plus an `end` flag; all three operations are the same walk from the root, differing only in what a miss does and whether `end` is checked at the finish. **Not a hash set of words**, which serves `search` in `O(1)` but has to scan all `k` stored words for `startsWith`, at `O(k * L)` per query, and re-reads the identical shared prefixes of every word that begins the same way. Per operation on a word of length `L`, counting only the nodes an insert adds: **O(L)** time, **O(L)** space.
 
 #### Explanation
-A trie stores strings as paths from root to leaf, sharing common prefixes. Each node holds a map from character to child node, plus a boolean `end` marking whether a complete word ends here. `insert` walks (or creates) a child per character, then sets `end = True`. `search` walks children and additionally checks `end`; `startsWith` only checks that all prefix characters exist. The dict-based child map keeps the implementation concise and language-agnostic compared to a fixed-size 26-element array, at the cost of slightly higher constant overhead per node. The key design choice: `search` and `startsWith` share the same traversal logic — only the final check differs.
+**Brute force.** Keep the words in a hash set and scan for prefixes.
+
+```python
+class Trie:
+    def __init__(self):
+        self.words = set()
+
+    def insert(self, word):
+        self.words.add(word)
+
+    def search(self, word):
+        return word in self.words
+
+    def startsWith(self, prefix):
+        return any(w.startswith(prefix) for w in self.words)
+```
+
+`O(1)` search, `O(k * L)` startsWith over `k` words.
+
+**Wasteful because.** `startsWith` touches every stored word to answer a question about their first few characters, and it compares the same shared prefix again and again: with a thousand words beginning `"pre"`, the query `"pre"` re-reads those three characters a thousand times. The set stores whole words when the query is about the beginnings.
+
+**Optimal.** Store each distinct prefix exactly once, as a node, and put the characters on the edges out of it. Then a query is a walk: follow the child labelled by each character, and the walk either completes or dies at the first character no word extends. Length of the query is the only cost, independent of how many words are stored. The one piece a pure prefix tree lacks is the difference between "a word ends here" and "words pass through here", which the boolean `end` supplies; `search` returns `node.end` at the finish while `startsWith` returns `True`. A 26-slot array beats a dict for the fixed lowercase alphabet, and a dict wins when the alphabet is large or sparse.
+
+**Edge cases.** After inserting only `"apple"`, `search("app")` is false but `startsWith("app")` is true, which is exactly what `end` decides. Inserting the same word twice is idempotent. A prefix longer than any stored word dies at its first missing child. No deletion is required, so nodes never need reference counts.
 
 #### Python
 
@@ -8999,13 +10010,56 @@ Design a word dictionary supporting `addWord(word)` and `search(word)`, where `s
 
 #### Examples
 
-TODO
+```text
+Input: ["WordDictionary","addWord","addWord","addWord",
+"search","search","search","search"],
+[[],["bad"],["dad"],["mad"],["pad"],["bad"],[".ad"],["b.."]]
+Output: [null,null,null,null,false,true,true,true]
+Explanation: "pad" was never added; ".ad" matches "bad".
+
+Input: ["WordDictionary","addWord","search","search","search"],
+[[],["a"],["a"],["."],["aa"]]
+Output: [null,null,true,true,false]
+
+Input: ["WordDictionary","addWord","search","search"],
+[[],["bad"],["..."],[".."]]
+Output: [null,null,true,false]
+
+Constraints:
+- 1 <= word.length <= 25
+- addWord takes lowercase letters; search may contain '.'
+- at most 2 dots per search pattern, 10^4 calls total
+```
 
 #### Recognition
-**Trie with recursive DFS for wildcard expansion.** **O(m)** add, **O(26^m)** worst-case search.
+**Signals.** "Design" plus a dictionary plus a character that must match *any* single letter. The dot means the query is a pattern rather than a key, so nothing you can hash will answer it, but the pattern is still positional and fixed-length, which is exactly what a prefix walk consumes one character at a time. **Therefore.** A trie, with `search` as a DFS: on a concrete character follow that one child, on `.` recurse into every child that exists and return true if any branch succeeds. **Not expanding the dot into its 26 substitutions and hashing each candidate**, because that costs `26^d` full-word lookups no matter what is stored, while the trie only descends into children that exist, so a dot over a node with three children branches three ways. It also pays nothing for prefixes no word uses. With `d` dots and pattern length `L`, search is **O(26^d * L)** time, **O(L)** space.
 
 #### Explanation
-A plain trie handles exact-match queries in `O(m)`. The wildcard `'.'` breaks direct traversal because you don't know which child to follow. The solution is to treat `'.'` as a branch point: instead of following one child, try all children recursively. In the worst case (a pattern like `"..."`) every node fans out 26 ways, giving exponential time — but in practice most patterns are mostly literal characters. The recursive call passes the remaining suffix `word[i+1:]`, so each branch explores independently. An iterative stack-based variant avoids deep Python recursion for very long words, but the recursive form is clearest.
+**Brute force.** Keep every word in a list and match the pattern against each one.
+
+```python
+class WordDictionary:
+    def __init__(self):
+        self.words = []
+
+    def addWord(self, word):
+        self.words.append(word)
+
+    def search(self, word):
+        return any(
+            len(w) == len(word)
+            and all(c in (".", d) for c, d in zip(word, w))
+            for w in self.words
+        )
+```
+
+`O(1)` add, `O(k * L)` search over `k` stored words.
+
+**Wasteful because.** Every search re-reads all `k` words end to end, and it re-tests the same shared prefixes: matching `"b.."` compares the literal `b` against the first letter of every stored word, when only the words in the `b` bucket could ever match. The dictionary's structure is rediscovered on each query instead of being stored once.
+
+**Optimal.** Build the trie once at insert time so the shared prefixes are physically shared, then let the pattern drive a walk down it. A concrete character is a single child lookup, which is where all the savings come from: it eliminates every word not on that branch in one step. The dot is the only place the walk forks, and it forks only as wide as the node's actual child count, then short-circuits on the first branch that succeeds. That makes cost depend on the number of dots and where they sit, not on dictionary size. A leading dot is the expensive case because the root is the widest node, so it fans out before any pruning has happened.
+
+**Edge cases.** A pattern of all dots matches any stored word of that length and nothing shorter or longer. Running out of pattern at a node whose `end` is false correctly returns false, which is how length mismatches are rejected without a length check. Adding the same word twice is idempotent. A dot at a leaf has no children to fan into and fails immediately.
 
 #### Python
 
@@ -9217,13 +10271,57 @@ Given an `m×n` character grid and a list of words, return all words that can be
 
 #### Examples
 
-TODO
+```text
+Compare: any-order
+
+Input: board = [["o","a","a","n"],["e","t","a","e"],
+["i","h","k","r"],["i","f","l","v"]],
+words = ["oath","pea","eat","rain"]
+Output: ["eat","oath"]
+
+Input: board = [["a","b"],["c","d"]], words = ["abcb"]
+Output: []
+Explanation: reusing the 'b' cell is not allowed.
+
+Input: board = [["a"]], words = ["a","b","aa"]
+Output: ["a"]
+
+Constraints:
+- 1 <= m, n <= 12
+- 1 <= words.length <= 3 * 10^4
+- 1 <= words[i].length <= 10
+```
 
 #### Recognition
-**Trie-backed DFS backtracking on the board.** **O(m·n·4^L)** time where L is the max word length.
+**Signals.** A **word list** rather than one word, and "return all words that can be formed". The search space is the same grid every time, so the query set is the thing that grew, and a list of thirty thousand words shares enormous amounts of prefix with itself. That asks for a structure indexed by prefix. **Therefore.** Insert every word into a trie storing the word at its terminal node, then run one backtracking DFS from each cell that descends the board and the trie in lockstep, returning the moment the current letter is not a child. **Not running the single-word grid search once per word**, which is problem 79 called `W` times at `O(W * m * n * 4^L)`: `"oath"`, `"oat"`, and `"oaths"` each rediscover the path `o -> a -> t` from scratch, and each of the `W` runs restarts from all `m * n` cells even for words whose first letter is nowhere on the board. Over `k` total dictionary characters: **O(m * n * 4^L)** time, **O(k)** space.
 
 #### Explanation
-The naive approach — run Word Search (problem #79) for each word independently — costs `O(W · m·n·4^L)` and redundantly re-explores shared prefixes. Building a trie over all words lets you prune whole subtrees the moment the current cell sequence leaves all word paths. The DFS starts from every cell, walks the trie in parallel with the board, and marks visited cells by temporarily overwriting them with `'#'`, restoring on backtrack. When a node has the special end marker `"#"`, the full word is in the result set; the marker is deleted to avoid duplicates. Pruning dead branches from the trie as words are found (optional but efficient) reduces repeat visits. A `set` collects results to handle grids that could find the same word from multiple starting positions.
+**Brute force.** Run the one-word board search independently for every word.
+
+```python
+def findWords(board, words):
+    R, C = len(board), len(board[0])
+    def dfs(w, i, r, c):
+        if i == len(w):
+            return True
+        if not (0 <= r < R and 0 <= c < C) or board[r][c] != w[i]:
+            return False
+        board[r][c] = "#"
+        ok = any(dfs(w, i + 1, r + dr, c + dc) for dr, dc
+                 in ((0, 1), (0, -1), (1, 0), (-1, 0)))
+        board[r][c] = w[i]
+        return ok
+    return [w for w in words if any(dfs(w, 0, r, c)
+            for r in range(R) for c in range(C))]
+```
+
+`O(W * m * n * 4^L)` time.
+
+**Wasteful because.** The board walk is repeated once per word with no memory between runs. Words sharing a prefix retrace the identical cell path: with `"oath"` and `"oat"` in the list, the exploration of `o -> a -> t` happens twice, and a word starting with a letter absent from the board still costs a full sweep of all `m * n` starting cells before failing.
+
+**Optimal.** Invert the loop. Instead of driving the DFS with one word and asking the board, drive it with the board and ask a trie holding all words at once, so a single cell path is explored once and simultaneously tests every word compatible with it. Walking board and trie together makes the prune free: if the current letter is not a child of the current node, no word in the dictionary continues this way, and the whole branch dies immediately. Reaching a node that carries a stored word records a hit, and blanking that cell to a sentinel before recursing gives the no-reuse rule without a separate visited set, restored on the way back out. Nulling a word once collected prevents the same word being reported from a second starting cell.
+
+**Edge cases.** The same word reachable from two starting cells must appear once, which is why hits are deduped. A word longer than `m * n` can never fit and dies naturally on the prune. A one-by-one board can only match single-character words. The visited sentinel has to be rejected explicitly before the trie lookup, since the nested-dict trie also uses `"#"` as its end-of-word key and a marked cell would otherwise index into a stored word.
 
 #### Python
 
@@ -9245,7 +10343,7 @@ def findWords(board, words):
         if r < 0 or c < 0 or r >= rows or c >= cols:
             return
         tmp = board[r][c]
-        if tmp not in node:
+        if tmp == "#" or tmp not in node:
             return
         board[r][c] = "#"
         for dr, dc in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
@@ -9487,13 +10585,52 @@ Design a class initialized with `k` and a list of initial numbers; `add(val)` in
 
 #### Examples
 
-TODO
+```text
+Input: ["KthLargest","add","add","add","add","add"],
+[[3,[4,5,8,2]],[3],[5],[10],[9],[4]]
+Output: [null,4,5,5,8,8]
+Explanation: after add(3) the values are 2,3,4,5,8
+and the 3rd largest is 4.
+
+Input: ["KthLargest","add","add"], [[1,[]],[-1],[1]]
+Output: [null,-1,1]
+
+Input: ["KthLargest","add","add","add"],
+[[2,[0]],[-1],[1],[3]]
+Output: [null,-1,0,1]
+
+Constraints:
+- 1 <= k <= 10^4
+- 0 <= nums.length <= 10^4
+- -10^4 <= nums[i] <= 10^4
+- nums.length >= k - 1, up to 10^4 add calls
+```
 
 #### Recognition
-**Min-heap of size k.** **O(log k)** per `add`, **O(n log k)** initialization.
+**Signals.** "Kth largest element seen so far" with a value arriving between every query. Two words carry the design. "Kth largest" means you need one order statistic, not the whole order, so the `n - k` smaller values are dead weight the moment they lose. "So far" means the input never ends, so any structure you rebuild per query is priced per call, not once. **Therefore.** A min-heap capped at `k`: push each arrival, pop when the size passes `k`, and the root is the answer because the heap holds exactly the `k` largest values seen and the root is the smallest of those. **Not a max-heap over every value**, which is the reflex on hearing "largest" but needs `k - 1` pops and re-pushes per query and stores all `n`. **O(log k)** time, **O(k)** space.
 
 #### Explanation
-Maintaining a sorted structure over all seen elements would cost `O(n)` space and `O(log n)` per query, but we only care about the k-th largest. A min-heap of exactly `k` elements does the job: the heap's minimum is always the k-th largest, because there are exactly `k-1` elements larger than it in the heap. When a new value arrives, push it; if the heap grows beyond `k`, pop the smallest — the new value displaces itself if it was too small, leaving the top always as answer. During `__init__`, heapify first (O(n)), then pop excess elements down to size `k`. Edge case: the initial list may have fewer than `k` elements; the first few `add` calls grow the heap before it is trimmed.
+**Brute force.** Keep every value and re-sort on each `add`.
+
+```python
+class KthLargest:
+    def __init__(self, k, nums):
+        self.k = k
+        self.vals = list(nums)
+
+    def add(self, val):
+        self.vals.append(val)
+        self.vals.sort()
+        return self.vals[-self.k]
+```
+
+`O(n log n)` time per `add`, `O(n)` space.
+
+**Wasteful because.** Every `add` re-establishes a total order over the entire history when exactly one element moved, and it keeps ordering values below the kth that can never be the answer again.
+
+**Optimal.** Store only the `k` values that could still matter. A min-heap of size `k` makes that cheap: push the arrival, and if the heap now holds `k + 1` values pop the smallest, which is by construction the one that just fell out of the top `k`. The root is then the kth largest over all values ever seen, readable in `O(1)`. The cost per `add` is one push and one pop on a heap of height `log k`. In `__init__`, `heapify` the initial list in `O(n)` and then trim, which beats `n` separate pushes.
+
+**Edge cases.** The initial list may hold as few as `k - 1` values, so the first `add` fills the heap rather than trimming it. Duplicates count as separate elements: with `k = 2` over `[5,5]` the answer is `5`. With `k = 1` this degenerates to a running maximum.
 
 #### Python
 
@@ -9772,13 +10909,48 @@ Given an array of points on a plane, return the `k` closest points to the origin
 
 #### Examples
 
-TODO
+```text
+Compare: any-order
+
+Input: points = [[1,3],[-2,2]], k = 1
+Output: [[-2,2]]
+Explanation: 8 < 10, so [-2,2] is nearer the origin.
+
+Input: points = [[3,3],[5,-1],[-2,4]], k = 2
+Output: [[3,3],[-2,4]]
+
+Input: points = [[0,1],[1,0]], k = 2
+Output: [[0,1],[1,0]]
+
+Constraints:
+- 1 <= k <= points.length <= 10^4
+- -10^4 <= xi, yi <= 10^4
+- the k closest points are unique up to order
+```
 
 #### Recognition
-**Max-heap of size k (negated distance).** **O(n log k)** time, **O(k)** space.
+**Signals.** "The `k` closest points" asks for a *set* of the `k` smallest under a derived key, and "order of the output does not matter" confirms the winners are never ranked against each other. Distance is `sqrt(x^2 + y^2)`, but `sqrt` is monotonic, so `x*x + y*y` induces the identical ordering in exact integer arithmetic. Computing the root would only burn cycles and introduce float error. **Therefore.** A max-heap capped at `k` keyed on squared distance: the worst of the current best `k` sits at the root, so each point costs one `O(1)` comparison and at most one `O(log k)` eviction. **Not sorting every point by distance**, which builds a total order over the `n - k` points you discard, at `O(n log n)` time and `O(n)` space, to answer what is only a membership question. **O(n log k)** time, **O(k)** space.
 
 #### Explanation
-The naive approach — sort all points by distance — costs `O(n log n)` and `O(n)` space. A max-heap of size `k` is better: maintain a window of the `k` smallest distances seen so far. For each point, push its (negated) squared distance onto the heap; if the heap exceeds `k`, pop the largest (most-negative negation = largest real distance), evicting the farthest candidate. Squaring avoids `sqrt` which is both slower and introduces floating-point error. Negation lets Python's min-heap behave like a max-heap. After processing all points, the heap holds exactly the `k` closest.
+**Brute force.** Sort all points by distance, keep the first `k`.
+
+```python
+def kClosest(points, k):
+    from math import sqrt
+    ranked = []
+    for x, y in points:
+        ranked.append((sqrt(x * x + y * y), [x, y]))
+    ranked.sort(key=lambda pair: pair[0])
+    return [p for _, p in ranked[:k]]
+```
+
+`O(n log n)` time, `O(n)` space.
+
+**Wasteful because.** The sort settles the relative order of every pair of points, including the `n - k` that get dropped, when the only thing read afterwards is which side of the cut each point fell on.
+
+**Optimal.** Track just the current best `k` and the boundary between them and everything else. A max-heap of size `k` puts that boundary at the root: the farthest point you are still keeping. Push each point, and once the heap holds `k + 1` pop the root, which is exactly the point that just lost its place. That is `O(log k)` per point instead of a global `O(n log n)` ordering, and `O(k)` space instead of `O(n)`. Quickselect wins when you may reorder the input: partition around a random pivot on squared distance and recurse only into the side holding index `k`, giving `O(n)` expected time and `O(1)` extra space, at the price of an `O(n^2)` worst case.
+
+**Edge cases.** `k == n` returns every point. Ties in distance are harmless here because the answer is guaranteed unique up to order, so no tie straddles the cut. Squared distances peak at `2 * 10^8`, well inside 32-bit range, so no overflow guard is needed.
 
 #### Python
 
@@ -9896,17 +11068,45 @@ std::vector<std::vector<int>> kClosest(std::vector<std::vector<int>>& points, in
 ### 70. Kth Largest Element in an Array
 
 #### Problem
-Given an integer array and an integer `k`, return the kth largest element (not the kth distinct element — duplicates count).
+Given an integer array and an integer `k`, return the kth largest element (not the kth distinct element, so duplicates count).
 
 #### Examples
 
-TODO
+```text
+Input: nums = [3,2,1,5,6,4], k = 2
+Output: 5
+Explanation: sorted is [1,2,3,4,5,6]; the 2nd largest is 5.
+
+Input: nums = [3,2,3,1,2,4,5,5,6], k = 4
+Output: 4
+
+Input: nums = [2,2], k = 2
+Output: 2
+
+Constraints:
+- 1 <= k <= nums.length <= 10^5
+- -10^4 <= nums[i] <= 10^4
+```
 
 #### Recognition
-**Min-heap of size k.** **O(n log k)** time, **O(k)** space.
+**Signals.** "Kth largest element" over a static array with a single query, plus "not the kth distinct element", so duplicates each occupy a rank of their own. One order statistic is wanted, not the whole order, and that gap is the entire opportunity. **Therefore.** A min-heap capped at `k`: push every value, pop whenever the size passes `k`, and the root is the answer because the heap ends up holding exactly the `k` largest values, with the smallest of those on top. You never order the `n - k` losers against each other. **Not quickselect by default**, even though its expected `O(n)` is asymptotically better: it partitions in place, so it mutates the caller's array, and a bad pivot sequence degrades it to `O(n^2)`. It is the right call when you own the array and `k` is a large fraction of `n`. **O(n log k)** time, **O(k)** space.
 
 #### Explanation
-Sorting the array gives `O(n log n)` time and the answer is at index `n - k`, but a min-heap of size `k` does better when `k << n`. Seed the heap with the first `k` elements, then for each remaining element: if it exceeds the heap's minimum (the current kth largest), replace the minimum with it using `heapreplace` (pop + push in one O(log k) step). After processing all elements, the heap's minimum is the kth largest. The key insight: the heap always contains exactly the `k` largest elements seen so far, so its min is always the answer. Quickselect is the standard follow-up and the asymptotically better answer: partition around a random pivot and recurse into only the side containing index `n - k`, giving `O(n)` expected time and `O(1)` extra space, though `O(n^2)` worst case and it reorders the input. Prefer the heap when elements arrive as a stream or the array must not be modified, and quickselect when you own the array and `k` is a large fraction of `n`. For small `k` the heap is noticeably faster than a full sort; for `k ≈ n` the difference shrinks.
+**Brute force.** Sort ascending and read index `n - k`.
+
+```python
+def findKthLargest(nums, k):
+    ordered = sorted(nums)
+    return ordered[len(ordered) - k]
+```
+
+`O(n log n)` time, `O(n)` space.
+
+**Wasteful because.** A sort resolves the relative order of every pair, and exactly one of the `n` resulting positions is ever read. All the work spent arranging the values below the cut is discarded.
+
+**Optimal.** Keep only the `k` values that could still be the answer. A min-heap of size `k` maintains that set: push the next value, and if the heap grows to `k + 1` pop the root, which is by construction the value that just fell out of the top `k`. At the end the root is the kth largest. Each step is `O(log k)` rather than `O(log n)`, and the space is `O(k)` rather than `O(n)`. Quickselect is the asymptotically better alternative: partition around a random pivot and recurse into only the side containing index `n - k`, so the work is `n + n/2 + n/4 + ... = O(n)` expected with `O(1)` extra space. Prefer the heap when the array must not be modified, when values arrive as a stream, or when an adversary picks the data.
+
+**Edge cases.** `k == 1` is the maximum and `k == n` is the minimum, both handled without a branch. Duplicates count separately, so `[2,2]` with `k = 2` answers `2`, not "no second value". The constraint `1 <= k <= n` removes any bounds check.
 
 #### Python
 
@@ -10016,13 +11216,54 @@ Given a list of tasks and a cooldown period `n`, find the minimum number of CPU 
 
 #### Examples
 
-TODO
+```text
+Input: tasks = ["A","A","A","B","B","B"], n = 2
+Output: 8
+Explanation: A B idle A B idle A B, so two idles are forced.
+
+Input: tasks = ["A","C","A","B","D","B"], n = 1
+Output: 6
+
+Input: tasks = ["A","A","A","A","A","A","B","C","D","E","F","G"],
+n = 2
+Output: 16
+
+Constraints:
+- 1 <= tasks.length <= 10^4
+- tasks[i] is an uppercase English letter
+- 0 <= n <= 100
+```
 
 #### Recognition
-**Greedy simulation with max-heap and cooldown queue.** **O(n log n)** time, **O(n)** space.
+**Signals.** "Minimum number of intervals" with a rule that the same task must wait `n` ticks before repeating. The tell is that a task which is illegal now becomes legal later, so the set of candidates changes as the clock advances rather than being fixed up front. Idle slots being allowed confirms that the schedule is built tick by tick, not by permuting a list. **Therefore.** Greedy simulation: each tick run the available task with the most work left, then park it in a FIFO cooldown queue keyed by its ready time. The exchange argument is that deferring the most frequent task only pushes the same congestion later, so running it first is never worse. **Not one sort of the counts followed by a cycle through them**, because a fixed order goes stale the moment a task enters cooldown and a rarer task becomes the only legal move. Over `t` ticks with `k` distinct task types, at most 26 of them: **O(t log k)** time, **O(k)** space.
 
 #### Explanation
-Always execute the most frequent remaining task — this greedy choice minimises idle time. A max-heap stores `(-count, task)` to retrieve the highest-count task in `O(log k)`. After executing a task, it can't run again until time `t + n + 1`, so push it onto a FIFO queue as `(remaining_count, available_at)`. Each time-step: if the heap is non-empty, pop and execute; if the cooldown queue's front becomes available at this moment, push it back onto the heap. The loop runs until both the heap and queue are empty, and `time` counts the answer. A mathematical formula (`max(len(tasks), (maxCount-1)*(n+1)+numMaxTasks)`) gives `O(1)` but is harder to justify; the simulation generalises to variants.
+**Brute force.** Simulate each tick, rescanning every task type to pick the best legal one.
+
+```python
+def leastInterval(tasks, n):
+    count = {}
+    for t in tasks:
+        count[t] = count.get(t, 0) + 1
+    last, time = {}, 0
+    while any(count.values()):
+        time += 1
+        ready = [t for t, c in count.items() if c > 0
+                 and time - last.get(t, -n) > n]
+        if ready:
+            best = max(ready, key=lambda t: count[t])
+            count[best] -= 1
+            last[best] = time
+    return time
+```
+
+`O(t * k)` time, `O(k)` space.
+
+**Wasteful because.** Every tick recomputes readiness for all `k` task types and rescans for the maximum count, when only one task changed state since the previous tick.
+
+**Optimal.** Split the tasks into two structures that each answer one question in better than linear time. A max-heap of remaining counts holds the tasks that are legal right now, so the best choice is the root. A FIFO queue holds the ones cooling down as `(remaining, ready_at)` pairs. Because every task waits exactly `n + 1` ticks, tasks leave cooldown in the order they entered it, so the queue is already sorted by ready time and only its front ever needs checking. Each tick is then one pop, one push, and one front comparison. A closed form, `max(len(tasks), (maxCount - 1) * (n + 1) + numMaxTasks)`, answers this in `O(1)`, but it is harder to justify under questioning and it stops working the moment cooldowns differ per task.
+
+**Edge cases.** With `n = 0` a task re-enters the heap on the same tick it left, so the answer is just `len(tasks)`. All-distinct tasks never idle. One dominant task type is the idle-heavy case, where the answer is set by the gaps around it rather than by the total count.
 
 #### Python
 
@@ -10462,17 +11703,59 @@ public:
 ### 73. Find Median from Data Stream
 
 #### Problem
-Design a data structure that supports `addNum(int num)` and `findMedian()` — the median of all numbers added so far — in a streaming context.
+Design a data structure that supports `addNum(int num)` and `findMedian()`, returning the median of all numbers added so far, in a streaming context.
 
 #### Examples
 
-TODO
+```text
+Input: ["MedianFinder","addNum","addNum","findMedian",
+"addNum","findMedian"], [[],[1],[2],[],[3],[]]
+Output: [null,null,null,1.5,null,2.0]
+Explanation: after 1 and 2 the median is (1 + 2) / 2.
+
+Input: ["MedianFinder","addNum","findMedian"], [[],[5],[]]
+Output: [null,null,5.0]
+
+Input: ["MedianFinder","addNum","addNum","addNum",
+"findMedian"], [[],[-1],[-2],[-3],[]]
+Output: [null,null,null,null,-2.0]
+
+Constraints:
+- -10^5 <= num <= 10^5
+- findMedian runs only after at least one addNum
+- up to 5 * 10^4 calls to addNum and findMedian
+```
 
 #### Recognition
-**Two heaps: max-heap for lower half, min-heap for upper half.** **O(log n)** add, **O(1)** findMedian.
+**Signals.** "Median" is the giveaway, because it names a value at the *middle* of the order rather than at an end, and the numbers arrive in a stream with queries interleaved between insertions. So you need a structure that keeps the boundary between the lower and upper halves cheap to reach and cheap to maintain. **Therefore.** Two heaps facing each other: a max-heap for the lower half and a min-heap for the upper half, with sizes kept within one of each other. The two roots are exactly the elements adjacent to the middle, so the median is one root or the mean of both. **Not a single heap**, which exposes only its extreme; getting to the middle would mean popping half the elements and pushing them back on every query. **Not a sorted array with binary-search insertion**, where the search is `O(log n)` but the shift that makes room is `O(n)`. Each insert is one push and at most two moves. **O(log n)** time, **O(n)** space.
 
 #### Explanation
-The median requires knowing the "middle" of a sorted set — efficient insertion into a fully sorted structure would be `O(n)`. The two-heap trick: keep a max-heap `small` for the lower half and a min-heap `large` for the upper half, maintaining the invariant `len(small) == len(large)` or `len(small) == len(large) + 1`. After each insertion, rebalance if needed. If the tops violate the order property (max of lower > min of upper), fix by moving the offending element across. The median is then either the top of `small` (odd total) or the average of both tops (even total). All operations are `O(log n)` for heap push/pop. Python negates values for the max-heap since `heapq` is a min-heap only.
+**Brute force.** Append every number, sort on each query.
+
+```python
+class MedianFinder:
+    def __init__(self):
+        self.vals = []
+
+    def addNum(self, num):
+        self.vals.append(num)
+
+    def findMedian(self):
+        self.vals.sort()
+        n = len(self.vals)
+        if n % 2:
+            return float(self.vals[n // 2])
+        mid = n // 2
+        return (self.vals[mid - 1] + self.vals[mid]) / 2.0
+```
+
+`O(n log n)` per query, `O(n)` space.
+
+**Wasteful because.** Each query re-establishes a total order that was already correct at the previous query except for the handful of values appended since, and then reads one or two of the `n` positions it just computed.
+
+**Optimal.** You never need the full order, only the split point. Keep the smaller half in a max-heap and the larger half in a min-heap, so the two roots are the values on either side of the middle. Inserting means pushing into one side, then repairing two invariants: if the lower root now exceeds the upper root the sides overlap, so move that element across; if the sizes differ by more than one, move a root from the bigger side to the smaller. Both repairs are single pushes and pops, so `addNum` is `O(log n)` and `findMedian` is an `O(1)` read. Python's `heapq` has no max-heap, so the lower half stores negated values and negates again on the way out.
+
+**Edge cases.** After the first `addNum` the upper heap is empty, which the size rule handles by leaving the value in the lower heap. An even total returns a float average, so return `float(...)` in the odd case too rather than an `int`. Duplicates need no special handling; they simply land on either side of the split.
 
 #### Python
 
@@ -10670,13 +11953,50 @@ Given an array of distinct integers, return all possible subsets (the power set)
 
 #### Examples
 
-TODO
+```text
+Compare: any-order-nested
+
+Input: nums = [1,2,3]
+Output: [[],[1],[2],[3],[1,2],[1,3],[2,3],[1,2,3]]
+Explanation: 2^3 = 8 subsets, one per include/exclude choice.
+
+Input: nums = [0]
+Output: [[],[0]]
+
+Input: nums = [-1,2]
+Output: [[],[-1],[2],[-1,2]]
+
+Constraints:
+- 1 <= nums.length <= 10
+- -10 <= nums[i] <= 10
+- all elements of nums are distinct
+```
 
 #### Recognition
-**Backtracking (include/exclude decision tree).** **O(n · 2ⁿ)** time, **O(n)** auxiliary stack space.
+**Signals.** "Return **all** possible subsets" and a bound of `nums.length <= 10`. That bound is the whole tell: ten elements with an "all" objective means `2^10 = 1024` outputs are expected, so exponential is the target rather than a failure to optimise. "Distinct integers" removes the duplicate-handling that its sequel adds. **Therefore.** Enumerate one binary decision per element: at index `i` recurse having included `nums[i]`, then pop it and recurse having excluded it, emitting a copy of the running path at `i == n`. **Not memoisation or DP**, which is the reflex on seeing `2^n` but has nothing to cache here: every one of the `2^n` subsets is distinct and must be materialised, so the size of the output is itself the lower bound and no shared subproblem exists to collapse. Space is `O(n)` beyond the answer. **O(n * 2^n)** time, **O(n)** space.
 
 #### Explanation
-There are `2ⁿ` subsets — one for each way to include or exclude each element. The backtracking approach frames this as a binary decision tree: at index `i`, either include `nums[i]` and recurse, or skip it and recurse. When `i == n` the current subset is a complete choice and is recorded. This yields each subset exactly once in lexicographic order. An iterative bit-mask approach (`for mask in range(1 << n)`) gives the same `O(n · 2ⁿ)` result but is less generalisable. The `subset[:]` copy is necessary because `subset` is mutated in-place throughout the recursion.
+**Brute force.** Enumerate the `2^n` bitmasks and read off the set bits.
+
+```python
+def subsets(nums):
+    res = []
+    for mask in range(1 << len(nums)):
+        subset = []
+        for i in range(len(nums)):
+            if mask & (1 << i):
+                subset.append(nums[i])
+        res.append(subset)
+    return res
+```
+
+`O(n * 2^n)` time, `O(1)` space beyond the output.
+
+**Wasteful because.** Each mask rebuilds its subset from an empty list, re-testing all `n` bits, even though masks that agree on their low bits share that whole prefix. Nothing is carried from one iteration to the next.
+
+**Optimal.** Backtracking keeps the shared prefix alive on the call stack. The path from the root to the current node *is* the subset under construction, so descending is one `append` and returning is one `pop`, and only the leaf pays the `O(n)` copy. Be honest about what this buys: both versions are `O(n * 2^n)`, because the answer holds `n * 2^n` integers and nothing can beat printing it. The win is constant factors and generality. Backtracking is the version that extends: Subsets II skips equal siblings to dedupe, Combination Sum prunes a branch once its running total passes the target, and a bitmask loop has nowhere to put a prune. The bitmask is preferable when you want an iterative form with no recursion depth, or subsets addressable by index.
+
+**Edge cases.** The empty subset is a real answer, produced by mask `0` or the all-exclude path, so do not filter it out. A one-element input yields exactly two subsets. Inputs are distinct, so no dedupe pass is needed, and at `n = 10` the recursion is only ten frames deep.
 
 #### Python
 
