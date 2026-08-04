@@ -94,6 +94,22 @@ def build_graph(adj):
         nodes[i].neighbors = [nodes[j - 1] for j in nbrs]
     return nodes[0]
 
+def build_cycle_list(vals, pos):
+    """LeetCode's cycle encoding: values plus the index the tail links back to,
+    or -1 for no cycle. Lets `Input: head = [3,2,0,-4], pos = 1` stay in the
+    file's real LeetCode form while still being executable."""
+    head = build_list(vals)
+    if pos is None or pos < 0 or head is None:
+        return head
+    tail = head
+    while tail.next:
+        tail = tail.next
+    entry = head
+    for _ in range(pos):
+        entry = entry.next
+    tail.next = entry
+    return head
+
 def build_list_of_lists(arrs):
     """[[1,4,5],[1,3,4]] -> a list of ListNode heads (merge-k-lists shape)."""
     return [build_list(a) for a in (arrs or [])]
@@ -132,10 +148,18 @@ ADAPTERS: dict[str, tuple[str, str]] = {
 }
 
 # item id -> {"entry": name, "adapters": {param: (build, dump)}, "result": dump}
+# "consume" lists Input keys that are NOT function parameters: they are extra
+# arguments to that parameter's builder and are dropped before the call. This is
+# what lets an example keep LeetCode's published shape when the signature is
+# narrower than the problem statement.
 OVERRIDES: dict[int, dict] = {
     # Clone Graph's parameter is `node`, too generic to key on globally, so the
     # graph adapter is bound per item instead.
     84: {"adapters": {"node": ("build_graph", "dump_graph")}},
+    # hasCycle(head) takes no `pos`, but a cycle cannot be written as a JSON
+    # array, so `pos` feeds the builder and never reaches the solution.
+    44: {"adapters": {"head": ("build_cycle_list", "dump_list")},
+         "consume": {"head": ["pos"]}},
 }
 
 # Items whose Explanation snippet cannot reasonably be run against the examples

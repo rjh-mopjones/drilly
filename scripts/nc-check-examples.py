@@ -231,9 +231,17 @@ def __nc_main__(spec):
                 results.append({"ok": True, "value": res})
                 continue
             kw = {}
+            consume = spec.get("consume", {})
+            extra_keys = {x for xs in consume.values() for x in xs}
             for k, v in payload.items():
+                if k in extra_keys:
+                    continue
                 b = spec["adapters"].get(k)
-                kw[k] = globals()[b](copy.deepcopy(v)) if b else copy.deepcopy(v)
+                if b:
+                    extra = [copy.deepcopy(payload[e]) for e in consume.get(k, [])]
+                    kw[k] = globals()[b](copy.deepcopy(v), *extra)
+                else:
+                    kw[k] = copy.deepcopy(v)
             entry = spec["entry"]
             if isinstance(entry, list):
                 f1, f2 = globals()[entry[0]], globals()[entry[1]]
@@ -259,11 +267,13 @@ except Exception:
 """
 
 
-def run_solution(code, entry, adapters, examples, timeout):
+def run_solution(code, entry, adapters, examples, timeout, consume=None):
+    consume = consume or {}
     spec = {
         "entry": list(entry) if isinstance(entry, tuple) else entry,
         "adapters": adapters,
         "examples": [[p, o] for p, _, o in examples],
+        "consume": consume,
     }
     # The spec is JSON, not Python: `null`/`true` are not Python literals, so it
     # must be parsed inside the driver rather than interpolated as source.
@@ -328,7 +338,9 @@ def check_item(args_tuple):
     if examples and "__ops__" in examples[0][0]:
         ops_form = examples[0][0]["__ops__"][0]
     keys = set() if ops_form else set(examples[0][0])
-    entry, err = entry_point(py, keys, ops_form, compare, item_id)
+    consume = OVERRIDES.get(item_id, {}).get("consume", {})
+    consumed = {x for xs in consume.values() for x in xs}
+    entry, err = entry_point(py, keys - consumed, ops_form, compare, item_id)
     if err:
         return (MISCONF, item_id, title, err, [])
 
@@ -336,7 +348,7 @@ def check_item(args_tuple):
     adapters = {k: v[0] for k, v in ADAPTERS.items() if k in keys}
     adapters.update({k: v[0] for k, v in ov.get("adapters", {}).items()})
 
-    results, rerr = run_solution(py, entry, adapters, examples, opts["timeout"])
+    results, rerr = run_solution(py, entry, adapters, examples, opts["timeout"], consume)
     if rerr == "timeout":
         return (TIMEOUT, item_id, title, f">{opts['timeout']}s, killed", [])
     if results is None:
@@ -354,7 +366,7 @@ def check_item(args_tuple):
     if opts["naive"] and item_id not in NAIVE_SKIP:
         nv = fence(section(body, "Explanation"), "python")
         if nv is not None:
-            nres, nerr = run_solution(nv, entry, adapters, examples, opts["timeout"])
+            nres, nerr = run_solution(nv, entry, adapters, examples, opts["timeout"], consume)
             if nres is not None:
                 for i, (r, (_, expected, _)) in enumerate(zip(nres, examples), 1):
                     if r["ok"] and canon(r["value"], compare) != canon(

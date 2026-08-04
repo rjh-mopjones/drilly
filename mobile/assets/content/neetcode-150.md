@@ -6452,23 +6452,21 @@ Given the head of a linked list, return `true` if the list has a cycle (some nod
 #### Examples
 
 ```text
-Input: head = [3,2,0,-4]
-Output: false
-Explanation: written as an array the list simply ends.
-LeetCode's own case relinks the tail to index 1, and
-that wiring is what makes the answer true.
+Input: head = [3,2,0,-4], pos = 1
+Output: true
+Explanation: the tail links back to the node at index 1.
 
-Input: head = [1,2]
-Output: false
+Input: head = [1,2], pos = 0
+Output: true
 
-Input: head = []
+Input: head = [1], pos = -1
 Output: false
 
 Constraints:
 - 0 <= number of nodes <= 10^4
 - -10^5 <= node value <= 10^5
-- a cycle is made by relinking the tail to an earlier
-  node, which a plain JSON array cannot express
+- pos is the index the tail links to, or -1 for no cycle
+- pos is not passed to the function; it only describes the wiring
 ```
 
 #### Recognition
