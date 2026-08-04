@@ -41,6 +41,21 @@ export interface SourceConfig {
    * path ("/foo.html") is resolved against REMOTE_BASE on native.
    */
   externalUrl?: string;
+  /**
+   * When set, this source's item list renders a pinned "Cheat Sheet" entry
+   * as its last item; tapping it opens this URL (new tab on web, system
+   * browser on native) — same resolution rules as {@link externalUrl}. Lets
+   * a primer carry its printable A4 cheat sheet inline instead of as a
+   * separate library card.
+   */
+  cheatSheetUrl?: string;
+  /**
+   * Number of top-level items (topics) in this source, shown as a count on
+   * the sidebar category row. Backfilled into the manifest by
+   * `scripts/backfill-item-counts.ts` so the sidebar needn't eagerly parse
+   * every source. Omitted for external-only sources.
+   */
+  itemCount?: number;
 }
 
 export const SOURCES: Record<SourceId, SourceConfig> = {
@@ -77,7 +92,17 @@ export const SOURCES: Record<SourceId, SourceConfig> = {
     itemsPlural: "interview problems",
     storagePrefix: "sdf:neetcode",
     defaultRevealedSections: ["Problem"],
-    sectionOrder: ["Problem", "Pattern", "Explanation", "Solution"],
+    sectionOrder: [
+      "Problem",
+      "Examples",
+      "Recognition",
+      "Explanation",
+      "Python",
+      "Java",
+      "Rust",
+      "Go",
+      "C++",
+    ],
   },
   java: {
     id: "java",

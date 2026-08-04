@@ -7,11 +7,46 @@ type: interview-prep
 #### Problem
 Given an array of integers and a target, return the indices of the two numbers that add up to the target. Each input has exactly one solution; you may not use the same element twice.
 
-#### Pattern
-**Hashmap (one-pass complement lookup).** **O(n)** time, **O(n)** space.
+#### Examples
+
+```text
+Input: nums = [2,7,11,15], target = 9
+Output: [0,1]
+Explanation: nums[0] + nums[1] == 9.
+
+Input: nums = [3,2,4], target = 6
+Output: [1,2]
+
+Input: nums = [3,3], target = 6
+Output: [0,1]
+
+Constraints:
+- 2 <= nums.length <= 10^4
+- -10^9 <= nums[i] <= 10^9
+- exactly one valid answer exists
+```
+
+#### Recognition
+**Signals.** "Return the indices of the two numbers that add up to a target" gives you three tells at once: you need a *pair*, the array is *unsorted*, and you must return *positions* rather than values. Unsorted plus positions is what rules out the usual pair-finding trick. **Therefore.** A hashmap from value to index, checked as you scan, because the partner for `n` is fully determined (`target - n`) so membership is the only question you ever ask. **Not two pointers**, which needs sorted input and would destroy the original indices you have to return; sorting first costs `O(n log n)` and forces you to carry the original positions alongside. **Not a nested loop**, which is the `O(n^2)` baseline this exists to beat. **O(n)** time, **O(n)** space.
 
 #### Explanation
-The brute-force approach checks every pair — `O(n²)` time. The trick: as you walk the array left to right, for each number `n` at index `i`, the question "is there a partner that completes the sum?" reduces to "have I already seen `target - n`?" That's an `O(1)` hashmap lookup. So you scan once: at each index, compute the complement, check the map, and only if it's not there do you record the current `n → i`. The first time the complement check succeeds, you return both indices. Recording happens *after* the check, so you can never accidentally pair an element with itself.
+**Brute force.** Check every pair.
+
+```python
+def twoSum(nums, target):
+    for i in range(len(nums)):
+        for j in range(i + 1, len(nums)):
+            if nums[i] + nums[j] == target:
+                return [i, j]
+```
+
+`O(n^2)` time, `O(1)` space.
+
+**Wasteful because.** The inner loop re-scans the same suffix for every `i`, asking "does any later element equal `target - nums[i]`?" That is a membership question, and re-answering it by scanning is the entire cost.
+
+**Optimal.** Replace the scan with a lookup. Walk once, and at index `i` ask whether `target - nums[i]` has already been seen. A dict of value to index answers that in `O(1)`, so the whole thing collapses to a single pass. Record `nums[i] -> i` *after* the check, never before, which is what stops an element pairing with itself: when `nums = [3,3]` and `target = 6`, index 0 finds nothing and is then recorded, so index 1 finds it.
+
+**Edge cases.** Exactly one valid answer is guaranteed, so no not-found branch is needed. Duplicate values are fine because of the check-then-record order. Negative numbers and zero need no special handling since the complement is just arithmetic.
 
 #### Python
 
@@ -113,7 +148,11 @@ std::vector<int> twoSum(std::vector<int>& nums, int target) {
 #### Problem
 Given two non-empty linked lists representing non-negative integers stored in reverse order (ones digit first), add the two numbers and return the sum as a linked list in the same reversed format.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Linked list traversal with carry.** **O(max(m, n))** time, **O(max(m, n))** space.
 
 #### Explanation
@@ -279,7 +318,11 @@ ListNode* addTwoNumbers(ListNode* l1, ListNode* l2) {
 #### Problem
 Given two sorted arrays `nums1` and `nums2`, return the median of the combined sorted array. The solution must run in `O(log(min(m, n)))` time.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Binary search on partition.** **O(log(min(m, n)))** time, **O(1)** space.
 
 #### Explanation
@@ -485,7 +528,11 @@ double findMedianSortedArrays(std::vector<int>& nums1, std::vector<int>& nums2) 
 #### Problem
 Given a string `s`, return the longest substring that is a palindrome. If there are multiple answers of the same length, return any one of them.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Expand around center.** **O(n²)** time, **O(1)** space.
 
 #### Explanation
@@ -636,7 +683,11 @@ std::string longestPalindrome(std::string s) {
 #### Problem
 Given an integer `amount` and an array of coin denominations, return the number of combinations (not permutations) of coins that sum to `amount`. You may use each coin denomination an unlimited number of times.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **DP (unbounded knapsack).** **O(n * amount)** time, **O(amount)** space.
 
 #### Explanation
@@ -736,7 +787,11 @@ int change(int amount, std::vector<int>& coins) {
 #### Problem
 Given a 32-bit signed integer `x`, return `x` with its digits reversed. If the reversed integer overflows the 32-bit signed range `[-2³¹, 2³¹ - 1]`, return 0.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Math (digit extraction).** **O(log x)** time, **O(1)** space.
 
 #### Explanation
@@ -845,7 +900,11 @@ int reverse(int x) {
 #### Problem
 Given an integer array `nums`, return `true` if any value appears at least twice, and `false` if every element is distinct.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Hashset membership check.** **O(n)** time, **O(n)** space.
 
 #### Explanation
@@ -938,7 +997,11 @@ bool containsDuplicate(std::vector<int>& nums) {
 #### Problem
 Given two strings `s` and `t`, return `true` if `t` is an anagram of `s` (contains exactly the same characters with the same frequencies), and `false` otherwise.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Frequency array (26 lowercase letters).** **O(n)** time, **O(1)** space.
 
 #### Explanation
@@ -1041,28 +1104,73 @@ bool isAnagram(std::string s, std::string t) {
 #### Problem
 Given an array of strings, group the strings that are anagrams of each other and return the groups in any order.
 
-#### Pattern
-**Hashmap keyed by sorted string.** **O(n * k log k)** time, **O(n * k)** space (where `k` is the max string length).
+#### Examples
+
+```text
+Compare: any-order-nested
+
+Input: strs = ["eat","tea","tan","ate","nat","bat"]
+Output: [["bat"],["nat","tan"],["ate","eat","tea"]]
+
+Input: strs = [""]
+Output: [[""]]
+
+Input: strs = ["a"]
+Output: [["a"]]
+
+Constraints:
+- 1 <= strs.length <= 10^4
+- 0 <= strs[i].length <= 100
+- strs[i] is lowercase English letters only
+```
+
+#### Recognition
+**Signals.** "Group the strings that are anagrams of each other" plus "return the groups in any order". Grouping by a property means you need a *canonical form* of that property to key on, and "anagram" is a statement about character counts, nothing else. The any-order clause tells you the output is a partition, not a ranking, so no sorting of results is needed either. **Therefore.** A hashmap from canonical key to bucket, built in one pass. The only real question is what the key is, and counts beat sorted characters because counting is one linear pass per string. **Not sorting the whole array**, which groups nothing on its own since anagrams are not adjacent under lexicographic order. **Not pairwise comparison** of every string against every other, the `O(n^2 * k)` baseline. **O(n * k)** time, **O(n * k)** space.
 
 #### Explanation
-Two strings are anagrams if and only if their sorted character sequences are identical, so sorting each string produces a canonical key. Group strings by this key in a hashmap: walk the array once, sort each string in `O(k log k)`, and append it to the matching bucket. The total cost is `O(n * k log k)`. An alternative key is a 26-element frequency tuple, which sorts in `O(k)` per string but with a larger constant. Edge cases: an empty string is its own anagram group; a single-element array is trivially grouped.
+**Brute force.** Compare every string against every group's representative.
+
+```python
+def groupAnagrams(strs):
+    groups = []
+    for s in strs:
+        for g in groups:
+            if sorted(g[0]) == sorted(s):
+                g.append(s)
+                break
+        else:
+            groups.append([s])
+    return groups
+```
+
+`O(n^2 * k log k)` time.
+
+**Wasteful because.** It re-sorts the representative on every comparison, and it asks "does this string belong here?" once per existing group when the answer is fully determined by the string itself.
+
+**Optimal.** Compute a canonical key that any two anagrams share, and let a hashmap do the grouping. Sorting the characters is the obvious key and costs `O(k log k)` per string. Counting them is better: a 26-element tally is one `O(k)` pass, and the resulting fixed-width key hashes and compares faster than a variable-length string. That gives `O(n * k)` overall. Sorting stays the better answer when the alphabet is large or unbounded, because the count array is sized by the alphabet rather than by the string.
+
+**Edge cases.** The empty string is a valid key and forms its own group. A single-element array is trivially one group. Strings of different lengths can never collide, since their totals differ.
 
 #### Python
 
-`tuple(sorted(s))` is hashable so it can key a dict directly — no need to rejoin to a string. `setdefault(key, []).append(s)` is one of Python's few really tidy 'get-or-create then mutate' patterns.
+A `tuple` of counts is hashable so it can key a dict directly. `setdefault(key, []).append(s)` is one of Python's few really tidy 'get-or-create then mutate' patterns.
 
 ```python
 def groupAnagrams(strs):
     groups = {}
     for s in strs:
-        key = tuple(sorted(s))
-        groups.setdefault(key, []).append(s)
+        count = [0] * 26
+        for c in s:
+            count[ord(c) - ord('a')] += 1
+        groups.setdefault(tuple(count), []).append(s)
     return list(groups.values())
 ```
 
 #### Java
 
-Sort the string's chars via `toCharArray` + `Arrays.sort`, then `new String(chars)` as the map key. `computeIfAbsent(key, k -> new ArrayList<>())` is Java's tidy get-or-create-then-mutate.
+`Arrays.toString(count)` gives a cheap canonical key without writing a custom
+hash. `computeIfAbsent(key, k -> new ArrayList<>())` is Java's tidy
+get-or-create-then-mutate.
 
 ```java
 import java.util.*;
@@ -1071,9 +1179,9 @@ class Solution {
     public List<List<String>> groupAnagrams(String[] strs) {
         Map<String, List<String>> groups = new HashMap<>();
         for (String s : strs) {
-            char[] chars = s.toCharArray();
-            Arrays.sort(chars);
-            String key = new String(chars);
+            int[] count = new int[26];
+            for (char c : s.toCharArray()) count[c - 'a']++;
+            String key = Arrays.toString(count);
             groups.computeIfAbsent(key, k -> new ArrayList<>()).add(s);
         }
         return new ArrayList<>(groups.values());
@@ -1083,16 +1191,20 @@ class Solution {
 
 #### Rust
 
-Keying by `Vec<u8>` (sorted bytes) avoids a `String` allocation per key, and `sort_unstable` is faster than `sort` since stability doesn't matter for an anagram key. `entry(key).or_default().push(s)` is the canonical get-or-create-and-mutate.
+A fixed `[u8; 26]` array is `Hash + Eq`, so it keys the map with no allocation
+at all. `entry(key).or_default().push(s)` is the canonical
+get-or-create-and-mutate.
 
 ```rust
 use std::collections::HashMap;
 
 fn group_anagrams(strs: Vec<String>) -> Vec<Vec<String>> {
-    let mut groups: HashMap<Vec<u8>, Vec<String>> = HashMap::new();
+    let mut groups: HashMap<[u8; 26], Vec<String>> = HashMap::new();
     for s in strs {
-        let mut key = s.as_bytes().to_vec();
-        key.sort_unstable();
+        let mut key = [0u8; 26];
+        for b in s.bytes() {
+            key[(b - b'a') as usize] += 1;
+        }
         groups.entry(key).or_default().push(s);
     }
     groups.into_values().collect()
@@ -1101,17 +1213,18 @@ fn group_anagrams(strs: Vec<String>) -> Vec<Vec<String>> {
 
 #### Go
 
-Go has no first-class tuple, so the sorted bytes are converted back to `string` to use as a map key. `sort.Slice` with a closure is the pre-1.21 way; modern Go would use `slices.Sort(b)`.
+Go arrays (unlike slices) are comparable, so `[26]int` is directly usable as a
+map key with no encoding step at all. This is one of the few places the
+array/slice distinction pays off.
 
 ```go
-import "sort"
-
 func groupAnagrams(strs []string) [][]string {
-    groups := make(map[string][]string)
+    groups := make(map[[26]int][]string)
     for _, s := range strs {
-        b := []byte(s)
-        sort.Slice(b, func(i, j int) bool { return b[i] < b[j] })
-        key := string(b)
+        var key [26]int
+        for _, c := range s {
+            key[c-'a']++
+        }
         groups[key] = append(groups[key], s)
     }
     res := make([][]string, 0, len(groups))
@@ -1124,19 +1237,21 @@ func groupAnagrams(strs []string) [][]string {
 
 #### C++
 
-Copying the input to `key` and sorting in place is the simplest path; `unordered_map<string, ...>` keys naturally. `std::move(v)` in the final loop avoids copying each bucket's vector into the result.
+`std::array` has no standard hash, so the counts are packed into a short
+`string` of 26 chars, which `unordered_map` hashes for free. `std::move(v)` in
+the final loop avoids copying each bucket's vector into the result.
 
 ```cpp
 #include <vector>
 #include <string>
 #include <unordered_map>
-#include <algorithm>
 
-std::vector<std::vector<std::string>> groupAnagrams(std::vector<std::string>& strs) {
+std::vector<std::vector<std::string>> groupAnagrams(
+        std::vector<std::string>& strs) {
     std::unordered_map<std::string, std::vector<std::string>> groups;
     for (const auto& s : strs) {
-        std::string key = s;
-        std::sort(key.begin(), key.end());
+        std::string key(26, 0);
+        for (char c : s) key[c - 'a']++;
         groups[key].push_back(s);
     }
     std::vector<std::vector<std::string>> res;
@@ -1152,7 +1267,11 @@ std::vector<std::vector<std::string>> groupAnagrams(std::vector<std::string>& st
 #### Problem
 Given an integer array `nums` and an integer `k`, return the `k` most frequent elements. The answer can be returned in any order and is guaranteed to be unique.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Bucket sort by frequency.** **O(n)** time, **O(n)** space.
 
 #### Explanation
@@ -1282,7 +1401,11 @@ std::vector<int> topKFrequent(std::vector<int>& nums, int k) {
 #### Problem
 Design an algorithm to encode a list of strings into a single string, and decode that single string back into the original list. The strings may contain any character including `#` and digits.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Length-prefix encoding.** **O(n)** time, **O(n)** space.
 
 #### Explanation
@@ -1433,7 +1556,11 @@ std::vector<std::string> decode(std::string s) {
 #### Problem
 Given an integer array `nums`, return an array `output` where `output[i]` equals the product of all elements except `nums[i]`. You may not use division, and the solution must run in `O(n)`.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Prefix and suffix products.** **O(n)** time, **O(1)** extra space (output array not counted).
 
 #### Explanation
@@ -1555,7 +1682,11 @@ std::vector<int> productExceptSelf(std::vector<int>& nums) {
 #### Problem
 Determine if a 9×9 Sudoku board is valid. Each row, column, and 3×3 sub-box must contain the digits 1–9 with no repetition. Empty cells are marked with `'.'`. The board does not need to be fully solved.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Hashset per row, column, and 3×3 box.** **O(1)** time, **O(1)** space (fixed 9×9 board).
 
 #### Explanation
@@ -1690,7 +1821,11 @@ bool isValidSudoku(std::vector<std::vector<char>>& board) {
 #### Problem
 Given an unsorted integer array `nums`, return the length of the longest sequence of consecutive integers. The solution must run in `O(n)`.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Hashset with sequence-start detection.** **O(n)** time, **O(n)** space.
 
 #### Explanation
@@ -1807,7 +1942,11 @@ int longestConsecutive(std::vector<int>& nums) {
 #### Problem
 A phrase is a palindrome if, after converting all uppercase letters to lowercase and removing all non-alphanumeric characters, it reads the same forward and backward. Given a string `s`, return `true` if it is a palindrome.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Two pointers (in-place skip).** **O(n)** time, **O(1)** space.
 
 #### Explanation
@@ -1920,7 +2059,11 @@ bool isPalindrome(std::string s) {
 #### Problem
 Given a 1-indexed sorted array `numbers` and a target, return the 1-indexed positions of the two numbers that sum to the target. Use only `O(1)` extra space; exactly one solution is guaranteed.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Two pointers on sorted input.** **O(n)** time, **O(1)** space.
 
 #### Explanation
@@ -2019,7 +2162,11 @@ std::vector<int> twoSum(std::vector<int>& numbers, int target) {
 #### Problem
 Given an integer array `nums`, return all unique triplets `[a, b, c]` such that `a + b + c == 0`. The solution set must not contain duplicate triplets.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Sort + two pointers.** **O(n²)** time, **O(1)** extra space (excluding output).
 
 #### Explanation
@@ -2166,7 +2313,11 @@ std::vector<std::vector<int>> threeSum(std::vector<int>& nums) {
 #### Problem
 Given an array `height` of `n` non-negative integers where each represents a vertical line at position `i`, find two lines that together with the x-axis form a container that holds the most water. Return the maximum water volume.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Two pointers, always move the shorter side.** **O(n)** time, **O(1)** space.
 
 #### Explanation
@@ -2269,7 +2420,11 @@ int maxArea(std::vector<int>& height) {
 #### Problem
 Given an array `height` representing an elevation map where the width of each bar is 1, compute how much water can be trapped after raining.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Two pointers tracking running max on each side.** **O(n)** time, **O(1)** space.
 
 #### Explanation
@@ -2401,7 +2556,11 @@ int trap(std::vector<int>& height) {
 #### Problem
 Given an array `prices` where `prices[i]` is the stock price on day `i`, return the maximum profit from one buy followed by one sell on a later day. Return 0 if no profit is possible.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Single pass tracking minimum price.** **O(n)** time, **O(1)** space.
 
 #### Explanation
@@ -2492,7 +2651,11 @@ int maxProfit(std::vector<int>& prices) {
 #### Problem
 Given a string `s`, return the length of the longest substring that contains no repeating characters.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Sliding window with hashset.** **O(n)** time, **O(min(n, m))** space (where `m` is the character set size).
 
 #### Explanation
@@ -2610,7 +2773,11 @@ int lengthOfLongestSubstring(std::string s) {
 #### Problem
 Given a string `s` and an integer `k`, return the length of the longest substring that can be made into a single repeating character by replacing at most `k` characters.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Sliding window tracking max-frequency character.** **O(n)** time, **O(1)** space.
 
 #### Explanation
@@ -2733,7 +2900,11 @@ int characterReplacement(std::string s, int k) {
 #### Problem
 Given strings `s1` and `s2`, return `true` if any permutation of `s1` is a contiguous substring of `s2`.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Fixed-size sliding window with frequency array comparison.** **O(n)** time, **O(1)** space.
 
 #### Explanation
@@ -2869,7 +3040,11 @@ bool checkInclusion(std::string s1, std::string s2) {
 #### Problem
 Given strings `s` and `t`, return the minimum window substring of `s` that contains all characters of `t` (including duplicates). Return an empty string if no such window exists.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Sliding window, shrink when valid.** **O(|s| + |t|)** time, **O(|t|)** space.
 
 #### Explanation
@@ -3026,7 +3201,11 @@ std::string minWindow(std::string s, std::string t) {
 #### Problem
 Given an integer array `nums` and an integer `k`, return an array of the maximum value in each sliding window of size `k`.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Monotonic decreasing deque (indices).** **O(n)** time, **O(k)** space.
 
 #### Explanation
@@ -3145,7 +3324,11 @@ std::vector<int> maxSlidingWindow(std::vector<int>& nums, int k) {
 #### Problem
 Given a string `s` containing only `'('`, `')'`, `'{'`, `'}'`, `'['`, and `']'`, determine if the input string is valid. An input is valid if every open bracket is closed by the same type of bracket in the correct order.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Stack (push open, match on close).** **O(n)** time, **O(n)** space.
 
 #### Explanation
@@ -3262,7 +3445,11 @@ bool isValid(std::string s) {
 #### Problem
 Design a stack that supports `push`, `pop`, `top`, and `getMin` — all in `O(1)` time.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Parallel min-tracking stack.** **O(1)** all operations, **O(n)** space.
 
 #### Explanation
@@ -3410,7 +3597,11 @@ public:
 #### Problem
 Evaluate an arithmetic expression given as a list of tokens in Reverse Polish Notation (postfix). Operators are `+`, `-`, `*`, and `/` (integer division truncating toward zero). The expression is guaranteed to be valid.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Stack (postfix evaluation).** **O(n)** time, **O(n)** space.
 
 #### Explanation
@@ -3554,7 +3745,11 @@ int evalRPN(std::vector<std::string>& tokens) {
 #### Problem
 Given `n`, generate all combinations of `n` pairs of well-formed (valid) parentheses.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Backtracking with open/close counters.** **O(4ⁿ / √n)** time (Catalan number of results), **O(n)** stack space.
 
 #### Explanation
@@ -3674,7 +3869,11 @@ std::vector<std::string> generateParenthesis(int n) {
 #### Problem
 Given an array `temperatures`, return an array `answer` where `answer[i]` is the number of days after day `i` until a warmer temperature. If no warmer day exists, `answer[i]` is 0.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Monotonic decreasing stack (indices).** **O(n)** time, **O(n)** space.
 
 #### Explanation
@@ -3794,7 +3993,11 @@ std::vector<int> dailyTemperatures(std::vector<int>& temperatures) {
 #### Problem
 Given `n` cars at different positions on a one-lane road heading toward a `target`, where each car has a given `speed`, return the number of car fleets (groups of cars that arrive together) that reach the destination.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Monotonic stack (sort by position descending).** **O(n log n)** time, **O(n)** space.
 
 #### Explanation
@@ -3916,7 +4119,11 @@ int carFleet(int target, std::vector<int>& position, std::vector<int>& speed) {
 #### Problem
 Given an array of bar heights in a histogram where each bar has width 1, return the area of the largest rectangle that can be formed.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Monotonic stack (increasing).** **O(n)** time, **O(n)** space.
 
 #### Explanation
@@ -4065,11 +4272,15 @@ int largestRectangleArea(std::vector<int>& heights) {
 #### Problem
 Given a sorted array of integers and a target value, return the index of the target, or -1 if it is not present.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Binary search.** **O(log n)** time, **O(1)** space.
 
 #### Explanation
-A linear scan finds the target in `O(n)` time. Binary search exploits the sorted order: at every step, compare the middle element to the target. If it matches, return the index; if the middle is less than the target, the target must be in the right half — advance `l`; if greater, search the left half — retreat `r`. The loop invariant `l <= r` ensures we don't skip a single-element range. Computing the midpoint as `(l + r) // 2` avoids integer overflow compared to naive `(l + r) / 2` in languages with fixed-width integers. Edge cases: empty array (returns -1 immediately), duplicate values (any match is acceptable), single element.
+A linear scan finds the target in `O(n)` time. Binary search exploits the sorted order: at every step, compare the middle element to the target. If it matches, return the index; if the middle is less than the target, the target must be in the right half — advance `l`; if greater, search the left half — retreat `r`. The loop invariant `l <= r` ensures we don't skip a single-element range. Computing the midpoint as `l + (r - l) // 2` avoids integer overflow: `(l + r)` can exceed the maximum value in a fixed-width integer language even when both indices are valid, whereas `(r - l)` is bounded by the array length. Python integers are arbitrary-precision so `(l + r) // 2` is safe there, but the subtraction form is the habit worth keeping. Edge cases: empty array (returns -1 immediately), duplicate values (any match is acceptable), single element.
 
 #### Python
 
@@ -4175,11 +4386,15 @@ int search(std::vector<int>& nums, int target) {
 #### Problem
 Given an `m x n` matrix where each row is sorted left-to-right and the first integer of each row is greater than the last of the previous row, determine if a target value exists in the matrix.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Binary search on flattened matrix.** **O(log(m * n))** time, **O(1)** space.
 
 #### Explanation
-The matrix's row-continuation property means the entire grid is equivalent to one sorted array of `m * n` elements. Rather than two nested binary searches, flatten: treat index `mid` as referring to `matrix[mid // n][mid % n]`. This single binary search runs in `O(log(m * n))` — the same asymptotic cost as binary searching one sorted array of the same size. A naive search scanning row by row would be `O(m + log n)` with binary search per row, but the flat approach is simpler and equally efficient. Edge case: an empty matrix or a row with zero columns should be handled before accessing elements.
+The matrix's row-continuation property means the entire grid is equivalent to one sorted array of `m * n` elements. Rather than two nested binary searches, flatten: treat index `mid` as referring to `matrix[mid // n][mid % n]`. This single binary search runs in `O(log(m * n))` — the same asymptotic cost as binary searching one sorted array of the same size. Binary searching each row in turn would be `O(m log n)`; picking the right row first and then binary searching only that one is `O(m + log n)`. The flat search beats both at `O(log(m * n))`, and is simpler than the two-step version. Edge case: an empty matrix or a row with zero columns should be handled before accessing elements.
 
 #### Python
 
@@ -4292,7 +4507,11 @@ bool searchMatrix(std::vector<std::vector<int>>& matrix, int target) {
 #### Problem
 Given `n` piles of bananas and `h` hours, find the minimum eating speed `k` (bananas per hour) such that Koko can eat all bananas within `h` hours, eating at most one pile per hour.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Binary search on answer.** **O(n log m)** time, **O(1)** space (where `m = max(piles)`).
 
 #### Explanation
@@ -4406,7 +4625,11 @@ int minEatingSpeed(std::vector<int>& piles, int h) {
 #### Problem
 Given a sorted array of unique integers that has been rotated between 1 and n times, find the minimum element in `O(log n)` time.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Binary search (compare mid to right).** **O(log n)** time, **O(1)** space.
 
 #### Explanation
@@ -4504,7 +4727,11 @@ int findMin(std::vector<int>& nums) {
 #### Problem
 Given a sorted array of unique integers rotated at an unknown pivot, search for a target and return its index, or -1 if not found, in `O(log n)` time.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Binary search (determine which half is sorted).** **O(log n)** time, **O(1)** space.
 
 #### Explanation
@@ -4644,7 +4871,11 @@ int search(std::vector<int>& nums, int target) {
 #### Problem
 Design a key-value store supporting `set(key, value, timestamp)` and `get(key, timestamp)`, where `get` returns the value with the largest timestamp less than or equal to the given timestamp, or `""` if none exists.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Binary search on sorted timestamps.** **O(log n)** per `get`, **O(1)** per `set`.
 
 #### Explanation
@@ -4825,7 +5056,11 @@ public:
 #### Problem
 Given the head of a singly linked list, reverse it in-place and return the new head.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Iterative pointer reversal.** **O(n)** time, **O(1)** space.
 
 #### Explanation
@@ -4940,7 +5175,11 @@ ListNode* reverseList(ListNode* head) {
 #### Problem
 Given the heads of two sorted linked lists, merge them into a single sorted linked list and return its head.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Iterative merge with dummy head.** **O(n + m)** time, **O(1)** space.
 
 #### Explanation
@@ -5086,7 +5325,11 @@ ListNode* mergeTwoLists(ListNode* l1, ListNode* l2) {
 #### Problem
 Given a linked list `L0 → L1 → … → Ln`, reorder it in-place to `L0 → Ln → L1 → Ln-1 → L2 → Ln-2 → …` without returning a new list.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Find middle + reverse second half + merge.** **O(n)** time, **O(1)** space.
 
 #### Explanation
@@ -5279,7 +5522,11 @@ void reorderList(ListNode* head) {
 #### Problem
 Given the head of a linked list and an integer `n`, remove the nth node from the end of the list in one pass and return the head.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Two pointers (fast n+1 ahead of slow).** **O(n)** time, **O(1)** space.
 
 #### Explanation
@@ -5404,7 +5651,11 @@ ListNode* removeNthFromEnd(ListNode* head, int n) {
 #### Problem
 Deep-copy a linked list where each node has a `val`, a `next` pointer, and a `random` pointer that may point to any node or `None`.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Hashmap (old node → new node).** **O(n)** time, **O(n)** space.
 
 #### Explanation
@@ -5539,7 +5790,11 @@ Node* copyRandomList(Node* head) {
 #### Problem
 Given the head of a linked list, return `true` if the list has a cycle (some node's `next` pointer points back to a previous node), and `false` otherwise.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Floyd's cycle detection (fast/slow pointers).** **O(n)** time, **O(1)** space.
 
 #### Explanation
@@ -5659,7 +5914,11 @@ bool hasCycle(ListNode* head) {
 #### Problem
 Given an array of `n + 1` integers where each integer is in `[1, n]`, find the one duplicate without modifying the array and using only `O(1)` extra space.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Floyd's cycle detection (array as implicit linked list).** **O(n)** time, **O(1)** space.
 
 #### Explanation
@@ -5776,7 +6035,11 @@ int findDuplicate(std::vector<int>& nums) {
 #### Problem
 Design a data structure that supports `get(key)` and `put(key, value)` in `O(1)` time, evicting the least recently used entry when capacity is exceeded.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Hashmap + doubly linked list.** **O(1)** get/put.
 
 #### Explanation
@@ -6023,7 +6286,11 @@ public:
 #### Problem
 Given an array of `k` sorted linked lists, merge all of them into one sorted linked list and return its head.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Min-heap (priority queue).** **O(n log k)** time, **O(k)** space (where `n` = total nodes).
 
 #### Explanation
@@ -6184,7 +6451,11 @@ ListNode* mergeKLists(std::vector<ListNode*>& lists) {
 #### Problem
 Given a linked list and integer `k`, reverse the nodes in each group of `k` consecutive nodes. If the remaining nodes at the end are fewer than `k`, leave them as-is.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Iterative group reversal.** **O(n)** time, **O(1)** space.
 
 #### Explanation
@@ -6372,7 +6643,11 @@ ListNode* reverseKGroup(ListNode* head, int k) {
 #### Problem
 Given the root of a binary tree, invert it (mirror left and right subtrees at every node) and return the root.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **DFS (postorder recursion).** **O(n)** time, **O(h)** space.
 
 #### Explanation
@@ -6476,7 +6751,11 @@ TreeNode* invertTree(TreeNode* root) {
 #### Problem
 Given the root of a binary tree, return its maximum depth — the number of nodes along the longest path from root to leaf.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **DFS (recursive).** **O(n)** time, **O(h)** space.
 
 #### Explanation
@@ -6569,7 +6848,11 @@ int maxDepth(TreeNode* root) {
 #### Problem
 Given the root of a binary tree, return the length of the diameter — the longest path between any two nodes (the path does not need to pass through the root). The length is the number of edges.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **DFS with running maximum.** **O(n)** time, **O(h)** space.
 
 #### Explanation
@@ -6704,7 +6987,11 @@ int diameterOfBinaryTree(TreeNode* root) {
 #### Problem
 Given the root of a binary tree, return `true` if it is height-balanced — every node's left and right subtrees differ in height by at most 1.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **DFS with sentinel value for imbalance.** **O(n)** time, **O(h)** space.
 
 #### Explanation
@@ -6829,7 +7116,11 @@ bool isBalanced(TreeNode* root) { return dfs(root) != -1; }
 #### Problem
 Given the roots of two binary trees, return `true` if they are structurally identical with the same node values at every position.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **DFS (simultaneous recursive traversal).** **O(n)** time, **O(h)** space.
 
 #### Explanation
@@ -6930,7 +7221,11 @@ bool isSameTree(TreeNode* p, TreeNode* q) {
 #### Problem
 Given the roots of two binary trees `root` and `subRoot`, return `true` if there is a node in `root` whose subtree is identical to `subRoot`.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **DFS + isSameTree check at each node.** **O(m * n)** time, **O(h)** space.
 
 #### Explanation
@@ -7061,7 +7356,11 @@ bool isSubtree(TreeNode* root, TreeNode* subRoot) {
 #### Problem
 Given a BST and two nodes `p` and `q`, find their lowest common ancestor (the deepest node that is an ancestor of both).
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **BST property traversal (iterative).** **O(h)** time, **O(1)** space.
 
 #### Explanation
@@ -7180,7 +7479,11 @@ TreeNode* lowestCommonAncestor(TreeNode* root, TreeNode* p, TreeNode* q) {
 #### Problem
 Given the root of a binary tree, return the node values grouped by level — left to right, top to bottom — as a list of lists.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **BFS (queue with level-size snapshot).** **O(n)** time, **O(n)** space.
 
 #### Explanation
@@ -7343,7 +7646,11 @@ std::vector<std::vector<int>> levelOrder(TreeNode* root) {
 #### Problem
 Given the root of a binary tree, return the values of the nodes visible when looking from the right side — one value per level (the rightmost node at each level).
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **BFS, record last node per level.** **O(n)** time, **O(n)** space.
 
 #### Explanation
@@ -7500,7 +7807,11 @@ std::vector<int> rightSideView(TreeNode* root) {
 #### Problem
 Given a binary tree, count the number of "good" nodes — nodes where no node on the path from the root to that node has a value greater than the node's own value.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **DFS with running maximum.** **O(n)** time, **O(h)** space.
 
 #### Explanation
@@ -7624,7 +7935,11 @@ int goodNodes(TreeNode* root) {
 #### Problem
 Given the root of a binary tree, return `true` if it is a valid BST — every node's value is strictly greater than all values in its left subtree and strictly less than all values in its right subtree.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **DFS with min/max bounds.** **O(n)** time, **O(h)** space.
 
 #### Explanation
@@ -7746,7 +8061,11 @@ bool isValidBST(TreeNode* root) {
 #### Problem
 Given the root of a BST and an integer `k`, return the `k`th smallest value among all node values.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Iterative inorder traversal (sorted order).** **O(n)** time, **O(h)** space.
 
 #### Explanation
@@ -7885,7 +8204,11 @@ int kthSmallest(TreeNode* root, int k) {
 #### Problem
 Given a preorder and inorder traversal of a binary tree (all values unique), reconstruct and return the root of the tree.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Recursive divide with hashmap for inorder index lookup.** **O(n)** time, **O(n)** space.
 
 #### Explanation
@@ -8059,7 +8382,11 @@ public:
 #### Problem
 Given a binary tree, find the maximum path sum where a path is any sequence of nodes connected by edges (need not pass through the root). Node values can be negative.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Post-order DFS with global maximum tracking.** **O(n)** time, **O(h)** space.
 
 #### Explanation
@@ -8206,7 +8533,11 @@ int maxPathSum(TreeNode* root) {
 #### Problem
 Design an algorithm to serialize a binary tree to a string and deserialize it back to the original tree structure. Any encoding scheme is acceptable.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Preorder DFS with null markers.** **O(n)** time, **O(n)** space.
 
 #### Explanation
@@ -8428,7 +8759,11 @@ TreeNode* deserialize(std::string data) {
 #### Problem
 Implement a trie with `insert(word)`, `search(word)` (exact match), and `startsWith(prefix)` operations, each on strings of lowercase letters.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Trie with per-node children dict and end-of-word flag.** **O(n)** time per operation, **O(n)** space per inserted word.
 
 #### Explanation
@@ -8662,7 +8997,11 @@ public:
 #### Problem
 Design a word dictionary supporting `addWord(word)` and `search(word)`, where `search` may contain `'.'` as a wildcard that matches any single letter.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Trie with recursive DFS for wildcard expansion.** **O(m)** add, **O(26^m)** worst-case search.
 
 #### Explanation
@@ -8876,7 +9215,11 @@ public:
 #### Problem
 Given an `m×n` character grid and a list of words, return all words that can be formed by traversing adjacent (4-directional) cells without reusing the same cell in one path.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Trie-backed DFS backtracking on the board.** **O(m·n·4^L)** time where L is the max word length.
 
 #### Explanation
@@ -9142,7 +9485,11 @@ public:
 #### Problem
 Design a class initialized with `k` and a list of initial numbers; `add(val)` inserts a new value and returns the kth largest element seen so far.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Min-heap of size k.** **O(log k)** per `add`, **O(n log k)** initialization.
 
 #### Explanation
@@ -9300,7 +9647,11 @@ public:
 #### Problem
 You have a list of stone weights. Each turn, smash the two heaviest stones: if they are equal both are destroyed; otherwise the difference survives. Return the weight of the last remaining stone, or 0 if none remain.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Max-heap (negate values for min-heap languages).** **O(n log n)** time, **O(n)** space.
 
 #### Explanation
@@ -9419,7 +9770,11 @@ int lastStoneWeight(std::vector<int>& stones) {
 #### Problem
 Given an array of points on a plane, return the `k` closest points to the origin `(0, 0)`. Distance is Euclidean; order of the output does not matter.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Max-heap of size k (negated distance).** **O(n log k)** time, **O(k)** space.
 
 #### Explanation
@@ -9543,11 +9898,15 @@ std::vector<std::vector<int>> kClosest(std::vector<std::vector<int>>& points, in
 #### Problem
 Given an integer array and an integer `k`, return the kth largest element (not the kth distinct element — duplicates count).
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Min-heap of size k.** **O(n log k)** time, **O(k)** space.
 
 #### Explanation
-Sorting the array gives `O(n log n)` time and the answer is at index `n - k`, but a min-heap of size `k` does better when `k << n`. Seed the heap with the first `k` elements, then for each remaining element: if it exceeds the heap's minimum (the current kth largest), replace the minimum with it using `heapreplace` (pop + push in one O(log k) step). After processing all elements, the heap's minimum is the kth largest. The key insight: the heap always contains exactly the `k` largest elements seen so far, so its min is always the answer. For small `k` this is noticeably faster than full sort; for `k ≈ n` the difference shrinks.
+Sorting the array gives `O(n log n)` time and the answer is at index `n - k`, but a min-heap of size `k` does better when `k << n`. Seed the heap with the first `k` elements, then for each remaining element: if it exceeds the heap's minimum (the current kth largest), replace the minimum with it using `heapreplace` (pop + push in one O(log k) step). After processing all elements, the heap's minimum is the kth largest. The key insight: the heap always contains exactly the `k` largest elements seen so far, so its min is always the answer. Quickselect is the standard follow-up and the asymptotically better answer: partition around a random pivot and recurse into only the side containing index `n - k`, giving `O(n)` expected time and `O(1)` extra space, though `O(n^2)` worst case and it reorders the input. Prefer the heap when elements arrive as a stream or the array must not be modified, and quickselect when you own the array and `k` is a large fraction of `n`. For small `k` the heap is noticeably faster than a full sort; for `k ≈ n` the difference shrinks.
 
 #### Python
 
@@ -9655,7 +10014,11 @@ int findKthLargest(std::vector<int>& nums, int k) {
 #### Problem
 Given a list of tasks and a cooldown period `n`, find the minimum number of CPU intervals needed to execute all tasks, where the same task type must be at least `n` intervals apart (idle slots are allowed).
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Greedy simulation with max-heap and cooldown queue.** **O(n log n)** time, **O(n)** space.
 
 #### Explanation
@@ -9820,7 +10183,11 @@ int leastInterval(std::vector<char>& tasks, int n) {
 #### Problem
 Design a simplified Twitter supporting `postTweet`, `getNewsFeed` (the 10 most recent tweets from the user and their followees), `follow`, and `unfollow`.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Heap merge of per-user tweet lists.** **O(k log u)** per `getNewsFeed` where `u` is number of followed users and `k=10`.
 
 #### Explanation
@@ -10097,7 +10464,11 @@ public:
 #### Problem
 Design a data structure that supports `addNum(int num)` and `findMedian()` — the median of all numbers added so far — in a streaming context.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Two heaps: max-heap for lower half, min-heap for upper half.** **O(log n)** add, **O(1)** findMedian.
 
 #### Explanation
@@ -10297,7 +10668,11 @@ public:
 #### Problem
 Given an array of distinct integers, return all possible subsets (the power set). The solution set must not contain duplicate subsets; order does not matter.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Backtracking (include/exclude decision tree).** **O(n · 2ⁿ)** time, **O(n)** auxiliary stack space.
 
 #### Explanation
@@ -10419,7 +10794,11 @@ std::vector<std::vector<int>> subsets(std::vector<int>& nums) {
 #### Problem
 Given an array of distinct positive integers and a target, find all unique combinations where the chosen numbers sum to the target. Each number may be used an unlimited number of times; order does not matter.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Backtracking with unlimited reuse.** **O(2^(t/m))** time where `t` is the target and `m` is the smallest candidate.
 
 #### Explanation
@@ -10550,7 +10929,11 @@ std::vector<std::vector<int>> combinationSum(std::vector<int>& candidates, int t
 #### Problem
 Given an array of distinct integers, return all possible permutations in any order.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Backtracking with in-place swap or visited set.** **O(n! · n)** time, **O(n)** auxiliary stack space.
 
 #### Explanation
@@ -10686,7 +11069,11 @@ std::vector<std::vector<int>> permute(std::vector<int>& nums) {
 #### Problem
 Given an integer array that may contain duplicates, return all possible unique subsets. The solution set must not contain duplicate subsets.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Backtracking with sort-and-skip-duplicate technique.** **O(n · 2ⁿ)** time, **O(n)** auxiliary stack space.
 
 #### Explanation
@@ -10820,7 +11207,11 @@ std::vector<std::vector<int>> subsetsWithDup(std::vector<int>& nums) {
 #### Problem
 Given a collection of candidates (may contain duplicates) and a target, find all unique combinations that sum to the target where each candidate may only be used once.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Backtracking with sort-and-skip-duplicate and early break.** **O(2ⁿ)** time, **O(n)** auxiliary stack space.
 
 #### Explanation
@@ -10967,7 +11358,11 @@ std::vector<std::vector<int>> combinationSum2(std::vector<int>& candidates, int 
 #### Problem
 Given an `m×n` grid of characters, determine if the word exists in the grid by moving to horizontally or vertically adjacent cells, without reusing the same cell in one path.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **DFS backtracking with in-place visited marking.** **O(m · n · 4^L)** time where L is the word length.
 
 #### Explanation
@@ -11111,7 +11506,11 @@ bool exist(std::vector<std::vector<char>>& board, std::string word) {
 #### Problem
 Given a string `s`, partition it so that every substring in the partition is a palindrome. Return all possible partitioning schemes.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Backtracking with inline palindrome check.** **O(n · 2ⁿ)** time, **O(n)** auxiliary stack space.
 
 #### Explanation
@@ -11281,7 +11680,11 @@ std::vector<std::vector<std::string>> partition(std::string s) {
 #### Problem
 Given a string of digits `2-9`, return all possible letter combinations that the digits could represent on a phone keypad. Return an empty list for an empty input.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Backtracking over digit-to-letter mapping.** **O(4ⁿ · n)** time where n is the number of digits (4 accounts for `7` and `9` having 4 letters each).
 
 #### Explanation
@@ -11422,7 +11825,11 @@ std::vector<std::string> letterCombinations(std::string digits) {
 #### Problem
 Place `n` queens on an `n×n` chessboard such that no two queens share a row, column, or diagonal. Return all distinct solutions as board layouts.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Backtracking with column and diagonal conflict sets.** **O(n!)** time, **O(n)** auxiliary space.
 
 #### Explanation
@@ -11599,7 +12006,11 @@ std::vector<std::vector<std::string>> solveNQueens(int n) {
 #### Problem
 Given an `m×n` binary grid of `'1'` (land) and `'0'` (water), count the number of islands. An island is a group of adjacent (4-directional) land cells surrounded by water.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **DFS flood fill (in-place marking).** **O(m·n)** time, **O(m·n)** space (recursion stack in worst case).
 
 #### Explanation
@@ -11738,7 +12149,11 @@ int numIslands(std::vector<std::vector<char>>& grid) {
 #### Problem
 Given a reference to a node in a connected undirected graph, return a deep copy (clone) of the graph. Each node contains a value and a list of neighbors.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **DFS with old-to-new node hashmap.** **O(V+E)** time, **O(V)** space.
 
 #### Explanation
@@ -11887,7 +12302,11 @@ Node* cloneGraph(Node* node) {
 #### Problem
 Given a binary matrix where `1` is land and `0` is water, return the area of the largest island (group of 4-directionally connected land cells), or `0` if there is no land.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **DFS flood fill returning subtree size.** **O(m·n)** time, **O(m·n)** space.
 
 #### Explanation
@@ -12009,7 +12428,11 @@ int maxAreaOfIsland(std::vector<std::vector<int>>& grid) {
 #### Problem
 Given an `m×n` integer matrix of heights, water flows to adjacent cells with equal or lower elevation. The Pacific touches the top and left edges; the Atlantic touches the bottom and right edges. Return all cells from which water can reach both oceans.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Reverse multi-source BFS from each ocean border.** **O(m·n)** time, **O(m·n)** space.
 
 #### Explanation
@@ -12207,7 +12630,11 @@ std::vector<std::vector<int>> pacificAtlantic(std::vector<std::vector<int>>& hei
 #### Problem
 Given an `m×n` board of `'X'` and `'O'`, capture all `'O'` regions completely surrounded by `'X'` by flipping them to `'X'`. Border-connected `'O'` regions are never captured.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **DFS from border `'O'` cells to mark safe regions, then sweep.** **O(m·n)** time, **O(m·n)** space.
 
 #### Explanation
@@ -12347,7 +12774,11 @@ void solve(std::vector<std::vector<char>>& board) {
 #### Problem
 In a grid, `0` = empty, `1` = fresh orange, `2` = rotten orange. Each minute, every fresh orange adjacent to a rotten one becomes rotten. Return the minimum minutes to rot all oranges, or `-1` if impossible.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Multi-source BFS from all initially rotten oranges.** **O(m·n)** time, **O(m·n)** space.
 
 #### Explanation
@@ -12521,7 +12952,11 @@ int orangesRotting(std::vector<std::vector<int>>& grid) {
 #### Problem
 Given a grid of rooms where `-1` is a wall, `0` is a gate, and `INF` (2^31 - 1) is an empty room, fill each empty room with its distance to the nearest gate in-place. Rooms unreachable from any gate remain `INF`.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Multi-source BFS from all gates simultaneously.** **O(m·n)** time, **O(m·n)** space.
 
 #### Explanation
@@ -12669,7 +13104,11 @@ void wallsAndGates(std::vector<std::vector<int>>& rooms) {
 #### Problem
 Given `numCourses` and a list of prerequisite pairs `[a, b]` meaning you must take course `b` before `a`, determine if it's possible to finish all courses (i.e., the prerequisite graph has no cycle).
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **DFS cycle detection with three-state coloring.** **O(V+E)** time, **O(V+E)** space.
 
 #### Explanation
@@ -12807,7 +13246,11 @@ bool canFinish(int numCourses, std::vector<std::vector<int>>& prerequisites) {
 #### Problem
 Given `numCourses` and a list of `[course, prerequisite]` pairs, return a valid order to take all courses, or an empty array if a cycle makes it impossible.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Topological sort (Kahn's BFS).** **O(V+E)** time, **O(V+E)** space.
 
 #### Explanation
@@ -12977,7 +13420,11 @@ std::vector<int> findOrder(int numCourses, std::vector<std::vector<int>>& prereq
 #### Problem
 Given a graph that started as a tree with one extra edge added, find and return that redundant edge. The graph has `n` nodes labeled `1` to `n`.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Union-Find (cycle detection).** **O(n α(n))** time, **O(n)** space.
 
 #### Explanation
@@ -13162,7 +13609,11 @@ std::vector<int> findRedundantConnection(std::vector<std::vector<int>>& edges) {
 #### Problem
 Given `n` nodes and a list of undirected edges, return the number of connected components in the graph.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Union-Find.** **O(n α(n))** time, **O(n)** space.
 
 #### Explanation
@@ -13350,7 +13801,11 @@ int countComponents(int n, std::vector<std::vector<int>>& edges) {
 #### Problem
 Given `n` nodes labeled `0` to `n-1` and a list of undirected edges, determine whether they form a valid tree (connected and acyclic).
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Union-Find (no cycle + connected).** **O(n α(n))** time, **O(n)** space.
 
 #### Explanation
@@ -13512,7 +13967,11 @@ bool validTree(int n, std::vector<std::vector<int>>& edges) {
 #### Problem
 Given `beginWord`, `endWord`, and a `wordList`, return the length of the shortest transformation sequence where each step changes exactly one letter and each intermediate word must be in the list. Return `0` if no such sequence exists.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **BFS (unweighted shortest path).** **O(m² * n)** time, **O(m * n)** space, where `m` is word length and `n` is dictionary size.
 
 #### Explanation
@@ -13708,7 +14167,11 @@ int ladderLength(std::string beginWord, std::string endWord, std::vector<std::st
 #### Problem
 Given a list of airline tickets `[from, to]`, reconstruct the full itinerary starting from `"JFK"` using all tickets exactly once. When multiple itineraries exist, return the one with the smallest lexical order.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Hierholzer's algorithm (Eulerian path, iterative DFS).** **O(E log E)** time, **O(E)** space.
 
 #### Explanation
@@ -13869,7 +14332,11 @@ std::vector<std::string> findItinerary(std::vector<std::vector<std::string>>& ti
 #### Problem
 Given an array of points on a 2-D plane, return the minimum cost to connect all points, where the cost between two points is their Manhattan distance. Each point must be connected (directly or indirectly) to every other.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Prim's MST (min-heap / lazy deletion).** **O(n² log n)** time, **O(n²)** space.
 
 #### Explanation
@@ -14050,7 +14517,11 @@ int minCostConnectPoints(std::vector<std::vector<int>>& points) {
 #### Problem
 Given a directed weighted graph with `n` nodes and edges `[u, v, w]`, find the minimum time for all nodes to receive a signal sent from node `k`. Return `-1` if any node is unreachable.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Dijkstra's shortest path.** **O((V+E) log V)** time, **O(V+E)** space.
 
 #### Explanation
@@ -14233,7 +14704,11 @@ int networkDelayTime(std::vector<std::vector<int>>& times, int n, int k) {
 #### Problem
 Given an `n x n` grid where `grid[r][c]` is the elevation of cell `(r, c)`, find the minimum time `t` such that you can swim from `(0, 0)` to `(n-1, n-1)`. At time `t` you can swim through any cell with elevation at most `t`.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Dijkstra (minimax path).** **O(n² log n)** time, **O(n²)** space.
 
 #### Explanation
@@ -14406,7 +14881,11 @@ int swimInWater(std::vector<std::vector<int>>& grid) {
 #### Problem
 Given a sorted list of words in an alien language, determine the character ordering of the alien alphabet. Return any valid ordering, or `""` if no valid ordering exists (i.e., the input is contradictory).
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Topological sort (DFS cycle detection).** **O(C)** time and space, where `C` is the total number of characters across all words.
 
 #### Explanation
@@ -14653,7 +15132,11 @@ std::string alienOrder(std::vector<std::string>& words) {
 #### Problem
 Given `n` cities, a list of directed flights `[from, to, price]`, a source `src`, destination `dst`, and an integer `k`, find the cheapest price from `src` to `dst` with at most `k` stops (i.e. at most `k+1` edges).
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Bellman-Ford with stop limit.** **O(k * E)** time, **O(n)** space.
 
 #### Explanation
@@ -14784,7 +15267,11 @@ int findCheapestPrice(int n, std::vector<std::vector<int>>& flights, int src, in
 #### Problem
 You can climb `1` or `2` steps at a time. Count the number of distinct ways to reach the top of a staircase with `n` steps.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **DP (Fibonacci recurrence).** **O(n)** time, **O(1)** space.
 
 #### Explanation
@@ -14872,7 +15359,11 @@ int climbStairs(int n) {
 #### Problem
 Given an array `cost` where `cost[i]` is the cost of stepping on stair `i`, find the minimum total cost to reach the top (beyond the last index). You can start from index `0` or `1` and can take `1` or `2` steps.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **DP (bottom-up, in-place).** **O(n)** time, **O(1)** space.
 
 #### Explanation
@@ -14962,7 +15453,11 @@ int minCostClimbingStairs(std::vector<int>& cost) {
 #### Problem
 Given an array of non-negative integers representing money in each house, return the maximum amount you can rob without robbing two adjacent houses.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **DP (rolling variables).** **O(n)** time, **O(1)** space.
 
 #### Explanation
@@ -15058,7 +15553,11 @@ int rob(std::vector<int>& nums) {
 #### Problem
 Houses are arranged in a circle so the first and last are adjacent. Return the maximum amount you can rob without robbing two adjacent houses.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **DP on two linear subproblems (skip first or last).** **O(n)** time, **O(1)** space.
 
 #### Explanation
@@ -15183,7 +15682,11 @@ int rob2(std::vector<int>& nums) {
 #### Problem
 Given a string `s`, return the number of substrings that are palindromes (single characters count).
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Expand Around Center.** **O(n²)** time, **O(1)** space.
 
 #### Explanation
@@ -15309,7 +15812,11 @@ int countSubstrings(std::string& s) {
 #### Problem
 A string of digits can be decoded where `'1'→'A'`, `'2'→'B'`, ..., `'26'→'Z'`. Count the number of ways to decode a non-empty digit string `s`.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **DP (top-down memoization).** **O(n)** time, **O(n)** space.
 
 #### Explanation
@@ -15433,7 +15940,11 @@ int numDecodings(std::string& s) {
 #### Problem
 Given an array of coin denominations and a target `amount`, return the minimum number of coins needed to make up that amount, or `-1` if it's impossible.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **DP (bottom-up unbounded knapsack).** **O(n * amount)** time, **O(amount)** space.
 
 #### Explanation
@@ -15547,7 +16058,11 @@ int coinChange(std::vector<int>& coins, int amount) {
 #### Problem
 Given an integer array `nums`, find the contiguous subarray with the largest product and return that product.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **DP (track running min and max).** **O(n)** time, **O(1)** space.
 
 #### Explanation
@@ -15683,7 +16198,11 @@ int maxProduct(std::vector<int>& nums) {
 #### Problem
 Given a string `s` and a dictionary `wordDict`, return `true` if `s` can be segmented into a space-separated sequence of one or more dictionary words.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **DP (bottom-up, right-to-left).** **O(n² * m)** time, **O(n)** space, where `m` is average word length.
 
 #### Explanation
@@ -15808,7 +16327,11 @@ bool wordBreak(std::string& s, std::vector<std::string>& wordDict) {
 #### Problem
 Given an integer array `nums`, return the length of the longest strictly increasing subsequence.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Binary search (patience sorting).** **O(n log n)** time, **O(n)** space.
 
 #### Explanation
@@ -15919,7 +16442,11 @@ int lengthOfLIS(std::vector<int>& nums) {
 #### Problem
 Given an integer array `nums`, determine whether it can be partitioned into two subsets with equal sum.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **DP (0/1 knapsack, set of reachable sums).** **O(n * sum)** time, **O(sum)** space.
 
 #### Explanation
@@ -16034,7 +16561,11 @@ bool canPartition(std::vector<int>& nums) {
 #### Problem
 A robot starts at the top-left of an `m x n` grid and can only move right or down. Count the number of unique paths to the bottom-right corner.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **DP (1-D rolling row).** **O(m * n)** time, **O(n)** space.
 
 #### Explanation
@@ -16130,7 +16661,11 @@ int uniquePaths(int m, int n) {
 #### Problem
 Given two strings `text1` and `text2`, return the length of their longest common subsequence. A subsequence does not need to be contiguous.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **2-D DP.** **O(m * n)** time, **O(m * n)** space.
 
 #### Explanation
@@ -16248,7 +16783,11 @@ int longestCommonSubsequence(std::string& text1, std::string& text2) {
 #### Problem
 Given an array of stock prices, maximize profit where after selling you must wait one day (cooldown) before buying again. You may hold at most one share at a time.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **DP with states (holding, sold, rest).** **O(n)** time, **O(1)** space.
 
 #### Explanation
@@ -16351,7 +16890,11 @@ int maxProfitCooldown(std::vector<int>& prices) {
 #### Problem
 Given an integer array `nums` and an integer `target`, assign `+` or `-` to each number and return the number of ways to make the expression equal `target`.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **DP (subset sum variant, dict of counts).** **O(n * S)** time, **O(S)** space, where `S` is the range of reachable sums.
 
 #### Explanation
@@ -16468,7 +17011,11 @@ int findTargetSumWays(std::vector<int>& nums, int target) {
 #### Problem
 Given strings `s1`, `s2`, and `s3`, determine whether `s3` can be formed by interleaving `s1` and `s2` (preserving the relative order of each).
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **2-D DP.** **O(m * n)** time, **O(m * n)** space.
 
 #### Explanation
@@ -16587,7 +17134,11 @@ bool isInterleave(std::string& s1, std::string& s2, std::string& s3) {
 #### Problem
 Given an `m x n` integer matrix, return the length of the longest strictly increasing path. You can move in four directions (up, down, left, right) but not diagonally.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **DFS with memoization.** **O(m * n)** time, **O(m * n)** space.
 
 #### Explanation
@@ -16763,7 +17314,11 @@ int longestIncreasingPath(std::vector<std::vector<int>>& matrix) {
 #### Problem
 Given strings `s` and `t`, return the number of distinct subsequences of `s` that equal `t`.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **2-D DP.** **O(m * n)** time, **O(m * n)** space.
 
 #### Explanation
@@ -16875,7 +17430,11 @@ int numDistinct(std::string& s, std::string& t) {
 #### Problem
 Given two strings `word1` and `word2`, return the minimum number of operations (insert, delete, or replace a character) required to convert `word1` to `word2`.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **2-D DP (space-optimized to 1-D).** **O(m * n)** time, **O(n)** space.
 
 #### Explanation
@@ -17013,7 +17572,11 @@ int minDistance(std::string& word1, std::string& word2) {
 #### Problem
 Given `n` balloons with integer values, burst them one at a time; when you burst balloon `i`, you earn `nums[i-1] * nums[i] * nums[i+1]` coins (using 1 for out-of-bounds neighbors). Return the maximum coins collectable.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Interval DP (think-last trick).** **O(n³)** time, **O(n²)** space.
 
 #### Explanation
@@ -17183,7 +17746,11 @@ int maxCoins(std::vector<int>& nums) {
 #### Problem
 Given string `s` and pattern `p` with `.` (matches any char) and `*` (matches zero or more of the preceding element), return whether `p` fully matches `s`.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **2-D DP (top-down memoization).** **O(m·n)** time, **O(m·n)** space.
 
 #### Explanation
@@ -17341,7 +17908,11 @@ bool isMatch(std::string s, std::string p) {
 #### Problem
 Given an integer array `nums`, find the contiguous subarray with the largest sum and return that sum. The array may contain negative numbers.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Kadane's Algorithm (greedy running sum).** **O(n)** time, **O(1)** space.
 
 #### Explanation
@@ -17438,7 +18009,11 @@ int maxSubArray(std::vector<int>& nums) {
 #### Problem
 Given an array `nums` where `nums[i]` is the maximum jump length from index `i`, return whether you can reach the last index starting from index 0.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Greedy (shrink goal leftward).** **O(n)** time, **O(1)** space.
 
 #### Explanation
@@ -17527,7 +18102,11 @@ bool canJump(std::vector<int>& nums) {
 #### Problem
 Given `nums` where `nums[i]` is the max jump from index `i`, return the minimum number of jumps to reach the last index. A solution is guaranteed to exist.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Greedy BFS (implicit levels via boundary tracking).** **O(n)** time, **O(1)** space.
 
 #### Explanation
@@ -17635,7 +18214,11 @@ int jump(std::vector<int>& nums) {
 #### Problem
 Given `gas[i]` and `cost[i]` for `n` stations in a circle, find the starting station index that allows you to complete the circuit without running dry, or return -1 if none exists.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Greedy (surplus tracking with reset).** **O(n)** time, **O(1)** space.
 
 #### Explanation
@@ -17756,7 +18339,11 @@ int canCompleteCircuit(std::vector<int>& gas, std::vector<int>& cost) {
 #### Problem
 Given a hand of cards and a `groupSize`, determine if the cards can be rearranged into groups of `groupSize` consecutive cards.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Greedy with ordered counter.** **O(n log n)** time, **O(n)** space.
 
 #### Explanation
@@ -17907,7 +18494,11 @@ bool isNStraightHand(std::vector<int>& hand, int groupSize) {
 #### Problem
 Given a list of triplets and a `target` triplet, you can merge any triplets by taking the element-wise maximum. Return whether it's possible to form exactly `target` by merging some subset of triplets.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Greedy (filter then element-wise max).** **O(n)** time, **O(1)** space.
 
 #### Explanation
@@ -18010,7 +18601,11 @@ bool mergeTriplets(std::vector<std::vector<int>>& triplets, std::vector<int>& ta
 #### Problem
 Given string `s`, partition it into as many parts as possible such that each letter appears in at most one part. Return the list of partition sizes.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Greedy (last-occurrence boundary extension).** **O(n)** time, **O(1)** space (26-char alphabet).
 
 #### Explanation
@@ -18141,7 +18736,11 @@ std::vector<int> partitionLabels(std::string s) {
 #### Problem
 Given a string containing `(`, `)`, and `*` (which can be `(`, `)`, or empty), return whether the string can be valid.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Greedy (min/max open-count range).** **O(n)** time, **O(1)** space.
 
 #### Explanation
@@ -18262,7 +18861,11 @@ bool checkValidString(std::string s) {
 #### Problem
 Given a sorted list of non-overlapping intervals and a `newInterval`, insert it into the list (merging if necessary) and return the updated sorted list.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Linear scan with three phases.** **O(n)** time, **O(n)** space.
 
 #### Explanation
@@ -18396,7 +18999,11 @@ std::vector<std::vector<int>> insert(std::vector<std::vector<int>>& intervals, s
 #### Problem
 Given a list of intervals, merge all overlapping intervals and return the minimal non-overlapping list.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Sort then greedy merge.** **O(n log n)** time, **O(n)** space.
 
 #### Explanation
@@ -18515,7 +19122,11 @@ std::vector<std::vector<int>> merge(std::vector<std::vector<int>>& intervals) {
 #### Problem
 Given intervals, return the minimum number of intervals to remove so that no two intervals overlap.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Greedy (sort by end, activity selection).** **O(n log n)** time, **O(1)** space.
 
 #### Explanation
@@ -18629,7 +19240,11 @@ int eraseOverlapIntervals(std::vector<std::vector<int>>& intervals) {
 #### Problem
 Given a list of meeting time intervals `[start, end]`, determine if a person can attend all meetings without any overlap.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Sort then adjacent-pair check.** **O(n log n)** time, **O(1)** space.
 
 #### Explanation
@@ -18725,7 +19340,11 @@ bool canAttendMeetings(std::vector<std::vector<int>>& intervals) {
 #### Problem
 Given meeting time intervals, return the minimum number of conference rooms required to hold all meetings simultaneously.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Min-heap of end times.** **O(n log n)** time, **O(n)** space.
 
 #### Explanation
@@ -18853,7 +19472,11 @@ int minMeetingRooms(std::vector<std::vector<int>>& intervals) {
 #### Problem
 Given intervals and queries, for each query value return the size (`end - start + 1`) of the smallest interval containing it, or -1 if none.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Sort + sweep with min-heap.** **O((n + q) log n)** time, **O(n + q)** space.
 
 #### Explanation
@@ -19036,7 +19659,11 @@ std::vector<int> minInterval(std::vector<std::vector<int>>& intervals, std::vect
 #### Problem
 Given an `n x n` matrix, rotate it 90 degrees clockwise in-place without using extra space.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Transpose then reverse each row.** **O(n²)** time, **O(1)** space.
 
 #### Explanation
@@ -19146,7 +19773,11 @@ void rotate(std::vector<std::vector<int>>& matrix) {
 #### Problem
 Given an `m x n` matrix, return all elements in spiral order (right, down, left, up, repeat inward).
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Shrinking boundary simulation.** **O(m·n)** time, **O(1)** extra space.
 
 #### Explanation
@@ -19297,7 +19928,11 @@ std::vector<int> spiralOrder(std::vector<std::vector<int>>& matrix) {
 #### Problem
 Given an `m x n` matrix, if any element is 0, set its entire row and column to 0, in-place.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Use first row/column as markers.** **O(m·n)** time, **O(1)** space.
 
 #### Explanation
@@ -19435,7 +20070,11 @@ void setZeroes(std::vector<std::vector<int>>& matrix) {
 #### Problem
 A number is "happy" if repeatedly replacing it with the sum of squares of its digits eventually reaches 1. Return whether `n` is happy.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Floyd's cycle detection (fast/slow pointers).** **O(log n)** time per step, **O(1)** space.
 
 #### Explanation
@@ -19560,7 +20199,11 @@ bool isHappy(int n) {
 #### Problem
 Given a non-negative integer represented as an array of its digits (most significant first), increment it by one and return the resulting array.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Carry propagation from least-significant digit.** **O(n)** time, **O(1)** extra space.
 
 #### Explanation
@@ -19659,7 +20302,11 @@ std::vector<int> plusOne(std::vector<int>& digits) {
 #### Problem
 Implement `pow(x, n)` — compute `x` raised to the power `n`, where `n` can be negative.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Fast exponentiation (binary exponentiation).** **O(log n)** time, **O(1)** space.
 
 #### Explanation
@@ -19779,7 +20426,11 @@ double myPow(double x, int n) {
 #### Problem
 Given two non-negative integers as strings `num1` and `num2`, return their product as a string without converting them to integers directly.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Grade-school multiplication with position arithmetic.** **O(m·n)** time, **O(m + n)** space.
 
 #### Explanation
@@ -19916,7 +20567,11 @@ std::string multiply(std::string num1, std::string num2) {
 #### Problem
 Design a data structure supporting `add(point)` and `count(point)` — the latter returns the number of ways to form an axis-aligned square using the query point as one corner and three previously added points.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Count map + enumerate diagonal partners.** **O(1)** add, **O(n)** count per query, **O(n)** space.
 
 #### Explanation
@@ -20098,7 +20753,11 @@ public:
 #### Problem
 Given an array where every element appears exactly twice except one, find that single element. Must run in O(n) time and O(1) space.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **XOR (self-canceling pairs).** **O(n)** time, **O(1)** space.
 
 #### Explanation
@@ -20174,7 +20833,11 @@ int singleNumber(std::vector<int>& nums) {
 #### Problem
 Return the number of `1` bits (Hamming weight) in the binary representation of an unsigned 32-bit integer.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Bit manipulation — Brian Kernighan's trick.** **O(k)** time where k = number of set bits, **O(1)** space.
 
 #### Explanation
@@ -20246,7 +20909,11 @@ int hammingWeight(uint32_t n) {
 #### Problem
 Given `n`, return an array `ans` of length `n + 1` where `ans[i]` is the number of `1` bits in `i`.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **DP with LSB recurrence.** **O(n)** time, **O(n)** space.
 
 #### Explanation
@@ -20329,7 +20996,11 @@ std::vector<int> countBits(int n) {
 #### Problem
 Reverse the bits of a given 32-bit unsigned integer and return the result.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Bit manipulation — shift and OR 32 times.** **O(1)** time, **O(1)** space.
 
 #### Explanation
@@ -20405,7 +21076,11 @@ uint32_t reverseBits(uint32_t n) {
 #### Problem
 Given an array `nums` containing `n` distinct numbers in the range `[0, n]`, return the one number missing from the range.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Gauss summation formula.** **O(n)** time, **O(1)** space.
 
 #### Explanation
@@ -20485,7 +21160,11 @@ int missingNumber(std::vector<int>& nums) {
 #### Problem
 Calculate the sum of two integers `a` and `b` without using the `+` or `-` operators.
 
-#### Pattern
+#### Examples
+
+TODO
+
+#### Recognition
 **Bit manipulation (simulate full adder).** **O(1)** time, **O(1)** space.
 
 #### Explanation

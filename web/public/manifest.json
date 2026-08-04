@@ -267,7 +267,8 @@
       ],
       "sectionOrder": [
         "Problem",
-        "Pattern",
+        "Examples",
+        "Recognition",
         "Explanation",
         "Python",
         "Java",

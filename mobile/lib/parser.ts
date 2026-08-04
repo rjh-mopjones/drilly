@@ -92,7 +92,17 @@ export const SOURCES: Record<SourceId, SourceConfig> = {
     itemsPlural: "interview problems",
     storagePrefix: "sdf:neetcode",
     defaultRevealedSections: ["Problem"],
-    sectionOrder: ["Problem", "Pattern", "Explanation", "Solution"],
+    sectionOrder: [
+      "Problem",
+      "Examples",
+      "Recognition",
+      "Explanation",
+      "Python",
+      "Java",
+      "Rust",
+      "Go",
+      "C++",
+    ],
   },
   java: {
     id: "java",
