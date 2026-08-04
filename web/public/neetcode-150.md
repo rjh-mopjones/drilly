@@ -12116,13 +12116,55 @@ Given an array of distinct positive integers and a target, find all unique combi
 
 #### Examples
 
-TODO
+```text
+Compare: any-order-nested
+
+Input: candidates = [2,3,6,7], target = 7
+Output: [[2,2,3],[7]]
+Explanation: 2 + 2 + 3 == 7, and 7 is itself a candidate.
+
+Input: candidates = [2,3,5], target = 8
+Output: [[2,2,2,2],[2,3,3],[3,5]]
+
+Input: candidates = [2], target = 1
+Output: []
+
+Constraints:
+- 1 <= candidates.length <= 30
+- 2 <= candidates[i] <= 40, all distinct
+- 1 <= target <= 40
+```
 
 #### Recognition
-**Backtracking with unlimited reuse.** **O(2^(t/m))** time where `t` is the target and `m` is the smallest candidate.
+**Signals.** "Return all unique combinations" is an enumeration objective, so the output itself is exponential and no polynomial algorithm exists; the `list of lists` return type is the second tell. "The same number may be chosen an unlimited number of times" plus `candidates.length <= 30` and `target <= 40` bound the search tree, whose depth cannot exceed `target / min(candidates)`. "Combinations", not permutations, means `[2,2,3]` and `[3,2,2]` are one answer, not two. **Therefore.** Index-based backtracking with two moves: take `candidates[i]` and recurse *staying at* `i`, which models unlimited reuse, or advance to `i + 1`. The index never moving backwards is what makes each multiset appear exactly once, so no dedup pass is needed. **Not the unbounded-knapsack DP**, which fills an `O(n · target)` table but only counts or minimises; listing the combinations means walking that table back along every path, which is the same exponential work with a table bolted on. Excluding the output, **O(2^(t/m))** time, **O(n + t/m)** space.
 
 #### Explanation
-Unlike a subset problem, here a candidate can be picked repeatedly — so the recursion does not advance the index after including an element. At each call with index `i`, two branches: (1) use `candidates[i]` again (recurse with same `i`, larger total), (2) move to the next candidate (recurse with `i+1`, same total). Pruning fires when `total > target` or `i` runs past the array. No sorting is strictly required because candidates are distinct, but pre-sorting lets you break early when a candidate exceeds the remaining budget. The result contains no duplicates because the index only moves forward, preventing the same multi-set from being constructed in different orders.
+**Brute force.** Try every candidate at every step, dedupe at the end.
+
+```python
+def combinationSum(candidates, target):
+    found = set()
+    def grow(curr, total):
+        if total == target:
+            found.add(tuple(sorted(curr)))
+            return
+        if total > target:
+            return
+        for c in candidates:
+            curr.append(c)
+            grow(curr, total + c)
+            curr.pop()
+    grow([], 0)
+    return [list(t) for t in found]
+```
+
+`O(n^(t/m))` time, `O(t/m)` space plus the set.
+
+**Wasteful because.** Every ordering of a winning multiset is its own root-to-leaf descent: `[2,2,3]`, `[2,3,2]` and `[3,2,2]` are three full paths that the closing `sorted` collapses into one answer. A k-element combination costs up to `k!` paths and all but one are discarded.
+
+**Optimal.** Impose an order on the choices instead of deleting duplicates afterwards. Carry an index `i` and allow only "take `candidates[i]` again" or "skip to `i + 1` and never come back". Each combination then has exactly one construction, the one that emits its elements in candidate-array order, so the set and the sorting both vanish. Pruning on `total > target` kills a branch the moment it overshoots. Pre-sorting the candidates lets you `break` out of the loop rather than test each remaining one, which pays off when the array is long and the target is small.
+
+**Edge cases.** A target below every candidate returns `[]`, not `None`. A candidate equal to the target is a valid one-element combination. Candidates are at least 2, so the "stay at `i`" branch always makes progress; a 0 in the array would recurse forever. Duplicate candidates are ruled out by the constraints, which is why no equal-sibling skip appears.
 
 #### Python
 
@@ -12251,13 +12293,53 @@ Given an array of distinct integers, return all possible permutations in any ord
 
 #### Examples
 
-TODO
+```text
+Compare: any-order-nested
+
+Input: nums = [1,2,3]
+Output: [[1,2,3],[1,3,2],[2,1,3],[2,3,1],[3,1,2],[3,2,1]]
+Explanation: all 3! = 6 orderings, in any order.
+
+Input: nums = [0,1]
+Output: [[0,1],[1,0]]
+
+Input: nums = [1]
+Output: [[1]]
+
+Constraints:
+- 1 <= nums.length <= 6
+- -10 <= nums[i] <= 10
+- all integers in nums are unique
+```
 
 #### Recognition
-**Backtracking with in-place swap or visited set.** **O(n! · n)** time, **O(n)** auxiliary stack space.
+**Signals.** "All possible permutations" and "in any order" is an enumeration objective: the output alone is `n!` lists of length `n`, so nothing can beat `O(n · n!)` and there is no point looking for a clever trick. `nums.length <= 6` confirms it, since `6! = 720` is a bound that only makes sense when the intended answer is factorial. "All integers are unique" removes the duplicate-branch problem before it starts. **Therefore.** Backtrack over *which unused element comes next*: at each level scan the array, skip whatever is already on the path, choose, recurse one level deeper, then unchoose. **Not the subsets include/exclude recursion**, which visits each index once and emits `2^n` sets whose elements keep their original relative order; permutations need the orderings of one fixed set, so the branching factor at depth `d` is `n - d` rather than 2, and no include/exclude tree can ever emit `[1,2,3]` and `[2,1,3]` as different answers. **O(n · n!)** time, **O(n)** space.
 
 #### Explanation
-There are `n!` permutations each of length `n`, so `O(n! · n)` is unavoidable. The visited-set approach checks `if n not in perm` on each recursive call — correct but `O(n)` per check, turning the guard into `O(n²)` overhead per leaf. An in-place swap approach avoids this: keep a boundary index `start`; swap `nums[start]` with each `nums[i]` for `i >= start`, recurse, then swap back. This explores every arrangement without extra memory for tracking. The `perm[:]` copy on leaf is necessary regardless of approach. The existing Python solution with `if n not in perm` is `O(n)` per check but still correct and clear for moderate `n`.
+**Brute force.** Build every length-`n` sequence of indices, keep the ones with no repeat.
+
+```python
+def permute(nums):
+    n = len(nums)
+    res = []
+    def grow(picks):
+        if len(picks) == n:
+            if len(set(picks)) == n:
+                res.append([nums[i] for i in picks])
+            return
+        for i in range(n):
+            grow(picks + [i])
+    grow([])
+    return res
+```
+
+`O(n^n · n)` time, `O(n)` space.
+
+**Wasteful because.** The repeat check only fires at depth `n`, so a path that picked index 0 twice at the first two levels is still expanded all the way to the bottom. At `n = 6` that is 46656 leaves for 720 answers: 98 percent of the tree is dead and every dead branch is walked to full depth.
+
+**Optimal.** Reject a repeat at the moment it is made rather than at the leaf. Track which elements are already on the path and skip them when choosing, so the branching factor falls from `n` at the root to 1 at the bottom and the tree has exactly `n!` leaves, none of them dead. The shipped Python tests membership with `n not in perm`, a linear scan that adds an `O(n)` factor; a `used` boolean array or a set makes each test `O(1)`. Swapping `nums[start]` with `nums[i]` in place, as the Java, Rust, Go and C++ versions do, buys the same guarantee with no auxiliary structure at all, at the cost of mutating the caller's array. The copy at each leaf is unavoidable either way, because the path buffer is reused.
+
+**Edge cases.** A one-element array returns `[[1]]`, a single permutation, not `[]`. Distinctness is guaranteed, so no equal-sibling skip is needed; with repeats you would sort first and skip a value equal to its predecessor at the same level. Negative values need no handling since nothing is summed or compared.
 
 #### Python
 
@@ -13328,13 +13410,54 @@ Given an `m×n` binary grid of `'1'` (land) and `'0'` (water), count the number 
 
 #### Examples
 
-TODO
+```text
+Input: grid = [["1","1","1","1","0"],["1","1","0","1","0"],
+  ["1","1","0","0","0"],["0","0","0","0","0"]]
+Output: 1
+
+Input: grid = [["1","1","0","0","0"],["1","1","0","0","0"],
+  ["0","0","1","0","0"],["0","0","0","1","1"]]
+Output: 3
+
+Input: grid = [["0"]]
+Output: 0
+
+Constraints:
+- m == grid.length, n == grid[i].length
+- 1 <= m, n <= 300
+- grid[i][j] is "0" or "1"
+```
 
 #### Recognition
-**DFS flood fill (in-place marking).** **O(m·n)** time, **O(m·n)** space (recursion stack in worst case).
+**Signals.** A grid whose cells are "adjacent" in four directions is a graph in disguise: each cell is a vertex, each orthogonal neighbour an edge. "Count the number of islands" asks for connected components, and the word *distance* appears nowhere in the statement, which is what settles the DFS-versus-BFS question: visiting order is irrelevant, only reachability matters. `1 <= m, n <= 300` is 90000 cells, so the budget is a single pass. **Therefore.** Scan every cell; on an unvisited `"1"`, add one to the count and flood-fill its whole component, overwriting each land cell with `"0"` so the grid doubles as the visited set. **Not Union Find**, which solves it but pays for an `m·n` parent array and an inverse-Ackermann factor to answer a connectivity question that never changes; a DSU earns its keep only when edges arrive one at a time, as in Number of Islands II. **O(m·n)** time, **O(m·n)** space.
 
 #### Explanation
-Each call to DFS from an unvisited `'1'` cell represents discovering a new island. The DFS marks every reachable land cell `'0'` to prevent counting any cell twice. After the DFS returns, the whole island has been consumed and the counter increments by 1. In-place marking avoids a separate visited set. This approach modifies the input — if that's unacceptable, use a separate boolean grid. BFS is an iterative alternative with the same complexity that avoids deep recursion stacks on large grids. Both are `O(m·n)` since each cell is visited at most once.
+**Brute force.** Give each land cell its own label, then push the smaller label to neighbours until nothing changes.
+
+```python
+def numIslands(grid):
+    rows, cols = len(grid), len(grid[0])
+    lab = {(r, c): r * cols + c
+           for r in range(rows) for c in range(cols)
+           if grid[r][c] == "1"}
+    changed = True
+    while changed:
+        changed = False
+        for (r, c) in lab:
+            for nb in ((r+1,c), (r-1,c), (r,c+1), (r,c-1)):
+                if nb in lab and lab[nb] < lab[(r, c)]:
+                    lab[(r, c)] = lab[nb]
+                    changed = True
+    return len(set(lab.values()))
+```
+
+`O((m·n)^2)` time, `O(m·n)` space.
+
+**Wasteful because.** One sweep carries a label exactly one cell further along an island, so a snake-shaped island of length k needs k sweeps, and each of those sweeps re-reads all m·n cells to move information that one walk along the snake would have carried in a single pass.
+
+**Optimal.** A component only has to be discovered once, from whichever of its cells the row-major scan reaches first. Flood-fill from that cell and consume the entire island in one traversal, writing `"0"` over each land cell as you enter it. That write does two jobs at once: it marks the cell visited, and it guarantees the outer scan will never start a second island from a cell already counted, so the answer is simply the number of traversals started. Each cell is entered at most once per side, giving `O(m·n)` overall. BFS with an explicit queue is the same algorithm at the same cost and is the version to write for large grids: 300 by 300 all-land recurses 90000 frames deep, far past Python's default limit.
+
+**Edge cases.** An all-water grid returns 0 and never enters the fill. An all-land grid is one island and is also the worst case for stack depth. Cells touching only diagonally are separate islands, since the four orthogonal directions are the only edges. The grid cells are the strings `"1"` and `"0"`, not integers, so the comparison must be against a string. The function overwrites the caller's grid; copy it first if the caller still needs it.
 
 #### Python
 
@@ -13471,13 +13594,56 @@ Given a reference to a node in a connected undirected graph, return a deep copy 
 
 #### Examples
 
-TODO
+```text
+Input: node = [[2,4],[1,3],[2,4],[1,3]]
+Output: [[2,4],[1,3],[2,4],[1,3]]
+Explanation: the graph is written as an adjacency list whose
+  i-th entry holds the neighbours of the node with value i+1;
+  `node` is the first of them. The clone serialises the same.
+
+Input: node = [[]]
+Output: [[]]
+
+Input: node = []
+Output: null
+
+Constraints:
+- 0 <= number of nodes <= 100
+- 1 <= Node.val <= 100, unique per node
+- connected, undirected, no self-loops or repeated edges
+```
 
 #### Recognition
-**DFS with old-to-new node hashmap.** **O(V+E)** time, **O(V)** space.
+**Signals.** "Deep copy" of a graph given "a reference to a node" says the input is a pointer, not an array, so the only way to see the whole graph is to traverse it. Undirected guarantees cycles, because from any node you can walk straight back the way you came, and a plain recursive copy would therefore never terminate. Nothing in the statement mentions distance or ordering, so DFS and BFS are equally correct here. **Therefore.** One traversal carrying a hash map from original node to its clone, doing double duty: the keys are the visited set and the values are what neighbours get wired to. Create the clone and record it *before* recursing, so a cycle arriving back finds the in-progress copy instead of starting a second one. **Not a plain visited set**, because knowing a node has been seen does not tell you which clone it became, and you still have to append that exact clone to the current node's neighbour list. **O(V+E)** time, **O(V)** space.
 
 #### Explanation
-A plain recursive copy without tracking would revisit nodes and loop infinitely on cycles. The `old_to_new` map serves two purposes: it acts as a visited set to detect already-cloned nodes, and it maps each original node to its clone so neighbors can be wired correctly. When the DFS encounters a node already in the map, it returns the existing clone — this breaks cycles. The DFS creates the clone immediately and inserts it into the map *before* recursing into neighbors, which is critical for graphs with cycles (otherwise the second visit tries to create a second clone). The `null` guard handles an empty graph input.
+**Brute force.** Collect the nodes into a list, clone them, then find each neighbour by scanning that list.
+
+```python
+def cloneGraph(node):
+    if not node:
+        return None
+    seen, stack = [], [node]
+    while stack:
+        n = stack.pop()
+        if any(o is n for o in seen):
+            continue
+        seen.append(n)
+        stack += n.neighbors
+    copies = [Node(o.val) for o in seen]
+    for o, c in zip(seen, copies):
+        for nb in o.neighbors:
+            c.neighbors.append(copies[seen.index(nb)])
+    return copies[0]
+```
+
+`O(V^2 + E·V)` time, `O(V)` space.
+
+**Wasteful because.** Both `any(o is n ...)` and `seen.index(nb)` walk the whole list to answer a membership or lookup question. Every edge triggers one such scan, so wiring the graph costs `E·V` comparisons where each one could have been a single hash.
+
+**Optimal.** Replace the list with a dict keyed on the original node object. A single DFS then suffices: on entering a node, return its clone if the dict already holds one; otherwise create the clone, store it immediately, and only then recurse into the neighbours, appending each returned clone. Storing before recursing is the whole trick, and it is what converts a cycle from infinite recursion into a dict hit. Every node is entered once and every edge followed once, so the cost is `O(V+E)`. An iterative BFS with a queue is the same algorithm with the same map, and is the version to reach for if the graph could be deep enough to exhaust the recursion stack.
+
+**Edge cases.** A null start node returns null, not an empty node. A lone node must come back with its own empty neighbour list, not a shared reference to the original's. Undirected edges appear twice, once in each endpoint's list, and the map keeps both copies consistent with no special handling. The test that the copy is truly deep: no clone's neighbour list may contain an original node.
 
 #### Python
 
@@ -14096,13 +14262,56 @@ In a grid, `0` = empty, `1` = fresh orange, `2` = rotten orange. Each minute, ev
 
 #### Examples
 
-TODO
+```text
+Input: grid = [[2,1,1],[1,1,0],[0,1,1]]
+Output: 4
+Explanation: the last fresh orange rots at minute 4.
+
+Input: grid = [[2,1,1],[0,1,1],[1,0,1]]
+Output: -1
+Explanation: the bottom-left orange is never reached.
+
+Input: grid = [[0,2]]
+Output: 0
+
+Constraints:
+- 1 <= m, n <= 10
+- grid[i][j] is 0, 1 or 2
+- rot spreads 4-directionally, one cell per minute
+```
 
 #### Recognition
-**Multi-source BFS from all initially rotten oranges.** **O(m·n)** time, **O(m·n)** space.
+**Signals.** "Minimum minutes" is a shortest-distance objective on an unweighted grid, which means BFS rather than DFS. The decisive word is *simultaneously*: every rotten orange spreads during the same minute, so there is not one source but many, and what a fresh cell needs is its distance to the *nearest* rotten one. "Or -1 if impossible" warns that some fresh oranges may be unreachable, so leftovers have to be detectable. **Therefore.** Multi-source BFS. Seed the queue with every initially rotten cell at time 0, count the fresh ones, then expand outward, decrementing the count as each cell flips. The answer is the largest time stamp written, or -1 if the count is still positive when the queue drains. **Not one BFS per rotten orange**, which costs `O(k·m·n)` for k sources and then makes you take a per-cell minimum across k distance grids; one shared frontier expanding in lockstep produces those same minima in a single pass. **O(m·n)** time, **O(m·n)** space.
 
 #### Explanation
-The classic single-source BFS finds shortest path from one source; multi-source BFS seeds all rotten oranges simultaneously, which naturally propagates rotting in all directions at once (optimal spread). Count fresh oranges upfront; decrement on each conversion. The time elapsed is tracked by carrying a timestamp `t` per cell in the queue (or by processing level by level). When the queue empties, if `fresh > 0` some oranges were isolated — return `-1`. Edge case: if there are no fresh oranges to begin with, return `0` immediately (the BFS loop exits without modifying `time`).
+**Brute force.** Simulate one minute at a time, rescanning the grid for fresh cells that touch a rotten one.
+
+```python
+def orangesRotting(grid):
+    rows, cols = len(grid), len(grid[0])
+    minutes = 0
+    while True:
+        rot = [(r, c)
+               for r in range(rows) for c in range(cols)
+               if grid[r][c] == 1 and any(
+                   0 <= r + dr < rows and 0 <= c + dc < cols
+                   and grid[r + dr][c + dc] == 2
+                   for dr, dc in ((0,1),(0,-1),(1,0),(-1,0)))]
+        if not rot:
+            break
+        for r, c in rot:
+            grid[r][c] = 2
+        minutes += 1
+    return -1 if any(1 in row for row in grid) else minutes
+```
+
+`O((m·n)^2)` time, `O(m·n)` space.
+
+**Wasteful because.** Each minute re-reads all m·n cells and all four neighbours of each, when the only cells that can possibly change are those touching an orange that rotted in the *previous* minute. With up to m·n minutes, untouched cells are examined m·n times over.
+
+**Optimal.** Keep the frontier instead of rediscovering it every minute. A queue seeded with every rotten cell at time 0 is exactly the set whose neighbours might flip next; pop a cell at time `t`, flip each fresh neighbour, and push it at `t + 1`. Each cell is enqueued once and carries the minute it actually rots, because BFS pops in nondecreasing time order, so the first source to reach a cell is the nearest one and nothing needs revisiting. A running `fresh` counter turns the -1 test into a comparison rather than a closing sweep of the grid, and the answer is the last `t + 1` written. Draining the queue one level at a time and bumping a counter per level is an equivalent formulation that keeps the time out of the queue entries.
+
+**Edge cases.** A grid with no fresh oranges returns 0 however many rotten ones it holds, because nothing ever writes `time`. A fresh orange walled off by empty cells returns -1, and so does a grid with fresh oranges but no rotten one at all. A 0 cell is not just empty, it blocks spread, so a pocket of fresh oranges ringed by zeros never rots.
 
 #### Python
 
@@ -14426,13 +14635,52 @@ Given `numCourses` and a list of prerequisite pairs `[a, b]` meaning you must ta
 
 #### Examples
 
-TODO
+```text
+Input: numCourses = 2, prerequisites = [[1,0]]
+Output: true
+Explanation: take course 0, then course 1.
+
+Input: numCourses = 2, prerequisites = [[1,0],[0,1]]
+Output: false
+Explanation: each course requires the other.
+
+Input: numCourses = 3, prerequisites = []
+Output: true
+
+Constraints:
+- 1 <= numCourses <= 2000
+- 0 <= prerequisites.length <= 5000
+- 0 <= a, b < numCourses
+- all prerequisite pairs are distinct
+```
 
 #### Recognition
-**DFS cycle detection with three-state coloring.** **O(V+E)** time, **O(V+E)** space.
+**Signals.** The literal word *prerequisite* plus a directed pair `[a, b]` that reads right to left ("take `b` before `a`") is the topological-sort family. The ask is a bare yes/no, "is it possible to finish all courses", with no ordering requested, so only the cycle-detection half of that family is needed. `numCourses <= 2000` with up to 5000 pairs puts one linear pass over the graph well inside budget. **Therefore.** Depth-first search with a three-state mark: unvisited, on the current path, finished. Reaching a node that is on the current path is a back edge, which is exactly a circular dependency. **Not union-find**, which is blind to direction: it merges `0 -> 1` and `1 -> 0` into the same component either way, so a legal chain and an illegal cycle look identical to it. **Not a single visited set**, which cannot separate "on the current path" from "finished on an earlier path", so it cries cycle on a diamond where courses 1 and 2 both require 0 and course 3 requires both. **O(V+E)** time, **O(V+E)** space.
 
 #### Explanation
-A cycle in the prerequisite graph means some set of courses depends circularly on each other — impossible to finish. DFS detects cycles via a "currently visiting" set (`visiting`): if DFS reaches a node already in that set, a back-edge (cycle) is found. After successfully exploring all of a node's prerequisites, it's removed from `visiting` and its adjacency list cleared — this memoises completion and prevents re-traversal. A node with an empty adjacency list is safe (no prerequisites or already verified). The call `all(dfs(c) for c in range(numCourses))` ensures disconnected components are all checked. Kahn's BFS approach (used in problem #91) is an alternative that naturally produces a topological order.
+**Brute force.** Repeatedly sweep for a course whose prerequisites are all done.
+
+```python
+def canFinish(numCourses, prerequisites):
+    remaining = list(range(numCourses))
+    progress, done = True, set()
+    while progress:
+        progress = False
+        for c in list(remaining):
+            if all(b in done for a, b in prerequisites if a == c):
+                done.add(c)
+                remaining.remove(c)
+                progress = True
+    return not remaining
+```
+
+`O(V^2 E)` time, `O(V)` space.
+
+**Wasteful because.** Every sweep re-filters the whole prerequisite list for every unfinished course, re-answering "are all of `c`'s prerequisites done?" from scratch. Only the courses finished in the previous sweep can have changed any of those answers, and the sweep ignores that.
+
+**Optimal.** Ask the question once per edge instead. Build the adjacency list `a -> its prerequisites`, then run one DFS per course. The `visiting` set holds the courses on the current recursion path, so hitting a member of it means the path came back to itself: a cycle, return false. On the way out a course is removed from `visiting` and its adjacency list is cleared, which memoises "this course is verified safe" so a later DFS short-circuits on the empty list instead of re-descending. Every edge is therefore walked at most once. Kahn's BFS with in-degree counting is the equally good alternative, and it wins when you also want the order itself, which is exactly problem #91.
+
+**Edge cases.** A self-loop `[0,0]` means a course requires itself and must return false. Courses that appear in no pair still need checking, which is what looping `c` over the full range buys. An empty prerequisite list is always finishable. Note the recursion depth: a 2000-course chain recurses 2000 frames and exceeds Python's default 1000-frame limit, so the iterative Kahn's formulation is the safer choice at that scale.
 
 #### Python
 
@@ -14568,13 +14816,54 @@ Given `numCourses` and a list of `[course, prerequisite]` pairs, return a valid 
 
 #### Examples
 
-TODO
+```text
+Input: numCourses = 2, prerequisites = [[1,0]]
+Output: [0,1]
+Explanation: course 1 needs course 0, so 0 goes first.
+
+Input: numCourses = 3, prerequisites = [[1,0],[2,1]]
+Output: [0,1,2]
+Explanation: a straight chain, so only one order works.
+
+Input: numCourses = 2, prerequisites = [[1,0],[0,1]]
+Output: []
+
+Constraints:
+- 1 <= numCourses <= 2000
+- 0 <= prerequisites.length <= numCourses * (numCourses - 1)
+- 0 <= a, b < numCourses and a != b
+- all prerequisite pairs are distinct
+```
 
 #### Recognition
-**Topological sort (Kahn's BFS).** **O(V+E)** time, **O(V+E)** space.
+**Signals.** The same prerequisite pairs as Course Schedule, but the ask moves from a boolean to "return a valid order", and LeetCode adds "if there are many valid answers, return any of them". That explicit admission of multiple answers is the DAG tell: an acyclic dependency graph normally has many topological orders and the problem wants only one. The empty-array fallback says cycle detection still has to happen. **Therefore.** Kahn's algorithm. Count each course's unmet prerequisites, seed a queue with the courses at zero, and emit a course the instant its count drops to zero. The emission sequence is the answer, and `len(res) == numCourses` is the cycle check for free. **Not a recursive DFS post-order**, which also produces a valid order but recurses to depth `V`, so a 2000-course chain overflows Python's default 1000-frame stack; it also needs its own three-state marking for the cycle case that Kahn's reads straight off a length. **O(V+E)** time, **O(V+E)** space.
 
 #### Explanation
-The prerequisite graph must be a DAG for a valid ordering to exist. Kahn's algorithm tracks `indegree` — the number of prerequisites each course still needs. Courses with `indegree == 0` are ready to take immediately and seed the BFS queue. Each time a course is taken, its dependents get their `indegree` decremented; when a dependent hits zero it enters the queue. If all `numCourses` are collected the topological order is valid; if the queue empties early, a cycle exists and we return `[]`. This extends Course Schedule I naturally — you just collect the order instead of only checking feasibility.
+**Brute force.** Sweep repeatedly, appending any course whose prerequisites are all done.
+
+```python
+def findOrder(numCourses, prerequisites):
+    order, done = [], set()
+    progress = True
+    while progress:
+        progress = False
+        for c in range(numCourses):
+            if c in done:
+                continue
+            if all(b in done for a, b in prerequisites if a == c):
+                done.add(c)
+                order.append(c)
+                progress = True
+    return order if len(order) == numCourses else []
+```
+
+`O(V^2 E)` time, `O(V)` space.
+
+**Wasteful because.** Each sweep rescans the entire prerequisite list for every course still outstanding, recomputing "is `c` ready?" from raw edges. Nothing about a course's readiness changes unless one of its own prerequisites was just finished, and the sweep has no way to notice that.
+
+**Optimal.** Replace the rescan with a counter. `indegree[c]` holds how many prerequisites `c` still lacks, so "is `c` ready?" becomes reading one integer rather than filtering `E` pairs. Build the reverse adjacency `b -> the courses that depend on b`, so finishing `b` touches exactly the counters that can change, and each edge decrements exactly once across the whole run. That makes the total `O(V+E)`. Seed the queue with every zero-indegree course, which also covers disconnected components. If the queue drains before `numCourses` courses are emitted, every leftover still has an unmet prerequisite that is itself a leftover, and a finite set where everyone depends on someone inside it must contain a cycle, so `[]` is correct.
+
+**Edge cases.** With no prerequisites, every permutation is valid and this returns `[0,1,...,n-1]`. A cycle returns `[]`, not a partial order. Courses named in no pair still appear, because the seed loop runs over the full range rather than over the keys of the adjacency map. If a follow-up asks for the lexicographically smallest valid order, swap the deque for a min-heap and pay `O(V log V + E)`.
 
 #### Python
 
@@ -14742,13 +15031,53 @@ Given a graph that started as a tree with one extra edge added, find and return 
 
 #### Examples
 
-TODO
+```text
+Input: edges = [[1,2],[1,3],[2,3]]
+Output: [2,3]
+Explanation: 1-2-3-1 is the cycle; [2,3] closes it last.
+
+Input: edges = [[1,2],[2,3],[3,4],[1,4],[1,5]]
+Output: [1,4]
+
+Input: edges = [[1,2],[2,3],[1,3],[1,4]]
+Output: [1,3]
+Explanation: the answer need not be the final input edge.
+
+Constraints:
+- n == edges.length and 3 <= n <= 1000
+- 1 <= a < b <= n, no repeated edges
+- the graph is connected: n nodes, n edges
+```
 
 #### Recognition
-**Union-Find (cycle detection).** **O(n α(n))** time, **O(n)** space.
+**Signals.** "Started as a tree with one extra edge added" pins the counts exactly: a tree on `n` nodes has `n-1` edges and the input has `n`, so there is precisely one cycle and precisely one edge that closes it. The edges are undirected and arrive in a fixed order, and the question is which edge closes the loop, so what you actually need per edge is incremental connectivity: are these two endpoints already in the same component? **Therefore.** Union-find. Walk the edges in input order, and the first `union` that fails because both endpoints already share a root is the answer. **Not the three-state DFS** from Course Schedule, because this graph is undirected, so every edge looks like a back edge to the node you just came from and the state machine needs a parent-exclusion patch to work at all; even then it hands you the cycle's nodes and you still have to map them back to input positions to pick the last edge. **O(n α(n))** time, **O(n)** space.
 
 #### Explanation
-A tree on `n` nodes has exactly `n-1` edges; the input has `n` edges, so exactly one creates a cycle. We process edges in order and union the two endpoints. If both endpoints already share the same root — meaning they are already connected — this edge is the culprit and we return it immediately. Union by rank with path compression (via path halving) keeps each `find` nearly O(1). The problem guarantees exactly one redundant edge, so the first cycle-creating edge is the answer, and returning it preserves the "last such edge" tie-breaking rule since we process edges in order.
+**Brute force.** Before adding each edge, walk the graph so far to see if its endpoints already connect.
+
+```python
+def findRedundantConnection(edges):
+    adj = {}
+    for u, v in edges:
+        seen, stack = {u}, [u]
+        while stack:
+            for y in adj.get(stack.pop(), []):
+                if y not in seen:
+                    seen.add(y)
+                    stack.append(y)
+        if v in seen:
+            return [u, v]
+        adj.setdefault(u, []).append(v)
+        adj.setdefault(v, []).append(u)
+```
+
+`O(n^2)` time, `O(n)` space.
+
+**Wasteful because.** Each edge re-walks an entire component from scratch to answer one yes/no question, rebuilding connectivity facts that the previous walks already established and then throwing them away.
+
+**Optimal.** Store the answer instead of recomputing it. Give every component a single representative and keep a `parent` pointer per node; `find(x)` climbs to the representative, and two nodes are connected exactly when their representatives match, so the traversal collapses into a short pointer chase. Two tricks keep the chase short. Union by rank attaches the shorter tree under the taller one so the depth never grows unnecessarily, and path halving (`parent[x] = parent[parent[x]]` during the climb) flattens the path you just walked. Together they make each operation `O(α(n))`, inverse Ackermann, effectively constant. Because exactly one cycle exists, the first failing `union` is the edge that closed it, which is also the last edge of that cycle in input order, which is precisely the tie-break LeetCode asks for.
+
+**Edge cases.** The answer is not always the final edge of the input: `[[1,2],[2,3],[1,3],[1,4]]` answers `[1,3]`. Nodes are labelled from 1, so `parent` must be sized `n+1` or every index is off by one. A three-node triangle is the smallest legal input. The graph is guaranteed connected with exactly one extra edge, so `union` fails exactly once and no not-found branch is needed.
 
 #### Python
 
@@ -15289,13 +15618,60 @@ Given `beginWord`, `endWord`, and a `wordList`, return the length of the shortes
 
 #### Examples
 
-TODO
+```text
+Input: beginWord = "hit", endWord = "cog",
+       wordList = ["hot","dot","dog","lot","log","cog"]
+Output: 5
+Explanation: hit -> hot -> dot -> dog -> cog is 5 words.
+
+Input: beginWord = "hit", endWord = "cog",
+       wordList = ["hot","dot","dog","lot","log"]
+Output: 0
+Explanation: endWord is not in wordList.
+
+Input: beginWord = "a", endWord = "c",
+       wordList = ["a","b","c"]
+Output: 2
+
+Constraints:
+- 1 <= beginWord.length <= 10
+- endWord.length == beginWord.length
+- 1 <= wordList.length <= 5000, words are unique
+- all words are lowercase, beginWord != endWord
+```
 
 #### Recognition
-**BFS (unweighted shortest path).** **O(m² * n)** time, **O(m * n)** space, where `m` is word length and `n` is dictionary size.
+**Signals.** "Shortest transformation sequence" where each step changes exactly one letter: every step costs the same, which is the unweighted-shortest-path tell. There is also no graph in the input, only a word list, which is the implicit-graph tell. Words are the nodes, one-letter edits are the edges, and you generate the neighbours rather than read them. Dictionary size `n <= 5000` against word length `m <= 10` decides *how* you generate them. **Therefore.** Breadth-first search from `beginWord`, where a word's neighbours are its `26 * m` single-letter mutations filtered through a set built from the dictionary. **Not DFS**, which finds *a* transformation sequence but has no reason to find the shortest, so you would have to enumerate every path and take the minimum. **Not an explicit all-pairs edge build**, which is `O(n^2 m)`, about 25 million word comparisons at `n = 5000`, against the at most 260 mutations BFS probes per word. **O(m² * n)** time, **O(m * n)** space.
 
 #### Explanation
-Each word is a node; two words are adjacent if they differ by exactly one character. The problem reduces to finding the shortest path in this implicit graph — precisely what BFS solves for unweighted graphs. A naive approach tries every pair of words to build edges, costing `O(n² * m)`; instead, generate all `26 * m` one-letter mutations per word and check them against the set in `O(1)`. The `visited` set prevents revisiting words and guarantees each node is processed at most once. Checking `endWord` at generation time (not dequeue time) lets us return `steps + 1` immediately, shaving one BFS level off the loop.
+**Brute force.** BFS, but find each word's neighbours by scanning the whole dictionary.
+
+```python
+from collections import deque
+
+def ladderLength(beginWord, endWord, wordList):
+    if endWord not in wordList:
+        return 0
+    q, seen = deque([(beginWord, 1)]), {beginWord}
+    while q:
+        w, d = q.popleft()
+        if w == endWord:
+            return d
+        for u in wordList:
+            diff = sum(a != b for a, b in zip(w, u))
+            if diff == 1 and u not in seen:
+                seen.add(u)
+                q.append((u, d + 1))
+    return 0
+```
+
+`O(n^2 m)` time, `O(n m)` space.
+
+**Wasteful because.** Every pop compares the current word against all `n` dictionary words at `O(m)` each, even though at most `26 * m` strings in the universe are one edit away from it. The scan cost is driven by the dictionary size, and the answer is not.
+
+**Optimal.** Turn the neighbour search around. Instead of asking every dictionary word "are you one edit from me?", generate the `26 * m` strings that are one edit away and ask the set "do you contain this?". A hash set answers in `O(1)`, so a pop costs `26 * m` probes of `O(m)` each, which is `O(m²)` and does not grow with `n` at all. At `m <= 10` that is at most 260 probes versus 5000 comparisons. BFS still supplies the shortest-path guarantee: the first time `endWord` is generated, it is generated at the minimum possible depth, so returning `steps + 1` at generation time rather than waiting to dequeue it is correct and saves a level. The `visited` set is what keeps the work linear in edges rather than exponential in paths. If pushed further, bidirectional BFS expands from both ends and stops when the frontiers meet, turning `O(b^d)` into `O(b^(d/2))`.
+
+**Edge cases.** If `endWord` is absent from `wordList` the answer is 0, and testing that first avoids a full pointless search. `beginWord` does not have to be in `wordList`, but it still counts as the first word in the length. The mutation loop regenerates the word itself, which is harmless because it is already in `visited`. Dictionary words in no connected component are simply never enqueued.
 
 #### Python
 
@@ -15654,13 +16030,55 @@ Given an array of points on a 2-D plane, return the minimum cost to connect all 
 
 #### Examples
 
-TODO
+```text
+Input: points = [[0,0],[2,2],[3,10],[5,2],[7,0]]
+Output: 20
+Explanation: 4 + 4 + 4 + 8 links all five points.
+
+Input: points = [[3,12],[-2,5],[-4,1]]
+Output: 18
+Explanation: 6 joins the lower pair, 12 attaches [3,12].
+
+Input: points = [[0,0]]
+Output: 0
+
+Constraints:
+- 1 <= points.length <= 1000
+- -10^6 <= xi, yi <= 10^6
+- all points are distinct
+```
 
 #### Recognition
-**Prim's MST (min-heap / lazy deletion).** **O(n² log n)** time, **O(n²)** space.
+**Signals.** "Connect all points" at "minimum cost", with every point reachable from every other directly or indirectly: a connected subgraph of minimum total weight is by definition a minimum spanning tree, not a shortest path. The cost between two points is given by a formula rather than an edge list, so the graph is implicit and complete. `points.length <= 1000` makes that about 500,000 candidate edges, which is dense, and dense is the fact that picks the algorithm. **Therefore.** Prim's algorithm, grown from any starting point, repeatedly taking the cheapest edge that crosses from the built tree to a point outside it, with a min-heap holding the candidates. **Not Kruskal**, the other MST algorithm, which has to materialise and sort all 500,000 edges before it can accept the first one, whereas Prim only ever holds edges out of the points it has actually reached. **Not Dijkstra**, which from a distance looks identical (heap, greedy, relax) but minimises distance *from a source*; a shortest-path tree can cost strictly more than an MST. **O(n² log n)** time, **O(n²)** space.
 
 #### Explanation
-This is a dense minimum spanning tree problem — the implicit graph is fully connected with `n*(n-1)/2` edges. Prim's algorithm is preferred over Kruskal's here because generating all edges explicitly would be expensive; Prim's grows the MST one node at a time by always picking the cheapest edge to a not-yet-visited node. The lazy heap approach pushes all candidate edges for a newly added node immediately, tolerating stale entries that get skipped when popped. Since every pair of points is a potential edge, the heap can hold O(n²) entries. With only `n` points Kruskal would also work but requires materializing all edges upfront.
+**Brute force.** Grow the tree one point at a time, rescanning all pairs for the cheapest link.
+
+```python
+def minCostConnectPoints(points):
+    n = len(points)
+    inTree = [True] + [False] * (n - 1)
+    cost = 0
+    for _ in range(n - 1):
+        best = (float("inf"), -1)
+        for i in range(n):
+            for j in range(n):
+                if inTree[i] and not inTree[j]:
+                    d = (abs(points[i][0] - points[j][0])
+                         + abs(points[i][1] - points[j][1]))
+                    best = min(best, (d, j))
+        cost += best[0]
+        inTree[best[1]] = True
+    return cost
+```
+
+`O(n^3)` time, `O(n)` space.
+
+**Wasteful because.** Every round recomputes all `n²` pairwise distances to extract a single minimum, and almost all of them are unchanged since the previous round. Adding one point to the tree can only introduce `n` new crossing edges, so recomputing the other `n² - n` is pure repetition.
+
+**Optimal.** Keep the crossing edges in a min-heap instead of rediscovering them. When point `i` joins the tree, push its distance to every point still outside; the cheapest crossing edge is then one `heappop` rather than an `n²` scan. Edges whose target has since been absorbed are left in the heap and skipped when popped, which is lazy deletion, and it beats hunting through the heap to remove them. Each point contributes at most `n` pushes, so the heap holds `O(n²)` entries at `O(log n)` each, hence `O(n² log n)`. Correctness is the cut property: the minimum-weight edge crossing any cut between visited and unvisited points is always safe to add to some MST, so a greedy pick never needs revisiting. Where a different choice wins: Kruskal, when the edge list is explicit and sparse, and here the array-based Prim, which stores one best-known distance per point and takes the minimum by linear scan, is `Θ(n²)` with no heap at all.
+
+**Edge cases.** A single point costs 0 and the main loop never runs. Manhattan distance, not Euclidean: the `|dx| + |dy|` choice can select a different tree, and squaring or square-rooting the terms is a different problem. Ties between equal-cost edges are safe because any of them belongs to some MST and the total is unique. All points are distinct, so no zero-length edge can inflate the heap.
 
 #### Python
 
@@ -15839,13 +16257,51 @@ Given a directed weighted graph with `n` nodes and edges `[u, v, w]`, find the m
 
 #### Examples
 
-TODO
+```text
+Input: times = [[2,1,1],[2,3,1],[3,4,1]], n = 4, k = 2
+Output: 2
+Explanation: nodes 1 and 3 hear at time 1, node 4 at time 2.
+
+Input: times = [[1,2,1]], n = 2, k = 1
+Output: 1
+
+Input: times = [[1,2,1]], n = 2, k = 2
+Output: -1
+Explanation: node 1 is not reachable from node 2.
+
+Constraints:
+- 1 <= k <= n <= 100, nodes are labelled 1..n
+- 1 <= times.length <= 6000
+- 0 <= w <= 100, all (u, v) pairs are distinct
+```
 
 #### Recognition
-**Dijkstra's shortest path.** **O((V+E) log V)** time, **O(V+E)** space.
+**Signals.** "Directed weighted graph", one fixed origin `k`, and edge triples `[u, v, w]` where `w` is a travel time and is never negative. That is the Dijkstra fingerprint: single source plus non-negative weights means the first time the heap pops a node, its distance is final and nothing later can undercut it. The second tell is "the minimum time for **all** nodes to receive a signal". That is not a path query, it is an aggregate over every shortest path, so the answer is the largest of them, and unreachability is a size check on the distance table rather than a special case. **Therefore.** Dijkstra from `k` with a min-heap, answer `max(dist)` once `len(dist) == n`. **Not BFS**, which minimises hop count, so it would happily prefer one 100-unit edge over a two-edge route costing 2. **Not Bellman-Ford**, which is correct here but pays `O(V*E)` to buy a negative-weight guarantee this problem never needs. **O((V+E) log V)** time, **O(V+E)** space.
 
 #### Explanation
-The question reduces to: find the maximum single-source shortest path from `k` to all other nodes. Dijkstra's greedy approach always expands the unvisited node with the current shortest distance, guaranteeing that when a node is first popped from the min-heap its distance is finalized. We skip stale heap entries with the `if u in dist` guard (lazy deletion). After processing, if `dist` contains fewer than `n` nodes, some node was unreachable and we return `-1`; otherwise the max distance is the answer — the last node to receive the signal determines overall delay.
+**Brute force.** Walk every route out of `k`, keeping the best arrival time seen per node.
+
+```python
+def networkDelayTime(times, n, k):
+    best = {}
+    def dfs(u, t):
+        if u in best and best[u] <= t:
+            return
+        best[u] = t
+        for a, b, w in times:
+            if a == u:
+                dfs(b, t + w)
+    dfs(k, 0)
+    return max(best.values()) if len(best) == n else -1
+```
+
+`O(V*E)` time, `O(V)` space.
+
+**Wasteful because.** Every recursive step rescans the entire `times` list just to find the edges leaving `u`, and a node is re-expanded together with its whole downstream subgraph each time a cheaper route into it turns up. The same suffix of the graph gets walked again and again.
+
+**Optimal.** Two fixes. Build adjacency lists once, so finding the edges out of `u` costs `O(deg u)` instead of `O(E)`. Then kill the re-expansion by controlling the order in which nodes are settled: a min-heap keyed on distance always hands back the nearest unsettled node, and since no weight is negative, no route discovered later can beat it. So the first pop of a node is final and it is expanded exactly once. Python's `heapq` has no decrease-key, so rather than update an entry you push a second one and discard the stale pop with `if u in dist: continue`. The answer is then `max(dist.values())`, the node that hears last.
+
+**Edge cases.** A node with no outgoing edges is fine, `adj.get(u, [])` returns empty. Labels run `1..n`, so `len(dist) < n` is the unreachable test. Zero-weight edges are legal and harmless. With `n == 1` the source is the only node and the answer is 0.
 
 #### Python
 
@@ -16026,13 +16482,58 @@ Given an `n x n` grid where `grid[r][c]` is the elevation of cell `(r, c)`, find
 
 #### Examples
 
-TODO
+```text
+Input: grid = [[0,2],[1,3]]
+Output: 3
+Explanation: the corner cell itself has elevation 3.
+
+Input: grid = [[0,4,3],[8,5,2],[7,6,1]]
+Output: 4
+Explanation: the route 0,4,3,2,1 peaks at 4; going down
+peaks at 8.
+
+Input: grid = [[0]]
+Output: 0
+
+Constraints:
+- n == grid.length == grid[i].length, 1 <= n <= 50
+- 0 <= grid[i][j] < n * n
+- every elevation in the grid is distinct
+```
 
 #### Recognition
-**Dijkstra (minimax path).** **O(n² log n)** time, **O(n²)** space.
+**Signals.** A grid with a cost attached to each cell, and an objective that reads "minimum time `t` such that you can swim through", meaning every cell on the route must satisfy `elevation <= t`. So the cost of a route is the **largest** elevation on it, not the total. "Minimise the maximum" is the bottleneck, or minimax, variant of shortest path, and it is the phrase to react to. The elevations are distinct values in `[0, n*n)`, which quietly tells you the answer is one of the grid values. **Therefore.** Run Dijkstra with the relaxation changed from `d + w` to `max(d, grid[v])`. That value is still non-decreasing along a route, which is the only property the pop-order argument needs, so the first pop of the corner is optimal. **Not Dijkstra with a summed cost**, which is the reflex here and is wrong: a route over twenty cells of elevation 1 would score 20 and lose to a single cell of elevation 5, when in fact it is free and the other costs 5. **O(n² log n)** time, **O(n²)** space.
 
 #### Explanation
-Rather than minimizing the sum of weights along a path, we want to minimize the maximum elevation encountered — a minimax path problem. Dijkstra handles this naturally by replacing the "relax with sum" step with `max(current_t, grid[nr][nc])`. The min-heap always expands the reachable cell with the lowest bottleneck elevation, so when `(n-1, n-1)` is first popped, its value is the globally optimal minimax cost. An alternative is binary search on `t` with BFS/DFS feasibility check, also `O(n² log n)`, but Dijkstra solves it in one pass without the outer binary search loop.
+**Brute force.** Try each candidate time in increasing order and flood-fill the cells it unlocks.
+
+```python
+def swimInWater(grid):
+    n = len(grid)
+    dirs = ((0, 1), (0, -1), (1, 0), (-1, 0))
+    for t in range(grid[0][0], n * n):
+        seen, stack = {(0, 0)}, [(0, 0)]
+        while stack:
+            r, c = stack.pop()
+            if r == n - 1 and c == n - 1:
+                return t
+            for dr, dc in dirs:
+                nr, nc = r + dr, c + dc
+                if (0 <= nr < n and 0 <= nc < n
+                        and (nr, nc) not in seen
+                        and grid[nr][nc] <= t):
+                    seen.add((nr, nc))
+                    stack.append((nr, nc))
+    return -1
+```
+
+`O(n^4)` time, `O(n^2)` space.
+
+**Wasteful because.** Each value of `t` restarts the flood from an empty `seen`, even though the region reachable at `t` strictly contains the region reachable at `t - 1`. Almost all of the work at every step is rediscovering cells already known to be reachable.
+
+**Optimal.** Grow that region once, in the order the rising water would unlock it, and let a min-heap keep the frontier sorted by bottleneck. Popping the frontier cell with the lowest bottleneck means keys come off in non-decreasing order, so the first time the corner is popped, its value is optimal. Marking a cell visited on push rather than on pop is safe for the same reason: if some route gave a neighbour a strictly lower bottleneck, the cell achieving it would already have been popped and would already have pushed that neighbour. Binary searching `t` and flooding once per guess is the same `O(n² log n)` and is easier to argue; Union-Find, adding cells in increasing elevation until the two corners connect, is the fastest of the three once the sort is paid for.
+
+**Edge cases.** `n == 1` returns `grid[0][0]`, which the distinctness constraint pins at 0. The answer is never below `grid[n-1][n-1]`, since you must stand on it. Elevations are distinct, so heap keys never tie. A cell can be pushed with a bottleneck higher than its own elevation, which is the whole point.
 
 #### Python
 
@@ -16203,13 +16704,51 @@ Given a sorted list of words in an alien language, determine the character order
 
 #### Examples
 
-TODO
+```text
+Input: words = ["wrt","wrf","er","ett","rftt"]
+Output: "wertf"
+Explanation: the pairs give t<f, w<e, r<t, e<r, which chain
+into one total order.
+
+Input: words = ["z","x","z"]
+Output: ""
+Explanation: z<x and x<z contradict each other.
+
+Input: words = ["abc","ab"]
+Output: ""
+
+Constraints:
+- 1 <= words.length <= 100
+- 1 <= words[i].length <= 100
+- words[i] is lowercase English letters only
+```
 
 #### Recognition
-**Topological sort (DFS cycle detection).** **O(C)** time and space, where `C` is the total number of characters across all words.
+**Signals.** "Sorted according to the rules of this new language", plus "return any valid ordering" and `""` when the input is contradictory. Nothing here hands you a graph, so the recognition step is that the edges are latent and you must derive them before you can sort anything. "Any valid ordering" says the answer is a partial order with slack, not a unique sequence, and `""` on contradiction is a cycle-detection requirement wearing a disguise. **Therefore.** Compare each adjacent pair of words, take the first position where they differ as one edge `w1[j] -> w2[j]`, then topologically sort the resulting character graph. **Not a sort with a custom comparator**, which is the reflex once you see "sorted": you have no comparator. Two characters that never meet at a first-difference are genuinely incomparable, and Python's `sort` needs a total order, so it would either crash on the gaps or invent an ordering the input never justified. With `C` the total number of characters across all words, **O(C)** time, **O(C)** space.
 
 #### Explanation
-Adjacent words in the sorted list reveal ordering constraints: the first position where they differ tells us `word1[j]` comes before `word2[j]` in the alien alphabet. We build a directed graph of these constraints. A valid alphabet is a topological ordering of that graph; a cycle means no valid ordering exists. The DFS uses a three-state visited map: unseen, `True` (currently in DFS stack — cycle if revisited), and `False` (fully processed). The edge case where a longer word precedes a prefix of itself (e.g., `["abc", "ab"]`) is invalid — we detect and return `""` immediately.
+**Brute force.** Try every permutation of the alphabet and keep the first that sorts the input correctly.
+
+```python
+from itertools import permutations
+
+def alienOrder(words):
+    chars = sorted({c for w in words for c in w})
+    for p in permutations(chars):
+        rank = {c: i for i, c in enumerate(p)}
+        keys = [[rank[c] for c in w] for w in words]
+        if all(a <= b for a, b in zip(keys, keys[1:])):
+            return "".join(p)
+    return ""
+```
+
+`O(k! * C)` time for an alphabet of size `k`, `O(k)` space.
+
+**Wasteful because.** Nearly every permutation is rejected by the same one adjacent pair, and the ordering was never free to begin with. The input already pins down individual "a before b" facts; enumerating whole alphabets to rediscover them is the waste.
+
+**Optimal.** Read the facts off directly. For adjacent words `w1, w2`, scan to the first position where they differ. That single character pair is the only information the pair carries, because everything after the first difference is unconstrained, so you record `w1[j] -> w2[j]` and break. If they agree through the shared prefix and `w1` is the longer one, no alphabet can order them and the answer is `""` at once. What is left is a directed graph over characters, and every valid alphabet is one of its topological orders. This DFS carries three states: absent means unseen, `True` means on the current recursion stack so a revisit is a back edge and therefore a cycle, and `False` means finished. Each node is appended after all its successors, so the reversed post-order is the answer. Kahn's algorithm with in-degrees is equally valid and reports the cycle by emitting fewer characters than exist.
+
+**Edge cases.** A character constrained by nothing still belongs in the output, which is why `adj` is seeded from every character before any edge is added. A single word yields no adjacent pair at all, so every character is free. `["abc", "ab"]` is the invalid-prefix case and must be caught before the DFS. Repeated adjacent words are consistent and contribute no edge.
 
 #### Python
 
@@ -16454,13 +16993,57 @@ Given `n` cities, a list of directed flights `[from, to, price]`, a source `src`
 
 #### Examples
 
-TODO
+```text
+Input: n = 4, src = 0, dst = 3, k = 1,
+flights = [[0,1,100],[1,2,100],[2,0,100],[1,3,600],[2,3,200]]
+Output: 700
+Explanation: 0->1->3 costs 700 with one stop. The cheaper
+0->1->2->3 at 400 uses two stops and is illegal.
+
+Input: n = 3, src = 0, dst = 2, k = 1,
+flights = [[0,1,100],[1,2,100],[0,2,500]]
+Output: 200
+
+Input: n = 3, src = 0, dst = 2, k = 0,
+flights = [[0,1,100],[1,2,100],[0,2,500]]
+Output: 500
+
+Constraints:
+- 1 <= n <= 100, 0 <= src, dst, k < n, src != dst
+- 0 <= flights.length <= n * (n - 1) / 2
+- 1 <= price <= 10^4
+```
 
 #### Recognition
-**Bellman-Ford with stop limit.** **O(k * E)** time, **O(n)** space.
+**Signals.** Weighted directed edges and a single source, which reads like Dijkstra, but bolted on is "at most `k` stops". A cap on the *number of edges* alongside a minimisation over *edge weights* is the disambiguator, and it is the whole problem. It means the thing you carry per node is no longer one number: cost and hops used are both part of the state, and a route can be cheap and illegal or dear and legal. `n <= 100` with `k < n` puts a `k`-round pass over every flight well inside budget. **Therefore.** Bellman-Ford run `k+1` times, snapshotting the cost array so one round adds exactly one flight. **Not Dijkstra keyed on the node alone**, which settles each node at its globally cheapest cost and never reopens it. In example 1 it would settle node 2 at 200 via two hops and node 3 at 400 via three, then have no way to recover the legal 700, because the route it discarded was the expensive one. **O(k * E)** time, **O(n)** space.
 
 #### Explanation
-Standard Dijkstra can't enforce a stop limit because it may greedily settle a node via a long path before trying a shorter-hop one. Bellman-Ford relaxes edges in `k+1` rounds, where each round represents one more edge (flight) used. Crucially we copy `prices` into `tmp` before each round so a single relaxation round only uses distances computed from the previous round — preventing multi-hop chaining within one iteration. After `k+1` rounds, `prices[dst]` holds the cheapest cost reachable in at most `k+1` edges, or infinity if unreachable.
+**Brute force.** Recurse over every route out of `src`, stopping when the hop budget runs out.
+
+```python
+def findCheapestPrice(n, flights, src, dst, k):
+    best = float('inf')
+    def dfs(u, hops, cost):
+        nonlocal best
+        if u == dst:
+            best = min(best, cost)
+            return
+        if hops > k:
+            return
+        for a, b, w in flights:
+            if a == u:
+                dfs(b, hops + 1, cost + w)
+    dfs(src, 0, 0)
+    return best if best != float('inf') else -1
+```
+
+`O(E^(k+1))` time, `O(k)` space.
+
+**Wasteful because.** The same `(node, hops used)` pair is reached by many different prefixes, and the entire subtree below it is re-explored once per prefix, even though only the cheapest cost of arriving in that state can ever affect the answer.
+
+**Optimal.** Collapse the state. All the recursion needs at a node is the cheapest cost of reaching it having spent at most `i` edges, so keep one array of `n` costs per round instead of a call tree. Round `i` relaxes every flight once against round `i-1`'s array, which is exactly Bellman-Ford with the round count doing double duty as the hop budget. Copying `prices` into `tmp` before relaxing is the entire trick: relaxing in place would let a single round chain two or more flights, quietly spending hops you have not been given. After `k+1` rounds, since at most `k` stops means at most `k+1` flights, `prices[dst]` is the answer. Dijkstra over the widened state `(cost, node, hops)` also works and wins on sparse graphs with a large `k`, where most of the `k * E` relaxations touch nothing.
+
+**Edge cases.** `k = 0` permits exactly one direct flight. An unreachable `dst` leaves the `inf` sentinel in place and returns `-1`. Cycles are harmless because the round count bounds the search, so no visited set is needed. Prices are strictly positive, so no round can improve a cost by looping.
 
 #### Python
 
@@ -16589,13 +17172,44 @@ You can climb `1` or `2` steps at a time. Count the number of distinct ways to r
 
 #### Examples
 
-TODO
+```text
+Input: n = 2
+Output: 2
+Explanation: 1+1 and 2.
+
+Input: n = 3
+Output: 3
+Explanation: 1+1+1, 1+2, 2+1.
+
+Input: n = 1
+Output: 1
+
+Constraints:
+- 1 <= n <= 45
+- each move is exactly 1 or 2 steps
+- the answer fits in a signed 32-bit integer
+```
 
 #### Recognition
-**DP (Fibonacci recurrence).** **O(n)** time, **O(1)** space.
+**Signals.** "Count the number of distinct ways" is the counting objective, and there is exactly one thing to decide at each point (take 1 or take 2) with a single index describing where you are. Crucially the branches re-converge: reaching step 5 by 2+2+1 and by 1+2+2 both leave you facing the identical remaining problem. One index of state, a small fixed set of choices, and overlapping subproblems is linear DP. **Therefore.** Define `f(i)` as the number of ways to reach step `i`, note `f(i) = f(i-1) + f(i-2)`, and roll two scalars up the staircase. **Not greedy**, which cannot even be phrased here: greedy commits to one choice per step and returns one route, while the question asks how many routes exist, so there is no locally best move to be greedy about. **Not the closed-form binomial sum** over the number of 2-steps, which is correct but needs factorials that overflow long before `n = 45` does. **O(n)** time, **O(1)** space.
 
 #### Explanation
-Let `f(n)` = number of ways to reach step `n`. From step `n`, you arrived from either step `n-1` (one step) or step `n-2` (two steps), so `f(n) = f(n-1) + f(n-2)` — exactly the Fibonacci recurrence. Base cases: `f(1) = 1`, `f(2) = 2`. We only ever need the previous two values, so rolling variables `a` and `b` give O(1) space. A naive recursive approach without memoization re-computes subproblems exponentially; even top-down memo uses O(n) space unnecessarily.
+**Brute force.** Recurse on the two choices available at every step.
+
+```python
+def climbStairs(n):
+    if n <= 1:
+        return 1
+    return climbStairs(n - 1) + climbStairs(n - 2)
+```
+
+`O(2^n)` time, `O(n)` space for the call stack.
+
+**Wasteful because.** The branches re-converge. `climbStairs(10)` evaluates `climbStairs(8)` inside both of its children, and every level below repeats the same way, so a call tree with `O(2^n)` nodes covers only `n` distinct arguments. That gap between number of calls and number of distinct subproblems is the signature of every problem in this section, and closing it is what DP means.
+
+**Optimal.** Three moves, and they are the same three for the rest of the chapter. First name the state: `f(i)` is the number of ways to reach step `i`. Then read the transition off the choices: you arrive at `i` either from `i-1` or from `i-2`, those two route sets are disjoint and together they are all of them, so `f(i) = f(i-1) + f(i-2)` with `f(0) = f(1) = 1`. Memoising the recursion on `i` alone already collapses `2^n` calls to `n`. Next notice that `i` only ever depends on smaller `i`, so the recursion can be replaced by a left-to-right loop over a table, which drops the call stack. Finally notice each cell reads only the two cells before it, so the table can be two scalars. That last step is where the `O(n)` space becomes `O(1)`, and it is available whenever the transition has a bounded lookback.
+
+**Edge cases.** `n = 1` returns 1 with the loop body never running. `n = 2` returns 2, not 1, which is why `f(0)` must be 1 rather than 0. The answer is Fibonacci shifted by one, so `n = 45` gives 1836311903, just under the signed 32-bit ceiling, which is exactly why the constraint stops there.
 
 #### Python
 
@@ -17262,13 +17876,52 @@ Given an array of coin denominations and a target `amount`, return the minimum n
 
 #### Examples
 
-TODO
+```text
+Input: coins = [1,2,5], amount = 11
+Output: 3
+Explanation: 11 = 5 + 5 + 1.
+
+Input: coins = [2], amount = 3
+Output: -1
+
+Input: coins = [1], amount = 0
+Output: 0
+
+Constraints:
+- 1 <= coins.length <= 12
+- 1 <= coins[i] <= 2^31 - 1
+- 0 <= amount <= 10^4
+```
 
 #### Recognition
-**DP (bottom-up unbounded knapsack).** **O(n * amount)** time, **O(amount)** space.
+**Signals.** "Minimum number of coins" is an optimisation over repeated choices, and `amount` arrives as its own bound (`<= 10^4`) rather than being derived from the array, which is the tell that it is a second state dimension. Coins are reusable without limit, so each denomination can be picked any number of times. **Therefore.** Unbounded knapsack: `dp[a]` is the fewest coins making `a`, `dp[a] = 1 + min(dp[a - c])` over coins `c <= a`, base `dp[0] = 0`, unreachable amounts left at infinity. **Not greedy**, taking the largest coin that fits: with `coins = [1,3,4]` and `amount = 6` that picks `4 + 1 + 1` for three coins, while `3 + 3` needs two. Greedy is correct only for canonical systems such as ordinary currency, and nothing in the constraints promises one. **Not plain recursion on the remainder**, which re-solves the same remaining amount once per ordering of the same multiset of coins. **O(n * amount)** time, **O(amount)** space.
 
 #### Explanation
-This is the classic unbounded knapsack variant — each coin can be used any number of times. We build `dp[a]` = fewest coins to make amount `a`. The base case is `dp[0] = 0`; everything else starts at infinity. For each amount from `1` to `amount`, we try every coin: if `a - c >= 0` and `dp[a - c]` is reachable, we can reach `a` in one more coin. A greedy (always use the largest coin) fails for denominations like `[1, 3, 4]` with amount `6`, where `3+3` beats `4+1+1`. Bottom-up avoids recursive overhead and naturally builds all subproblems before they're needed.
+**Brute force.** Recurse on the remaining amount, trying every coin.
+
+```python
+def coinChange(coins, amount):
+    def rec(rem):
+        if rem == 0:
+            return 0
+        if rem < 0:
+            return -1
+        best = -1
+        for c in coins:
+            sub = rec(rem - c)
+            if sub >= 0 and (best < 0 or sub + 1 < best):
+                best = sub + 1
+        return best
+    return rec(amount)
+```
+
+`O(n^amount)` time, `O(amount)` stack.
+
+**Wasteful because.** With `coins = [1,2,5]`, remainder 4 is reached from 6 by taking `2`, by taking `1,1`, and by taking `1` then `1` in the other order, and the identical subtree is rebuilt each time. Only the remainder matters, so every distinct ordering of the same coins is redundant work.
+
+**Optimal.** The state is a single integer, the remaining amount, so there are only `amount + 1` distinct subproblems. Solve them in increasing order and each is answered once: `dp[a] = 1 + min(dp[a - c])` over the coins that fit. Reusability is what keeps the state that small, since a coin may be taken again there is no "which coins are still available" component, unlike 0/1 knapsack. The conceptual table is 2-D, `dp[i][a]` over the first `i` denominations and every amount, at `O(n * amount)` space; because a coin can be reused, row `i` reads from row `i` rather than row `i - 1`, so the rows collapse into a single array of `amount + 1` entries and the space drops to `O(amount)`. Infinity is the honest base for unreachable amounts: `-1` would compare as smaller than any real count and poison the `min`.
+
+**Edge cases.** `amount = 0` returns 0 without entering the loop. Coins larger than the target are skipped by the `c <= a` guard, and if every coin is too large `dp[amount]` stays infinite and the answer is `-1`. The sentinel must survive `+ 1` in a fixed-width type, so the typed solutions either pick `amount + 1` as infinity or guard the read before adding. Duplicate denominations are harmless, just repeated work.
 
 #### Python
 
@@ -17649,13 +18302,48 @@ Given an integer array `nums`, return the length of the longest strictly increas
 
 #### Examples
 
-TODO
+```text
+Input: nums = [10,9,2,5,3,7,101,18]
+Output: 4
+Explanation: the subsequence is [2,3,7,101].
+
+Input: nums = [0,1,0,3,2,3]
+Output: 4
+
+Input: nums = [7,7,7,7,7,7,7]
+Output: 1
+
+Constraints:
+- 1 <= nums.length <= 2500
+- -10^4 <= nums[i] <= 10^4
+- the subsequence must be strictly increasing
+```
 
 #### Recognition
-**Binary search (patience sorting).** **O(n log n)** time, **O(n)** space.
+**Signals.** "Longest" over an array fires the sliding-window reflex, and the word that stops it is *subsequence*: elements may be skipped, so the answer is not a contiguous stretch. "Strictly increasing" makes the comparison a total order, which is what lets one number summarise a whole prefix of choices. `n <= 2500` leaves `O(n^2)` affordable and rewards better. **Therefore.** Maintain `tails`, where `tails[k]` is the smallest value that can end an increasing subsequence of length `k + 1`. That array is sorted by construction, so each element is binary searched into it and either appended or written over the first entry it is not larger than; the final length is the answer. **Not a sliding window**, because there is no left pointer whose advance repairs a violated condition, and the window is not the answer once elements can be skipped. **Not greedily extending one chain**, which on `[10,9,2,5,3,7]` commits to 10 and reports 1. **O(n log n)** time, **O(n)** space.
 
 #### Explanation
-The `O(n²)` DP approach maintains `dp[i]` = length of LIS ending at index `i`, which is correct but slow. The faster approach maintains a `tails` array where `tails[k]` is the smallest tail value of all increasing subsequences of length `k+1`. For each number `n`, we binary search `tails` for the leftmost position where `tails[pos] >= n` and replace it with `n`. If `n` is larger than everything in `tails`, we append it. The length of `tails` at the end is the LIS length. Note: `tails` does not itself represent an actual LIS (elements might not form a valid subsequence), but its length is always correct.
+**Brute force.** Include or exclude each element, tracking the last one kept.
+
+```python
+def lengthOfLIS(nums):
+    def rec(i, prev):
+        if i == len(nums):
+            return 0
+        best = rec(i + 1, prev)
+        if prev is None or nums[i] > prev:
+            best = max(best, 1 + rec(i + 1, nums[i]))
+        return best
+    return rec(0, None)
+```
+
+`O(2^n)` time, `O(n)` stack.
+
+**Wasteful because.** Two different sets of earlier picks that end on the same element leave exactly the same problem behind, yet each is explored in full. `rec(i, prev)` reads only that pair, so on `[1,2,3,9]` the choices `[1,2]` and `[2]` both arrive at index 2 with `prev = 2` and rebuild the same subtree.
+
+**Optimal.** Memoising `(i, prev)` gives the `O(n^2)` DP everyone writes first: `dp[i]` is the best length ending at `i`, found by scanning earlier `j` with `nums[j] < nums[i]`. The shipped solution drops `dp` entirely, because among all increasing subsequences of a given length only the one with the smallest tail can ever matter, and anything that extends a larger tail extends a smaller one too. So keep one value per length in `tails`, which stays sorted, and place each new element with a binary search: it either extends the longest run by appending or lowers the smallest tail at its own length by overwriting. `tails` is not itself a valid subsequence, only the right length, and saying so unprompted is the senior signal. Prefer the `O(n^2)` DP when you must reconstruct the actual subsequence, or when the ordering is partial rather than total so binary search has nothing to exploit.
+
+**Edge cases.** A single element answers 1. All-equal input answers 1, which is exactly what `bisect_left` rather than `bisect_right` enforces for strict increase. Strictly decreasing input also answers 1, with `tails` overwritten at index 0 each time. Negative values need no handling, since only comparisons are used.
 
 #### Python
 
@@ -17764,13 +18452,51 @@ Given an integer array `nums`, determine whether it can be partitioned into two 
 
 #### Examples
 
-TODO
+```text
+Input: nums = [1,5,11,5]
+Output: true
+Explanation: [1,5,5] and [11] both sum to 11.
+
+Input: nums = [1,2,3,5]
+Output: false
+
+Input: nums = [2,2,3,5]
+Output: false
+Explanation: the total is 12 but no subset reaches 6.
+
+Constraints:
+- 1 <= nums.length <= 200
+- 1 <= nums[i] <= 100
+- 1 <= sum(nums) <= 20000
+```
 
 #### Recognition
-**DP (0/1 knapsack, set of reachable sums).** **O(n * sum)** time, **O(sum)** space.
+**Signals.** "Can it be partitioned" is a yes/no feasibility question, not a count and not an optimum. The two halves must be equal, so each is exactly `total / 2`, and the problem collapses to a single subset-sum query against a bounded target. Every element lands on exactly one side, so each is used **at most once**. At most 200 values of at most 100 caps the sum at 20000, small enough to index an array by, which is what makes a pseudo-polynomial `O(n * sum)` acceptable. **Therefore.** 0/1 knapsack over reachable sums: `dp[s]` is whether sum `s` is achievable, seeded `dp[0] = True`, answer `dp[total // 2]` after an odd-total early exit. **Not backtracking over subsets**, which is the right shape only when the subsets themselves are the output; here two branches that leave the same remaining target are interchangeable, so a memo collapses them and there is nothing left to enumerate. **Not the unbounded-knapsack loop order** of Coin Change: sweeping sums upward lets one number be spent twice, and `[1,5]` would wrongly report `true` for target 3. **O(n * sum)** time, **O(sum)** space.
 
 #### Explanation
-If the total sum is odd, partitioning is impossible — return early. Otherwise, the question becomes: can any subset sum to `total / 2`? We maintain a set `dp` of all subset sums reachable so far. For each number `n`, we extend every existing reachable sum by adding `n`. This is the 0/1 knapsack: each element is used at most once, so we build the new set from the old one without in-place mutation. An optimized approach uses a bitset (shift and OR), giving the same asymptotic complexity with much better constants; the set version is clearer to reason about in interviews.
+**Brute force.** Take or skip each number, chasing the remaining half.
+
+```python
+def canPartition(nums):
+    total = sum(nums)
+    if total % 2:
+        return False
+    def rec(i, rem):
+        if rem == 0:
+            return True
+        if i == len(nums) or rem < 0:
+            return False
+        return rec(i + 1, rem - nums[i]) or rec(i + 1, rem)
+    return rec(0, total // 2)
+```
+
+`O(2^n)` time, `O(n)` stack.
+
+**Wasteful because.** Different take/skip patterns over the same prefix often remove the same total, and then leave an identical state. On `nums = [1,2,3,...]`, taking 1 and 2 while skipping 3, and skipping 1 and 2 while taking 3, both reach index 3 with the target reduced by 3, and the whole remaining search runs twice. With 200 numbers there are `2^200` paths but only `200 * 10001` distinct `(i, rem)` pairs.
+
+**Optimal.** Memoising `(i, rem)` is the direct fix, and because the numbers are consumed in order the `i` dimension can be swept away as well. Keep one boolean row over sums `0..target` and, for each number `n`, mark `dp[s]` true wherever `dp[s - n]` was already true. The conceptual table is 2-D, `dp[i][s]` over the first `i` numbers and every sum up to `target`, at `O(n * sum)` space; iterating `s` **downward** guarantees each write reads a cell that still holds the previous row's value, so the rows collapse to a single array and the space drops to `O(sum)`. Sweeping upward instead would read a cell this same number just updated, reusing it and turning the recurrence into the unbounded one. The Python solution shown keeps a `set` of reachable sums instead of the array, which expresses the same take-or-skip step without needing loop-order discipline, at the cost of not capping anything at `target`.
+
+**Edge cases.** An odd total is impossible and exits before any DP runs. A single element can never be split; its total is odd, or half of it is unreachable from the empty set. `dp[0] = True` is the empty subset, not a special case. Every value is at least 1 here, so sums only grow; zeros or negatives would break the downward sweep's bounds.
 
 #### Python
 
@@ -17983,13 +18709,47 @@ Given two strings `text1` and `text2`, return the length of their longest common
 
 #### Examples
 
-TODO
+```text
+Input: text1 = "abcde", text2 = "ace"
+Output: 3
+Explanation: the longest common subsequence is "ace".
+
+Input: text1 = "abc", text2 = "abc"
+Output: 3
+
+Input: text1 = "abc", text2 = "def"
+Output: 0
+
+Constraints:
+- 1 <= text1.length, text2.length <= 1000
+- both strings are lowercase English letters
+- a subsequence may skip characters on either side
+```
 
 #### Recognition
-**2-D DP.** **O(m * n)** time, **O(m * n)** space.
+**Signals.** Two strings compared against each other, and the word *subsequence* rather than *substring*: characters may be skipped on either side, so no window and no single scan position holds enough state. Two independent positions to track is what makes the state a pair. "Return the length" rather than the string itself means nothing but a number has to be carried. `1000 * 1000` is a million cells, comfortably inside budget. **Therefore.** 2-D DP over suffixes: `dp[i][j]` is the LCS length of `text1[i:]` and `text2[j:]`, taking `1 + dp[i+1][j+1]` on a character match and `max(dp[i+1][j], dp[i][j+1])` otherwise. **Not the longest-common-substring recurrence**, whose mismatch case resets the run to 0 instead of taking a max over two skips; on `"abcde"` and `"ace"` that reports 1 rather than 3. **Not two pointers**, which can decide whether one string is a subsequence of the other but has no rule for which side to advance on a mismatch, because either branch can be the winner. **O(m * n)** time, **O(m * n)** space.
 
 #### Explanation
-`dp[i][j]` = length of the LCS of `text1[i:]` and `text2[j:]`. We fill it bottom-up from the ends. When characters match, `dp[i][j] = 1 + dp[i+1][j+1]` — we consume both. When they differ, we skip one character from either string and take the better result: `dp[i][j] = max(dp[i+1][j], dp[i][j+1])`. This two-choice structure is the hallmark of subsequence DP. Space can be reduced to O(n) by keeping only two rows at a time, but the full table is easier to reason about and reconstruct the actual sequence if needed.
+**Brute force.** Recurse on both positions, branching at every mismatch.
+
+```python
+def longestCommonSubsequence(text1, text2):
+    def rec(i, j):
+        if i == len(text1) or j == len(text2):
+            return 0
+        if text1[i] == text2[j]:
+            return 1 + rec(i + 1, j + 1)
+        return max(rec(i + 1, j), rec(i, j + 1))
+    return rec(0, 0)
+```
+
+`O(2^(m + n))` time, `O(m + n)` stack.
+
+**Wasteful because.** The two mismatch branches reconverge. From `(i, j)`, skipping `text1[i]` and then `text2[j]`, or skipping them in the other order, both land on `(i + 1, j + 1)`, so that subtree is rebuilt twice at every mismatch and the duplication compounds with depth.
+
+**Optimal.** The recursion only ever asks about a pair of suffix starts, and there are `(m + 1) * (n + 1)` of those, so fill a table rather than recurse. Sweeping `i` and `j` downward from the ends means `dp[i+1][j+1]`, `dp[i+1][j]` and `dp[i][j+1]` are all written before `dp[i][j]` needs them, and the row and column of zeros at the far edges encode "one string is exhausted". The match case is not a choice: when `text1[i] == text2[j]` some optimal LCS always pairs them, so no `max` belongs there, and putting one in costs nothing but hides the argument. This solution holds the whole `(m + 1) * (n + 1)` table at `O(m * n)` space, which is what lets you walk back through it to recover the actual subsequence; if only the length is wanted, two rolling rows suffice and the space falls to `O(min(m, n))` by making the shorter string the inner dimension.
+
+**Edge cases.** Disjoint alphabets give 0, which the zero-filled table produces with no special branch. Identical strings give the full length. Repeated characters need no care because the state is a pair of positions, not a character. Empty input is excluded by the constraints, but the extra row and column would answer 0 anyway.
 
 #### Python
 
@@ -18456,13 +19216,55 @@ Given an `m x n` integer matrix, return the length of the longest strictly incre
 
 #### Examples
 
-TODO
+```text
+Input: matrix = [[9,9,4],[6,6,8],[2,1,1]]
+Output: 4
+Explanation: the path is [1,2,6,9].
+
+Input: matrix = [[3,4,5],[3,2,6],[2,2,1]]
+Output: 4
+Explanation: the path is [3,4,5,6]; diagonals are not allowed.
+
+Input: matrix = [[1]]
+Output: 1
+
+Constraints:
+- 1 <= m, n <= 200
+- 0 <= matrix[i][j] <= 2^31 - 1
+- moves are up, down, left or right only
+```
 
 #### Recognition
-**DFS with memoization.** **O(m * n)** time, **O(m * n)** space.
+**Signals.** "Longest path" in a graph is NP-hard in general, so the word to fix on is *strictly* increasing: every legal move goes from a smaller value to a strictly larger one, so no path can ever return to a cell it left. The implicit graph is a DAG, and that acyclicity is the whole recognition. A 200 by 200 grid with four-way moves is 40000 nodes and under 160000 edges, so the expected answer is linear in the graph. **Therefore.** Longest path on a DAG, which is DP: `best(r, c) = 1 + max(best(neighbour))` over strictly greater neighbours, evaluated by DFS with a memo table. **Not a row-major grid DP**, because the dependency order follows values rather than positions: a cell can depend on the neighbour below it or to its right, so no fixed sweep direction works and tabulation would first have to sort every cell by value or peel them with Kahn's algorithm. **Not a visited set**, DFS's usual companion, which is unnecessary here and actively wrong, since it would block cells that legitimately sit on several different paths. **O(m * n)** time, **O(m * n)** space.
 
 #### Explanation
-Treat the matrix as a DAG: there is a directed edge from cell `(r, c)` to a neighbor only if the neighbor's value is strictly greater. The longest increasing path equals the longest path in this DAG, which has no cycles (values are strictly increasing). We use DFS from every cell with a memo table: `memo[(r, c)]` = the longest path starting from `(r, c)`. Because the graph is acyclic, memoization is safe — we'll never revisit a cell in the same DFS chain. Each cell is computed at most once, giving `O(m * n)` total work. No explicit visited set is needed since the strictly-greater condition prevents cycles.
+**Brute force.** DFS from every cell, following strictly greater neighbours.
+
+```python
+def longestIncreasingPath(matrix):
+    rows, cols = len(matrix), len(matrix[0])
+
+    def dfs(r, c):
+        best = 1
+        for dr, dc in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+            nr, nc = r + dr, c + dc
+            if not (0 <= nr < rows and 0 <= nc < cols):
+                continue
+            if matrix[nr][nc] > matrix[r][c]:
+                best = max(best, 1 + dfs(nr, nc))
+        return best
+
+    return max(dfs(r, c) for r in range(rows)
+               for c in range(cols))
+```
+
+Exponential time, `O(m * n)` stack.
+
+**Wasteful because.** `dfs(r, c)` depends on nothing but `(r, c)`. The route taken to reach a cell cannot change its answer, since every continuation has to beat the current value regardless of history. Yet a cell at the foot of one long ascending ridge is recomputed once for every cell that can reach it, and those recomputations nest inside each other.
+
+**Optimal.** Cache each cell's result the first time it is finished. There are `m * n` states and each does constant work over four neighbours, so the whole search is `O(m * n)` however many cells the outer loop starts from. Correctness rests on the same acyclicity that made this a DAG: a memo slot can never be read while it is still being computed, because that would require a cycle of strictly increasing values. That is also why no visited set appears, and why 0 is a safe "not computed yet" sentinel, given every real answer is at least 1. Recursion depth is the one thing acyclicity does not bound, so a 200 by 200 board of increasing values nests 40000 frames; Kahn's algorithm on the reversed edges, peeling off cells whose greater neighbours are all resolved, costs the same and avoids recursion entirely.
+
+**Edge cases.** A one-cell matrix answers 1, since a single cell is a path of length 1. A matrix of all equal values also answers 1, because the strict comparison leaves it with no edges at all. Plateaus of ties never extend a path, which is what makes `[[9,9,4],[6,6,8],[2,1,1]]` cap at 4 rather than running along the nines. Values reach `2^31 - 1`, so compare neighbours directly and never by subtracting them.
 
 #### Python
 
@@ -19230,13 +20032,48 @@ Given an integer array `nums`, find the contiguous subarray with the largest sum
 
 #### Examples
 
-TODO
+```text
+Input: nums = [-2,1,-3,4,-1,2,1,-5,4]
+Output: 6
+Explanation: the subarray [4,-1,2,1] sums to 6.
+
+Input: nums = [-3,-1,-2]
+Output: -1
+
+Input: nums = [5,4,-1,7,8]
+Output: 23
+
+Constraints:
+- 1 <= nums.length <= 10^5
+- -10^4 <= nums[i] <= 10^4
+- the subarray must be non-empty
+```
 
 #### Recognition
-**Kadane's Algorithm (greedy running sum).** **O(n)** time, **O(1)** space.
+**Signals.** "Contiguous subarray" plus "largest sum" plus one flat array that "may contain negative numbers". Contiguous forbids sorting or cherry-picking, and a single array with no second dimension in the state means what you carry forward is one scalar, not a table. The negatives are the load-bearing detail. **Therefore.** Kadane: sweep once holding `cur`, the best sum of a subarray ending exactly at this index, restarting whenever the carried prefix has gone negative. **Not a sliding window**, because a window needs the running sum to move monotonically as you extend right or shrink left, and negatives break that: growing the window can lower the sum and shrinking it can raise it, so no condition tells the left pointer when to advance. **O(n)** time, **O(1)** space.
 
 #### Explanation
-A naive approach enumerates all O(n²) subarrays. Kadane's insight: the best subarray ending at position `i` is either just `nums[i]` alone, or `nums[i]` appended to the best subarray ending at `i-1`. If the running sum `cur` goes negative, it can only hurt any future subarray, so restart from `nums[i]`. This greedy decision is locally optimal and provably globally optimal. Track the overall maximum in `res` as you go. Initialize both to `nums[0]` to handle all-negative arrays correctly — returning the largest single element rather than zero.
+**Brute force.** Sum every subarray and keep the largest.
+
+```python
+def maxSubArray(nums):
+    best = nums[0]
+    for i in range(len(nums)):
+        total = 0
+        for j in range(i, len(nums)):
+            total += nums[j]
+            if total > best:
+                best = total
+    return best
+```
+
+`O(n^2)` time, `O(1)` space.
+
+**Wasteful because.** Every start index rebuilds the whole suffix from zero, and the pass starting at `i + 1` differs from the pass starting at `i` by exactly one leading term. The quantity being recomputed `n` times over is "the best sum ending at `j`".
+
+**Optimal.** Ask that question once per position instead of once per start. The best subarray ending at `i` is either `nums[i]` standing alone or `nums[i]` glued onto the best one ending at `i - 1`, because those are the only two shapes a contiguous run can have, so `cur = max(nums[i], cur + nums[i])` absorbs the entire inner loop. The greedy reading of the same line is the proof: once `cur` is negative, carrying it forward subtracts from every later sum, so dropping it can never discard an optimum. Seed `cur` and `res` from `nums[0]`, not from `0`; seeding from `0` quietly answers `0` on an all-negative array. If the follow-up asks for the boundaries rather than the sum, keep a start index that resets on the restart branch.
+
+**Edge cases.** All-negative input must return the largest single element, so `[-3,-1,-2]` answers `-1` and not `0`. A one-element array returns that element. A leading run of negatives is discarded outright, so `[-5,9]` answers `9`, not `4`. Zeros need no branch since they neither help nor hurt.
 
 #### Python
 
@@ -19331,13 +20168,49 @@ Given an array `nums` where `nums[i]` is the maximum jump length from index `i`,
 
 #### Examples
 
-TODO
+```text
+Input: nums = [2,3,1,1,4]
+Output: true
+Explanation: jump 1 to index 1, then 3 to the last index.
+
+Input: nums = [3,2,1,0,4]
+Output: false
+Explanation: every route lands on the 0 at index 3 and stalls.
+
+Input: nums = [0]
+Output: true
+
+Constraints:
+- 1 <= nums.length <= 10^4
+- 0 <= nums[i] <= 10^5
+```
 
 #### Recognition
-**Greedy (shrink goal leftward).** **O(n)** time, **O(1)** space.
+**Signals.** A yes/no reachability question over one array, and `nums[i]` is the *maximum* jump length, so every shorter hop from `i` is legal too. That word "maximum" is the whole problem: it makes reachability downward closed, meaning if you can land on index `i` you can land on every index before it. A downward closed set of indices is described completely by one number. **Therefore.** Carry that one number. Scan right to left holding `goal`, the leftmost index known to reach the end, and pull it back to `i` whenever `i + nums[i] >= goal`; the answer is `goal == 0`. **Not BFS over indices**, which is correct but treats each index as a node and pushes the same heavily overlapping ranges again and again, costing `O(n^2)` edges and an `O(n)` visited array to learn nothing the scalar did not already have. **O(n)** time, **O(1)** space.
 
 #### Explanation
-A BFS/DP approach tracks reachability for every index — O(n) space and conceptually heavier. The greedy insight: scan right-to-left, maintaining a `goal` (the leftmost index that can reach the end). If index `i` can jump to `goal` or beyond (`i + nums[i] >= goal`), then `i` itself becomes the new goal. By the time you reach index 0, if `goal == 0` then index 0 can transitively reach the end. Zeros in the array are the only real obstacles — an index with `nums[i] == 0` can't propagate the goal leftward. This single left-to-right goal-update pass is optimal.
+**Brute force.** Mark every index reachable from an already-reachable one.
+
+```python
+def canJump(nums):
+    n = len(nums)
+    ok = [False] * n
+    ok[0] = True
+    for i in range(n):
+        if not ok[i]:
+            continue
+        for j in range(i + 1, min(i + nums[i], n - 1) + 1):
+            ok[j] = True
+    return ok[n - 1]
+```
+
+`O(n^2)` time, `O(n)` space.
+
+**Wasteful because.** The ranges written by successive indices overlap almost entirely, so each index is set to `True` once per predecessor that covers it. In `[3,2,1,0,4]` indices 1 through 3 are marked three separate times, and one witness would have done.
+
+**Optimal.** Because reachability is downward closed and transitive, you never need to know *which* index reaches the end, only whether some index at or before your position does. Set `goal = n - 1` and walk backwards: if `i + nums[i] >= goal` then `i` reaches the goal, and anything reaching `i` now reaches the end, so `i` becomes the new goal. Reaching index 0 with `goal == 0` means the chain is unbroken. The mirror image works equally well and is worth knowing: sweep forward tracking `reach`, the furthest index seen so far, and fail the moment `i > reach`. Prefer the forward form when the follow-up is Jump Game II, since counting minimum jumps is that same `reach` read as BFS layers.
+
+**Edge cases.** A single-element array is true even when `nums[0] == 0`, since you already stand on the last index. A zero at the final index never blocks anything. A zero elsewhere blocks only if nothing strictly before it can jump clear over it. Large `nums[i]` values overshoot the array end, which the `>=` comparison handles without clamping.
 
 #### Python
 
@@ -20183,13 +21056,49 @@ Given a sorted list of non-overlapping intervals and a `newInterval`, insert it 
 
 #### Examples
 
-TODO
+```text
+Input: intervals = [[1,3],[6,9]], newInterval = [2,5]
+Output: [[1,5],[6,9]]
+Explanation: [2,5] overlaps [1,3], so they fuse into [1,5].
+
+Input: intervals = [[1,2],[3,5],[6,7],[8,10],[12,16]],
+       newInterval = [4,8]
+Output: [[1,2],[3,10],[12,16]]
+
+Input: intervals = [], newInterval = [5,7]
+Output: [[5,7]]
+
+Constraints:
+- 0 <= intervals.length <= 10^4
+- intervals is sorted by start and pairwise disjoint
+- 0 <= start <= end <= 10^5
+```
 
 #### Recognition
-**Linear scan with three phases.** **O(n)** time, **O(n)** space.
+**Signals.** The statement volunteers that the input is "sorted" and "non-overlapping", and that you insert exactly one interval. A guarantee handed to you for free is a budget statement: the `O(n log n)` has already been paid, so the intended answer is `O(n)`. Disjointness adds a second fact, that everything `newInterval` touches forms one contiguous run, so the edit is local. **Therefore.** One pass in three phases: copy intervals ending before `newInterval` starts, absorb every interval that touches it by widening with `min` and `max`, append it, copy the rest. **Not sort-then-merge**, the Merge Intervals routine run over `intervals + [newInterval]`, which is correct but discards both guarantees and pays `O(n log n)` to rediscover an order the problem already gave you. **O(n)** time, **O(n)** space.
 
 #### Explanation
-The scan naturally falls into three phases: (1) intervals that end before `newInterval` starts — copy as-is; (2) intervals that overlap with `newInterval` — merge by expanding `newInterval`'s bounds; (3) intervals that start after `newInterval` ends — append `newInterval` then copy the rest. Because the input is already sorted, phases 1 and 3 are simply prefix/suffix copies. The merging in phase 2 works by extending `newInterval` greedily. When we first detect the new interval no longer overlaps (phase 3), we can short-circuit with a slice copy. The empty-input edge case is handled naturally — we exit the loop and append `newInterval`.
+**Brute force.** Append the new interval and re-merge the whole list from scratch.
+
+```python
+def insert(intervals, newInterval):
+    ivs = sorted(intervals + [newInterval])
+    res = []
+    for s, e in ivs:
+        if res and s <= res[-1][1]:
+            res[-1][1] = max(res[-1][1], e)
+        else:
+            res.append([s, e])
+    return res
+```
+
+`O(n log n)` time, `O(n)` space.
+
+**Wasteful because.** The sort re-derives an ordering the input already carried, and the merge pass then tests all `n` intervals for overlaps that the disjointness guarantee has already ruled out. Only the run of intervals actually touching `newInterval` can change.
+
+**Optimal.** Walk the sorted list once and let position do the sorting's job. Three cases, in order: if `newInterval` ends before the current interval starts you are past the affected run, so emit `newInterval` and copy the untouched suffix; if `newInterval` starts after the current interval ends you have not reached the run yet, so copy the interval through; otherwise they touch, and you widen `newInterval` to `min` of the starts and `max` of the ends rather than emitting anything. Widening rather than emitting is what fuses a whole chain of overlaps into one interval in a single pass, and it is correct because the inputs are disjoint, so once the widened interval clears the current one it can only meet later ones. A binary search would find the first affected interval in `O(log n)`, but you still copy every element into the output, so the total stays `O(n)`; that only pays off when you can splice in place instead of returning a fresh list.
+
+**Edge cases.** An empty input list falls straight through the loop and returns `[[newInterval]]`. A `newInterval` that lands entirely before or entirely after every existing interval never enters the widening branch. Touching endpoints count as overlap, so `[1,3]` and `[3,5]` fuse into `[1,5]`. A `newInterval` swallowing several intervals emits exactly one merged result.
 
 #### Python
 
@@ -20321,13 +21230,53 @@ Given a list of intervals, merge all overlapping intervals and return the minima
 
 #### Examples
 
-TODO
+```text
+Input: intervals = [[1,3],[2,6],[8,10],[15,18]]
+Output: [[1,6],[8,10],[15,18]]
+Explanation: [1,3] and [2,6] overlap, so they fuse into [1,6].
+
+Input: intervals = [[1,4],[4,5]]
+Output: [[1,5]]
+
+Input: intervals = [[1,4],[2,3]]
+Output: [[1,4]]
+
+Constraints:
+- 1 <= intervals.length <= 10^4
+- intervals[i].length == 2
+- 0 <= start <= end <= 10^4
+```
 
 #### Recognition
-**Sort then greedy merge.** **O(n log n)** time, **O(n)** space.
+**Signals.** "Intervals", "overlapping", "merge", and an output that is a restructured *set* rather than a count, with nothing said about the input order. That silence is the tell: nothing in the raw input tells you which intervals are neighbours, and supplying that missing adjacency is exactly what a sort buys. **Therefore.** Sort by start, then sweep once, extending the last kept interval when the current one starts at or before its end and appending otherwise. **Not sorting by end**, which also clusters overlaps but destroys the one-comparison test: after an end-sort a later interval can start before the last kept interval's start, so deciding overlap means scanning further back than one element. Sorting by start guarantees every earlier-starting interval has already been folded in, which makes the previous result entry the only candidate. **O(n log n)** time, **O(n)** space.
 
 #### Explanation
-Without sorting, you'd need O(n²) to find all overlapping pairs. After sorting by start time, any interval that overlaps the previous one must have its start ≤ the previous end (since starts are non-decreasing). When overlap is detected, extend the last result interval's end to the max of both ends — this handles the case where one interval is fully contained within another. When no overlap, push a new interval. Sorting dominates the runtime; the merge pass is O(n). Edge: a single interval is handled correctly since we initialize `res` with `intervals[0]`.
+**Brute force.** Fuse any overlapping pair you can find, and repeat until nothing changes.
+
+```python
+def merge(intervals):
+    res = [iv[:] for iv in intervals]
+    i = 0
+    while i < len(res):
+        for j in range(i + 1, len(res)):
+            if res[i][0] <= res[j][1] and res[j][0] <= res[i][1]:
+                res[i][0] = min(res[i][0], res[j][0])
+                res[i][1] = max(res[i][1], res[j][1])
+                res.pop(j)
+                i = -1
+                break
+        i += 1
+    res.sort()
+    return res
+```
+
+`O(n^3)` time, `O(n)` space.
+
+**Wasteful because.** Every fuse widens an interval and so invalidates the pairings already rejected, forcing the whole `O(n^2)` pair scan to restart. The overlap test itself is two comparisons; running it that many times is the cost, and it exists only because nothing tells you which intervals sit next to each other.
+
+**Optimal.** Sort by start first, at `O(n log n)`, and the restarts vanish. Seed the result with the first interval, then for each next one compare its start against the last result entry's end: if `start <= res[-1][1]` they touch, so widen with `res[-1][1] = max(res[-1][1], end)`; otherwise the gap is real and you append. Only the last entry ever needs checking, because starts are non-decreasing, so any interval that failed to touch the running result cannot touch anything earlier either. The `max` on the end, rather than a plain assignment, is what handles a fully contained interval: `[2,3]` inside `[1,4]` must not shrink the result to `[1,3]`. The sort dominates; the sweep is a single `O(n)` pass and the only extra memory is the output.
+
+**Edge cases.** A single interval comes back unchanged, which is why seeding the result with `intervals[0]` is safe. Touching endpoints count as overlap, so `[1,4]` and `[4,5]` fuse into `[1,5]`. A fully contained interval keeps the outer end. Input already disjoint returns the same list in sorted order.
 
 #### Python
 
@@ -20444,13 +21393,50 @@ Given intervals, return the minimum number of intervals to remove so that no two
 
 #### Examples
 
-TODO
+```text
+Input: intervals = [[1,2],[2,3],[3,4],[1,3]]
+Output: 1
+Explanation: drop [1,3] and the other three are disjoint.
+
+Input: intervals = [[1,2],[1,2],[1,2]]
+Output: 2
+
+Input: intervals = [[1,2],[2,3]]
+Output: 0
+
+Constraints:
+- 1 <= intervals.length <= 10^5
+- intervals[i].length == 2
+- -5 * 10^4 <= start < end <= 5 * 10^4
+```
 
 #### Recognition
-**Greedy (sort by end, activity selection).** **O(n log n)** time, **O(1)** space.
+**Signals.** "Minimum number of intervals to remove so that no two overlap." Minimising removals is maximising what stays, so this is Activity Selection with the answer read backwards. Every removal costs the same and no interval carries a value or priority, and that unweighted counting is the second tell: the moment intervals carry weights this becomes weighted interval scheduling, which needs DP and binary search rather than a greedy. **Therefore.** Sort by *end*, keep an interval whenever its start is at or after the last kept end, and count everything else as a removal. The exchange argument: replacing any optimal schedule's first pick with the earliest-finishing interval frees the timeline no later, so it never creates a fresh conflict. **Not sorting by start**, which will happily keep one long early interval that blocks several short ones that would all have fitted. **O(n log n)** time, **O(1)** space.
 
 #### Explanation
-This is the classic activity selection problem in disguise. Sorting by end time and greedily keeping the interval that finishes earliest maximizes the number of non-overlapping intervals we keep — equivalently, minimizing removals. Why sort by end and not start? An interval with a smaller end leaves more room for subsequent intervals; keeping it is always at least as good as keeping a later-ending alternative that also starts at the same time. Walk left to right: if the current interval starts at or after `end`, keep it (update `end`); otherwise it overlaps — count it as a removal. `end` is initialized to negative infinity so the first interval is always kept.
+**Brute force.** Try every subset and keep the largest conflict-free one.
+
+```python
+def eraseOverlapIntervals(intervals):
+    n = len(intervals)
+    best = 0
+    for mask in range(1 << n):
+        pick = sorted(intervals[i] for i in range(n)
+                      if mask >> i & 1)
+        ok = all(pick[k][1] <= pick[k + 1][0]
+                 for k in range(len(pick) - 1))
+        if ok:
+            best = max(best, len(pick))
+    return n - best
+```
+
+`O(2^n * n log n)` time, `O(n)` space.
+
+**Wasteful because.** The `2^n` subsets overlap enormously, so the same pair of intervals is re-tested for conflict in exponentially many candidate schedules. Every subset containing `[1,3]` and `[2,4]` rediscovers that those two clash.
+
+**Optimal.** The choice does not actually need searching, because one rule fixes it. Sort by end time and walk left to right holding `end`, the finish time of the last interval you kept. If the current interval starts at or after `end` it fits, so keep it and advance `end`; otherwise it conflicts with something already kept and you count a removal. Earliest-finish-first is optimal by the exchange argument above: among the intervals still compatible with what you have kept, the one that ends soonest leaves the most room for everything after it, and swapping it into any optimal schedule cannot make that schedule worse. Sorting by end rather than start is the entire difference between this and Merge Intervals, and it is not interchangeable: with `[[1,100],[2,3],[4,5]]` a start-sort keeps `[1,100]` and removes two, while the end-sort keeps both short ones and removes one. Initialise `end` to negative infinity so the first interval is always kept.
+
+**Edge cases.** Identical duplicates conflict with each other, so three copies of `[1,2]` cost two removals. Touching intervals do not overlap, which is why the test is `start >= end` and not `>`, so `[[1,2],[2,3]]` answers `0`. A single interval or an empty list answers `0`. Fully contained intervals are handled by the end-sort automatically, since the inner one finishes first and is seen first.
 
 #### Python
 
@@ -20662,13 +21648,50 @@ Given meeting time intervals, return the minimum number of conference rooms requ
 
 #### Examples
 
-TODO
+```text
+Input: intervals = [[0,30],[5,10],[15,20]]
+Output: 2
+Explanation: [0,30] holds one room throughout; the other
+two never overlap each other, so they share a second.
+
+Input: intervals = [[7,10],[2,4]]
+Output: 1
+
+Input: intervals = [[1,5],[5,9],[5,9]]
+Output: 2
+
+Constraints:
+- 1 <= intervals.length <= 10^4
+- 0 <= start < end <= 10^6
+- a room freed at time t is reusable at time t
+```
 
 #### Recognition
-**Min-heap of end times.** **O(n log n)** time, **O(n)** space.
+**Signals.** "Minimum number of conference rooms" plus "simultaneously". A minimum-resource count over intervals is not a subset question, it is a *maximum concurrency* question: the answer is the largest number of meetings alive at one instant, and concurrency only changes at a start or an end. Interval input plus a quantity measured "at any instant" is the standing cue to sort by start and walk forward in time. **Therefore.** Sort by start, keep a min-heap of end times representing the rooms opened so far, and for each meeting either reuse the room that frees soonest (when its end is at or below the new start) or open a new one. The heap never shrinks, so its final size is the peak. **Not merge intervals**, the reflex on interval input, because merging collapses overlaps into a single span and destroys exactly the quantity being counted: `[[0,30],[5,10],[15,20]]` merges to one `[0,30]` and reports 1 room instead of 2. **O(n log n)** time, **O(n)** space.
 
 #### Explanation
-The minimum rooms equals the maximum number of overlapping meetings at any instant. After sorting by start time, process meetings in order: the min-heap tracks the earliest end time among all currently occupied rooms. If the next meeting starts at or after that earliest end (`heap[0] <= s`), the room is free — replace its end time with the new meeting's end (same room count). Otherwise, a new room is needed — push the new end time. `heapreplace` is an atomic pop-push that's slightly more efficient than separate operations. The heap size at the end equals the peak simultaneous count. Don't forget to import `heapq` in Python.
+**Brute force.** Count how many meetings are live at each meeting's start.
+
+```python
+def minMeetingRooms(intervals):
+    best = 0
+    for s, _ in intervals:
+        live = 0
+        for a, b in intervals:
+            if a <= s < b:
+                live += 1
+        if live > best:
+            best = live
+    return best
+```
+
+`O(n^2)` time, `O(1)` space.
+
+**Wasteful because.** Concurrency changes by exactly one at each start and each end, yet the inner loop rebuilds the whole count from scratch at every start, re-testing meetings it already knew were live an instant earlier.
+
+**Optimal.** Process meetings in start order so the count is maintained instead of recomputed. A min-heap of end times holds the rooms opened so far with the one freeing soonest on top. For each meeting, if that earliest end is at or below the new start the room is genuinely free, so overwrite it with this meeting's end and the room count is unchanged; otherwise no room is free (the earliest end is the best candidate, so if it fails they all fail) and a push grows the count by one. The heap therefore never shrinks, and its final size is the peak concurrency. One sort plus `n` heap operations is `O(n log n)`. A sweep line over `(start, +1)` and `(end, -1)` events costs the same and is less code; keep the heap when you also need to know *which* meeting expires next.
+
+**Edge cases.** Touching meetings such as `[1,5]` and `[5,9]` share one room, which is why the test is `<=` and not `<`. Fully nested meetings like `[5,10]` inside `[0,30]` still need two rooms. An empty list returns 0 with no special branch.
 
 #### Python
 
@@ -21624,13 +22647,47 @@ Implement `pow(x, n)` — compute `x` raised to the power `n`, where `n` can be 
 
 #### Examples
 
-TODO
+```text
+Input: x = 2.00000, n = 10
+Output: 1024.00000
+Explanation: 2^10 == 1024.
+
+Input: x = 2.00000, n = -2
+Output: 0.25000
+Explanation: 2^-2 == 1 / 2^2 == 1 / 4.
+
+Input: x = -2.00000, n = 0
+Output: 1.00000
+
+Constraints:
+- -100.0 < x < 100.0
+- -2^31 <= n <= 2^31 - 1
+- -10^4 <= x^n <= 10^4
+```
 
 #### Recognition
-**Fast exponentiation (binary exponentiation).** **O(log n)** time, **O(1)** space.
+**Signals.** `n` is a *value*, not a length, and it runs to `2^31 - 1`. That single fact reclassifies the problem: a loop that multiplies `n` times is about two billion multiplications, so anything linear in the magnitude of the input is out and `O(log n)` is the target. "Where `n` can be negative" is the second, smaller signal, flagging a normalisation step rather than a different algorithm. **Therefore.** Binary exponentiation off the identity `x^n = (x^(n/2))^2`, times one leftover `x` when `n` is odd. Walk the bits of `n`: fold the running base into the result when the low bit is set, then square the base and shift right. **Not recursion** on `myPow(x, n // 2)`, which reaches the same `O(log n)` but spends `O(log n)` stack frames and gives the `n = -2^31` negation a second place to overflow in fixed-width languages. **Not a library `pow`**, which answers the question rather than the exercise. **O(log n)** time, **O(1)** space.
 
 #### Explanation
-Naive repeated multiplication is O(n). Binary exponentiation halves the exponent each step: if `n` is odd, multiply the result by the current `x` (capturing the "leftover" factor), then square `x` and halve `n`. This processes each bit of `n` once, giving O(log n) multiplications. Negative exponents are handled by inverting `x` and negating `n` upfront. Watch for the edge case where `n == INT_MIN` in languages with fixed-width integers: `-INT_MIN` overflows — use unsigned or cast to 64-bit before negating. Python handles this transparently with arbitrary-precision integers.
+**Brute force.** Multiply `x` by itself `n` times.
+
+```python
+def myPow(x, n):
+    if n < 0:
+        x, n = 1 / x, -n
+    res = 1.0
+    for _ in range(n):
+        res *= x
+    return res
+```
+
+`O(n)` time, `O(1)` space.
+
+**Wasteful because.** Reaching `x^10` costs ten multiplications here, but `x^10` is `(x^5)^2` and `x^5` is `(x^2)^2 * x`. Every intermediate `x^k` the loop builds is discarded rather than squared, so the halving structure sitting inside the exponent gets paid for one unit at a time.
+
+**Optimal.** Square the base instead of accumulating it. Hold a base equal to `x^(2^k)` at step `k`, and a result that collects exactly the powers whose bits are set in `n`, which is valid because `n` in binary *is* a sum of distinct powers of two. Each round tests the low bit, folds the base into the result when it is set, squares the base, and shifts `n` right, so the loop runs once per bit: 31 iterations rather than two billion. A negative `n` is normalised up front by replacing `x` with `1 / x` and flipping the sign, which changes the inputs and not the loop.
+
+**Edge cases.** `n = 0` returns 1 for every `x`. `n = -2^31` cannot be negated inside a 32-bit int, so Java, Rust and C++ widen to 64 bits before flipping the sign; Python's arbitrary-precision ints make the step invisible. Repeated squaring can overflow to infinity or collapse to zero for bases far from 1, which the stated bound `-10^4 <= x^n <= 10^4` exists to keep out.
 
 #### Python
 
@@ -22075,13 +23132,45 @@ Given an array where every element appears exactly twice except one, find that s
 
 #### Examples
 
-TODO
+```text
+Input: nums = [2,2,1]
+Output: 1
+
+Input: nums = [4,1,2,1,2]
+Output: 4
+
+Input: nums = [1]
+Output: 1
+
+Constraints:
+- 1 <= nums.length <= 3 * 10^4
+- -3 * 10^4 <= nums[i] <= 3 * 10^4
+- every element appears twice except one, which appears once
+```
 
 #### Recognition
-**XOR (self-canceling pairs).** **O(n)** time, **O(1)** space.
+**Signals.** "Every element appears exactly twice except one" states the multiplicity rule outright, and the problem then demands `O(n)` time *and* `O(1)` space. Those two clauses together are the whole puzzle: linear time on its own is easy, but constant space alongside it rules out a hash set, a counter, and the scratch space of a sort. When the structure is pairing and the answer has to survive in one accumulator, reach for an involution, an operation that undoes itself. **Therefore.** Fold XOR across the array. `a ^ a == 0` and `a ^ 0 == a`, and XOR is commutative and associative, so each pair cancels no matter how far apart its two copies sit, leaving the lone value. **Not a hash set** toggled on each value, which is honestly `O(n)` time and arguably clearer, but costs `O(n)` space and so breaks the constraint the problem went out of its way to state. **Not sorting** and scanning for the element without a neighbour, which is `O(n log n)`. **O(n)** time, **O(1)** space.
 
 #### Explanation
-A hashset approach finds the answer in O(n) time but uses O(n) space. XOR is the key: `a ^ a == 0` (any value XORed with itself cancels) and `a ^ 0 == a` (identity). XOR is also commutative and associative, so XORing all elements together causes every duplicated number to cancel, leaving only the single element. No sorting, no extra memory, just one pass. This is one of the most elegant constant-space tricks in competitive programming.
+**Brute force.** Tally every value, then return the one seen once.
+
+```python
+def singleNumber(nums):
+    counts = {}
+    for n in nums:
+        counts[n] = counts.get(n, 0) + 1
+    for value, c in counts.items():
+        if c == 1:
+            return value
+```
+
+`O(n)` time, `O(n)` space.
+
+**Wasteful because.** This one is not slow, it is fat, and space is the constraint it breaks. It builds and stores an exact tally for all `n / 2` paired values and then reads none of them: every count but one is computed and discarded. It also needs two passes where the information could have been folded during the first.
+
+**Optimal.** Replace the tally with an accumulator that forgets pairs on its own. XOR is its own inverse, so `x ^ x` erases `x` from the running value the instant the second copy arrives, and because XOR is commutative and associative there is no bookkeeping to match copies up. Start at 0, XOR everything in, and the bits still set are exactly those set an odd number of times, which is the singleton. Note how tightly this is bound to the stated multiplicity: if elements repeated three times instead of twice XOR would cancel nothing, and you would count each of the 32 bit positions modulo 3 instead.
+
+**Edge cases.** A one-element array returns that element, since `0 ^ x == x`. Negative values need no special handling because XOR works on the two's-complement bit pattern, not the magnitude. A zero in the input is not special either: it pairs and cancels like any other value.
 
 #### Python
 
@@ -22231,13 +23320,49 @@ Given `n`, return an array `ans` of length `n + 1` where `ans[i]` is the number 
 
 #### Examples
 
-TODO
+```text
+Input: n = 2
+Output: [0,1,1]
+Explanation: 0 is 0b0, 1 is 0b1, 2 is 0b10.
+
+Input: n = 5
+Output: [0,1,1,2,1,2]
+
+Input: n = 0
+Output: [0]
+
+Constraints:
+- 0 <= n <= 10^5
+- the answer has length n + 1
+- ans[i] is the number of set bits in i
+```
 
 #### Recognition
-**DP with LSB recurrence.** **O(n)** time, **O(n)** space.
+**Signals.** "For every `i` in `0..n`" turns a per-number trick into a *sequence*, and `n` reaches `10^5`. The question stops being how to popcount one integer and becomes how to avoid paying full price `n` times. Whenever an answer is wanted for every prefix of the naturals, ask what `i` shares with a smaller index: `i >> 1` is `i` with its lowest bit removed, it is strictly smaller, so it is already solved. **Therefore.** Fill a table with `dp[i] = dp[i >> 1] + (i & 1)`, one array pass, one shift and one mask per entry. **Not a builtin popcount** in a loop, such as `bin(i).count('1')` or `Integer.bitCount(i)`, which costs `O(n log n)` bit-level work and, more to the point, sidesteps the reuse the problem is testing. **Not a precomputed nibble table**, the classic constant-factor trick, which is strictly more code for the same `O(n)`. **O(n)** time, **O(n)** space.
 
 #### Explanation
-Computing popcount for each number independently is O(n · 32) — fine for small n but wastes prior work. The recurrence `dp[i] = dp[i >> 1] + (i & 1)` reuses already-computed results: `i >> 1` is `i` with its last bit removed (already in `dp`), and `(i & 1)` adds 1 if `i` is odd. Since `i >> 1 < i`, `dp[i >> 1]` is always available when computing `dp[i]`. Base case `dp[0] = 0` is correct. This builds the entire table in a single O(n) pass with no branching or popcount instruction needed.
+**Brute force.** Popcount each number independently.
+
+```python
+def countBits(n):
+    ans = []
+    for i in range(n + 1):
+        bits = 0
+        x = i
+        while x:
+            bits += x & 1
+            x >>= 1
+        ans.append(bits)
+    return ans
+```
+
+`O(n log n)` time, `O(n)` space for the output.
+
+**Wasteful because.** Counting the bits of `i` walks the whole number, but everything above `i`'s last bit is itself a smaller index whose answer already sits in the array. For `i` near `10^5` that is 17 shifts, 16 of which redo work finished earlier in the same loop.
+
+**Optimal.** Turn the popcount into a one-step recurrence over the table being built. Dropping the lowest bit gives `i >> 1`, strictly less than `i` and therefore already filled, so `dp[i] = dp[i >> 1] + (i & 1)`: take the answer for the shorter number and add back the bit you removed. The base case `dp[0] = 0` is free in any language that zero-initialises. The alternative recurrence `dp[i] = dp[i & (i - 1)] + 1` clears the *lowest set* bit instead of the last bit and is equally `O(n)`; prefer it when you also want the identity behind Kernighan's popcount, and prefer the shift form when you want the dependency to be a plain halving.
+
+**Edge cases.** `n = 0` must return `[0]`, a one-element array rather than an empty one. The table has length `n + 1`, an off-by-one easy to miss in both directions. Odd `i` always lands on `dp[i >> 1] + 1`, powers of two always on 1.
 
 #### Python
 
@@ -22398,13 +23523,48 @@ Given an array `nums` containing `n` distinct numbers in the range `[0, n]`, ret
 
 #### Examples
 
-TODO
+```text
+Input: nums = [3,0,1]
+Output: 2
+Explanation: n == 3, so the range is [0,3] and 2 is absent.
+
+Input: nums = [0,1]
+Output: 2
+
+Input: nums = [9,6,4,2,3,5,7,0,1]
+Output: 8
+
+Constraints:
+- n == nums.length, 1 <= n <= 10^4
+- 0 <= nums[i] <= n
+- all values in nums are distinct
+```
 
 #### Recognition
-**Gauss summation formula.** **O(n)** time, **O(1)** space.
+**Signals.** `n` distinct numbers drawn from `[0, n]`, exactly one absent. The value range is pinned to the index range and the defect count is exactly one, which is the standing cue that the answer is recoverable from an *aggregate* rather than a search: any quantity computable in one pass over the whole range and invertible will expose the gap. The usual follow-up asking for `O(1)` extra space rules out a set. **Therefore.** Compute what the total should be and subtract what it is: `n * (n + 1) / 2 - sum(nums)`. One pass, one accumulator, no allocation. **Not the XOR fold** over all indices `0..n` and all values, which is just as correct and just as short, but is the better choice in Java, Rust, Go or C++ once `n` grows, because the expected sum grows quadratically and overflows a 32-bit int while XOR cannot overflow at all. **O(n)** time, **O(1)** space.
 
 #### Explanation
-A sorting approach is O(n log n). A hashset approach is O(n) time but O(n) space. The Gauss formula `n * (n + 1) / 2` gives the expected sum of `0..n`. Subtracting the actual array sum leaves exactly the missing number — neat, branchless, and constant space. An XOR alternative also works: XOR all indices 0..n with all array values; every present number cancels, leaving the missing one. The Gauss approach is slightly more readable. Watch for integer overflow in languages with fixed-width types — use 64-bit integers if `n` is large.
+**Brute force.** Try each candidate in `0..n` and scan for it.
+
+```python
+def missingNumber(nums):
+    for want in range(len(nums) + 1):
+        found = False
+        for v in nums:
+            if v == want:
+                found = True
+                break
+        if not found:
+            return want
+```
+
+`O(n^2)` time, `O(1)` space.
+
+**Wasteful because.** Every candidate rescans the array to answer one membership question, and the `n` candidates that are present get confirmed only to be thrown away. A full pass over the input yields a single bit of information.
+
+**Optimal.** Stop searching and start accounting. The set `0..n` has a known total, `n * (n + 1) / 2`, and the array is that set with exactly one member removed, so the difference between the expected total and the actual total *is* the removed member. One pass, one accumulator, nothing stored. The same argument runs with XOR in place of addition: fold every index `0..n` and every value together and each present number meets its own copy and cancels. That version is the safer default in a fixed-width language, since the expected sum here is only about `5 * 10^7` but grows as `n^2` and will overflow a 32-bit int, while XOR has no ceiling. Cyclic sort, swapping each value to its own index and reporting the first mismatch, is a third correct answer and the one that survives when several values are missing.
+
+**Edge cases.** The missing value can be `n` itself, as in `[0,1]` where the answer is 2, so the candidate range must run to `n` inclusive. It can equally be 0, as in `[1]`. A single-element array has to work in both directions.
 
 #### Python
 
@@ -22482,13 +23642,44 @@ Calculate the sum of two integers `a` and `b` without using the `+` or `-` opera
 
 #### Examples
 
-TODO
+```text
+Input: a = 1, b = 2
+Output: 3
+
+Input: a = 2, b = 3
+Output: 5
+
+Input: a = -12, b = 8
+Output: -4
+
+Constraints:
+- -1000 <= a <= 1000
+- -1000 <= b <= 1000
+- neither + nor - may appear in the solution
+```
 
 #### Recognition
-**Bit manipulation (simulate full adder).** **O(1)** time, **O(1)** space.
+**Signals.** "Without using the `+` or `-` operators" is not a performance constraint, it is the entire problem. Nothing about the input is large or awkward and there is no faster algorithm hiding here. A banned arithmetic operator with the bitwise operators left open is a request to rebuild the operation out of them, and for addition that means reproducing a hardware full adder. **Therefore.** `a ^ b` is the per-column sum with all carries ignored, and `(a & b) << 1` is exactly those carries moved one place left. Feed the pair back in until the carry word is zero, at most 32 rounds for 32-bit inputs. **Not repeated increment** by `b` steps, which still spells `+` or `-` in every language and costs `O(|b|)` besides. **Not a library call** such as `sum([a, b])` or `operator.add(a, b)`, which is the banned operator wearing a hat rather than an alternative to it. **O(1)** time, **O(1)** space.
 
 #### Explanation
-A hardware full adder computes sum and carry separately. `a ^ b` gives the sum bits with no carry; `(a & b) << 1` gives the carry bits shifted into the next position. Repeat until carry is zero — at most 32 iterations for 32-bit integers. In Python, integers are arbitrary-precision and can be negative without a fixed width, so `b` might never reach zero with naive shifting. The fix: apply `mask = 0xFFFFFFFF` to keep `b` in 32-bit range during iteration, then interpret `a` as a signed 32-bit value at the end (`a & mask` converts it). In Rust/Go/C++ the fixed-width types handle this naturally without masking.
+**Brute force.** The line you would write if the ban did not exist.
+
+```python
+def getSum(a, b):
+    # The obvious answer, and the one the problem forbids.
+    # Every dodge reduces to it: sum([a, b]),
+    # operator.add(a, b) and math.fsum([a, b]) all issue
+    # the same machine ADD, so none of them count.
+    return a + b
+```
+
+`O(1)` time, `O(1)` space.
+
+**Wasteful because.** Nothing here is slow, so the usual framing does not hold: the cost is that you are not permitted this. What the one-liner hides is the machinery, and the machinery is the exercise. A single `+` is a chain of full adders in silicon, and you are being asked to write that chain out.
+
+**Optimal.** Split addition into its two independent halves. Column by column, `a ^ b` is the digit you keep when you ignore carrying, and `a & b` marks the columns that generate a carry, which belongs one position to the left, hence the `<< 1`. Neither half is the answer on its own, so set `a, b = a ^ b, (a & b) << 1` and repeat: each round pushes the surviving carries further left, so after at most 32 rounds the carry word is zero and `a` holds the sum. Python needs one extra guard, because its integers are arbitrary precision and a negative value has infinitely many leading one bits, so the carry never falls off the end. Mask with `0xFFFFFFFF` each round to emulate a 32-bit register, then reinterpret the result as signed. Java, Rust, Go and C++ get that truncation from the type itself.
+
+**Edge cases.** `b = 0` returns `a` without entering the loop. Mixed signs such as `a = -12, b = 8` are what exposes a missing mask in Python, where the loop otherwise never terminates. Two's complement means subtraction needs no separate branch: negative operands flow through the same adder unchanged.
 
 #### Python
 

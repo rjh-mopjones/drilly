@@ -132,7 +132,11 @@ ADAPTERS: dict[str, tuple[str, str]] = {
 }
 
 # item id -> {"entry": name, "adapters": {param: (build, dump)}, "result": dump}
-OVERRIDES: dict[int, dict] = {}
+OVERRIDES: dict[int, dict] = {
+    # Clone Graph's parameter is `node`, too generic to key on globally, so the
+    # graph adapter is bound per item instead.
+    84: {"adapters": {"node": ("build_graph", "dump_graph")}},
+}
 
 # Items whose Explanation snippet cannot reasonably be run against the examples
 # (pure design classes where the "brute force" is a different data structure).
