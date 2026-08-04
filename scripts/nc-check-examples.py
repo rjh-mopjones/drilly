@@ -237,6 +237,12 @@ def __nc_main__(spec):
                 if k in extra_keys:
                     continue
                 b = spec["adapters"].get(k)
+                # Adapters are inferred from parameter name, and names like p/q
+                # are used both for tree roots (#53, #55) and for plain strings
+                # (#122's regex pattern). Every builder takes an array, so only
+                # apply one when the value actually is one.
+                if b and not isinstance(v, list):
+                    b = None
                 if b:
                     extra = [copy.deepcopy(payload[e]) for e in consume.get(k, [])]
                     kw[k] = globals()[b](copy.deepcopy(v), *extra)
