@@ -198,7 +198,18 @@ OVERRIDES: dict[int, dict] = {
 # validate_nc.py fails if this grows past the baseline, so it cannot rot quietly.
 NAIVE_SKIP: set[int] = set()
 
-# item id -> callable(inputs: dict, actual) -> bool, for Compare: any-valid
-CHECKERS: dict[int, str] = {}
+# Items whose examples are only safe under `exact` because of a tie-break
+# convention, not because the answer is unique. If the harness suddenly fails one
+# of these after an edit, suspect the convention before suspecting the content.
+TIE_SENSITIVE: dict[int, str] = {
+    4: "Longest Palindromic Substring: 'babad' admits both 'bab' and 'aba'. "
+       "The shipped solution and the naive snippet both scan i ascending and "
+       "keep a strictly-longer match, so both return 'bab'. Preserve that scan "
+       "order in either implementation or the example must change.",
+}
 
-COMPARE_MODES = {"exact", "any-order", "any-order-nested", "any-valid", "roundtrip"}
+# Deliberately no `any-valid`: it would need a per-item checker, and a mode that
+# silently degrades to exact comparison is worse than not offering it. If a
+# problem genuinely has several valid answers, pick an example whose answer is
+# unique instead. #91 and #100 do exactly that.
+COMPARE_MODES = {"exact", "any-order", "any-order-nested", "roundtrip"}

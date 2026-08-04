@@ -47,7 +47,7 @@ LANG_TAG = {
     "Go": "go",
     "C++": "cpp",
 }
-COMPARE_MODES = {"exact", "any-order", "any-order-nested", "any-valid", "roundtrip"}
+COMPARE_MODES = {"exact", "any-order", "any-order-nested", "roundtrip"}
 LINE_LIMIT = 70
 
 

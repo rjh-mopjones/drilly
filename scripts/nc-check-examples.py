@@ -315,7 +315,7 @@ def run_solution(code, entry, adapters, examples, timeout, consume=None, result=
 
 
 def canon(v, mode):
-    if mode in ("exact", "any-valid", "roundtrip"):
+    if mode in ("exact", "roundtrip"):
         return v
     if mode == "any-order":
         return sorted(map(repr, v)) if isinstance(v, list) else v
