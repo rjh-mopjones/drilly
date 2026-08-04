@@ -150,13 +150,52 @@ Given two non-empty linked lists representing non-negative integers stored in re
 
 #### Examples
 
-TODO
+```text
+Input: l1 = [2,4,3], l2 = [5,6,4]
+Output: [7,0,8]
+Explanation: 342 + 465 = 807, stored reversed.
+
+Input: l1 = [0], l2 = [0]
+Output: [0]
+
+Input: l1 = [9,9,9,9,9,9,9], l2 = [9,9,9,9]
+Output: [8,9,9,9,0,0,0,1]
+
+Constraints:
+- 1 <= length of each list <= 100
+- 0 <= node value <= 9
+- no leading zeros, except the number 0 itself
+```
 
 #### Recognition
-**Linked list traversal with carry.** **O(max(m, n))** time, **O(max(m, n))** space.
+**Signals.** "Stored in reverse order (ones digit first)" is the gift: that is exactly the order addition consumes digits in, so no reversal, no stack, no recursion is needed anywhere. "Non-empty" removes the null-input case. The constraint that each list holds up to 100 nodes is the second signal, and it is a prohibition: a 100-digit number fits in no fixed-width integer type, so the numbers can never be reconstructed. **Therefore.** Walk both lists in lockstep carrying one integer, emitting one node per position behind a dummy head, exactly as you would add on paper. **Not converting each list to an integer**, adding, and splitting the digits back out, which passes in Python only because its integers are arbitrary precision, and overflows a 64-bit integer at 19 digits in every other language here. **O(max(m, n))** time, **O(max(m, n))** space.
 
 #### Explanation
-The numbers are already in the convenient ones-first order, so you can walk both lists simultaneously and simulate grade-school addition. At each step, sum the two node values (defaulting to 0 when a list is exhausted) plus any carry from the previous step. The digit to store is `val % 10` and the new carry is `val // 10`. A dummy head node eliminates the special case of building the first node. The loop condition `while l1 or l2 or carry` handles lists of unequal length and a final carry (e.g., 99 + 1 = 100) without extra code. Edge case: both lists can have different lengths, and there may be a final carry after both lists are consumed.
+**Brute force.** Rebuild both numbers, add them, take the sum apart again.
+
+```python
+def addTwoNumbers(l1, l2):
+    def to_int(node):
+        digits = ""
+        while node:
+            digits = str(node.val) + digits
+            node = node.next
+        return int(digits)
+    total = to_int(l1) + to_int(l2)
+    dummy = curr = ListNode()
+    for c in reversed(str(total)):
+        curr.next = ListNode(int(c))
+        curr = curr.next
+    return dummy.next
+```
+
+`O(m + n)` time, `O(m + n)` space.
+
+**Wasteful because.** The digits arrive in the order addition wants them and this throws that away: it assembles two whole numbers, then immediately decomposes the sum back into the same digits. Every character of both string forms is written twice and read twice to move information that never had to leave the node it started in.
+
+**Optimal.** Add in place, one position at a time. Take whatever each list offers at the current position, add the carry from the previous position, store `val % 10` in a new node and keep `val // 10` as the next carry. The single loop condition `while l1 or l2 or carry` folds three separate endings into one: a shorter list simply stops contributing, and a carry out of the top digit gets its own node without any code after the loop. A dummy head removes the other special case, "is this the first node?", so the body never branches on position. No intermediate value here exceeds 19, so nothing overflows in any language.
+
+**Edge cases.** Unequal lengths, where the shorter list contributes nothing past its end. A final carry, so `[9,9] + [1]` is `[0,0,1]`, one node longer than either input. Both lists `[0]`, which must return `[0]` rather than an empty list.
 
 #### Python
 
@@ -570,13 +609,48 @@ Given a string `s`, return the longest substring that is a palindrome. If there 
 
 #### Examples
 
-TODO
+```text
+Input: s = "babad"
+Output: "bab"
+Explanation: "aba" is also a valid answer.
+
+Input: s = "cbbd"
+Output: "bb"
+
+Input: s = "ac"
+Output: "a"
+
+Constraints:
+- 1 <= s.length <= 1000
+- s consists of digits and English letters
+- any longest answer is accepted when several tie
+```
 
 #### Recognition
-**Expand around center.** **O(n²)** time, **O(1)** space.
+**Signals.** "Longest substring that is a palindrome", where substring means contiguous, so the answer is one interval and not a subsequence problem. The property being searched for is *inherited inward*: if `s[l..r]` is a palindrome then `s[l+1..r-1]` is one too, and the reverse direction is what you exploit, growing a known palindrome by testing one character at each end. `s.length <= 1000` puts `O(n²)` in budget and rules out `O(n³)`. **Therefore.** Try all `2n - 1` centers, `n` single characters plus `n - 1` gaps between adjacent characters, and expand each outward while the ends match, keeping the longest seen. **Not the DP table** over `is s[i..j] a palindrome`, which reaches the same `O(n²)` time but pays `O(n²)` memory to store answers that expansion computes and discards. Manacher's algorithm is `O(n)` and almost never expected. **O(n²)** time, **O(1)** space.
 
 #### Explanation
-A brute-force approach checks all `O(n²)` substrings and verifies each in `O(n)`, giving `O(n³)` overall. The expand-around-center insight is that every palindrome has a center — either a single character (odd length) or a pair of identical characters (even length). By trying all `2n - 1` centers and expanding outward as long as characters match, each expansion is `O(n)` worst case and the total is `O(n²)`. No extra space is needed beyond tracking the best result. A linear-time solution (Manacher's algorithm) exists but is rarely expected in interviews. Edge case: empty string or single character are trivially palindromes.
+**Brute force.** Test every substring, keep the longest that reads the same backwards.
+
+```python
+def longestPalindrome(s):
+    best = ""
+    n = len(s)
+    for i in range(n):
+        for j in range(i, n):
+            sub = s[i:j + 1]
+            if sub == sub[::-1] and len(sub) > len(best):
+                best = sub
+    return best
+```
+
+`O(n³)` time, `O(n)` space.
+
+**Wasteful because.** Checking `s[i..j]` starts over from both ends every time, when the answer for `s[i+1..j-1]` was computed moments earlier and fully determines it. There are `O(n²)` substrings and each verification is an independent `O(n)` scan that re-reads characters already compared.
+
+**Optimal.** Turn the inheritance around and build outward instead of testing inward. Every palindrome has a center, and there are only `2n - 1` of them, because an even-length palindrome is centered on the gap between two characters rather than on a character. From each center, compare the two ends and step outward while they match; the moment they differ, no wider palindrome shares that center, so the expansion stops with the maximum for that center already known. Each expansion is `O(n)` at worst and every comparison contributes to a new candidate rather than re-verifying an old one. Only the best start and length are kept, so nothing beyond a few integers is stored.
+
+**Edge cases.** A string with no palindrome longer than one character, such as `"ac"`, must return a single character and not the empty string. Even-length answers like `"bb"` are found only by the gap centers, which is why `expand(i, i + 1)` is called as well. The whole string being a palindrome means the first center already expands to the full length. A single-character input returns itself.
 
 #### Python
 
@@ -725,13 +799,48 @@ Given an integer `amount` and an array of coin denominations, return the number 
 
 #### Examples
 
-TODO
+```text
+Input: amount = 5, coins = [1,2,5]
+Output: 4
+Explanation: 5=5, 5=2+2+1, 5=2+1+1+1, 5=1+1+1+1+1.
+
+Input: amount = 3, coins = [2]
+Output: 0
+
+Input: amount = 0, coins = [7]
+Output: 1
+
+Constraints:
+- 1 <= coins.length <= 300
+- 1 <= coins[i] <= 5000
+- 0 <= amount <= 5000
+- the denominations are distinct
+```
 
 #### Recognition
-**DP (unbounded knapsack).** **O(n * amount)** time, **O(amount)** space.
+**Signals.** "Return the number of combinations", not the combinations themselves, so nothing needs to be enumerated and the answer is one integer. "Unlimited number of times" is the unbounded part: a denomination is never used up, so the state after choosing a coin still allows that same coin. The parenthesised "not permutations" is the whole difficulty, because it says two orderings of the same multiset are one answer. With `amount <= 5000` and 300 coins, a table of 1.5 million cells is nothing while enumeration is hopeless. **Therefore.** A 1-D table where `dp[a]` counts the ways to make `a`, filled with the coins in the outer loop so each denomination is finished before the next is introduced. **Not amount-outer, coin-inner**, the same three lines with the loops swapped, which counts every ordering separately and is the standard way this problem is failed. **O(n * amount)** time, **O(amount)** space.
 
 #### Explanation
-This is the classic "combination count" variant of the unbounded knapsack. `dp[a]` represents the number of ways to make amount `a`. Initialize `dp[0] = 1` (one way to make 0: use no coins). For each coin, iterate amounts from `coin` to `amount` and add `dp[a - coin]` to `dp[a]`. The outer loop over coins ensures we count combinations, not permutations — each coin is "committed" before moving to the next, so (1, 2) and (2, 1) are counted once. The naive recursive approach without memoization has exponential branches; the DP collapses overlapping subproblems to `O(n * amount)`.
+**Brute force.** Recurse on "use this coin again, or move past it".
+
+```python
+def change(amount, coins):
+    def count(i, rem):
+        if rem == 0:
+            return 1
+        if rem < 0 or i == len(coins):
+            return 0
+        return count(i, rem - coins[i]) + count(i + 1, rem)
+    return count(0, amount)
+```
+
+Exponential time, `O(amount)` stack.
+
+**Wasteful because.** The pair `(i, rem)` is all that determines the answer, and the recursion reaches the same pair down many different paths, recomputing the entire subtree each time. With `amount = 5000` there are at most 300 times 5001 distinct pairs, and the naive version visits vastly more calls than that.
+
+**Optimal.** Store each `(i, rem)` answer once. Going bottom up removes the recursion too: start from `dp[0] = 1`, the one way to make nothing, which is to take no coins, and for each coin sweep amounts upward adding `dp[a - coin]` into `dp[a]`. Sweeping upward rather than downward is what encodes unlimited reuse, because `dp[a - coin]` has already absorbed the current coin by the time it is read. Only one row is needed because the row for coin `i` is built from the row for coin `i - 1` in place. Keeping coins outermost is the part that counts combinations: when coin 2 is processed, coin 1 is already fully accounted for and never appears after it, so `1 + 2` and `2 + 1` are the same single path through the loops.
+
+**Edge cases.** `amount = 0` returns 1, the empty selection, and it is what seeds the table. A coin larger than `amount` makes its inner loop body never run and contributes nothing. An unreachable amount, such as 3 from `[2]`, returns 0 rather than failing.
 
 #### Python
 
@@ -829,13 +938,46 @@ Given a 32-bit signed integer `x`, return `x` with its digits reversed. If the r
 
 #### Examples
 
-TODO
+```text
+Input: x = 123
+Output: 321
+
+Input: x = -123
+Output: -321
+
+Input: x = 1534236469
+Output: 0
+Explanation: reversed it is 9646324351, past 2^31 - 1.
+
+Constraints:
+- -2^31 <= x <= 2^31 - 1
+- 2^31 - 1 is 2147483647, -2^31 is -2147483648
+- return 0 when the reversed value leaves that range
+```
 
 #### Recognition
-**Math (digit extraction).** **O(log x)** time, **O(1)** space.
+**Signals.** "Digits reversed" over "a 32-bit signed integer", with a rule for what happens when the result "overflows the 32-bit signed range". Reversing the digits is not the problem; the overflow clause is, and it is stated in terms of a fixed-width type, which says the intended solution builds the answer in that type and guards it rather than escaping to a wider one. There is no array, nothing to search and nothing to compare, so the only tools available are `% 10` to read the last digit and `// 10` to drop it, at most ten steps for any 32-bit value. **Therefore.** Peel the last digit off `x` and push it onto `res` with `res = res * 10 + d`, checking the range before or after each push depending on the language. **Not a round trip through a string**, reversing the characters and parsing back, which allocates two buffers for a value that fits in one register and lets the parser silently produce something outside the 32-bit range. **O(log x)** time, **O(1)** space.
 
 #### Explanation
-Extract digits one at a time by repeatedly taking `x % 10` (the last digit) and building the result with `res = res * 10 + digit`, then dividing `x` by 10. The number of iterations is proportional to the number of digits, which is `O(log x)`. The key constraint is overflow: in C++ or Rust the multiplication could silently wrap, so you must check bounds before or after constructing the result. Python integers are arbitrary precision, so you check the final result against the 32-bit range. Strip the sign first, reverse the absolute value, then reapply the sign — this avoids dealing with negative modulo behavior in languages where it differs. Edge case: `x = -2147483648` reverses to a value that exceeds `INT_MAX`, so it must return 0.
+**Brute force.** Print it, reverse the text, read it back.
+
+```python
+def reverse(x):
+    sign = -1 if x < 0 else 1
+    digits = str(abs(x))
+    res = sign * int(digits[::-1])
+    if res < -(2 ** 31) or res > 2 ** 31 - 1:
+        return 0
+    return res
+```
+
+`O(d)` time, `O(d)` space for `d` digits.
+
+**Wasteful because.** Nothing is recomputed here; the cost is the detour. Two heap buffers are allocated and a decimal parser is run to move at most ten digits that arithmetic can address directly, and the parse happily builds a value outside the 32-bit range, so the check that matters happens only after the number the problem forbids has already been constructed.
+
+**Optimal.** Do the same reversal with two operators. `x % 10` is the last digit and `x // 10` is everything above it, so each step moves one digit from the bottom of `x` to the bottom of `res` after shifting `res` up by a factor of ten. That is exactly a reversal, because the first digit removed is the last one placed. Strip the sign first and reapply it at the end: Python's floor division rounds toward negative infinity, so `-7 % 10` is 3 rather than the `-7` the other four languages produce, and the sign strip makes the code read the same everywhere. The guard is then one comparison against the two bounds, and in Java, Go and C++ the accumulation is done in a 64-bit type so the check happens before any narrowing.
+
+**Edge cases.** Trailing zeros vanish, so 120 reverses to 21 and never to 021. Zero itself skips the loop entirely and returns 0. `-2147483648` reverses to `-8463847412`, past `-2^31`, so it returns 0; it is also the one value with no positive counterpart in a 32-bit int, which is why the Java, Go and C++ versions keep the sign and lean on `%` truncating toward zero instead of calling `abs`.
 
 #### Python
 
@@ -1069,13 +1211,45 @@ Given two strings `s` and `t`, return `true` if `t` is an anagram of `s` (contai
 
 #### Examples
 
-TODO
+```text
+Input: s = "anagram", t = "nagaram"
+Output: true
+
+Input: s = "rat", t = "car"
+Output: false
+
+Input: s = "a", t = "ab"
+Output: false
+
+Constraints:
+- 1 <= s.length, t.length <= 5 * 10^4
+- s and t consist of lowercase English letters
+```
 
 #### Recognition
-**Frequency array (26 lowercase letters).** **O(n)** time, **O(1)** space.
+**Signals.** "Exactly the same characters with the same frequencies" defines the answer entirely in terms of counts, so position and order carry no information at all and any work that establishes an order is work you will throw away. The constraint "lowercase English letters" is the second signal and it fixes the alphabet at 26, which is what turns the tally from `O(k)` space into a constant. Unequal lengths can never be anagrams, so one comparison disposes of a large share of inputs before any counting starts. **Therefore.** One array of 26 counters: increment on `s`, decrement on `t` in the same pass, then check every counter is zero. **Not sorting both strings and comparing**, the answer most people give, which is correct and one line but spends `O(n log n)` computing a total ordering when only multiset equality was asked for, and needs a copy of both inputs to sort. **O(n)** time, **O(1)** space.
 
 #### Explanation
-An anagram has identical character frequencies. Early-exit on length mismatch avoids unnecessary work. With only lowercase English letters, a fixed 26-element integer array replaces a hashmap entirely, keeping auxiliary space constant. Increment for each character in `s` and decrement for the corresponding character in `t` simultaneously; if all counts are zero at the end, the strings are anagrams. This is equivalent to sorting both strings and comparing — `O(n log n)` — but the frequency array runs in `O(n)`. For Unicode inputs you would need a hashmap instead. Edge case: two empty strings are anagrams of each other.
+**Brute force.** Sort both strings and compare them.
+
+```python
+def isAnagram(s, t):
+    if len(s) != len(t):
+        return False
+    a = list(s)
+    b = list(t)
+    a.sort()
+    b.sort()
+    return a == b
+```
+
+`O(n log n)` time, `O(n)` space.
+
+**Wasteful because.** Sorting answers a much harder question than the one asked. It computes where every character stands relative to every other, at a cost of `n log n` comparisons, and then uses that ordering for exactly one thing: checking whether two multisets match. The ordering itself is discarded the moment the comparison returns.
+
+**Optimal.** Count instead of order. Because the alphabet is 26 fixed letters, a plain array indexed by `ord(c) - ord('a')` is a complete frequency table, and it is the same 26 integers whether the strings are 3 characters or 50,000, which is where the constant space comes from. The two strings can be walked together once the lengths are known equal, adding one for each character of `s` and subtracting one for the matching position of `t`; the strings are anagrams exactly when every counter lands back on zero. The length guard is not just an optimisation in the Python version: `zip` stops at the shorter string, so without it the tail of the longer one would never be counted. If the alphabet were Unicode, swap the array for a hash map and the space becomes `O(k)` distinct characters.
+
+**Edge cases.** Different lengths return false before a single character is read. Two identical strings are anagrams of each other. Strings with the same letters in different quantities, such as `"aab"` and `"abb"`, are caught by two nonzero counters rather than by any length or membership check.
 
 #### Python
 
@@ -1507,13 +1681,54 @@ Design an algorithm to encode a list of strings into a single string, and decode
 
 #### Examples
 
-TODO
+```text
+Compare: roundtrip
+
+Input: strs = ["hello","world"]
+Output: ["hello","world"]
+
+Input: strs = ["4#abc","",""]
+Output: ["4#abc","",""]
+
+Input: strs = [""]
+Output: [""]
+
+Constraints:
+- 0 <= strs.length < 100
+- 0 <= strs[i].length < 200
+- strs[i] may hold any of the 256 ASCII characters
+```
 
 #### Recognition
-**Length-prefix encoding.** **O(n)** time, **O(n)** space.
+**Signals.** "Encode a list of strings into a single string" and "may contain any character including `#` and digits". The second clause is the entire problem: it says no character can be reserved as a separator, which kills every scheme that finds boundaries by searching the payload. What is left is that the encoding must be self-delimiting, meaning the decoder learns where each string ends from the stream without ever inspecting the content. **Therefore.** Prefix each string with its own length: `"<len>#<content>"`. The `#` does not separate strings, it only terminates the digits, so a `#` inside a payload is never looked at; once the length is parsed the decoder jumps exactly that far. **Not a delimiter with escaping**, which needs every dangerous character enumerated, rescans character by character to find each boundary, and still cannot tell an empty list from a list holding one empty string. **O(n)** time, **O(n)** space.
 
 #### Explanation
-A naive delimiter like `","` fails if strings contain that character. Escaping every special character is error-prone. Length-prefix encoding avoids both issues: encode each string as `"<length>#<content>"`. On decode, read up to the `#` to get the length, then slice exactly that many characters — no ambiguity regardless of the string content. The `#` only acts as a separator between the length and the content; because you read the length first, you always know where the content ends. This is `O(total characters)` for both encode and decode.
+**Brute force.** Join on a comma, and escape any comma already in the data.
+
+```python
+def encode(strs):
+    esc = [s.replace("\\", "\\\\").replace(",", "\\,") for s in strs]
+    return ",".join(esc)
+
+def decode(s):
+    out, cur, i = [], "", 0
+    while i < len(s):
+        if s[i] == "\\":
+            cur, i = cur + s[i + 1], i + 2
+        elif s[i] == ",":
+            out, cur, i = out + [cur], "", i + 1
+        else:
+            cur, i = cur + s[i], i + 1
+    return out + [cur]
+```
+
+`O(n)` time, `O(n)` space, and not fully correct.
+
+**Wasteful because.** The encoder knew the length of every string and threw that away, so the decoder has to rediscover each boundary one character at a time, branching on every single character to ask whether it is a separator, an escape, or content. That is the same information being derived twice, and the second derivation is the fragile one: the empty list and `[""]` both encode to the empty string, so one of them can never be recovered.
+
+**Optimal.** Keep the length instead of re-deriving it. Write `len(s)`, then a `#`, then the string itself, so the header is unambiguous no matter what the payload holds: the digits before the first `#` cannot contain a `#`, and everything after it is content of a known size. Decoding is then two moves in a loop, find the next `#` from the cursor to read the length, then slice exactly that many characters and jump the cursor past them. Nothing inside a payload is ever examined, which is why a string like `"4#abc"` costs nothing extra. Both directions touch each character a constant number of times, so both are linear in the total input size.
+
+**Edge cases.** An empty list encodes to the empty string and decodes back to an empty list, while `[""]` encodes to `"0#"`, which is how the two stay distinguishable. Payloads containing `#` and digits, like `"4#abc"`, decode correctly because the decoder never searches inside them. Strings up to 199 characters give three-digit headers, so the header width varies and cannot be assumed.
 
 #### Python
 
@@ -1822,13 +2037,67 @@ Determine if a 9×9 Sudoku board is valid. Each row, column, and 3×3 sub-box mu
 
 #### Examples
 
-TODO
+```text
+Input: board =
+[["5","3",".",".","7",".",".",".","."],
+ ["6",".",".","1","9","5",".",".","."],
+ [".","9","8",".",".",".",".","6","."],
+ ["8",".",".",".","6",".",".",".","3"],
+ ["4",".",".","8",".","3",".",".","1"],
+ ["7",".",".",".","2",".",".",".","6"],
+ [".","6",".",".",".",".","2","8","."],
+ [".",".",".","4","1","9",".",".","5"],
+ [".",".",".",".","8",".",".","7","9"]]
+Output: true
+Explanation: no digit repeats in any row, column or box.
+
+Input: board =
+[["8",".",".",".",".",".",".",".","."],
+ [".","8",".",".",".",".",".",".","."],
+ [".",".",".",".",".",".",".",".","."],
+ [".",".",".",".",".",".",".",".","."],
+ [".",".",".",".",".",".",".",".","."],
+ [".",".",".",".",".",".",".",".","."],
+ [".",".",".",".",".",".",".",".","."],
+ [".",".",".",".",".",".",".",".","."],
+ [".",".",".",".",".",".",".",".","."]]
+Output: false
+Explanation: every row and column is clean, but the two
+8s share the top-left 3x3 box.
+
+Constraints:
+- board.length == 9 and board[i].length == 9
+- board[i][j] is a digit '1'-'9' or the character '.'
+- the board may be partly filled and need not be solvable
+```
 
 #### Recognition
-**Hashset per row, column, and 3×3 box.** **O(1)** time, **O(1)** space (fixed 9×9 board).
+**Signals.** Two phrases decide it. "No repetition" inside a row, a column or a 3×3 box is duplicate detection, which is a membership question rather than a search. "Does not need to be fully solved" says the check is entirely local: each cell is judged against three fixed regions and nothing else, so there is no lookahead and no completion to find. The board is pinned at 9×9, which turns every bound into a constant. **Therefore.** One scan of the 81 cells carrying 27 membership structures, nine per region type, with the box holding cell `(r, c)` at index `(r // 3) * 3 + c // 3`; a filled cell already present in any of its three regions fails on the spot. **Not backtracking**, the Sudoku Solver algorithm, which answers a different question: solvability means searching an exponential space of completions, whereas validity falls out of a single linear scan, and a board can easily be valid and still have no solution. Fixed 9×9, so **O(1)** time, **O(1)** space.
 
 #### Explanation
-Validity requires that digits 1–9 appear at most once in each row, column, and 3×3 box. Maintain three arrays of nine sets — one per row, one per column, one per box. For each filled cell, compute the box index as `(r // 3) * 3 + (c // 3)`, which maps the nine boxes to indices 0–8. If the digit is already in any of the three relevant sets, the board is invalid; otherwise add it to all three. The board size is fixed, so the algorithm is `O(81) = O(1)`. Edge case: `'.'` cells are simply skipped.
+**Brute force.** Materialise all 27 regions, then check each one for a repeat.
+
+```python
+def isValidSudoku(board):
+    groups = [[board[r][c] for c in range(9)] for r in range(9)]
+    groups += [[board[r][c] for r in range(9)] for c in range(9)]
+    groups += [[board[br + i][bc + j]
+                for i in range(3) for j in range(3)]
+               for br in (0, 3, 6) for bc in (0, 3, 6)]
+    for g in groups:
+        digits = [v for v in g if v != "."]
+        if len(digits) != len(set(digits)):
+            return False
+    return True
+```
+
+Generalised to an `n × n` board, `O(n^2)` time and `O(n^2)` space.
+
+**Wasteful because.** Every cell is read three times, once into its row list, once into its column list, once into its box list, and 243 characters are copied into 27 lists before a single comparison happens. The one fact a cell contributes, "digit `d` occupies row `r`, column `c`, box `b`", is available the instant you touch it, so building the regions first is pure duplication.
+
+**Optimal.** Fill the membership structures as you scan instead of before. At cell `(r, c)` compute `b = (r // 3) * 3 + c // 3`, which numbers the boxes 0 to 8, left to right then top to bottom, with two integer divisions and no lookup table. Skip `'.'`. If the digit is already in `rows[r]`, `cols[c]` or `boxes[b]`, return false immediately; otherwise insert it into all three. Each cell costs `O(1)` and is touched once, and the early return means a board that breaks at the second cell costs two cells rather than a full rebuild. To shrink the constant further, swap each set for a nine-bit integer and test with `mask & (1 << d)`, which is what the Java, Rust, Go and C++ versions do.
+
+**Edge cases.** A board of all `'.'` is valid, since the skip means nothing is ever inserted. Two equal digits in one box but in different rows and columns must fail, and catching that is the only thing the box index buys you. A valid board with no possible completion still returns true, because solvability is not what was asked.
 
 #### Python
 
@@ -2269,13 +2538,46 @@ Given a 1-indexed sorted array `numbers` and a target, return the 1-indexed posi
 
 #### Examples
 
-TODO
+```text
+Input: numbers = [2,7,11,15], target = 9
+Output: [1,2]
+Explanation: 2 + 7 == 9, returned 1-indexed.
+
+Input: numbers = [-1,0], target = -1
+Output: [1,2]
+
+Input: numbers = [1,1,3], target = 2
+Output: [1,2]
+
+Constraints:
+- 2 <= numbers.length <= 3 * 10^4
+- -1000 <= numbers[i] <= 1000
+- numbers is sorted in non-decreasing order
+- exactly one solution exists; use O(1) extra space
+```
 
 #### Recognition
-**Two pointers on sorted input.** **O(n)** time, **O(1)** space.
+**Signals.** Two phrases carry the whole problem. The array is "sorted in non-decreasing order", so the sum of a pair moves monotonically with each index, and one comparison at the two ends is enough to prove which end cannot appear in any answer. The solution must "use only constant extra space", which deletes the obvious alternative before you write it. "Exactly one solution" removes the not-found branch, and the 1-indexed return is a formatting trap rather than an algorithmic one. **Therefore.** Put `l` at the first index and `r` at the last and compare `numbers[l] + numbers[r]` against the target: too small raises `l`, too large lowers `r`, equal returns `[l + 1, r + 1]`. **Not the Two Sum hashmap** of LeetCode 1, which matches the `O(n)` time but stores up to `n` values, precisely the space this variant forbids; sortedness is what makes that memory redundant. **Not a binary search for each complement**, which honours the space bound but pays `O(n log n)`. **O(n)** time, **O(1)** space.
 
 #### Explanation
-Because the array is already sorted, you can exploit its monotonic property with two pointers starting at opposite ends. If the current sum equals the target, return the indices. If it's too small, advance the left pointer to increase the sum. If it's too large, retreat the right pointer. Each step eliminates at least one element from consideration, so the loop runs in `O(n)` with no extra memory. The sorted precondition is the key — without it, you'd need a hashmap as in Two Sum I. Exactly one solution is guaranteed, so the loop always terminates with an answer.
+**Brute force.** Try every pair and ignore the fact that the input is sorted.
+
+```python
+def twoSum(numbers, target):
+    n = len(numbers)
+    for i in range(n):
+        for j in range(i + 1, n):
+            if numbers[i] + numbers[j] == target:
+                return [i + 1, j + 1]
+```
+
+`O(n^2)` time, `O(1)` space.
+
+**Wasteful because.** The inner loop keeps going after the sum has overshot. Once `numbers[i] + numbers[j] > target`, every larger `j` overshoots too, because the values only climb, yet the scan re-derives that from scratch for each `i`. Sortedness is the one gift the problem hands you and this ignores it.
+
+**Optimal.** Converge from the ends and prove each discard. Suppose `numbers[l] + numbers[r] > target`. For any `l'` with `l <= l' < r` we have `numbers[l'] >= numbers[l]`, so `numbers[l'] + numbers[r] > target` as well: no surviving pair can use `r`, and dropping it loses nothing. The mirror argument applies when the sum is short, since every `r'` at or below `r` gives `numbers[l] + numbers[r'] < target`, so `l` is the index to drop. Each iteration eliminates exactly one index permanently, so the pointers meet within `n - 1` steps and no candidate pair is ever skipped. The hashmap version becomes the right answer the moment the input stops arriving sorted, because sorting purely to enable this scan costs `O(n log n)`.
+
+**Edge cases.** Exactly one answer is guaranteed, so the loop always leaves through the equality branch and no fallback return is reachable. The output is 1-indexed, so add one to both pointers. Negative values need no special handling: `[-1,0]` with target `-1` returns `[1,2]`. Repeated values such as `[1,1,3]` with target `2` work because `l < r` keeps the two pointers on distinct positions.
 
 #### Python
 
@@ -2561,13 +2863,48 @@ Given an array `height` of `n` non-negative integers where each represents a ver
 
 #### Examples
 
-TODO
+```text
+Input: height = [1,8,6,2,5,4,8,3,7]
+Output: 49
+Explanation: indices 1 and 8 give min(8,7) * 7 == 49.
+
+Input: height = [1,1]
+Output: 1
+
+Input: height = [4,3,2,1,4]
+Output: 16
+
+Constraints:
+- 2 <= height.length <= 10^5
+- 0 <= height[i] <= 10^4
+- the lines between the two chosen ones are ignored
+```
 
 #### Recognition
-**Two pointers, always move the shorter side.** **O(n)** time, **O(1)** space.
+**Signals.** The score of a candidate is handed to you in the statement: `min(height[l], height[r]) * (r - l)`, a function of two positions where everything between them is irrelevant. The objective is a maximum over pairs, and `height.length <= 10^5` puts an all-pairs scan out of budget. The two factors pull against each other: width is largest at the extremes and only shrinks as you move inward, while height is capped by whichever of the two lines is shorter. That cap is the structure to exploit, because the shorter line is always the binding constraint. **Therefore.** Start at the widest pair, record its area, then discard whichever side is shorter and repeat until the pointers meet. **Not the monotonic stack** you would reach for on Trapping Rain Water, which draws the same picture but solves a different shape: there water sits above every index and interior bars displace it, so each position needs its bounding maxima. Here the container is exactly two lines, the interior is ignored, and one converging sweep suffices. **O(n)** time, **O(1)** space.
 
 #### Explanation
-The brute-force approach tests all pairs of lines in `O(n²)`. The two-pointer approach works because water volume is `min(height[l], height[r]) * (r - l)`. Starting with the widest container (pointers at both ends), moving the shorter pointer inward is the only action that could possibly increase the water level — moving the taller pointer can only decrease the width without any chance of gaining height. This greedy move is provably optimal: we never skip a container that could be larger. The loop runs in `O(n)` since each step advances one pointer.
+**Brute force.** Score every pair of lines.
+
+```python
+def maxArea(height):
+    res = 0
+    n = len(height)
+    for i in range(n):
+        for j in range(i + 1, n):
+            area = min(height[i], height[j]) * (j - i)
+            if area > res:
+                res = area
+    return res
+```
+
+`O(n^2)` time, `O(1)` space.
+
+**Wasteful because.** Most of those pairs are already beaten before they are measured. Holding `i` fixed and walking `j` inward evaluates containers that are simultaneously narrower than one already scored and no taller than it, so their area cannot win, and the loop has no way to notice.
+
+**Optimal.** Put `l` at 0 and `r` at the last index, the widest container available, and measure it. Now suppose `height[l] <= height[r]`. Every other pair still using `l` is some `(l, j)` with `j < r`, so its width `j - l` is strictly smaller and its height `min(height[l], height[j])` is at most `height[l]`, which is exactly the height just used. Every such pair is therefore no better than the area already recorded, so `l` can be dropped with nothing lost, and the mirrored argument drops `r` when `height[r] < height[l]`. Moving the taller side instead is unsound: it throws away an index that may still belong to the optimum, and it cannot pay off in any case, because the height stays pinned by the shorter line while the width only shrinks. One index leaves per step, so `n - 1` steps cover every pair worth considering.
+
+**Edge cases.** With exactly two lines the single pair is measured before the loop can move either pointer. Heights of 0 produce an area of 0 and are stepped over with no special case. When the two heights tie, the argument above dominates both indices, so discarding either is safe and the code's `else` branch simply picks one. All-equal heights such as `[3,3,3]` are answered by the first measurement, since the widest pair wins.
 
 #### Python
 
@@ -2836,13 +3173,47 @@ Given an array `prices` where `prices[i]` is the stock price on day `i`, return 
 
 #### Examples
 
-TODO
+```text
+Input: prices = [7,1,5,3,6,4]
+Output: 5
+Explanation: buy on day 1 at 1, sell on day 4 at 6.
+
+Input: prices = [7,6,4,3,1]
+Output: 0
+
+Input: prices = [2]
+Output: 0
+
+Constraints:
+- 1 <= prices.length <= 10^5
+- 0 <= prices[i] <= 10^4
+- one buy and one sell, and the sell day must be later
+```
 
 #### Recognition
-**Single pass tracking minimum price.** **O(n)** time, **O(1)** space.
+**Signals.** "Buy on one day and sell on a later day" is an ordering constraint between the two indices, and exactly one transaction is allowed, so the answer is a single maximum of `prices[j] - prices[i]` over `i < j`. With `prices.length` up to `10^5`, examining all pairs is out. The decisive question is what a candidate sell day actually needs from its past, and the answer is not the history but one number: the cheapest price before it, which changes by a single comparison as you step forward. **Therefore.** One left-to-right pass carrying `buy`, the minimum price strictly earlier than today, and `profit`, the best difference so far; the order of the two updates is what enforces buy-before-sell. **Not a DP table over (day, holding) states**, the reflex for stock problems, which genuinely earns its place when the transaction count `k` is a parameter as in LeetCode 123 and 188; at `k = 1` the holding state collapses to that running minimum, so the table would store `n` rows to recompute a scalar. **O(n)** time, **O(1)** space.
 
 #### Explanation
-You must buy before you sell, so the brute-force approach checks every (buy, sell) pair in `O(n²)`. The key observation is that for any sell day, the best buy day is the cheapest day seen so far. Walk the prices array left to right, maintaining the running minimum `buy`. At each price `p`, the profit if you sold today is `p - buy`; update the best profit and the running minimum. This greedy one-pass approach is optimal because it correctly pairs each potential sell day with the globally cheapest prior buy day. Edge case: a strictly decreasing sequence yields 0 profit.
+**Brute force.** Try every buy day against every later sell day.
+
+```python
+def maxProfit(prices):
+    best = 0
+    n = len(prices)
+    for i in range(n):
+        for j in range(i + 1, n):
+            if prices[j] - prices[i] > best:
+                best = prices[j] - prices[i]
+    return best
+```
+
+`O(n^2)` time, `O(1)` space.
+
+**Wasteful because.** Fix a sell day `j`. All the pairs `(i, j)` differ only in `prices[i]`, so every one of them loses to the single smallest price before `j`. The nested loop rediscovers that minimum from scratch for each `j`, even though going from `j` to `j + 1` can change it by at most one comparison.
+
+**Optimal.** Carry the minimum rather than recomputing it. Seed `buy = prices[0]` and walk from day 1. At day `i` the quantity `prices[i] - buy` is the best profit obtainable by selling on day `i`, because `buy` is the minimum over days strictly before `i`, so keeping a running maximum of it over all `i` is the answer. Then fold `prices[i]` into `buy` for the next iteration. Updating the profit before the minimum is the entire buy-before-sell rule: swapping those two lines would let a day sell to itself, which scores zero and is harmless here but is the wrong invariant to carry into the harder variants. Read another way this is Kadane's algorithm on the array of day-to-day differences, and that framing is what generalises.
+
+**Edge cases.** A strictly falling series such as `[7,6,4,3,1]` returns 0, because doing nothing is legal and `profit` starts at 0 rather than going negative. A single day returns 0 with the loop body never running. Flat prices return 0. Seeding from `prices[0]` requires a non-empty array, which the constraints guarantee.
 
 #### Python
 
@@ -2931,13 +3302,48 @@ Given a string `s`, return the length of the longest substring that contains no 
 
 #### Examples
 
-TODO
+```text
+Input: s = "abcabcbb"
+Output: 3
+Explanation: the longest is "abc", of length 3.
+
+Input: s = "bbbbb"
+Output: 1
+
+Input: s = ""
+Output: 0
+
+Constraints:
+- 0 <= s.length <= 5 * 10^4
+- s holds English letters, digits, symbols and spaces
+- the answer is a substring, not a subsequence
+```
 
 #### Recognition
-**Sliding window with hashset.** **O(n)** time, **O(min(n, m))** space (where `m` is the character set size).
+**Signals.** "Substring" and not subsequence means the answer is a contiguous span `[l, r]`, and adjacent spans differ by one character gained and one lost. "Without repeating characters" is a property that can only break when you extend the span and can only be repaired by cutting from the left, and that one-directional behaviour is the licence to shrink instead of restart. A length up to `5 * 10^4` rules out enumerating the `O(n^2)` spans. **Therefore.** A variable-size sliding window over a set of the characters currently inside: push `r` right one character at a time, and while the incoming character is already in the set, evict `s[l]` and advance `l`; the answer is the largest `r - l + 1` observed. **Not a fixed-size window**, because the length is the unknown being solved for, so there is no `k` to slide and the inner shrink loop is unavoidable. **Not a frequency count of the whole string**, which tells you which characters repeat but not where, and adjacency is the entire question. With `m` the alphabet size, **O(n)** time, **O(min(n, m))** space.
 
 #### Explanation
-The brute-force approach checks all `O(n²)` substrings and verifies uniqueness in `O(n)`, giving `O(n³)`. The sliding window maintains a valid window `[l, r]` where all characters are unique. Expand by moving `r` right; when the new character `c` is already in the window, shrink by moving `l` right (removing characters from the set) until `c` is no longer in the window, then add `c`. At each step the window `[l, r]` is always duplicate-free, and we track the maximum seen window size. Each character is added and removed from the set at most once, giving `O(n)` amortized. Edge case: empty string returns 0.
+**Brute force.** Test every substring for uniqueness.
+
+```python
+def lengthOfLongestSubstring(s):
+    res = 0
+    n = len(s)
+    for i in range(n):
+        for j in range(i, n):
+            w = s[i:j + 1]
+            if len(set(w)) == len(w):
+                res = max(res, len(w))
+    return res
+```
+
+`O(n^3)` time, `O(n)` space.
+
+**Wasteful because.** Growing the span from `[i, j]` to `[i, j + 1]` discards the character set just built and constructs the whole thing again one character longer. Worse, when `i` advances the scan re-walks a prefix that the previous round already proved duplicate-free.
+
+**Optimal.** Maintain the set incrementally under one invariant: every character in `[l, r]` is distinct. Advance `r` by one. If `s[r]` is already inside, its earlier copy must sit at or after `l`, so evicting `s[l]` and advancing `l` repeatedly is guaranteed to reach and remove it; then insert `s[r]` and record the width. `l` never moves backwards, so over the whole run each index is inserted once and removed at most once, which is `2n` set operations despite the nested `while`. A common variant stores the last index of each character and jumps `l = max(l, last[c] + 1)` in one step rather than several; it is the same `O(n)` and wins when evictions would be long, but the `max` is not optional, because a stale index from outside the window would otherwise drag `l` backwards.
+
+**Edge cases.** The empty string returns 0 with the loop body never entered. `"bbbbb"` returns 1: each new `b` evicts the previous one and the window never grows. `"abba"` is the case that punishes a careless jump, since at `r = 3` the last recorded index of `a` is 0, well behind `l = 2`, and the answer is 2 rather than 4.
 
 #### Python
 
@@ -3746,13 +4152,47 @@ Given a string `s` containing only `'('`, `')'`, `'{'`, `'}'`, `'['`, and `']'`,
 
 #### Examples
 
-TODO
+```text
+Input: s = "()"
+Output: true
+
+Input: s = "([)]"
+Output: false
+Explanation: every type balances, but the pairs interleave.
+
+Input: s = "]"
+Output: false
+
+Constraints:
+- 1 <= s.length <= 10^4
+- s holds only the characters '(', ')', '[', ']', '{', '}'
+- nesting depth can reach s.length / 2
+```
 
 #### Recognition
-**Stack (push open, match on close).** **O(n)** time, **O(n)** space.
+**Signals.** "Closed by the same type of bracket" is a matching condition, but "in the correct order" is the phrase that picks the data structure: a closer must answer to the most recently opened bracket that is still unmatched, which is last-in-first-out by definition. Nesting can run to depth `s.length / 2`, so the number of pending openers is unbounded and has to live somewhere. **Therefore.** A stack. Push every opener; on a closer, fail if the stack is empty or its top is the wrong type, otherwise pop. The string is valid only if every closer matched and the stack finishes empty. **Not three counters**, one per bracket type, raised on open and lowered on close: `([)]` leaves all three at zero and is still invalid, because a count records how many brackets are open and never which one is innermost. **Not repeatedly deleting `"()"`, `"[]"` and `"{}"` until the string stops shrinking**, which is correct but pays a full rescan per nesting level. **O(n)** time, **O(n)** space.
 
 #### Explanation
-Every closing bracket must match the most recently opened unmatched bracket — a last-in-first-out requirement that maps directly to a stack. Push opening brackets; on a closing bracket, check whether the stack top is the matching opener. If the stack is empty or the top doesn't match, return false immediately. After processing all characters, the string is valid only if the stack is empty (all openers were matched). Edge cases: an odd-length string is always invalid; a string starting with a closing bracket fails on the first character.
+**Brute force.** Peel off adjacent matched pairs until nothing changes.
+
+```python
+def isValid(s):
+    prev = None
+    while prev != s:
+        prev = s
+        s = s.replace("()", "")
+        s = s.replace("[]", "")
+        s = s.replace("{}", "")
+    return s == ""
+```
+
+`O(n^2)` time, `O(n)` space.
+
+**Wasteful because.** Each round rescans and rebuilds the entire remaining string in order to strip one layer of nesting. On `"(((...)))"` of depth `n / 2` that is `n / 2` rounds over `O(n)` characters, and nearly all of those characters are unchanged, re-read only because the algorithm keeps no memory of where it had got to.
+
+**Optimal.** Do the same peeling in one pass, with a stack standing in for the shrinking string. Push each opener. When a closer arrives, the only bracket it may legally close is the one on top, so an empty stack or a mismatched top is an immediate false; otherwise pop, which is the `O(1)` equivalent of deleting that pair out of the middle of the string. A dict from closer to opener folds the three cases into one branch and makes `stack[-1] != pairs[c]` the whole test. At the end an empty stack means every opener was closed, and leftovers mean unclosed openers, the same signal the naive version reads off a non-empty remainder. Each character is pushed at most once and popped at most once.
+
+**Edge cases.** An odd-length string can never be valid, and both routes to failure are covered: `"("` survives to the end and fails the emptiness check, while `"]"` fails on the first character against an empty stack. `"([)]"` is the case that separates a stack from counting, since it balances by type and still breaks order. Deep nesting is fine; the stack simply grows to the nesting depth, at most `n / 2`.
 
 #### Python
 
@@ -3867,13 +4307,55 @@ Design a stack that supports `push`, `pop`, `top`, and `getMin` — all in `O(1)
 
 #### Examples
 
-TODO
+```text
+Input: ["MinStack","push","push","push","getMin","pop","top",
+"getMin"],
+[[],[-2],[0],[-3],[],[],[],[]]
+Output: [null,null,null,null,-3,null,0,-2]
+Explanation: getMin() returns -3, then after pop() top() is 0
+and getMin() is -2.
+
+Input: ["MinStack","push","push","getMin","pop","getMin"],
+[[],[2],[2],[],[],[]]
+Output: [null,null,null,2,null,2]
+
+Input: ["MinStack","push","top","getMin"],
+[[],[0],[],[]]
+Output: [null,null,0,0]
+
+Constraints:
+- -2^31 <= val <= 2^31 - 1
+- pop, top and getMin are called on a non-empty stack
+- at most 3 * 10^4 calls in total
+```
 
 #### Recognition
-**Parallel min-tracking stack.** **O(1)** all operations, **O(n)** space.
+**Signals.** "Design a stack" fixes the access order as last-in-first-out, and "`getMin` in `O(1)`" is the clause that does the work: a query must be answered without looking at the elements, so the answer has to be stored, not computed. Because `pop` undoes exactly one `push`, the state you need is a history, and a history that unwinds in the same order as the stack is just a second stack. **Therefore.** Push a paired entry recording the minimum of everything at or below that height, and pop both together. **Not a heap**, which peeks its minimum in `O(1)` but must remove the *most recent* element on `pop`, not the smallest, and deleting an arbitrary element costs `O(n)` to locate. **Not a single `min` variable**, which is correct until that minimum is popped and you have nothing to fall back to. Every operation stays constant time, paid for with one extra integer per element. **O(1)** time, **O(n)** space.
 
 #### Explanation
-A standard stack cannot retrieve the minimum in `O(1)` after arbitrary pops. The trick is to maintain a parallel `min_stack` where each entry records the minimum value reachable from that position down to the bottom of the stack. On `push`, append `min(val, min_stack[-1])` to `min_stack`. On `pop`, remove from both stacks simultaneously. `getMin` is then just `min_stack[-1]`. This works because each element in `min_stack` encodes the answer to "what is the minimum if the main stack were trimmed to this height?" — so pops automatically restore the correct running minimum.
+**Brute force.** One list, and `getMin` scans it.
+
+```python
+class MinStack:
+    def __init__(self):
+        self.stack = []
+
+    def push(self, val): self.stack.append(val)
+
+    def pop(self): self.stack.pop()
+
+    def top(self): return self.stack[-1]
+
+    def getMin(self): return min(self.stack)  # rescans
+```
+
+`O(n)` per `getMin`, `O(n)` space.
+
+**Wasteful because.** Each scan recomputes the minimum of a list that changed by one element since the last scan. With `getMin` called after every push, that is `O(n^2)` total work to answer a question whose answer was already known one element ago.
+
+**Optimal.** Keep the answer instead of recomputing it. On every `push`, also push `min(val, current_min)` onto a parallel stack, so entry `i` of that stack means "the minimum if the main stack were trimmed to height `i + 1`". `getMin` reads its top. The reason pops need no repair is that the two stacks change height together, so removing an element automatically exposes the minimum that was correct before it arrived. Storing a value per element rather than a value per distinct minimum is what keeps duplicates safe; the space-tighter variant pushes onto the min stack only when `val <= current_min` and pops only when the popped value equals the top, which wins when the input is mostly increasing.
+
+**Edge cases.** The first push sees an empty min stack, so the min is `val` itself. Pushing the same minimum twice then popping once must still report it, which the one-entry-per-element rule handles for free. All-negative inputs need nothing special since only comparisons are used.
 
 #### Python
 
@@ -4019,13 +4501,54 @@ Evaluate an arithmetic expression given as a list of tokens in Reverse Polish No
 
 #### Examples
 
-TODO
+```text
+Input: tokens = ["2","1","+","3","*"]
+Output: 9
+Explanation: ((2 + 1) * 3) = 9.
+
+Input: tokens = ["4","13","5","/","+"]
+Output: 6
+Explanation: (4 + (13 / 5)) = 4 + 2 = 6.
+
+Input: tokens = ["-7","2","/"]
+Output: -3
+Explanation: truncation is toward zero, not floor.
+
+Constraints:
+- 1 <= tokens.length <= 10^4
+- each token is an operator or an integer in [-200, 200]
+- the expression is a valid RPN expression
+- division never divides by zero
+```
 
 #### Recognition
-**Stack (postfix evaluation).** **O(n)** time, **O(n)** space.
+**Signals.** "Reverse Polish Notation" means each operator arrives *after* both of its operands, so there is no precedence to resolve and no parentheses to match; the only rule is that an operator consumes the two most recently completed values. "Most recent, then the one before it" is the definition of last-in-first-out. **Therefore.** Push integers onto a stack, and on an operator pop two, apply, and push the result back so it can serve as an operand later. **Not an expression tree**, which is the classic way to evaluate arithmetic but costs `O(n)` node allocations plus a second traversal to buy back an evaluation order that postfix already hands you. **Not scanning the token list repeatedly** for the leftmost reducible operator, because collapsing three tokens into one shifts every token after it, giving `O(n^2)`. **O(n)** time, **O(n)** space.
 
 #### Explanation
-RPN is designed for stack-based evaluation: push operands onto the stack; when you see an operator, pop the top two operands, apply the operator, and push the result. The key subtlety is division truncation toward zero — in Python `int(a / b)` handles negative cases correctly (unlike `a // b` which floors). After processing all tokens, the stack contains exactly one element: the result. Edge case: the token list is guaranteed valid so the stack will never underflow.
+**Brute force.** Find the leftmost operator, collapse it, repeat.
+
+```python
+def evalRPN(tokens):
+    t = list(tokens)
+    while len(t) > 1:
+        for i in range(2, len(t)):
+            if t[i] in "+-*/":
+                a, b = int(t[i - 2]), int(t[i - 1])
+                v = (a + b if t[i] == "+" else
+                     a - b if t[i] == "-" else
+                     a * b if t[i] == "*" else int(a / b))
+                t[i - 2:i + 1] = [str(v)]
+                break
+    return int(t[0])
+```
+
+`O(n^2)` time, `O(n)` space.
+
+**Wasteful because.** Every collapse restarts the search at index 0 and rewrites the tail of the list. The tokens before the operator were already known to be plain numbers, and the scan re-establishes that fact once per operator.
+
+**Optimal.** Keep the numbers you have already passed on a stack, so the search never restarts: reading left to right, an integer is pushed, and an operator pops exactly two values and pushes one. The stack top is always the leftmost reducible operand pair, which is why one pass suffices. Argument order matters, since the *first* pop is the right operand: `b, a = stack.pop(), stack.pop()` then `a - b`. Because the input is guaranteed valid, the stack never underflows and finishes holding exactly one value.
+
+**Edge cases.** Division truncates toward zero, so `int(a / b)` and not `a // b`, which floors and turns `-7 / 2` into `-4` instead of `-3`. A negative literal such as `"-7"` is an operand, not the `-` operator, so test the whole token rather than its first character. A single-token input like `["42"]` is a complete expression.
 
 #### Python
 
@@ -4167,13 +4690,50 @@ Given `n`, generate all combinations of `n` pairs of well-formed (valid) parenth
 
 #### Examples
 
-TODO
+```text
+Input: n = 3
+Output: ["((()))","(()())","(())()","()(())","()()()"]
+
+Input: n = 1
+Output: ["()"]
+
+Input: n = 2
+Output: ["(())","()()"]
+
+Compare: any-order
+
+Constraints:
+- 1 <= n <= 8
+- the answer may be returned in any order
+```
 
 #### Recognition
-**Backtracking with open/close counters.** **O(4ⁿ / √n)** time (Catalan number of results), **O(n)** stack space.
+**Signals.** "Generate all combinations" asks for the list, not a count, so the output itself is exponential and the only thing you control is how much invalid work you do on the way. "Well-formed" is the lever: a parenthesis string is valid exactly when no prefix has more `)` than `(` and the totals match, and a *prefix* property is testable while you are still building. **Therefore.** Build the string one character at a time, allowing `(` while `open < n` and `)` while `close < open`, so every leaf reached is already valid and nothing needs filtering or deduplicating. **Not generate-then-filter** over all `2^(2n)` strings, which at `n = 8` inspects 65536 candidates to keep 1430. **Not BFS by string length**, because a queue holds every partial string of the current length at once, while the depth-first path holds only `2n` characters. The number of answers is the `n`-th Catalan number, so that is the floor any method must pay. **O(4ⁿ / √n)** time, **O(n)** space.
 
 #### Explanation
-The total number of valid combinations is the `n`-th Catalan number, so any correct algorithm is at least that expensive. Backtracking prunes invalid paths early with two rules: you may add `'('` only while `open < n`, and you may add `')'` only while `close < open` (to keep the string valid at every prefix). When the string reaches length `2n`, it is a complete valid combination. This generates every valid combination exactly once without any deduplication needed. The recursive depth is at most `2n`, so stack space is `O(n)`.
+**Brute force.** Enumerate every string of `(` and `)`, then keep the valid ones.
+
+```python
+def generateParenthesis(n):
+    res = []
+    for bits in itertools.product("()", repeat=2 * n):
+        s, bal = "".join(bits), 0
+        for c in s:
+            bal += 1 if c == "(" else -1
+            if bal < 0:
+                break
+        if bal == 0:
+            res.append(s)
+    return res
+```
+
+`O(2^(2n) * n)` time, `O(n)` space.
+
+**Wasteful because.** Every candidate is built to full length before it is judged. A string starting `())` is already dead, yet all `2^(2n - 3)` completions of it get generated and validated one by one.
+
+**Optimal.** Move the validity test from the leaves to the branches. Carry two counters, `open` and `close`, and take the `(` branch only while `open < n` and the `)` branch only while `close < open`; the second condition is the prefix rule enforced at the moment it could first be broken, so no dead subtree is ever entered. The recursion therefore visits one node per prefix of a valid answer, and the count of answers is the `n`-th Catalan number, which is the floor for any algorithm that must print them. Each string is produced by exactly one sequence of choices, so no deduplication is needed. Mutating one buffer with `push`/`pop` instead of concatenating saves the `O(n)` copy per call, which matters more in the compiled languages than in Python.
+
+**Edge cases.** `n = 1` yields the single string `"()"`. Order is unspecified, so any permutation of the list is accepted. The recursion depth is exactly `2n`, at most 16 here, so there is no stack risk.
 
 #### Python
 
@@ -4450,13 +5010,54 @@ Given `n` cars at different positions on a one-lane road heading toward a `targe
 
 #### Examples
 
-TODO
+```text
+Input: target = 12, position = [10,8,0,5,3], speed = [2,4,1,1,3]
+Output: 3
+Explanation: cars at 10 and 8 meet at 12; the car at 0 arrives
+alone; cars at 5 and 3 meet at 6.
+
+Input: target = 10, position = [3], speed = [3]
+Output: 1
+
+Input: target = 100, position = [0,2,4], speed = [4,2,1]
+Output: 1
+
+Constraints:
+- n == position.length == speed.length
+- 1 <= n <= 10^5
+- 0 < target <= 10^6 and 0 < speed[i] <= 10^6
+- 0 <= position[i] < target, all positions distinct
+```
 
 #### Recognition
-**Monotonic stack (sort by position descending).** **O(n log n)** time, **O(n)** space.
+**Signals.** "One-lane road" plus "cannot pass" means a car is only ever affected by cars *ahead* of it, which makes position the natural processing order. "Arrive together" plus a fixed `target` means the only quantity that matters per car is its solo arrival time `(target - pos) / speed`; where it is at any intermediate moment is irrelevant. A car merges into the group ahead exactly when its own time is no larger than that group's time, because it would otherwise have overtaken. **Therefore.** Sort by position descending and sweep, counting a new fleet each time a car's time exceeds the largest time seen so far. **Not simulating time steps**, because positions reach `10^6` and the catch-up moment is generally fractional, so no step size is both fast enough and fine enough to avoid missing a merge. **Not sorting by arrival time**, which loses the road order that decides who blocks whom. **O(n log n)** time, **O(n)** space.
 
 #### Explanation
-A brute-force simulation would step time forward in small increments — expensive and fragile. The key insight is that a car can only catch the car ahead of it, never pass it. Sorting by starting position in descending order lets you process cars from closest-to-target to farthest. For each car, compute the time it would need to reach `target` on its own. If that time is greater than the time of the car ahead (top of stack), it can never catch up and forms a new fleet. If it's less than or equal, it merges into the car ahead's fleet and is not pushed. The stack therefore holds the arrival times of distinct fleets. Edge case: cars starting at the same position collapse immediately into one fleet — handled naturally because the slower one always has a longer time.
+**Brute force.** For each car, check every other car for one ahead that it cannot pass.
+
+```python
+def carFleet(target, position, speed):
+    n = len(position)
+    fleets = 0
+    for i in range(n):
+        t = (target - position[i]) / speed[i]
+        blocked = False
+        for j in range(n):
+            ahead = position[j] > position[i]
+            if ahead and (target - position[j]) / speed[j] >= t:
+                blocked = True
+        if not blocked:
+            fleets += 1
+    return fleets
+```
+
+`O(n^2)` time, `O(1)` space.
+
+**Wasteful because.** The inner loop asks "is any car ahead of me slower to arrive?", which is a maximum over a suffix of the road. It recomputes that maximum from scratch for every car, when a single sweep in road order builds it incrementally.
+
+**Optimal.** Sort the cars by position descending, so each car is visited after everything ahead of it. Keep the arrival time of the frontmost fleet found so far. If the current car's time is greater, nothing ahead can hold it back and it starts a new fleet; if it is less than or equal, it catches that fleet and inherits its time, so nothing is recorded. This is usually written with a stack, but only the top is ever read, so a single running maximum is equivalent and `O(1)` in space. The sort dominates at `O(n log n)`; if positions were already given in order the sweep alone would be `O(n)`.
+
+**Edge cases.** One car is always exactly one fleet. A car that catches another exactly at the target still counts as merged, which is why the comparison is `>` for a new fleet and not `>=`. Float division is safe at these bounds, but comparing `(target - p1) * s2` against `(target - p2) * s1` avoids floats entirely if exactness is questioned.
 
 #### Python
 
@@ -4908,13 +5509,47 @@ Given an `m x n` matrix where each row is sorted left-to-right and the first int
 
 #### Examples
 
-TODO
+```text
+Input: matrix = [[1,3,5,7],[10,11,16,20],[23,30,34,60]],
+target = 3
+Output: true
+
+Input: matrix = [[1,3,5,7],[10,11,16,20],[23,30,34,60]],
+target = 13
+Output: false
+
+Input: matrix = [[1]], target = 1
+Output: true
+
+Constraints:
+- m == matrix.length, n == matrix[0].length
+- 1 <= m, n <= 100
+- -10^4 <= matrix[i][j], target <= 10^4
+- each row starts above the previous row's last value
+```
 
 #### Recognition
-**Binary search on flattened matrix.** **O(log(m * n))** time, **O(1)** space.
+**Signals.** Two clauses, and the second is the whole problem. "Each row is sorted left to right" alone would only let you search within a row. "The first integer of each row is greater than the last of the previous row" says the rows concatenate into one globally sorted sequence, so the grid is a flat sorted array wearing a 2D shape. Sorted input plus a yes/no membership question is binary search. **Therefore.** Binary search the range `[0, m * n - 1]` and decode each probe with `matrix[mid // n][mid % n]`. **Not the staircase walk from the top-right corner**, the standard trick for a matrix that is only sorted per row and per column; it is `O(m + n)` and throws away the stronger guarantee you were given here. **Not searching row by row**: binary searching every row is `O(m log n)`, and locating the row first then searching it is `O(m + log n)`, both beaten by the single flat search. **O(log(m * n))** time, **O(1)** space.
 
 #### Explanation
-The matrix's row-continuation property means the entire grid is equivalent to one sorted array of `m * n` elements. Rather than two nested binary searches, flatten: treat index `mid` as referring to `matrix[mid // n][mid % n]`. This single binary search runs in `O(log(m * n))` — the same asymptotic cost as binary searching one sorted array of the same size. Binary searching each row in turn would be `O(m log n)`; picking the right row first and then binary searching only that one is `O(m + log n)`. The flat search beats both at `O(log(m * n))`, and is simpler than the two-step version. Edge case: an empty matrix or a row with zero columns should be handled before accessing elements.
+**Brute force.** Look at every cell.
+
+```python
+def searchMatrix(matrix, target):
+    for row in matrix:
+        for v in row:
+            if v == target:
+                return True
+    return False
+```
+
+`O(m * n)` time, `O(1)` space.
+
+**Wasteful because.** Every comparison is used only to reject one cell, when a comparison against a sorted sequence rejects half of what remains. At 100 by 100 that is 10000 probes instead of 14.
+
+**Optimal.** Treat the matrix as the array it already is. Binary search over flat indices `0` to `m * n - 1`, converting a probe with `row = mid // n` and `col = mid % n`, since row `r` occupies flat indices `r * n` through `r * n + n - 1`. The comparison logic is then the ordinary one: equal means found, smaller means move `l` right, larger means move `r` left. Two-step alternatives are worth pricing: scanning the first column for the right row and then binary searching it is `O(m + log n)`, and binary searching each row in turn is `O(m log n)`. Only binary searching for the row as well, at `O(log m + log n)`, matches the flat search, and it costs two loops plus a boundary rule for which row a value belongs to, so the flat version is the one to write under time pressure.
+
+**Edge cases.** A `1 x 1` matrix works unchanged, with `l == r == 0` on the first probe. A target below `matrix[0][0]` or above the last element exits with `l > r` and returns false. Guard for an empty matrix or an empty first row before reading `matrix[0][0]` if the constraints do not rule it out.
 
 #### Python
 
@@ -5182,13 +5817,47 @@ Given a sorted array of unique integers that has been rotated between 1 and n ti
 
 #### Examples
 
-TODO
+```text
+Input: nums = [3,4,5,1,2]
+Output: 1
+Explanation: the original array was [1,2,3,4,5], rotated 3 times.
+
+Input: nums = [4,5,6,7,0,1,2]
+Output: 0
+
+Input: nums = [11,13,15,17]
+Output: 11
+Explanation: rotated n times, so it is back in sorted order.
+
+Constraints:
+- n == nums.length
+- 1 <= n <= 5000
+- -5000 <= nums[i] <= 5000
+- all values are unique and the array was originally sorted
+```
 
 #### Recognition
-**Binary search (compare mid to right).** **O(log n)** time, **O(1)** space.
+**Signals.** "In `O(log n)` time" is stated outright, and on an array that only ever means binary search. The obstacle is that there is no target to compare against, so the deciding comparison has to be between two elements of the array itself. "Sorted then rotated" tells you the array is two sorted runs and every element of the left run is greater than every element of the right run, so a single probe against the right end says which run you are in: `nums[mid] > nums[r]` puts `mid` in the high run, and the minimum starts the other one. **Therefore.** Binary search with `l = mid + 1` when `nums[mid] > nums[r]` and `r = mid` otherwise, converging on the drop. **Not comparing `nums[mid]` to `nums[l]`**, because in an unrotated array that test is true at every step and walks you rightward past the answer unless you bolt on an extra `nums[l] < nums[r]` early exit. **O(log n)** time, **O(1)** space.
 
 #### Explanation
-A linear scan finds the minimum trivially in `O(n)`. To achieve `O(log n)`, observe that the rotation creates exactly one "drop" point where the minimum lives. At each step, compare `nums[mid]` to `nums[r]`: if `nums[mid] > nums[r]`, the right half is the rotated part and the minimum is to the right of `mid` — set `l = mid + 1`. Otherwise the left half (including `mid`) still contains the minimum — set `r = mid`. The loop ends when `l == r`, pointing at the minimum. Using `nums[r]` as the pivot (rather than `nums[l]`) avoids ambiguity in the unrotated case where the entire array is sorted.
+**Brute force.** Scan for the smallest value.
+
+```python
+def findMin(nums):
+    best = nums[0]
+    for v in nums:
+        if v < best:
+            best = v
+    return best
+```
+
+`O(n)` time, `O(1)` space.
+
+**Wasteful because.** The scan treats the input as unordered and spends `n` comparisons, when the array is two sorted runs and one comparison classifies which run the midpoint lies in, discarding half the remaining range.
+
+**Optimal.** Compare `nums[mid]` to `nums[r]`, the current right end. If `nums[mid] > nums[r]`, then `mid` sits in the high run and the wrap point is strictly after it, so `l = mid + 1`. Otherwise `mid` is already in the low run and may itself be the minimum, so `r = mid` and never `mid - 1`. The loop uses strict `l < r` and stops with `l == r` on the answer, which is why no candidate is tracked separately. The right end is the correct pivot because `nums[mid] <= nums[r]` means "sorted from here to the end" in both the rotated and unrotated cases, whereas `nums[l]` cannot distinguish them. With duplicates allowed, as in the follow-up problem, `nums[mid] == nums[r]` carries no information and you fall back to `r -= 1`, degrading to `O(n)` worst case.
+
+**Edge cases.** A single element returns immediately since `l < r` is false at entry. An array rotated a full `n` times is plain sorted, and the first probe sends `r` leftward, ending at index 0. `mid` computed as `l + (r - l) // 2` biases low, which is what keeps `r = mid` from stalling when `r == l + 1`.
 
 #### Python
 
@@ -5459,13 +6128,58 @@ Design a key-value store supporting `set(key, value, timestamp)` and `get(key, t
 
 #### Examples
 
-TODO
+```text
+Input: ["TimeMap","set","get","get","set","get","get"],
+[[],["foo","bar",1],["foo",1],["foo",3],
+["foo","bar2",4],["foo",4],["foo",5]]
+Output: [null,null,"bar","bar",null,"bar2","bar2"]
+Explanation: get("foo",3) finds no write at 3, so it falls
+  back to the newest write at or below 3, which is "bar".
+
+Input: ["TimeMap","get","set","get"],
+[[],["a",1],["a","x",5],["a",1]]
+Output: [null,"",null,""]
+
+Input: ["TimeMap","set","set","get","get"],
+[[],["a","one",1],["b","two",2],["a",1],["b",1]]
+Output: [null,null,null,"one",""]
+
+Constraints:
+- 1 <= key.length, value.length <= 100
+- 1 <= timestamp <= 10^7
+- up to 2 * 10^5 calls to set and get combined
+- per key, timestamps are strictly increasing
+```
 
 #### Recognition
-**Binary search on sorted timestamps.** **O(log n)** per `get`, **O(1)** per `set`.
+**Signals.** "The largest timestamp less than or equal to the given timestamp" is a predecessor query, not an equality lookup, so the word "key-value store" is a trap: a hash map answers "is this exact pair present" and the query almost never lands on a timestamp anyone wrote. The second signal is buried in the constraints: writes for a given key arrive with strictly increasing timestamps, which hands you a sorted array per key for free, with no sorting cost. Sorted plus "rightmost element at or below `x`" is binary search. **Therefore.** A hash map from key to an append-only list of `(timestamp, value)`, and a binary search of that list per `get`. **Not one flat log scanned per query**, because 2 * 10^5 calls against a log that grows to 2 * 10^5 entries is 10^10 comparisons, and each scan re-applies two filters, key match and timestamp bound, that the bucketing and the sort order remove permanently. Each `set` is `O(1)`. **O(log n)** time, **O(n)** space.
 
 #### Explanation
-Timestamps are strictly increasing per key (guaranteed by the problem), so each key maps to a list of `(timestamp, value)` pairs in sorted order. A linear scan would give `O(n)` per `get`. Instead, binary search for the largest timestamp ≤ the query timestamp. When `vals[m][0] <= timestamp`, record the candidate and search right for a potentially larger valid timestamp (`l = m + 1`). When `vals[m][0] > timestamp`, the candidate is too new — search left. The result variable holds the last accepted value. Edge case: if the key doesn't exist or all timestamps are greater than the query, return `""`.
+**Brute force.** One flat list of every write, rescanned on each `get`.
+
+```python
+class TimeMap:
+    def __init__(self):
+        self.log = []
+
+    def set(self, key, value, timestamp):
+        self.log.append((key, timestamp, value))
+
+    def get(self, key, timestamp):
+        best, out = -1, ""
+        for k, ts, v in self.log:
+            if k == key and ts <= timestamp and ts > best:
+                best, out = ts, v
+        return out
+```
+
+`O(w)` time per `get` for `w` writes, `O(w)` space.
+
+**Wasteful because.** Every `get` re-reads every write ever made, including all the entries belonging to other keys and all the entries too new to qualify. Both of those tests have answers that never change once a write lands, so the scan is re-deriving the same two facts on every call.
+
+**Optimal.** Remove each filter with the structure that makes it free. Bucketing by key in a hash map means the key test is answered once, at insert time. Within a bucket, the guarantee that timestamps arrive increasing means the list is already sorted, so the timestamp test becomes monotone: everything left of the answer qualifies, everything right of it does not, which is exactly the precondition binary search needs. The loop keeps `res` as "best value found so far at or below the query"; on `vals[m][0] <= timestamp` the entry qualifies and a better one can only be further right, so record it and set `l = m + 1`; otherwise everything from `m` rightwards is too new and `r = m - 1`. `bisect_right` over a parallel list of timestamps does the same thing in one line when you are not being asked to show the search.
+
+**Edge cases.** A key never written gives an empty list, the loop body never runs, and `""` comes back. A query below every timestamp for that key drives `r` to `-1` without ever recording, also `""`. An exact timestamp hit is accepted by the `<=` and the remaining right half is empty.
 
 #### Python
 
@@ -5986,13 +6700,53 @@ Given a linked list `L0 → L1 → … → Ln`, reorder it in-place to `L0 → L
 
 #### Examples
 
-TODO
+```text
+Input: head = [1,2,3,4]
+Output: head = [1,4,2,3]
+Explanation: the list is zipped with its own reverse.
+
+Input: head = [1,2,3,4,5]
+Output: head = [1,5,2,4,3]
+
+Input: head = [1]
+Output: head = [1]
+
+Constraints:
+- 1 <= number of nodes <= 5 * 10^4
+- 1 <= node value <= 1000
+- reorder in place; nothing is returned
+```
 
 #### Recognition
-**Find middle + reverse second half + merge.** **O(n)** time, **O(1)** space.
+**Signals.** The target order `L0, Ln, L1, Ln-1, ...` is the list zipped with its own reverse, and "in place" forbids building a second one. Reading `Ln` then `Ln-1` means moving backwards, which a singly linked list simply cannot do, so the shape of the problem is: get backwards access to the tail end, without paying for storage. **Therefore.** Three phases. Walk slow and fast pointers to land slow on the last node of the first half and sever there, reverse the detached second half in place so its nodes now run tail-first, then splice the two halves together one node at a time. **Not collecting node references into an array and indexing inwards from both ends**, which is far easier to write and gives exactly the random access the pattern wants, but costs `n` extra pointers, and it buffers the whole list when only the second half ever needs to be read in reverse. **O(n)** time, **O(1)** space.
 
 #### Explanation
-The naive approach copies nodes to an array and interleaves by index — `O(n)` space. The in-place approach has three phases: (1) find the midpoint with slow/fast pointers; (2) reverse the second half in-place; (3) interleave the first and reversed-second halves. Splitting at the midpoint (and severing `slow.next = None`) is critical — it avoids corrupting the list during the merge step. During interleaving, save both `first.next` and `second.next` before rewiring, since both pointers are overwritten. Edge case: a list of length 1 or 2 requires no work — the slow/fast phase handles this by leaving `second = None`.
+**Brute force.** Put every node in an array and rewire by index.
+
+```python
+def reorderList(head):
+    nodes = []
+    node = head
+    while node:
+        nodes.append(node)
+        node = node.next
+    i, j = 0, len(nodes) - 1
+    while i < j:
+        nodes[i].next = nodes[j]
+        i += 1
+        if i < j:
+            nodes[j].next = nodes[i]
+            j -= 1
+    nodes[i].next = None
+```
+
+`O(n)` time, `O(n)` space.
+
+**Wasteful because.** Nothing is recomputed; the cost is pure storage. The array exists for one reason, to make `nodes[j]` reachable when `j` is behind you, and it holds all `n` references to do it. Half of them are never read backwards at all: the first half is consumed strictly left to right, exactly as the list already allows.
+
+**Optimal.** Buy backwards access with a reversal instead of an array. Find the split with slow and fast pointers, cut the list in two, reverse the shorter tail half in place, and the nodes you needed to reach from the back are now reachable from the front. The splice then walks both halves forward at once, saving `first.next` and `second.next` before either is overwritten, since each assignment destroys the pointer the other side still needs. Starting `fast` at `head.next` rather than `head` biases `slow` to the end of the first half, so on an odd length the extra node stays in front, which is what puts the middle element last in the output. `slow.next = None` is what lets the splice loop terminate on `while second` alone.
+
+**Edge cases.** A single node leaves both loops unentered and is already correct. Two nodes are unchanged, since reversing a one-node tail is a no-op. On odd lengths the middle node ends up as the final node, with its `next` already cleared by the sever.
 
 #### Python
 
@@ -6183,13 +6937,53 @@ Given the head of a linked list and an integer `n`, remove the nth node from the
 
 #### Examples
 
-TODO
+```text
+Input: head = [1,2,3,4,5], n = 2
+Output: [1,2,3,5]
+Explanation: the 2nd node from the end holds 4.
+
+Input: head = [1,2], n = 1
+Output: [1]
+
+Input: head = [1], n = 1
+Output: null
+Explanation: the only node is removed, so the list is empty.
+
+Constraints:
+- 1 <= number of nodes <= 30
+- 1 <= n <= number of nodes
+- -100 <= node value <= 100
+```
 
 #### Recognition
-**Two pointers (fast n+1 ahead of slow).** **O(n)** time, **O(1)** space.
+**Signals.** "The nth node from the end" together with "in one pass". A singly linked list carries no length field and no backward pointer, so a position measured from the tail is not addressable directly; the only way to hold one while walking forward is to keep a second pointer a fixed number of nodes behind the first. "One pass" is the clause that turns that from a nicety into the requirement. **Therefore.** Advance a lead pointer `n + 1` nodes ahead of a trailing pointer, both starting at a dummy placed before `head`, then step them together until the lead falls off the end; the trailing pointer is then parked on the node immediately before the target. **Not counting the length first and walking again**, which is correct and easier to reason about but re-traverses a prefix it has already visited, and cannot work at all if the list arrives as a one-shot stream you cannot rewind. **O(n)** time, **O(1)** space.
 
 #### Explanation
-A naive approach finds the length first, then traverses again to the target — two passes. The two-pointer trick does it in one: advance `fast` by `n + 1` steps ahead of `slow` (both start at a dummy node). Then advance both together until `fast` is `None`. At that point `slow` is exactly one node before the target, so `slow.next = slow.next.next` unlinks it. The dummy node before `head` handles the edge case of removing the first node (where `slow` would be the dummy itself).
+**Brute force.** Measure the list, then walk back in to the target.
+
+```python
+def removeNthFromEnd(head, n):
+    length = 0
+    node = head
+    while node:
+        length += 1
+        node = node.next
+    if length == n:
+        return head.next
+    node = head
+    for _ in range(length - n - 1):
+        node = node.next
+    node.next = node.next.next
+    return head
+```
+
+`O(n)` time, `O(1)` space.
+
+**Wasteful because.** The counting pass stands on every node and knows exactly where it is, then discards all of it; the second pass re-walks the first `length - n - 1` of those same nodes to recover a position it had already reached. The `length == n` branch is the second symptom: `head` has no predecessor to patch, so deleting the first element needs its own code path.
+
+**Optimal.** Keep the position instead of throwing it away. A trailing pointer held exactly `n + 1` nodes behind the leader is, at every moment, a record of where the leader stood `n + 1` steps ago, so the instant the leader runs off the end the trailer is sitting on the node before the target for free. The gap is `n + 1` rather than `n` precisely because you can only unlink a node through its predecessor. Starting both at a dummy in front of `head` erases the special case: the dummy is a real predecessor for the first element, and returning `dummy.next` picks up the head whether or not it changed.
+
+**Edge cases.** `n` equal to the length removes the head, and the dummy absorbs it with no branch. A one-node list returns `None`, the empty list. `n == 1` removes the tail, and the trailer lands on the second-to-last node.
 
 #### Python
 
@@ -6312,13 +7106,54 @@ Deep-copy a linked list where each node has a `val`, a `next` pointer, and a `ra
 
 #### Examples
 
-TODO
+```text
+Input: head = [[7,null],[13,0],[11,4],[10,2],[1,0]]
+Output: [[7,null],[13,0],[11,4],[10,2],[1,0]]
+Explanation: each entry is [value, index the random points at],
+  and the clone must serialise to the same encoding.
+
+Input: head = [[3,null],[3,0],[3,null]]
+Output: [[3,null],[3,0],[3,null]]
+
+Input: head = [[1,1],[2,1]]
+Output: [[1,1],[2,1]]
+
+Constraints:
+- 0 <= number of nodes <= 1000
+- -10^4 <= node value <= 10^4
+- random is null or points at some node in this list
+- values are not unique
+```
 
 #### Recognition
-**Hashmap (old node → new node).** **O(n)** time, **O(n)** space.
+**Signals.** "Deep copy" plus a `random` pointer that "may point to any node in the list". Two things follow. Deep copy means every pointer in the result has to reference a fresh node, so you cannot reuse a single original anywhere. And because `random` may point forward, at the moment you allocate a node's copy the copy it must point at may not exist yet, which kills any single-pass build that wires as it walks. **Therefore.** Two passes over a dictionary keyed on the original node: pass one allocates a copy for every node so the mapping is total, pass two reads `next` and `random` through that mapping, which by then has an answer for every node. **Not an array of nodes with `random` recorded as an index**, because turning an arbitrary node pointer back into its index costs a linear scan, so building that table is `O(n^2)`; a dictionary answers the same question in `O(1)` because it is keyed on node identity, not position. **O(n)** time, **O(n)** space.
 
 #### Explanation
-The challenge is that `random` can point forward or backward — you can't set it until the target node exists. Two-pass hashmap solves this cleanly: first pass creates all new nodes and maps each old node to its copy; second pass wires `next` and `random` using the map. Seeding the map with `{None: None}` means you never need to check for null `random` pointers during the second pass — the lookup for `None` simply returns `None`. An alternative interleaving approach avoids the hashmap at `O(1)` space but is more error-prone.
+**Brute force.** Snapshot the nodes in order, then look up each random target's position by searching that list.
+
+```python
+def copyRandomList(head):
+    order = []
+    cur = head
+    while cur:
+        order.append(cur)
+        cur = cur.next
+    copies = [Node(n.val) for n in order]
+    for i in range(len(copies) - 1):
+        copies[i].next = copies[i + 1]
+    for i, n in enumerate(order):
+        if n.random is not None:
+            copies[i].random = copies[order.index(n.random)]
+    return copies[0] if copies else None
+```
+
+`O(n^2)` time, `O(n)` space.
+
+**Wasteful because.** `order.index` re-walks the list from the front once per node, to answer "which position is this pointer?" That position was already known during the first walk and was thrown away, so at `n = 1000` the search redoes up to a million steps to recover facts it had a moment ago.
+
+**Optimal.** Record the answer at the moment you know it. A dictionary from original node to its copy is exactly the index table the brute force keeps rebuilding, except lookup is `O(1)` and the key is the node object itself, so identity does the matching and duplicate values cannot collide. The first pass has to complete before any wiring starts; that is what makes forward `random` pointers safe, because by the second pass the mapping is defined for every node in the list. Seeding it with `{None: None}` makes the second pass branchless: a null `next` or `random` looks up to null with no guard. There is an `O(1)`-space alternative that weaves each copy in behind its original as `A, A', B, B'`, sets `A'.random = A.random.next`, then unzips the two lists; take it when memory is the binding constraint and you can afford the extra care.
+
+**Edge cases.** An empty list returns `None` before the map is ever read. A `random` that points at its own node is nothing special, since the map holds that node too. Repeated values, as in `[[3,null],[3,0],[3,null]]`, are the case that punishes keying the map on `val` instead of the node.
 
 #### Python
 
@@ -7268,13 +8103,53 @@ Given a linked list and integer `k`, reverse the nodes in each group of `k` cons
 
 #### Examples
 
-TODO
+```text
+Input: head = [1,2,3,4,5], k = 2
+Output: [2,1,4,3,5]
+Explanation: 5 is a leftover group of size 1, so it stays put.
+
+Input: head = [1,2,3,4,5], k = 3
+Output: [3,2,1,4,5]
+
+Input: head = [1,2,3], k = 1
+Output: [1,2,3]
+
+Constraints:
+- 1 <= k <= n <= 5000, where n is the number of nodes
+- 0 <= node value <= 1000
+- the nodes must be relinked; swapping values is not allowed
+- follow-up: O(1) extra memory
+```
 
 #### Recognition
-**Iterative group reversal.** **O(n)** time, **O(1)** space.
+**Signals.** "Reverse the nodes in each group of `k`" plus "if fewer than `k` remain, leave them as-is". The leftover rule is the real tell: you have to know a full group exists *before* you disturb any of it, so each round starts with a `k`-step probe that is allowed to come back empty, and that probe is also the pointer you need for the relink. "Reverse" itself is the standard three-pointer walk. **Therefore.** A dummy node and a `group_prev` marker: probe `k` nodes ahead, and if the probe lands on a real node, reverse that span in place with `prev` seeded to the node *after* the group so the group's tail wires straight into the remainder, then patch `group_prev.next` to the probe. **Not recursion per group**, which reads far better but holds `n / k` frames, so `k = 1` on the maximum input parks 5000 frames on the stack and forfeits the `O(1)` memory the follow-up asks for. **O(n)** time, **O(1)** space.
 
 #### Explanation
-The recursive approach builds `O(n/k)` stack frames. The iterative approach uses a `group_prev` pointer that tracks the node just before the current group. For each group: (1) walk `k` steps forward to find the `kth` node — if it doesn't exist, we're done; (2) save `group_next = kth.next` as the anchor; (3) reverse the `k` nodes between `group_prev.next` and `kth` using standard pointer reversal, stopping when `curr == group_next`; (4) patch `group_prev.next` to the new head of the reversed group and advance `group_prev` to the old head (now the group's tail). The dummy node simplifies the initial `group_prev` setup.
+**Brute force.** Copy the values out, reverse them in slices, copy them back.
+
+```python
+def reverseKGroup(head, k):
+    vals = []
+    node = head
+    while node:
+        vals.append(node.val)
+        node = node.next
+    for i in range(0, len(vals) - k + 1, k):
+        vals[i:i + k] = vals[i:i + k][::-1]
+    node = head
+    for v in vals:
+        node.val = v
+        node = node.next
+    return head
+```
+
+`O(n)` time, `O(n)` space.
+
+**Wasteful because.** The list is walked three times and `n` values are held in memory just to borrow Python's slice reversal, when the reversal only ever touches `k` consecutive nodes at a time. Worse, it moves *values* rather than nodes, which this problem explicitly forbids and which breaks the moment nodes carry any payload beyond `val`.
+
+**Optimal.** Nothing here needs a buffer, because reversal only ever reads a node's own `next`. Hold `group_prev` on the node before the current group and probe `k` steps from it; if the probe returns `None` the tail is short and you stop, which is the leftover rule for free. Seeding `prev = group_next` instead of `None` is the whole trick: the group's last node is the first one rewritten, and it is pointed at the remainder immediately, so no separate stitching pass is needed afterwards. Then `group_prev.next` becomes the probe (the group's new head) and `group_prev` advances to the node that used to be first and is now the group's tail.
+
+**Edge cases.** `k == 1` reverses each single node into itself, so the list is unchanged. When `n` is not a multiple of `k` the final short run is skipped because the probe returns `None`. A group that is exactly the whole list reverses once and `group_prev` then probes past the end.
 
 #### Python
 
@@ -7460,13 +8335,56 @@ Given the root of a binary tree, invert it (mirror left and right subtrees at ev
 
 #### Examples
 
-TODO
+```text
+Input: root = [4,2,7,1,3,6,9]
+Output: [4,7,2,9,6,3,1]
+Explanation: every node's two children trade places.
+
+Input: root = [1,null,2]
+Output: [1,2]
+Explanation: a right-only child becomes a left-only child.
+
+Input: root = []
+Output: null
+
+Constraints:
+- 0 <= number of nodes <= 100
+- -100 <= node value <= 100
+- the tree is given in level order with null holes
+```
 
 #### Recognition
-**DFS (postorder recursion).** **O(n)** time, **O(h)** space.
+**Signals.** "Mirror the left and right subtrees at every node" is one rule stated in terms of subtrees and applying unchanged at each node, which is the shape of a recursive tree problem: solve both children, then do `O(1)` work at the parent. Nothing asks about ordering, depth, or search, so no traversal-specific bookkeeping is needed and the answer is the same tree object you were handed. **Therefore.** Recurse into both children and swap them; the swap can come before the calls (pre-order) or after them (post-order), and both land on the same tree because a node's swap never depends on what its subtrees became. **Not in-order DFS**, the one traversal that quietly breaks here: it recurses left, swaps, then recurses right, so the subtree it already inverted has just been moved into the right slot and gets inverted a second time back to the original, while the true right subtree is never visited at all. **O(n)** time, **O(h)** space.
 
 #### Explanation
-Every node must have its children swapped, and the same must happen recursively for all descendants. Postorder DFS (process children before parent) naturally handles this: recurse left, recurse right, then swap. Preorder also works — swap first, then recurse. BFS level-order works too but requires a queue. The single-line Python swap `root.left, root.right = invertTree(root.right), invertTree(root.left)` is correct because both recursive calls complete and return before the assignment happens. Edge case: `None` node returns `None` immediately, terminating the recursion.
+**Brute force.** Deep-copy the tree so the input is untouched, then mirror the copy.
+
+```python
+def invertTree(root):
+    def copy(n):
+        if not n:
+            return None
+        return TreeNode(n.val, copy(n.left), copy(n.right))
+
+    def swap(n):
+        if not n:
+            return
+        n.left, n.right = n.right, n.left
+        swap(n.left)
+        swap(n.right)
+
+    out = copy(root)
+    swap(out)
+    return out
+```
+
+`O(n)` time, `O(n)` space.
+
+**Wasteful because.** It traverses the whole tree twice to do work that commutes: the copy pass visits every node to allocate a twin, then the swap pass visits every node again to exchange two pointers. Nothing the copy learns is used by the swap, so the second walk re-derives a position the first walk was already standing on, and `n` freshly allocated nodes sit alongside the originals for the duration.
+
+**Optimal.** Fuse the two walks, then notice the copy was never required. The problem returns a root, not a new tree, so mutating in place is allowed, and the swap at a node needs nothing but that node: exchange `left` and `right`, recurse into both, done in one pass with no allocation. Space drops from `n` nodes to `h` stack frames. When `h` is a worry, and a 5000-node right-leaning chain is exactly that, swap the recursion for a queue and do it breadth-first: pop a node, swap its two children, push both. The iterative form costs `O(w)` for the widest level instead of `O(h)`, which is the better trade on deep skinny trees and the worse one on wide bushy trees.
+
+**Edge cases.** An empty tree returns `None` on the first line. A single node has two `None` children and swapping them is a no-op. A tree that is already its own mirror comes back looking identical, which is the correct answer, not a bug.
 
 #### Python
 
@@ -7703,13 +8621,51 @@ Given the root of a binary tree, return the length of the diameter — the longe
 
 #### Examples
 
-TODO
+```text
+Input: root = [1,2,3,4,5]
+Output: 3
+Explanation: the path 4 -> 2 -> 1 -> 3 has 3 edges.
+
+Input: root = [1,2,null,3,null,4]
+Output: 3
+
+Input: root = [1]
+Output: 0
+
+Constraints:
+- 1 <= number of nodes <= 10^4
+- -100 <= Node.val <= 100
+- length is counted in edges, not nodes
+```
 
 #### Recognition
-**DFS with running maximum.** **O(n)** time, **O(h)** space.
+**Signals.** "The longest path between any two nodes" together with "the path does not need to pass through the root". That second phrase is the whole problem: the answer is a maximum taken over every node, so no single measurement from the top can see it. A path in a tree bends at exactly one node and runs downward on both sides of that bend, so its length there is the depth of the deepest left descendant plus the depth of the deepest right descendant. **Therefore.** One postorder pass in which every call returns its own height to its parent while a running maximum absorbs `l + r` at each node. The value returned and the value being maximised are deliberately different quantities riding the same recursion. **Not BFS level order**, which hands you nodes grouped by depth but gives a node no channel to receive its subtrees' heights, so you would end up re-measuring heights per node anyway. **O(n)** time, **O(h)** space.
 
 #### Explanation
-The diameter through a given node is the sum of the longest path going down through its left subtree plus the longest path going down through its right subtree. DFS computes each node's "height" (longest downward path) as a return value, while simultaneously updating a global maximum with `l + r` (the diameter through that node). The key insight: the diameter might pass through any node, not just the root, so you can't just measure from the top. The nonlocal `res` (or class attribute) accumulates the answer across all nodes. Edge case: a single-node tree has diameter 0.
+**Brute force.** Measure both subtree heights at every node.
+
+```python
+def diameterOfBinaryTree(root):
+    def height(node):
+        if not node:
+            return 0
+        return 1 + max(height(node.left),
+                       height(node.right))
+    if not root:
+        return 0
+    through = height(root.left) + height(root.right)
+    return max(through,
+               diameterOfBinaryTree(root.left),
+               diameterOfBinaryTree(root.right))
+```
+
+`O(n^2)` time, `O(h)` space.
+
+**Wasteful because.** `height` is a full traversal of a subtree, and it is invoked again from every one of that subtree's ancestors. A node at depth `d` has its height recomputed `d` times, so on a chain of 10^4 nodes the identical walk is repeated 10^4 times.
+
+**Optimal.** The height a parent needs is exactly what the child's own call already computed, so return it instead of recomputing it. Each call hands `1 + max(l, r)` upward, and on the way updates a shared maximum with `l + r`, the length of the path that bends at this node. Every node is visited once and every path is considered once, at its unique bend, so the maximum is complete. The answer is a bottom-up accumulation, not a top-down pass: nothing useful flows downward, and the only reason a shared variable appears at all is that the recursion's return slot is already occupied by the height. Swapping the two expressions is the standard bug.
+
+**Edge cases.** A single node has diameter 0, since both heights are 0. A chain has diameter `n - 1` and one of `l`, `r` is always 0 there. Edges rather than nodes, so a two-node tree answers 1, not 2.
 
 #### Python
 
@@ -7842,13 +8798,51 @@ Given the root of a binary tree, return `true` if it is height-balanced — ever
 
 #### Examples
 
-TODO
+```text
+Input: root = [3,9,20,null,null,15,7]
+Output: true
+
+Input: root = [1,2,2,3,3,null,null,4,4]
+Output: false
+Explanation: left subtree height 3, right subtree height 1.
+
+Input: root = []
+Output: true
+
+Constraints:
+- 0 <= number of nodes <= 5000
+- -10^4 <= Node.val <= 10^4
+- balanced means every node, not just the root
+```
 
 #### Recognition
-**DFS with sentinel value for imbalance.** **O(n)** time, **O(h)** space.
+**Signals.** "Every node's left and right subtrees differ in height by at most 1" quantifies over every node, and height is defined by descendants, so the verdict at a node cannot be reached before its children have reported. That is the signature of a bottom-up answer. The second tell is that height and balance need the same traversal: whatever computes one has already walked everything the other needs. **Therefore.** One postorder pass that returns a height, with `-1` reserved as a sentinel meaning "something below me is already unbalanced", which propagates to the root without any further comparison. **Not the top-down version** that calls a separate `height(node)` at every node, which is what most people write first: a node's height is then recomputed once per ancestor, giving `O(n^2)` on a 5000-node chain. **O(n)** time, **O(h)** space.
 
 #### Explanation
-A naive approach calls a `height` function at every node — `O(n²)` for skewed trees because height is recomputed repeatedly. The optimal approach computes height and checks balance in a single DFS pass by using `-1` as a sentinel value meaning "already imbalanced." At each node, if either subtree returns `-1`, propagate `-1` up immediately without further work. Otherwise, check whether the heights differ by more than 1 — if so return `-1`; if not, return the actual height. This early-exit mechanism is key: once any imbalance is detected, all ancestor calls short-circuit.
+**Brute force.** Ask for both subtree heights at every node, from scratch.
+
+```python
+def isBalanced(root):
+    def height(node):
+        if not node:
+            return 0
+        return 1 + max(height(node.left),
+                       height(node.right))
+    if not root:
+        return True
+    if abs(height(root.left) - height(root.right)) > 1:
+        return False
+    return (isBalanced(root.left)
+            and isBalanced(root.right))
+```
+
+`O(n^2)` time, `O(h)` space.
+
+**Wasteful because.** `height` walks a whole subtree, and `isBalanced` then calls it again at every descendant of that subtree. Each node is counted once per ancestor above it, so a one-sided chain of 5000 nodes performs about 12.5 million node visits to produce one boolean.
+
+**Optimal.** Fold the two walks into one. A single postorder call returns the height of its subtree, which is precisely the number its parent needs, so nothing is ever measured twice. Then carry the verdict in that same return value: `-1` means "unbalanced somewhere below", and a parent seeing `-1` from either child returns `-1` at once, so the first violation short-circuits the whole remainder of the tree. The sentinel is safe because a genuine height is never negative, so the two meanings cannot collide. Both pieces of information travel bottom-up on one channel, which is what collapses `O(n^2)` to `O(n)`.
+
+**Edge cases.** An empty tree is balanced with height 0, which is also the recursion's base case. A single node is balanced. The check is per node, so a tree whose root subtrees differ by 0 can still fail deeper, as example 2 would if the imbalance sat one level down.
 
 #### Python
 
@@ -7971,13 +8965,51 @@ Given the roots of two binary trees, return `true` if they are structurally iden
 
 #### Examples
 
-TODO
+```text
+Input: p = [1,2,3], q = [1,2,3]
+Output: true
+
+Input: p = [1,2], q = [1,null,2]
+Output: false
+Explanation: same values, mirrored shape.
+
+Input: p = [1,2,1], q = [1,1,2]
+Output: false
+
+Constraints:
+- 0 <= nodes in each tree <= 100
+- -10^4 <= Node.val <= 10^4
+- both shape and values must match
+```
 
 #### Recognition
-**DFS (simultaneous recursive traversal).** **O(n)** time, **O(h)** space.
+**Signals.** "Structurally identical with the same node values at every position" bolts two conditions together, shape and content, and both are local: two trees are the same exactly when their roots agree and their left subtrees are the same and their right subtrees are the same. A property that decomposes into the same property on the children is a recursion you can transcribe straight from the sentence. **Therefore.** Walk both trees in lockstep with one function taking two nodes, returning `False` the instant a null pattern or a value disagrees, so the traversal aborts at the first difference instead of finishing. **Not comparing traversal outputs**, the tempting shortcut: a bare preorder list is ambiguous without null markers, since `[1,2]` describes two different trees, and the preorder-plus-inorder pair only pins down a tree when all values are distinct, which nothing here promises. **O(n)** time, **O(h)** space.
 
 #### Explanation
-You must check every node in both trees simultaneously. The three base cases cover all structural mismatches: (1) both null — trivially the same; (2) one null but not the other — different; (3) values differ — different. Only if values match do you recurse into both subtrees, short-circuiting with `and` so the right subtree is skipped if the left already fails. The time complexity is `O(min(m, n))` in practice because we stop as soon as a mismatch is found, but `O(n)` in the worst case (identical trees). Stack depth is `O(h)` — the height of the tree.
+**Brute force.** Serialise both trees in full, then compare the two sequences.
+
+```python
+def isSameTree(p, q):
+    def ser(node, out):
+        if not node:
+            out.append(None)
+            return
+        out.append(node.val)
+        ser(node.left, out)
+        ser(node.right, out)
+    a, b = [], []
+    ser(p, a)
+    ser(q, b)
+    return a == b
+```
+
+`O(n)` time, `O(n)` space.
+
+**Wasteful because.** Both trees are walked to completion before a single comparison happens, so two trees whose roots already disagree still cost `2n` appends and `2n` list cells. Nothing is recomputed here; the work is simply done before anyone asks whether it was needed.
+
+**Optimal.** Interleave the two walks so the comparison happens at each node instead of at the end. One function takes both nodes and covers four cases in three lines: both null is a match, exactly one null is a mismatch, unequal values is a mismatch, and otherwise recurse on the two left children and then the two right children. Python's `and` short-circuits, so a failure anywhere in the left subtree never touches the right one. Nothing is stored, so the only memory is the call stack at `O(h)`. Keep the serialising version when one tree must be compared against many, since each serialisation is then computed once and reused.
+
+**Edge cases.** Two empty trees are the same. One empty and one not is caught by the second base case, before any `.val` is dereferenced. Mirror images such as `[1,2]` and `[1,null,2]` hold the same values and fail purely on the null pattern.
 
 #### Python
 
@@ -8076,13 +9108,54 @@ Given the roots of two binary trees `root` and `subRoot`, return `true` if there
 
 #### Examples
 
-TODO
+```text
+Input: root = [3,4,5,1,2], subRoot = [4,1,2]
+Output: true
+
+Input: root = [3,4,5,1,2], subRoot = [4,1]
+Output: false
+Explanation: root's node 4 has a right child, subRoot's has none.
+
+Input: root = [1,1], subRoot = [1]
+Output: true
+
+Constraints:
+- 1 <= nodes in root <= 2000
+- 1 <= nodes in subRoot <= 1000
+- -10^4 <= Node.val <= 10^4
+```
 
 #### Recognition
-**DFS + isSameTree check at each node.** **O(m * n)** time, **O(h)** space.
+**Signals.** "There is a node in `root` whose subtree is identical to `subRoot`" names two separate jobs: pick a candidate node, then test identity there. Identity of two trees is problem 53 and already costs `O(n)`, so the only new decision is which nodes to test, and "a node in root" with no qualifier means all of them. **Therefore.** Walk `root`, and at each node run the same-tree comparison against `subRoot`, stopping at the first success. Two nested recursions: the outer one enumerates candidates, the inner one compares. **Not anchoring on the first node whose value equals `subRoot.val`**, the natural shortcut, which breaks the moment values repeat: `root = [1,1]` against `subRoot = [1]` fails at the root and succeeds at the child, so a failed candidate says nothing about its descendants and every candidate has to stay live. **O(m * n)** time, **O(h)** space.
 
 #### Explanation
-At each node of the main tree, attempt to match `subRoot` using an `isSameTree` check. If it matches, return `true`; otherwise recurse into both children. The worst case is `O(m * n)` — for each of `m` nodes in `root`, the `isSameTree` check costs `O(n)`. A more optimal `O(m + n)` approach serializes both trees to strings and uses KMP or hashing to find the pattern, but the straightforward DFS is simpler and acceptable for most inputs. Edge case: `subRoot = None` is considered a subtree of any tree; a `None` root contains no subtrees.
+**Brute force.** Serialise every subtree of `root`, then look up `subRoot`'s serialisation.
+
+```python
+def isSubtree(root, subRoot):
+    def ser(node):
+        if not node:
+            return "#"
+        return ("," + str(node.val) + ser(node.left)
+                + ser(node.right))
+    seen = []
+    def walk(node):
+        if not node:
+            return
+        seen.append(ser(node))
+        walk(node.left)
+        walk(node.right)
+    walk(root)
+    return ser(subRoot) in seen
+```
+
+`O(m^2)` time, `O(m^2)` space.
+
+**Wasteful because.** Every subtree is written out in full, including the candidates that a single root value comparison would have thrown away. On a chain the stored strings sum to about `m^2 / 2` characters, all held in memory at once, to produce one boolean.
+
+**Optimal.** Materialise nothing. Walk `root` and at each node compare against `subRoot` directly with the same-tree recursion, which returns `False` at the first differing value and so usually costs `O(1)` rather than `O(n)`. Memory falls to the two call stacks at `O(h)`. The worst case is still `O(m * n)` and it is genuinely reachable: 2000 identical values in `root` against 1000 identical values in `subRoot` drives nearly every comparison to completion. That is when the third approach earns its complexity. Serialise both trees once with explicit null markers, then run KMP to locate one string inside the other for `O(m + n)` time and space. The null markers are what make the substring test sound; without them a match can land on a fragment that is not a whole subtree.
+
+**Edge cases.** Because a failed match at a node tells you nothing about its children, the recursion must continue past every failure. A leaf `subRoot` matches any leaf of `root` carrying the same value. `subRoot` is guaranteed non-empty here, and this code answers `False` for an empty one rather than the conventional `True`.
 
 #### Python
 
@@ -8211,13 +9284,54 @@ Given a BST and two nodes `p` and `q`, find their lowest common ancestor (the de
 
 #### Examples
 
-TODO
+```text
+Input: root = [6,2,8,0,4,7,9,null,null,3,5], p = [2], q = [8]
+Output: [6,2,8,0,4,7,9,null,null,3,5]
+Explanation: 2 and 8 split at the root, so the answer is 6.
+
+Input: root = [6,2,8,0,4,7,9,null,null,3,5], p = [2], q = [4]
+Output: [2,0,4,null,null,3,5]
+
+Input: root = [2,1], p = [2], q = [1]
+Output: [2,1]
+
+Constraints:
+- 2 <= number of nodes <= 10^5
+- all Node.val are unique, and p != q
+- p and q both exist in the tree
+- Output prints the subtree rooted at the answer node
+```
 
 #### Recognition
-**BST property traversal (iterative).** **O(h)** time, **O(1)** space.
+**Signals.** Two words carry it, "BST" and "lowest". A BST supplies a total order, so from any node one value comparison says which side a target lies on, and the lowest common ancestor of `p` and `q` is precisely the first node where those two answers disagree. Above that node both targets sit on the same side, so the other half can be discarded outright; below it they are separated forever. **Therefore.** Walk down from the root, going left while both values are smaller and right while both are larger, and return the node where the walk stops, which is either the split point or one of `p` and `q` itself. **Not the general binary tree LCA**, the postorder that returns `p` or `q` upward and merges where they join: it is correct but visits all 10^5 nodes to learn what one comparison per level already reveals. **Not recursion at all**, since a BST may be a chain of 10^5 nodes and this descent needs no stack. **O(h)** time, **O(1)** space.
 
 #### Explanation
-In a general binary tree, LCA requires `O(n)` DFS to find both nodes. In a BST the ordering property lets you navigate directly. At each node: if both `p` and `q` are less than the current value, the LCA is in the left subtree; if both are greater, it's in the right subtree; otherwise, the current node splits them (or equals one of them) — it is the LCA. This eliminates one side at each step, giving `O(h)` time with `O(1)` space iteratively. The recursive version is equally clear but uses `O(h)` stack space. Edge case: `p` or `q` may equal the current node, which the "else" branch handles correctly since a node is its own ancestor.
+**Brute force.** Use the algorithm that works on any binary tree: ask each subtree whether it contains both targets.
+
+```python
+def lowestCommonAncestor(root, p, q):
+    def has(node, t):
+        if not node:
+            return False
+        return (node.val == t.val or has(node.left, t)
+                or has(node.right, t))
+    cur = root
+    while True:
+        if has(cur.left, p) and has(cur.left, q):
+            cur = cur.left
+        elif has(cur.right, p) and has(cur.right, q):
+            cur = cur.right
+        else:
+            return cur
+```
+
+`O(n * h)` time, `O(h)` space.
+
+**Wasteful because.** `has` is a full subtree scan and it runs up to four times per level of the descent. It rediscovers by exhaustive search the one fact the BST invariant states for free: whether a value lies to the left or the right of the current node.
+
+**Optimal.** Replace each scan with a comparison. At the current node, if `p.val` and `q.val` are both smaller then both targets live in the left subtree, so the answer cannot be here or anywhere to the right; go left. Both larger, go right. Anything else means either the pair straddles this node or one of them is this node, and both cases make this node the lowest ancestor of the pair, so stop. Each step discards half the remaining tree, giving `O(h)`, which is `O(log n)` on a balanced BST. Because the descent never backtracks, the answer is found on the way down rather than returned on the way up, so a single reassigned pointer suffices and the space is `O(1)`. That is why the shipped solution is a loop and not a recursion.
+
+**Edge cases.** A node is its own ancestor, so `p` being an ancestor of `q` returns `p`, handled by the final branch and not by a special case. `p` and `q` may arrive in either order, since both comparisons are two-sided. On a plain binary tree the ordering test would be meaningless and the postorder version above would be required.
 
 #### Python
 
@@ -8538,13 +9652,52 @@ Given the root of a binary tree, return the values of the nodes visible when loo
 
 #### Examples
 
-TODO
+```text
+Input: root = [1,2,3,null,5,null,4]
+Output: [1,3,4]
+
+Input: root = [1,2,3,4]
+Output: [1,3,4]
+Explanation: level 2 holds only node 4, which is a left child.
+
+Input: root = []
+Output: []
+
+Constraints:
+- 0 <= number of nodes <= 100
+- -100 <= Node.val <= 100
+- exactly one value per level, top down
+```
 
 #### Recognition
-**BFS, record last node per level.** **O(n)** time, **O(n)** space.
+**Signals.** "Looking from the right side" and "one value per level" say the same thing: the output has one entry per depth, so depth is the grouping key and the answer is the last node at each depth. Anything that hands you nodes grouped by depth solves it. **Therefore.** Level order BFS with the size snapshot: read `len(queue)` before the level begins, pop exactly that many nodes, and take the last one's value. A right-first DFS works equally well, recording a value the first time each new depth is reached, and is the version to reach for when you also want the left side view or per-level aggregates. **Not walking `root.right` until null**, which is the reading the phrase invites: visibility is per level, not per branch, so when the right spine ends early a deeper left subtree becomes the rightmost thing at its level, exactly as `[1,2,3,4]` shows. **O(n)** time, **O(n)** space.
 
 #### Explanation
-The "right side view" is the last node at each level in BFS order. Use the same level-size snapshot technique as level-order traversal: process exactly `len(q)` nodes per level, and append the final node's value to the result. DFS works too — traverse right before left and record the first node seen at each new depth — but BFS is more straightforward. Edge case: an empty tree returns an empty list. Note that the rightmost visible node is not necessarily a right child; if a left subtree is deeper than the right subtree, its deepest nodes are visible.
+**Brute force.** Find the height, then hunt for the rightmost node at each depth separately.
+
+```python
+def rightSideView(root):
+    def height(node):
+        if not node:
+            return 0
+        return 1 + max(height(node.left),
+                       height(node.right))
+    def at(node, d):
+        if not node:
+            return []
+        if d == 0:
+            return [node.val]
+        return at(node.left, d - 1) + at(node.right, d - 1)
+    return [at(root, d)[-1] for d in range(height(root))]
+```
+
+`O(n * h)` time, `O(n)` space.
+
+**Wasteful because.** `at(root, d)` descends through every node above depth `d` just to reach it, and the next value of `d` descends through all of them again. Each upper level is re-traversed once per level below it, and `height` adds a full pass of its own before any of that starts.
+
+**Optimal.** Visit each node once and let the traversal do the grouping. A BFS queue already holds exactly one level at a time provided you snapshot its length before draining it: pop that many nodes, push their children, and the last node popped is the rightmost of that level. One pass, `O(n)` time, with the queue peaking at the widest level for `O(n)` space. The DFS alternative is the same `O(n)` time with only `O(h)` space, so it wins on a deep narrow tree; it visits the right child first and appends a value whenever the current depth equals the result length. Note that the Python solution leans on the loop variable outliving its `for`, which is legal but reads as an accident; tracking `last` explicitly, as the other four languages do, is clearer.
+
+**Edge cases.** An empty tree returns an empty list, guarded before the queue is built. A left-only chain returns every node, since each one is alone on its level. A node with only a left child still contributes when nothing to its right exists at that depth.
 
 #### Python
 
@@ -8699,13 +9852,50 @@ Given a binary tree, count the number of "good" nodes — nodes where no node on
 
 #### Examples
 
-TODO
+```text
+Input: root = [3,1,4,3,null,1,5]
+Output: 4
+Explanation: 3, 3, 4 and 5 are good; both 1s sit
+below a larger ancestor.
+
+Input: root = [3,3,null,4,2]
+Output: 3
+
+Input: root = [1]
+Output: 1
+
+Constraints:
+- 1 <= number of nodes <= 10^5
+- -10^4 <= Node.val <= 10^4
+- this is not a BST; values may repeat
+```
 
 #### Recognition
-**DFS with running maximum.** **O(n)** time, **O(h)** space.
+**Signals.** "No node on the path from the root to that node has a value greater than the node's own value" is a condition about ancestors only, and a whole list of ancestors collapses to one number: their maximum. Nothing orders the tree, so no subtree can be skipped and every node must be visited regardless. **Therefore.** A single top-down DFS carrying the largest value seen so far on the current root-to-node path, counting the node when `node.val >= max_so_far` and recursing with `max(max_so_far, node.val)`. **Not a bottom-up post-order** that combines what children return, because the predicate looks up toward the root and nothing computed inside a subtree can settle it. **Not carrying the ancestor list** and rescanning it at each node, which is correct but costs `O(n * h)` to recompute a maximum that changes by at most one comparison per step. **O(n)** time, **O(h)** space.
 
 #### Explanation
-A "good" node is one where the node's value is at least as large as every ancestor's value — equivalently, `node.val >= max_so_far`. Thread the running maximum down the recursion: at each node, compare `node.val` to `max_val`, count 1 if it qualifies, then recurse with `max(max_val, node.val)`. The root is always good (no ancestors to violate the condition). Using `root.val` as the initial `max_val` correctly seeds the comparison. The running max ensures `O(h)` extra space — just the recursion stack, no additional data structure.
+**Brute force.** Carry the ancestor values down and rescan them at every node.
+
+```python
+def goodNodes(root):
+    def dfs(node, path):
+        if not node:
+            return 0
+        good = 1 if all(v <= node.val for v in path) else 0
+        path.append(node.val)
+        total = good + dfs(node.left, path) + dfs(node.right, path)
+        path.pop()
+        return total
+    return dfs(root, [])
+```
+
+`O(n * h)` time, `O(h)` space.
+
+**Wasteful because.** The `all(...)` sweep re-reads the entire ancestor list at every node, and between a parent and its child that list changes by exactly one element. What the sweep computes is a single fact, "is the largest ancestor value at most `node.val`", so the whole scan reduces to one comparison against a number you were already holding.
+
+**Optimal.** Thread that number down instead of the list. Each call receives `max_val`, the largest value on the path above it, counts itself when `node.val >= max_val`, and hands `max(max_val, node.val)` to both children. Seeding the top call with `root.val` makes the root count itself, which is right: it has no ancestors, so it is always good. Passing `max_val` by value means nothing has to be undone on the way back up, unlike the `path.pop()` above, so the only memory is the call stack: `O(log n)` on a balanced tree, `O(n)` on a path. An explicit stack of `(node, max_val)` pairs is the same algorithm if 10^5 nodes in a line would blow the recursion limit.
+
+**Edge cases.** A single node answers 1. Equal values along a path all count, because the test is `>=` and not `>`. Negative values need nothing special, and seeding with `root.val` rather than a sentinel avoids picking one at all.
 
 #### Python
 
@@ -8992,13 +10182,50 @@ Given the root of a BST and an integer `k`, return the `k`th smallest value amon
 
 #### Examples
 
-TODO
+```text
+Input: root = [3,1,4,null,2], k = 1
+Output: 1
+
+Input: root = [5,3,6,2,4,null,null,1], k = 3
+Output: 3
+Explanation: sorted the values read 1,2,3,4,5,6.
+
+Input: root = [2,1,3], k = 3
+Output: 3
+
+Constraints:
+- 1 <= number of nodes <= 10^4
+- 1 <= k <= number of nodes
+- 0 <= Node.val <= 10^4
+```
 
 #### Recognition
-**Iterative inorder traversal (sorted order).** **O(n)** time, **O(h)** space.
+**Signals.** "BST" plus "kth smallest" is the whole tip. The BST invariant says every left descendant is smaller and every right descendant is larger, so the tree already holds its values in sorted order and an inorder walk (left, node, right) reads that order out one value at a time. "kth" then just means stop counting at `k`. **Therefore.** Inorder traversal with an explicit stack, decrementing `k` at each visit and returning the node where `k` hits zero, so the walk ends after `k` pops rather than finishing the tree. **Not collecting every value and sorting**, which pays `O(n log n)` to rebuild an ordering the invariant already guarantees. **Not a size-`k` heap**, the usual kth-smallest tool on unordered data, which is `O(n log k)` and still has to touch every node. **O(n)** time, **O(h)** space.
 
 #### Explanation
-In a BST, inorder traversal (left → node → right) visits nodes in ascending order. The `k`th node visited is the answer. Iterative inorder using an explicit stack avoids recursion's stack-overflow risk on deep trees. The inner loop drills left as far as possible, then pops a node, decrements `k`, and if `k` reaches 0 that node is the answer; otherwise continue to the right subtree. This visits nodes one by one in sorted order and stops early after `k` visits. A recursive approach is equally correct but uses call-stack space. Edge case: the problem guarantees `1 <= k <= n`, so no out-of-bounds check is needed.
+**Brute force.** Gather every value, sort it, index.
+
+```python
+def kthSmallest(root, k):
+    vals = []
+    def dfs(node):
+        if not node:
+            return
+        vals.append(node.val)
+        dfs(node.left)
+        dfs(node.right)
+    dfs(root)
+    vals.sort()
+    return vals[k - 1]
+```
+
+`O(n log n)` time, `O(n)` space.
+
+**Wasteful because.** The sort re-derives an ordering that the BST already encodes in its shape, and the traversal visits all `n` nodes even when `k` is 1. Both costs come from discarding the invariant on the way in and paying to recover it on the way out.
+
+**Optimal.** Walk inorder instead. Push nodes while descending left, and every pop yields the next smallest value, so the `k`th pop is the answer and the walk can return on the spot. The stack only ever holds the current root-to-node spine, `O(h)`, and the work is `O(h + k)`: `O(h)` to reach the smallest, then one pop per rank after that. The worst case is `O(n)`, when `k = n` or the tree degenerates into a path. Recursion is equally correct and shorter to write, but the iterative form makes the early exit explicit and survives a 10^4-deep tree. If the tree is modified often and kth queries are frequent, store a subtree size in each node instead: a query then descends once in `O(h)`, and an insert or delete fixes counts along a single path.
+
+**Edge cases.** `k = 1` returns the leftmost node, `k = n` the rightmost. Because `1 <= k <= n` is guaranteed, the loop always returns before the stack empties. A right-leaning path makes the stack depth 1 the whole way, a left-leaning one makes it `n`.
 
 #### Python
 
@@ -9135,13 +10362,48 @@ Given a preorder and inorder traversal of a binary tree (all values unique), rec
 
 #### Examples
 
-TODO
+```text
+Input: preorder = [3,9,20,15,7], inorder = [9,3,15,20,7]
+Output: [3,9,20,null,null,15,7]
+
+Input: preorder = [-1], inorder = [-1]
+Output: [-1]
+
+Input: preorder = [1,2,3], inorder = [3,2,1]
+Output: [1,2,null,3]
+Explanation: every node is a left child.
+
+Constraints:
+- 1 <= preorder.length <= 3000
+- inorder.length == preorder.length
+- -3000 <= values <= 3000, all distinct
+- inorder is a permutation of preorder
+```
 
 #### Recognition
-**Recursive divide with hashmap for inorder index lookup.** **O(n)** time, **O(n)** space.
+**Signals.** Two traversals of one tree, and "all values unique". Preorder's first element is the root by definition; uniqueness means that value occurs exactly once in inorder, and its position there splits inorder into the left subtree's values and the right subtree's. That split hands you the size of each subtree, which is precisely what preorder alone will not tell you. **Therefore.** Recurse: take the next preorder value as the current root, look up its index in inorder to get the boundary, then build the left child before the right so a single advancing preorder cursor stays aligned with the recursion. A value-to-index dict built once makes every lookup `O(1)`. **Not scanning inorder for the root on each call**, the version everybody writes first, which costs `O(n)` per node and degrades to `O(n^2)` on a skewed tree. **O(n)** time, **O(n)** space.
 
 #### Explanation
-The key insight is that the first element of the preorder list is always the root. Once you know the root, its position `mid` in the inorder list tells you exactly how many nodes are in the left subtree (`mid - l`) and right subtree. A naive approach re-scans the inorder array to find `mid` on every recursive call, giving `O(n²)` time; precomputing a `val → index` hashmap drops each lookup to `O(1)`. A shared `pre` index (or pointer) advances through the preorder array in the correct DFS order as recursion proceeds. The recursion bottoms out when `l > r`, meaning the subtree is empty. No special casing is needed for one-node subtrees — the guard handles them automatically.
+**Brute force.** Find the root in inorder by scanning, then recurse on fresh sublists.
+
+```python
+def buildTree(preorder, inorder):
+    if not preorder:
+        return None
+    root = TreeNode(preorder[0])
+    mid = inorder.index(preorder[0])
+    root.left = buildTree(preorder[1:mid + 1], inorder[:mid])
+    root.right = buildTree(preorder[mid + 1:], inorder[mid + 1:])
+    return root
+```
+
+`O(n^2)` time, `O(n^2)` space.
+
+**Wasteful because.** Two things are redone at every node. `inorder.index` re-walks the array to find a position that never changes once the input is fixed, and each slice copies values into new lists, so a tree shaped like a path copies `O(n)` elements `n` times over.
+
+**Optimal.** Stop moving data. Build one dict from value to index in inorder up front, `O(n)`, so the split point becomes a lookup. Then describe a subtree by a pair of inorder bounds `(l, r)` instead of a slice, and keep one cursor into preorder that advances by one every time a node is created. That cursor is correct because preorder emits a node, then its entire left subtree, then its entire right subtree, which is exactly the order the recursion consumes them in: build `left` before `right`, never the reverse. The base case `l > r` is the empty subtree, and it also covers leaves without a special case. Each node is created once and each lookup is `O(1)`, so the build is `O(n)` with `O(n)` for the dict plus `O(h)` for the stack.
+
+**Edge cases.** A single node has `mid == l == r`, so both children hit `l > r` immediately. A left-skewed tree, where inorder is the reverse of preorder, is the case that makes the naive version quadratic. Duplicate values would break the dict, which is why the problem guarantees distinct ones.
 
 #### Python
 
@@ -9502,13 +10764,63 @@ Design an algorithm to serialize a binary tree to a string and deserialize it ba
 
 #### Examples
 
-TODO
+```text
+Input: root = [1,2,3,null,null,4,5]
+Output: [1,2,3,null,null,4,5]
+Explanation: the string in between is one valid
+encoding; only the rebuilt tree has to match.
+
+Input: root = []
+Output: null
+
+Input: root = [1,2]
+Output: [1,2]
+
+Compare: roundtrip
+
+Constraints:
+- 0 <= number of nodes <= 10^4
+- -1000 <= Node.val <= 1000
+- any format is allowed provided it round-trips
+```
 
 #### Recognition
-**Preorder DFS with null markers.** **O(n)** time, **O(n)** space.
+**Signals.** "Serialize to a string and deserialize back to the original tree structure", plus "any encoding scheme is acceptable". Structure, not just values, is the payload: a bag of node values names no particular tree, so the format has to record where the missing children are. Freedom over the format is the hint to pick the traversal that rebuilds itself with no extra bookkeeping. **Therefore.** Preorder DFS, emitting `node.val` or a literal `"N"` for an absent child. Reading it back is the same walk: consume one token, and if it is a value, make the node and fill left then right from the tokens that follow, so a single advancing index is all the state deserialization needs. **Not inorder with the same markers**, which is genuinely ambiguous: the root sits at no known position in the stream, so different trees produce identical tokens. **Not an index-based array** with children at `2i+1` and `2i+2`, which is unambiguous but sizes itself to the tree's depth rather than its node count. **O(n)** time, **O(n)** space.
 
 #### Explanation
-The challenge is encoding structure, not just values — you need to know where null children are so the shape can be recovered. Preorder traversal (root, left, right) with an explicit `"N"` marker for null nodes encodes exactly enough information. During deserialization, you replay the same preorder DFS: each token is either a number (create a node and recurse into its left then right) or `"N"` (return null). A mutable index `i` advances through the flat token list as the recursion proceeds. BFS (level-order) encoding works too but needs more bookkeeping; preorder is elegantly self-describing. The only edge case worth noting is an empty tree, where serialization produces `"N"` and deserialization immediately returns `None`.
+**Brute force.** Put every node at its heap index and write the whole array out.
+
+```python
+def serialize(root):
+    slots = {}
+    def fill(node, i):
+        if node:
+            slots[i] = node.val
+            fill(node.left, 2 * i + 1)
+            fill(node.right, 2 * i + 2)
+    fill(root, 0)
+    n = max(slots) + 1 if slots else 0
+    return ",".join(str(slots.get(i, "N")) for i in range(n))
+
+def deserialize(data):
+    vals = data.split(",") if data else []
+    def build(i):
+        if i >= len(vals) or vals[i] == "N":
+            return None
+        node = TreeNode(int(vals[i]))
+        node.left = build(2 * i + 1)
+        node.right = build(2 * i + 2)
+        return node
+    return build(0)
+```
+
+`O(2^h)` time, `O(2^h)` space.
+
+**Wasteful because.** The index encoding pays for positions no node occupies. A tree that leans one way puts its deepest node at index `2^h - 1`, so the string burns `2^h` tokens on nulls to describe `n` nodes. The shape is already implicit in the order a traversal visits nodes; the array pays a second time to store it as arithmetic.
+
+**Optimal.** Emit nodes in preorder and mark absence explicitly. Every node contributes one token and every missing child contributes one `"N"`, so a tree of `n` nodes always serializes to exactly `2n + 1` tokens whatever its shape. Deserialization replays the identical walk: read a token, return `None` on `"N"`, otherwise build the node and fill `left` then `right` from what follows. Left before right is not cosmetic, it is the order serialization wrote them in, and swapping it silently mirrors the tree. Postorder with markers works the same way if you consume the tokens in reverse. Level order round-trips too and is what LeetCode prints, but it needs a queue on both sides instead of one index.
+
+**Edge cases.** The empty tree serializes to `"N"` and comes straight back as `None`. Negative values are fine because `int()` parses the sign, but that is why the marker is `"N"` and not something like `-1`, which is a legal value. A single node gives `"1,N,N"`.
 
 #### Python
 
@@ -10784,13 +12096,49 @@ You have a list of stone weights. Each turn, smash the two heaviest stones: if t
 
 #### Examples
 
-TODO
+```text
+Input: stones = [2,7,4,1,8,1]
+Output: 1
+Explanation: 8 and 7 leave 1, then 4 and 2 leave 2,
+then 2 and 1 leave 1, then 1 and 1 destroy each
+other, leaving a single stone of weight 1.
+
+Input: stones = [1]
+Output: 1
+
+Input: stones = [2,2]
+Output: 0
+
+Constraints:
+- 1 <= stones.length <= 30
+- 1 <= stones[i] <= 1000
+```
 
 #### Recognition
-**Max-heap (negate values for min-heap languages).** **O(n log n)** time, **O(n)** space.
+**Signals.** "Each turn, smash the two heaviest stones" and the survivor goes back in. Two things follow: you need the maximum repeatedly rather than once, and the collection changes between extractions, because a smash can insert a weight that was not there before. Repeated extract-max interleaved with insert is the contract a priority queue exists to serve. **Therefore.** Heapify the weights into a max-heap and loop: pop twice, and when the two differ push their difference back. That is `n - 1` rounds at `O(log n)` each. Python's `heapq` is min-only, so negate on the way in and on the way out. **Not sorting once and popping from the end**, because the remainder has to be reinserted in order, so each round pays another `O(n log n)` sort or an `O(n)` shift to keep the array sorted. **Not a counting array** over the `1..1000` value range, which would work but buys nothing at `n <= 30`. **O(n log n)** time, **O(n)** space.
 
 #### Explanation
-Each turn requires the two largest elements, which is the classic max-heap use-case. Python's `heapq` only provides a min-heap, so negate all values: the smallest negative corresponds to the largest stone. Each iteration: pop twice (getting `a >= b` in absolute value), and if they differ, push back `-(a - b)`. The loop ends when one or zero stones remain. The `if heap else 0` guard handles the edge case where all stones cancel perfectly, leaving an empty heap. Sorting would give `O(n log n)` per step (re-sort after each smash), so the heap is the right structure here — each smash costs only `O(log n)`.
+**Brute force.** Keep the list sorted and re-sort after every smash.
+
+```python
+def lastStoneWeight(stones):
+    stones = sorted(stones)
+    while len(stones) > 1:
+        a = stones.pop()
+        b = stones.pop()
+        if a != b:
+            stones.append(a - b)
+            stones.sort()
+    return stones[0] if stones else 0
+```
+
+`O(n^2 log n)` time, `O(n)` space.
+
+**Wasteful because.** Each round re-sorts an array in which two elements were removed and at most one was added. The `n - 1` rounds therefore pay `O(n log n)` apiece to answer "which two are largest", a question a heap answers in `O(log n)` while absorbing the new value at the same price.
+
+**Optimal.** A binary heap keeps the largest element at the root and restores that property after a pop or a push by sifting along one root-to-leaf path, `O(log n)`. Build it once with `heapify` in `O(n)`, then every round is two pops and at most one push, so the total is `O(n log n)`. Termination is easy to argue: after the two pops `a >= b`, so `a - b` is never negative and never larger than `a`, and the collection shrinks by at least one stone per round. Python has no max-heap, so store `-weight` and the smallest negative is the heaviest stone; negating again on the way out restores the true value. Java, Rust, Go and C++ all offer a max-heap directly, by default or by flipping the comparator.
+
+**Edge cases.** One stone: the loop never runs and that stone is the answer. All stones cancel, as in `[2,2]`, leaving the heap empty, so the return needs an explicit `0` rather than a peek. An equal pair destroys both and pushes nothing, which is what the `a != b` guard encodes.
 
 #### Python
 
@@ -11424,13 +12772,59 @@ Design a simplified Twitter supporting `postTweet`, `getNewsFeed` (the 10 most r
 
 #### Examples
 
-TODO
+```text
+Input: ["Twitter","postTweet","getNewsFeed","follow",
+"postTweet","getNewsFeed","unfollow","getNewsFeed"],
+[[],[1,5],[1],[1,2],[2,6],[1],[1,2],[1]]
+Output: [null,null,[5],null,null,[6,5],null,[5]]
+
+Input: ["Twitter","postTweet","postTweet","getNewsFeed"],
+[[],[1,1],[1,2],[1]]
+Output: [null,null,null,[2,1]]
+
+Input: ["Twitter","getNewsFeed","unfollow","follow",
+"getNewsFeed"],
+[[],[9],[9,4],[9,9],[9]]
+Output: [null,[],null,null,[]]
+
+Constraints:
+- 1 <= userId, tweetId <= 10^4
+- up to 3 * 10^4 calls in total
+- the feed returns at most 10 tweets, newest first
+```
 
 #### Recognition
-**Heap merge of per-user tweet lists.** **O(k log u)** per `getNewsFeed` where `u` is number of followed users and `k=10`.
+**Signals.** "The 10 most recent tweets from the user and their followees" fixes three things at once: the answer is capped at 10 however long the history is, each user's own tweets arrive in time order and stay that way if you only append, and the feed is a merge across a small set of those already-ordered lists. A constant `k` taken from `u` sorted sequences is the k-way merge signature. **Therefore.** A global counter stamps every tweet so recency is an integer comparison, each user keeps an append-only list, and `getNewsFeed` seeds a heap with the newest tweet from each followee plus the user, pops 10 times, and after each pop pushes the next tweet from whichever list that pop came from. Follow and unfollow are set operations. **Not concatenating every followee's tweets and sorting**, which is `O(T log T)` in the total number of tweets posted, repeated on every single read, to produce 10 of them. **Not fanning out on write** into a materialised per-user feed, which makes `postTweet` cost `O(followers)` and `follow` need a backfill; that trade only wins when reads hugely outnumber writes. **O(k log u)** time, **O(T)** space.
 
 #### Explanation
-Each user maintains their tweets as a list in posting order, indexed by a global descending counter so recency comparison is just numeric ordering. `getNewsFeed` needs the 10 most recent tweets from up to `u+1` sorted lists — a classic k-way merge. Seed a min-heap with the latest tweet from each relevant user; each pop extracts the globally newest remaining tweet, then the next tweet from that user is pushed. This runs in `O(k log u)` rather than concatenating and sorting everything. The follow/unfollow operations update a set-per-user for `O(1)` lookup. Edge case: a user with no tweets or who hasn't tweeted yet needs a guard before accessing their tweet list.
+**Brute force.** One global tweet log, filtered and sorted on every read.
+
+```python
+class Twitter:
+    def __init__(self):
+        self.tweets = []
+        self.following = {}
+    def postTweet(self, userId, tweetId):
+        self.tweets.append((len(self.tweets), userId, tweetId))
+    def getNewsFeed(self, userId):
+        ok = self.following.get(userId, set()) | {userId}
+        feed = [t for t in self.tweets if t[1] in ok]
+        feed.sort(reverse=True)
+        return [t[2] for t in feed[:10]]
+    def follow(self, followerId, followeeId):
+        self.following.setdefault(followerId, set()).add(followeeId)
+    def unfollow(self, followerId, followeeId):
+        s = self.following.setdefault(followerId, set())
+        s.discard(followeeId)
+```
+
+`O(T log T)` per feed, `O(T)` space.
+
+**Wasteful because.** Every `getNewsFeed` walks the whole history, most of it posted by users this one does not follow, then sorts a list that was already built in posting order to take 10 items off the front. The sort is redundant twice over.
+
+**Optimal.** Store tweets per user, appended, so each list is already sorted by recency with the newest at the tail. A feed is then the top 10 of a merge over at most `u + 1` sorted lists. Seed a heap with one entry per list, the newest tweet plus a cursor to the one before it, then pop 10 times, pushing that list's next-oldest entry after each pop. The heap never holds more than `u + 1` items, and each pop is the globally newest remaining candidate because every list's own newest is present. That is `O(u log u)` to seed and `O(k log u)` to drain, with no dependence at all on how many tweets exist. The global counter, decremented on each post so Python's min-heap orders newest first, is what makes cross-user recency a single integer compare.
+
+**Edge cases.** A user with no tweets contributes nothing and must be skipped rather than indexed. Ids are created implicitly, so a feed for someone who never posted is `[]`. Following yourself must not duplicate your tweets, which the union with `{userId}` handles. Unfollowing a non-followee is a no-op, so `discard`, not `remove`.
 
 #### Python
 

@@ -114,6 +114,28 @@ def build_list_of_lists(arrs):
     """[[1,4,5],[1,3,4]] -> a list of ListNode heads (merge-k-lists shape)."""
     return [build_list(a) for a in (arrs or [])]
 
+def build_random_list(a):
+    """LeetCode's random-pointer encoding: [[val, randomIndex|null], ...].
+    A random pointer cannot be written as a plain value array, so the index
+    is resolved to the node it names once every node exists."""
+    nodes = [Node(v) for v, _ in (a or [])]
+    for i, (_, r) in enumerate(a or []):
+        if i + 1 < len(nodes):
+            nodes[i].next = nodes[i + 1]
+        if r is not None:
+            nodes[i].random = nodes[r]
+    return nodes[0] if nodes else None
+
+def dump_random_list(h):
+    """Inverse of build_random_list, so a clone serialises like its original."""
+    order, idx, cur = [], {}, h
+    while cur is not None:
+        idx[id(cur)] = len(order)
+        order.append(cur)
+        cur = cur.next
+    return [[n.val, idx.get(id(n.random)) if n.random is not None else None]
+            for n in order]
+
 def dump_graph(n):
     if n is None:
         return []
@@ -158,8 +180,17 @@ OVERRIDES: dict[int, dict] = {
     84: {"adapters": {"node": ("build_graph", "dump_graph")}},
     # hasCycle(head) takes no `pos`, but a cycle cannot be written as a JSON
     # array, so `pos` feeds the builder and never reaches the solution.
-    44: {"adapters": {"head": ("build_cycle_list", "dump_list")},
-         "consume": {"head": ["pos"]}},
+    44: {
+        "adapters": {"head": ("build_cycle_list", "dump_list")},
+        "consume": {"head": ["pos"]},
+    },
+    # copyRandomList's input is [[val, randomIndex|null], ...], which build_list
+    # cannot express, and the clone has to be re-encoded the same way rather
+    # than dumped as a plain value list.
+    43: {
+        "adapters": {"head": ("build_random_list", "dump_random_list")},
+        "result": "dump_random_list",
+    },
 }
 
 # Items whose Explanation snippet cannot reasonably be run against the examples

@@ -247,11 +247,13 @@ def __nc_main__(spec):
                 f1, f2 = globals()[entry[0]], globals()[entry[1]]
                 results.append({"ok": True, "value": __nc_dump__(f2(f1(*kw.values())))})
                 continue
+            rd = spec.get("result")
+            dump = globals()[rd] if rd else __nc_dump__
             out = globals()[entry](**kw)
             if out_name is not None:
-                results.append({"ok": True, "value": __nc_dump__(kw[out_name])})
+                results.append({"ok": True, "value": dump(kw[out_name])})
             else:
-                results.append({"ok": True, "value": __nc_dump__(out)})
+                results.append({"ok": True, "value": dump(out)})
         except Exception as e:
             results.append({"ok": False, "error": type(e).__name__ + ": " + str(e)})
     print("__NC__" + json.dumps(results))
@@ -267,13 +269,14 @@ except Exception:
 """
 
 
-def run_solution(code, entry, adapters, examples, timeout, consume=None):
+def run_solution(code, entry, adapters, examples, timeout, consume=None, result=None):
     consume = consume or {}
     spec = {
         "entry": list(entry) if isinstance(entry, tuple) else entry,
         "adapters": adapters,
         "examples": [[p, o] for p, _, o in examples],
         "consume": consume,
+        "result": result,
     }
     # The spec is JSON, not Python: `null`/`true` are not Python literals, so it
     # must be parsed inside the driver rather than interpolated as source.
@@ -348,7 +351,9 @@ def check_item(args_tuple):
     adapters = {k: v[0] for k, v in ADAPTERS.items() if k in keys}
     adapters.update({k: v[0] for k, v in ov.get("adapters", {}).items()})
 
-    results, rerr = run_solution(py, entry, adapters, examples, opts["timeout"], consume)
+    results, rerr = run_solution(
+        py, entry, adapters, examples, opts["timeout"], consume, ov.get("result")
+    )
     if rerr == "timeout":
         return (TIMEOUT, item_id, title, f">{opts['timeout']}s, killed", [])
     if results is None:
@@ -366,7 +371,15 @@ def check_item(args_tuple):
     if opts["naive"] and item_id not in NAIVE_SKIP:
         nv = fence(section(body, "Explanation"), "python")
         if nv is not None:
-            nres, nerr = run_solution(nv, entry, adapters, examples, opts["timeout"], consume)
+            nres, nerr = run_solution(
+                nv,
+                entry,
+                adapters,
+                examples,
+                opts["timeout"],
+                consume,
+                ov.get("result"),
+            )
             if nres is not None:
                 for i, (r, (_, expected, _)) in enumerate(zip(nres, examples), 1):
                     if r["ok"] and canon(r["value"], compare) != canon(
