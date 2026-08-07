@@ -4948,3 +4948,1889 @@ No `default` arm: because `ParsedLine` is `sealed`, adding a third outcome later
 - **A nullable `Quote` plus a side-channel error list.** Easy to forget an outcome. A `sealed ParsedLine` with an exhaustive `switch` makes the compiler prove every case is handled.
 
 **Senior tells:** reaches for `mapMulti` (or a clearly-justified `map`+`filter`) to stay lazy and can explain *why* laziness matters for a live-socket feed; names the two silent-corruption traps (`split` trailing-empty, `parseLong` negatives) before being prompted; models the outcome as a sealed type for exhaustiveness rather than nulls; notes that `bid`/`ask` are `double` for the kata but a real pricing engine uses `BigDecimal`; and, asked "what would you actually ship?", extends to a quoted/escaped-`|` field rule and a `BufferedReader.lines()` source adapter for a real socket.
+
+## Rolling Window Aggregator
+
+### Summary
+
+**What this topic covers**
+This kata builds a `SlidingWindow` that keeps a rolling count / sum / weighted average over the *last* `windowMillis` of an injected clock. Values arrive stamped with a millisecond timestamp — possibly out of order — and every read (`count`, `sum`, `weightedAverage`, `retainedBuckets`) reports only the values still inside the current window. This is the shape behind a rolling traded-volume counter, a moving-average price, or the accounting side of a rate limiter: cheap, exact reads over a moving time horizon without rescanning history on every call.
+
+**Mental model**
+Two decisions do all the work. First, the clock is injected as a `LongSupplier` of millis, never `System.currentTimeMillis()` inline, so a test can pin `now` with an `AtomicLong` and move it deterministically. Second, storage is keyed by **timestamp**, not arrival order: a `TreeMap<Long, Bucket>` where each bucket aggregates every value that landed in that millisecond (count, sum, weight, weighted-sum). Four running totals mirror the live buckets so every read is an O(1) totals read, not an O(n) walk of the map. Eviction is lazy — `evict(now)` runs at the top of every `add` and every read, pruning `buckets.headMap(edge, true)` (everything at or before the trailing edge) and subtracting each pruned bucket from the totals before removing it. There is no background sweeper thread.
+
+**Key terms**
+- **trailing edge** — the old boundary of the window, `now - windowMillis`; a value with `ts <= edge` has expired.
+- **leading edge** — the window's boundary at `now`; a value with `ts > now` is in the future and rejected.
+- **boundary rule** — a value is in-window iff `now - windowMillis < ts <= now`: trailing edge **exclusive**, leading edge **inclusive**.
+- **lazy eviction** — pruning happens on demand (every `add`/read), not on a timer; between calls, expired buckets simply sit there until the next touch.
+- **bucket** — one millisecond's worth of aggregate (`count`, `sum`, `weight`, `weighted`), not a list of raw events — this is what bounds memory.
+- **running totals** — four fields (`totalCount`, `totalSum`, `totalWeight`, `totalWeighted`) kept in sync with the live buckets so reads never rescan.
+- **weighted average** — `Σ(value·weight) / Σ(weight)`; `OptionalDouble.empty()` when the window is empty or total weight is zero.
+
+**Why interviewers ask this**
+It looks like "just a ring buffer with a timestamp," but three traps separate a working answer from a correct one: the injected clock (so the test suite doesn't need real sleeps), the exact-inclusive/exclusive boundary (an off-by-one here is a silent data bug, not a crash — a value bounces in and out of the count depending on which edge you got backwards), and keying by timestamp rather than arrival order (a head-eviction design that assumes monotonically increasing arrival breaks the instant an event arrives late). A senior candidate states the boundary rule out loud before coding and picks the bucket-per-timestamp structure specifically because it tolerates out-of-order arrival for free.
+
+**Common confusions**
+- *"Just keep a queue of raw events and evict from the front."* — Works only if timestamps arrive in non-decreasing order; a late (but still in-window) event breaks front-eviction because it does not belong at the tail.
+- *"Recompute the sum from the map on every read."* — Correct but O(bucket count) per read; the running totals make reads O(1) at the cost of keeping them in sync during eviction.
+- *"windowMillis long is the same as an inclusive `>=` boundary."* — No; this design is `now - window < ts <= now`. Get the inequality direction backwards and a value at exactly the edge silently double-counts or vanishes one call early/late.
+- *"High event rate means high memory."* — Not with per-millisecond buckets: a million events landing in the same millisecond collapse into one bucket, so retention is bounded by `windowMillis`, independent of event rate.
+
+**What follows from this topic**
+The same lazy-eviction-plus-running-totals idea underpins a token-bucket **[[ratelimit]]** and a **[[cache]]** with TTL eviction. Swapping millisecond buckets for coarser (per-second) buckets trades memory for boundary accuracy — the granularity/accuracy trade-off worth naming unprompted. A count-based ("last N events") window instead of time-based would swap the `TreeMap` for a ring/deque since the boundary becomes ordinal, not temporal. Concurrent producers would need to guard the totals + map with a single lock or shard by key and merge on read.
+
+### Clarify & design the API
+
+Questions to settle before writing a line of logic:
+
+- **What does the window aggregate?** Count, sum, and a weighted average — so each recorded value carries an optional weight (default `1.0`).
+- **Where does time come from?** Never read the wall clock inline; take a `LongSupplier` of millis in the constructor so tests can drive it with an `AtomicLong`.
+- **Exact boundary?** Nail down which edge is inclusive before coding: `now - windowMillis < ts <= now` — trailing exclusive, leading inclusive. A value exactly `windowMillis` old has *just* expired.
+- **Out-of-order arrival?** Must be tolerated — a value can arrive after a later-timestamped one and still land correctly in the window, as long as its own `ts` is still in range.
+- **Future timestamps?** Reject them (`ts > now`) rather than silently accepting a value that would only become "in window" later.
+- **Empty-window reads?** `count`/`sum` return `0`/`0.0`; `weightedAverage` returns `OptionalDouble.empty()` — no divide-by-zero, no sentinel doubles.
+- **Memory bound?** Must not grow with event *rate* — only with window length. Expose it (`retainedBuckets()`) so the bound is testable, not just asserted in prose.
+
+Commit to this surface:
+
+```java
+public final class SlidingWindow {
+    public SlidingWindow(long windowMillis, LongSupplier nowMillis);
+
+    public boolean add(long tsMillis, double value);                  // unit weight
+    public boolean add(long tsMillis, double value, double weight);   // returns false if out of range
+
+    public long count();
+    public double sum();
+    public OptionalDouble weightedAverage();
+    public int retainedBuckets();
+}
+```
+
+### Write the tests
+
+Write these first — they pin the boundary rule, the out-of-order tolerance, and the memory bound before a line of implementation exists. Group them: empty state, basic count/sum, the boundary itself, weighted average, out-of-order arrival, and the retention bound.
+
+**Empty window and basic in/out-of-window behaviour.**
+
+```java
+private final AtomicLong clock = new AtomicLong(2_000);
+private final SlidingWindow window = new SlidingWindow(1_000, clock::get);
+
+@Test
+void empty_window_reports_zero_and_no_average() {
+    assertEquals(0, window.count());
+    assertEquals(0.0, window.sum(), 1e-9);
+    assertEquals(OptionalDouble.empty(), window.weightedAverage());
+    assertEquals(0, window.retainedBuckets());
+}
+
+@Test
+void values_drop_out_as_the_clock_advances() {
+    window.add(1_200, 10.0);
+    window.add(1_800, 5.0);
+    clock.set(2_500); // window is now (1_500, 2_500]; the ts=1_200 value has expired
+    assertEquals(1, window.count());
+    assertEquals(5.0, window.sum(), 1e-9);
+}
+```
+
+**The boundary — this is the test that catches an off-by-one.** Pin both edges explicitly: a value exactly at the trailing edge is OUT, one millisecond newer is IN.
+
+```java
+@Test
+void trailing_edge_is_exclusive() {
+    window.add(1_500, 7.0);
+    clock.set(2_499); // edge = 1_499; ts=1_500 > 1_499 is IN
+    assertEquals(1, window.count());
+    clock.set(2_500); // edge = now - window = 1_500; ts == edge is OUT
+    assertEquals(0, window.count());
+}
+
+@Test
+void future_timestamp_is_rejected() {
+    assertFalse(window.add(2_500, 1.0)); // now = 2_000
+    assertEquals(0, window.count());
+}
+```
+
+**Weighted average — the divide-by-zero edge and expiry moving both sums together.**
+
+```java
+@Test
+void weighted_average_is_sum_of_value_weight_over_sum_of_weight() {
+    window.add(1_500, 2.0, 3.0);  // contributes 6 to weighted, 3 to weight
+    window.add(1_800, 4.0, 1.0);  // contributes 4 to weighted, 1 to weight
+    OptionalDouble avg = window.weightedAverage();
+    assertTrue(avg.isPresent());
+    assertEquals(10.0 / 4.0, avg.getAsDouble(), 1e-9);
+}
+
+@Test
+void zero_total_weight_yields_empty_average() {
+    window.add(1_500, 5.0, 0.0);
+    assertEquals(1, window.count());
+    assertEquals(OptionalDouble.empty(), window.weightedAverage());
+}
+```
+
+**Out-of-order arrival — the case a naive head-eviction design cannot survive.**
+
+```java
+@Test
+void out_of_order_but_in_window_event_is_counted() {
+    window.add(1_800, 1.0);
+    window.add(1_200, 2.0); // arrives later but is older; still inside (1_000, 2_000]
+    assertEquals(2, window.count());
+    assertEquals(3.0, window.sum(), 1e-9);
+}
+
+@Test
+void event_already_past_the_trailing_edge_is_rejected() {
+    clock.set(3_000); // window (2_000, 3_000]
+    assertFalse(window.add(1_500, 9.0));
+    assertEquals(0, window.count());
+}
+```
+
+**The retention bound — proves memory scales with window length, not event count.** A million events land in only 1,000 distinct milliseconds; the bucket count must stay near the window size, not near a million.
+
+```java
+@Test
+void retention_is_bounded_by_the_window_not_the_event_count() {
+    for (int i = 0; i < 1_000_000; i++) {
+        long ts = 1_001 + (i % 1_000); // timestamps in [1_001, 2_000]
+        window.add(ts, 1.0);
+    }
+    assertTrue(window.retainedBuckets() <= 1_001,
+            "retained " + window.retainedBuckets() + " buckets; expected <= window+1");
+    assertEquals(1_000_000, window.count());
+    assertEquals(1_000_000.0, window.sum(), 1e-3);
+}
+```
+
+A companion `duplicate_timestamps_aggregate_into_one_bucket` test confirms three `add`s at the same `ts` land in one bucket (`retainedBuckets() == 1`), and a constructor test asserts `IllegalArgumentException` for `windowMillis <= 0`.
+
+### Implement it
+
+A `TreeMap<Long, Bucket>` keyed by timestamp, plus four running totals kept in sync on every add and every eviction. `evict` is the one piece of real logic; every accessor just calls it then reads a total.
+
+```java
+private static final class Bucket {
+    long count;
+    double sum;
+    double weight;
+    double weighted;
+}
+
+private final long windowMillis;
+private final LongSupplier now;
+private final TreeMap<Long, Bucket> buckets = new TreeMap<>();
+private long totalCount;
+private double totalSum;
+private double totalWeight;
+private double totalWeighted;
+
+/** Drop buckets past the trailing edge (ts <= now - window), keeping the running totals in sync. */
+private void evict(long nowMs) {
+    long edge = nowMs - windowMillis; // in-window iff ts > edge
+    Iterator<Map.Entry<Long, Bucket>> it = buckets.headMap(edge, true).entrySet().iterator();
+    while (it.hasNext()) {
+        Bucket b = it.next().getValue();
+        totalCount -= b.count;
+        totalSum -= b.sum;
+        totalWeight -= b.weight;
+        totalWeighted -= b.weighted;
+        it.remove();
+    }
+}
+
+public boolean add(long tsMillis, double value, double weight) {
+    long nowMs = now.getAsLong();
+    evict(nowMs);
+    if (tsMillis > nowMs || tsMillis <= nowMs - windowMillis) {
+        return false;
+    }
+    Bucket b = buckets.computeIfAbsent(tsMillis, k -> new Bucket());
+    b.count++; b.sum += value; b.weight += weight; b.weighted += value * weight;
+    totalCount++; totalSum += value; totalWeight += weight; totalWeighted += value * weight;
+    return true;
+}
+
+public OptionalDouble weightedAverage() {
+    evict(now.getAsLong());
+    return totalWeight == 0.0 ? OptionalDouble.empty() : OptionalDouble.of(totalWeighted / totalWeight);
+}
+```
+
+- **Why `TreeMap.headMap(edge, true)`:** it hands back exactly the expired sub-map (keys `<= edge`) in one navigable-map call — no manual iteration over the full key set, and `it.remove()` on that view's iterator removes from the backing map.
+- **Why keyed by timestamp, not a FIFO queue:** eviction targets "everything at or before the trailing edge" regardless of insertion order, so an out-of-order-but-in-window `add` lands correctly and a stale `add` is rejected outright — arrival order never enters the eviction decision.
+- **Complexity:** `add` is O(log b) for the TreeMap touch plus O(k) for evicting k now-expired buckets (amortised O(log b) since each bucket is created and evicted at most once); every read is O(log b) + O(k) for the same eviction, then O(1) off the running totals. Space is O(windowMillis) buckets, independent of event count.
+- **Key gotcha:** every accessor — `count`, `sum`, `weightedAverage`, `retainedBuckets`, and `add` itself — calls `evict(now.getAsLong())` first. Skip it on a read-only path and a query right after a big clock jump returns stale totals.
+
+### Common mistakes & senior signal
+
+- **Head-eviction on an arrival-ordered queue.** Assuming timestamps arrive in non-decreasing order and evicting "from the front" works until one event arrives late — then a still-valid value never gets removed, or a stale one lingers at the wrong end. Keying by timestamp in a `TreeMap` sidesteps the assumption entirely; naming why arrival order is irrelevant here is the senior tell.
+- **Recomputing sums on every read.** Walking the live buckets on each `count()`/`sum()` call is correct but O(bucket count) per read; the running totals turn every read into O(1) after eviction. Forgetting to keep the totals in sync *during* eviction (subtracting a bucket's contribution before removing it) is the bug that makes this optimization dangerous.
+- **Boundary inequality backwards.** Using `>=`/`<` instead of `>`/`<=` (or vice versa) silently shifts every value by one edge — it compiles, most tests pass, and only the exact-boundary test catches it. State the rule (`now - window < ts <= now`) before writing the comparison.
+- **Float `==` on weight or sum.** The zero-weight guard in `weightedAverage` compares `totalWeight == 0.0` deliberately — that's safe because weight only ever accumulates from exact adds of `0.0`/positive doubles here, but reach for an epsilon comparison the moment weights could be computed rather than literal inputs; do not generalize a bare `==` to arbitrary float comparisons elsewhere.
+- **Unbounded memory per event.** Storing a list of raw `(ts, value)` pairs instead of aggregating per millisecond means retention scales with event *rate*, not window length — the million-events-into-1,000-buckets test exists specifically to catch this regression.
+- **Ignoring the granularity/accuracy trade-off.** Per-millisecond buckets are exact to the millisecond; coarsening to per-second buckets would shrink memory further but blur the boundary to within a second. A senior names this trade explicitly rather than treating the bucket width as an arbitrary implementation detail.
+
+## Top-K Over a Stream
+
+### Summary
+
+**What this topic covers**
+This kata builds a `TopK` that answers "who are the K highest-scoring keys *right now*" over an unbounded stream of weighted observations — the "biggest movers" panel on a live feed (most-traded selections, top gainers, trending symbols) recomputed on every tick. Every observation is `add(key, weight)`: the key's cumulative score changes by `weight` (which may be negative — a key can fall as well as rise), and `top()` must always answer with the current top `k`, ranked by score descending, ties broken by key ascending so two callers reading the same state see the same order. You design a two-structure model — a map holding the score of truth and a sorted structure holding the ranking — and the one tricky operation: re-ranking a key whose score just changed, in O(log n) rather than a full re-sort.
+
+**Mental model**
+A `HashMap<String, Long>` is the source of truth for "what is key X's score right now"; a `TreeSet<Entry>`, ordered by score descending then key ascending, is a live ranking of the same keys. The two must never disagree. Because `Entry` is an immutable record, "the score changed" means "a different tree node" — you cannot mutate a `TreeSet` element in place and expect the tree to re-balance itself; the only correct move is remove-the-old-entry, update-the-map, insert-the-new-entry, and the removal must happen *before* the map is overwritten (you need the *old* score to find the *old* node — looking a key up by itself, after the map already holds the new score, silently misses it and leaves a stale/duplicate node in the tree). `top()` is then a trivial O(k) walk of the set's head. This wins over a bounded min-heap precisely because the requirement is not "insert new values, evict the smallest" but *rescore an arbitrary existing key* — one already in the top K, or one currently outside it, can move either direction on every tick, and a plain `PriorityQueue` has no efficient "find and re-rank this element" operation.
+
+**Key terms**
+- **score of truth vs ranking structure** — the map is authoritative for a key's current score; the tree is a derived, always-consistent view sorted for ranking. Two structures, one invariant.
+- **`Comparator.comparingLong(...).reversed().thenComparing(...)`** — chained comparator: primary key descending (score), tiebreaker ascending (key) — the idiom for "rank by X, then deterministically by Y".
+- **remove-before-reinsert** — because `Entry` is immutable, an "update" on a `TreeSet` element is really delete-old-node, insert-new-node; skipping the delete leaves a ghost entry ranked at the old score.
+- **indexed / addressable heap** — a `PriorityQueue` augmented with a key→array-index side map so an arbitrary element can be found and re-heapified; the bookkeeping alternative to a `TreeSet` when memory, not update flexibility, is the constraint.
+- **bounded top-K heap** — a fixed-size-K min-heap of current leaders; O(1) memory in K regardless of key-space size, but no efficient way to rescore a key already tracked or check one that fell out.
+- **Count-Min Sketch** — a sub-linear-memory approximate frequency counter; trades per-key exactness for a bounded key population when the key space is too large to track exactly (e.g. millions of symbols).
+- **deterministic tie-break** — without a secondary sort key, equal scores have an undefined/JVM-dependent order; two readers (or two runs) can disagree on "the" top K.
+- **O(log n) rescoring** — both the removal and the reinsertion are single `TreeSet` operations; a naive "collect all entries, sort, take k" `top()` call would be O(n log n) on every read instead of O(log n) on every write.
+
+**Why interviewers ask this**
+It tests whether a candidate's first instinct is a `PriorityQueue` (right shape, wrong requirement) or a structure that supports efficient *update*, not just insert/extract-min. The senior signal is naming the actual constraint unprompted — "scores change on existing keys, so I need find-and-rerank, not just push/pop" — and then picking the `HashMap` + `TreeSet` pair because a `TreeSet` is a balanced BST that supports both ordered iteration *and* O(log n) removal by value, whereas a heap array only supports O(log n) removal by *index*, which means either linear search or extra bookkeeping (the indexed heap) to locate the element to update. A second signal is catching the remove-before-map-update ordering bug in code review before it is pointed out.
+
+**Common confusions**
+- *"Just use a `PriorityQueue<Entry>`."* — A heap gives you extract-min/max in O(log n), not "find and update the priority of an arbitrary element" — that needs either a linear scan (O(n)) or an indexed heap (more machinery than a `TreeSet`, for the same O(log n) bound).
+- *"Update the map first, then remove the stale entry by key."* — By the time you look the key up again, the map already returns the *new* score, so `new Entry(key, scores.get(key))` does not equal the old tree node — the remove misses, and the tree now holds two entries for one key.
+- *"Ties don't matter, any order is fine."* — Two callers (or two test runs) observing the same score set can then see different "top K" lists; a leaderboard without a deterministic tiebreaker is not reproducible.
+- *"Exact per-key tracking always scales."* — It is O(n) in distinct keys seen; fine for thousands of symbols, not for an unbounded or adversarial key space, where a Count-Min Sketch trades exactness for bounded memory.
+- *"`top()` should re-sort every call."* — That moves the O(log n) cost from every write (rare-ish, one per tick) to every read (potentially every render), and throws away the whole point of keeping a sorted structure incrementally maintained.
+
+**What follows from this topic**
+The same "map for truth, ordered structure for ranking, remove-before-reinsert on update" shape reappears in the **[[orderbook]]** kata (price-time priority — an order's price level changes, and the book must re-rank it, not just insert/delete), and in the **[[cache]]** kata's LFU eviction (frequency changes on every access, and the eviction candidate is "current minimum," a live-ranked structure by another name). The two named extensions — a bounded indexed min-heap when K is small relative to the key space, and a Count-Min Sketch when the key space itself is too large for exact per-key state — are the standard escalation path for "top-K of a stream" questions once memory, not correctness, becomes the constraint.
+
+### Clarify & design the API
+
+Questions to settle before writing a line of logic:
+
+- **What does "score" mean — cumulative sum, or last value?** Cumulative: every `add(key, weight)` *changes* the score by `weight`, it doesn't replace it. Confirm negative weights are legal (a key can fall).
+- **How are ties broken?** Score descending is the obvious primary order; without an explicit secondary key (key ascending) the result is non-deterministic. Nail this down before writing tests — it drives half of them.
+- **Can `add` touch a key already inside — or outside — the top K?** Yes, on every call; that single fact is what rules out a plain bounded heap and drives the remove/reinsert design.
+- **What about `k == 0` or `k` larger than the number of distinct keys seen?** `k == 0` → always empty; `k` larger than the population → return everything you have, no padding with zeros/nulls.
+- **Do unseen keys have a score?** Yes, `0` by convention (`scoreOf` never throws for an unknown key) — matches "hasn't been observed yet," not "is invalid."
+
+Commit to this surface:
+
+```java
+public final class TopK {
+    public TopK(int k);                                  // k must be >= 0
+    public void add(String key, long weight);             // cumulative; weight may be negative
+    public void increment(String key);                    // shorthand for add(key, 1)
+    public List<Entry> top();                              // score desc, then key asc; size <= k
+    public long scoreOf(String key);                       // 0 if never observed
+}
+
+public record Entry(String key, long score) {}
+```
+
+### Write the tests
+
+Write these first — they pin the ranking contract before a line of `TopK` exists. Group them: ordering basics, the fewer-than-k / larger-than-population edge cases, the tie-break rule, then the re-ranking behaviour that is the actual point of the kata.
+
+**Ordering basics — highest score first, ties settle by key ascending.**
+
+```java
+@Test
+void top_orders_by_score_descending() {
+    TopK topK = new TopK(3);
+    topK.add("AAPL", 10);
+    topK.add("MSFT", 30);
+    topK.add("GOOG", 20);
+
+    assertEquals(
+            List.of(new Entry("MSFT", 30), new Entry("GOOG", 20), new Entry("AAPL", 10)),
+            topK.top());
+}
+
+@Test
+void tied_scores_break_ties_by_key_ascending() {
+    TopK topK = new TopK(3);
+    topK.add("MSFT", 10);
+    topK.add("AAPL", 10);
+    topK.add("GOOG", 10);
+
+    assertEquals(
+            List.of(new Entry("AAPL", 10), new Entry("GOOG", 10), new Entry("MSFT", 10)),
+            topK.top());
+}
+```
+
+**Population smaller / larger than k — no padding, no truncation surprises.**
+
+```java
+@Test
+void fewer_than_k_distinct_keys_returns_all_of_them() {
+    TopK topK = new TopK(5);
+    topK.add("AAPL", 10);
+    topK.add("MSFT", 20);
+
+    assertEquals(List.of(new Entry("MSFT", 20), new Entry("AAPL", 10)), topK.top());
+}
+
+@Test
+void k_of_zero_always_returns_empty() {
+    TopK topK = new TopK(0);
+    topK.add("AAPL", 100);
+
+    assertTrue(topK.top().isEmpty());
+}
+
+@Test
+void negative_k_is_rejected() {
+    assertThrows(IllegalArgumentException.class, () -> new TopK(-1));
+}
+```
+
+**The re-ranking tests — this is the heart of the kata.** A key already inside the top K must be able to fall out on a rescore; a key outside must be able to climb in. Both require finding and moving the *existing* tree node, not just inserting a new one.
+
+```java
+@Test
+void updating_a_key_can_climb_it_into_the_top_k() {
+    TopK topK = new TopK(2);
+    topK.add("AAPL", 100);
+    topK.add("MSFT", 90);
+    topK.add("GOOG", 10); // outside top 2
+
+    topK.add("GOOG", 200); // now 210, climbs to first place
+
+    assertEquals(List.of(new Entry("GOOG", 210), new Entry("AAPL", 100)), topK.top());
+}
+
+@Test
+void updating_a_key_can_drop_it_out_of_the_top_k() {
+    TopK topK = new TopK(2);
+    topK.add("AAPL", 100);
+    topK.add("MSFT", 90);
+    topK.add("GOOG", 10);
+
+    topK.add("AAPL", -95); // drops to 5, now last
+
+    assertEquals(List.of(new Entry("MSFT", 90), new Entry("GOOG", 10)), topK.top());
+}
+
+@Test
+void negative_weight_lowers_score_and_rank() {
+    TopK topK = new TopK(2);
+    topK.add("AAPL", 50);
+    topK.add("MSFT", 40);
+
+    topK.add("AAPL", -20);
+
+    assertEquals(30, topK.scoreOf("AAPL"));
+    assertEquals(List.of(new Entry("MSFT", 40), new Entry("AAPL", 30)), topK.top());
+}
+```
+
+**`scoreOf` and `increment` — the small, easy-to-forget contract corners.**
+
+```java
+@Test
+void score_of_unseen_key_is_zero() {
+    TopK topK = new TopK(3);
+    assertEquals(0, topK.scoreOf("AAPL"));
+}
+
+@Test
+void increment_adds_one_to_score() {
+    TopK topK = new TopK(1);
+    topK.increment("AAPL");
+    topK.increment("AAPL");
+    topK.increment("AAPL");
+
+    assertEquals(3, topK.scoreOf("AAPL"));
+    assertEquals(List.of(new Entry("AAPL", 3)), topK.top());
+}
+```
+
+A companion test seeds `k` larger than the observed key population and asserts `top()` returns exactly the observed keys, unpadded — the "don't invent zero-score entries" trap.
+
+### Implement it
+
+`scores` is the map of record — every read/write of "what does this key have right now" goes through it. `ranked` is a `TreeSet<Entry>` ordered by score descending, key ascending; it never diverges from `scores` because every mutation removes the stale node (using the *old* score, captured before the map is touched) before inserting the fresh one.
+
+```java
+public final class TopK {
+
+    private static final Comparator<Entry> RANKING =
+            Comparator.comparingLong(Entry::score).reversed()
+                    .thenComparing(Entry::key);
+
+    private final int k;
+    private final Map<String, Long> scores = new HashMap<>();
+    private final TreeSet<Entry> ranked = new TreeSet<>(RANKING);
+
+    public TopK(int k) {
+        if (k < 0) {
+            throw new IllegalArgumentException("k must be non-negative: " + k);
+        }
+        this.k = k;
+    }
+
+    public void add(String key, long weight) {
+        long oldScore = scores.getOrDefault(key, 0L);
+        long newScore = oldScore + weight;
+        if (scores.containsKey(key)) {
+            ranked.remove(new Entry(key, oldScore)); // must use the OLD score to find the OLD node
+        }
+        scores.put(key, newScore);
+        ranked.add(new Entry(key, newScore));
+    }
+
+    public void increment(String key) {
+        add(key, 1);
+    }
+
+    public List<Entry> top() {
+        List<Entry> result = new ArrayList<>(Math.min(k, ranked.size()));
+        for (Entry entry : ranked) {
+            if (result.size() == k) {
+                break;
+            }
+            result.add(entry);
+        }
+        return result;
+    }
+
+    public long scoreOf(String key) {
+        return scores.getOrDefault(key, 0L);
+    }
+}
+```
+
+- **Ordering mechanism:** a chained `Comparator` — `comparingLong(Entry::score).reversed().thenComparing(Entry::key)` — score descending is the primary key, key ascending is the tiebreaker; `TreeSet` maintains this order on every insert/remove, not just at read time.
+- **Complexity:** `add` is O(log n) (one removal, one insertion, both tree operations) in the number of distinct keys n; `top()` is O(k), a bounded walk of the set's head; `scoreOf` is O(1).
+- **Key gotcha:** the `if (scores.containsKey(key))` guard plus capturing `oldScore` *before* `scores.put` — remove the old node using the score it actually had, not the score it is about to have.
+
+### Common mistakes & senior signal
+
+- **Reaching for a plain `PriorityQueue`.** It supports insert and extract-min/max, not "find and re-rank an arbitrary element." Making one work needs a key→array-index side map kept in sync on every heap swap (a hand-rolled indexed heap) — more bookkeeping than a `TreeSet` for the same O(log n) bound. Naming this trade-off unprompted is the senior tell.
+- **Removing the stale `TreeSet` entry *after* updating the map.** `scores.put(key, newScore)` first, then `ranked.remove(new Entry(key, scores.get(key)))` looks reasonable but constructs the entry with the *new* score — the remove silently misses the old node, `top()` starts returning duplicate/stale ranks for that key, and the set slowly corrupts as more keys update.
+- **Non-deterministic tie-break.** Sorting by score alone means the JVM/`TreeSet` internal order decides ties — two identical states can produce two different "top K" answers. The fix is a chained comparator with an explicit, stable secondary key.
+- **Re-sorting on every `top()` call instead of maintaining order incrementally.** Collecting all entries and sorting on read moves an O(log n) per-write cost to an O(n log n) per-read cost — backwards for a workload where reads (dashboard refreshes) likely outnumber writes (individual ticks) by a lot, and it throws away the reason to keep a sorted structure at all.
+- **Confusing "top-K memory" with "exact."** A `HashMap` + `TreeSet` gives *exact* answers at O(n) memory in distinct keys seen — correct here, but it does not scale to an unbounded/adversarial key space. The senior answer names the two standard escalations: a **bounded indexed min-heap of size K** (O(K) memory, but loses `scoreOf` for keys outside the top K and cheap arbitrary-key rescoring) when the key space is large but K is small, and a **Count-Min Sketch** (sub-linear memory, approximate counts with bounded over-estimation) when even per-key existence is too much to track exactly — while explaining *why* neither is the right default here: the requirement is exact, arbitrary-direction rescoring of a bounded key population, which is exactly what `TreeSet` + map is built for.
+
+## Position & Exposure Keeper
+
+### Summary
+
+**What this topic covers**
+This kata builds a `PositionKeeper` — the thread-safe running position and worst-case exposure book for a betting exchange. Matched `BACK`/`LAY` bets stream in from many concurrent order-matching threads; the keeper folds each into a running per-market book via `apply`, and answers two hot-path risk queries — `pnlIfWins(market, selection)` and `worstCaseLiability(market)` — in O(1)/O(distinct selections), never by replaying bet history. That last constraint is the whole kata: a real-time risk engine that gates the *next* bet on the *current* worst-case liability cannot afford to rescan thousands of historical bets on every check, so the design question is which running numbers to maintain per market so both queries fall out of arithmetic on them.
+
+**Mental model**
+Decimal odds `O`, stake `S`. If a bet's selection is the winning outcome: `BACK` profits `+S*(O-1)`, `LAY` loses `-S*(O-1)`. If it does not win: `BACK` loses `-S`, `LAY` profits `+S`. `pnlIfWins(w)` sums that payoff over every bet in the market for a hypothesised winner `w`. Rather than replay bets, each market keeps four running numbers — `backStakeTotal`, `layStakeTotal`, and per-selection `backOddsStake[sel] = Σ S*O` / `layOddsStake[sel] = Σ S*O` — from which `pnlIfWins(w) = (backOddsStake[w] - backStakeTotal) + (layStakeTotal - layOddsStake[w])`. The first term collapses every back bet at once: backers of `w` collect their odds-stake, everyone else's back stake is forfeit; the second term is the lay mirror image. `worstCaseLiability` is the largest possible loss across every outcome the market could resolve to: every selection with at least one bet on it, *plus* the "other outcome" case — none of those selections wins, so every back bet loses its stake and every lay bet pays out, `pnl = layStakeTotal - backStakeTotal`. That candidate set is bounded by the number of distinct selections actually bet on, not the (possibly unbounded — "top goalscorer") universe of outcomes, because an outcome nobody backed or laid cannot be the worst case: its pnl is exactly the "other outcome" figure, which is already a candidate. Liability is reported as `max(0, -min pnl)` — non-negative; a market that cannot lose money reports `0`.
+
+**Key terms**
+- **decimal odds** — total return per unit stake including the stake; profit on a winning back bet is `stake * (odds - 1)`.
+- **BACK** — betting *for* an outcome; wins `stake * (odds - 1)` if it happens, loses the stake otherwise.
+- **LAY** — the exchange counterparty side; the mirror image of BACK — wins the stake if the outcome does not happen, pays out `stake * (odds - 1)` if it does.
+- **odds-stake** — `stake * odds`, the running per-selection accumulator that lets `pnlIfWins` collapse all bets on a selection into one number instead of replaying them.
+- **worst-case liability** — the largest loss across every possible market outcome, reported as a non-negative number.
+- **the "other outcome"** — the case where none of the selections that were actually bet on wins; easy to forget, and it is frequently the actual worst case for a one-sided book.
+- **per-market lock** — a `ReentrantLock` guarding one market's four running numbers, so reads never observe a torn update mid-write.
+- **lost update** — two concurrent writers both read a stale total and overwrite each other's increment; the reason plain fields under no lock corrupt the book under contention.
+
+**Why interviewers ask this**
+It looks like "sum some numbers" but is really three separate senior signals at once: (1) recognising that a running-totals design beats replay-on-read for a hot risk-check path, (2) getting the payoff algebra right including the easy-to-miss "other outcome" case, and (3) choosing the right concurrency grain — not a global lock (kills throughput across unrelated markets), not lock-free-per-field (torn reads across the four numbers), but one lock per market held across both the write and the multi-field read. Candidates who reach for `BigDecimal` and `compareTo` unprompted, and who name per-market locking as the deliberate middle ground between "too coarse" and "too fine," are showing they've actually built something like this before.
+
+**Common confusions**
+- *"Just store the bet list and sum on read."* — Correct but O(n) per query on a path that needs to run before every accepted bet; the running-totals design trades O(1) writes-are-already-happening bookkeeping for O(1) reads.
+- *"Worst case is just the minimum pnl across selections that were bet on."* — Missing the "other outcome": a pure-back book (nobody laid anything) loses the *most* when none of the backed selections wins, and that case isn't in the selection set at all.
+- *"One global lock across all markets is simpler and fine."* — It is simpler, but it serialises unrelated markets that share nothing; a live exchange runs many more markets than any one market has concurrent bets, so lock-per-market is the throughput-correct grain.
+- *"double is fine for money, it's just arithmetic."* — Binary floating point cannot represent most decimal fractions exactly; money and prices use `BigDecimal` with `compareTo`, never `==` or `double`.
+- *"totalMatchedStake needs the market lock too."* — No: it only needs per-key atomicity (a `ConcurrentHashMap.merge`), not consistency with any one market's other fields, so it is deliberately a separate, unlocked structure.
+
+**What follows from this topic**
+The natural extension is turning this from a passive tracker into an active risk gate — reject `apply` before it lands if the resulting `worstCaseLiability` would exceed a configured cap, which is exactly the kind of check-then-act-under-lock reasoning from **[[idempotentprocessor]]** and **[[ratelimit]]**. It also connects to **[[pricecache]]** (per-key locking granularity trade-offs) and the general "aggregate incrementally, don't replay" lesson behind any O(1)-read/O(1)-write running-statistics design.
+
+### Clarify & design the API
+
+Questions to settle before writing a line of logic:
+
+- **What counts as "exposure"?** Two distinct queries: `pnlIfWins(market, selection)` — the whole market's P&L if a specific selection wins — and `worstCaseLiability(market)` — the largest possible loss across *every* outcome the market could resolve to, floored at zero.
+- **Scoped per market or global?** Per market. Markets are independent books (different events, different selections); nothing about one market's liability depends on another's.
+- **Concurrent writers?** Yes — many order-matching threads apply bets to potentially the same market concurrently. That is the hard case to design for, not an afterthought.
+- **Money type?** `BigDecimal` throughout — stakes, odds, and every derived total — compared with `compareTo`, never `double`/`==`.
+- **What about an unknown market or selection?** Return `BigDecimal.ZERO`, not throw — a market with no bets yet has no exposure, that's a valid, common state.
+- **Does "other outcome" belong in the candidate set even with zero back-only or lay-only bets?** Yes, always — it's the case where none of the selections that were bet on wins, and it must be considered even when it is not the eventual worst case.
+
+Commit to this surface (the fixtures — `Bet`, `Side` — are copied verbatim from `solution/`):
+
+```java
+public record Bet(String market, String selection, Side side, BigDecimal stake, BigDecimal odds) { … }
+
+public enum Side { BACK, LAY }
+
+public final class PositionKeeper {
+    public void apply(Bet bet);                                    // fold a matched bet into its market's book
+    public BigDecimal pnlIfWins(String market, String selection);  // 0 for unknown/empty market
+    public BigDecimal worstCaseLiability(String market);           // non-negative; 0 for unknown/empty/can't-lose market
+    public BigDecimal totalMatchedStake(String selection);         // sum of stakes on a selection, across all markets
+}
+```
+
+### Write the tests
+
+Write these first — pin the payoff arithmetic on paper, then let the tests hold you to it. Group them: two-outcome pnl, a mixed multi-selection book, worst-case liability (including the "other outcome" trap), a back+lay hedge that should net to zero, validation, and the concurrency stress test.
+
+**Two-way market — the base case.** Confirm the sign convention for BACK on both legs.
+
+```java
+@Test
+void two_way_market_back_bet_pnl() {
+    var keeper = new PositionKeeper();
+    keeper.apply(new Bet("Match1", "Home", Side.BACK, new BigDecimal("100"), new BigDecimal("2.0")));
+    keeper.apply(new Bet("Match1", "Away", Side.BACK, new BigDecimal("50"), new BigDecimal("3.0")));
+
+    // Home wins: +100*(2-1) on the Home bet, -50 on the losing Away bet.
+    assertMoneyEquals("50", keeper.pnlIfWins("Match1", "Home"));
+    // Away wins: -100 on the losing Home bet, +50*(3-1) on the Away bet.
+    assertMoneyEquals("0", keeper.pnlIfWins("Match1", "Away"));
+}
+```
+
+**Three-way mixed book — BACK and LAY on different selections in the same market.** This is the one that pins the general formula, not just a two-outcome special case.
+
+```java
+@Test
+void three_way_mixed_book_pnl_per_outcome() {
+    var keeper = new PositionKeeper();
+    keeper.apply(new Bet("Race", "A", Side.BACK, new BigDecimal("10"), new BigDecimal("4")));
+    keeper.apply(new Bet("Race", "B", Side.LAY, new BigDecimal("20"), new BigDecimal("2")));
+    keeper.apply(new Bet("Race", "C", Side.BACK, new BigDecimal("5"), new BigDecimal("10")));
+
+    // A wins: +10*(4-1) back A, +20 lay B (B loses), -5 back C (C loses) = 45.
+    assertMoneyEquals("45", keeper.pnlIfWins("Race", "A"));
+    // B wins: -10 back A, -20*(2-1) lay B (B wins), -5 back C = -35.
+    assertMoneyEquals("-35", keeper.pnlIfWins("Race", "B"));
+    // C wins: -10 back A, +20 lay B, +5*(10-1) back C = 55.
+    assertMoneyEquals("55", keeper.pnlIfWins("Race", "C"));
+}
+```
+
+**Worst-case liability — the "other outcome" trap, twice.** A pure-back book's worst case is neither selection winning (the "other outcome"); a pure-lay book can never lose money, so liability floors at zero rather than going negative.
+
+```java
+@Test
+void pure_back_book_worst_case_is_the_other_outcome() {
+    var keeper = new PositionKeeper();
+    keeper.apply(new Bet("PureBack", "X", Side.BACK, new BigDecimal("100"), new BigDecimal("1.5")));
+    keeper.apply(new Bet("PureBack", "Y", Side.BACK, new BigDecimal("100"), new BigDecimal("1.5")));
+
+    // Either X or Y winning still loses 50 on the other leg; neither winning loses both stakes.
+    assertMoneyEquals("-50", keeper.pnlIfWins("PureBack", "X"));
+    assertMoneyEquals("-50", keeper.pnlIfWins("PureBack", "Y"));
+    assertMoneyEquals("200", keeper.worstCaseLiability("PureBack"));
+}
+
+@Test
+void pure_lay_book_cannot_lose_money() {
+    var keeper = new PositionKeeper();
+    keeper.apply(new Bet("PureLay", "X", Side.LAY, new BigDecimal("100"), new BigDecimal("1.5")));
+    keeper.apply(new Bet("PureLay", "Y", Side.LAY, new BigDecimal("100"), new BigDecimal("1.5")));
+
+    // Every outcome nets a profit for a book with no backers; liability floors at zero, not negative.
+    assertMoneyEquals("0", keeper.worstCaseLiability("PureLay"));
+}
+
+@Test
+void worst_case_liability_across_a_mixed_book_including_other_outcome() {
+    var keeper = new PositionKeeper();
+    keeper.apply(new Bet("Race", "A", Side.BACK, new BigDecimal("10"), new BigDecimal("4")));
+    keeper.apply(new Bet("Race", "B", Side.LAY, new BigDecimal("20"), new BigDecimal("2")));
+    keeper.apply(new Bet("Race", "C", Side.BACK, new BigDecimal("5"), new BigDecimal("10")));
+
+    // Candidates: A=45, B=-35, C=55, "other outcome" = layTotal-backTotal = 20-15 = 5.
+    // Worst is B winning (pnl -35), so liability is 35.
+    assertMoneyEquals("35", keeper.worstCaseLiability("Race"));
+}
+```
+
+**A back+lay hedge on the same selection nets to zero.** The exchange's classic sanity check: opposing bets at the same odds cancel out exactly.
+
+```java
+@Test
+void opposing_back_and_lay_at_same_odds_nets_liability_toward_zero() {
+    var keeper = new PositionKeeper();
+    keeper.apply(new Bet("Hedge", "X", Side.BACK, new BigDecimal("100"), new BigDecimal("2")));
+    keeper.apply(new Bet("Hedge", "X", Side.LAY, new BigDecimal("100"), new BigDecimal("2")));
+
+    assertMoneyEquals("0", keeper.pnlIfWins("Hedge", "X"));
+    assertMoneyEquals("0", keeper.worstCaseLiability("Hedge"));
+}
+```
+
+**Unknown market and bet validation.**
+
+```java
+@Test
+void unknown_market_reports_zero() {
+    var keeper = new PositionKeeper();
+    assertMoneyEquals("0", keeper.pnlIfWins("NoSuchMarket", "X"));
+    assertMoneyEquals("0", keeper.worstCaseLiability("NoSuchMarket"));
+}
+
+@Test
+void bet_validation_throws_on_invalid_stake_and_odds() {
+    assertThrows(IllegalArgumentException.class, () ->
+            new Bet("M", "X", Side.BACK, new BigDecimal("0"), new BigDecimal("2")));
+    assertThrows(IllegalArgumentException.class, () ->
+            new Bet("M", "X", Side.BACK, new BigDecimal("10"), new BigDecimal("1")));
+    assertThrows(IllegalArgumentException.class, () ->
+            new Bet("M", "X", null, new BigDecimal("10"), new BigDecimal("2")));
+}
+```
+
+**The stress test — the one a plain-field, unlocked `Market` fails.** Fire N virtual threads at the *same* selection through a `CountDownLatch` gate so they collide, then assert the running total is exactly `N * stake` — no lost updates from an unsynchronised read-modify-write race.
+
+```java
+@Test
+void concurrent_applies_to_the_same_selection_conserve_total_stake() throws Exception {
+    var keeper = new PositionKeeper();
+    int n = 200;
+    BigDecimal stake = new BigDecimal("10");
+    var gate = new CountDownLatch(1);
+    var done = new CountDownLatch(n);
+
+    try (var exec = Executors.newVirtualThreadPerTaskExecutor()) {
+        IntStream.range(0, n).forEach(i -> exec.submit(() -> {
+            try {
+                gate.await(); // all threads block here, then stampede together
+                keeper.apply(new Bet("ConcMkt", "ConcSel", Side.BACK, stake, new BigDecimal("2")));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } finally {
+                done.countDown();
+            }
+        }));
+        gate.countDown(); // release the stampede
+        assertTrue(done.await(5, TimeUnit.SECONDS));
+    }
+
+    assertMoneyEquals("2000", keeper.totalMatchedStake("ConcSel"));
+}
+```
+
+### Implement it
+
+`markets` is a `ConcurrentHashMap<String, Market>`; each `Market` is a small mutable aggregate guarded by its own `ReentrantLock`, held across both the write in `apply` and the multi-field read in `pnlIfWins`/`worstCaseLiability` so a reader never observes a torn update.
+
+```java
+private static final class Market {
+    private final ReentrantLock lock = new ReentrantLock();
+    private final Map<String, BigDecimal> backOddsStake = new HashMap<>();
+    private final Map<String, BigDecimal> layOddsStake = new HashMap<>();
+    private BigDecimal backStakeTotal = BigDecimal.ZERO;
+    private BigDecimal layStakeTotal = BigDecimal.ZERO;
+
+    void apply(Bet bet) {
+        BigDecimal stakeOdds = bet.stake().multiply(bet.odds());
+        lock.lock();
+        try {
+            if (bet.side() == Side.BACK) {
+                backStakeTotal = backStakeTotal.add(bet.stake());
+                backOddsStake.merge(bet.selection(), stakeOdds, BigDecimal::add);
+            } else {
+                layStakeTotal = layStakeTotal.add(bet.stake());
+                layOddsStake.merge(bet.selection(), stakeOdds, BigDecimal::add);
+            }
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Caller must hold {@link #lock}. */
+    private BigDecimal pnlIfWinsLocked(String selection) {
+        BigDecimal backOdds = backOddsStake.getOrDefault(selection, BigDecimal.ZERO);
+        BigDecimal layOdds = layOddsStake.getOrDefault(selection, BigDecimal.ZERO);
+        return backOdds.subtract(backStakeTotal).add(layStakeTotal).subtract(layOdds);
+    }
+
+    BigDecimal worstCaseLiability() {
+        lock.lock();
+        try {
+            BigDecimal otherOutcome = layStakeTotal.subtract(backStakeTotal);
+            Set<String> selections = Stream.concat(
+                            backOddsStake.keySet().stream(), layOddsStake.keySet().stream())
+                    .collect(Collectors.toSet());
+
+            BigDecimal worstPnl = otherOutcome;
+            for (String selection : selections) {
+                BigDecimal pnl = pnlIfWinsLocked(selection);
+                if (pnl.compareTo(worstPnl) < 0) {
+                    worstPnl = pnl;
+                }
+            }
+            return worstPnl.negate().max(BigDecimal.ZERO);
+        } finally {
+            lock.unlock();
+        }
+    }
+}
+```
+
+The outer class routes by market id and treats an unknown market as empty:
+
+```java
+private final ConcurrentHashMap<String, Market> markets = new ConcurrentHashMap<>();
+private final ConcurrentHashMap<String, BigDecimal> matchedStakeBySelection = new ConcurrentHashMap<>();
+
+public void apply(Bet bet) {
+    markets.computeIfAbsent(bet.market(), m -> new Market()).apply(bet);
+    matchedStakeBySelection.merge(bet.selection(), bet.stake(), BigDecimal::add);
+}
+
+public BigDecimal pnlIfWins(String market, String selection) {
+    Market m = markets.get(market);
+    return m == null ? BigDecimal.ZERO : m.pnlIfWins(selection);
+}
+
+public BigDecimal worstCaseLiability(String market) {
+    Market m = markets.get(market);
+    return m == null ? BigDecimal.ZERO : m.worstCaseLiability();
+}
+```
+
+- **Concurrency mechanism:** one `ReentrantLock` per `Market`, held across the write and across the whole multi-field read — never a global lock, never per-field atomics (those would let a reader see `backStakeTotal` updated but `backOddsStake` not yet, i.e. a torn read). `totalMatchedStake` is intentionally *outside* any market lock — a `ConcurrentHashMap.merge` gives it the per-key atomicity it needs without coupling it to a market's consistency.
+- **Complexity:** `apply` and `pnlIfWins` are O(1); `worstCaseLiability` is O(distinct selections bet on in that market), never O(bet count) — the whole point of running totals over replay.
+- **Key gotcha:** the worst-case candidate set must seed with the "other outcome" pnl (`layStakeTotal - backStakeTotal`) *before* scanning selections, not just take the min over selections — a pure-back book has no lay bets at all, so its true worst case only shows up in that seed value.
+
+### Common mistakes & senior signal
+
+- **Replaying the bet list on every query.** Storing `List<Bet>` and summing on read is correct but O(n) on a path a risk gate needs to call before accepting the *next* bet. Running per-market totals updated on write is the senior design; it moves the cost to the side that can afford it.
+- **Forgetting the "other outcome".** Taking `worstCaseLiability` as just the minimum `pnlIfWins` over selections that were bet on misses the case where none of them wins — the actual worst case for a pure-back book. Seed the candidate set with `layStakeTotal - backStakeTotal` unconditionally.
+- **A global lock across all markets.** Simpler, but serialises every market's bets through one monitor even though markets share no state; a live exchange runs far more markets than any single market has concurrent bets, so per-market locking gives near-linear scalability for the same safety.
+- **Per-field atomics instead of a per-market lock.** Four independent `AtomicReference<BigDecimal>` fields eliminates the *word-tearing* problem but not the *cross-field* one: a reader can see `backStakeTotal` post-update and `backOddsStake` pre-update mid-write, corrupting `pnlIfWins`. The lock must span the whole read, not just each field.
+- **`double` for money.** Binary floating point cannot represent most decimal stakes/odds exactly, and repeated `+=` compounds the error. `BigDecimal` with `compareTo` (never `==`) is non-negotiable for this domain.
+- **Lost updates under concurrency.** Reading `backStakeTotal`, adding, and writing back without holding the market lock loses increments when two threads interleave — the stress test's `N * stake` conservation check is exactly what catches this.
+- **The named alternative, unprompted.** A senior candidate flags that per-market locking is the right grain *for now* and names the escalation path if profiling ever shows one hot market's lock as the bottleneck: sharded/striped atomic accumulators per selection, paying the extra bookkeeping cost only once single-market throughput actually saturates the lock.
+
+## Quote-Expiry Cache — TTL
+
+### Summary
+
+**What this topic covers**
+This kata builds a `QuoteCache<K, V>` whose entries expire a fixed duration after they were *written* — stale-price protection for a trading desk, where a quote that hasn't been refreshed inside its TTL is worse than no quote at all: trading against it risks execution at a price nobody would honour. You design a small four-method API (`put`, `get`, `size`, `containsKey`), a value-plus-timestamp record, an injected clock so the whole thing is testable without real sleeps, and — the crux — a lazy expiry check that must not race a concurrent overwrite. This is a mechanics-plus-concurrency kata: the interesting work is the exact-boundary semantics and the conditional-remove race, not raw complexity.
+
+**Mental model**
+A `QuoteCache` is deliberately a *different* eviction policy from an `LruCache`/`LfuCache`. Those evict based on **recency** or **frequency** of access once the cache is at capacity — a hot entry survives indefinitely, a cold one gets pushed out only when something new needs the slot. A `QuoteCache` has no capacity bound at all; every entry evicts on a **wall-clock deadline** regardless of how often it is read. A quote read a thousand times a second is exactly as stale at `ttlNanos` as one never read again — access pattern is irrelevant to whether a price is safe to trade on. That is the whole conceptual shift: LRU/LFU answer "is this still useful," TTL answers "is this still true."
+
+**Key terms**
+- **TTL (time-to-live)** — the fixed duration after write that an entry stays valid; here expressed as `ttlNanos`.
+- **stale-price protection** — the business reason for the kata: an expired quote must never be readable, because trading on it risks a bad fill.
+- **injected clock** — a `LongSupplier` of nanoseconds passed into the constructor (default `System::nanoTime`) so tests can drive time deterministically with an `AtomicLong`, instead of the untestable `System.nanoTime()` called inline.
+- **lazy (passive) expiry**‑ checking an entry's age against the TTL only when something touches it (`get`/`size`/`containsKey`), rather than running a background sweep.
+- **active expiry (reaper)** — the alternative: a scheduled task or delay-ordered queue that proactively evicts expired entries even if nobody ever reads them again.
+- **conditional remove** — `ConcurrentHashMap.remove(key, expectedEntry)`, which deletes only if the map still maps `key` to that exact object — the tool that prevents a stale reader from deleting a value a concurrent writer just refreshed.
+- **exact-TTL boundary** — the inclusive/exclusive edge case at `age == ttlNanos`; this kata defines it as *already expired*.
+- **storedAt timestamp** — the write-time nanosecond stamp captured per entry, reset on every `put` (including overwrites).
+
+**Why interviewers ask this**
+It looks like "write a `Map` with a timer" but it quietly tests three separate skills: precise boundary reasoning (is `age == ttl` expired or not, and can you justify the choice), designing for testability (would you dare call `System.nanoTime()` inline, or do you reach for dependency injection unprompted), and concurrency correctness under a lazy-eviction design (does your expiry check on `get` know it can race a `put`). A candidate who reaches for `Thread.sleep` in a test, or does an unconditional `map.remove(key)` after detecting staleness, has missed both the testability and the race. The senior signal is stating the boundary rule out loud, injecting the clock from the first line of the constructor, and reasoning about the read-then-remove race *before* being asked "what if two threads touch this key at once?"
+
+**Common confusions**
+- *"This is basically an LRU cache with a timer bolted on."* — No: LRU/LFU are capacity-driven and access-driven; TTL is time-driven and access-agnostic. A `QuoteCache` never evicts because the cache is "full" — there is no bound — and never keeps an entry alive because it's popular.
+- *"`age > ttl` and `age >= ttl` are the same thing in practice."* — They are one nanosecond apart in code but a real behavioural difference: at `age == ttl` exactly, one design still serves the value and the other doesn't. For a price feed, treating "exactly at the deadline" as expired is the conservative, defensible choice.
+- *"Lazy expiry means stale data can leak out."* — Only if the check is missing from a read path. Every accessor (`get`, `size`, `containsKey`) must independently re-check age; a cache that only purges in `put` can serve a stale `get`.
+- *"An unconditional `remove(key)` after detecting staleness is fine — it's just cleanup."* — Not under concurrency: if a `put` refreshed that key between your `get`'s staleness check and your `remove` call, an unconditional remove deletes the *fresh* entry a racing writer just installed.
+- *"Overwriting a key should have no relation to TTL."* — Wrong for this design: `put` unconditionally re-stamps `storedAt`, so an overwrite is defined to reset the deadline — a quote that gets refreshed 1ns before it would have expired lives a full fresh TTL.
+
+**What follows from this topic**
+The active-reaper extension swaps passive per-access checks for a `ScheduledExecutorService` sweep or a `DelayQueue<K>` ordered by deadline — the difference between "clean on touch" and "clean on a timer," the same trade-off as generational GC vs. reference counting. A per-entry-TTL extension (accepting an override on `put` instead of one fixed TTL for the whole cache) generalises this into something closer to Redis `EXPIRE`. It connects to the **[[idempotentprocessor]]** kata's `ConcurrentHashMap` primitives (there `computeIfAbsent`, here conditional `remove`), and to any **[[ratelimit]]**/**[[cache]]** kata that also needs an injectable clock instead of wall-clock calls sprinkled through the implementation.
+
+### Clarify & design the API
+
+Questions to settle before writing a line of logic:
+
+- **Is the TTL boundary inclusive or exclusive?** Decide explicitly: an entry stored at `t` is expired at `now` iff `now - t >= ttlNanos`. "Valid for up to N nanos" (inclusive of the deadline) is the safer reading for a price feed than "valid for more than N nanos."
+- **Does overwriting a key reset its TTL, or preserve the original deadline?** This kata resets it — `put` is unconditional, so the newest write always re-stamps `storedAt`, and the entry gets a fresh full TTL from that point.
+- **Lazy or active expiry?** Lazy: no background thread, no timer wheel. Every accessor checks age on the way in and purges on the spot if stale. Trade-off: `put` stays O(1) with zero bookkeeping, but a key nobody ever reads again lingers in the map (and counts toward memory) until something touches it.
+- **How is "now" obtained?** Never call `System.nanoTime()` inline — inject a `LongSupplier` clock (default `System::nanoTime`) so tests can drive it with an `AtomicLong`.
+- **Thread-safe?** Assume concurrent `put`/`get` from many threads is the normal case (many quote sources publishing, many strategies reading). Point at `ConcurrentHashMap`, and flag the one subtlety: expiring an entry inside `get` must not race a concurrent `put` that just refreshed the same key.
+- **What does an expired read look like?** `Optional.empty()`, not `null` and not an exception — a missing/expired quote is a normal, expected outcome for a caller to branch on.
+
+Commit to this surface:
+
+```java
+public final class QuoteCache<K, V> {
+    public QuoteCache(long ttlNanos);                    // default clock: System::nanoTime
+    public QuoteCache(long ttlNanos, LongSupplier clock); // injected clock for tests; ttlNanos must be > 0
+
+    public void put(K key, V value);        // stores/overwrites, stamping "now"; resets TTL
+    public Optional<V> get(K key);          // present+live -> value; absent or expired -> empty
+    public int size();                      // count of live entries; purges stale ones as a side effect
+    public boolean containsKey(K key);      // true iff a live entry exists
+}
+```
+
+### Write the tests
+
+Group them: basic contract (fresh reads, missing keys), the exact-TTL boundary, lazy purge behaviour, overwrite-resets-TTL, argument validation, then the concurrency stress test. Drive time with an `AtomicLong` — never a real sleep.
+
+**Setup — a shared `AtomicLong` clock and a small, easy-to-reason-about TTL.**
+
+```java
+// now starts at 10_000 with a 1_000ns TTL, so a quote stored at 10_000 expires at 11_000.
+private final AtomicLong clock = new AtomicLong(10_000);
+private final QuoteCache<String, Double> cache = new QuoteCache<>(1_000, clock::get);
+```
+
+**Basic contract — a fresh write is readable; a missing key is empty.**
+
+```java
+@Test
+void get_returns_value_before_expiry() {
+    cache.put("EURUSD", 1.0850);
+    assertEquals(1.0850, cache.get("EURUSD").orElseThrow());
+}
+
+@Test
+void missing_key_returns_empty() {
+    assertTrue(cache.get("GBPUSD").isEmpty());
+    assertFalse(cache.containsKey("GBPUSD"));
+}
+```
+
+**The exact-TTL boundary — this is the test that pins the inclusive/exclusive decision.** One nanosecond below the deadline is still live; exactly at the deadline is already expired.
+
+```java
+@Test
+void exact_ttl_boundary_is_expired() {
+    cache.put("EURUSD", 1.0850);
+    clock.set(10_999); // age = 999 < 1_000 -> still live
+    assertTrue(cache.get("EURUSD").isPresent());
+
+    clock.set(11_000); // age = 1_000 == ttl -> expired
+    assertTrue(cache.get("EURUSD").isEmpty());
+}
+```
+
+**Lazy purge — `get` on an expired entry must both return empty AND remove it, dropping `size()`.**
+
+```java
+@Test
+void expired_entry_is_purged_lazily_on_get() {
+    cache.put("EURUSD", 1.0850);
+    assertEquals(1, cache.size());
+
+    clock.set(11_000); // age == 1_000 == ttl -> expired
+    assertTrue(cache.get("EURUSD").isEmpty());
+    assertEquals(0, cache.size(), "get() must lazily purge the expired entry");
+}
+
+@Test
+void size_reflects_only_live_entries_and_purges_stale_ones() {
+    cache.put("EURUSD", 1.0850);
+    clock.set(10_500);
+    cache.put("GBPUSD", 1.2650); // stored later, still fresh at 11_500
+
+    clock.set(11_100); // EURUSD (age 1_100) expired; GBPUSD (age 600) live
+    assertEquals(1, cache.size());
+    assertTrue(cache.get("EURUSD").isEmpty());
+    assertTrue(cache.get("GBPUSD").isPresent());
+}
+```
+
+**Overwrite resets the TTL — a refreshed quote gets a full fresh deadline from the overwrite time, not the original write time.**
+
+```java
+@Test
+void overwrite_resets_the_ttl() {
+    cache.put("EURUSD", 1.0850);
+    clock.set(10_900); // age 900, about to expire at 11_000
+    cache.put("EURUSD", 1.0860); // overwrite resets storedAt to 10_900
+
+    clock.set(11_000); // age since original write is 1_000, but since overwrite only 100
+    assertEquals(1.0860, cache.get("EURUSD").orElseThrow(),
+            "overwrite must reset the TTL clock, keeping the entry alive past the original deadline");
+}
+```
+
+**Argument validation — a non-positive TTL is nonsensical and must be rejected in the constructor.**
+
+```java
+@Test
+void non_positive_ttl_is_rejected() {
+    assertThrows(IllegalArgumentException.class, () -> new QuoteCache<String, Double>(0, clock::get));
+    assertThrows(IllegalArgumentException.class, () -> new QuoteCache<String, Double>(-5, clock::get));
+}
+```
+
+**The concurrency stress test — distinct-key puts must all be conserved under contention on one shared map.** N virtual threads each write a *different* key through a `CountDownLatch` start gate so writes collide on the same `ConcurrentHashMap` bins simultaneously; a large TTL keeps anything from expiring mid-test. Afterwards every key must be present and `size()` must equal N exactly — no write lost, no phantom entry.
+
+```java
+@Test
+void concurrent_puts_of_distinct_keys_are_all_conserved() throws InterruptedException {
+    final int n = 200;
+    var bigTtlCache = new QuoteCache<Integer, String>(1_000_000_000L, clock::get);
+
+    var gate = new CountDownLatch(1);
+    var done = new CountDownLatch(n);
+
+    try (var exec = Executors.newVirtualThreadPerTaskExecutor()) {
+        for (int i = 0; i < n; i++) {
+            final int key = i;
+            exec.submit(() -> {
+                try {
+                    gate.await(); // all threads block here, then stampede together
+                    bigTtlCache.put(key, "quote-" + key);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } finally {
+                    done.countDown();
+                }
+            });
+        }
+        gate.countDown(); // release the stampede
+        assertTrue(done.await(5, TimeUnit.SECONDS), "threads did not complete within 5 seconds");
+    }
+
+    assertEquals(n, bigTtlCache.size());
+    for (int i = 0; i < n; i++) {
+        assertEquals("quote-" + i, bigTtlCache.get(i).orElseThrow(),
+                "key " + i + " was lost under concurrent put");
+    }
+}
+```
+
+### Implement it
+
+The store is a `ConcurrentHashMap<K, Entry<V>>`, where `Entry` is a private record pairing the value with its write timestamp. `put` is a single unconditional map write that always re-stamps — that unconditionality is *why* overwrite resets the TTL for free. `get` (and `size`) each independently re-check age and lazily purge, using the conditional two-arg `remove` so a reader never deletes a fresher write it raced past.
+
+```java
+private record Entry<V>(V value, long storedAt) {}
+
+private final long ttlNanos;
+private final LongSupplier clock;
+private final ConcurrentHashMap<K, Entry<V>> entries = new ConcurrentHashMap<>();
+
+public QuoteCache(long ttlNanos) {
+    this(ttlNanos, System::nanoTime);
+}
+
+public QuoteCache(long ttlNanos, LongSupplier clock) {
+    if (ttlNanos <= 0) {
+        throw new IllegalArgumentException("ttlNanos must be positive: " + ttlNanos);
+    }
+    this.ttlNanos = ttlNanos;
+    this.clock = clock;
+}
+
+public void put(K key, V value) {
+    entries.put(key, new Entry<>(value, clock.getAsLong()));
+}
+
+public Optional<V> get(K key) {
+    Entry<V> entry = entries.get(key);
+    if (entry == null) {
+        return Optional.empty();
+    }
+    if (isExpired(entry, clock.getAsLong())) {
+        // Conditional remove: only delete if the map still holds this exact (now-expired)
+        // entry. If a concurrent put() already replaced it with a fresh one, that fresh
+        // entry must survive — we'd otherwise race-delete a live write.
+        entries.remove(key, entry);
+        return Optional.empty();
+    }
+    return Optional.of(entry.value());
+}
+
+public int size() {
+    long now = clock.getAsLong();
+    int live = 0;
+    for (var mapEntry : entries.entrySet()) {
+        Entry<V> entry = mapEntry.getValue();
+        if (isExpired(entry, now)) {
+            entries.remove(mapEntry.getKey(), entry);
+        } else {
+            live++;
+        }
+    }
+    return live;
+}
+
+public boolean containsKey(K key) {
+    return get(key).isPresent(); // reuses get()'s lazy-purge path
+}
+
+private boolean isExpired(Entry<V> entry, long now) {
+    return now - entry.storedAt() >= ttlNanos;
+}
+```
+
+- **Concurrency mechanism:** `ConcurrentHashMap` gives lock-free-ish `put`/`get`; the only hand-written correctness step is the conditional `remove(key, entry)` in the expiry path, which is a compare-and-remove keyed on object identity of the exact stale entry.
+- **Complexity:** O(1) for `put`/`get`/`containsKey` (hash lookup); O(n) for `size()` since it must scan every entry to separate live from stale — there is no cheaper way to answer "how many are live right now" without an active reaper maintaining a running count.
+- **Key gotcha:** `containsKey` must route through `get` (or duplicate its expiry+purge logic) rather than a bare `entries.containsKey(key)` — otherwise a stale entry that hasn't been touched yet would report as present.
+
+### Common mistakes & senior signal
+
+- **Returning an expired value.** Checking `entries.containsKey(key)` (or reading the map directly) without re-validating age against "now" serves a price that is provably stale — the exact bug this cache exists to prevent. Every read path must re-check the deadline, every time.
+- **Unconditional remove racing an overwrite.** `if (isExpired(entry, now)) entries.remove(key);` looks like harmless cleanup but is a real race: if a concurrent `put` refreshed that key between the staleness check and the remove, the unconditional remove deletes the *fresh* entry the other thread just wrote. The fix is the two-arg conditional `remove(key, entry)`, which only deletes if the map still maps to that exact stale object.
+- **Calling `System.nanoTime()` inline instead of injecting the clock.** It compiles and passes a demo, but makes the exact-boundary and overwrite-reset tests impossible to write deterministically — you'd be at the mercy of real elapsed wall-clock time in a unit test. Injecting a `LongSupplier` (defaulting to `System::nanoTime`) is what makes `AtomicLong`-driven tests possible at all.
+- **Confusing TTL eviction with LRU/LFU.** A candidate who reaches for "evict the least-recently-used entry when the map gets big" has solved a capacity problem, not a freshness problem — this cache has no capacity bound and must evict *purely* on age, independent of how often (or recently) an entry was read.
+- **Getting the boundary backwards.** Treating `age == ttlNanos` as still valid (using `>` instead of `>=`) is a subtle off-by-one that a boundary test catches immediately; state and justify the inclusive choice before writing the comparison.
+- **Ignoring the memory cost of lazy expiry.** A senior flags, unprompted, that a cold key nobody reads again lingers in the map forever under pure lazy expiry, and names the fix: an active reaper (`ScheduledExecutorService` sweep, or a `DelayQueue<K>` ordered by deadline, drained periodically) to reclaim memory even for abandoned keys — and, separately, a per-entry-TTL override on `put` for symbols with different freshness SLAs instead of one fixed TTL for the whole cache.
+
+## Odds Converter — Decimal · Fractional · American
+
+### Summary
+
+**What this topic covers**
+This kata builds an `OddsConverter` that translates a betting price between the three quoting
+conventions bookmakers actually use — **decimal** (`3.50`), **fractional** (`5/2`), and **American /
+moneyline** (`+150` / `-200`) — plus **implied probability** (`0.2857`). Every conversion must be
+*exact and round-trippable*: decimal → fractional → decimal must return (within a fixed tolerance)
+what you started with, and the even-money price must agree across all four representations at once.
+It reads like a small formula exercise, but it is really a kata about choosing the right numeric type
+and a fixed rounding policy — the interesting bugs live in what happens when you reach for `double`
+instead of `BigDecimal`, not in the formulas themselves.
+
+**Mental model**
+Odds are fractions dressed up in three display conventions, and a sportsbook that quotes them
+inconsistently — or drifts a hundredth of a cent through repeated conversions — leaks money at
+volume. Decimal odds are "multiply your stake by this to get total payout"; fractional odds are "you
+win this much per that much staked"; American odds are a US convention where positive means "profit
+per $100 staked" and negative means "stake needed to profit $100". All three pivot through decimal
+odds — the common currency — with an `xFromDecimal`/`decimalFromX` pair per format. Because
+`1.0 / 3.0` has no exact binary (`double`) representation and repeated float conversions compound that
+drift, every calculation goes through `BigDecimal` with one fixed scale and `RoundingMode`, so the
+rounding policy is a design decision you can point to, not an accident of IEEE 754.
+
+**Key terms**
+- **decimal odds** — `stake × decimalOdds = total payout` (stake included); e.g. `3.5` pays `$3.50`
+  per `$1` staked. The pivot format every other conversion routes through.
+- **fractional odds** — `numerator/denominator = profit per denominator staked` (stake excluded);
+  e.g. `5/2` wins `$5` profit per `$2` staked. UK/Irish board convention.
+- **American / moneyline odds** — positive = profit per `$100` staked (`+150` → `$150` profit on
+  `$100`); negative = stake needed to profit `$100` (`-200` → stake `$200` to profit `$100`). Has no
+  `0`, no `-100 … +100` gap — the scale jumps straight from `-100` to `+100`.
+- **implied probability** — `1 / decimalOdds`; the break-even win probability the price encodes,
+  ignoring the bookmaker's margin.
+- **even-money boundary** — decimal `2.0` ≡ fractional `1/1` ≡ American `+100` ≡ probability `0.5`;
+  the coin-flip price where American's sign flips.
+- **`BigDecimal.compareTo` vs `equals`** — `compareTo` compares numeric value; `equals` also compares
+  *scale*, so `2.50` and `2.5` are numerically equal but not `.equals()`. Every comparison here uses
+  `compareTo`.
+- **`HALF_UP` rounding** — round half away from zero, the convention a bettor checking a price by hand
+  expects; `HALF_EVEN` (banker's rounding) is defensible for accounting but surprising here.
+- **exact fraction reduction** — recovering lowest-terms `numerator/denominator` from a `BigDecimal`
+  via its unscaled integer value and `BigInteger.gcd`, rather than looping or casting through `double`.
+
+**Why interviewers ask this**
+It looks like a "just write the formulas" exercise, which is the trap: a candidate who reaches for
+`double` sails through the happy-path tests and then fails silently on round-trips or values that
+don't divide evenly. The senior signal is picking `BigDecimal` unprompted, naming *why* (exact
+decimal arithmetic, no float drift, an explicit rounding policy), and catching two sharp edges by
+construction: the even-money sign boundary in American odds, and `equals` vs `compareTo` when
+comparing two `BigDecimal`s. It also rewards clean API taste — small, single-purpose conversion
+methods plus one shared validation guard, rather than one "convert(from, to)" god method with a
+format enum and a switch inside.
+
+**Common confusions**
+- *"`double` is fine, I'll just round at the end."* — Rounding once doesn't undo drift accumulated
+  earlier; `1.0/3.0` is already wrong before you round it, and chained conversions compound the error.
+- *"`BigDecimal.equals` and `compareTo` are interchangeable."* — `new BigDecimal("2.50").equals(new
+  BigDecimal("2.5"))` is `false` because scale differs, even though the values are equal. Use
+  `compareTo` everywhere, tests included.
+- *"American odds go smoothly from negative to positive through zero."* — There is no `0` and no line
+  between `-100` and `+100`. `decimalOdds == 2.0` is the pivot and belongs on the *positive* branch
+  (`+100`), not the negative one.
+- *"5/2 and 10/4 are different fractional prices."* — Same price; a converter that doesn't reduce to
+  lowest terms produces `10/4` on one path and `5/2` on another, breaking equality checks.
+- *"Any decimal odds value is valid."* — Odds `<= 1` (or a probability outside `(0, 1)`, or American
+  `0`) are out of domain and must throw, not silently produce nonsense.
+
+**What follows from this topic**
+This is the arithmetic core of an odds-quoting/pricing service; natural extensions are the
+bookmaker's **margin/overround** (implied probabilities across a market summing to `> 1`) and **vig
+removal** — normalising those probabilities back to a fair book. It also generalises: Hong Kong,
+Indonesian, and Malaysian odds are each another linear transform of decimal odds, slotting in as more
+`xFromDecimal`/`decimalFromX` pairs once the `BigDecimal`-first, fixed-scale discipline is
+established. The scale/rounding lesson generalises anywhere money or exact fractions are modelled —
+ledgers, interest, currency conversion.
+
+### Clarify & design the API
+
+Questions to settle before writing a line of logic:
+
+- **Numeric type — `double` or `BigDecimal`?** Odds and probabilities are exact fractions with no
+  exact binary form; at bookmaker volume even a fraction-of-a-cent rounding error is real money.
+  `BigDecimal` throughout, never `double`.
+- **What's the pivot format?** Decimal odds — every other format converts *through* decimal
+  (`xFromDecimal(decimal)` / `decimalFromX(x)`), so there is one canonical representation instead of
+  N² direct conversions.
+- **Rounding policy?** A single fixed scale and `RoundingMode` (this kata: 4 decimal places,
+  `HALF_UP`) applied everywhere, so results are deterministic and the policy is a named, testable
+  decision rather than incidental.
+- **What's invalid, per format?** Decimal odds `<= 1` (odds must at least return the stake);
+  probability outside the open interval `(0, 1)`; American odds of exactly `0` (no such price exists).
+  Reject all of these with `IllegalArgumentException` up front.
+- **Does fractional odds need to reduce to lowest terms?** Yes — `10/4` and `5/2` are the same price;
+  a `Fractional` produced by the converter must always be in lowest terms so equal prices compare
+  equal.
+
+Commit to this surface:
+
+```java
+public record Fractional(int numerator, int denominator) {
+    public Fractional { /* rejects numerator/denominator <= 0 */ }
+    public static Fractional parse(String text); // "5/2" -> Fractional(5, 2)
+}
+
+public final class OddsConverter {
+    BigDecimal decimalFromFractional(Fractional fractional);
+    BigDecimal decimalFromAmerican(int american);
+    BigDecimal impliedProbability(BigDecimal decimalOdds);
+    BigDecimal decimalFromProbability(BigDecimal probability);
+    Fractional fractionalFromDecimal(BigDecimal decimalOdds);
+    int americanFromDecimal(BigDecimal decimalOdds);
+}
+```
+
+Six small conversion methods, each one direction, each validating its own input — no shared mutable
+state, no format enum, no god method.
+
+### Write the tests
+
+Write these first: textbook values for each conversion, the even-money boundary that must agree
+across all four representations at once, fractional reduction, round-trips within a tolerance, then
+the validation guards.
+
+**Textbook conversions — pin the formulas against known bookmaker prices.**
+
+```java
+@Test
+void decimal_from_fractional_matches_textbook_values() {
+    assertBigDecimalEquals(new BigDecimal("3.5000"), converter.decimalFromFractional(new Fractional(5, 2)));
+    assertBigDecimalEquals(new BigDecimal("2.0000"), converter.decimalFromFractional(new Fractional(1, 1)));
+}
+
+@Test
+void decimal_from_american_handles_both_signs() {
+    assertBigDecimalEquals(new BigDecimal("2.5000"), converter.decimalFromAmerican(150));
+    assertBigDecimalEquals(new BigDecimal("1.5000"), converter.decimalFromAmerican(-200));
+}
+```
+
+Comparisons go through a helper that calls `compareTo`, not `assertEquals` on the `BigDecimal`
+directly — `2.0000` and `2.0` are numerically equal but not `.equals()`:
+
+```java
+private static void assertBigDecimalEquals(BigDecimal expected, BigDecimal actual) {
+    assertEquals(0, expected.compareTo(actual), () -> "expected " + expected + " but was " + actual);
+}
+```
+
+**The even-money boundary — the one test that pins all four formats against each other at once.**
+This is the American sign-flip trap made explicit: `2.0` must land on the *positive* branch.
+
+```java
+@Test
+void even_money_boundary_agrees_across_all_four_representations() {
+    assertBigDecimalEquals(new BigDecimal("2.0000"), converter.decimalFromFractional(new Fractional(1, 1)));
+    assertBigDecimalEquals(new BigDecimal("2.0000"), converter.decimalFromAmerican(100));
+    assertEquals(100, converter.americanFromDecimal(new BigDecimal("2.0")));
+    assertEquals(1, converter.fractionalFromDecimal(new BigDecimal("2.0")).numerator());
+    assertEquals(1, converter.fractionalFromDecimal(new BigDecimal("2.0")).denominator());
+    assertBigDecimalEquals(new BigDecimal("0.5000"), converter.impliedProbability(new BigDecimal("2.0")));
+}
+```
+
+**Fractional reduction — 10/4 and 5/2 are the same price and must reduce identically.**
+
+```java
+@Test
+void fractional_from_decimal_reduces_to_lowest_terms() {
+    BigDecimal decimalOdds = converter.decimalFromFractional(new Fractional(10, 4));
+    Fractional reduced = converter.fractionalFromDecimal(decimalOdds);
+    assertEquals(5, reduced.numerator());
+    assertEquals(2, reduced.denominator());
+}
+```
+
+**Round-trips — a fixed-tolerance check, not exact equality, since rounding is lossy by design.**
+
+```java
+@Test
+void round_trip_decimal_american_decimal_stays_within_tolerance() {
+    BigDecimal original = new BigDecimal("2.5");
+    int american = converter.americanFromDecimal(original);
+    BigDecimal roundTripped = converter.decimalFromAmerican(american);
+    assertWithinTolerance(original, roundTripped);
+}
+```
+
+`assertWithinTolerance` asserts `expected.subtract(actual).abs().compareTo(TOLERANCE) <= 0` — the
+right shape for a lossy round-trip through an integer moneyline, where exact equality would be too
+strict.
+
+**Validation — every out-of-domain input throws, including the American-zero and Fractional-record
+edges.**
+
+```java
+@Test void american_odds_of_zero_is_rejected() {
+    assertThrows(IllegalArgumentException.class, () -> converter.decimalFromAmerican(0));
+}
+@Test void fractional_rejects_non_positive_terms() {
+    assertThrows(IllegalArgumentException.class, () -> new Fractional(0, 2));
+    assertThrows(IllegalArgumentException.class, () -> new Fractional(5, -2));
+}
+```
+
+### Implement it
+
+Every method funnels through decimal odds and one fixed rounding policy: `SCALE = 4`,
+`RoundingMode.HALF_UP`.
+
+**Decimal ↔ fractional and American** are direct formula translations:
+
+```java
+public BigDecimal decimalFromFractional(Fractional fractional) {
+    return BigDecimal.valueOf(fractional.numerator())
+            .divide(BigDecimal.valueOf(fractional.denominator()), SCALE, ROUNDING)
+            .add(BigDecimal.ONE);
+}
+
+public BigDecimal decimalFromAmerican(int american) {
+    if (american == 0) throw new IllegalArgumentException("american odds cannot be zero");
+    if (american > 0) {
+        return BigDecimal.valueOf(american).divide(HUNDRED, SCALE, ROUNDING).add(BigDecimal.ONE);
+    }
+    return HUNDRED.divide(BigDecimal.valueOf(-american), SCALE, ROUNDING).add(BigDecimal.ONE);
+}
+```
+
+**Implied probability** is `1 / decimalOdds`, guarded by a shared `requireValidDecimalOdds`:
+
+```java
+public BigDecimal impliedProbability(BigDecimal decimalOdds) {
+    requireValidDecimalOdds(decimalOdds);
+    return BigDecimal.ONE.divide(decimalOdds, SCALE, ROUNDING);
+}
+```
+
+**American from decimal is where the even-money boundary lives** — the branch is `>= 2.0`, not
+`> 2.0`, so `2.0` lands on `+100`:
+
+```java
+public int americanFromDecimal(BigDecimal decimalOdds) {
+    requireValidDecimalOdds(decimalOdds);
+    BigDecimal diff = decimalOdds.subtract(BigDecimal.ONE);
+    if (decimalOdds.compareTo(TWO) >= 0) {
+        return diff.multiply(HUNDRED).setScale(0, ROUNDING).intValueExact();
+    }
+    BigDecimal ratio = HUNDRED.divide(diff, SCALE, ROUNDING);
+    return -ratio.setScale(0, ROUNDING).intValueExact();
+}
+```
+
+**Fractional reduction reads the `BigDecimal` as an exact integer ratio**, not a looped search for a
+denominator and not a `double` cast — `unscaledValue() / 10^scale`, then divide both terms by their
+`BigInteger.gcd`:
+
+```java
+private static Fractional reduce(BigDecimal value) {
+    BigDecimal normalized = value.stripTrailingZeros();
+    int scale = normalized.scale();
+    BigInteger numerator = scale <= 0
+            ? normalized.unscaledValue().multiply(BigInteger.TEN.pow(-scale))
+            : normalized.unscaledValue();
+    BigInteger denominator = scale <= 0 ? BigInteger.ONE : BigInteger.TEN.pow(scale);
+    BigInteger gcd = numerator.gcd(denominator);
+    return new Fractional(numerator.divide(gcd).intValueExact(), denominator.divide(gcd).intValueExact());
+}
+```
+
+`3.50 - 1 = 2.50 = 250/100`, `gcd(250, 100) = 50`, reduces to `5/2` — exact, no floating-point
+candidate search.
+
+- **Rounding policy:** one `SCALE`/`RoundingMode` pair applied at every `divide`, so results are
+  deterministic and the policy is a single named constant, not scattered magic numbers.
+- **Complexity:** O(1) per conversion — a handful of `BigDecimal` operations and one `gcd`.
+- **Key gotcha:** `requireValidDecimalOdds` (odds `> 1`) is shared across every method that consumes
+  decimal odds, so a bad input is rejected once, consistently, rather than re-checked (or missed) per
+  method.
+
+### Common mistakes & senior signal
+
+- **Reaching for `double`.** Passes every hand-checked textbook value, then drifts on round-trips or
+  produces a value that's off in the last decimal place under a large batch of conversions. The senior
+  move is `BigDecimal` from the first line, with the "why" (exact decimal arithmetic, explicit
+  rounding) stated unprompted.
+- **`BigDecimal.equals` instead of `compareTo`.** `new BigDecimal("2.0").equals(new
+  BigDecimal("2.0000"))` is `false` — `equals` is scale-sensitive. Every comparison, in the
+  implementation and in tests, must use `compareTo`; forgetting this makes tests flaky depending on
+  incidental trailing zeros.
+- **Getting the even-money sign boundary wrong.** American odds have no `-100`/`+0` gap; the branch
+  must be `decimalOdds >= 2.0` → positive, not `> 2.0`. Off-by-one here silently mis-prices every
+  coin-flip market at exactly the boundary — the one price most likely to appear in a real book.
+- **Skipping fraction reduction.** Returning `10/4` for one input and `5/2` for another (the same
+  price) breaks equality checks and looks wrong on a board. Reduce with `BigInteger.gcd` from the
+  exact unscaled value, not a `double`-cast search for a denominator.
+- **Missing validation.** Decimal odds `<= 1`, probability outside `(0, 1)`, and American odds of
+  exactly `0` are all out-of-domain inputs that must throw `IllegalArgumentException`, not silently
+  produce a nonsense price or divide-by-zero.
+- **Extensions worth naming unprompted:** removing the vig (normalising a market's implied
+  probabilities that sum to `> 1` back to a fair book) and computing the bookmaker's margin/overround
+  — both build directly on `impliedProbability`, and naming them shows you see this as one piece of a
+  pricing service, not an isolated formula exercise.
+
+## Overround / De-vig
+
+### Summary
+
+**What this topic covers**
+This kata builds an `Overround` class that measures a bookmaker's built-in margin (the "overround",
+"vig", or "juice") from a set of decimal odds, and strips that margin back out to recover the
+underlying *fair* probabilities — the ones a perfectly efficient, zero-margin market would quote.
+Every decimal odds price implies a probability, `p = 1/odds`; sum those across every outcome and a
+fair book totals exactly `1.0`. A real bookmaker shortens every price slightly so the book sums to
+*more* than `1.0` — that excess is the overround, the house edge baked into the prices. You design a
+small four-method API (`bookSum`, `overround`, `fairProbabilities`, `fairOdds`) and implement three
+industry-standard de-vig methods — `PROPORTIONAL`, `ADDITIVE`, `POWER` — each a different model of
+*how* the bookmaker distributed the margin across outcomes.
+
+**Mental model**
+Think of a two-horse race priced at 1.90 / 1.90. Each price implies `1/1.90 ≈ 0.5263`; summed, the
+book totals `1.0526` — a 5.26% overround. If both horses were truly 50/50, a fair market would price
+them at 2.00 / 2.00. De-vigging recovers the fair split from the shortened prices, and the three
+methods differ in *where* they assume the margin was loaded. `PROPORTIONAL` spreads it evenly in
+proportion to each outcome's own probability (simple, always well-behaved). `ADDITIVE` shaves an equal
+*absolute* slice off every outcome regardless of size — which can drive a longshot negative, a known
+failure mode. `POWER` reflects the "favourite-longshot bias" — bookmakers load more margin onto
+longshots — by raising every implied probability to a common exponent `k` solved so they sum to `1.0`.
+
+**Key terms**
+- **decimal odds / implied probability** — a price where `1/odds` is the implied probability; e.g.
+  `2.00` implies 50%.
+- **book sum** — `Σ 1/oddsᵢ` across a market; `> 1.0` for a real (over-round) book.
+- **overround / vig / juice** — `bookSum − 1`, the bookmaker's built-in margin, e.g. `0.05` = 5%.
+- **de-vig / fair probabilities** — probabilities with the margin removed, summing to exactly `1.0`.
+- **PROPORTIONAL / ADDITIVE / POWER** — the three margin-removal models: uniform scale-down; equal
+  absolute subtraction (clamped at zero); a common exponent `k` solved so `Σ pᵢ^k = 1`.
+- **favourite-longshot bias** — the empirical observation that bookmakers price longshots with
+  proportionally more margin than favourites; what `POWER` models.
+- **arbitrage / negative overround** — a mispriced book where `bookSum < 1`; backing every outcome
+  locks in profit.
+
+**Why interviewers ask this**
+It is a compact test of numerical discipline in a real financial domain: candidates who reach for
+`double` throughout get bitten by compounding rounding error, and candidates who don't renormalise
+after adjustment ship probabilities that silently don't sum to 1 — the one invariant the class exists
+to guarantee. It also probes root-finding competence: `POWER` has no closed form, so the candidate
+must recognise a monotonic function, bracket a root, and bisect with a hard iteration cap rather than
+trust an unbounded loop. The senior signal is naming each method's known weakness unprompted, rather
+than presenting one formula as "the" answer.
+
+**Common confusions**
+- *"The raw `1/odds` values already sum to 1."* — Only for a theoretical fair book; a real market's
+  implied probabilities sum to `1 + overround`, precisely the quantity being measured.
+- *"Any de-vig method recovers the one 'true' probability."* — Each is a heuristic assumption about
+  margin distribution; they disagree except in symmetric (equal-price) books.
+- *"The additive method is safe because it's the simplest."* — It is the *most* fragile: once the
+  equal absolute share exceeds a longshot's tiny implied probability, it goes negative and must be
+  clamped — exactly what forces the renormalisation step.
+
+**What follows from this topic**
+Shin's method is the natural next step — a fourth de-vig model that solves for an implied
+insider-trading fraction rather than a flat exponent, strictly more accurate than `POWER` for markets
+with informed money, at the cost of a 2D solve instead of a 1D bisection. The same `bookSum` primitive
+also powers arbitrage detection: flag `overround < 0` as a distinctly mispriced, arbable book.
+
+### Clarify & design the API
+
+Questions to settle before writing a line of logic:
+
+- **Which de-vig method(s) must be supported?** All three classic ones — `PROPORTIONAL`, `ADDITIVE`,
+  `POWER` — as a caller-selected `Method` enum, not a single hard-coded formula.
+- **Two-way or N-way markets?** Generalise from the start: `List<BigDecimal>` of any size, not a
+  fixed pair — a 3-way (soccer) or 20-way (horse race) market must work identically.
+- **Must fair probabilities sum to exactly 1?** Yes — the contract's whole point. Every method's raw
+  output gets renormalised by its own total, so the invariant holds even where a method's construction
+  (additive, after clamping) would otherwise fall short of 1.
+- **What counts as invalid input?** An empty odds list, and any single price `<= 1.0` (certainty, or
+  not a valid decimal price at all) — both throw `IllegalArgumentException` before arithmetic runs.
+- **Precision model?** `BigDecimal` at a fixed working scale for all the "real" arithmetic — this is
+  money-adjacent math where `double`'s binary rounding of fractions like `1/3` compounds across a
+  multi-leg book. The deliberate exception is `POWER`'s iterative solve, done in `double`.
+
+Commit to this surface:
+
+```java
+public final class Overround {
+    BigDecimal bookSum(List<BigDecimal> decimalOdds);                              // Σ 1/oddsᵢ
+    BigDecimal overround(List<BigDecimal> decimalOdds);                            // bookSum − 1
+    List<BigDecimal> fairProbabilities(List<BigDecimal> decimalOdds, Method m);    // sum to 1
+    List<BigDecimal> fairOdds(List<BigDecimal> decimalOdds, Method m);             // 1/p
+}
+
+public enum Method { PROPORTIONAL, ADDITIVE, POWER }
+```
+
+### Write the tests
+
+Pin the measurement contract first (`bookSum`/`overround`), then the de-vig invariant every method
+must satisfy, then each method's distinguishing behaviour, then validation.
+
+**Measurement — a known two-way book has a known book sum and overround.**
+
+```java
+@Test
+void book_sum_and_overround_on_a_known_two_way_book() {
+    List<BigDecimal> odds = List.of(bd("1.90"), bd("1.90"));
+    assertEquals(1.0526315790, overround.bookSum(odds).doubleValue(), 1e-8);
+    assertEquals(0.0526315790, overround.overround(odds).doubleValue(), 1e-8);
+}
+```
+
+**The de-vig invariant — every method's output sums to exactly 1, on a fair book and a real one.**
+A fair (zero-margin) book is the sanity check every method must agree on.
+
+```java
+@Test
+void fair_book_has_zero_overround_and_every_method_agrees_on_fifty_fifty() {
+    List<BigDecimal> odds = List.of(bd("2.0"), bd("2.0"));
+    assertEquals(0.0, overround.overround(odds).doubleValue(), DELTA);
+
+    for (Method method : Method.values()) {
+        List<BigDecimal> fair = overround.fairProbabilities(odds, method);
+        assertEquals(0.5, fair.get(0).doubleValue(), DELTA, method + " outcome 0");
+        assertEquals(0.5, fair.get(1).doubleValue(), DELTA, method + " outcome 1");
+    }
+}
+
+@Test
+void every_de_vig_method_returns_probabilities_summing_to_one_for_a_three_way_market() {
+    List<BigDecimal> odds = List.of(bd("1.90"), bd("3.60"), bd("4.20"));
+    for (Method method : Method.values()) {
+        assertEquals(1.0, sum(overround.fairProbabilities(odds, method)), DELTA, method + " sums to 1");
+    }
+}
+```
+
+**Method-specific behaviour — proportional gives exact even shares; additive removes an equal
+absolute slice; power converges and preserves the favourite's ranking.**
+
+```java
+@Test
+void proportional_method_gives_exact_values_on_a_simple_book() {
+    List<BigDecimal> odds = List.of(bd("2.0"), bd("2.0"), bd("2.0"));
+    List<BigDecimal> fair = overround.fairProbabilities(odds, Method.PROPORTIONAL);
+    for (BigDecimal p : fair) {
+        assertEquals(1.0 / 3.0, p.doubleValue(), DELTA);
+    }
+}
+
+@Test
+void power_method_converges_and_its_probabilities_sum_to_one() {
+    List<BigDecimal> odds = List.of(bd("1.50"), bd("4.00"), bd("6.00"));
+    List<BigDecimal> fair = overround.fairProbabilities(odds, Method.POWER);
+    assertEquals(1.0, sum(fair), DELTA);
+    // Favourite (shortest odds) should still have the highest fair probability.
+    assertTrue(fair.get(0).compareTo(fair.get(1)) > 0);
+    assertTrue(fair.get(1).compareTo(fair.get(2)) > 0);
+}
+```
+
+**Fair odds are the reciprocal of fair probabilities, and validation rejects bad prices and empty
+markets.**
+
+```java
+@Test
+void fair_odds_are_the_reciprocal_of_fair_probabilities() {
+    List<BigDecimal> odds = List.of(bd("1.90"), bd("3.60"), bd("4.20"));
+    List<BigDecimal> fairProbabilities = overround.fairProbabilities(odds, Method.PROPORTIONAL);
+    List<BigDecimal> fairOdds = overround.fairOdds(odds, Method.PROPORTIONAL);
+    for (int i = 0; i < odds.size(); i++) {
+        assertEquals(1.0 / fairProbabilities.get(i).doubleValue(), fairOdds.get(i).doubleValue(), 1e-6);
+    }
+}
+
+@Test
+void odds_at_or_below_one_and_empty_markets_are_rejected() {
+    assertThrows(IllegalArgumentException.class, () -> overround.bookSum(List.of(bd("1.0"), bd("2.0"))));
+    assertThrows(IllegalArgumentException.class, () -> overround.bookSum(List.of(bd("0.5"), bd("2.0"))));
+    assertThrows(IllegalArgumentException.class, () -> overround.bookSum(List.of()));
+    assertThrows(IllegalArgumentException.class,
+            () -> overround.fairProbabilities(List.of(), Method.POWER));
+}
+```
+
+### Implement it
+
+`bookSum` and `overround` are one line each once implied probabilities exist; the real work is the
+three de-vig adjustments and the shared `normalize` renormalisation that closes out every method.
+
+```java
+public BigDecimal bookSum(List<BigDecimal> decimalOdds) {
+    validate(decimalOdds);
+    return sum(impliedProbabilities(decimalOdds));
+}
+
+public BigDecimal overround(List<BigDecimal> decimalOdds) {
+    return bookSum(decimalOdds).subtract(BigDecimal.ONE);
+}
+
+public List<BigDecimal> fairProbabilities(List<BigDecimal> decimalOdds, Method method) {
+    validate(decimalOdds);
+    List<BigDecimal> implied = impliedProbabilities(decimalOdds);
+    return switch (method) {
+        case PROPORTIONAL -> normalize(implied);
+        case ADDITIVE -> normalize(additiveAdjust(implied));
+        case POWER -> normalize(powerAdjust(implied));
+    };
+}
+```
+
+**Proportional** is `normalize` applied directly to the implied probabilities — divide every value by
+the group's own total so it sums to 1. **Additive** subtracts an equal absolute share of the margin
+from every outcome and clamps at zero before that same `normalize` call runs:
+
+```java
+private static List<BigDecimal> additiveAdjust(List<BigDecimal> implied) {
+    BigDecimal margin = sum(implied).subtract(BigDecimal.ONE);
+    BigDecimal share = margin.divide(BigDecimal.valueOf(implied.size()), SCALE, ROUNDING);
+    List<BigDecimal> adjusted = new ArrayList<>(implied.size());
+    for (BigDecimal p : implied) {
+        BigDecimal shifted = p.subtract(share);
+        adjusted.add(shifted.max(BigDecimal.ZERO));
+    }
+    return adjusted;
+}
+```
+
+**Power** raises every implied probability to an exponent `k` found by bisection, then — like the
+other two — gets renormalised. The exponent has no closed form, so it is solved numerically by
+exploiting one fact: each `pᵢ ∈ (0, 1)`, so `pᵢ^k` is strictly *decreasing* in `k`. That monotonicity
+guarantees `f(k) = Σ pᵢ^k − 1` has exactly one root, so a single bracket found by doubling `hi` until
+`f(hi) ≤ 0`, then plain bisection — no Newton step, no derivative — converges reliably regardless of
+whether the book has positive or negative overround:
+
+```java
+private static double solveExponent(List<BigDecimal> implied) {
+    double[] p = toDoubles(implied);
+    double lo = 0.0, hi = 1.0;
+    while (residual(p, hi) > 0 && hi < 1e6) hi *= 2;   // bracket the root
+
+    for (int i = 0; i < MAX_BISECTION_ITERATIONS; i++) {
+        double mid = (lo + hi) / 2;
+        double residual = residual(p, mid);
+        if (Math.abs(residual) < BISECTION_TOLERANCE) return mid;
+        if (residual > 0) lo = mid; else hi = mid;
+    }
+    return (lo + hi) / 2; // best estimate if the loop exhausts without hitting tolerance
+}
+```
+
+- **Precision:** `BigDecimal` at `SCALE = 10` with `HALF_UP` for every "real" step; `double` only
+  inside the bisection, converted back to `BigDecimal` at the end. `hi < 1e6` and
+  `MAX_BISECTION_ITERATIONS` both cap their loops — no unbounded iteration on pathological input.
+- **Why renormalise always:** for `PROPORTIONAL`/`POWER` it is close to a no-op; for `ADDITIVE` it is
+  load-bearing — clamping a longshot at zero leaves the remaining mass short of 1.
+- **Complexity:** `PROPORTIONAL`/`ADDITIVE` are `O(n)`; `POWER` is `O(n · iterations)`, bounded by
+  `MAX_BISECTION_ITERATIONS` (200), effectively `O(n)` since tolerance (`1e-12`) is hit in a handful
+  of steps.
+
+### Common mistakes & senior signal
+
+- **Forgetting to renormalise.** Returning `additiveAdjust`'s raw clamped output without dividing by
+  its own total ships probabilities that don't sum to 1 — silently breaking the one property a "fair
+  probabilities" method exists to guarantee. Every method must funnel through `normalize`.
+- **Additive going negative on longshots without a floor.** `p − margin/n` for a tiny implied
+  probability and a large margin goes negative; forgetting `.max(BigDecimal.ZERO)` corrupts the whole
+  book. Naming this as a *known weakness* — not a bug to hide — is the senior tell, matching the
+  Javadoc's own callout that `fairOdds` can throw `ArithmeticException` for a longshot clamped to zero.
+- **Power method with no convergence guarantee.** Bisecting without a hard iteration cap risks an
+  infinite loop on pathological input. The correct answer names the monotonicity argument (`pᵢ^k`
+  strictly decreasing in `k`) as *why* plain bisection is safe — no Newton step needed.
+- **Doing the "real" arithmetic in `double`.** Decimal odds and stake math never uses binary floating
+  point: fractions like `1/3` have no exact binary representation and error compounds across a
+  multi-leg book. `BigDecimal` is the default; `double` is the deliberate exception for the bisection.
+- **Treating one method as "the" correct answer.** All three are heuristic assumptions about *where*
+  the margin was loaded. A senior candidate names the trade-off between them and, if asked "which is
+  best," names Shin's method as the more accurate but more expensive extension.
+
+## Cross-Book Arbitrage Detector
+
+### Summary
+
+**What this topic covers**
+This kata builds an `ArbitrageDetector` that shops the best decimal-odds price for every selection in a market across multiple bookmakers, detects when the combined implied probability of those best prices is a risk-free "surebet" (below 100%), and sizes stakes across the selections so the payout is identical whichever one wins — and strictly exceeds the total staked. You design four small public methods (`bestOdds`, `bookSum`, `isArbitrage`, `stakes`, plus `guaranteedProfit`) around one immutable `Quote` record. It is a `BigDecimal` precision-and-correctness kata dressed as a betting-market problem: the interesting work is the strict-inequality arbitrage condition, the missing-selection edge case, and the rounding trade-off when converting theoretical stakes into whole currency cents.
+
+**Mental model**
+Decimal odds `o` mean a stake of 1 returns `o` if the selection wins, so the book is implicitly pricing the outcome's probability at `1/o`. A single honest bookmaker sets its own odds so `Σ(1/oi)` across all selections in a market is slightly *above* 1 — that excess (the "overround" or "vig") is the house edge. But no rule says every book must have the best price on every selection: Book A might have the best price on "Home", Book B the best price on "Away". If you take the *best* price per selection across several competing books, the combined sum can slip *below* 1 — which means the market as a whole is, briefly, offering odds no single rational book would offer alone. At that point there exists a stake split — proportional to each selection's implied probability — that returns the *same* payout no matter which selection wins, and that payout is guaranteed larger than what you staked. This is a real, if narrow and fleeting, source of risk-free profit, and it is the same shape of problem as detecting negative-cost cycles in a graph of exchange rates (FX triangular arbitrage) — implied-probability sum instead of log-rate cycle product.
+
+**Key terms**
+- **decimal (European) odds** — a stake of 1 pays back `odds` on a win; `Quote` rejects any odds `<= 1` because that is not a coherent price.
+- **implied probability** — `1/odds`; what the market's price says the true win probability is, ignoring margin.
+- **overround / vig / bookmaker's margin** — the amount by which one book's own `Σ(1/oi)` exceeds 1; the house edge baked into a single book's own prices.
+- **surebet / arbitrage** — a stake split across selections, sourced from the best price per selection *across* books, that guarantees a positive payout regardless of outcome; requires `bookSum < 1` strictly.
+- **`bookSum`** — `Σ(1/best_oi)` over the selections in the market, using the best (highest) available price per selection.
+- **coverage** — every selection in the market must have at least one quote; a missing selection means the book cannot be hedged and is not tradeable.
+- **equalised payout** — the stake sizing rule `stakeI = totalStake * (1/oI) / bookSum`, chosen so `stakeI * oI` is the same constant `P` for every `i`.
+- **`MathContext` / `RoundingMode.HALF_UP`** — the fixed intermediate precision (`MathContext(12, HALF_UP)`) used for every `BigDecimal` division so implied-probability arithmetic doesn't accumulate representation error; stakes are separately rounded to 2 decimal places (whole cents) at the very end.
+- **strict inequality** — every comparison against 1 uses `BigDecimal.compareTo`, never `==` or floating equality; `bookSum == 1` is break-even, not arbitrage.
+
+**Why interviewers ask this**
+It looks like a finance-flavoured data-structure drill but is really a test of numeric discipline and edge-case discovery under a precise mathematical contract. Juniors reach for `double` and `==`, silently corrupting the strict-inequality boundary that defines the whole feature (break-even vs. genuine edge). The senior signal is treating `BigDecimal` and `compareTo` as non-negotiable from the first line, catching the missing-selection case unprompted (an uncovered outcome is not "assume zero", it's "not tradeable at all"), and reasoning explicitly about what happens when you round stakes to real currency — that rounding *is not free*, it can erode or (rarely) invert the theoretical edge, and a production system needs a residual-assignment strategy to preserve it. It is also a nice probe for whether a candidate can derive a formula (`stakeI = totalStake * (1/oI) / bookSum`) from a stated invariant (equal payout `P`) rather than just memorising it.
+
+**Common confusions**
+- *"`bookSum < 1` and `bookSum <= 1` are basically the same."* — No: `== 1` is break-even (payout equals stake, zero profit); only strict `< 1` is a genuine, profitable arbitrage.
+- *"If a selection has no quote, just skip it / treat its odds as infinite."* — Wrong; an unhedged outcome means you cannot guarantee a payout if it wins, so the whole market is untradeable, not partially tradeable.
+- *"Round each stake independently and it all works out."* — Independent per-selection rounding to cents can perturb payouts by a fraction of a cent each, and in aggregate can erode or flip a razor-thin edge; a real venue rounds all-but-one stake and assigns the last to preserve the total (or rounds down for a safety margin).
+- *"`double` is fine, odds are just numbers."* — `double` binary floating point cannot represent values like `2.10` exactly, and repeated arithmetic across quotes compounds that error right at the strict `< 1` boundary that defines the feature.
+- *"`guaranteedProfit` should be derived from the rounded stakes."* — The solution deliberately reports the *theoretical* unrounded edge from `bookSum`, not a re-derivation from rounded stakes, so it isn't itself subject to rounding erosion; a caller wanting the realized, rounding-adjusted number sums the actual rounded payouts themselves.
+
+**What follows from this topic**
+The natural production evolution is **streaming quotes**: books push price updates continuously, so instead of rescanning the full quote list on every check you maintain a live best-price table per selection and incrementally update `bookSum` as quotes arrive or expire — which turns this from a batch computation into a concurrency problem (guarding the shared best-price table with a lock, or sharding per market). It also connects to transaction-cost modelling (commission/stake-limits haircut the edge before summing), stale-price/slippage risk (re-validate every leg immediately before execution and abort the whole split if one leg fails), and multi-currency books (convert to a common currency before summing implied probabilities). The core technique — reduce a set of competing prices to one canonical "best" value, then test an aggregate invariant with strict comparison — reappears anywhere you shop across venues for a best price (FX, order routing, price comparison engines).
+
+### Clarify & design the API
+
+Questions to settle before writing a line of logic:
+
+- **Best price per selection, or per-book totals?** The market is only arbitrageable if you shop the *best* quote for each selection independently across all books — a single book's own quotes almost never sum below 1. `bestOdds` must group by selection and keep the max, not evaluate books in isolation.
+- **Tie-breaking?** Two books can quote the exact same best price for a selection. Pick a deterministic rule — book name ascending — so the winner doesn't depend on input list order (needed for reproducible tests and reproducible execution routing).
+- **Full selection set vs. whatever quotes happen to exist?** The caller must state the complete selection set for the market (`Set<String> selections`) rather than inferring it from the quotes present, because a *missing* selection is exactly the case that must reject the market — inferring the set from the quotes would silently hide that case.
+- **Strict `< 1`, or `<= 1`?** Strict. Break-even (`bookSum == 1`) returns a payout equal to the stake — zero profit, not an arbitrage.
+- **What does `bookSum` return when the market is uncoverable?** Design choice: return `BigDecimal.ONE` (which reads as "no arbitrage" to the strict `< 1` check) rather than throwing, so callers can inspect the value without a try/catch; `isArbitrage` and `stakes` layer the actual coverage check and throw/false behaviour on top.
+- **Stake rounding?** Real venues only accept whole-cent stakes, so `stakes` rounds to 2 decimal places (`HALF_UP`). Call out — but don't necessarily fix in the kata — that per-selection independent rounding can erode the edge by a fraction of a cent.
+- **What happens when you ask for stakes/profit on a non-arbitrage market?** Split the two: `stakes` has no valid equalising split to return, so it throws `IllegalStateException`; `guaranteedProfit` has a perfectly meaningful answer — zero — so it returns `BigDecimal.ZERO` instead of throwing.
+
+Commit to this surface:
+
+```java
+public final class ArbitrageDetector {
+    Map<String, Quote> bestOdds(List<Quote> quotes);
+    BigDecimal bookSum(List<Quote> quotes, Set<String> selections);
+    boolean isArbitrage(List<Quote> quotes, Set<String> selections);
+    Map<String, BigDecimal> stakes(List<Quote> quotes, Set<String> selections, BigDecimal totalStake);
+    BigDecimal guaranteedProfit(List<Quote> quotes, Set<String> selections, BigDecimal totalStake);
+}
+
+public record Quote(String book, String selection, BigDecimal odds) {
+    // compact constructor rejects blank book/selection and odds <= 1
+}
+```
+
+### Write the tests
+
+Write these first — they pin the arbitrage condition's strict boundary and the coverage rule before any implementation exists. Group them: `bestOdds` selection/tie-break, a genuine multi-way arbitrage with equalised payouts, the non-arbitrage and break-even rejections, the missing-selection rejection, then a profit-consistency check.
+
+**`bestOdds` picks the highest price per selection and breaks ties by book name.**
+
+```java
+@Test
+void best_odds_picks_the_highest_price_per_selection_and_breaks_ties_by_book_name() {
+    List<Quote> quotes = List.of(
+            new Quote("Zeta", "A", new BigDecimal("2.00")),
+            new Quote("Alpha", "A", new BigDecimal("2.00")), // ties Zeta; "Alpha" < "Zeta"
+            new Quote("Beta", "A", new BigDecimal("1.90")),
+            new Quote("Gamma", "B", new BigDecimal("3.50")));
+
+    Map<String, Quote> best = detector.bestOdds(quotes);
+
+    assertEquals("Alpha", best.get("A").book());
+    assertEquals(0, new BigDecimal("2.00").compareTo(best.get("A").odds()));
+    assertEquals("Gamma", best.get("B").book());
+}
+```
+
+**A genuine two-way arbitrage is detected, and the resulting stakes equalise the payout above the stake.** This is the heart of the contract: both payout legs must match exactly, and both must beat the total staked.
+
+```java
+@Test
+void two_way_arbitrage_is_detected_and_stakes_equalise_payout() {
+    List<Quote> quotes = List.of(
+            new Quote("Pinnacle", "A", new BigDecimal("2.10")),
+            new Quote("Bet365", "B", new BigDecimal("2.10")));
+    Set<String> selections = Set.of("A", "B");
+
+    assertTrue(detector.isArbitrage(quotes, selections));
+    assertEquals(0.952380952, detector.bookSum(quotes, selections).doubleValue(), 1e-6);
+
+    BigDecimal totalStake = new BigDecimal("1000.00");
+    Map<String, BigDecimal> stakes = detector.stakes(quotes, selections, totalStake);
+
+    BigDecimal payoutA = stakes.get("A").multiply(new BigDecimal("2.10"));
+    BigDecimal payoutB = stakes.get("B").multiply(new BigDecimal("2.10"));
+
+    assertEquals(0, payoutA.compareTo(payoutB), "payout must be equal whichever selection wins");
+    assertTrue(payoutA.compareTo(totalStake) > 0, "payout must exceed the amount staked");
+
+    BigDecimal profit = detector.guaranteedProfit(quotes, selections, totalStake);
+    assertEquals(0, profit.compareTo(new BigDecimal("50.00")));
+}
+```
+
+**Non-arbitrage (a single book's own market) and exact break-even are both rejected.** The break-even test is the one that actually pins the strict-inequality decision — `1/2.0 + 1/2.0` sums to exactly 1.
+
+```java
+@Test
+void a_single_bookmakers_own_market_is_not_an_arbitrage() {
+    List<Quote> quotes = List.of(
+            new Quote("Pinnacle", "A", new BigDecimal("1.90")),
+            new Quote("Pinnacle", "B", new BigDecimal("1.90")));
+    Set<String> selections = Set.of("A", "B");
+
+    assertFalse(detector.isArbitrage(quotes, selections));
+    assertThrows(IllegalStateException.class,
+            () -> detector.stakes(quotes, selections, new BigDecimal("1000")));
+    assertEquals(0, detector.guaranteedProfit(quotes, selections, new BigDecimal("1000"))
+            .compareTo(BigDecimal.ZERO));
+}
+
+@Test
+void exact_break_even_is_not_an_arbitrage() {
+    List<Quote> quotes = List.of(
+            new Quote("Pinnacle", "A", new BigDecimal("2.0")),
+            new Quote("Bet365", "B", new BigDecimal("2.0")));
+    Set<String> selections = Set.of("A", "B");
+
+    BigDecimal sum = detector.bookSum(quotes, selections);
+    assertEquals(0, sum.compareTo(BigDecimal.ONE), "1/2.0 + 1/2.0 must sum to exactly 1");
+    assertFalse(detector.isArbitrage(quotes, selections));
+}
+```
+
+**A selection with no quote at all is not an arbitrage, even if the priced selections would otherwise clear.**
+
+```java
+@Test
+void a_selection_missing_from_every_quote_is_not_an_arbitrage() {
+    List<Quote> quotes = List.of(new Quote("Pinnacle", "A", new BigDecimal("2.10")));
+    Set<String> selections = Set.of("A", "B"); // "B" has no quote at all
+
+    assertFalse(detector.isArbitrage(quotes, selections));
+    assertThrows(IllegalStateException.class,
+            () -> detector.stakes(quotes, selections, new BigDecimal("1000")));
+}
+```
+
+**`guaranteedProfit` is consistent with `bookSum`, independent of `stakes`' rounding.**
+
+```java
+@Test
+void guaranteed_profit_is_positive_and_consistent_with_the_book_sum() {
+    List<Quote> quotes = List.of(
+            new Quote("Pinnacle", "HOME", new BigDecimal("3.10")),
+            new Quote("Bet365", "DRAW", new BigDecimal("3.10")),
+            new Quote("William Hill", "AWAY", new BigDecimal("3.10")));
+    Set<String> selections = Set.of("HOME", "DRAW", "AWAY");
+    BigDecimal totalStake = new BigDecimal("1000.00");
+
+    BigDecimal sum = detector.bookSum(quotes, selections);
+    BigDecimal profit = detector.guaranteedProfit(quotes, selections, totalStake);
+
+    assertTrue(profit.compareTo(BigDecimal.ZERO) > 0);
+    double expected = totalStake.doubleValue() * (1.0 / sum.doubleValue() - 1.0);
+    assertEquals(expected, profit.doubleValue(), 0.01);
+}
+```
+
+A three-way variant (`HOME`/`DRAW`/`AWAY` each at 3.10 from a different book) asserts three equalised payouts up to a one-cent tolerance — the tolerance itself documents that per-selection rounding is expected to introduce a small perturbation.
+
+### Implement it
+
+`bestOdds` is a single pass keeping the max per selection with a two-part comparator (odds, then book name). `bookSum` and `isArbitrage` both need the coverage check — `does every requested selection have a best quote?` — before touching the arithmetic. `stakes` and `guaranteedProfit` both start by calling `isArbitrage` and branching on its result, but differently: one throws, one returns zero.
+
+```java
+private static final MathContext MC = new MathContext(12, RoundingMode.HALF_UP);
+private static final int STAKE_SCALE = 2;
+
+public Map<String, Quote> bestOdds(List<Quote> quotes) {
+    Map<String, Quote> best = new LinkedHashMap<>();
+    for (Quote quote : quotes) {
+        Quote current = best.get(quote.selection());
+        if (current == null || isBetter(quote, current)) {
+            best.put(quote.selection(), quote);
+        }
+    }
+    return best;
+}
+
+private boolean isBetter(Quote candidate, Quote current) {
+    int cmp = candidate.odds().compareTo(current.odds());
+    if (cmp != 0) {
+        return cmp > 0;
+    }
+    return candidate.book().compareTo(current.book()) < 0; // tie-break: book name ascending
+}
+
+public BigDecimal bookSum(List<Quote> quotes, Set<String> selections) {
+    Map<String, Quote> best = bestOdds(quotes);
+    if (!best.keySet().containsAll(selections)) {
+        return BigDecimal.ONE; // uncoverable market reads as "no arbitrage" downstream
+    }
+    BigDecimal sum = BigDecimal.ZERO;
+    for (String selection : selections) {
+        BigDecimal odds = best.get(selection).odds();
+        sum = sum.add(BigDecimal.ONE.divide(odds, MC), MC);
+    }
+    return sum;
+}
+
+public boolean isArbitrage(List<Quote> quotes, Set<String> selections) {
+    if (selections.isEmpty()) {
+        return false;
+    }
+    Map<String, Quote> best = bestOdds(quotes);
+    if (!best.keySet().containsAll(selections)) {
+        return false;
+    }
+    return bookSum(quotes, selections).compareTo(BigDecimal.ONE) < 0; // strict
+}
+```
+
+Stake sizing derives from the equal-payout invariant `stakeI * oI = P` for every `i`, with `Σ stakeI = totalStake`. Substituting `stakeI = P / oI` into the sum and solving for `P` gives `P = totalStake / bookSum`, so `stakeI = totalStake * (1/oI) / bookSum`:
+
+```java
+public Map<String, BigDecimal> stakes(List<Quote> quotes, Set<String> selections, BigDecimal totalStake) {
+    if (!isArbitrage(quotes, selections)) {
+        throw new IllegalStateException("no arbitrage exists for the given quotes/selections");
+    }
+    Map<String, Quote> best = bestOdds(quotes);
+    BigDecimal sum = bookSum(quotes, selections);
+    Map<String, BigDecimal> stakes = new LinkedHashMap<>();
+    for (String selection : selections) {
+        BigDecimal odds = best.get(selection).odds();
+        BigDecimal impliedShare = BigDecimal.ONE.divide(odds, MC);
+        BigDecimal stake = totalStake.multiply(impliedShare, MC).divide(sum, MC);
+        stakes.put(selection, stake.setScale(STAKE_SCALE, RoundingMode.HALF_UP));
+    }
+    return stakes;
+}
+
+public BigDecimal guaranteedProfit(List<Quote> quotes, Set<String> selections, BigDecimal totalStake) {
+    if (!isArbitrage(quotes, selections)) {
+        return BigDecimal.ZERO;
+    }
+    BigDecimal sum = bookSum(quotes, selections);
+    BigDecimal payout = totalStake.divide(sum, MC);
+    return payout.subtract(totalStake).setScale(STAKE_SCALE, RoundingMode.HALF_UP);
+}
+```
+
+- **`MathContext(12, HALF_UP)`:** every intermediate division (`1/odds`, the stake formula) uses this fixed 12-digit precision so implied-probability arithmetic doesn't drift; only the *final* stake and profit values are separately rounded to 2 decimal places for currency display. Mixing those two roundings up would push imprecision into the strict `< 1` comparison.
+- **Stake rounding is the real subtlety, not an afterthought:** rounding each stake independently to whole cents can make the rounded stakes sum to a few cents more or less than `totalStake`, and since payout-if-`i`-wins is `stakeI * oI`, that rounding also perturbs the equal-payout property and can erode — rarely invert — the theoretical edge. A production system rounds all-but-one stake and assigns the remainder to the last selection (or rounds down and banks the residual as a safety margin) to preserve the edge exactly.
+- **`guaranteedProfit` deliberately does not re-derive from the rounded `stakes` map** — it reports the theoretical, unrounded edge straight from `bookSum`, so it isn't itself subject to the rounding erosion above; a caller who needs the realized, rounding-adjusted profit sums the actual rounded payouts themselves.
+- **Complexity:** `bestOdds` is O(n) in quotes; `bookSum`/`isArbitrage`/`stakes` are O(k) in the selection count on top of that O(n) scan.
+
+### Common mistakes & senior signal
+
+- **Comparing a book's own odds instead of the best-across-books price.** `bookSum` must be computed from `bestOdds` (the max per selection across *all* quotes), never from one book's own quotes in isolation — a single honest book's own market almost never sums below 1; the edge only appears when you shop across competing books.
+- **Treating break-even as an arbitrage.** `bookSum == 1` means the payout exactly equals the stake — zero profit, a guaranteed wash, not a surebet. The strict `< 1` check (via `compareTo`, never `==`) is the entire point of the kata; getting this wrong silently turns "no edge" into "edge".
+- **Ignoring a missing selection.** If any selection in the requested set has no quote at all, the outcome cannot be hedged and the market is not tradeable — `bookSum` returning `BigDecimal.ONE` for that case (rather than silently summing over only the covered selections) is what makes the missing-selection case fail the strict-inequality check safely instead of computing a bogus partial arbitrage.
+- **Stake rounding eroding the edge.** Rounding every stake independently to whole cents can, in aggregate, shave a few cents off the guaranteed payout or (on a razor-thin edge) flip it negative. The senior answer is to round all-but-one stake and assign the remainder to the last selection (or round down and keep the residual as a margin) — and to know `guaranteedProfit` intentionally reports the theoretical, not the rounded-realized, number.
+- **`double` instead of `BigDecimal`.** Decimal odds like `2.10` aren't exactly representable in binary floating point, and the whole feature hinges on a strict comparison at a boundary (`bookSum < 1`) that floating-point error can flip in either direction. `BigDecimal` with a fixed `MathContext` and explicit `RoundingMode` is non-negotiable here, not a style preference.
+- **Extension to name:** a streaming-quotes variant, where books push continuous price updates and the detector maintains a live best-price table per selection, incrementally updating `bookSum` as quotes arrive or expire instead of rescanning the full list — which turns this from a batch computation into a concurrency problem (guarding the shared best-price table with a lock or sharding it per market).
