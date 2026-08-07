@@ -6834,3 +6834,2100 @@ public BigDecimal guaranteedProfit(List<Quote> quotes, Set<String> selections, B
 - **Stake rounding eroding the edge.** Rounding every stake independently to whole cents can, in aggregate, shave a few cents off the guaranteed payout or (on a razor-thin edge) flip it negative. The senior answer is to round all-but-one stake and assign the remainder to the last selection (or round down and keep the residual as a margin) — and to know `guaranteedProfit` intentionally reports the theoretical, not the rounded-realized, number.
 - **`double` instead of `BigDecimal`.** Decimal odds like `2.10` aren't exactly representable in binary floating point, and the whole feature hinges on a strict comparison at a boundary (`bookSum < 1`) that floating-point error can flip in either direction. `BigDecimal` with a fixed `MathContext` and explicit `RoundingMode` is non-negotiable here, not a style preference.
 - **Extension to name:** a streaming-quotes variant, where books push continuous price updates and the detector maintains a live best-price table per selection, incrementally updating `bookSum` as quotes arrive or expire instead of rescanning the full list — which turns this from a batch computation into a concurrency problem (guarding the shared best-price table with a lock or sharding it per market).
+
+## Hash Map From Scratch
+
+### Summary
+
+**What this topic covers**
+This kata builds `MyHashMap<K, V>` — the data structure behind `java.util.HashMap` — from first principles: `put`, `get`, `remove`, `size`, `containsKey`. It is not a wrapper over `java.util.HashMap`; you own the bucket array, the hash spreading, the collision strategy, and the resize. The point is to make the four ideas that make a hash map O(1)-average explicit and testable: the `equals`/`hashCode` contract that key lookup depends on, bit-spreading a hash before masking it to an index, separate chaining for collisions, and load-factor-triggered resize-and-rehash. A `null` key is a first-class, deterministically-routed case, not a special path bolted on.
+
+**Mental model**
+A hash map is an array of buckets where each bucket is a small list (a *chain*) of entries whose keys hashed to that index. `put`/`get`/`remove` all start the same way: spread the key's `hashCode()` (XOR-fold the high 16 bits into the low 16 — `h ^ (h >>> 16)`), then mask it down to a bucket index with `hash & (capacity - 1)`. That AND-mask is only a valid substitute for `% capacity` when capacity is a power of two — it is the reason capacity is always rounded up to the next power of two and only ever doubled. Within a bucket, equality is decided by `equals()`, never `==` — two distinct objects that are `.equals()` must resolve to the *same* entry, which is only possible if they also share a `hashCode()` (the contract). As entries accumulate past `size > capacity * 0.75` (the load factor), the table doubles and every existing node is *rehashed* — re-bucketed against the new capacity — not reallocated, since a node's key/value never changes, only which bucket it lives in.
+
+**Key terms**
+- **`equals`/`hashCode` contract** — objects that are `.equals()` MUST return the same `hashCode()`; violate it and a key silently becomes unfindable after insertion (it hashes to a different bucket than the one it was compared against).
+- **spread hash** — `h ^ (h >>> 16)`, XOR-folding a hash's high bits into its low bits so low-entropy hash codes (small `Integer`s, short `String`s) still spread across a small capacity.
+- **power-of-two capacity** — capacity is always `2^n`; `hash & (capacity - 1)` is then equivalent to `hash % capacity` but is a single AND instead of a division.
+- **separate chaining** — each bucket is a singly linked list of `Node`s; collisions just extend the chain instead of needing a second probe strategy.
+- **load factor** — the fill ratio (`0.75` here) past which the table resizes; it trades memory (lower factor, shorter chains, more buckets) against time (higher factor, longer chains, less memory).
+- **resize / rehash** — doubling the bucket array and re-linking every existing node against the new capacity; O(n) per resize, amortised O(1) per `put` across all resizes (same argument as `ArrayList` growth).
+- **generic array creation** — Java forbids `new Node<K,V>[n]` outright (type erasure means there is no reified `K`/`V` for the JVM to check on array store); the standard workaround is a raw `new Node[n]` cast to `Node<K,V>[]`.
+- **open addressing** — the alternative collision strategy to chaining: probe for the next free *slot* in the array itself instead of linking a list.
+- **tombstone** — a "deleted" marker used in open addressing so a probe sequence doesn't stop early at a hole left by a real deletion.
+- **treeify** — converting a pathologically long bucket chain into a balanced tree (red-black, keyed by `hashCode()`) so a worst-case bucket degrades to O(log n) instead of O(n).
+
+**Why interviewers ask this**
+It tests whether "I know HashMap is O(1)" is backed by an actual mental model or just memorised trivia. The senior signal is naming the `equals`/`hashCode` contract *unprompted* and explaining what breaks if it's violated, knowing *why* capacity must be a power of two (the AND-instead-of-modulo trick), and being able to reason about the amortised cost of resize rather than treating it as magic. It also probes generics fluency: `new Node<K,V>[]` failing to compile, and why the fix is a raw-array cast rather than `new Object[n]` (an `Object[]` is not a `Node[]` — the array-type cast throws `ClassCastException` at the point of use). A candidate who reaches for open addressing or treeification as *extensions* rather than starting requirements shows they know the trade-off space, not just one implementation.
+
+**Common confusions**
+- *"You can hash straight to an index with `hashCode() % capacity`."* — Without spreading, low-entropy hash codes collide far more than necessary once capacity is small; spreading folds high-bit entropy down first.
+- *"Any capacity works as long as you mask with `& (capacity - 1)`."* — That mask is only equivalent to modulo when capacity is a power of two; on a non-power-of-two capacity it silently produces wrong (out-of-range or biased) indices.
+- *"Resize is a reallocation of new entries."* — Nodes are moved, not recreated: the cached `hash` is reused, only the bucket assignment changes.
+- *"`null` keys need a special-cased branch everywhere."* — Here `null` just spreads to hash `0` and is routed to bucket 0 like any other key; no `if (key == null)` scattered through `put`/`get`/`remove`.
+- *"Casting `(Node<K,V>[]) new Object[n]` is fine."* — It compiles but throws `ClassCastException` at runtime; only casting from a raw `Node[]` (not `Object[]`) works, because the runtime array type must actually be `Node[]`.
+
+**What follows from this topic**
+This is the substrate for anything "cache-shaped": the **[[cache]]** kata's LRU builds an eviction policy *on top of* a hash map (hash map for O(1) lookup + a doubly linked list for O(1) recency reordering) — you cannot build an LRU without first having this. It also connects to the interview-standard "design a `HashMap`" and "why does Java forbid generic arrays" questions, and to `ConcurrentHashMap`'s bin-locking story (see the idempotent-processor kata) once you add concurrency on top.
+
+### Clarify & design the API
+
+Questions worth settling before writing logic:
+
+- **What is key identity?** `equals()`, never reference equality — two distinct-but-equal instances (`new String("x")` twice) must resolve to the same entry, matching `java.util.HashMap`'s contract.
+- **Is `null` a valid key?** Yes — deterministically routed to a bucket (here, bucket 0 via `spread(null) == 0`), not rejected or special-cased away.
+- **What triggers resize, and by how much?** Load factor `0.75`; doubling (not incrementing) keeps capacity a power of two, which the index mask depends on.
+- **Initial capacity contract?** Round up to the next power of two; reject non-positive requested capacities.
+- **What does `put` return?** The previous value (or `null` if absent) — mirrors `Map.put`.
+
+Commit to this surface:
+
+```java
+public final class MyHashMap<K, V> {
+    public MyHashMap();                     // default capacity 16
+    public MyHashMap(int initialCapacity);  // rounded up to next power of two
+
+    public V put(K key, V value);           // returns previous value, or null
+    public V get(K key);                    // null if absent
+    public boolean containsKey(K key);
+    public V remove(K key);                 // returns removed value, or null
+    public int size();
+}
+```
+
+### Write the tests
+
+Write these first: basic round-trip, collision handling with a hand-crafted colliding key, `null`-key support, and resize correctness across many entries — including from a tiny initial capacity, to force several resizes.
+
+**Basic contract — round trip, overwrite returns the previous value, missing key is `null`.**
+
+```java
+@Test
+void put_and_get_round_trip() {
+    MyHashMap<String, Integer> map = new MyHashMap<>();
+    map.put("a", 1);
+    assertEquals(1, map.get("a"));
+}
+
+@Test
+void put_returns_previous_value_on_overwrite() {
+    MyHashMap<String, Integer> map = new MyHashMap<>();
+    assertNull(map.put("a", 1));
+    assertEquals(1, map.put("a", 2));
+    assertEquals(2, map.get("a"));
+    assertEquals(1, map.size());
+}
+```
+
+**Collision handling — a key whose `hashCode()` is a constant forces every instance into one bucket chain.** This is the test that actually exercises chaining rather than the happy path where every key lands in its own bucket.
+
+```java
+@Test
+void colliding_keys_are_both_stored_in_the_same_bucket() {
+    MyHashMap<CollidingKey, String> map = new MyHashMap<>();
+    CollidingKey k1 = new CollidingKey(1);
+    CollidingKey k2 = new CollidingKey(2);
+
+    map.put(k1, "one");
+    map.put(k2, "two");
+
+    assertEquals("one", map.get(k1));
+    assertEquals("two", map.get(k2));
+    assertEquals(2, map.size());
+}
+
+@Test
+void remove_from_middle_of_a_collision_chain_preserves_the_rest() {
+    MyHashMap<CollidingKey, String> map = new MyHashMap<>();
+    CollidingKey k1 = new CollidingKey(1);
+    CollidingKey k2 = new CollidingKey(2);
+    CollidingKey k3 = new CollidingKey(3);
+    map.put(k1, "one"); map.put(k2, "two"); map.put(k3, "three");
+
+    assertEquals("two", map.remove(k2));
+
+    assertEquals("one", map.get(k1));
+    assertNull(map.get(k2));
+    assertEquals("three", map.get(k3));
+    assertEquals(2, map.size());
+}
+
+/** A key whose hashCode is constant so every instance collides into one bucket. */
+private static final class CollidingKey {
+    private final int id;
+    CollidingKey(int id) { this.id = id; }
+
+    @Override public int hashCode() { return 42; }
+    @Override public boolean equals(Object o) {
+        return o instanceof CollidingKey other && other.id == id;
+    }
+}
+```
+
+**`null` key — supported like any other key, including overwrite and removal.**
+
+```java
+@Test
+void null_key_is_supported() {
+    MyHashMap<String, Integer> map = new MyHashMap<>();
+
+    assertNull(map.put(null, 1));
+    assertTrue(map.containsKey(null));
+    assertEquals(1, map.get(null));
+
+    assertEquals(1, map.put(null, 2));
+    assertEquals(2, map.remove(null));
+
+    assertNull(map.get(null));
+    assertFalse(map.containsKey(null));
+}
+```
+
+**Resize correctness — every entry must survive doubling, including starting from a capacity of 1 (forcing many resizes on the way to 1000 entries).**
+
+```java
+@Test
+void resize_preserves_all_entries() {
+    MyHashMap<Integer, Integer> map = new MyHashMap<>();
+    for (int i = 0; i < 1_000; i++) map.put(i, i * i);
+
+    assertEquals(1_000, map.size());
+    for (int i = 0; i < 1_000; i++) assertEquals(i * i, map.get(i));
+}
+
+@Test
+void resize_preserves_entries_starting_from_a_tiny_initial_capacity() {
+    MyHashMap<Integer, Integer> map = new MyHashMap<>(1);
+    for (int i = 0; i < 200; i++) map.put(i, i);
+
+    assertEquals(200, map.size());
+    for (int i = 0; i < 200; i++) assertEquals(i, map.get(i));
+}
+
+@Test
+void non_positive_initial_capacity_is_rejected() {
+    assertThrows(IllegalArgumentException.class, () -> new MyHashMap<Integer, Integer>(0));
+    assertThrows(IllegalArgumentException.class, () -> new MyHashMap<Integer, Integer>(-1));
+}
+```
+
+### Implement it
+
+Four pieces, in order: the bucket array (and why it needs an unchecked cast), the spread-and-mask index function, chain traversal shared by `put`/`get`/`remove`, and resize.
+
+**The generic-array trap.** `new Node<K,V>[capacity]` does not compile — Java forbids generic array creation because type erasure leaves no reified `K`/`V` for the JVM to check on array store. The fix `java.util.HashMap` itself uses: allocate a **raw** `Node[]` and cast to `Node<K,V>[]`. The cast is unchecked but safe because the array is private and every element ever stored is a `Node<K,V>` this class constructed itself.
+
+```java
+@SuppressWarnings("unchecked")
+private Node<K, V>[] newTable(int capacity) {
+    return (Node<K, V>[]) new Node[capacity];   // raw Node[], NOT new Object[capacity]
+}
+```
+
+Casting from `new Object[capacity]` instead would compile identically but throw `ClassCastException` the first time the array is used as `Node[]` — the runtime array type genuinely has to be `Node[]`, not `Object[]`, because array types are reified even though generics are erased.
+
+**Spread the hash, then mask to a power-of-two index.**
+
+```java
+private static int spread(Object key) {
+    if (key == null) return 0;
+    int h = key.hashCode();
+    return h ^ (h >>> 16);          // fold high bits into low bits
+}
+
+private static int indexFor(int hash, int capacity) {
+    return hash & (capacity - 1);   // valid only because capacity is always a power of two
+}
+```
+
+**`put` walks the target bucket's chain for an existing key (via `equals`), else prepends a new node.**
+
+```java
+public V put(K key, V value) {
+    int hash = spread(key);
+    int idx = indexFor(hash, buckets.length);
+    for (Node<K, V> node = buckets[idx]; node != null; node = node.next) {
+        if (node.hash == hash && Objects.equals(node.key, key)) {
+            V previous = node.value;
+            node.value = value;
+            return previous;
+        }
+    }
+    buckets[idx] = new Node<>(hash, key, value, buckets[idx]);
+    size++;
+    if (size > threshold) resize();
+    return null;
+}
+```
+
+`get`/`containsKey`/`remove` share the same `spread` → `indexFor` → chain-walk with `Objects.equals`; `remove` additionally tracks `prev` to unlink without breaking the rest of the chain.
+
+**Resize doubles capacity and re-links every node — moved, not recreated.**
+
+```java
+private void resize() {
+    Node<K, V>[] old = buckets;
+    int newCapacity = old.length * 2;
+    Node<K, V>[] newBuckets = newTable(newCapacity);
+    for (Node<K, V> head : old) {
+        Node<K, V> node = head;
+        while (node != null) {
+            Node<K, V> next = node.next;
+            int idx = indexFor(node.hash, newCapacity);
+            node.next = newBuckets[idx];
+            newBuckets[idx] = node;
+            node = next;
+        }
+    }
+    buckets = newBuckets;
+    threshold = (int) (newCapacity * LOAD_FACTOR);
+}
+```
+
+- **Complexity:** O(1) average for `get`/`put`/`remove` (short chains); O(n) worst case if every key collides into one bucket (a pathological or adversarial `hashCode()`). Resize is O(n) but amortises to O(1) per `put`, same argument as `ArrayList` growth.
+- **Key gotcha:** a resize does *not* recompute hashes — the cached `hash` field on each `Node` is reused, since a key's `hashCode()` doesn't change across a resize, only which bucket `hash & (newCapacity - 1)` now points to.
+
+### Common mistakes & senior signal
+
+- **Violating the `equals`/`hashCode` contract.** Overriding `equals()` without `hashCode()` (or vice versa) means two "equal" keys can spread to different buckets — a `put` with one instance becomes permanently unfindable via the other. Naming this contract unprompted, not just "override both," is the senior tell.
+- **Using `hashCode() % capacity` without spreading.** Works, but degrades badly for low-entropy hash codes (small `Integer`s, short `String`s) against a small power-of-two capacity — the high bits of the hash never influence a small mask. The spread step (`h ^ (h >>> 16)`) exists specifically to fix that.
+- **Growing capacity by anything other than doubling.** The `hash & (capacity - 1)` trick is only valid when capacity is a power of two; growing by, say, +50% would silently break every future index lookup.
+- **The `new Object[n]` cast.** Compiles, throws `ClassCastException` on first use. The only safe unchecked cast is from a raw `Node[]`, never `Object[]` — array types are reified even though generic type parameters are erased.
+- **Reference-equality shortcuts (`node.key == key`).** Breaks the map contract for any two `.equals()`-but-distinct key instances; must always be `Objects.equals(node.key, key)` (which also handles `null` keys for free).
+- **Named extensions (from the solution's Javadoc), the natural senior follow-ups:**
+  - **Open addressing** — linear or quadratic probing packs entries directly into the array (better cache locality, no per-entry `Node` allocation) but needs **tombstone** markers on deletion so a probe sequence doesn't stop early at a hole, and suffers clustering at high load factor.
+  - **Treeify hot buckets** — once a bucket's chain exceeds a threshold (`java.util.HashMap` treeifies at 8), convert it to a red-black tree keyed by `hashCode()` so a pathological chain degrades to O(log n) instead of O(n) — the real-world defence against hash-flooding attacks.
+
+See also **[[cache]]** — an LRU cache is this hash map plus a doubly linked list for O(1) recency tracking; you need this kata's O(1) lookup before that one's eviction policy makes sense.
+
+## Ring Buffer — Bounded Queue
+
+### Summary
+
+**What this topic covers**
+This kata builds `RingBuffer<E>` — a fixed-capacity FIFO queue backed by a single array, the classic circular buffer behind `java.util.ArrayDeque`, a JVM async logger ring, or an audio driver's playback buffer. A producer `offer`s elements, a consumer `poll`s them, and the buffer never grows past its construction-time `capacity`: once full, `offer` reports failure rather than overwriting or resizing, leaving the backpressure decision (drop, block, apply pressure upstream) to the caller. The whole exercise is mechanical correctness under index arithmetic — modular head/tail cursors that wrap around the backing array — plus the classic full-vs-empty ambiguity that trips up a surprising number of candidates on a whiteboard.
+
+**Mental model**
+One `Object[] elements` plus three cursors: `head` (index of the next element to poll), `tail` (index of the next free slot to offer into), and `count` (how many live elements there are right now). Both `head` and `tail` only ever move forward, modulo `capacity` — `(index + 1) % elements.length` — so when either would run off the end of the array it snaps back to `0` instead. No element is ever copied and the array is never reallocated after construction, so `offer`/`poll` are O(1) with zero per-element allocation — the entire cost is one array write/read and one modulo. The one wrinkle that defines the whole class: with only `head` and `tail`, `head == tail` is ambiguous — it means both "just constructed, nothing offered yet" and "tail has wrapped all the way around and lapped head". This implementation resolves the ambiguity with a third field, `count`, as the single source of truth for `isEmpty()`/`isFull()`/`size()`, so every real array slot stays usable and no method needs a special case for the wrap point.
+
+**Key terms**
+- **circular / ring buffer** — a fixed-length array where the logical "ends" wrap around to index 0, so the structure behaves like a queue without ever shifting elements.
+- **`head`** — index of the next element `poll`/`peek` will return; advances on every successful `poll`.
+- **`tail`** — index of the next free slot `offer` will write into; advances on every successful `offer`.
+- **modular wrap-around** — `index = (index + 1) % capacity`; the mechanism that turns a linear array into a logical ring.
+- **full/empty ambiguity** — the classic circular-buffer trap: `head == tail` alone cannot distinguish "empty" from "full".
+- **count field vs. slot-burning** — the two textbook fixes for the ambiguity: track a separate live-element counter (this class), or deliberately waste one array slot so `tail` can never fully lap `head`.
+- **FIFO order** — first offered, first polled; preserved across any number of wraps.
+- **generic array creation** — `new E[capacity]` is illegal under erasure; the standard workaround is a raw `Object[]` with an unchecked-but-safe cast on read.
+- **bounded / fixed-capacity** — capacity is set once at construction and never changes; there is no amortised-growth story like a resizable `ArrayList`.
+
+**Why interviewers ask this**
+It is a compact test of whether a candidate can reason precisely about array indices under a wrap-around invariant — a skill that shows up anywhere a fixed-size window or lock-free structure is on the table. The naive first attempt almost always uses only `head`/`tail` and silently breaks on the empty-vs-full case; the senior signal is naming that ambiguity *before* writing code and picking one of the two fixes deliberately, rather than discovering the bug from a failing test. It also probes whether someone reaches for the right invariant at each capacity boundary (capacity 1 is the sharpest edge case — it alternates between empty and full on every single operation) and whether they know why `Object[]` shows up instead of `E[]`.
+
+**Common confusions**
+- *"`head == tail` means empty."* — Only sometimes; after `capacity` offers with no polls, `tail` has wrapped back to equal `head` again while the buffer is completely full.
+- *"I need to special-case the wrap in `offer`/`poll`."* — Not with a `count` field: `isFull()`/`isEmpty()` are answered directly from `count`, so `offer`/`poll` never branch on where the cursors happen to sit relative to each other.
+- *"Offering into a full buffer should overwrite the oldest element."* — Some ring buffers (metrics samplers, "last N" windows) do that by design, but this one is a bounded *queue*: `offer` returns `false` and leaves the buffer untouched, pushing the drop/overwrite/block decision to the caller.
+- *"`poll` on empty should throw."* — This API returns `null`, mirroring `Queue.poll()`'s "best-effort, no exception" contract rather than `Queue.remove()`'s throwing one.
+- *"A generic `E[]` array is just cleaner."* — `new E[capacity]` doesn't compile; `Object[]` plus a cast on read (`(E) elements[i]`) is the idiomatic workaround because the class alone controls what goes in, so the cast can never actually fail.
+
+**What follows from this topic**
+The concurrent, thread-safe cousin of this exact bounded-queue contract is **[[blockingqueue]]** — same full/empty semantics, but `offer`/`poll` block or time out instead of returning `false`/`null`, guarded by a lock and condition variables. Pushing further into "no lock at all, single producer/single consumer" territory is **[[lockfree]]**: swap `head`/`tail` for `volatile`/`AtomicInteger` cursors, re-derive full/empty from the cursors themselves instead of a shared `count` (a plain `int` written by one thread and read by another has no happens-before edge), and the array-of-slots layout here is exactly the structure that pattern reuses.
+
+### Clarify & design the API
+
+Questions worth settling before writing a line of index arithmetic:
+
+- **What happens when full?** `offer` fails fast — returns `false`, leaves the buffer unchanged — rather than overwriting the oldest element or growing. That is the "queue" reading of a ring buffer, as opposed to the "rolling window" reading.
+- **What happens when empty?** `poll`/`peek` return `null` rather than throwing, matching `Queue.poll()`'s non-throwing contract.
+- **How is full-vs-empty disambiguated?** Either burn one array slot (max usable capacity is `capacity - 1`) or track a separate `count`. Pick `count`: it keeps every constructed slot usable and keeps the cursor math branch-free.
+- **Backing storage?** A single fixed-length array allocated once at construction; no per-element boxing/allocation on `offer`/`poll` beyond the generic-erasure cast.
+- **Validation?** Reject non-positive capacity at construction — a zero- or negative-capacity ring buffer is meaningless.
+
+Commit to this surface:
+
+```java
+public final class RingBuffer<E> {
+    public RingBuffer(int capacity);   // throws IllegalArgumentException if capacity <= 0
+
+    public boolean offer(E e);         // false (buffer unchanged) if full
+    public E poll();                   // null if empty; advances head
+    public E peek();                   // null if empty; does not advance head
+
+    public int size();
+    public boolean isEmpty();
+    public boolean isFull();
+    public int capacity();             // fixed at construction, never changes
+}
+```
+
+### Write the tests
+
+Write these first: basic FIFO contract, full/empty edge behaviour, the wrap-around case that actually exercises the modular arithmetic, and the boundary conditions (`capacity == 1`, repeated wraps) that catch an off-by-one in the index math.
+
+**Basic contract — FIFO order, `peek` doesn't consume, `offer`/`poll` at the boundaries.**
+
+```java
+@Test
+void offer_then_poll_returns_elements_in_fifo_order() {
+    RingBuffer<String> buffer = new RingBuffer<>(3);
+    assertTrue(buffer.offer("a"));
+    assertTrue(buffer.offer("b"));
+    assertTrue(buffer.offer("c"));
+    assertEquals("a", buffer.poll());
+    assertEquals("b", buffer.poll());
+    assertEquals("c", buffer.poll());
+}
+
+@Test
+void peek_returns_head_without_removing_it() {
+    RingBuffer<Integer> buffer = new RingBuffer<>(2);
+    buffer.offer(1);
+    buffer.offer(2);
+    assertEquals(1, buffer.peek());
+    assertEquals(1, buffer.peek());     // still there
+    assertEquals(2, buffer.size());
+}
+```
+
+**Full/empty semantics — the two "leave it alone" edge cases that a naive implementation gets wrong.**
+
+```java
+@Test
+void offer_when_full_returns_false_and_leaves_contents_unchanged() {
+    RingBuffer<Integer> buffer = new RingBuffer<>(2);
+    buffer.offer(1);
+    buffer.offer(2);
+    assertTrue(buffer.isFull());
+    assertFalse(buffer.offer(3));       // rejected, not overwritten
+    assertEquals(2, buffer.size());
+    assertEquals(1, buffer.poll());     // original contents intact
+    assertEquals(2, buffer.poll());
+}
+
+@Test
+void poll_and_peek_on_empty_buffer_return_null() {
+    RingBuffer<String> buffer = new RingBuffer<>(4);
+    assertNull(buffer.poll());
+    assertNull(buffer.peek());
+}
+```
+
+**Wrap-around — the test that actually proves the modular cursor math, not just the FIFO contract in isolation.**
+
+```java
+@Test
+void wrap_around_preserves_fifo_order_once_tail_crosses_the_array_end() {
+    RingBuffer<Integer> buffer = new RingBuffer<>(3);
+    buffer.offer(1);
+    buffer.offer(2);
+    buffer.offer(3);
+    assertEquals(1, buffer.poll());     // head advances, freeing a slot near the array start
+    assertEquals(2, buffer.poll());
+    buffer.offer(4);                    // tail wraps past the end of the backing array
+    buffer.offer(5);
+    assertEquals(3, buffer.poll());
+    assertEquals(4, buffer.poll());
+    assertEquals(5, buffer.poll());
+    assertTrue(buffer.isEmpty());
+}
+
+@Test
+void repeated_wrap_around_over_many_cycles_stays_correct() {
+    RingBuffer<Integer> buffer = new RingBuffer<>(4);
+    int nextValue = 0;
+    for (int cycle = 0; cycle < 10; cycle++) {
+        buffer.offer(nextValue++);
+        buffer.offer(nextValue++);
+        buffer.offer(nextValue++);
+        assertEquals(nextValue - 3, buffer.poll());
+        assertEquals(nextValue - 2, buffer.poll());
+        assertEquals(nextValue - 1, buffer.poll());
+        assertTrue(buffer.isEmpty());
+    }
+}
+```
+
+**Boundary — `capacity == 1` is the sharpest edge, alternating full/empty every single call; plus construction validation.**
+
+```java
+@Test
+void capacity_of_one_alternates_between_empty_and_full() {
+    RingBuffer<String> buffer = new RingBuffer<>(1);
+    assertTrue(buffer.isEmpty());
+    assertTrue(buffer.offer("only"));
+    assertTrue(buffer.isFull());
+    assertFalse(buffer.offer("second"));
+    assertEquals("only", buffer.poll());
+    assertTrue(buffer.isEmpty());
+}
+
+@Test
+void non_positive_capacity_is_rejected() {
+    assertThrows(IllegalArgumentException.class, () -> new RingBuffer<Integer>(0));
+    assertThrows(IllegalArgumentException.class, () -> new RingBuffer<Integer>(-3));
+}
+```
+
+A `size()`/`isEmpty()`/`isFull()` transition test walks the same buffer through empty → partial → full → partial → empty, asserting all three predicates stay consistent with each other at every step — the cheapest way to catch a `count` update that drifts out of sync with the cursors.
+
+### Implement it
+
+Three fields carry the whole class: the backing `Object[] elements`, and `head`/`tail`/`count` as `int`s. `offer` and `poll` are symmetric — guard on `isFull()`/`isEmpty()`, touch one slot, advance one cursor modulo `elements.length`, and keep `count` in lock-step.
+
+```java
+public final class RingBuffer<E> {
+
+    // Object[] rather than E[]: generic array creation (`new E[capacity]`) is illegal because the
+    // component type is erased at runtime. Casting on read is the standard, unchecked-but-safe
+    // workaround: this class alone controls what goes into the array, so the cast can never fail.
+    private final Object[] elements;
+    private int head;
+    private int tail;
+    private int count;
+
+    public RingBuffer(int capacity) {
+        if (capacity <= 0) {
+            throw new IllegalArgumentException("capacity must be positive: " + capacity);
+        }
+        this.elements = new Object[capacity];
+    }
+
+    public boolean offer(E e) {
+        if (isFull()) {
+            return false;
+        }
+        elements[tail] = e;
+        tail = (tail + 1) % elements.length;
+        count++;
+        return true;
+    }
+
+    @SuppressWarnings("unchecked")
+    public E poll() {
+        if (isEmpty()) {
+            return null;
+        }
+        E value = (E) elements[head];
+        elements[head] = null;              // drop the reference so a polled object isn't pinned
+        head = (head + 1) % elements.length;
+        count--;
+        return value;
+    }
+
+    @SuppressWarnings("unchecked")
+    public E peek() {
+        if (isEmpty()) {
+            return null;
+        }
+        return (E) elements[head];
+    }
+
+    public int size()       { return count; }
+    public boolean isEmpty(){ return count == 0; }
+    public boolean isFull() { return count == elements.length; }
+    public int capacity()   { return elements.length; }
+}
+```
+
+- **Wrap-around mechanism:** `(cursor + 1) % elements.length` on every successful `offer`/`poll`. No branch for "did we hit the end" — the modulo handles it uniformly whether or not a wrap actually occurs this call.
+- **Full/empty disambiguation:** `count`, not cursor comparison. `isFull()`/`isEmpty()` never look at `head`/`tail` at all, which is what keeps `offer`/`poll` free of a special-cased wrap check.
+- **Complexity:** O(1) time, O(1) additional space per `offer`/`poll` — no element is ever copied or the array reallocated after construction.
+- **Key gotcha:** `poll` nulls out the vacated slot (`elements[head] = null`) before advancing `head`. Skipping that line doesn't break correctness (the slot gets overwritten on the next wrap-around `offer` to that index) but it pins the polled object in memory until the ring wraps back around — a silent memory leak in a long-lived buffer holding large objects.
+
+### Common mistakes & senior signal
+
+- **The `head == tail` trap.** Using only two cursors and comparing them directly is the single most common bug — it conflates "just constructed" with "just filled to capacity" because `tail` laps `head` on the `capacity`-th offer. Naming this ambiguity before writing `isFull()` is the senior tell; picking a fix deliberately (count field vs. burn one slot) rather than debugging it out of a failing test is the stronger one.
+- **Off-by-one on the modulo.** `tail = (tail + 1) % elements.length` is correct; `tail = tail == elements.length ? 0 : tail + 1` (or worse, forgetting to wrap at all and indexing out of bounds) is the kind of bug that only surfaces once a test actually crosses the array boundary — which is why `wrap_around_preserves_fifo_order_once_tail_crosses_the_array_end` and the repeated-cycle test exist rather than testing capacity-and-under only.
+- **Growing instead of rejecting.** Reaching for `Arrays.copyOf` on a full buffer turns a bounded, latency-sensitive structure into an `ArrayList` with extra steps, defeating the entire point of a fixed-capacity ring — `offer` must fail fast and let the caller decide (drop/block/backpressure).
+- **Leaking references on `poll`.** Forgetting `elements[head] = null` after reading it out is correct but leaky — the stale reference keeps a (potentially large) object alive until the slot is overwritten by a future wrap, which can be an arbitrarily long time in a low-throughput buffer.
+- **Skipping `capacity == 1`.** The smallest capacity is the sharpest edge case — every single `offer` immediately makes it full, every single `poll` immediately makes it empty — and is exactly where an implicit "leave one slot empty" assumption (the slot-burning alternative to `count`) would silently cap real capacity at zero.
+- **Named extensions, for when asked "what would you add?"**: an `Iterable<E>` walking `count` elements from `head` in logical (not backing-array) order via a custom `Iterator`; a double-ended variant (`offerFirst`/`offerLast`, `pollFirst`/`pollLast`) by allowing `head` to decrement as well as increment, modulo `capacity`; and the lock-free single-producer/single-consumer cousin — `volatile`/`AtomicInteger` cursors instead of a shared `count`, re-deriving full/empty from the cursors themselves, since a plain `int` written by one thread and read by another has no happens-before guarantee (see **[[lockfree]]**). The thread-safe, blocking-instead-of-failing sibling of this exact contract is **[[blockingqueue]]**.
+
+## Binary Heap — Priority Queue
+
+### Summary
+
+**What this topic covers**
+This kata builds `BinaryHeap<E>` — the array-backed structure behind `java.util.PriorityQueue`. You implement `add`, `peek`, `poll`, `size`, `isEmpty`, plus a bulk-build constructor that heapifies an existing collection in O(n). There is no linked node, no pointer chasing: a heap is a *complete binary tree* stored implicitly in a flat `Object[]`, where a node's children and parent are computed from its index. The whole exercise is two small tree-walk operations — sift-up on insert, sift-down on remove — plus the one insight (Floyd's algorithm) that turns "build from n items" into O(n) instead of O(n log n). It is also a clean vehicle for a Java-specific wrinkle: generic array creation is erased at runtime, so the backing store has to be a raw `Object[]` with casts, exactly like the JDK's own `PriorityQueue`.
+
+**Mental model**
+Picture the tree drawn out level by level, then read it left-to-right into an array — that reading order *is* the storage layout. For a node at index `i`: left child at `2i+1`, right child at `2i+2`, parent at `(i-1)/2` (integer division). Completeness — every level full except possibly the last, which fills left-to-right with no gaps — is what makes this indexing scheme valid; a tree with a hole partway through a level would not map onto a dense array. The heap-order invariant is weaker than a sorted structure: every parent compares "not after" its children (`cmp.compare(parent, child) <= 0` for a min-heap), but siblings and separate subtrees have no ordering relationship at all. Only the root is guaranteed to be the extreme element. That weaker invariant is the whole performance story — `add` and `poll` only ever touch a single root-to-leaf path, which is `O(log n)` deep because the tree is complete, instead of the `O(n)` a fully sorted array would need to keep sorted.
+
+**Key terms**
+- **complete binary tree** — every level full except possibly the last, which fills left-to-right; the property that lets the tree be array-backed with no pointers.
+- **implicit tree / array-backed** — child/parent relationships are computed from index arithmetic (`2i+1`, `2i+2`, `(i-1)/2`), not stored as references.
+- **heap-order invariant** — every parent compares "not after" its children under the comparator; weaker than a total order, so only the root is pinned.
+- **sift-up (bubble-up)** — after appending at the last slot, swap upward while the new element compares before its parent. Used by `add`.
+- **sift-down (bubble-down)** — after moving the last element into a vacated slot, swap downward with the "better" child while it compares before the parent. Used by `poll`.
+- **heapify (Floyd's build-heap)** — bottom-up sift-down from the last non-leaf index to the root; builds a valid heap from n items in O(n) total, not O(n log n).
+- **natural ordering vs `Comparator`** — the no-arg constructor casts elements to `Comparable`; an explicit `Comparator` decouples the heap from `E` needing to implement anything.
+- **generic array erasure** — Java forbids `new E[cap]`; the backing store is `Object[]` with a cast on every read, same as `java.util.PriorityQueue`.
+- **`decreaseKey`** — the classic heap extension: an auxiliary element-to-index map turns "find an arbitrary element, then re-sift it" from O(n) into O(log n); what Dijkstra's algorithm needs.
+- **d-ary heap** — widen fan-out from 2 children to d; shallower tree (cheaper sift-up) at the cost of more per-level comparisons on sift-down.
+
+**Why interviewers ask this**
+A heap is the single most-reused structure in the "design an algorithm" half of an interview — top-k, Dijkstra, merge-k-sorted-lists, task scheduling all reduce to "give me the extreme element, repeatedly, with cheap updates." Asking a candidate to build one from scratch (not just call `PriorityQueue`) tests whether they actually understand *why* it is O(log n) rather than treating it as a black box. The senior signal is deriving the index arithmetic from "complete tree stored in array" rather than memorizing `2i+1`/`2i+2`, explaining why heap order is weaker than sorted (and why that's exactly what makes it fast), and volunteering Floyd's O(n) heapify instead of defaulting to n sequential `add` calls when asked to build from a collection. Bonus points for naming `decreaseKey` and the element-to-index map unprompted — it's the detail that separates "I've implemented a heap" from "I've implemented Dijkstra's algorithm with one."
+
+**Common confusions**
+- *"Heap order means the array is sorted."* — No. Only the parent-child edges are ordered; `elements[1]` and `elements[2]` (siblings) have no defined relationship, and neither do arbitrary cross-subtree pairs.
+- *"Building from n items by calling `add` n times is the best you can do."* — That's O(n log n). Loading all items first, then sifting down from the last non-leaf index to the root, is O(n) — Floyd's algorithm.
+- *"`peek` should sift or search."* — The root is always at index 0 by the invariant; `peek` is a plain array read, O(1).
+- *"The heap needs `E extends Comparable<E>`."* — Only the no-arg (natural-ordering) path needs that, and it's enforced at compare-time via a `ClassCastException`, not encoded as a compile-time bound — so the same class works with any `E` when you pass a `Comparator`.
+- *"A `PriorityQueue`-style heap gives sorted iteration."* — It doesn't; iterating the backing array directly yields heap order, not sorted order. Only repeated `poll()` yields sorted order.
+
+**What follows from this topic**
+The bounded min-heap in **[[topk]]** is this same structure with one twist: cap the size at k and evict the root on overflow, turning "keep the k largest" into an O(n log k) streaming algorithm instead of sorting everything. **[[scheduler]]** reaches for the same priority-queue shape to always dispatch the next-due task in O(log n). The `decreaseKey` extension is also the piece that turns this heap into Dijkstra's shortest-path priority queue — the reason the "auxiliary index map" detail matters beyond this kata.
+
+### Clarify & design the API
+
+Questions worth settling before writing logic:
+
+- **Min-heap or max-heap by default?** Min-heap: the no-arg constructor mirrors `java.util.PriorityQueue`'s natural-ordering default, where the smallest element is the root. A max-heap is just `Comparator.reverseOrder()`.
+- **Comparable-only, or pluggable ordering?** Both — a no-arg constructor for `Comparable` elements, plus a `Comparator`-taking constructor so the class works for types with no natural order (or a custom order for a `Comparable` type).
+- **Empty-heap behaviour for `peek`/`poll`?** Return `null` rather than throwing — mirrors `PriorityQueue.poll()`/`peek()`, and callers can loop `while ((e = heap.poll()) != null)`.
+- **Bulk construction?** A `Collection` + `Comparator` constructor that heapifies in O(n) — the point being to *not* pay O(n log n) via repeated `add`.
+- **Growth strategy?** Amortised doubling on overflow, same as `ArrayList`/`PriorityQueue` — keeps `add` amortised O(log n) rather than O(n) on every insert.
+
+Commit to this surface:
+
+```java
+public final class BinaryHeap<E> {
+    public BinaryHeap();                                             // natural ordering, min-heap
+    public BinaryHeap(Comparator<? super E> cmp);                    // explicit ordering
+    public BinaryHeap(Collection<? extends E> items, Comparator<? super E> cmp); // O(n) heapify
+
+    public void add(E e);      // sift-up, amortised O(log n)
+    public E peek();           // O(1), null if empty
+    public E poll();           // sift-down, O(log n), null if empty
+    public int size();
+    public boolean isEmpty();
+}
+```
+
+### Write the tests
+
+Write these first — they pin the contract before any sift logic exists. Group them: empty-heap edge cases, ordering under the default and an injected comparator, duplicates, the heapify constructor, and a scale test that forces array growth.
+
+**Empty heap — `peek`/`poll` return `null`, never throw.**
+
+```java
+@Test
+void empty_heap_peek_and_poll_return_null() {
+    BinaryHeap<Integer> heap = new BinaryHeap<>();
+    assertTrue(heap.isEmpty());
+    assertEquals(0, heap.size());
+    assertNull(heap.peek());
+    assertNull(heap.poll());
+}
+```
+
+**Default ordering — natural order, min first.** This is the ordering guarantee the whole class exists to provide: repeated `poll()` drains ascending regardless of insertion order.
+
+```java
+@Test
+void default_ctor_polls_in_ascending_order_min_heap() {
+    BinaryHeap<Integer> heap = new BinaryHeap<>();
+    heap.add(5);
+    heap.add(1);
+    heap.add(4);
+    heap.add(2);
+    heap.add(3);
+
+    assertEquals(5, heap.size());
+    assertEquals(1, heap.poll());
+    assertEquals(2, heap.poll());
+    assertEquals(3, heap.poll());
+    assertEquals(4, heap.poll());
+    assertEquals(5, heap.poll());
+    assertTrue(heap.isEmpty());
+}
+
+@Test
+void peek_returns_root_without_removing_it() {
+    BinaryHeap<Integer> heap = new BinaryHeap<>();
+    heap.add(3);
+    heap.add(1);
+    heap.add(2);
+
+    assertEquals(1, heap.peek());
+    assertEquals(3, heap.size());   // unchanged — peek does not remove
+    assertEquals(1, heap.peek());
+}
+```
+
+**Injected `Comparator` — prove the heap is not hardwired to natural order.** `Comparator.reverseOrder()` turns the same class into a max-heap with zero code changes.
+
+```java
+@Test
+void comparator_reverse_order_makes_a_max_heap() {
+    BinaryHeap<Integer> heap = new BinaryHeap<>(Comparator.reverseOrder());
+    heap.add(5);
+    heap.add(1);
+    heap.add(4);
+    heap.add(2);
+    heap.add(3);
+
+    assertEquals(5, heap.poll());
+    assertEquals(4, heap.poll());
+    assertEquals(3, heap.poll());
+    assertEquals(2, heap.poll());
+    assertEquals(1, heap.poll());
+}
+```
+
+**Duplicates, and drain-to-empty-then-poll-again.** Duplicates are all retained (a heap is a multiset, not a set); polling past empty settles back to `null` rather than throwing.
+
+```java
+@Test
+void duplicate_elements_are_all_retained_and_ordered() {
+    BinaryHeap<Integer> heap = new BinaryHeap<>();
+    heap.add(2); heap.add(2); heap.add(1); heap.add(1); heap.add(2);
+
+    assertEquals(5, heap.size());
+    assertEquals(1, heap.poll());
+    assertEquals(1, heap.poll());
+    assertEquals(2, heap.poll());
+    assertEquals(2, heap.poll());
+    assertEquals(2, heap.poll());
+}
+```
+
+**Heapify constructor — build from a `Collection` in one shot and drain sorted.** This is the O(n) path; the test doesn't assert complexity directly, but pairs with the doc comment's claim that this beats n sequential `add` calls.
+
+```java
+@Test
+void heapify_constructor_builds_from_a_collection_and_drains_sorted() {
+    List<Integer> items = List.of(9, 3, 7, 1, 8, 2, 6, 4, 5, 0);
+    BinaryHeap<Integer> heap = new BinaryHeap<>(items, Comparator.naturalOrder());
+
+    assertEquals(items.size(), heap.size());
+    for (int expected = 0; expected <= 9; expected++) {
+        assertEquals(expected, heap.poll());
+    }
+    assertTrue(heap.isEmpty());
+}
+
+@Test
+void heapify_constructor_with_empty_collection_is_an_empty_heap() {
+    BinaryHeap<Integer> heap = new BinaryHeap<>(List.<Integer>of(), Comparator.naturalOrder());
+    assertTrue(heap.isEmpty());
+    assertNull(heap.poll());
+}
+```
+
+**Scale test — forces at least one capacity-growth cycle.** A thousand descending inserts, then a fully ascending drain, is the cheapest way to exercise `ensureCapacity`'s doubling without asserting on internal array length.
+
+```java
+@Test
+void handles_many_elements_across_capacity_growth() {
+    BinaryHeap<Integer> heap = new BinaryHeap<>();
+    int n = 1_000;
+    for (int i = n - 1; i >= 0; i--) {
+        heap.add(i);
+    }
+    assertEquals(n, heap.size());
+    for (int expected = 0; expected < n; expected++) {
+        assertEquals(expected, heap.poll());
+    }
+}
+```
+
+### Implement it
+
+The backing store is `Object[] elements` plus `int size` — the array *is* the tree; nothing else is stored. `add` appends then sifts up; `poll` swaps the last element into the root slot then sifts down. Both sift operations only ever touch one root-to-leaf path.
+
+```java
+public final class BinaryHeap<E> {
+
+    private Object[] elements;
+    private int size;
+    private final Comparator<? super E> comparator;
+
+    private static final int DEFAULT_CAPACITY = 16;
+
+    public BinaryHeap() {
+        this(BinaryHeap.<E>naturalOrderComparator());
+    }
+
+    public BinaryHeap(Comparator<? super E> cmp) {
+        if (cmp == null) throw new IllegalArgumentException("comparator must not be null");
+        this.comparator = cmp;
+        this.elements = new Object[DEFAULT_CAPACITY];
+        this.size = 0;
+    }
+
+    public BinaryHeap(Collection<? extends E> items, Comparator<? super E> cmp) {
+        if (cmp == null) throw new IllegalArgumentException("comparator must not be null");
+        this.comparator = cmp;
+        this.elements = items.toArray(new Object[0]);
+        this.size = elements.length;
+        if (this.elements.length == 0) {
+            this.elements = new Object[DEFAULT_CAPACITY];
+        }
+        for (int i = parentOf(size - 1); i >= 0; i--) {   // Floyd: bottom-up, internal nodes only
+            siftDown(i);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T> Comparator<T> naturalOrderComparator() {
+        return (a, b) -> ((Comparable<T>) a).compareTo(b);
+    }
+
+    public void add(E e) {
+        ensureCapacity(size + 1);
+        elements[size] = e;
+        size++;
+        siftUp(size - 1);
+    }
+
+    @SuppressWarnings("unchecked")
+    public E peek() {
+        return size == 0 ? null : (E) elements[0];
+    }
+
+    @SuppressWarnings("unchecked")
+    public E poll() {
+        if (size == 0) return null;
+        E root = (E) elements[0];
+        size--;
+        elements[0] = elements[size];   // last element takes the root's place
+        elements[size] = null;
+        if (size > 0) siftDown(0);
+        return root;
+    }
+
+    private void siftUp(int i) {
+        while (i > 0) {
+            int parent = parentOf(i);
+            if (compare(i, parent) >= 0) break;
+            swap(i, parent);
+            i = parent;
+        }
+    }
+
+    private void siftDown(int i) {
+        while (true) {
+            int left = 2 * i + 1;
+            int right = 2 * i + 2;
+            int smallest = i;
+            if (left < size && compare(left, smallest) < 0) smallest = left;
+            if (right < size && compare(right, smallest) < 0) smallest = right;
+            if (smallest == i) break;
+            swap(i, smallest);
+            i = smallest;
+        }
+    }
+
+    private static int parentOf(int i) {
+        return (i - 1) / 2;
+    }
+}
+```
+
+- **Index arithmetic:** `2i+1` / `2i+2` for children, `(i-1)/2` for parent — derives directly from reading a complete tree level-by-level into an array; no lookup table needed.
+- **`siftUp` after `add`:** the new element only ever needs to climb past *ancestors*, since everything else in the tree already satisfies heap order. Stops the moment it finds a parent it doesn't beat.
+- **`siftDown` after `poll`:** the element dropped into the root slot only ever needs to descend, picking the smaller (or larger, under the comparator) of its two children at each level so it doesn't skip over a still-smaller node.
+- **Floyd's heapify:** starting the bottom-up sift-down at `parentOf(size - 1)` (the last non-leaf) skips leaves entirely — they're trivially valid heaps with no children to violate — and fixing bottom-up means every `siftDown` only ever moves an element into a subtree that's already valid. That's what gets the total cost to O(n) rather than O(n log n).
+- **`Object[]` and the cast:** Java erases `E` at runtime, so `new E[cap]` doesn't compile; the array is raw `Object[]` and every read casts back, exactly mirroring `java.util.PriorityQueue`'s own field.
+- **Complexity:** `add`/`poll` are O(log n) (bounded by tree height); `peek`/`size`/`isEmpty` are O(1); the collection constructor is O(n).
+
+### Common mistakes & senior signal
+
+- **Confusing heap order with sorted order.** Iterating the raw array (or asserting `elements[1] < elements[2]`) is *not* a valid heap check — only parent-child edges are ordered. The only way to read sorted order out is repeated `poll()`.
+- **Building from a collection with n `add` calls.** Correct, but O(n log n). Naming Floyd's bottom-up sift-down (O(n)) unprompted — and explaining *why* it's O(n) (leaves are free, bottom-up keeps every sift landing in an already-valid subtree) — is the senior signal.
+- **Forgetting the last-element-to-root swap on `poll`.** A common bug is sifting down from the *removed* slot instead of moving the last element into the root first — that leaves a hole partway through the tree, breaking completeness.
+- **Encoding `E extends Comparable<E>` as a class-level bound.** That forecloses ever using the class with a `Comparator` for non-Comparable types. The real solution's no-arg constructor pushes the constraint to a `ClassCastException` at compare time instead — matching `java.util.PriorityQueue`'s own design.
+- **`ArrayList<E>` instead of `Object[]`.** Sidesteps the erasure cast but adds a layer of boxing/indirection for what's fundamentally a flat array; worth naming as the trade-off, not just picking one silently.
+- **Not naming the extensions.** `decreaseKey` (an auxiliary element-to-index map, turning "find and re-sift an arbitrary element" from O(n) into O(log n) — what Dijkstra's algorithm and [[topk]]'s bounded-heap tracker both lean on) and the **d-ary heap** (wider fan-out, shallower tree, tunable per workload) are the two extensions worth volunteering when asked "how would you make this faster for use case X."
+
+## Dynamic Array (ArrayList)
+
+### Summary
+
+**What this topic covers**
+This kata builds `DynamicArray<E>`, the index-based growable array behind `java.util.ArrayList`. It is backed by a single `Object[]` that grows geometrically as elements are appended, giving O(1) *amortised* `add(E)` and O(1) random access via `get(int)`. Indexed `add(int, E)` and `remove(int)` stay O(n) because they must shift the tail to keep the backing array dense and contiguous — that shift is the fundamental trade-off against a linked structure, which gets O(1) insert/remove at a known node but loses O(1) indexing. You design the public surface (`add`, `get`, `set`, `remove`, `size`, `isEmpty`), the private growth policy, and the two distinct bounds checks. This is a mechanics kata: the real deliverable is getting the size/capacity bookkeeping, the growth formula, and the `System.arraycopy` shifts exactly right.
+
+**Mental model**
+Two numbers matter and must never be conflated: **size** (how many logical elements are stored — what `size()` returns and what the API's bounds checks are relative to) and **capacity** (`elements.length` — how many *slots* the backing array currently has, always `>= size`, with the extra slots unused headroom). Every mutation that could exceed capacity calls `ensureCapacity` first, which reallocates a *bigger* array and copies the old contents in — the array itself never grows in place (Java arrays are fixed-length), so "growing" always means allocate-new + copy + swap the reference. Because reallocation is amortised across many appends (most appends just write into existing headroom), the average cost per `add` stays O(1) even though any single call might trigger an O(n) copy.
+
+**Key terms**
+- **size vs capacity** — size is the logical element count; capacity is `elements.length`, the physical slot count. `size <= capacity` always holds.
+- **geometric growth** — capacity grows by a constant *multiple* of itself (here `oldCapacity + (oldCapacity >> 1)`, i.e. ~1.5x) rather than a constant increment, so the number of resizes needed to reach N elements is O(log N), not O(N).
+- **amortised O(1)** — the *average* cost per `add` across a long sequence is O(1), even though individual calls that trigger a resize cost O(n); the geometric series of copy costs sums to a constant multiple of N total.
+- **`System.arraycopy`** — the JVM intrinsic bulk-copy used both to grow the backing array (`Arrays.copyOf`, which calls it internally) and to shift elements during indexed insert/remove; far faster than a manual loop.
+- **type erasure** — generics are compile-time-only in Java; `new E[capacity]` does not compile, so the backing store must be declared `Object[]` and cast back to `E` on read.
+- **unchecked cast** — the `@SuppressWarnings("unchecked")` cast from `Object` to `E` in `get`/`set`/`remove`; safe here only because every *write* path is typed `E`.
+- **dense/contiguous** — the array has no gaps between index 0 and `size - 1`; insert/remove must shift elements to preserve this.
+- **fail-fast iterator** — an iterator that detects structural modification during iteration (via a `modCount` counter) and throws rather than returning corrupted results.
+
+**Why interviewers ask this**
+It looks trivial ("just wrap an array") but cleanly separates candidates who understand *why* `ArrayList` is O(1) amortised from those who only know that it is. The senior signal is explaining the growth factor trade-off unprompted — doubling (2x) is the textbook default, but the JDK's real `ArrayList` uses ~1.5x specifically because after several resizes a freed 2x-oversized array can never be reused to satisfy a later allocation of the *same* size class in some allocators/GCs, while a 1.5x-grown array leaves less permanently wasted headroom; both keep the amortised bound but trade memory against resize frequency. The rest of the kata is a clean test of care with array indices: two different bounds-check ranges, an off-by-one in the shift direction, and the classic generic-array-creation problem from erasure.
+
+**Common confusions**
+- *"`add` is always O(1)."* — Only amortised. The call that crosses the capacity boundary is O(n) (allocate + copy); it is the *average* over many calls that is O(1).
+- *"Doubling and 1.5x are the same idea, so it doesn't matter which."* — Both give amortised O(1), but doubling wastes up to 50% of the array as unused headroom right after a resize; 1.5x wastes less at the cost of resizing slightly more often. It's a memory/CPU trade-off, not a correctness one.
+- *"`get`/`set`/`remove` and `add(int, e)` use the same bounds check."* — They don't: `get`/`set`/`remove` require `0 <= index < size` (index must name an *existing* element); `add(int, e)` additionally allows `index == size` (append via the indexed overload).
+- *"Since it's generic, just do `new E[capacity]`."* — Doesn't compile; erasure means the JVM has no runtime `E` to instantiate. Use `Object[]` and cast on read.
+- *"`remove` just decrements `size`; no need to touch the last slot."* — It must null out `elements[size]` after the shift, or the removed reference stays reachable from the array past the logical end — a quiet memory leak.
+
+**What follows from this topic**
+The same "size vs capacity + geometric growth" story reappears wherever a data structure amortises resizes over a stream of operations — most directly **[[hashmap]]**'s bucket-array resize-on-load-factor and **[[ringbuffer]]**'s fixed-capacity, wraparound-indexed buffer (which trades growth for a hard capacity bound instead). The unchecked-cast-over-`Object[]` pattern for a generic array is the same trick both of those use. The two possible extensions — a fail-fast `Iterator` with `modCount`, and a public `ensureCapacity` — are exactly the features `java.util.ArrayList` ships that this kata's minimal surface omits.
+
+### Clarify & design the API
+
+Questions to settle before writing a line of logic:
+
+- **What's the element type story?** Generic `DynamicArray<E>`, so the backing store can't be `E[]` (erasure) — commit to `Object[]` plus an unchecked cast on every read.
+- **Which operations does the contract need?** `add(E)` (append), `add(int, E)` (indexed insert), `get(int)`, `set(int, E)`, `remove(int)`, `size()`, `isEmpty()` — the minimal `ArrayList`-like surface, no iteration, no bulk ops.
+- **What are the two bounds-check ranges?** Access-by-existing-index (`get`/`set`/`remove`: `0 <= index < size`) vs insert-index (`add(int, e)`: `0 <= index <= size`, since appending at `size` is valid).
+- **What does the constructor accept?** A no-arg constructor with a sane default capacity (10, matching `ArrayList`), and an `initialCapacity` overload that rejects negative values.
+- **What's the growth trigger and formula?** Check capacity *before* every write that could exceed it (`ensureCapacity(size + 1)`), grow by `oldCapacity + (oldCapacity >> 1)` (~1.5x), and fall back to `minCapacity` itself when 1.5x isn't enough yet (small/zero starting capacities).
+
+Commit to this surface:
+
+```java
+public final class DynamicArray<E> {
+    public DynamicArray();
+    public DynamicArray(int initialCapacity);   // throws IllegalArgumentException if < 0
+
+    public void add(E e);                        // append, amortised O(1)
+    public void add(int index, E e);              // insert, O(n) shift; 0 <= index <= size
+    public E get(int index);                      // O(1); 0 <= index < size
+    public E set(int index, E e);                  // O(1), returns old value; 0 <= index < size
+    public E remove(int index);                    // O(n) shift, returns removed value; 0 <= index < size
+    public int size();
+    public boolean isEmpty();
+}
+```
+
+### Write the tests
+
+No tests ship with `practice/` — design your own, but they should pin the same contract the reference suite does. Group them: empty/basic contract, growth across a resize boundary, indexed insert/remove shift direction, and the two distinct bounds-check ranges.
+
+**Basic contract — empty on construction, append preserves order.**
+
+```java
+@Test
+void new_array_is_empty() {
+    DynamicArray<String> array = new DynamicArray<>();
+    assertTrue(array.isEmpty());
+    assertEquals(0, array.size());
+}
+
+@Test
+void append_and_get_return_values_in_order() {
+    DynamicArray<String> array = new DynamicArray<>();
+    array.add("a");
+    array.add("b");
+    array.add("c");
+    assertEquals(3, array.size());
+    assertEquals("a", array.get(0));
+    assertEquals("b", array.get(1));
+    assertEquals("c", array.get(2));
+}
+```
+
+**Growth — the whole point of the kata.** Start from a deliberately tiny capacity so multiple resizes fire, and assert every element survives every reallocation in order. This is the test that would catch a growth-formula bug (e.g. forgetting the `newCapacity < minCapacity` fallback for capacity 0/1) that unit tests on a default-sized array would never exercise.
+
+```java
+@Test
+void growth_across_the_capacity_boundary_preserves_all_elements() {
+    DynamicArray<Integer> array = new DynamicArray<>(2); // tiny initial capacity forces resizes
+    for (int i = 0; i < 20; i++) {
+        array.add(i);
+    }
+    assertEquals(20, array.size());
+    for (int i = 0; i < 20; i++) {
+        assertEquals(i, array.get(i));
+    }
+}
+```
+
+**Indexed insert/remove — shift direction, and the `index == size` append edge case.**
+
+```java
+@Test
+void insert_at_the_front_shifts_everything_right() {
+    DynamicArray<String> array = arrayOf("b", "c");
+    array.add(0, "a");
+    assertEquals(3, array.size());
+    assertEquals("a", array.get(0));
+    assertEquals("b", array.get(1));
+    assertEquals("c", array.get(2));
+}
+
+@Test
+void insert_at_size_behaves_like_append() {
+    DynamicArray<String> array = arrayOf("a", "b");
+    array.add(2, "c");
+    assertEquals(3, array.size());
+    assertEquals("c", array.get(2));
+}
+
+@Test
+void remove_shifts_the_tail_left_and_returns_the_removed_element() {
+    DynamicArray<String> array = arrayOf("a", "b", "c", "d");
+    String removed = array.remove(1);
+    assertEquals("b", removed);
+    assertEquals(3, array.size());
+    assertEquals("a", array.get(0));
+    assertEquals("c", array.get(1));
+    assertEquals("d", array.get(2));
+}
+```
+
+**Bounds checks — the two ranges, tested at both edges.**
+
+```java
+@Test
+void get_out_of_bounds_throws() {
+    DynamicArray<String> array = arrayOf("a");
+    assertThrows(IndexOutOfBoundsException.class, () -> array.get(-1));
+    assertThrows(IndexOutOfBoundsException.class, () -> array.get(1)); // == size, invalid for get
+}
+
+@Test
+void indexed_add_out_of_bounds_throws() {
+    DynamicArray<String> array = arrayOf("a");
+    assertThrows(IndexOutOfBoundsException.class, () -> array.add(-1, "x"));
+    assertThrows(IndexOutOfBoundsException.class, () -> array.add(2, "x")); // > size, invalid for insert
+}
+
+@Test
+void negative_initial_capacity_is_rejected() {
+    assertThrows(IllegalArgumentException.class, () -> new DynamicArray<String>(-1));
+}
+
+private static DynamicArray<String> arrayOf(String... values) {
+    DynamicArray<String> array = new DynamicArray<>();
+    for (String v : values) array.add(v);
+    return array;
+}
+```
+
+### Implement it
+
+The backing store is `Object[] elements` plus an `int size`. Every public mutator that can exceed capacity calls `ensureCapacity` first; every indexed accessor calls one of two bounds checks first.
+
+```java
+public final class DynamicArray<E> {
+    private static final int DEFAULT_CAPACITY = 10;
+
+    private Object[] elements;
+    private int size;
+
+    public DynamicArray() {
+        this(DEFAULT_CAPACITY);
+    }
+
+    public DynamicArray(int initialCapacity) {
+        if (initialCapacity < 0) {
+            throw new IllegalArgumentException("initialCapacity must be >= 0: " + initialCapacity);
+        }
+        this.elements = new Object[initialCapacity];
+    }
+
+    public void add(E e) {
+        ensureCapacity(size + 1);
+        elements[size++] = e;
+    }
+
+    public void add(int index, E e) {
+        checkIndexForInsert(index);
+        ensureCapacity(size + 1);
+        System.arraycopy(elements, index, elements, index + 1, size - index); // open a gap
+        elements[index] = e;
+        size++;
+    }
+
+    @SuppressWarnings("unchecked") // only add/set ever write a slot, always with an E
+    public E get(int index) {
+        checkIndexForAccess(index);
+        return (E) elements[index];
+    }
+
+    @SuppressWarnings("unchecked")
+    public E remove(int index) {
+        checkIndexForAccess(index);
+        E removed = (E) elements[index];
+        int numMoved = size - index - 1;
+        if (numMoved > 0) {
+            System.arraycopy(elements, index + 1, elements, index, numMoved); // close the gap
+        }
+        size--;
+        elements[size] = null; // drop the reference so it isn't pinned past the logical end
+        return removed;
+    }
+
+    private void ensureCapacity(int minCapacity) {
+        if (minCapacity <= elements.length) return;
+        int oldCapacity = elements.length;
+        int newCapacity = oldCapacity + (oldCapacity >> 1); // ~1.5x
+        if (newCapacity < minCapacity) {
+            newCapacity = minCapacity; // covers capacity 0/1 where 1.5x alone can't catch up
+        }
+        elements = Arrays.copyOf(elements, newCapacity);
+    }
+
+    private void checkIndexForAccess(int index) {   // get/set/remove: index must name an existing element
+        if (index < 0 || index >= size) {
+            throw new IndexOutOfBoundsException("Index: " + index + ", Size: " + size);
+        }
+    }
+
+    private void checkIndexForInsert(int index) {    // add(index, e): index may additionally equal size
+        if (index < 0 || index > size) {
+            throw new IndexOutOfBoundsException("Index: " + index + ", Size: " + size);
+        }
+    }
+}
+```
+
+- **Why 1.5x, not doubling:** doubling is the textbook default; the JDK's real `ArrayList` uses ~1.5x to trade a few more resizes for less permanently wasted headroom. Both are geometric, so both keep N appends at O(N) total work — each element is copied only O(log N) times across all resizes, and the resulting geometric series of copy costs sums to a constant multiple of N.
+- **Why `System.arraycopy`, not a loop:** it's a JVM intrinsic bulk-copy, used both inside `Arrays.copyOf` (growth) and directly for the insert/remove shifts — the shift direction matters: insert copies `[index, size)` right *before* writing the new element; remove copies `[index + 1, size)` left *after* saving the removed value.
+- **Complexity:** `add`/`get`/`set` are O(1) amortised/worst-case; `add(int,·)`/`remove(int)` are O(n) worst-case (the shift), O(1) only at the tail (`index == size - 1`).
+- **Key gotcha:** the `newCapacity < minCapacity` fallback. Without it, growing from capacity 0 or 1 computes `0 + 0 = 0` or `1 + 0 = 1` — the array never actually grows and the next write throws `ArrayIndexOutOfBoundsException` deep inside the "safe" growable structure.
+
+### Common mistakes & senior signal
+
+- **Conflating size and capacity.** Bounds checks, loops, and the growth trigger must all be relative to `size`, never `elements.length`. Using `elements.length` anywhere in the public-facing logic silently exposes uninitialised slots.
+- **Growth formula edge case.** Forgetting the `newCapacity < minCapacity` fallback breaks growth from a tiny (0 or 1) initial capacity — exactly what the "growth across the capacity boundary" test is designed to catch. A candidate who reasons about this unprompted, rather than discovering it via a failing test, is showing the senior signal.
+- **Conflating the two bounds-check ranges.** `get`/`set`/`remove` require `0 <= index < size`; `add(int, e)` additionally allows `index == size`. Reusing one check for both either wrongly rejects a valid append-via-insert or wrongly accepts an out-of-range `get`.
+- **Wrong shift order/direction.** Insert must open the gap (copy right) *before* writing the new element, or the write clobbers a live slot; remove must copy left *then* decrement `size`, or the arithmetic is off by one.
+- **Forgetting to null the vacated slot after `remove`.** Skipping `elements[size] = null` leaves a reference alive past the logical end of the array — a genuine, if minor, memory leak (the object can't be GC'd while the array holds it).
+- **`new E[capacity]` instead of `Object[]`.** The classic type-erasure trap — doesn't compile, because there is no runtime `E` to reify. The fix is `Object[]` plus a documented unchecked cast, safe only because every write path is statically typed `E`.
+- **Named extensions from the Javadoc, worth raising unprompted:** a **fail-fast `Iterator`** (track `modCount`, bump it on every structural change, check it in `next()`/`hasNext()` — the same mechanism `ArrayList` uses to throw `ConcurrentModificationException`); a public **`ensureCapacity(int)`** hook so a caller who knows the eventual size can pre-size once and skip intermediate resizes; and **shrinking** — halving the backing array when `size` falls far enough below capacity (e.g. below a quarter) to bound memory after a large removal burst, using the same amortised argument as growth run in reverse.
+
+## Money — equals / hashCode / Comparable
+
+### Summary
+
+**What this topic covers**
+This kata builds an immutable `Money` value type wrapping a `BigDecimal` amount and a currency-code `String`, and uses it as the textbook exercise in making `equals`, `hashCode`, and `compareTo` mutually consistent. The trap is `BigDecimal` itself: `new BigDecimal("2.0")` and `new BigDecimal("2.00")` are numerically the same value but carry different *scale*, and `BigDecimal.equals` treats scale as part of state — so a naive `Money` that stores the caller's raw `BigDecimal` fails `equals` (and lands in different `HashMap` buckets) for two amounts a human would call identical. `Money` closes the gap by canonicalising the scale in the constructor, so every downstream comparison — `equals`, `hashCode`, `compareTo`, and safe use as a `HashMap`/`HashSet` key — agrees on what "the same amount" means.
+
+**Mental model**
+Two competing notions of "equal" collide on `BigDecimal`: *numeric* equality (`compareTo() == 0`, what `5.0` and `5.00` mean to a human) and *representational* equality (`equals()`, which also compares scale). Pick one and normalise to it at the boundary rather than juggling both downstream. `Money` normalises on construction — `amount.setScale(SCALE, RoundingMode.HALF_EVEN)` — so by the time any comparison runs, two logically-equal amounts are the *same* `BigDecimal` object state (same unscaled value, same scale). That single decision makes every other method trivial: `equals`/`hashCode` become a plain field comparison, and `compareTo` (needed for cross-scale correctness anywhere a raw `BigDecimal` is compared) agrees with `equals` because there is no scale drift left to disagree about. The second mental model is the *partial order*: `compareTo` only means something within one currency, so it throws across currencies rather than inventing a nonsensical ordering.
+
+**Key terms**
+- **equals/hashCode contract** — reflexive (`x.equals(x)`), symmetric (`x.equals(y) == y.equals(x)`), transitive (`x.equals(y) && y.equals(z) ⟹ x.equals(z)`), consistent (repeated calls give the same answer absent mutation), and `x.equals(null) == false`. `hashCode` must additionally agree: equal objects *must* produce equal hash codes (the reverse need not hold).
+- **scale** — the number of digits after the decimal point a `BigDecimal` records as part of its state; `2.0` (scale 1) and `2.00` (scale 2) are numerically equal but not `.equals()`-equal.
+- **`BigDecimal.equals` vs `compareTo`** — `equals` is scale-sensitive (representational); `compareTo` (and therefore `compareTo() == 0`) is scale-insensitive (numeric). Using the wrong one for a given purpose is the classic bug source.
+- **canonicalisation** — normalising representation at a single chokepoint (here, the constructor) so every later comparison is trivially consistent instead of re-deriving "same value" logic in three different methods.
+- **`Comparable` consistent with `equals`** — the general contract that `x.compareTo(y) == 0` should imply `x.equals(y)` (and vice versa); violating it silently corrupts sorted collections like `TreeSet`/`TreeMap`, which use `compareTo` alone for membership.
+- **partial order** — `compareTo` is total *within* a currency but undefined *across* currencies; `Money` throws rather than guessing, which is the deliberate, honest choice over a false total order.
+- **banker's rounding (`HALF_EVEN`)** — rounds ties to the nearest even digit; the standard for financial arithmetic because it has no cumulative positive/negative bias across many roundings, unlike `HALF_UP`.
+- **value type / immutability** — no setters, all fields `final`; operations (`plus`/`minus`/`times`) return new instances, which is also *why* it's safe as a hash key (a key's hash code must never change while it's in the map).
+
+**Why interviewers ask this**
+It's a compact probe of whether a candidate actually understands the `equals`/`hashCode`/`Comparable` contracts or has just memorised "override both together." Anyone can write `Objects.equals(a, b)`; the senior signal is recognising that `BigDecimal` is a landmine for this exact contract (scale-sensitive `equals`, scale-insensitive `compareTo`) and designing the type so the landmine can't go off — canonicalise once at construction rather than special-casing every comparison. It also tests judgement on partial orders: a junior might make `compareTo` order arbitrarily by currency code to avoid ever throwing; a senior recognises that a false total order is worse than an honest exception, because it lets `5 USD < 5 GBP` silently sort into a `TreeSet` as if that meant something.
+
+**Common confusions**
+- *"`BigDecimal.equals` and `compareTo() == 0` are interchangeable."* — They're not: `new BigDecimal("2.0").equals(new BigDecimal("2.00"))` is `false`, but `.compareTo(...)` is `0`. Pick the one semantics you need and canonicalise instead of mixing them ad hoc.
+- *"I can override `equals` without touching `hashCode`."* — Two `Money`s that are `.equals()` must return the same `hashCode()`, or a `HashMap`/`HashSet` will silently fail to find an entry that's logically present.
+- *"`compareTo` should never throw — just pick *some* ordering."* — Ordering `5 USD` against `5 GBP` by amount alone, or by currency code, produces a total order that lies about meaning. Throwing is the correct, honest answer when there's no sane comparison.
+- *"Storing the raw caller `BigDecimal` is fine, I'll just be careful with scale downstream."* — That pushes the bug to every call site instead of fixing it once; the correct fix is canonicalising at the single choke point (the constructor).
+- *"`HALF_UP` is the obvious rounding mode."* — For money, `HALF_EVEN` (banker's rounding) is the professional default — it avoids the slight upward bias `HALF_UP` introduces when rounding many values.
+
+**What follows from this topic**
+This is the same "canonicalise once, then trust the contract" discipline behind any value type over a representation with hidden state (dates with timezone offsets, floating point with `-0.0` vs `0.0`, case-insensitive strings). It pairs naturally with **[[oddsconverter]]** — another `BigDecimal` value-math kata, where the discipline shifts from equality/ordering to precision-preserving arithmetic across representations (decimal/fractional/moneyline odds). The extension path here is `java.util.Currency` (validates ISO 4217 codes, drives locale-aware formatting), allocation/splitting (dividing an amount N ways without losing or gaining a cent), and JSR-354 (`javax.money.MonetaryAmount`), the standard-library abstraction this class is a simplified stand-in for.
+
+### Clarify & design the API
+
+Questions to settle before writing a line of logic:
+
+- **What does "equal" mean for money?** Same currency *and* the same numeric amount — `2.0 USD` and `2.00 USD` must compare equal, because a human reading a receipt would call them identical.
+- **Where does scale get normalised — at construction, or at every comparison?** At construction. Normalising once means `equals`/`hashCode` can be dumb field comparisons and there's no way to construct an un-canonical `Money`.
+- **Can `equals` ever throw (e.g. on a currency mismatch)?** No — `equals` must be usable as a `HashMap`/`HashSet` predicate without exploding, so cross-currency amounts are simply *unequal*, never an error.
+- **Can `compareTo` ever throw?** Yes, deliberately — cross-currency ordering has no correct answer, so `compareTo` throws `IllegalArgumentException` rather than silently picking one.
+- **Mutable or immutable?** Immutable — `plus`/`minus`/`times` return new instances. A hash key that could change its hash code after insertion would corrupt any `HashMap`/`HashSet` it sits in.
+- **Rounding mode?** `HALF_EVEN` (banker's rounding) at a fixed 2 decimal places, applied uniformly on construction and after every arithmetic op.
+
+Commit to this surface:
+
+```java
+public final class Money implements Comparable<Money> {
+    public Money(BigDecimal amount, String currency);
+    public static Money of(String amount, String currency);
+
+    public Money plus(Money other);
+    public Money minus(Money other);
+    public Money times(BigDecimal factor);
+
+    public BigDecimal amount();
+    public String currency();
+
+    @Override public boolean equals(Object o);
+    @Override public int hashCode();
+    @Override public int compareTo(Money other);   // throws IllegalArgumentException cross-currency
+}
+```
+
+### Write the tests
+
+Write these first — they pin the contract before any canonicalisation logic exists. Group them: the equals/hashCode contract by name, hash-collection behaviour, `compareTo` (same-currency ordering and cross-currency rejection), then arithmetic and immutability.
+
+**The contract, tested explicitly — reflexive, symmetric, transitive, consistent, and scale-insensitive.** This is the part interviewers are actually grading: naming and pinning each contract clause, not just "it works."
+
+```java
+@Test
+void differently_scaled_equal_amounts_compare_equal() {
+    assertEquals(usd("2.0"), usd("2.00"));
+    assertEquals(usd("2"), usd("2.00"));
+}
+
+@Test
+void equals_is_reflexive() {
+    Money m = usd("10.00");
+    assertEquals(m, m);
+}
+
+@Test
+void equals_is_symmetric() {
+    Money a = usd("10.00");
+    Money b = usd("10.0");
+    assertEquals(a, b);
+    assertEquals(b, a);
+}
+
+@Test
+void equals_is_transitive() {
+    Money a = usd("10.0");
+    Money b = usd("10.00");
+    Money c = Money.of("10.000", "USD");
+    assertEquals(a, b);
+    assertEquals(b, c);
+    assertEquals(a, c);
+}
+
+@Test
+void equals_rejects_null_and_other_types() {
+    Money m = usd("10.00");
+    assertNotEquals(null, m);
+    assertNotEquals("10.00 USD", m);
+}
+
+@Test
+void equal_instances_have_equal_hash_code() {
+    Money a = usd("2.0");
+    Money b = usd("2.00");
+    assertEquals(a, b);
+    assertEquals(a.hashCode(), b.hashCode());
+}
+```
+
+**As a hash key/member — the payoff of canonicalising scale.** A differently-scaled lookup key must still find the entry, and a `HashSet` must dedup amounts that are numerically the same regardless of how they were constructed.
+
+```java
+@Test
+void works_as_a_hash_map_key() {
+    Map<Money, String> prices = new HashMap<>();
+    prices.put(usd("19.99"), "widget");
+
+    assertEquals("widget", prices.get(Money.of("19.990", "USD")));
+    assertTrue(prices.containsKey(usd("19.99")));
+}
+
+@Test
+void dedups_in_a_hash_set() {
+    Set<Money> amounts = new HashSet<>();
+    amounts.add(usd("5.0"));
+    amounts.add(usd("5.00"));
+    amounts.add(usd("5.000"));
+    amounts.add(usd("6.00"));
+
+    assertEquals(2, amounts.size());
+    assertTrue(amounts.contains(usd("5.00")));
+}
+```
+
+**`compareTo` — total within a currency, an exception across currencies.** The cross-currency case is the one candidates most often get wrong by silently returning *something* instead of throwing.
+
+```java
+@Test
+void compare_to_orders_amounts_within_a_currency() {
+    Money five = usd("5.00");
+    Money ten = usd("10.00");
+
+    assertTrue(five.compareTo(ten) < 0);
+    assertTrue(ten.compareTo(five) > 0);
+    assertEquals(0, five.compareTo(usd("5.0")));
+}
+
+@Test
+void compare_to_across_currencies_throws() {
+    Money usd = usd("5.00");
+    Money gbp = Money.of("5.00", "GBP");
+
+    assertThrows(IllegalArgumentException.class, () -> usd.compareTo(gbp));
+}
+```
+
+**Arithmetic and immutability — same-currency required, operands never mutated.**
+
+```java
+@Test
+void plus_adds_same_currency_amounts() {
+    assertEquals(usd("15.00"), usd("10.00").plus(usd("5.00")));
+}
+
+@Test
+void plus_across_currencies_throws() {
+    Money usd = usd("10.00");
+    Money gbp = Money.of("10.00", "GBP");
+    assertThrows(IllegalArgumentException.class, () -> usd.plus(gbp));
+}
+
+@Test
+void operations_do_not_mutate_the_operands() {
+    Money original = usd("10.00");
+    Money unused = original.plus(usd("5.00"));
+
+    assertEquals(usd("10.00"), original);
+}
+```
+
+### Implement it
+
+The whole trick is a single line in the constructor: rescale on the way in, and every other method becomes a plain field comparison. No method ever has to reconcile two differently-scaled `BigDecimal`s again.
+
+```java
+public final class Money implements Comparable<Money> {
+
+    static final int SCALE = 2;
+
+    private final BigDecimal amount;
+    private final String currency;
+
+    public Money(BigDecimal amount, String currency) {
+        if (amount == null) throw new IllegalArgumentException("amount must not be null");
+        if (currency == null) throw new IllegalArgumentException("currency must not be null");
+        this.amount = amount.setScale(SCALE, RoundingMode.HALF_EVEN);  // canonicalise once, here
+        this.currency = currency;
+    }
+
+    public static Money of(String amount, String currency) {
+        return new Money(new BigDecimal(amount), currency);
+    }
+
+    public Money plus(Money other) {
+        requireSameCurrency(other);
+        return new Money(this.amount.add(other.amount), currency);
+    }
+
+    private void requireSameCurrency(Money other) {
+        if (!this.currency.equals(other.currency)) {
+            throw new IllegalArgumentException(
+                    "currency mismatch: " + this.currency + " vs " + other.currency);
+        }
+    }
+
+    /** Plain field comparison — safe *only* because amount is already canonical scale. */
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (!(o instanceof Money other)) return false;
+        return amount.equals(other.amount) && currency.equals(other.currency);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(amount, currency);
+    }
+
+    /** Total within a currency; throws rather than guessing across currencies. */
+    @Override
+    public int compareTo(Money other) {
+        requireSameCurrency(other);
+        return this.amount.compareTo(other.amount);
+    }
+}
+```
+
+- **The key insight:** canonicalisation is a *chokepoint*, not a policy scattered across methods. Because `amount` is guaranteed scale-2 the instant an object exists, `equals`/`hashCode` can use `BigDecimal.equals` directly (fast, correct) instead of `compareTo() == 0` (which `Objects.hash` can't consume anyway — you'd have to hash the unscaled value yourself).
+- **Why `equals` never throws but `compareTo` does:** `equals` must be total (usable as a hash/set predicate on any two objects); `compareTo` is documented to allow `ClassCastException`-style rejections when no ordering exists, so throwing on a currency mismatch is contract-compliant, not a hack.
+- **Complexity:** O(1) for all three methods (bounded-size field comparisons); the canonicalisation cost is paid once, in the constructor, not on every comparison.
+
+### Common mistakes & senior signal
+
+- **Storing the raw `BigDecimal` and comparing with `equals`.** `Money.of("2.0", "USD").equals(Money.of("2.00", "USD"))` silently returns `false` if the constructor doesn't rescale — the amount looks right in a debugger (`toString()` may even mask it) but fails equality and hash lookups. This is the single most common `BigDecimal`-as-a-field bug.
+- **Overriding `equals` without `hashCode` (or hashing a different field set).** Breaks the `HashMap`/`HashSet` contract: `works_as_a_hash_map_key` and `dedups_in_a_hash_set` would fail unpredictably — the value is "in" the set by `equals` but unreachable by `hashCode`.
+- **Making `compareTo` a false total order.** Ordering by currency code first, or comparing raw amounts ignoring currency, produces a `compareTo` that *works* in tests with one currency and quietly corrupts a `TreeSet`/`TreeMap` the moment two currencies mix. Throwing is the correct, defensible answer — say so unprompted.
+- **`compareTo` inconsistent with `equals`.** If `compareTo` ever returned `0` for objects that aren't `.equals()` (or vice versa), sorted collections that rely on `compareTo` alone for membership (`TreeSet`) would silently drop or duplicate entries relative to a `HashSet`. Canonicalising scale is precisely what keeps the two mutually consistent here.
+- **Reaching for `HALF_UP` out of habit.** It's the "intuitive" rounding mode from school, but it biases sums upward over many roundings; `HALF_EVEN` (banker's rounding) is the correct default for financial code and worth naming as a deliberate choice.
+- **Mutable money.** A hash key whose state can change after insertion (no `final` fields, exposed setters) corrupts any `HashMap`/`HashSet` bucket it's stored in — immutability isn't just tidiness here, it's required for hash-key correctness.
+- **Named extensions to mention:** `java.util.Currency` in place of a raw `String` (validates ISO 4217, unlocks locale-aware formatting); allocation/splitting an amount N ways without losing or gaining a cent; and JSR-354 `MonetaryAmount`, the real standard-library abstraction this class simplifies. Compare against **[[oddsconverter]]**, which applies the same "canonicalise a `BigDecimal` representation once, trust it everywhere after" discipline to a different problem — converting between odds formats without losing precision.
+
+## Trade Blotter — Streams & Collectors
+
+### Summary
+
+**What this topic covers**
+This kata builds `Blotter`, a read-only reporting layer over a `List<Trade>`, written as a guided tour
+of the `java.util.stream.Collectors` catalogue. Four query methods, each a single `stream().collect(...)`
+call: `pnlByDeskAndSymbol` nests two levels of `groupingBy` with a `reducing` downstream to sum
+`BigDecimal` pnl per desk-then-symbol bucket; `winnersVsLosers` uses `partitioningBy` for a two-way
+boolean split; `minMaxPnl` uses `Collectors.teeing` to find the min *and* max pnl in one pass instead of
+two; `tagCounts` uses `flatMap` to fan out each trade's tag list before `groupingBy(identity(), counting())`.
+Every method takes `trades` as a parameter rather than holding state — the blotter is a query surface,
+not a stateful ledger. This is a collectors kata, not a streams-fundamentals kata: the point is knowing
+which collector composition expresses each shape, not `map`/`filter` basics.
+
+**Mental model**
+A `Collector` is a mutable-reduction recipe: it describes *how* to fold a stream into a result container,
+and `Collectors` supplies pre-built recipes you compose rather than write by hand. The composition trick
+that separates a junior answer from a senior one is **downstream collectors** — `groupingBy` takes a
+second argument that is itself a collector, so `groupingBy(desk, groupingBy(symbol, reducing(...)))`
+builds a `Map<String, Map<String, BigDecimal>>` in one pass instead of grouping once and then
+re-iterating each bucket. `teeing` is the same idea applied to fan-out: it runs *two* downstream
+collectors over the same elements and merges their results with a `BiFunction`, so `min` and `max` come
+out of a single walk of the stream rather than two separate `stream().min()`/`stream().max()` calls. The
+naive two-pass version is invisible in a five-element test and real money on a multi-million-row
+end-of-day blotter.
+
+**Key terms**
+- **`Collector`** — the `accumulator`/`combiner`/`finisher` recipe a terminal `collect()` call executes;
+  `Collectors` is the JDK's library of pre-built ones.
+- **downstream collector** — the second argument to `groupingBy`/`partitioningBy` that decides what
+  happens *within* each bucket (`reducing`, `counting`, another `groupingBy`, …), instead of the default
+  `toList()`.
+- **`Collectors.groupingBy(classifier, downstream)`** — buckets elements by a key function, applying the
+  downstream collector to each bucket; nesting it builds multi-level maps in one pass.
+- **`Collectors.reducing(identity, mapper, op)`** — a reduction with an explicit identity and combining
+  function; the idiomatic way to sum `BigDecimal` since there is no `summingBigDecimal`.
+- **`Collectors.partitioningBy(predicate)`** — a specialised two-bucket `groupingBy` keyed by
+  `Boolean`; the result map *always* has both `true` and `false` keys, even with an empty input.
+- **`Collectors.teeing(d1, d2, merger)`** — fans one stream into two downstream collectors and merges
+  their results in a single pass; the fix for "two `min`/`max` calls walk the data twice."
+- **`Collectors.mapping(fn, downstream)`** — projects each element before handing it to a downstream
+  collector; used here to turn `Stream<Trade>` into "the pnl values" before `minBy`/`maxBy`.
+- **`flatMap`** — turns each element into a stream of zero-or-more elements and flattens them; the
+  many-to-many fan-out from "one trade, many tags" to "one stream entry per tag occurrence."
+- **`Function.identity()`** — a no-op key function (`x -> x`), used as the `groupingBy` classifier when
+  the element itself (here, the tag string) is the key.
+
+**Why interviewers ask this**
+It tests whether a candidate reaches for the *composed* collector or writes a manual loop that
+re-implements one. The naive first draft for min/max is two stream calls — correct, but a double pass
+that a senior should name unprompted and fix with `teeing`. The naive first draft for nested grouping
+is `groupingBy` once, then a second loop over each bucket's list to sum — also correct, also a second
+pass, also fixable by nesting the downstream collector. The `BigDecimal` sum is a small but real trap:
+reaching for a primitive `summingDouble`-style collector silently loses precision on money, and there is
+no `Collectors.summingBigDecimal` in the JDK, so knowing `reducing(BigDecimal.ZERO, mapper, BigDecimal::add)`
+is the substitute is a genuine signal. `partitioningBy` vs `groupingBy(predicate)` for a two-outcome
+split is a smaller but real efficiency/API-fit question.
+
+**Common confusions**
+- *"`groupingBy` with no downstream collects a `List` per key."* — True, and that is the default; the
+  power move is passing a second collector to change what accumulates per bucket.
+- *"I'll find min and max with two `stream().min()`/`.max()` calls."* — Correct but two passes;
+  `teeing` with two `mapping(...).minBy/maxBy` downstreams does it in one.
+- *"`partitioningBy` is just `groupingBy` with a boolean key."* — Similar shape, but `partitioningBy`
+  guarantees both `true`/`false` keys exist in the result map, even for an empty or one-sided input;
+  plain `groupingBy(predicate)` would only produce the keys that actually occurred.
+- *"`flatMap` is for `Optional`."* — It is a `Stream` operation too: `Stream<Trade>` →
+  `stream.flatMap(t -> t.tags().stream())` → `Stream<String>`, the fan-out this kata's `tagCounts` needs.
+- *"Sum pnl with `Collectors.summingDouble`."* — Loses precision converting `BigDecimal` to `double`;
+  use `reducing` with an explicit `BigDecimal.ZERO` identity instead.
+
+**What follows from this topic**
+Once collector composition is muscle memory, `Collectors.summarizingInt`/`summarizingDouble` give
+count/sum/min/max/average in a single collector (for primitives — `BigDecimal` still needs `reducing`),
+and `Collector.of(...)` lets you hand-roll a bespoke accumulator (a running VWAP, a Sharpe ratio) that
+no built-in collector expresses. It also raises the parallel-stream question: `groupingBy`'s default
+`HashMap` merge and `reducing`'s associative combiner are parallel-safe, but `.parallelStream()` only
+pays off above a real data-size threshold — measure, don't reach for it reflexively. This kata is a
+good pairing with **[[feedparser]]**, which is about *lazy* Streams (the pipeline doesn't run until a
+terminal op); `Blotter` is the payoff on the other side — once you have a stream, `Collectors` is how
+you turn it into a shaped result.
+
+### Clarify & design the API
+
+Questions worth settling before writing a collector:
+
+- **Is the blotter stateful or a query surface?** A query surface — every method takes `List<Trade>` as
+  a parameter and returns a fresh `Map`/record; nothing is mutated or cached.
+- **What does empty input produce, per method?** Matters because the collectors behave differently:
+  `groupingBy` on an empty stream gives an empty map; `partitioningBy` still gives both `true`/`false`
+  keys mapped to empty lists (never a missing key); `teeing`'s two `Optional`-based downstreams both
+  come back empty, so the merger must handle "no min/no max" explicitly.
+- **How is money summed?** `pnl` is `BigDecimal`, so precision rules out `double`-based collectors;
+  reduction needs an explicit identity (`BigDecimal.ZERO`).
+- **One pass or two for min/max?** State the requirement out loud — "in one pass" is the tell that
+  `teeing` (not two `stream()` calls) is the intended answer.
+- **Two-outcome split — `partitioningBy` or `groupingBy(predicate)`?** Two outcomes and both keys
+  always wanted → `partitioningBy`.
+
+Commit to this surface:
+
+```java
+public final class Blotter {
+    public record MinMax(BigDecimal min, BigDecimal max) {}
+
+    public Map<String, Map<String, BigDecimal>> pnlByDeskAndSymbol(List<Trade> trades);
+    public Map<Boolean, List<Trade>> winnersVsLosers(List<Trade> trades);
+    public MinMax minMaxPnl(List<Trade> trades);
+    public Map<String, Long> tagCounts(List<Trade> trades);
+}
+```
+
+### Write the tests
+
+Each method gets a "happy path" test plus an explicit empty-input test — the empty case is where
+`groupingBy`, `partitioningBy`, and `teeing` diverge in behaviour, so pinning it matters as much as the
+happy path.
+
+**`pnlByDeskAndSymbol` — nested sum, and empty input is an empty map.** Compare `BigDecimal` with
+`compareTo`, never `equals`, since scale differs (`"60.00"` vs a summed `"60.00"` may differ in
+representation even when numerically equal).
+
+```java
+@Test
+void pnl_is_summed_per_desk_and_symbol() {
+    List<Trade> trades = List.of(
+            trade("rates", "UST10Y", Side.BUY, "100.00"),
+            trade("rates", "UST10Y", Side.SELL, "-40.00"),
+            trade("rates", "UST2Y", Side.BUY, "10.00"),
+            trade("equities", "AAPL", Side.BUY, "5.00"));
+
+    Map<String, Map<String, BigDecimal>> result = blotter.pnlByDeskAndSymbol(trades);
+
+    assertEquals(0, new BigDecimal("60.00").compareTo(result.get("rates").get("UST10Y")));
+    assertEquals(0, new BigDecimal("10.00").compareTo(result.get("rates").get("UST2Y")));
+    assertEquals(0, new BigDecimal("5.00").compareTo(result.get("equities").get("AAPL")));
+}
+
+@Test
+void pnl_by_desk_and_symbol_is_empty_map_for_empty_input() {
+    assertTrue(blotter.pnlByDeskAndSymbol(List.of()).isEmpty());
+}
+```
+
+**`winnersVsLosers` — `partitioningBy` always yields both keys, even for empty input.** Note the
+boundary: `pnl == 0` (flat) counts as a loser, not a winner — `signum() > 0` is strict.
+
+```java
+@Test
+void winners_and_losers_are_partitioned_by_positive_pnl() {
+    Trade winner = trade("rates", "UST10Y", Side.BUY, "50.00");
+    Trade loser = trade("rates", "UST10Y", Side.SELL, "-20.00");
+    Trade flat = trade("rates", "UST10Y", Side.SELL, "0.00");
+
+    Map<Boolean, List<Trade>> result = blotter.winnersVsLosers(List.of(winner, loser, flat));
+
+    assertEquals(List.of(winner), result.get(true));
+    assertEquals(List.of(loser, flat), result.get(false));   // flat pnl is not a winner
+}
+
+@Test
+void winners_vs_losers_is_empty_lists_for_empty_input() {
+    Map<Boolean, List<Trade>> result = blotter.winnersVsLosers(List.of());
+
+    assertTrue(result.get(true).isEmpty());   // both keys present, not missing
+    assertTrue(result.get(false).isEmpty());
+}
+```
+
+**`minMaxPnl` — the one-pass `teeing` collector; empty input is `null`/`null`, not thrown.** The
+"in one pass" wording is the design cue this needs `teeing`, not two separate stream calls.
+
+```java
+@Test
+void min_and_max_pnl_are_found_in_one_pass() {
+    List<Trade> trades = List.of(
+            trade("rates", "UST10Y", Side.BUY, "50.00"),
+            trade("rates", "UST10Y", Side.SELL, "-20.00"),
+            trade("equities", "AAPL", Side.BUY, "5.00"));
+
+    Blotter.MinMax result = blotter.minMaxPnl(trades);
+
+    assertEquals(0, new BigDecimal("-20.00").compareTo(result.min()));
+    assertEquals(0, new BigDecimal("50.00").compareTo(result.max()));
+}
+
+@Test
+void min_max_pnl_is_null_for_empty_input() {
+    Blotter.MinMax result = blotter.minMaxPnl(List.of());
+
+    assertNull(result.min());
+    assertNull(result.max());
+}
+```
+
+**`tagCounts` — `flatMap` fans out tags, then `groupingBy(identity(), counting())`; trades with no
+tags contribute nothing.**
+
+```java
+@Test
+void tag_counts_are_totalled_across_trades() {
+    List<Trade> trades = List.of(
+            trade("rates", "UST10Y", Side.BUY, "50.00", "algo", "hedge"),
+            trade("rates", "UST2Y", Side.SELL, "-10.00", "algo"),
+            trade("equities", "AAPL", Side.BUY, "5.00", "manual"));
+
+    Map<String, Long> result = blotter.tagCounts(trades);
+
+    assertEquals(2L, result.get("algo"));
+    assertEquals(1L, result.get("hedge"));
+    assertEquals(1L, result.get("manual"));
+}
+
+@Test
+void tag_counts_ignores_trades_with_no_tags() {
+    Trade noTags = trade("rates", "UST10Y", Side.BUY, "50.00");
+
+    Map<String, Long> result = blotter.tagCounts(List.of(noTags));
+
+    assertTrue(result.isEmpty());
+}
+```
+
+### Implement it
+
+Each method is one `stream().collect(...)` call; the design work is entirely in *which* collector, and
+how to nest or fan it.
+
+```java
+/** Sum of pnl per desk, then per symbol within that desk. */
+public Map<String, Map<String, BigDecimal>> pnlByDeskAndSymbol(List<Trade> trades) {
+    return trades.stream()
+            .collect(Collectors.groupingBy(Trade::desk,
+                    Collectors.groupingBy(Trade::symbol,
+                            Collectors.reducing(BigDecimal.ZERO, Trade::pnl, BigDecimal::add))));
+}
+
+/** Trades split into winners (pnl > 0, key true) and losers/flat (key false). */
+public Map<Boolean, List<Trade>> winnersVsLosers(List<Trade> trades) {
+    return trades.stream()
+            .collect(Collectors.partitioningBy(t -> t.pnl().signum() > 0));
+}
+
+/** The lowest and highest pnl across all trades, found in one pass over the stream. */
+public MinMax minMaxPnl(List<Trade> trades) {
+    return trades.stream()
+            .collect(Collectors.teeing(
+                    Collectors.mapping(Trade::pnl, Collectors.minBy(Comparator.naturalOrder())),
+                    Collectors.mapping(Trade::pnl, Collectors.maxBy(Comparator.naturalOrder())),
+                    (min, max) -> new MinMax(min.orElse(null), max.orElse(null))));
+}
+
+/** How many times each tag occurs across all trades. */
+public Map<String, Long> tagCounts(List<Trade> trades) {
+    return trades.stream()
+            .flatMap(t -> t.tags().stream())
+            .collect(Collectors.groupingBy(Function.identity(), Collectors.counting()));
+}
+```
+
+- **`pnlByDeskAndSymbol`:** the outer `groupingBy(Trade::desk, ...)` classifies by desk; its downstream
+  is *another* `groupingBy`, classifying by symbol; *its* downstream is `reducing(ZERO, Trade::pnl, add)`
+  — three collectors nested, one stream walk.
+- **`minMaxPnl`:** `teeing` takes two downstream collectors and a merge `BiFunction`. Each downstream is
+  `mapping(Trade::pnl, minBy/maxBy(...))` — project to pnl, then reduce to an `Optional<BigDecimal>`.
+  The merger unwraps both optionals with `orElse(null)`, which is exactly what makes empty input come
+  back as `MinMax(null, null)` instead of throwing.
+- **Key gotcha:** `Collectors.reducing` needs an explicit identity (`BigDecimal.ZERO`) because there is
+  no zero-arg reduction that is safe on an empty stream — the identity *is* the empty-input answer.
+
+### Common mistakes & senior signal
+
+- **Two passes for min/max.** `trades.stream().max(...)` then a second `trades.stream().min(...)` is
+  correct but walks the list twice; `teeing` is the tell that a candidate thinks about pass count, not
+  just correctness. On a small test list it is invisible; on a real end-of-day blotter it is not.
+- **`summingDouble` on `BigDecimal` pnl.** Converting money to `double` to use a primitive summing
+  collector silently loses precision. There is no `Collectors.summingBigDecimal` — `reducing(BigDecimal.ZERO,
+  Trade::pnl, BigDecimal::add)` is the idiomatic substitute, and naming *why* (no primitive summing
+  collector for `BigDecimal`) is the senior signal.
+- **Grouping then re-iterating instead of nesting.** `groupingBy(Trade::desk)` into a
+  `Map<String, List<Trade>>`, then looping each bucket to sum by symbol, works but is a second pass per
+  bucket. Passing a nested `groupingBy` as the downstream collector does it in the original single pass.
+- **`groupingBy(predicate)` instead of `partitioningBy`.** For an exactly-two-outcome split,
+  `partitioningBy` is more direct and — unlike `groupingBy` — guarantees both `true` and `false` keys
+  exist in the result even when one side is empty; a candidate who reaches for `groupingBy` here may not
+  know that guarantee exists.
+- **Forgetting `BigDecimal.compareTo` vs `equals` in assertions.** `new BigDecimal("60.00")` and a
+  reduced sum can differ in scale while being numerically equal; `assertEquals(0, a.compareTo(b))` is the
+  correct comparison, `assertEquals(a, b)` is not.
+- **Named extensions (from the solution Javadoc):** `summarizingInt`/`summarizingDouble` for a single
+  count/sum/min/max/average collector (primitives only, not `BigDecimal` directly); a custom
+  `Collector.of(...)` for a bespoke accumulator like VWAP or a running Sharpe ratio that `reducing` can't
+  express; and the parallel-stream caveat — `groupingBy`'s default `HashMap` merge and `reducing`'s
+  associative combiner are parallel-safe, but `.parallelStream()` only pays off above a real data-size
+  threshold, so measure before reaching for it.
+
+## Typed Pipeline — Generics & PECS
+
+### Summary
+
+**What this topic covers**
+This kata builds `Pipeline<T>`, a small fluent transformation wrapper over an in-memory `List<T>` with four operations — `addAll`, `map`, `drainTo`, and a standalone static `copy` — whose signatures only differ from the "obvious" unbounded-generic version in their wildcard bounds. That's the whole kata: every method would still compile written the naive way (`addAll(Collection<T>)`), but the wildcard version is what lets client code build against a real type *hierarchy* — loading a `Pipeline<Number>` from a `List<Integer>`, or draining a `Pipeline<Number>` into a `List<Object>` — instead of forcing exact-type matches everywhere. You design the bounded-wildcard signatures, a private-constructor-plus-static-factory shape, and internalise what type erasure does and doesn't let you do with `T` at runtime.
+
+**Mental model**
+PECS — **P**roducer-**E**xtends, **C**onsumer-**S**uper — answers one question for every generic parameter: does this method only *read* from it, or only *write* to it? A parameter you only read from is a producer of `T`s, so declare it `? extends T` (`addAll`'s `items`, `copy`'s `src`): a `List<Integer>` can produce `Number`s. A parameter you only write into is a consumer of `T`s, so declare it `? super T` (`drainTo`'s `sink`, `copy`'s `dst`): a `List<Object>` can consume `Number`s. The cost is symmetric and is the mechanism, not a limitation: `? extends T` forbids `add` (the compiler can't prove *which* subtype the list holds), and `? super T` forbids reading back anything more specific than `Object`. `map` applies the same reasoning to a `Function` instead of a `Collection`: the function *consumes* `T` (so `? super T`) and *produces* `R` (so `? extends R`) — exactly the bound the JDK puts on `Stream#map`. The plain internal field, `List<T> items`, stays invariant (no wildcard) because it is both read and written internally — neither variance direction alone would be sound there.
+
+**Key terms**
+- **PECS** — Producer-Extends, Consumer-Super: the mnemonic for choosing `? extends T` vs `? super T` on a generic parameter based on whether the method reads or writes it.
+- **bounded wildcard** — `? extends T` or `? super T`, restricting an unknown type argument to a sub- or super-type of `T` without naming it.
+- **producer / consumer parameter** — a parameter only ever read from (`addAll`'s `items`) vs one only ever written to (`drainTo`'s `sink`).
+- **invariance** — `List<T>` is not a subtype of `List<Number>` even if `T` is `Integer`; the internal `items` field needs this because it's read *and* written.
+- **type erasure** — the compiler discards `T` after checking the wildcard bounds and compiles every instantiation to the same bytecode operating on the erased bound (`Object` here).
+- **static factory** — `create()`, replacing `new Pipeline<>()` so the type argument can be inferred and the constructor can stay `private`.
+- **heap pollution** — a generic-varargs parameter is really one shared `Object[]` at runtime; nothing stops a differently-typed write into it before it's read.
+- **unchecked cast** — a cast the compiler can't verify at runtime (post-erasure) but accepts because the surrounding generic code proved it sound at compile time.
+
+**Why interviewers ask this**
+Generics with wildcards is where "I know Java generics" gets tested for real. Anyone can write `<T> void foo(List<T> list)`. Fewer people can explain *why* `List<? extends T>` rejects `.add(...)`, or design a `copy(dst, src)` signature that needs *both* wildcards on *different* parameters at once. The senior signal is reaching for PECS unprompted, applying it correctly to `Function` (not just `Collection`), and being able to name the erasure consequences that trip people up in real code review: why a generic class can't do `new T[n]`, why `@SafeVarargs` is a promise and not a fix, and why the JDK itself uses `Collections.copy(List<? super T> dst, List<? extends T> src)` — the same shape as this kata's `copy`.
+
+**Common confusions**
+- *"`? extends T` should let me add a `T` — it's still `T`-ish."* — No: the compiler only knows the actual list holds *some* unknown subtype of `T`, so it can't verify a `T` (or any specific subtype) is safe to insert. Only reads are guaranteed safe.
+- *"`? super T` means I can read a `T` back out."* — No: the compiler only knows the list holds *some* supertype of `T`, so a read only guarantees `Object`. Only writes of `T` (or its subtypes) are guaranteed safe.
+- *"I could just use `List<T>` everywhere and skip the wildcards."* — Then `Pipeline<Number>.addAll(List<Integer>)` doesn't compile — `List<Integer>` is not a `List<Number>`. Wildcards exist precisely to let hierarchy-typed callers in.
+- *"Type erasure means generics do nothing at runtime, so why bother."* — Erasure removes the *reified* type, not the compile-time safety; the safety is the whole value, and it's why `new T[n]` is rejected instead of silently misbehaving.
+- *"`@SafeVarargs` fixes the heap-pollution warning."* — It suppresses the warning as a promise the author has manually verified; it changes nothing at the bytecode level.
+
+**What follows from this topic**
+The natural extensions are a recursive-bound `sorted()` (`<T extends Comparable<? super T>>`, the same bound `Collections.max` uses), a `@SafeVarargs static <T> Pipeline<T> of(T... items)` factory, and swapping the eager `List<T>` for a lazy `Stream`-backed implementation so `map` composes functions instead of materialising an intermediate list per stage. It connects to **[[cache]]** — another generics-heavy API, where the interesting question is bounding a key/value type instead of variance on read/write parameters — and to any JDK API shaped like `Collections.copy` or `Stream.map` once you recognise the PECS pattern underneath.
+
+### Clarify & design the API
+
+Questions to settle before writing a signature:
+
+- **Does each parameter only get read, or only get written?** `addAll`'s `items` and `copy`'s `src` are read-only (producers) → `? extends T`. `drainTo`'s `sink` and `copy`'s `dst` are write-only (consumers) → `? super T`.
+- **What about a `Function` parameter — is PECS even relevant?** Yes: the function *consumes* `T` and *produces* `R`, so it needs both halves at once: `Function<? super T, ? extends R>`.
+- **Should the internal storage be wildcarded too?** No — `items` is both read and written internally by the class itself, so it must stay the invariant `List<T>`.
+- **Constructor: public, or a static factory?** Static factory (`create()`), so the type argument is inferred at the call site and the no-arg constructor can stay `private` — `create()` and `map` are the only code that ever builds a `Pipeline`.
+- **Does `map` mutate `this`, or return a new pipeline?** Returns a new `Pipeline<R>`; the source pipeline is left untouched — chaining requires each stage to be independent.
+
+Commit to this surface:
+
+```java
+public final class Pipeline<T> {
+    public static <T> Pipeline<T> create();
+
+    public Pipeline<T> addAll(Collection<? extends T> items);
+    public <R> Pipeline<R> map(Function<? super T, ? extends R> fn);
+    public void drainTo(Collection<? super T> sink);
+    public List<T> toList();
+
+    public static <T> void copy(List<? super T> dst, List<? extends T> src);
+}
+```
+
+### Write the tests
+
+Write these first — each one exists to pin a *variance* claim, not just a happy path. Group them: producer variance on `addAll`, `map`'s type-changing chain, consumer variance on `drainTo`, the defensive-copy guarantee, and the standalone `copy`.
+
+**Producer variance — `addAll` accepts a narrower element type than the pipeline's own.**
+
+```java
+@Test
+void addAll_accepts_a_covariant_producer_collection() {
+    // Pipeline<Number> loaded from a List<Integer> — only legal because addAll takes
+    // Collection<? extends T>.
+    Pipeline<Number> pipeline = Pipeline.<Number>create().addAll(List.of(1, 2, 3));
+
+    assertEquals(List.of(1, 2, 3), pipeline.toList());
+}
+
+@Test
+void addAll_returns_this_for_chaining() {
+    Pipeline<Number> pipeline = Pipeline.create();
+    Pipeline<Number> same = pipeline.addAll(List.of(1, 2));
+
+    assertSame(pipeline, same);
+    assertEquals(List.of(1, 2), same.toList());
+}
+```
+
+**`map` — changes element type, leaves the source untouched, chains across multiple type changes.** The chaining test is the strongest proof the signature is right: `Integer → String → Integer (length) → Double` compiles and runs cleanly through three different `R`s.
+
+```java
+@Test
+void map_changes_the_element_type() {
+    Pipeline<Integer> ints = Pipeline.<Integer>create().addAll(List.of(1, 2, 3));
+
+    Pipeline<String> strings = ints.map(i -> "v" + i);
+
+    assertEquals(List.of("v1", "v2", "v3"), strings.toList());
+}
+
+@Test
+void map_leaves_the_source_pipeline_untouched() {
+    Pipeline<Integer> ints = Pipeline.<Integer>create().addAll(List.of(1, 2, 3));
+
+    ints.map(i -> i * 10);
+
+    assertEquals(List.of(1, 2, 3), ints.toList());
+}
+
+@Test
+void map_chains_across_multiple_type_changes() {
+    Pipeline<Integer> ints = Pipeline.<Integer>create().addAll(List.of(1, 2, 3));
+
+    Pipeline<Double> doubled = ints
+            .map(i -> "v" + i)
+            .map(String::length)
+            .map(len -> len * 1.5);
+
+    assertEquals(List.of(3.0, 3.0, 3.0), doubled.toList());
+}
+```
+
+**Consumer variance — `drainTo` accepts a wider sink type than the pipeline's own, empties on drain, and appends rather than overwrites.**
+
+```java
+@Test
+void drainTo_accepts_a_contravariant_sink_collection() {
+    // Pipeline<Number> draining into a List<Object> — only legal because drainTo takes
+    // Collection<? super T>.
+    Pipeline<Number> pipeline = Pipeline.<Number>create().addAll(List.<Number>of(1, 2.5, 3));
+    List<Object> sink = new ArrayList<>();
+
+    pipeline.drainTo(sink);
+
+    assertEquals(List.<Number>of(1, 2.5, 3), sink);
+}
+
+@Test
+void drainTo_appends_to_an_already_populated_sink() {
+    Pipeline<Number> pipeline = Pipeline.<Number>create().addAll(List.of(2, 3));
+    List<Object> sink = new ArrayList<>(List.of(1));
+
+    pipeline.drainTo(sink);
+
+    assertEquals(List.of(1, 2, 3), sink);
+}
+```
+
+**Defensive copy and the standalone `copy` — the latter needs both wildcards at once, on two different parameters.**
+
+```java
+@Test
+void toList_returns_a_defensive_copy() {
+    Pipeline<Integer> pipeline = Pipeline.<Integer>create().addAll(List.of(1, 2));
+
+    List<Integer> snapshot = pipeline.toList();
+    snapshot.add(99);
+
+    assertEquals(List.of(1, 2), pipeline.toList());
+}
+
+@Test
+void static_copy_appends_a_covariant_source_into_a_contravariant_destination() {
+    List<Number> dst = new ArrayList<>(List.of(0));
+    List<Integer> src = List.of(1, 2, 3);
+
+    Pipeline.copy(dst, src);
+
+    assertEquals(List.of(0, 1, 2, 3), dst);
+}
+```
+
+### Implement it
+
+Storage is a plain `List<T>` behind a private constructor — no reflection, no array, nothing that needs a reified `T`. `create()` is the only public way in for a fresh pipeline; every other method either reads or writes `items` and the wildcard on its own parameter tells the compiler which is safe.
+
+```java
+public final class Pipeline<T> {
+
+    private final List<T> items;
+
+    private Pipeline(List<T> items) {
+        this.items = items;
+    }
+
+    public static <T> Pipeline<T> create() {
+        return new Pipeline<>(new ArrayList<>());
+    }
+
+    public Pipeline<T> addAll(Collection<? extends T> items) {
+        this.items.addAll(items);
+        return this;
+    }
+
+    public <R> Pipeline<R> map(Function<? super T, ? extends R> fn) {
+        List<R> mapped = new ArrayList<>(items.size());
+        for (T item : items) {
+            mapped.add(fn.apply(item));
+        }
+        return new Pipeline<>(mapped);
+    }
+
+    public void drainTo(Collection<? super T> sink) {
+        sink.addAll(items);
+        items.clear();
+    }
+
+    public List<T> toList() {
+        return new ArrayList<>(items);
+    }
+
+    public static <T> void copy(List<? super T> dst, List<? extends T> src) {
+        for (T item : src) {
+            dst.add(item);
+        }
+    }
+}
+```
+
+- **`addAll`:** `items` is `Collection<? extends T>` — a producer. `this.items.addAll(items)` only ever *reads* elements out of the parameter, so the wildcard costs nothing here.
+- **`map`:** `fn` is `Function<? super T, ? extends R>` — PECS applied to a functional interface instead of a collection. `fn.apply(item)` passes a `T` in (needs `? super T` to accept it) and gets an `R`-or-narrower out (needs `? extends R` to store it as `R`).
+- **`drainTo`:** `sink` is `Collection<? super T>` — a consumer. `sink.addAll(items)` only ever *writes* `T`s into it.
+- **`copy`:** both halves at once, on two *different* parameters — `dst` consumes (`? super T`), `src` produces (`? extends T`) — mirroring `java.util.Collections#copy`.
+- **Why a static factory, not `new Pipeline<>()`:** `create()` lets the type argument be inferred (or supplied explicitly as `Pipeline.<Integer>create()`) without repeating `<T>` on both sides of an assignment, and lets the constructor stay `private` — `create()` and `map` are the only two places that know the element type of the `List` they hand to it.
+- **Key gotcha:** the internal `items` field is deliberately *not* wildcarded — it is `List<T>`, invariant — because the class itself both reads and writes it. Wildcards only earn their keep at a method boundary where one direction is the whole story.
+
+**Type erasure consequences.** At runtime, `Pipeline<Integer>` and `Pipeline<String>` are the same class — the compiler erases `T` to its bound (`Object` here) once the wildcard checks above have passed, and inserts the unchecked casts needed to make that safe.
+
+- `new T[n]` does not compile inside a generic class — the JVM needs a reified component type to allocate an array, and erasure has already discarded `T`. Backing `Pipeline` with a `List` (which hides its own `Object[]` behind a type-safe API) sidesteps the problem entirely instead of working around it with a manually-cast `Object[]`.
+- A hypothetical `static <T> Pipeline<T> of(T... items)` factory would compile with an "unchecked generic array creation" warning: `items` is really one shared `Object[]` at runtime, so nothing stops another erased-generic method from stashing a different type into that same array before it's read (heap pollution). `@SafeVarargs` suppresses the warning as a promise, not a fix — it only belongs on a method the author has manually verified never writes into that array.
+- Every `? extends`/`? super` bound above is a compile-time-only proof; the generated bytecode for `addAll`, `map`, and `copy` is identical regardless of the concrete types used, with an implicit unchecked cast to `T` wherever the erased code reads a value the wildcard guaranteed was assignable.
+
+### Common mistakes & senior signal
+
+- **Writing the unbounded signature and missing why it's wrong.** `addAll(Collection<T> items)` compiles and passes a same-type test, but `Pipeline<Number>.addAll(List.of(1, 2, 3))` — a `List<Integer>` — fails to compile. The senior tell is explaining *why* before being shown the failing call: producer parameters need `? extends T`.
+- **Getting the direction backwards.** Declaring `drainTo(Collection<? extends T> sink)` compiles but breaks the moment a caller passes a `List<Object>` sink for a `Pipeline<Number>` — `? extends T` can't accept a `List<Object>` as a `T`-consumer. PECS gets the direction right from the read/write question, not from guessing.
+- **Trying to read out of a `? extends T` parameter, or write into a `? super T` one.** Both are compiler-rejected on purpose — the fix is never a cast to silence it, it's recognising the parameter was declared with the wrong variance for what the method is trying to do with it.
+- **Wildcarding the internal field.** `List<? extends T> items` would break `addAll`'s own `this.items.addAll(items)` — you can't write into a `? extends T` list, even your own. Invariant storage plus wildcarded *boundaries* is the correct split.
+- **Believing `@SafeVarargs` is a fix rather than a promise.** It suppresses the heap-pollution warning; it does not change that `items` is one shared `Object[]` at runtime. Only add it after manually verifying the varargs body never writes into that array.
+- **Named extensions that show depth beyond the base kata:** a `sorted()` operation needs the recursive bound `<T extends Comparable<? super T>>` (`T` comparable to itself or a supertype — the same bound `Collections.max` uses); a verified `@SafeVarargs static <T> Pipeline<T> of(T... items)` factory for `Pipeline.of(1, 2, 3)`-style construction; and replacing the eager `List<T>` with a `Stream`-backed pipeline so `map` composes functions lazily instead of materialising an intermediate list at every stage.
+
+## Resource Lease — AutoCloseable
+
+### Summary
+
+**What this topic covers**
+This kata builds a fixed-size, single-threaded `Pool<R>` that hands out resources as `Lease<R>` handles implementing `AutoCloseable`. A caller `acquire()`s a lease, reaches the resource through `Lease.get()`, and returns it by `close()`-ing the lease — almost always via try-with-resources, so the return happens even when the caller's code throws. It is the fundamentals-tier shape behind a JDBC connection pool or an object pool, stripped of concurrency machinery: no `Semaphore`, no blocking, `acquire()` either succeeds immediately or throws. A third fixture, `FaultyResource`, whose `close()` always throws, exists purely to drill suppressed exceptions in a multi-resource try-with-resources block. The real deliverable is not the pool's bookkeeping — it's getting `Lease.close()` right: deterministic, idempotent, and correct under exception unwinding.
+
+**Mental model**
+`try-with-resources` is sugar for a `finally` block that calls `close()` on every resource declared in the parenthesised list, in **reverse (LIFO) declaration order**, no matter how the try body exits — normally, or via exception. That guarantee is what makes `Lease` safe to hand out: the pool never needs the caller to remember to return anything. The second half of the mental model is idempotency: `close()` must tolerate being called more than once, doing nothing on the second call. Without that guard, a caller who (accidentally or defensively) closes a lease twice would call `Pool.release()` twice, pushing the same resource onto the idle deque twice and inflating `available()` past the pool's real capacity — two future callers would then believe they each hold an exclusive resource that is actually the same object. The third piece is what happens when **both** the try body and a resource's `close()` throw: the JVM does not discard either exception. The body's exception (whichever is already propagating) becomes primary; every exception thrown while closing resources during unwinding is attached to it via `Throwable.addSuppressed(Throwable)`, retrievable from `getSuppressed()` — nothing is silently lost.
+
+**Key terms**
+- **`AutoCloseable`** — the interface with a single `close() throws Exception`; implementing it makes a type eligible for try-with-resources.
+- **try-with-resources** — the `try (Resource r = ...) { }` form; compiles to a `finally` that closes every declared resource, LIFO order, even on exception.
+- **LIFO close ordering** — resources close in the reverse of their declaration order — the last resource acquired is the first one closed, mirroring stack unwinding / RAII destructor order.
+- **idempotent `close()`** — a second (or later) call is a safe no-op; `Closeable`/`AutoCloseable` both document this as the expected contract, not just a nice-to-have.
+- **suppressed exception** — an exception thrown while closing a resource during unwinding, attached to the primary (already-propagating) exception via `addSuppressed`, read back via `getSuppressed()`.
+- **lease** — a borrow handle, not the resource itself; closing a lease means "I'm done borrowing this," not "destroy this."
+- **lazy creation** — the pool calls `factory` only when acquiring and no idle resource is waiting, not `size` times up front.
+- **`available()` invariant** — `size - leased`, which must hold exactly even under double-close, exceptions, and reuse.
+
+**Why interviewers ask this**
+Nearly everyone can write `try { } finally { close(); }` for one resource. Far fewer can state — unprompted — the three rules that make multi-resource cleanup actually safe: LIFO ordering (so a resource that depends on one opened before it is closed first), suppressed exceptions (so a close-time failure doesn't silently swallow the real bug), and idempotency (so defensive double-closing doesn't corrupt shared state). This kata is small enough to implement in minutes, which is exactly why interviewers use it as a filter: the code is trivial, but explaining *why* each line is there — and predicting `getSuppressed()` output on a whiteboard — separates people who have internalized RAII-style resource management from people who've only ever called `.close()` in a `finally` block by habit.
+
+**Common confusions**
+- *"try-with-resources closes resources in declaration order."* — No, it's LIFO: the last one opened is the first one closed, mirroring how a stack of destructors unwinds.
+- *"If `close()` throws while a body exception is propagating, the close exception replaces it."* — No, the body's exception stays primary; the close exception is attached via `addSuppressed`, not thrown on its own.
+- *"`Lease.close()` should call `close()` on the underlying resource `R`."* — No. The lease closing means "return to the pool," not "destroy." The pool (not any individual lease) owns the resource's lifecycle.
+- *"A second `close()` call should throw to catch bugs."* — No, the `AutoCloseable`/`Closeable` contract expects tolerance: nested try-with-resources and defensive cleanup code routinely double-close. Throwing turns safe code into a bug source.
+- *"`acquire()` should block when the pool is exhausted."* — Not here: single-threaded, no other thread could ever return a resource while this one waits, so blocking would deadlock. It throws `IllegalStateException` instead.
+
+**What follows from this topic**
+The natural extension is making this concurrent: swap the `Deque` + `leased` counter for a `Semaphore` (bounding concurrent leases) and a thread-safe idle queue, and swap "throw when exhausted" for "block with a timeout" — that's exactly [[connectionpool]], the concurrent cousin of this kata. Other extensions living in the `Pool` Javadoc: **FIFO vs LIFO reuse** (this pool's `ArrayDeque` push/pop is a stack, reusing the most-recently-returned resource first to keep a small working set hot; a queue would round-robin instead), and **validation on reuse** (running a `Predicate<R>` over an idle resource before handing it out, discarding and recreating on failure — what `ConnectionPool` does for real connections that may have gone stale).
+
+### Clarify & design the API
+
+Questions worth settling before writing the pool:
+
+- **Blocking or throwing on exhaustion?** Single-threaded pool, so blocking would deadlock (no other thread can ever return a resource). `acquire()` throws `IllegalStateException` immediately instead.
+- **Eager or lazy resource creation?** Lazy — `factory` runs only when `acquire()` needs a resource and none is idle, not `size` times at construction.
+- **What does `Lease.close()` actually do?** Return the resource to the pool's idle deque and decrement `leased` — *not* call `close()`/cleanup on the resource itself. The pool owns the resource's lifecycle, not any one lease.
+- **What happens on double-close?** Must be a no-op, tracked with a `boolean closed` flag on the lease — never call `Pool.release()` twice for the same acquisition.
+- **What happens when the try body *and* a resource's close both throw?** Nothing should be swallowed — this is what `FaultyResource` exists to force you to observe and assert on (`getSuppressed()`).
+
+Commit to this surface:
+
+```java
+public final class Pool<R> {
+    public Pool(Supplier<R> factory, int size);
+    public Lease<R> acquire();      // throws IllegalStateException if exhausted
+    public int available();         // size - leased
+    void release(R resource);       // package-private return path, called by Lease.close()
+}
+
+public final class Lease<R> implements AutoCloseable {
+    public R get();
+    @Override public void close();  // idempotent — returns resource to the pool at most once
+}
+```
+
+### Write the tests
+
+Write these first: the try-with-resources happy path, the body-throws path, idempotency, resource reuse, exhaustion, and — the payoff — the suppressed-exception case with `FaultyResource`.
+
+**Happy path — try-with-resources returns the resource deterministically.**
+
+```java
+@Test
+void try_with_resources_returns_the_lease_to_the_pool() {
+    Pool<Object> pool = newPool(2);
+    assertEquals(2, pool.available());
+
+    try (Lease<Object> lease = pool.acquire()) {
+        assertNotNull(lease.get());
+        assertEquals(1, pool.available());
+    }
+
+    assertEquals(2, pool.available());
+}
+```
+
+**Body throws — the resource still comes back.** This is the entire point of `AutoCloseable`: cleanup happens even on the unhappy path.
+
+```java
+@Test
+void body_throwing_still_returns_the_resource() {
+    Pool<Object> pool = newPool(1);
+
+    assertThrows(RuntimeException.class, () -> {
+        try (Lease<Object> lease = pool.acquire()) {
+            throw new RuntimeException("boom");
+        }
+    });
+
+    assertEquals(1, pool.available());
+}
+```
+
+**Idempotency — double-close must not inflate `available()`.** Without the `closed` guard this test fails: two `release()` calls would push the same resource twice and `available()` would read `2` on a pool of size `1`.
+
+```java
+@Test
+void double_close_is_idempotent() {
+    Pool<Object> pool = newPool(1);
+    Lease<Object> lease = pool.acquire();
+
+    lease.close();
+    lease.close();
+
+    assertEquals(1, pool.available());
+}
+```
+
+**Reuse — a closed lease's resource comes back out on the next `acquire()`.**
+
+```java
+@Test
+void closed_lease_reuses_the_same_resource_on_next_acquire() {
+    Pool<Object> pool = newPool(1);
+    Lease<Object> first = pool.acquire();
+    Object resource = first.get();
+    first.close();
+
+    Lease<Object> second = pool.acquire();
+
+    assertSame(resource, second.get());
+}
+```
+
+**Exhaustion — `acquire()` throws rather than blocking, since blocking here would deadlock.**
+
+```java
+@Test
+void acquire_when_exhausted_throws() {
+    Pool<Object> pool = newPool(1);
+    pool.acquire();
+
+    assertThrows(IllegalStateException.class, pool::acquire);
+}
+```
+
+**Suppressed exceptions — the payoff test.** A multi-resource try-with-resources block where the body throws *and* the second resource's `close()` throws. LIFO ordering closes `resource` (the `FaultyResource`) before `lease`; the body's `RuntimeException` stays primary, `FaultyResource`'s `IllegalStateException` is suppressed onto it, and `Lease.close()` still runs afterward, returning the resource to the pool regardless.
+
+```java
+@Test
+void faulty_resource_close_exception_is_suppressed_under_the_body_exception() {
+    Pool<FaultyResource> pool = new Pool<>(FaultyResource::new, 1);
+    RuntimeException bodyFailure = new RuntimeException("body failed");
+
+    RuntimeException thrown = assertThrows(RuntimeException.class, () -> {
+        try (Lease<FaultyResource> lease = pool.acquire();
+             FaultyResource resource = lease.get()) {
+            throw bodyFailure;
+        }
+    });
+
+    assertSame(bodyFailure, thrown);
+    assertEquals(1, thrown.getSuppressed().length);
+    assertInstanceOf(IllegalStateException.class, thrown.getSuppressed()[0]);
+    // Lease.close() still ran (after the faulty resource's close) and returned the resource.
+    assertEquals(1, pool.available());
+}
+```
+
+### Implement it
+
+`Pool<R>` holds a `Deque<R>` of idle resources plus a `leased` counter; `available() == size - leased` is the invariant every test pins.
+
+```java
+public final class Pool<R> {
+    private final Supplier<R> factory;
+    private final int size;
+    private final Deque<R> idle = new ArrayDeque<>();
+    private int leased;
+
+    public Pool(Supplier<R> factory, int size) {
+        this.factory = Objects.requireNonNull(factory, "factory");
+        if (size <= 0) throw new IllegalArgumentException("size must be positive: " + size);
+        this.size = size;
+    }
+
+    public Lease<R> acquire() {
+        if (leased >= size) {
+            throw new IllegalStateException("pool exhausted: all " + size + " resources are leased");
+        }
+        R resource = idle.isEmpty() ? factory.get() : idle.pop();
+        leased++;
+        return new Lease<>(resource, this);
+    }
+
+    public int available() {
+        return size - leased;
+    }
+
+    void release(R resource) {   // package-private: only Lease.close() calls this
+        idle.push(resource);
+        leased--;
+    }
+}
+```
+
+`Lease<R>` is where the pedagogy lives — a `boolean closed` flag makes `close()` idempotent, and `close()` never touches the resource's own lifecycle, only the pool's bookkeeping:
+
+```java
+public final class Lease<R> implements AutoCloseable {
+    private final R resource;
+    private final Pool<R> pool;
+    private boolean closed;
+
+    Lease(R resource, Pool<R> pool) {
+        this.resource = resource;
+        this.pool = pool;
+    }
+
+    public R get() {
+        return resource;   // still returns the resource after close() — the pool is what forgets it
+    }
+
+    @Override
+    public void close() {
+        if (closed) return;   // idempotency guard — the whole point of this class
+        closed = true;
+        pool.release(resource);
+    }
+}
+```
+
+- **The key insight:** `Lease.close()` and `Pool.release()` are two different concerns — `close()` guards against being called more than once; `release()` trusts its caller and just does the bookkeeping. Idempotency belongs on the lease (the thing a caller might close twice), not on the pool (which is only ever told once, by the one lease that owns that acquisition).
+- **Complexity:** O(1) for `acquire()`/`release()`/`available()` (deque push/pop, counter arithmetic).
+- **Why `release()` is package-private:** only `Lease.close()` should ever be able to call it — a public `release()` would let a caller bypass the idempotency guard entirely by calling `pool.release(resource)` directly.
+
+### Common mistakes & senior signal
+
+- **Forgetting the idempotency guard.** The most common bug: `close()` unconditionally calls `pool.release(resource)`. It passes the happy-path test and fails only `double_close_is_idempotent` — which is exactly why that test exists as its own case rather than being folded into the happy path.
+- **Assuming close order matches declaration order.** try-with-resources unwinds LIFO — the *last* resource declared is the *first* one closed. Get this backwards and you'll mispredict which resource's exception ends up primary versus suppressed in a multi-resource block.
+- **Thinking a close-time exception replaces the body's exception.** It doesn't — the already-propagating body exception stays primary, and the close-time exception is *attached* via `addSuppressed`, not thrown separately or discarded. Missing this means misreading `assertSame(bodyFailure, thrown)` in the suppressed-exception test as a coincidence rather than the contract.
+- **Conflating "close the lease" with "close the resource."** `Lease.close()` returns the resource to the pool; it must not call any cleanup on `R` itself. A resource that itself needs shutdown (e.g. a real `Closeable` network connection) is closed by whoever eventually retires the *pool*, not by every lease that borrows and returns it.
+- **Reaching for blocking `acquire()` here.** In a single-threaded pool, blocking on exhaustion is a guaranteed deadlock — no other thread exists to ever call `release()`. Throwing `IllegalStateException` is the correct fundamentals-tier answer; blocking-with-timeout is a real technique, but it belongs to the concurrent pool.
+- **Senior signal — naming the concurrent extension unprompted.** The strongest answer volunteers that a multi-threaded version swaps the `Deque` + counter for a `Semaphore` and a thread-safe idle queue, and swaps "throw when exhausted" for "block with a timeout" — precisely the design of [[connectionpool]]. Also worth naming: LIFO-vs-FIFO reuse policy (this pool's stack-based reuse keeps a small working set hot) and validating a resource before handing it back out on reuse (discard-and-recreate on failure, as a real connection pool does for connections that went stale while idle).
