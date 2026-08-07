@@ -464,6 +464,21 @@
       "itemCount": 11
     },
     {
+      "id": "mm-katas",
+      "file": "/mm-katas-primer.md",
+      "title": "Live Coding (MM)",
+      "category": "Katas",
+      "itemLabel": "Kata",
+      "itemsPlural": "market-making katas",
+      "storagePrefix": "ip:mm-katas",
+      "defaultRevealedSections": [],
+      "itemHeadingLevel": 2,
+      "sectionHeadingLevel": 3,
+      "autoNumberItems": true,
+      "sectionOrder": [],
+      "itemCount": 4
+    },
+    {
       "id": "postgres",
       "file": "/postgres-interview-primer.md",
       "title": "Postgres",
