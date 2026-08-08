@@ -27,7 +27,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Return the indices of the two numbers that add up to a target" gives you three tells at once: you need a *pair*, the array is *unsorted*, and you must return *positions* rather than values. Unsorted plus positions is what rules out the usual pair-finding trick. **Therefore.** A hashmap from value to index, checked as you scan, because the partner for `n` is fully determined (`target - n`) so membership is the only question you ever ask. **Not two pointers**, which needs sorted input and would destroy the original indices you have to return; sorting first costs `O(n log n)` and forces you to carry the original positions alongside. **Not a nested loop**, which is the `O(n^2)` baseline this exists to beat. **O(n)** time, **O(n)** space.
+**Signals.** "Return the indices of the two numbers that add up to a target" gives you three tells at once: you need a *pair*, the array is *unsorted*, and you must return *positions* rather than values. Unsorted plus positions is what rules out the usual pair-finding trick. **Therefore.** A hashmap from value to index, checked as you scan, because the partner for `n` is fully determined (`target - n`) so membership is the only question you ever ask. **Not two pointers**, which needs sorted input and would destroy the original indices you have to return; sorting first costs `O(n log n)` and forces you to carry the original positions alongside. **Not a nested loop**, which is the `O(n^2)` baseline this exists to beat.
+
+- **Use:** Hashmap (one-pass complement lookup). **O(n)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Check every pair.
@@ -168,7 +170,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Stored in reverse order (ones digit first)" is the gift: that is exactly the order addition consumes digits in, so no reversal, no stack, no recursion is needed anywhere. "Non-empty" removes the null-input case. The constraint that each list holds up to 100 nodes is the second signal, and it is a prohibition: a 100-digit number fits in no fixed-width integer type, so the numbers can never be reconstructed. **Therefore.** Walk both lists in lockstep carrying one integer, emitting one node per position behind a dummy head, exactly as you would add on paper. **Not converting each list to an integer**, adding, and splitting the digits back out, which passes in Python only because its integers are arbitrary precision, and overflows a 64-bit integer at 19 digits in every other language here. **O(max(m, n))** time, **O(max(m, n))** space.
+**Signals.** "Stored in reverse order (ones digit first)" is the gift: that is exactly the order addition consumes digits in, so no reversal, no stack, no recursion is needed anywhere. "Non-empty" removes the null-input case. The constraint that each list holds up to 100 nodes is the second signal, and it is a prohibition: a 100-digit number fits in no fixed-width integer type, so the numbers can never be reconstructed. **Therefore.** Walk both lists in lockstep carrying one integer, emitting one node per position behind a dummy head, exactly as you would add on paper. **Not converting each list to an integer**, adding, and splitting the digits back out, which passes in Python only because its integers are arbitrary precision, and overflows a 64-bit integer at 19 digits in every other language here.
+
+- **Use:** Linked list traversal with carry. **O(max(m, n))** time, **O(max(m, n))** space.
 
 #### Explanation
 **Brute force.** Rebuild both numbers, add them, take the sum apart again.
@@ -377,7 +381,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** Two already sorted inputs plus a required `O(log(min(m, n)))`. The bound is the tell and it is an unusually strong one: a logarithmic budget forbids even touching every element, which kills merging and kills any two-pointer walk to the midpoint. Sorted input plus a log bound is binary search by elimination; the only real question left is what you search over, and it is not a value, it is a *split point*. **Therefore.** Binary search on `i`, the number of elements taken from the shorter array into the left half, which forces `j = half - i` from the other. The split is right when `a[i-1] <= b[j]` and `b[j-1] <= a[i]`, and that predicate is monotonic in `i`, so whichever comparison fails tells you which way to move. **Not merging** to the midpoint, the `O(m + n)` baseline this problem exists to beat. **O(log(min(m, n)))** time, **O(1)** space.
+**Signals.** Two already sorted inputs plus a required `O(log(min(m, n)))`. The bound is the tell and it is an unusually strong one: a logarithmic budget forbids even touching every element, which kills merging and kills any two-pointer walk to the midpoint. Sorted input plus a log bound is binary search by elimination; the only real question left is what you search over, and it is not a value, it is a *split point*. **Therefore.** Binary search on `i`, the number of elements taken from the shorter array into the left half, which forces `j = half - i` from the other. The split is right when `a[i-1] <= b[j]` and `b[j-1] <= a[i]`, and that predicate is monotonic in `i`, so whichever comparison fails tells you which way to move. **Not merging** to the midpoint, the `O(m + n)` baseline this problem exists to beat.
+
+- **Use:** Binary search on partition. **O(log(min(m, n)))** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Merge the two arrays, then index the middle.
@@ -627,7 +633,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Longest substring that is a palindrome", where substring means contiguous, so the answer is one interval and not a subsequence problem. The property being searched for is *inherited inward*: if `s[l..r]` is a palindrome then `s[l+1..r-1]` is one too, and the reverse direction is what you exploit, growing a known palindrome by testing one character at each end. `s.length <= 1000` puts `O(n²)` in budget and rules out `O(n³)`. **Therefore.** Try all `2n - 1` centers, `n` single characters plus `n - 1` gaps between adjacent characters, and expand each outward while the ends match, keeping the longest seen. **Not the DP table** over `is s[i..j] a palindrome`, which reaches the same `O(n²)` time but pays `O(n²)` memory to store answers that expansion computes and discards. Manacher's algorithm is `O(n)` and almost never expected. **O(n²)** time, **O(1)** space.
+**Signals.** "Longest substring that is a palindrome", where substring means contiguous, so the answer is one interval and not a subsequence problem. The property being searched for is *inherited inward*: if `s[l..r]` is a palindrome then `s[l+1..r-1]` is one too, and the reverse direction is what you exploit, growing a known palindrome by testing one character at each end. `s.length <= 1000` puts `O(n²)` in budget and rules out `O(n³)`. **Therefore.** Try all `2n - 1` centers, `n` single characters plus `n - 1` gaps between adjacent characters, and expand each outward while the ends match, keeping the longest seen. **Not the DP table** over `is s[i..j] a palindrome`, which reaches the same `O(n²)` time but pays `O(n²)` memory to store answers that expansion computes and discards. Manacher's algorithm is `O(n)` and almost never expected.
+
+- **Use:** Expand around center. **O(n²)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Test every substring, keep the longest that reads the same backwards.
@@ -818,7 +826,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Return the number of combinations", not the combinations themselves, so nothing needs to be enumerated and the answer is one integer. "Unlimited number of times" is the unbounded part: a denomination is never used up, so the state after choosing a coin still allows that same coin. The parenthesised "not permutations" is the whole difficulty, because it says two orderings of the same multiset are one answer. With `amount <= 5000` and 300 coins, a table of 1.5 million cells is nothing while enumeration is hopeless. **Therefore.** A 1-D table where `dp[a]` counts the ways to make `a`, filled with the coins in the outer loop so each denomination is finished before the next is introduced. **Not amount-outer, coin-inner**, the same three lines with the loops swapped, which counts every ordering separately and is the standard way this problem is failed. **O(n * amount)** time, **O(amount)** space.
+**Signals.** "Return the number of combinations", not the combinations themselves, so nothing needs to be enumerated and the answer is one integer. "Unlimited number of times" is the unbounded part: a denomination is never used up, so the state after choosing a coin still allows that same coin. The parenthesised "not permutations" is the whole difficulty, because it says two orderings of the same multiset are one answer. With `amount <= 5000` and 300 coins, a table of 1.5 million cells is nothing while enumeration is hopeless. **Therefore.** A 1-D table where `dp[a]` counts the ways to make `a`, filled with the coins in the outer loop so each denomination is finished before the next is introduced. **Not amount-outer, coin-inner**, the same three lines with the loops swapped, which counts every ordering separately and is the standard way this problem is failed.
+
+- **Use:** DP (unbounded knapsack). **O(n * amount)** time, **O(amount)** space.
 
 #### Explanation
 **Brute force.** Recurse on "use this coin again, or move past it".
@@ -956,7 +966,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Digits reversed" over "a 32-bit signed integer", with a rule for what happens when the result "overflows the 32-bit signed range". Reversing the digits is not the problem; the overflow clause is, and it is stated in terms of a fixed-width type, which says the intended solution builds the answer in that type and guards it rather than escaping to a wider one. There is no array, nothing to search and nothing to compare, so the only tools available are `% 10` to read the last digit and `// 10` to drop it, at most ten steps for any 32-bit value. **Therefore.** Peel the last digit off `x` and push it onto `res` with `res = res * 10 + d`, checking the range before or after each push depending on the language. **Not a round trip through a string**, reversing the characters and parsing back, which allocates two buffers for a value that fits in one register and lets the parser silently produce something outside the 32-bit range. **O(log x)** time, **O(1)** space.
+**Signals.** "Digits reversed" over "a 32-bit signed integer", with a rule for what happens when the result "overflows the 32-bit signed range". Reversing the digits is not the problem; the overflow clause is, and it is stated in terms of a fixed-width type, which says the intended solution builds the answer in that type and guards it rather than escaping to a wider one. There is no array, nothing to search and nothing to compare, so the only tools available are `% 10` to read the last digit and `// 10` to drop it, at most ten steps for any 32-bit value. **Therefore.** Peel the last digit off `x` and push it onto `res` with `res = res * 10 + d`, checking the range before or after each push depending on the language. **Not a round trip through a string**, reversing the characters and parsing back, which allocates two buffers for a value that fits in one register and lets the parser silently produce something outside the 32-bit range.
+
+- **Use:** Math (digit extraction). **O(log x)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Print it, reverse the text, read it back.
@@ -1100,7 +1112,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Return `true` if any value appears at least twice" asks exactly one thing: has this value been seen before. There is no index to report, no ordering to preserve, no count to compare, so it is a pure membership question and nothing about the input has to survive the scan. The bound `n <= 10^5` rules out the pairwise scan on its own, since that is 5 billion comparisons at the top end. **Therefore.** Stream the array into a hash set and return the moment an insert finds the value already present, which stops on the first duplicate instead of always paying full cost. **Not sorting**, which does make duplicates adjacent and needs no extra structure, but costs `O(n log n)` and reorders the caller's array; take it only when memory rather than time is the binding constraint. **Not a nested loop**, the `O(n^2)` baseline this exists to beat. **O(n)** time, **O(n)** space.
+**Signals.** "Return `true` if any value appears at least twice" asks exactly one thing: has this value been seen before. There is no index to report, no ordering to preserve, no count to compare, so it is a pure membership question and nothing about the input has to survive the scan. The bound `n <= 10^5` rules out the pairwise scan on its own, since that is 5 billion comparisons at the top end. **Therefore.** Stream the array into a hash set and return the moment an insert finds the value already present, which stops on the first duplicate instead of always paying full cost. **Not sorting**, which does make duplicates adjacent and needs no extra structure, but costs `O(n log n)` and reorders the caller's array; take it only when memory rather than time is the binding constraint. **Not a nested loop**, the `O(n^2)` baseline this exists to beat.
+
+- **Use:** Hashset membership check. **O(n)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Compare every pair.
@@ -1227,7 +1241,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Exactly the same characters with the same frequencies" defines the answer entirely in terms of counts, so position and order carry no information at all and any work that establishes an order is work you will throw away. The constraint "lowercase English letters" is the second signal and it fixes the alphabet at 26, which is what turns the tally from `O(k)` space into a constant. Unequal lengths can never be anagrams, so one comparison disposes of a large share of inputs before any counting starts. **Therefore.** One array of 26 counters: increment on `s`, decrement on `t` in the same pass, then check every counter is zero. **Not sorting both strings and comparing**, the answer most people give, which is correct and one line but spends `O(n log n)` computing a total ordering when only multiset equality was asked for, and needs a copy of both inputs to sort. **O(n)** time, **O(1)** space.
+**Signals.** "Exactly the same characters with the same frequencies" defines the answer entirely in terms of counts, so position and order carry no information at all and any work that establishes an order is work you will throw away. The constraint "lowercase English letters" is the second signal and it fixes the alphabet at 26, which is what turns the tally from `O(k)` space into a constant. Unequal lengths can never be anagrams, so one comparison disposes of a large share of inputs before any counting starts. **Therefore.** One array of 26 counters: increment on `s`, decrement on `t` in the same pass, then check every counter is zero. **Not sorting both strings and comparing**, the answer most people give, which is correct and one line but spends `O(n log n)` computing a total ordering when only multiset equality was asked for, and needs a copy of both inputs to sort.
+
+- **Use:** Frequency array (26 lowercase letters). **O(n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Sort both strings and compare them.
@@ -1369,7 +1385,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Group the strings that are anagrams of each other" plus "return the groups in any order". Grouping by a property means you need a *canonical form* of that property to key on, and "anagram" is a statement about character counts, nothing else. The any-order clause tells you the output is a partition, not a ranking, so no sorting of results is needed either. **Therefore.** A hashmap from canonical key to bucket, built in one pass. The only real question is what the key is, and counts beat sorted characters because counting is one linear pass per string. **Not sorting the whole array**, which groups nothing on its own since anagrams are not adjacent under lexicographic order. **Not pairwise comparison** of every string against every other, the `O(n^2 * k)` baseline. **O(n * k)** time, **O(n * k)** space.
+**Signals.** "Group the strings that are anagrams of each other" plus "return the groups in any order". Grouping by a property means you need a *canonical form* of that property to key on, and "anagram" is a statement about character counts, nothing else. The any-order clause tells you the output is a partition, not a ranking, so no sorting of results is needed either. **Therefore.** A hashmap from canonical key to bucket, built in one pass. The only real question is what the key is, and counts beat sorted characters because counting is one linear pass per string. **Not sorting the whole array**, which groups nothing on its own since anagrams are not adjacent under lexicographic order. **Not pairwise comparison** of every string against every other, the `O(n^2 * k)` baseline.
+
+- **Use:** Hashmap keyed by a 26-slot character count. **O(n * k)** time, **O(n * k)** space.
 
 #### Explanation
 **Brute force.** Compare every string against every group's representative.
@@ -1533,7 +1551,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Most frequent" means you need a count per value, so a frequency map is forced before anything else can happen. "Top `k`" is a selection layered on that map, and "returned in any order" says the output is a set rather than a ranking, so the counts never need to be fully ordered. The last signal is a bound hiding in the data: no value can occur more than `n` times, so every count is an integer in `[1, n]`. **Therefore.** Count in one pass, then bucket by count into an array of `n + 1` lists and walk it from the back until `k` values are collected. Indexing by a bounded integer replaces comparison entirely. **Not a size-`k` min-heap**, which is the answer most people give and is genuinely good at `O(n log k)`; it loses only because the counts are bounded here, which is what makes the log disappear. Reach for it when the counts are unbounded or the data arrives as a stream. **O(n)** time, **O(n)** space.
+**Signals.** "Most frequent" means you need a count per value, so a frequency map is forced before anything else can happen. "Top `k`" is a selection layered on that map, and "returned in any order" says the output is a set rather than a ranking, so the counts never need to be fully ordered. The last signal is a bound hiding in the data: no value can occur more than `n` times, so every count is an integer in `[1, n]`. **Therefore.** Count in one pass, then bucket by count into an array of `n + 1` lists and walk it from the back until `k` values are collected. Indexing by a bounded integer replaces comparison entirely. **Not a size-`k` min-heap**, which is the answer most people give and is genuinely good at `O(n log k)`; it loses only because the counts are bounded here, which is what makes the log disappear. Reach for it when the counts are unbounded or the data arrives as a stream.
+
+- **Use:** Bucket sort by frequency. **O(n)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Count, sort the counts, take the first `k`.
@@ -1700,7 +1720,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Encode a list of strings into a single string" and "may contain any character including `#` and digits". The second clause is the entire problem: it says no character can be reserved as a separator, which kills every scheme that finds boundaries by searching the payload. What is left is that the encoding must be self-delimiting, meaning the decoder learns where each string ends from the stream without ever inspecting the content. **Therefore.** Prefix each string with its own length: `"<len>#<content>"`. The `#` does not separate strings, it only terminates the digits, so a `#` inside a payload is never looked at; once the length is parsed the decoder jumps exactly that far. **Not a delimiter with escaping**, which needs every dangerous character enumerated, rescans character by character to find each boundary, and still cannot tell an empty list from a list holding one empty string. **O(n)** time, **O(n)** space.
+**Signals.** "Encode a list of strings into a single string" and "may contain any character including `#` and digits". The second clause is the entire problem: it says no character can be reserved as a separator, which kills every scheme that finds boundaries by searching the payload. What is left is that the encoding must be self-delimiting, meaning the decoder learns where each string ends from the stream without ever inspecting the content. **Therefore.** Prefix each string with its own length: `"<len>#<content>"`. The `#` does not separate strings, it only terminates the digits, so a `#` inside a payload is never looked at; once the length is parsed the decoder jumps exactly that far. **Not a delimiter with escaping**, which needs every dangerous character enumerated, rescans character by character to find each boundary, and still cannot tell an empty list from a list holding one empty string.
+
+- **Use:** Length-prefix encoding. **O(n)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Join on a comma, and escape any comma already in the data.
@@ -1894,7 +1916,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "The product of all elements except `nums[i]`", asked for every `i`, is a range query over everything but one position, and the explicit ban on division removes the one-line shortcut of dividing the total by `nums[i]`. Two more tells: the required `O(n)` forbids recomputing a product per index, and "except self" splits cleanly into everything left of `i` times everything right of `i`. **Therefore.** Two accumulation passes. Sweep left to right writing the running prefix product into `output[i]`, then sweep right to left multiplying in the running suffix product, which needs one scalar and no second array. **Not the division trick**, and not merely because it is banned: one zero in the array makes every other index divide by zero, and two zeros zero the whole answer, so you end up branching on a zero count anyway and the "simple" version stops being simple. Counting the returned array as required output rather than working space, **O(n)** time, **O(1)** space.
+**Signals.** "The product of all elements except `nums[i]`", asked for every `i`, is a range query over everything but one position, and the explicit ban on division removes the one-line shortcut of dividing the total by `nums[i]`. Two more tells: the required `O(n)` forbids recomputing a product per index, and "except self" splits cleanly into everything left of `i` times everything right of `i`. **Therefore.** Two accumulation passes. Sweep left to right writing the running prefix product into `output[i]`, then sweep right to left multiplying in the running suffix product, which needs one scalar and no second array. **Not the division trick**, and not merely because it is banned: one zero in the array makes every other index divide by zero, and two zeros zero the whole answer, so you end up branching on a zero count anyway and the "simple" version stops being simple. Counting the returned array as required output rather than working space,
+
+- **Use:** Prefix and suffix products. **O(n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** For each index, multiply everything else.
@@ -2072,7 +2096,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** Two phrases decide it. "No repetition" inside a row, a column or a 3×3 box is duplicate detection, which is a membership question rather than a search. "Does not need to be fully solved" says the check is entirely local: each cell is judged against three fixed regions and nothing else, so there is no lookahead and no completion to find. The board is pinned at 9×9, which turns every bound into a constant. **Therefore.** One scan of the 81 cells carrying 27 membership structures, nine per region type, with the box holding cell `(r, c)` at index `(r // 3) * 3 + c // 3`; a filled cell already present in any of its three regions fails on the spot. **Not backtracking**, the Sudoku Solver algorithm, which answers a different question: solvability means searching an exponential space of completions, whereas validity falls out of a single linear scan, and a board can easily be valid and still have no solution. Fixed 9×9, so **O(1)** time, **O(1)** space.
+**Signals.** Two phrases decide it. "No repetition" inside a row, a column or a 3×3 box is duplicate detection, which is a membership question rather than a search. "Does not need to be fully solved" says the check is entirely local: each cell is judged against three fixed regions and nothing else, so there is no lookahead and no completion to find. The board is pinned at 9×9, which turns every bound into a constant. **Therefore.** One scan of the 81 cells carrying 27 membership structures, nine per region type, with the box holding cell `(r, c)` at index `(r // 3) * 3 + c // 3`; a filled cell already present in any of its three regions fails on the spot. **Not backtracking**, the Sudoku Solver algorithm, which answers a different question: solvability means searching an exponential space of completions, whereas validity falls out of a single linear scan, and a board can easily be valid and still have no solution. Fixed 9×9, so
+
+- **Use:** Hashset per row, column, and 3×3 box. **O(1)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Materialise all 27 regions, then check each one for a repeat.
@@ -2248,7 +2274,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Longest sequence of consecutive integers" over an **unsorted** array, plus an explicit `O(n)` requirement. That requirement is the tell and it is the whole problem: consecutiveness is trivially found by sorting and scanning, so stating a linear bound is the statement telling you sorting is off the table and that adjacency has to come from lookups instead. "Consecutive" also fixes the only question you ever ask about a value, which is whether `n - 1` or `n + 1` exists, and that is membership. **Therefore.** Load every value into a hash set, then start a walk only at values `n` whose predecessor `n - 1` is absent, since only those begin a run, and extend while `n + 1`, `n + 2` and so on are present. **Not sort and scan**, which is correct, shorter and needs no extra structure, but is `O(n log n)` and so is exactly what the stated bound forbids. **O(n)** time, **O(n)** space.
+**Signals.** "Longest sequence of consecutive integers" over an **unsorted** array, plus an explicit `O(n)` requirement. That requirement is the tell and it is the whole problem: consecutiveness is trivially found by sorting and scanning, so stating a linear bound is the statement telling you sorting is off the table and that adjacency has to come from lookups instead. "Consecutive" also fixes the only question you ever ask about a value, which is whether `n - 1` or `n + 1` exists, and that is membership. **Therefore.** Load every value into a hash set, then start a walk only at values `n` whose predecessor `n - 1` is absent, since only those begin a run, and extend while `n + 1`, `n + 2` and so on are present. **Not sort and scan**, which is correct, shorter and needs no extra structure, but is `O(n log n)` and so is exactly what the stated bound forbids.
+
+- **Use:** Hashset with sequence-start detection. **O(n)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Sort, then scan for the longest run.
@@ -2406,7 +2434,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Reads the same forward and backward" is symmetry about a centre, and the only comparison that ever matters is first remaining character against last remaining character. That is a converging pair, so the working state is two indices, not a copy. The filtering clause, "ignoring case and non-alphanumeric characters", does not change the shape at all; it only means each pointer may have to step several times before it lands on something comparable. **Therefore.** A left index at 0 and a right index at `n - 1`, each skipping past non-alphanumeric characters, then compare lowercased and step both inward, returning false on the first mismatch. **Not building a cleaned copy** and testing it against its reverse, which is correct, shorter and the answer most people give, but costs `O(n)` extra space; on a 200000-character input that is a second buffer bought for nothing. **O(n)** time, **O(1)** space.
+**Signals.** "Reads the same forward and backward" is symmetry about a centre, and the only comparison that ever matters is first remaining character against last remaining character. That is a converging pair, so the working state is two indices, not a copy. The filtering clause, "ignoring case and non-alphanumeric characters", does not change the shape at all; it only means each pointer may have to step several times before it lands on something comparable. **Therefore.** A left index at 0 and a right index at `n - 1`, each skipping past non-alphanumeric characters, then compare lowercased and step both inward, returning false on the first mismatch. **Not building a cleaned copy** and testing it against its reverse, which is correct, shorter and the answer most people give, but costs `O(n)` extra space; on a 200000-character input that is a second buffer bought for nothing.
+
+- **Use:** Two pointers (in-place skip). **O(n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Filter into a clean string, then compare it with its reverse.
@@ -2557,7 +2587,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** Two phrases carry the whole problem. The array is "sorted in non-decreasing order", so the sum of a pair moves monotonically with each index, and one comparison at the two ends is enough to prove which end cannot appear in any answer. The solution must "use only constant extra space", which deletes the obvious alternative before you write it. "Exactly one solution" removes the not-found branch, and the 1-indexed return is a formatting trap rather than an algorithmic one. **Therefore.** Put `l` at the first index and `r` at the last and compare `numbers[l] + numbers[r]` against the target: too small raises `l`, too large lowers `r`, equal returns `[l + 1, r + 1]`. **Not the Two Sum hashmap** of LeetCode 1, which matches the `O(n)` time but stores up to `n` values, precisely the space this variant forbids; sortedness is what makes that memory redundant. **Not a binary search for each complement**, which honours the space bound but pays `O(n log n)`. **O(n)** time, **O(1)** space.
+**Signals.** Two phrases carry the whole problem. The array is "sorted in non-decreasing order", so the sum of a pair moves monotonically with each index, and one comparison at the two ends is enough to prove which end cannot appear in any answer. The solution must "use only constant extra space", which deletes the obvious alternative before you write it. "Exactly one solution" removes the not-found branch, and the 1-indexed return is a formatting trap rather than an algorithmic one. **Therefore.** Put `l` at the first index and `r` at the last and compare `numbers[l] + numbers[r]` against the target: too small raises `l`, too large lowers `r`, equal returns `[l + 1, r + 1]`. **Not the Two Sum hashmap** of LeetCode 1, which matches the `O(n)` time but stores up to `n` values, precisely the space this variant forbids; sortedness is what makes that memory redundant. **Not a binary search for each complement**, which honours the space bound but pays `O(n log n)`.
+
+- **Use:** Two pointers on sorted input. **O(n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Try every pair and ignore the fact that the input is sorted.
@@ -2694,7 +2726,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "All unique triplets" that "sum to zero", and the answer is a set of *values*, not indices. Values rather than indices is the permission slip: you are free to sort, and sorting is what turns a search into a scan. `nums.length <= 3000` puts `O(n²)` comfortably in budget and `O(n³)` out of it. "Must not contain duplicate triplets" is a second, separate problem hiding in the statement. **Therefore.** Sort, fix the first element, and converge two pointers over the suffix, skipping equal neighbours at both levels. **Not the Two Sum hashmap** applied to each suffix, which also reaches `O(n²)` but produces triplets in arbitrary internal order, so every hit must be normalised and pushed through a hashset to dedupe; after sorting, duplicates are adjacent and the skip is one comparison. Excluding the output list, **O(n²)** time, **O(1)** space.
+**Signals.** "All unique triplets" that "sum to zero", and the answer is a set of *values*, not indices. Values rather than indices is the permission slip: you are free to sort, and sorting is what turns a search into a scan. `nums.length <= 3000` puts `O(n²)` comfortably in budget and `O(n³)` out of it. "Must not contain duplicate triplets" is a second, separate problem hiding in the statement. **Therefore.** Sort, fix the first element, and converge two pointers over the suffix, skipping equal neighbours at both levels. **Not the Two Sum hashmap** applied to each suffix, which also reaches `O(n²)` but produces triplets in arbitrary internal order, so every hit must be normalised and pushed through a hashset to dedupe; after sorting, duplicates are adjacent and the skip is one comparison. Excluding the output list,
+
+- **Use:** Sort + two pointers. **O(n²)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Try every triple, dedupe with a set.
@@ -2881,7 +2915,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** The score of a candidate is handed to you in the statement: `min(height[l], height[r]) * (r - l)`, a function of two positions where everything between them is irrelevant. The objective is a maximum over pairs, and `height.length <= 10^5` puts an all-pairs scan out of budget. The two factors pull against each other: width is largest at the extremes and only shrinks as you move inward, while height is capped by whichever of the two lines is shorter. That cap is the structure to exploit, because the shorter line is always the binding constraint. **Therefore.** Start at the widest pair, record its area, then discard whichever side is shorter and repeat until the pointers meet. **Not the monotonic stack** you would reach for on Trapping Rain Water, which draws the same picture but solves a different shape: there water sits above every index and interior bars displace it, so each position needs its bounding maxima. Here the container is exactly two lines, the interior is ignored, and one converging sweep suffices. **O(n)** time, **O(1)** space.
+**Signals.** The score of a candidate is handed to you in the statement: `min(height[l], height[r]) * (r - l)`, a function of two positions where everything between them is irrelevant. The objective is a maximum over pairs, and `height.length <= 10^5` puts an all-pairs scan out of budget. The two factors pull against each other: width is largest at the extremes and only shrinks as you move inward, while height is capped by whichever of the two lines is shorter. That cap is the structure to exploit, because the shorter line is always the binding constraint. **Therefore.** Start at the widest pair, record its area, then discard whichever side is shorter and repeat until the pointers meet. **Not the monotonic stack** you would reach for on Trapping Rain Water, which draws the same picture but solves a different shape: there water sits above every index and interior bars displace it, so each position needs its bounding maxima. Here the container is exactly two lines, the interior is ignored, and one converging sweep suffices.
+
+- **Use:** Two pointers, always move the shorter side. **O(n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Score every pair of lines.
@@ -3022,7 +3058,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Trapped after raining" means water at index `i` is held in place by a taller bar on *each* side, so the amount is `min(maxLeft, maxRight) - height[i]`. An answer that depends on one boundary from the left and one from the right is the converging-pointer shape. Bar width is fixed at 1, so the total is a plain sum over indices with no geometry. **Therefore.** Two pointers carrying a running maximum each; the side with the smaller maximum is provably the limiting one, so its water is already determined and that pointer can step inwards. **Not prefix and suffix maximum arrays**, the answer most people give: also `O(n)` time, but it materialises two length-`n` arrays holding information each index consumes exactly once, and the two scalars carry the same thing. **O(n)** time, **O(1)** space.
+**Signals.** "Trapped after raining" means water at index `i` is held in place by a taller bar on *each* side, so the amount is `min(maxLeft, maxRight) - height[i]`. An answer that depends on one boundary from the left and one from the right is the converging-pointer shape. Bar width is fixed at 1, so the total is a plain sum over indices with no geometry. **Therefore.** Two pointers carrying a running maximum each; the side with the smaller maximum is provably the limiting one, so its water is already determined and that pointer can step inwards. **Not prefix and suffix maximum arrays**, the answer most people give: also `O(n)` time, but it materialises two length-`n` arrays holding information each index consumes exactly once, and the two scalars carry the same thing.
+
+- **Use:** Two pointers tracking running max on each side. **O(n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** For each bar, scan both directions for the tallest bar on each side.
@@ -3191,7 +3229,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Buy on one day and sell on a later day" is an ordering constraint between the two indices, and exactly one transaction is allowed, so the answer is a single maximum of `prices[j] - prices[i]` over `i < j`. With `prices.length` up to `10^5`, examining all pairs is out. The decisive question is what a candidate sell day actually needs from its past, and the answer is not the history but one number: the cheapest price before it, which changes by a single comparison as you step forward. **Therefore.** One left-to-right pass carrying `buy`, the minimum price strictly earlier than today, and `profit`, the best difference so far; the order of the two updates is what enforces buy-before-sell. **Not a DP table over (day, holding) states**, the reflex for stock problems, which genuinely earns its place when the transaction count `k` is a parameter as in LeetCode 123 and 188; at `k = 1` the holding state collapses to that running minimum, so the table would store `n` rows to recompute a scalar. **O(n)** time, **O(1)** space.
+**Signals.** "Buy on one day and sell on a later day" is an ordering constraint between the two indices, and exactly one transaction is allowed, so the answer is a single maximum of `prices[j] - prices[i]` over `i < j`. With `prices.length` up to `10^5`, examining all pairs is out. The decisive question is what a candidate sell day actually needs from its past, and the answer is not the history but one number: the cheapest price before it, which changes by a single comparison as you step forward. **Therefore.** One left-to-right pass carrying `buy`, the minimum price strictly earlier than today, and `profit`, the best difference so far; the order of the two updates is what enforces buy-before-sell. **Not a DP table over (day, holding) states**, the reflex for stock problems, which genuinely earns its place when the transaction count `k` is a parameter as in LeetCode 123 and 188; at `k = 1` the holding state collapses to that running minimum, so the table would store `n` rows to recompute a scalar.
+
+- **Use:** Single pass tracking minimum price. **O(n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Try every buy day against every later sell day.
@@ -3320,7 +3360,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Substring" and not subsequence means the answer is a contiguous span `[l, r]`, and adjacent spans differ by one character gained and one lost. "Without repeating characters" is a property that can only break when you extend the span and can only be repaired by cutting from the left, and that one-directional behaviour is the licence to shrink instead of restart. A length up to `5 * 10^4` rules out enumerating the `O(n^2)` spans. **Therefore.** A variable-size sliding window over a set of the characters currently inside: push `r` right one character at a time, and while the incoming character is already in the set, evict `s[l]` and advance `l`; the answer is the largest `r - l + 1` observed. **Not a fixed-size window**, because the length is the unknown being solved for, so there is no `k` to slide and the inner shrink loop is unavoidable. **Not a frequency count of the whole string**, which tells you which characters repeat but not where, and adjacency is the entire question. With `m` the alphabet size, **O(n)** time, **O(min(n, m))** space.
+**Signals.** "Substring" and not subsequence means the answer is a contiguous span `[l, r]`, and adjacent spans differ by one character gained and one lost. "Without repeating characters" is a property that can only break when you extend the span and can only be repaired by cutting from the left, and that one-directional behaviour is the licence to shrink instead of restart. A length up to `5 * 10^4` rules out enumerating the `O(n^2)` spans. **Therefore.** A variable-size sliding window over a set of the characters currently inside: push `r` right one character at a time, and while the incoming character is already in the set, evict `s[l]` and advance `l`; the answer is the largest `r - l + 1` observed. **Not a fixed-size window**, because the length is the unknown being solved for, so there is no `k` to slide and the inner shrink loop is unavoidable. **Not a frequency count of the whole string**, which tells you which characters repeat but not where, and adjacency is the entire question. With `m` the alphabet size,
+
+- **Use:** Sliding window with hashset. **O(n)** time, **O(min(n, m))** space.
 
 #### Explanation
 **Brute force.** Test every substring for uniqueness.
@@ -3477,7 +3519,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Longest substring" plus an explicit budget `k`. Substring means contiguous, so a window applies; "longest" plus a budget that only gets harder to satisfy as the window grows is the shrink-while-invalid variant. The cost of a window is `size - maxFreq`, where `maxFreq` is the count of its most common character, because every other character has to be replaced. That cost never decreases when you extend, which is what licenses a single left pointer that only moves forward. **Therefore.** One window, a 26-slot count array, and a running `maxFreq`. **Not 26 separate passes**, one per target letter, keeping the longest window whose non-target count stays within `k`. That is correct and easier to argue, but it is `O(26n)` and rebuilds the same window logic 26 times; tracking `maxFreq` folds all 26 into one pass. **O(n)** time, **O(1)** space.
+**Signals.** "Longest substring" plus an explicit budget `k`. Substring means contiguous, so a window applies; "longest" plus a budget that only gets harder to satisfy as the window grows is the shrink-while-invalid variant. The cost of a window is `size - maxFreq`, where `maxFreq` is the count of its most common character, because every other character has to be replaced. That cost never decreases when you extend, which is what licenses a single left pointer that only moves forward. **Therefore.** One window, a 26-slot count array, and a running `maxFreq`. **Not 26 separate passes**, one per target letter, keeping the longest window whose non-target count stays within `k`. That is correct and easier to argue, but it is `O(26n)` and rebuilds the same window logic 26 times; tracking `maxFreq` folds all 26 into one pass.
+
+- **Use:** Sliding window tracking max-frequency character. **O(n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Count characters for every substring and test the budget.
@@ -3639,7 +3683,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Permutation" pins the length: any rearrangement of `s1` has exactly `len(s1)` characters, so the window size is fixed, not variable. "Contiguous substring" makes it a window rather than a subsequence. And a permutation is entirely characterised by its character counts, so equality of two 26-slot tallies is the whole test. **Therefore.** Slide a window of exactly `len(s1)` over `s2`, adding the entering character and removing the leaving one, comparing counts at each stop. **Not generating the permutations of `s1`** and searching for each, which is the reflex answer and is `k!` candidates: `k = 10` already means 3.6 million searches for a problem that is one linear pass. **O(n)** time, **O(1)** space.
+**Signals.** "Permutation" pins the length: any rearrangement of `s1` has exactly `len(s1)` characters, so the window size is fixed, not variable. "Contiguous substring" makes it a window rather than a subsequence. And a permutation is entirely characterised by its character counts, so equality of two 26-slot tallies is the whole test. **Therefore.** Slide a window of exactly `len(s1)` over `s2`, adding the entering character and removing the leaving one, comparing counts at each stop. **Not generating the permutations of `s1`** and searching for each, which is the reflex answer and is `k!` candidates: `k = 10` already means 3.6 million searches for a problem that is one linear pass.
+
+- **Use:** Fixed-size sliding window with frequency array comparison. **O(n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Sort `s1`, then sort every window of that length in `s2`.
@@ -3812,7 +3858,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Minimum window" plus "contains all characters of `t`, including duplicates". Contains-all is a validity predicate that only gets easier as the window grows, and minimum means you want the tightest valid window, so the pattern is expand until valid, then shrink while still valid. "Including duplicates" says the state is counts, not a set of seen characters. **Therefore.** A `need` map of outstanding counts plus one scalar counting unfilled requirements, so validity is the test `missing == 0`. **Not comparing the two count maps for equality** at each step, which is the reflex and is simply wrong: a window holding three `A`s when `t` needs one is still valid, so equality rejects correct answers. The right test is per-character `>=`, and rescanning the alphabet to evaluate it turns every index into 52 comparisons over state that changed in one slot. **O(|s| + |t|)** time, **O(|t|)** space.
+**Signals.** "Minimum window" plus "contains all characters of `t`, including duplicates". Contains-all is a validity predicate that only gets easier as the window grows, and minimum means you want the tightest valid window, so the pattern is expand until valid, then shrink while still valid. "Including duplicates" says the state is counts, not a set of seen characters. **Therefore.** A `need` map of outstanding counts plus one scalar counting unfilled requirements, so validity is the test `missing == 0`. **Not comparing the two count maps for equality** at each step, which is the reflex and is simply wrong: a window holding three `A`s when `t` needs one is still valid, so equality rejects correct answers. The right test is per-character `>=`, and rescanning the alphabet to evaluate it turns every index into 52 comparisons over state that changed in one slot.
+
+- **Use:** Sliding window, shrink when valid. **O(|s| + |t|)** time, **O(|t|)** space.
 
 #### Explanation
 **Brute force.** Check every substring against a count of `t`.
@@ -4012,7 +4060,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** A fixed window width `k`, one extremum query per shift, and `n` up to `10^5` so the `O(n * k)` rescan is out at `k` near `n`. The structural tell is that elements leave the window in the order they entered, oldest first, while the query asks for a maximum: that pairing of FIFO eviction with an order statistic is what a monotonic deque exists for. **Therefore.** Hold indices in decreasing value order, pop dominated indices from the back, pop the expired index from the front, and read the front. **Not a max-heap** of `(value, index)` with lazy eviction of stale tops, which is correct and usually accepted, but costs `O(n log n)` and can hold all `n` entries at once, since a small value is only discarded when it happens to surface. The deque discards it the moment a larger later value appears, and never exceeds `k`. **O(n)** time, **O(k)** space.
+**Signals.** A fixed window width `k`, one extremum query per shift, and `n` up to `10^5` so the `O(n * k)` rescan is out at `k` near `n`. The structural tell is that elements leave the window in the order they entered, oldest first, while the query asks for a maximum: that pairing of FIFO eviction with an order statistic is what a monotonic deque exists for. **Therefore.** Hold indices in decreasing value order, pop dominated indices from the back, pop the expired index from the front, and read the front. **Not a max-heap** of `(value, index)` with lazy eviction of stale tops, which is correct and usually accepted, but costs `O(n log n)` and can hold all `n` entries at once, since a small value is only discarded when it happens to surface. The deque discards it the moment a larger later value appears, and never exceeds `k`.
+
+- **Use:** Monotonic decreasing deque (indices). **O(n)** time, **O(k)** space.
 
 #### Explanation
 **Brute force.** Rescan each window for its maximum.
@@ -4170,7 +4220,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Closed by the same type of bracket" is a matching condition, but "in the correct order" is the phrase that picks the data structure: a closer must answer to the most recently opened bracket that is still unmatched, which is last-in-first-out by definition. Nesting can run to depth `s.length / 2`, so the number of pending openers is unbounded and has to live somewhere. **Therefore.** A stack. Push every opener; on a closer, fail if the stack is empty or its top is the wrong type, otherwise pop. The string is valid only if every closer matched and the stack finishes empty. **Not three counters**, one per bracket type, raised on open and lowered on close: `([)]` leaves all three at zero and is still invalid, because a count records how many brackets are open and never which one is innermost. **Not repeatedly deleting `"()"`, `"[]"` and `"{}"` until the string stops shrinking**, which is correct but pays a full rescan per nesting level. **O(n)** time, **O(n)** space.
+**Signals.** "Closed by the same type of bracket" is a matching condition, but "in the correct order" is the phrase that picks the data structure: a closer must answer to the most recently opened bracket that is still unmatched, which is last-in-first-out by definition. Nesting can run to depth `s.length / 2`, so the number of pending openers is unbounded and has to live somewhere. **Therefore.** A stack. Push every opener; on a closer, fail if the stack is empty or its top is the wrong type, otherwise pop. The string is valid only if every closer matched and the stack finishes empty. **Not three counters**, one per bracket type, raised on open and lowered on close: `([)]` leaves all three at zero and is still invalid, because a count records how many brackets are open and never which one is innermost. **Not repeatedly deleting `"()"`, `"[]"` and `"{}"` until the string stops shrinking**, which is correct but pays a full rescan per nesting level.
+
+- **Use:** Stack (push open, match on close). **O(n)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Peel off adjacent matched pairs until nothing changes.
@@ -4330,7 +4382,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Design a stack" fixes the access order as last-in-first-out, and "`getMin` in `O(1)`" is the clause that does the work: a query must be answered without looking at the elements, so the answer has to be stored, not computed. Because `pop` undoes exactly one `push`, the state you need is a history, and a history that unwinds in the same order as the stack is just a second stack. **Therefore.** Push a paired entry recording the minimum of everything at or below that height, and pop both together. **Not a heap**, which peeks its minimum in `O(1)` but must remove the *most recent* element on `pop`, not the smallest, and deleting an arbitrary element costs `O(n)` to locate. **Not a single `min` variable**, which is correct until that minimum is popped and you have nothing to fall back to. Every operation stays constant time, paid for with one extra integer per element. **O(1)** time, **O(n)** space.
+**Signals.** "Design a stack" fixes the access order as last-in-first-out, and "`getMin` in `O(1)`" is the clause that does the work: a query must be answered without looking at the elements, so the answer has to be stored, not computed. Because `pop` undoes exactly one `push`, the state you need is a history, and a history that unwinds in the same order as the stack is just a second stack. **Therefore.** Push a paired entry recording the minimum of everything at or below that height, and pop both together. **Not a heap**, which peeks its minimum in `O(1)` but must remove the *most recent* element on `pop`, not the smallest, and deleting an arbitrary element costs `O(n)` to locate. **Not a single `min` variable**, which is correct until that minimum is popped and you have nothing to fall back to. Every operation stays constant time, paid for with one extra integer per element.
+
+- **Use:** Parallel min-tracking stack. **O(1)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** One list, and `getMin` scans it.
@@ -4522,7 +4576,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Reverse Polish Notation" means each operator arrives *after* both of its operands, so there is no precedence to resolve and no parentheses to match; the only rule is that an operator consumes the two most recently completed values. "Most recent, then the one before it" is the definition of last-in-first-out. **Therefore.** Push integers onto a stack, and on an operator pop two, apply, and push the result back so it can serve as an operand later. **Not an expression tree**, which is the classic way to evaluate arithmetic but costs `O(n)` node allocations plus a second traversal to buy back an evaluation order that postfix already hands you. **Not scanning the token list repeatedly** for the leftmost reducible operator, because collapsing three tokens into one shifts every token after it, giving `O(n^2)`. **O(n)** time, **O(n)** space.
+**Signals.** "Reverse Polish Notation" means each operator arrives *after* both of its operands, so there is no precedence to resolve and no parentheses to match; the only rule is that an operator consumes the two most recently completed values. "Most recent, then the one before it" is the definition of last-in-first-out. **Therefore.** Push integers onto a stack, and on an operator pop two, apply, and push the result back so it can serve as an operand later. **Not an expression tree**, which is the classic way to evaluate arithmetic but costs `O(n)` node allocations plus a second traversal to buy back an evaluation order that postfix already hands you. **Not scanning the token list repeatedly** for the leftmost reducible operator, because collapsing three tokens into one shifts every token after it, giving `O(n^2)`.
+
+- **Use:** Stack (postfix evaluation). **O(n)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Find the leftmost operator, collapse it, repeat.
@@ -4708,7 +4764,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Generate all combinations" asks for the list, not a count, so the output itself is exponential and the only thing you control is how much invalid work you do on the way. "Well-formed" is the lever: a parenthesis string is valid exactly when no prefix has more `)` than `(` and the totals match, and a *prefix* property is testable while you are still building. **Therefore.** Build the string one character at a time, allowing `(` while `open < n` and `)` while `close < open`, so every leaf reached is already valid and nothing needs filtering or deduplicating. **Not generate-then-filter** over all `2^(2n)` strings, which at `n = 8` inspects 65536 candidates to keep 1430. **Not BFS by string length**, because a queue holds every partial string of the current length at once, while the depth-first path holds only `2n` characters. The number of answers is the `n`-th Catalan number, so that is the floor any method must pay. **O(4ⁿ / √n)** time, **O(n)** space.
+**Signals.** "Generate all combinations" asks for the list, not a count, so the output itself is exponential and the only thing you control is how much invalid work you do on the way. "Well-formed" is the lever: a parenthesis string is valid exactly when no prefix has more `)` than `(` and the totals match, and a *prefix* property is testable while you are still building. **Therefore.** Build the string one character at a time, allowing `(` while `open < n` and `)` while `close < open`, so every leaf reached is already valid and nothing needs filtering or deduplicating. **Not generate-then-filter** over all `2^(2n)` strings, which at `n = 8` inspects 65536 candidates to keep 1430. **Not BFS by string length**, because a queue holds every partial string of the current length at once, while the depth-first path holds only `2n` characters. The number of answers is the `n`-th Catalan number, so that is the floor any method must pay.
+
+- **Use:** Backtracking with open/close counters. **O(4ⁿ / √n)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Enumerate every string of `(` and `)`, then keep the valid ones.
@@ -4869,7 +4927,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "How many days **until** a warmer temperature" asks for a *distance* to the next qualifying element, not its value, so what you carry has to be indices rather than temperatures. "Next warmer" is next-greater-element phrasing, and the structural hint is that a cool day wedged between two warmer ones can never be anybody's answer once a warmer day passes it. **Therefore.** One left-to-right pass over a stack of indices whose temperatures are non-increasing: each new day resolves every waiting day it beats, recording `i - j`. **Not sort by temperature** and query a sorted set for the nearest later index, which is correct but costs `O(n log n)` plus a balanced-tree structure, where the stack answers the same queries for free in one pass. **Not a forward scan per day**, the `O(n^2)` baseline this exists to beat. **O(n)** time, **O(n)** space.
+**Signals.** "How many days **until** a warmer temperature" asks for a *distance* to the next qualifying element, not its value, so what you carry has to be indices rather than temperatures. "Next warmer" is next-greater-element phrasing, and the structural hint is that a cool day wedged between two warmer ones can never be anybody's answer once a warmer day passes it. **Therefore.** One left-to-right pass over a stack of indices whose temperatures are non-increasing: each new day resolves every waiting day it beats, recording `i - j`. **Not sort by temperature** and query a sorted set for the nearest later index, which is correct but costs `O(n log n)` plus a balanced-tree structure, where the stack answers the same queries for free in one pass. **Not a forward scan per day**, the `O(n^2)` baseline this exists to beat.
+
+- **Use:** Monotonic decreasing stack (indices). **O(n)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** For each day, walk forward until a warmer day appears.
@@ -5030,7 +5090,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "One-lane road" plus "cannot pass" means a car is only ever affected by cars *ahead* of it, which makes position the natural processing order. "Arrive together" plus a fixed `target` means the only quantity that matters per car is its solo arrival time `(target - pos) / speed`; where it is at any intermediate moment is irrelevant. A car merges into the group ahead exactly when its own time is no larger than that group's time, because it would otherwise have overtaken. **Therefore.** Sort by position descending and sweep, counting a new fleet each time a car's time exceeds the largest time seen so far. **Not simulating time steps**, because positions reach `10^6` and the catch-up moment is generally fractional, so no step size is both fast enough and fine enough to avoid missing a merge. **Not sorting by arrival time**, which loses the road order that decides who blocks whom. **O(n log n)** time, **O(n)** space.
+**Signals.** "One-lane road" plus "cannot pass" means a car is only ever affected by cars *ahead* of it, which makes position the natural processing order. "Arrive together" plus a fixed `target` means the only quantity that matters per car is its solo arrival time `(target - pos) / speed`; where it is at any intermediate moment is irrelevant. A car merges into the group ahead exactly when its own time is no larger than that group's time, because it would otherwise have overtaken. **Therefore.** Sort by position descending and sweep, counting a new fleet each time a car's time exceeds the largest time seen so far. **Not simulating time steps**, because positions reach `10^6` and the catch-up moment is generally fractional, so no step size is both fast enough and fine enough to avoid missing a merge. **Not sorting by arrival time**, which loses the road order that decides who blocks whom.
+
+- **Use:** Monotonic stack (sort by position descending). **O(n log n)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** For each car, check every other car for one ahead that it cannot pass.
@@ -5195,7 +5257,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Largest rectangle" over bars of width 1 means every candidate rectangle is pinned by a single number, the shortest bar inside it. So each bar anchors exactly one maximal rectangle, stretching left and right until it meets a strictly shorter bar, and the problem reduces to finding "previous smaller" and "next smaller" for every index. That pair of queries is the monotonic-stack fingerprint. **Therefore.** One pass with a stack of `(start, height)` in increasing height order; a shorter incoming bar evicts every taller entry and scores it with the current index as its right boundary. **Not two pointers** as in Container With Most Water: there you may discard the shorter wall because water only needs the two walls, but here every bar between the boundaries caps the height, so a short interior bar invalidates the move. **Not divide and conquer** on the minimum bar, which degrades to `O(n^2)` on an already-sorted histogram unless you bolt on a range-minimum structure. **O(n)** time, **O(n)** space.
+**Signals.** "Largest rectangle" over bars of width 1 means every candidate rectangle is pinned by a single number, the shortest bar inside it. So each bar anchors exactly one maximal rectangle, stretching left and right until it meets a strictly shorter bar, and the problem reduces to finding "previous smaller" and "next smaller" for every index. That pair of queries is the monotonic-stack fingerprint. **Therefore.** One pass with a stack of `(start, height)` in increasing height order; a shorter incoming bar evicts every taller entry and scores it with the current index as its right boundary. **Not two pointers** as in Container With Most Water: there you may discard the shorter wall because water only needs the two walls, but here every bar between the boundaries caps the height, so a short interior bar invalidates the move. **Not divide and conquer** on the minimum bar, which degrades to `O(n^2)` on an already-sorted histogram unless you bolt on a range-minimum structure.
+
+- **Use:** Monotonic stack (increasing). **O(n)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Fix a left edge, extend right, tracking the running minimum height.
@@ -5382,7 +5446,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** Three phrases decide this before you write anything: "sorted array", "return the index", and an explicit `O(log n)` requirement in the statement. Sorted plus a log-time demand is the halving signal, and "return the index" tells you the array itself is the search space rather than some derived quantity. **Therefore.** The textbook template: hold a closed candidate range `[l, r]`, compare the middle, and discard the half the ordering rules out. **Not a hash map** from value to index, which does answer lookups in `O(1)` but needs an `O(n)` pass and `O(n)` memory to build, so for one query it is strictly worse than an `O(log n)` search that allocates nothing. Build one only if you must answer many queries against the same fixed array. **Not a linear scan**, the `O(n)` baseline that ignores the single structural fact you were handed. **O(log n)** time, **O(1)** space.
+**Signals.** Three phrases decide this before you write anything: "sorted array", "return the index", and an explicit `O(log n)` requirement in the statement. Sorted plus a log-time demand is the halving signal, and "return the index" tells you the array itself is the search space rather than some derived quantity. **Therefore.** The textbook template: hold a closed candidate range `[l, r]`, compare the middle, and discard the half the ordering rules out. **Not a hash map** from value to index, which does answer lookups in `O(1)` but needs an `O(n)` pass and `O(n)` memory to build, so for one query it is strictly worse than an `O(log n)` search that allocates nothing. Build one only if you must answer many queries against the same fixed array. **Not a linear scan**, the `O(n)` baseline that ignores the single structural fact you were handed.
+
+- **Use:** Binary search. **O(log n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Walk the array and compare each element.
@@ -5529,7 +5595,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** Two clauses, and the second is the whole problem. "Each row is sorted left to right" alone would only let you search within a row. "The first integer of each row is greater than the last of the previous row" says the rows concatenate into one globally sorted sequence, so the grid is a flat sorted array wearing a 2D shape. Sorted input plus a yes/no membership question is binary search. **Therefore.** Binary search the range `[0, m * n - 1]` and decode each probe with `matrix[mid // n][mid % n]`. **Not the staircase walk from the top-right corner**, the standard trick for a matrix that is only sorted per row and per column; it is `O(m + n)` and throws away the stronger guarantee you were given here. **Not searching row by row**: binary searching every row is `O(m log n)`, and locating the row first then searching it is `O(m + log n)`, both beaten by the single flat search. **O(log(m * n))** time, **O(1)** space.
+**Signals.** Two clauses, and the second is the whole problem. "Each row is sorted left to right" alone would only let you search within a row. "The first integer of each row is greater than the last of the previous row" says the rows concatenate into one globally sorted sequence, so the grid is a flat sorted array wearing a 2D shape. Sorted input plus a yes/no membership question is binary search. **Therefore.** Binary search the range `[0, m * n - 1]` and decode each probe with `matrix[mid // n][mid % n]`. **Not the staircase walk from the top-right corner**, the standard trick for a matrix that is only sorted per row and per column; it is `O(m + n)` and throws away the stronger guarantee you were given here. **Not searching row by row**: binary searching every row is `O(m log n)`, and locating the row first then searching it is `O(m + log n)`, both beaten by the single flat search.
+
+- **Use:** Binary search on flattened matrix. **O(log(m * n))** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Look at every cell.
@@ -5684,7 +5752,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** The array is never sorted and sorting it would change nothing, since the total hours sums over all piles regardless of order. The ask is "the **minimum** `k` such that" a condition holds, and the bounds pair a tiny `n` (`10^4`) with an enormous value range (`piles[i]` up to `10^9`). A "minimum such that" objective over a huge numeric range, with a check that is cheap to run for any single candidate, is the binary-search-on-the-answer fingerprint: the thing with sorted structure is the answer axis, not the input. **Therefore.** Search `k` over `[1, max(piles)]` under the predicate `can_finish(k) = sum(ceil(p / k)) <= h`, which is monotone because a faster Koko is never slower. **Not a linear scan over candidate speeds**, which is correct but tests `k = 1, 2, 3, ...` up toward `10^9` where 30 probes suffice. Writing `m` for `max(piles)`: **O(n log m)** time, **O(1)** space.
+**Signals.** The array is never sorted and sorting it would change nothing, since the total hours sums over all piles regardless of order. The ask is "the **minimum** `k` such that" a condition holds, and the bounds pair a tiny `n` (`10^4`) with an enormous value range (`piles[i]` up to `10^9`). A "minimum such that" objective over a huge numeric range, with a check that is cheap to run for any single candidate, is the binary-search-on-the-answer fingerprint: the thing with sorted structure is the answer axis, not the input. **Therefore.** Search `k` over `[1, max(piles)]` under the predicate `can_finish(k) = sum(ceil(p / k)) <= h`, which is monotone because a faster Koko is never slower. **Not a linear scan over candidate speeds**, which is correct but tests `k = 1, 2, 3, ...` up toward `10^9` where 30 probes suffice. Writing `m` for `max(piles)`:
+
+- **Use:** Binary search on answer. **O(n log m)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Try every speed from 1 upward and return the first that fits.
@@ -5837,7 +5907,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "In `O(log n)` time" is stated outright, and on an array that only ever means binary search. The obstacle is that there is no target to compare against, so the deciding comparison has to be between two elements of the array itself. "Sorted then rotated" tells you the array is two sorted runs and every element of the left run is greater than every element of the right run, so a single probe against the right end says which run you are in: `nums[mid] > nums[r]` puts `mid` in the high run, and the minimum starts the other one. **Therefore.** Binary search with `l = mid + 1` when `nums[mid] > nums[r]` and `r = mid` otherwise, converging on the drop. **Not comparing `nums[mid]` to `nums[l]`**, because in an unrotated array that test is true at every step and walks you rightward past the answer unless you bolt on an extra `nums[l] < nums[r]` early exit. **O(log n)** time, **O(1)** space.
+**Signals.** "In `O(log n)` time" is stated outright, and on an array that only ever means binary search. The obstacle is that there is no target to compare against, so the deciding comparison has to be between two elements of the array itself. "Sorted then rotated" tells you the array is two sorted runs and every element of the left run is greater than every element of the right run, so a single probe against the right end says which run you are in: `nums[mid] > nums[r]` puts `mid` in the high run, and the minimum starts the other one. **Therefore.** Binary search with `l = mid + 1` when `nums[mid] > nums[r]` and `r = mid` otherwise, converging on the drop. **Not comparing `nums[mid]` to `nums[l]`**, because in an unrotated array that test is true at every step and walks you rightward past the answer unless you bolt on an extra `nums[l] < nums[r]` early exit.
+
+- **Use:** Binary search (compare mid to right). **O(log n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Scan for the smallest value.
@@ -5971,7 +6043,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Sorted" and "rotated at an unknown pivot" together say the order is broken in exactly one place, not scrambled. The statement then demands `O(log n)` outright, which forbids both the scan and any pass that rebuilds the ordering. One break point plus a halving requirement is the whole setup: wherever you cut, the pivot lands on one side only, so the other side is a clean ascending run whose endpoints you can read off directly. **Therefore.** Binary search, but each step first identifies the sorted half with a single comparison of `nums[l]` to `nums[m]`, then tests whether the target lies inside that half's known range, going there or into its complement. **Not a plain binary search**, which assumes global order and fails concretely: on `[4,5,6,7,0,1,2]` with `target = 1`, the middle is `7 > 1` so it turns left and never reaches the `1`. **O(log n)** time, **O(1)** space.
+**Signals.** "Sorted" and "rotated at an unknown pivot" together say the order is broken in exactly one place, not scrambled. The statement then demands `O(log n)` outright, which forbids both the scan and any pass that rebuilds the ordering. One break point plus a halving requirement is the whole setup: wherever you cut, the pivot lands on one side only, so the other side is a clean ascending run whose endpoints you can read off directly. **Therefore.** Binary search, but each step first identifies the sorted half with a single comparison of `nums[l]` to `nums[m]`, then tests whether the target lies inside that half's known range, going there or into its complement. **Not a plain binary search**, which assumes global order and fails concretely: on `[4,5,6,7,0,1,2]` with `target = 1`, the middle is `7 > 1` so it turns left and never reaches the `1`.
+
+- **Use:** Binary search (determine which half is sorted). **O(log n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Ignore the ordering and scan.
@@ -6152,7 +6226,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "The largest timestamp less than or equal to the given timestamp" is a predecessor query, not an equality lookup, so the word "key-value store" is a trap: a hash map answers "is this exact pair present" and the query almost never lands on a timestamp anyone wrote. The second signal is buried in the constraints: writes for a given key arrive with strictly increasing timestamps, which hands you a sorted array per key for free, with no sorting cost. Sorted plus "rightmost element at or below `x`" is binary search. **Therefore.** A hash map from key to an append-only list of `(timestamp, value)`, and a binary search of that list per `get`. **Not one flat log scanned per query**, because 2 * 10^5 calls against a log that grows to 2 * 10^5 entries is 10^10 comparisons, and each scan re-applies two filters, key match and timestamp bound, that the bucketing and the sort order remove permanently. Each `set` is `O(1)`. **O(log n)** time, **O(n)** space.
+**Signals.** "The largest timestamp less than or equal to the given timestamp" is a predecessor query, not an equality lookup, so the word "key-value store" is a trap: a hash map answers "is this exact pair present" and the query almost never lands on a timestamp anyone wrote. The second signal is buried in the constraints: writes for a given key arrive with strictly increasing timestamps, which hands you a sorted array per key for free, with no sorting cost. Sorted plus "rightmost element at or below `x`" is binary search. **Therefore.** A hash map from key to an append-only list of `(timestamp, value)`, and a binary search of that list per `get`. **Not one flat log scanned per query**, because 2 * 10^5 calls against a log that grows to 2 * 10^5 entries is 10^10 comparisons, and each scan re-applies two filters, key match and timestamp bound, that the bucketing and the sort order remove permanently. Each `set` is `O(1)`.
+
+- **Use:** Binary search on sorted timestamps. **O(log n)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** One flat list of every write, rescanned on each `get`.
@@ -6375,7 +6451,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** The input is a `head` pointer, not an array, so there is no random access and no index arithmetic available. "Return the new head" says the head moves, so the caller's handle becomes the tail and you cannot keep using it. The classic follow-up asking for both an iterative and a recursive version is the tell that the interviewer cares about stack space, not elegance. **Therefore.** Three-pointer in-place reversal: `prev` starts at `None`, and for each node you save `nxt = curr.next` *before* writing `curr.next = prev`, then advance both. **Not copying the values into a list** and writing them back reversed, which is `O(n)` extra space and sidesteps the pointer surgery the question exists to test. **Not the recursive version** as your only answer, since it costs `O(n)` stack frames to do what one loop does in `O(1)`. **O(n)** time, **O(1)** space.
+**Signals.** The input is a `head` pointer, not an array, so there is no random access and no index arithmetic available. "Return the new head" says the head moves, so the caller's handle becomes the tail and you cannot keep using it. The classic follow-up asking for both an iterative and a recursive version is the tell that the interviewer cares about stack space, not elegance. **Therefore.** Three-pointer in-place reversal: `prev` starts at `None`, and for each node you save `nxt = curr.next` *before* writing `curr.next = prev`, then advance both. **Not copying the values into a list** and writing them back reversed, which is `O(n)` extra space and sidesteps the pointer surgery the question exists to test. **Not the recursive version** as your only answer, since it costs `O(n)` stack frames to do what one loop does in `O(1)`.
+
+- **Use:** Iterative pointer reversal. **O(n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Copy the values out, then write them back in reverse.
@@ -6530,7 +6608,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "The heads of two *sorted* linked lists" plus "return its head" gives you three tells. The inputs are already ordered, so no two elements of the same list ever need comparing. The output is a list of nodes, not values, so you can relink what you were handed instead of allocating anything. And the returned head may come from either input, which is the standard cue for a dummy sentinel. **Therefore.** Walk both lists with a tail pointer, always splicing on whichever front node is smaller, then attach the surviving remainder in one move. **Not concatenate and sort**, which throws away the ordering you were given and pays `O((n + m) log(n + m))` to rediscover it, plus a full second copy. **Not a min-heap**, which is correct but pointless at `k = 2`: a heap of two items is a single comparison wearing a costume. **O(n + m)** time, **O(1)** space.
+**Signals.** "The heads of two *sorted* linked lists" plus "return its head" gives you three tells. The inputs are already ordered, so no two elements of the same list ever need comparing. The output is a list of nodes, not values, so you can relink what you were handed instead of allocating anything. And the returned head may come from either input, which is the standard cue for a dummy sentinel. **Therefore.** Walk both lists with a tail pointer, always splicing on whichever front node is smaller, then attach the surviving remainder in one move. **Not concatenate and sort**, which throws away the ordering you were given and pays `O((n + m) log(n + m))` to rediscover it, plus a full second copy. **Not a min-heap**, which is correct but pointless at `k = 2`: a heap of two items is a single comparison wearing a costume.
+
+- **Use:** Iterative merge with dummy head. **O(n + m)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Copy every value out, sort it, build a fresh list.
@@ -6718,7 +6798,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** The target order `L0, Ln, L1, Ln-1, ...` is the list zipped with its own reverse, and "in place" forbids building a second one. Reading `Ln` then `Ln-1` means moving backwards, which a singly linked list simply cannot do, so the shape of the problem is: get backwards access to the tail end, without paying for storage. **Therefore.** Three phases. Walk slow and fast pointers to land slow on the last node of the first half and sever there, reverse the detached second half in place so its nodes now run tail-first, then splice the two halves together one node at a time. **Not collecting node references into an array and indexing inwards from both ends**, which is far easier to write and gives exactly the random access the pattern wants, but costs `n` extra pointers, and it buffers the whole list when only the second half ever needs to be read in reverse. **O(n)** time, **O(1)** space.
+**Signals.** The target order `L0, Ln, L1, Ln-1, ...` is the list zipped with its own reverse, and "in place" forbids building a second one. Reading `Ln` then `Ln-1` means moving backwards, which a singly linked list simply cannot do, so the shape of the problem is: get backwards access to the tail end, without paying for storage. **Therefore.** Three phases. Walk slow and fast pointers to land slow on the last node of the first half and sever there, reverse the detached second half in place so its nodes now run tail-first, then splice the two halves together one node at a time. **Not collecting node references into an array and indexing inwards from both ends**, which is far easier to write and gives exactly the random access the pattern wants, but costs `n` extra pointers, and it buffers the whole list when only the second half ever needs to be read in reverse.
+
+- **Use:** Find middle + reverse second half + merge. **O(n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Put every node in an array and rewire by index.
@@ -6956,7 +7038,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "The nth node from the end" together with "in one pass". A singly linked list carries no length field and no backward pointer, so a position measured from the tail is not addressable directly; the only way to hold one while walking forward is to keep a second pointer a fixed number of nodes behind the first. "One pass" is the clause that turns that from a nicety into the requirement. **Therefore.** Advance a lead pointer `n + 1` nodes ahead of a trailing pointer, both starting at a dummy placed before `head`, then step them together until the lead falls off the end; the trailing pointer is then parked on the node immediately before the target. **Not counting the length first and walking again**, which is correct and easier to reason about but re-traverses a prefix it has already visited, and cannot work at all if the list arrives as a one-shot stream you cannot rewind. **O(n)** time, **O(1)** space.
+**Signals.** "The nth node from the end" together with "in one pass". A singly linked list carries no length field and no backward pointer, so a position measured from the tail is not addressable directly; the only way to hold one while walking forward is to keep a second pointer a fixed number of nodes behind the first. "One pass" is the clause that turns that from a nicety into the requirement. **Therefore.** Advance a lead pointer `n + 1` nodes ahead of a trailing pointer, both starting at a dummy placed before `head`, then step them together until the lead falls off the end; the trailing pointer is then parked on the node immediately before the target. **Not counting the length first and walking again**, which is correct and easier to reason about but re-traverses a prefix it has already visited, and cannot work at all if the list arrives as a one-shot stream you cannot rewind.
+
+- **Use:** Two pointers (fast n+1 ahead of slow). **O(n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Measure the list, then walk back in to the target.
@@ -7126,7 +7210,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Deep copy" plus a `random` pointer that "may point to any node in the list". Two things follow. Deep copy means every pointer in the result has to reference a fresh node, so you cannot reuse a single original anywhere. And because `random` may point forward, at the moment you allocate a node's copy the copy it must point at may not exist yet, which kills any single-pass build that wires as it walks. **Therefore.** Two passes over a dictionary keyed on the original node: pass one allocates a copy for every node so the mapping is total, pass two reads `next` and `random` through that mapping, which by then has an answer for every node. **Not an array of nodes with `random` recorded as an index**, because turning an arbitrary node pointer back into its index costs a linear scan, so building that table is `O(n^2)`; a dictionary answers the same question in `O(1)` because it is keyed on node identity, not position. **O(n)** time, **O(n)** space.
+**Signals.** "Deep copy" plus a `random` pointer that "may point to any node in the list". Two things follow. Deep copy means every pointer in the result has to reference a fresh node, so you cannot reuse a single original anywhere. And because `random` may point forward, at the moment you allocate a node's copy the copy it must point at may not exist yet, which kills any single-pass build that wires as it walks. **Therefore.** Two passes over a dictionary keyed on the original node: pass one allocates a copy for every node so the mapping is total, pass two reads `next` and `random` through that mapping, which by then has an answer for every node. **Not an array of nodes with `random` recorded as an index**, because turning an arbitrary node pointer back into its index costs a linear scan, so building that table is `O(n^2)`; a dictionary answers the same question in `O(1)` because it is keyed on node identity, not position.
+
+- **Use:** Hashmap (old node → new node). **O(n)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Snapshot the nodes in order, then look up each random target's position by searching that list.
@@ -7305,7 +7391,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** A bare `head` pointer, the word "cycle", and the follow-up asking for `O(1)` memory. A linked list gives you no random access, no length, and no index, so the only move available is to walk it. The space bound is what forbids the obvious visited-set. "Cycle" also means the walk may never terminate on its own, so whatever you write needs its own termination argument. **Therefore.** Two pointers over the same list, `slow` one node per step and `fast` two. If a cycle exists, `fast` gains exactly one position on `slow` per step, so inside a cycle of length `L` it closes any gap within `L` steps and they coincide; if not, `fast` or `fast.next` reaches `None`. **Not a hash set** of visited node identities, which is correct and shorter to write but costs `O(n)` space, which is the exact thing the follow-up exists to take away. **O(n)** time, **O(1)** space.
+**Signals.** A bare `head` pointer, the word "cycle", and the follow-up asking for `O(1)` memory. A linked list gives you no random access, no length, and no index, so the only move available is to walk it. The space bound is what forbids the obvious visited-set. "Cycle" also means the walk may never terminate on its own, so whatever you write needs its own termination argument. **Therefore.** Two pointers over the same list, `slow` one node per step and `fast` two. If a cycle exists, `fast` gains exactly one position on `slow` per step, so inside a cycle of length `L` it closes any gap within `L` steps and they coincide; if not, `fast` or `fast.next` reaches `None`. **Not a hash set** of visited node identities, which is correct and shorter to write but costs `O(n)` space, which is the exact thing the follow-up exists to take away.
+
+- **Use:** Floyd's cycle detection (fast/slow pointers). **O(n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Remember every node you have already stood on.
@@ -7464,7 +7552,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** Three clauses that only ever show up together for one reason: `n + 1` integers each in `[1, n]`, "without modifying the array", and `O(1)` extra space. The range clause is the load-bearing one, because every value is a legal index into the same array, which makes `i -> nums[i]` a function from the array into itself. The no-modify clause kills index marking, where you negate `nums[v - 1]` to record a visit, and kills cyclic sort. The space clause kills a set or a count array. That pairing leaves essentially one technique. **Therefore.** Read `nums` as an implicit linked list whose next pointer at `i` is `nums[i]`. Pigeonhole forces a repeat, a repeat means two indices share a successor, and that is a cycle whose entrance is the duplicate, so Floyd's two phases find it. **Not sorting** and scanning for adjacent equals, which modifies the array and costs `O(n log n)`. **O(n)** time, **O(1)** space.
+**Signals.** Three clauses that only ever show up together for one reason: `n + 1` integers each in `[1, n]`, "without modifying the array", and `O(1)` extra space. The range clause is the load-bearing one, because every value is a legal index into the same array, which makes `i -> nums[i]` a function from the array into itself. The no-modify clause kills index marking, where you negate `nums[v - 1]` to record a visit, and kills cyclic sort. The space clause kills a set or a count array. That pairing leaves essentially one technique. **Therefore.** Read `nums` as an implicit linked list whose next pointer at `i` is `nums[i]`. Pigeonhole forces a repeat, a repeat means two indices share a successor, and that is a cycle whose entrance is the duplicate, so Floyd's two phases find it. **Not sorting** and scanning for adjacent equals, which modifies the array and costs `O(n log n)`.
+
+- **Use:** Floyd's cycle detection (array as implicit linked list). **O(n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Compare every pair.
@@ -7620,7 +7710,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** The word "design", an explicit `O(1)` bound on *both* `get` and `put`, and an eviction rule that depends on a recency *ordering* which changes on every single access, reads included. Those requirements pull in opposite directions: `O(1)` lookup by key is a hash map, and `O(1)` "which entry is oldest, and promote this one to newest" is a linked list. Neither structure does both, and the `O(1)` bound is what stops you settling for one of them. **Therefore.** Run both over the same nodes: a hash map from key to a node *reference*, and a doubly linked list holding those nodes in recency order with a sentinel at each end. **Not an array or list of keys in access order**, where promoting a key costs an `O(n)` search plus an `O(n)` shift, which is the version that quietly makes every operation linear. **O(1)** time, **O(capacity)** space.
+**Signals.** The word "design", an explicit `O(1)` bound on *both* `get` and `put`, and an eviction rule that depends on a recency *ordering* which changes on every single access, reads included. Those requirements pull in opposite directions: `O(1)` lookup by key is a hash map, and `O(1)` "which entry is oldest, and promote this one to newest" is a linked list. Neither structure does both, and the `O(1)` bound is what stops you settling for one of them. **Therefore.** Run both over the same nodes: a hash map from key to a node *reference*, and a doubly linked list holding those nodes in recency order with a sentinel at each end. **Not an array or list of keys in access order**, where promoting a key costs an `O(n)` search plus an `O(n)` shift, which is the version that quietly makes every operation linear.
+
+- **Use:** Hashmap + doubly linked list. **O(1)** time, **O(capacity)** space.
 
 #### Explanation
 **Brute force.** A dict for the values, plus a plain list holding the keys oldest-first.
@@ -7915,7 +8007,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "An array of `k` sorted linked lists" and a single merged output. Because each list is sorted, the global minimum is always sitting at one of the `k` heads and never deeper, so the whole problem reduces to "repeatedly take the smallest of `k` candidates, then replace it". That sentence is the definition of a priority queue. The second tell is that `k` and the total node count `n` are given as separate quantities, which is how a problem hints that `k` belongs inside a logarithm rather than as a multiplier. **Therefore.** Push all `k` heads into a min-heap, then pop the smallest, append it to the tail, and push that node's successor. **Not rescanning all `k` heads** on every step to find the minimum, which is `O(n * k)` and redoes `k - 1` comparisons whose answers did not change since the last pop. **O(n log k)** time, **O(k)** space.
+**Signals.** "An array of `k` sorted linked lists" and a single merged output. Because each list is sorted, the global minimum is always sitting at one of the `k` heads and never deeper, so the whole problem reduces to "repeatedly take the smallest of `k` candidates, then replace it". That sentence is the definition of a priority queue. The second tell is that `k` and the total node count `n` are given as separate quantities, which is how a problem hints that `k` belongs inside a logarithm rather than as a multiplier. **Therefore.** Push all `k` heads into a min-heap, then pop the smallest, append it to the tail, and push that node's successor. **Not rescanning all `k` heads** on every step to find the minimum, which is `O(n * k)` and redoes `k - 1` comparisons whose answers did not change since the last pop.
+
+- **Use:** Min-heap (priority queue). **O(n log k)** time, **O(k)** space.
 
 #### Explanation
 **Brute force.** Fold the lists into a running result, one pairwise merge at a time.
@@ -8122,7 +8216,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Reverse the nodes in each group of `k`" plus "if fewer than `k` remain, leave them as-is". The leftover rule is the real tell: you have to know a full group exists *before* you disturb any of it, so each round starts with a `k`-step probe that is allowed to come back empty, and that probe is also the pointer you need for the relink. "Reverse" itself is the standard three-pointer walk. **Therefore.** A dummy node and a `group_prev` marker: probe `k` nodes ahead, and if the probe lands on a real node, reverse that span in place with `prev` seeded to the node *after* the group so the group's tail wires straight into the remainder, then patch `group_prev.next` to the probe. **Not recursion per group**, which reads far better but holds `n / k` frames, so `k = 1` on the maximum input parks 5000 frames on the stack and forfeits the `O(1)` memory the follow-up asks for. **O(n)** time, **O(1)** space.
+**Signals.** "Reverse the nodes in each group of `k`" plus "if fewer than `k` remain, leave them as-is". The leftover rule is the real tell: you have to know a full group exists *before* you disturb any of it, so each round starts with a `k`-step probe that is allowed to come back empty, and that probe is also the pointer you need for the relink. "Reverse" itself is the standard three-pointer walk. **Therefore.** A dummy node and a `group_prev` marker: probe `k` nodes ahead, and if the probe lands on a real node, reverse that span in place with `prev` seeded to the node *after* the group so the group's tail wires straight into the remainder, then patch `group_prev.next` to the probe. **Not recursion per group**, which reads far better but holds `n / k` frames, so `k = 1` on the maximum input parks 5000 frames on the stack and forfeits the `O(1)` memory the follow-up asks for.
+
+- **Use:** Iterative group reversal. **O(n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Copy the values out, reverse them in slices, copy them back.
@@ -8354,7 +8450,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Mirror the left and right subtrees at every node" is one rule stated in terms of subtrees and applying unchanged at each node, which is the shape of a recursive tree problem: solve both children, then do `O(1)` work at the parent. Nothing asks about ordering, depth, or search, so no traversal-specific bookkeeping is needed and the answer is the same tree object you were handed. **Therefore.** Recurse into both children and swap them; the swap can come before the calls (pre-order) or after them (post-order), and both land on the same tree because a node's swap never depends on what its subtrees became. **Not in-order DFS**, the one traversal that quietly breaks here: it recurses left, swaps, then recurses right, so the subtree it already inverted has just been moved into the right slot and gets inverted a second time back to the original, while the true right subtree is never visited at all. **O(n)** time, **O(h)** space.
+**Signals.** "Mirror the left and right subtrees at every node" is one rule stated in terms of subtrees and applying unchanged at each node, which is the shape of a recursive tree problem: solve both children, then do `O(1)` work at the parent. Nothing asks about ordering, depth, or search, so no traversal-specific bookkeeping is needed and the answer is the same tree object you were handed. **Therefore.** Recurse into both children and swap them; the swap can come before the calls (pre-order) or after them (post-order), and both land on the same tree because a node's swap never depends on what its subtrees became. **Not in-order DFS**, the one traversal that quietly breaks here: it recurses left, swaps, then recurses right, so the subtree it already inverted has just been moved into the right slot and gets inverted a second time back to the original, while the true right subtree is never visited at all.
+
+- **Use:** DFS (postorder recursion). **O(n)** time, **O(h)** space.
 
 #### Explanation
 **Brute force.** Deep-copy the tree so the input is untouched, then mirror the copy.
@@ -8503,7 +8601,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** A `TreeNode` root, and a quantity whose value at any node is fully determined by the same quantity at its two children: the depth below a node is one more than the deeper of its subtrees. That self-similarity is the tell, and it points at bottom-up recursion specifically, because nothing has to be passed *down* and everything is returned *up*. The second signal is negative: there is no pruning available, since the deeper side could be either one, so every node must be visited and `O(n)` is the floor rather than a compromise. **Therefore.** Postorder recursion, with `None` returning 0 and a node returning `1 + max(left, right)`. **Not level-order BFS**, which is equally correct at the same `O(n)` time but holds an entire tree level in a queue, up to `O(n)` nodes on a wide tree, against `O(h)` stack frames here; it earns its place only when the tree is deep enough to blow the call stack. **O(n)** time, **O(h)** space.
+**Signals.** A `TreeNode` root, and a quantity whose value at any node is fully determined by the same quantity at its two children: the depth below a node is one more than the deeper of its subtrees. That self-similarity is the tell, and it points at bottom-up recursion specifically, because nothing has to be passed *down* and everything is returned *up*. The second signal is negative: there is no pruning available, since the deeper side could be either one, so every node must be visited and `O(n)` is the floor rather than a compromise. **Therefore.** Postorder recursion, with `None` returning 0 and a node returning `1 + max(left, right)`. **Not level-order BFS**, which is equally correct at the same `O(n)` time but holds an entire tree level in a queue, up to `O(n)` nodes on a wide tree, against `O(h)` stack frames here; it earns its place only when the tree is deep enough to blow the call stack.
+
+- **Use:** DFS (recursive). **O(n)** time, **O(h)** space.
 
 #### Explanation
 **Brute force.** Enumerate every root-to-leaf path and take the longest.
@@ -8639,7 +8739,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "The longest path between any two nodes" together with "the path does not need to pass through the root". That second phrase is the whole problem: the answer is a maximum taken over every node, so no single measurement from the top can see it. A path in a tree bends at exactly one node and runs downward on both sides of that bend, so its length there is the depth of the deepest left descendant plus the depth of the deepest right descendant. **Therefore.** One postorder pass in which every call returns its own height to its parent while a running maximum absorbs `l + r` at each node. The value returned and the value being maximised are deliberately different quantities riding the same recursion. **Not BFS level order**, which hands you nodes grouped by depth but gives a node no channel to receive its subtrees' heights, so you would end up re-measuring heights per node anyway. **O(n)** time, **O(h)** space.
+**Signals.** "The longest path between any two nodes" together with "the path does not need to pass through the root". That second phrase is the whole problem: the answer is a maximum taken over every node, so no single measurement from the top can see it. A path in a tree bends at exactly one node and runs downward on both sides of that bend, so its length there is the depth of the deepest left descendant plus the depth of the deepest right descendant. **Therefore.** One postorder pass in which every call returns its own height to its parent while a running maximum absorbs `l + r` at each node. The value returned and the value being maximised are deliberately different quantities riding the same recursion. **Not BFS level order**, which hands you nodes grouped by depth but gives a node no channel to receive its subtrees' heights, so you would end up re-measuring heights per node anyway.
+
+- **Use:** DFS with running maximum. **O(n)** time, **O(h)** space.
 
 #### Explanation
 **Brute force.** Measure both subtree heights at every node.
@@ -8816,7 +8918,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Every node's left and right subtrees differ in height by at most 1" quantifies over every node, and height is defined by descendants, so the verdict at a node cannot be reached before its children have reported. That is the signature of a bottom-up answer. The second tell is that height and balance need the same traversal: whatever computes one has already walked everything the other needs. **Therefore.** One postorder pass that returns a height, with `-1` reserved as a sentinel meaning "something below me is already unbalanced", which propagates to the root without any further comparison. **Not the top-down version** that calls a separate `height(node)` at every node, which is what most people write first: a node's height is then recomputed once per ancestor, giving `O(n^2)` on a 5000-node chain. **O(n)** time, **O(h)** space.
+**Signals.** "Every node's left and right subtrees differ in height by at most 1" quantifies over every node, and height is defined by descendants, so the verdict at a node cannot be reached before its children have reported. That is the signature of a bottom-up answer. The second tell is that height and balance need the same traversal: whatever computes one has already walked everything the other needs. **Therefore.** One postorder pass that returns a height, with `-1` reserved as a sentinel meaning "something below me is already unbalanced", which propagates to the root without any further comparison. **Not the top-down version** that calls a separate `height(node)` at every node, which is what most people write first: a node's height is then recomputed once per ancestor, giving `O(n^2)` on a 5000-node chain.
+
+- **Use:** DFS with sentinel value for imbalance. **O(n)** time, **O(h)** space.
 
 #### Explanation
 **Brute force.** Ask for both subtree heights at every node, from scratch.
@@ -8983,7 +9087,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Structurally identical with the same node values at every position" bolts two conditions together, shape and content, and both are local: two trees are the same exactly when their roots agree and their left subtrees are the same and their right subtrees are the same. A property that decomposes into the same property on the children is a recursion you can transcribe straight from the sentence. **Therefore.** Walk both trees in lockstep with one function taking two nodes, returning `False` the instant a null pattern or a value disagrees, so the traversal aborts at the first difference instead of finishing. **Not comparing traversal outputs**, the tempting shortcut: a bare preorder list is ambiguous without null markers, since `[1,2]` describes two different trees, and the preorder-plus-inorder pair only pins down a tree when all values are distinct, which nothing here promises. **O(n)** time, **O(h)** space.
+**Signals.** "Structurally identical with the same node values at every position" bolts two conditions together, shape and content, and both are local: two trees are the same exactly when their roots agree and their left subtrees are the same and their right subtrees are the same. A property that decomposes into the same property on the children is a recursion you can transcribe straight from the sentence. **Therefore.** Walk both trees in lockstep with one function taking two nodes, returning `False` the instant a null pattern or a value disagrees, so the traversal aborts at the first difference instead of finishing. **Not comparing traversal outputs**, the tempting shortcut: a bare preorder list is ambiguous without null markers, since `[1,2]` describes two different trees, and the preorder-plus-inorder pair only pins down a tree when all values are distinct, which nothing here promises.
+
+- **Use:** DFS (simultaneous recursive traversal). **O(n)** time, **O(h)** space.
 
 #### Explanation
 **Brute force.** Serialise both trees in full, then compare the two sequences.
@@ -9126,7 +9232,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "There is a node in `root` whose subtree is identical to `subRoot`" names two separate jobs: pick a candidate node, then test identity there. Identity of two trees is problem 53 and already costs `O(n)`, so the only new decision is which nodes to test, and "a node in root" with no qualifier means all of them. **Therefore.** Walk `root`, and at each node run the same-tree comparison against `subRoot`, stopping at the first success. Two nested recursions: the outer one enumerates candidates, the inner one compares. **Not anchoring on the first node whose value equals `subRoot.val`**, the natural shortcut, which breaks the moment values repeat: `root = [1,1]` against `subRoot = [1]` fails at the root and succeeds at the child, so a failed candidate says nothing about its descendants and every candidate has to stay live. **O(m * n)** time, **O(h)** space.
+**Signals.** "There is a node in `root` whose subtree is identical to `subRoot`" names two separate jobs: pick a candidate node, then test identity there. Identity of two trees is problem 53 and already costs `O(n)`, so the only new decision is which nodes to test, and "a node in root" with no qualifier means all of them. **Therefore.** Walk `root`, and at each node run the same-tree comparison against `subRoot`, stopping at the first success. Two nested recursions: the outer one enumerates candidates, the inner one compares. **Not anchoring on the first node whose value equals `subRoot.val`**, the natural shortcut, which breaks the moment values repeat: `root = [1,1]` against `subRoot = [1]` fails at the root and succeeds at the child, so a failed candidate says nothing about its descendants and every candidate has to stay live.
+
+- **Use:** DFS + isSameTree check at each node. **O(m * n)** time, **O(h)** space.
 
 #### Explanation
 **Brute force.** Serialise every subtree of `root`, then look up `subRoot`'s serialisation.
@@ -9303,7 +9411,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** Two words carry it, "BST" and "lowest". A BST supplies a total order, so from any node one value comparison says which side a target lies on, and the lowest common ancestor of `p` and `q` is precisely the first node where those two answers disagree. Above that node both targets sit on the same side, so the other half can be discarded outright; below it they are separated forever. **Therefore.** Walk down from the root, going left while both values are smaller and right while both are larger, and return the node where the walk stops, which is either the split point or one of `p` and `q` itself. **Not the general binary tree LCA**, the postorder that returns `p` or `q` upward and merges where they join: it is correct but visits all 10^5 nodes to learn what one comparison per level already reveals. **Not recursion at all**, since a BST may be a chain of 10^5 nodes and this descent needs no stack. **O(h)** time, **O(1)** space.
+**Signals.** Two words carry it, "BST" and "lowest". A BST supplies a total order, so from any node one value comparison says which side a target lies on, and the lowest common ancestor of `p` and `q` is precisely the first node where those two answers disagree. Above that node both targets sit on the same side, so the other half can be discarded outright; below it they are separated forever. **Therefore.** Walk down from the root, going left while both values are smaller and right while both are larger, and return the node where the walk stops, which is either the split point or one of `p` and `q` itself. **Not the general binary tree LCA**, the postorder that returns `p` or `q` upward and merges where they join: it is correct but visits all 10^5 nodes to learn what one comparison per level already reveals. **Not recursion at all**, since a BST may be a chain of 10^5 nodes and this descent needs no stack.
+
+- **Use:** BST property traversal (iterative). **O(h)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Use the algorithm that works on any binary tree: ask each subtree whether it contains both targets.
@@ -9465,7 +9575,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Grouped by level" and "top to bottom" say the output is indexed by distance from the root, and the grouping is part of the answer rather than a side effect. Any structure that hands you nodes in distance order is a queue, and the only missing piece is knowing where one level stops. **Therefore.** BFS from a queue, taking `len(q)` as a snapshot before each level and popping exactly that many nodes; every child enqueued during that inner loop belongs to the next level by construction. **Not recursive DFS in visit order**, because a preorder walk reaches depth 3 down the left spine before it ever sees the root's right child, so appending as you go interleaves levels. You can repair it by passing a depth and writing into `res[depth]`, but that is simulating the queue rather than using one. **O(n)** time, **O(n)** space.
+**Signals.** "Grouped by level" and "top to bottom" say the output is indexed by distance from the root, and the grouping is part of the answer rather than a side effect. Any structure that hands you nodes in distance order is a queue, and the only missing piece is knowing where one level stops. **Therefore.** BFS from a queue, taking `len(q)` as a snapshot before each level and popping exactly that many nodes; every child enqueued during that inner loop belongs to the next level by construction. **Not recursive DFS in visit order**, because a preorder walk reaches depth 3 down the left spine before it ever sees the root's right child, so appending as you go interleaves levels. You can repair it by passing a depth and writing into `res[depth]`, but that is simulating the queue rather than using one.
+
+- **Use:** BFS (queue with level-size snapshot). **O(n)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Measure the height, then collect each depth with its own full traversal.
@@ -9670,7 +9782,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Looking from the right side" and "one value per level" say the same thing: the output has one entry per depth, so depth is the grouping key and the answer is the last node at each depth. Anything that hands you nodes grouped by depth solves it. **Therefore.** Level order BFS with the size snapshot: read `len(queue)` before the level begins, pop exactly that many nodes, and take the last one's value. A right-first DFS works equally well, recording a value the first time each new depth is reached, and is the version to reach for when you also want the left side view or per-level aggregates. **Not walking `root.right` until null**, which is the reading the phrase invites: visibility is per level, not per branch, so when the right spine ends early a deeper left subtree becomes the rightmost thing at its level, exactly as `[1,2,3,4]` shows. **O(n)** time, **O(n)** space.
+**Signals.** "Looking from the right side" and "one value per level" say the same thing: the output has one entry per depth, so depth is the grouping key and the answer is the last node at each depth. Anything that hands you nodes grouped by depth solves it. **Therefore.** Level order BFS with the size snapshot: read `len(queue)` before the level begins, pop exactly that many nodes, and take the last one's value. A right-first DFS works equally well, recording a value the first time each new depth is reached, and is the version to reach for when you also want the left side view or per-level aggregates. **Not walking `root.right` until null**, which is the reading the phrase invites: visibility is per level, not per branch, so when the right spine ends early a deeper left subtree becomes the rightmost thing at its level, exactly as `[1,2,3,4]` shows.
+
+- **Use:** BFS, record last node per level. **O(n)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Find the height, then hunt for the rightmost node at each depth separately.
@@ -9871,7 +9985,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "No node on the path from the root to that node has a value greater than the node's own value" is a condition about ancestors only, and a whole list of ancestors collapses to one number: their maximum. Nothing orders the tree, so no subtree can be skipped and every node must be visited regardless. **Therefore.** A single top-down DFS carrying the largest value seen so far on the current root-to-node path, counting the node when `node.val >= max_so_far` and recursing with `max(max_so_far, node.val)`. **Not a bottom-up post-order** that combines what children return, because the predicate looks up toward the root and nothing computed inside a subtree can settle it. **Not carrying the ancestor list** and rescanning it at each node, which is correct but costs `O(n * h)` to recompute a maximum that changes by at most one comparison per step. **O(n)** time, **O(h)** space.
+**Signals.** "No node on the path from the root to that node has a value greater than the node's own value" is a condition about ancestors only, and a whole list of ancestors collapses to one number: their maximum. Nothing orders the tree, so no subtree can be skipped and every node must be visited regardless. **Therefore.** A single top-down DFS carrying the largest value seen so far on the current root-to-node path, counting the node when `node.val >= max_so_far` and recursing with `max(max_so_far, node.val)`. **Not a bottom-up post-order** that combines what children return, because the predicate looks up toward the root and nothing computed inside a subtree can settle it. **Not carrying the ancestor list** and rescanning it at each node, which is correct but costs `O(n * h)` to recompute a maximum that changes by at most one comparison per step.
+
+- **Use:** DFS with running maximum. **O(n)** time, **O(h)** space.
 
 #### Explanation
 **Brute force.** Carry the ancestor values down and rescan them at every node.
@@ -10035,7 +10151,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Every node's value is greater than all values in its left subtree" is a claim about whole subtrees, not about neighbours, and the word "all" is the tell: the constraint on a node comes from every ancestor, not just its parent. That is a range, and ranges compose as you descend. **Therefore.** DFS carrying `(lo, hi)`, rejecting unless `lo < node.val < hi`, tightening `hi` to `node.val` when you go left and `lo` to `node.val` when you go right. **Not comparing each node against its parent only**, because `[5,4,6,null,null,3,7]` passes every parent test (4 is left of 5, 3 is left of 6) yet 3 lives in the root's right subtree while being smaller than 5. The parent check is local and the property is global. **O(n)** time, **O(h)** space.
+**Signals.** "Every node's value is greater than all values in its left subtree" is a claim about whole subtrees, not about neighbours, and the word "all" is the tell: the constraint on a node comes from every ancestor, not just its parent. That is a range, and ranges compose as you descend. **Therefore.** DFS carrying `(lo, hi)`, rejecting unless `lo < node.val < hi`, tightening `hi` to `node.val` when you go left and `lo` to `node.val` when you go right. **Not comparing each node against its parent only**, because `[5,4,6,null,null,3,7]` passes every parent test (4 is left of 5, 3 is left of 6) yet 3 lives in the root's right subtree while being smaller than 5. The parent check is local and the property is global.
+
+- **Use:** DFS with min/max bounds. **O(n)** time, **O(h)** space.
 
 #### Explanation
 **Brute force.** At each node, collect both subtrees in full and check their extremes.
@@ -10200,7 +10318,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "BST" plus "kth smallest" is the whole tip. The BST invariant says every left descendant is smaller and every right descendant is larger, so the tree already holds its values in sorted order and an inorder walk (left, node, right) reads that order out one value at a time. "kth" then just means stop counting at `k`. **Therefore.** Inorder traversal with an explicit stack, decrementing `k` at each visit and returning the node where `k` hits zero, so the walk ends after `k` pops rather than finishing the tree. **Not collecting every value and sorting**, which pays `O(n log n)` to rebuild an ordering the invariant already guarantees. **Not a size-`k` heap**, the usual kth-smallest tool on unordered data, which is `O(n log k)` and still has to touch every node. **O(n)** time, **O(h)** space.
+**Signals.** "BST" plus "kth smallest" is the whole tip. The BST invariant says every left descendant is smaller and every right descendant is larger, so the tree already holds its values in sorted order and an inorder walk (left, node, right) reads that order out one value at a time. "kth" then just means stop counting at `k`. **Therefore.** Inorder traversal with an explicit stack, decrementing `k` at each visit and returning the node where `k` hits zero, so the walk ends after `k` pops rather than finishing the tree. **Not collecting every value and sorting**, which pays `O(n log n)` to rebuild an ordering the invariant already guarantees. **Not a size-`k` heap**, the usual kth-smallest tool on unordered data, which is `O(n log k)` and still has to touch every node.
+
+- **Use:** Iterative inorder traversal (sorted order). **O(n)** time, **O(h)** space.
 
 #### Explanation
 **Brute force.** Gather every value, sort it, index.
@@ -10381,7 +10501,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** Two traversals of one tree, and "all values unique". Preorder's first element is the root by definition; uniqueness means that value occurs exactly once in inorder, and its position there splits inorder into the left subtree's values and the right subtree's. That split hands you the size of each subtree, which is precisely what preorder alone will not tell you. **Therefore.** Recurse: take the next preorder value as the current root, look up its index in inorder to get the boundary, then build the left child before the right so a single advancing preorder cursor stays aligned with the recursion. A value-to-index dict built once makes every lookup `O(1)`. **Not scanning inorder for the root on each call**, the version everybody writes first, which costs `O(n)` per node and degrades to `O(n^2)` on a skewed tree. **O(n)** time, **O(n)** space.
+**Signals.** Two traversals of one tree, and "all values unique". Preorder's first element is the root by definition; uniqueness means that value occurs exactly once in inorder, and its position there splits inorder into the left subtree's values and the right subtree's. That split hands you the size of each subtree, which is precisely what preorder alone will not tell you. **Therefore.** Recurse: take the next preorder value as the current root, look up its index in inorder to get the boundary, then build the left child before the right so a single advancing preorder cursor stays aligned with the recursion. A value-to-index dict built once makes every lookup `O(1)`. **Not scanning inorder for the root on each call**, the version everybody writes first, which costs `O(n)` per node and degrades to `O(n^2)` on a skewed tree.
+
+- **Use:** Recursive divide with hashmap for inorder index lookup. **O(n)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Find the root in inorder by scanning, then recurse on fresh sublists.
@@ -10593,7 +10715,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Any sequence of nodes connected by edges", "need not pass through the root", and "values can be negative". The first two say the answer is anchored nowhere, so there is no single starting point to recurse from; the third kills every greedy accumulate-as-you-go idea, since extending a path can lower the sum. **Therefore.** The two-values-up idiom: one post-order pass where `dfs(node)` returns the best *downward* path ending at `node`, clamped at 0, while a running best absorbs `node.val + left + right`, the path that turns at this node. **Not returning the subtree's best path to the parent**, which is the natural single-value recursion and is wrong: a best path may bend at some node inside the subtree, and a bent path has no free end for the parent to attach to. The value you report up and the value you record are different quantities. **O(n)** time, **O(h)** space.
+**Signals.** "Any sequence of nodes connected by edges", "need not pass through the root", and "values can be negative". The first two say the answer is anchored nowhere, so there is no single starting point to recurse from; the third kills every greedy accumulate-as-you-go idea, since extending a path can lower the sum. **Therefore.** The two-values-up idiom: one post-order pass where `dfs(node)` returns the best *downward* path ending at `node`, clamped at 0, while a running best absorbs `node.val + left + right`, the path that turns at this node. **Not returning the subtree's best path to the parent**, which is the natural single-value recursion and is wrong: a best path may bend at some node inside the subtree, and a bent path has no free end for the parent to attach to. The value you report up and the value you record are different quantities.
+
+- **Use:** Post-order DFS with global maximum tracking. **O(n)** time, **O(h)** space.
 
 #### Explanation
 **Brute force.** Treat every node as the turning point and recompute both downward arms.
@@ -10785,7 +10909,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Serialize to a string and deserialize back to the original tree structure", plus "any encoding scheme is acceptable". Structure, not just values, is the payload: a bag of node values names no particular tree, so the format has to record where the missing children are. Freedom over the format is the hint to pick the traversal that rebuilds itself with no extra bookkeeping. **Therefore.** Preorder DFS, emitting `node.val` or a literal `"N"` for an absent child. Reading it back is the same walk: consume one token, and if it is a value, make the node and fill left then right from the tokens that follow, so a single advancing index is all the state deserialization needs. **Not inorder with the same markers**, which is genuinely ambiguous: the root sits at no known position in the stream, so different trees produce identical tokens. **Not an index-based array** with children at `2i+1` and `2i+2`, which is unambiguous but sizes itself to the tree's depth rather than its node count. **O(n)** time, **O(n)** space.
+**Signals.** "Serialize to a string and deserialize back to the original tree structure", plus "any encoding scheme is acceptable". Structure, not just values, is the payload: a bag of node values names no particular tree, so the format has to record where the missing children are. Freedom over the format is the hint to pick the traversal that rebuilds itself with no extra bookkeeping. **Therefore.** Preorder DFS, emitting `node.val` or a literal `"N"` for an absent child. Reading it back is the same walk: consume one token, and if it is a value, make the node and fill left then right from the tokens that follow, so a single advancing index is all the state deserialization needs. **Not inorder with the same markers**, which is genuinely ambiguous: the root sits at no known position in the stream, so different trees produce identical tokens. **Not an index-based array** with children at `2i+1` and `2i+2`, which is unambiguous but sizes itself to the tree's depth rather than its node count.
+
+- **Use:** Preorder DFS with null markers. **O(n)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Put every node at its heap index and write the whole array out.
@@ -11062,7 +11188,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** The problem names the structure, but the real tell is `startsWith` sitting next to `search`. Exact membership is a hash set's whole job; a prefix is not a stored value, so there is no key to hash and no lookup to perform. A structure that answers prefix questions has to store the prefixes themselves, which means one node per distinct prefix and characters on the edges. **Therefore.** A tree where each node holds a child map keyed by character plus an `end` flag; all three operations are the same walk from the root, differing only in what a miss does and whether `end` is checked at the finish. **Not a hash set of words**, which serves `search` in `O(1)` but has to scan all `k` stored words for `startsWith`, at `O(k * L)` per query, and re-reads the identical shared prefixes of every word that begins the same way. Per operation on a word of length `L`, counting only the nodes an insert adds: **O(L)** time, **O(L)** space.
+**Signals.** The problem names the structure, but the real tell is `startsWith` sitting next to `search`. Exact membership is a hash set's whole job; a prefix is not a stored value, so there is no key to hash and no lookup to perform. A structure that answers prefix questions has to store the prefixes themselves, which means one node per distinct prefix and characters on the edges. **Therefore.** A tree where each node holds a child map keyed by character plus an `end` flag; all three operations are the same walk from the root, differing only in what a miss does and whether `end` is checked at the finish. **Not a hash set of words**, which serves `search` in `O(1)` but has to scan all `k` stored words for `startsWith`, at `O(k * L)` per query, and re-reads the identical shared prefixes of every word that begins the same way. Per operation on a word of length `L`, counting only the nodes an insert adds:
+
+- **Use:** Trie with per-node children dict and end-of-word flag. **O(L)** time, **O(L)** space.
 
 #### Explanation
 **Brute force.** Keep the words in a hash set and scan for prefixes.
@@ -11342,7 +11470,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Design" plus a dictionary plus a character that must match *any* single letter. The dot means the query is a pattern rather than a key, so nothing you can hash will answer it, but the pattern is still positional and fixed-length, which is exactly what a prefix walk consumes one character at a time. **Therefore.** A trie, with `search` as a DFS: on a concrete character follow that one child, on `.` recurse into every child that exists and return true if any branch succeeds. **Not expanding the dot into its 26 substitutions and hashing each candidate**, because that costs `26^d` full-word lookups no matter what is stored, while the trie only descends into children that exist, so a dot over a node with three children branches three ways. It also pays nothing for prefixes no word uses. With `d` dots and pattern length `L`, search is **O(26^d * L)** time, **O(L)** space.
+**Signals.** "Design" plus a dictionary plus a character that must match *any* single letter. The dot means the query is a pattern rather than a key, so nothing you can hash will answer it, but the pattern is still positional and fixed-length, which is exactly what a prefix walk consumes one character at a time. **Therefore.** A trie, with `search` as a DFS: on a concrete character follow that one child, on `.` recurse into every child that exists and return true if any branch succeeds. **Not expanding the dot into its 26 substitutions and hashing each candidate**, because that costs `26^d` full-word lookups no matter what is stored, while the trie only descends into children that exist, so a dot over a node with three children branches three ways. It also pays nothing for prefixes no word uses. With `d` dots and pattern length `L`, search is
+
+- **Use:** Trie with recursive DFS for wildcard expansion. **O(26^d * L)** time, **O(L)** space.
 
 #### Explanation
 **Brute force.** Keep every word in a list and match the pattern against each one.
@@ -11603,7 +11733,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** A **word list** rather than one word, and "return all words that can be formed". The search space is the same grid every time, so the query set is the thing that grew, and a list of thirty thousand words shares enormous amounts of prefix with itself. That asks for a structure indexed by prefix. **Therefore.** Insert every word into a trie storing the word at its terminal node, then run one backtracking DFS from each cell that descends the board and the trie in lockstep, returning the moment the current letter is not a child. **Not running the single-word grid search once per word**, which is problem 79 called `W` times at `O(W * m * n * 4^L)`: `"oath"`, `"oat"`, and `"oaths"` each rediscover the path `o -> a -> t` from scratch, and each of the `W` runs restarts from all `m * n` cells even for words whose first letter is nowhere on the board. Over `k` total dictionary characters: **O(m * n * 4^L)** time, **O(k)** space.
+**Signals.** A **word list** rather than one word, and "return all words that can be formed". The search space is the same grid every time, so the query set is the thing that grew, and a list of thirty thousand words shares enormous amounts of prefix with itself. That asks for a structure indexed by prefix. **Therefore.** Insert every word into a trie storing the word at its terminal node, then run one backtracking DFS from each cell that descends the board and the trie in lockstep, returning the moment the current letter is not a child. **Not running the single-word grid search once per word**, which is problem 79 called `W` times at `O(W * m * n * 4^L)`: `"oath"`, `"oat"`, and `"oaths"` each rediscover the path `o -> a -> t` from scratch, and each of the `W` runs restarts from all `m * n` cells even for words whose first letter is nowhere on the board. Over `k` total dictionary characters:
+
+- **Use:** Trie-backed DFS backtracking on the board. **O(m * n * 4^L)** time, **O(k)** space.
 
 #### Explanation
 **Brute force.** Run the one-word board search independently for every word.
@@ -11917,7 +12049,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Kth largest element seen so far" with a value arriving between every query. Two words carry the design. "Kth largest" means you need one order statistic, not the whole order, so the `n - k` smaller values are dead weight the moment they lose. "So far" means the input never ends, so any structure you rebuild per query is priced per call, not once. **Therefore.** A min-heap capped at `k`: push each arrival, pop when the size passes `k`, and the root is the answer because the heap holds exactly the `k` largest values seen and the root is the smallest of those. **Not a max-heap over every value**, which is the reflex on hearing "largest" but needs `k - 1` pops and re-pushes per query and stores all `n`. **O(log k)** time, **O(k)** space.
+**Signals.** "Kth largest element seen so far" with a value arriving between every query. Two words carry the design. "Kth largest" means you need one order statistic, not the whole order, so the `n - k` smaller values are dead weight the moment they lose. "So far" means the input never ends, so any structure you rebuild per query is priced per call, not once. **Therefore.** A min-heap capped at `k`: push each arrival, pop when the size passes `k`, and the root is the answer because the heap holds exactly the `k` largest values seen and the root is the smallest of those. **Not a max-heap over every value**, which is the reflex on hearing "largest" but needs `k - 1` pops and re-pushes per query and stores all `n`.
+
+- **Use:** Min-heap of size k. **O(log k)** time, **O(k)** space.
 
 #### Explanation
 **Brute force.** Keep every value and re-sort on each `add`.
@@ -12115,7 +12249,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Each turn, smash the two heaviest stones" and the survivor goes back in. Two things follow: you need the maximum repeatedly rather than once, and the collection changes between extractions, because a smash can insert a weight that was not there before. Repeated extract-max interleaved with insert is the contract a priority queue exists to serve. **Therefore.** Heapify the weights into a max-heap and loop: pop twice, and when the two differ push their difference back. That is `n - 1` rounds at `O(log n)` each. Python's `heapq` is min-only, so negate on the way in and on the way out. **Not sorting once and popping from the end**, because the remainder has to be reinserted in order, so each round pays another `O(n log n)` sort or an `O(n)` shift to keep the array sorted. **Not a counting array** over the `1..1000` value range, which would work but buys nothing at `n <= 30`. **O(n log n)** time, **O(n)** space.
+**Signals.** "Each turn, smash the two heaviest stones" and the survivor goes back in. Two things follow: you need the maximum repeatedly rather than once, and the collection changes between extractions, because a smash can insert a weight that was not there before. Repeated extract-max interleaved with insert is the contract a priority queue exists to serve. **Therefore.** Heapify the weights into a max-heap and loop: pop twice, and when the two differ push their difference back. That is `n - 1` rounds at `O(log n)` each. Python's `heapq` is min-only, so negate on the way in and on the way out. **Not sorting once and popping from the end**, because the remainder has to be reinserted in order, so each round pays another `O(n log n)` sort or an `O(n)` shift to keep the array sorted. **Not a counting array** over the `1..1000` value range, which would work but buys nothing at `n <= 30`.
+
+- **Use:** Max-heap (negate values for min-heap languages). **O(n log n)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Keep the list sorted and re-sort after every smash.
@@ -12275,7 +12411,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "The `k` closest points" asks for a *set* of the `k` smallest under a derived key, and "order of the output does not matter" confirms the winners are never ranked against each other. Distance is `sqrt(x^2 + y^2)`, but `sqrt` is monotonic, so `x*x + y*y` induces the identical ordering in exact integer arithmetic. Computing the root would only burn cycles and introduce float error. **Therefore.** A max-heap capped at `k` keyed on squared distance: the worst of the current best `k` sits at the root, so each point costs one `O(1)` comparison and at most one `O(log k)` eviction. **Not sorting every point by distance**, which builds a total order over the `n - k` points you discard, at `O(n log n)` time and `O(n)` space, to answer what is only a membership question. **O(n log k)** time, **O(k)** space.
+**Signals.** "The `k` closest points" asks for a *set* of the `k` smallest under a derived key, and "order of the output does not matter" confirms the winners are never ranked against each other. Distance is `sqrt(x^2 + y^2)`, but `sqrt` is monotonic, so `x*x + y*y` induces the identical ordering in exact integer arithmetic. Computing the root would only burn cycles and introduce float error. **Therefore.** A max-heap capped at `k` keyed on squared distance: the worst of the current best `k` sits at the root, so each point costs one `O(1)` comparison and at most one `O(log k)` eviction. **Not sorting every point by distance**, which builds a total order over the `n - k` points you discard, at `O(n log n)` time and `O(n)` space, to answer what is only a membership question.
+
+- **Use:** Max-heap of size k (negated distance). **O(n log k)** time, **O(k)** space.
 
 #### Explanation
 **Brute force.** Sort all points by distance, keep the first `k`.
@@ -12435,7 +12573,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Kth largest element" over a static array with a single query, plus "not the kth distinct element", so duplicates each occupy a rank of their own. One order statistic is wanted, not the whole order, and that gap is the entire opportunity. **Therefore.** A min-heap capped at `k`: push every value, pop whenever the size passes `k`, and the root is the answer because the heap ends up holding exactly the `k` largest values, with the smallest of those on top. You never order the `n - k` losers against each other. **Not quickselect by default**, even though its expected `O(n)` is asymptotically better: it partitions in place, so it mutates the caller's array, and a bad pivot sequence degrades it to `O(n^2)`. It is the right call when you own the array and `k` is a large fraction of `n`. **O(n log k)** time, **O(k)** space.
+**Signals.** "Kth largest element" over a static array with a single query, plus "not the kth distinct element", so duplicates each occupy a rank of their own. One order statistic is wanted, not the whole order, and that gap is the entire opportunity. **Therefore.** A min-heap capped at `k`: push every value, pop whenever the size passes `k`, and the root is the answer because the heap ends up holding exactly the `k` largest values, with the smallest of those on top. You never order the `n - k` losers against each other. **Not quickselect by default**, even though its expected `O(n)` is asymptotically better: it partitions in place, so it mutates the caller's array, and a bad pivot sequence degrades it to `O(n^2)`. It is the right call when you own the array and `k` is a large fraction of `n`.
+
+- **Use:** Min-heap of size k. **O(n log k)** time, **O(k)** space.
 
 #### Explanation
 **Brute force.** Sort ascending and read index `n - k`.
@@ -12581,7 +12721,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Minimum number of intervals" with a rule that the same task must wait `n` ticks before repeating. The tell is that a task which is illegal now becomes legal later, so the set of candidates changes as the clock advances rather than being fixed up front. Idle slots being allowed confirms that the schedule is built tick by tick, not by permuting a list. **Therefore.** Greedy simulation: each tick run the available task with the most work left, then park it in a FIFO cooldown queue keyed by its ready time. The exchange argument is that deferring the most frequent task only pushes the same congestion later, so running it first is never worse. **Not one sort of the counts followed by a cycle through them**, because a fixed order goes stale the moment a task enters cooldown and a rarer task becomes the only legal move. Over `t` ticks with `k` distinct task types, at most 26 of them: **O(t log k)** time, **O(k)** space.
+**Signals.** "Minimum number of intervals" with a rule that the same task must wait `n` ticks before repeating. The tell is that a task which is illegal now becomes legal later, so the set of candidates changes as the clock advances rather than being fixed up front. Idle slots being allowed confirms that the schedule is built tick by tick, not by permuting a list. **Therefore.** Greedy simulation: each tick run the available task with the most work left, then park it in a FIFO cooldown queue keyed by its ready time. The exchange argument is that deferring the most frequent task only pushes the same congestion later, so running it first is never worse. **Not one sort of the counts followed by a cycle through them**, because a fixed order goes stale the moment a task enters cooldown and a rarer task becomes the only legal move. Over `t` ticks with `k` distinct task types, at most 26 of them:
+
+- **Use:** Greedy simulation with max-heap and cooldown queue. **O(t log k)** time, **O(k)** space.
 
 #### Explanation
 **Brute force.** Simulate each tick, rescanning every task type to pick the best legal one.
@@ -12794,7 +12936,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "The 10 most recent tweets from the user and their followees" fixes three things at once: the answer is capped at 10 however long the history is, each user's own tweets arrive in time order and stay that way if you only append, and the feed is a merge across a small set of those already-ordered lists. A constant `k` taken from `u` sorted sequences is the k-way merge signature. **Therefore.** A global counter stamps every tweet so recency is an integer comparison, each user keeps an append-only list, and `getNewsFeed` seeds a heap with the newest tweet from each followee plus the user, pops 10 times, and after each pop pushes the next tweet from whichever list that pop came from. Follow and unfollow are set operations. **Not concatenating every followee's tweets and sorting**, which is `O(T log T)` in the total number of tweets posted, repeated on every single read, to produce 10 of them. **Not fanning out on write** into a materialised per-user feed, which makes `postTweet` cost `O(followers)` and `follow` need a backfill; that trade only wins when reads hugely outnumber writes. **O(k log u)** time, **O(T)** space.
+**Signals.** "The 10 most recent tweets from the user and their followees" fixes three things at once: the answer is capped at 10 however long the history is, each user's own tweets arrive in time order and stay that way if you only append, and the feed is a merge across a small set of those already-ordered lists. A constant `k` taken from `u` sorted sequences is the k-way merge signature. **Therefore.** A global counter stamps every tweet so recency is an integer comparison, each user keeps an append-only list, and `getNewsFeed` seeds a heap with the newest tweet from each followee plus the user, pops 10 times, and after each pop pushes the next tweet from whichever list that pop came from. Follow and unfollow are set operations. **Not concatenating every followee's tweets and sorting**, which is `O(T log T)` in the total number of tweets posted, repeated on every single read, to produce 10 of them. **Not fanning out on write** into a materialised per-user feed, which makes `postTweet` cost `O(followers)` and `follow` need a backfill; that trade only wins when reads hugely outnumber writes.
+
+- **Use:** Heap merge of per-user tweet lists. **O(k log u)** time, **O(T)** space.
 
 #### Explanation
 **Brute force.** One global tweet log, filtered and sorted on every read.
@@ -13119,7 +13263,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Median" is the giveaway, because it names a value at the *middle* of the order rather than at an end, and the numbers arrive in a stream with queries interleaved between insertions. So you need a structure that keeps the boundary between the lower and upper halves cheap to reach and cheap to maintain. **Therefore.** Two heaps facing each other: a max-heap for the lower half and a min-heap for the upper half, with sizes kept within one of each other. The two roots are exactly the elements adjacent to the middle, so the median is one root or the mean of both. **Not a single heap**, which exposes only its extreme; getting to the middle would mean popping half the elements and pushing them back on every query. **Not a sorted array with binary-search insertion**, where the search is `O(log n)` but the shift that makes room is `O(n)`. Each insert is one push and at most two moves. **O(log n)** time, **O(n)** space.
+**Signals.** "Median" is the giveaway, because it names a value at the *middle* of the order rather than at an end, and the numbers arrive in a stream with queries interleaved between insertions. So you need a structure that keeps the boundary between the lower and upper halves cheap to reach and cheap to maintain. **Therefore.** Two heaps facing each other: a max-heap for the lower half and a min-heap for the upper half, with sizes kept within one of each other. The two roots are exactly the elements adjacent to the middle, so the median is one root or the mean of both. **Not a single heap**, which exposes only its extreme; getting to the middle would mean popping half the elements and pushing them back on every query. **Not a sorted array with binary-search insertion**, where the search is `O(log n)` but the shift that makes room is `O(n)`. Each insert is one push and at most two moves.
+
+- **Use:** Two heaps: max-heap for lower half, min-heap for upper half. **O(log n)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Append every number, sort on each query.
@@ -13365,7 +13511,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Return **all** possible subsets" and a bound of `nums.length <= 10`. That bound is the whole tell: ten elements with an "all" objective means `2^10 = 1024` outputs are expected, so exponential is the target rather than a failure to optimise. "Distinct integers" removes the duplicate-handling that its sequel adds. **Therefore.** Enumerate one binary decision per element: at index `i` recurse having included `nums[i]`, then pop it and recurse having excluded it, emitting a copy of the running path at `i == n`. **Not memoisation or DP**, which is the reflex on seeing `2^n` but has nothing to cache here: every one of the `2^n` subsets is distinct and must be materialised, so the size of the output is itself the lower bound and no shared subproblem exists to collapse. Space is `O(n)` beyond the answer. **O(n * 2^n)** time, **O(n)** space.
+**Signals.** "Return **all** possible subsets" and a bound of `nums.length <= 10`. That bound is the whole tell: ten elements with an "all" objective means `2^10 = 1024` outputs are expected, so exponential is the target rather than a failure to optimise. "Distinct integers" removes the duplicate-handling that its sequel adds. **Therefore.** Enumerate one binary decision per element: at index `i` recurse having included `nums[i]`, then pop it and recurse having excluded it, emitting a copy of the running path at `i == n`. **Not memoisation or DP**, which is the reflex on seeing `2^n` but has nothing to cache here: every one of the `2^n` subsets is distinct and must be materialised, so the size of the output is itself the lower bound and no shared subproblem exists to collapse. Space is `O(n)` beyond the answer.
+
+- **Use:** Backtracking (include/exclude decision tree). **O(n * 2^n)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Enumerate the `2^n` bitmasks and read off the set bits.
@@ -13528,7 +13676,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Return all unique combinations" is an enumeration objective, so the output itself is exponential and no polynomial algorithm exists; the `list of lists` return type is the second tell. "The same number may be chosen an unlimited number of times" plus `candidates.length <= 30` and `target <= 40` bound the search tree, whose depth cannot exceed `target / min(candidates)`. "Combinations", not permutations, means `[2,2,3]` and `[3,2,2]` are one answer, not two. **Therefore.** Index-based backtracking with two moves: take `candidates[i]` and recurse *staying at* `i`, which models unlimited reuse, or advance to `i + 1`. The index never moving backwards is what makes each multiset appear exactly once, so no dedup pass is needed. **Not the unbounded-knapsack DP**, which fills an `O(n · target)` table but only counts or minimises; listing the combinations means walking that table back along every path, which is the same exponential work with a table bolted on. Excluding the output, **O(2^(t/m))** time, **O(n + t/m)** space.
+**Signals.** "Return all unique combinations" is an enumeration objective, so the output itself is exponential and no polynomial algorithm exists; the `list of lists` return type is the second tell. "The same number may be chosen an unlimited number of times" plus `candidates.length <= 30` and `target <= 40` bound the search tree, whose depth cannot exceed `target / min(candidates)`. "Combinations", not permutations, means `[2,2,3]` and `[3,2,2]` are one answer, not two. **Therefore.** Index-based backtracking with two moves: take `candidates[i]` and recurse *staying at* `i`, which models unlimited reuse, or advance to `i + 1`. The index never moving backwards is what makes each multiset appear exactly once, so no dedup pass is needed. **Not the unbounded-knapsack DP**, which fills an `O(n · target)` table but only counts or minimises; listing the combinations means walking that table back along every path, which is the same exponential work with a table bolted on. Excluding the output,
+
+- **Use:** Backtracking with unlimited reuse. **O(2^(t/m))** time, **O(n + t/m)** space.
 
 #### Explanation
 **Brute force.** Try every candidate at every step, dedupe at the end.
@@ -13705,7 +13855,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "All possible permutations" and "in any order" is an enumeration objective: the output alone is `n!` lists of length `n`, so nothing can beat `O(n · n!)` and there is no point looking for a clever trick. `nums.length <= 6` confirms it, since `6! = 720` is a bound that only makes sense when the intended answer is factorial. "All integers are unique" removes the duplicate-branch problem before it starts. **Therefore.** Backtrack over *which unused element comes next*: at each level scan the array, skip whatever is already on the path, choose, recurse one level deeper, then unchoose. **Not the subsets include/exclude recursion**, which visits each index once and emits `2^n` sets whose elements keep their original relative order; permutations need the orderings of one fixed set, so the branching factor at depth `d` is `n - d` rather than 2, and no include/exclude tree can ever emit `[1,2,3]` and `[2,1,3]` as different answers. **O(n · n!)** time, **O(n)** space.
+**Signals.** "All possible permutations" and "in any order" is an enumeration objective: the output alone is `n!` lists of length `n`, so nothing can beat `O(n · n!)` and there is no point looking for a clever trick. `nums.length <= 6` confirms it, since `6! = 720` is a bound that only makes sense when the intended answer is factorial. "All integers are unique" removes the duplicate-branch problem before it starts. **Therefore.** Backtrack over *which unused element comes next*: at each level scan the array, skip whatever is already on the path, choose, recurse one level deeper, then unchoose. **Not the subsets include/exclude recursion**, which visits each index once and emits `2^n` sets whose elements keep their original relative order; permutations need the orderings of one fixed set, so the branching factor at depth `d` is `n - d` rather than 2, and no include/exclude tree can ever emit `[1,2,3]` and `[2,1,3]` as different answers.
+
+- **Use:** Backtracking with in-place swap or visited set. **O(n · n!)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Build every length-`n` sequence of indices, keep the ones with no repeat.
@@ -13885,7 +14037,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Return all possible unique subsets" with `nums.length <= 10`. "All" plus a tiny bound is the universal backtracking tell: `2^10 = 1024` outputs are expected, so exponential is the specification rather than a failure to optimise. The new word against plain Subsets is "may contain duplicates", which hides a second problem inside the first: enumerate, and suppress repeats. **Therefore.** Sort so equal values are adjacent, recurse on a `start` index, and skip `nums[j]` whenever `j > start and nums[j] == nums[j-1]`, which kills a repeated *sibling* while leaving the deeper copy reachable. **Not a hashset of sorted tuples**, the reflex fix, which still builds all `2^n` subsets and pays a full hash of each one before discarding it; sorting makes duplicates adjacent, so a single integer comparison replaces the hash and the duplicate branch is never entered at all. **O(n * 2^n)** time, **O(n)** space.
+**Signals.** "Return all possible unique subsets" with `nums.length <= 10`. "All" plus a tiny bound is the universal backtracking tell: `2^10 = 1024` outputs are expected, so exponential is the specification rather than a failure to optimise. The new word against plain Subsets is "may contain duplicates", which hides a second problem inside the first: enumerate, and suppress repeats. **Therefore.** Sort so equal values are adjacent, recurse on a `start` index, and skip `nums[j]` whenever `j > start and nums[j] == nums[j-1]`, which kills a repeated *sibling* while leaving the deeper copy reachable. **Not a hashset of sorted tuples**, the reflex fix, which still builds all `2^n` subsets and pays a full hash of each one before discarding it; sorting makes duplicates adjacent, so a single integer comparison replaces the hash and the duplicate branch is never entered at all.
+
+- **Use:** Backtracking with sort-and-skip-duplicate technique. **O(n * 2^n)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Enumerate the `2^n` bitmasks and dedupe with a set.
@@ -14060,7 +14214,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Find all unique combinations" that sum to a target, "each number may only be used once", and an input that "may contain duplicates". "All" over a set of value-multisets is the backtracking tell; two other words do the real work. "Once" forces the recursion to advance past the index it just consumed instead of reusing it, and "unique" means duplicate *values* in the input must not yield duplicate *outputs*. **Therefore.** Sort, recurse on a `start` index, skip a candidate when `j > start and candidates[j] == candidates[j-1]`, and `break` the loop the moment `total + candidates[j] > target`. **Not a hashset of sorted tuples over the full power set**, the obvious dedupe, which explores all `2^n` subsets and sums each before filtering; sorting buys both prunings at once, and the `break` alone discards whole tails of the candidate list unvisited. **O(2^n)** time, **O(n)** space.
+**Signals.** "Find all unique combinations" that sum to a target, "each number may only be used once", and an input that "may contain duplicates". "All" over a set of value-multisets is the backtracking tell; two other words do the real work. "Once" forces the recursion to advance past the index it just consumed instead of reusing it, and "unique" means duplicate *values* in the input must not yield duplicate *outputs*. **Therefore.** Sort, recurse on a `start` index, skip a candidate when `j > start and candidates[j] == candidates[j-1]`, and `break` the loop the moment `total + candidates[j] > target`. **Not a hashset of sorted tuples over the full power set**, the obvious dedupe, which explores all `2^n` subsets and sums each before filtering; sorting buys both prunings at once, and the `break` alone discards whole tails of the candidate list unvisited.
+
+- **Use:** Backtracking with sort-and-skip-duplicate and early break. **O(2^n)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Test every subset, keep the ones that hit the target, dedupe.
@@ -14253,7 +14409,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** A grid, "horizontally or vertically neighbouring cells", "the same cell may not be used more than once", and bounds of 6 by 6 against a word up to 15 characters long. That last pair is the tell: only 36 cells, but a path of 15 steps means the search space is *paths*, not cells, and paths are exponential. "Not used more than once" scopes to one path rather than to the whole search, which is the word that forces an undo. **Therefore.** DFS from every cell, testing `word[i]` on arrival, marking the cell occupied before descending and restoring it on the way out. **Not a global visited set or BFS**, the reflex carried over from Number of Islands: a visited set that is never cleared would permanently forbid a cell that a later, correct path needs, and BFS has no natural place to undo a mark because frontier states share the grid. **O(m · n · 4^L)** time, **O(L)** space.
+**Signals.** A grid, "horizontally or vertically neighbouring cells", "the same cell may not be used more than once", and bounds of 6 by 6 against a word up to 15 characters long. That last pair is the tell: only 36 cells, but a path of 15 steps means the search space is *paths*, not cells, and paths are exponential. "Not used more than once" scopes to one path rather than to the whole search, which is the word that forces an undo. **Therefore.** DFS from every cell, testing `word[i]` on arrival, marking the cell occupied before descending and restoring it on the way out. **Not a global visited set or BFS**, the reflex carried over from Number of Islands: a visited set that is never cleared would permanently forbid a cell that a later, correct path needs, and BFS has no natural place to undo a mark because frontier states share the grid.
+
+- **Use:** DFS backtracking with in-place visited marking. **O(m · n · 4^L)** time, **O(L)** space.
 
 #### Explanation
 **Brute force.** Enumerate every self-avoiding path of the right length, then read off what it spells.
@@ -14444,7 +14602,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Return all possible palindrome partitionings" and `s.length <= 16`. "All" plus a bound of 16 is the backtracking tell, and the bound tells you the shape of the search: a string of length `n` has `n - 1` gaps, each independently cut or not, so `2^15` partitions is the expected order of the answer. The palindrome requirement is a per-piece filter, and a filter that can be evaluated on a single piece is one you can apply the instant that piece is proposed. **Therefore.** Recurse on a start index, try every end index, descend only when `s[start..end]` is a palindrome, and record the path when start reaches the end of the string. **Not generate-then-filter over the `2^(n-1)` cut masks**, the natural first move, which commits to all `n - 1` cut decisions before checking any piece, so a bad first piece is rediscovered inside `2^(n-2)` separate masks. **O(n * 2^n)** time, **O(n)** space.
+**Signals.** "Return all possible palindrome partitionings" and `s.length <= 16`. "All" plus a bound of 16 is the backtracking tell, and the bound tells you the shape of the search: a string of length `n` has `n - 1` gaps, each independently cut or not, so `2^15` partitions is the expected order of the answer. The palindrome requirement is a per-piece filter, and a filter that can be evaluated on a single piece is one you can apply the instant that piece is proposed. **Therefore.** Recurse on a start index, try every end index, descend only when `s[start..end]` is a palindrome, and record the path when start reaches the end of the string. **Not generate-then-filter over the `2^(n-1)` cut masks**, the natural first move, which commits to all `n - 1` cut decisions before checking any piece, so a bad first piece is rediscovered inside `2^(n-2)` separate masks.
+
+- **Use:** Backtracking with inline palindrome check. **O(n * 2^n)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Enumerate the `2^(n-1)` cut placements, keep those whose every piece is a palindrome.
@@ -14658,7 +14818,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Return all possible letter combinations that the number could represent" with `digits.length <= 4`. "All" plus a tiny bound is the enumeration tell: each digit offers 3 or 4 letters, so the answer holds at most `4^4 = 256` strings and writing them out is the dominant cost. What is *absent* matters as much: there is no target, no uniqueness clause, and no validity filter, so every branch reaches a leaf and there is nothing to prune. This is the simplest member of the backtracking family for that reason. **Therefore.** One recursion level per digit, branching over that digit's letters, emitting the accumulated string once the index passes the last digit. **Not an iterative layer expansion** (start from `[""]`, extend by each letter of the next digit), which computes the same answer but holds all `4^(n-1)` partial strings at once, where the recursion holds one path of length `n`. **O(4^n * n)** time, **O(n)** space.
+**Signals.** "Return all possible letter combinations that the number could represent" with `digits.length <= 4`. "All" plus a tiny bound is the enumeration tell: each digit offers 3 or 4 letters, so the answer holds at most `4^4 = 256` strings and writing them out is the dominant cost. What is *absent* matters as much: there is no target, no uniqueness clause, and no validity filter, so every branch reaches a leaf and there is nothing to prune. This is the simplest member of the backtracking family for that reason. **Therefore.** One recursion level per digit, branching over that digit's letters, emitting the accumulated string once the index passes the last digit. **Not an iterative layer expansion** (start from `[""]`, extend by each letter of the next digit), which computes the same answer but holds all `4^(n-1)` partial strings at once, where the recursion holds one path of length `n`.
+
+- **Use:** Backtracking over digit-to-letter mapping. **O(4^n * n)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Generate every string of the right length over the whole alphabet, keep the ones the keypad allows.
@@ -14845,7 +15007,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Return all distinct solutions" for an `n × n` board with `n <= 9`. "All" plus a single-digit bound is the tell, and here the constraint itself hands you the search structure. No two queens share a row, so a solution is exactly one column choice per row, which collapses the space from `C(n^2, n)` placements to `n^n` assignments and then, once columns must also differ, to `n!` permutations. **Therefore.** Place row by row, and before descending check three `O(1)` conditions: the column is free, the `r + c` anti-diagonal is free, and the `r - c` diagonal is free. **Not generate-then-validate over column permutations**, which already honours rows and columns but only discovers a diagonal conflict after all `n` queens are down; checking at placement time cuts the subtree at row 2 instead of row `n`, and that is where the entire practical speedup lives. **O(n!)** time, **O(n)** space.
+**Signals.** "Return all distinct solutions" for an `n × n` board with `n <= 9`. "All" plus a single-digit bound is the tell, and here the constraint itself hands you the search structure. No two queens share a row, so a solution is exactly one column choice per row, which collapses the space from `C(n^2, n)` placements to `n^n` assignments and then, once columns must also differ, to `n!` permutations. **Therefore.** Place row by row, and before descending check three `O(1)` conditions: the column is free, the `r + c` anti-diagonal is free, and the `r - c` diagonal is free. **Not generate-then-validate over column permutations**, which already honours rows and columns but only discovers a diagonal conflict after all `n` queens are down; checking at placement time cuts the subtree at row 2 instead of row `n`, and that is where the entire practical speedup lives.
+
+- **Use:** Backtracking with column and diagonal conflict sets. **O(n!)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Assign a column to every row, then check all pairs.
@@ -15066,7 +15230,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** A grid whose cells are "adjacent" in four directions is a graph in disguise: each cell is a vertex, each orthogonal neighbour an edge. "Count the number of islands" asks for connected components, and the word *distance* appears nowhere in the statement, which is what settles the DFS-versus-BFS question: visiting order is irrelevant, only reachability matters. `1 <= m, n <= 300` is 90000 cells, so the budget is a single pass. **Therefore.** Scan every cell; on an unvisited `"1"`, add one to the count and flood-fill its whole component, overwriting each land cell with `"0"` so the grid doubles as the visited set. **Not Union Find**, which solves it but pays for an `m·n` parent array and an inverse-Ackermann factor to answer a connectivity question that never changes; a DSU earns its keep only when edges arrive one at a time, as in Number of Islands II. **O(m·n)** time, **O(m·n)** space.
+**Signals.** A grid whose cells are "adjacent" in four directions is a graph in disguise: each cell is a vertex, each orthogonal neighbour an edge. "Count the number of islands" asks for connected components, and the word *distance* appears nowhere in the statement, which is what settles the DFS-versus-BFS question: visiting order is irrelevant, only reachability matters. `1 <= m, n <= 300` is 90000 cells, so the budget is a single pass. **Therefore.** Scan every cell; on an unvisited `"1"`, add one to the count and flood-fill its whole component, overwriting each land cell with `"0"` so the grid doubles as the visited set. **Not Union Find**, which solves it but pays for an `m·n` parent array and an inverse-Ackermann factor to answer a connectivity question that never changes; a DSU earns its keep only when edges arrive one at a time, as in Number of Islands II.
+
+- **Use:** DFS flood fill (in-place marking). **O(m·n)** time, **O(m·n)** space.
 
 #### Explanation
 **Brute force.** Give each land cell its own label, then push the smaller label to neighbours until nothing changes.
@@ -15251,7 +15417,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Deep copy" of a graph given "a reference to a node" says the input is a pointer, not an array, so the only way to see the whole graph is to traverse it. Undirected guarantees cycles, because from any node you can walk straight back the way you came, and a plain recursive copy would therefore never terminate. Nothing in the statement mentions distance or ordering, so DFS and BFS are equally correct here. **Therefore.** One traversal carrying a hash map from original node to its clone, doing double duty: the keys are the visited set and the values are what neighbours get wired to. Create the clone and record it *before* recursing, so a cycle arriving back finds the in-progress copy instead of starting a second one. **Not a plain visited set**, because knowing a node has been seen does not tell you which clone it became, and you still have to append that exact clone to the current node's neighbour list. **O(V+E)** time, **O(V)** space.
+**Signals.** "Deep copy" of a graph given "a reference to a node" says the input is a pointer, not an array, so the only way to see the whole graph is to traverse it. Undirected guarantees cycles, because from any node you can walk straight back the way you came, and a plain recursive copy would therefore never terminate. Nothing in the statement mentions distance or ordering, so DFS and BFS are equally correct here. **Therefore.** One traversal carrying a hash map from original node to its clone, doing double duty: the keys are the visited set and the values are what neighbours get wired to. Create the clone and record it *before* recursing, so a cycle arriving back finds the in-progress copy instead of starting a second one. **Not a plain visited set**, because knowing a node has been seen does not tell you which clone it became, and you still have to append that exact clone to the current node's neighbour list.
+
+- **Use:** DFS with old-to-new node hashmap. **O(V+E)** time, **O(V)** space.
 
 #### Explanation
 **Brute force.** Collect the nodes into a list, clone them, then find each neighbour by scanning that list.
@@ -15453,7 +15621,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Group of 4-directionally connected land cells" is the giveaway that the matrix is a graph: each cell is a vertex, each orthogonal neighbour an edge, so "largest island" means "largest connected component". Nothing in the statement mentions distance or ordering, only membership, so a depth-first walk suffices and the visiting order is free. **Therefore.** Scan every cell; on an unvisited `1`, flood-fill it and have the recursion return `1` plus the sum of what its four neighbours return, so the walk that discovers a component also measures it. Keep the running maximum. **Not DP over the grid**, the reflex borrowed from Maximal Square: DP needs each cell's answer to depend only on cells already computed, and island membership admits no such order, since a cell can belong to a component first reached from below and to the right. **O(m·n)** time, **O(m·n)** space.
+**Signals.** "Group of 4-directionally connected land cells" is the giveaway that the matrix is a graph: each cell is a vertex, each orthogonal neighbour an edge, so "largest island" means "largest connected component". Nothing in the statement mentions distance or ordering, only membership, so a depth-first walk suffices and the visiting order is free. **Therefore.** Scan every cell; on an unvisited `1`, flood-fill it and have the recursion return `1` plus the sum of what its four neighbours return, so the walk that discovers a component also measures it. Keep the running maximum. **Not DP over the grid**, the reflex borrowed from Maximal Square: DP needs each cell's answer to depend only on cells already computed, and island membership admits no such order, since a cell can belong to a component first reached from below and to the right.
+
+- **Use:** DFS flood fill returning subtree size. **O(m·n)** time, **O(m·n)** space.
 
 #### Explanation
 **Brute force.** For every land cell, walk its whole component from scratch with a fresh visited set and keep the largest size seen.
@@ -15624,7 +15794,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Water flows to adjacent cells with equal or lower elevation" defines a directed edge between neighbouring cells, so the matrix is a graph again, but this time the edges point downhill and the two oceans are sets of border cells rather than single targets. "Return all cells that can reach both" is two reachability questions per cell, and reachability is cheapest answered backwards: reverse every edge and one traversal seeded at an ocean labels every cell that drains into it. **Therefore.** Run two multi-source traversals from the border cells, each stepping only to a neighbour of greater or equal height, and intersect the two visited sets. **Not memoised DFS from each cell**, because equal heights make the flow graph cyclic, and a cell whose only escape runs through a cell still on the recursion stack caches `false` before that route resolves. **O(m·n)** time, **O(m·n)** space.
+**Signals.** "Water flows to adjacent cells with equal or lower elevation" defines a directed edge between neighbouring cells, so the matrix is a graph again, but this time the edges point downhill and the two oceans are sets of border cells rather than single targets. "Return all cells that can reach both" is two reachability questions per cell, and reachability is cheapest answered backwards: reverse every edge and one traversal seeded at an ocean labels every cell that drains into it. **Therefore.** Run two multi-source traversals from the border cells, each stepping only to a neighbour of greater or equal height, and intersect the two visited sets. **Not memoised DFS from each cell**, because equal heights make the flow graph cyclic, and a cell whose only escape runs through a cell still on the recursion stack caches `false` before that route resolves.
+
+- **Use:** Reverse multi-source BFS from each ocean border. **O(m·n)** time, **O(m·n)** space.
 
 #### Explanation
 **Brute force.** From every cell, walk downhill and record whether the walk ever touches a Pacific edge and an Atlantic edge.
@@ -15875,7 +16047,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** The board is a grid graph again: `'O'` cells are vertices and orthogonal `'O'` neighbours are edges. "Surrounded on all four sides" is not a local test on one cell, it is a property of a whole connected region, and the exception clause, that a border `'O'` is never flipped, names the only way a region escapes. That inverts the search: captured regions are awkward to enumerate, but every safe region has a known starting point. **Therefore.** Flood-fill from each border `'O'`, mark everything reached with a third symbol, then sweep once, turning marked cells back to `'O'` and every other cell to `'X'`. **Not Union Find with a virtual border node**, the textbook alternative: it is correct, but it allocates an `m·n + 1` parent array and pays an inverse-Ackermann factor per union to answer a connectivity question that never changes once the input is read. **O(m·n)** time, **O(m·n)** space.
+**Signals.** The board is a grid graph again: `'O'` cells are vertices and orthogonal `'O'` neighbours are edges. "Surrounded on all four sides" is not a local test on one cell, it is a property of a whole connected region, and the exception clause, that a border `'O'` is never flipped, names the only way a region escapes. That inverts the search: captured regions are awkward to enumerate, but every safe region has a known starting point. **Therefore.** Flood-fill from each border `'O'`, mark everything reached with a third symbol, then sweep once, turning marked cells back to `'O'` and every other cell to `'X'`. **Not Union Find with a virtual border node**, the textbook alternative: it is correct, but it allocates an `m·n + 1` parent array and pays an inverse-Ackermann factor per union to answer a connectivity question that never changes once the input is read.
+
+- **Use:** DFS from border `'O'` cells to mark safe regions, then sweep. **O(m·n)** time, **O(m·n)** space.
 
 #### Explanation
 **Brute force.** Flood-fill each `'O'` region, remember its cells, and flip them only if none of them sat on the border.
@@ -16065,7 +16239,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Minimum minutes" is a shortest-distance objective on an unweighted grid, which means BFS rather than DFS. The decisive word is *simultaneously*: every rotten orange spreads during the same minute, so there is not one source but many, and what a fresh cell needs is its distance to the *nearest* rotten one. "Or -1 if impossible" warns that some fresh oranges may be unreachable, so leftovers have to be detectable. **Therefore.** Multi-source BFS. Seed the queue with every initially rotten cell at time 0, count the fresh ones, then expand outward, decrementing the count as each cell flips. The answer is the largest time stamp written, or -1 if the count is still positive when the queue drains. **Not one BFS per rotten orange**, which costs `O(k·m·n)` for k sources and then makes you take a per-cell minimum across k distance grids; one shared frontier expanding in lockstep produces those same minima in a single pass. **O(m·n)** time, **O(m·n)** space.
+**Signals.** "Minimum minutes" is a shortest-distance objective on an unweighted grid, which means BFS rather than DFS. The decisive word is *simultaneously*: every rotten orange spreads during the same minute, so there is not one source but many, and what a fresh cell needs is its distance to the *nearest* rotten one. "Or -1 if impossible" warns that some fresh oranges may be unreachable, so leftovers have to be detectable. **Therefore.** Multi-source BFS. Seed the queue with every initially rotten cell at time 0, count the fresh ones, then expand outward, decrementing the count as each cell flips. The answer is the largest time stamp written, or -1 if the count is still positive when the queue drains. **Not one BFS per rotten orange**, which costs `O(k·m·n)` for k sources and then makes you take a per-cell minimum across k distance grids; one shared frontier expanding in lockstep produces those same minima in a single pass.
+
+- **Use:** Multi-source BFS from all initially rotten oranges. **O(m·n)** time, **O(m·n)** space.
 
 #### Explanation
 **Brute force.** Simulate one minute at a time, rescanning the grid for fresh cells that touch a rotten one.
@@ -16289,7 +16465,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Distance to the nearest gate" is a shortest-path question on an unweighted grid graph: each room is a vertex, each orthogonal step costs 1, and that is precisely what BFS answers. The word to catch is *nearest*, because it ranges over a set of gates rather than one, so each room's answer is a minimum over sources. A minimum over sources does not need one search per source: put every source in the queue at distance 0 and BFS treats them as a single frontier, so the wave that first reaches a room came from the closest gate. **Therefore.** Seed the queue with every `0` cell, expand in waves, and write `dist + 1` into any neighbour still holding `INF`. **Not one BFS per gate** taking the minimum, because with up to 62500 gates on a 250 by 250 board that is 62500 sweeps over 62500 cells, near 4·10^9 steps against the 62500 a single pass needs. **O(m·n)** time, **O(m·n)** space.
+**Signals.** "Distance to the nearest gate" is a shortest-path question on an unweighted grid graph: each room is a vertex, each orthogonal step costs 1, and that is precisely what BFS answers. The word to catch is *nearest*, because it ranges over a set of gates rather than one, so each room's answer is a minimum over sources. A minimum over sources does not need one search per source: put every source in the queue at distance 0 and BFS treats them as a single frontier, so the wave that first reaches a room came from the closest gate. **Therefore.** Seed the queue with every `0` cell, expand in waves, and write `dist + 1` into any neighbour still holding `INF`. **Not one BFS per gate** taking the minimum, because with up to 62500 gates on a 250 by 250 board that is 62500 sweeps over 62500 cells, near 4·10^9 steps against the 62500 a single pass needs.
+
+- **Use:** Multi-source BFS from all gates simultaneously. **O(m·n)** time, **O(m·n)** space.
 
 #### Explanation
 **Brute force.** Run a separate BFS from each gate and keep the smallest distance written into each room.
@@ -16487,7 +16665,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** The literal word *prerequisite* plus a directed pair `[a, b]` that reads right to left ("take `b` before `a`") is the topological-sort family. The ask is a bare yes/no, "is it possible to finish all courses", with no ordering requested, so only the cycle-detection half of that family is needed. `numCourses <= 2000` with up to 5000 pairs puts one linear pass over the graph well inside budget. **Therefore.** Depth-first search with a three-state mark: unvisited, on the current path, finished. Reaching a node that is on the current path is a back edge, which is exactly a circular dependency. **Not union-find**, which is blind to direction: it merges `0 -> 1` and `1 -> 0` into the same component either way, so a legal chain and an illegal cycle look identical to it. **Not a single visited set**, which cannot separate "on the current path" from "finished on an earlier path", so it cries cycle on a diamond where courses 1 and 2 both require 0 and course 3 requires both. **O(V+E)** time, **O(V+E)** space.
+**Signals.** The literal word *prerequisite* plus a directed pair `[a, b]` that reads right to left ("take `b` before `a`") is the topological-sort family. The ask is a bare yes/no, "is it possible to finish all courses", with no ordering requested, so only the cycle-detection half of that family is needed. `numCourses <= 2000` with up to 5000 pairs puts one linear pass over the graph well inside budget. **Therefore.** Depth-first search with a three-state mark: unvisited, on the current path, finished. Reaching a node that is on the current path is a back edge, which is exactly a circular dependency. **Not union-find**, which is blind to direction: it merges `0 -> 1` and `1 -> 0` into the same component either way, so a legal chain and an illegal cycle look identical to it. **Not a single visited set**, which cannot separate "on the current path" from "finished on an earlier path", so it cries cycle on a diamond where courses 1 and 2 both require 0 and course 3 requires both.
+
+- **Use:** DFS cycle detection with three-state coloring. **O(V+E)** time, **O(V+E)** space.
 
 #### Explanation
 **Brute force.** Repeatedly sweep for a course whose prerequisites are all done.
@@ -16668,7 +16848,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** The same prerequisite pairs as Course Schedule, but the ask moves from a boolean to "return a valid order", and LeetCode adds "if there are many valid answers, return any of them". That explicit admission of multiple answers is the DAG tell: an acyclic dependency graph normally has many topological orders and the problem wants only one. The empty-array fallback says cycle detection still has to happen. **Therefore.** Kahn's algorithm. Count each course's unmet prerequisites, seed a queue with the courses at zero, and emit a course the instant its count drops to zero. The emission sequence is the answer, and `len(res) == numCourses` is the cycle check for free. **Not a recursive DFS post-order**, which also produces a valid order but recurses to depth `V`, so a 2000-course chain overflows Python's default 1000-frame stack; it also needs its own three-state marking for the cycle case that Kahn's reads straight off a length. **O(V+E)** time, **O(V+E)** space.
+**Signals.** The same prerequisite pairs as Course Schedule, but the ask moves from a boolean to "return a valid order", and LeetCode adds "if there are many valid answers, return any of them". That explicit admission of multiple answers is the DAG tell: an acyclic dependency graph normally has many topological orders and the problem wants only one. The empty-array fallback says cycle detection still has to happen. **Therefore.** Kahn's algorithm. Count each course's unmet prerequisites, seed a queue with the courses at zero, and emit a course the instant its count drops to zero. The emission sequence is the answer, and `len(res) == numCourses` is the cycle check for free. **Not a recursive DFS post-order**, which also produces a valid order but recurses to depth `V`, so a 2000-course chain overflows Python's default 1000-frame stack; it also needs its own three-state marking for the cycle case that Kahn's reads straight off a length.
+
+- **Use:** Topological sort (Kahn's BFS). **O(V+E)** time, **O(V+E)** space.
 
 #### Explanation
 **Brute force.** Sweep repeatedly, appending any course whose prerequisites are all done.
@@ -16882,7 +17064,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Started as a tree with one extra edge added" pins the counts exactly: a tree on `n` nodes has `n-1` edges and the input has `n`, so there is precisely one cycle and precisely one edge that closes it. The edges are undirected and arrive in a fixed order, and the question is which edge closes the loop, so what you actually need per edge is incremental connectivity: are these two endpoints already in the same component? **Therefore.** Union-find. Walk the edges in input order, and the first `union` that fails because both endpoints already share a root is the answer. **Not the three-state DFS** from Course Schedule, because this graph is undirected, so every edge looks like a back edge to the node you just came from and the state machine needs a parent-exclusion patch to work at all; even then it hands you the cycle's nodes and you still have to map them back to input positions to pick the last edge. **O(n α(n))** time, **O(n)** space.
+**Signals.** "Started as a tree with one extra edge added" pins the counts exactly: a tree on `n` nodes has `n-1` edges and the input has `n`, so there is precisely one cycle and precisely one edge that closes it. The edges are undirected and arrive in a fixed order, and the question is which edge closes the loop, so what you actually need per edge is incremental connectivity: are these two endpoints already in the same component? **Therefore.** Union-find. Walk the edges in input order, and the first `union` that fails because both endpoints already share a root is the answer. **Not the three-state DFS** from Course Schedule, because this graph is undirected, so every edge looks like a back edge to the node you just came from and the state machine needs a parent-exclusion patch to work at all; even then it hands you the cycle's nodes and you still have to map them back to input positions to pick the last edge.
+
+- **Use:** Union-Find (cycle detection). **O(n α(n))** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Before adding each edge, walk the graph so far to see if its endpoints already connect.
@@ -17111,7 +17295,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** The input is already a graph, handed over as `n` plus a flat edge list, and the question is a pure connectivity count with no path, distance or ordering attached. Edges arriving unordered rather than as adjacency lists is the shape a disjoint-set forest consumes directly: start with `n` singleton components, and every edge either merges two of them or tells you nothing new. **Therefore.** Keep a parent array with path compression and union by rank, process each edge once, and subtract the number of successful merges from `n`. **Not recursive DFS over an adjacency list**, which is the same `O(V + E)` but has to materialise the edge list into a map of neighbour lists first and then recurses as deep as the longest path: a 2000-node chain overruns Python's default 1000-frame limit, while the disjoint-set version never recurses at all. **O(n α(n))** time, **O(n)** space.
+**Signals.** The input is already a graph, handed over as `n` plus a flat edge list, and the question is a pure connectivity count with no path, distance or ordering attached. Edges arriving unordered rather than as adjacency lists is the shape a disjoint-set forest consumes directly: start with `n` singleton components, and every edge either merges two of them or tells you nothing new. **Therefore.** Keep a parent array with path compression and union by rank, process each edge once, and subtract the number of successful merges from `n`. **Not recursive DFS over an adjacency list**, which is the same `O(V + E)` but has to materialise the edge list into a map of neighbour lists first and then recurses as deep as the longest path: a 2000-node chain overruns Python's default 1000-frame limit, while the disjoint-set version never recurses at all.
+
+- **Use:** Union-Find. **O(n α(n))** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Give every node its own label, then sweep the edge list repeatedly, pushing the smaller label across each edge, until a full sweep changes nothing.
@@ -17341,7 +17527,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Connected and acyclic" is the definition of a tree, and the two halves pull opposite ways: connectivity wants enough edges, acyclicity wants few enough. The standard identity collapses them, since a graph on `n` nodes is a tree exactly when it has `n-1` edges and no cycle; either of those plus one more implies the third. Edges again arrive as a flat list, and "does this edge join two nodes that were already joined" is the disjoint-set query stated verbatim. **Therefore.** Reject at once unless `len(edges) == n-1`, then union every edge and fail on the first edge whose endpoints already share a root. Surviving all `n-1` edges means acyclic, and acyclic with `n-1` edges means connected. **Not cycle-detecting DFS with a parent pointer**, which is the same `O(n + E)` but leaves you two invariants to get right instead of one: it says nothing about the nodes it never reached, so it still needs a second pass confirming all `n` were visited. **O(n α(n))** time, **O(n)** space.
+**Signals.** "Connected and acyclic" is the definition of a tree, and the two halves pull opposite ways: connectivity wants enough edges, acyclicity wants few enough. The standard identity collapses them, since a graph on `n` nodes is a tree exactly when it has `n-1` edges and no cycle; either of those plus one more implies the third. Edges again arrive as a flat list, and "does this edge join two nodes that were already joined" is the disjoint-set query stated verbatim. **Therefore.** Reject at once unless `len(edges) == n-1`, then union every edge and fail on the first edge whose endpoints already share a root. Surviving all `n-1` edges means acyclic, and acyclic with `n-1` edges means connected. **Not cycle-detecting DFS with a parent pointer**, which is the same `O(n + E)` but leaves you two invariants to get right instead of one: it says nothing about the nodes it never reached, so it still needs a second pass confirming all `n` were visited.
+
+- **Use:** Union-Find (no cycle + connected). **O(n α(n))** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Add the edges one at a time, and before each one search the graph built so far to see whether the two endpoints are already connected.
@@ -17555,7 +17743,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Shortest transformation sequence" where each step changes exactly one letter: every step costs the same, which is the unweighted-shortest-path tell. There is also no graph in the input, only a word list, which is the implicit-graph tell. Words are the nodes, one-letter edits are the edges, and you generate the neighbours rather than read them. Dictionary size `n <= 5000` against word length `m <= 10` decides *how* you generate them. **Therefore.** Breadth-first search from `beginWord`, where a word's neighbours are its `26 * m` single-letter mutations filtered through a set built from the dictionary. **Not DFS**, which finds *a* transformation sequence but has no reason to find the shortest, so you would have to enumerate every path and take the minimum. **Not an explicit all-pairs edge build**, which is `O(n^2 m)`, about 25 million word comparisons at `n = 5000`, against the at most 260 mutations BFS probes per word. **O(m² * n)** time, **O(m * n)** space.
+**Signals.** "Shortest transformation sequence" where each step changes exactly one letter: every step costs the same, which is the unweighted-shortest-path tell. There is also no graph in the input, only a word list, which is the implicit-graph tell. Words are the nodes, one-letter edits are the edges, and you generate the neighbours rather than read them. Dictionary size `n <= 5000` against word length `m <= 10` decides *how* you generate them. **Therefore.** Breadth-first search from `beginWord`, where a word's neighbours are its `26 * m` single-letter mutations filtered through a set built from the dictionary. **Not DFS**, which finds *a* transformation sequence but has no reason to find the shortest, so you would have to enumerate every path and take the minimum. **Not an explicit all-pairs edge build**, which is `O(n^2 m)`, about 25 million word comparisons at `n = 5000`, against the at most 260 mutations BFS probes per word.
+
+- **Use:** BFS (unweighted shortest path). **O(m² * n)** time, **O(m * n)** space.
 
 #### Explanation
 **Brute force.** BFS, but find each word's neighbours by scanning the whole dictionary.
@@ -17802,7 +17992,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Use all tickets exactly once" is the definition of an Eulerian path, and the word to catch is *tickets* rather than *airports*: the constraint binds edges, not vertices, which rules out every vertex-visiting pattern. Repeated airport pairs are allowed, so the same vertex may appear several times in the answer, another Eulerian tell. "Smallest lexical order when several itineraries exist" adds a tie-break, and the guarantee that one exists means you never have to prove it. **Therefore.** Sort each airport's outgoing list, then run Hierholzer's algorithm: walk greedily to the smallest unused destination until stuck, append the stuck airport to the output, back up, and reverse at the end. **Not plain greedy DFS that commits to the smallest edge**, because the smallest first hop can dead-end with tickets still unused and a greedy walk has no way to unwind. **O(E log E)** time, **O(E)** space.
+**Signals.** "Use all tickets exactly once" is the definition of an Eulerian path, and the word to catch is *tickets* rather than *airports*: the constraint binds edges, not vertices, which rules out every vertex-visiting pattern. Repeated airport pairs are allowed, so the same vertex may appear several times in the answer, another Eulerian tell. "Smallest lexical order when several itineraries exist" adds a tie-break, and the guarantee that one exists means you never have to prove it. **Therefore.** Sort each airport's outgoing list, then run Hierholzer's algorithm: walk greedily to the smallest unused destination until stuck, append the stuck airport to the output, back up, and reverse at the end. **Not plain greedy DFS that commits to the smallest edge**, because the smallest first hop can dead-end with tickets still unused and a greedy walk has no way to unwind.
+
+- **Use:** Hierholzer's algorithm (Eulerian path, iterative DFS). **O(E log E)** time, **O(E)** space.
 
 #### Explanation
 **Brute force.** Try tickets in sorted order with backtracking and return the first complete ordering that uses all of them.
@@ -18009,7 +18201,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Connect all points" at "minimum cost", with every point reachable from every other directly or indirectly: a connected subgraph of minimum total weight is by definition a minimum spanning tree, not a shortest path. The cost between two points is given by a formula rather than an edge list, so the graph is implicit and complete. `points.length <= 1000` makes that about 500,000 candidate edges, which is dense, and dense is the fact that picks the algorithm. **Therefore.** Prim's algorithm, grown from any starting point, repeatedly taking the cheapest edge that crosses from the built tree to a point outside it, with a min-heap holding the candidates. **Not Kruskal**, the other MST algorithm, which has to materialise and sort all 500,000 edges before it can accept the first one, whereas Prim only ever holds edges out of the points it has actually reached. **Not Dijkstra**, which from a distance looks identical (heap, greedy, relax) but minimises distance *from a source*; a shortest-path tree can cost strictly more than an MST. **O(n² log n)** time, **O(n²)** space.
+**Signals.** "Connect all points" at "minimum cost", with every point reachable from every other directly or indirectly: a connected subgraph of minimum total weight is by definition a minimum spanning tree, not a shortest path. The cost between two points is given by a formula rather than an edge list, so the graph is implicit and complete. `points.length <= 1000` makes that about 500,000 candidate edges, which is dense, and dense is the fact that picks the algorithm. **Therefore.** Prim's algorithm, grown from any starting point, repeatedly taking the cheapest edge that crosses from the built tree to a point outside it, with a min-heap holding the candidates. **Not Kruskal**, the other MST algorithm, which has to materialise and sort all 500,000 edges before it can accept the first one, whereas Prim only ever holds edges out of the points it has actually reached. **Not Dijkstra**, which from a distance looks identical (heap, greedy, relax) but minimises distance *from a source*; a shortest-path tree can cost strictly more than an MST.
+
+- **Use:** Prim's MST (min-heap / lazy deletion). **O(n² log n)** time, **O(n²)** space.
 
 #### Explanation
 **Brute force.** Grow the tree one point at a time, rescanning all pairs for the cheapest link.
@@ -18236,7 +18430,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Directed weighted graph", one fixed origin `k`, and edge triples `[u, v, w]` where `w` is a travel time and is never negative. That is the Dijkstra fingerprint: single source plus non-negative weights means the first time the heap pops a node, its distance is final and nothing later can undercut it. The second tell is "the minimum time for **all** nodes to receive a signal". That is not a path query, it is an aggregate over every shortest path, so the answer is the largest of them, and unreachability is a size check on the distance table rather than a special case. **Therefore.** Dijkstra from `k` with a min-heap, answer `max(dist)` once `len(dist) == n`. **Not BFS**, which minimises hop count, so it would happily prefer one 100-unit edge over a two-edge route costing 2. **Not Bellman-Ford**, which is correct here but pays `O(V*E)` to buy a negative-weight guarantee this problem never needs. **O((V+E) log V)** time, **O(V+E)** space.
+**Signals.** "Directed weighted graph", one fixed origin `k`, and edge triples `[u, v, w]` where `w` is a travel time and is never negative. That is the Dijkstra fingerprint: single source plus non-negative weights means the first time the heap pops a node, its distance is final and nothing later can undercut it. The second tell is "the minimum time for **all** nodes to receive a signal". That is not a path query, it is an aggregate over every shortest path, so the answer is the largest of them, and unreachability is a size check on the distance table rather than a special case. **Therefore.** Dijkstra from `k` with a min-heap, answer `max(dist)` once `len(dist) == n`. **Not BFS**, which minimises hop count, so it would happily prefer one 100-unit edge over a two-edge route costing 2. **Not Bellman-Ford**, which is correct here but pays `O(V*E)` to buy a negative-weight guarantee this problem never needs.
+
+- **Use:** Dijkstra's shortest path. **O((V+E) log V)** time, **O(V+E)** space.
 
 #### Explanation
 **Brute force.** Walk every route out of `k`, keeping the best arrival time seen per node.
@@ -18462,7 +18658,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** A grid with a cost attached to each cell, and an objective that reads "minimum time `t` such that you can swim through", meaning every cell on the route must satisfy `elevation <= t`. So the cost of a route is the **largest** elevation on it, not the total. "Minimise the maximum" is the bottleneck, or minimax, variant of shortest path, and it is the phrase to react to. The elevations are distinct values in `[0, n*n)`, which quietly tells you the answer is one of the grid values. **Therefore.** Run Dijkstra with the relaxation changed from `d + w` to `max(d, grid[v])`. That value is still non-decreasing along a route, which is the only property the pop-order argument needs, so the first pop of the corner is optimal. **Not Dijkstra with a summed cost**, which is the reflex here and is wrong: a route over twenty cells of elevation 1 would score 20 and lose to a single cell of elevation 5, when in fact it is free and the other costs 5. **O(n² log n)** time, **O(n²)** space.
+**Signals.** A grid with a cost attached to each cell, and an objective that reads "minimum time `t` such that you can swim through", meaning every cell on the route must satisfy `elevation <= t`. So the cost of a route is the **largest** elevation on it, not the total. "Minimise the maximum" is the bottleneck, or minimax, variant of shortest path, and it is the phrase to react to. The elevations are distinct values in `[0, n*n)`, which quietly tells you the answer is one of the grid values. **Therefore.** Run Dijkstra with the relaxation changed from `d + w` to `max(d, grid[v])`. That value is still non-decreasing along a route, which is the only property the pop-order argument needs, so the first pop of the corner is optimal. **Not Dijkstra with a summed cost**, which is the reflex here and is wrong: a route over twenty cells of elevation 1 would score 20 and lose to a single cell of elevation 5, when in fact it is free and the other costs 5.
+
+- **Use:** Dijkstra (minimax path). **O(n² log n)** time, **O(n²)** space.
 
 #### Explanation
 **Brute force.** Try each candidate time in increasing order and flood-fill the cells it unlocks.
@@ -18684,7 +18882,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Sorted according to the rules of this new language", plus "return any valid ordering" and `""` when the input is contradictory. Nothing here hands you a graph, so the recognition step is that the edges are latent and you must derive them before you can sort anything. "Any valid ordering" says the answer is a partial order with slack, not a unique sequence, and `""` on contradiction is a cycle-detection requirement wearing a disguise. **Therefore.** Compare each adjacent pair of words, take the first position where they differ as one edge `w1[j] -> w2[j]`, then topologically sort the resulting character graph. **Not a sort with a custom comparator**, which is the reflex once you see "sorted": you have no comparator. Two characters that never meet at a first-difference are genuinely incomparable, and Python's `sort` needs a total order, so it would either crash on the gaps or invent an ordering the input never justified. With `C` the total number of characters across all words, **O(C)** time, **O(C)** space.
+**Signals.** "Sorted according to the rules of this new language", plus "return any valid ordering" and `""` when the input is contradictory. Nothing here hands you a graph, so the recognition step is that the edges are latent and you must derive them before you can sort anything. "Any valid ordering" says the answer is a partial order with slack, not a unique sequence, and `""` on contradiction is a cycle-detection requirement wearing a disguise. **Therefore.** Compare each adjacent pair of words, take the first position where they differ as one edge `w1[j] -> w2[j]`, then topologically sort the resulting character graph. **Not a sort with a custom comparator**, which is the reflex once you see "sorted": you have no comparator. Two characters that never meet at a first-difference are genuinely incomparable, and Python's `sort` needs a total order, so it would either crash on the gaps or invent an ordering the input never justified. With `C` the total number of characters across all words,
+
+- **Use:** Topological sort (DFS cycle detection). **O(C)** time, **O(C)** space.
 
 #### Explanation
 **Brute force.** Try every permutation of the alphabet and keep the first that sorts the input correctly.
@@ -18975,7 +19175,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** Weighted directed edges and a single source, which reads like Dijkstra, but bolted on is "at most `k` stops". A cap on the *number of edges* alongside a minimisation over *edge weights* is the disambiguator, and it is the whole problem. It means the thing you carry per node is no longer one number: cost and hops used are both part of the state, and a route can be cheap and illegal or dear and legal. `n <= 100` with `k < n` puts a `k`-round pass over every flight well inside budget. **Therefore.** Bellman-Ford run `k+1` times, snapshotting the cost array so one round adds exactly one flight. **Not Dijkstra keyed on the node alone**, which settles each node at its globally cheapest cost and never reopens it. In example 1 it would settle node 2 at 200 via two hops and node 3 at 400 via three, then have no way to recover the legal 700, because the route it discarded was the expensive one. **O(k * E)** time, **O(n)** space.
+**Signals.** Weighted directed edges and a single source, which reads like Dijkstra, but bolted on is "at most `k` stops". A cap on the *number of edges* alongside a minimisation over *edge weights* is the disambiguator, and it is the whole problem. It means the thing you carry per node is no longer one number: cost and hops used are both part of the state, and a route can be cheap and illegal or dear and legal. `n <= 100` with `k < n` puts a `k`-round pass over every flight well inside budget. **Therefore.** Bellman-Ford run `k+1` times, snapshotting the cost array so one round adds exactly one flight. **Not Dijkstra keyed on the node alone**, which settles each node at its globally cheapest cost and never reopens it. In example 1 it would settle node 2 at 200 via two hops and node 3 at 400 via three, then have no way to recover the legal 700, because the route it discarded was the expensive one.
+
+- **Use:** Bellman-Ford with stop limit. **O(k * E)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Recurse over every route out of `src`, stopping when the hop budget runs out.
@@ -19151,7 +19353,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Count the number of distinct ways" is the counting objective, and there is exactly one thing to decide at each point (take 1 or take 2) with a single index describing where you are. Crucially the branches re-converge: reaching step 5 by 2+2+1 and by 1+2+2 both leave you facing the identical remaining problem. One index of state, a small fixed set of choices, and overlapping subproblems is linear DP. **Therefore.** Define `f(i)` as the number of ways to reach step `i`, note `f(i) = f(i-1) + f(i-2)`, and roll two scalars up the staircase. **Not greedy**, which cannot even be phrased here: greedy commits to one choice per step and returns one route, while the question asks how many routes exist, so there is no locally best move to be greedy about. **Not the closed-form binomial sum** over the number of 2-steps, which is correct but needs factorials that overflow long before `n = 45` does. **O(n)** time, **O(1)** space.
+**Signals.** "Count the number of distinct ways" is the counting objective, and there is exactly one thing to decide at each point (take 1 or take 2) with a single index describing where you are. Crucially the branches re-converge: reaching step 5 by 2+2+1 and by 1+2+2 both leave you facing the identical remaining problem. One index of state, a small fixed set of choices, and overlapping subproblems is linear DP. **Therefore.** Define `f(i)` as the number of ways to reach step `i`, note `f(i) = f(i-1) + f(i-2)`, and roll two scalars up the staircase. **Not greedy**, which cannot even be phrased here: greedy commits to one choice per step and returns one route, while the question asks how many routes exist, so there is no locally best move to be greedy about. **Not the closed-form binomial sum** over the number of 2-steps, which is correct but needs factorials that overflow long before `n = 45` does.
+
+- **Use:** DP (Fibonacci recurrence). **O(n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Recurse on the two choices available at every step.
@@ -19273,7 +19477,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Minimum total cost to reach the top" is an optimisation over routes rather than a count of them, and "you can take 1 or 2 steps" means what you may do from stair `i` depends on `i` and nothing else. Two routes that both land on stair 7 face an identical remainder, so the number of distinct situations is `n`, not the number of routes. **Therefore.** Let `best[i]` be the cheapest way to be standing on stair `i`; then `best[i] = cost[i] + min(best[i-1], best[i-2])`, and the top is reachable from either of the last two stairs. **Not greedy**, meaning always step onto the cheaper of the two stairs in front of you: on `cost = [0,0,1,2,100,0]` that pays 3 while the optimum is 2, because paying the 2 early is what buys the skip over the 100. **Not top-down memoised recursion**, which is correct but recurses to depth 1000 at the constraint ceiling and trips CPython's default limit. **O(n)** time, **O(1)** space.
+**Signals.** "Minimum total cost to reach the top" is an optimisation over routes rather than a count of them, and "you can take 1 or 2 steps" means what you may do from stair `i` depends on `i` and nothing else. Two routes that both land on stair 7 face an identical remainder, so the number of distinct situations is `n`, not the number of routes. **Therefore.** Let `best[i]` be the cheapest way to be standing on stair `i`; then `best[i] = cost[i] + min(best[i-1], best[i-2])`, and the top is reachable from either of the last two stairs. **Not greedy**, meaning always step onto the cheaper of the two stairs in front of you: on `cost = [0,0,1,2,100,0]` that pays 3 while the optimum is 2, because paying the 2 early is what buys the skip over the 100. **Not top-down memoised recursion**, which is correct but recurses to depth 1000 at the constraint ceiling and trips CPython's default limit.
+
+- **Use:** DP (bottom-up, in-place). **O(n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Recurse on both moves, from both legal starts.
@@ -19402,7 +19608,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Maximum amount" plus "without robbing two adjacent houses" is one binary decision per index, take it or leave it, under a constraint that reaches back exactly one position. That reach is the whole design: once you are standing at house `i`, the only thing the future needs to know about the past is the best total achievable, so the state is the index alone. **Therefore.** Let `best[i]` be the most you can take from the first `i` houses; then `best[i] = max(best[i-1], best[i-2] + nums[i])`, and only the last two values are ever read. **Not greedy**, in either of its plausible forms: robbing alternate houses gets 3 on `[2,1,1,2]` where 4 is available from indices 0 and 3, and repeatedly taking the richest house and deleting its neighbours gets 3 on `[2,3,2]` where 4 is available. **Not a two-state DP over (index, was the previous house robbed)**, which is correct but carries a bit that `best[i-2]` already encodes: reading from two back *is* the guarantee that `i-1` was skipped. **O(n)** time, **O(1)** space.
+**Signals.** "Maximum amount" plus "without robbing two adjacent houses" is one binary decision per index, take it or leave it, under a constraint that reaches back exactly one position. That reach is the whole design: once you are standing at house `i`, the only thing the future needs to know about the past is the best total achievable, so the state is the index alone. **Therefore.** Let `best[i]` be the most you can take from the first `i` houses; then `best[i] = max(best[i-1], best[i-2] + nums[i])`, and only the last two values are ever read. **Not greedy**, in either of its plausible forms: robbing alternate houses gets 3 on `[2,1,1,2]` where 4 is available from indices 0 and 3, and repeatedly taking the richest house and deleting its neighbours gets 3 on `[2,3,2]` where 4 is available. **Not a two-state DP over (index, was the previous house robbed)**, which is correct but carries a bit that `best[i-2]` already encodes: reading from two back *is* the guarantee that `i-1` was skipped.
+
+- **Use:** DP (rolling variables). **O(n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Recurse on the take-or-skip choice at every house.
@@ -19537,7 +19745,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Arranged in a circle so the first and last are adjacent" adds exactly one constraint to a problem you already know how to solve, and it couples only two positions. A single coupling between two ends is the classic prompt to case-split on it rather than to design around it: whatever the answer is, it either leaves house 0 out or leaves house `n-1` out, since it cannot take both. **Therefore.** Run the linear House Robber twice, once on `nums[1:]` and once on `nums[:-1]`, and take the larger. **Not a bespoke circular DP** that threads "did I rob house 0" through the loop, which is correct but doubles the state and the off-by-one risk to replace two calls to code you already have. **Not the linear answer patched afterwards** by subtracting the smaller end when both ends were used: on `[2,3,2]` the linear optimum is 4, patching gives 2, and the true answer is 3, because dropping an end re-optimises the whole interior rather than just deleting a term. **O(n)** time, **O(1)** space.
+**Signals.** "Arranged in a circle so the first and last are adjacent" adds exactly one constraint to a problem you already know how to solve, and it couples only two positions. A single coupling between two ends is the classic prompt to case-split on it rather than to design around it: whatever the answer is, it either leaves house 0 out or leaves house `n-1` out, since it cannot take both. **Therefore.** Run the linear House Robber twice, once on `nums[1:]` and once on `nums[:-1]`, and take the larger. **Not a bespoke circular DP** that threads "did I rob house 0" through the loop, which is correct but doubles the state and the off-by-one risk to replace two calls to code you already have. **Not the linear answer patched afterwards** by subtracting the smaller end when both ends were used: on `[2,3,2]` the linear optimum is 4, patching gives 2, and the true answer is 3, because dropping an end re-optimises the whole interior rather than just deleting a term.
+
+- **Use:** DP on two linear subproblems (skip first or last). **O(n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Enumerate every subset of houses and keep the legal ones.
@@ -19704,7 +19914,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Count the number of substrings that are palindromes" asks about `n(n+1)/2` candidates, and `n <= 1000` puts a quadratic algorithm comfortably in budget while forbidding the cubic one. The property itself is what to exploit: `s[l..r]` is a palindrome only if `s[l] == s[r]` and `s[l+1..r-1]` already is, so every palindrome is a smaller palindrome with a matching pair wrapped around it, and each one has a unique center. **Therefore.** Walk the `2n - 1` centers, `n` single characters and `n - 1` gaps, and expand outward from each while the ends match, counting one palindrome per successful expansion. **Not the 2-D table** `dp[l][r]`, which is the same `O(n^2)` time but pays `O(n^2)` space to store facts it reads once; expansion visits the identical pairs in an order that needs no storage. **Not Manacher's algorithm**, genuinely `O(n)` but built to produce radii rather than a count, and 1000 characters never justify it. **O(n²)** time, **O(1)** space.
+**Signals.** "Count the number of substrings that are palindromes" asks about `n(n+1)/2` candidates, and `n <= 1000` puts a quadratic algorithm comfortably in budget while forbidding the cubic one. The property itself is what to exploit: `s[l..r]` is a palindrome only if `s[l] == s[r]` and `s[l+1..r-1]` already is, so every palindrome is a smaller palindrome with a matching pair wrapped around it, and each one has a unique center. **Therefore.** Walk the `2n - 1` centers, `n` single characters and `n - 1` gaps, and expand outward from each while the ends match, counting one palindrome per successful expansion. **Not the 2-D table** `dp[l][r]`, which is the same `O(n^2)` time but pays `O(n^2)` space to store facts it reads once; expansion visits the identical pairs in an order that needs no storage. **Not Manacher's algorithm**, genuinely `O(n)` but built to produce radii rather than a count, and 1000 characters never justify it.
+
+- **Use:** Expand Around Center. **O(n²)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Test every substring against its own reverse.
@@ -19870,7 +20082,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Count the number of ways" over a mapping that consumes either one digit or two is a decision with a fixed, tiny branching factor, and the piece you consume from the front never depends on what you consumed earlier. So the whole future is described by one number, the position you have reached, and two different prefixes that end at position 5 leave the identical remaining string. **Therefore.** Let `dp[i]` be the number of decodings of the suffix `s[i:]`; then `dp[i] = dp[i+1] + dp[i+2]`, where the first term is dropped when `s[i]` is `'0'` and the second only applies when `s[i:i+2]` reads between 10 and 26. **Not backtracking that builds the decodings**, which is the right tool if the output were the list but not for a count: `"1"` repeated 100 times has Fibonacci(101) decodings, roughly `5 * 10^20`, so they cannot be enumerated while counting them takes 100 steps. **Not a product over the positions where a two-digit read is legal**, because those windows overlap and exclude one another: in `"111"` both `(0,1)` and `(1,2)` are legal but no decoding uses both, so multiplying overcounts. **O(n)** time, **O(n)** space.
+**Signals.** "Count the number of ways" over a mapping that consumes either one digit or two is a decision with a fixed, tiny branching factor, and the piece you consume from the front never depends on what you consumed earlier. So the whole future is described by one number, the position you have reached, and two different prefixes that end at position 5 leave the identical remaining string. **Therefore.** Let `dp[i]` be the number of decodings of the suffix `s[i:]`; then `dp[i] = dp[i+1] + dp[i+2]`, where the first term is dropped when `s[i]` is `'0'` and the second only applies when `s[i:i+2]` reads between 10 and 26. **Not backtracking that builds the decodings**, which is the right tool if the output were the list but not for a count: `"1"` repeated 100 times has Fibonacci(101) decodings, roughly `5 * 10^20`, so they cannot be enumerated while counting them takes 100 steps. **Not a product over the positions where a two-digit read is legal**, because those windows overlap and exclude one another: in `"111"` both `(0,1)` and `(1,2)` are legal but no decoding uses both, so multiplying overcounts.
+
+- **Use:** DP (top-down memoization). **O(n)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Recurse on the two ways to consume the front of the string.
@@ -20033,7 +20247,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Minimum number of coins" is an optimisation over repeated choices, and `amount` arrives as its own bound (`<= 10^4`) rather than being derived from the array, which is the tell that it is a second state dimension. Coins are reusable without limit, so each denomination can be picked any number of times. **Therefore.** Unbounded knapsack: `dp[a]` is the fewest coins making `a`, `dp[a] = 1 + min(dp[a - c])` over coins `c <= a`, base `dp[0] = 0`, unreachable amounts left at infinity. **Not greedy**, taking the largest coin that fits: with `coins = [1,3,4]` and `amount = 6` that picks `4 + 1 + 1` for three coins, while `3 + 3` needs two. Greedy is correct only for canonical systems such as ordinary currency, and nothing in the constraints promises one. **Not plain recursion on the remainder**, which re-solves the same remaining amount once per ordering of the same multiset of coins. **O(n * amount)** time, **O(amount)** space.
+**Signals.** "Minimum number of coins" is an optimisation over repeated choices, and `amount` arrives as its own bound (`<= 10^4`) rather than being derived from the array, which is the tell that it is a second state dimension. Coins are reusable without limit, so each denomination can be picked any number of times. **Therefore.** Unbounded knapsack: `dp[a]` is the fewest coins making `a`, `dp[a] = 1 + min(dp[a - c])` over coins `c <= a`, base `dp[0] = 0`, unreachable amounts left at infinity. **Not greedy**, taking the largest coin that fits: with `coins = [1,3,4]` and `amount = 6` that picks `4 + 1 + 1` for three coins, while `3 + 3` needs two. Greedy is correct only for canonical systems such as ordinary currency, and nothing in the constraints promises one. **Not plain recursion on the remainder**, which re-solves the same remaining amount once per ordering of the same multiset of coins.
+
+- **Use:** DP (bottom-up unbounded knapsack). **O(n * amount)** time, **O(amount)** space.
 
 #### Explanation
 **Brute force.** Recurse on the remaining amount, trying every coin.
@@ -20191,7 +20407,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Contiguous subarray" plus a single optimum is the Kadane shape: sweep left to right and carry the best answer that ends at the current index. What breaks the standard version is the operator. Sums are monotone under appending, products are not, because a negative factor swaps the order of everything, so the best product ending here can descend from the *worst* product ending one step back. **Therefore.** Carry two running values, the largest and the smallest product ending at `i`, and take the new largest as `max(nums[i], curMax * nums[i], curMin * nums[i])` with the minimum defined symmetrically. **Not plain Kadane on the maximum alone**, which returns 3 on `[-2,3,-4]` where the answer is 24: the winning subarray is the whole array, and it is reachable only through the running minimum `-6`. **Not prefix products with division**, the usual trick for range products, because a single 0 makes the quotient undefined and the constraints allow zeros anywhere. **O(n)** time, **O(1)** space.
+**Signals.** "Contiguous subarray" plus a single optimum is the Kadane shape: sweep left to right and carry the best answer that ends at the current index. What breaks the standard version is the operator. Sums are monotone under appending, products are not, because a negative factor swaps the order of everything, so the best product ending here can descend from the *worst* product ending one step back. **Therefore.** Carry two running values, the largest and the smallest product ending at `i`, and take the new largest as `max(nums[i], curMax * nums[i], curMin * nums[i])` with the minimum defined symmetrically. **Not plain Kadane on the maximum alone**, which returns 3 on `[-2,3,-4]` where the answer is 24: the winning subarray is the whole array, and it is reachable only through the running minimum `-6`. **Not prefix products with division**, the usual trick for range products, because a single 0 makes the quotient undefined and the constraints allow zeros anywhere.
+
+- **Use:** DP (track running min and max). **O(n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Extend every start index and keep the best product seen.
@@ -20366,7 +20584,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Can be segmented into a sequence of dictionary words" is a yes or no question about cuts, and the moment you commit a word at the front, everything you still have to decide depends only on where that word ended. One integer, the cut position, is the entire state, and `n <= 300` says quadratic work per position is affordable. **Therefore.** Let `dp[i]` mean "the suffix `s[i:]` is segmentable", fill it from the right with `dp[n] = true`, and set `dp[i]` when some dictionary word matches at `i` and `dp[i + len(w)]` is already true. **Not greedy longest-match**, which takes the longest word that fits and never reconsiders: on `s = "cars"` with `["car","ca","rs"]` it commits to `"car"`, strands `"s"`, and reports false, while `"ca" + "rs"` succeeds. **Not backtracking that produces the segmentations**, because the answer is one boolean and the number of valid segmentations can be exponential, as with `"aaaa..."` over `["a","aa"]`. With `k` dictionary words of length at most `m`, that is **O(n * k * m)** time, **O(n)** space.
+**Signals.** "Can be segmented into a sequence of dictionary words" is a yes or no question about cuts, and the moment you commit a word at the front, everything you still have to decide depends only on where that word ended. One integer, the cut position, is the entire state, and `n <= 300` says quadratic work per position is affordable. **Therefore.** Let `dp[i]` mean "the suffix `s[i:]` is segmentable", fill it from the right with `dp[n] = true`, and set `dp[i]` when some dictionary word matches at `i` and `dp[i + len(w)]` is already true. **Not greedy longest-match**, which takes the longest word that fits and never reconsiders: on `s = "cars"` with `["car","ca","rs"]` it commits to `"car"`, strands `"s"`, and reports false, while `"ca" + "rs"` succeeds. **Not backtracking that produces the segmentations**, because the answer is one boolean and the number of valid segmentations can be exponential, as with `"aaaa..."` over `["a","aa"]`. With `k` dictionary words of length at most `m`, that is
+
+- **Use:** DP (bottom-up, right-to-left). **O(n * k * m)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Try every dictionary word at the front and recurse on the rest.
@@ -20529,7 +20749,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Longest" over an array fires the sliding-window reflex, and the word that stops it is *subsequence*: elements may be skipped, so the answer is not a contiguous stretch. "Strictly increasing" makes the comparison a total order, which is what lets one number summarise a whole prefix of choices. `n <= 2500` leaves `O(n^2)` affordable and rewards better. **Therefore.** Maintain `tails`, where `tails[k]` is the smallest value that can end an increasing subsequence of length `k + 1`. That array is sorted by construction, so each element is binary searched into it and either appended or written over the first entry it is not larger than; the final length is the answer. **Not a sliding window**, because there is no left pointer whose advance repairs a violated condition, and the window is not the answer once elements can be skipped. **Not greedily extending one chain**, which on `[10,9,2,5,3,7]` commits to 10 and reports 1. **O(n log n)** time, **O(n)** space.
+**Signals.** "Longest" over an array fires the sliding-window reflex, and the word that stops it is *subsequence*: elements may be skipped, so the answer is not a contiguous stretch. "Strictly increasing" makes the comparison a total order, which is what lets one number summarise a whole prefix of choices. `n <= 2500` leaves `O(n^2)` affordable and rewards better. **Therefore.** Maintain `tails`, where `tails[k]` is the smallest value that can end an increasing subsequence of length `k + 1`. That array is sorted by construction, so each element is binary searched into it and either appended or written over the first entry it is not larger than; the final length is the answer. **Not a sliding window**, because there is no left pointer whose advance repairs a violated condition, and the window is not the answer once elements can be skipped. **Not greedily extending one chain**, which on `[10,9,2,5,3,7]` commits to 10 and reports 1.
+
+- **Use:** Binary search (patience sorting). **O(n log n)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Include or exclude each element, tracking the last one kept.
@@ -20680,7 +20902,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Can it be partitioned" is a yes/no feasibility question, not a count and not an optimum. The two halves must be equal, so each is exactly `total / 2`, and the problem collapses to a single subset-sum query against a bounded target. Every element lands on exactly one side, so each is used **at most once**. At most 200 values of at most 100 caps the sum at 20000, small enough to index an array by, which is what makes a pseudo-polynomial `O(n * sum)` acceptable. **Therefore.** 0/1 knapsack over reachable sums: `dp[s]` is whether sum `s` is achievable, seeded `dp[0] = True`, answer `dp[total // 2]` after an odd-total early exit. **Not backtracking over subsets**, which is the right shape only when the subsets themselves are the output; here two branches that leave the same remaining target are interchangeable, so a memo collapses them and there is nothing left to enumerate. **Not the unbounded-knapsack loop order** of Coin Change: sweeping sums upward lets one number be spent twice, and `[1,5]` would wrongly report `true` for target 3. **O(n * sum)** time, **O(sum)** space.
+**Signals.** "Can it be partitioned" is a yes/no feasibility question, not a count and not an optimum. The two halves must be equal, so each is exactly `total / 2`, and the problem collapses to a single subset-sum query against a bounded target. Every element lands on exactly one side, so each is used **at most once**. At most 200 values of at most 100 caps the sum at 20000, small enough to index an array by, which is what makes a pseudo-polynomial `O(n * sum)` acceptable. **Therefore.** 0/1 knapsack over reachable sums: `dp[s]` is whether sum `s` is achievable, seeded `dp[0] = True`, answer `dp[total // 2]` after an odd-total early exit. **Not backtracking over subsets**, which is the right shape only when the subsets themselves are the output; here two branches that leave the same remaining target are interchangeable, so a memo collapses them and there is nothing left to enumerate. **Not the unbounded-knapsack loop order** of Coin Change: sweeping sums upward lets one number be spent twice, and `[1,5]` would wrongly report `true` for target 3.
+
+- **Use:** DP (0/1 knapsack, set of reachable sums). **O(n * sum)** time, **O(sum)** space.
 
 #### Explanation
 **Brute force.** Take or skip each number, chasing the remaining half.
@@ -20836,7 +21060,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Count the number of unique paths" is a counting objective, and the two legal moves mean every cell is entered from exactly one of two places: the cell above or the cell to its left. Position needs a row and a column, so the state is a pair of indices, and unlike a 1-D staircase there is no single scan order that a lone index can express. Routes re-converge: reaching `(2, 2)` right-then-down and down-then-right leaves the identical remaining grid. **Therefore.** 2-D DP with `dp[i][j] = dp[i-1][j] + dp[i][j-1]`, first row and first column all 1, collapsed to one rolling array because a cell reads only its own column in the row above and its neighbour on the left. **Not path enumeration by backtracking**, which is what "count paths" invites and is exactly what the answer counts: a 100 by 100 grid has about 2 * 10^58 paths, so listing them is hopeless while the table is 10,000 cells. **O(m * n)** time, **O(n)** space.
+**Signals.** "Count the number of unique paths" is a counting objective, and the two legal moves mean every cell is entered from exactly one of two places: the cell above or the cell to its left. Position needs a row and a column, so the state is a pair of indices, and unlike a 1-D staircase there is no single scan order that a lone index can express. Routes re-converge: reaching `(2, 2)` right-then-down and down-then-right leaves the identical remaining grid. **Therefore.** 2-D DP with `dp[i][j] = dp[i-1][j] + dp[i][j-1]`, first row and first column all 1, collapsed to one rolling array because a cell reads only its own column in the row above and its neighbour on the left. **Not path enumeration by backtracking**, which is what "count paths" invites and is exactly what the answer counts: a 100 by 100 grid has about 2 * 10^58 paths, so listing them is hopeless while the table is 10,000 cells.
+
+- **Use:** DP (1-D rolling row). **O(m * n)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Recurse on the two moves available from every cell.
@@ -20968,7 +21194,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** Two strings compared against each other, and the word *subsequence* rather than *substring*: characters may be skipped on either side, so no window and no single scan position holds enough state. Two independent positions to track is what makes the state a pair. "Return the length" rather than the string itself means nothing but a number has to be carried. `1000 * 1000` is a million cells, comfortably inside budget. **Therefore.** 2-D DP over suffixes: `dp[i][j]` is the LCS length of `text1[i:]` and `text2[j:]`, taking `1 + dp[i+1][j+1]` on a character match and `max(dp[i+1][j], dp[i][j+1])` otherwise. **Not the longest-common-substring recurrence**, whose mismatch case resets the run to 0 instead of taking a max over two skips; on `"abcde"` and `"ace"` that reports 1 rather than 3. **Not two pointers**, which can decide whether one string is a subsequence of the other but has no rule for which side to advance on a mismatch, because either branch can be the winner. **O(m * n)** time, **O(m * n)** space.
+**Signals.** Two strings compared against each other, and the word *subsequence* rather than *substring*: characters may be skipped on either side, so no window and no single scan position holds enough state. Two independent positions to track is what makes the state a pair. "Return the length" rather than the string itself means nothing but a number has to be carried. `1000 * 1000` is a million cells, comfortably inside budget. **Therefore.** 2-D DP over suffixes: `dp[i][j]` is the LCS length of `text1[i:]` and `text2[j:]`, taking `1 + dp[i+1][j+1]` on a character match and `max(dp[i+1][j], dp[i][j+1])` otherwise. **Not the longest-common-substring recurrence**, whose mismatch case resets the run to 0 instead of taking a max over two skips; on `"abcde"` and `"ace"` that reports 1 rather than 3. **Not two pointers**, which can decide whether one string is a subsequence of the other but has no rule for which side to advance on a mismatch, because either branch can be the winner.
+
+- **Use:** 2-D DP. **O(m * n)** time, **O(m * n)** space.
 
 #### Explanation
 **Brute force.** Recurse on both positions, branching at every mismatch.
@@ -21124,7 +21352,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Maximize profit" over a sequence with a rule that reaches backwards in time: "after selling you must wait one day". Whether buying is legal today depends not only on whether you hold a share but on whether you sold yesterday, so a single index into `prices` does not describe your situation. That second dimension is a mode, not another sequence: three of them, `hold`, `sold` and `rest`. **Therefore.** Carry one best-balance figure per mode and advance all three together each day, reading only yesterday's triple. **Not the sum-every-rise greedy from Best Time to Buy and Sell Stock II**, which assumes you can rebuy the instant you sell: on `[1,2,3,0,2]` it banks the rises 1 and 2 for 4, and the cooldown makes 4 unreachable, so it overshoots the true 3. **O(n)** time, **O(1)** space.
+**Signals.** "Maximize profit" over a sequence with a rule that reaches backwards in time: "after selling you must wait one day". Whether buying is legal today depends not only on whether you hold a share but on whether you sold yesterday, so a single index into `prices` does not describe your situation. That second dimension is a mode, not another sequence: three of them, `hold`, `sold` and `rest`. **Therefore.** Carry one best-balance figure per mode and advance all three together each day, reading only yesterday's triple. **Not the sum-every-rise greedy from Best Time to Buy and Sell Stock II**, which assumes you can rebuy the instant you sell: on `[1,2,3,0,2]` it banks the rises 1 and 2 for 4, and the cooldown makes 4 unreachable, so it overshoots the true 3.
+
+- **Use:** DP with states (holding, sold, rest). **O(n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Recurse on buy, sell or skip at every day.
@@ -21266,7 +21496,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** Each element gets an independent binary decision, `+` or `-`, and the objective is "the number of ways", not one witness. That combination is counting DP. The state needs the index you have reached *and* the running total, because two prefixes that stop at the same index with different totals have different numbers of completions. The second index here is an accumulated quantity rather than a position in another sequence, which is the knapsack shape. Totals are pinned between -1000 and 1000, so there are at most 2001 of them against `2^20` sign assignments. **Therefore.** Sweep left to right carrying a map from running total to the number of ways to reach it, splitting each entry in two per number. **Not memoising on the index alone**, the reflex carried over from 1-D DP: the completions available from index `i` depend on the total you arrived with, so collapsing the state to `i` merges cases that are not interchangeable. Writing `S` for the range of reachable sums, that is **O(n * S)** time, **O(S)** space.
+**Signals.** Each element gets an independent binary decision, `+` or `-`, and the objective is "the number of ways", not one witness. That combination is counting DP. The state needs the index you have reached *and* the running total, because two prefixes that stop at the same index with different totals have different numbers of completions. The second index here is an accumulated quantity rather than a position in another sequence, which is the knapsack shape. Totals are pinned between -1000 and 1000, so there are at most 2001 of them against `2^20` sign assignments. **Therefore.** Sweep left to right carrying a map from running total to the number of ways to reach it, splitting each entry in two per number. **Not memoising on the index alone**, the reflex carried over from 1-D DP: the completions available from index `i` depend on the total you arrived with, so collapsing the state to `i` merges cases that are not interchangeable. Writing `S` for the range of reachable sums, that is
+
+- **Use:** DP (subset sum variant, dict of counts). **O(n * S)** time, **O(S)** space.
 
 #### Explanation
 **Brute force.** Try both signs for every number and count the leaves that land on `target`.
@@ -21419,7 +21651,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** Three strings, and "preserving the relative order of each" says this is a merge: every character of `s3` is taken off the front of `s1` or the front of `s2`, never reordered. Two consumption positions move independently, so one index cannot say where you are, and the pair `(i, j)` pins the position in `s3` for free because exactly `i + j` characters have been placed. "Determine whether" makes the table booleans rather than counts. **Therefore.** 2-D DP where `dp[i][j]` asks whether `s3[i+j:]` can be built from `s1[i:]` and `s2[j:]`, true if either front character matches the next character of `s3` and the corresponding neighbour is true. **Not greedy consumption**, because when both `s1[i]` and `s2[j]` match `s3[i+j]` there is no local rule for choosing: on `s1 = "aa"`, `s2 = "ab"`, `s3 = "aaba"` always preferring `s1` dead-ends, and the answer is true only by taking the second `a` from `s2`. **O(m * n)** time, **O(m * n)** space.
+**Signals.** Three strings, and "preserving the relative order of each" says this is a merge: every character of `s3` is taken off the front of `s1` or the front of `s2`, never reordered. Two consumption positions move independently, so one index cannot say where you are, and the pair `(i, j)` pins the position in `s3` for free because exactly `i + j` characters have been placed. "Determine whether" makes the table booleans rather than counts. **Therefore.** 2-D DP where `dp[i][j]` asks whether `s3[i+j:]` can be built from `s1[i:]` and `s2[j:]`, true if either front character matches the next character of `s3` and the corresponding neighbour is true. **Not greedy consumption**, because when both `s1[i]` and `s2[j]` match `s3[i+j]` there is no local rule for choosing: on `s1 = "aa"`, `s2 = "ab"`, `s3 = "aaba"` always preferring `s1` dead-ends, and the answer is true only by taking the second `a` from `s2`.
+
+- **Use:** 2-D DP. **O(m * n)** time, **O(m * n)** space.
 
 #### Explanation
 **Brute force.** Recurse, branching whenever both fronts match.
@@ -21581,7 +21815,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Longest path" in a graph is NP-hard in general, so the word to fix on is *strictly* increasing: every legal move goes from a smaller value to a strictly larger one, so no path can ever return to a cell it left. The implicit graph is a DAG, and that acyclicity is the whole recognition. A 200 by 200 grid with four-way moves is 40000 nodes and under 160000 edges, so the expected answer is linear in the graph. **Therefore.** Longest path on a DAG, which is DP: `best(r, c) = 1 + max(best(neighbour))` over strictly greater neighbours, evaluated by DFS with a memo table. **Not a row-major grid DP**, because the dependency order follows values rather than positions: a cell can depend on the neighbour below it or to its right, so no fixed sweep direction works and tabulation would first have to sort every cell by value or peel them with Kahn's algorithm. **Not a visited set**, DFS's usual companion, which is unnecessary here and actively wrong, since it would block cells that legitimately sit on several different paths. **O(m * n)** time, **O(m * n)** space.
+**Signals.** "Longest path" in a graph is NP-hard in general, so the word to fix on is *strictly* increasing: every legal move goes from a smaller value to a strictly larger one, so no path can ever return to a cell it left. The implicit graph is a DAG, and that acyclicity is the whole recognition. A 200 by 200 grid with four-way moves is 40000 nodes and under 160000 edges, so the expected answer is linear in the graph. **Therefore.** Longest path on a DAG, which is DP: `best(r, c) = 1 + max(best(neighbour))` over strictly greater neighbours, evaluated by DFS with a memo table. **Not a row-major grid DP**, because the dependency order follows values rather than positions: a cell can depend on the neighbour below it or to its right, so no fixed sweep direction works and tabulation would first have to sort every cell by value or peel them with Kahn's algorithm. **Not a visited set**, DFS's usual companion, which is unnecessary here and actively wrong, since it would block cells that legitimately sit on several different paths.
+
+- **Use:** DFS with memoization. **O(m * n)** time, **O(m * n)** space.
 
 #### Explanation
 **Brute force.** DFS from every cell, following strictly greater neighbours.
@@ -21802,7 +22038,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** Two strings compared against each other, "subsequence" so characters of `s` may be skipped freely, and "number of distinct" so the objective is a count rather than a length or a yes/no. Distinctness is by index set, not by resulting text, which is why the three `b`s in `"rabbbit"` give three answers and not one. A position in `s` and a position in `t` move independently, so the state is a pair. **Therefore.** 2-D DP where `dp[i][j]` counts the ways to form `t[j:]` out of `s[i:]`, always inheriting the skip-`s[i]` count and adding the paired count when the characters agree. **Not a greedy left-to-right match**, which finds one occurrence and then has nothing left to enumerate with: on `"babgbag"` against `"bag"` it reports 1 where the answer is 5, because committing to the first `b` discards the four alignments that start later. **O(m * n)** time, **O(m * n)** space.
+**Signals.** Two strings compared against each other, "subsequence" so characters of `s` may be skipped freely, and "number of distinct" so the objective is a count rather than a length or a yes/no. Distinctness is by index set, not by resulting text, which is why the three `b`s in `"rabbbit"` give three answers and not one. A position in `s` and a position in `t` move independently, so the state is a pair. **Therefore.** 2-D DP where `dp[i][j]` counts the ways to form `t[j:]` out of `s[i:]`, always inheriting the skip-`s[i]` count and adding the paired count when the characters agree. **Not a greedy left-to-right match**, which finds one occurrence and then has nothing left to enumerate with: on `"babgbag"` against `"bag"` it reports 1 where the answer is 5, because committing to the first `b` discards the four alignments that start later.
+
+- **Use:** 2-D DP. **O(m * n)** time, **O(m * n)** space.
 
 #### Explanation
 **Brute force.** At each character of `s`, count both skipping it and using it.
@@ -21955,7 +22193,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Minimum number of operations" to turn one string into another, with two strings aligned against each other and no requirement that the edits be contiguous. The three operations are exactly the three ways to retire one step of an alignment: drop a character from `word1`, drop one from `word2`, or drop one from each. So the state is a pair of prefix lengths, and the second index exists because there is a second string, not because of any capacity. `500 * 500` is 250,000 cells. **Therefore.** 2-D DP where matching characters inherit the diagonal for free and mismatches pay 1 plus the best of delete, insert and replace. **Not the length-minus-common-subsequence formula** `m + n - 2 * LCS`, which is the right answer only when replacement is forbidden: it charges 2 for every substitution, so `"horse"` to `"ros"` comes out 4 instead of 3. **O(m * n)** time, **O(n)** space.
+**Signals.** "Minimum number of operations" to turn one string into another, with two strings aligned against each other and no requirement that the edits be contiguous. The three operations are exactly the three ways to retire one step of an alignment: drop a character from `word1`, drop one from `word2`, or drop one from each. So the state is a pair of prefix lengths, and the second index exists because there is a second string, not because of any capacity. `500 * 500` is 250,000 cells. **Therefore.** 2-D DP where matching characters inherit the diagonal for free and mismatches pay 1 plus the best of delete, insert and replace. **Not the length-minus-common-subsequence formula** `m + n - 2 * LCS`, which is the right answer only when replacement is forbidden: it charges 2 for every substitution, so `"horse"` to `"ros"` comes out 4 instead of 3.
+
+- **Use:** 2-D DP (space-optimized to 1-D). **O(m * n)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Recurse on the three edits at every mismatch.
@@ -22134,7 +22374,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** A balloon's payout depends on its *current* neighbours, and bursting one re-stitches the array so the survivors are no longer a contiguous slice of the original. That coupling rules out any prefix DP: after arbitrary bursts the remaining set is not describable by one index. What is describable is a contiguous range of the original array with both its boundaries still intact, so the state is a pair `[l, r]`, and the second index exists because the subproblem is a window, not a prefix. **Therefore.** Interval DP that picks which balloon in `[l, r]` bursts *last*. **Not asking which bursts first**, the natural reading, which leaves the two remaining sides coupled through the gap the first burst opened. **Not greedy on the biggest immediate payout**, which reaches at best 96 on `[3,1,5,8]` against an optimum of 167. **O(n³)** time, **O(n²)** space.
+**Signals.** A balloon's payout depends on its *current* neighbours, and bursting one re-stitches the array so the survivors are no longer a contiguous slice of the original. That coupling rules out any prefix DP: after arbitrary bursts the remaining set is not describable by one index. What is describable is a contiguous range of the original array with both its boundaries still intact, so the state is a pair `[l, r]`, and the second index exists because the subproblem is a window, not a prefix. **Therefore.** Interval DP that picks which balloon in `[l, r]` bursts *last*. **Not asking which bursts first**, the natural reading, which leaves the two remaining sides coupled through the gap the first burst opened. **Not greedy on the biggest immediate payout**, which reaches at best 96 on `[3,1,5,8]` against an optimum of 167.
+
+- **Use:** Interval DP (think-last trick). **O(n³)** time, **O(n²)** space.
 
 #### Explanation
 **Brute force.** Try every balloon as the next to pop.
@@ -22344,7 +22586,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** Two sequences consumed against each other, but at wildly different rates: a single `x*` in the pattern can absorb any number of characters of `s` while the pattern pointer stays put. So the position in `s` and the position in `p` are genuinely independent and one index cannot say where you are. "Fully matches" rather than "contains" makes the accept condition both indices at the end. Pattern length 20 means at most 441 states, so nothing clever is needed once the state is right. **Therefore.** Memoise "does `s[i:]` match `p[j:]`" on the pair `(i, j)`. **Not a greedy scan that lets each `*` swallow as much as it can**, because a maximal match overshoots and there is no cheap way to back off: on `s = "aab"`, `p = ".*b"`, letting `.*` take all three characters strands the trailing `b`, while taking two succeeds. **O(m·n)** time, **O(m·n)** space.
+**Signals.** Two sequences consumed against each other, but at wildly different rates: a single `x*` in the pattern can absorb any number of characters of `s` while the pattern pointer stays put. So the position in `s` and the position in `p` are genuinely independent and one index cannot say where you are. "Fully matches" rather than "contains" makes the accept condition both indices at the end. Pattern length 20 means at most 441 states, so nothing clever is needed once the state is right. **Therefore.** Memoise "does `s[i:]` match `p[j:]`" on the pair `(i, j)`. **Not a greedy scan that lets each `*` swallow as much as it can**, because a maximal match overshoots and there is no cheap way to back off: on `s = "aab"`, `p = ".*b"`, letting `.*` take all three characters strands the trailing `b`, while taking two succeeds.
+
+- **Use:** 2-D DP (top-down memoization). **O(m·n)** time, **O(m·n)** space.
 
 #### Explanation
 **Brute force.** Recurse on suffixes with no memo, slicing as you go.
@@ -22540,7 +22784,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Contiguous subarray" plus "largest sum" plus one flat array that "may contain negative numbers". Contiguous forbids sorting or cherry-picking, and a single array with no second dimension in the state means what you carry forward is one scalar, not a table. The negatives are the load-bearing detail. **Therefore.** Kadane: sweep once holding `cur`, the best sum of a subarray ending exactly at this index, restarting whenever the carried prefix has gone negative. **Not a sliding window**, because a window needs the running sum to move monotonically as you extend right or shrink left, and negatives break that: growing the window can lower the sum and shrinking it can raise it, so no condition tells the left pointer when to advance. **O(n)** time, **O(1)** space.
+**Signals.** "Contiguous subarray" plus "largest sum" plus one flat array that "may contain negative numbers". Contiguous forbids sorting or cherry-picking, and a single array with no second dimension in the state means what you carry forward is one scalar, not a table. The negatives are the load-bearing detail. **Therefore.** Kadane: sweep once holding `cur`, the best sum of a subarray ending exactly at this index, restarting whenever the carried prefix has gone negative. **Not a sliding window**, because a window needs the running sum to move monotonically as you extend right or shrink left, and negatives break that: growing the window can lower the sum and shrinking it can raise it, so no condition tells the left pointer when to advance.
+
+- **Use:** Kadane's Algorithm (greedy running sum). **O(n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Sum every subarray and keep the largest.
@@ -22676,7 +22922,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** A yes/no reachability question over one array, and `nums[i]` is the *maximum* jump length, so every shorter hop from `i` is legal too. That word "maximum" is the whole problem: it makes reachability downward closed, meaning if you can land on index `i` you can land on every index before it. A downward closed set of indices is described completely by one number. **Therefore.** Carry that one number. Scan right to left holding `goal`, the leftmost index known to reach the end, and pull it back to `i` whenever `i + nums[i] >= goal`; the answer is `goal == 0`. **Not BFS over indices**, which is correct but treats each index as a node and pushes the same heavily overlapping ranges again and again, costing `O(n^2)` edges and an `O(n)` visited array to learn nothing the scalar did not already have. **O(n)** time, **O(1)** space.
+**Signals.** A yes/no reachability question over one array, and `nums[i]` is the *maximum* jump length, so every shorter hop from `i` is legal too. That word "maximum" is the whole problem: it makes reachability downward closed, meaning if you can land on index `i` you can land on every index before it. A downward closed set of indices is described completely by one number. **Therefore.** Carry that one number. Scan right to left holding `goal`, the leftmost index known to reach the end, and pull it back to `i` whenever `i + nums[i] >= goal`; the answer is `goal == 0`. **Not BFS over indices**, which is correct but treats each index as a node and pushes the same heavily overlapping ranges again and again, costing `O(n^2)` edges and an `O(n)` visited array to learn nothing the scalar did not already have.
+
+- **Use:** Greedy (shrink goal leftward). **O(n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Mark every index reachable from an already-reachable one.
@@ -22805,7 +23053,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Minimum number of jumps" over a structure where each index reaches a contiguous range of successors. Minimum steps on an unweighted graph is BFS, and the graph here is implicit: index `i` has an edge to every index in `(i, i + nums[i]]`. The second signal is that those edges form a prefix, so everything reachable in `k` jumps is one contiguous block `[0, far_k]`. **Therefore.** Run BFS without a queue: `cur_end` marks where the current level stops and `cur_far` the farthest any index in it reaches, so hitting `cur_end` means the level is exhausted, bump the jump count and promote `cur_far`. **Not DP** with `dp[i] = 1 + min(dp[j])` over every `j` that reaches `i`, which is correct but `O(n^2)`, and at `n = 10^4` that is 10^8 relaxations spent recomputing a value that is constant across an entire level. **O(n)** time, **O(1)** space.
+**Signals.** "Minimum number of jumps" over a structure where each index reaches a contiguous range of successors. Minimum steps on an unweighted graph is BFS, and the graph here is implicit: index `i` has an edge to every index in `(i, i + nums[i]]`. The second signal is that those edges form a prefix, so everything reachable in `k` jumps is one contiguous block `[0, far_k]`. **Therefore.** Run BFS without a queue: `cur_end` marks where the current level stops and `cur_far` the farthest any index in it reaches, so hitting `cur_end` means the level is exhausted, bump the jump count and promote `cur_far`. **Not DP** with `dp[i] = 1 + min(dp[j])` over every `j` that reaches `i`, which is correct but `O(n^2)`, and at `n = 10^4` that is 10^8 relaxations spent recomputing a value that is constant across an entire level.
+
+- **Use:** Greedy BFS (implicit levels via boundary tracking). **O(n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Relax every edge: from each index, stamp `dp[i] + 1` onto everything it can reach.
@@ -22953,7 +23203,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** A circular route, a per-station surplus `gas[i] - cost[i]`, and the promise that the answer is unique if one exists. Two consequences follow with no search at all. A total surplus below zero rules out every start, since one full loop burns the same total wherever you begin. And the first index at which a run from `s` goes negative disqualifies every start in `[s, i]` at once, because each of those later starts skips a stretch whose sum was non-negative, so it arrives at `i` with no more fuel than `s` had. **Therefore.** One pass accumulating `tank`, and on a negative reset it to 0 and move `start` to `i + 1`. **Not simulating each of the n starts**, `O(n^2)`, which at `n = 10^5` is 10^10 steps spent rediscovering the fact that a failing prefix already rules out all of its own indices. **O(n)** time, **O(1)** space.
+**Signals.** A circular route, a per-station surplus `gas[i] - cost[i]`, and the promise that the answer is unique if one exists. Two consequences follow with no search at all. A total surplus below zero rules out every start, since one full loop burns the same total wherever you begin. And the first index at which a run from `s` goes negative disqualifies every start in `[s, i]` at once, because each of those later starts skips a stretch whose sum was non-negative, so it arrives at `i` with no more fuel than `s` had. **Therefore.** One pass accumulating `tank`, and on a negative reset it to 0 and move `start` to `i + 1`. **Not simulating each of the n starts**, `O(n^2)`, which at `n = 10^5` is 10^10 steps spent rediscovering the fact that a failing prefix already rules out all of its own indices.
+
+- **Use:** Greedy (surplus tracking with reset). **O(n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Try every station as the start and walk the full circle from it.
@@ -23117,7 +23369,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Groups of `groupSize` consecutive cards" partitions the whole multiset, and consecutive means a group is fully determined by its lowest card. That is the forcing tell: the smallest card still in hand cannot be the second or later member of any group, because the card below it is already gone, so its group must be exactly `[m, m+1, ..., m+groupSize-1]`. There is no decision to make, which is why the greedy is safe without needing an exchange argument. **Therefore.** Count the cards, walk the distinct values in ascending order, and for a value holding `k` copies remove `k` copies of each of the next `groupSize` values, failing the moment one falls short. **Not backtracking** over which cards join which group, since the assignment space is exponential while the forcing argument shows every branch but one is dead on arrival. Card values reach 10^9, so a counting array is out; you need a hash map with sorted keys or an ordered map. **O(n log n)** time, **O(n)** space.
+**Signals.** "Groups of `groupSize` consecutive cards" partitions the whole multiset, and consecutive means a group is fully determined by its lowest card. That is the forcing tell: the smallest card still in hand cannot be the second or later member of any group, because the card below it is already gone, so its group must be exactly `[m, m+1, ..., m+groupSize-1]`. There is no decision to make, which is why the greedy is safe without needing an exchange argument. **Therefore.** Count the cards, walk the distinct values in ascending order, and for a value holding `k` copies remove `k` copies of each of the next `groupSize` values, failing the moment one falls short. **Not backtracking** over which cards join which group, since the assignment space is exponential while the forcing argument shows every branch but one is dead on arrival. Card values reach 10^9, so a counting array is out; you need a hash map with sorted keys or an ordered map.
+
+- **Use:** Greedy with ordered counter. **O(n log n)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Repeatedly pull the smallest remaining card and hunt down its successors.
@@ -23310,7 +23564,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** The merge operation is an element-wise maximum, and max is monotone: once a component rises it never comes back down. Put that next to an exact-equality goal and the input splits in two with no search. A triplet holding any component above the matching target is poison forever, and a triplet whose every component sits at or below target can be thrown in for free, because including it only pushes components toward the target and never past it. **Therefore.** Discard the overshooting triplets, take the element-wise max of everything left, compare with `target`. The exchange argument in one line: adding a safe triplet to any successful subset keeps it successful, so the subset of all safe triplets is optimal. **Not subset search**, bitmask or backtracking over which triplets to merge, which is `2^n` for `n` up to 10^5 while monotonicity makes the choice vacuous. **O(n)** time, **O(1)** space.
+**Signals.** The merge operation is an element-wise maximum, and max is monotone: once a component rises it never comes back down. Put that next to an exact-equality goal and the input splits in two with no search. A triplet holding any component above the matching target is poison forever, and a triplet whose every component sits at or below target can be thrown in for free, because including it only pushes components toward the target and never past it. **Therefore.** Discard the overshooting triplets, take the element-wise max of everything left, compare with `target`. The exchange argument in one line: adding a safe triplet to any successful subset keeps it successful, so the subset of all safe triplets is optimal. **Not subset search**, bitmask or backtracking over which triplets to merge, which is `2^n` for `n` up to 10^5 while monotonicity makes the choice vacuous.
+
+- **Use:** Greedy (filter then element-wise max). **O(n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Try every non-empty subset and merge it.
@@ -23453,7 +23709,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "As many parts as possible" next to "each letter appears in at most one part". The second phrase constrains positions, not counts: if letter `c` sits at index `i` and again at index `j`, then `i` and `j` land in the same part, and so does everything between them. Every letter therefore pins the interval from its first occurrence to its last, and a legal cut is one that no letter's interval straddles. **Therefore.** Record each letter's last index, then sweep extending a running `end` to `max(end, last[c])`; when `i` catches `end`, no letter inside the current part reappears later, so cut there. **Not DP** over cut positions with `dp[i]` as the best count for a prefix, which costs `O(n^2)` and is never needed, because cutting at the earliest legal boundary is provably safe: any legal partition's first cut lies at or after it. The last-occurrence table is 26 entries wide whatever the input, so it counts as constant. **O(n)** time, **O(1)** space.
+**Signals.** "As many parts as possible" next to "each letter appears in at most one part". The second phrase constrains positions, not counts: if letter `c` sits at index `i` and again at index `j`, then `i` and `j` land in the same part, and so does everything between them. Every letter therefore pins the interval from its first occurrence to its last, and a legal cut is one that no letter's interval straddles. **Therefore.** Record each letter's last index, then sweep extending a running `end` to `max(end, last[c])`; when `i` catches `end`, no letter inside the current part reappears later, so cut there. **Not DP** over cut positions with `dp[i]` as the best count for a prefix, which costs `O(n^2)` and is never needed, because cutting at the earliest legal boundary is provably safe: any legal partition's first cut lies at or after it. The last-occurrence table is 26 entries wide whatever the input, so it counts as constant.
+
+- **Use:** Greedy (last-occurrence boundary extension). **O(n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** At every position, ask whether cutting there is legal by comparing the two sides.
@@ -23623,7 +23881,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** Parenthesis validity is a running-balance property: scan left to right, `(` adds one, `)` subtracts one, never dip below zero, finish at zero. The wildcard does not change the property, it changes the state from a number into a set of numbers, one per assignment of the stars seen so far. The load-bearing observation is that this set is always a contiguous interval, because every character shifts all reachable balances by the same amount and a star shifts them by -1, 0, and +1 together, leaving no gaps. **Therefore.** Carry only the interval's endpoints, `lo` and `hi`. Fail as soon as `hi < 0`, since even the most generous reading has run out of openers; clamp `lo` at 0 to drop readings that already died; accept when `lo == 0` at the end. **Not DP** over `(index, balance)` states, which is correct at `O(n^2)` time and `O(n)` space and collapses to these two integers the moment you notice each row of the table is an interval. **O(n)** time, **O(1)** space.
+**Signals.** Parenthesis validity is a running-balance property: scan left to right, `(` adds one, `)` subtracts one, never dip below zero, finish at zero. The wildcard does not change the property, it changes the state from a number into a set of numbers, one per assignment of the stars seen so far. The load-bearing observation is that this set is always a contiguous interval, because every character shifts all reachable balances by the same amount and a star shifts them by -1, 0, and +1 together, leaving no gaps. **Therefore.** Carry only the interval's endpoints, `lo` and `hi`. Fail as soon as `hi < 0`, since even the most generous reading has run out of openers; clamp `lo` at 0 to drop readings that already died; accept when `lo == 0` at the end. **Not DP** over `(index, balance)` states, which is correct at `O(n^2)` time and `O(n)` space and collapses to these two integers the moment you notice each row of the table is an interval.
+
+- **Use:** Greedy (min/max open-count range). **O(n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Branch on all three meanings of every star.
@@ -23788,7 +24048,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** The statement volunteers that the input is "sorted" and "non-overlapping", and that you insert exactly one interval. A guarantee handed to you for free is a budget statement: the `O(n log n)` has already been paid, so the intended answer is `O(n)`. Disjointness adds a second fact, that everything `newInterval` touches forms one contiguous run, so the edit is local. **Therefore.** One pass in three phases: copy intervals ending before `newInterval` starts, absorb every interval that touches it by widening with `min` and `max`, append it, copy the rest. **Not sort-then-merge**, the Merge Intervals routine run over `intervals + [newInterval]`, which is correct but discards both guarantees and pays `O(n log n)` to rediscover an order the problem already gave you. **O(n)** time, **O(n)** space.
+**Signals.** The statement volunteers that the input is "sorted" and "non-overlapping", and that you insert exactly one interval. A guarantee handed to you for free is a budget statement: the `O(n log n)` has already been paid, so the intended answer is `O(n)`. Disjointness adds a second fact, that everything `newInterval` touches forms one contiguous run, so the edit is local. **Therefore.** One pass in three phases: copy intervals ending before `newInterval` starts, absorb every interval that touches it by widening with `min` and `max`, append it, copy the rest. **Not sort-then-merge**, the Merge Intervals routine run over `intervals + [newInterval]`, which is correct but discards both guarantees and pays `O(n log n)` to rediscover an order the problem already gave you.
+
+- **Use:** Linear scan with three phases. **O(n)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Append the new interval and re-merge the whole list from scratch.
@@ -23961,7 +24223,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Intervals", "overlapping", "merge", and an output that is a restructured *set* rather than a count, with nothing said about the input order. That silence is the tell: nothing in the raw input tells you which intervals are neighbours, and supplying that missing adjacency is exactly what a sort buys. **Therefore.** Sort by start, then sweep once, extending the last kept interval when the current one starts at or before its end and appending otherwise. **Not sorting by end**, which also clusters overlaps but destroys the one-comparison test: after an end-sort a later interval can start before the last kept interval's start, so deciding overlap means scanning further back than one element. Sorting by start guarantees every earlier-starting interval has already been folded in, which makes the previous result entry the only candidate. **O(n log n)** time, **O(n)** space.
+**Signals.** "Intervals", "overlapping", "merge", and an output that is a restructured *set* rather than a count, with nothing said about the input order. That silence is the tell: nothing in the raw input tells you which intervals are neighbours, and supplying that missing adjacency is exactly what a sort buys. **Therefore.** Sort by start, then sweep once, extending the last kept interval when the current one starts at or before its end and appending otherwise. **Not sorting by end**, which also clusters overlaps but destroys the one-comparison test: after an end-sort a later interval can start before the last kept interval's start, so deciding overlap means scanning further back than one element. Sorting by start guarantees every earlier-starting interval has already been folded in, which makes the previous result entry the only candidate.
+
+- **Use:** Sort then greedy merge. **O(n log n)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Fuse any overlapping pair you can find, and repeat until nothing changes.
@@ -24124,7 +24388,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Minimum number of intervals to remove so that no two overlap." Minimising removals is maximising what stays, so this is Activity Selection with the answer read backwards. Every removal costs the same and no interval carries a value or priority, and that unweighted counting is the second tell: the moment intervals carry weights this becomes weighted interval scheduling, which needs DP and binary search rather than a greedy. **Therefore.** Sort by *end*, keep an interval whenever its start is at or after the last kept end, and count everything else as a removal. The exchange argument: replacing any optimal schedule's first pick with the earliest-finishing interval frees the timeline no later, so it never creates a fresh conflict. **Not sorting by start**, which will happily keep one long early interval that blocks several short ones that would all have fitted. **O(n log n)** time, **O(1)** space.
+**Signals.** "Minimum number of intervals to remove so that no two overlap." Minimising removals is maximising what stays, so this is Activity Selection with the answer read backwards. Every removal costs the same and no interval carries a value or priority, and that unweighted counting is the second tell: the moment intervals carry weights this becomes weighted interval scheduling, which needs DP and binary search rather than a greedy. **Therefore.** Sort by *end*, keep an interval whenever its start is at or after the last kept end, and count everything else as a removal. The exchange argument: replacing any optimal schedule's first pick with the earliest-finishing interval frees the timeline no later, so it never creates a fresh conflict. **Not sorting by start**, which will happily keep one long early interval that blocks several short ones that would all have fitted.
+
+- **Use:** Greedy (sort by end, activity selection). **O(n log n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Try every subset and keep the largest conflict-free one.
@@ -24279,7 +24545,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** A boolean answer over a set of intervals, with no room count and no request for which pair clashes. A single conflict anywhere decides it, so the job is detection rather than construction. Nothing promises the input is sorted, and unsorted intervals can hide a conflict between entries arbitrarily far apart in the list; sorting by start is what makes the check local, because the interval immediately after `a` starts no later than any other interval that overlaps `a`, so if `a` clashes with anything it clashes with its own neighbour. **Therefore.** Sort by start and test each neighbour: `intervals[i][0] < intervals[i-1][1]` is a conflict. **Not the min-heap sweep from Meeting Rooms II**, the reflex once you have seen that problem; it is correct, but it computes how many rooms you need only to throw the number away against a comparison with 1, spending `O(n)` extra space on a fact one adjacent comparison already gives. **O(n log n)** time, **O(1)** space.
+**Signals.** A boolean answer over a set of intervals, with no room count and no request for which pair clashes. A single conflict anywhere decides it, so the job is detection rather than construction. Nothing promises the input is sorted, and unsorted intervals can hide a conflict between entries arbitrarily far apart in the list; sorting by start is what makes the check local, because the interval immediately after `a` starts no later than any other interval that overlaps `a`, so if `a` clashes with anything it clashes with its own neighbour. **Therefore.** Sort by start and test each neighbour: `intervals[i][0] < intervals[i-1][1]` is a conflict. **Not the min-heap sweep from Meeting Rooms II**, the reflex once you have seen that problem; it is correct, but it computes how many rooms you need only to throw the number away against a comparison with 1, spending `O(n)` extra space on a fact one adjacent comparison already gives.
+
+- **Use:** Sort then adjacent-pair check. **O(n log n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Compare every pair of meetings.
@@ -24414,7 +24682,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Minimum number of conference rooms" plus "simultaneously". A minimum-resource count over intervals is not a subset question, it is a *maximum concurrency* question: the answer is the largest number of meetings alive at one instant, and concurrency only changes at a start or an end. Interval input plus a quantity measured "at any instant" is the standing cue to sort by start and walk forward in time. **Therefore.** Sort by start, keep a min-heap of end times representing the rooms opened so far, and for each meeting either reuse the room that frees soonest (when its end is at or below the new start) or open a new one. The heap never shrinks, so its final size is the peak. **Not merge intervals**, the reflex on interval input, because merging collapses overlaps into a single span and destroys exactly the quantity being counted: `[[0,30],[5,10],[15,20]]` merges to one `[0,30]` and reports 1 room instead of 2. **O(n log n)** time, **O(n)** space.
+**Signals.** "Minimum number of conference rooms" plus "simultaneously". A minimum-resource count over intervals is not a subset question, it is a *maximum concurrency* question: the answer is the largest number of meetings alive at one instant, and concurrency only changes at a start or an end. Interval input plus a quantity measured "at any instant" is the standing cue to sort by start and walk forward in time. **Therefore.** Sort by start, keep a min-heap of end times representing the rooms opened so far, and for each meeting either reuse the room that frees soonest (when its end is at or below the new start) or open a new one. The heap never shrinks, so its final size is the peak. **Not merge intervals**, the reflex on interval input, because merging collapses overlaps into a single span and destroys exactly the quantity being counted: `[[0,30],[5,10],[15,20]]` merges to one `[0,30]` and reports 1 room instead of 2.
+
+- **Use:** Min-heap of end times. **O(n log n)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Count how many meetings are live at each meeting's start.
@@ -24581,7 +24851,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** A static set of intervals, up to 10^5 independent point queries, and a minimum taken over "intervals containing this point". Nothing forces you to answer in input order, and that permission is the whole trick: sorting the queries turns a scattered set of containment tests into a left-to-right sweep whose candidate set changes only at the edges. Interval size appears in the objective and never in the containment test, which is why it belongs in a heap key rather than in the sort order. **Therefore.** Sort intervals by start and queries by value, advance a pointer pushing every interval whose start has been passed into a min-heap keyed by size, pop while the top's end lies behind the query, then read the top. Restore the original order from a map at the end. **Not one scan per query**, `O(n * q)`, which is 10^10 at these bounds and re-tests every interval for every query. **O((n + q) log n)** time, **O(n + q)** space.
+**Signals.** A static set of intervals, up to 10^5 independent point queries, and a minimum taken over "intervals containing this point". Nothing forces you to answer in input order, and that permission is the whole trick: sorting the queries turns a scattered set of containment tests into a left-to-right sweep whose candidate set changes only at the edges. Interval size appears in the objective and never in the containment test, which is why it belongs in a heap key rather than in the sort order. **Therefore.** Sort intervals by start and queries by value, advance a pointer pushing every interval whose start has been passed into a min-heap keyed by size, pop while the top's end lies behind the query, then read the top. Restore the original order from a map at the end. **Not one scan per query**, `O(n * q)`, which is 10^10 at these bounds and re-tests every interval for every query.
+
+- **Use:** Sort + sweep with min-heap. **O((n + q) log n)** time, **O(n + q)** space.
 
 #### Explanation
 **Brute force.** For each query, scan all intervals and keep the smallest that contains it.
@@ -24804,7 +25076,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** Three phrases carry everything: `n x n`, "rotate 90 degrees clockwise", and "in-place". Square means every row and every column has the same length, so the rotation can be expressed as swaps between existing cells rather than moves into new ones. In-place means no second grid, which forbids the obvious answer outright. And a 90 degree clockwise turn has a closed form: cell `(i, j)` lands at `(j, n-1-i)`. **Therefore.** Factor that one mapping into two moves you already know how to do in place. Transpose sends `(i, j)` to `(j, i)`, then reversing each row sends `(j, i)` to `(j, n-1-i)`. **Not an auxiliary matrix**, where each cell is written into a fresh `n x n` grid at its rotated position and copied back; it is easy to get right but costs `O(n^2)` space, which is exactly what the in-place requirement rules out. **O(n^2)** time, **O(1)** space.
+**Signals.** Three phrases carry everything: `n x n`, "rotate 90 degrees clockwise", and "in-place". Square means every row and every column has the same length, so the rotation can be expressed as swaps between existing cells rather than moves into new ones. In-place means no second grid, which forbids the obvious answer outright. And a 90 degree clockwise turn has a closed form: cell `(i, j)` lands at `(j, n-1-i)`. **Therefore.** Factor that one mapping into two moves you already know how to do in place. Transpose sends `(i, j)` to `(j, i)`, then reversing each row sends `(j, i)` to `(j, n-1-i)`. **Not an auxiliary matrix**, where each cell is written into a fresh `n x n` grid at its rotated position and copied back; it is easy to get right but costs `O(n^2)` space, which is exactly what the in-place requirement rules out.
+
+- **Use:** Transpose then reverse each row. **O(n^2)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Write every cell into a fresh grid at its rotated position, then copy the grid back.
@@ -24952,7 +25226,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Return all elements in spiral order" asks for a permutation of the grid: every cell once, nothing compared, nothing searched. That marks it as a pure traversal-order problem, so the only real question is how to encode "turn right when you run out of room". The second signal is that the input is a rectangle rather than a square, so the ring you are walking can collapse to a single row or a single column while cells still remain. **Therefore.** Hold four boundaries, `top`, `bottom`, `left`, `right`, emit one full ring per outer iteration, and pull the used boundary inward after each of the four legs. **Not a visited grid** with four direction vectors and a turn-when-blocked rule, which is correct and arguably easier to write, but spends `O(m·n)` extra space rediscovering a shape the four boundaries state outright. **O(m·n)** time, **O(1)** space.
+**Signals.** "Return all elements in spiral order" asks for a permutation of the grid: every cell once, nothing compared, nothing searched. That marks it as a pure traversal-order problem, so the only real question is how to encode "turn right when you run out of room". The second signal is that the input is a rectangle rather than a square, so the ring you are walking can collapse to a single row or a single column while cells still remain. **Therefore.** Hold four boundaries, `top`, `bottom`, `left`, `right`, emit one full ring per outer iteration, and pull the used boundary inward after each of the four legs. **Not a visited grid** with four direction vectors and a turn-when-blocked rule, which is correct and arguably easier to write, but spends `O(m·n)` extra space rediscovering a shape the four boundaries state outright.
+
+- **Use:** Shrinking boundary simulation. **O(m·n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Walk with direction vectors and a visited grid, turning right whenever the next cell is off the edge or already seen.
@@ -25146,7 +25422,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "If an element is 0, set its entire row and column to 0" combined with "in place" describes a read-write conflict, not an algorithm. A zero you write is indistinguishable from a zero that was already there, so if you blank as you scan, that new zero goes on to blank a row that should have been left alone. Any correct solution therefore has to separate the reading phase from the writing phase. The follow-up asking for constant space is the second signal, and it is what pushes you past the easy fix. **Therefore.** Record which rows and columns need blanking inside the matrix itself, using row 0 and column 0 as two flag strips, plus two booleans to disambiguate the cell `matrix[0][0]` that both strips share. **Not two boolean arrays** of length `m` and `n`, which separates the phases just as well and is far easier to write, but costs `O(m + n)` space when the grid already contains a spare row and column that can carry the same bits. **O(m·n)** time, **O(1)** space.
+**Signals.** "If an element is 0, set its entire row and column to 0" combined with "in place" describes a read-write conflict, not an algorithm. A zero you write is indistinguishable from a zero that was already there, so if you blank as you scan, that new zero goes on to blank a row that should have been left alone. Any correct solution therefore has to separate the reading phase from the writing phase. The follow-up asking for constant space is the second signal, and it is what pushes you past the easy fix. **Therefore.** Record which rows and columns need blanking inside the matrix itself, using row 0 and column 0 as two flag strips, plus two booleans to disambiguate the cell `matrix[0][0]` that both strips share. **Not two boolean arrays** of length `m` and `n`, which separates the phases just as well and is far easier to write, but costs `O(m + n)` space when the grid already contains a spare row and column that can carry the same bits.
+
+- **Use:** Use first row/column as markers. **O(m·n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Snapshot the grid, then blank a whole row and column for every zero the snapshot contains.
@@ -25325,7 +25603,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Repeatedly replace `n` by the sum of the squares of its digits" is an iterated function, and "does it eventually reach 1" is really asking whether the sequence halts or repeats. It must be one of the two, because the state is bounded: any value above 999 shrinks on the next step, and every value below 1000 maps into the range 1 to 243. A bounded sequence that never halts has to revisit a value, so this is cycle detection on a functional graph, the same shape as finding a loop in a linked list with `next` replaced by arithmetic. **Therefore.** Run Floyd's tortoise and hare over the digit-square-sum step, stopping when the fast pointer reaches 1 (happy) or the two meet (a cycle, so unhappy). **Not a hash set** of visited values, which finds the same cycle, explains itself faster, and is what most people write; it simply carries `O(k)` space for a chain of length `k` where Floyd's carries none. **O(log n)** time, **O(1)** space.
+**Signals.** "Repeatedly replace `n` by the sum of the squares of its digits" is an iterated function, and "does it eventually reach 1" is really asking whether the sequence halts or repeats. It must be one of the two, because the state is bounded: any value above 999 shrinks on the next step, and every value below 1000 maps into the range 1 to 243. A bounded sequence that never halts has to revisit a value, so this is cycle detection on a functional graph, the same shape as finding a loop in a linked list with `next` replaced by arithmetic. **Therefore.** Run Floyd's tortoise and hare over the digit-square-sum step, stopping when the fast pointer reaches 1 (happy) or the two meet (a cycle, so unhappy). **Not a hash set** of visited values, which finds the same cycle, explains itself faster, and is what most people write; it simply carries `O(k)` space for a chain of length `k` where Floyd's carries none.
+
+- **Use:** Floyd's cycle detection (fast/slow pointers). **O(log n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Remember every value seen and stop when one repeats.
@@ -25488,7 +25768,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** The number arrives "as an array of its digits, most significant first" and the array may hold 100 of them. One hundred digits fits in no fixed-width integer, so the representation is the constraint rather than a decoration: rebuilding the number is simply unavailable in Java, Go, Rust, or C++. The second signal is that the addend is exactly 1, which bounds the carry to 0 or 1 and means it dies at the first digit below 9. **Therefore.** Walk right to left. The first digit under 9 gets incremented and you return immediately, because nothing to its left changes; every 9 passed on the way becomes 0. Running off the left end means the input was all nines, the single case where the answer is longer than the input. **Not rebuilding the integer**, adding one, and splitting it back into digits, which overflows past 19 digits anywhere but Python and is exactly the trap the array form is there to set. **O(n)** time, **O(1)** space.
+**Signals.** The number arrives "as an array of its digits, most significant first" and the array may hold 100 of them. One hundred digits fits in no fixed-width integer, so the representation is the constraint rather than a decoration: rebuilding the number is simply unavailable in Java, Go, Rust, or C++. The second signal is that the addend is exactly 1, which bounds the carry to 0 or 1 and means it dies at the first digit below 9. **Therefore.** Walk right to left. The first digit under 9 gets incremented and you return immediately, because nothing to its left changes; every 9 passed on the way becomes 0. Running off the left end means the input was all nines, the single case where the answer is longer than the input. **Not rebuilding the integer**, adding one, and splitting it back into digits, which overflows past 19 digits anywhere but Python and is exactly the trap the array form is there to set.
+
+- **Use:** Carry propagation from least-significant digit. **O(n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Fold the digits into a number, add one, and take the result apart again.
@@ -25628,7 +25910,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** `n` is a *value*, not a length, and it runs to `2^31 - 1`. That single fact reclassifies the problem: a loop that multiplies `n` times is about two billion multiplications, so anything linear in the magnitude of the input is out and `O(log n)` is the target. "Where `n` can be negative" is the second, smaller signal, flagging a normalisation step rather than a different algorithm. **Therefore.** Binary exponentiation off the identity `x^n = (x^(n/2))^2`, times one leftover `x` when `n` is odd. Walk the bits of `n`: fold the running base into the result when the low bit is set, then square the base and shift right. **Not recursion** on `myPow(x, n // 2)`, which reaches the same `O(log n)` but spends `O(log n)` stack frames and gives the `n = -2^31` negation a second place to overflow in fixed-width languages. **Not a library `pow`**, which answers the question rather than the exercise. **O(log n)** time, **O(1)** space.
+**Signals.** `n` is a *value*, not a length, and it runs to `2^31 - 1`. That single fact reclassifies the problem: a loop that multiplies `n` times is about two billion multiplications, so anything linear in the magnitude of the input is out and `O(log n)` is the target. "Where `n` can be negative" is the second, smaller signal, flagging a normalisation step rather than a different algorithm. **Therefore.** Binary exponentiation off the identity `x^n = (x^(n/2))^2`, times one leftover `x` when `n` is odd. Walk the bits of `n`: fold the running base into the result when the low bit is set, then square the base and shift right. **Not recursion** on `myPow(x, n // 2)`, which reaches the same `O(log n)` but spends `O(log n)` stack frames and gives the `n = -2^31` negation a second place to overflow in fixed-width languages. **Not a library `pow`**, which answers the question rather than the exercise.
+
+- **Use:** Fast exponentiation (binary exponentiation). **O(log n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Multiply `x` by itself `n` times.
@@ -25784,7 +26068,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** The operands arrive as strings of up to 200 digits and the problem explicitly bans converting them to integers. Two hundred digits is roughly 664 bits, so no primitive type holds one, and the ban only makes visible a constraint that was already there. "Return the product as a string" says the answer is a digit array too, so the entire computation stays in digit space. What is left is bookkeeping: where does the product of two individual digits land. **Therefore.** Allocate a buffer of `m + n` digits and add `num1[i] * num2[j]` into it at index `i + j + 1` for the units and `i + j` for the tens, carrying as you go, then strip leading zeros. **Not repeated addition** of `num1` to itself `num2` times, which is exponential in the length of `num2`, since a 200-digit `num2` names a number with 200 digits worth of iterations. **O(m·n)** time, **O(m + n)** space.
+**Signals.** The operands arrive as strings of up to 200 digits and the problem explicitly bans converting them to integers. Two hundred digits is roughly 664 bits, so no primitive type holds one, and the ban only makes visible a constraint that was already there. "Return the product as a string" says the answer is a digit array too, so the entire computation stays in digit space. What is left is bookkeeping: where does the product of two individual digits land. **Therefore.** Allocate a buffer of `m + n` digits and add `num1[i] * num2[j]` into it at index `i + j + 1` for the units and `i + j` for the tens, carrying as you go, then strip leading zeros. **Not repeated addition** of `num1` to itself `num2` times, which is exponential in the length of `num2`, since a 200-digit `num2` names a number with 200 digits worth of iterations.
+
+- **Use:** Grade-school multiplication with position arithmetic. **O(m·n)** time, **O(m + n)** space.
 
 #### Explanation
 **Brute force.** Build both integers by hand, multiply them, and render the digits back out.
@@ -25969,7 +26255,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Design a data structure" with one `add` and one `count` says the two operations have different budgets: adds are the bulk of the traffic and must stay cheap, while a query can afford to scan. The geometric signal is "axis-aligned square" with the query point handed to you as one corner. Axis-aligned means a single diagonal pins the entire square, so you only ever guess one other point and the remaining two corners are then forced. The third signal is that the same point may be added more than once, which makes this a counting problem rather than a set problem. **Therefore.** Keep a hash map from point to how many times it was added, giving `O(1)` add. Per query, scan the distinct points for one at equal horizontal and vertical distance and multiply the multiplicities of the three other corners. **Not enumerating triples** of stored points per query, which is `O(n^3)` and throws away the fact that two opposite corners already determine the other two. **O(n)** time, **O(n)** space.
+**Signals.** "Design a data structure" with one `add` and one `count` says the two operations have different budgets: adds are the bulk of the traffic and must stay cheap, while a query can afford to scan. The geometric signal is "axis-aligned square" with the query point handed to you as one corner. Axis-aligned means a single diagonal pins the entire square, so you only ever guess one other point and the remaining two corners are then forced. The third signal is that the same point may be added more than once, which makes this a counting problem rather than a set problem. **Therefore.** Keep a hash map from point to how many times it was added, giving `O(1)` add. Per query, scan the distinct points for one at equal horizontal and vertical distance and multiply the multiplicities of the three other corners. **Not enumerating triples** of stored points per query, which is `O(n^3)` and throws away the fact that two opposite corners already determine the other two.
+
+- **Use:** Count map + enumerate diagonal partners. **O(n)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Keep every added point in a list and answer a query by scanning that list for the other corners.
@@ -26201,7 +26489,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Every element appears exactly twice except one" states the multiplicity rule outright, and the problem then demands `O(n)` time *and* `O(1)` space. Those two clauses together are the whole puzzle: linear time on its own is easy, but constant space alongside it rules out a hash set, a counter, and the scratch space of a sort. When the structure is pairing and the answer has to survive in one accumulator, reach for an involution, an operation that undoes itself. **Therefore.** Fold XOR across the array. `a ^ a == 0` and `a ^ 0 == a`, and XOR is commutative and associative, so each pair cancels no matter how far apart its two copies sit, leaving the lone value. **Not a hash set** toggled on each value, which is honestly `O(n)` time and arguably clearer, but costs `O(n)` space and so breaks the constraint the problem went out of its way to state. **Not sorting** and scanning for the element without a neighbour, which is `O(n log n)`. **O(n)** time, **O(1)** space.
+**Signals.** "Every element appears exactly twice except one" states the multiplicity rule outright, and the problem then demands `O(n)` time *and* `O(1)` space. Those two clauses together are the whole puzzle: linear time on its own is easy, but constant space alongside it rules out a hash set, a counter, and the scratch space of a sort. When the structure is pairing and the answer has to survive in one accumulator, reach for an involution, an operation that undoes itself. **Therefore.** Fold XOR across the array. `a ^ a == 0` and `a ^ 0 == a`, and XOR is commutative and associative, so each pair cancels no matter how far apart its two copies sit, leaving the lone value. **Not a hash set** toggled on each value, which is honestly `O(n)` time and arguably clearer, but costs `O(n)` space and so breaks the constraint the problem went out of its way to state. **Not sorting** and scanning for the element without a neighbour, which is `O(n log n)`.
+
+- **Use:** XOR (self-canceling pairs). **O(n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Tally every value, then return the one seen once.
@@ -26314,7 +26604,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Number of 1 bits" over a fixed 32-bit width is the whole problem statement, and the fixed width is the signal. Because the input cannot be wider than 32 bits, any loop over bit positions is already constant time, so the interesting question is not the asymptotics but whether you can do fewer than 32 steps. The word "unsigned" is the second signal: a shift-right loop over a signed integer with the top bit set never terminates in a language with arithmetic shift, which is a real bug in Java and C++. **Therefore.** Use Brian Kernighan's step, `n &= n - 1`, which clears the lowest set bit in one operation, so the loop runs exactly popcount times and never touches sign. **Not testing all 32 positions** with `(n >> i) & 1`, which is correct and equally `O(1)` but always pays 32 iterations no matter how sparse `n` is. **Not a 256-entry lookup table** of byte popcounts, which is the right answer only when the follow-up bites and you are called billions of times. **O(k)** time, **O(1)** space.
+**Signals.** "Number of 1 bits" over a fixed 32-bit width is the whole problem statement, and the fixed width is the signal. Because the input cannot be wider than 32 bits, any loop over bit positions is already constant time, so the interesting question is not the asymptotics but whether you can do fewer than 32 steps. The word "unsigned" is the second signal: a shift-right loop over a signed integer with the top bit set never terminates in a language with arithmetic shift, which is a real bug in Java and C++. **Therefore.** Use Brian Kernighan's step, `n &= n - 1`, which clears the lowest set bit in one operation, so the loop runs exactly popcount times and never touches sign. **Not testing all 32 positions** with `(n >> i) & 1`, which is correct and equally `O(1)` but always pays 32 iterations no matter how sparse `n` is. **Not a 256-entry lookup table** of byte popcounts, which is the right answer only when the follow-up bites and you are called billions of times.
+
+- **Use:** Bit manipulation, Brian Kernighan's trick. **O(k)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Test each of the 32 bit positions in turn.
@@ -26422,7 +26714,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "For every `i` in `0..n`" turns a per-number trick into a *sequence*, and `n` reaches `10^5`. The question stops being how to popcount one integer and becomes how to avoid paying full price `n` times. Whenever an answer is wanted for every prefix of the naturals, ask what `i` shares with a smaller index: `i >> 1` is `i` with its lowest bit removed, it is strictly smaller, so it is already solved. **Therefore.** Fill a table with `dp[i] = dp[i >> 1] + (i & 1)`, one array pass, one shift and one mask per entry. **Not a builtin popcount** in a loop, such as `bin(i).count('1')` or `Integer.bitCount(i)`, which costs `O(n log n)` bit-level work and, more to the point, sidesteps the reuse the problem is testing. **Not a precomputed nibble table**, the classic constant-factor trick, which is strictly more code for the same `O(n)`. **O(n)** time, **O(n)** space.
+**Signals.** "For every `i` in `0..n`" turns a per-number trick into a *sequence*, and `n` reaches `10^5`. The question stops being how to popcount one integer and becomes how to avoid paying full price `n` times. Whenever an answer is wanted for every prefix of the naturals, ask what `i` shares with a smaller index: `i >> 1` is `i` with its lowest bit removed, it is strictly smaller, so it is already solved. **Therefore.** Fill a table with `dp[i] = dp[i >> 1] + (i & 1)`, one array pass, one shift and one mask per entry. **Not a builtin popcount** in a loop, such as `bin(i).count('1')` or `Integer.bitCount(i)`, which costs `O(n log n)` bit-level work and, more to the point, sidesteps the reuse the problem is testing. **Not a precomputed nibble table**, the classic constant-factor trick, which is strictly more code for the same `O(n)`.
+
+- **Use:** DP with LSB recurrence. **O(n)** time, **O(n)** space.
 
 #### Explanation
 **Brute force.** Popcount each number independently.
@@ -26546,7 +26840,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Reverse the bits of a 32-bit unsigned integer" pins the width, and the width is what makes the problem non-trivial: the answer depends on how many bits you are told to consider, not on the value, so `1` reverses to `2^31` rather than to `1`. Leading zeros are significant data here, which is unusual and is the thing that trips people up. There is no data structure and nothing to search, only a positional mapping in which bit `i` must end up at bit `31 - i`. **Therefore.** Build the answer one bit at a time: shift the accumulator left to open a slot, drop in `n & 1`, then shift `n` right to expose the next bit, 32 times. **Not reversing a binary string** with `bin`, `zfill(32)`, and a slice, which is correct in Python and reads well, but allocates 32 characters per call and has no counterpart in a language without arbitrary-width integers. **O(1)** time, **O(1)** space.
+**Signals.** "Reverse the bits of a 32-bit unsigned integer" pins the width, and the width is what makes the problem non-trivial: the answer depends on how many bits you are told to consider, not on the value, so `1` reverses to `2^31` rather than to `1`. Leading zeros are significant data here, which is unusual and is the thing that trips people up. There is no data structure and nothing to search, only a positional mapping in which bit `i` must end up at bit `31 - i`. **Therefore.** Build the answer one bit at a time: shift the accumulator left to open a slot, drop in `n & 1`, then shift `n` right to expose the next bit, 32 times. **Not reversing a binary string** with `bin`, `zfill(32)`, and a slice, which is correct in Python and reads well, but allocates 32 characters per call and has no counterpart in a language without arbitrary-width integers.
+
+- **Use:** Bit manipulation, shift and OR 32 times. **O(1)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Collect the 32 bits into a string and reparse it.
@@ -26657,7 +26953,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** `n` distinct numbers drawn from `[0, n]`, exactly one absent. The value range is pinned to the index range and the defect count is exactly one, which is the standing cue that the answer is recoverable from an *aggregate* rather than a search: any quantity computable in one pass over the whole range and invertible will expose the gap. The usual follow-up asking for `O(1)` extra space rules out a set. **Therefore.** Compute what the total should be and subtract what it is: `n * (n + 1) / 2 - sum(nums)`. One pass, one accumulator, no allocation. **Not the XOR fold** over all indices `0..n` and all values, which is just as correct and just as short, but is the better choice in Java, Rust, Go or C++ once `n` grows, because the expected sum grows quadratically and overflows a 32-bit int while XOR cannot overflow at all. **O(n)** time, **O(1)** space.
+**Signals.** `n` distinct numbers drawn from `[0, n]`, exactly one absent. The value range is pinned to the index range and the defect count is exactly one, which is the standing cue that the answer is recoverable from an *aggregate* rather than a search: any quantity computable in one pass over the whole range and invertible will expose the gap. The usual follow-up asking for `O(1)` extra space rules out a set. **Therefore.** Compute what the total should be and subtract what it is: `n * (n + 1) / 2 - sum(nums)`. One pass, one accumulator, no allocation. **Not the XOR fold** over all indices `0..n` and all values, which is just as correct and just as short, but is the better choice in Java, Rust, Go or C++ once `n` grows, because the expected sum grows quadratically and overflows a 32-bit int while XOR cannot overflow at all.
+
+- **Use:** Gauss summation formula. **O(n)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** Try each candidate in `0..n` and scan for it.
@@ -26775,7 +27073,9 @@ Constraints:
 ```
 
 #### Recognition
-**Signals.** "Without using the `+` or `-` operators" is not a performance constraint, it is the entire problem. Nothing about the input is large or awkward and there is no faster algorithm hiding here. A banned arithmetic operator with the bitwise operators left open is a request to rebuild the operation out of them, and for addition that means reproducing a hardware full adder. **Therefore.** `a ^ b` is the per-column sum with all carries ignored, and `(a & b) << 1` is exactly those carries moved one place left. Feed the pair back in until the carry word is zero, at most 32 rounds for 32-bit inputs. **Not repeated increment** by `b` steps, which still spells `+` or `-` in every language and costs `O(|b|)` besides. **Not a library call** such as `sum([a, b])` or `operator.add(a, b)`, which is the banned operator wearing a hat rather than an alternative to it. **O(1)** time, **O(1)** space.
+**Signals.** "Without using the `+` or `-` operators" is not a performance constraint, it is the entire problem. Nothing about the input is large or awkward and there is no faster algorithm hiding here. A banned arithmetic operator with the bitwise operators left open is a request to rebuild the operation out of them, and for addition that means reproducing a hardware full adder. **Therefore.** `a ^ b` is the per-column sum with all carries ignored, and `(a & b) << 1` is exactly those carries moved one place left. Feed the pair back in until the carry word is zero, at most 32 rounds for 32-bit inputs. **Not repeated increment** by `b` steps, which still spells `+` or `-` in every language and costs `O(|b|)` besides. **Not a library call** such as `sum([a, b])` or `operator.add(a, b)`, which is the banned operator wearing a hat rather than an alternative to it.
+
+- **Use:** Bit manipulation (simulate full adder). **O(1)** time, **O(1)** space.
 
 #### Explanation
 **Brute force.** The line you would write if the ban did not exist.
