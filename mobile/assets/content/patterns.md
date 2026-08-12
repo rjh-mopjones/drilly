@@ -24671,3 +24671,460 @@ POST /internal/auctions/{id}/second-chance   body: { to_bidder, price }   (platf
 - **Failover cadence:** automatic within region; quarterly cross-region game-days deliberately scheduled *outside* the Sunday-evening close window. Close-scheduler shards fail over independently of the data tier so a stalled scheduler never blocks bidding.
 - **Cross-region cost:** bid log replication is small (~47GB/day at RF=3, replicated once cross-region ≈ ~16GB/day egress). Media dominates and is served from regional CDN edges rather than replicated on the write path. Price ticks are never cross-region: a watcher connects to their nearest gateway, which subscribes to the home region's bus for that auction only.
 
+### 56. Design a System to Push a Software Update to 500 Million Devices
+#### Problem
+You have a signed update artifact and a fleet of 500 million devices that are not yours: they are off, on cellular, out of battery, in another country, or running one of a dozen versions you shipped over the last two years. Get the update onto as many of them as possible, know how many actually took it, and be able to stop when it goes wrong. The payload could be firmware, an application, or an asset bundle; what makes this hard is the count, the fact that you cannot reach in and fix a device that has already taken a bad build, and that the whole fleet acting at once is itself the outage.
+#### Core
+The instinct is to size a CDN. The correct instinct is to size a schedule, because the only free variable big enough to matter is how long you are willing to take.
+
+Do the arithmetic first. About 460 million reachable devices times a 25MB delta is ~11.5PB of egress. Spread over 14 days that is ~76Gbps average and ~230Gbps at diurnal peak, an unremarkable CDN commitment. Compress the same bytes into 24 hours and it is ~1.1Tbps sustained; into 6 hours, ~4.3Tbps. Nothing about the artifact changed. Duration is the capacity knob, and every other decision is downstream of where you set it.
+
+Three subsystems. A **release pipeline** turns one build into a small matrix of deltas, one per source version and variant, and signs them; the whole matrix is ~17GB, so caching is trivial and egress is the entire cost. A **rollout controller** owns the answer to "does this device get it, and when", handing out cohort and timing on a check-in that is already happening, so 500M devices never decide anything for themselves. A **health analyser** compares updated cohorts against a permanent holdback and can halt.
+
+The two things that separate this from deploying to servers: devices choose when to cooperate, so conditions like unmetered network and charging pace you more than bandwidth does; and halt is not rollback. Stopping a rollout at 5% leaves 25 million devices on the bad build, recoverable only by shipping another one. Detection cost at 0.1% is 500,000 devices. That gap is the design.
+#### Summary
+**The picture in your head:** a national postal service delivering the same leaflet to every address in a large country, except the recipients open the door only when they feel like it, roughly a tenth of them have moved, and if the leaflet is wrong you cannot go back and collect it. You could hire every van in the country and do it in a day, at enormous cost, or use your normal fleet for a fortnight at almost no marginal cost. You send the first thousand to one small town, wait to hear whether anything caught fire, and only then widen. And you deliberately keep one street with no leaflet at all, so that when complaints rise you can tell whether it was the leaflet or just a bad week.
+
+**The approaches people actually take:**
+
+*Pull on a jittered timer.* Every device asks a lightweight endpoint "is there anything for me?" on a randomised schedule, and the answer carries the decision. Dead simple, degrades gracefully, and works for devices that are off for a week. It costs you immediacy: the median device learns about an update hours after it exists, and there is no way to make a specific device act now.
+
+*Push a wake signal, pull the bytes.* A push channel tells devices something is waiting, and they then fetch through the normal path. This buys minutes instead of hours for the urgent case. It costs you a second delivery system with its own reachability limits, and the temptation to treat delivery of the signal as delivery of the update, which it is not.
+
+*Peer assisted distribution.* Devices that have the bytes serve them to nearby devices that do not, over the local network. At fleet scale this is the only lever that changes the egress bill by an order of magnitude rather than a percentage. It costs you a genuinely hard subsystem, and on mobile it is close to unusable because uploading on someone's metered connection is a betrayal.
+
+The mature answer is the first as the backbone, the second as an accelerant for urgent releases, and the third only where devices sit on shared unmetered networks.
+
+**The single-request walkthrough:** a device wakes for its check-in at a time the server assigned it, 04:12 local, and posts a compact fingerprint: current version `7.4.1`, variant `arm64/high`, region, and its rollout token. Stage 1: the check-in service reads the rollout state for the device's cohort and finds cohort 41 is inside the current band (~3ms, and 95% of the time this call answers "nothing for you" in about 200 bytes). Stage 2: the response carries the artifact URL for the `7.4.1 -> 7.5.0` delta, its digest, a signature, and a `not_before` timestamp 40 minutes out, so even inside a band the herd is smeared. Stage 3: at 04:52 the device checks conditions, unmetered network, charging, screen off, and only then requests the artifact. Stage 4: the request lands on an edge PoP, hits cache because ~17GB of artifacts is nothing, and streams 25MB with resumable ranges. Stage 5: the device verifies the digest and signature, applies the delta, and stages the result. Stage 6: it reports `applied` on its next check-in, not immediately, because 500M immediate acknowledgements is a self inflicted denial of service. Stage 7: the health analyser sees cohort 41's crash rate against the holdback cohort and the band widens or halts.
+
+**The pieces (and what each one is for):**
+- **Release pipeline and delta matrix generator.** One build in, a small matrix out: one delta per supported source version per variant. ~144 artifacts, ~17GB total, signed and content addressed.
+- **Artifact store and CDN (see #51).** The easiest caching problem you will ever be given, since every device on earth wants the same dozen objects. The hard part is not hit rate, it is the bill.
+- **Rollout controller.** Owns cohorts, bands, conditions, pacing and the halt switch. The single place that answers "who gets it and when".
+- **Check-in service.** ~5,800 requests/s average, mostly answering "no". Must be the most boring, most available service you operate, because it is the only channel you have to a device once it is broken.
+- **Health analyser and holdback.** Compares updated cohorts against a permanent never-updated 1% and drives the band ladder automatically.
+- **Telemetry ingest (see #7, #41).** Progress and failure events, sampled hard on success and kept whole on failure.
+- **Peer assist (optional).** Windows Update's Delivery Optimization reports peers supplying 10% to 50% of update bytes on suitable networks; Meta's Owl moves over 800PB/day internally on the same principle at a ~95% cache hit rate. Both are evidence that this works and that it is a real system, not a checkbox.
+
+**The thing that makes it hard is that you cannot recall a device.** Server deployment (#54) is safe because the previous artifact is one restore away and the fleet is yours; a bad canary is over in a minute. Here, a device that has taken the bad build is gone until it voluntarily comes back and asks for something newer. Halting a staged rollout stops new devices receiving it, which is exactly what Google Play's halt control does, and does precisely nothing for the ones that already have it. So the ladder is not ceremony, it is the only mechanism you have: detect at 0.1% and you own 500,000 broken devices, detect at 5% and you own 25 million.
+
+**Why this design and what it costs:** you spend the budget on pacing, cohorting and detection, and deliberately refuse to spend it on peak capacity, because peak capacity is a consequence of the schedule you chose rather than a constraint handed to you. The costs are honest ones. Slow rollouts mean the fleet runs many versions at once, which every server-side API must then support, and the delta matrix grows with the number of live versions. Conditions gating means a meaningful slice of devices are simply never eligible, so "100% rolled out" is a fiction and the real target is a percentile. And an automatic halt that fires on noise is worse than no halt, so the analyser needs a holdback and a statistical threshold rather than a dashboard and a hunch.
+
+**If you were building it tomorrow:**
+- A commodity CDN with committed egress in front of object storage; Postgres or a KV store for rollout state; a stateless check-in tier behind anycast; a stream processor for health metrics; deltas generated with bsdiff-style binary diffing.
+- Check-in response logic:
+  ```
+  on check_in(device_id, version, variant, region, token):
+      if version == target_version: return NOTHING           -- ~95% of calls
+      cohort = token % 1000                                  -- stable, assigned at first contact
+      band   = rollout_state(target_version)                 -- e.g. admits cohorts 0..49
+      if cohort >= band.admitted or device in holdback:
+          return NOTHING
+      artifact = delta(version -> target_version, variant)
+        or full_artifact(variant)                            -- tail versions get the full build
+      return {
+        url: artifact.url, digest, signature,
+        not_before: now + jitter(0, band.smear_window),      -- smear inside the band
+        conditions: [UNMETERED, CHARGING, IDLE],
+        max_attempts: 3, backoff: exponential_with_jitter
+      }
+  ```
+#### What this is really testing
+Whether you convert the headline number into bytes and then into a rate before you design anything. 500 million is meant to trigger the wrong reflex, which is to start sizing a global CDN and talking about Tbps. The candidate who is going to be useful writes 460M × 25MB = ~11.5PB on the board, divides by a duration, and notices that the same payload is either 76Gbps or 4.3Tbps depending on a number nobody has given them yet. Once you see that, the interesting question becomes what forces the duration, and the answer is not bandwidth: it is that devices only cooperate when unmetered, charged and idle, and that you need soak time between bands to detect a regression at all. The second thing being tested is whether you know that halt is not rollback. Everything about deploying software to machines you control teaches you that a bad release is a one minute restore, and that intuition is exactly wrong here. The third is restraint about the check-in path: 500M devices asking a question is a bigger load problem than 500M devices downloading an answer, and the fix is jitter and a 200 byte "no", not a bigger fleet.
+
+Closest question: Q54
+
+Both ship one artifact to a large fleet on a widening ladder with automatic halt, and the vocabulary is identical right up to the point where it inverts. In #54 the fleet is yours, homogeneous, always on and instrumented, so the canary is a statistical exercise with a one minute undo: ship to 1%, compare against a freshly restarted baseline, restore the pinned previous digest on failure. Here nothing in that sentence survives. The fleet belongs to other people, runs a dozen versions across hundreds of hardware variants, is mostly offline at any instant, and has no undo at all, so the previous digest is irrelevant and the only remedy is another forward release that the broken device has to voluntarily come and collect. The consequence is that #54 spends its effort on detection speed, since the cost of being wrong is bounded by how fast you can restore, while this question spends its effort on blast radius, since the cost of being wrong is permanent. It also inherits the whole of #51 as substrate, and inverts its hard part too: a CDN's difficulty is a long tail of unpredictable objects and invalidation, whereas here every device wants the same dozen objects, cache hit rate is a rounding error from 100%, and the difficulty is entirely the egress bill.
+#### Clarifying questions and how each answer forks the design
+- Is this routine or a security fix, and what is the acceptable exposure window?
+- Can a device that takes this update still receive the next one, or can the update break the updater?
+- What fraction of the fleet is on metered or expensive connections, and who pays for the bytes?
+- Do we need a hard deadline for compliance, or is best effort over weeks acceptable?
+- How many source versions are live in the field, and do we support all of them?
+- Do devices sit on shared unmetered networks where peers could serve each other?
+- Is there an existing push channel to these devices, or only a polling client?
+
+**How the answers shape the design**
+
+| If the answer is… | Then the design… |
+|---|---|
+| Routine release, weeks acceptable | pace over 14 days at ~76Gbps average, use spare CDN commit, and let conditions gating do the shaping for free |
+| Urgent security fix | compress to 24h at ~1.1Tbps, relax conditions to allow metered downloads, and pre-position bytes at the edge before opening the band |
+| The update can break the updater | the update client becomes separately versioned, ships on its own slower track, and is never changed in the same release as the payload |
+| Fleet is mostly cellular | peer assist is off the table, conditions gating dominates the schedule, and delta size becomes the single most valuable optimisation |
+| Hard compliance deadline | you need per-device accounting and an escalation path, which turns a fire-and-forget system into one that tracks individual stragglers |
+| Many live source versions | the delta matrix grows as versions × variants, so cap it at the versions covering ~90% of the fleet and serve the tail a full artifact |
+| Devices share unmetered LANs | peer assist becomes worth building, targeting the 10% to 50% offload that Windows Delivery Optimization reports |
+| A push channel exists | it wakes devices for urgent releases only, and never becomes the delivery mechanism, because push reachability is worse than polling reachability |
+#### Requirements and scale, derived out loud
+**Requirements**
+
+- **FR:** generate and sign per-version deltas; assign every device a stable cohort; admit cohorts in bands under policy; gate on device conditions; deliver resumable, verifiable artifacts; report apply outcomes; compare cohort health against a holdback; halt automatically; roll forward.
+- **NFR:** check-in path available at 99.99% and independently deployable from everything else; no band widens without a statistically meaningful signal; a bad build reaches no more than ~0.1% of the fleet before detection; the fleet never generates a synchronised request spike; every artifact verified by signature before application.
+
+**Scale**
+
+All figures are stated assumptions; the question supplies only the device count, and saying which numbers you invented is part of the answer.
+- **Reachable fleet:** 500M devices, assume ~8% effectively unreachable in any 14-day window (off, abandoned, permanently metered), so 500M × 0.92 = **~460M reachable**.
+- **Payload:** full artifact ~120MB, typical delta ~25MB. Google's file-by-file patching reported updates averaging 65% smaller than the full app, so a ~4.8× reduction is a defensible assumption rather than a hopeful one.
+- **Total egress:** 460M × 25MB = **~11.5PB per release**. This is the number the whole design orbits.
+- **Duration is the capacity knob:** 11.5PB ÷ 14 days = 11.5e15 ÷ 1.21e6 s = ~9.5GB/s = **~76Gbps average**, and at a 3× diurnal peak, **~230Gbps**. The same bytes ÷ 24h = **~1.1Tbps**; ÷ 6h = **~4.3Tbps**. One of those is a purchase order and one is a research project.
+- **Cost:** 11.5PB = 11.5e6 GB, so at ~$0.01/GB that is **~$115k per release**, and at a committed ~$0.002/GB, **~$23k**. Peer assist at a 30% offload saves ~$35k or ~$7k respectively, which is the number that decides whether building it is rational.
+- **Artifact working set:** 12 live source versions × 12 variants (4 ABIs × 3 asset tiers) = **144 artifacts** × ~120MB ≈ **~17GB per release**. Small enough to pre-position at every PoP, which is why cache hit rate is not a discussion.
+- **Check-in load:** 500M × 1 check/day = 500e6 ÷ 86,400 = **~5,800 req/s** average, ~17k/s at peak. At ~200 bytes for the common "nothing for you", that is ~1.2MB/s of response bytes. Trivial, and only because of jitter.
+- **What jitter is worth:** the same 500M devices checking in during one synchronised minute would be 500e6 ÷ 60 = **~8.3M req/s**, three orders of magnitude beyond the jittered rate. The herd, not the payload, is what kills naive designs.
+- **Detection cost per band:** 0.1% = **500k devices**, 1% = 5M, 5% = 25M. A crash-rate regression of even 0.5% is significant against a 500k cohort within a day of usage, so there is no statistical excuse for skipping the first band.
+- **Telemetry:** 460M × ~3 events per update = **~1.4B events per release**; at ~200B that is ~280GB. Sample success at 1% and keep failures whole, which cuts it to ~30GB while losing nothing that matters.
+- **Concurrency:** at the 14-day pace, 460M ÷ 14 days = ~33M devices/day = ~380/s starting a download; at ~25MB and ~5Mbps effective, each holds a connection ~40s, so 380 × 40 = **~15k concurrent transfers**. A single PoP's worth of connections, spread across a hundred.
+#### Key decisions
+**How long the rollout takes**
+- Choice: pace over ~14 days by default, with the band ladder and conditions gating as the pacing mechanism rather than a bandwidth cap. Capacity then follows from the schedule: ~76Gbps average, ~230Gbps peak.
+- Alternative: push it as fast as the network allows, sizing for ~1.1Tbps to complete inside 24 hours, and relaxing conditions so devices download on metered connections.
+- Decider: the ratio of exposure cost to egress cost. 11.5PB ÷ 24h is ~1.1Tbps and roughly 5× the unit price once you leave committed capacity, so a routine release cannot justify it. A security fix under active exploitation can justify almost any number, and the honest threshold is whether a day of exposure across 460M devices is worse than ~$100k and a week of engineering attention.
+- Alternative wins when: the update fixes something being exploited now, or a regulator has given you a deadline. Note the second-order effect that people miss: going fast removes your soak time, so you are trading detection for speed, and the correct move is to keep the first two bands at full duration and compress only the wide ones.
+
+**Who decides a device's place in the rollout**
+- Choice: the server assigns a stable cohort at first contact and the rollout controller admits cohorts in bands. The device obeys, and carries a `not_before` timestamp that smears arrival inside its band.
+- Alternative: the device hashes its own id against the target version and self-selects, so the check-in response is a static file and the control plane holds no per-device state at all.
+- Decider: whether you will ever need to change your mind, weighed against ~5,800 check-ins/s. Server assignment costs a lookup on a request that already exists and buys the ability to halt, to exclude a specific hardware variant, and to re-target the same cohort. Self-hashing costs nothing and gives you none of that.
+- Alternative wins when: the check-in path must work with zero backend state, for example a fully static, air-gapped or extremely cheap distribution model. Be clear about the failure it creates: with client-side selection, halting means shipping new policy to devices that must first come and ask for it, which is exactly the population you have lost control of.
+
+**Whether to build peer assisted distribution**
+- Choice: do not build it initially. Rely on CDN egress with committed pricing, and revisit once the release cadence and payload size are known.
+- Alternative: build peer assist, targeting the 10% to 50% of bytes that Windows Delivery Optimization reports peers supply, with Meta's Owl as the existence proof that a tracker-coordinated peer plane scales to 800PB/day.
+- Decider: annual egress against build cost. At ~$115k per release and 6 releases a year, that is ~$700k of egress, and a 30% offload saves ~$200k against a subsystem that is comfortably a year of a small team plus permanent operational surface. Below roughly 1PB per release it is never worth it.
+- Alternative wins when: devices sit on shared unmetered networks, corporate LANs, campuses, set-top boxes behind one household router, where a peer is genuinely one hop away. On consumer mobile it is close to indefensible, because you are spending someone else's data allowance to save your own bill, and the reputational cost of getting that wrong dwarfs the saving.
+#### High-level design
+**must-say**
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 590" role="img" aria-label="Update distribution architecture: build pipeline into a delta matrix and signed artifact store, CDN origin and edge caches, a rollout controller and check-in service deciding which cohorts are admitted, telemetry feeding a health analyser that can halt the rollout, and 500 million devices pulling artifacts">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box" x="20" y="18" width="215" height="44" rx="9"/>
+  <text class="lbl" x="127" y="40">Build pipeline</text>
+
+  <rect class="box" x="285" y="18" width="200" height="44" rx="9"/>
+  <text class="lbl" x="385" y="40">Release policy</text>
+
+  <rect class="box" x="525" y="18" width="215" height="44" rx="9"/>
+  <text class="lbl" x="632" y="40">Telemetry ingest</text>
+
+  <rect class="box" x="20" y="88" width="215" height="58" rx="9"/>
+  <text class="lbl" x="127" y="106">Delta matrix</text>
+  <text class="sub" x="127" y="127">144 artifacts · ~17GB</text>
+
+  <rect class="box acc" x="285" y="88" width="200" height="58" rx="9"/>
+  <text class="lbl" x="385" y="106">Rollout controller</text>
+  <text class="sub" x="385" y="127">cohorts · bands · halt</text>
+
+  <rect class="box" x="525" y="88" width="215" height="58" rx="9"/>
+  <text class="lbl" x="632" y="106">Health analyser</text>
+  <text class="sub" x="632" y="127">cohort vs 1% holdback</text>
+
+  <rect class="box" x="20" y="176" width="215" height="58" rx="9"/>
+  <text class="lbl" x="127" y="194">Signed artifact store</text>
+  <text class="sub" x="127" y="215">content addressed</text>
+
+  <rect class="box" x="285" y="176" width="200" height="58" rx="9"/>
+  <text class="lbl" x="385" y="194">Check-in service</text>
+  <text class="sub" x="385" y="215">~5.8k req/s · 95% "no"</text>
+
+  <rect class="box dash" x="525" y="176" width="215" height="58" rx="9"/>
+  <text class="lbl" x="632" y="194">Halt or roll forward</text>
+  <text class="sub" x="632" y="215">no recall exists</text>
+
+  <rect class="box" x="20" y="264" width="215" height="58" rx="9"/>
+  <text class="lbl" x="127" y="282">CDN origin shield</text>
+  <text class="sub" x="127" y="303">see #51</text>
+
+  <rect class="box acc" x="20" y="352" width="300" height="58" rx="9"/>
+  <text class="lbl" x="170" y="370">Edge PoPs · ISP caches</text>
+  <text class="sub" x="170" y="391">~230 Gbps at peak</text>
+
+  <rect class="box dash" x="20" y="440" width="300" height="58" rx="9"/>
+  <text class="lbl" x="170" y="458">Peer assist (optional)</text>
+  <text class="sub" x="170" y="479">10% to 50% of bytes</text>
+
+  <rect class="box" x="285" y="524" width="200" height="44" rx="9"/>
+  <text class="lbl" x="385" y="546">500M devices</text>
+
+  <path class="flow" d="M127,62 L127,88"/>
+  <path class="flow" d="M127,146 L127,176"/>
+  <path class="flow" d="M127,234 L127,264"/>
+  <path class="flow" d="M127,322 L127,352"/>
+  <path class="flow" d="M170,410 L170,440"/>
+  <path class="flow" d="M385,62 L385,88"/>
+  <path class="flow" d="M385,146 L385,176"/>
+  <path class="flow" d="M632,62 L632,88"/>
+  <path class="flow" d="M632,146 L632,176"/>
+  <path class="flow dash" d="M525,205 L505,205 L505,117 L485,117"/>
+  <path class="flow" d="M170,498 L170,546 L285,546"/>
+  <path class="flow" d="M385,234 L385,300 L430,300 L430,546 L485,546"/>
+  <path class="flow dash" d="M540,546 L632,546 L632,234"/>
+
+  <text class="edge" x="600" y="330">apply outcomes reported on the next check-in</text>
+  <text class="edge" x="640" y="566">devices</text>
+</svg>
+```
+
+**Say the arithmetic before the boxes.** Open by converting the headline: ~460M reachable devices at ~25MB is ~11.5PB, which is 76Gbps over a fortnight or 1.1Tbps over a day. Then state the design consequence out loud, which is that you are not sizing infrastructure, you are choosing a duration and letting capacity fall out of it. Everything after this is in service of that sentence.
+
+**Two planes, and only one of them carries bytes.** The control plane is the rollout controller plus the check-in service: tiny requests, enormous request count, and the only channel that reaches a device you have already broken. The data plane is the artifact store behind a CDN: enormous bytes, trivial request count, and completely replaceable. Keep them independently deployable, because the day you need the control plane most is the day the data plane is melting.
+
+**The release pipeline.** One build becomes a matrix of deltas, one per (source version, variant) pair, capped at the versions covering ~90% of the fleet with a full artifact for the tail. Every artifact is content addressed and signed, and the signature is verified on the device before anything is applied, because a distribution system that can be induced to install arbitrary bytes on 500M devices is the most valuable target in the company.
+
+**The check-in path is the load problem.** Devices poll on a server-assigned, jittered schedule. The response is ~200 bytes and says "nothing for you" about 95% of the time, so make that path cacheable, cheap and boring: anycast, no per-request database write, and a hard rule that it never depends on the release pipeline being healthy. Jitter is not a nicety here. The same fleet checking in synchronously would be ~8.3M req/s instead of ~5,800.
+
+**The rollout controller decides, the device obeys.** A stable cohort assigned at first contact, bands admitting cohorts progressively, a `not_before` timestamp smearing arrivals inside a band, and conditions the device must satisfy before spending anyone's bandwidth: unmetered, charging, idle. Those conditions are the real schedule. They are why a rollout takes days when the bytes would take hours, and they are the single biggest source of "the graph plateaued at 78%" surprises.
+
+**The feedback loop, and the holdback.** A permanent ~1% holdback never receives anything. Without it you cannot distinguish "the new build raised crash rate" from "it is Monday", and every automatic halt becomes a coin toss. The analyser compares admitted cohorts against that holdback and either widens the band or halts. Halting stops admission and does nothing else, which is why the ladder starts at 0.1%.
+
+**What I am deliberately not building.** No push channel in v1, because polling reaches more devices than push does and adding push tempts you to confuse signal delivery with update delivery. No peer assist in v1, on the arithmetic in `Key decisions`. No per-device tracking table, because 500M rows of mutable state buys you a compliance feature nobody asked for; cohort-level accounting answers every question you actually have.
+#### Deep dive
+**must-say**
+
+**The pacing arithmetic, done properly, is the answer to the question.** Start from bytes and end at a rate, and show the sensitivity:
+
+```
+reachable  = 500M × 0.92                     = 460M devices
+egress     = 460M × 25MB                     = 11.5 PB per release
+
+11.5 PB ÷ 14 days = 11.5e15 ÷ 1.21e6 s       = ~9.5  GB/s  = ~76   Gbps   (routine)
+11.5 PB ÷ 24 h    = 11.5e15 ÷ 8.64e4 s       = ~133  GB/s  = ~1.1  Tbps   (urgent)
+11.5 PB ÷ 6 h     = 11.5e15 ÷ 2.16e4 s       = ~532  GB/s  = ~4.3  Tbps   (fantasy)
+```
+
+Three observations that follow, and they are the whole design. First, the artifact set is ~17GB, so every PoP can hold the entire release and cache hit rate is ~100%; this is not a caching problem, it is purely an egress problem. Second, at the routine pace the peak is ~230Gbps, which is an ordinary commercial commitment, so the correct answer to "how do we serve 500 million devices?" is "slowly, and then it is not a hard problem". Third, and this is the part people miss, delta size sits inside every one of those numbers linearly. Halving the delta from 25MB to 12MB halves the bill and halves the time at fixed bandwidth, which is why binary diffing is not a micro-optimisation here. Google's move to file-by-file patching produced updates averaging 65% smaller than the full artifact, and at this scale that difference is measured in petabytes.
+
+**The check-in path, not the download path, is what a naive design gets wrong.** Devices must ask before they can receive, and asking is where the herd lives. 500M devices at one check per day is ~5,800 req/s, which is one modest service. The same 500M devices checking at a fixed local time, say on the hour, is 500e6 ÷ 3,600 = ~139k req/s across that hour and far worse in its first minute. Three rules keep this boring:
+
+- **Server-assigned schedules, not client-chosen ones.** The response carries the next check-in time, so you can widen the interval globally when you are in trouble. A client with a hardcoded interval is a client you cannot slow down.
+- **Full jitter, not equal jitter.** Sleep for `random(0, interval)` rather than `interval/2 + random(0, interval/2)`. This is the standard result from retry design and it matters more here, because a correlated event, a power cut, a carrier outage, a mass reboot, resynchronises the entire fleet and you need the next wave spread flat.
+- **A cheap negative.** ~95% of check-ins answer "nothing for you" in ~200 bytes with no write. Push that to the edge if you can, and never let the negative path touch the release database.
+
+Then smear inside the band. Admitting a 1% band is admitting 5M devices, and if they all act on their next check-in you have a 5M-device spike against your CDN and your telemetry. The `not_before` timestamp spreads them across the band's window, which is why the response carries a time rather than a yes.
+
+**Halt is not rollback, and this is the sentence to say out loud.** Google Play's halt control stops further devices receiving the version and explicitly does not remove it from devices that have it. That is not a product limitation, it is the physics of the situation: the only way to change software on a device is for that device to come and ask for something. So the recovery path is roll forward, and it is strictly slower than the failure was, because the fix must be built, validated, and then paced through the same ladder to the same devices, which are now possibly worse at checking in than they were.
+
+Two design consequences follow, and they are non-negotiable:
+
+- **The ladder is your only blast-radius control.** 0.1% → 1% → 5% → 20% → 50% → 100%, with soak time at each step that is at least as long as it takes for a regression to become visible in usage, typically ~24h for the early bands. A 0.5 percentage point crash-rate regression is statistically obvious against a 500k cohort within a day, so there is no honest argument for starting at 5%. Detect at 0.1% and you own 500k broken devices; detect at 5% and you own 25 million.
+- **The updater must never be broken by the update.** Whatever component performs check-in and application is the last remaining channel to the device. Version it separately, ship it on its own slower and more conservative track, never change it in the same release as a payload, and keep its dependency surface minimal. Everything else in this design is recoverable. This is the one thing that is not.
+
+**You need a holdback or your automatic halt is superstition.** Reserve ~1% of the fleet, 5M devices, that never receives the release. Crash rate, battery drain and engagement all move for reasons that have nothing to do with your build, so comparing an admitted cohort against the *previous week* is comparing against a different world. Comparing against a concurrent holdback controls for the day, the weather, the football and the third-party outage. The analyser then works on a difference with a confidence interval, and the halt threshold becomes a statement rather than a vibe. Keep the holdback permanent and rotate its membership between releases, so no device is stranded on an old version forever.
+
+**The long tail is real and you should name it before the interviewer does.** Devices are off, abandoned, permanently on metered connections, in regions you throttled, or owned by people who never charge them overnight. Assume ~8% never take a given release inside its window. Two consequences: "rolled out to 100%" is a fiction, so define success as a percentile, for example 95% of *active* devices within 14 days; and the server side must support every live version simultaneously, which caps how aggressively you can deprecate and feeds directly back into the size of the delta matrix.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 300" role="img" aria-label="Rollout ladder as a control loop: bands at 0.1, 1, 5, 20 and 100 percent with device counts and soak times, each gated by a health analyser comparing against a one percent holdback, with halt stopping admission but not recalling devices">
+  <defs>
+    <marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <style>
+    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
+    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah2); }
+    .dash{ stroke-dasharray:5 4; }
+    .acc{ stroke:var(--accent); }
+    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
+    text{ dominant-baseline:middle; text-anchor:middle; }
+  </style>
+
+  <rect class="box acc" x="15" y="40" width="130" height="72" rx="9"/>
+  <text class="sub" x="80" y="58">0.1%</text>
+  <text class="sub" x="80" y="77">500k devices</text>
+  <text class="sub" x="80" y="96">soak 24h</text>
+
+  <rect class="box" x="165" y="40" width="130" height="72" rx="9"/>
+  <text class="sub" x="230" y="58">1%</text>
+  <text class="sub" x="230" y="77">5M devices</text>
+  <text class="sub" x="230" y="96">soak 24h</text>
+
+  <rect class="box" x="315" y="40" width="130" height="72" rx="9"/>
+  <text class="sub" x="380" y="58">5%</text>
+  <text class="sub" x="380" y="77">25M devices</text>
+  <text class="sub" x="380" y="96">soak 12h</text>
+
+  <rect class="box" x="465" y="40" width="130" height="72" rx="9"/>
+  <text class="sub" x="530" y="58">20%</text>
+  <text class="sub" x="530" y="77">100M devices</text>
+  <text class="sub" x="530" y="96">soak 12h</text>
+
+  <rect class="box" x="615" y="40" width="130" height="72" rx="9"/>
+  <text class="sub" x="680" y="58">100%</text>
+  <text class="sub" x="680" y="77">460M reached</text>
+  <text class="sub" x="680" y="96">~14 days</text>
+
+  <path class="flow" d="M145,76 L165,76"/>
+  <path class="flow" d="M295,76 L315,76"/>
+  <path class="flow" d="M445,76 L465,76"/>
+  <path class="flow" d="M595,76 L615,76"/>
+
+  <rect class="box acc" x="230" y="180" width="300" height="66" rx="9"/>
+  <text class="sub" x="380" y="200">Health analyser</text>
+  <text class="sub" x="380" y="221">admitted cohorts vs permanent 1% holdback</text>
+
+  <path class="flow dash" d="M80,112 L80,213 L230,213"/>
+  <path class="flow dash" d="M530,213 L680,213 L680,112"/>
+
+  <rect class="box dash" x="590" y="180" width="155" height="66" rx="9"/>
+  <text class="sub" x="667" y="200">Halt</text>
+  <text class="sub" x="667" y="221">stops admission only</text>
+
+  <text class="edge" x="380" y="272">detect at 500k, or explain 25M. There is no recall.</text>
+</svg>
+```
+#### Where it breaks
+**must-say**
+
+**Bottlenecks**
+
+- **Egress at the chosen pace.** ~11.5PB per release; at 24h that is ~1.1Tbps and you are buying burst capacity at uncommitted rates. Fix it by treating duration as the knob, pre-positioning the ~17GB artifact set at PoPs before opening any band, and negotiating committed egress. Trade-off: a longer rollout means more live versions in the field for longer, which every server-side API must tolerate.
+- **The synchronised herd.** 500M devices are one correlated event away from acting together; the difference between jittered and synchronised check-in is ~5,800/s against ~8.3M/s. Full jitter, server-assigned intervals, and `not_before` smearing inside bands. Trade-off: jitter means you cannot promise anyone a fast fleet-wide action, which is exactly the promise product managers want during an incident.
+- **Delta matrix growth.** Versions × variants grows quadratically in spirit if you support everything: 12 × 12 is fine, 40 × 20 is not, and generation cost and cache dilution both rise. Cap at the source versions covering ~90% of the fleet and serve the tail full artifacts. Trade-off: the tail pays ~120MB instead of ~25MB, which is precisely the population least able to afford it.
+- **Telemetry backpressure.** ~1.4B events per release, and failures cluster exactly when the system is already unhappy. Sample success at 1%, keep failures whole, and report on the next check-in rather than immediately. Trade-off: sampled success data makes precise progress accounting impossible, which is fine until someone asks for a compliance number.
+- **Check-in service as a single point of everything.** It is the only channel to a broken device, so its availability bound is the recovery bound for the whole fleet. Anycast, no dependency on the release database, independently deployable, and a static fallback response. Trade-off: the fallback answers "nothing for you", which is safe but means a control-plane outage silently stalls the rollout rather than failing loudly.
+- **Regional and carrier concentration.** A band admits cohorts globally, but cohorts are not evenly distributed across networks, so one carrier can see a disproportionate share. Weight admission by network and region, not just by cohort id. Trade-off: more complex cohorting, and a rollout that is no longer a single number you can put on a slide.
+
+**Failure modes**
+
+| Layer | Failure | Detection | Mitigation |
+|---|---|---|---|
+| Payload | Build is broken for one hardware variant only | Per-variant crash rate against holdback, not fleet aggregate | Halt admission for that variant's cohorts; fleet-wide aggregates hide a variant-specific fire |
+| Payload | Update breaks the update client itself | Check-in rate for admitted cohorts falls below the holdback's | Prevented, not mitigated: separate track for the updater, never shipped with a payload |
+| Rollout | Analyser halts on noise | Halt fires with overlapping confidence intervals against holdback | Require both effect size and significance; a halt that fires weekly gets ignored, which is worse than no halt |
+| Rollout | Band widens on a signal that has not had time to appear | Soak shorter than the usage window needed to observe the metric | Minimum soak per band expressed in device-usage-hours, not wall clock |
+| Distribution | Corrupt or truncated artifact | Digest verification on device before apply | Refuse and re-request with backoff; never apply unverified bytes |
+| Distribution | Signing key compromise | Out of band; assume the worst case | Short-lived signing keys, verification against a pinned root, and an offline root that can revoke |
+| Distribution | Cache miss storm at band open | Origin request rate spikes as a new artifact appears | Pre-position artifacts at PoPs before opening the band; open bands on a schedule, never on release publish |
+| Check-in | Fleet resynchronises after a correlated outage | Check-in rate spike far above the ~5,800/s baseline | Full jitter, server-controlled interval, load shedding that returns "nothing for you" rather than an error |
+| Device | Conditions never satisfied, device never updates | Cohort completion plateaus below target percentile | Progressive relaxation of conditions with age of release; accept a permanent tail and report a percentile |
+| Device | Partial application leaves an inconsistent state | Post-apply self-check reported on next check-in | Stage then commit, with the ability to fall back to the prior state on the device itself |
+| Reporting | Progress numbers are wrong because success is sampled | Reconciliation gap between sampled progress and version distribution | Track version distribution from check-in fingerprints, which are unsampled, and treat that as the source of truth |
+
+**Unresolved**
+
+- **Who pays for the bytes.** On metered connections the user pays, and no amount of engineering makes that decision for you. It is a product and ethics question that determines whether conditions gating is a default or a hard rule, and the answer differs by region and by regulator.
+- **What "done" means.** A permanent ~8% tail makes 100% unreachable, so someone has to sign off on a percentile as the definition of a completed rollout. Until they do, every release looks like a failure on the dashboard.
+- **Whether a forced-update path should exist at all.** The ability to compel 460M devices to take a build in hours is enormously useful during a security incident and enormously dangerous every other day. If it exists it needs two-person control and an audit trail, and the design question is whether to build it before you need it or refuse to build it at all.
+- **How long to support old versions.** The delta matrix, the server-side API surface and the security exposure all scale with the number of live versions, and the deprecation policy is a business decision that the architecture can only make cheaper or more expensive, never resolve.
+#### Drill questions
+1. The interviewer says 500 million devices. What is the first thing you write on the board?
+2. Marketing wants everyone updated in 6 hours. What do you tell them?
+3. Every device checks in at 03:00 local time. What happens?
+4. You are at 5% and crash rate is up 0.4%. Is that the build?
+5. You halt the rollout. What happens to the devices that already updated?
+6. Why not just push the update to every device with a notification?
+7. Why is the artifact working set ~17GB when the release is 11.5PB of traffic?
+8. A carrier outage knocks 40 million devices offline for two hours. What happens when they come back?
+9. Is peer-to-peer distribution worth building here?
+10. Your rollout plateaus at 78% and stops climbing. Diagnose it.
+11. The update breaks the component that performs the update. What now?
+12. How do you know how many devices actually took the update, if you sample success telemetry at 1%?
+13. Why start at 0.1% rather than 5%, when 5% still sounds small?
+#### Answers to drill questions
+1. `460M × 25MB = ~11.5PB`, then that number divided by three candidate durations. 500 million is not a design input on its own; bytes per unit time is. The follow-through is that 14 days is ~76Gbps and 24 hours is ~1.1Tbps for identical bytes, so the real question is what duration anyone will accept. *If pushed:* say explicitly which numbers you invented, the 92% reachability and the 25MB delta, and note that delta size scales the whole thing linearly, so it is the highest-leverage number in the design.
+
+2. That it costs roughly 15× the peak capacity of the routine plan, ~1.1Tbps against ~76Gbps average, and more importantly that it costs the soak time, because you cannot observe a regression in a population that is still downloading. Then offer the actual trade: keep the 0.1% and 1% bands at full duration and compress only the wide bands, which gets most of the speed for most of the safety. *If pushed:* if it is a live security exploit, take the deal and say so, because a day of exposure across 460M devices outweighs both the money and the risk. The decision belongs to whoever owns the exposure, not to the infrastructure.
+
+3. You have built a distributed denial of service against yourself. 500M ÷ 3,600 is ~139k req/s over that hour and far worse in the first minute, against a jittered baseline of ~5,800/s. Fix it with full jitter, `sleep(random(0, interval))`, and by having the server hand out the next check-in time so you can widen the interval globally when in trouble. *If pushed:* note that "03:00 local" is not one event but 24, which sounds better and is not: each timezone still gets its own synchronised spike, and the populous ones are the worst.
+
+4. You cannot tell without a holdback. Crash rate moves for reasons unrelated to your build, so the comparison must be against a concurrent never-updated cohort, not against last week. With a permanent 1% holdback you have 5M devices experiencing the same day, the same third-party outages and the same weather, and the difference is attributable. *If pushed:* require both effect size and significance before halting, because an analyser that halts on noise gets muted within a month, and a muted halt is worse than no halt because everyone believes it is protecting them.
+
+5. Nothing. They keep the bad build. Halting stops admission of new devices and has no recall mechanism, which is exactly how Google Play's halt control behaves and is not a product limitation but the physics: the only way to change a device is for that device to come and ask. Recovery is roll forward, and it is slower than the break was. *If pushed:* this is why the ladder exists at all, and why the first band is 0.1%. It is also why the updater is versioned separately, because if the broken build broke the asking mechanism, there is no forward path either.
+
+6. Because push reachability is worse than polling reachability, and because delivering a notification is not delivering an update. A device that is off receives neither, but a polling device will ask when it wakes, whereas a push is a one-shot you may have already spent. Push is useful as an accelerant for urgent releases, waking devices to poll sooner. *If pushed:* the failure mode of push-as-delivery is that your progress metric becomes "notifications sent", which is a number that looks like progress and is not, and teams reliably confuse the two under incident pressure.
+
+7. Because every device wants the same handful of objects. 12 live source versions × 12 variants = 144 artifacts at ~120MB is ~17GB, small enough that every PoP holds the entire release, so cache hit rate is ~100% and origin load is negligible. The 11.5PB is the same small set of bytes sent 460 million times. *If pushed:* this is the inversion against #51, where a CDN's hard problem is a long tail of unpredictable objects and invalidation. Here caching is free and egress is everything, which is why the design levers are delta size and duration rather than anything cache-shaped.
+
+8. They come back synchronised, which is the correlated event that jitter exists for. On reconnection every one of those 40M devices has a pending check-in, and if the client retries immediately you get a spike orders of magnitude above baseline. Full jitter on reconnect, server-controlled intervals, and load shedding that returns a cheap "nothing for you" rather than an error, since an error triggers a retry and makes it worse. *If pushed:* the subtle version is that equal jitter is not enough after a mass event, because it only spreads over half the interval; you want `random(0, interval)` across the full window.
+
+9. Not at this scale, on the arithmetic. ~$115k per release at $0.01/GB, six releases a year, is ~$700k of egress; a 30% offload saves ~$200k against a subsystem that costs a small team a year plus permanent operational surface. Below ~1PB per release it is never worth it. *If pushed:* the answer flips when devices share unmetered networks, corporate LANs, campuses, set-top boxes behind one router, and the evidence that it works is real: Windows Delivery Optimization reports peers supplying 10% to 50% of update bytes, and Meta's Owl moves over 800PB/day on a tracker-coordinated peer plane. On consumer mobile it is indefensible, because you are spending someone else's data allowance to reduce your own bill.
+
+10. Almost certainly conditions gating rather than anything broken. Devices that are never unmetered, never charged overnight, or never idle simply never become eligible, and they are concentrated in particular regions and price tiers. Check the eligibility funnel, admitted versus eligible versus started versus applied, and you will usually find the drop between admitted and eligible. *If pushed:* the fix is progressive relaxation of conditions as a release ages rather than a global relaxation, and the real fix is organisational, which is agreeing that success is a percentile of active devices and not 100%.
+
+11. You have lost those devices, and this is the one unrecoverable failure in the design, so the answer is prevention. The updater is versioned separately, shipped on its own slower and more conservative track, never changed in the same release as a payload, and kept dependency-minimal. Detection is that admitted cohorts' check-in rate falls below the holdback's, which is the signal you watch precisely because a silent device reports nothing. *If pushed:* concede honestly that if it does happen, the remaining options are non-technical: a manual recovery flow, a support channel, or physical service. Anything you can do remotely requires the device to ask, and it has stopped asking.
+
+12. From the check-in fingerprint, which is unsampled. Every device reports its current version on every check-in as part of the request, so the version distribution across the fleet is a byproduct of a call that already happens, and it is the source of truth for progress. Sampled success events are for latency and quality analysis, not for counting. *If pushed:* the reconciliation gap between the two is itself a useful signal, since a divergence means either sampling bias or devices applying without reporting, and both are worth understanding before anyone quotes a number to a regulator.
+
+13. Because 5% of 500 million is 25 million devices with no recall, against 500,000 at 0.1%, and the statistics do not require the larger number: a 0.5 percentage point crash-rate regression is clearly significant against a 500k cohort within a day of usage. You are paying 24 hours to reduce the blast radius by 50×. *If pushed:* the only honest argument for starting higher is a metric so rare that 500k devices cannot produce enough events, and the correct response to that is to pick a leading indicator you can measure at 500k, not to gamble 25 million devices on it.
+#### Whiteboard script
+**0-5, convert the number before you draw anything.** Write `460M × 25MB = ~11.5PB` and immediately under it the three divisions: 14 days is ~76Gbps, 24 hours is ~1.1Tbps, 6 hours is ~4.3Tbps. Say the thesis out loud, which is that duration is the capacity knob and nobody has told you what duration is acceptable. Ask the two clarifying questions that fork everything: is this routine or a security fix, and can this update break the thing that performs updates.
+
+**5-15, draw two planes and size them separately.** Control plane, check-in and rollout controller, is tiny bytes and huge request count at ~5,800/s. Data plane, artifacts behind a CDN, is huge bytes and trivial request count. Note the ~17GB working set and say that cache hit rate is ~100%, so this is an egress problem, not a caching problem, which is the inversion against #51. Then the release pipeline: deltas per source version and variant, capped at the versions covering ~90% of the fleet, signed and verified on device.
+
+**15-35, the two things you are here to demonstrate.** First, the herd: 500M devices at a fixed hour is ~139k req/s against ~5,800/s jittered, so full jitter, server-assigned intervals, a cheap 200 byte negative, and `not_before` smearing inside each band. Second, halt is not rollback. Say it in those words, then draw the ladder 0.1% → 1% → 5% → 20% → 100% with the device counts on it, and land the punchline that detecting at 0.1% costs 500k devices while detecting at 5% costs 25 million. Add the holdback and explain why an automatic halt without one is superstition. Finish this block with the rule that the updater is versioned separately and never ships with a payload, because it is the only unrecoverable failure in the design.
+
+**35-45, the parts that make it real.** Conditions gating, unmetered, charging, idle, and the admission that this is what actually paces you rather than bandwidth. The long tail: ~8% never take a release, so success is a percentile and the server must support every live version. Progress measured from unsampled check-in fingerprints rather than sampled success events. Concede one gap unprompted, most usefully that a forced-update path is enormously useful in an incident and dangerous every other day, so whether it should exist at all is a governance decision. Leave three minutes.
+
+Cut first: peer assist, which is a one-line "not at this scale, here is the arithmetic". Then the signing key hierarchy and the telemetry pipeline. Do not cut the PB-to-Gbps conversion or the halt-is-not-rollback point, and if you land only one of those, land the conversion, because everything else in the design is downstream of it.
+#### Appendix
+**Data model**
+
+- **releases** (Postgres): `(release_id, target_version, created_at, state, ladder_json, holdback_pct, conditions_json, signing_key_id)`. `state ∈ {DRAFT, ROLLING, HALTED, COMPLETE, SUPERSEDED}`.
+- **artifacts** (object store, key `artifacts/<digest>`; index row in Postgres): `(digest, target_version, source_version | NULL, variant, size_bytes, signature, kind)`. `kind ∈ {DELTA, FULL}`; `source_version IS NULL` for full artifacts. ~144 rows per release.
+- **bands** (Postgres): `(release_id, band_index, admitted_cohort_max, opened_at, min_soak_seconds, smear_window_seconds, status)`. The ladder, as data rather than as a runbook.
+- **device_cohorts** (KV, key `device_id`): `(cohort, assigned_at, holdback_flag, variant, region, carrier_hash)`. Cohort is stable for the life of the device; holdback membership rotates between releases.
+- **checkins** (append-only, partitioned by hour, heavily sampled): `(device_id_hash, ts, current_version, variant, region, outcome)`. The unsampled aggregate of `current_version` is the progress source of truth, so it is rolled up continuously rather than queried raw.
+- **apply_outcomes** (append-only): `(device_id_hash, release_id, result, error_code, duration_ms, reported_at)`. `result ∈ {APPLIED, FAILED_VERIFY, FAILED_APPLY, ROLLED_BACK}`. Success sampled at 1%, failures kept whole.
+- **cohort_health** (time series): `(release_id, cohort_bucket, metric, window, value, holdback_value, delta, ci_low, ci_high)`. What the analyser reads and what a halt decision cites.
+
+**API contract**
+
+```
+POST /v1/checkin        body: { device_token, current_version, variant, region, last_result? }
+                        -> { action: NONE }
+                         | { action: UPDATE, url, digest, signature, size_bytes,
+                             not_before, conditions: [UNMETERED, CHARGING, IDLE],
+                             backoff: {base_s, max_s, jitter: FULL} }
+                        + always: { next_checkin_after_s }        (server controls the interval)
+
+GET  /artifacts/{digest}                    -> bytes (CDN, immutable, range requests supported)
+
+POST /v1/report         body: { device_token, release_id, result, error_code?, duration_ms }
+                        -> { ok }                                  (batched onto the next check-in)
+
+-- control plane, operator-facing
+POST /v1/releases                  body: { target_version, ladder, holdback_pct, conditions }
+POST /v1/releases/{id}/bands/next  -> { band_index, admitted_cohort_max, opened_at }
+POST /v1/releases/{id}/halt        body: { reason, cited_metric }  -> { halted_at, devices_admitted }
+GET  /v1/releases/{id}/progress    -> { admitted, eligible, started, applied, failed,
+                                        version_distribution, percentile_reached }
+GET  /v1/releases/{id}/health      -> [{ metric, cohort_value, holdback_value, delta, ci, verdict }]
+```
+
+**Observability**
+
+- **Version distribution across the fleet** (share of check-ins per `current_version`, unsampled): the single source of truth for progress. Everything else is an estimate; this is a census taken by a call that already happens.
+- **Eligibility funnel** (admitted → eligible → started → applied, per band): SLO no stage losing more than 20% unexplained. This is where "the rollout plateaued" gets diagnosed, and the usual culprit is the admitted-to-eligible step, meaning conditions gating.
+- **Check-in rate against baseline** (requests/s versus the ~5,800/s expected): both directions matter. A spike means the fleet has resynchronised; a *drop confined to admitted cohorts* is the signature of the release breaking the update client, and it is the most important alert in the system.
+- **Cohort health delta versus holdback** (crash rate, battery, engagement, with confidence intervals): the input to automatic halt. Alert on effect size and significance together, never on either alone.
+- **Egress rate and cost burn** (Gbps and cumulative PB against the release plan): SLO within 20% of the planned pace. Running hot means the ladder is widening faster than intended; running cold usually means eligibility, not bandwidth.
+- **Artifact cache hit ratio at edge** (SLO above 99%): expected to be near perfect given a ~17GB working set. Anything lower means artifacts are not pre-positioned before a band opens.
+- **Verification failure rate** (`FAILED_VERIFY` per million): SLO effectively zero, alert on any sustained non-zero rate, because it is either corruption on a specific network path or something far worse.
+- **Time to halt** (regression first observable to admission stopped): SLO under 30 minutes. This is the only latency number in the system that is worth optimising, because every minute of it is measured in devices.
+
+**Multi-region and DR**
+
+- **Replication mode:** the data plane is a CDN and is globally replicated by construction; artifacts are immutable and content addressed, so there is no consistency question. The control plane runs active-active across three regions behind anycast, with rollout state in a replicated store; check-in reads vastly outnumber writes, so regional read replicas serve the ~95% negative path locally.
+- **RTO:** ~2 minutes for the check-in tier, which is the number that matters, since it is the only channel to a device. Rollout controller and analyser tolerate ~30 minutes, because a stalled rollout is safe and a rushed one is not.
+- **RPO:** zero for artifacts and signing metadata. Cohort assignments tolerate loss and can be regenerated deterministically from the device token, which is a good reason to derive them that way. Check-in telemetry tolerates minutes of loss, since the version census is continuously recomputed.
+- **Degraded mode:** if the control plane is unavailable the check-in path serves a static "nothing for you", which stalls the rollout without breaking any device. This is deliberately the safe failure, and its cost is that a control-plane outage is silent, so alert on rollout progress flatlining rather than trusting the absence of errors.
+- **The failure that actually matters:** losing the ability to halt while a bad build is admitting. Keep the halt path independent of the analyser and the release pipeline, make it a single write that the check-in tier reads on its normal path, and rehearse it quarterly. Halting must work when everything upstream is broken, because that is the only circumstance in which anyone reaches for it.
