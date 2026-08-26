@@ -25,21 +25,21 @@ MOBILE="$ROOT/mobile/assets/content"
 # AND the vault note has been updated from web/public/patterns.md, not the
 # other way round.
 # cp "$VAULT/System-Design-Patterns.md"             "$WEB/patterns.md"
-# FROZEN: neetcode 9-section migration. neetcode-150.md is being restructured
+# FROZEN: neetcode 9-section migration. neetcode-250.md is being restructured
 # in-repo (Examples + Recognition sections, brute-force-to-optimal progression).
 # The vault copy is the OLD 8-section version, so syncing it would silently
 # revert the whole migration. Same unfreeze rule as above: update the vault
-# note FROM web/public/neetcode-150.md, then re-enable.
-# cp "$VAULT/Neet-150-Pattens.md"                   "$WEB/neetcode-150.md"
+# note FROM web/public/neetcode-250.md, then re-enable.
+# cp "$VAULT/Neet-150-Pattens.md"                   "$WEB/neetcode-250.md"
 cp "$VAULT/Java Interview Primer - 100 Questions.md" "$WEB/java-interview-primer.md"
 # Kotlin primer is authored directly in web/public (no vault source yet).
-echo "Synced 1 file from $VAULT into $WEB/ (patterns.md + neetcode-150.md frozen, see above)"
+echo "Synced 1 file from $VAULT into $WEB/ (patterns.md + neetcode-250.md frozen, see above)"
 
 # Mirror to mobile/assets/content/ if mobile exists
 if [ -d "$ROOT/mobile" ]; then
 	mkdir -p "$MOBILE"
 	cp "$WEB/patterns.md" "$MOBILE/patterns.md"
-	cp "$WEB/neetcode-150.md" "$MOBILE/neetcode-150.md"
+	cp "$WEB/neetcode-250.md" "$MOBILE/neetcode-250.md"
 	cp "$WEB/java-interview-primer.md" "$MOBILE/java-interview-primer.md"
 	cp "$WEB/kotlin-interview-primer.md" "$MOBILE/kotlin-interview-primer.md"
 	# Bundled-fallback manifest — kept in lockstep with web/public so a fresh

@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from nc_harness import ADAPTERS, COMPARE_MODES, NAIVE_SKIP, OVERRIDES, PRELUDE  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MD = os.path.join(ROOT, "web/public/neetcode-150.md")
+MD = os.path.join(ROOT, "web/public/neetcode-250.md")
 
 OK, FAIL, ERROR, TIMEOUT, SKIP, MISCONF, NAIVE_MISMATCH = (
     "OK",

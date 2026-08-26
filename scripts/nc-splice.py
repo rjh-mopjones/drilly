@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Splice authored problem fragments back into neetcode-150.md.
+"""Splice authored problem fragments back into neetcode-250.md.
 
 Usage: nc-splice.py <fragment.md> [...]
 Each fragment must start with `### N. Title` matching an existing question.
 """
 import os, re, sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-P = os.path.join(ROOT, "web/public/neetcode-150.md")
+P = os.path.join(ROOT, "web/public/neetcode-250.md")
 text = open(P, encoding="utf-8").read()
 for f in sys.argv[1:]:
     frag = open(f, encoding="utf-8").read().strip() + "\n"
@@ -27,6 +27,6 @@ for f in sys.argv[1:]:
     tail = old.group(0)[len(old.group(0).rstrip()):]
     text = text[: old.start()] + frag.rstrip() + tail + text[old.end():]
     print(f"spliced Q{n} ({len(frag.split())} words)")
-# NOTE: no blank-line collapse here. neetcode-150.md separates items with a
+# NOTE: no blank-line collapse here. neetcode-250.md separates items with a
 # blank line before each `### N.`, and squashing those would rewrite all 150.
 open(P, "w", encoding="utf-8").write(text)

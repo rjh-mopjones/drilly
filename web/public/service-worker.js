@@ -20,7 +20,7 @@
  * CACHE_VERSION — the old cache is deleted on activate.
  */
 
-const CACHE_VERSION = "v14";
+const CACHE_VERSION = "v15";
 const CACHE = `drilly-${CACHE_VERSION}`;
 
 const MERMAID_CDN =
@@ -39,7 +39,7 @@ const FONT_URLS = [
 const CONTENT_URLS = [
   "/manifest.json",
   "/patterns.md",
-  "/neetcode-150.md",
+  "/neetcode-250.md",
   "/java-interview-primer.md",
   "/go-interview-primer.md",
   "/rust-interview-primer.md",
@@ -48,8 +48,6 @@ const CONTENT_URLS = [
   "/postgres-interview-primer.md",
   "/db-theory-primer.md",
   "/sql-patterns-primer.md",
-  "/sql-practice.md",
-  "/advanced-sql-practice.md",
   "/csharp-interview-primer.md",
   "/ai-engineering-primer.md",
   "/sql-postgres-cheatsheet.html",

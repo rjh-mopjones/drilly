@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate web/public/neetcode-150.md against the 9-section format.
+"""Validate web/public/neetcode-250.md against the 9-section format.
 
 Items are authored in batches, so an item still carrying a `TODO` Examples stub
 is reported as unauthored rather than failing. --strict requires all 150.
@@ -21,8 +21,8 @@ import re
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-WEB_MD = os.path.join(ROOT, "web/public/neetcode-150.md")
-MOBILE_MD = os.path.join(ROOT, "mobile/assets/content/neetcode-150.md")
+WEB_MD = os.path.join(ROOT, "web/public/neetcode-250.md")
+MOBILE_MD = os.path.join(ROOT, "mobile/assets/content/neetcode-250.md")
 WEB_MANIFEST = os.path.join(ROOT, "web/public/manifest.json")
 MOBILE_MANIFEST = os.path.join(ROOT, "mobile/assets/content/manifest.json")
 UP_PARSER = os.path.join(ROOT, "packages/parser/src/parser.ts")
@@ -285,10 +285,10 @@ def check_config(rep):
         ):
             rep.err(
                 "S5",
-                "web and mobile copies of neetcode-150.md differ; re-copy the mirror",
+                "web and mobile copies of neetcode-250.md differ; re-copy the mirror",
             )
     else:
-        rep.warn("S5", "mobile/assets/content/neetcode-150.md missing")
+        rep.warn("S5", "mobile/assets/content/neetcode-250.md missing")
 
 
 def main():
@@ -304,8 +304,8 @@ def main():
     items = split_items(text)
 
     ids = [i for i, _, _ in items]
-    if len(items) != 150:
-        rep.err("S1", f"{len(items)} items, want 150")
+    if len(items) != 250:
+        rep.err("S1", f"{len(items)} items, want 250")
     if ids != sorted(ids):
         rep.err("S1", "item ids are not ascending")
     if len(set(ids)) != len(ids):

@@ -177,17 +177,17 @@ ADAPTERS: dict[str, tuple[str, str]] = {
 OVERRIDES: dict[int, dict] = {
     # Clone Graph's parameter is `node`, too generic to key on globally, so the
     # graph adapter is bound per item instead.
-    84: {"adapters": {"node": ("build_graph", "dump_graph")}},
+    148: {"adapters": {"node": ("build_graph", "dump_graph")}},
     # hasCycle(head) takes no `pos`, but a cycle cannot be written as a JSON
     # array, so `pos` feeds the builder and never reaches the solution.
-    44: {
+    76: {
         "adapters": {"head": ("build_cycle_list", "dump_list")},
         "consume": {"head": ["pos"]},
     },
     # copyRandomList's input is [[val, randomIndex|null], ...], which build_list
     # cannot express, and the clone has to be re-encoded the same way rather
     # than dumped as a plain value list.
-    43: {
+    79: {
         "adapters": {"head": ("build_random_list", "dump_random_list")},
         "result": "dump_random_list",
     },
@@ -202,7 +202,7 @@ NAIVE_SKIP: set[int] = set()
 # convention, not because the answer is unique. If the harness suddenly fails one
 # of these after an edit, suspect the convention before suspecting the content.
 TIE_SENSITIVE: dict[int, str] = {
-    4: "Longest Palindromic Substring: 'babad' admits both 'bab' and 'aba'. "
+    179: "Longest Palindromic Substring: 'babad' admits both 'bab' and 'aba'. "
        "The shipped solution and the naive snippet both scan i ascending and "
        "keep a strictly-longer match, so both return 'bab'. Preserve that scan "
        "order in either implementation or the example must change.",

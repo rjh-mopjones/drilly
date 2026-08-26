@@ -86,8 +86,8 @@ export const SOURCES: Record<SourceId, SourceConfig> = {
   },
   neetcode: {
     id: "neetcode",
-    file: "/neetcode-150.md",
-    title: "NeetCode 150",
+    file: "/neetcode-250.md",
+    title: "NeetCode 250",
     itemLabel: "Problem",
     itemsPlural: "interview problems",
     storagePrefix: "sdf:neetcode",
