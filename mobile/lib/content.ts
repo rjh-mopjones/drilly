@@ -29,7 +29,7 @@ const REMOTE_BASE = "https://drilly-rjh-mopjones-projects.vercel.app";
 // here (they fall back to "show empty" rather than a stale bundle).
 const BUNDLED: Record<string, number> = {
   patterns: require("../assets/content/patterns.md"),
-  neetcode: require("../assets/content/neetcode-150.md"),
+  neetcode: require("../assets/content/neetcode-250.md"),
   java: require("../assets/content/java-interview-primer.md"),
 };
 

@@ -256,8 +256,8 @@
     },
     {
       "id": "neetcode",
-      "file": "/neetcode-150.md",
-      "title": "NeetCode 150",
+      "file": "/neetcode-250.md",
+      "title": "NeetCode 250",
       "category": "Data Structures & Algorithms",
       "itemLabel": "Problem",
       "itemsPlural": "interview problems",
@@ -277,7 +277,7 @@
         "Go",
         "C++"
       ],
-      "itemCount": 150
+      "itemCount": 250
     },
     {
       "id": "leetcode-design",
