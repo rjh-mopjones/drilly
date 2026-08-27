@@ -3,11 +3,15 @@ import {
   ReactFlow,
   Background,
   BackgroundVariant,
+  BaseEdge,
   Controls,
+  EdgeLabelRenderer,
   Handle,
   Position,
   MarkerType,
+  getSmoothStepPath,
   type Edge,
+  type EdgeProps,
   type Node,
   type NodeProps,
 } from "@xyflow/react";
@@ -152,7 +156,75 @@ function ZoneNode({ data }: NodeProps) {
   );
 }
 
+/**
+ * Edge whose label is portalled into React Flow's label layer, which sits
+ * ABOVE the node layer. The default label lives in the edge SVG underneath the
+ * nodes, so any edge routing across a box loses its label entirely: the text is
+ * drawn, just hidden. Spacing alone cannot fix that, because the collision is
+ * with a node the edge passes over rather than with the gap it sits in.
+ */
+function LabelledEdge({
+  id,
+  sourceX,
+  sourceY,
+  targetX,
+  targetY,
+  sourcePosition,
+  targetPosition,
+  style,
+  markerEnd,
+  label,
+  data,
+}: EdgeProps) {
+  const d = (data ?? {}) as { offset?: number; fg?: string; bg?: string; border?: string };
+  const [path, labelX, labelY] = getSmoothStepPath({
+    sourceX,
+    sourceY,
+    targetX,
+    targetY,
+    sourcePosition,
+    targetPosition,
+    borderRadius: 10,
+    offset: d.offset ?? 20,
+  });
+  return (
+    <>
+      <BaseEdge id={id} path={path} style={style} markerEnd={markerEnd} interactionWidth={26} />
+      {label ? (
+        <EdgeLabelRenderer>
+          <div
+            style={{
+              position: "absolute",
+              transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
+              padding: "2px 6px",
+              borderRadius: 4,
+              background: d.bg,
+              border: `1px solid ${d.border}`,
+              color: d.fg,
+              fontFamily: UI_FONT,
+              fontSize: 11.5,
+              whiteSpace: "nowrap",
+              pointerEvents: "none",
+            }}
+          >
+            {label}
+          </div>
+        </EdgeLabelRenderer>
+      ) : null}
+    </>
+  );
+}
+
 const NODE_TYPES = { box: BoxNode, zone: ZoneNode };
+const EDGE_TYPES = { labelled: LabelledEdge };
+
+/**
+ * React Flow emits .react-flow__edgelabel-renderer BEFORE .react-flow__nodes in
+ * the DOM and leaves both at `z-index: auto`, so paint order alone puts edge
+ * labels underneath every node. Lift the label layer so a label on an edge that
+ * routes across a box stays readable.
+ */
+const LABEL_LAYER_CSS = ".react-flow__edgelabel-renderer { z-index: 6; }";
 
 /**
  * Re-space the authored grid so edge labels have room.
@@ -361,8 +433,13 @@ export default function ArchDiagram({
                 : palette.text;
         return {
           id: e.id,
-          type: "smoothstep",
-          pathOptions: { borderRadius: 10, offset: e.offset ?? 20 },
+          type: "labelled",
+          data: {
+            offset: e.offset ?? 20,
+            fg: isSel ? palette.accent : palette.textMuted,
+            bg: palette.bg,
+            border: palette.border,
+          },
           source: e.from,
           target: e.to,
           sourceHandle: e.fromSide ?? "bottom",
@@ -379,14 +456,6 @@ export default function ArchDiagram({
             cursor: "pointer",
             transition: "opacity 140ms ease, stroke-width 140ms ease",
           },
-          labelStyle: {
-            fill: isSel ? palette.accent : palette.textMuted,
-            fontSize: 11.5,
-            fontFamily: UI_FONT,
-          },
-          labelBgStyle: { fill: palette.bg },
-          labelBgPadding: [5, 3] as [number, number],
-          labelBgBorderRadius: 4,
           markerEnd: { type: MarkerType.ArrowClosed, color: stroke, width: 16, height: 16 },
         };
       }),
@@ -416,10 +485,12 @@ export default function ArchDiagram({
       ref={wrapRef}
       style={{ position: "relative", width: "100%", height: "100%", fontFamily: UI_FONT }}
     >
+      <style>{LABEL_LAYER_CSS}</style>
       <ReactFlow
         nodes={nodes}
         edges={edges}
         nodeTypes={NODE_TYPES}
+        edgeTypes={EDGE_TYPES}
         onNodeClick={onNodeClick}
         onEdgeClick={onEdgeClick}
         onPaneClick={() => setSel(null)}
