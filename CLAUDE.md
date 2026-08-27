@@ -81,6 +81,10 @@ under the next box, so spacing is a correctness concern rather than taste.
   changes nothing: paint order still puts labels underneath every node. Spacing
   cannot fix this case either, because the collision is with a node the edge
   routes *across* rather than with the gap the label sits in.
+- `LabelledEdge` also nudges a label clear of any box its midpoint lands on
+  (see the `boxes` it receives in edge `data`). Without it the label is readable
+  but sits on top of that node's own title. Label-on-label overlap is the
+  accepted residue; it beats covering a component name.
 - Careful with automated collision checks. Geometric overlap no longer implies
   hidden, and `document.elementFromPoint` is useless here because the label divs
   are `pointer-events: none`, so it reports every label as covered. The reliable

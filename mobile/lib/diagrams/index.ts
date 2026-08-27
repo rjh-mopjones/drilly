@@ -5,6 +5,11 @@
  */
 import type { Diagram } from "./types";
 import { WEB_CRAWLER } from "./web-crawler";
+import { MESSAGE_QUEUE } from "./message-queue";
+import { GOOGLE_MAPS } from "./google-maps";
+import { NEARBY_FRIENDS } from "./nearby-friends";
+import { PROXIMITY_SERVICE } from "./proximity-service";
+import { GOOGLE_DRIVE } from "./google-drive";
 import { YOUTUBE } from "./youtube";
 import { SEARCH_AUTOCOMPLETE } from "./search-autocomplete";
 import { CHAT_SYSTEM } from "./chat-system";
@@ -20,6 +25,11 @@ export * from "./types";
 
 export const DIAGRAMS: Record<string, Diagram> = {
   "web-crawler": WEB_CRAWLER,
+  "message-queue": MESSAGE_QUEUE,
+  "google-maps": GOOGLE_MAPS,
+  "nearby-friends": NEARBY_FRIENDS,
+  "proximity-service": PROXIMITY_SERVICE,
+  "google-drive": GOOGLE_DRIVE,
   "youtube": YOUTUBE,
   "search-autocomplete": SEARCH_AUTOCOMPLETE,
   "chat-system": CHAT_SYSTEM,
