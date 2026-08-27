@@ -48,6 +48,11 @@ The algorithm is a thirty second discussion. Token bucket, or GCRA which is the 
   ```
 - On store timeout (over 5ms), log it and return `ALLOW` for quota limits; the scarce-resource limits on the same gateway reject instead.
 - Return `429` with `Retry-After`, `X-RateLimit-Limit` and `X-RateLimit-Remaining` on deny.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/rate-limiter).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you treat the limiter as protective infrastructure rather than as an accounting system. Everything that matters follows from admitting that the number is approximate on purpose: you choose how much inaccuracy to buy, from whom, and in exchange for what. Accuracy is bought with a round trip on every request and a hard dependency on a store; looseness is bought with `N × limit` overshoot; and the only question the interviewer is really waiting for is what the system does when the counter is unavailable, because that is where a candidate reveals whether they think the limiter is load-bearing.
 
@@ -553,6 +558,11 @@ Everything remaining is membership. Every node computes the same mapping locally
   primary = ring_positions[idx].server
   replicas = next 2 distinct physical servers clockwise
   ```
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/consistent-hashing).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you evaluate a mapping by how much of it changes, not by how well it spreads. Any decent hash spreads keys. The question is what happens to the mapping when the inputs to it change, and the answer follows from one structural property: under modulo, every key's answer depends on N, a global quantity, so changing N changes every answer. On a ring, a key's answer depends only on its nearest node in one direction, a local quantity, so changing membership only changes answers near the change. A candidate who states that distinction can rederive everything else on the spot, including why scoring every server works for the same reason: a key's answer depends on the per-server score, so removing a server only disturbs the keys it happened to win.
 
@@ -919,6 +929,11 @@ The residue is concurrent writes to one key. Timestamps alone lose data under cl
   wait_for(futures, count=W)  # return to client after W acks
   background: hinted_handoff for any unreachable replica
   ```
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/distributed-kv-store).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you understand that a leaderless store does not remove the need to agree about a key. It moves the agreement from write time to read time, and someone still pays. `W + R > N` is the line that separates a candidate who read the 2007 Dynamo paper from one who understood it, but only if they state what it actually says: the set of replicas that acknowledged a write and the set that answers a read must intersect, so a read is guaranteed to reach at least one replica holding the last acknowledged write. That is an overlap property and nothing more. It does not order concurrent writes, it does not make two successive reads agree, and it does not make read-modify-write safe at any W and R. Everything an interviewer pushes on lives in that gap: which of the returned versions is later, what happens when neither is, who decides, and what the store does with a delete when a replica that missed it is still allowed to answer reads. Saying "Cassandra is eventually consistent" classifies the system instead of describing the knob. Consistency here is per request, not per system: one keyspace serves a W=R=2 caller and a W=R=1 caller in the same second.
 
@@ -1343,6 +1358,11 @@ Scale by adding workers. The ceiling is the 1024 slots, not the rate.
   Everything it reads is process-local. That is the property to protect.
 - Custom epoch set to the launch date; burn no bits on ancient history.
 - Leap-smearing time source fleet-wide, so a leap second is a slow slew rather than a one-second rewind.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/unique-id-generator).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you notice what this design actually did. It did not solve distributed uniqueness, it removed the need to solve it. No two generators can produce the same triple of worker, millisecond and sequence, because the number space was cut into disjoint slices before the first request was served. Nothing is verified at runtime, and there is no code path that detects a collision, because a collision is supposed to be structurally impossible. The price is that a guarantee by construction is only as strong as its premises, and one premise is that a wall clock moves forward. So the interview converges on a hardware fact. A candidate who recites 41 / 10 / 12 has memorised a layout. One who says "I traded a coordination problem for a clock problem, and here is what happens when the trade goes bad" has understood the design.
 
@@ -1652,6 +1672,11 @@ Click events go onto a queue fire-and-forget. The redirect never waits on analyt
     return 302, url
   ```
 - Use 301 only if you are certain the destination is permanent and nobody is paying for click reports.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/url-shortener).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you notice that the thing being served is immutable and identical for every reader, and that this is what makes the read path cacheable all the way to the browser. Once you see it, the remaining engineering is a single trade repeated at three layers: each step further from the origin is cheaper and faster, and each step costs you fidelity in what you can measure and speed in what you can retract. A candidate who treats this as a database question, and spends the hour on sharding and collision probability, has missed that the database is barely in the read path at all.
 
