@@ -2,6 +2,7 @@ import { useCallback, useMemo, useState } from "react";
 import { Pressable, Text, StyleSheet } from "react-native";
 import * as Clipboard from "expo-clipboard";
 import type { Pattern, SourceConfig } from "../lib/parser";
+import { diagramToMarkdown, getDiagramForItem } from "../lib/diagrams";
 import { useTheme, type Palette } from "../lib/theme";
 
 interface Props {
@@ -13,6 +14,10 @@ interface Props {
  * Build a Markdown serialisation of an entire item — title heading plus
  * one `## Section` block per parsed section. Designed to paste straight
  * into Claude / ChatGPT / a notes app for follow-up questions.
+ *
+ * If the item has an interactive diagram, its content is appended too. The
+ * "Interactive diagram" section in the markdown is only a link, so without
+ * this the copy would carry a URL instead of the explanations behind it.
  */
 function buildCopy(item: Pattern, source: SourceConfig): string {
   const lines: string[] = [
@@ -24,6 +29,10 @@ function buildCopy(item: Pattern, source: SourceConfig): string {
     lines.push("");
     lines.push(s.content.trim());
     lines.push("");
+  }
+  const diagram = getDiagramForItem(source.id, Number(item.id));
+  if (diagram) {
+    lines.push(diagramToMarkdown(diagram));
   }
   return lines.join("\n").trim() + "\n";
 }
