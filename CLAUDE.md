@@ -74,10 +74,19 @@ under the next box, so spacing is a correctness concern rather than taste.
 - **Edge labels must be <= 28 characters.** Longer ones collide even at the
   minimum gutter. `check-spec.ts` warns. Put the detail in the edge's `detail`,
   which is what clicking the arrow shows, not in the label.
-- Verify with `scratchpad/dg/overlap.js`, which measures actual on-screen
-  collisions between edge labels and node boxes. It must report zero. Exclude
-  `.react-flow__node-zone` from any such check: labels legitimately sit inside
-  zone bounds, and counting those produces false positives.
+- Edge labels are rendered through `EdgeLabelRenderer` **and** the label layer
+  is lifted with `LABEL_LAYER_CSS` (`z-index: 6`). Both are required. React Flow
+  emits `.react-flow__edgelabel-renderer` *before* `.react-flow__nodes` in the
+  DOM and leaves both at `z-index: auto`, so using the label renderer alone
+  changes nothing: paint order still puts labels underneath every node. Spacing
+  cannot fix this case either, because the collision is with a node the edge
+  routes *across* rather than with the gap the label sits in.
+- Careful with automated collision checks. Geometric overlap no longer implies
+  hidden, and `document.elementFromPoint` is useless here because the label divs
+  are `pointer-events: none`, so it reports every label as covered. The reliable
+  signals are the computed `z-index` of the label layer and looking at a
+  screenshot. Any rectangle-based check must also exclude
+  `.react-flow__node-zone`, since labels legitimately sit inside zone bounds.
 
 ### The "Interactive diagram" section is optional
 

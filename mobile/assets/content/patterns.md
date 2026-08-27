@@ -2589,6 +2589,11 @@ The volume is trivial, so the choice is not about throughput. It is about what y
       else: raise
   ```
 - On APNs 429, honour the `Retry-After` header in preference to your own backoff curve and wait exactly as long as APNs asks, or the throttle extends.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/notification-system).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you can state a delivery guarantee precisely and then say where it stops. The honest claim is at-least-once with duplicate suppression at four hops, which is observably exactly-once and is a different sentence from exactly-once. Nothing above the provider can do better, because a call to APNs is an HTTP request with no transaction to enrol in, and the hop after that, provider to handset, is not yours at all. A candidate who promises exactly-once has failed the question. A candidate who names the four hops, says which one they cannot cover, and picks a retry budget that stops rather than one that runs forever, has passed it.
 
@@ -3037,6 +3042,11 @@ The threshold is the design. Raise it and cache write load doubles; lower it and
     posts = hydrate(db.batch_get(candidates), viewer=user_id)
     return ranker.score(posts, user_id)[:50]
   ```
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/news-feed).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you can say why the threshold exists, not just that it does.
 
@@ -3445,6 +3455,11 @@ The fork that reshapes the rest is end-to-end encryption. It removes server-side
     ws.send({type: ack, server_msg_id: msg_id})                 # then ack
     bus.publish(route(msg.chat_id), msg_id)                     # then deliver
   ```
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/chat-system).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you can see that the real-time part is the easy part. The socket is a latency optimisation over a store-and-forward system, and every hard question in the interview lives in the durable path: what the sender's tick actually promises, what a device asks for when it comes back after three weeks, what happens to a message that was written but never pushed. A candidate who opens with WebSockets and connection pooling has picked the layer that scales linearly with boxes and skipped the layer that does not.
 
@@ -3944,6 +3959,11 @@ Personalization stays off the shared structure. The index is global; the user's 
     return policy_filter(merge(base, overlay))[:10]
   # personal history is merged client-side, so this response stays cacheable
   ```
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/search-autocomplete).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you recognise that the answer to a prefix can be enumerated in advance, and that this single fact relocates the entire system. There are on the order of 10^8 prefixes worth serving and the answer to each is ten short strings, so the complete answer space is small enough to compute offline and hold in memory. Once you see that, the interview stops being about matching and starts being about the build and serve split: what the build cadence is, what freshness that cadence costs you, what you bolt on beside the snapshot to recover it, and how you get a new snapshot into a fleet without serving garbage for an hour. A candidate who reaches for an index and a scoring pass at request time has answered a harder question than the one asked.
 
@@ -4374,6 +4394,11 @@ Storage tiers on last access, and renditions for cold titles are deleted and reg
 - Packaging: CMAF fragmented MP4 written once, HLS and DASH manifests generated over the same objects.
 - Serving: segments at content-addressed URLs with `Cache-Control: public, max-age=31536000, immutable`; manifests at `max-age=60`.
 - Escalation: view-velocity counters in Redis, a threshold job that re-enqueues the video for the upper rungs.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/youtube).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you notice that the expensive work has to be committed before the information that would justify it exists. Transcoding, storage and edge placement all cost real money per video, and the demand distribution that decides whether that money was well spent is not known for hours or days. A candidate who describes a seven-rung ladder, replication, and global pre-positioning has designed a system that is correct and about three times more expensive than it needs to be, and has not noticed that the interesting engineering is the policy layer deciding which videos deserve which treatment. The second half of the same insight is that this is the only design in the media cluster where the content itself is untrusted, so publication is a gated event rather than a deployment step.
 

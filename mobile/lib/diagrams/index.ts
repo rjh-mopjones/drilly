@@ -5,6 +5,11 @@
  */
 import type { Diagram } from "./types";
 import { WEB_CRAWLER } from "./web-crawler";
+import { YOUTUBE } from "./youtube";
+import { SEARCH_AUTOCOMPLETE } from "./search-autocomplete";
+import { CHAT_SYSTEM } from "./chat-system";
+import { NEWS_FEED } from "./news-feed";
+import { NOTIFICATION_SYSTEM } from "./notification-system";
 import { URL_SHORTENER } from "./url-shortener";
 import { UNIQUE_ID_GENERATOR } from "./unique-id-generator";
 import { DISTRIBUTED_KV_STORE } from "./distributed-kv-store";
@@ -15,6 +20,11 @@ export * from "./types";
 
 export const DIAGRAMS: Record<string, Diagram> = {
   "web-crawler": WEB_CRAWLER,
+  "youtube": YOUTUBE,
+  "search-autocomplete": SEARCH_AUTOCOMPLETE,
+  "chat-system": CHAT_SYSTEM,
+  "news-feed": NEWS_FEED,
+  "notification-system": NOTIFICATION_SYSTEM,
   "url-shortener": URL_SHORTENER,
   "unique-id-generator": UNIQUE_ID_GENERATOR,
   "distributed-kv-store": DISTRIBUTED_KV_STORE,
