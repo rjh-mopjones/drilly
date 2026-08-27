@@ -176,7 +176,13 @@ function LabelledEdge({
   label,
   data,
 }: EdgeProps) {
-  const d = (data ?? {}) as { offset?: number; fg?: string; bg?: string; border?: string };
+  const d = (data ?? {}) as {
+    offset?: number;
+    fg?: string;
+    bg?: string;
+    border?: string;
+    boxes?: { x: number; y: number; w: number; h: number }[];
+  };
   const [path, labelX, labelY] = getSmoothStepPath({
     sourceX,
     sourceY,
@@ -187,6 +193,18 @@ function LabelledEdge({
     borderRadius: 10,
     offset: d.offset ?? 20,
   });
+  // The midpoint of an edge that routes across a box lands on that box. The
+  // label is drawn above the node layer so it stays readable, but it would sit
+  // on top of the node's own title, so slide it clear of whichever box it hit.
+  let ly = labelY;
+  for (const b of d.boxes ?? []) {
+    if (labelX < b.x || labelX > b.x + b.w || ly < b.y || ly > b.y + b.h) continue;
+    const above = b.y - 12;
+    const below = b.y + b.h + 12;
+    ly = ly - b.y < b.y + b.h - ly ? above : below;
+    break;
+  }
+
   return (
     <>
       <BaseEdge id={id} path={path} style={style} markerEnd={markerEnd} interactionWidth={26} />
@@ -195,7 +213,7 @@ function LabelledEdge({
           <div
             style={{
               position: "absolute",
-              transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
+              transform: `translate(-50%, -50%) translate(${labelX}px, ${ly}px)`,
               padding: "2px 6px",
               borderRadius: 4,
               background: d.bg,
@@ -417,6 +435,14 @@ export default function ArchDiagram({
     [diagram, palette, sel, lit],
   );
 
+  const boxRects = useMemo(
+    () =>
+      diagram.nodes
+        .filter((n) => n.kind !== "group")
+        .map((n) => ({ x: n.x, y: n.y, w: n.w ?? 240, h: n.h ?? 76 })),
+    [diagram],
+  );
+
   const edges: Edge[] = useMemo(
     () =>
       diagram.edges.map((e) => {
@@ -435,6 +461,7 @@ export default function ArchDiagram({
           id: e.id,
           type: "labelled",
           data: {
+            boxes: boxRects,
             offset: e.offset ?? 20,
             fg: isSel ? palette.accent : palette.textMuted,
             bg: palette.bg,
@@ -459,7 +486,7 @@ export default function ArchDiagram({
           markerEnd: { type: MarkerType.ArrowClosed, color: stroke, width: 16, height: 16 },
         };
       }),
-    [diagram, palette, sel, lit],
+    [diagram, palette, sel, lit, boxRects],
   );
 
   const onNodeClick = useCallback((_e: unknown, n: Node) => {

@@ -4840,6 +4840,11 @@ Commit is a compare and swap on the parent version. Two devices committing again
   POST /file/commit {file_id, parent_version, hashes, metadata}
   ```
 - On reconnect: `GET /journal?since={cursor}` then replay operations, transferring only the chunks the local tree lacks.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/google-drive).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you can tell a storage problem from a replication problem. The bytes are the easy half and you should buy them. The real question is how several replicas, some unplugged for a week, agree on the state of a tree. Every interesting answer is forced by one fact: the system cannot read the files. It sees opaque bytes with no notion of a line, a cell, or a paragraph, so it has no merge function, so concurrent edits cannot be resolved automatically, so the design has to make conflicts rare and hand the survivors to a human. A candidate who spends the hour on erasure coding and replication factor has answered question 21 by accident.
 
@@ -5257,6 +5262,11 @@ The choice is not taste. It turns on two measured things: what a single candidat
   cache.set((block[0], mask, radius_bucket, 1), page, ttl=60)
   ```
 - Coordinate edits since the last build land in a small overlay map consulted alongside the artifact.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/proximity-service).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you understand that spatial locality has to be manufactured, and that the manufactured key is lossy in a specific way you then have to pay for. Cell ids give you locality in one dimension out of two, so a circle becomes a block of boxes, the block over-covers by roughly 3.6×, and every downstream decision (how many neighbour rings to read, what precision to pick, what to put inside an index entry, what to key the cache on) is a consequence of that loss rather than an independent choice. A candidate who names geohash in the first thirty seconds has skipped the only interesting part, which is what happens between "I have a cell id" and "I have twenty ranked results".
 
@@ -5733,6 +5743,11 @@ Ship the second and third together: poll for the map, push for the crossing.
           publish(f"user.crossing.{user_id}", friend_id, ts)
   ```
 - Map read path: `GET /nearby` returns the positions of the caller's online, permitted friends, permission joined on the read, at whatever precision the pair has agreed.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/nearby-friends).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you notice that when the indexed points move, the index stops being a read-side asset and becomes a write-side cost. Candidates hear "nearby" and start rebuilding a spatial index over all users, then find themselves re-indexing a billion moving points ten million times a second to answer a question whose candidate set was handed to them for free by the friend graph. The unlock is seeing that a 200-entry friend list is a better filter than any cell scheme, that the read path therefore needs no spatial structure at all, and that the only remaining job for one is deciding which shard a write lands on. Q13 settles which cell scheme; borrow that answer rather than re-deriving it, and be explicit that you are using it for placement rather than for lookup.
 
@@ -6235,6 +6250,11 @@ Separately, the map tiles on screen were rendered offline, stored in object stor
   eta     = eta_model(path, metric, departure_time)
   return path.polyline, eta
   ```
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/google-maps).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you notice that the interactive latency budget makes the query itself impossible, so the entire design is a choice about what to precompute, and that precomputation and freshness are the same axis rather than two separate concerns. A candidate who says "shortest path, so Dijkstra, sharded by region" has not felt the problem. A candidate who says "contraction hierarchies" has read the right paper but usually stops one step short, which is where the interviewer is waiting: your hierarchy was built for weights that traffic replaces every five minutes, so what exactly did you precompute, and what does it cost to refresh it? Every good answer here is a position on that trade, and the honest ones concede that the fastest published schemes are the least refreshable ones.
 
@@ -6732,6 +6752,11 @@ Delivery is at least once by default. Make consumers idempotent and stop there u
   ```
 - Consumer hot path: `poll()`, process, then `commit(offset + 1)`. Committing after processing is at-least-once, which is the right default; carry an idempotency key in the payload so a duplicate is harmless.
 - For 30-day retention on a 1GB/s topic: tiered storage (KIP-405) uploads closed segments to object storage automatically, keeping local NVMe small while the full log stays replayable.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/message-queue).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you can tell a log from a queue, and whether you know that one placement decision, where the read position lives, settles everything else. Put it in the consumer and you get replay, fan out that costs the broker a sequential read, ordering per key, a broker that tracks nobody, and no way at all to retry a single message. Put it in the broker and you get per message retry, backoff, priority and dead lettering, and you lose rewind and cheap fan out. A candidate who reaches for a log because it is fast has answered the wrong question. Sequential I/O is not a property of any one product, and throughput is the least interesting thing on the list.
 
