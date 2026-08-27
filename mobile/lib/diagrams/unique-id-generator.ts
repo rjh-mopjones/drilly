@@ -28,7 +28,7 @@ export const UNIQUE_ID_GENERATOR: Diagram = {
   nodes: [
     {
       id: "id-layout",
-      label: "id = (ts << 22) | (worker_id << 12) | seq",
+      label: "id = ts | worker | seq",
       kind: "group",
       x: 24,
       y: 464,
@@ -528,7 +528,7 @@ export const UNIQUE_ID_GENERATOR: Diagram = {
       id: "e10",
       from: "generator",
       to: "worker-field",
-      label: "worker id, fixed at boot",
+      label: "worker id at boot",
       dashed: true,
       fromSide: "left",
       toSide: "top",

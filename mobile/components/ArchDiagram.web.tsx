@@ -134,7 +134,7 @@ function ZoneNode({ data }: NodeProps) {
       <span
         style={{
           display: "inline-block",
-          margin: "8px 0 0 12px",
+          margin: "-11px 0 0 14px",
           padding: "3px 9px",
           borderRadius: 999,
           border: `1px solid ${selected ? p.accent : p.border}`,
@@ -154,6 +154,125 @@ function ZoneNode({ data }: NodeProps) {
 
 const NODE_TYPES = { box: BoxNode, zone: ZoneNode };
 
+/**
+ * Re-space the authored grid so edge labels have room.
+ *
+ * Specs are authored on a loose grid and the horizontal gutter between columns
+ * is routinely too small for the label sitting on the arrow between them. Edge
+ * labels render in the SVG layer BELOW nodes, so an oversized label does not
+ * push anything aside, it just disappears under the next box. Rather than
+ * police that per spec, widen every gutter to a fixed minimum here: columns
+ * keep their order and their contents, only the spacing changes.
+ *
+ * Group zones are repositioned to keep enclosing whatever they enclosed before.
+ */
+// MINIMUMS, not fixed spacing. Forcing a fixed gutter blows up diagrams that
+// already had several columns: the graph gets so wide that fitView shrinks the
+// text to nothing. Authored spacing is kept wherever it is already generous
+// enough for the label that sits in the gap.
+const MIN_GUTTER = 190; // ~28 chars at 11.5px, the label cap the checker enforces
+const MIN_ROW_GAP = 46; // label height plus its background padding
+const COL_TOLERANCE = 60;
+const ROW_TOLERANCE = 40;
+const DEFAULT_H = 76;
+
+function spaceColumns(d: Diagram): Diagram {
+  const boxes = d.nodes.filter((n) => n.kind !== "group");
+  if (boxes.length < 2) return d;
+
+  // Cluster nodes into columns by x, tolerating slight authoring drift.
+  const sorted = [...boxes].sort((a, b) => a.x - b.x);
+  const cols: { xs: number[]; nodes: DiagramNode[] }[] = [];
+  for (const n of sorted) {
+    const last = cols[cols.length - 1];
+    if (last && Math.abs(n.x - last.xs[0]) <= COL_TOLERANCE) {
+      last.nodes.push(n);
+      last.xs.push(n.x);
+    } else {
+      cols.push({ xs: [n.x], nodes: [n] });
+    }
+  }
+  if (cols.length < 2) return d;
+
+  // Lay the columns out left to right with a guaranteed gutter.
+  const moved = new Map<string, number>();
+  let cursor = Math.min(...cols[0].xs);
+  for (let i = 0; i < cols.length; i++) {
+    const c = cols[i];
+    const left = Math.min(...c.xs);
+    const width = Math.max(...c.nodes.map((n) => n.w ?? 240));
+    for (const n of c.nodes) moved.set(n.id, cursor + (n.x - left));
+    const next = cols[i + 1];
+    if (next) {
+      const authored = Math.min(...next.xs) - (left + width);
+      cursor += width + Math.max(MIN_GUTTER, authored);
+    }
+  }
+
+  // Same treatment vertically: labels on the arrows between stacked boxes need
+  // a gap they do not get from the authored step size.
+  const rowsSorted = [...boxes].sort((a, b) => a.y - b.y);
+  const rows: { ys: number[]; nodes: DiagramNode[] }[] = [];
+  for (const n of rowsSorted) {
+    const last = rows[rows.length - 1];
+    if (last && Math.abs(n.y - last.ys[0]) <= ROW_TOLERANCE) {
+      last.nodes.push(n);
+      last.ys.push(n.y);
+    } else {
+      rows.push({ ys: [n.y], nodes: [n] });
+    }
+  }
+  const movedY = new Map<string, number>();
+  let vCursor = rows.length ? Math.min(...rows[0].ys) : 0;
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    const top = Math.min(...r.ys);
+    const height = Math.max(...r.nodes.map((n) => n.h ?? DEFAULT_H));
+    for (const n of r.nodes) movedY.set(n.id, vCursor + (n.y - top));
+    const next = rows[i + 1];
+    if (next) {
+      const authored = Math.min(...next.ys) - (top + height);
+      vCursor += height + Math.max(MIN_ROW_GAP, authored);
+    }
+  }
+
+  const nodes = d.nodes.map((n) => {
+    if (n.kind !== "group") {
+      return { ...n, x: moved.get(n.id) ?? n.x, y: movedY.get(n.id) ?? n.y };
+    }
+    // Keep the zone around the same members it framed originally.
+    const w0 = n.w ?? 300;
+    const h0 = n.h ?? 300;
+    const inside = boxes.filter(
+      (b) =>
+        b.x >= n.x - 8 &&
+        b.x + (b.w ?? 240) <= n.x + w0 + 8 &&
+        b.y >= n.y - 8 &&
+        b.y + (b.h ?? DEFAULT_H) <= n.y + h0 + 8,
+    );
+    if (!inside.length) return n;
+    const l = Math.min(...inside.map((b) => moved.get(b.id) ?? b.x));
+    const r = Math.max(
+      ...inside.map((b) => (moved.get(b.id) ?? b.x) + (b.w ?? 240)),
+    );
+    const tp = Math.min(...inside.map((b) => movedY.get(b.id) ?? b.y));
+    const bt = Math.max(
+      ...inside.map((b) => (movedY.get(b.id) ?? b.y) + (b.h ?? DEFAULT_H)),
+    );
+    const padL = Math.min(...inside.map((b) => b.x)) - n.x;
+    const padT = Math.min(...inside.map((b) => b.y)) - n.y;
+    return {
+      ...n,
+      x: l - padL,
+      w: r - l + padL * 2,
+      y: tp - padT,
+      h: bt - tp + padT * 2,
+    };
+  });
+  return { ...d, nodes };
+}
+
+
 /** Width of a DOM node, tracked so the detail panel can reflow. */
 function useWidth(ref: React.RefObject<HTMLDivElement | null>): number {
   const [w, setW] = useState(0);
@@ -169,12 +288,13 @@ function useWidth(ref: React.RefObject<HTMLDivElement | null>): number {
 }
 
 export default function ArchDiagram({
-  diagram,
+  diagram: authored,
   palette,
 }: {
   diagram: Diagram;
   palette: Palette;
 }) {
+  const diagram = useMemo(() => spaceColumns(authored), [authored]);
   const [sel, setSel] = useState<Selection | null>(null);
 
   const selNode = useMemo(

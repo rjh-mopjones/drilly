@@ -328,7 +328,7 @@ export const DISTRIBUTED_KV_STORE: Diagram = {
       id: "e1",
       from: "client",
       to: "coordinator",
-      label: "get / put(key), R and W per call",
+      label: "get / put(key)",
       animated: true,
       detail: {
         what: "The client request, carrying the key, the value on a write, and the quorum the caller wants for this specific call.",
@@ -465,7 +465,7 @@ export const DISTRIBUTED_KV_STORE: Diagram = {
       id: "e10",
       from: "lsm",
       to: "anti-entropy",
-      label: "Merkle tree over token ranges",
+      label: "Merkle over ranges",
       dashed: true,
       fromSide: "right",
       toSide: "left",
