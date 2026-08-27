@@ -5,6 +5,16 @@
  */
 import type { Diagram } from "./types";
 import { WEB_CRAWLER } from "./web-crawler";
+import { TWITTER } from "./twitter";
+import { STOCK_EXCHANGE } from "./stock-exchange";
+import { DIGITAL_WALLET } from "./digital-wallet";
+import { PAYMENT_SYSTEM } from "./payment-system";
+import { GAMING_LEADERBOARD } from "./gaming-leaderboard";
+import { OBJECT_STORAGE } from "./object-storage";
+import { EMAIL_SERVICE } from "./email-service";
+import { HOTEL_RESERVATION } from "./hotel-reservation";
+import { AD_CLICK_AGGREGATION } from "./ad-click-aggregation";
+import { METRICS_MONITORING } from "./metrics-monitoring";
 import { MESSAGE_QUEUE } from "./message-queue";
 import { GOOGLE_MAPS } from "./google-maps";
 import { NEARBY_FRIENDS } from "./nearby-friends";
@@ -25,6 +35,16 @@ export * from "./types";
 
 export const DIAGRAMS: Record<string, Diagram> = {
   "web-crawler": WEB_CRAWLER,
+  "twitter": TWITTER,
+  "stock-exchange": STOCK_EXCHANGE,
+  "digital-wallet": DIGITAL_WALLET,
+  "payment-system": PAYMENT_SYSTEM,
+  "gaming-leaderboard": GAMING_LEADERBOARD,
+  "object-storage": OBJECT_STORAGE,
+  "email-service": EMAIL_SERVICE,
+  "hotel-reservation": HOTEL_RESERVATION,
+  "ad-click-aggregation": AD_CLICK_AGGREGATION,
+  "metrics-monitoring": METRICS_MONITORING,
   "message-queue": MESSAGE_QUEUE,
   "google-maps": GOOGLE_MAPS,
   "nearby-friends": NEARBY_FRIENDS,

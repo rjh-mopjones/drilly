@@ -7189,6 +7189,11 @@ What kills it is cardinality. Every distinct label combination is a new series, 
       alertmanager.send(alert)
   ```
 - Cardinality guard at ingest: reject any new series that would push a metric past 1M unique label combinations; increment `metric_dropped_total{reason="per_metric_limit"}` and page the owning team.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/metrics-monitoring).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you can name the thing that is actually scarce. Sample rate is linear and cheap; the number of distinct series is multiplicative in label values and is chosen by application teams rather than by you. At 1M samples per second the wire carries about 29MB/s, which is a quarter of a 1GbE link, and the same system falls over anyway because one deploy added a label. A candidate who spends the hour on ingest throughput and compression ratios has optimised the axis that was never going to break. The corollary is the part most people will not say out loud: the write path has to be able to refuse a write, and the refusal has to be loud, counted, and attributable to a named team.
 
@@ -7651,6 +7656,11 @@ Dashboards read the stream, billing reads the recompute, and the difference betw
         .addSink(clickhouse_sink)               # absolute upsert on (ad_id, ts_minute)
   ```
 - Late data: `late_tag` publishes to a `late-clicks` topic that the nightly recompute reads alongside the archive.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/ad-click-aggregation).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you design the correction path before the happy path. An analytics pipeline is easy until someone bills off it. The moment the output is an invoice, three ordinary streaming shortcuts become defects: processing-time windows put a click on the wrong day, a dropped late event is theft in one direction and a duplicate is theft in the other, and "we will just replay the log" stops working the day your retention is shorter than your dispute window. A candidate who reaches for windows, watermarks and exactly-once has the vocabulary. A candidate who says "the batch path exists so I can restate January in March" has the point.
 
@@ -8085,6 +8095,11 @@ Contention is a tail phenomenon: the average inventory row is touched once every
   UPDATE bookings SET status='CONFIRMED', auth_ref=auth.id
   -- capture at check-in for flexible rates, immediately for prepaid
   ```
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/hotel-reservation).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you can tell a physical constraint from a business parameter. Almost everyone arrives with "never double-book" as an axiom and spends the interview defending a lock. But hotels oversell on purpose, every night, and they are right to: rooms inside a class are interchangeable, a room-night unsold is revenue that cannot be recovered later, and the failure has a bounded price of roughly $300 to walk a guest to a comparable property. The interesting engineering is therefore not the lock. It is the accounting around a number that somebody else owns: the transactional path enforces `sold < allowance` exactly, a nightly forecast job writes `allowance`, and the two must never race. A candidate who treats the room count as sacred has built a correct system that leaves several percent of revenue on the floor on exactly the nights the business cares about, and will not have an answer when the interviewer says "the hotel already oversells, so what are you protecting?"
 
@@ -8570,6 +8585,11 @@ The number that governs the design is the false-positive rate. At 0.1% on 100B m
                         body_hash, wrap(dek, kek[user_id]), labels=["UNSORTED"])
   # classifier, indexer and notifier all consume the change stream
   ```
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/email-service).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you notice that the interface is not yours. Every other system in this set gets to define its own write path: you choose the API, you authenticate the caller, you version the protocol and you make clients upgrade. Here the write path was specified in 1982, every host on the internet is a legitimate caller, roughly half of them are hostile, and the only vocabulary you have for declining is a three-digit response code inside a transaction you cannot reopen. So the first architectural decision is not what to store, it is which signals are permitted to refuse and which are only permitted to file. A candidate who opens with sharding and storage tiers is designing the second half of the system and will be steered back to the first within ten minutes, because every capacity number they quote is a function of what they let in.
 
@@ -9046,6 +9066,11 @@ Scaling is asymmetric: the data plane grows with bytes, metadata grows with obje
   return 200, manifest.etag
   ```
 - Background: repair job polls `under_replicated_object_count`; scrub re-reads every piece on a rolling 90-day cadence.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/object-storage).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you know that the durability number does not come from the erasure code. Every candidate says "Reed-Solomon 6+3, tolerates 3 losses". A code word gives you a fixed number of simultaneous losses and nothing more; eleven nines comes from the ratio between the repair window and the failure interarrival time. Run the arithmetic in the room: at 1% annual failure rate per disk and a one-hour repair window, the chance of losing 3 more of the 8 surviving fragments before repair finishes is `C(8,3) x (1.14e-6)^3`, which is about 8e-17, and multiplied by the 0.09 per-year rate of the first failure gives roughly seventeen nines. The published figure is eleven. The six orders of magnitude between them are correlated failure, software defects and operator error, which is why S3's storage layer got rewritten in Rust with an executable specification checked by property tests (ShardStore, SOSP 2021) rather than given a wider code. A candidate who reaches for a wider code to improve durability has misread which term dominates.
 
@@ -9506,6 +9531,11 @@ The first wins for a board under roughly 100M entries taking under roughly 100k 
   ```
 - Tiebreaker packed into the score, not stored beside it: `packed = points * 2^31 + (2^31 - 1 - t)`, where `t` is seconds since a game epoch. 20 bits of points and 31 bits of inverted time is 51 bits, inside the 53 bits of integer precision an IEEE-754 double carries.
 - Rank below the top 10,000 served as a percentile bucket from quantile snapshots refreshed every 60s.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/gaming-leaderboard).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you notice that "give me the top 100" and "give me *this* player's rank" are different queries, and that only the second one constrains the design. Almost every candidate reaches for a sorted structure immediately and cannot say what it buys, because the example they have in their head is top-N, which any index does. The follow-up that separates people is "now do it for the player at position 4,812,004", and the useful answer names the property doing the work: the structure keeps a count on every pointer, so position falls out of the descent instead of requiring a scan. Everything downstream, whether you can shard, whether you can use the database you already have, whether approximation is acceptable, is decided by that one requirement.
 
@@ -9931,6 +9961,11 @@ Underneath all three sits a separate choice: whether money state is a running ba
   update idempotency_key=DONE, cache response
   ```
 - On PSP timeout: query `PSP.get_by_idempotency_key(client_key)`, then decide whether to compensate or confirm.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/payment-system).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you can reason about a state change you cannot roll back, cannot lock, and cannot fully observe. Every other part of a payments answer follows from one question: what do you do when you asked an outside party to move money and you do not know whether they did it. Candidates who reach for a transaction, a retry loop, or a distributed lock are answering a different question.
 
@@ -10490,6 +10525,11 @@ Idempotency key on every transfer, deduplicated 24 hours. Hourly per-shard recon
   COMMIT;
   ```
 - Hourly reconciliation job: `SELECT user_id, balance FROM accounts` vs `SELECT user_id, SUM(amount) FROM ledger GROUP BY user_id`. Any non-zero diff freezes the account and pages on-call.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/digital-wallet).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you can tell internal consistency from external irreversibility, and pick machinery that matches.
 
@@ -10971,6 +11011,11 @@ Scale comes from partitioning by symbol. One tuned core handles far more than an
   if order.qty > 0: insert into book at order's price level
   ```
 - Market data goes out via Aeron multicast to all subscriber NICs in the same data center rack.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/stock-exchange).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you understand that a venue's product is a verifiable total order, not speed. Every other property follows from one placement decision: where in the pipeline the sequence number is assigned, and what is permitted to happen before it and after it. Risk before sequencing, because the official record must contain no rejects. Durability before visibility, because a trade that exists in the market data feed but not in the log cannot be unwound. Nothing but the log inside the engine, because that is what makes replay, standby failover, and the regulator's reconstruction the same mechanism. A candidate who leads with "single-threaded per symbol for speed" has the right answer for the wrong reason and will not survive the follow-ups.
 
@@ -11427,6 +11472,11 @@ Now an account with 100M followers posts, perhaps 20M of them recently active. B
   ```
 - Retweet path: identical, plus `retweeters.append(original_id, user_id)`. If the original's retweet rate is above the cutover, skip the fan-out loop entirely and let the read-side merge surface it.
 - Read path: read the prebuilt block, resolve fetch-path followees, one pipelined multi-get of their recent lists, merge by id, collapse duplicate `retweet_of`, apply blocks and mutes, rank, hydrate 20 bodies.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/twitter).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether the follower distribution, rather than the fan-out strategy, is what you treat as the design input. Everyone arrives knowing push, pull and hybrid. The thing being marked is what you do when you look at the actual distribution and notice that the hybrid rule you just described puts roughly forty on-demand fetches on the read path of an ordinary user, because people follow by fame and a typical follow set is stuffed with mid-tier accounts sitting just above whatever threshold you picked. The split has to be per edge, not per author. And once it is, the interesting write burst is no longer the celebrity post at all: it is the retweet cascade behind it, which routes the same content back through the push path you deliberately excluded it from, at greater volume and in a fraction of the time.
 
