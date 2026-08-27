@@ -38,6 +38,23 @@ interface Props {
 export function ItemView({ source, item, onNeighbourItem }: Props) {
   const palette = useTheme();
   const router = useRouter();
+
+  /**
+   * Keep in-app links (e.g. the "Interactive diagram" section's
+   * /diagram/<id>) inside the router. Returning false tells
+   * react-native-markdown-display not to hand the URL to Linking.openURL,
+   * which on web would be a full page load. External URLs fall through.
+   */
+  const handleLinkPress = useCallback(
+    (url: string) => {
+      if (url.startsWith("/")) {
+        router.push(url as never);
+        return false;
+      }
+      return true;
+    },
+    [router],
+  );
   const settings = useSettings();
   const styles = useMemo(
     () => makeStyles(palette, settings.eReaderMode),
@@ -227,7 +244,11 @@ export function ItemView({ source, item, onNeighbourItem }: Props) {
               </Pressable>
               {open && (
                 <View style={styles.sectionBody}>
-                  <Markdown style={markdownStyles} rules={markdownRules}>
+                  <Markdown
+                    style={markdownStyles}
+                    rules={markdownRules}
+                    onLinkPress={handleLinkPress}
+                  >
                     {section.content}
                   </Markdown>
                 </View>
