@@ -18,6 +18,7 @@ import type {
   DiagramNode,
   DiagramNodeDetail,
   NodeKind,
+  TechChoice,
 } from "../lib/diagrams";
 import { UI_FONT, type Palette } from "../lib/theme";
 
@@ -473,6 +474,7 @@ function DetailPanel({
       <Section p={p} title="Why it exists" body={detail.why} />
       {detail.numbers?.length ? <Pills p={p} items={detail.numbers} /> : null}
       {detail.breaks ? <Section p={p} title="What breaks" body={detail.breaks} accent /> : null}
+      {detail.choice ? <ChoiceBlock p={p} c={detail.choice} /> : null}
     </div>
   );
 }
@@ -530,6 +532,47 @@ function OverviewPanel({
       ))}
       {o.numbers?.length ? <Pills p={p} items={o.numbers} /> : null}
       <Section p={p} title="The hard part" body={o.crux} accent />
+    </div>
+  );
+}
+
+/**
+ * Technology rationale, in the same Choice / Alternative / Decider / flips
+ * shape the written questions use. Boxed off so it reads as a decision rather
+ * than more description.
+ */
+function ChoiceBlock({ p, c }: { p: Palette; c: TechChoice }) {
+  const Row = ({ k, v, tone }: { k: string; v: string; tone?: string }) => (
+    <div style={{ marginTop: 8 }}>
+      <span style={{ color: p.textMuted, fontSize: 11.5, fontWeight: 700 }}>{k} </span>
+      <span style={{ color: tone ?? p.text, fontSize: 13, lineHeight: 1.5 }}>{v}</span>
+    </div>
+  );
+  return (
+    <div
+      style={{
+        marginTop: 16,
+        padding: "12px 13px",
+        borderRadius: 10,
+        border: `1px solid ${p.border}`,
+        background: p.codeBg,
+      }}
+    >
+      <div
+        style={{
+          color: p.accent,
+          fontSize: 11,
+          textTransform: "uppercase",
+          letterSpacing: 0.6,
+          fontWeight: 700,
+        }}
+      >
+        Why this technology
+      </div>
+      <Row k="Choice:" v={c.pick} tone={p.textStrong} />
+      <Row k="Instead of:" v={c.instead} />
+      <Row k="Decider:" v={c.decider} />
+      <Row k="Alternative wins when:" v={c.flips} />
     </div>
   );
 }
