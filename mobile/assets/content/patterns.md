@@ -2088,6 +2088,11 @@ Two things dominate real deployments and appear in no textbook diagram: DNS, whi
     return parse(resp.html), extract_links(resp.html)
   ```
 - DNS: in-process resolver with a 1-hour TTL cache. Uncached DNS at 50ms per lookup otherwise dominates wall time at 1000 fetches/second.
+#### Interactive diagram
+The whole crawler as one explorable picture: [open the interactive diagram](/diagram/web-crawler).
+
+Every box is clickable. Selecting one dims everything it does not touch, so the neighbourhood of a component is visible at a glance, and opens a panel with what it is, why it exists, the numbers worth quoting, and the specific failure it owns. The static picture above is the version you would draw on a whiteboard; this one is the version you would talk through.
+
 #### What this is really testing
 Whether you understand that the crawler's output is not pages, it is an allocation of a fixed fetch budget across an unbounded graph. Every component exists to stop that budget leaking. Deduplication so you do not buy the same page twice. Politeness so a host does not ban you and cost you the whole domain permanently. Trap detection so one calendar script does not absorb a month of throughput. A candidate who describes fetch, parse, extract, repeat has described the easy half, and will have nothing to say when asked what the system does on day 400, when the frontier holds ten times more URLs than can ever be fetched and the only interesting question is which ones get dropped.
 
@@ -2224,11 +2229,6 @@ Closest question: Q47
 **Why the flow is shaped this way:** the expensive part is not storing HTML, it is deciding what to fetch next without getting trapped in duplicates, loops, or impolite behavior. That is why URL dedup, content dedup, and per-domain scheduling sit in the middle of the architecture instead of being bolt-ons.
 
 **What this layout buys you:** high concurrency, controlled crawl behavior, and the ability to keep discovering new content forever. The tradeoff is that the frontier logic becomes the real brain of the system.
-#### Interactive diagram
-The whole crawler as one explorable picture: [open the interactive diagram](/diagram/web-crawler).
-
-Every box is clickable. Selecting one dims everything it does not touch, so the neighbourhood of a component is visible at a glance, and opens a panel with what it is, why it exists, the numbers worth quoting, and the specific failure it owns. The static picture above is the version you would draw on a whiteboard; this one is the version you would talk through.
-
 #### Deep dive
 **must-say**
 

@@ -90,7 +90,8 @@ export interface DiagramOverview {
 export interface Diagram {
   id: string;
   title: string;
-  subtitle: string;
+  /** The question this diagram answers, worded exactly as in the source. */
+  question: string;
   overview: DiagramOverview;
   /** Deep link back to the question this diagram belongs to. */
   sourceId: string;
@@ -102,7 +103,7 @@ export interface Diagram {
 const WEB_CRAWLER: Diagram = {
   id: "web-crawler",
   title: "Web Crawler",
-  subtitle: "Frontier, fetch, parse, store. The loop that keeps discovering.",
+  question: "Design a Web Crawler",
   sourceId: "patterns",
   itemId: 6,
   overview: {
@@ -533,4 +534,63 @@ export const DIAGRAMS: Record<string, Diagram> = {
 
 export function getDiagram(id: string): Diagram | undefined {
   return DIAGRAMS[id];
+}
+
+/** The diagram belonging to a reader item, if one exists. */
+export function getDiagramForItem(sourceId: string, itemId: number): Diagram | undefined {
+  return Object.values(DIAGRAMS).find(
+    (d) => d.sourceId === sourceId && d.itemId === itemId,
+  );
+}
+
+/**
+ * Flatten a diagram to Markdown so the reader's copy-all action carries the
+ * explanations, not just the link. Everything a component says on screen ends
+ * up here, in reading order.
+ */
+export function diagramToMarkdown(d: Diagram): string {
+  const out: string[] = [`## Interactive diagram: ${d.title}`, ""];
+  const o = d.overview;
+  out.push("### Overview", "", `**The shape of it.** ${o.shape}`, "");
+  out.push("**How it works.**", "");
+  o.beats.forEach((b, i) => out.push(`${i + 1}. ${b}`));
+  out.push("");
+  if (o.numbers?.length) out.push(`**Numbers.** ${o.numbers.join(" · ")}`, "");
+  out.push(`**The hard part.** ${o.crux}`, "");
+
+  const byId = (id: string) => d.nodes.find((n) => n.id === id)?.label ?? id;
+
+  out.push("### Components", "");
+  for (const n of d.nodes) {
+    if (!n.detail) continue;
+    out.push(`#### ${n.label}${n.sub ? ` (${n.sub})` : ""}`, "");
+    out.push(`- **What it is.** ${n.detail.what}`);
+    out.push(`- **Why it exists.** ${n.detail.why}`);
+    if (n.detail.numbers?.length)
+      out.push(`- **Numbers.** ${n.detail.numbers.join(" · ")}`);
+    if (n.detail.breaks) out.push(`- **What breaks.** ${n.detail.breaks}`);
+    const c = n.detail.choice;
+    if (c) {
+      out.push(`- **Why this technology.**`);
+      out.push(`  - Choice: ${c.pick}`);
+      out.push(`  - Instead of: ${c.instead}`);
+      out.push(`  - Decider: ${c.decider}`);
+      out.push(`  - Alternative wins when: ${c.flips}`);
+    }
+    out.push("");
+  }
+
+  out.push("### Connections", "");
+  for (const e of d.edges) {
+    if (!e.detail) continue;
+    const hop = `${byId(e.from)} -> ${byId(e.to)}`;
+    out.push(`#### ${hop}${e.label ? ` (${e.label})` : ""}`, "");
+    out.push(`- **What it is.** ${e.detail.what}`);
+    out.push(`- **Why it exists.** ${e.detail.why}`);
+    if (e.detail.numbers?.length)
+      out.push(`- **Numbers.** ${e.detail.numbers.join(" · ")}`);
+    if (e.detail.breaks) out.push(`- **What breaks.** ${e.detail.breaks}`);
+    out.push("");
+  }
+  return out.join("\n").trim() + "\n";
 }

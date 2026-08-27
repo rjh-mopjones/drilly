@@ -505,7 +505,7 @@ function OverviewPanel({
             }),
       }}
     >
-      <PanelHeader p={p} title={diagram.title} sub={diagram.subtitle} onClose={onClose} />
+      <PanelHeader p={p} title={diagram.title} sub={diagram.question} onClose={onClose} />
       <Section p={p} title="The shape of it" body={o.shape} />
       <Label p={p}>How it works</Label>
       {o.beats.map((b, i) => (

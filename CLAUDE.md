@@ -26,6 +26,44 @@ Every `## Topic` must open with a `### Summary` card (~700-900 words, 6 subsecti
 - Match Core Java's depth (~930 words) and tone (senior engineer briefing, opinionated, concrete examples — not a glossary).
 - If the primer ships in the native bundle (Java, Kotlin, NeetCode, Patterns), `cp web/public/<file>.md mobile/assets/content/<file>.md` after editing. Other primers are remote-only.
 
+## Interactive diagrams
+
+Whole-solution architecture diagrams for System Design Questions, rendered with
+React Flow at `/diagram/<id>`. **Diagrams are data, not drawings** — a new one is
+a spec in `mobile/lib/diagrams.ts`, never hand-authored SVG.
+
+- **Data model** (`mobile/lib/diagrams.ts`): `Diagram` = `question` + `overview` +
+  `nodes` + `edges`. Every node and every edge carries a `detail`
+  (`what` / `why` / `numbers` / `breaks`), and components with a real technology
+  decision also carry a `choice` (`pick` / `instead` / `decider` / `flips`) in the
+  same shape as the written `Key decisions` sections, so the diagram and the prose
+  agree. Deciders must contain the number or property that settles it.
+- **Renderer**: `mobile/components/ArchDiagram.web.tsx`. `ArchDiagram.tsx` is a
+  native stub — the shipping app is a WebView shell over the web build, so the
+  `.web.tsx` is what renders on every surface. Same split as `SvgDiagram`.
+- **Everything is clickable**: boxes, the grouping zone (via its label chip; its
+  body stays click-through so it cannot swallow clicks meant for nodes inside it),
+  and every arrow. Arrows get a 26px invisible hit area so they are tappable.
+- **Wiring a diagram to a question**: set `sourceId` + `itemId` on the spec, then
+  add an `#### Interactive diagram` section to that question linking to
+  `/diagram/<id>`. `ItemView` intercepts markdown links starting with `/` and
+  routes them through expo-router; without that, `react-native-markdown-display`
+  hands them to `Linking.openURL`, which on web is a full page reload.
+- **Copy-all includes the diagram.** `CopyButton` appends
+  `diagramToMarkdown(diagram)` when `getDiagramForItem(sourceId, itemId)` matches.
+  The markdown section itself is only a link, so without this the copy would carry
+  a URL instead of the explanations. Update `diagramToMarkdown` if you add fields
+  to `DiagramNodeDetail`, or they will silently not be copied.
+
+### The "Interactive diagram" section is optional
+
+`scripts/validate_sd.py` splits `SECTIONS` (canonical order, used for ordering and
+for the manifest check) from `OPTIONAL_SECTIONS`. Only `REQUIRED_SECTIONS` must be
+present in every question, which is what lets this section roll out one question at
+a time. It sits **after `Summary`**, and the physical order in `patterns.md` must
+match the canonical order or the validator fails with S5. Adding it to a question
+means: write the section, and add it to `sectionOrder` in **both** manifests.
+
 ## Standing user preferences
 
 - **Merge policy**: drilly only — once a change is approved, merge straight to `main` without re-asking. The user has explicitly opted into "always merge to main" for this repo.
@@ -70,3 +108,4 @@ If you spot leaked PII while editing, redact it in the same commit and surface i
 - `packages/parser/src/parser.ts` — content shape is contract; changes propagate through every primer and break the reader. Adjust manifest config first.
 - `mobile/lib/content.ts:REMOTE_BASE` — hardcoded to the Vercel project domain; only change if the project URL truly changes.
 - `vercel.json` rewrites — SPA fallback. Breaking these breaks deep-links like `/source/java`.
+- `mobile/metro.config.js` zustand resolver — forces zustand (a React Flow dependency) onto its CJS build. Its ESM build uses `import.meta.env`, and Metro bundles web as a classic script, so `import.meta` is a hard syntax error that kills the **entire** bundle at parse time and renders a blank page. The route still returns HTTP 200 throughout, so this is invisible unless you actually render the page.

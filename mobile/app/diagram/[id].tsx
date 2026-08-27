@@ -30,7 +30,7 @@ export default function DiagramScreen() {
     <View style={styles.root}>
       <Stack.Screen options={{ title: diagram.title }} />
       <View style={styles.header}>
-        <Text style={styles.subtitle}>{diagram.subtitle}</Text>
+        <Text style={styles.subtitle}>{diagram.question}</Text>
         <Pressable
           onPress={() => router.push(`/reader/${diagram.sourceId}/${diagram.itemId}`)}
           style={styles.link}
