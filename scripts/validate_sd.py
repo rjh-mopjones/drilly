@@ -45,6 +45,7 @@ SECTIONS = [
     "Requirements and scale, derived out loud",
     "Key decisions",
     "High-level design",
+    "Interactive diagram",
     "Deep dive",
     "Where it breaks",
     "Drill questions",
@@ -52,6 +53,13 @@ SECTIONS = [
     "Whiteboard script",
     "Appendix",
 ]
+
+# Sections a question MAY carry. They are still order-checked and still have to
+# appear in the manifest's sectionOrder, but a question without one is fine, so
+# a new section can be rolled out question by question instead of all 56 at once.
+OPTIONAL_SECTIONS = {"Interactive diagram"}
+
+REQUIRED_SECTIONS = [s for s in SECTIONS if s not in OPTIONAL_SECTIONS]
 
 LEGACY_SECTIONS = [
     "Problem",
@@ -186,7 +194,7 @@ def check_migrated(
             f"Q{rid}: duplicate section names {sorted(dupes)} (collide on React key and reveal Set)",
         )
 
-    missing = [s for s in SECTIONS if s not in names]
+    missing = [s for s in REQUIRED_SECTIONS if s not in names]
     if missing:
         rep.err("S3", f"Q{rid}: missing sections {missing}")
     extra = [n for n in names if n not in SECTIONS]
@@ -346,7 +354,7 @@ def check_manifests(rep: Report, strict: bool) -> None:
     if strict and we.get("sectionOrder") != SECTIONS:
         rep.err(
             "S6",
-            "sectionOrder is not the final 14-section array (required under --strict)",
+            "sectionOrder is not the canonical section array (required under --strict)",
         )
 
 

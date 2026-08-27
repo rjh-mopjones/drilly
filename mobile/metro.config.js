@@ -23,4 +23,23 @@ config.resolver.assetExts.push("md");
 // Don't try to transform .md as source code
 config.resolver.sourceExts = config.resolver.sourceExts.filter((ext) => ext !== "md");
 
+// @xyflow/react (interactive architecture diagrams) depends on zustand, whose
+// ESM build uses `import.meta.env` to emit deprecation warnings. Metro bundles
+// web as a classic script, so `import.meta` is a hard syntax error and the
+// entire bundle fails to parse at runtime, rendering a blank page. zustand also
+// ships a clean CJS build, so disable package-exports resolution for that one
+// package to fall back to its `main` entry.
+const defaultResolveRequest = config.resolver.resolveRequest;
+config.resolver.resolveRequest = (context, moduleName, platform) => {
+  const resolve = defaultResolveRequest ?? context.resolveRequest;
+  if (moduleName === "zustand" || moduleName.startsWith("zustand/")) {
+    return context.resolveRequest(
+      { ...context, unstable_enablePackageExports: false },
+      moduleName,
+      platform,
+    );
+  }
+  return resolve(context, moduleName, platform);
+};
+
 module.exports = config;
