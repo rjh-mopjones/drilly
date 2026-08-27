@@ -5,6 +5,16 @@
  */
 import type { Diagram } from "./types";
 import { WEB_CRAWLER } from "./web-crawler";
+import { JOB_SCHEDULER } from "./job-scheduler";
+import { DISTRIBUTED_LOCK } from "./distributed-lock";
+import { DISTRIBUTED_CACHE } from "./distributed-cache";
+import { ZOOM } from "./zoom";
+import { SLACK } from "./slack";
+import { NETFLIX } from "./netflix";
+import { BOOKING_PLATFORM } from "./booking-platform";
+import { RIDE_HAILING } from "./ride-hailing";
+import { TIKTOK } from "./tiktok";
+import { INSTAGRAM } from "./instagram";
 import { TWITTER } from "./twitter";
 import { STOCK_EXCHANGE } from "./stock-exchange";
 import { DIGITAL_WALLET } from "./digital-wallet";
@@ -35,6 +45,16 @@ export * from "./types";
 
 export const DIAGRAMS: Record<string, Diagram> = {
   "web-crawler": WEB_CRAWLER,
+  "job-scheduler": JOB_SCHEDULER,
+  "distributed-lock": DISTRIBUTED_LOCK,
+  "distributed-cache": DISTRIBUTED_CACHE,
+  "zoom": ZOOM,
+  "slack": SLACK,
+  "netflix": NETFLIX,
+  "booking-platform": BOOKING_PLATFORM,
+  "ride-hailing": RIDE_HAILING,
+  "tiktok": TIKTOK,
+  "instagram": INSTAGRAM,
   "twitter": TWITTER,
   "stock-exchange": STOCK_EXCHANGE,
   "digital-wallet": DIGITAL_WALLET,
