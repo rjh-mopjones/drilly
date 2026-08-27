@@ -12,17 +12,22 @@ import {
   type NodeProps,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import type { Diagram, DiagramNode, NodeKind } from "../lib/diagrams";
-import type { Palette } from "../lib/theme";
+import type {
+  Diagram,
+  DiagramEdge,
+  DiagramNode,
+  DiagramNodeDetail,
+  NodeKind,
+} from "../lib/diagrams";
+import { UI_FONT, type Palette } from "../lib/theme";
 
 /**
  * Interactive architecture diagram (web). The native app is a WebView shell
  * over the web build, so this renders on every surface; ArchDiagram.tsx is a
  * compile-time stub for the native bundle.
  *
- * Diagrams are data (lib/diagrams.ts). Selecting a node opens its explanation,
- * which is the point of the screen: the picture is the index, the panel is the
- * content.
+ * Everything is clickable: boxes, the grouping zone, and every arrow. The
+ * picture is the index; the panel is the content.
  */
 
 const SIDE: Record<string, Position> = {
@@ -32,7 +37,11 @@ const SIDE: Record<string, Position> = {
   left: Position.Left,
 };
 
-/** Per-kind accent, derived from the palette so themes stay in charge. */
+type Selection =
+  | { kind: "node"; id: string }
+  | { kind: "edge"; id: string }
+  | { kind: "overview" };
+
 function kindColor(kind: NodeKind, p: Palette): string {
   switch (kind) {
     case "bus":
@@ -69,6 +78,7 @@ function BoxNode({ data }: NodeProps) {
         opacity: dimmed ? 0.32 : 1,
         transition: "opacity 140ms ease, border-color 140ms ease, background 140ms ease",
         cursor: "pointer",
+        fontFamily: UI_FONT,
         boxShadow: selected ? `0 0 0 3px ${p.accent}33` : "none",
       }}
     >
@@ -102,23 +112,41 @@ function BoxNode({ data }: NodeProps) {
   );
 }
 
+/** Grouping box. Clickable via its label chip; the body stays click-through. */
 function ZoneNode({ data }: NodeProps) {
-  const { node, palette: p } = data as unknown as NodeData;
+  const { node, palette: p, selected, dimmed } = data as unknown as NodeData;
   return (
     <div
       style={{
         width: node.w ?? 300,
         height: node.h ?? 300,
         boxSizing: "border-box",
-        border: `1.2px dashed ${p.border}`,
+        border: `1.2px dashed ${selected ? p.accent : p.border}`,
         borderRadius: 12,
         background: `${p.text}06`,
+        opacity: dimmed ? 0.4 : 1,
         pointerEvents: "none",
+        fontFamily: UI_FONT,
+        transition: "opacity 140ms ease, border-color 140ms ease",
       }}
     >
-      <div style={{ color: p.textMuted, fontSize: 12, padding: "8px 12px", fontWeight: 600 }}>
+      <span
+        style={{
+          display: "inline-block",
+          margin: "8px 0 0 12px",
+          padding: "3px 9px",
+          borderRadius: 999,
+          border: `1px solid ${selected ? p.accent : p.border}`,
+          background: p.surface,
+          color: selected ? p.accent : p.textMuted,
+          fontSize: 11.5,
+          fontWeight: 700,
+          cursor: "pointer",
+          pointerEvents: "all",
+        }}
+      >
         {node.label}
-      </div>
+      </span>
     </div>
   );
 }
@@ -146,22 +174,36 @@ export default function ArchDiagram({
   diagram: Diagram;
   palette: Palette;
 }) {
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const selected = useMemo(
-    () => diagram.nodes.find((n) => n.id === selectedId) ?? null,
-    [diagram, selectedId],
+  const [sel, setSel] = useState<Selection | null>(null);
+
+  const selNode = useMemo(
+    () => (sel?.kind === "node" ? (diagram.nodes.find((n) => n.id === sel.id) ?? null) : null),
+    [diagram, sel],
+  );
+  const selEdge = useMemo(
+    () => (sel?.kind === "edge" ? (diagram.edges.find((e) => e.id === sel.id) ?? null) : null),
+    [diagram, sel],
   );
 
-  /** Neighbours of the selection stay lit; everything else dims. */
+  /** What stays lit: the selection and whatever it touches. */
   const lit = useMemo(() => {
-    if (!selectedId) return null;
-    const s = new Set<string>([selectedId]);
-    for (const e of diagram.edges) {
-      if (e.from === selectedId) s.add(e.to);
-      if (e.to === selectedId) s.add(e.from);
+    if (!sel || sel.kind === "overview") return null;
+    const s = new Set<string>();
+    if (sel.kind === "node") {
+      s.add(sel.id);
+      for (const e of diagram.edges) {
+        if (e.from === sel.id) s.add(e.to);
+        if (e.to === sel.id) s.add(e.from);
+      }
+    } else {
+      const e = diagram.edges.find((x) => x.id === sel.id);
+      if (e) {
+        s.add(e.from);
+        s.add(e.to);
+      }
     }
     return s;
-  }, [diagram, selectedId]);
+  }, [diagram, sel]);
 
   const nodes: Node[] = useMemo(
     () =>
@@ -170,29 +212,32 @@ export default function ArchDiagram({
         type: n.kind === "group" ? "zone" : "box",
         position: { x: n.x, y: n.y },
         draggable: false,
-        selectable: n.kind !== "group",
+        selectable: true,
         zIndex: n.kind === "group" ? 0 : 1,
         data: {
           node: n,
           palette,
-          selected: n.id === selectedId,
-          dimmed: !!lit && !lit.has(n.id) && n.kind !== "group",
+          selected: sel?.kind === "node" && sel.id === n.id,
+          dimmed: !!lit && !lit.has(n.id),
         },
       })),
-    [diagram, palette, selectedId, lit],
+    [diagram, palette, sel, lit],
   );
 
   const edges: Edge[] = useMemo(
     () =>
       diagram.edges.map((e) => {
-        const dim = !!lit && !(lit.has(e.from) && lit.has(e.to));
-        const stroke = dim
-          ? palette.border
-          : e.animated
-            ? palette.accent
-            : e.dashed
-              ? palette.textMuted
-              : palette.text;
+        const isSel = sel?.kind === "edge" && sel.id === e.id;
+        const dim = !!lit && !isSel && !(lit.has(e.from) && lit.has(e.to));
+        const stroke = isSel
+          ? palette.accent
+          : dim
+            ? palette.border
+            : e.animated
+              ? palette.accent
+              : e.dashed
+                ? palette.textMuted
+                : palette.text;
         return {
           id: e.id,
           type: "smoothstep",
@@ -203,46 +248,60 @@ export default function ArchDiagram({
           targetHandle: e.toSide ?? "top",
           label: e.label,
           animated: !!e.animated && !dim,
+          // Fat invisible hit area so thin arrows are still tappable.
+          interactionWidth: 26,
           style: {
             stroke,
-            strokeWidth: 1.6,
+            strokeWidth: isSel ? 2.6 : 1.6,
             strokeDasharray: e.dashed ? "5 4" : undefined,
             opacity: dim ? 0.35 : 1,
-            transition: "opacity 140ms ease",
+            cursor: "pointer",
+            transition: "opacity 140ms ease, stroke-width 140ms ease",
           },
-          labelStyle: { fill: palette.textMuted, fontSize: 11.5 },
+          labelStyle: {
+            fill: isSel ? palette.accent : palette.textMuted,
+            fontSize: 11.5,
+            fontFamily: UI_FONT,
+          },
           labelBgStyle: { fill: palette.bg },
           labelBgPadding: [5, 3] as [number, number],
           labelBgBorderRadius: 4,
           markerEnd: { type: MarkerType.ArrowClosed, color: stroke, width: 16, height: 16 },
         };
       }),
-    [diagram, palette, lit],
+    [diagram, palette, sel, lit],
   );
 
   const onNodeClick = useCallback((_e: unknown, n: Node) => {
-    setSelectedId((cur) => (cur === n.id ? null : n.id));
+    setSel((cur) => (cur?.kind === "node" && cur.id === n.id ? null : { kind: "node", id: n.id }));
+  }, []);
+  const onEdgeClick = useCallback((_e: unknown, ed: Edge) => {
+    setSel((cur) => (cur?.kind === "edge" && cur.id === ed.id ? null : { kind: "edge", id: ed.id }));
   }, []);
 
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const width = useWidth(wrapRef);
   const narrow = width > 0 && width < 720;
-  /** Keep the panel off the node it describes. */
+
   const maxX = useMemo(
     () => Math.max(...diagram.nodes.map((n) => n.x + (n.w ?? 240))),
     [diagram],
   );
-  const side: "left" | "right" =
-    selected && selected.x + (selected.w ?? 240) / 2 > maxX / 2 ? "left" : "right";
+  const anchorX = selNode ? selNode.x + (selNode.w ?? 240) / 2 : 0;
+  const side: "left" | "right" = selNode && anchorX > maxX / 2 ? "left" : "right";
 
   return (
-    <div ref={wrapRef} style={{ position: "relative", width: "100%", height: "100%" }}>
+    <div
+      ref={wrapRef}
+      style={{ position: "relative", width: "100%", height: "100%", fontFamily: UI_FONT }}
+    >
       <ReactFlow
         nodes={nodes}
         edges={edges}
         nodeTypes={NODE_TYPES}
         onNodeClick={onNodeClick}
-        onPaneClick={() => setSelectedId(null)}
+        onEdgeClick={onEdgeClick}
+        onPaneClick={() => setSel(null)}
         fitView
         fitViewOptions={{ padding: 0.22 }}
         minZoom={0.2}
@@ -256,19 +315,58 @@ export default function ArchDiagram({
         <Controls showInteractive={false} />
       </ReactFlow>
 
-      {selected?.detail ? (
+      <button
+        onClick={() => setSel((c) => (c?.kind === "overview" ? null : { kind: "overview" }))}
+        style={{
+          position: "absolute",
+          top: 12,
+          left: 12,
+          padding: "8px 14px",
+          borderRadius: 999,
+          border: `1px solid ${sel?.kind === "overview" ? palette.accent : palette.border}`,
+          background: sel?.kind === "overview" ? palette.surfacePressed : palette.surface,
+          color: sel?.kind === "overview" ? palette.accent : palette.textStrong,
+          fontFamily: UI_FONT,
+          fontSize: 13,
+          fontWeight: 600,
+          cursor: "pointer",
+        }}
+      >
+        Overview
+      </button>
+
+      {sel?.kind === "overview" ? (
+        <OverviewPanel diagram={diagram} palette={palette} narrow={narrow} onClose={() => setSel(null)} />
+      ) : selNode?.detail ? (
         <DetailPanel
-          node={selected}
+          title={selNode.label}
+          sub={selNode.sub}
+          detail={selNode.detail}
           palette={palette}
           narrow={narrow}
           side={side}
-          onClose={() => setSelectedId(null)}
+          onClose={() => setSel(null)}
+        />
+      ) : selEdge?.detail ? (
+        <DetailPanel
+          title={edgeTitle(selEdge, diagram)}
+          sub={selEdge.label}
+          detail={selEdge.detail}
+          palette={palette}
+          narrow={narrow}
+          side="right"
+          onClose={() => setSel(null)}
         />
       ) : (
         <Hint palette={palette} />
       )}
     </div>
   );
+}
+
+function edgeTitle(e: DiagramEdge, d: Diagram): string {
+  const name = (id: string) => d.nodes.find((n) => n.id === id)?.label ?? id;
+  return `${name(e.from)} → ${name(e.to)}`;
 }
 
 function Hint({ palette: p }: { palette: Palette }) {
@@ -283,55 +381,53 @@ function Hint({ palette: p }: { palette: Palette }) {
         background: p.surface,
         border: `1px solid ${p.border}`,
         color: p.textMuted,
+        fontFamily: UI_FONT,
         fontSize: 12.5,
         pointerEvents: "none",
       }}
     >
-      Tap a component for what it does, why it exists, and what breaks.
+      Tap any box or arrow. Start with Overview.
     </div>
   );
 }
 
-function DetailPanel({
-  node,
-  palette: p,
-  narrow,
-  side,
-  onClose,
-}: {
-  node: DiagramNode;
-  palette: Palette;
-  narrow: boolean;
-  side: "left" | "right";
-  onClose: () => void;
-}) {
-  const d = node.detail;
-  if (!d) return null;
-  // Narrow viewports get a bottom sheet so the diagram stays visible above it;
-  // wide ones get a side panel, flipped away from the node it describes.
-  const place: React.CSSProperties = narrow
+function panelPlacement(narrow: boolean, side: "left" | "right"): React.CSSProperties {
+  return narrow
     ? { left: 10, right: 10, bottom: 10, maxHeight: "52%" }
     : {
-        top: 12,
+        top: 62,
         [side]: 12,
-        width: "min(370px, calc(100% - 24px))",
-        maxHeight: "calc(100% - 24px)",
+        width: "min(380px, calc(100% - 24px))",
+        maxHeight: "calc(100% - 76px)",
       };
+}
+
+const panelChrome = (p: Palette): React.CSSProperties => ({
+  position: "absolute",
+  overflowY: "auto",
+  padding: 16,
+  borderRadius: 12,
+  background: p.surface,
+  border: `1px solid ${p.border}`,
+  fontFamily: UI_FONT,
+  boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
+});
+
+function PanelHeader({
+  p,
+  title,
+  sub,
+  onClose,
+}: {
+  p: Palette;
+  title: string;
+  sub?: string;
+  onClose: () => void;
+}) {
   return (
-    <div
-      style={{
-        position: "absolute",
-        ...place,
-        overflowY: "auto",
-        padding: 16,
-        borderRadius: 12,
-        background: p.surface,
-        border: `1px solid ${p.border}`,
-        boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
-      }}
-    >
+    <>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-        <div style={{ color: p.textStrong, fontSize: 16, fontWeight: 700 }}>{node.label}</div>
+        <div style={{ color: p.textStrong, fontSize: 16, fontWeight: 700 }}>{title}</div>
         <button
           onClick={onClose}
           aria-label="Close"
@@ -342,41 +438,124 @@ function DetailPanel({
             fontSize: 18,
             cursor: "pointer",
             lineHeight: 1,
+            fontFamily: UI_FONT,
           }}
         >
           ✕
         </button>
       </div>
-      {node.sub ? (
-        <div style={{ color: p.accent, fontSize: 12.5, marginTop: 2 }}>{node.sub}</div>
-      ) : null}
+      {sub ? <div style={{ color: p.accent, fontSize: 12.5, marginTop: 2 }}>{sub}</div> : null}
+    </>
+  );
+}
 
-      <Section p={p} title="What it is" body={d.what} />
-      <Section p={p} title="Why it exists" body={d.why} />
-      {d.numbers?.length ? (
-        <>
-          <Label p={p}>Numbers</Label>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6 }}>
-            {d.numbers.map((n) => (
-              <span
-                key={n}
-                style={{
-                  fontSize: 12,
-                  color: p.text,
-                  background: p.codeBg,
-                  border: `1px solid ${p.border}`,
-                  borderRadius: 999,
-                  padding: "3px 9px",
-                }}
-              >
-                {n}
-              </span>
-            ))}
-          </div>
-        </>
-      ) : null}
-      {d.breaks ? <Section p={p} title="What breaks" body={d.breaks} accent /> : null}
+function DetailPanel({
+  title,
+  sub,
+  detail,
+  palette: p,
+  narrow,
+  side,
+  onClose,
+}: {
+  title: string;
+  sub?: string;
+  detail: DiagramNodeDetail;
+  palette: Palette;
+  narrow: boolean;
+  side: "left" | "right";
+  onClose: () => void;
+}) {
+  return (
+    <div style={{ ...panelChrome(p), ...panelPlacement(narrow, side) }}>
+      <PanelHeader p={p} title={title} sub={sub} onClose={onClose} />
+      <Section p={p} title="What it is" body={detail.what} />
+      <Section p={p} title="Why it exists" body={detail.why} />
+      {detail.numbers?.length ? <Pills p={p} items={detail.numbers} /> : null}
+      {detail.breaks ? <Section p={p} title="What breaks" body={detail.breaks} accent /> : null}
     </div>
+  );
+}
+
+function OverviewPanel({
+  diagram,
+  palette: p,
+  narrow,
+  onClose,
+}: {
+  diagram: Diagram;
+  palette: Palette;
+  narrow: boolean;
+  onClose: () => void;
+}) {
+  const o = diagram.overview;
+  return (
+    <div
+      style={{
+        ...panelChrome(p),
+        ...(narrow
+          ? { left: 10, right: 10, bottom: 10, maxHeight: "62%" }
+          : {
+              top: 62,
+              left: 12,
+              width: "min(440px, calc(100% - 24px))",
+              maxHeight: "calc(100% - 76px)",
+            }),
+      }}
+    >
+      <PanelHeader p={p} title={diagram.title} sub={diagram.subtitle} onClose={onClose} />
+      <Section p={p} title="The shape of it" body={o.shape} />
+      <Label p={p}>How it works</Label>
+      {o.beats.map((b, i) => (
+        <div key={i} style={{ display: "flex", gap: 10, marginTop: 9 }}>
+          <div
+            style={{
+              flex: "0 0 auto",
+              width: 20,
+              height: 20,
+              borderRadius: 999,
+              border: `1px solid ${p.border}`,
+              color: p.accent,
+              fontSize: 11,
+              fontWeight: 700,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            {i + 1}
+          </div>
+          <div style={{ color: p.text, fontSize: 13.5, lineHeight: 1.55 }}>{b}</div>
+        </div>
+      ))}
+      {o.numbers?.length ? <Pills p={p} items={o.numbers} /> : null}
+      <Section p={p} title="The hard part" body={o.crux} accent />
+    </div>
+  );
+}
+
+function Pills({ p, items }: { p: Palette; items: string[] }) {
+  return (
+    <>
+      <Label p={p}>Numbers</Label>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6 }}>
+        {items.map((n) => (
+          <span
+            key={n}
+            style={{
+              fontSize: 12,
+              color: p.text,
+              background: p.codeBg,
+              border: `1px solid ${p.border}`,
+              borderRadius: 999,
+              padding: "3px 9px",
+            }}
+          >
+            {n}
+          </span>
+        ))}
+      </div>
+    </>
   );
 }
 

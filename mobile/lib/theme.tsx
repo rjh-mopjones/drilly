@@ -15,6 +15,14 @@ import { useSettings } from "./settings";
  * since native is a WebView shell). Comma-separated families are valid on
  * react-native-web (passed straight through to CSS font-family).
  */
+/**
+ * UI font stack. react-native-web applies its own default to <Text>, but raw
+ * DOM nodes (the React Flow diagram) inherit the browser default, which is a
+ * serif. Anything hand-rendering DOM should use this so it matches the app.
+ */
+export const UI_FONT =
+  'system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
+
 export const MONO_FONT =
   '"JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace';
 

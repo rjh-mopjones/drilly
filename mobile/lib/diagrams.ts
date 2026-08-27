@@ -52,15 +52,28 @@ export interface DiagramEdge {
   animated?: boolean;
   /** How far the orthogonal route stands off from the node, in px. */
   offset?: number;
+  /** Every edge is clickable; this is what it says when you click it. */
+  detail?: DiagramNodeDetail;
   /** Anchor overrides when the default top/bottom routing reads badly. */
   fromSide?: "top" | "right" | "bottom" | "left";
   toSide?: "top" | "right" | "bottom" | "left";
+}
+
+export interface DiagramOverview {
+  /** The one-sentence shape of the system. */
+  shape: string;
+  /** Ordered walk through the design, one beat per paragraph. */
+  beats: string[];
+  /** The single hardest thing, stated plainly. */
+  crux: string;
+  numbers?: string[];
 }
 
 export interface Diagram {
   id: string;
   title: string;
   subtitle: string;
+  overview: DiagramOverview;
   /** Deep link back to the question this diagram belongs to. */
   sourceId: string;
   itemId: number;
@@ -74,6 +87,24 @@ const WEB_CRAWLER: Diagram = {
   subtitle: "Frontier, fetch, parse, store. The loop that keeps discovering.",
   sourceId: "patterns",
   itemId: 6,
+  overview: {
+    shape:
+      "A crawler is a loop, not a pipeline: every page you fetch produces the URLs that feed the next fetch, so the system's job is deciding what to pull next without drowning in duplicates or getting itself blocked.",
+    beats: [
+      "Discovery is a hand-off. A parser on one shard constantly finds links belonging to another, so new URLs go onto a partitioned log keyed by hash(domain) rather than being handled locally. Sharding by domain is what keeps all politeness state for a host on one machine.",
+      "Admission is where the money is saved. Before a URL can occupy queue space it must clear the seen index and the robots rules. Every rejection here avoids a TCP connection, a download and a parse, which is why the cheap checks sit in front.",
+      "The frontier is two tiers because it answers two different questions. Front queues decide what is worth crawling (value); back queues decide when you are allowed to (politeness). Keeping them separate means one queue per host makes the rate limit structural rather than something a lock has to enforce.",
+      "Fetch and parse are the easy part, and deliberately stateless. The interesting constraint is that they are almost entirely I/O wait, so concurrency comes from async sockets rather than threads.",
+      "Storage closes the loop safely. The acknowledgement must follow the write, never the fetch, or a crash leaves a URL marked crawled with no page behind it and nothing downstream will ever notice.",
+    ],
+    crux:
+      "Politeness and throughput pull in opposite directions. You want maximum parallelism globally and strict serialisation per host, and the only way to have both is to make the host the unit of scheduling rather than the URL.",
+    numbers: [
+      "~300 links extracted per page",
+      "12GB Bloom vs ~240GB exact index",
+      "one request per second per domain",
+    ],
+  },
   nodes: [
     {
       id: "frontier-group",
@@ -83,6 +114,13 @@ const WEB_CRAWLER: Diagram = {
       y: 112,
       w: 344,
       h: 336,
+      detail: {
+        what: "One shard's worth of frontier: the admission gate plus both queue tiers, owning every domain that hashes to this shard.",
+        why: "Politeness is per host, so the scheduling state for a host has to live in exactly one place. Sharding by hash(domain) guarantees that, which is why cross-shard discoveries go over the bus instead of being handled locally.",
+        numbers: ["shard key = hash(domain)", "all politeness state stays node-local"],
+        breaks:
+          "Rebalancing shards moves domains between nodes, and their next-fetch timestamps have to move with them or the new owner will crawl too fast.",
+      },
     },
     {
       id: "kafka",
@@ -276,14 +314,66 @@ const WEB_CRAWLER: Diagram = {
     },
   ],
   edges: [
-    { id: "e1", from: "kafka", to: "admission", label: "to owning shard", animated: true },
-    { id: "e2", from: "admission", to: "front-queues" },
-    { id: "e3", from: "front-queues", to: "back-queues" },
-    { id: "e4", from: "admission", to: "seen", label: "seen?", fromSide: "right", toSide: "left" },
-    { id: "e5", from: "admission", to: "robots", dashed: true, fromSide: "right", toSide: "left" },
-    { id: "e6", from: "back-queues", to: "robots", dashed: true, fromSide: "right", toSide: "left" },
-    { id: "e7", from: "back-queues", to: "fetcher", label: "ready host, leased", animated: true },
-    { id: "e8", from: "fetcher", to: "web", label: "HTTP GET", fromSide: "right", toSide: "left" },
+    { id: "e1", from: "kafka", to: "admission", label: "to owning shard", animated: true,
+      detail: {
+        what: 'Newly discovered URLs travelling from whichever shard found them to the shard that owns their domain.',
+        why: 'A parser has no idea which shard owns the links it just extracted, and a direct call would couple every shard to every other. The log decouples them and survives a restart, so a hand-off is never lost mid-flight.',
+        numbers: ['partitioned by hash(domain)'],
+        breaks: 'If the consumer falls behind, discovery lag grows silently: the crawl still looks healthy because fetching continues, but it is working from stale discoveries.',
+      },
+    },
+    { id: "e2", from: "admission", to: "front-queues",
+      detail: {
+        what: 'An admitted URL being placed into a priority band.',
+        why: 'Admission and prioritisation are separate concerns. By this point the URL is known to be new and allowed, so the only remaining question is how much it is worth, which is what the band encodes.',
+        breaks: 'Scoring at admission time means the score is frozen; a page that becomes important later keeps its old band until it is rediscovered.',
+      },
+    },
+    { id: "e3", from: "front-queues", to: "back-queues",
+      detail: {
+        what: "A URL moving from its value band into its host's politeness queue.",
+        why: "This is the hand-off from 'what is worth crawling' to 'when am I allowed to crawl it'. The two tiers exist precisely so these questions do not have to be answered by the same structure.",
+        breaks: 'A flood of URLs for one host piles into a single back queue, so a high band cannot make that host go faster; value cannot buy politeness.',
+      },
+    },
+    { id: "e4", from: "admission", to: "seen", label: "seen?", fromSide: "right", toSide: "left",
+      detail: {
+        what: 'The dedup check: has this URL been crawled before?',
+        why: 'This is the cheapest possible rejection and it happens before anything is queued. A memory probe here saves a full fetch and parse downstream.',
+        numbers: ['~1% false-positive rate', 'answered from RAM'],
+        breaks: 'A false positive silently drops a page forever. There is no error and no retry, which is the accepted cost of the 20x memory saving.',
+      },
+    },
+    { id: "e5", from: "admission", to: "robots", dashed: true, fromSide: "right", toSide: "left",
+      detail: {
+        what: 'Checking the cached robots rules before a URL is admitted.',
+        why: 'Rejecting a disallowed path at admission stops it consuming queue space and guarantees it can never be fetched by accident later.',
+        breaks: 'If the rules are missing for a host, admission has to decide whether to block or to optimistically allow, and getting that default wrong is how crawlers get banned.',
+      },
+    },
+    { id: "e6", from: "back-queues", to: "robots", dashed: true, fromSide: "right", toSide: "left",
+      detail: {
+        what: "Reading a host's crawl delay and next-fetch timestamp to schedule it.",
+        why: "The back queue's min-heap is ordered by next-fetch time, and that value comes from here. This is the read that turns a published crawl-delay into actual scheduling behaviour.",
+        numbers: ['one entry per live host'],
+        breaks: 'A missing or stale delay makes the heap schedule a host too early, which is a politeness violation rather than a performance bug.',
+      },
+    },
+    { id: "e7", from: "back-queues", to: "fetcher", label: "ready host, leased", animated: true,
+      detail: {
+        what: 'A host whose cooldown has elapsed being leased to a fetcher.',
+        why: 'Leasing rather than handing out the URL outright is what stops two workers crawling the same host at once. The lease is the mutual exclusion, so no global lock is needed.',
+        numbers: ['lease held for the fetch duration'],
+        breaks: 'If a worker dies holding a lease, that host stalls until the lease expires, so the timeout directly bounds recovery time.',
+      },
+    },
+    { id: "e8", from: "fetcher", to: "web", label: "HTTP GET", fromSide: "right", toSide: "left",
+      detail: {
+        what: "The actual HTTP request to somebody else's server.",
+        why: 'Everything upstream exists to make this one call safe to make: known-new, allowed, and correctly paced.',
+        breaks: 'Timeouts, redirects and hostile responses all land here, and retry state has to belong to the host rather than the URL or a dead host pulls the whole fleet back at once.',
+      },
+    },
     {
       id: "e9",
       from: "web",
@@ -292,8 +382,20 @@ const WEB_CRAWLER: Diagram = {
       dashed: true,
       fromSide: "top",
       toSide: "bottom",
+      detail: {
+        what: 'Fetching robots.txt on first contact with a host and caching it with a TTL.',
+        why: 'It is one request per host rather than per URL. This is drawn as a control path because it does not carry crawl output; it exists purely to constrain the crawler.',
+        numbers: ['one fetch per host per TTL'],
+        breaks: 'A stale cache keeps you crawling paths a site has since disallowed, which is the specific failure that gets a crawler blocked.',
+      },
     },
-    { id: "e10", from: "fetcher", to: "parser", label: "HTML", animated: true },
+    { id: "e10", from: "fetcher", to: "parser", label: "HTML", animated: true,
+      detail: {
+        what: 'Fetched HTML handed to the parser.',
+        why: 'The split keeps fetching (I/O bound, high concurrency) separate from parsing (CPU bound), so the two can be scaled and failed independently.',
+        breaks: 'Malformed or enormous pages are a parser problem, not a fetch problem, and need their own size and time bounds or one page can stall a worker.',
+      },
+    },
     {
       id: "e11",
       from: "parser",
@@ -303,10 +405,35 @@ const WEB_CRAWLER: Diagram = {
       offset: 90,
       fromSide: "right",
       toSide: "right",
+      detail: {
+        what: 'Extracted links published back onto the discovery bus. This is the arrow that makes it a crawl.',
+        why: 'Without this edge the system is a downloader with a fixed input list. Every link goes back to the bus rather than into the local frontier because most of them belong to other shards.',
+        numbers: ['~300 links per page'],
+        breaks: 'URL normalisation happens before publishing; miss it and the same page arrives under endlessly many spellings that the seen index cannot recognise as duplicates.',
+      },
     },
-    { id: "e12", from: "parser", to: "filter" },
-    { id: "e13", from: "filter", to: "object-store", fromSide: "right", toSide: "left" },
-    { id: "e14", from: "filter", to: "metadata", fromSide: "right", toSide: "left" },
+    { id: "e12", from: "parser", to: "filter",
+      detail: {
+        what: 'Parsed content passed to near-duplicate detection.',
+        why: 'URL dedup already happened upstream and is not sufficient: mirrors and syndicated copies are distinct URLs with identical bodies, and only a content fingerprint catches them.',
+        breaks: 'Fingerprinting cost is paid on every page, including the large majority that turn out to be unique.',
+      },
+    },
+    { id: "e13", from: "filter", to: "object-store", fromSide: "right", toSide: "left",
+      detail: {
+        what: 'Writing the page itself to durable storage.',
+        why: 'This write is the one that must complete before the URL is acknowledged as crawled, because the acknowledgement is what makes the work unrepeatable.',
+        numbers: ['ack strictly after the write'],
+        breaks: 'Ack-before-write loses pages invisibly: the seen index insists the work is done, so nothing ever retries.',
+      },
+    },
+    { id: "e14", from: "filter", to: "metadata", fromSide: "right", toSide: "left",
+      detail: {
+        what: 'Recording status, content hash and timestamps for the URL.',
+        why: 'Recrawl scheduling and change detection both need history, and comparing a stored hash tells you a page changed without re-parsing it.',
+        breaks: 'Without per-host retry counts alongside this, backoff is decided per URL and a dead host is hammered by every worker independently.',
+      },
+    },
   ],
 };
 
