@@ -387,7 +387,7 @@ export const CONSISTENT_HASHING: Diagram = {
       id: "e3",
       from: "ring",
       to: "replica-walk",
-      label: "bisect_left, first vnode clockwise",
+      label: "first vnode clockwise",
       animated: true,
       detail: {
         what: "The binary search result: the index of the first ring position at or above the key's position, wrapped modulo the ring length.",
@@ -550,7 +550,7 @@ export const CONSISTENT_HASHING: Diagram = {
       id: "e14",
       from: "donors",
       to: "data-node",
-      label: "~30GB streamed, donor deletes last",
+      label: "~30GB streamed",
       fromSide: "right",
       toSide: "right",
       offset: 60,

@@ -55,6 +55,30 @@ a spec in `mobile/lib/diagrams.ts`, never hand-authored SVG.
   a URL instead of the explanations. Update `diagramToMarkdown` if you add fields
   to `DiagramNodeDetail`, or they will silently not be copied.
 
+### Diagram layout and spacing
+
+Edge labels render in React Flow's SVG layer, which sits **below** the node
+layer. An oversized label does not push anything aside, it silently disappears
+under the next box, so spacing is a correctness concern rather than taste.
+
+- `ArchDiagram.web.tsx` runs `spaceColumns()` over every diagram before render.
+  It clusters nodes into columns and rows and enforces `MIN_GUTTER` (190px) and
+  `MIN_ROW_GAP` (46px), **keeping authored spacing wherever it is already
+  wider**. Do not change these to fixed spacing: forcing a fixed gutter
+  over-spreads multi-column diagrams until fitView shrinks the text to nothing.
+  Group zones are repositioned to keep framing the same members.
+- Because spacing is corrected at render time, specs only need a sane relative
+  grid: left column `x: 40`, further columns to the right, vertical steps of
+  ~100, widths 240-280, and no overlapping boxes (`check-spec.ts` fails on
+  overlap).
+- **Edge labels must be <= 28 characters.** Longer ones collide even at the
+  minimum gutter. `check-spec.ts` warns. Put the detail in the edge's `detail`,
+  which is what clicking the arrow shows, not in the label.
+- Verify with `scratchpad/dg/overlap.js`, which measures actual on-screen
+  collisions between edge labels and node boxes. It must report zero. Exclude
+  `.react-flow__node-zone` from any such check: labels legitimately sit inside
+  zone bounds, and counting those produces false positives.
+
 ### The "Interactive diagram" section is optional
 
 `scripts/validate_sd.py` splits `SECTIONS` (canonical order, used for ordering and
