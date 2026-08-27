@@ -11951,6 +11951,11 @@ The price is that publishing is asynchronous, so a post is not viewable until it
   fan_out_queue.publish(post_id)
   ```
 - Counters: Redis with 100 shards per post for likes, plus a separate Kafka event stream as the audit-grade source of truth. Exact counts come from the event log, approximate counts from Redis for display.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/instagram).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you can turn a media problem into an addressing problem. Every request path in this system carries addresses, and the bytes travel on a separate, cacheable, asynchronous path that neither the API tier nor the database ever touches. Upload bypasses the API with a pre-signed URL, transcoding happens off a queue, the feed response is JSON containing URLs, and delivery is a cache hit in the viewer's city. Once you see that, the follow-on questions answer themselves: URLs must be immutable so they cache forever, mutation must mint a new URL, and deletion becomes hard precisely because you optimised for cacheability. A candidate who designs the feed carefully and then says "and the images go in S3" has answered the wrong question, because the images are the question.
 
@@ -12417,6 +12422,11 @@ The interesting scale problem is not the celebrity. It is the unknown. 100M vide
   return hydrate(top50)  // manifest URLs, metadata, prefetch hints
   ```
 - Interaction events to Kafka, streaming consumer joining them against logged request-time features to produce `(user_id, video_id, label)` training pairs, online ranker checkpoint every 5 minutes.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/tiktok).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you notice that the follow graph has stopped being the data structure the feed is built from. Every other social feed question is, underneath, a question about propagating an item to a known set of recipients: the graph tells you who, and the engineering is about doing that cheaply for the users with pathological degree. Here the graph tells you almost nothing. Most watch time comes from creators the user has never heard of, the candidate set for any single request is the entire corpus, and there is no set of recipients to propagate to. The moment you accept that, fan-out is not a design option that you rejected, it is a mechanism with nothing to do. What replaces it is a retrieval index, and the interesting property of an index is not how fast it serves but what is allowed into it and on what evidence.
 
@@ -12911,6 +12921,11 @@ When supply runs short there are two levers, price on the rider side and reposit
   #   cas(driver[d], expect=OFFERED(req.id), set=ASSIGNED)  # driver committed
   ```
 - Surge: a streaming job over the request stream keyed by cell on a 60 s tumbling window, writing the multiplier to a cache the pricing service reads at quote time.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/ride-hailing).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you see the driver as scarce inventory rather than as a search result. Finding nearby drivers is a lookup, and it is solved. The moment you decide to offer one, you are allocating a mutable, self-willed resource that can say no, and every hard property of this system falls out of that: the exclusive hold taken before the offer is sent rather than after it is accepted, the expiry that returns the hold without a sweeper, the cascade to the next candidate, the second claim on the request itself so two drivers cannot both accept, and the fact that the allocation policy is a product decision with a latency price attached rather than an implementation detail. A candidate who spends thirty minutes on geohashes and H3 and then says "and then we assign the closest driver" has described the input to the problem.
 
@@ -13398,6 +13413,11 @@ The hard parts are the ones no lock reaches: hosts change availability out of ba
   idempotency_key -> DONE; emit BookingConfirmed (notify async)
   ```
 - Reaper: every 60s, `UPDATE calendar SET status='available' WHERE status='held' AND hold_expires_at < now()`. Same CAS discipline, so it can never release a hold that has since become a booking.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/booking-platform).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you notice that the inventory is unique, and that this removes an entire class of answer rather than just changing a parameter. When units are interchangeable you can count them, and counting admits every trick that makes booking systems fast: approximate counters, per-region allocation slices, optimistic decrement with reconciliation afterwards, deliberate oversell with a compensation policy. None of those survive here. You cannot allocate half a night to Europe. You cannot oversell and walk the guest, because there is no equivalent room in the building and no building. Reconciliation after the fact is not a repair; it is a refund plus a person with nowhere to sleep. So the commit has to be exact at the moment it happens, and the honest consequence is a single writer per listing and a booking that pays a round trip to that listing's home region.
 
@@ -13875,6 +13895,11 @@ Every appliance is independent, so there is no shared hot path to scale.
   // OCA: pinned hit -> serve from SSD; miss -> peer OCA, then IXP, then origin
   ```
 - ABR: step up when the buffer exceeds 40 seconds and has been growing for two segments; step down immediately below 10 seconds; never move more than one rung per segment.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/netflix).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you notice that the catalogue is finite and known in advance, and then follow that fact all the way through. Once the set of bytes anyone might ask for is small enough to enumerate and stable enough to forecast, delivery stops being a routing problem and becomes a placement problem. Everything distinctive follows from that. You can afford to own the hardware, because you know how much of it you need. You can pre-position, because you know what will be watched. You can spend thousands of CPU hours on a bespoke encoding ladder per title, because there are only tens of thousands of titles. You can steer clients from the manifest, because you know what is resident where. A candidate who describes a cache hierarchy with anycast routing has described Q51 and has not answered this question.
 
@@ -14282,6 +14307,11 @@ Scale comes from packing tens of thousands of small tenants onto shared shards a
     shard.bus.publish(topic=msg.channel_id, msg, id)       # then deliver
     # indexer and notifier consume the store's change stream, not the bus
   ```
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/slack).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you put the tenancy boundary before the query or inside it. Everything an enterprise buyer pays for is expressed per organisation rather than per user: delete our data within 30 days and attest to it, keep it in the EU, hold these channels for litigation, revoke our key and make us unreadable, export five years for a regulator, prove no other customer can read us. Each of those is one operation when a tenant is a physical bundle you can point at, and each is an unprovable scan across a shared corpus when a tenant is a column. A candidate who describes a chat system and adds `workspace_id` to the tables has answered a different question, because every follow-up is about the operations that column cannot make cheap.
 
@@ -14736,6 +14766,11 @@ Real systems run all three and switch between them per call, sometimes within on
         forward(receiver, rtp_packet)
   ```
 - On TWCC report showing >5% loss: downgrade that receiver's target layer. On recovery: upgrade. On persistent loss: switch to audio-only for that receiver.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/zoom).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you can design a system where discarding data is the correct behaviour. Every frame has a playout deadline, and a frame that arrives after it is not late data, it is wrong data: the receiver throws it away regardless, and the bandwidth spent carrying it was taken from frames that could still have made it. Once you accept that, the design stops being about delivery and becomes about triage. What do you give up first, in what order, per receiver, and how fast does the control loop notice? Candidates who bring durability instincts to this question, buffering to avoid loss or a reliable transport to avoid drops, build a system that freezes instead of blurring, which is the one failure users will not tolerate.
 
@@ -15118,6 +15153,11 @@ Then say what happens if the whole cache vanishes. If the answer is that the sit
 - Backstop TTL on every key, no exceptions, jittered by 10%.
 - Hot key handling: an explicit allowlist of keys that get a per process L1 with a 1 second TTL, plus key level replication across 8 shards for anything above the NIC threshold.
 - On a cache timeout above 5ms: treat it as a miss, count it, and go to the origin. Never block the request waiting for the cache.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/distributed-cache).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you can hold two ideas at once: the cache may lose any value at any moment with no correctness consequence, and it may not serve a wrong value for an unbounded time. Most candidates hold one of them. Hold only the first and the cache becomes free in your head, and you ship a system that shows a customer a price that changed twenty minutes ago. Hold only the second and you reach for replication, persistence and quorum reads, and rebuild a slow database that happens to live in RAM. The actual work is picking the staleness bound in seconds, per class of key, and then choosing the cheapest mechanism that enforces it, which is almost always a TTL with something better layered on top for the few keys that deserve it.
 
@@ -15597,6 +15637,11 @@ If one key is hot, the lock is the wrong tool. Shard it, or move to compare-and-
   ```
 - Renewal thread runs every 10 seconds while work is ongoing, calling `etcd.renew(key, token, ttl=30)`.
 - If the lock ever gets hot (1000 workers fighting for one key), that is a design smell, so shard by sub-key or switch to optimistic concurrency (a `version` column + compare-and-swap update) instead.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/distributed-lock).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you know that mutual exclusion is not the deliverable. The deliverable is that a process which has lost the lock cannot still do damage, and no lock service can provide that alone, because the damage happens at the resource rather than at the lock. Everything else follows from accepting it. The token has to be monotonic, so it has to come from a log with a single agreed order. The resource has to check it, so every writer to that resource has to participate, including the batch job and the operator running a manual fix. The check has to sit in the same transaction as the write, or the race has moved rather than closed. A candidate who designs a flawless consensus-backed lock and never mentions the resource has built contention control and called it safety.
 
@@ -16035,6 +16080,11 @@ The hard parts, in order: a run that never fires produces no error, catch-up aft
       publish(run)          -- after commit, never before
   ```
 - Workers: pull, `SETNX lease:{job_id}:{scheduled_at}`, execute, compare-and-set the terminal status on `(run_id, attempt)`, release. Heartbeat every 30s to extend the lease. On crash the TTL expires and the run is reclaimed.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/job-scheduler).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you understand that the product is a decision about time, and that the decision is the only thing you can make exactly-once. Everything downstream of the run record is ordinary at-least-once distributed work, and any queue-and-worker system already knows how to do it. Candidates spend the interview on the worker pool, the retry policy and the DAG engine, which are the easy half. The hard half is that nobody produces the input. Time produces it, and time is the one input you do not control. It drifts between hosts. It is not uniform: 02:00 does not exist on one Sunday in March and happens twice on one Sunday in October, so a naive implementation both skips a run and emits a duplicate every year. And its failure mode is silence. A run that never fires raises no error, generates no retry, and consumes no capacity, so nothing in the system is aware that anything is missing.
 
