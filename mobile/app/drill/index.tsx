@@ -1,5 +1,13 @@
 import { useCallback, useMemo, useState } from "react";
-import { View, Text, Pressable, ScrollView, StyleSheet } from "react-native";
+import {
+  View,
+  Text,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Platform,
+  useWindowDimensions,
+} from "react-native";
 import { Stack, router, useFocusEffect } from "expo-router";
 import { useManifest } from "../../lib/manifest";
 import { loadDeck, statsFor, type DeckStats } from "../../lib/drill";
@@ -17,6 +25,10 @@ export default function DrillIndex() {
   const palette = useTheme();
   const styles = useMemo(() => makeStyles(palette), [palette]);
   const { sources } = useManifest();
+  const { width } = useWindowDimensions();
+  // The desktop sidebar carries its own settings icon, so a second one in this
+  // header is a duplicate. Same width check as app/settings.tsx.
+  const isDesktop = Platform.OS === "web" && width >= 900;
   const [stats, setStats] = useState<Record<string, DeckStats>>({});
 
   const decks = useMemo(
@@ -51,13 +63,24 @@ export default function DrillIndex() {
     }, [decks]),
   );
 
-  const ordered = useMemo(
-    () =>
-      [...decks].sort(
-        (a, b) => (stats[a.id]?.mastery ?? 0) - (stats[b.id]?.mastery ?? 0),
-      ),
-    [decks, stats],
-  );
+  // Weakest-first, but only among decks actually attempted. Ranking on mastery
+  // alone put untouched decks at the top: mastery is 0 both for a deck of
+  // all-hards and for one never opened, so the two tied and manifest order
+  // broke the tie. Weakness is instead the weighted count of what you got
+  // wrong (hard = 1, medium = 0.5), and an unattempted deck scores -1 so it
+  // sorts below every attempted one — there is nothing known to be weak in it.
+  const ordered = useMemo(() => {
+    const weakness = (id: string) => {
+      const st = stats[id];
+      if (!st) return UNATTEMPTED;
+      const seen = st.hard + st.medium + st.easy;
+      return seen ? st.hard + st.medium * 0.5 : UNATTEMPTED;
+    };
+    return decks
+      .map((s, i) => ({ s, i, w: weakness(s.id) }))
+      .sort((a, b) => b.w - a.w || a.i - b.i)
+      .map((x) => x.s);
+  }, [decks, stats]);
 
   const totalCards = decks.reduce((n, s) => n + (s.drillCards ?? 0), 0);
 
@@ -73,13 +96,15 @@ export default function DrillIndex() {
           <Text style={styles.backGlyph}>‹</Text>
         </Pressable>
         <Text style={styles.title}>Drill</Text>
-        <Pressable
-          onPress={() => router.push("/settings")}
-          style={styles.icon}
-          accessibilityLabel="Settings"
-        >
-          <Text style={styles.iconGlyph}>⚙</Text>
-        </Pressable>
+        {!isDesktop && (
+          <Pressable
+            onPress={() => router.push("/settings")}
+            style={styles.icon}
+            accessibilityLabel="Settings"
+          >
+            <Text style={styles.iconGlyph}>⚙</Text>
+          </Pressable>
+        )}
       </View>
 
       <ScrollView contentContainerStyle={styles.body}>
@@ -107,7 +132,7 @@ export default function DrillIndex() {
                 <Seg n={st?.unseen ?? total} total={total} color={palette.border} />
               </View>
               <Text style={styles.legend}>
-                {st
+                {st && st.hard + st.medium + st.easy > 0
                   ? `${st.hard} hard · ${st.medium} medium · ${st.easy} easy` +
                     (st.unseen ? ` · ${st.unseen} new` : "")
                   : `${total} not yet seen`}
@@ -126,6 +151,10 @@ export default function DrillIndex() {
     </View>
   );
 }
+
+// Sentinel rank for a deck with no labels at all, below every real weakness
+// score (the lowest of which is 0, an attempted deck graded entirely easy).
+const UNATTEMPTED = -1;
 
 export const HARD = "#f2777a";
 export const MEDIUM = "#fbbf24";
