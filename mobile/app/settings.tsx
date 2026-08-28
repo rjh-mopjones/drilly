@@ -18,6 +18,7 @@ import {
   type ThemeMode,
 } from "../lib/settings";
 import { useTheme, type Palette } from "../lib/theme";
+import { DrillSyncSection } from "../components/DrillSyncSection";
 
 export default function SettingsScreen() {
   const palette = useTheme();
@@ -127,6 +128,10 @@ export default function SettingsScreen() {
             thumbColor={palette.surface}
           />
         </View>
+      </Section>
+
+      <Section title="Sync" palette={palette}>
+        <DrillSyncSection />
       </Section>
 
       <Section title="Android app" palette={palette}>

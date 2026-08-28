@@ -16,5 +16,9 @@
     "sync-content": "bash scripts/sync-content.sh",
     "validate:sd": "python3 scripts/validate_sd.py && bun run scripts/parse-check.ts",
     "validate:nc": "python3 scripts/validate_nc.py && bun run scripts/nc-parse-check.ts && python3 scripts/nc-check-examples.py --quiet"
+  },
+  "dependencies": {
+    "@upstash/ratelimit": "^2.0.8",
+    "@upstash/redis": "^1.38.3"
   }
 }
