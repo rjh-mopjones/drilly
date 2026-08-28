@@ -56,6 +56,13 @@ export interface SourceConfig {
    * every source. Omitted for external-only sources.
    */
   itemCount?: number;
+  /**
+   * Number of question-shaped sections in this source. Present only on sources
+   * Drill can use; absent means the source is not question-shaped (katas, the
+   * question banks) and never appears as a deck. Written by
+   * scripts/backfill-drill-counts.ts so the deck list needs no parsing.
+   */
+  drillCards?: number;
 }
 
 export const SOURCES: Record<SourceId, SourceConfig> = {

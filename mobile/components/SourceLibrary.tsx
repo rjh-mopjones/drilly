@@ -114,6 +114,13 @@ export function SourceLibrary() {
           </Text>
         </View>
         <View style={styles.headerRight}>
+          <Pressable
+            onPress={() => router.push("/drill" as never)}
+            style={styles.cog}
+            accessibilityLabel="Drill"
+          >
+            <Text style={styles.drillText}>⚡</Text>
+          </Pressable>
           <RefreshAllButton />
           <Pressable
             onPress={() => router.push("/settings")}
@@ -215,6 +222,7 @@ function makeStyles(p: Palette) {
       justifyContent: "center",
       borderRadius: 22,
     },
+    drillText: { color: p.accent, fontSize: 20 },
     cogText: {
       color: p.textMuted,
       fontSize: 22,

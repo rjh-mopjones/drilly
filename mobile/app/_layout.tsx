@@ -115,6 +115,20 @@ function ThemedRoot() {
           animation: anim,
         }}
       />
+      <Stack.Screen
+        name="drill/index"
+        options={{
+          headerShown: false,
+          animation: anim,
+        }}
+      />
+      <Stack.Screen
+        name="drill/[source]"
+        options={{
+          headerShown: false,
+          animation: anim,
+        }}
+      />
     </Stack>
   );
 
