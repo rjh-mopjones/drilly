@@ -32,6 +32,8 @@ import {
   MAX_BOXES,
   MAX_HOT,
   MAX_LABEL,
+  MAX_NODE_LABEL,
+  MAX_NODE_SUB,
   MIN_ZOOM,
 } from "../mobile/lib/diagrams/layout";
 
@@ -60,6 +62,12 @@ function check(authored: Diagram): Report {
       if (!home) errors.push(`process "${n.label}" is not inside any serviceGroup`);
     }
     if (!isFrame(n.kind) && !n.detail) warnings.push(`node "${n.label}" has no detail`);
+    if (!isFrame(n.kind) || n.kind === "serviceGroup") {
+      if (n.label.length > MAX_NODE_LABEL)
+        warnings.push(`"${n.label}" is ${n.label.length} chars; over ${MAX_NODE_LABEL} it is cut off with an ellipsis`);
+      if (n.sub && n.sub.length > MAX_NODE_SUB)
+        warnings.push(`sub of "${n.label}" is ${n.sub.length} chars; over ${MAX_NODE_SUB} it is cut off: "${n.sub}"`);
+    }
   }
   if (errors.some((m) => m.startsWith("edge") && m.includes("no node"))) {
     return { errors, warnings, line: "" };
@@ -86,7 +94,16 @@ function check(authored: Diagram): Report {
     errors.push(`zoom ${L.zoom.toFixed(2)} < ${MIN_ZOOM}: ${Math.round(L.bounds.w)}×${Math.round(L.bounds.h)} units is too big to read`);
   if (boxes.length > MAX_BOXES) errors.push(`${boxes.length} visible boxes (max ${MAX_BOXES}): collapse a group or fold attributes into panels`);
   if (hot.length > MAX_HOT) errors.push(`${hot.length} hot edges (max ${MAX_HOT})`);
-  if (L.crossings > 0) errors.push(`${L.crossings} crossing(s): move cells or use a frame-sourced edge`);
+  if (L.crossings > 0) {
+    const name = (id: string) => {
+      const e = L.diagram.edges.find((x) => x.id === id);
+      const lbl = (nid: string) => L.diagram.nodes.find((n) => n.id === nid)?.label ?? nid;
+      return e ? `${id} (${lbl(e.from)} → ${lbl(e.to)})` : id;
+    };
+    errors.push(
+      `${L.crossings} crossing(s): ${L.crossingPairs.map(([a, b]) => `${name(a)} × ${name(b)}`).join("; ")} — move cells, set fromSide/toSide, or use a frame-sourced edge`,
+    );
+  }
   if (L.boxHits > 0) errors.push(`${L.boxHits} arrow(s) run under or along a box`);
   if (routed < L.diagram.edges.length) errors.push(`${L.diagram.edges.length - routed} edge(s) could not be routed`);
   if (textItems > 40) warnings.push(`${textItems} text items on screen`);

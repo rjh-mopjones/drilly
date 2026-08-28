@@ -25,9 +25,9 @@ import type { Diagram, DiagramEdge, DiagramNode, EdgeTier } from "./types";
 import { isFrame } from "./types";
 
 // --- measured geometry ------------------------------------------------------
-export const BOX_W = 200;
+export const BOX_W = 220;
 export const BOX_H = 60;
-export const COL_PITCH = 340; // BOX_W + 140 gutter
+export const COL_PITCH = 360; // BOX_W + 140 gutter
 export const ROW_PITCH = 160; // BOX_H + 100 gap
 export const ORIGIN = 40;
 export const LANE = 20; // spacing between parallel lanes
@@ -43,6 +43,9 @@ export const MIN_ZOOM = 0.8;
 export const MAX_BOXES = 12;
 export const MAX_HOT = 8;
 export const MAX_LABEL = 28;
+/** Longest node label / sub that fits a 220px box without an ellipsis (measured: 15px/600 and 12px). */
+export const MAX_NODE_LABEL = 24;
+export const MAX_NODE_SUB = 32;
 
 // Legacy (pixel spec) constants, kept until every spec is on the grid.
 export const MIN_GUTTER = 190;
@@ -74,6 +77,8 @@ export interface Route {
 export interface Layout {
   /** The diagram after collapsing: this is what gets drawn. */
   diagram: Diagram;
+  /** Edge id pairs that cross, for the gate's report. */
+  crossingPairs: [string, string][];
   rects: Record<string, Rect>;
   routes: Record<string, Route>;
   /** Centre of each hot edge's label. */
@@ -389,6 +394,14 @@ export function countCrossings(routes: Route[]): number {
     for (let j = i + 1; j < routes.length; j++)
       for (const a of segs[i]) for (const b of segs[j]) if (segsCross(a, b)) n++;
   return n;
+}
+
+export function crossingPairs(routes: Route[]): [string, string][] {
+  const out: [string, string][] = [];
+  for (let i = 0; i < routes.length; i++)
+    for (let j = i + 1; j < routes.length; j++)
+      if (countCrossings([routes[i], routes[j]]) > 0) out.push([routes[i].id, routes[j].id]);
+  return out;
 }
 
 function segHitsRect(s: [Point, Point], r: Rect, pad: number): boolean {
@@ -745,7 +758,24 @@ export class Router {
     }
   }
 
-  /** Mark every grid node a route passes through, by orientation. */
+  /** Index of the first grid line >= v (binary search). */
+  private lower(arr: number[], v: number): number {
+    let lo = 0;
+    let hi = arr.length;
+    while (lo < hi) {
+      const m = (lo + hi) >> 1;
+      if (arr[m] < v - 0.5) lo = m + 1;
+      else hi = m;
+    }
+    return lo;
+  }
+
+  /**
+   * Mark every grid node a route passes through, by orientation. Walks each
+   * segment's full extent rather than its endpoints, because a straight
+   * port-to-port route has no interior points at all and used to leave no
+   * trace — every other edge could cross it for free.
+   */
   private stamp(points: Point[], index: number) {
     const set = (k: number, kind: 1 | 2 | 3) => {
       const m = this.occ.get(k) ?? new Map<number, 1 | 2 | 3>();
@@ -753,30 +783,28 @@ export class Router {
       m.set(index, prev && prev !== kind ? 3 : kind);
       this.occ.set(k, m);
     };
-    // interior points only (ports are on box faces, not grid nodes)
-    const inner = points.slice(1, -1);
-    for (let s = 0; s < inner.length - 1; s++) {
-      const [x1, y1] = inner[s];
-      const [x2, y2] = inner[s + 1];
+    for (let s = 0; s < points.length - 1; s++) {
+      const [x1, y1] = points[s];
+      const [x2, y2] = points[s + 1];
       const horizontal = Math.abs(y1 - y2) < 0.5;
       if (horizontal) {
         const j = this.yi.get(Math.round(y1));
-        const i1 = this.xi.get(Math.round(Math.min(x1, x2)));
-        const i2 = this.xi.get(Math.round(Math.max(x1, x2)));
-        if (j == null || i1 == null || i2 == null) continue;
-        for (let i = i1; i <= i2; i++) set(this.idx(i, j), 1);
+        if (j == null) continue;
+        const lo = Math.min(x1, x2);
+        const hi = Math.max(x1, x2);
+        for (let i = this.lower(this.xs, lo); i < this.nx && this.xs[i] <= hi + 0.5; i++) set(this.idx(i, j), 1);
       } else {
         const i = this.xi.get(Math.round(x1));
-        const j1 = this.yi.get(Math.round(Math.min(y1, y2)));
-        const j2 = this.yi.get(Math.round(Math.max(y1, y2)));
-        if (i == null || j1 == null || j2 == null) continue;
-        for (let j = j1; j <= j2; j++) set(this.idx(i, j), 2);
+        if (i == null) continue;
+        const lo = Math.min(y1, y2);
+        const hi = Math.max(y1, y2);
+        for (let j = this.lower(this.ys, lo); j < this.ny && this.ys[j] <= hi + 0.5; j++) set(this.idx(i, j), 2);
       }
     }
-    // corners and ends are untouchable
-    for (const [x, y] of inner) {
-      const i = this.xi.get(Math.round(x));
-      const j = this.yi.get(Math.round(y));
+    // corners are untouchable
+    for (let s = 1; s < points.length - 1; s++) {
+      const i = this.xi.get(Math.round(points[s][0]));
+      const j = this.yi.get(Math.round(points[s][1]));
       if (i == null || j == null) continue;
       set(this.idx(i, j), 3);
     }
@@ -1075,14 +1103,21 @@ export function placeLabels(
     const segs = segments(pts);
     const total = segs.reduce((s, [p, q]) => s + Math.abs(q[0] - p[0]) + Math.abs(q[1] - p[1]), 0);
     // candidates: every 8 units along every run, plus perpendicular nudges
-    const cands: { p: Point; along: number; seg: number }[] = [];
+    const cands: { p: Point; along: number; seg: number; off: number }[] = [];
     let acc = 0;
     segs.forEach(([p, q], si) => {
       const len = Math.abs(q[0] - p[0]) + Math.abs(q[1] - p[1]);
+      const horiz = Math.abs(p[1] - q[1]) < 0.5;
       const steps = Math.max(1, Math.floor(len / 8));
       for (let k = 0; k <= steps; k++) {
         const t = k / steps;
-        cands.push({ p: [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t], along: acc + len * t, seg: si });
+        const x = p[0] + (q[0] - p[0]) * t;
+        const y = p[1] + (q[1] - p[1]) * t;
+        // On the line, or one label-height off it: a short run between two
+        // boxes has no room on the line, but plenty just above or below.
+        for (const off of [0, -(LABEL_H + 3), LABEL_H + 3]) {
+          cands.push({ p: horiz ? [x, y + off] : [x + off * 1.2, y], along: acc + len * t, seg: si, off });
+        }
       }
       acc += len;
     });
@@ -1102,7 +1137,11 @@ export function placeLabels(
       const [p, q] = segs[cand.seg];
       const horiz = Math.abs(p[1] - q[1]) < 0.5;
       const runLen = Math.abs(q[0] - p[0]) + Math.abs(q[1] - p[1]);
-      if (horiz && runLen < w) c += (w - runLen) * 0.5;
+      if (horiz && runLen < w && cand.off === 0) c += (w - runLen) * 0.5;
+      // off the line is fine but on the line is the default
+      if (cand.off !== 0) c += 12;
+      // a label on a vertical run reads worse than beside it
+      if (!horiz && cand.off === 0) c += 6;
       // prefer the middle of the route
       c += Math.abs(cand.along - total / 2) * 0.05;
       if (!best || c < best.c) best = { c, p: cand.p };
@@ -1144,7 +1183,20 @@ export function layoutDiagram(authored: Diagram): Layout {
   }
   const bounds = { x: l, y: t, w: r - l, h: b - t };
   const zoom = Math.min(CANVAS.w / (bounds.w + 40), CANVAS.h / (bounds.h + 40));
-  return { diagram, rects, routes, labels, pipelines, collapsed, bounds, zoom, crossings, boxHits, onGrid: grid };
+  return {
+    diagram,
+    crossingPairs: crossingPairs(Object.values(routes)),
+    rects,
+    routes,
+    labels,
+    pipelines,
+    collapsed,
+    bounds,
+    zoom,
+    crossings,
+    boxHits,
+    onGrid: grid,
+  };
 }
 
 /** SVG path with rounded corners for a route. */
