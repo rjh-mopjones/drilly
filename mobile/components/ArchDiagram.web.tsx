@@ -24,7 +24,8 @@ import type {
   NodeKind,
   TechChoice,
 } from "../lib/diagrams";
-import { UI_FONT, type Palette } from "../lib/theme";
+import { isFrame } from "../lib/diagrams";
+import { MONO_FONT, UI_FONT, type Palette } from "../lib/theme";
 
 /**
  * Interactive architecture diagram (web). The native app is a WebView shell
@@ -47,17 +48,115 @@ type Selection =
   | { kind: "edge"; id: string }
   | { kind: "overview" };
 
+/**
+ * What each kind looks like. A kind is a claim about what the thing IS, so it
+ * drives three signals at once: the hue, a motif drawn inside the box, and the
+ * type tag in the top-right corner. Together they let a reader tell a queue
+ * from a database without reading a word.
+ *
+ * `hue` is a function of the palette so the same table serves light and dark.
+ */
+type KindStyle = {
+  tag: string;
+  hue: (p: Palette) => string;
+  /** Cylinder rim across the top: stores. */
+  rim?: boolean;
+  /** Dashed strokes: you are allowed to lose it, or you do not own it. */
+  dashed?: boolean;
+  /** Motif drawn against the leading edge, and the padding it needs. */
+  motif?: "bars" | "layers" | "chevron";
+  /** Fully rounded: the only pill in the language. */
+  pill?: boolean;
+  /** A stage inside a service, drawn lighter and with no fill of its own. */
+  faint?: boolean;
+};
+
+const KIND: Record<NodeKind, KindStyle> = {
+  service: { tag: "SERVICE", hue: (p) => p.accent },
+  process: { tag: "PROCESS", hue: (p) => p.accent, faint: true },
+  queue: { tag: "QUEUE", hue: (p) => (p.scheme === "dark" ? "#c4b5fd" : "#6d28d9"), motif: "bars" },
+  database: { tag: "DATABASE", hue: (p) => (p.scheme === "dark" ? "#86efac" : "#15803d"), rim: true },
+  cache: { tag: "CACHE", hue: (p) => (p.scheme === "dark" ? "#fcd34d" : "#b45309"), rim: true, dashed: true },
+  blob: { tag: "OBJECT STORE", hue: (p) => (p.scheme === "dark" ? "#67e8f9" : "#0e7490"), rim: true, motif: "layers" },
+  gateway: { tag: "GATEWAY", hue: (p) => (p.scheme === "dark" ? "#5eead4" : "#0f766e"), motif: "chevron" },
+  client: { tag: "CLIENT", hue: (p) => (p.scheme === "dark" ? "#94a3b8" : "#475569"), pill: true },
+  external: { tag: "EXTERNAL", hue: (p) => (p.scheme === "dark" ? "#fda4af" : "#be123c"), dashed: true },
+  // Frames render through their own components; these entries exist so the
+  // record is total and a missing kind is a type error rather than a crash.
+  serviceGroup: { tag: "SERVICE", hue: (p) => p.accent },
+  zone: { tag: "", hue: (p) => p.border },
+};
+
 function kindColor(kind: NodeKind, p: Palette): string {
-  switch (kind) {
-    case "bus":
-      return p.accent;
-    case "store":
-      return p.textMuted;
-    case "external":
-      return p.errorFg;
-    default:
-      return p.text;
+  return KIND[kind].hue(p);
+}
+
+/** Tint used for a box fill; stronger in dark, where a 7% wash vanishes. */
+function tint(p: Palette): string {
+  return p.scheme === "dark" ? "24" : "12";
+}
+
+/** The cylinder lip, drawn INSIDE the box so the bounding rect is unchanged. */
+function Rim({ color, dashed }: { color: string; dashed?: boolean }) {
+  return (
+    <svg
+      width="100%"
+      height="12"
+      viewBox="0 0 100 12"
+      preserveAspectRatio="none"
+      style={{ position: "absolute", left: 0, top: 3, pointerEvents: "none" }}
+      aria-hidden
+    >
+      <path
+        d="M0 2 C 18 10, 82 10, 100 2"
+        fill="none"
+        stroke={color}
+        strokeWidth={1.3}
+        vectorEffect="non-scaling-stroke"
+        strokeDasharray={dashed ? "6 3" : undefined}
+      />
+    </svg>
+  );
+}
+
+/** Leading-edge motif. Queue = messages in line, blob = stacked layers. */
+function Motif({ kind, color }: { kind: "bars" | "layers" | "chevron"; color: string }) {
+  const base: React.CSSProperties = {
+    position: "absolute",
+    left: 13,
+    pointerEvents: "none",
+  };
+  if (kind === "chevron") {
+    return (
+      <svg width="15" height="20" viewBox="0 0 15 20" style={{ ...base, bottom: 13 }} aria-hidden>
+        <path d="M1 1 L13 10 L1 19" fill="none" stroke={color} strokeWidth={1.4} />
+      </svg>
+    );
   }
+  const bars = kind === "bars";
+  return (
+    <div
+      style={{
+        ...base,
+        bottom: 12,
+        display: "flex",
+        flexDirection: bars ? "row" : "column",
+        gap: 3.5,
+      }}
+      aria-hidden
+    >
+      {[0, 1, 2].map((i) => (
+        <div
+          key={i}
+          style={{
+            width: bars ? 1.4 : 17,
+            height: bars ? 24 : 1.4,
+            background: color,
+          }}
+        />
+      ))}
+    </div>
+  );
 }
 
 type NodeData = {
@@ -69,18 +168,29 @@ type NodeData = {
 
 function BoxNode({ data }: NodeProps) {
   const { node, palette: p, selected, dimmed } = data as unknown as NodeData;
-  const color = kindColor(node.kind, p);
+  const k = KIND[node.kind];
+  const color = k.hue(p);
   const handles = ["top", "right", "bottom", "left"] as const;
+  // A left-edge motif needs the text moved out of its way; nothing else does.
+  const textPad = k.motif === "chevron" ? 20 : k.motif ? 24 : 0;
+
   return (
     <div
       style={{
+        position: "relative",
         width: node.w ?? 240,
         boxSizing: "border-box",
-        padding: "12px 14px",
-        borderRadius: 10,
-        border: `1.5px solid ${selected ? p.accent : color}`,
-        background: selected ? p.surfacePressed : p.surface,
-        opacity: dimmed ? 0.32 : 1,
+        padding: "9px 14px 12px",
+        borderRadius: k.pill ? 999 : 10,
+        border: `${k.faint ? 1.2 : 1.5}px ${k.dashed ? "dashed" : "solid"} ${
+          selected ? p.accent : color
+        }`,
+        background: selected
+          ? p.surfacePressed
+          : k.faint
+            ? "transparent"
+            : `${color}${tint(p)}`,
+        opacity: dimmed ? 0.32 : k.faint ? 0.88 : 1,
         transition: "opacity 140ms ease, border-color 140ms ease, background 140ms ease",
         cursor: "pointer",
         fontFamily: UI_FONT,
@@ -105,14 +215,100 @@ function BoxNode({ data }: NodeProps) {
           style={{ opacity: 0, pointerEvents: "none" }}
         />
       ))}
-      <div style={{ color: p.textStrong, fontSize: 15, fontWeight: 600, lineHeight: 1.25 }}>
-        {node.label}
+
+      {k.rim ? <Rim color={color} dashed={k.dashed} /> : null}
+      {k.motif ? <Motif kind={k.motif} color={color} /> : null}
+
+      {/* Type tag: its own row, so a rim or a long label never collides with it. */}
+      <div
+        style={{
+          height: 12,
+          marginBottom: 5,
+          textAlign: "right",
+          fontFamily: MONO_FONT,
+          fontSize: 8.5,
+          letterSpacing: "0.1em",
+          lineHeight: "12px",
+          color,
+          opacity: k.faint ? 0.75 : 1,
+        }}
+      >
+        {k.tag}
       </div>
-      {node.sub ? (
-        <div style={{ color: p.textMuted, fontSize: 12.5, marginTop: 4, lineHeight: 1.3 }}>
-          {node.sub}
+
+      <div style={{ paddingLeft: textPad }}>
+        <div style={{ color: p.textStrong, fontSize: 14.5, fontWeight: 600, lineHeight: 1.25 }}>
+          {node.label}
         </div>
-      ) : null}
+        {node.sub ? (
+          <div style={{ color: p.textMuted, fontSize: 12, marginTop: 3, lineHeight: 1.3 }}>
+            {node.sub}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * A service that is made of several processes. Unlike a zone this is a claim
+ * about deployment: one thing you ship, several stages inside it. It is what
+ * stops four stages of one request path being drawn as four peer services.
+ */
+function ServiceGroupNode({ data }: NodeProps) {
+  const { node, palette: p, selected, dimmed } = data as unknown as NodeData;
+  const color = selected ? p.accent : p.accent;
+  return (
+    <div
+      style={{
+        width: node.w ?? 300,
+        height: node.h ?? 300,
+        boxSizing: "border-box",
+        border: `1.5px solid ${color}`,
+        borderRadius: 14,
+        background: `${p.accent}${p.scheme === "dark" ? "14" : "0a"}`,
+        opacity: dimmed ? 0.4 : 1,
+        // Click-through body so the processes inside stay reachable; the header
+        // strip is what selects the service itself.
+        pointerEvents: "none",
+        fontFamily: UI_FONT,
+        transition: "opacity 140ms ease, border-color 140ms ease",
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "baseline",
+          justifyContent: "space-between",
+          gap: 12,
+          padding: "9px 14px 8px",
+          borderBottom: `1px solid ${p.accent}44`,
+          cursor: "pointer",
+          pointerEvents: "all",
+        }}
+      >
+        <span
+          style={{
+            fontFamily: MONO_FONT,
+            fontSize: 10.5,
+            fontWeight: 700,
+            letterSpacing: "0.09em",
+            color: selected ? p.accent : p.textStrong,
+          }}
+        >
+          {node.label.toUpperCase()}
+        </span>
+        <span
+          style={{
+            fontFamily: MONO_FONT,
+            fontSize: 8.5,
+            letterSpacing: "0.1em",
+            color: p.accent,
+          }}
+        >
+          SERVICE
+        </span>
+      </div>
     </div>
   );
 }
@@ -183,6 +379,7 @@ function LabelledEdge({
     border?: string;
     lx?: number;
     ly?: number;
+    pick?: () => void;
   };
   const [path, labelX, labelY] = getSmoothStepPath({
     sourceX,
@@ -202,7 +399,14 @@ function LabelledEdge({
 
   return (
     <>
-      <BaseEdge id={id} path={path} style={style} markerEnd={markerEnd} interactionWidth={26} />
+      {/*
+        interactionWidth 0 on purpose. A 26px invisible path per edge means the
+        edge drawn last wins any overlap, regardless of which line the pointer
+        was nearest, and edges that pass under a box are unreachable entirely.
+        Dropping it lets the click fall through to the pane, where
+        nearestEdgeId() picks by distance instead of by paint order.
+      */}
+      <BaseEdge id={id} path={path} style={style} markerEnd={markerEnd} interactionWidth={0} />
       {label ? (
         <EdgeLabelRenderer>
           <div
@@ -228,7 +432,7 @@ function LabelledEdge({
   );
 }
 
-const NODE_TYPES = { box: BoxNode, zone: ZoneNode };
+const NODE_TYPES = { box: BoxNode, zone: ZoneNode, serviceGroup: ServiceGroupNode };
 const EDGE_TYPES = { labelled: LabelledEdge };
 
 /**
@@ -237,7 +441,24 @@ const EDGE_TYPES = { labelled: LabelledEdge };
  * labels underneath every node. Lift the label layer so a label on an edge that
  * routes across a box stays readable.
  */
-const LABEL_LAYER_CSS = ".react-flow__edgelabel-renderer { z-index: 6; }";
+const LABEL_LAYER_CSS = [
+  ".react-flow__edgelabel-renderer { z-index: 6; }",
+  // Frames must be click-through, and setting pointerEvents on the component's
+  // own div is NOT enough: React Flow wraps every custom node in its own
+  // .react-flow__node element, and that wrapper keeps pointer events. A frame
+  // spans a large area, so the wrapper silently swallows every click aimed at a
+  // box or an arrow inside it. Measured on web-crawler, whose two service frames
+  // and one zone made 13 of its 22 arrows unclickable while none of them were
+  // actually drawn underneath anything.
+  //
+  // The header strip and the zone chip re-enable pointer events on themselves,
+  // so a frame is still selectable by its own title.
+  // !important is required: React Flow ships `.react-flow__node { pointer-events:
+  // all }` at the same specificity and its stylesheet wins on order.
+  ".react-flow__node-zone, .react-flow__node-serviceGroup { pointer-events: none !important; }",
+  // ...but the title still has to be clickable, so the frame stays selectable.
+  ".react-flow__node-zone > div > span, .react-flow__node-serviceGroup > div > div { pointer-events: all !important; }",
+].join("\n");
 
 /**
  * Re-space the authored grid so edge labels have room.
@@ -259,14 +480,14 @@ const MIN_GUTTER = 190; // ~28 chars at 11.5px, the label cap the checker enforc
 const MIN_ROW_GAP = 46; // label height plus its background padding
 const COL_TOLERANCE = 60;
 const ROW_TOLERANCE = 40;
-const DEFAULT_H = 66;   // measured: a box with a sub-label renders ~65px
+const DEFAULT_H = 84;   // measured: box + type-tag row, with a sub-label
 const LABEL_H = 19;     // measured
 const LABEL_CHAR_W = 6.9; // measured ~6.3px/char; rounded up for safety
 const LABEL_PAD = 14;   // horizontal padding + border
 
 /** Rendered height of a box: taller when it carries a sub-label. */
 function nodeH(n: DiagramNode): number {
-  return n.h ?? (n.sub ? DEFAULT_H : 46);
+  return n.h ?? (n.sub ? DEFAULT_H : 62);
 }
 
 /** Where an edge attaches to a box, in flow coordinates. */
@@ -285,8 +506,120 @@ function anchor(n: DiagramNode, side: string): { x: number; y: number } {
   }
 }
 
+/**
+ * Give every edge that would share a corridor its own lane.
+ *
+ * getSmoothStepPath turns a fixed distance from the node, so two edges crossing
+ * the same gap turn at the same coordinate and their orthogonal runs land on top
+ * of each other. Visually that is one line instead of two; worse, with a 26px hit
+ * area it is one click target, so the edge underneath can never be selected.
+ * Measured on the notification system before this existed: 4 of 18 edges were
+ * unreachable at every point along their length, and 4 more had their midpoint
+ * taken by a neighbour.
+ *
+ * This is a greedy packer, not a router. Each edge takes the lowest lane that
+ * does not collide with one already placed, where a collision means the two turn
+ * within a lane-width of each other AND their perpendicular spans overlap. Edges
+ * that are already well separated keep the default offset and nothing moves.
+ */
+/**
+ * Which edge did that click mean?
+ *
+ * Fat invisible hit paths do not work here. Stacked in one layer they overlap,
+ * and the one drawn last wins regardless of which line the pointer was actually
+ * nearest — measured on the notification system, that left 4 of 18 edges
+ * unselectable anywhere along their length. Distance is unambiguous where
+ * stacking is not: sample every rendered path and take the closest one.
+ *
+ * Runs only on a pane click (a click that hit no node), so boxes still win where
+ * a box is genuinely under the pointer.
+ */
+const HIT_RADIUS_PX = 16;
+
+function nearestEdgeId(root: HTMLElement, cx: number, cy: number): string | null {
+  let best: string | null = null;
+  let bestD2 = HIT_RADIUS_PX * HIT_RADIUS_PX;
+
+  for (const el of root.querySelectorAll<SVGPathElement>(".react-flow__edge-path")) {
+    const id = el.closest(".react-flow__edge")?.getAttribute("data-id");
+    if (!id) continue;
+    const ctm = el.getScreenCTM();
+    const svg = el.ownerSVGElement;
+    if (!ctm || !svg) continue;
+
+    const len = el.getTotalLength();
+    if (!len) continue;
+    // ~6px along the path is fine: we only need to beat HIT_RADIUS_PX.
+    const steps = Math.min(400, Math.max(12, Math.ceil(len / 6)));
+    const pt = svg.createSVGPoint();
+    for (let i = 0; i <= steps; i++) {
+      const q = el.getPointAtLength((len * i) / steps);
+      pt.x = q.x;
+      pt.y = q.y;
+      const s = pt.matrixTransform(ctm);
+      const dx = s.x - cx;
+      const dy = s.y - cy;
+      const d2 = dx * dx + dy * dy;
+      if (d2 < bestD2) {
+        bestD2 = d2;
+        best = id;
+      }
+    }
+  }
+  return best;
+}
+
+const LANE_STEP = 26; // matches the hit width, so lanes cannot share a target
+const MAX_LANES = 6;  // past this the spec is wrong; spreading further hurts more
+
+function assignLanes(d: Diagram): Record<string, number> {
+  const byId = new Map(d.nodes.map((n) => [n.id, n] as const));
+  type Placed = { horizontal: boolean; turn: number; lo: number; hi: number };
+  const placed: Placed[] = [];
+  const out: Record<string, number> = {};
+
+  for (const e of d.edges) {
+    const a = byId.get(e.from);
+    const b = byId.get(e.to);
+    if (!a || !b) continue;
+
+    // An authored offset is a deliberate override; never second-guess it.
+    if (typeof e.offset === "number") {
+      out[e.id] = e.offset;
+      continue;
+    }
+
+    const from = anchor(a, e.fromSide ?? "bottom");
+    const to = anchor(b, e.toSide ?? "top");
+    const horizontal = Math.abs(to.x - from.x) > Math.abs(to.y - from.y);
+    // Which way the path leaves the source, so the turn lands on the right side.
+    const dir = horizontal ? Math.sign(to.x - from.x) || 1 : Math.sign(to.y - from.y) || 1;
+    const base = horizontal ? from.x : from.y;
+    const lo = horizontal ? Math.min(from.y, to.y) : Math.min(from.x, to.x);
+    const hi = horizontal ? Math.max(from.y, to.y) : Math.max(from.x, to.x);
+
+    let lane = 0;
+    for (; lane < MAX_LANES; lane++) {
+      const turn = base + dir * (20 + lane * LANE_STEP);
+      const clash = placed.some(
+        (q) =>
+          q.horizontal === horizontal &&
+          Math.abs(q.turn - turn) < LANE_STEP * 0.8 &&
+          q.lo < hi &&
+          lo < q.hi,
+      );
+      if (!clash) {
+        placed.push({ horizontal, turn, lo, hi });
+        break;
+      }
+    }
+    out[e.id] = 20 + Math.min(lane, MAX_LANES - 1) * LANE_STEP;
+  }
+  return out;
+}
+
 function spaceColumns(d: Diagram): Diagram {
-  const boxes = d.nodes.filter((n) => n.kind !== "group");
+  const boxes = d.nodes.filter((n) => !isFrame(n.kind));
   if (boxes.length < 2) return d;
 
   // Cluster nodes into columns by x, tolerating slight authoring drift.
@@ -346,7 +679,7 @@ function spaceColumns(d: Diagram): Diagram {
   }
 
   const nodes = d.nodes.map((n) => {
-    if (n.kind !== "group") {
+    if (!isFrame(n.kind)) {
       return { ...n, x: moved.get(n.id) ?? n.x, y: movedY.get(n.id) ?? n.y };
     }
     // Keep the zone around the same members it framed originally.
@@ -409,7 +742,7 @@ function useWidth(ref: React.RefObject<HTMLDivElement | null>): number {
 function placeLabels(d: Diagram): Record<string, { lx: number; ly: number }> {
   const byId = new Map(d.nodes.map((n) => [n.id, n]));
   const boxes = d.nodes
-    .filter((n) => n.kind !== "group")
+    .filter((n) => !isFrame(n.kind))
     .map((n) => ({ x: n.x, y: n.y, w: n.w ?? 240, h: nodeH(n) }));
 
   type Placed = { x: number; y: number; w: number; h: number };
@@ -538,11 +871,12 @@ export default function ArchDiagram({
     () =>
       diagram.nodes.map((n) => ({
         id: n.id,
-        type: n.kind === "group" ? "zone" : "box",
+        type:
+          n.kind === "zone" ? "zone" : n.kind === "serviceGroup" ? "serviceGroup" : "box",
         position: { x: n.x, y: n.y },
         draggable: false,
         selectable: true,
-        zIndex: n.kind === "group" ? 0 : 1,
+        zIndex: isFrame(n.kind) ? 0 : 1,
         data: {
           node: n,
           palette,
@@ -553,7 +887,12 @@ export default function ArchDiagram({
     [diagram, palette, sel, lit],
   );
 
+  const selectEdge = useCallback((id: string) => {
+    setSel((cur) => (cur?.kind === "edge" && cur.id === id ? null : { kind: "edge", id }));
+  }, []);
+
   const labelPos = useMemo(() => placeLabels(diagram), [diagram]);
+  const lanes = useMemo(() => assignLanes(diagram), [diagram]);
 
   const edges: Edge[] = useMemo(
     () =>
@@ -574,7 +913,8 @@ export default function ArchDiagram({
           type: "labelled",
           data: {
             ...labelPos[e.id],
-            offset: e.offset ?? 20,
+            pick: () => selectEdge(e.id),
+            offset: lanes[e.id] ?? e.offset ?? 20,
             fg: isSel ? palette.accent : palette.textMuted,
             bg: palette.bg,
             border: palette.border,
@@ -595,18 +935,21 @@ export default function ArchDiagram({
             cursor: "pointer",
             transition: "opacity 140ms ease, stroke-width 140ms ease",
           },
-          markerEnd: { type: MarkerType.ArrowClosed, color: stroke, width: 16, height: 16 },
+          // 9px, not 16: a 16px head on an 84px box reads as a blob and
+          // swallows the border it lands on.
+          markerEnd: { type: MarkerType.ArrowClosed, color: stroke, width: 9, height: 9 },
         };
       }),
-    [diagram, palette, sel, lit, labelPos],
+    [diagram, palette, sel, lit, labelPos, lanes, selectEdge],
   );
 
   const onNodeClick = useCallback((_e: unknown, n: Node) => {
     setSel((cur) => (cur?.kind === "node" && cur.id === n.id ? null : { kind: "node", id: n.id }));
   }, []);
-  const onEdgeClick = useCallback((_e: unknown, ed: Edge) => {
-    setSel((cur) => (cur?.kind === "edge" && cur.id === ed.id ? null : { kind: "edge", id: ed.id }));
-  }, []);
+  const onEdgeClick = useCallback(
+    (_e: unknown, ed: Edge) => selectEdge(ed.id),
+    [selectEdge],
+  );
 
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const width = useWidth(wrapRef);
@@ -632,9 +975,20 @@ export default function ArchDiagram({
         edgeTypes={EDGE_TYPES}
         onNodeClick={onNodeClick}
         onEdgeClick={onEdgeClick}
-        onPaneClick={() => setSel(null)}
+        onPaneClick={(ev) => {
+          // A click that reached the pane may still have been aimed at an arrow
+          // that a box is sitting on top of. Ask which line was nearest first.
+          const root = wrapRef.current;
+          const id = root ? nearestEdgeId(root, ev.clientX, ev.clientY) : null;
+          if (id) selectEdge(id);
+          else setSel(null);
+        }}
         fitView
-        fitViewOptions={{ padding: 0.4 }}
+        // 0.4 padding was covering label overhang back when labels routinely
+        // sat outside the node bounds. placeLabels keeps them close now, and
+        // 40% of the canvas spent on margin left the text too small to read on
+        // a first look — which is the whole point of the diagram.
+        fitViewOptions={{ padding: 0.14, maxZoom: 1.15 }}
         minZoom={0.2}
         maxZoom={2.5}
         proOptions={{ hideAttribution: true }}

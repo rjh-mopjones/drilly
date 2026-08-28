@@ -26,31 +26,12 @@ export const URL_SHORTENER: Diagram = {
     ],
   },
   nodes: [
-    {
-      id: "async-group",
-      label: "Async analytics, never on the redirect path",
-      kind: "group",
-      x: 384,
-      y: 444,
-      w: 652,
-      h: 228,
-      detail: {
-        what: "The click pipeline: edge-served clicks recovered from CDN logs, origin-served clicks fired onto a durable log, both landing in a columnar warehouse.",
-        why: "It is drawn as a separate zone because nothing inside it is allowed to sit on a redirect. Redirects carry a 99.99% availability target and a p99 under 100ms; the whole of this box is best effort at a 99.9% delivery target and may be down.",
-        numbers: [
-          "1.04 x 10^10 click events/day",
-          "24 MB/s steady, 200 MB/s at 1M clicks/s peak",
-          "click pipeline lag alert above 60s",
-        ],
-        breaks:
-          "Click counts are approximate and the error bar is not stateable: fire-and-forget loses whatever exceeds the local ring buffer, CDN log sampling is a vendor behaviour, and bots and link unfurlers inflate counts by an amount that varies by referrer.",
-      },
-    },
+    // --- write path, left column ---
     {
       id: "creator",
       label: "Creator",
       sub: "POST /shorten, ~1.2k/s",
-      kind: "external",
+      kind: "client",
       x: 40,
       y: 0,
       w: 260,
@@ -70,20 +51,20 @@ export const URL_SHORTENER: Diagram = {
       id: "write-api",
       label: "Write API",
       sub: "base62 encode, one unconditional insert",
-      kind: "compute",
+      kind: "service",
       x: 40,
-      y: 110,
+      y: 130,
       w: 260,
       detail: {
-        what: "Takes the long URL, asks for an id, encodes it in base62 and performs a single insert with no collision check.",
-        why: "Uniqueness comes from the generator rather than from the database, so there is no read before the write and creation is one round trip. Base62 is chosen over base64 because it needs neither percent-encoding for + and / nor = padding, and it double-click-selects as one token.",
+        what: "Takes the long URL, checks the destination's reputation, asks for an id, encodes it in base62 and performs a single insert with no collision check.",
+        why: "Uniqueness comes from the generator rather than from the database, so there is no read before the write and creation is one round trip. It stays one box rather than a group of stages because the prose treats the whole write path as a rounding error next to the read path: ninety seconds of the interview, one service, one insert. Base62 is chosen over base64 because it needs neither percent-encoding for + and / nor = padding, and it double-click-selects as one token.",
         numbers: [
           "7 base62 chars = 62^7 = 3.5 x 10^12 aliases",
           "10% saturation after ten years of 100M/day",
           "an 8th character takes it to 62^8 = 218 trillion",
         ],
         breaks:
-          "Custom aliases are the exception and the abuse vector: without a reserved-word list, required auth and a per-account quota, users take /login, /admin and every brand name you did not think of.",
+          "Custom aliases are the exception and the abuse vector. They take the one conditional insert in the design, an IF NOT EXISTS, and without a reserved-word list, required auth and a per-account quota users take /login, /admin and every brand name you did not think of.",
         choice: {
           pick: "base62 over an id from a coordination-free generator, inserted unconditionally",
           instead: "Random 7-character codes with a conditional insert to catch duplicates.",
@@ -98,13 +79,13 @@ export const URL_SHORTENER: Diagram = {
       id: "id-gen",
       label: "ID generator",
       sub: "Snowflake, or a 1000-id lease",
-      kind: "compute",
+      kind: "service",
       x: 40,
-      y: 220,
+      y: 260,
       w: 260,
       detail: {
-        what: "Hands out unique ids with nothing to coordinate on the request path: Snowflake as in Q4, or a block of 1000 ids leased from a central counter at startup.",
-        why: "If the generator has to be consulted per insert it becomes the write path's ceiling and its single point of failure. Leasing amortises the counter away, and gaps in the alias space from an unused block cost nothing because 90% of the space is still free after a decade.",
+        what: "Hands out unique ids with nothing to coordinate on the request path: Snowflake as in Q4, or a block of 1000 ids leased from a central HA counter at startup.",
+        why: "It stays a separate box rather than a stage of the Write API because the leased-counter form is a service that fails on its own schedule and is explicitly run in HA mode. If the generator has to be consulted per insert it becomes the write path's ceiling and its single point of failure; leasing amortises the counter away, and gaps in the alias space from an unused block cost nothing because 90% of the space is still free after a decade.",
         numbers: [
           "blocks of 1000 ids, one counter op per 1000 inserts",
           "a central auto-increment caps out at a few thousand inserts/s",
@@ -128,10 +109,10 @@ export const URL_SHORTENER: Diagram = {
       sub: "Safe Browsing + internal blocklist",
       kind: "external",
       x: 40,
-      y: 330,
+      y: 390,
       w: 260,
       detail: {
-        what: "A reputation call on the destination before the alias is issued, plus a periodic re-scan of stored URLs against newly flagged domains.",
+        what: "A third-party reputation call on the destination before the alias is issued, plus a periodic re-scan of stored URLs against newly flagged domains.",
         why: "A shortener launders its destination, so it is a phishing delivery mechanism unless something inspects what it points at. Create time is the only moment you have full control, because after that the link is in the wild and removal is best effort.",
         numbers: [
           "one call per create, ~1.2k/s",
@@ -150,145 +131,15 @@ export const URL_SHORTENER: Diagram = {
         },
       },
     },
-    {
-      id: "cache",
-      label: "In-memory cache",
-      sub: "Redis, 75 GB LRU, ~99% of origin reads",
-      kind: "store",
-      x: 400,
-      y: 150,
-      w: 260,
-      detail: {
-        what: "The hot alias to long_url working set in memory, LRU, positive TTL 1h and negative TTL 30s.",
-        why: "Clicks concentrate on new links, so a link takes about 80% of its lifetime clicks in three days and the working set is just three days of creations. That is 300M aliases at about 250B each, so 75 GB, a handful of replicated nodes rather than a fleet, which is why this tier is cheap.",
-        numbers: [
-          "300M aliases x ~250B = 75 GB",
-          "~6k reads/s in, ~60 reads/s out",
-          "positive TTL 1h, negative TTL 30s",
-        ],
-        breaks:
-          "Distinct 404s from an enumeration scan are guaranteed misses that coalescing cannot collapse, so the negative cache is the only thing standing between a scanner and the store. Keep its TTL well under the positive one, or a freshly created alias that was probed first will 404 for its own creator.",
-        choice: {
-          pick: "Replicated in-memory LRU cache, with tombstones for misses",
-          instead: "No cache at all, letting the alias store absorb everything the edge misses.",
-          decider:
-            "6k/s of point reads is survivable for a partitioned store, but the working set is only 75 GB and the cache turns 6k/s into about 60/s, a 100x reduction for a few nodes. That spare headroom is what absorbs a viral link before any edge is warm.",
-          flips:
-            "When the alias corpus has no temporal concentration, so there is no small working set to hold and the cache only earns its keep on repeat hits inside a TTL.",
-        },
-      },
-    },
-    {
-      id: "alias-store",
-      label: "Alias store",
-      sub: "hash(alias) partitioned, RF 3",
-      kind: "store",
-      x: 400,
-      y: 290,
-      w: 260,
-      detail: {
-        what: "The durable alias to long_url table with created_by, expires_at and deleted_at, hash-partitioned and replicated three ways.",
-        why: "It is ground truth for everything cached above it, and it is deliberately the quietest box in the diagram at about 60 reads/s in steady state. The entire cache hierarchy exists to keep that number where it is, which is why a step change in it is a pageable alert.",
-        numbers: [
-          "~60 reads/s steady, 1.2k writes/s",
-          "365B rows at ten years, ~500B per row",
-          "~180 TB logical, ~550 TB at RF 3",
-        ],
-        breaks:
-          "Range partitioning by alias puts 100% of inserts on the newest partition, because generator-derived codes sort by creation time. It is a design-time decision that is expensive to undo, which is why it is worth volunteering before being asked.",
-        choice: {
-          pick: "Partition on hash(alias), never on alias range",
-          instead: "Range partitioning by alias, which buys cheap ordered scans.",
-          decider:
-            "Insert distribution. Time-ordered aliases mean range partitioning sends every one of 1.2k inserts/s to a single partition while the other partitions idle. Hashing spreads consecutive aliases uniformly across all of them.",
-          flips:
-            "When the workload genuinely scans key ranges. This one does not: it is point lookups by exact key, and listing a single owner's links is served from an index on created_by instead.",
-        },
-      },
-    },
-    {
-      id: "clicker",
-      label: "Clicker",
-      sub: "GET /{alias}, 120k/s, ~1M/s peak",
-      kind: "external",
-      x: 760,
-      y: 0,
-      w: 260,
-      detail: {
-        what: "Everyone who follows a short link: browsers, chat clients unfurling a preview, crawlers and security scanners.",
-        why: "This is the traffic the system exists to serve and it is 100 times the write path, so every component below is positioned to answer it as early as possible. Peak is roughly 8x steady from diurnal concentration plus a handful of simultaneously viral links.",
-        numbers: [
-          "120k reads/s steady, ~1M/s peak",
-          "peak is about 8x steady",
-          "redirect p99 target under 100ms, 50ms at the edge",
-        ],
-        breaks:
-          "Not all of it is human. Bots, link unfurlers and scanners fetch a link with nobody watching, which inflates click counts by an amount that varies by referrer and that deduping on IP plus user-agent only partly removes.",
-      },
-    },
-    {
-      id: "cdn",
-      label: "CDN edge",
-      sub: "302 + Cache-Control max-age=60",
-      kind: "compute",
-      x: 760,
-      y: 110,
-      w: 260,
-      detail: {
-        what: "The PoP network caching the redirect response itself, not the data behind it, and serving the large majority of clicks without your servers being involved.",
-        why: "The redirect for a given alias is byte-identical for every user on earth, which is a rare property and the one that makes full edge caching possible at all. At a 95% hit rate it removes 114k of 120k reads/s before they can become anyone's problem.",
-        numbers: [
-          "~95% hit rate, ~10ms served from the edge",
-          "max-age=60, so a 100k req/s link costs at most one origin fetch per PoP per minute",
-          "hit-rate alert below 90% sustained",
-        ],
-        breaks:
-          "A 302 is not cacheable by default under RFC 9111, so it must carry explicit freshness or the edge is decorative. The 60-second TTL is chosen from the takedown requirement, not the load one, and it simultaneously sets click-counting granularity.",
-        choice: {
-          pick: "302 with Cache-Control: public, max-age=60, clicks counted off the CDN log stream",
-          instead: "301 permanent with a long max-age, hours to a year, and no per-click counting.",
-          decider:
-            "Whether click data and later editability are worth the load. A 60-second edge TTL already collapses a link taking 100k clicks/s down to one origin fetch per PoP per minute, so the load argument for 301 is mostly gone. What 301 actually buys is the clicks that never leave the browser: a user visiting a link 10 times sends 1 request instead of 10.",
-          flips:
-            "When the shortener is infrastructure rather than a product. DOIs, documentation links and QR codes printed on physical objects have destinations that genuinely never change, nobody is paying for click reports, and search engines pass link equity through a 301 but not a 302.",
-        },
-      },
-    },
-    {
-      id: "app",
-      label: "Redirect handler",
-      sub: "single-flight coalescing",
-      kind: "compute",
-      x: 760,
-      y: 220,
-      w: 260,
-      detail: {
-        what: "The origin tier resolving the 5% the edge missed: cache lookup, store read on miss, back-fill on the way out, then the redirect.",
-        why: "It exists to be rare, so its job is not throughput but making sure a herd of identical misses becomes one read. A per-server map of alias to in-flight future means the second request for a cold alias waits on the first instead of issuing its own, and probabilistic early refresh within the last 10% of a TTL stops the herd re-forming at each expiry boundary.",
-        numbers: [
-          "~6k reads/s at a 95% edge hit rate",
-          "~30ms from cache, ~80ms from the store",
-          "200 servers turn 100k identical misses into 200 reads",
-        ],
-        breaks:
-          "A viral link no edge has yet: 100k requests arrive across the fleet in one second, every one misses and every one issues the same point query for the same key. Without coalescing that is 100k identical reads landing on one partition.",
-        choice: {
-          pick: "Lookup at origin app servers, with the edge caching the response rather than holding the data",
-          instead: "Run the redirect at the edge, with the alias table replicated into an edge key-value store.",
-          decider:
-            "p99 on the cold-alias path against the per-invocation bill. A miss on the origin design costs a cross-continent round trip, roughly 150ms Sydney to us-east, against 5 to 10ms served entirely at the edge. At a 95% hit rate, 5% of 120k reads/s takes the slow path, and against an SLO of p99 under 100ms a 5% slow path fails outright.",
-          flips:
-            "Genuinely global traffic with a long tail, which describes this workload better than most. The cost is that an edge key-value store is eventually consistent, so a new link can 404 in a distant PoP for a few seconds and a takedown propagates on the same delay. The usual resolution is both, with the edge serving reads and origin remaining the write and purge authority.",
-        },
-      },
-    },
+
+    // --- control plane and data tier, middle column ---
     {
       id: "takedown",
       label: "Takedown control",
       sub: "410 Gone + explicit CDN purge",
-      kind: "compute",
-      x: 760,
-      y: 330,
+      kind: "service",
+      x: 490,
+      y: 0,
       w: 260,
       detail: {
         what: "Sets deleted_at at origin, drops the memory cache entry on the same write, and issues an explicit purge to the CDN for safety cases.",
@@ -311,16 +162,304 @@ export const URL_SHORTENER: Diagram = {
       },
     },
     {
-      id: "cdn-logs",
-      label: "CDN log stream",
-      sub: "the ~95% origin never saw",
-      kind: "compute",
-      x: 760,
-      y: 460,
+      id: "cache",
+      label: "In-memory cache",
+      sub: "Redis, 75 GB LRU, ~99% of origin reads",
+      kind: "cache",
+      x: 490,
+      y: 390,
       w: 260,
       detail: {
-        what: "The CDN's own delivery logs, parsed into click events for every redirect that was answered at the edge.",
-        why: "Caching the redirect at the edge is precisely what makes those clicks invisible to your servers, so counting has to move to where the request was actually answered. This is why the 60-second TTL is a click-counting granularity as well as a takedown SLA.",
+        what: "The hot alias to long_url working set in memory, LRU, positive TTL 1h and negative TTL 30s. It is a cache in the strict sense: every entry can be rebuilt from the alias store, so losing the whole tier costs latency and not data.",
+        why: "Clicks concentrate on new links, so a link takes about 80% of its lifetime clicks in three days and the working set is just three days of creations. That is 300M aliases at about 250B each, so 75 GB, a handful of replicated nodes rather than a fleet, which is why this tier is cheap.",
+        numbers: [
+          "300M aliases x ~250B = 75 GB",
+          "~6k reads/s in, ~60 reads/s out",
+          "positive TTL 1h, negative TTL 30s",
+        ],
+        breaks:
+          "Distinct 404s from an enumeration scan are guaranteed misses that coalescing cannot collapse, so the negative cache is the only thing standing between a scanner and the store. Keep its TTL well under the positive one, or a freshly created alias that was probed first will 404 for its own creator.",
+        choice: {
+          pick: "Replicated in-memory LRU cache, with tombstones for misses",
+          instead: "No cache at all, letting the alias store absorb everything the edge misses.",
+          decider:
+            "6k/s of point reads is survivable for a partitioned store, but the working set is only 75 GB and the cache turns 6k/s into about 60/s, a 100x reduction for a few nodes. That spare headroom is what absorbs a viral link before any edge is warm.",
+          flips:
+            "When the alias corpus has no temporal concentration, so there is no small working set to hold and the cache only earns its keep on repeat hits inside a TTL.",
+        },
+      },
+    },
+    {
+      id: "alias-store",
+      label: "Alias store",
+      sub: "hash(alias) partitioned, RF 3",
+      kind: "database",
+      x: 490,
+      y: 520,
+      w: 260,
+      detail: {
+        what: "The durable alias to long_url table with created_by, expires_at and deleted_at, hash-partitioned and replicated three ways.",
+        why: "It is ground truth for everything cached above it, and it is deliberately the quietest box in the diagram at about 60 reads/s in steady state. The entire cache hierarchy exists to keep that number where it is, which is why a step change in it is a pageable alert.",
+        numbers: [
+          "~60 reads/s steady, 1.2k writes/s",
+          "365B rows at ten years, ~500B per row",
+          "~180 TB logical, ~550 TB at RF 3",
+        ],
+        breaks:
+          "Range partitioning by alias puts 100% of inserts on the newest partition, because generator-derived codes sort by creation time. It is a design-time decision that is expensive to undo, which is why it is worth volunteering before being asked.",
+        choice: {
+          pick: "Partition on hash(alias), never on alias range",
+          instead: "Range partitioning by alias, which buys cheap ordered scans.",
+          decider:
+            "Insert distribution. Time-ordered aliases mean range partitioning sends every one of 1.2k inserts/s to a single partition while the other partitions idle. Hashing spreads consecutive aliases uniformly across all of them.",
+          flips:
+            "When the workload genuinely scans key ranges. This one does not: it is point lookups by exact key, and listing a single owner's links is served from an index on created_by instead.",
+        },
+      },
+    },
+    {
+      id: "cold-archive",
+      label: "Cold archive",
+      sub: "columnar on object storage, ~8 GB/day",
+      kind: "blob",
+      x: 490,
+      y: 650,
+      w: 260,
+      detail: {
+        what: "Links with no click in twelve months, rolled out of the hot tier into columnar files on object storage with a lookup index. A miss for an archived alias falls through the store's index to these files rather than 404ing.",
+        why: "About 60% of links are never clicked again after a year, and they are 60% of a 365B-row table sitting on the fast storage that the 60 reads/s path depends on. Moving the dormant tail off it keeps the hot dataset a fraction of the logical size, and object storage is the only tier priced for data that is written once and almost never read.",
+        numbers: [
+          "60M rows/day archived, ~30 GB/day logical",
+          "~4x columnar compression, so ~8 GB/day stored",
+          "read only on the rare old-link lookup",
+        ],
+        breaks:
+          "An archived alias is still a live link, so the rare lookup that lands here pays object-storage latency well outside the 100ms budget. It is survivable only because it is rare; if archived links start getting clicked in volume, the tiering policy is wrong and the rows have to come back.",
+        choice: {
+          pick: "Age dormant rows out to columnar files on object storage behind a lookup index",
+          instead: "Keep all 365B rows on the hot partitioned store forever.",
+          decider:
+            "What fraction of the table earns its storage. 60% of rows get no click after twelve months, so at 500B a row that is over 100 TB logical of fast storage serving effectively no reads, against about 8 GB/day compressed on object storage.",
+          flips:
+            "When the corpus is small enough that the hot tier is not the cost driver, where a second storage tier and its index are complexity bought for nothing.",
+        },
+      },
+    },
+
+    // --- read path, right column ---
+    {
+      id: "clicker",
+      label: "Clicker",
+      sub: "GET /{alias}, 120k/s, ~1M/s peak",
+      kind: "client",
+      x: 940,
+      y: 0,
+      w: 260,
+      detail: {
+        what: "Everyone who follows a short link: browsers, chat clients unfurling a preview, crawlers and security scanners.",
+        why: "This is the traffic the system exists to serve and it is 100 times the write path, so every component below is positioned to answer it as early as possible. Peak is roughly 8x steady from diurnal concentration plus a handful of simultaneously viral links.",
+        numbers: [
+          "120k reads/s steady, ~1M/s peak",
+          "peak is about 8x steady",
+          "redirect p99 target under 100ms, 50ms at the edge",
+        ],
+        breaks:
+          "Not all of it is human. Bots, link unfurlers and scanners fetch a link with nobody watching, which inflates click counts by an amount that varies by referrer and that deduping on IP plus user-agent only partly removes.",
+      },
+    },
+    {
+      id: "cdn",
+      label: "CDN edge",
+      sub: "302 + Cache-Control max-age=60",
+      kind: "gateway",
+      x: 940,
+      y: 130,
+      w: 260,
+      detail: {
+        what: "The PoP network caching the redirect response itself, not the data behind it, and serving the large majority of clicks without your servers being involved. It is also where per-IP 404 rate limiting belongs, since an enumeration scan arrives through this same door.",
+        why: "The redirect for a given alias is byte-identical for every user on earth, which is a rare property and the one that makes full edge caching possible at all. At a 95% hit rate it removes 114k of 120k reads/s before they can become anyone's problem.",
+        numbers: [
+          "~95% hit rate, ~10ms served from the edge",
+          "max-age=60, so a 100k req/s link costs at most one origin fetch per PoP per minute",
+          "hit-rate alert below 90% sustained",
+        ],
+        breaks:
+          "A 302 is not cacheable by default under RFC 9111, so it must carry explicit freshness or the edge is decorative. The 60-second TTL is chosen from the takedown requirement, not the load one, and it simultaneously sets click-counting granularity.",
+        choice: {
+          pick: "302 with Cache-Control: public, max-age=60, clicks counted off the CDN log stream",
+          instead: "301 permanent with a long max-age, hours to a year, and no per-click counting.",
+          decider:
+            "Whether click data and later editability are worth the load. A 60-second edge TTL already collapses a link taking 100k clicks/s down to one origin fetch per PoP per minute, so the load argument for 301 is mostly gone. What 301 actually buys is the clicks that never leave the browser: a user visiting a link 10 times sends 1 request instead of 10.",
+          flips:
+            "When the shortener is infrastructure rather than a product. DOIs, documentation links and QR codes printed on physical objects have destinations that genuinely never change, nobody is paying for click reports, and search engines pass link equity through a 301 but not a 302.",
+        },
+      },
+    },
+    {
+      id: "redirect-svc",
+      label: "Redirect service",
+      kind: "serviceGroup",
+      x: 920,
+      y: 346,
+      w: 300,
+      h: 432,
+      detail: {
+        what: "The origin tier that answers the 5% the edge missed, on roughly 200 servers: a single-flight gate in front of a cache-then-store lookup, with the click event emitted on the way out.",
+        why: "These are three stages of one request rather than three services. They deploy together, scale on the same signal, and a request that gets past the gate is already inside the process that resolves it, so drawing them as peers would claim an independence that does not exist. What the group as a whole exists for is not throughput but rarity: its job is to make sure a herd of identical misses becomes one read.",
+        numbers: [
+          "~6k reads/s at a 95% edge hit rate",
+          "~30ms from cache, ~80ms from the store",
+          "200 servers turn 100k identical misses into 200 reads",
+        ],
+        breaks:
+          "A viral link no edge has yet: 100k requests arrive across the fleet in one second, every one misses and every one wants the same key. Everything inside this box is arranged around that second.",
+        choice: {
+          pick: "Lookup at origin app servers, with the edge caching the response rather than holding the data",
+          instead: "Run the redirect at the edge, with the alias table replicated into an edge key-value store.",
+          decider:
+            "p99 on the cold-alias path against the per-invocation bill. A miss on the origin design costs a cross-continent round trip, roughly 150ms Sydney to us-east, against 5 to 10ms served entirely at the edge. At a 95% hit rate, 5% of 120k reads/s takes the slow path, and against an SLO of p99 under 100ms a 5% slow path fails outright.",
+          flips:
+            "Genuinely global traffic with a long tail, which describes this workload better than most. The cost is that an edge key-value store is eventually consistent, so a new link can 404 in a distant PoP for a few seconds and a takedown propagates on the same delay. The usual resolution is both, with the edge serving reads and origin remaining the write and purge authority.",
+        },
+      },
+    },
+    {
+      id: "coalesce",
+      label: "Single-flight gate",
+      sub: "one in-flight read per alias",
+      kind: "process",
+      x: 940,
+      y: 390,
+      w: 260,
+      detail: {
+        what: "A per-server map of alias to in-flight future. A request that finds an entry already there waits on it instead of issuing its own read, and an entry inside the last 10% of its TTL is refreshed by one request while the rest keep serving the old value.",
+        why: "It is the first stage rather than a lookup detail because it is what stands between a viral link and the store. 100,000 requests for one cold alias arrive across the fleet in a second; without this every one of them issues the same point query against the same partition. With 200 servers it becomes 200 reads.",
+        numbers: [
+          "100k identical misses collapse to ~200 reads",
+          "early refresh inside the last 10% of the TTL",
+          "per-server state, nothing shared, nothing to coordinate",
+        ],
+        breaks:
+          "Coalescing only helps when the answer exists. An enumeration scan produces distinct keys, so nothing merges and every request goes straight through this gate to the tier behind it; that failure is the negative cache's to own, not this one's.",
+        choice: {
+          pick: "Per-server single-flight plus probabilistic early refresh",
+          instead: "Let every miss issue its own read and size the store for the herd.",
+          decider:
+            "The arithmetic of one hot key: 100k req/s for an alias no edge has yet is 100k identical point queries on one partition, against 200 with a coalescing map that costs a hash map per server. Early refresh is what stops the herd re-forming at each 60-second TTL boundary.",
+          flips:
+            "When there are no hot keys, so misses are spread across the space and each one is genuinely a distinct read that coalescing can never merge.",
+        },
+      },
+    },
+    {
+      id: "resolve",
+      label: "Resolve and redirect",
+      sub: "cache, then store, then 302",
+      kind: "process",
+      x: 940,
+      y: 520,
+      w: 260,
+      detail: {
+        what: "The lookup itself: memory cache first, alias store on a miss, back-fill on the way out, then a 302 carrying Location and Cache-Control: public, max-age=60 so the edge will cache it. A missing alias is written back as a tombstone; a deleted one answers 410 Gone.",
+        why: "The three latency figures are the budget, and this stage decides which one a request pays: about 30ms answered from memory, about 80ms if it has to reach the store. The p99 target of 100ms is met only because the third case is rare, which is why the miss rate rather than the miss latency is the number to watch.",
+        numbers: [
+          "~99% of the 6k/s answered from memory",
+          "~30ms from cache, ~80ms from the store",
+          "positive TTL 1h, negative TTL 30s",
+        ],
+        breaks:
+          "Caching a miss is the dangerous half. A tombstone TTL anywhere near the positive one would make a newly created alias 404 for its own creator, which is why 30 seconds is not a tuning knob.",
+      },
+    },
+    {
+      id: "emit",
+      label: "Click emitter",
+      sub: "fire-and-forget, bounded buffer",
+      kind: "process",
+      x: 940,
+      y: 650,
+      w: 260,
+      detail: {
+        what: "One click event of about 200B per origin-served redirect, pushed onto the log without waiting for an acknowledgement, buffered in a small bounded ring on the server if the broker is unreachable.",
+        why: "The response is already on its way back to the client when this runs, which is what makes a 99.99% redirect SLO independent of a 99.9% analytics pipeline. It is a stage of the redirect rather than a separate service precisely because it must share the request's process and none of its guarantees.",
+        numbers: [
+          "~6k events/s from origin, ~200B each",
+          "alias, ts, country, referrer, ua and ip hashes",
+          "delivery target 99.9%, against 99.99% on redirects",
+        ],
+        breaks:
+          "Fire-and-forget means the producer never learns about a failure. The bounded ring buffer is the only thing between a broker outage and silent loss, and it is deliberately small, so you cannot say afterwards how much you lost.",
+        choice: {
+          pick: "Fire-and-forget onto a durable log, with a bounded local ring buffer during an outage",
+          instead: "Write the click synchronously on the redirect path.",
+          decider:
+            "1M clicks/s at peak. A synchronous write puts warehouse latency inside a p99 budget of 100ms and makes a 99.99% redirect SLO depend on an analytics pipeline that is only best effort.",
+          flips:
+            "When a click is a billable event, where dropping one is a revenue error and the write genuinely has to be acknowledged before the redirect is served.",
+        },
+      },
+    },
+
+    // --- analytics, bottom ---
+    {
+      id: "async-group",
+      label: "Async analytics, never on the redirect path",
+      kind: "zone",
+      x: 470,
+      y: 800,
+      w: 750,
+      h: 254,
+      detail: {
+        what: "The click pipeline: edge-served clicks recovered from CDN logs, origin-served clicks fired onto a durable log, both landing in a columnar warehouse.",
+        why: "It is drawn as a zone rather than a service because nothing in it deploys with anything else in it, and nothing in it is allowed to sit on a redirect. Redirects carry a 99.99% availability target and a p99 under 100ms; the whole of this box is best effort at a 99.9% delivery target and may be down.",
+        numbers: [
+          "1.04 x 10^10 click events/day",
+          "24 MB/s steady, 200 MB/s at 1M clicks/s peak",
+          "click pipeline lag alert above 60s",
+        ],
+        breaks:
+          "Click counts are approximate and the error bar is not stateable: fire-and-forget loses whatever exceeds the local ring buffer, CDN log sampling is a vendor behaviour, and bots and link unfurlers inflate counts by an amount that varies by referrer.",
+      },
+    },
+    {
+      id: "kafka",
+      label: "Click event log",
+      sub: "Kafka, 24 MB/s steady",
+      kind: "queue",
+      x: 490,
+      y: 820,
+      w: 260,
+      detail: {
+        what: "A durable partitioned log carrying every click event, from the origin producers and from the parsed CDN logs, retained long enough for a consumer to catch up after an outage.",
+        why: "Two producers with completely different delivery characteristics have to converge somewhere before the warehouse, and the log is also the shock absorber: it takes a 1M/s burst at the write end and lets the consumer drain it in batches at whatever rate columnar writes allow.",
+        numbers: [
+          "~200B per event: alias, ts, country, referrer, ua and ip hashes",
+          "24 MB/s steady, 200 MB/s at peak",
+          "1.04 x 10^10 events/day",
+        ],
+        breaks:
+          "A broker outage loses whatever overflows the bounded local ring buffer on each app server, and you cannot say how much, because the events that would have told you are the ones you lost.",
+        choice: {
+          pick: "A durable partitioned log between the redirect tier and the warehouse",
+          instead: "Have the app servers and the log parser write click rows straight to the warehouse.",
+          decider:
+            "1M clicks/s at peak against warehouse ingest. The log absorbs the burst and lets one consumer write columnar files in batches; direct writes put warehouse availability and latency in front of a tier that is explicitly not allowed to care about either.",
+          flips:
+            "When the click rate is low enough that the warehouse's own streaming ingest keeps up, where a broker is a component to operate for no gain.",
+        },
+      },
+    },
+    {
+      id: "cdn-logs",
+      label: "CDN log stream",
+      sub: "vendor-delivered, the ~95% origin never saw",
+      kind: "external",
+      x: 940,
+      y: 820,
+      w: 260,
+      detail: {
+        what: "The CDN's own delivery logs, shipped on the vendor's schedule and parsed into click events for every redirect that was answered at the edge.",
+        why: "Caching the redirect at the edge is precisely what makes those clicks invisible to your servers, so counting has to move to where the request was actually answered. This is why the 60-second TTL is a click-counting granularity as well as a takedown SLA. It is drawn as external because neither the sampling nor the delivery schedule is yours.",
         numbers: [
           "covers about 95% of all clicks",
           "delivered on a lag of minutes",
@@ -339,40 +478,12 @@ export const URL_SHORTENER: Diagram = {
       },
     },
     {
-      id: "kafka",
-      label: "Click event log",
-      sub: "Kafka, fire-and-forget",
-      kind: "bus",
-      x: 400,
-      y: 460,
-      w: 260,
-      detail: {
-        what: "A durable log taking one click event of about 200B per origin-served redirect, written fire-and-forget from the redirect handler.",
-        why: "The redirect must never wait on analytics. At 1M clicks/s peak a synchronous warehouse write would either crush the warehouse or serialise every redirect behind it, so the producer does not wait for an acknowledgement and the pipeline is explicitly allowed to be down.",
-        numbers: [
-          "~200B per event: alias, ts, country, referrer, ua and ip hashes",
-          "24 MB/s steady, 200 MB/s at peak",
-          "delivery target 99.9%, against 99.99% on redirects",
-        ],
-        breaks:
-          "A broker outage loses whatever overflows the bounded local ring buffer on each app server, and you cannot say how much, because the events that would have told you are the ones you lost.",
-        choice: {
-          pick: "Fire-and-forget onto a durable log, with a bounded local ring buffer during an outage",
-          instead: "Write the click synchronously on the redirect path.",
-          decider:
-            "1M clicks/s at peak. A synchronous write puts warehouse latency inside a p99 budget of 100ms and makes a 99.99% redirect SLO depend on an analytics pipeline that is only best effort.",
-          flips:
-            "When a click is a billable event, where dropping one is a revenue error and the write genuinely has to be acknowledged before the redirect is served.",
-        },
-      },
-    },
-    {
       id: "warehouse",
       label: "Analytics warehouse",
       sub: "columnar, ~260 GB/day",
-      kind: "store",
-      x: 400,
-      y: 580,
+      kind: "database",
+      x: 490,
+      y: 950,
       w: 260,
       detail: {
         what: "Columnar storage for click events, filled by a batching consumer and serving /api/{alias}/stats.",
@@ -460,7 +571,7 @@ export const URL_SHORTENER: Diagram = {
       to: "cache",
       label: "warm on create",
       fromSide: "right",
-      toSide: "left",
+      toSide: "top",
       detail: {
         what: "Populating the memory cache with the mapping at creation time rather than waiting for the first reader to miss.",
         why: "New links are exactly the ones about to be clicked, since a link takes most of its lifetime clicks in its first three days. Seeding on write means the first click of a link that is about to go viral is already a cache hit.",
@@ -503,11 +614,11 @@ export const URL_SHORTENER: Diagram = {
     {
       id: "e8",
       from: "cdn",
-      to: "app",
+      to: "coalesce",
       label: "miss, ~6k/s",
       animated: true,
       detail: {
-        what: "The 5% of requests the edge cannot answer: cold aliases and entries whose 60-second TTL has just lapsed.",
+        what: "The 5% of requests the edge cannot answer: cold aliases and entries whose 60-second TTL has just lapsed. The response that comes back is what the PoP then caches for the next minute.",
         why: "The miss rate, not the miss latency, is the number to watch. A p99 of 100ms is met only because this path is rare, so a hit-rate regression is a latency incident rather than a cost one.",
         numbers: ["5% of 120k/s = ~6k/s", "alert if the hit rate drops below 90%"],
         breaks:
@@ -516,9 +627,23 @@ export const URL_SHORTENER: Diagram = {
     },
     {
       id: "e9",
-      from: "app",
+      from: "coalesce",
+      to: "resolve",
+      label: "one read per key",
+      animated: true,
+      detail: {
+        what: "The single request per alias per server that is allowed past the gate; every other request for that alias waits on its result.",
+        why: "This is where a herd becomes a lookup. Everything downstream of this arrow is sized for 6k/s of distinct work, which only holds because duplicates were collapsed before it.",
+        numbers: ["100k identical misses become ~200 reads across 200 servers"],
+        breaks:
+          "Distinct keys do not merge, so an enumeration scan passes through this arrow at full rate and the tombstones in the cache are the only thing that stops it.",
+      },
+    },
+    {
+      id: "e10",
+      from: "resolve",
       to: "cache",
-      label: "lookup",
+      label: "cache lookup",
       animated: true,
       fromSide: "left",
       toSide: "right",
@@ -527,12 +652,12 @@ export const URL_SHORTENER: Diagram = {
         why: "It answers about 99% of what gets past the edge, at roughly 30ms end to end, which is the difference between meeting the p99 target and depending on the database for it.",
         numbers: ["~6k/s in", "~30ms served from here"],
         breaks:
-          "Simultaneous misses for the same key would each issue their own store read, so the coalescing map has to sit in front of this call rather than behind it.",
+          "Simultaneous misses for the same key would each issue their own store read, which is why the coalescing gate sits in front of this call rather than behind it.",
       },
     },
     {
-      id: "e10",
-      from: "app",
+      id: "e11",
+      from: "resolve",
       to: "alias-store",
       label: "miss, ~60/s",
       fromSide: "left",
@@ -546,16 +671,15 @@ export const URL_SHORTENER: Diagram = {
       },
     },
     {
-      id: "e11",
+      id: "e12",
       from: "alias-store",
       to: "cache",
       label: "back-fill on the way out",
       dashed: true,
-      fromSide: "left",
-      toSide: "left",
-      offset: 70,
+      fromSide: "top",
+      toSide: "bottom",
       detail: {
-        what: "The row written into the memory cache as the response passes back through the handler, and pushed to the edge with the redirect.",
+        what: "The row written into the memory cache as the response passes back through the resolver, and pushed to the edge with the redirect.",
         why: "It makes a cold alias a one-time cost. The second request for the same alias is already warm, which is what stops a slowly-warming viral link from paying the 80ms store path repeatedly.",
         numbers: ["positive TTL 1h", "negative entries cached for 30s"],
         breaks:
@@ -563,21 +687,51 @@ export const URL_SHORTENER: Diagram = {
       },
     },
     {
-      id: "e12",
-      from: "app",
-      to: "kafka",
-      label: "click event, fire-and-forget",
+      id: "e13",
+      from: "alias-store",
+      to: "cold-archive",
+      label: "no click in 12 months",
       dashed: true,
       detail: {
-        what: "One ~200B event per origin-served redirect, pushed onto the log without waiting for an acknowledgement.",
-        why: "It is dashed because nothing on the redirect depends on it. The response is already on its way back to the client, so a broker outage costs analytics accuracy and never availability.",
-        numbers: ["~6k events/s from origin", "~200B each"],
+        what: "Dormant rows aged out of the hot partitioned store into columnar files on object storage, leaving an index entry behind so the alias still resolves.",
+        why: "The hot tier is sized and priced for 60 reads/s against a working set of days, not for a decade of rows that will never be read again. Tiering is what keeps 365B rows from all living on the storage the redirect path depends on.",
+        numbers: ["60M rows/day archived", "~30 GB/day logical, ~8 GB/day stored"],
         breaks:
-          "Fire-and-forget means the producer never learns about a failure. The bounded local ring buffer is the only thing between a broker outage and silent loss, and it is deliberately small.",
+          "The policy is a guess about the future: a link with no click for twelve months can still go viral, and when it does the first reader pays object-storage latency instead of 80ms.",
       },
     },
     {
-      id: "e13",
+      id: "e14",
+      from: "resolve",
+      to: "emit",
+      label: "click event",
+      dashed: true,
+      detail: {
+        what: "The resolved redirect handed to the emitter as an event of about 200B, after the response is already on its way.",
+        why: "It is dashed because nothing on the redirect depends on it. The ordering is the point: respond, then record, so a broker outage costs analytics accuracy and never availability.",
+        numbers: ["~6k events/s from origin", "~200B each"],
+        breaks:
+          "Only origin-served clicks pass down this arrow. The other 95% were answered at the edge and have to be recovered from the CDN's logs instead.",
+      },
+    },
+    {
+      id: "e15",
+      from: "emit",
+      to: "kafka",
+      label: "~6k/s, no ack",
+      dashed: true,
+      fromSide: "left",
+      toSide: "right",
+      detail: {
+        what: "The event pushed onto the durable log without waiting for an acknowledgement.",
+        why: "Waiting here would put broker latency inside a p99 budget of 100ms and make a 99.99% redirect SLO depend on a 99.9% pipeline, so the producer deliberately does not learn whether the write landed.",
+        numbers: ["~6k events/s steady", "200 MB/s across the log at peak"],
+        breaks:
+          "Fire-and-forget means a broker outage is silent at the producer. The bounded local ring buffer is the only thing between that outage and lost events, and it is deliberately small.",
+      },
+    },
+    {
+      id: "e16",
       from: "cdn",
       to: "cdn-logs",
       label: "delivery logs",
@@ -594,7 +748,7 @@ export const URL_SHORTENER: Diagram = {
       },
     },
     {
-      id: "e14",
+      id: "e17",
       from: "cdn-logs",
       to: "kafka",
       label: "edge clicks, batched",
@@ -610,7 +764,7 @@ export const URL_SHORTENER: Diagram = {
       },
     },
     {
-      id: "e15",
+      id: "e18",
       from: "kafka",
       to: "warehouse",
       label: "batched consumer",
@@ -623,14 +777,13 @@ export const URL_SHORTENER: Diagram = {
       },
     },
     {
-      id: "e16",
+      id: "e19",
       from: "takedown",
       to: "cdn",
       label: "purge",
       dashed: true,
-      fromSide: "left",
+      fromSide: "right",
       toSide: "left",
-      offset: 90,
       detail: {
         what: "An explicit purge call for the alias, invalidating it across PoPs rather than waiting out the TTL.",
         why: "Without it, a link flagged as phishing keeps redirecting from the edge for up to 60 more seconds, which is a live exploit rather than a stale cache. Purges are billed per call, so this is reserved for safety cases.",
@@ -640,13 +793,14 @@ export const URL_SHORTENER: Diagram = {
       },
     },
     {
-      id: "e17",
+      id: "e20",
       from: "takedown",
       to: "alias-store",
       label: "deleted_at, then 410",
       dashed: true,
       fromSide: "left",
-      toSide: "right",
+      toSide: "left",
+      offset: 130,
       detail: {
         what: "Setting deleted_at on the row and clearing the cache entry in the same write, after which the alias answers 410 Gone.",
         why: "Origin has to become correct first, or a purge just refills the edge with the same bad redirect. 410 rather than 404 tells crawlers and clients the difference between deliberately removed and never existed.",

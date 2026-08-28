@@ -30,20 +30,58 @@ Every `## Topic` must open with a `### Summary` card (~700-900 words, 6 subsecti
 
 Whole-solution architecture diagrams for System Design Questions, rendered with
 React Flow at `/diagram/<id>`. **Diagrams are data, not drawings** — a new one is
-a spec in `mobile/lib/diagrams.ts`, never hand-authored SVG.
+a spec file in `mobile/lib/diagrams/`, never hand-authored SVG.
 
-- **Data model** (`mobile/lib/diagrams.ts`): `Diagram` = `question` + `overview` +
-  `nodes` + `edges`. Every node and every edge carries a `detail`
-  (`what` / `why` / `numbers` / `breaks`), and components with a real technology
-  decision also carry a `choice` (`pick` / `instead` / `decider` / `flips`) in the
-  same shape as the written `Key decisions` sections, so the diagram and the prose
-  agree. Deciders must contain the number or property that settles it.
+- **Data model** (`mobile/lib/diagrams/types.ts`, specs in `mobile/lib/diagrams/<id>.ts`):
+  `Diagram` = `question` + `overview` + `nodes` + `edges`. Every node and every edge
+  carries a `detail` (`what` / `why` / `numbers` / `breaks`), and components with a
+  real technology decision also carry a `choice` (`pick` / `instead` / `decider` /
+  `flips`) in the same shape as the written `Key decisions` sections, so the diagram
+  and the prose agree. Deciders must contain the number or property that settles it.
+- **`kind` is a claim about what a thing IS**, not a colour picker. Nine box kinds —
+  `service`, `process`, `queue`, `database`, `cache`, `blob`, `gateway`, `client`,
+  `external` — and two frames, `serviceGroup` and `zone`. Each kind drives a hue, a
+  motif drawn inside the box, and an uppercase type tag in the top-right corner.
+- **`process` may only appear inside a `serviceGroup`.** A `serviceGroup` is one
+  deployable service containing several stages; a `process` is one of those stages.
+  This exists because four stages of one request path were being drawn as four peer
+  services, which asserts a deployment that is not real. `check-diagrams.ts` enforces
+  the containment. Do not demote things the prose says scale or fail independently —
+  the frame is a modelling tool, not a tidying reflex.
+- **Every motif is drawn INSIDE the bounding rectangle** (cylinder rims, queue bars,
+  gateway chevrons). Never change a box's outline to a real cylinder or hexagon:
+  `spaceColumns()`, `placeLabels()` and `check-diagrams.ts` all measure rectangles,
+  and a non-rectangular outline silently breaks all three.
 - **Renderer**: `mobile/components/ArchDiagram.web.tsx`. `ArchDiagram.tsx` is a
   native stub — the shipping app is a WebView shell over the web build, so the
   `.web.tsx` is what renders on every surface. Same split as `SvgDiagram`.
-- **Everything is clickable**: boxes, the grouping zone (via its label chip; its
-  body stays click-through so it cannot swallow clicks meant for nodes inside it),
-  and every arrow. Arrows get a 26px invisible hit area so they are tappable.
+- **Everything is clickable**: boxes, a frame (via its label chip or header strip;
+  the body stays click-through so it cannot swallow clicks meant for nodes inside
+  it), and every arrow.
+- **Arrow clicks are resolved by distance, not by hit areas.** `BaseEdge` is given
+  `interactionWidth={0}` on purpose and `onPaneClick` runs `nearestEdgeId()`, which
+  samples every rendered path and takes the closest within 16px. Do not "fix" this
+  by restoring a fat invisible hit path: measured on the notification system, 26px
+  interaction paths left 4 of 18 edges unselectable *anywhere along their length*,
+  because stacked transparent strokes resolve by paint order rather than by which
+  line the pointer was actually nearest, and an edge passing under a box is
+  unreachable regardless of how wide its hit area is.
+- Arrowheads are 9px. A 16px head on an 84px box reads as a blob and swallows the
+  border it lands on.
+- **A frame must be made click-through in CSS, not in its component.** Setting
+  `pointerEvents: "none"` on a frame component's own `<div>` does nothing useful:
+  React Flow wraps every custom node in its own `.react-flow__node` element and
+  that wrapper keeps pointer events, so a frame silently swallows every click
+  aimed at a box or an arrow inside it. `LABEL_LAYER_CSS` therefore carries
+  `.react-flow__node-zone, .react-flow__node-serviceGroup { pointer-events: none
+  !important; }`, with the title strip re-enabling them so the frame stays
+  selectable. **The `!important` is load-bearing** — React Flow ships
+  `.react-flow__node { pointer-events: all }` at the same specificity and its
+  stylesheet wins on order.
+  This one bug accounted for nearly all of "I can't click the arrow, there is a
+  component above it": across the first seven diagrams it left **41 of 126 arrows
+  unclickable**, dropping to 5 once the wrapper stopped intercepting. None of
+  those 41 were actually drawn underneath anything.
 - **Wiring a diagram to a question**: set `sourceId` + `itemId` on the spec, then
   add an `#### Interactive diagram` section to that question linking to
   `/diagram/<id>`. `ItemView` intercepts markdown links starting with `/` and
@@ -69,10 +107,10 @@ under the next box, so spacing is a correctness concern rather than taste.
   Group zones are repositioned to keep framing the same members.
 - Because spacing is corrected at render time, specs only need a sane relative
   grid: left column `x: 40`, further columns to the right, vertical steps of
-  ~100, widths 240-280, and no overlapping boxes (`check-spec.ts` fails on
-  overlap).
+  ~110, widths 240-300, and no overlapping boxes. Boxes are ~84px tall now that
+  every one carries a type-tag row, so rows need ~110px of vertical step.
 - **Edge labels must be <= 28 characters.** Longer ones collide even at the
-  minimum gutter. `check-spec.ts` warns. Put the detail in the edge's `detail`,
+  minimum gutter. `check-diagrams.ts` fails. Put the detail in the edge's `detail`,
   which is what clicking the arrow shows, not in the label.
 - Edge labels are rendered through `EdgeLabelRenderer` **and** the label layer
   is lifted with `LABEL_LAYER_CSS` (`z-index: 6`). Both are required. React Flow
@@ -104,6 +142,42 @@ under the next box, so spacing is a correctness concern rather than taste.
   signals are the computed `z-index` of the label layer and looking at a
   screenshot. Any rectangle-based check must also exclude
   `.react-flow__node-zone`, since labels legitimately sit inside zone bounds.
+
+### The diagram gate: `scripts/check-diagrams.ts`
+
+`bunx tsx scripts/check-diagrams.ts [id ...]` — run it after touching any spec.
+CLAUDE.md referred to a `check-spec.ts` for a long time; **it never existed**, which
+is why 45 of the 56 diagrams were found routing an edge across a box the first time
+a real checker ran. Errors fail (exit 1), warnings do not:
+
+- two boxes overlapping;
+- an edge whose orthogonal route crosses a box that is not its own endpoint — the
+  line, its label and its arrowhead are all drawn and all hidden there, and it
+  cannot be clicked there either;
+- an edge label over 28 characters;
+- a `process` that is not geometrically inside a `serviceGroup`;
+- a frame that clips a box it overlaps;
+- an edge naming a node that does not exist, or a duplicate node id.
+
+The route check approximates `getSmoothStepPath` as an L (out along the dominant
+axis, then across). Fix failures by moving boxes apart or by setting `fromSide` /
+`toSide` so the edge leaves and enters faces that are actually clear.
+
+**That approximation is not the truth, and it has already given false confidence.**
+web-crawler passed the static check while arrows were still rendering across boxes,
+because the real curve and its lane offset put the corners somewhere else. So there
+is a second, slower checker that measures what is actually on screen:
+
+```
+bash scripts/build-web.sh && bunx serve -s mobile/dist -l 8099 &
+NODE_PATH=<a dir with playwright> node scripts/check-diagrams-rendered.js <id> ...
+```
+
+It samples every rendered path and reports the percentage of each edge's length
+that falls inside a rendered box, plus any edge label sitting on a box. Use the
+static check as the fast gate and this one before shipping. Note it must exclude
+`.react-flow__node-zone` **and** `.react-flow__node-serviceGroup` from "boxes" —
+labels and edges legitimately sit inside frames.
 
 ### The "Interactive diagram" section is optional
 

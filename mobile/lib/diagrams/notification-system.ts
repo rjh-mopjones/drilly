@@ -27,50 +27,23 @@ export const NOTIFICATION_SYSTEM: Diagram = {
   },
   nodes: [
     {
-      id: "lanes",
-      label: "Per-channel delivery lanes",
-      kind: "group",
+      id: "notif-svc",
+      label: "Notification service",
+      kind: "serviceGroup",
       x: 16,
-      y: 344,
-      w: 700,
-      h: 328,
+      y: 16,
+      w: 328,
+      h: 692,
       detail: {
-        what: "One backlog and one worker pool per channel, each sized and retried against its own provider.",
-        why: "Providers fail independently and publish different ceilings, so the only thing that keeps a bad hour on push from becoming a product-wide outage is that email and SMS never share its queue. Isolation here is what turns a system-wide outage into a channel outage.",
-        numbers: [
-          "push ~10k/s, SES ~10k/s, SMS ~200/s",
-          "4 attempts on push and email, 1 on SMS",
-        ],
-        breaks:
-          "Operational sprawl: one notification system is really several channel systems behind a shared front door, each with its own credentials, its own sending reputation and its own way of telling you it is unhappy.",
-        choice: {
-          pick: "One queue and one worker pool per channel",
-          instead: "A single shared queue with a channel field on the message.",
-          decider:
-            "What a 30-minute APNs outage costs. With one queue, 15M backed-up push messages sit in front of every password reset going out by email; with a queue per channel the other channels drain at their normal 120/s throughout.",
-          flips:
-            "A single channel, or volumes low enough that a provider outage is absorbed by one worker pool anyway, where three brokers' worth of operational surface buys nothing.",
-        },
-      },
-    },
-    {
-      id: "ingest",
-      label: "Ingestion service",
-      sub: "validate · dedupe · the only front door",
-      kind: "compute",
-      x: 40,
-      y: 0,
-      w: 280,
-      detail: {
-        what: "The single entry point every internal service posts to. It decides nothing about whether to notify and everything about how.",
-        why: "Preferences, quiet hours and a provider rate limit that every team shares can only be enforced in one place. Spread across a client library, each service reimplements restraint, one team forgets, and each backs off independently against a limit they hold in common.",
+        what: "One deployable service, four stages of one request path: accept and dedupe, gate, fan out, publish. It decides nothing about whether to notify and everything about how, and it delivers nothing itself.",
+        why: "Preferences, quiet hours and a provider rate limit that every team shares can only be enforced in one place. Spread across a client library, each service reimplements restraint, one team forgets, and each backs off independently against a limit they hold in common. The stages are stages rather than services because a request passes through all four or none: they deploy together, they fail together, and splitting them would buy independent scaling of a path that runs at 120 a second.",
         numbers: [
           "~6M accepted requests/day, ~120 sends/s after fan-out",
           "~220/s daytime, 80% of traffic in a 10-hour window",
           "idempotency_key is required, never defaulted",
         ],
         breaks:
-          "A segment-wide broadcast accepted synchronously puts 15M messages on the queues in seconds, which is why segment targets are rejected here and routed to the batch path instead.",
+          "A segment-wide broadcast accepted synchronously puts 15M messages on the queues in seconds, which is why segment targets are rejected at the front and routed to the batch path instead.",
         choice: {
           pick: "One accepting service in front of durable per-channel queues",
           instead:
@@ -83,12 +56,129 @@ export const NOTIFICATION_SYSTEM: Diagram = {
       },
     },
     {
+      id: "accept",
+      label: "Accept + dedupe",
+      sub: "validate · idempotency key",
+      kind: "process",
+      x: 40,
+      y: 60,
+      w: 280,
+      detail: {
+        what: "The only front door. Validates the request, requires a caller-supplied idempotency key, and returns the original notif_id if this (caller_id, key) pair has been seen in the last 24 hours.",
+        why: "The caller retried because our response timed out, and it has no way to know whether the original was accepted. Suppressing that retry here is the first of the four dedup hops, and it is the cheapest one: everything downstream of this point is already committed to happening.",
+        numbers: [
+          "~6M accepted requests/day, ~220/s daytime",
+          "idempotency cache 24h TTL, ~1.2 GB resident",
+          "idempotency_key is required, never defaulted",
+        ],
+        breaks:
+          "Read-then-write loses the race between two parallel retries: both miss the cache and both create a notification. The check has to be a conditional insert, and the loser has to wait for the winner's notif_id.",
+      },
+    },
+    {
+      id: "gate",
+      label: "Per-user gate",
+      sub: "prefs · quiet hours · 5/hr · digest",
+      kind: "process",
+      x: 40,
+      y: 190,
+      w: 280,
+      detail: {
+        what: "The only stage that can refuse or delay a send: preferences, quiet hours in the recipient's timezone, and a token bucket of five notifications per user per hour, with anything over the cap held and collapsed into one digest.",
+        why: "Throughput was never at risk here, so human tolerance is the scarce resource. A system that delivers every notification reliably and then gets muted in settings has failed at exactly the thing it was built for, and no retry policy recovers a user who has turned notifications off. It runs above the queues because once a message is in a channel queue the only question left is when to send it, not whether to.",
+        numbers: [
+          "5 per user per hour at normal priority",
+          "average user 0.6 notifications/day, p99 user above 40",
+          "above ~20% bypass traffic the gate has stopped working",
+        ],
+        breaks:
+          "Bypass inflation. Every team believes its notification is transactional, so unless the bypass list is centrally owned and audited it grows until the cap protects nobody.",
+        choice: {
+          pick: "A per-user token bucket in front of the channel queues, digesting the overflow",
+          instead:
+            "Send everything immediately and give users granular per-category toggles instead.",
+          decider:
+            "The top of the distribution rather than the average. The average user gets 0.6 notifications a day, so a cap of five an hour is invisible to almost everyone; the p99 user above 40 a day is the entire reason the limiter exists, and every user who disables notifications comes from that tail.",
+          flips:
+            "When every notification is individually actionable and time-critical. A two-factor code, a trade fill or an on-call page in a digest is worse than no notification, so a paging product keeps the preference and quiet-hours checks and drops the limiter.",
+        },
+      },
+    },
+    {
+      id: "fanout",
+      label: "Fan-out",
+      sub: "one row per user · channel · device",
+      kind: "process",
+      x: 40,
+      y: 320,
+      w: 280,
+      detail: {
+        what: "Expands one approved logical send into one message row per user, per enabled channel and per registered device, each carrying its own notif_id.",
+        why: "Retry and dedup have to be independent per target: a user's stale iPad token must not block the phone that still works, and a bounced email address must not fail the push. Expansion here rather than in the workers means the per-message state exists before anything is queued, so a redelivery has something durable to resume from.",
+        numbers: [
+          "~1.5 registered push tokens per user, ~15M push targets",
+          "fan-out ~1.6 messages per accepted request",
+          "a full-base broadcast is 15M rows, 1.5x a normal day",
+        ],
+        breaks:
+          "The gate ran on the logical send, before this expansion, so the cap counts logical notifications rather than the interruptions a user with two devices and two channels actually feels.",
+      },
+    },
+    {
+      id: "outbox",
+      label: "Outbox table",
+      sub: "unpublished rows, same transaction",
+      kind: "database",
+      x: 40,
+      y: 450,
+      w: 280,
+      detail: {
+        what: "A holding table. The notification rows and one unpublished outbox row per message commit in the same transaction as the fan-out, and a row is marked published only after the broker acknowledges it.",
+        why: "Two writes to two systems with no shared transaction. Publish first and a crash before the commit produces a notification nobody can look up; commit first and a crash before the publish loses it silently, which is worse, because the API already told the caller it was accepted. The table is the second of the four dedup hops.",
+        numbers: [
+          "one row per fanned-out message, ~1.6 per accepted request",
+          "rows marked published only after the broker acknowledges",
+          "published rows reaped on a schedule, not left to accumulate",
+        ],
+        breaks:
+          "Nothing reaps published rows and the table grows without bound behind a workload that never reads it; and because rows are claimed in batches, ordering across a user's channels is not preserved here and must not be relied on downstream.",
+        choice: {
+          pick: "Transactional outbox with a separate publisher process",
+          instead: "Publishing to Kafka directly from the request handler.",
+          decider:
+            "Which failure ordering you can live with. A direct publish loses the message on any crash between commit and publish, after the API already returned accepted, and at 6M accepted requests a day a rare crash is a steady trickle of silent misses nobody can find.",
+          flips:
+            "A best-effort channel such as an in-app badge that the client reconciles on its next fetch, where an outbox row per badge update costs more than the notification it is protecting.",
+        },
+      },
+    },
+    {
+      id: "publisher",
+      label: "Outbox publisher",
+      sub: "marks published on broker ack",
+      kind: "process",
+      x: 40,
+      y: 580,
+      w: 280,
+      detail: {
+        what: "The loop that claims unpublished outbox rows, writes them to the channel topic, and marks them published only once the broker has acknowledged the write.",
+        why: "This is what makes the outbox worth having. Committing the row and publishing it are separated in time on purpose, so a crash anywhere in between leaves an unpublished row that the next pass picks up rather than a message that was accepted and then quietly lost.",
+        numbers: [
+          "~190 rows/s at daytime steady, ~4,400/s during a broadcast",
+          "publisher lag and outbox depth are first-class metrics",
+          "re-publish on an unacknowledged write, hence at-least-once",
+        ],
+        breaks:
+          "A stalled publisher presents as an empty queue and idle workers while rows pile up in a table nobody graphs, so outbox depth and publisher lag have to be alerted on directly rather than inferred from queue depth. Every queue-based signal reports this failure as healthy.",
+      },
+    },
+    {
       id: "cache",
       label: "Redis cache tier",
       sub: "dedup keys · prefs · token buckets",
-      kind: "store",
-      x: 440,
-      y: 0,
+      kind: "cache",
+      x: 520,
+      y: 190,
       w: 260,
       detail: {
         what: "One Redis tier holding three accept-path structures: (caller_id, idempotency_key) to notif_id at 24h TTL, the preference cache at 1-minute TTL, and a per-user token bucket per hour.",
@@ -112,59 +202,29 @@ export const NOTIFICATION_SYSTEM: Diagram = {
       },
     },
     {
-      id: "gate",
-      label: "Per-user gate",
-      sub: "prefs · quiet hours · 5/hr · digest",
-      kind: "compute",
-      x: 40,
-      y: 110,
-      w: 280,
+      id: "lanes",
+      label: "Per-channel delivery lanes",
+      kind: "zone",
+      x: 496,
+      y: 756,
+      w: 768,
+      h: 432,
       detail: {
-        what: "The only component that can refuse or delay a send: preferences, quiet hours in the recipient's timezone, and a token bucket of five notifications per user per hour, with anything over the cap held and collapsed into one digest.",
-        why: "Throughput was never at risk here, so human tolerance is the scarce resource. A system that delivers every notification reliably and then gets muted in settings has failed at exactly the thing it was built for, and no retry policy recovers a user who has turned notifications off.",
+        what: "One backlog and one worker pool per channel, each sized and retried against its own provider.",
+        why: "Providers fail independently and publish different ceilings, so the only thing that keeps a bad hour on push from becoming a product-wide outage is that email and SMS never share its queue. Isolation here is what turns a system-wide outage into a channel outage.",
         numbers: [
-          "5 per user per hour at normal priority",
-          "average user 0.6 notifications/day, p99 user above 40",
-          "above ~20% bypass traffic the gate has stopped working",
+          "push ~10k/s, SES ~10k/s, SMS ~200/s",
+          "4 attempts on push and email, 1 on SMS",
         ],
         breaks:
-          "Bypass inflation. Every team believes its notification is transactional, so unless the bypass list is centrally owned and audited it grows until the cap protects nobody.",
+          "Operational sprawl: one notification system is really several channel systems behind a shared front door, each with its own credentials, its own sending reputation and its own way of telling you it is unhappy.",
         choice: {
-          pick: "A per-user token bucket in front of the channel queues, digesting the overflow",
-          instead:
-            "Send everything immediately and give users granular per-category toggles instead.",
+          pick: "One queue and one worker pool per channel",
+          instead: "A single shared queue with a channel field on the message.",
           decider:
-            "The top of the distribution rather than the average. The average user gets 0.6 notifications a day, so a cap of five an hour is invisible to almost everyone; the p99 user above 40 a day is the entire reason the limiter exists, and every user who disables notifications comes from that tail.",
+            "What a 30-minute APNs outage costs. With one queue, 15M backed-up push messages sit in front of every password reset going out by email; with a queue per channel the other channels drain at their normal 120/s throughout.",
           flips:
-            "When every notification is individually actionable and time-critical. A two-factor code, a trade fill or an on-call page in a digest is worse than no notification, so a paging product keeps the preference and quiet-hours checks and drops the limiter.",
-        },
-      },
-    },
-    {
-      id: "outbox",
-      label: "Fan-out + outbox",
-      sub: "one row per device, one transaction",
-      kind: "store",
-      x: 40,
-      y: 220,
-      w: 280,
-      detail: {
-        what: "Expands one approved logical send into one message per user, channel and device, and commits those rows with an unpublished outbox row in the same transaction; a publisher then moves them onto the channel topics.",
-        why: "Two writes to two systems with no shared transaction. Publish first and a crash before the commit produces a notification nobody can look up; commit first and a crash before the publish loses it silently, which is worse, because the API already told the caller it was accepted.",
-        numbers: [
-          "~1.5 registered push tokens per user, ~15M push targets",
-          "fan-out ~1.6 messages per accepted request",
-          "rows marked published only after the broker acknowledges",
-        ],
-        breaks:
-          "A stalled publisher presents as an empty queue and idle workers while rows pile up in a table nobody graphs, so outbox depth and publisher lag have to be first-class metrics rather than something you infer from queue depth.",
-        choice: {
-          pick: "Transactional outbox with a separate publisher process",
-          instead: "Publishing to Kafka directly from the request handler.",
-          decider:
-            "Which failure ordering you can live with. A direct publish loses the message on any crash between commit and publish, after the API already returned accepted, and at 6M accepted requests a day a rare crash is a steady trickle of silent misses nobody can find.",
-          flips:
-            "A best-effort channel such as an in-app badge that the client reconciles on its next fetch, where an outbox row per badge update costs more than the notification it is protecting.",
+            "A single channel, or volumes low enough that a provider outage is absorbed by one worker pool anyway, where three brokers' worth of operational surface buys nothing.",
         },
       },
     },
@@ -172,10 +232,10 @@ export const NOTIFICATION_SYSTEM: Diagram = {
       id: "push-topic",
       label: "Push topic",
       sub: "notif.push, 7-day retention",
-      kind: "bus",
-      x: 40,
-      y: 360,
-      w: 280,
+      kind: "queue",
+      x: 520,
+      y: 800,
+      w: 260,
       detail: {
         what: "The durable backlog for push, drained by its own consumer group.",
         why: "This is the topic a broadcast lands on, so it is the one that has to absorb 1.5 days of normal traffic in one event without pushing it at the provider as fast as the pool allows. Retention exists so a worker rebuild or a same-week audit can replay rather than lose.",
@@ -201,10 +261,10 @@ export const NOTIFICATION_SYSTEM: Diagram = {
       id: "email-topic",
       label: "Email topic",
       sub: "notif.email",
-      kind: "bus",
-      x: 40,
-      y: 470,
-      w: 280,
+      kind: "queue",
+      x: 520,
+      y: 930,
+      w: 260,
       detail: {
         what: "The durable backlog for email, drained by the SES worker pool at its own pace.",
         why: "Email is the channel that keeps working while push is throttled, and that is only true because it has its own backlog. It is also the fallback path for high-priority traffic when push fails, so it must have spare headroom precisely when the push topic does not.",
@@ -221,10 +281,10 @@ export const NOTIFICATION_SYSTEM: Diagram = {
       id: "sms-topic",
       label: "SMS topic",
       sub: "notif.sms, transactional only",
-      kind: "bus",
-      x: 40,
-      y: 580,
-      w: 280,
+      kind: "queue",
+      x: 520,
+      y: 1060,
+      w: 260,
       detail: {
         what: "The durable backlog for SMS, deliberately the narrowest lane in the system.",
         why: "The carrier ceiling, not our capacity, sets what this channel can carry, and it is two orders of magnitude below the others. A full-base broadcast down this lane is 20.8 hours of sending, so broadcasts are push and email only and that is arithmetic rather than policy.",
@@ -238,12 +298,40 @@ export const NOTIFICATION_SYSTEM: Diagram = {
       },
     },
     {
+      id: "dlq",
+      label: "Dead-letter queue",
+      sub: "one per channel, budget spent",
+      kind: "queue",
+      x: 520,
+      y: 1190,
+      w: 260,
+      detail: {
+        what: "Where a message stops once its attempt budget is spent, one queue per channel, for a human to look at.",
+        why: "The budget ends at roughly an hour for staleness rather than cost: a notification about a delivery that already arrived is worse than no notification. Retrying forever also spends attempts on tokens that will never be valid again and hides bugs behind a metric that never settles.",
+        numbers: [
+          "push and email: 4 attempts at 30s, 5min, 1h",
+          "delay = base x 2^attempt x random(0.5, 1.5)",
+          "DLQ growth is a page, not an alert",
+        ],
+        breaks:
+          "Growth here always means a persistent failure pattern rather than a blip, so anything that drains it automatically hides the exact bug it was built to surface.",
+        choice: {
+          pick: "A bounded retry budget that ends in a dead letter",
+          instead: "Retry until it succeeds, on an ever-lengthening backoff.",
+          decider:
+            "Staleness rather than cost. Past about an hour the notification is about something the user already knows, and an unbounded budget keeps spending attempts on tokens that returned 410 Gone and will never work again.",
+          flips:
+            "A channel whose payload does not go stale, such as a receipt or a statement email, where a very long backoff genuinely beats handing the message to a human.",
+        },
+      },
+    },
+    {
       id: "push-workers",
       label: "Push workers",
       sub: "APNs / FCM, apns-id dedup",
-      kind: "compute",
-      x: 440,
-      y: 360,
+      kind: "service",
+      x: 980,
+      y: 800,
       w: 260,
       detail: {
         what: "The pool that drains notif.push, calls APNs over HTTP/2 or FCM, classifies the response, prunes dead tokens and records the attempt.",
@@ -269,9 +357,9 @@ export const NOTIFICATION_SYSTEM: Diagram = {
       id: "email-workers",
       label: "Email workers",
       sub: "SES + a warm standby provider",
-      kind: "compute",
-      x: 440,
-      y: 470,
+      kind: "service",
+      x: 980,
+      y: 930,
       w: 260,
       detail: {
         what: "Drains notif.email, substitutes the per-user slots into the pre-rendered locale shell, and hands the message to SES behind an adapter that a second provider also sits behind.",
@@ -298,9 +386,9 @@ export const NOTIFICATION_SYSTEM: Diagram = {
       id: "sms-workers",
       label: "SMS workers",
       sub: "Twilio, one attempt only",
-      kind: "compute",
-      x: 440,
-      y: 580,
+      kind: "service",
+      x: 980,
+      y: 1060,
       w: 260,
       detail: {
         what: "Drains notif.sms at roughly 200 messages a second and sends once, because the provider's synchronous accept is not the delivery and the final state arrives by webhook minutes later.",
@@ -327,8 +415,8 @@ export const NOTIFICATION_SYSTEM: Diagram = {
       label: "Providers and devices",
       sub: "APNs · FCM · SES · Twilio",
       kind: "external",
-      x: 820,
-      y: 360,
+      x: 1480,
+      y: 800,
       w: 240,
       detail: {
         what: "Everyone else's infrastructure, and behind it the handset or inbox you have no visibility into at all.",
@@ -346,9 +434,9 @@ export const NOTIFICATION_SYSTEM: Diagram = {
       id: "status-store",
       label: "Status store",
       sub: "wide-column, 7 days hot",
-      kind: "store",
-      x: 820,
-      y: 560,
+      kind: "database",
+      x: 1480,
+      y: 1320,
       w: 240,
       detail: {
         what: "One record per notification keyed by notif_id, carrying every attempt and the current state: queued, attempting, delivered, bounced, failed.",
@@ -370,44 +458,16 @@ export const NOTIFICATION_SYSTEM: Diagram = {
         },
       },
     },
-    {
-      id: "dlq",
-      label: "Dead-letter queue",
-      sub: "one per channel, budget spent",
-      kind: "bus",
-      x: 40,
-      y: 720,
-      w: 280,
-      detail: {
-        what: "Where a message stops once its attempt budget is spent, one queue per channel, for a human to look at.",
-        why: "The budget ends at roughly an hour for staleness rather than cost: a notification about a delivery that already arrived is worse than no notification. Retrying forever also spends attempts on tokens that will never be valid again and hides bugs behind a metric that never settles.",
-        numbers: [
-          "push and email: 4 attempts at 30s, 5min, 1h",
-          "delay = base x 2^attempt x random(0.5, 1.5)",
-          "DLQ growth is a page, not an alert",
-        ],
-        breaks:
-          "Growth here always means a persistent failure pattern rather than a blip, so anything that drains it automatically hides the exact bug it was built to surface.",
-        choice: {
-          pick: "A bounded retry budget that ends in a dead letter",
-          instead: "Retry until it succeeds, on an ever-lengthening backoff.",
-          decider:
-            "Staleness rather than cost. Past about an hour the notification is about something the user already knows, and an unbounded budget keeps spending attempts on tokens that returned 410 Gone and will never work again.",
-          flips:
-            "A channel whose payload does not go stale, such as a receipt or a statement email, where a very long backoff genuinely beats handing the message to a human.",
-        },
-      },
-    },
   ],
   edges: [
     {
       id: "e1",
-      from: "ingest",
+      from: "accept",
       to: "cache",
       label: "idempotency key check",
       dashed: true,
       fromSide: "right",
-      toSide: "left",
+      toSide: "top",
       detail: {
         what: "The first duplicate check: has (caller_id, idempotency_key) been seen in the last 24 hours?",
         why: "The caller retried because our response timed out and it has no way to know whether the original was accepted. Returning the original notif_id rather than creating a second notification is the only thing standing between a flaky network and a duplicate the user sees.",
@@ -418,13 +478,13 @@ export const NOTIFICATION_SYSTEM: Diagram = {
     },
     {
       id: "e2",
-      from: "ingest",
+      from: "accept",
       to: "gate",
       label: "one logical send",
       animated: true,
       detail: {
-        what: "A validated, deduplicated notification request handed to the component that decides whether it happens at all.",
-        why: "Validation and restraint are separate jobs. By this point the request is known to be well formed and not a retry, so the only remaining question is whether this person wants this notification right now, which is a different question with a different owner.",
+        what: "A validated, deduplicated notification request handed to the stage that decides whether it happens at all.",
+        why: "Validation and restraint are separate jobs even inside one service. By this point the request is known to be well formed and not a retry, so the only remaining question is whether this person wants this notification right now, which is a different question with a different owner.",
         breaks:
           "The gate runs on the logical send, before expansion, so its cap counts logical notifications rather than the interruptions a user with two devices and two channels actually feels.",
       },
@@ -448,11 +508,11 @@ export const NOTIFICATION_SYSTEM: Diagram = {
     {
       id: "e4",
       from: "gate",
-      to: "outbox",
+      to: "fanout",
       label: "allowed sends only",
       animated: true,
       detail: {
-        what: "The sends that survived preferences, quiet hours and the cap, on their way to be expanded and persisted.",
+        what: "The sends that survived preferences, quiet hours and the cap, on their way to be expanded per device and channel.",
         why: "Everything that can refuse a send has now run. This is the boundary the design is built around: below it the only remaining question is when to send, so nothing downstream needs to know what a preference is.",
         breaks:
           "What was held rather than sent has to go somewhere. Over-cap messages land in a digest buffer for the next allowed slot, and a digest buffer nobody drains is a silent miss with extra steps.",
@@ -460,23 +520,55 @@ export const NOTIFICATION_SYSTEM: Diagram = {
     },
     {
       id: "e5",
+      from: "fanout",
+      to: "outbox",
+      label: "rows + outbox row, one txn",
+      animated: true,
+      detail: {
+        what: "The fanned-out message rows and their unpublished outbox rows committed together in a single database transaction.",
+        why: "This is the whole point of the outbox: the message and the record that it still has to be published either both exist or neither does. There is no window in which the API has returned accepted and nothing durable says so.",
+        numbers: ["~1.6 rows per accepted request", "one outbox row per message"],
+        breaks:
+          "Any code path that writes the notification and publishes to Kafka in the same handler bypasses this transaction and reintroduces exactly the gap it exists to close.",
+      },
+    },
+    {
+      id: "e6",
       from: "outbox",
+      to: "publisher",
+      label: "unpublished rows",
+      animated: true,
+      detail: {
+        what: "The publisher claiming a batch of rows that are committed but not yet on a topic.",
+        why: "Reading the table rather than being told about the write is what makes this crash-safe. A publisher that restarts finds the same unpublished rows waiting, so the recovery path and the normal path are the same code.",
+        numbers: ["~190 rows/s daytime steady", "~4,400/s during a broadcast"],
+        breaks:
+          "Claiming without a lease means two publisher instances publish the same row twice, which is survivable because the guarantee is at-least-once, but it doubles provider traffic during exactly the incident where you have least headroom.",
+      },
+    },
+    {
+      id: "e7",
+      from: "publisher",
       to: "push-topic",
       label: "one message per device",
       animated: true,
+      fromSide: "right",
+      toSide: "left",
       detail: {
-        what: "The publisher moving per-device push messages from the outbox table onto notif.push, one per registered token.",
-        why: "Expansion happens per device because retry and dedup have to be independent per device: a user's stale iPad token must not block the phone that still works, so each message carries its own notif_id.",
+        what: "The publisher moving per-device push messages onto notif.push, one per registered token.",
+        why: "Each message carries its own notif_id so retry and dedup are independent per device: a user's stale iPad token must not block the phone that still works.",
         numbers: ["~1.5 tokens per user, ~15M push targets"],
         breaks:
           "This is the arrow that goes quiet when the publisher stalls, and the symptom is an empty queue with idle workers, which every depth-based alert reports as healthy.",
       },
     },
     {
-      id: "e6",
-      from: "outbox",
+      id: "e8",
+      from: "publisher",
       to: "email-topic",
       label: "one message per address",
+      fromSide: "right",
+      toSide: "left",
       detail: {
         what: "The same publisher, moving email messages onto notif.email.",
         why: "Email fans out far less than push, one message per address rather than per device, but it goes through the identical outbox path because the guarantee has to be the same on every channel a human actually reads.",
@@ -485,24 +577,28 @@ export const NOTIFICATION_SYSTEM: Diagram = {
       },
     },
     {
-      id: "e7",
-      from: "outbox",
+      id: "e9",
+      from: "publisher",
       to: "sms-topic",
       label: "one message per number",
+      fromSide: "right",
+      toSide: "left",
       detail: {
         what: "SMS messages moving onto notif.sms, the narrowest lane and the only one with a per-message cost.",
-        why: "Routing SMS through the same outbox is what lets its retry budget differ from the others: the guarantee machinery is shared, the retry policy is per channel, and those are separate decisions.",
+        why: "Routing SMS through the same publisher is what lets its retry budget differ from the others: the guarantee machinery is shared, the retry policy is per channel, and those are separate decisions.",
         numbers: ["~$0.0075 per message"],
         breaks:
-          "Nothing on this arrow stops a bulk send from being routed here; that has to be refused at ingestion, because 15M messages at 200/s is 20.8 hours of backlog.",
+          "Nothing on this arrow stops a bulk send from being routed here; that has to be refused at accept, because 15M messages at 200/s is 20.8 hours of backlog.",
       },
     },
     {
-      id: "e8",
+      id: "e10",
       from: "push-topic",
       to: "push-workers",
       label: "consumer group",
       animated: true,
+      fromSide: "right",
+      toSide: "left",
       detail: {
         what: "Push workers draining their own topic at whatever rate the provider will accept.",
         why: "The pool is sized to the provider's published ceiling rather than to the queue depth, because the queue is allowed to be deep and the provider is not allowed to be overrun. Backpressure lives in the topic, which is exactly what a durable log is for.",
@@ -512,10 +608,12 @@ export const NOTIFICATION_SYSTEM: Diagram = {
       },
     },
     {
-      id: "e9",
+      id: "e11",
       from: "email-topic",
       to: "email-workers",
       label: "consumer group",
+      fromSide: "right",
+      toSide: "left",
       detail: {
         what: "Email workers draining notif.email independently of whatever is happening on push.",
         why: "This is the arrow that proves the isolation claim: during a 30-minute APNs outage this one keeps moving at its normal rate, which is why a push problem is a channel outage rather than a product outage.",
@@ -524,10 +622,12 @@ export const NOTIFICATION_SYSTEM: Diagram = {
       },
     },
     {
-      id: "e10",
+      id: "e12",
       from: "sms-topic",
       to: "sms-workers",
       label: "consumer group",
+      fromSide: "right",
+      toSide: "left",
       detail: {
         what: "SMS workers draining notif.sms, paced hard against the carrier limit.",
         why: "The pool is small on purpose. There is no benefit to consuming faster than roughly 200 messages a second, and consuming faster only converts a queue you can see into provider errors you have to classify.",
@@ -537,7 +637,7 @@ export const NOTIFICATION_SYSTEM: Diagram = {
       },
     },
     {
-      id: "e11",
+      id: "e13",
       from: "push-workers",
       to: "providers",
       label: "HTTP/2 + apns-id",
@@ -553,7 +653,7 @@ export const NOTIFICATION_SYSTEM: Diagram = {
       },
     },
     {
-      id: "e12",
+      id: "e14",
       from: "email-workers",
       to: "providers",
       label: "SMTP, warm standby",
@@ -568,7 +668,7 @@ export const NOTIFICATION_SYSTEM: Diagram = {
       },
     },
     {
-      id: "e13",
+      id: "e15",
       from: "sms-workers",
       to: "providers",
       label: "HTTPS, single attempt",
@@ -583,7 +683,7 @@ export const NOTIFICATION_SYSTEM: Diagram = {
       },
     },
     {
-      id: "e14",
+      id: "e16",
       from: "push-workers",
       to: "status-store",
       label: "attempt log",
@@ -599,7 +699,7 @@ export const NOTIFICATION_SYSTEM: Diagram = {
       },
     },
     {
-      id: "e15",
+      id: "e17",
       from: "email-workers",
       to: "status-store",
       label: "attempts + bounces",
@@ -615,7 +715,7 @@ export const NOTIFICATION_SYSTEM: Diagram = {
       },
     },
     {
-      id: "e16",
+      id: "e18",
       from: "sms-workers",
       to: "status-store",
       label: "accepted, awaiting webhook",
@@ -630,7 +730,7 @@ export const NOTIFICATION_SYSTEM: Diagram = {
       },
     },
     {
-      id: "e17",
+      id: "e19",
       from: "providers",
       to: "status-store",
       label: "delivery / bounce webhooks",
@@ -646,7 +746,7 @@ export const NOTIFICATION_SYSTEM: Diagram = {
       },
     },
     {
-      id: "e18",
+      id: "e20",
       from: "sms-workers",
       to: "dlq",
       label: "budget spent, stop",

@@ -25,52 +25,26 @@ export const RATE_LIMITER: Diagram = {
     ],
   },
   nodes: [
-    {
-      id: "limiter-group",
-      label: "Limiter middleware (in-process)",
-      kind: "group",
-      x: 16,
-      y: 196,
-      w: 328,
-      h: 424,
-      detail: {
-        what: "The three decisions, running as middleware inside every gateway node: build the key, match the rule, run the atomic check, and decide what to do when the store does not answer.",
-        why: "Keeping all four steps in-process means the only remote call on the request path is the counter round trip, which is what makes a sub-10ms p99 overhead achievable at all across a 200 node fleet.",
-        numbers: ["one remote call per request", "<10ms p99 added overhead"],
-        breaks:
-          "Everything here is replicated 200 times, so a bug ships to the whole fleet at once and there is no canary between the limiter and the traffic it decides on.",
-      },
-    },
-    {
-      id: "client",
-      label: "Client",
-      sub: "SDK, integration or browser",
-      kind: "external",
-      x: 40,
-      y: 0,
-      w: 280,
-      detail: {
-        what: "Everything outside the trust boundary that makes requests: browsers, server-side integrations and SDKs holding an API key.",
-        why: "It is drawn explicitly because the whole rejection contract depends on it. Headers and Retry-After only change behaviour if the caller reads them, and a hostile caller is under no obligation to read anything.",
-        numbers: ["1M req/s at peak", "~10B requests/day", "100M distinct identities"],
-        breaks:
-          "A million clients handed the same Retry-After retry in the same instant, re-trigger the limit at the next boundary and oscillate; jitter fixes the well-behaved SDK, which was never the problem.",
-      },
-    },
+    // --- the enforcement fleet: one deployable, five stages ---------------
     {
       id: "gateway",
       label: "API gateway node",
-      sub: "~200 nodes, 5k req/s each",
-      kind: "compute",
-      x: 40,
-      y: 100,
-      w: 280,
+      sub: "~200 nodes, limiter in-process",
+      kind: "serviceGroup",
+      x: 16,
+      y: 130,
+      w: 620,
+      h: 608,
       detail: {
-        what: "The stateless edge tier that terminates the request and runs the limiter as middleware before anything downstream is touched.",
-        why: "Rejecting at the edge is the point: a request stopped here never burns an app server or a database connection. The node count is also the number that settles the shared-store fork, so it belongs on the board early.",
-        numbers: ["200 nodes x 5k req/s = 1M req/s", "<10ms p99 limiter overhead"],
+        what: "The stateless edge tier that terminates the request and runs the limiter as middleware. One deployable unit; the five stages inside it are phases of a single request, not five services.",
+        why: "Rejecting at the edge is the point: a request stopped here never burns an app server or a database connection. Keeping all five stages in-process means the only remote call on the request path is the counter round trip, which is what makes a sub-10ms p99 overhead achievable at all across a 200 node fleet.",
+        numbers: [
+          "200 nodes x 5k req/s = 1M req/s",
+          "one remote call per request",
+          "<10ms p99 added overhead",
+        ],
         breaks:
-          "Middleware OOM under sudden load, which shows up as container restarts and p99 spikes; it needs bounded per-identity memory and request-level timeouts so it sheds before the OOM killer fires.",
+          "Everything here is replicated 200 times, so a bug ships to the whole fleet at once and there is no canary between the limiter and the traffic it decides on. The characteristic crash is middleware OOM under sudden load, which shows as container restarts and p99 spikes.",
         choice: {
           pick: "Limiter as in-process middleware on the gateway",
           instead: "A dedicated rate-limiter service the gateway calls per request.",
@@ -82,12 +56,28 @@ export const RATE_LIMITER: Diagram = {
       },
     },
     {
+      id: "client",
+      label: "Client",
+      sub: "SDK, integration or browser",
+      kind: "client",
+      x: 356,
+      y: 0,
+      w: 260,
+      detail: {
+        what: "Everything making requests: browsers, server-side integrations and SDKs holding an API key.",
+        why: "It is drawn explicitly because the whole rejection contract depends on it. Headers and Retry-After only change behaviour if the caller reads them, and a hostile caller is under no obligation to read anything.",
+        numbers: ["1M req/s at peak", "~10B requests/day", "100M distinct identities"],
+        breaks:
+          "A million clients handed the same Retry-After retry in the same instant, re-trigger the limit at the next boundary and oscillate; jitter fixes the well-behaved SDK, which was never the problem.",
+      },
+    },
+    {
       id: "key-builder",
       label: "Key builder",
       sub: "(identity, scope)",
-      kind: "compute",
+      kind: "process",
       x: 40,
-      y: 220,
+      y: 194,
       w: 280,
       detail: {
         what: "Resolves the caller to an identity and the request to a scope, producing the single key everything downstream counts against.",
@@ -106,16 +96,16 @@ export const RATE_LIMITER: Diagram = {
       },
     },
     {
-      id: "rule-lookup",
+      id: "rule-matcher",
       label: "Rule matcher",
       sub: "local cache, ~10k compiled rules",
-      kind: "compute",
+      kind: "process",
       x: 40,
-      y: 320,
+      y: 304,
       w: 280,
       detail: {
         what: "Matches (scope, identifier pattern, tier) to a rule carrying algorithm, limit, window, priority and the on-store-failure posture.",
-        why: "Rules change while an attack is happening, so they are data rather than code. Tiering also lives here: joining a user to its tier from a fast cache makes a plan upgrade a cache invalidation instead of a rule rewrite.",
+        why: "Rules change while an attack is happening, so they are data rather than code. Tiering also lives here: the middleware joins user to tier from a cache resident in node memory alongside the compiled rules, so a plan upgrade is a cache invalidation rather than a rule rewrite and costs no extra hop.",
         numbers: ["~1000 endpoints x ~10 rules = 10k compiled rules", "~1KB per rule, ~10MB per node"],
         breaks:
           "A bad config push inverts a rule, so something that was 99% allow becomes 99% deny; the guard is allow-rate-by-rule alerting plus 24h of shadow mode before any new rule enforces.",
@@ -133,12 +123,12 @@ export const RATE_LIMITER: Diagram = {
       id: "limiter-check",
       label: "Atomic check-and-update",
       sub: "GCRA in one Lua script",
-      kind: "compute",
+      kind: "process",
       x: 40,
-      y: 420,
+      y: 414,
       w: 280,
       detail: {
-        what: "The one function everything lands on: given a key and the current time, return allow or deny and update the stored state, as a single script executed inside the store.",
+        what: "The one function everything lands on: given a key and the current time, return allow or deny and update the stored state, as a single script executed inside the store. The per-key counter and the coarse per-endpoint ceiling are both evaluated by that one script, so stacking them costs no second round trip.",
         why: "The unit of atomicity has to be the whole read, compute and write. A Redis shard runs commands and scripts one at a time on a single thread, so while the script runs nothing else on that shard can observe or modify the key, and that property is the entire correctness argument.",
         numbers: [
           "1 round trip per request, ~3 internal ops",
@@ -161,9 +151,9 @@ export const RATE_LIMITER: Diagram = {
       id: "breaker",
       label: "Timeout + circuit breaker",
       sub: "5ms budget, trips after 5 failures",
-      kind: "compute",
+      kind: "process",
       x: 40,
-      y: 520,
+      y: 524,
       w: 280,
       detail: {
         what: "Bounds the store call at 5ms, trips after 5 consecutive timeouts, and then applies the rule's on-store-failure posture instead of the counter's verdict.",
@@ -186,63 +176,41 @@ export const RATE_LIMITER: Diagram = {
       },
     },
     {
-      id: "backend",
-      label: "Protected backend",
-      sub: "app tier + connection pool",
-      kind: "compute",
-      x: 40,
-      y: 680,
-      w: 280,
+      id: "reject-429",
+      label: "Reject path",
+      sub: "429 + Retry-After + jitter",
+      kind: "process",
+      x: 356,
+      y: 634,
+      w: 260,
       detail: {
-        what: "The service the limit exists to protect, along with the finite resources behind it such as a fixed pool of database connections.",
-        why: "It is on the diagram because it is the thing the third decision is really about. Whether it degrades or falls over at 10x nominal load is what settles fail open against fail closed, and that is a property of this box, not of the limiter.",
-        numbers: ["e.g. a fixed pool of 200 database connections", "100M identities x 100 req/min is six orders of magnitude above capacity"],
+        what: "Builds the rejection: 429 with Retry-After and X-RateLimit-{Limit,Remaining,Reset}, with the retry time jittered before it goes out.",
+        why: "The rejection is a contract, not an error page. The GCRA deny path already yields the exact retry instant rather than a guess, and a wrong Retry-After is precisely what synchronises a million clients into retrying together at the next boundary.",
+        numbers: ["retry_after = base + random(0, base/2)", "X-RateLimit headers on every response, not just 429s"],
         breaks:
-          "Ten thousand tenants can each sit comfortably inside their limit and still take it down, and the limiter will report a healthy allow rate throughout.",
+          "A 429 is cheaper to serve than the request it replaced and cheaper for an attacker to receive, so the polite reply subsidises the hostile client it was meant to stop.",
         choice: {
-          pick: "Per-key limits plus a coarse per-endpoint ceiling as a backstop",
-          instead: "Concurrency-based admission control that sheds by priority when backend latency degrades.",
+          pick: "429 with headers and jittered Retry-After for the first burst, connection-level drop for a sustained offender",
+          instead: "Always a clean 429, or always a connection-level drop.",
           decider:
-            "Per-key budgets sum to far past capacity, 100M identities at 100 req/min being six orders of magnitude above anything real, and the design only works because the simultaneously active set stays in a narrow band. The ceiling fires on total volume and cannot tell the tenant to shed from the tenant to protect.",
+            "Cost to the sender against debuggability. Jitter only fixes the well-behaved SDK, and at 1M req/s a 429 is cheaper to serve than the request it replaced and cheaper again for an attacker to receive, so only refusing at the connection level costs a hostile sender anything; that also removes the diagnosis for the paying customer who is merely misconfigured, which is where this design has the least to say.",
           flips:
-            "At a market open or during a post-incident retry storm, when the narrow-band assumption breaks and the backend's own latency is the only signal that still means anything. That is the honest fix and this design does not have it.",
+            "APIs whose callers are all first-party or contractual, where every rejection has to be explainable and a support story about intermittent timeouts costs more than the abuse does.",
         },
       },
     },
-    {
-      id: "config",
-      label: "Rule config service",
-      sub: "transactional store + pub/sub",
-      kind: "store",
-      x: 440,
-      y: 320,
-      w: 240,
-      detail: {
-        what: "Source of truth for rules, keyed on (rule_id, scope, identifier_pattern, endpoint_pattern, algorithm, limit, window, priority, on_store_failure), publishing invalidation events on a channel.",
-        why: "Pushing a rule change through a deploy is too slow when an attacker is mid-attack. Nodes drop the cached rule on an invalidation event and refetch lazily, so a new rule reaches 200 nodes in under a second without a redeploy.",
-        numbers: ["propagates in under a second", "~10k compiled rules, ~10MB", "rule store replicated at RPO 0"],
-        breaks:
-          "If it is down there are no rule refreshes; nodes serve last-known-good from cache on a rule-cache-age alert and rule creation is refused until it recovers.",
-        choice: {
-          pick: "Transactional config store with pub/sub invalidation and lazy refetch",
-          instead: "Rules in the deploy artefact, or polled from a plain key-value store.",
-          decider:
-            "Propagation time under attack. Invalidate-then-refetch is under a second against minutes for a deploy, and a poll is only ever as fresh as its interval. The rule set is 10MB, small enough that the choice is entirely about latency of change, not about size.",
-          flips:
-            "Small or static rule sets where limits change quarterly, at which point a deploy is a perfectly good propagation channel and the control plane is pure operational cost.",
-        },
-      },
-    },
+
+    // --- the counters -----------------------------------------------------
     {
       id: "counter-store",
       label: "Sharded counter store",
       sub: "16 Redis primaries, TTL = window",
-      kind: "store",
-      x: 440,
-      y: 420,
-      w: 240,
+      kind: "cache",
+      x: 740,
+      y: 430,
+      w: 260,
       detail: {
-        what: "The authoritative counters, one key per (identity, scope), spread over 16 primaries with a replica each and evicted by TTL at window length.",
+        what: "The authoritative counters, one key per (identity, scope), spread over 16 primaries and evicted by TTL at window length. In-memory and disposable by design: nothing here is a system of record.",
         why: "Every one of 200 gateway nodes needs the same view of a number changing a million times a second, and only one authoritative copy gives that. Single-threaded per-shard execution is also what makes the check script atomic, so the store choice and the correctness argument are the same choice.",
         numbers: [
           "16 primaries, ~1.25GB each",
@@ -263,15 +231,42 @@ export const RATE_LIMITER: Diagram = {
       },
     },
     {
+      id: "counter-replica",
+      label: "Counter replicas",
+      sub: "1 per primary, Sentinel failover",
+      kind: "cache",
+      x: 1100,
+      y: 430,
+      w: 260,
+      detail: {
+        what: "One asynchronous replica behind each of the 16 primaries, promoted by Sentinel or Cluster when a primary stops answering health checks. 32 nodes in total.",
+        why: "The 30 second RTO in the failure story comes from here, and it is the number that makes fail-open survivable rather than theoretical: a 30 second window of degraded counting is 0.001% of a month, which is only true because promotion is automatic and fast.",
+        numbers: [
+          "16 replicas, RTO ~30s",
+          "RPO not applicable: counter state is ephemeral and rebuilds as traffic flows",
+        ],
+        breaks:
+          "Replication is asynchronous, so a promoted replica starts from a slightly stale count and briefly under-counts; that is deliberate, because waiting for a synchronous ack would put a second network hop inside the 5ms budget.",
+        choice: {
+          pick: "Async replica per primary with automatic promotion, no persistence",
+          instead: "Synchronous replication, or no replica and a cold rebuild from traffic.",
+          decider:
+            "What the 5ms budget can pay for. A synchronous ack adds a round trip inside a hot path already spending one, to protect counters that expire at window length anyway. No replica at all means the shard's keys are simply gone and every identity on it gets a free window, which is a worse trade than a few seconds of stale count.",
+          flips:
+            "When the counter is billing-grade, at which point you are on a durable store with real replication semantics and a different latency budget entirely.",
+        },
+      },
+    },
+    {
       id: "local-counters",
       label: "Per-node local counters",
-      sub: "degraded mode, no hop",
-      kind: "store",
-      x: 440,
-      y: 520,
-      w: 240,
+      sub: "in-process, no hop, degraded mode",
+      kind: "cache",
+      x: 740,
+      y: 560,
+      w: 260,
       detail: {
-        what: "Coarse in-process counters each gateway node keeps, used when the breaker is open and available as the shape of the whole design when the round trip is unaffordable.",
+        what: "Coarse in-process counters each gateway node keeps in its own memory, used when the breaker is open and available as the shape of the whole design when the round trip is unaffordable.",
         why: "Degrading to coarse local counting is materially better than degrading to no limiting at all, and it is the same mechanism as the block-reservation middle option: spend W tokens locally per round trip so the hop amortises without giving up a bound you can state.",
         numbers: [
           "200 nodes x 100/min = 20,000/min effective",
@@ -291,67 +286,117 @@ export const RATE_LIMITER: Diagram = {
         },
       },
     },
+
+    // --- the control plane ------------------------------------------------
     {
-      id: "reject-429",
-      label: "Reject path",
-      sub: "429 + Retry-After + jitter",
-      kind: "compute",
-      x: 440,
-      y: 620,
-      w: 240,
+      id: "config-service",
+      label: "Rule config service",
+      sub: "authoring API + shadow mode",
+      kind: "service",
+      x: 740,
+      y: 300,
+      w: 260,
       detail: {
-        what: "Builds the rejection: 429 with Retry-After and X-RateLimit-{Limit,Remaining,Reset}, with the retry time jittered before it goes out.",
-        why: "The rejection is a contract, not an error page. The GCRA deny path already yields the exact retry instant rather than a guess, and a wrong Retry-After is precisely what synchronises a million clients into retrying together at the next boundary.",
-        numbers: ["retry_after = base + random(0, base/2)", "X-RateLimit headers on every response, not just 429s"],
+        what: "The control plane for limits: validates and writes rules to the rule store, publishes an invalidation event per change, and runs a new rule in shadow mode for 24h before it enforces.",
+        why: "Pushing a rule change through a deploy is too slow when an attacker is mid-attack. Separating the service from the store it writes to is what lets rule creation be refused while the last-known-good rules keep serving from 200 local caches.",
+        numbers: ["propagates in under a second", "24h shadow mode before any rule enforces", "~10k compiled rules"],
         breaks:
-          "A 429 is cheaper to serve than the request it replaced and cheaper for an attacker to receive, so the polite reply subsidises the hostile client it was meant to stop.",
+          "If it is down there are no rule refreshes; nodes serve last-known-good from cache on a rule-cache-age alert, and rule creation is refused until it recovers.",
         choice: {
-          pick: "429 with headers and jittered Retry-After for the first burst, connection-level drop for a sustained offender",
-          instead: "Always a clean 429, or always a connection-level drop.",
+          pick: "A control-plane service off the request path, with shadow mode as a first-class state",
+          instead: "Letting operators write the rule store directly, or shipping rules in the deploy artefact.",
           decider:
-            "Cost to the sender against debuggability. Jitter only fixes the well-behaved SDK, and at 1M req/s a 429 is cheaper to serve than the request it replaced and cheaper again for an attacker to receive, so only refusing at the connection level costs a hostile sender anything; that also removes the diagnosis for the paying customer who is merely misconfigured, which is where this design has the least to say.",
+            "Blast radius of a bad rule. A rule that flips 99% allow to 99% deny reaches 200 nodes in under a second, which is exactly as fast as the fix and exactly as fast as the mistake, so the 24h shadow window has to be enforced by something that is not the person in a hurry.",
           flips:
-            "APIs whose callers are all first-party or contractual, where every rejection has to be explainable and a support story about intermittent timeouts costs more than the abuse does.",
+            "Small or static rule sets where limits change quarterly, at which point a deploy is a perfectly good propagation channel and the control plane is pure operational cost.",
         },
       },
     },
     {
-      id: "decision-log",
-      label: "Sampled decision log",
-      sub: "1% to columnar archive",
-      kind: "store",
-      x: 440,
-      y: 720,
-      w: 240,
+      id: "rule-store",
+      label: "Rule store",
+      sub: "transactional, RPO 0",
+      kind: "database",
+      x: 1100,
+      y: 300,
+      w: 260,
       detail: {
-        what: "A 1% sample of allow and deny decisions written to a columnar archive: identity, endpoint, decision, limit, remaining, timestamp, region and rule version.",
-        why: "The over-allow metric cannot be computed from the counters themselves, because they hold current state rather than the rate actually served. This is also the only record that survives a window expiring, so abuse forensics has to come from here.",
+        what: "Source of truth for rules, keyed on (rule_id, scope, identifier_pattern, endpoint_pattern, algorithm, limit, window_sec, priority, on_store_failure), synchronously replicated.",
+        why: "This is the one piece of durable state in the design. Counters are ephemeral and rebuild from traffic; rules do not, and losing them means the fleet enforces whatever 200 stale local caches happen to hold with no way to correct it.",
+        numbers: ["~10k compiled rules, ~10MB total", "~1KB per rule", "synchronously replicated at RPO 0"],
+        breaks:
+          "It is small enough that nobody sizes it and nobody watches it, so the failure is a rule store that has been running unreplicated for months and is discovered during the restore.",
+        choice: {
+          pick: "A transactional database with synchronous replication",
+          instead: "Keeping rules in the counter cluster, which is already there and already sharded.",
+          decider:
+            "Durability requirement and blast radius, not size. At 10MB the rule set fits anywhere, but the counter cluster is explicitly ephemeral with TTL eviction and no persistence, so putting rules there means a failover that is harmless for counters silently deletes the limits.",
+          flips:
+            "A single-tenant deployment with a handful of static rules, where a versioned file in the deploy artefact is both durable and auditable for free.",
+        },
+      },
+    },
+    {
+      id: "invalidation-bus",
+      label: "Invalidation channel",
+      sub: "pub/sub fan-out to 200 nodes",
+      kind: "queue",
+      x: 740,
+      y: 180,
+      w: 260,
+      detail: {
+        what: "The pub/sub channel carrying one small message per rule change to every gateway node, which drops the cached rule and refetches it lazily on the next request that needs it.",
+        why: "Invalidate-then-refetch is what turns a rule change into a sub-second fleet-wide event without a redeploy and without 200 nodes polling the config service. It is a fan-out channel, not a work queue: messages are not durable and are not meant to be.",
+        numbers: ["fan-out to ~200 subscribers", "a handful of messages per day", "under a second end to end"],
+        breaks:
+          "If the channel is silent nobody notices, because stale rules still serve perfectly well; rule-cache-age is the only metric that shows this path has stopped working, and it is the metric people forget to alert on.",
+        choice: {
+          pick: "Fire-and-forget pub/sub with lazy refetch on the node",
+          instead: "Each node polling the config service on an interval, or pushing the full rule body over the channel.",
+          decider:
+            "Freshness against load. A poll is only ever as fresh as its interval and 200 nodes polling a control-plane service is constant load for nothing; pushing the rule body makes the message the source of truth, so a dropped message leaves nodes permanently divergent, while a dropped invalidation only leaves them stale until the next one.",
+          flips:
+            "A fleet small enough that a 5 second poll is both fresh enough and cheaper than running a broker at all.",
+        },
+      },
+    },
+
+    // --- what the limit is protecting -------------------------------------
+    {
+      id: "backend",
+      label: "Protected backend",
+      sub: "app tier + connection pool",
+      kind: "service",
+      x: 40,
+      y: 800,
+      w: 280,
+      detail: {
+        what: "The service the limit exists to protect, along with the finite resources behind it such as a fixed pool of database connections.",
+        why: "It is on the diagram because it is the thing the third decision is really about. Whether it degrades or falls over at 10x nominal load is what settles fail open against fail closed, and that is a property of this box, not of the limiter.",
         numbers: [
-          "10k events/s at 1% of 1M req/s",
-          "~300B per event, ~3MB/s",
-          "~250GB/day, ~7.5TB at 30d retention",
-          "alert when over_allow_rate exceeds 1.2x",
+          "e.g. a fixed pool of 200 database connections",
+          "100M identities x 100 req/min is six orders of magnitude above capacity",
         ],
         breaks:
-          "At 1% a rule misbehaving for one low-volume identity may never appear in the sample, so the log answers aggregate questions well and single-customer questions badly.",
+          "Ten thousand tenants can each sit comfortably inside their limit and still take it down, and the limiter will report a healthy allow rate throughout.",
         choice: {
-          pick: "1% sampling into a columnar archive",
-          instead: "Log every decision, or derive over-allow from the counters.",
+          pick: "Per-key limits plus a coarse per-endpoint ceiling as a backstop",
+          instead: "Concurrency-based admission control that sheds by priority when backend latency degrades.",
           decider:
-            "Cost. Every decision at 1M req/s and ~300B each is 300MB/s and roughly 25TB a day; 1% is 3MB/s and ~250GB/day and still yields 10k events/s, which is ample for the aggregate. Deriving it from the counters is not an option at any price, since they never held the served rate.",
+            "Per-key budgets sum to far past capacity, 100M identities at 100 req/min being six orders of magnitude above anything real, and the design only works because the simultaneously active set stays in a narrow band. The ceiling fires on total volume and cannot tell the tenant to shed from the tenant to protect.",
           flips:
-            "Billing-grade quotas a customer will dispute, where the individual decision behind a charge has to exist in full and sampling makes the invoice unarguable in the wrong direction.",
+            "At a market open or during a post-incident retry storm, when the narrow-band assumption breaks and the backend's own latency is the only signal that still means anything. That is the honest fix and this design does not have it.",
         },
       },
     },
     {
       id: "risk-gate",
       label: "Risk gate",
-      sub: "fails closed, own store",
-      kind: "compute",
-      x: 440,
+      sub: "fails closed, exact count",
+      kind: "service",
+      x: 1100,
       y: 820,
-      w: 240,
+      w: 260,
       detail: {
         what: "The same mechanism with the default inverted, sitting in front of something genuinely scarce: an order throttle ahead of a broker's exchange session capped by the venue.",
         why: "Exceeding this number does not degrade a backend, it gets the session disconnected by the venue, so the limiter must reject when it cannot verify the count. It also needs a real count rather than a statistical one, which rules out sub-counters and cross-node block reservation.",
@@ -364,11 +409,40 @@ export const RATE_LIMITER: Diagram = {
           "Today it shares a cluster with the quota counters, so a single store outage produces fail-open and fail-closed behaviour at the same time. That is a known gap, not a design worth defending.",
         choice: {
           pick: "Fail closed, exact single-owner counter, its own store",
-          instead: "Reuse the quota limiter's cluster and its fail-open posture.",
+          instead: "Reuse the quota limiter's cluster and its fail-open posture, which is what is deployed today.",
           decider:
             "Failure domain. At 50 orders per second the throughput is trivial, so a separate store is almost free, while sharing the cluster serving 1M req/s of ordinary API traffic means the outage that trips the quota breaker also blinds the gate that must reject.",
           flips:
             "Before any real money sits behind it, one cluster is less operational surface; the sequencing argument is that the second store is worth building on the day the first risk gate goes in front of a live session.",
+        },
+      },
+    },
+    {
+      id: "decision-log",
+      label: "Sampled decision archive",
+      sub: "1% sample, columnar on object store",
+      kind: "blob",
+      x: 1100,
+      y: 690,
+      w: 260,
+      detail: {
+        what: "A 1% sample of allow and deny decisions written as columnar files to object storage: identity, endpoint, decision, limit, remaining, timestamp, region and rule version.",
+        why: "The over-allow metric cannot be computed from the counters themselves, because they hold current state rather than the rate actually served. This is also the only record that survives a window expiring, so abuse forensics has to come from here.",
+        numbers: [
+          "10k events/s at 1% of 1M req/s",
+          "~300B per event, ~3MB/s",
+          "~250GB/day, ~7.5TB at 30d retention",
+          "alert when over_allow_rate exceeds 1.2x",
+        ],
+        breaks:
+          "At 1% a rule misbehaving for one low-volume identity may never appear in the sample, so the archive answers aggregate questions well and single-customer questions badly.",
+        choice: {
+          pick: "1% sampling into columnar files on object storage",
+          instead: "Log every decision, or derive over-allow from the counters.",
+          decider:
+            "Cost. Every decision at 1M req/s and ~300B each is 300MB/s and roughly 25TB a day; 1% is 3MB/s and ~250GB/day and still yields 10k events/s, which is ample for the aggregate. Deriving it from the counters is not an option at any price, since they never held the served rate.",
+          flips:
+            "Billing-grade quotas a customer will dispute, where the individual decision behind a charge has to exist in full and sampling makes the invoice unarguable in the wrong direction.",
         },
       },
     },
@@ -377,9 +451,11 @@ export const RATE_LIMITER: Diagram = {
     {
       id: "e1",
       from: "client",
-      to: "gateway",
+      to: "key-builder",
       label: "request",
       animated: true,
+      fromSide: "bottom",
+      toSide: "top",
       detail: {
         what: "Ordinary API traffic arriving at the edge, a million requests a second at peak.",
         why: "The limiter sits on this path rather than beside it, which is why its own latency and availability are design inputs rather than afterthoughts; everything downstream is spent in the 10ms this hop is allowed to add.",
@@ -390,47 +466,19 @@ export const RATE_LIMITER: Diagram = {
     },
     {
       id: "e2",
-      from: "gateway",
-      to: "key-builder",
-      label: "identity resolved",
-      detail: {
-        what: "The request handing over its authenticated identity, or the absence of one, to the key builder.",
-        why: "Ordering matters here: keying on the account requires auth to have already run, so the limiter sits behind authentication or reads a signed API key. Keying on IP is the only option available before that point.",
-        breaks:
-          "If auth is expensive and runs before the limiter, an attacker can burn auth capacity with requests the limiter would have rejected for free.",
-      },
-    },
-    {
-      id: "e3",
       from: "key-builder",
-      to: "rule-lookup",
+      to: "rule-matcher",
       label: "(identity, scope)",
       detail: {
         what: "The composed key travelling to rule matching, carrying the identity and the endpoint class it is being counted against.",
-        why: "The key is built before the rule is matched because the rule itself is keyed on scope, identifier pattern and user tier, so you cannot select a limit until you know who and what you are limiting.",
+        why: "The key is built before the rule is matched because the rule itself is keyed on scope, identifier pattern and user tier, so you cannot select a limit until you know who and what you are limiting. Keying on the account also requires auth to have already run, which is why the limiter sits behind authentication or reads a signed API key.",
         breaks:
           "Scope defined too finely explodes cardinality: per-route keys multiply the 100M identity space by the endpoint count without changing what the limit actually protects.",
       },
     },
     {
-      id: "e4",
-      from: "rule-lookup",
-      to: "config",
-      label: "invalidate + refetch",
-      dashed: true,
-      fromSide: "right",
-      toSide: "left",
-      detail: {
-        what: "The control path: invalidation events pushed down, and a lazy refetch of the compiled rule when a cached entry is dropped.",
-        why: "Drawn as a control path because no request data flows on it. It exists so a rule change reaches 200 nodes in under a second during an attack, instead of waiting on a deploy.",
-        numbers: ["~10MB of compiled rules per node", "under a second to propagate"],
-        breaks:
-          "If the channel is silent nobody notices, because stale rules still serve; the rule-cache-age metric is the only signal that this path has stopped working.",
-      },
-    },
-    {
-      id: "e5",
-      from: "rule-lookup",
+      id: "e3",
+      from: "rule-matcher",
       to: "limiter-check",
       label: "limit, window, posture",
       detail: {
@@ -441,36 +489,115 @@ export const RATE_LIMITER: Diagram = {
       },
     },
     {
-      id: "e6",
-      from: "limiter-check",
-      to: "counter-store",
-      label: "one atomic script, 5ms budget",
-      animated: true,
-      fromSide: "right",
-      toSide: "left",
-      detail: {
-        what: "The hot path: one round trip per request carrying the script hash, key and arguments, returning the verdict and the remaining allowance.",
-        why: "It is one call rather than a read followed by a write because the read, the compute and the write must be indivisible. The shard executes it single-threaded, so nothing else can observe or modify the key while it runs.",
-        numbers: ["1M round trips/s", "~100B out, ~60B back", "~160MB/s aggregate"],
-        breaks:
-          "This is the arrow that turns a store degradation into a site outage if its timeout is the 1s that client libraries ship by default rather than the 5ms the budget allows.",
-      },
-    },
-    {
-      id: "e7",
+      id: "e4",
       from: "limiter-check",
       to: "breaker",
-      label: "verdict, or silence at 5ms",
+      label: "verdict, or 5ms silence",
       detail: {
-        what: "The store's answer, or the absence of one once the 5ms budget expires, arriving at the component that owns the failure posture.",
-        why: "Separating the check from the posture is deliberate: the check is arithmetic and is either right or wrong, while the posture is a policy decision that differs per limit and has to be reviewable on its own.",
+        what: "The store's answer, or the absence of one once the 5ms budget expires, arriving at the stage that owns the failure posture.",
+        why: "Separating the check from the posture is deliberate even inside one process: the check is arithmetic and is either right or wrong, while the posture is a policy decision that differs per limit and has to be reviewable on its own.",
         numbers: ["breaker trips after 5 consecutive timeouts"],
         breaks:
           "A slow store that answers at 4.9ms never trips the breaker but eats half the request budget, which is a latency failure the fail-open metric does not catch.",
       },
     },
     {
+      id: "e5",
+      from: "rule-matcher",
+      to: "config-service",
+      label: "refetch on invalidate",
+      dashed: true,
+      fromSide: "right",
+      toSide: "left",
+      detail: {
+        what: "The lazy half of the control path: after an invalidation drops a cached entry, the next request needing that rule fetches the compiled version from the config service.",
+        why: "Drawn as a control path because no request data flows on it and it runs at most once per rule change per node, not once per request. Refetching lazily rather than eagerly means a rule nobody is currently hitting costs nothing to invalidate.",
+        numbers: ["~10MB of compiled rules per node", "at most one fetch per rule per node per change"],
+        breaks:
+          "If the config service is unreachable at refetch time the node serves last-known-good, which is right, but it means a genuinely urgent rule change can silently fail to reach part of the fleet.",
+      },
+    },
+    {
+      id: "e6",
+      from: "config-service",
+      to: "invalidation-bus",
+      label: "publish invalidation",
+      dashed: true,
+      fromSide: "top",
+      toSide: "bottom",
+      detail: {
+        what: "One small message per rule change, published the moment the write to the rule store commits.",
+        why: "Publishing after the commit rather than before is what makes the refetch safe: a node that reacts instantly is guaranteed to read the new rule rather than race the write.",
+        numbers: ["a handful of messages per day", "published post-commit"],
+        breaks:
+          "If the publish fails after the commit succeeds, the rule store and the fleet diverge with no error anywhere; the reconciliation is the rule-cache-age metric, not this path.",
+      },
+    },
+    {
+      id: "e7",
+      from: "invalidation-bus",
+      to: "rule-matcher",
+      label: "drop cached rule",
+      dashed: true,
+      fromSide: "left",
+      toSide: "top",
+      detail: {
+        what: "Fan-out of the invalidation to all ~200 gateway nodes, each dropping the named rule from its local compiled cache.",
+        why: "This is the arrow that makes a rule change a sub-second event during an attack instead of a deploy that takes minutes. It carries the rule id rather than the rule body, so a dropped message costs staleness rather than divergence.",
+        numbers: ["~200 subscribers", "under a second to propagate"],
+        breaks:
+          "If the channel is silent nobody notices, because stale rules still serve; the rule-cache-age metric is the only signal that this path has stopped working.",
+      },
+    },
+    {
       id: "e8",
+      from: "config-service",
+      to: "rule-store",
+      label: "reads / writes rules",
+      fromSide: "right",
+      toSide: "left",
+      detail: {
+        what: "The authoring path: validated rule writes committed transactionally, and reads that serve the fleet's lazy refetches.",
+        why: "The service and the store are separate because they fail differently. The store being down must refuse new rules; the service being down must not, on its own, stop the fleet enforcing what it already has.",
+        numbers: ["~10k rules, ~10MB", "synchronous replication, RPO 0"],
+        breaks:
+          "A partial write of a multi-rule change leaves the fleet enforcing half a policy, which is why this is a transaction rather than a sequence of puts.",
+      },
+    },
+    {
+      id: "e9",
+      from: "limiter-check",
+      to: "counter-store",
+      label: "one atomic script",
+      animated: true,
+      fromSide: "right",
+      toSide: "left",
+      detail: {
+        what: "The hot path: one round trip per request carrying the script hash, key and arguments, returning the verdict and the remaining allowance, bounded at 5ms.",
+        why: "It is one call rather than a read followed by a write because the read, the compute and the write must be indivisible. The shard executes it single-threaded, so nothing else can observe or modify the key while it runs.",
+        numbers: ["1M round trips/s", "~100B out, ~60B back", "~160MB/s aggregate", "5ms timeout"],
+        breaks:
+          "This is the arrow that turns a store degradation into a site outage if its timeout is the 1s that client libraries ship by default rather than the 5ms the budget allows.",
+      },
+    },
+    {
+      id: "e10",
+      from: "counter-store",
+      to: "counter-replica",
+      label: "async replica, RTO 30s",
+      dashed: true,
+      fromSide: "right",
+      toSide: "left",
+      detail: {
+        what: "Asynchronous replication from each primary to its replica, with automatic promotion when the primary stops answering.",
+        why: "Asynchronous on purpose: a synchronous ack would add a network round trip inside the same 5ms budget the check already spends, to protect state that expires at window length anyway.",
+        numbers: ["16 primaries to 16 replicas", "RTO ~30s", "RPO not applicable to ephemeral counters"],
+        breaks:
+          "A promoted replica starts slightly behind, so a handful of identities get a briefly generous count; that under-count is invisible in the counters and only recoverable from the sampled archive.",
+      },
+    },
+    {
+      id: "e11",
       from: "breaker",
       to: "local-counters",
       label: "degrade when open",
@@ -478,33 +605,19 @@ export const RATE_LIMITER: Diagram = {
       fromSide: "right",
       toSide: "left",
       detail: {
-        what: "The degraded path taken while the breaker is open: coarse per-node counting instead of the shared authoritative count.",
+        what: "The degraded path taken while the breaker is open: coarse per-node counting in the gateway's own memory instead of the shared authoritative count. No network hop is involved.",
         why: "Failing open should mean degrading to something rather than to nothing. Local counters over 200 nodes are a bad limit, but a bad limit during a 30 second failover is better than an unmetered edge.",
         numbers: ["200 nodes x limit as the worst case", "RTO 30s while the store fails over"],
         breaks:
-          "The over-allow during this window is invisible in the counters and only recoverable from the 1% sampled decision log afterwards.",
+          "The over-allow during this window is invisible in the counters and only recoverable from the 1% sampled archive afterwards.",
       },
     },
     {
-      id: "e9",
-      from: "breaker",
-      to: "backend",
-      label: "allow",
-      animated: true,
-      detail: {
-        what: "The allowed request continuing to the service it was always trying to reach, with X-RateLimit headers attached to the eventual response.",
-        why: "The overwhelming majority of traffic takes this arrow, which is why the whole design is optimised for the allow path costing one round trip rather than for making rejection elegant.",
-        numbers: ["<10ms p99 of added overhead on this path"],
-        breaks:
-          "Every allowed request here was checked against a per-key budget, and those budgets sum to far more than the backend can serve, so a healthy allow rate is not evidence the backend is safe.",
-      },
-    },
-    {
-      id: "e10",
+      id: "e12",
       from: "breaker",
       to: "reject-429",
       label: "deny",
-      fromSide: "right",
+      fromSide: "bottom",
       toSide: "left",
       detail: {
         what: "A denied request routed to the rejection path, carrying the exact retry instant the GCRA deny branch computed.",
@@ -514,13 +627,29 @@ export const RATE_LIMITER: Diagram = {
       },
     },
     {
-      id: "e11",
+      id: "e13",
+      from: "breaker",
+      to: "backend",
+      label: "allow",
+      animated: true,
+      fromSide: "bottom",
+      toSide: "top",
+      detail: {
+        what: "The allowed request leaving the gateway for the service it was always trying to reach, with X-RateLimit headers attached to the eventual response.",
+        why: "The overwhelming majority of traffic takes this arrow, which is why the whole design is optimised for the allow path costing one round trip rather than for making rejection elegant.",
+        numbers: ["<10ms p99 of added overhead on this path"],
+        breaks:
+          "Every allowed request here was checked against a per-key budget, and those budgets sum to far more than the backend can serve, so a healthy allow rate is not evidence the backend is safe.",
+      },
+    },
+    {
+      id: "e14",
       from: "reject-429",
       to: "client",
       label: "429 + Retry-After",
       fromSide: "right",
       toSide: "right",
-      offset: 120,
+      offset: 48,
       detail: {
         what: "The rejection travelling back: 429 with a jittered Retry-After and the X-RateLimit triple so the caller can self-throttle.",
         why: "This closes the loop, and the jitter is on it for a reason. Handing a million throttled clients the same retry instant means they all return together and re-trigger the limit at the next boundary.",
@@ -530,14 +659,13 @@ export const RATE_LIMITER: Diagram = {
       },
     },
     {
-      id: "e12",
+      id: "e15",
       from: "breaker",
       to: "decision-log",
       label: "1% sample",
       dashed: true,
       fromSide: "right",
       toSide: "left",
-      offset: 40,
       detail: {
         what: "One decision in a hundred, allow or deny, emitted asynchronously to the archive with the rule version that produced it.",
         why: "It is off the hot path deliberately and it is sampled deliberately: full logging would be 300MB/s, and the questions it answers, over-allow rate and abuse forensics, are aggregate questions that a 1% sample answers just as well.",
@@ -547,18 +675,35 @@ export const RATE_LIMITER: Diagram = {
       },
     },
     {
-      id: "e13",
+      id: "e16",
       from: "backend",
       to: "risk-gate",
-      label: "order flow, 50/s venue cap",
+      label: "order flow, 50/s cap",
       fromSide: "right",
       toSide: "left",
       detail: {
         what: "The subset of allowed traffic that goes on to touch something genuinely scarce, passing a second limiter with the opposite failure default.",
-        why: "It is a separate arrow and a separate component because the two limits are the same mechanism with inverted defaults, and pretending one component can hold both postures is how the contradiction ends up invisible in the design.",
+        why: "It is a separate arrow and a separate service because the two limits are the same mechanism with inverted defaults, and pretending one component can hold both postures is how the contradiction ends up invisible in the design.",
         numbers: ["50 orders/s venue cap", "no sub-counters and no block reservation on this path"],
         breaks:
-          "Both limiters currently share one counter cluster, so a single outage waves quota traffic through while rejecting order flow, and the same client sees both verdicts.",
+          "Exceeding the cap does not degrade anything gradually; the venue disconnects the session, so this is the one place where rejecting is cheaper than allowing.",
+      },
+    },
+    {
+      id: "e17",
+      from: "risk-gate",
+      to: "counter-store",
+      label: "shares the quota cluster",
+      dashed: true,
+      fromSide: "left",
+      toSide: "right",
+      offset: 40,
+      detail: {
+        what: "The gate's exact counter, which today lives on the same 16-primary cluster as the quota counters rather than on a store of its own.",
+        why: "It is drawn because it is the known gap rather than the intended design. The intent is a dedicated store: at 50 orders per second the throughput is trivial, so a separate cluster costs almost nothing and buys an independent failure domain.",
+        numbers: ["50 orders/s, trivial next to 1M req/s", "one shared failure domain today"],
+        breaks:
+          "A single store outage produces fail-open and fail-closed behaviour at the same instant, so one client sees both verdicts and the platform reads as failing selectively rather than failing.",
       },
     },
   ],

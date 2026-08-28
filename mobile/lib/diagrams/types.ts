@@ -9,13 +9,44 @@
  * viewport, so only the relative layout matters.
  */
 
-/** Visual role. Drives colour and border treatment, nothing else. */
+/**
+ * What a box IS, not just how it looks. The kind picks the hue, the motif drawn
+ * inside the box and the type tag in its top-right corner, so a reader can tell
+ * a queue from a database without reading the label.
+ *
+ * The claim a kind makes is about deployment, which is why `process` exists: a
+ * stage of one request path is not a thing you deploy, and drawing it as a peer
+ * `service` says it is. A `process` may only appear inside a `serviceGroup`.
+ *
+ * Geometry note: every kind renders inside the same bounding rectangle. The
+ * motifs are drawn within it rather than changing the outline, because
+ * spaceColumns() and placeLabels() measure box rectangles and a real cylinder
+ * or hexagon would silently break both.
+ */
 export type NodeKind =
-  | "bus" // durable log / message bus
-  | "compute" // stateless worker tier
-  | "store" // database, index, object store
-  | "external" // outside our trust boundary
-  | "group"; // background grouping box, non-interactive
+  // --- things you deploy or depend on ---
+  | "service" // one deployable unit of stateless compute
+  | "process" // a stage INSIDE a service; never stands alone
+  | "queue" // durable log, topic, work queue
+  | "database" // durable system of record
+  | "cache" // in-memory store you are allowed to lose
+  | "blob" // object storage: S3, GCS, HDFS
+  | "gateway" // load balancer, API gateway, CDN edge
+  | "client" // the thing a person is holding
+  | "external" // outside our trust boundary and our pager
+  // --- frames: containers, not components ---
+  | "serviceGroup" // one service made of several processes
+  | "zone"; // a boundary; things that belong together but deploy apart
+
+/** Frames contain other nodes and are sized rather than laid out. */
+export const FRAME_KINDS: ReadonlySet<NodeKind> = new Set<NodeKind>([
+  "serviceGroup",
+  "zone",
+]);
+
+export function isFrame(kind: NodeKind): boolean {
+  return FRAME_KINDS.has(kind);
+}
 
 /**
  * Why this particular technology, in the same shape as the "Key decisions"
