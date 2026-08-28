@@ -32,237 +32,101 @@ Whole-solution architecture diagrams for System Design Questions, rendered with
 React Flow at `/diagram/<id>`. **Diagrams are data, not drawings** — a new one is
 a spec file in `mobile/lib/diagrams/`, never hand-authored SVG.
 
-- **Data model** (`mobile/lib/diagrams/types.ts`, specs in `mobile/lib/diagrams/<id>.ts`):
-  `Diagram` = `question` + `overview` + `nodes` + `edges`. Every node and every edge
-  carries a `detail` (`what` / `why` / `numbers` / `breaks`), and components with a
-  real technology decision also carry a `choice` (`pick` / `instead` / `decider` /
-  `flips`) in the same shape as the written `Key decisions` sections, so the diagram
-  and the prose agree. Deciders must contain the number or property that settles it.
-- **`kind` is a claim about what a thing IS**, not a colour picker. Nine box kinds —
-  `service`, `process`, `queue`, `database`, `cache`, `blob`, `gateway`, `client`,
-  `external` — and two frames, `serviceGroup` and `zone`. Each kind drives a hue, a
-  motif drawn inside the box, and an uppercase type tag in the top-right corner.
-- **`process` may only appear inside a `serviceGroup`.** A `serviceGroup` is one
-  deployable service containing several stages; a `process` is one of those stages.
-  This exists because four stages of one request path were being drawn as four peer
-  services, which asserts a deployment that is not real. `check-diagrams.ts` enforces
-  the containment. Do not demote things the prose says scale or fail independently —
-  the frame is a modelling tool, not a tidying reflex.
-- **Every motif is drawn INSIDE the bounding rectangle** (cylinder rims, queue bars,
-  gateway chevrons). Never change a box's outline to a real cylinder or hexagon:
-  `spaceColumns()`, `placeLabels()` and `check-diagrams.ts` all measure rectangles,
-  and a non-rectangular outline silently breaks all three.
-- **Renderer**: `mobile/components/ArchDiagram.web.tsx`. `ArchDiagram.tsx` is a
-  native stub — the shipping app is a WebView shell over the web build, so the
-  `.web.tsx` is what renders on every surface. Same split as `SvgDiagram`.
-- **Everything is clickable**: boxes, a frame (via its label chip or header strip;
-  the body stays click-through so it cannot swallow clicks meant for nodes inside
-  it), and every arrow.
-- **Arrow clicks are resolved by distance, not by hit areas.** `BaseEdge` is given
-  `interactionWidth={0}` on purpose and `onPaneClick` runs `nearestEdgeId()`, which
-  samples every rendered path and takes the closest within 16px. Do not "fix" this
-  by restoring a fat invisible hit path: measured on the notification system, 26px
-  interaction paths left 4 of 18 edges unselectable *anywhere along their length*,
-  because stacked transparent strokes resolve by paint order rather than by which
-  line the pointer was actually nearest, and an edge passing under a box is
-  unreachable regardless of how wide its hit area is.
-- **Arrowheads are 20 FLOW units, not screen pixels.** `fitView` scales the whole
-  canvas and these diagrams land at 0.35-0.65 zoom, so the 9px head that looked
-  right in a full-scale mockup rendered at 3-6px and read as no arrowhead at all.
-  Size arrowheads for the zoom the app actually uses, not for the mockup.
-- **Routing keeps 16 units of CLEARANCE around every box, and the checker uses 12.**
-  A corridor that merely misses a box's interior still runs along its border, which
-  reads as a line glued to the side of every box in a column. An earlier checker
-  *inset* boxes instead of inflating them and called that clean.
-- **Every route leaves and arrives PERPENDICULAR to its face.** `routePoints()`
-  gives both ends a 20-unit stub along the face normal before any turn. Without
-  it a route chose its shape from the source side alone, so an edge leaving
-  `right` and entering `top` finished with a horizontal run into a horizontal
-  face: the line slid along the top border and the arrowhead landed in the middle
-  of the box. "The arrows are not going into the node" is what that looks like.
-- **`fromSide` / `toSide` in a spec are a preference, not an order.** `assignLanes()`
-  tries the authored pair first, then every face pair ranked by whether the normal
-  actually points at the other node, and takes the first that does not cross a box.
-  Hand-tuned faces are correct only for the router shape they were tuned against;
-  after the stub change 13 of 20 diagrams broke, and auto-selection fixed all 20
-  without editing a single spec. It also took the 36 un-re-modelled diagrams from
-  24 failing to 12.
-- **Crossings are scored, and weighted above almost everything but burial.** The
-  user's stated preference is explicit: a long way round beats two lines crossing.
-  So `assignLanes()` counts how many committed routes a candidate would cross and
-  charges 90 per crossing, while leaving the endpoint span costs only 8.
-- **Face choice is scored on its BEST corridor, not its natural one.** Testing only
-  the midpoint rejected face pairs that are fine once the lane search shifts them,
-  which is how an edge ended up ploughing through the box stacked between its two
-  endpoints. Fixing that took all 56 diagrams clean, including the 36 nobody has
-  re-modelled.
-- **Do not "fan only the edges that collide".** Tried it: fanning only edges whose
-  corridors already clashed looked tidier in isolation and was much worse overall —
-  crossings went 36 to 55 and 19 pairs became coincident again. Edges leaving one
-  point have to separate at that point.
-- **Short middle runs are collapsed** (`JOG = 14` in `routePoints`). A stub of a run
-  between two parallel runs renders as a step in an otherwise straight line: a kink
-  that carries no information.
-- **One route definition: `routePoints()` / `routeSegments()`.** The path drawn,
-  the obstacle test inside the lane search, and `check-diagrams.ts` all call it.
-  Do not re-derive the shape anywhere else — that drift is what made the gate lie
-  twice.
-- **Edges are routed by `assignLanes()` + `corridorPath()`, not by
-  `getSmoothStepPath`.** That function places its perpendicular run at the
-  midpoint between the two nodes and **ignores its own `offset` argument** for a
-  normal left-to-right pair, so every edge crossing the same gap turns at the
-  same coordinate and they are drawn on top of each other. Measured before the
-  router existed: 27 pairs of coincident edges across the first seven diagrams,
-  one pair running together for 448px; afterwards, 1.
-  Two separate corrections, and both are needed:
-  - `srcShift` / `dstShift` fan edges that share a node face, because otherwise
-    they start or end at literally the same point.
-  - `corridor` gives each edge its own lane for the perpendicular run.
-  The lane search is **scored, not first-fit**: first-fit has no answer when
-  every candidate is bad, so two edges both fall back to the natural midpoint
-  and stack — the exact failure the function exists to prevent. Burial scores
-  worse than crowding, because a buried line is invisible as well as
-  unclickable.
-- **A frame must be made click-through in CSS, not in its component.** Setting
-  `pointerEvents: "none"` on a frame component's own `<div>` does nothing useful:
-  React Flow wraps every custom node in its own `.react-flow__node` element and
-  that wrapper keeps pointer events, so a frame silently swallows every click
-  aimed at a box or an arrow inside it. `LABEL_LAYER_CSS` therefore carries
-  `.react-flow__node-zone, .react-flow__node-serviceGroup { pointer-events: none
-  !important; }`, with the title strip re-enabling them so the frame stays
-  selectable. **The `!important` is load-bearing** — React Flow ships
-  `.react-flow__node { pointer-events: all }` at the same specificity and its
-  stylesheet wins on order.
-  This one bug accounted for nearly all of "I can't click the arrow, there is a
-  component above it": across the first seven diagrams it left **41 of 126 arrows
-  unclickable**, dropping to 5 once the wrapper stopped intercepting. None of
-  those 41 were actually drawn underneath anything.
-- **Wiring a diagram to a question**: set `sourceId` + `itemId` on the spec, then
-  add an `#### Interactive diagram` section to that question linking to
-  `/diagram/<id>`. `ItemView` intercepts markdown links starting with `/` and
-  routes them through expo-router; without that, `react-native-markdown-display`
-  hands them to `Linking.openURL`, which on web is a full page reload.
-- **Copy-all includes the diagram.** `CopyButton` appends
-  `diagramToMarkdown(diagram)` when `getDiagramForItem(sourceId, itemId)` matches.
-  The markdown section itself is only a link, so without this the copy would carry
-  a URL instead of the explanations. Update `diagramToMarkdown` if you add fields
-  to `DiagramNodeDetail`, or they will silently not be copied.
+### The four rules (the gate enforces them)
 
-### Diagram layout and spacing
+The old rules optimised collisions and produced 56 unreadable diagrams that all
+"passed". These optimise what a reader sees. `bunx tsx scripts/check-diagrams.ts`
+fails on any of the first four.
 
-Edge labels render in React Flow's SVG layer, which sits **below** the node
-layer. An oversized label does not push anything aside, it silently disappears
-under the next box, so spacing is a correctness concern rather than taste.
+1. **Readable or it fails.** The design canvas is 1140×760 (a 1440 window minus
+   the sidebar). The laid-out diagram must fit at **zoom ≥ 0.8**. With 220×60
+   boxes on a 350×150 pitch that means **at most 4 columns and 5 rows**.
+2. **Overview on the canvas, detail in the panel.** **≤ 12 visible boxes.** A
+   `serviceGroup` draws as ONE box by default (`N STAGES` tag) and its processes
+   become a pipeline list in the panel. Set `expanded: true` only when the
+   pipeline IS the subject (the rate limiter's gateway stages). Attribute boxes
+   (a store's replicas, an in-process cache, a DLQ) are folded into their
+   owner's `sub`/`detail`, not drawn.
+3. **Three edge tiers, one of them loud.** `tier: "hot"` (≤ 8 per diagram; bold,
+   accent, always labelled), `"data"` (thin; label on hover / selection),
+   `"control"` (thin dashed; same). The old `animated`/`dashed` flags still map
+   to hot/control if `tier` is missing, but write `tier`.
+4. **Zero crossings, nothing over a box.** Long detours are fine; two lines
+   crossing is not, and a line under a box is invisible and unclickable. The
+   router does the work; the author steers.
 
-- `ArchDiagram.web.tsx` runs `spaceColumns()` over every diagram before render.
-  It clusters nodes into columns and rows and enforces `MIN_GUTTER` (190px) and
-  `MIN_ROW_GAP` (46px), **keeping authored spacing wherever it is already
-  wider**. Do not change these to fixed spacing: forcing a fixed gutter
-  over-spreads multi-column diagrams until fitView shrinks the text to nothing.
-  Group zones are repositioned to keep framing the same members.
-- **Keep the whole diagram roughly the shape of the viewport (~4:3).** `fitView`
-  scales to whichever axis binds, so a wide strip shrinks the text while leaving
-  vertical space empty. google-maps at 1840x864 rendered at **0.34 scale** —
-  unreadable at a glance — while diagrams of similar size but squarer proportions
-  sat at 0.5-0.6. If a layout has run to five columns and three rows, fold the
-  rightmost columns down into more row bands rather than widening further.
-- Because spacing is corrected at render time, specs only need a sane relative
-  grid: left column `x: 40`, further columns to the right, vertical steps of
-  ~110, widths 240-300, and no overlapping boxes. Boxes are ~84px tall now that
-  every one carries a type-tag row, so rows need ~110px of vertical step.
-- **Edge labels must be <= 28 characters.** Longer ones collide even at the
-  minimum gutter. `check-diagrams.ts` fails. Put the detail in the edge's `detail`,
-  which is what clicking the arrow shows, not in the label.
-- Edge labels are rendered through `EdgeLabelRenderer` **and** the label layer
-  is lifted with `LABEL_LAYER_CSS` (`z-index: 6`). Both are required. React Flow
-  emits `.react-flow__edgelabel-renderer` *before* `.react-flow__nodes` in the
-  DOM and leaves both at `z-index: auto`, so using the label renderer alone
-  changes nothing: paint order still puts labels underneath every node. Spacing
-  cannot fix this case either, because the collision is with a node the edge
-  routes *across* rather than with the gap the label sits in.
-- **A label may only move a short way from its own edge.** `placeLabels()` searches
-  outward for a free slot, and the search used to run 22 steps of 11 units — so a
-  label could be relocated 242 units away and end up floating in empty space with
-  no arrow near it. The search is capped at 6 steps and its cost function now
-  charges 4 per unit of distance from the line. A label touching its own arrow
-  beats a label in a tidy void.
-- Label positions are resolved centrally by `placeLabels()`, not per edge. An
-  edge cannot deconflict alone because it cannot see its neighbours, and there
-  are three constraints at once: a label must not cover a component box, must
-  not overlap another label, and must stay inside the node bounds that `fitView`
-  frames or the viewport crops it. `placeLabels` computes each label rectangle,
-  then searches outward from the natural midpoint scoring candidates by overlap
-  area, taking the least-bad slot rather than giving up. Measured across all 56
-  diagrams this took label-on-node from 25 to ~1, label-on-label from 72 to ~2
-  and clipped labels from 16 to ~2.
-- The out-of-bounds penalty is a strong preference, NOT absolute. Making it
-  absolute forces labels back onto component boxes, which is worse: 65
-  label-on-node collisions in testing. `fitView` padding is set to 0.4 to cover
-  the modest remaining overhang.
-- Node geometry constants are measured, not guessed: a box with a sub-label
-  renders ~65px tall, a label ~19px, and label width is ~6.3px per character.
-  `nodeH()` and `LABEL_CHAR_W` encode this. Guessing 76px here caused the dodge
-  to mis-fire.
-- Careful with automated collision checks. Geometric overlap no longer implies
-  hidden, and `document.elementFromPoint` is useless here because the label divs
-  are `pointer-events: none`, so it reports every label as covered. The reliable
-  signals are the computed `z-index` of the label layer and looking at a
-  screenshot. Any rectangle-based check must also exclude
-  `.react-flow__node-zone`, since labels legitimately sit inside zone bounds.
+### How a spec is written
 
-### The diagram gate: `scripts/check-diagrams.ts`
+- Nodes declare a **grid cell**: `col`, `row` (0-based), and `parent` for
+  anything inside a frame. No pixels. Frames (`zone`, `serviceGroup`) have no
+  cell of their own except a collapsed `serviceGroup`, which uses `col`/`row`
+  for the single box it draws; expanded frames are sized from their members.
+- Two boxes cannot share a cell. Processes hidden inside a collapsed group can
+  share cells with anything; they are not drawn.
+- `fromSide` / `toSide` on an edge are the author's **routing instrument**: a
+  strong preference the router honours unless it would force a crossing. The
+  gate names every crossing pair; fix by moving cells, then by setting faces.
+- **Frame-sourced edges**: `from: "<frameId>"` means "from every member". Three
+  identical attempt-log edges from three workers are one edge from their lane
+  frame; it is also the only way some K₃,₂ patterns draw without a crossing.
+- Node labels ≤ 24 chars, subs ≤ 32 chars (the box ellipsises beyond that; the
+  gate warns). Edge labels ≤ 28 chars (error).
+- Every node and edge keeps its `detail` (`what` / `why` / `numbers` / `breaks`,
+  plus `choice` for a real technology decision). The copy-all in the reader
+  emits it via `diagramToMarkdown` in `mobile/lib/diagrams/index.ts`.
 
-`bunx tsx scripts/check-diagrams.ts [id ...]` — run it after touching any spec.
-CLAUDE.md referred to a `check-spec.ts` for a long time; **it never existed**, which
-is why 45 of the 56 diagrams were found routing an edge across a box the first time
-a real checker ran. Errors fail (exit 1), warnings do not:
+### Tools
 
-- two boxes overlapping;
-- an edge whose orthogonal route crosses a box that is not its own endpoint — the
-  line, its label and its arrowhead are all drawn and all hidden there, and it
-  cannot be clicked there either;
-- an edge label over 28 characters;
-- a `process` that is not geometrically inside a `serviceGroup`;
-- a frame that clips a box it overlaps;
-- an edge naming a node that does not exist, or a duplicate node id.
+- `bunx tsx scripts/check-diagrams.ts [--summary] [id ...]` — the gate: zoom,
+  boxes, hot count, crossings (with the pairs named), box hits, label lengths.
+- `bunx tsx scripts/render-diagram.ts <outDir> <id ...>` then
+  `NODE_PATH=<dir with playwright> node scripts/render-diagram-png.js <outDir> <id ...>`
+  — the computed layout as an SVG/PNG, without building the app. Look at it;
+  the gate cannot see ugliness, only rule breaks.
+- `scripts/snap-diagrams-to-grid.ts` — one-off pixel→cell migration; keep for
+  reference, do not re-run on a migrated spec.
+- `scripts/check-diagrams-rendered.js` — browser-side truth for what the
+  static check cannot see (rendered text metrics, actual paint).
 
-The route check approximates `getSmoothStepPath` as an L (out along the dominant
-axis, then across). Fix failures by moving boxes apart or by setting `fromSide` /
-`toSide` so the edge leaves and enters faces that are actually clear.
+### How it works (read before touching `layout.ts`)
 
-`check-diagrams.ts` is now **exact**: the pure layout maths lives in
-`mobile/lib/diagrams/layout.ts` (`spaceColumns`, `assignLanes`, `corridorPath`,
-`placeLabels`, `nodeH`, `anchor`) with no React or DOM, and both the renderer and
-the checker import it. Keep it that way. Every time the two were allowed to drift
-the gate lied — twice in one session.
+`mobile/lib/diagrams/layout.ts` is pure (no React, no DOM) and is used by BOTH
+the renderer (`mobile/components/ArchDiagram.web.tsx`) and the gate. Keep it
+that way: every time the two were allowed to drift, the gate lied.
+`layoutDiagram()` runs four steps — collapse groups, place cells, route, place
+hot labels — and returns diagnostics (zoom, crossings, box hits) that ARE the
+gate's numbers.
 
-The browser checker remains useful for what the spec cannot express (rendered
-text metrics, actual paint), but it is no longer the only source of truth.
+The router builds an orthogonal lane grid (gutter lanes between column
+clusters, row lanes between row clusters, four margin lanes on every side, and
+perpendicular port stubs on each box face) and runs a shortest-path search per
+edge with bends charged, overlap and touching forbidden, and a crossing costed
+at 3000 units (so a 3000-unit detour still wins). Edges are routed shortest
+span first (they have the fewest options), then negotiated for several passes,
+then polished pairwise, across a few restart orders, within a time budget.
+Hard-won facts:
 
-**A route model that only approximates will give false confidence.**
-web-crawler passed the static check while arrows were still rendering across boxes,
-because the real curve and its lane offset put the corners somewhere else. So there
-is a second, slower checker that measures what is actually on screen:
+- **Stamp whole segments, not interior points.** A straight port-to-port edge
+  has no interior points after simplification; stamping only those left every
+  straight edge invisible to the router and other edges crossed it for free.
+- **A collapsed `serviceGroup` is a box** to the router (obstacle, port rules),
+  not a frame. Treating it as a frame let edges run along its border.
+- **Side faces need three port slots** (±14 on a 60-tall box). With one slot,
+  any second edge on a side has to wrap round the outside, which is what the
+  ugly detours were.
+- Port stub lines beside a box are perpendicular-only (`noH`/`noV`); routes
+  never run along a box at 16 px.
+- `ArchDiagram.tsx` is a native stub; the shipping app is a WebView over the
+  web build, so the `.web.tsx` renders everywhere.
+- Arrow clicks resolve by distance (`nearestEdgeId`), not hit areas; frames are
+  click-through via `LABEL_LAYER_CSS` (the `!important` is load-bearing).
 
-```
-bash scripts/build-web.sh && bunx serve -s mobile/dist -l 8099 &
-NODE_PATH=<a dir with playwright> node scripts/check-diagrams-rendered.js <id> ...
-```
+### Wiring a diagram to a question
 
-It samples every rendered path and reports the percentage of each edge's length
-that falls inside a rendered box, plus any edge label sitting on a box. Use the
-static check as the fast gate and this one before shipping. Note it must exclude
-`.react-flow__node-zone` **and** `.react-flow__node-serviceGroup` from "boxes" —
-labels and edges legitimately sit inside frames.
-
-### The "Interactive diagram" section is optional
-
-`scripts/validate_sd.py` splits `SECTIONS` (canonical order, used for ordering and
-for the manifest check) from `OPTIONAL_SECTIONS`. Only `REQUIRED_SECTIONS` must be
-present in every question, which is what lets this section roll out one question at
-a time. It sits **after `Summary`**, and the physical order in `patterns.md` must
-match the canonical order or the validator fails with S5. Adding it to a question
-means: write the section, and add it to `sectionOrder` in **both** manifests.
+Set `sourceId` + `itemId` on the spec, add an `#### Interactive diagram`
+section to that question linking to `/diagram/<id>` (`ItemView` routes `/`
+links through expo-router), and add the section to `sectionOrder` in both
+manifests. `scripts/validate_sd.py` treats the section as optional.
 
 ## Standing user preferences
 

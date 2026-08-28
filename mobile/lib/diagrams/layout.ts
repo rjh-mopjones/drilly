@@ -27,8 +27,8 @@ import { isFrame } from "./types";
 // --- measured geometry ------------------------------------------------------
 export const BOX_W = 220;
 export const BOX_H = 60;
-export const COL_PITCH = 360; // BOX_W + 140 gutter
-export const ROW_PITCH = 160; // BOX_H + 100 gap
+export const COL_PITCH = 350; // BOX_W + 130 gutter: room for 5 lanes
+export const ROW_PITCH = 150; // BOX_H + 90 gap: room for 3 lanes
 export const ORIGIN = 40;
 export const LANE = 20; // spacing between parallel lanes
 export const CLEARANCE = 16; // a route never comes closer than this to a box
