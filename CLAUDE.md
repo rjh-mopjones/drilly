@@ -147,6 +147,12 @@ under the next box, so spacing is a correctness concern rather than taste.
   changes nothing: paint order still puts labels underneath every node. Spacing
   cannot fix this case either, because the collision is with a node the edge
   routes *across* rather than with the gap the label sits in.
+- **A label may only move a short way from its own edge.** `placeLabels()` searches
+  outward for a free slot, and the search used to run 22 steps of 11 units — so a
+  label could be relocated 242 units away and end up floating in empty space with
+  no arrow near it. The search is capped at 6 steps and its cost function now
+  charges 4 per unit of distance from the line. A label touching its own arrow
+  beats a label in a tidy void.
 - Label positions are resolved centrally by `placeLabels()`, not per edge. An
   edge cannot deconflict alone because it cannot see its neighbours, and there
   are three constraints at once: a label must not cover a component box, must

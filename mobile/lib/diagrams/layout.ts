@@ -449,6 +449,11 @@ export function placeLabels(d: Diagram): Record<string, { lx: number; ly: number
       };
       for (const q of boxes) acc(q, PAD_X, PAD_Y);
       for (const q of placed) acc(q, 0, 0);
+      // Distance from the line the label belongs to. Without this the search
+      // treats a free slot 200 units away as perfect, and the label ends up
+      // floating in empty space with no arrow near it — which reads as a bug,
+      // not as tidiness. A label touching its own line is always better.
+      c += (Math.abs(x - lx0) + Math.abs(y - ly0)) * 4;
       // Prefer staying inside the framed bounds, but not at the cost of sitting
       // on a component: fitView is given padding to cover a modest overhang.
       if (r.x < bounds.l || r.x + r.w > bounds.r || r.y < bounds.t || r.y + r.h > bounds.b)
@@ -461,7 +466,10 @@ export function placeLabels(d: Diagram): Record<string, { lx: number; ly: number
     // rather than leaving the label sitting on something.
     let best = { x: lx0, y: ly0, c: cost(lx0, ly0) };
     if (best.c > 0) {
-      outer: for (let step = 1; step <= 22; step++) {
+      // Cap the search radius. It used to run to 22 steps of 11 units, so a
+      // label could be relocated 242 units from its own edge; at the 0.4-0.6
+      // zoom these diagrams render at, that is a caption stranded in the void.
+      outer: for (let step = 1; step <= 6; step++) {
         for (const dy of [-step * 11, step * 11]) {
           for (const dx of [0, -26, 26, -52, 52]) {
             const c = cost(lx0 + dx, ly0 + dy);
