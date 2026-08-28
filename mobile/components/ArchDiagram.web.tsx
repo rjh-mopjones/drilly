@@ -380,17 +380,23 @@ function LabelledEdge({
     lx?: number;
     ly?: number;
     pick?: () => void;
+    corridor?: number;
+    srcShift?: number;
+    dstShift?: number;
   };
-  const [path, labelX, labelY] = getSmoothStepPath({
-    sourceX,
-    sourceY,
-    targetX,
-    targetY,
-    sourcePosition,
-    targetPosition,
-    borderRadius: 10,
-    offset: d.offset ?? 20,
-  });
+  // Routed here rather than by getSmoothStepPath, which places its
+  // perpendicular run at the midpoint between the two nodes and ignores its
+  // own `offset` argument for a normal left-to-right pair — so every edge
+  // crossing the same gap turned at the same coordinate and they stacked.
+  const horizontal =
+    sourcePosition === Position.Left || sourcePosition === Position.Right;
+  const sx = horizontal ? sourceX : sourceX + (d.srcShift ?? 0);
+  const sy = horizontal ? sourceY + (d.srcShift ?? 0) : sourceY;
+  const tx = horizontal ? targetX : targetX + (d.dstShift ?? 0);
+  const ty = horizontal ? targetY + (d.dstShift ?? 0) : targetY;
+  const corridor =
+    d.corridor ?? (horizontal ? (sx + tx) / 2 : (sy + ty) / 2);
+  const [path, labelX, labelY] = corridorPath(sx, sy, tx, ty, horizontal, corridor);
   // Label placement is resolved centrally in ArchDiagram (see placeLabels) so
   // labels can be deconflicted against boxes AND against each other; an edge
   // cannot do that alone because it cannot see its neighbours.
@@ -569,53 +575,233 @@ function nearestEdgeId(root: HTMLElement, cx: number, cy: number): string | null
   return best;
 }
 
-const LANE_STEP = 26; // matches the hit width, so lanes cannot share a target
-const MAX_LANES = 6;  // past this the spec is wrong; spreading further hurts more
+const LANE_STEP = 26;   // matches the click radius, so lanes cannot merge
+const FACE_STEP = 16;   // separation between edges sharing one face
+const CORNER_R = 9;
 
-function assignLanes(d: Diagram): Record<string, number> {
+export type Lane = { corridor: number; srcShift: number; dstShift: number };
+
+/**
+ * Route every edge through its own corridor, and fan edges that share a face.
+ *
+ * This replaces getSmoothStepPath's routing, which cannot do the job: for a
+ * normal left-to-right pair it puts the perpendicular run at the MIDPOINT
+ * between the two nodes and ignores the `offset` argument entirely. So three
+ * edges from one node into one column all turn at the same x and are drawn on
+ * top of each other. Measured before this existed: the notification system had
+ * 15 pairs of coincident edges, one of them running together for 448px.
+ *
+ * Two separate problems, two corrections:
+ *
+ *  - Edges leaving or entering the same face of the same node start or end at
+ *    literally the same point. `srcShift` / `dstShift` fan them along that face
+ *    so they are distinguishable from the very first pixel.
+ *  - Edges crossing the same gap turn at the same coordinate. `corridor` gives
+ *    each one its own lane, stepping outward from the natural midpoint.
+ *
+ * Both are clamped to stay on the node's own face and inside the gap, so a
+ * dense diagram degrades to "slightly crowded" rather than "arrows pointing at
+ * nothing".
+ */
+function assignLanes(d: Diagram): Record<string, Lane> {
   const byId = new Map(d.nodes.map((n) => [n.id, n] as const));
-  type Placed = { horizontal: boolean; turn: number; lo: number; hi: number };
+  const out: Record<string, Lane> = {};
+
+  const horiz = (side: string) => side === "left" || side === "right";
+
+  // --- fan edges that share a face -------------------------------------
+  const faceGroups = new Map<string, string[]>();
+  const faceKey = (nodeId: string, side: string) => `${nodeId}:${side}`;
+  for (const e of d.edges) {
+    const sk = faceKey(e.from, e.fromSide ?? "bottom");
+    const tk = faceKey(e.to, e.toSide ?? "top");
+    (faceGroups.get(sk) ?? faceGroups.set(sk, []).get(sk)!).push(`${e.id}>s`);
+    (faceGroups.get(tk) ?? faceGroups.set(tk, []).get(tk)!).push(`${e.id}>t`);
+  }
+  const shift = new Map<string, number>();
+  for (const [key, members] of faceGroups) {
+    if (members.length < 2) continue;
+    const [nodeId, side] = key.split(":");
+    const n = byId.get(nodeId);
+    if (!n) continue;
+    // Stay on the face: half the extent, less a margin so the arrow does not
+    // land on the box's rounded corner.
+    const extent = horiz(side) ? nodeH(n) : (n.w ?? 240);
+    const room = Math.max(0, extent / 2 - 14);
+    const span = Math.min(FACE_STEP * (members.length - 1), room * 2);
+    const step = members.length > 1 ? span / (members.length - 1) : 0;
+    members.forEach((m, i) => shift.set(m, -span / 2 + i * step));
+  }
+
+  // --- give each edge crossing a gap its own corridor -------------------
+  type Placed = { horizontal: boolean; corridor: number; lo: number; hi: number };
   const placed: Placed[] = [];
-  const out: Record<string, number> = {};
+
+  // Boxes the route has to stay out of. Frames are excluded: an edge crossing
+  // a zone or a service frame is normal and reads fine, an edge crossing a
+  // component box is invisible there.
+  const obstacles = d.nodes
+    .filter((n) => !isFrame(n.kind))
+    .map((n) => ({
+      id: n.id,
+      x: n.x + 5,
+      y: n.y + 5,
+      r: n.x + (n.w ?? 240) - 5,
+      b: n.y + nodeH(n) - 5,
+    }));
+
+  /** Does this three-segment route pass through a box that is not an endpoint? */
+  const routeHitsBox = (
+    sx: number,
+    sy: number,
+    tx: number,
+    ty: number,
+    horizontal: boolean,
+    corridor: number,
+    fromId: string,
+    toId: string,
+  ): boolean => {
+    const segs: [number, number, number, number][] = horizontal
+      ? [
+          [sx, sy, corridor, sy],
+          [corridor, sy, corridor, ty],
+          [corridor, ty, tx, ty],
+        ]
+      : [
+          [sx, sy, sx, corridor],
+          [sx, corridor, tx, corridor],
+          [tx, corridor, tx, ty],
+        ];
+    return obstacles.some((o) => {
+      if (o.id === fromId || o.id === toId) return false;
+      return segs.some(([x1, y1, x2, y2]) => {
+        const loX = Math.min(x1, x2);
+        const hiX = Math.max(x1, x2);
+        const loY = Math.min(y1, y2);
+        const hiY = Math.max(y1, y2);
+        return loX < o.r && hiX > o.x && loY < o.b && hiY > o.y;
+      });
+    });
+  };
 
   for (const e of d.edges) {
     const a = byId.get(e.from);
     const b = byId.get(e.to);
     if (!a || !b) continue;
 
-    // An authored offset is a deliberate override; never second-guess it.
-    if (typeof e.offset === "number") {
-      out[e.id] = e.offset;
-      continue;
-    }
+    const fromSide = e.fromSide ?? "bottom";
+    const toSide = e.toSide ?? "top";
+    const from = anchor(a, fromSide);
+    const to = anchor(b, toSide);
+    const horizontal = horiz(fromSide);
 
-    const from = anchor(a, e.fromSide ?? "bottom");
-    const to = anchor(b, e.toSide ?? "top");
-    const horizontal = Math.abs(to.x - from.x) > Math.abs(to.y - from.y);
-    // Which way the path leaves the source, so the turn lands on the right side.
-    const dir = horizontal ? Math.sign(to.x - from.x) || 1 : Math.sign(to.y - from.y) || 1;
-    const base = horizontal ? from.x : from.y;
-    const lo = horizontal ? Math.min(from.y, to.y) : Math.min(from.x, to.x);
-    const hi = horizontal ? Math.max(from.y, to.y) : Math.max(from.x, to.x);
+    const srcShift = shift.get(`${e.id}>s`) ?? 0;
+    const dstShift = shift.get(`${e.id}>t`) ?? 0;
 
-    let lane = 0;
-    for (; lane < MAX_LANES; lane++) {
-      const turn = base + dir * (20 + lane * LANE_STEP);
+    const sMain = horizontal ? from.x : from.y;
+    const tMain = horizontal ? to.x : to.y;
+    const natural = (sMain + tMain) / 2;
+    // The perpendicular extent the corridor has to keep clear of neighbours.
+    const lo = Math.min(
+      horizontal ? from.y + srcShift : from.x + srcShift,
+      horizontal ? to.y + dstShift : to.x + dstShift,
+    );
+    const hi = Math.max(
+      horizontal ? from.y + srcShift : from.x + srcShift,
+      horizontal ? to.y + dstShift : to.x + dstShift,
+    );
+
+    // Search outward from the midpoint: 0, +1, -1, +2, -2 ... so lanes stay in
+    // the gap rather than drifting steadily to one side.
+    //
+    // Scored rather than first-fit. First-fit has no answer when every
+    // candidate is bad, so both edges fall back to the natural midpoint and end
+    // up drawn on top of each other — which is the exact failure this function
+    // exists to prevent. Scoring always separates them, and ranks burial as
+    // worse than crowding because a buried line is invisible as well as
+    // unclickable.
+    let corridor = natural;
+    let bestScore = Infinity;
+    for (let k = 0; k < 12; k++) {
+      const delta = (k % 2 === 0 ? 1 : -1) * Math.ceil(k / 2) * LANE_STEP;
+      const c = natural + delta;
+      // Do not push a corridor past either endpoint; that doubles the line back.
+      const min = Math.min(sMain, tMain) + 12;
+      const max = Math.max(sMain, tMain) - 12;
+      if (max > min && (c < min || c > max)) continue;
       const clash = placed.some(
         (q) =>
           q.horizontal === horizontal &&
-          Math.abs(q.turn - turn) < LANE_STEP * 0.8 &&
-          q.lo < hi &&
-          lo < q.hi,
+          Math.abs(q.corridor - c) < LANE_STEP * 0.75 &&
+          q.lo < hi + 4 &&
+          lo - 4 < q.hi,
       );
-      if (!clash) {
-        placed.push({ horizontal, turn, lo, hi });
-        break;
+      const sxx = horizontal ? from.x : from.x + srcShift;
+      const syy = horizontal ? from.y + srcShift : from.y;
+      const txx = horizontal ? to.x : to.x + dstShift;
+      const tyy = horizontal ? to.y + dstShift : to.y;
+      const buried = routeHitsBox(sxx, syy, txx, tyy, horizontal, c, e.from, e.to);
+      const score =
+        (buried ? 1000 : 0) + (clash ? 100 : 0) + Math.abs(delta) * 0.05;
+      if (score < bestScore) {
+        bestScore = score;
+        corridor = c;
       }
+      if (score < 1) break; // clean and closest to the natural line
     }
-    out[e.id] = 20 + Math.min(lane, MAX_LANES - 1) * LANE_STEP;
+    placed.push({ horizontal, corridor, lo, hi });
+    out[e.id] = { corridor, srcShift, dstShift };
   }
   return out;
+}
+
+/** Orthogonal path through an explicit corridor, with rounded corners. */
+export function corridorPath(
+  sx: number,
+  sy: number,
+  tx: number,
+  ty: number,
+  horizontal: boolean,
+  corridor: number,
+): [string, number, number] {
+  const r = CORNER_R;
+  const pts: [number, number][] = horizontal
+    ? [
+        [sx, sy],
+        [corridor, sy],
+        [corridor, ty],
+        [tx, ty],
+      ]
+    : [
+        [sx, sy],
+        [sx, corridor],
+        [tx, corridor],
+        [tx, ty],
+      ];
+
+  let d = `M ${pts[0][0]},${pts[0][1]}`;
+  for (let i = 1; i < pts.length - 1; i++) {
+    const [px, py] = pts[i - 1];
+    const [cx, cy] = pts[i];
+    const [nx, ny] = pts[i + 1];
+    const inLen = Math.hypot(cx - px, cy - py);
+    const outLen = Math.hypot(nx - cx, ny - cy);
+    const rad = Math.min(r, inLen / 2, outLen / 2);
+    if (rad < 1) {
+      d += ` L ${cx},${cy}`;
+      continue;
+    }
+    const iu = [(cx - px) / (inLen || 1), (cy - py) / (inLen || 1)];
+    const ou = [(nx - cx) / (outLen || 1), (ny - cy) / (outLen || 1)];
+    d += ` L ${cx - iu[0] * rad},${cy - iu[1] * rad}`;
+    d += ` Q ${cx},${cy} ${cx + ou[0] * rad},${cy + ou[1] * rad}`;
+  }
+  d += ` L ${pts[3][0]},${pts[3][1]}`;
+
+  // Label belongs on the middle run, which is the part with room for it.
+  const lx = horizontal ? corridor : (sx + tx) / 2;
+  const ly = horizontal ? (sy + ty) / 2 : corridor;
+  return [d, lx, ly];
 }
 
 function spaceColumns(d: Diagram): Diagram {
@@ -914,7 +1100,7 @@ export default function ArchDiagram({
           data: {
             ...labelPos[e.id],
             pick: () => selectEdge(e.id),
-            offset: lanes[e.id] ?? e.offset ?? 20,
+            ...lanes[e.id],
             fg: isSel ? palette.accent : palette.textMuted,
             bg: palette.bg,
             border: palette.border,

@@ -704,7 +704,7 @@ export const WEB_CRAWLER: Diagram = {
       label: "next-fetch time",
       dashed: true,
       fromSide: "left",
-      toSide: "bottom",
+      toSide: "left",
       detail: {
         what: "Reading a host's crawl delay and next-fetch timestamp to order the min-heap.",
         why: "The heap is keyed on next_allowed_time, and that value comes from here. This is the read that turns a published Crawl-Delay into actual scheduling behaviour.",
@@ -767,7 +767,7 @@ export const WEB_CRAWLER: Diagram = {
       to: "robots",
       label: "robots.txt, TTL cached",
       dashed: true,
-      fromSide: "top",
+      fromSide: "left",
       toSide: "right",
       detail: {
         what: "Fetching robots.txt on first contact with a host and caching the parsed rules with a TTL.",
@@ -831,7 +831,7 @@ export const WEB_CRAWLER: Diagram = {
       label: "~300 links/page",
       animated: true,
       offset: 100,
-      fromSide: "right",
+      fromSide: "left",
       toSide: "right",
       detail: {
         what: "Canonicalised links published back onto the discovery bus. This is the arrow that makes it a crawl.",

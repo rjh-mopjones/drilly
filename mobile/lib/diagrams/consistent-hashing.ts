@@ -597,7 +597,7 @@ export const CONSISTENT_HASHING: Diagram = {
       to: "snapshots",
       label: "hourly, ~5MB",
       dashed: true,
-      fromSide: "right",
+      fromSide: "bottom",
       toSide: "top",
       offset: 60,
       detail: {

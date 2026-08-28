@@ -64,6 +64,11 @@ async function checkOne(page, id) {
       let covered = 0;
       const hitting = new Set();
       for (let i = 0; i <= steps; i++) {
+        // Skip the first and last tenth: that is where the edge attaches to its
+        // own endpoints, and counting those reports every edge as buried in the
+        // boxes it connects.
+        const f = i / steps;
+        if (f < 0.1 || f > 0.9) continue;
         const q = p.getPointAtLength((len * i) / steps);
         pt.x = q.x;
         pt.y = q.y;

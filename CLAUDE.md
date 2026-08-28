@@ -68,6 +68,22 @@ a spec file in `mobile/lib/diagrams/`, never hand-authored SVG.
   unreachable regardless of how wide its hit area is.
 - Arrowheads are 9px. A 16px head on an 84px box reads as a blob and swallows the
   border it lands on.
+- **Edges are routed by `assignLanes()` + `corridorPath()`, not by
+  `getSmoothStepPath`.** That function places its perpendicular run at the
+  midpoint between the two nodes and **ignores its own `offset` argument** for a
+  normal left-to-right pair, so every edge crossing the same gap turns at the
+  same coordinate and they are drawn on top of each other. Measured before the
+  router existed: 27 pairs of coincident edges across the first seven diagrams,
+  one pair running together for 448px; afterwards, 1.
+  Two separate corrections, and both are needed:
+  - `srcShift` / `dstShift` fan edges that share a node face, because otherwise
+    they start or end at literally the same point.
+  - `corridor` gives each edge its own lane for the perpendicular run.
+  The lane search is **scored, not first-fit**: first-fit has no answer when
+  every candidate is bad, so two edges both fall back to the natural midpoint
+  and stack — the exact failure the function exists to prevent. Burial scores
+  worse than crowding, because a buried line is invisible as well as
+  unclickable.
 - **A frame must be made click-through in CSS, not in its component.** Setting
   `pointerEvents: "none"` on a frame component's own `<div>` does nothing useful:
   React Flow wraps every custom node in its own `.react-flow__node` element and
