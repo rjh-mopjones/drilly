@@ -122,6 +122,8 @@ export function assignLanes(d: Diagram): Record<string, Lane> {
   // --- give each edge crossing a gap its own corridor -------------------
   type Placed = { horizontal: boolean; corridor: number; lo: number; hi: number };
   const placed: Placed[] = [];
+  /** Segments of the routes already committed, for counting crossings. */
+  const placedSegs: [number, number, number, number][][] = [];
   const chosen: { id: string; fromSide: string; toSide: string; from: string; to: string }[] = [];
 
   // Boxes the route has to stay out of. Frames are excluded: an edge crossing
@@ -142,6 +144,35 @@ export function assignLanes(d: Diagram): Record<string, Lane> {
       r: n.x + (n.w ?? 240) + CLEARANCE,
       b: n.y + nodeH(n) + CLEARANCE,
     }));
+
+
+  /** Do two axis-aligned segments properly cross? */
+  const segsCross = (
+    p: [number, number, number, number],
+    q: [number, number, number, number],
+  ): boolean => {
+    const [ax1, ay1, ax2, ay2] = p;
+    const [bx1, by1, bx2, by2] = q;
+    const aH = Math.abs(ay1 - ay2) < 0.5;
+    const bH = Math.abs(by1 - by2) < 0.5;
+    if (aH === bH) return false; // parallel runs are handled by the lane rules
+    const h = aH ? p : q;
+    const v = aH ? q : p;
+    const hy = h[1];
+    const hx1 = Math.min(h[0], h[2]);
+    const hx2 = Math.max(h[0], h[2]);
+    const vx = v[0];
+    const vy1 = Math.min(v[1], v[3]);
+    const vy2 = Math.max(v[1], v[3]);
+    return vx > hx1 + 1 && vx < hx2 - 1 && hy > vy1 + 1 && hy < vy2 - 1;
+  };
+
+  const crossingCount = (segs: [number, number, number, number][]): number => {
+    let n = 0;
+    for (const other of placedSegs)
+      for (const a of segs) for (const b of other) if (segsCross(a, b)) n++;
+    return n;
+  };
 
   /** Does the route pass through a box that is not one of its endpoints? */
   const routeHitsBox = (
@@ -199,19 +230,39 @@ export function assignLanes(d: Diagram): Record<string, Lane> {
     }
     for (const fs of srcOrder) for (const ts of dstOrder) candidates.push([fs, ts]);
 
+    // Score the face pairs rather than taking the first that avoids a box.
+    // Which faces an edge uses decides far more about crossings than which lane
+    // it later picks, so crossings have to be weighed here or the lane search is
+    // just tidying up a bad decision.
     let fromSide = candidates[0][0];
     let toSide = candidates[0][1];
-    for (const [fs, ts] of candidates) {
+    let faceBest = Infinity;
+    candidates.forEach(([fs, ts], rank) => {
       const fa = anchor(a, fs);
       const ta = anchor(b, ts);
       const h = horiz(fs);
       const natural = h ? (fa.x + ta.x) / 2 : (fa.y + ta.y) / 2;
-      if (!routeHitsBox(fa.x, fa.y, ta.x, ta.y, fs, ts, natural, e.from, e.to)) {
+      // Score the face pair on the BEST corridor available to it, not just the
+      // natural one. Testing only the midpoint rejected face pairs that are
+      // perfectly good once the lane search shifts them, which is how an edge
+      // ended up ploughing through the box stacked between its endpoints.
+      let bestForPair = Infinity;
+      for (let k = 0; k < 16; k++) {
+        const delta = (k % 2 === 0 ? 1 : -1) * Math.ceil(k / 2) * LANE_STEP;
+        const c = natural + delta;
+        const buried = routeHitsBox(fa.x, fa.y, ta.x, ta.y, fs, ts, c, e.from, e.to);
+        const segs = routeSegments(fa.x, fa.y, ta.x, ta.y, fs, ts, c);
+        const s = (buried ? 1000 : 0) + crossingCount(segs) * 90 + Math.abs(delta) * 0.02;
+        if (s < bestForPair) bestForPair = s;
+        if (s < 1) break;
+      }
+      const score = bestForPair + rank * 2;
+      if (score < faceBest) {
+        faceBest = score;
         fromSide = fs;
         toSide = ts;
-        break;
       }
-    }
+    });
 
     const from = anchor(a, fromSide);
     const to = anchor(b, toSide);
@@ -247,7 +298,7 @@ export function assignLanes(d: Diagram): Record<string, Lane> {
     // unclickable.
     let corridor = natural;
     let bestScore = Infinity;
-    for (let k = 0; k < 32; k++) {
+    for (let k = 0; k < 40; k++) {
       const delta = (k % 2 === 0 ? 1 : -1) * Math.ceil(k / 2) * LANE_STEP;
       const c = natural + delta;
       // Going past an endpoint doubles the line back on itself, so it is a
@@ -268,11 +319,19 @@ export function assignLanes(d: Diagram): Record<string, Lane> {
       const txx = horizontal ? to.x : to.x + dstShift;
       const tyy = horizontal ? to.y + dstShift : to.y;
       const buried = routeHitsBox(sxx, syy, txx, tyy, fromSide, toSide, c, e.from, e.to);
+      const segs = routeSegments(sxx, syy, txx, tyy, fromSide, toSide, c);
+      // Crossings are weighted above almost everything except burial: a long
+      // way round is preferable to two lines crossing, which is the single
+      // thing that makes these diagrams unreadable.
+      const crossings = crossingCount(segs);
       const score =
         (buried ? 1000 : 0) +
+        crossings * 90 +
         (clash ? 100 : 0) +
-        (outside ? 40 : 0) +
-        Math.abs(delta) * 0.05;
+        // Leaving the endpoint span is a mild cost now, not a real one: a
+        // detour that avoids a crossing is a good trade.
+        (outside ? 8 : 0) +
+        Math.abs(delta) * 0.01;
       if (score < bestScore) {
         bestScore = score;
         corridor = c;
@@ -280,6 +339,17 @@ export function assignLanes(d: Diagram): Record<string, Lane> {
       if (score < 1) break; // clean and closest to the natural line
     }
     placed.push({ horizontal, corridor, lo, hi });
+    placedSegs.push(
+      routeSegments(
+        horizontal ? from.x : from.x + srcShift,
+        horizontal ? from.y + srcShift : from.y,
+        horizontal ? to.x : to.x + dstShift,
+        horizontal ? to.y + dstShift : to.y,
+        fromSide,
+        toSide,
+        corridor,
+      ),
+    );
     out[e.id] = { corridor, srcShift, dstShift, fromSide, toSide };
     chosen.push({ id: e.id, fromSide, toSide, from: e.from, to: e.to });
   }
@@ -300,6 +370,10 @@ export function assignLanes(d: Diagram): Record<string, Lane> {
     const side = key.slice(idx + 1);
     if (!n) continue;
     // Stay on the face, clear of the rounded corners.
+    // Fan every edge on a shared face. An earlier attempt to fan only the ones
+    // whose corridors already collided looked tidier in isolation and was much
+    // worse overall: crossings went 36 -> 55 and 19 pairs of edges became
+    // coincident again. Edges leaving one point need to separate at the point.
     const extent = horiz(side) ? nodeH(n) : (n.w ?? 240);
     const room = Math.max(0, extent / 2 - 14);
     const span = Math.min(FACE_STEP * (members.length - 1), room * 2);
@@ -363,6 +437,32 @@ export function routePoints(
     const last = clean[clean.length - 1];
     if (last && Math.abs(last[0] - p[0]) < 0.5 && Math.abs(last[1] - p[1]) < 0.5) continue;
     clean.push(p);
+  }
+
+  // Collapse a stub of a run between two parallel runs. Left alone it renders
+  // as a small step in an otherwise straight line — a kink that carries no
+  // information and makes a diagram look untidy. Both endpoints are fixed, so
+  // only interior points move.
+  const JOG = 14;
+  for (let i = 1; i < clean.length - 2; i++) {
+    const [x1, y1] = clean[i];
+    const [x2, y2] = clean[i + 1];
+    const len = Math.hypot(x2 - x1, y2 - y1);
+    if (len >= JOG || len === 0) continue;
+    const before = clean[i - 1];
+    const after = clean[i + 2];
+    const beforeH = Math.abs(before[1] - y1) < 0.5;
+    const afterH = Math.abs(after[1] - y2) < 0.5;
+    if (beforeH !== afterH) continue; // a real corner, not a jog
+    if (beforeH) {
+      const y = (y1 + y2) / 2;
+      clean[i] = [x1, y];
+      clean[i + 1] = [x2, y];
+    } else {
+      const x = (x1 + x2) / 2;
+      clean[i] = [x, y1];
+      clean[i + 1] = [x, y2];
+    }
   }
   return clean;
 }

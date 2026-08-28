@@ -87,6 +87,22 @@ a spec file in `mobile/lib/diagrams/`, never hand-authored SVG.
   after the stub change 13 of 20 diagrams broke, and auto-selection fixed all 20
   without editing a single spec. It also took the 36 un-re-modelled diagrams from
   24 failing to 12.
+- **Crossings are scored, and weighted above almost everything but burial.** The
+  user's stated preference is explicit: a long way round beats two lines crossing.
+  So `assignLanes()` counts how many committed routes a candidate would cross and
+  charges 90 per crossing, while leaving the endpoint span costs only 8.
+- **Face choice is scored on its BEST corridor, not its natural one.** Testing only
+  the midpoint rejected face pairs that are fine once the lane search shifts them,
+  which is how an edge ended up ploughing through the box stacked between its two
+  endpoints. Fixing that took all 56 diagrams clean, including the 36 nobody has
+  re-modelled.
+- **Do not "fan only the edges that collide".** Tried it: fanning only edges whose
+  corridors already clashed looked tidier in isolation and was much worse overall —
+  crossings went 36 to 55 and 19 pairs became coincident again. Edges leaving one
+  point have to separate at that point.
+- **Short middle runs are collapsed** (`JOG = 14` in `routePoints`). A stub of a run
+  between two parallel runs renders as a step in an otherwise straight line: a kink
+  that carries no information.
 - **One route definition: `routePoints()` / `routeSegments()`.** The path drawn,
   the obstacle test inside the lane search, and `check-diagrams.ts` all call it.
   Do not re-derive the shape anywhere else — that drift is what made the gate lie
