@@ -265,22 +265,24 @@ function ServiceGroupNode({ data }: NodeProps) {
           pointerEvents: "all",
         }}
       >
-        <span
-          style={{
-            fontFamily: MONO_FONT,
-            fontSize: 10.5,
-            fontWeight: 700,
-            letterSpacing: "0.09em",
-            color: selected ? p.accent : p.textStrong,
-            whiteSpace: "nowrap",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-          }}
-        >
-          {node.label.toUpperCase()}
+        <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+          <span
+            style={{
+              fontFamily: MONO_FONT,
+              fontSize: 10.5,
+              fontWeight: 700,
+              letterSpacing: "0.09em",
+              color: selected ? p.accent : p.textStrong,
+            }}
+          >
+            {node.label.toUpperCase()}
+          </span>
+          {node.sub ? (
+            <span style={{ fontFamily: UI_FONT, fontSize: 11, color: p.textMuted, marginLeft: 8 }}>{node.sub}</span>
+          ) : null}
         </span>
-        <span style={{ fontFamily: MONO_FONT, fontSize: 8, letterSpacing: "0.1em", color: p.accent }}>
-          {node.sub ? node.sub.toUpperCase() : "SERVICE"}
+        <span style={{ fontFamily: MONO_FONT, fontSize: 8, letterSpacing: "0.1em", color: p.accent, whiteSpace: "nowrap" }}>
+          SERVICE
         </span>
       </div>
     </div>
@@ -638,8 +640,8 @@ export default function ArchDiagram({
         onClick={() => setSel((c) => (c?.kind === "overview" ? null : { kind: "overview" }))}
         style={{
           position: "absolute",
-          top: 12,
-          left: 12,
+          bottom: 12,
+          right: 12,
           padding: "8px 14px",
           borderRadius: 999,
           border: `1px solid ${sel?.kind === "overview" ? palette.accent : palette.border}`,

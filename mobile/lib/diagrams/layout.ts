@@ -277,11 +277,15 @@ export function spaceColumns(d: Diagram): Diagram {
 }
 
 /** Rectangles for every node. Frames are sized from their members (grid) or authored (legacy). */
-export function positionNodes(d: Diagram): { rects: Record<string, Rect>; onGrid: boolean } {
+export function positionNodes(d: Diagram, collapsed: Set<string> = new Set()): { rects: Record<string, Rect>; onGrid: boolean } {
   const rects: Record<string, Rect> = {};
   if (!onGrid(d)) {
     const spaced = spaceColumns(d);
-    for (const n of spaced.nodes) rects[n.id] = legacyRect(n);
+    for (const n of spaced.nodes) {
+      const r = legacyRect(n);
+      // A collapsed group is drawn as a box, not at its frame's size.
+      rects[n.id] = collapsed.has(n.id) ? { ...r, w: n.w ?? 260, h: DEFAULT_H } : r;
+    }
     return { rects, onGrid: false };
   }
   for (const n of d.nodes) {
@@ -1157,7 +1161,7 @@ export function placeLabels(
 
 export function layoutDiagram(authored: Diagram): Layout {
   const { diagram, pipelines, collapsed } = collapseGroups(authored);
-  const { rects, onGrid: grid } = positionNodes(diagram);
+  const { rects, onGrid: grid } = positionNodes(diagram, collapsed);
   const { routes, crossings } = routeEdges(diagram, rects, collapsed, grid);
   const labels = placeLabels(diagram, rects, routes, (e) => tierOf(e) === "hot", collapsed);
   const boxes: Record<string, Rect> = {};

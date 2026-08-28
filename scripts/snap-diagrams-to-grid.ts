@@ -68,7 +68,9 @@ function rewrite(file: string, d: Diagram): number {
     const cell = p.get(n.id);
     if (!cell) continue;
     // Locate this node's object: from its `id: "..."` line to the next `id:` at the same indent.
-    const idRe = new RegExp(`^(\\s+)id: "${n.id}",\\n`, "m");
+    // Node objects sit at indent 6; the diagram's own `id:` is at indent 2 and
+    // may share a name with a node (auth-service did).
+    const idRe = new RegExp(`^(      )id: "${n.id}",\\n`, "m");
     const m = idRe.exec(out);
     if (!m) continue;
     const indent = m[1];
