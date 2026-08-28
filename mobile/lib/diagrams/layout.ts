@@ -324,14 +324,24 @@ const DIRS: Point[] = [
   [0, -1],
 ];
 const BEND = 30;
-const CROSS = 1000;
+/** Set from a debug script to print one edge's routing decision. */
+export let DEBUG_EDGE = "";
+export let DEBUG_PAIR: [string, string] | null = null;
+export function setDebugPair(a: string, b: string) {
+  DEBUG_PAIR = [a, b];
+}
+export function setDebugEdge(id: string) {
+  DEBUG_EDGE = id;
+}
+const CROSS = 3000; // a 3000-unit detour is still better than two lines crossing
 const HEADER = 80;
 const INF = Number.POSITIVE_INFINITY;
 
 function slotsFor(r: Rect, side: Side, frame: boolean): number[] {
-  const along = side === "top" || side === "bottom" ? r.w : r.h;
-  const step = frame ? 40 : side === "top" || side === "bottom" ? 30 : 18;
-  const max = along / 2 - (frame ? 40 : 22);
+  const vertical = side === "left" || side === "right";
+  const along = vertical ? r.h : r.w;
+  const step = frame ? 40 : vertical ? 14 : 30;
+  const max = along / 2 - (frame ? 40 : vertical ? 12 : 22);
   const out = [0];
   for (let k = 1; k * step <= max; k++) out.push(-k * step, k * step);
   return out;
@@ -407,7 +417,7 @@ export function countBoxHits(routes: Route[], edges: DiagramEdge[], boxes: Recor
   return n;
 }
 
-class Router {
+export class Router {
   xs: number[] = [];
   ys: number[] = [];
   xi = new Map<number, number>();
@@ -418,14 +428,18 @@ class Router {
   noH!: Uint8Array; // may only be crossed vertically (stub line beside a box)
   noV!: Uint8Array;
   penalty!: Float32Array; // frame headers etc
-  /** Occupancy by committed routes: 0 free, 1 horizontal pass, 2 vertical pass, 3 corner/end. */
-  occ!: Uint8Array;
-  occBy!: Int16Array;
+  /**
+   * Occupancy by committed routes, per node and per route: 1 horizontal pass,
+   * 2 vertical pass, 3 corner or end. Kept per route so ripping one up leaves
+   * the others intact where they shared a node (a crossing).
+   */
+  occ = new Map<number, Map<number, 1 | 2 | 3>>();
   used = new Map<string, Set<string>>(); // nodeId -> "side:slot"
 
   constructor(
     public boxes: Record<string, Rect>,
     public frames: Record<string, Rect>,
+    public framePorts: Set<string>,
   ) {
     const xs = new Set<number>();
     const ys = new Set<number>();
@@ -439,6 +453,7 @@ class Router {
     }
     for (const [id, r] of Object.entries(all)) {
       const frame = !!frames[id];
+      if (frame && !framePorts.has(id)) continue;
       for (const side of ["top", "left"] as Side[]) {
         for (const slot of slotsFor(r, side, frame)) {
           const p = portPoint(r, { side, slot });
@@ -482,12 +497,16 @@ class Router {
     const br = Math.max(...Object.values(all).map((r) => r.x + r.w));
     const bt = Math.min(...Object.values(all).map((r) => r.y));
     const bb = Math.max(...Object.values(all).map((r) => r.y + r.h));
+    const marginLanes: number[] = [];
     for (let k = 0; k < 4; k++) {
       add(xs, bl - 30 - k * LANE);
       add(xs, br + 30 + k * LANE);
       add(ys, bt - 30 - k * LANE);
       add(ys, bb + 30 + k * LANE);
+      marginLanes.push(k);
     }
+    const marginRank = (v: number, lo: number, hi: number) =>
+      v < lo ? Math.round((lo - 30 - v) / LANE) : v > hi ? Math.round((v - hi - 30) / LANE) : -1;
     this.xs = [...xs].sort((a, b) => a - b);
     this.ys = [...ys].sort((a, b) => a - b);
     this.xs.forEach((v, i) => this.xi.set(v, i));
@@ -499,8 +518,6 @@ class Router {
     this.noH = new Uint8Array(N);
     this.noV = new Uint8Array(N);
     this.penalty = new Float32Array(N);
-    this.occ = new Uint8Array(N);
-    this.occBy = new Int16Array(N).fill(-1);
     for (let i = 0; i < this.nx; i++)
       for (let j = 0; j < this.ny; j++) {
         const x = this.xs[i];
@@ -518,6 +535,11 @@ class Router {
         for (const f of Object.values(frames)) {
           if (x >= f.x && x <= f.x + f.w && y >= f.y && y <= f.y + FRAME_PAD.top) this.penalty[k] += HEADER;
         }
+        // Outer margin lanes cost a little more than inner ones, so detours hug the diagram.
+        const mx = marginRank(x, bl, br);
+        const my = marginRank(y, bt, bb);
+        if (mx > 0) this.penalty[k] += mx * 6;
+        if (my > 0) this.penalty[k] += my * 6;
       }
   }
 
@@ -543,7 +565,8 @@ class Router {
         const node = this.stubNode(r, { side, slot });
         if (node == null || this.blocked[node]) continue;
         // Centre slots first; an authored side is a preference, not an order.
-        out.push({ f: { side, slot }, node, bonus: (prefer === side ? -25 : 0) + Math.abs(slot) * 0.3 });
+        // An authored side is close to an order: it is the author's one routing instrument.
+        out.push({ f: { side, slot }, node, bonus: (prefer ? (prefer === side ? -400 : 0) : 0) + Math.abs(slot) * 0.3 });
       }
     }
     return out;
@@ -560,10 +583,13 @@ class Router {
     a: { id: string; r: Rect; frame: boolean },
     b: { id: string; r: Rect; frame: boolean },
     routeIndex: number,
+    /** Frames either endpoint lives in; any other frame costs to pass through. */
+    home: Set<string> = new Set(),
   ): { from: Face; to: Face; points: Point[]; cost: number } | null {
     const starts = this.faces(a.id, a.r, a.frame, e.fromSide);
     const ends = this.faces(b.id, b.r, b.frame, e.toSide);
     if (!starts.length || !ends.length) return null;
+    const foreign = Object.entries(this.frames).filter(([id]) => !home.has(id)).map(([, r]) => r);
     const endAt = new Map<number, { f: Face; dir: number; bonus: number }>();
     for (const t of ends) {
       const d = dirOf(t.f.side);
@@ -649,20 +675,31 @@ class Router {
         if (horizontal && (this.noH[node] || this.noH[nn])) continue;
         if (!horizontal && (this.noV[node] || this.noV[nn])) continue;
         // Committed routes: never overlap, never touch a corner, cross at a price.
-        const o = this.occ[nn];
+        const o = this.occ.get(nn);
         let extra = 0;
-        if (o === 3) continue;
-        if (o === 1 && horizontal) continue;
-        if (o === 2 && !horizontal) continue;
-        if (o !== 0) {
-          // A crossing costs; turning ON another line's node would be a touch.
-          extra += CROSS;
+        let bad = false;
+        if (o) {
+          for (const kind of o.values()) {
+            if (kind === 3 || (kind === 1 && horizontal) || (kind === 2 && !horizontal)) {
+              bad = true;
+              break;
+            }
+            extra += CROSS;
+          }
         }
+        if (bad) continue;
+        // Turning on a node another route passes straight through is a touch.
+        if (nd !== dir && this.occ.get(node)?.size) continue;
         const step = Math.abs(horizontal ? this.xs[ni] - this.xs[i] : this.ys[nj] - this.ys[j]);
         const bend = nd === dir ? 0 : BEND;
-        // Do not turn on a node another route passes through.
-        if (o !== 0 && this.occ[node] !== 0 && nd !== dir) continue;
-        const nc = c + step + bend + extra + this.penalty[nn];
+        // A line through a frame it has no business in reads as a mistake.
+        let trespass = 0;
+        if (foreign.length) {
+          const x = this.xs[ni];
+          const y = this.ys[nj];
+          for (const f of foreign) if (x > f.x && x < f.x + f.w && y > f.y && y < f.y + f.h) trespass += step * 0.8;
+        }
+        const nc = c + step + bend + extra + trespass + this.penalty[nn];
         const ns = nn * 4 + nd;
         if (nc < dist[ns]) {
           dist[ns] = nc;
@@ -688,7 +725,7 @@ class Router {
     return { from, to, points: simplify(points), cost: dist[goal] };
   }
 
-  commit(id: string, aId: string, bId: string, res: { from: Face; to: Face; points: Point[] }, index: number) {
+  commit(aId: string, bId: string, res: { from: Face; to: Face; points: Point[] }, index: number) {
     const mark = (id: string, f: Face) => {
       const s = this.used.get(id) ?? new Set<string>();
       s.add(`${f.side}:${f.slot}`);
@@ -696,17 +733,26 @@ class Router {
     };
     mark(aId, res.from);
     mark(bId, res.to);
-    this.stamp(res.points, index, true);
+    this.stamp(res.points, index);
   }
 
   release(aId: string, bId: string, res: { from: Face; to: Face; points: Point[] }, index: number) {
     this.used.get(aId)?.delete(`${res.from.side}:${res.from.slot}`);
     this.used.get(bId)?.delete(`${res.to.side}:${res.to.slot}`);
-    this.stamp(res.points, index, false);
+    for (const [k, m] of this.occ) {
+      m.delete(index);
+      if (!m.size) this.occ.delete(k);
+    }
   }
 
   /** Mark every grid node a route passes through, by orientation. */
-  private stamp(points: Point[], index: number, on: boolean) {
+  private stamp(points: Point[], index: number) {
+    const set = (k: number, kind: 1 | 2 | 3) => {
+      const m = this.occ.get(k) ?? new Map<number, 1 | 2 | 3>();
+      const prev = m.get(index);
+      m.set(index, prev && prev !== kind ? 3 : kind);
+      this.occ.set(k, m);
+    };
     // interior points only (ports are on box faces, not grid nodes)
     const inner = points.slice(1, -1);
     for (let s = 0; s < inner.length - 1; s++) {
@@ -715,43 +761,24 @@ class Router {
       const horizontal = Math.abs(y1 - y2) < 0.5;
       if (horizontal) {
         const j = this.yi.get(Math.round(y1));
-        if (j == null) continue;
         const i1 = this.xi.get(Math.round(Math.min(x1, x2)));
         const i2 = this.xi.get(Math.round(Math.max(x1, x2)));
-        if (i1 == null || i2 == null) continue;
-        for (let i = i1; i <= i2; i++) this.mark(this.idx(i, j), 1, index, on);
+        if (j == null || i1 == null || i2 == null) continue;
+        for (let i = i1; i <= i2; i++) set(this.idx(i, j), 1);
       } else {
         const i = this.xi.get(Math.round(x1));
-        if (i == null) continue;
         const j1 = this.yi.get(Math.round(Math.min(y1, y2)));
         const j2 = this.yi.get(Math.round(Math.max(y1, y2)));
-        if (j1 == null || j2 == null) continue;
-        for (let j = j1; j <= j2; j++) this.mark(this.idx(i, j), 2, index, on);
+        if (i == null || j1 == null || j2 == null) continue;
+        for (let j = j1; j <= j2; j++) set(this.idx(i, j), 2);
       }
     }
     // corners and ends are untouchable
-    for (let s = 0; s < inner.length; s++) {
-      const i = this.xi.get(Math.round(inner[s][0]));
-      const j = this.yi.get(Math.round(inner[s][1]));
+    for (const [x, y] of inner) {
+      const i = this.xi.get(Math.round(x));
+      const j = this.yi.get(Math.round(y));
       if (i == null || j == null) continue;
-      const k = this.idx(i, j);
-      if (on) {
-        this.occ[k] = 3;
-        this.occBy[k] = index;
-      } else {
-        this.occ[k] = 0;
-        this.occBy[k] = -1;
-      }
-    }
-  }
-
-  private mark(k: number, kind: 1 | 2, index: number, on: boolean) {
-    if (on) {
-      this.occ[k] = this.occ[k] === 0 ? kind : 3;
-      this.occBy[k] = index;
-    } else if (this.occBy[k] === index) {
-      this.occ[k] = 0;
-      this.occBy[k] = -1;
+      set(this.idx(i, j), 3);
     }
   }
 }
@@ -772,83 +799,252 @@ function simplify(points: Point[]): Point[] {
   return out;
 }
 
-export function routeEdges(d: Diagram, rects: Record<string, Rect>): { routes: Record<string, Route>; crossings: number } {
+export function routeEdges(
+  d: Diagram,
+  rects: Record<string, Rect>,
+  collapsed: Set<string> = new Set(),
+  /** Restarts and polishing are only worth it on a grid; legacy pixel specs get one pass. */
+  thorough = true,
+  budgetMs = 1500,
+): { routes: Record<string, Route>; crossings: number } {
+  const deadline = Date.now() + budgetMs;
+  const overBudget = () => Date.now() > deadline;
   const boxes: Record<string, Rect> = {};
   const frames: Record<string, Rect> = {};
   for (const n of d.nodes) {
     if (!rects[n.id]) continue;
-    if (isFrame(n.kind)) frames[n.id] = rects[n.id];
+    if (isFrame(n.kind) && !collapsed.has(n.id)) frames[n.id] = rects[n.id];
     else boxes[n.id] = rects[n.id];
   }
-  const router = new Router(boxes, frames);
-  const ends = (id: string) => (boxes[id] ? { id, r: boxes[id], frame: false } : frames[id] ? { id, r: frames[id], frame: true } : null);
+  // A frame only needs ports (and their grid lines) if an edge starts or ends on it.
+  const framePorts = new Set(d.edges.flatMap((e) => [e.from, e.to]).filter((id) => frames[id]));
+  type End = { id: string; r: Rect; frame: boolean };
+  const ends = (id: string): End | null =>
+    boxes[id] ? { id, r: boxes[id], frame: false } : frames[id] ? { id, r: frames[id], frame: true } : null;
   const rank: Record<EdgeTier, number> = { hot: 0, data: 1, control: 2 };
-  const order = d.edges
-    .filter((e) => ends(e.from) && ends(e.to) && e.from !== e.to)
-    .map((e, i) => ({ e, i }))
-    .sort((p, q) => {
-      const t = rank[tierOf(p.e)] - rank[tierOf(q.e)];
-      if (t) return t;
-      const ra = rects[p.e.from];
-      const rb = rects[p.e.to];
-      const rc = rects[q.e.from];
-      const rd = rects[q.e.to];
-      const la = Math.abs(ra.x - rb.x) + Math.abs(ra.y - rb.y);
-      const lb = Math.abs(rc.x - rd.x) + Math.abs(rc.y - rd.y);
-      return la - lb;
-    });
-  const results = new Map<string, { from: Face; to: Face; points: Point[]; cost: number }>();
-  const idx = new Map<string, number>();
-  order.forEach((o, k) => idx.set(o.e.id, k));
-  for (const { e } of order) {
-    const a = ends(e.from) as { id: string; r: Rect; frame: boolean };
-    const b = ends(e.to) as { id: string; r: Rect; frame: boolean };
-    const res = router.route(e, a, b, idx.get(e.id) as number);
-    if (!res) continue;
-    results.set(e.id, res);
-    router.commit(e.id, a.id, b.id, res, idx.get(e.id) as number);
-  }
-  const toRoutes = (): Record<string, Route> => {
-    const out: Record<string, Route> = {};
-    for (const { e } of order) {
-      const r = results.get(e.id);
-      if (!r) continue;
-      out[e.id] = { id: e.id, tier: tierOf(e), fromSide: r.from.side, toSide: r.to.side, points: r.points };
-    }
-    return out;
+  const routable = d.edges.filter((e) => ends(e.from) && ends(e.to) && e.from !== e.to);
+  const span = (e: DiagramEdge) => {
+    const a = rects[e.from];
+    const b = rects[e.to];
+    return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
   };
-  // Rip up and re-route: each edge in turn is removed and routed again against
-  // everything else, kept only if the total does not get worse.
-  let best = countCrossings(Object.values(toRoutes()));
-  for (let pass = 0; pass < 4 && best > 0; pass++) {
-    let improved = false;
-    for (const { e } of order) {
-      const old = results.get(e.id);
-      if (!old) continue;
-      const a = ends(e.from) as { id: string; r: Rect; frame: boolean };
-      const b = ends(e.to) as { id: string; r: Rect; frame: boolean };
-      const k = idx.get(e.id) as number;
-      router.release(a.id, b.id, old, k);
-      const res = router.route(e, a, b, k);
-      if (!res) {
-        router.commit(e.id, a.id, b.id, old, k);
-        continue;
-      }
-      results.set(e.id, res);
-      const now = countCrossings(Object.values(toRoutes()));
-      if (now <= best && (now < best || res.cost <= old.cost)) {
-        router.commit(e.id, a.id, b.id, res, k);
-        if (now < best) improved = true;
-        best = now;
-      } else {
-        results.set(e.id, old);
-        router.commit(e.id, a.id, b.id, old, k);
-      }
+  // Frames each node lives in (transitively), so an edge knows which frames it may cross freely.
+  const homes = new Map<string, Set<string>>();
+  for (const n of d.nodes) {
+    const s = new Set<string>();
+    let p: string | undefined = n.parent ?? parentOf(n, d);
+    while (p) {
+      s.add(p);
+      const pn = d.nodes.find((x) => x.id === p);
+      p = pn?.parent ?? (pn ? parentOf(pn, d) : undefined);
     }
-    if (!improved) break;
+    if (frames[n.id]) s.add(n.id);
+    homes.set(n.id, s);
   }
-  const routes = toRoutes();
-  return { routes, crossings: countCrossings(Object.values(routes)) };
+  const homeOf = (e: DiagramEdge) => new Set([...(homes.get(e.from) ?? []), ...(homes.get(e.to) ?? [])]);
+  // Short edges have one sensible path and go first; long ones can detour.
+  const orders: DiagramEdge[][] = [
+    [...routable].sort((p, q) => span(p) - span(q) || rank[tierOf(p)] - rank[tierOf(q)]),
+    [...routable].sort((p, q) => rank[tierOf(p)] - rank[tierOf(q)] || span(p) - span(q)),
+  ];
+  // Deterministic shuffles as restarts.
+  let seed = 7;
+  const rnd = () => {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    return seed / 0x7fffffff;
+  };
+  for (let s = 0; s < 6; s++) {
+    const o = [...routable];
+    for (let i = o.length - 1; i > 0; i--) {
+      const j = Math.floor(rnd() * (i + 1));
+      [o[i], o[j]] = [o[j], o[i]];
+    }
+    orders.push(o);
+  }
+
+  type Res = { from: Face; to: Face; points: Point[]; cost: number };
+  const attempt = (order: DiagramEdge[]): { routes: Record<string, Route>; crossings: number } => {
+    const router = new Router(boxes, frames, framePorts);
+    const results = new Map<string, Res>();
+    const idx = new Map<string, number>();
+    order.forEach((e, k) => idx.set(e.id, k));
+    const toRoutes = (): Record<string, Route> => {
+      const out: Record<string, Route> = {};
+      for (const e of order) {
+        const r = results.get(e.id);
+        if (r) out[e.id] = { id: e.id, tier: tierOf(e), fromSide: r.from.side, toSide: r.to.side, points: r.points };
+      }
+      return out;
+    };
+    for (const e of order) {
+      const a = ends(e.from) as End;
+      const b = ends(e.to) as End;
+      const res = router.route(e, a, b, idx.get(e.id) as number, homeOf(e));
+      if (!res) continue;
+      results.set(e.id, res);
+      router.commit(a.id, b.id, res, idx.get(e.id) as number);
+    }
+    // Negotiate: every edge is ripped up and routed again against the others,
+    // in tier order, for several passes. Each re-route is accepted even when
+    // it is not an improvement, which is what lets the set escape the greedy
+    // first pass; the best snapshot seen is what we keep.
+    const snapshot = () => new Map(results);
+    const score = () => {
+      const rs = Object.values(toRoutes());
+      let cost = 0;
+      for (const r of results.values()) cost += r.cost;
+      return { crossings: countCrossings(rs), cost };
+    };
+    let bestSnap = snapshot();
+    let best = score();
+    for (let pass = 0; pass < 8 && best.crossings > 0 && thorough && !overBudget(); pass++) {
+      let moved = false;
+      for (const e of order) {
+        const old = results.get(e.id);
+        if (!old) continue;
+        const a = ends(e.from) as End;
+        const b = ends(e.to) as End;
+        const k = idx.get(e.id) as number;
+        router.release(a.id, b.id, old, k);
+        const res = router.route(e, a, b, k, homeOf(e)) ?? old;
+        results.set(e.id, res);
+        router.commit(a.id, b.id, res, k);
+        if (res !== old && JSON.stringify(res.points) !== JSON.stringify(old.points)) moved = true;
+      }
+      const now = score();
+      if (now.crossings < best.crossings || (now.crossings === best.crossings && now.cost < best.cost)) {
+        best = now;
+        bestSnap = snapshot();
+      }
+      if (!moved) break;
+    }
+    // Restore the best snapshot into the router before polishing.
+    for (const e of order) {
+      const cur = results.get(e.id);
+      const want = bestSnap.get(e.id);
+      if (!cur || !want || cur === want) continue;
+      const a = ends(e.from) as End;
+      const b = ends(e.to) as End;
+      const k = idx.get(e.id) as number;
+      router.release(a.id, b.id, cur, k);
+      results.set(e.id, want);
+      router.commit(a.id, b.id, want, k);
+    }
+    let bestCross = best.crossings;
+    // Pairwise: a crossing often needs ANOTHER line to move — sometimes the one
+    // it crosses, sometimes one that merely blocks the way round. For every
+    // edge still crossing something, rip it up together with each other edge in
+    // turn and route the two again in either order.
+    const pairs = (): [string, string][] => {
+      const rs = Object.values(toRoutes());
+      const crossing = new Set<string>();
+      for (let i = 0; i < rs.length; i++)
+        for (let j = i + 1; j < rs.length; j++)
+          if (countCrossings([rs[i], rs[j]]) > 0) {
+            crossing.add(rs[i].id);
+            crossing.add(rs[j].id);
+          }
+      const out: [string, string][] = [];
+      for (const a of crossing) for (const r of rs) if (r.id !== a) out.push([a, r.id]);
+      return out;
+    };
+    for (let pass = 0; pass < 4 && bestCross > 0 && thorough && !overBudget(); pass++) {
+      let improved = false;
+      for (const [p, q] of pairs()) {
+        if (overBudget()) break;
+        const ep = order.find((e) => e.id === p) as DiagramEdge;
+        const eq = order.find((e) => e.id === q) as DiagramEdge;
+        const oldP = results.get(p) as Res;
+        const oldQ = results.get(q) as Res;
+        const endsOf = (e: DiagramEdge) => [ends(e.from) as End, ends(e.to) as End, idx.get(e.id) as number] as const;
+        const [ap, bp, kp] = endsOf(ep);
+        const [aq, bq, kq] = endsOf(eq);
+        let bestTry: { crossings: number; cost: number; rp: Res; rq: Res } | null = null;
+        for (const first of [true, false]) {
+          router.release(ap.id, bp.id, results.get(p) as Res, kp);
+          router.release(aq.id, bq.id, results.get(q) as Res, kq);
+          const [e1, a1, b1, k1, e2, a2, b2, k2] = first
+            ? [ep, ap, bp, kp, eq, aq, bq, kq]
+            : [eq, aq, bq, kq, ep, ap, bp, kp];
+          const r1 = router.route(e1, a1, b1, k1, homeOf(e1));
+          if (r1) router.commit(a1.id, b1.id, r1, k1);
+          const r2 = r1 ? router.route(e2, a2, b2, k2, homeOf(e2)) : null;
+          if (r2) router.commit(a2.id, b2.id, r2, k2);
+          if (r1 && r2) {
+            results.set(e1.id, r1);
+            results.set(e2.id, r2);
+            const now = countCrossings(Object.values(toRoutes()));
+            const cost = r1.cost + r2.cost;
+            if (!bestTry || now < bestTry.crossings || (now === bestTry.crossings && cost < bestTry.cost))
+              bestTry = { crossings: now, cost, rp: first ? r1 : r2, rq: first ? r2 : r1 };
+          }
+          // undo this try
+          if (r1) router.release(a1.id, b1.id, r1, k1);
+          if (r2) router.release(a2.id, b2.id, r2, k2);
+          results.set(p, oldP);
+          results.set(q, oldQ);
+          router.commit(ap.id, bp.id, oldP, kp);
+          router.commit(aq.id, bq.id, oldQ, kq);
+        }
+        if (bestTry && (bestTry.crossings < bestCross || (bestTry.crossings === bestCross && bestTry.cost < oldP.cost + oldQ.cost))) {
+          router.release(ap.id, bp.id, oldP, kp);
+          router.release(aq.id, bq.id, oldQ, kq);
+          results.set(p, bestTry.rp);
+          results.set(q, bestTry.rq);
+          router.commit(ap.id, bp.id, bestTry.rp, kp);
+          router.commit(aq.id, bq.id, bestTry.rq, kq);
+          if (bestTry.crossings < bestCross) improved = true;
+          bestCross = bestTry.crossings;
+        }
+      }
+      if (!improved) break;
+      if (bestCross === 0) break;
+    }
+    if (DEBUG_PAIR && results.has(DEBUG_PAIR[0]) && results.has(DEBUG_PAIR[1])) {
+      const [p, q] = DEBUG_PAIR;
+      const ep = order.find((e) => e.id === p) as DiagramEdge;
+      const eq = order.find((e) => e.id === q) as DiagramEdge;
+      const oldP = results.get(p) as Res;
+      const oldQ = results.get(q) as Res;
+      const ap = ends(ep.from) as End, bp = ends(ep.to) as End, kp = idx.get(p) as number;
+      const aq = ends(eq.from) as End, bq = ends(eq.to) as End, kq = idx.get(q) as number;
+      console.log("[pair] before", countCrossings(Object.values(toRoutes())), JSON.stringify(oldP.points), JSON.stringify(oldQ.points));
+      router.release(ap.id, bp.id, oldP, kp);
+      router.release(aq.id, bq.id, oldQ, kq);
+      const r1 = router.route(ep, ap, bp, kp, homeOf(ep));
+      if (r1) router.commit(ap.id, bp.id, r1, kp);
+      const r2 = router.route(eq, aq, bq, kq, homeOf(eq));
+      if (r2) router.commit(aq.id, bq.id, r2, kq);
+      if (r1) results.set(p, r1);
+      if (r2) results.set(q, r2);
+      console.log("[pair] after p-then-q", countCrossings(Object.values(toRoutes())), JSON.stringify(r1?.points), JSON.stringify(r2?.points));
+      console.log("[pair] used", JSON.stringify([...router.used.entries()].filter(([k]) => k === ap.id).map(([k, v]) => [k, [...v]])));
+    }
+    if (DEBUG_EDGE && results.has(DEBUG_EDGE)) {
+      const e = order.find((x) => x.id === DEBUG_EDGE) as DiagramEdge;
+      const a = ends(e.from) as End;
+      const b = ends(e.to) as End;
+      const k = idx.get(e.id) as number;
+      const cur = results.get(e.id) as Res;
+      router.release(a.id, b.id, cur, k);
+      const again = router.route(e, a, b, k, homeOf(e));
+      console.log("[debug]", e.id, "current cost", cur.cost, JSON.stringify(cur.points));
+      console.log("[debug]", e.id, "re-route cost", again?.cost, JSON.stringify(again?.points));
+      console.log("[debug] used faces", JSON.stringify([...router.used.entries()].map(([k, v]) => [k, [...v]])));
+      router.commit(a.id, b.id, cur, k);
+    }
+    const routes = toRoutes();
+    return { routes, crossings: countCrossings(Object.values(routes)) };
+  };
+
+  const total = (r: { routes: Record<string, Route> }) =>
+    Object.values(r.routes).reduce((s, rt) => s + segments(rt.points).reduce((l, [p, q]) => l + Math.abs(q[0] - p[0]) + Math.abs(q[1] - p[1]), 0), 0);
+  let best = attempt(orders[0]);
+  for (let i = 1; i < orders.length && best.crossings > 0 && thorough && !overBudget(); i++) {
+    const alt = attempt(orders[i]);
+    if (alt.crossings < best.crossings || (alt.crossings === best.crossings && total(alt) < total(best))) best = alt;
+  }
+  return best;
 }
 
 // --- 4. labels ------------------------------------------------------------------
@@ -862,8 +1058,9 @@ export function placeLabels(
   rects: Record<string, Rect>,
   routes: Record<string, Route>,
   want: (e: DiagramEdge) => boolean,
+  collapsed: Set<string> = new Set(),
 ): Record<string, Point> {
-  const boxes = d.nodes.filter((n) => !isFrame(n.kind)).map((n) => rects[n.id]).filter(Boolean);
+  const boxes = d.nodes.filter((n) => !isFrame(n.kind) || collapsed.has(n.id)).map((n) => rects[n.id]).filter(Boolean);
   const placed: Rect[] = [];
   const out: Record<string, Point> = {};
   const allSegs = Object.values(routes).map((r) => ({ id: r.id, segs: segments(r.points) }));
@@ -922,10 +1119,10 @@ export function placeLabels(
 export function layoutDiagram(authored: Diagram): Layout {
   const { diagram, pipelines, collapsed } = collapseGroups(authored);
   const { rects, onGrid: grid } = positionNodes(diagram);
-  const { routes, crossings } = routeEdges(diagram, rects);
-  const labels = placeLabels(diagram, rects, routes, (e) => tierOf(e) === "hot");
+  const { routes, crossings } = routeEdges(diagram, rects, collapsed, grid);
+  const labels = placeLabels(diagram, rects, routes, (e) => tierOf(e) === "hot", collapsed);
   const boxes: Record<string, Rect> = {};
-  for (const n of diagram.nodes) if (!isFrame(n.kind) && rects[n.id]) boxes[n.id] = rects[n.id];
+  for (const n of diagram.nodes) if ((!isFrame(n.kind) || collapsed.has(n.id)) && rects[n.id]) boxes[n.id] = rects[n.id];
   const boxHits = countBoxHits(Object.values(routes), diagram.edges, boxes);
 
   let l = INF, t = INF, r = -INF, b = -INF;
