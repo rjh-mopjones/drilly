@@ -1,238 +1,105 @@
 /**
- * Geometry and vocabulary gate for the architecture diagram specs.
+ * Readability gate for the architecture diagram specs.
  *
- * CLAUDE.md referred to a `check-spec.ts` for years; it never existed, so every
- * rule below was previously enforced by looking at a screenshot. These are the
- * failures that are invisible in code review and obvious in the browser:
+ * The previous gate measured collisions and passed 56 of 56 while the diagrams
+ * were unreadable. This one measures what a reader sees, using the SAME
+ * layoutDiagram() the renderer draws with, so the numbers here are the picture:
  *
- *  - Two boxes overlapping. Reads as one box with garbled text.
- *  - An edge routed under a box. The line, its label and its arrowhead are all
- *    drawn and all hidden, and the arrow cannot be clicked there either.
- *  - An edge label over ~28 characters. Collides even at the minimum gutter.
- *  - A `process` outside a `serviceGroup`. A process is a stage inside a
- *    service; standing alone it makes a deployment claim that is false.
- *  - A frame that does not actually enclose the nodes it is meant to frame.
+ *  - zoom          fitView scale on the design canvas; below 0.8 the text is
+ *                  too small to read at a glance             (error)
+ *  - boxes         visible boxes after collapsing; more than 12 is a wiring
+ *                  diagram, not an overview                  (error)
+ *  - hot           hot-path edges; more than 8 and nothing is emphasised (error)
+ *  - crossings     two lines crossing; a long way round always beats it (error)
+ *  - box hits      a line running under or along a box it does not touch (error)
+ *  - label length  over 28 chars collides even in a wide gutter (error)
+ *  - process       a stage outside any serviceGroup is a false deployment claim (error)
+ *  - unrouted      an edge the router could not place at all (error)
+ *  - text items    boxes×2 + labels shown; over 40 is busy      (warning)
+ *  - legacy        spec still on pixel x/y rather than col/row  (warning)
  *
- * Run: bunx tsx scripts/check-diagrams.ts [id ...]
- * Exit 1 on any error. Warnings do not fail the build.
+ * Run: bunx tsx scripts/check-diagrams.ts [--summary] [id ...]
+ * Exit 1 on any error.
  */
-// scripts/ is outside mobile/tsconfig.json, which owns the only @types set in
-// this workspace, so the node globals are declared rather than imported.
 declare const process: { argv: string[]; exit(code: number): never };
 
 import { DIAGRAMS } from "../mobile/lib/diagrams";
-import { isFrame, type Diagram, type DiagramNode } from "../mobile/lib/diagrams/types";
-import { anchor, assignLanes, nodeH, routeSegments, spaceColumns } from "../mobile/lib/diagrams/layout";
+import { isFrame, type Diagram } from "../mobile/lib/diagrams/types";
+import {
+  layoutDiagram,
+  parentOf,
+  tierOf,
+  MAX_BOXES,
+  MAX_HOT,
+  MAX_LABEL,
+  MIN_ZOOM,
+} from "../mobile/lib/diagrams/layout";
 
-const MAX_LABEL = 28;
-/** Matches nodeH() in ArchDiagram.web.tsx: box + type-tag row, with a sub-label. */
-const DEFAULT_H = 84;
-const NO_SUB_H = 62;
-const DEFAULT_W = 240;
+type Report = { errors: string[]; warnings: string[]; line: string };
 
-type Rect = { x: number; y: number; w: number; h: number };
-
-function rectOf(n: DiagramNode): Rect {
-  return {
-    x: n.x,
-    y: n.y,
-    w: n.w ?? DEFAULT_W,
-    h: n.h ?? (n.sub ? DEFAULT_H : NO_SUB_H),
-  };
-}
-
-function overlaps(a: Rect, b: Rect, pad = 0): boolean {
-  return (
-    a.x + a.w + pad > b.x &&
-    b.x + b.w + pad > a.x &&
-    a.y + a.h + pad > b.y &&
-    b.y + b.h + pad > a.y
-  );
-}
-
-function contains(outer: Rect, inner: Rect): boolean {
-  return (
-    inner.x >= outer.x &&
-    inner.y >= outer.y &&
-    inner.x + inner.w <= outer.x + outer.w &&
-    inner.y + inner.h <= outer.y + outer.h
-  );
-}
-
-function anchor(r: Rect, side?: string): { x: number; y: number } {
-  switch (side) {
-    case "top":
-      return { x: r.x + r.w / 2, y: r.y };
-    case "bottom":
-      return { x: r.x + r.w / 2, y: r.y + r.h };
-    case "left":
-      return { x: r.x, y: r.y + r.h / 2 };
-    case "right":
-      return { x: r.x + r.w, y: r.y + r.h / 2 };
-    default:
-      return { x: r.x + r.w / 2, y: r.y + r.h / 2 };
-  }
-}
-
-/**
- * Clearance an edge must keep from any box it is not attached to.
- *
- * Not zero: a route that merely misses a box's interior still runs along its
- * border, which reads as a line glued to the side of every box in a column.
- * That is what "the arrows are on top of everything" actually looks like, and
- * an earlier version of this checker inset boxes instead of inflating them and
- * so called it clean.
- */
-const CLEARANCE = 12;
-
-/**
- * The three segments of the route that will actually be drawn.
- *
- * Computed from the same assignLanes() and layout the renderer uses, rather
- * than approximated. Every time this was approximated the gate lied.
- */
-function segmentsFor(
-  a: Rect,
-  b: Rect,
-  fromSide: string | undefined,
-  toSide: string | undefined,
-  lane: { corridor: number; srcShift: number; dstShift: number } | undefined,
-): [number, number, number, number][] {
-  const from = anchor(a as never, fromSide ?? "bottom");
-  const to = anchor(b as never, toSide ?? "top");
-  const srcH = (fromSide ?? "bottom") === "left" || (fromSide ?? "bottom") === "right";
-  const dstH = (toSide ?? "top") === "left" || (toSide ?? "top") === "right";
-  const sx = srcH ? from.x : from.x + (lane?.srcShift ?? 0);
-  const sy = srcH ? from.y + (lane?.srcShift ?? 0) : from.y;
-  const tx = dstH ? to.x : to.x + (lane?.dstShift ?? 0);
-  const ty = dstH ? to.y + (lane?.dstShift ?? 0) : to.y;
-  const c = lane?.corridor ?? (srcH ? (sx + tx) / 2 : (sy + ty) / 2);
-  return routeSegments(sx, sy, tx, ty, fromSide, toSide, c);
-}
-
-function segHitsBox(seg: [number, number, number, number], box: Rect): boolean {
-  const [x1, y1, x2, y2] = seg;
-  const r = {
-    x: box.x - CLEARANCE,
-    y: box.y - CLEARANCE,
-    w: box.w + CLEARANCE * 2,
-    h: box.h + CLEARANCE * 2,
-  };
-  const loX = Math.min(x1, x2);
-  const hiX = Math.max(x1, x2);
-  const loY = Math.min(y1, y2);
-  const hiY = Math.max(y1, y2);
-  return loX < r.x + r.w && hiX > r.x && loY < r.y + r.h && hiY > r.y;
-}
-
-function check(authored: Diagram): { errors: string[]; warnings: string[] } {
-  // spaceColumns runs before render, so the checker has to see the same
-  // coordinates the renderer will.
-  const d = spaceColumns(authored);
-  const lanes = assignLanes(d);
+function check(authored: Diagram): Report {
   const errors: string[] = [];
   const warnings: string[] = [];
-  const byId = new Map(d.nodes.map((n) => [n.id, n]));
-  const boxes = d.nodes.filter((n) => !isFrame(n.kind));
-  const frames = d.nodes.filter((n) => isFrame(n.kind));
 
-  // --- ids ---
   const seen = new Set<string>();
-  for (const n of d.nodes) {
+  for (const n of authored.nodes) {
     if (seen.has(n.id)) errors.push(`duplicate node id "${n.id}"`);
     seen.add(n.id);
   }
-
-  // --- boxes must not overlap each other ---
-  for (let i = 0; i < boxes.length; i++) {
-    for (let j = i + 1; j < boxes.length; j++) {
-      if (overlaps(rectOf(boxes[i]), rectOf(boxes[j]))) {
-        errors.push(`boxes overlap: "${boxes[i].label}" / "${boxes[j].label}"`);
-      }
-    }
-  }
-
-  // --- a process is a stage inside a service, never a peer ---
-  const serviceGroups = frames.filter((f) => f.kind === "serviceGroup");
-  for (const n of boxes.filter((b) => b.kind === "process")) {
-    const home = serviceGroups.find((f) => contains(rectOf(f), rectOf(n)));
-    if (!home) {
-      errors.push(`process "${n.label}" is not inside any serviceGroup frame`);
-    }
-  }
-  if (serviceGroups.length && !boxes.some((b) => b.kind === "process")) {
-    warnings.push("a serviceGroup frame with no process nodes inside it");
-  }
-
-  // --- a nested frame must clear the outer frame's header ---
-  // A zone draws its name on a chip at its top-left; a serviceGroup draws a
-  // header strip. Nest one right at the other's top edge and the two names
-  // render on top of each other. Nothing else catches this: neither is a box,
-  // so the overlap rules above never look at them.
-  const FRAME_HEADER_H = 34;
-  for (const outer of frames) {
-    for (const inner of frames) {
-      if (outer.id === inner.id) continue;
-      if (!contains(rectOf(outer), rectOf(inner))) continue;
-      if (rectOf(inner).y - rectOf(outer).y < FRAME_HEADER_H) {
-        errors.push(
-          `frame "${inner.label}" starts inside the header of "${outer.label}" — ` +
-            `their titles will overlap; drop it at least ${FRAME_HEADER_H}px lower`,
-        );
-      }
-    }
-  }
-
-  // --- frames need real size ---
-  for (const f of frames) {
-    if (!f.w || !f.h) errors.push(`frame "${f.label}" needs both w and h`);
-    const members = boxes.filter((b) => overlaps(rectOf(f), rectOf(b)));
-    for (const m of members) {
-      if (!contains(rectOf(f), rectOf(m))) {
-        errors.push(`frame "${f.label}" clips "${m.label}" — enlarge it or move the box out`);
-      }
-    }
-  }
-
-  // --- edges ---
-  for (const e of d.edges) {
-    const a = byId.get(e.from);
-    const b = byId.get(e.to);
-    if (!a) { errors.push(`edge ${e.id}: no node "${e.from}"`); continue; }
-    if (!b) { errors.push(`edge ${e.id}: no node "${e.to}"`); continue; }
-    if (e.label && e.label.length > MAX_LABEL) {
+  for (const e of authored.edges) {
+    if (!seen.has(e.from)) errors.push(`edge ${e.id}: no node "${e.from}"`);
+    if (!seen.has(e.to)) errors.push(`edge ${e.id}: no node "${e.to}"`);
+    if (e.label && e.label.length > MAX_LABEL)
       errors.push(`edge ${e.id} label ${e.label.length} chars (max ${MAX_LABEL}): "${e.label}"`);
-    }
     if (!e.detail) warnings.push(`edge ${e.id} has no detail; a click on it shows nothing`);
-
-    const lane = lanes[e.id];
-    const segs = segmentsFor(
-      rectOf(a),
-      rectOf(b),
-      lane?.fromSide ?? e.fromSide,
-      lane?.toSide ?? e.toSide,
-      lane,
-    );
-    for (const box of boxes) {
-      if (box.id === e.from || box.id === e.to) continue;
-      // The first and last segments leave and enter their own endpoints, so a
-      // neighbour sitting right beside an endpoint is not a routing fault.
-      if (segs.some((s) => segHitsBox(s, rectOf(box)))) {
-        errors.push(
-          `edge ${e.id} (${a.label} → ${b.label}) runs under or along "${box.label}"`,
-        );
-      }
+  }
+  for (const n of authored.nodes) {
+    if (n.kind === "process") {
+      const p = parentOf(n, authored);
+      const home = p && authored.nodes.find((f) => f.id === p && f.kind === "serviceGroup");
+      if (!home) errors.push(`process "${n.label}" is not inside any serviceGroup`);
     }
+    if (!isFrame(n.kind) && !n.detail) warnings.push(`node "${n.label}" has no detail`);
+  }
+  if (errors.some((m) => m.startsWith("edge") && m.includes("no node"))) {
+    return { errors, warnings, line: "" };
   }
 
-  for (const n of boxes) {
-    if (!n.detail) warnings.push(`node "${n.label}" has no detail`);
-  }
+  const L = layoutDiagram(authored);
+  const boxes = L.diagram.nodes.filter((n) => !isFrame(n.kind) || L.collapsed.has(n.id));
+  const hot = L.diagram.edges.filter((e) => tierOf(e) === "hot");
+  const routed = Object.keys(L.routes).length;
+  const textItems = boxes.length * 2 + Object.keys(L.labels).length;
 
-  return { errors, warnings };
+  if (L.onGrid) {
+    const cells = new Map<string, string>();
+    for (const n of boxes) {
+      const key = `${n.col},${n.row}`;
+      const other = cells.get(key);
+      if (other) errors.push(`"${n.label}" and "${other}" share cell (${key})`);
+      cells.set(key, n.label);
+    }
+  } else {
+    warnings.push("legacy pixel layout: give every box a col/row (scripts/snap-diagrams-to-grid.ts)");
+  }
+  if (L.zoom < MIN_ZOOM)
+    errors.push(`zoom ${L.zoom.toFixed(2)} < ${MIN_ZOOM}: ${Math.round(L.bounds.w)}×${Math.round(L.bounds.h)} units is too big to read`);
+  if (boxes.length > MAX_BOXES) errors.push(`${boxes.length} visible boxes (max ${MAX_BOXES}): collapse a group or fold attributes into panels`);
+  if (hot.length > MAX_HOT) errors.push(`${hot.length} hot edges (max ${MAX_HOT})`);
+  if (L.crossings > 0) errors.push(`${L.crossings} crossing(s): move cells or use a frame-sourced edge`);
+  if (L.boxHits > 0) errors.push(`${L.boxHits} arrow(s) run under or along a box`);
+  if (routed < L.diagram.edges.length) errors.push(`${L.diagram.edges.length - routed} edge(s) could not be routed`);
+  if (textItems > 40) warnings.push(`${textItems} text items on screen`);
+
+  const line =
+    `zoom ${L.zoom.toFixed(2).padStart(4)}  boxes ${String(boxes.length).padStart(2)}  edges ${String(L.diagram.edges.length).padStart(2)}` +
+    `  hot ${hot.length}  cross ${String(L.crossings).padStart(2)}  hits ${L.boxHits}  ${L.onGrid ? "grid" : "px  "}`;
+  return { errors, warnings, line };
 }
 
-const want = process.argv.slice(2);
+const args = process.argv.slice(2);
+const summary = args.includes("--summary");
+const want = args.filter((a) => !a.startsWith("--"));
 const ids = want.length ? want : Object.keys(DIAGRAMS);
 let failed = 0;
 let warned = 0;
@@ -244,22 +111,15 @@ for (const id of ids) {
     failed++;
     continue;
   }
-  const { errors, warnings } = check(d);
-  if (errors.length) {
-    failed++;
-    console.error(`\n✗ ${id}`);
-    for (const m of errors) console.error(`    ${m}`);
-    for (const m of warnings) console.error(`    (warn) ${m}`);
-  } else if (warnings.length) {
-    warned += warnings.length;
-    console.log(`~ ${id} — ${warnings.length} warning(s)`);
-    for (const m of warnings) console.log(`    ${m}`);
-  } else {
-    console.log(`✓ ${id}`);
-  }
+  const { errors, warnings, line } = check(d);
+  const tag = errors.length ? "✗" : warnings.length ? "~" : "✓";
+  if (errors.length) failed++;
+  warned += warnings.length;
+  console.log(`${tag} ${id.padEnd(22)} ${line}`);
+  if (summary) continue;
+  for (const m of errors) console.log(`      ${m}`);
+  for (const m of warnings) console.log(`      (warn) ${m}`);
 }
 
-console.log(
-  `\n${ids.length} diagram(s): ${ids.length - failed} clean, ${failed} failing, ${warned} warning(s)`,
-);
+console.log(`\n${ids.length} diagram(s): ${ids.length - failed} clean, ${failed} failing, ${warned} warning(s)`);
 process.exit(failed ? 1 : 0);

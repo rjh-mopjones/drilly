@@ -83,18 +83,55 @@ export interface DiagramNode {
   /** Second line inside the box: the implementation choice. */
   sub?: string;
   kind: NodeKind;
-  x: number;
-  y: number;
+  /**
+   * Grid cell. The renderer owns the pitch, so a spec says WHERE a box sits in
+   * the reading order and never how many pixels away it is. Frames omit these
+   * and are sized from their members; a collapsed serviceGroup uses its own
+   * cell for the single box it draws.
+   */
+  col?: number;
+  row?: number;
+  /** The frame this node sits inside, if any. */
+  parent?: string;
+  /** Legacy pixel position, used only by specs not yet on the grid. */
+  x?: number;
+  y?: number;
   w?: number;
   h?: number;
+  /**
+   * A serviceGroup draws as ONE box by default and its processes become a
+   * pipeline in the panel. Set this when the pipeline is the subject of the
+   * diagram and has to be on the canvas (the rate limiter's gateway stages).
+   */
+  expanded?: boolean;
   detail?: DiagramNodeDetail;
 }
 
+/**
+ * How much an edge matters to the reader, which decides how it is drawn.
+ *
+ *  - hot: the request path. Bold, accent, always labelled. At most 8.
+ *  - data: a read or write that is not the hot path. Thin; label on hover or
+ *    when an endpoint is selected.
+ *  - control: configuration, invalidation, metrics. Thin and dashed; label on
+ *    hover.
+ *
+ * Unset falls back to the older flags: animated => hot, dashed => control.
+ */
+export type EdgeTier = "hot" | "data" | "control";
+
 export interface DiagramEdge {
   id: string;
+  /**
+   * A node id, or a FRAME id. An edge from a frame means "from every member":
+   * three identical attempt-log edges from three workers are one edge from
+   * their lane frame, which is both quieter and, for some K3,2 patterns, the
+   * only way to draw the diagram without a crossing.
+   */
   from: string;
   to: string;
   label?: string;
+  tier?: EdgeTier;
   /** Dashed = control/metadata path rather than the main data path. */
   dashed?: boolean;
   /** Animated = the hot path the system spends its time on. */

@@ -4,6 +4,7 @@
  * collides. Types live in ./types.
  */
 import type { Diagram } from "./types";
+import { parentOf, tierOf } from "./layout";
 import { WEB_CRAWLER } from "./web-crawler";
 import { FLEET_UPDATE } from "./fleet-update";
 import { ONLINE_AUCTION } from "./online-auction";
@@ -153,7 +154,9 @@ export function diagramToMarkdown(d: Diagram): string {
   out.push("### Components", "");
   for (const n of d.nodes) {
     if (!n.detail) continue;
-    out.push(`#### ${n.label}${n.sub ? ` (${n.sub})` : ""}`, "");
+    const stageOf = n.kind === "process" ? parentOf(n, d) : undefined;
+    const home = stageOf ? d.nodes.find((x) => x.id === stageOf)?.label : undefined;
+    out.push(`#### ${n.label}${n.sub ? ` (${n.sub})` : ""}${home ? ` — stage of ${home}` : ""}`, "");
     out.push(`- **What it is.** ${n.detail.what}`);
     out.push(`- **Why it exists.** ${n.detail.why}`);
     if (n.detail.numbers?.length)
@@ -174,7 +177,8 @@ export function diagramToMarkdown(d: Diagram): string {
   for (const e of d.edges) {
     if (!e.detail) continue;
     const hop = `${byId(e.from)} -> ${byId(e.to)}`;
-    out.push(`#### ${hop}${e.label ? ` (${e.label})` : ""}`, "");
+    const tier = tierOf(e);
+    out.push(`#### ${hop}${e.label ? ` (${e.label})` : ""}${tier === "hot" ? " — hot path" : tier === "control" ? " — control" : ""}`, "");
     out.push(`- **What it is.** ${e.detail.what}`);
     out.push(`- **Why it exists.** ${e.detail.why}`);
     if (e.detail.numbers?.length)
