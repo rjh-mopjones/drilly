@@ -194,6 +194,13 @@ export function DesktopSidebar() {
         </Pressable>
         <View style={styles.headerActions}>
           <Pressable
+            onPress={() => router.push("/drill" as never)}
+            style={styles.iconButton}
+            accessibilityLabel="Drill"
+          >
+            <Text style={[styles.iconGlyph, { color: palette.accent }]}>⚡</Text>
+          </Pressable>
+          <Pressable
             onPress={onRefresh}
             disabled={busy}
             style={styles.iconButton}

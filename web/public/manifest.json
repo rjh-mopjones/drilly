@@ -15,7 +15,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/system-design-cheatsheet.html",
-      "itemCount": 22
+      "itemCount": 22,
+      "drillCards": 144
     },
     {
       "id": "patterns",
@@ -61,7 +62,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/operating-systems-cheatsheet.html",
-      "itemCount": 21
+      "itemCount": 21,
+      "drillCards": 334
     },
     {
       "id": "concurrency",
@@ -77,7 +79,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/concurrency-cheatsheet.html",
-      "itemCount": 21
+      "itemCount": 21,
+      "drillCards": 334
     },
     {
       "id": "computer-architecture",
@@ -93,7 +96,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/computer-architecture-cheatsheet.html",
-      "itemCount": 21
+      "itemCount": 21,
+      "drillCards": 233
     },
     {
       "id": "api-design",
@@ -109,7 +113,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/api-design-cheatsheet.html",
-      "itemCount": 21
+      "itemCount": 21,
+      "drillCards": 334
     },
     {
       "id": "ood-patterns",
@@ -125,7 +130,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/ood-patterns-cheatsheet.html",
-      "itemCount": 21
+      "itemCount": 21,
+      "drillCards": 332
     },
     {
       "id": "functional-programming",
@@ -141,7 +147,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/functional-programming-cheatsheet.html",
-      "itemCount": 21
+      "itemCount": 21,
+      "drillCards": 236
     },
     {
       "id": "testing",
@@ -157,7 +164,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/testing-cheatsheet.html",
-      "itemCount": 21
+      "itemCount": 21,
+      "drillCards": 336
     },
     {
       "id": "security",
@@ -173,7 +181,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/security-cheatsheet.html",
-      "itemCount": 21
+      "itemCount": 21,
+      "drillCards": 331
     },
     {
       "id": "front-end",
@@ -189,7 +198,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/front-end-cheatsheet.html",
-      "itemCount": 21
+      "itemCount": 21,
+      "drillCards": 333
     },
     {
       "id": "data-engineering",
@@ -205,7 +215,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/data-engineering-cheatsheet.html",
-      "itemCount": 21
+      "itemCount": 21,
+      "drillCards": 332
     },
     {
       "id": "data-structures",
@@ -221,7 +232,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "itemCount": 21,
-      "cheatSheetUrl": "/data-structures-cheatsheet.html"
+      "cheatSheetUrl": "/data-structures-cheatsheet.html",
+      "drillCards": 320
     },
     {
       "id": "algorithms",
@@ -237,7 +249,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "itemCount": 21,
-      "cheatSheetUrl": "/algorithms-cheatsheet.html"
+      "cheatSheetUrl": "/algorithms-cheatsheet.html",
+      "drillCards": 288
     },
     {
       "id": "dsa-patterns",
@@ -253,7 +266,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/dsa-patterns-cheatsheet.html",
-      "itemCount": 27
+      "itemCount": 27,
+      "drillCards": 167
     },
     {
       "id": "neetcode",
@@ -318,7 +332,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/java-cheatsheet.html",
-      "itemCount": 19
+      "itemCount": 19,
+      "drillCards": 340
     },
     {
       "id": "go",
@@ -334,7 +349,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/go-cheatsheet.html",
-      "itemCount": 18
+      "itemCount": 18,
+      "drillCards": 160
     },
     {
       "id": "rust",
@@ -350,7 +366,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/rust-cheatsheet.html",
-      "itemCount": 18
+      "itemCount": 18,
+      "drillCards": 85
     },
     {
       "id": "python",
@@ -366,7 +383,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/python-cheatsheet.html",
-      "itemCount": 18
+      "itemCount": 18,
+      "drillCards": 86
     },
     {
       "id": "kotlin",
@@ -382,7 +400,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/kotlin-cheatsheet.html",
-      "itemCount": 15
+      "itemCount": 15,
+      "drillCards": 170
     },
     {
       "id": "java-katas",
@@ -478,7 +497,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/sql-postgres-cheatsheet.html",
-      "itemCount": 17
+      "itemCount": 17,
+      "drillCards": 155
     },
     {
       "id": "db-theory",
@@ -494,7 +514,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/db-theory-cheatsheet.html",
-      "itemCount": 16
+      "itemCount": 16,
+      "drillCards": 95
     },
     {
       "id": "sql-patterns",
@@ -510,7 +531,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/sql-patterns-cheatsheet.html",
-      "itemCount": 26
+      "itemCount": 26,
+      "drillCards": 162
     },
     {
       "id": "sql-questions",
@@ -545,7 +567,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/cassandra-cheatsheet.html",
-      "itemCount": 21
+      "itemCount": 21,
+      "drillCards": 336
     },
     {
       "id": "redis",
@@ -561,7 +584,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/redis-cheatsheet.html",
-      "itemCount": 21
+      "itemCount": 21,
+      "drillCards": 332
     },
     {
       "id": "yugabyte",
@@ -577,7 +601,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/yugabyte-cheatsheet.html",
-      "itemCount": 21
+      "itemCount": 21,
+      "drillCards": 334
     },
     {
       "id": "csharp",
@@ -593,7 +618,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/csharp-cheatsheet.html",
-      "itemCount": 20
+      "itemCount": 20,
+      "drillCards": 127
     },
     {
       "id": "cpp",
@@ -609,7 +635,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/cpp-cheatsheet.html",
-      "itemCount": 21
+      "itemCount": 21,
+      "drillCards": 334
     },
     {
       "id": "aws",
@@ -625,7 +652,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/aws-cheatsheet.html",
-      "itemCount": 21
+      "itemCount": 21,
+      "drillCards": 343
     },
     {
       "id": "gcp",
@@ -641,7 +669,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/gcp-cheatsheet.html",
-      "itemCount": 21
+      "itemCount": 21,
+      "drillCards": 343
     },
     {
       "id": "linux",
@@ -657,7 +686,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/linux-cheatsheet.html",
-      "itemCount": 21
+      "itemCount": 21,
+      "drillCards": 336
     },
     {
       "id": "kubernetes",
@@ -673,7 +703,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/kubernetes-cheatsheet.html",
-      "itemCount": 21
+      "itemCount": 21,
+      "drillCards": 332
     },
     {
       "id": "observability",
@@ -689,7 +720,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/observability-cheatsheet.html",
-      "itemCount": 21
+      "itemCount": 21,
+      "drillCards": 332
     },
     {
       "id": "terraform",
@@ -705,7 +737,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/terraform-cheatsheet.html",
-      "itemCount": 21
+      "itemCount": 21,
+      "drillCards": 333
     },
     {
       "id": "docker",
@@ -721,7 +754,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/docker-cheatsheet.html",
-      "itemCount": 21
+      "itemCount": 21,
+      "drillCards": 338
     },
     {
       "id": "cicd",
@@ -737,7 +771,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/cicd-cheatsheet.html",
-      "itemCount": 21
+      "itemCount": 21,
+      "drillCards": 333
     },
     {
       "id": "networking",
@@ -753,7 +788,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/networking-cheatsheet.html",
-      "itemCount": 21
+      "itemCount": 21,
+      "drillCards": 334
     },
     {
       "id": "message-brokers",
@@ -769,7 +805,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/message-brokers-cheatsheet.html",
-      "itemCount": 21
+      "itemCount": 21,
+      "drillCards": 224
     },
     {
       "id": "git",
@@ -785,7 +822,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/git-cheatsheet.html",
-      "itemCount": 21
+      "itemCount": 21,
+      "drillCards": 332
     },
     {
       "id": "ai-engineering",
@@ -801,7 +839,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/ai-engineering-cheatsheet.html",
-      "itemCount": 21
+      "itemCount": 21,
+      "drillCards": 180
     },
     {
       "id": "how-llms-work",
@@ -817,7 +856,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/how-llms-work-cheatsheet.html",
-      "itemCount": 21
+      "itemCount": 21,
+      "drillCards": 328
     },
     {
       "id": "ml-fundamentals",
@@ -833,7 +873,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/ml-fundamentals-cheatsheet.html",
-      "itemCount": 21
+      "itemCount": 21,
+      "drillCards": 332
     },
     {
       "id": "classical-algorithms",
@@ -849,7 +890,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/classical-algorithms-cheatsheet.html",
-      "itemCount": 21
+      "itemCount": 21,
+      "drillCards": 335
     },
     {
       "id": "deep-learning",
@@ -865,7 +907,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/deep-learning-cheatsheet.html",
-      "itemCount": 21
+      "itemCount": 21,
+      "drillCards": 332
     },
     {
       "id": "mlops",
@@ -881,7 +924,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/mlops-cheatsheet.html",
-      "itemCount": 21
+      "itemCount": 21,
+      "drillCards": 331
     },
     {
       "id": "data-engineering-ml",
@@ -897,7 +941,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/data-engineering-ml-cheatsheet.html",
-      "itemCount": 21
+      "itemCount": 21,
+      "drillCards": 328
     },
     {
       "id": "finance-domain",
@@ -913,7 +958,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/finance-domain-cheatsheet.html",
-      "itemCount": 21
+      "itemCount": 21,
+      "drillCards": 333
     },
     {
       "id": "quant-methods",
@@ -929,7 +975,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/quant-methods-cheatsheet.html",
-      "itemCount": 21
+      "itemCount": 21,
+      "drillCards": 335
     },
     {
       "id": "high-frequency-finance",
@@ -945,7 +992,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/high-frequency-finance-cheatsheet.html",
-      "itemCount": 21
+      "itemCount": 21,
+      "drillCards": 333
     },
     {
       "id": "cpp-finance",
@@ -961,7 +1009,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/cpp-finance-cheatsheet.html",
-      "itemCount": 21
+      "itemCount": 21,
+      "drillCards": 333
     },
     {
       "id": "bedroom-quant",
@@ -977,7 +1026,8 @@
       "autoNumberItems": true,
       "sectionOrder": [],
       "cheatSheetUrl": "/bedroom-quant-cheatsheet.html",
-      "itemCount": 22
+      "itemCount": 22,
+      "drillCards": 317
     }
   ]
 }
