@@ -74,6 +74,23 @@ a spec file in `mobile/lib/diagrams/`, never hand-authored SVG.
   A corridor that merely misses a box's interior still runs along its border, which
   reads as a line glued to the side of every box in a column. An earlier checker
   *inset* boxes instead of inflating them and called that clean.
+- **Every route leaves and arrives PERPENDICULAR to its face.** `routePoints()`
+  gives both ends a 20-unit stub along the face normal before any turn. Without
+  it a route chose its shape from the source side alone, so an edge leaving
+  `right` and entering `top` finished with a horizontal run into a horizontal
+  face: the line slid along the top border and the arrowhead landed in the middle
+  of the box. "The arrows are not going into the node" is what that looks like.
+- **`fromSide` / `toSide` in a spec are a preference, not an order.** `assignLanes()`
+  tries the authored pair first, then every face pair ranked by whether the normal
+  actually points at the other node, and takes the first that does not cross a box.
+  Hand-tuned faces are correct only for the router shape they were tuned against;
+  after the stub change 13 of 20 diagrams broke, and auto-selection fixed all 20
+  without editing a single spec. It also took the 36 un-re-modelled diagrams from
+  24 failing to 12.
+- **One route definition: `routePoints()` / `routeSegments()`.** The path drawn,
+  the obstacle test inside the lane search, and `check-diagrams.ts` all call it.
+  Do not re-derive the shape anywhere else — that drift is what made the gate lie
+  twice.
 - **Edges are routed by `assignLanes()` + `corridorPath()`, not by
   `getSmoothStepPath`.** That function places its perpendicular run at the
   midpoint between the two nodes and **ignores its own `offset` argument** for a

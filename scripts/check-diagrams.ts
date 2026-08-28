@@ -22,7 +22,7 @@ declare const process: { argv: string[]; exit(code: number): never };
 
 import { DIAGRAMS } from "../mobile/lib/diagrams";
 import { isFrame, type Diagram, type DiagramNode } from "../mobile/lib/diagrams/types";
-import { anchor, assignLanes, nodeH, spaceColumns } from "../mobile/lib/diagrams/layout";
+import { anchor, assignLanes, nodeH, routeSegments, spaceColumns } from "../mobile/lib/diagrams/layout";
 
 const MAX_LABEL = 28;
 /** Matches nodeH() in ArchDiagram.web.tsx: box + type-tag row, with a sub-label. */
@@ -100,24 +100,14 @@ function segmentsFor(
 ): [number, number, number, number][] {
   const from = anchor(a as never, fromSide ?? "bottom");
   const to = anchor(b as never, toSide ?? "top");
-  const side = fromSide ?? "bottom";
-  const horizontal = side === "left" || side === "right";
-  const sx = horizontal ? from.x : from.x + (lane?.srcShift ?? 0);
-  const sy = horizontal ? from.y + (lane?.srcShift ?? 0) : from.y;
-  const tx = horizontal ? to.x : to.x + (lane?.dstShift ?? 0);
-  const ty = horizontal ? to.y + (lane?.dstShift ?? 0) : to.y;
-  const c = lane?.corridor ?? (horizontal ? (sx + tx) / 2 : (sy + ty) / 2);
-  return horizontal
-    ? [
-        [sx, sy, c, sy],
-        [c, sy, c, ty],
-        [c, ty, tx, ty],
-      ]
-    : [
-        [sx, sy, sx, c],
-        [sx, c, tx, c],
-        [tx, c, tx, ty],
-      ];
+  const srcH = (fromSide ?? "bottom") === "left" || (fromSide ?? "bottom") === "right";
+  const dstH = (toSide ?? "top") === "left" || (toSide ?? "top") === "right";
+  const sx = srcH ? from.x : from.x + (lane?.srcShift ?? 0);
+  const sy = srcH ? from.y + (lane?.srcShift ?? 0) : from.y;
+  const tx = dstH ? to.x : to.x + (lane?.dstShift ?? 0);
+  const ty = dstH ? to.y + (lane?.dstShift ?? 0) : to.y;
+  const c = lane?.corridor ?? (srcH ? (sx + tx) / 2 : (sy + ty) / 2);
+  return routeSegments(sx, sy, tx, ty, fromSide, toSide, c);
 }
 
 function segHitsBox(seg: [number, number, number, number], box: Rect): boolean {
@@ -215,7 +205,14 @@ function check(authored: Diagram): { errors: string[]; warnings: string[] } {
     }
     if (!e.detail) warnings.push(`edge ${e.id} has no detail; a click on it shows nothing`);
 
-    const segs = segmentsFor(rectOf(a), rectOf(b), e.fromSide, e.toSide, lanes[e.id]);
+    const lane = lanes[e.id];
+    const segs = segmentsFor(
+      rectOf(a),
+      rectOf(b),
+      lane?.fromSide ?? e.fromSide,
+      lane?.toSide ?? e.toSide,
+      lane,
+    );
     for (const box of boxes) {
       if (box.id === e.from || box.id === e.to) continue;
       // The first and last segments leave and enter their own endpoints, so a

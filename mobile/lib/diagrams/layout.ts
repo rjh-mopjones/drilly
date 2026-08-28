@@ -1,3 +1,24 @@
+/** Outward unit normal of a node face. */
+export function dirOf(side: string | undefined): { x: number; y: number } {
+  switch (side) {
+    case "top":
+      return { x: 0, y: -1 };
+    case "bottom":
+      return { x: 0, y: 1 };
+    case "left":
+      return { x: -1, y: 0 };
+    default:
+      return { x: 1, y: 0 };
+  }
+}
+
+/**
+ * How far an edge runs straight out of a face before it is allowed to turn.
+ * Without this an arrow can arrive parallel to the border it is pointing at,
+ * which is what "the arrows are not going into the node" looks like.
+ */
+export const STUB = 20;
+
 /**
  * Pure layout maths for the architecture diagrams: no React, no DOM.
  *
@@ -61,7 +82,14 @@ const LANE_STEP = 26;   // matches the click radius, so lanes cannot merge
 const FACE_STEP = 16;   // separation between edges sharing one face
 const CORNER_R = 9;
 
-export type Lane = { corridor: number; srcShift: number; dstShift: number };
+export type Lane = {
+  corridor: number;
+  srcShift: number;
+  dstShift: number;
+  /** The face actually used, which may not be the one the spec asked for. */
+  fromSide: string;
+  toSide: string;
+};
 
 /**
  * Route every edge through its own corridor, and fan edges that share a face.
@@ -91,33 +119,10 @@ export function assignLanes(d: Diagram): Record<string, Lane> {
 
   const horiz = (side: string) => side === "left" || side === "right";
 
-  // --- fan edges that share a face -------------------------------------
-  const faceGroups = new Map<string, string[]>();
-  const faceKey = (nodeId: string, side: string) => `${nodeId}:${side}`;
-  for (const e of d.edges) {
-    const sk = faceKey(e.from, e.fromSide ?? "bottom");
-    const tk = faceKey(e.to, e.toSide ?? "top");
-    (faceGroups.get(sk) ?? faceGroups.set(sk, []).get(sk)!).push(`${e.id}>s`);
-    (faceGroups.get(tk) ?? faceGroups.set(tk, []).get(tk)!).push(`${e.id}>t`);
-  }
-  const shift = new Map<string, number>();
-  for (const [key, members] of faceGroups) {
-    if (members.length < 2) continue;
-    const [nodeId, side] = key.split(":");
-    const n = byId.get(nodeId);
-    if (!n) continue;
-    // Stay on the face: half the extent, less a margin so the arrow does not
-    // land on the box's rounded corner.
-    const extent = horiz(side) ? nodeH(n) : (n.w ?? 240);
-    const room = Math.max(0, extent / 2 - 14);
-    const span = Math.min(FACE_STEP * (members.length - 1), room * 2);
-    const step = members.length > 1 ? span / (members.length - 1) : 0;
-    members.forEach((m, i) => shift.set(m, -span / 2 + i * step));
-  }
-
   // --- give each edge crossing a gap its own corridor -------------------
   type Placed = { horizontal: boolean; corridor: number; lo: number; hi: number };
   const placed: Placed[] = [];
+  const chosen: { id: string; fromSide: string; toSide: string; from: string; to: string }[] = [];
 
   // Boxes the route has to stay out of. Frames are excluded: an edge crossing
   // a zone or a service frame is normal and reads fine, an edge crossing a
@@ -138,28 +143,19 @@ export function assignLanes(d: Diagram): Record<string, Lane> {
       b: n.y + nodeH(n) + CLEARANCE,
     }));
 
-  /** Does this three-segment route pass through a box that is not an endpoint? */
+  /** Does the route pass through a box that is not one of its endpoints? */
   const routeHitsBox = (
     sx: number,
     sy: number,
     tx: number,
     ty: number,
-    horizontal: boolean,
+    fromSide: string | undefined,
+    toSide: string | undefined,
     corridor: number,
     fromId: string,
     toId: string,
   ): boolean => {
-    const segs: [number, number, number, number][] = horizontal
-      ? [
-          [sx, sy, corridor, sy],
-          [corridor, sy, corridor, ty],
-          [corridor, ty, tx, ty],
-        ]
-      : [
-          [sx, sy, sx, corridor],
-          [sx, corridor, tx, corridor],
-          [tx, corridor, tx, ty],
-        ];
+    const segs = routeSegments(sx, sy, tx, ty, fromSide, toSide, corridor);
     return obstacles.some((o) => {
       if (o.id === fromId || o.id === toId) return false;
       return segs.some(([x1, y1, x2, y2]) => {
@@ -177,14 +173,55 @@ export function assignLanes(d: Diagram): Record<string, Lane> {
     const b = byId.get(e.to);
     if (!a || !b) continue;
 
-    const fromSide = e.fromSide ?? "bottom";
-    const toSide = e.toSide ?? "top";
+    // Which faces to use. An authored fromSide/toSide is a preference, not an
+    // order: a face chosen by hand for one router shape becomes wrong when the
+    // route shape changes, and re-tuning every spec by hand does not scale.
+    // Try the authored pair first, then pairs whose normals actually point at
+    // the other node, and take the first that does not plough through a box.
+    const faces = ["right", "left", "bottom", "top"] as const;
+    const ra = { x: a.x, y: a.y, w: a.w ?? 240, h: nodeH(a) };
+    const rb = { x: b.x, y: b.y, w: b.w ?? 240, h: nodeH(b) };
+    const dx = rb.x + rb.w / 2 - (ra.x + ra.w / 2);
+    const dy = rb.y + rb.h / 2 - (ra.y + ra.h / 2);
+    /** Faces of A ordered by how well they point at B. */
+    const rank = (towardX: number, towardY: number) =>
+      [...faces].sort((p, q) => {
+        const d1 = dirOf(p);
+        const d2 = dirOf(q);
+        return d2.x * towardX + d2.y * towardY - (d1.x * towardX + d1.y * towardY);
+      });
+    const srcOrder = rank(dx, dy);
+    const dstOrder = rank(-dx, -dy);
+
+    const candidates: [string, string][] = [];
+    if (e.fromSide || e.toSide) {
+      candidates.push([e.fromSide ?? srcOrder[0], e.toSide ?? dstOrder[0]]);
+    }
+    for (const fs of srcOrder) for (const ts of dstOrder) candidates.push([fs, ts]);
+
+    let fromSide = candidates[0][0];
+    let toSide = candidates[0][1];
+    for (const [fs, ts] of candidates) {
+      const fa = anchor(a, fs);
+      const ta = anchor(b, ts);
+      const h = horiz(fs);
+      const natural = h ? (fa.x + ta.x) / 2 : (fa.y + ta.y) / 2;
+      if (!routeHitsBox(fa.x, fa.y, ta.x, ta.y, fs, ts, natural, e.from, e.to)) {
+        fromSide = fs;
+        toSide = ts;
+        break;
+      }
+    }
+
     const from = anchor(a, fromSide);
     const to = anchor(b, toSide);
+    // The corridor runs along the source's axis, for every edge.
     const horizontal = horiz(fromSide);
 
-    const srcShift = shift.get(`${e.id}>s`) ?? 0;
-    const dstShift = shift.get(`${e.id}>t`) ?? 0;
+    // Face fanning happens in a second pass below, once every edge has settled
+    // on which face it is actually using.
+    const srcShift = 0;
+    const dstShift = 0;
 
     const sMain = horizontal ? from.x : from.y;
     const tMain = horizontal ? to.x : to.y;
@@ -210,13 +247,15 @@ export function assignLanes(d: Diagram): Record<string, Lane> {
     // unclickable.
     let corridor = natural;
     let bestScore = Infinity;
-    for (let k = 0; k < 20; k++) {
+    for (let k = 0; k < 32; k++) {
       const delta = (k % 2 === 0 ? 1 : -1) * Math.ceil(k / 2) * LANE_STEP;
       const c = natural + delta;
-      // Do not push a corridor past either endpoint; that doubles the line back.
+      // Going past an endpoint doubles the line back on itself, so it is a
+      // penalty rather than a veto: a route that leaves the span is still much
+      // better than one that ploughs through a component.
       const min = Math.min(sMain, tMain) + 12;
       const max = Math.max(sMain, tMain) - 12;
-      if (max > min && (c < min || c > max)) continue;
+      const outside = max > min && (c < min || c > max);
       const clash = placed.some(
         (q) =>
           q.horizontal === horizontal &&
@@ -228,9 +267,12 @@ export function assignLanes(d: Diagram): Record<string, Lane> {
       const syy = horizontal ? from.y + srcShift : from.y;
       const txx = horizontal ? to.x : to.x + dstShift;
       const tyy = horizontal ? to.y + dstShift : to.y;
-      const buried = routeHitsBox(sxx, syy, txx, tyy, horizontal, c, e.from, e.to);
+      const buried = routeHitsBox(sxx, syy, txx, tyy, fromSide, toSide, c, e.from, e.to);
       const score =
-        (buried ? 1000 : 0) + (clash ? 100 : 0) + Math.abs(delta) * 0.05;
+        (buried ? 1000 : 0) +
+        (clash ? 100 : 0) +
+        (outside ? 40 : 0) +
+        Math.abs(delta) * 0.05;
       if (score < bestScore) {
         bestScore = score;
         corridor = c;
@@ -238,40 +280,139 @@ export function assignLanes(d: Diagram): Record<string, Lane> {
       if (score < 1) break; // clean and closest to the natural line
     }
     placed.push({ horizontal, corridor, lo, hi });
-    out[e.id] = { corridor, srcShift, dstShift };
+    out[e.id] = { corridor, srcShift, dstShift, fromSide, toSide };
+    chosen.push({ id: e.id, fromSide, toSide, from: e.from, to: e.to });
   }
+  // --- second pass: fan edges that ended up sharing a face ---------------
+  // This has to come after face selection: two edges only collide at a node if
+  // they chose the SAME face, and that is not known until the loop above ends.
+  const byFace = new Map<string, { id: string; end: "s" | "t" }[]>();
+  for (const c of chosen) {
+    const sk = `${c.from}:${c.fromSide}`;
+    const tk = `${c.to}:${c.toSide}`;
+    (byFace.get(sk) ?? byFace.set(sk, []).get(sk)!).push({ id: c.id, end: "s" });
+    (byFace.get(tk) ?? byFace.set(tk, []).get(tk)!).push({ id: c.id, end: "t" });
+  }
+  for (const [key, members] of byFace) {
+    if (members.length < 2) continue;
+    const idx = key.lastIndexOf(":");
+    const n = byId.get(key.slice(0, idx));
+    const side = key.slice(idx + 1);
+    if (!n) continue;
+    // Stay on the face, clear of the rounded corners.
+    const extent = horiz(side) ? nodeH(n) : (n.w ?? 240);
+    const room = Math.max(0, extent / 2 - 14);
+    const span = Math.min(FACE_STEP * (members.length - 1), room * 2);
+    const step = members.length > 1 ? span / (members.length - 1) : 0;
+    members.forEach((m, i) => {
+      const lane = out[m.id];
+      if (!lane) return;
+      const v = -span / 2 + i * step;
+      if (m.end === "s") lane.srcShift = v;
+      else lane.dstShift = v;
+    });
+  }
+
   return out;
 }
 
-/** Orthogonal path through an explicit corridor, with rounded corners. */
+/**
+ * The corner points of a route, and the single definition of its shape.
+ *
+ * corridorPath draws these, assignLanes tests them against boxes, and
+ * check-diagrams.ts gates on them. Keeping one function means the drawing and
+ * the gate cannot drift apart, which they did twice before this existed.
+ */
+export function routePoints(
+  sx: number,
+  sy: number,
+  tx: number,
+  ty: number,
+  fromSide: string | undefined,
+  toSide: string | undefined,
+  corridor: number,
+): [number, number][] {
+  const sd = dirOf(fromSide);
+  const td = dirOf(toSide);
+  const ex = sx + sd.x * STUB;
+  const ey = sy + sd.y * STUB;
+  const ax = tx + td.x * STUB;
+  const ay = ty + td.y * STUB;
+  const srcH = sd.y === 0;
+  const dstH = td.y === 0;
+
+  // The corridor always runs along the SOURCE's axis. A mixed pair used to get
+  // a single fixed corner instead, which left the lane search nothing to vary,
+  // so those routes could not be steered around a box in the way. The final
+  // stub is what guarantees a perpendicular arrival, so the middle is free to
+  // take any orthogonal shape.
+  const mid: [number, number][] = srcH
+    ? [
+        [corridor, ey],
+        [corridor, ay],
+      ]
+    : [
+        [ex, corridor],
+        [ax, corridor],
+      ];
+  void dstH;
+
+  const pts: [number, number][] = [[sx, sy], [ex, ey], ...mid, [ax, ay], [tx, ty]];
+  const clean: [number, number][] = [];
+  for (const p of pts) {
+    const last = clean[clean.length - 1];
+    if (last && Math.abs(last[0] - p[0]) < 0.5 && Math.abs(last[1] - p[1]) < 0.5) continue;
+    clean.push(p);
+  }
+  return clean;
+}
+
+/** The same route as line segments, for hit testing. */
+export function routeSegments(
+  sx: number,
+  sy: number,
+  tx: number,
+  ty: number,
+  fromSide: string | undefined,
+  toSide: string | undefined,
+  corridor: number,
+): [number, number, number, number][] {
+  const p = routePoints(sx, sy, tx, ty, fromSide, toSide, corridor);
+  const out: [number, number, number, number][] = [];
+  for (let i = 0; i < p.length - 1; i++) out.push([p[i][0], p[i][1], p[i + 1][0], p[i + 1][1]]);
+  return out;
+}
+
+
+
+/**
+ * Orthogonal route that leaves the source perpendicular to its face and
+ * arrives at the target perpendicular to ITS face.
+ *
+ * The previous version chose one orientation from the source side alone and
+ * ignored the target's. An edge leaving `right` and entering `top` therefore
+ * finished with a horizontal run into a horizontal face: the line slid along
+ * the top border and the arrowhead landed in the middle of the box instead of
+ * on its edge. Both ends now get a perpendicular stub, and the corridor only
+ * governs the middle.
+ */
 export function corridorPath(
   sx: number,
   sy: number,
   tx: number,
   ty: number,
-  horizontal: boolean,
+  fromSide: string | undefined,
+  toSide: string | undefined,
   corridor: number,
 ): [string, number, number] {
-  const r = CORNER_R;
-  const pts: [number, number][] = horizontal
-    ? [
-        [sx, sy],
-        [corridor, sy],
-        [corridor, ty],
-        [tx, ty],
-      ]
-    : [
-        [sx, sy],
-        [sx, corridor],
-        [tx, corridor],
-        [tx, ty],
-      ];
+  const clean = routePoints(sx, sy, tx, ty, fromSide, toSide, corridor);
 
-  let d = `M ${pts[0][0]},${pts[0][1]}`;
-  for (let i = 1; i < pts.length - 1; i++) {
-    const [px, py] = pts[i - 1];
-    const [cx, cy] = pts[i];
-    const [nx, ny] = pts[i + 1];
+  const r = CORNER_R;
+  let d = `M ${clean[0][0]},${clean[0][1]}`;
+  for (let i = 1; i < clean.length - 1; i++) {
+    const [px, py] = clean[i - 1];
+    const [cx, cy] = clean[i];
+    const [nx, ny] = clean[i + 1];
     const inLen = Math.hypot(cx - px, cy - py);
     const outLen = Math.hypot(nx - cx, ny - cy);
     const rad = Math.min(r, inLen / 2, outLen / 2);
@@ -284,12 +425,18 @@ export function corridorPath(
     d += ` L ${cx - iu[0] * rad},${cy - iu[1] * rad}`;
     d += ` Q ${cx},${cy} ${cx + ou[0] * rad},${cy + ou[1] * rad}`;
   }
-  d += ` L ${pts[3][0]},${pts[3][1]}`;
+  const end = clean[clean.length - 1];
+  d += ` L ${end[0]},${end[1]}`;
 
-  // Label belongs on the middle run, which is the part with room for it.
-  const lx = horizontal ? corridor : (sx + tx) / 2;
-  const ly = horizontal ? (sy + ty) / 2 : corridor;
-  return [d, lx, ly];
+  // Label goes on the longest straight run, which is the one with room for it.
+  let best = { len: -1, x: (sx + tx) / 2, y: (sy + ty) / 2 };
+  for (let i = 0; i < clean.length - 1; i++) {
+    const [x1, y1] = clean[i];
+    const [x2, y2] = clean[i + 1];
+    const len = Math.hypot(x2 - x1, y2 - y1);
+    if (len > best.len) best = { len, x: (x1 + x2) / 2, y: (y1 + y2) / 2 };
+  }
+  return [d, best.x, best.y];
 }
 
 export function spaceColumns(d: Diagram): Diagram {
@@ -420,18 +567,21 @@ export function placeLabels(d: Diagram): Record<string, { lx: number; ly: number
     const s = byId.get(e.from);
     const tg = byId.get(e.to);
     if (!s || !tg) continue;
-    const a = anchor(s, e.fromSide ?? "bottom");
-    const b = anchor(tg, e.toSide ?? "top");
-    const horizontal =
-      (e.fromSide ?? "bottom") === "left" || (e.fromSide ?? "bottom") === "right";
-    const lane = lanes[e.id];
-    const sx = horizontal ? a.x : a.x + (lane?.srcShift ?? 0);
-    const sy = horizontal ? a.y + (lane?.srcShift ?? 0) : a.y;
-    const tx = horizontal ? b.x : b.x + (lane?.dstShift ?? 0);
-    const ty = horizontal ? b.y + (lane?.dstShift ?? 0) : b.y;
-    const corridor =
-      lane?.corridor ?? (horizontal ? (sx + tx) / 2 : (sy + ty) / 2);
-    const [, lx0, ly0] = corridorPath(sx, sy, tx, ty, horizontal, corridor);
+
+    const lane0 = lanes[e.id];
+    const fromSide = lane0?.fromSide ?? e.fromSide ?? "bottom";
+    const toSide = lane0?.toSide ?? e.toSide ?? "top";
+    const srcH = fromSide === "left" || fromSide === "right";
+    const dstH = toSide === "left" || toSide === "right";
+    const a = anchor(s, fromSide);
+    const b = anchor(tg, toSide);
+    const lane = lane0;
+    const sx = srcH ? a.x : a.x + (lane?.srcShift ?? 0);
+    const sy = srcH ? a.y + (lane?.srcShift ?? 0) : a.y;
+    const tx = dstH ? b.x : b.x + (lane?.dstShift ?? 0);
+    const ty = dstH ? b.y + (lane?.dstShift ?? 0) : b.y;
+    const corridor = lane?.corridor ?? (srcH ? (sx + tx) / 2 : (sy + ty) / 2);
+    const [, lx0, ly0] = corridorPath(sx, sy, tx, ty, fromSide, toSide, corridor);
 
     const w = (e.label ?? "").length * LABEL_CHAR_W + LABEL_PAD;
     // Boxes are inflated a little: a sub-label that wraps to two lines renders

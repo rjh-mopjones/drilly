@@ -402,15 +402,20 @@ function LabelledEdge({
   // perpendicular run at the midpoint between the two nodes and ignores its
   // own `offset` argument for a normal left-to-right pair — so every edge
   // crossing the same gap turned at the same coordinate and they stacked.
-  const horizontal =
-    sourcePosition === Position.Left || sourcePosition === Position.Right;
-  const sx = horizontal ? sourceX : sourceX + (d.srcShift ?? 0);
-  const sy = horizontal ? sourceY + (d.srcShift ?? 0) : sourceY;
-  const tx = horizontal ? targetX : targetX + (d.dstShift ?? 0);
-  const ty = horizontal ? targetY + (d.dstShift ?? 0) : targetY;
-  const corridor =
-    d.corridor ?? (horizontal ? (sx + tx) / 2 : (sy + ty) / 2);
-  const [path, labelX, labelY] = corridorPath(sx, sy, tx, ty, horizontal, corridor);
+  const sideName = (p: Position) =>
+    p === Position.Left ? "left" : p === Position.Right ? "right" : p === Position.Top ? "top" : "bottom";
+  const fromSide = sideName(sourcePosition);
+  const toSide = sideName(targetPosition);
+  const srcH = fromSide === "left" || fromSide === "right";
+  const dstH = toSide === "left" || toSide === "right";
+  // A shift slides the attachment ALONG the face, so it moves the axis the
+  // face does not point down.
+  const sx = srcH ? sourceX : sourceX + (d.srcShift ?? 0);
+  const sy = srcH ? sourceY + (d.srcShift ?? 0) : sourceY;
+  const tx = dstH ? targetX : targetX + (d.dstShift ?? 0);
+  const ty = dstH ? targetY + (d.dstShift ?? 0) : targetY;
+  const corridor = d.corridor ?? (srcH ? (sx + tx) / 2 : (sy + ty) / 2);
+  const [path, labelX, labelY] = corridorPath(sx, sy, tx, ty, fromSide, toSide, corridor);
   // Label placement is resolved centrally in ArchDiagram (see placeLabels) so
   // labels can be deconflicted against boxes AND against each other; an edge
   // cannot do that alone because it cannot see its neighbours.
@@ -661,8 +666,10 @@ export default function ArchDiagram({
           },
           source: e.from,
           target: e.to,
-          sourceHandle: e.fromSide ?? "bottom",
-          targetHandle: e.toSide ?? "top",
+          // The router may pick a different face than the spec asked for when
+          // the authored one would drive the edge through a box.
+          sourceHandle: lanes[e.id]?.fromSide ?? e.fromSide ?? "bottom",
+          targetHandle: lanes[e.id]?.toSide ?? e.toSide ?? "top",
           label: e.label,
           animated: !!e.animated && !dim,
           // Fat invisible hit area so thin arrows are still tappable.
