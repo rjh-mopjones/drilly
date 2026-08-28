@@ -81,10 +81,23 @@ under the next box, so spacing is a correctness concern rather than taste.
   changes nothing: paint order still puts labels underneath every node. Spacing
   cannot fix this case either, because the collision is with a node the edge
   routes *across* rather than with the gap the label sits in.
-- `LabelledEdge` also nudges a label clear of any box its midpoint lands on
-  (see the `boxes` it receives in edge `data`). Without it the label is readable
-  but sits on top of that node's own title. Label-on-label overlap is the
-  accepted residue; it beats covering a component name.
+- Label positions are resolved centrally by `placeLabels()`, not per edge. An
+  edge cannot deconflict alone because it cannot see its neighbours, and there
+  are three constraints at once: a label must not cover a component box, must
+  not overlap another label, and must stay inside the node bounds that `fitView`
+  frames or the viewport crops it. `placeLabels` computes each label rectangle,
+  then searches outward from the natural midpoint scoring candidates by overlap
+  area, taking the least-bad slot rather than giving up. Measured across all 56
+  diagrams this took label-on-node from 25 to ~1, label-on-label from 72 to ~2
+  and clipped labels from 16 to ~2.
+- The out-of-bounds penalty is a strong preference, NOT absolute. Making it
+  absolute forces labels back onto component boxes, which is worse: 65
+  label-on-node collisions in testing. `fitView` padding is set to 0.4 to cover
+  the modest remaining overhang.
+- Node geometry constants are measured, not guessed: a box with a sub-label
+  renders ~65px tall, a label ~19px, and label width is ~6.3px per character.
+  `nodeH()` and `LABEL_CHAR_W` encode this. Guessing 76px here caused the dodge
+  to mis-fire.
 - Careful with automated collision checks. Geometric overlap no longer implies
   hidden, and `document.elementFromPoint` is useless here because the label divs
   are `pointer-events: none`, so it reports every label as covered. The reliable

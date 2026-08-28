@@ -181,7 +181,8 @@ function LabelledEdge({
     fg?: string;
     bg?: string;
     border?: string;
-    boxes?: { x: number; y: number; w: number; h: number }[];
+    lx?: number;
+    ly?: number;
   };
   const [path, labelX, labelY] = getSmoothStepPath({
     sourceX,
@@ -193,17 +194,11 @@ function LabelledEdge({
     borderRadius: 10,
     offset: d.offset ?? 20,
   });
-  // The midpoint of an edge that routes across a box lands on that box. The
-  // label is drawn above the node layer so it stays readable, but it would sit
-  // on top of the node's own title, so slide it clear of whichever box it hit.
-  let ly = labelY;
-  for (const b of d.boxes ?? []) {
-    if (labelX < b.x || labelX > b.x + b.w || ly < b.y || ly > b.y + b.h) continue;
-    const above = b.y - 12;
-    const below = b.y + b.h + 12;
-    ly = ly - b.y < b.y + b.h - ly ? above : below;
-    break;
-  }
+  // Label placement is resolved centrally in ArchDiagram (see placeLabels) so
+  // labels can be deconflicted against boxes AND against each other; an edge
+  // cannot do that alone because it cannot see its neighbours.
+  const lx = d.lx ?? labelX;
+  const ly = d.ly ?? labelY;
 
   return (
     <>
@@ -213,7 +208,7 @@ function LabelledEdge({
           <div
             style={{
               position: "absolute",
-              transform: `translate(-50%, -50%) translate(${labelX}px, ${ly}px)`,
+              transform: `translate(-50%, -50%) translate(${lx}px, ${ly}px)`,
               padding: "2px 6px",
               borderRadius: 4,
               background: d.bg,
@@ -264,7 +259,31 @@ const MIN_GUTTER = 190; // ~28 chars at 11.5px, the label cap the checker enforc
 const MIN_ROW_GAP = 46; // label height plus its background padding
 const COL_TOLERANCE = 60;
 const ROW_TOLERANCE = 40;
-const DEFAULT_H = 76;
+const DEFAULT_H = 66;   // measured: a box with a sub-label renders ~65px
+const LABEL_H = 19;     // measured
+const LABEL_CHAR_W = 6.9; // measured ~6.3px/char; rounded up for safety
+const LABEL_PAD = 14;   // horizontal padding + border
+
+/** Rendered height of a box: taller when it carries a sub-label. */
+function nodeH(n: DiagramNode): number {
+  return n.h ?? (n.sub ? DEFAULT_H : 46);
+}
+
+/** Where an edge attaches to a box, in flow coordinates. */
+function anchor(n: DiagramNode, side: string): { x: number; y: number } {
+  const w = n.w ?? 240;
+  const h = nodeH(n);
+  switch (side) {
+    case "top":
+      return { x: n.x + w / 2, y: n.y };
+    case "bottom":
+      return { x: n.x + w / 2, y: n.y + h };
+    case "left":
+      return { x: n.x, y: n.y + h / 2 };
+    default:
+      return { x: n.x + w, y: n.y + h / 2 };
+  }
+}
 
 function spaceColumns(d: Diagram): Diagram {
   const boxes = d.nodes.filter((n) => n.kind !== "group");
@@ -377,6 +396,105 @@ function useWidth(ref: React.RefObject<HTMLDivElement | null>): number {
   return w;
 }
 
+
+/**
+ * Decide where every edge label sits, in one place.
+ *
+ * Two collisions matter and neither can be solved by an edge on its own. A
+ * label whose edge routes across a box covers that component's name, and two
+ * labels landing in the same gap cover each other. Both are resolved here by
+ * computing each label's rectangle up front, sliding it clear of any box, then
+ * sliding it clear of labels already placed.
+ */
+function placeLabels(d: Diagram): Record<string, { lx: number; ly: number }> {
+  const byId = new Map(d.nodes.map((n) => [n.id, n]));
+  const boxes = d.nodes
+    .filter((n) => n.kind !== "group")
+    .map((n) => ({ x: n.x, y: n.y, w: n.w ?? 240, h: nodeH(n) }));
+
+  type Placed = { x: number; y: number; w: number; h: number };
+  const placed: Placed[] = [];
+
+  // fitView frames the NODE bounds, so a label pushed outside them gets clipped
+  // by the viewport. Keep every label inside the box the viewport will show.
+  const bounds = {
+    l: Math.min(...boxes.map((b) => b.x)),
+    r: Math.max(...boxes.map((b) => b.x + b.w)),
+    t: Math.min(...boxes.map((b) => b.y)),
+    b: Math.max(...boxes.map((b) => b.y + b.h)),
+  };
+  const out: Record<string, { lx: number; ly: number }> = {};
+
+  // Shorter labels first: they are easier to fit, and moving a long label is
+  // more visually disruptive than moving a short one.
+  const withLabels = d.edges
+    .filter((e) => e.label)
+    .sort((a, b) => (a.label ?? "").length - (b.label ?? "").length);
+
+  for (const e of withLabels) {
+    const s = byId.get(e.from);
+    const tg = byId.get(e.to);
+    if (!s || !tg) continue;
+    const a = anchor(s, e.fromSide ?? "bottom");
+    const b = anchor(tg, e.toSide ?? "top");
+    const [, lx0, ly0] = getSmoothStepPath({
+      sourceX: a.x,
+      sourceY: a.y,
+      targetX: b.x,
+      targetY: b.y,
+      sourcePosition: SIDE[e.fromSide ?? "bottom"],
+      targetPosition: SIDE[e.toSide ?? "top"],
+      borderRadius: 10,
+      offset: e.offset ?? 20,
+    });
+
+    const w = (e.label ?? "").length * LABEL_CHAR_W + LABEL_PAD;
+    // Boxes are inflated a little: a sub-label that wraps to two lines renders
+    // taller than nodeH() predicts, and a near miss reads as a collision.
+    const PAD_X = 5;
+    const PAD_Y = 9;
+    /** Total overlapped area for a candidate position; 0 means free. */
+    const cost = (x: number, y: number) => {
+      const r = { x: x - w / 2, y: y - LABEL_H / 2, w, h: LABEL_H };
+      let c = 0;
+      const acc = (q: Placed, px: number, py: number) => {
+        const ox = Math.min(r.x + r.w, q.x + q.w + px) - Math.max(r.x, q.x - px);
+        const oy = Math.min(r.y + r.h, q.y + q.h + py) - Math.max(r.y, q.y - py);
+        if (ox > 0 && oy > 0) c += ox * oy;
+      };
+      for (const q of boxes) acc(q, PAD_X, PAD_Y);
+      for (const q of placed) acc(q, 0, 0);
+      // Prefer staying inside the framed bounds, but not at the cost of sitting
+      // on a component: fitView is given padding to cover a modest overhang.
+      if (r.x < bounds.l || r.x + r.w > bounds.r || r.y < bounds.t || r.y + r.h > bounds.b)
+        c += 1200;
+      return c;
+    };
+
+    // Search outward from the natural midpoint, vertically first (cheapest
+    // visually) then sideways along the edge. Fall back to the least-bad slot
+    // rather than leaving the label sitting on something.
+    let best = { x: lx0, y: ly0, c: cost(lx0, ly0) };
+    if (best.c > 0) {
+      outer: for (let step = 1; step <= 22; step++) {
+        for (const dy of [-step * 11, step * 11]) {
+          for (const dx of [0, -26, 26, -52, 52]) {
+            const c = cost(lx0 + dx, ly0 + dy);
+            if (c < best.c) best = { x: lx0 + dx, y: ly0 + dy, c };
+            if (c === 0) break outer;
+          }
+        }
+      }
+    }
+    // Last resort: if every candidate was out of bounds, clamp into them.
+    const lx = best.x;
+    const ly = best.y;
+    placed.push({ x: lx - w / 2, y: ly - LABEL_H / 2, w, h: LABEL_H });
+    out[e.id] = { lx, ly };
+  }
+  return out;
+}
+
 export default function ArchDiagram({
   diagram: authored,
   palette,
@@ -435,13 +553,7 @@ export default function ArchDiagram({
     [diagram, palette, sel, lit],
   );
 
-  const boxRects = useMemo(
-    () =>
-      diagram.nodes
-        .filter((n) => n.kind !== "group")
-        .map((n) => ({ x: n.x, y: n.y, w: n.w ?? 240, h: n.h ?? 76 })),
-    [diagram],
-  );
+  const labelPos = useMemo(() => placeLabels(diagram), [diagram]);
 
   const edges: Edge[] = useMemo(
     () =>
@@ -461,7 +573,7 @@ export default function ArchDiagram({
           id: e.id,
           type: "labelled",
           data: {
-            boxes: boxRects,
+            ...labelPos[e.id],
             offset: e.offset ?? 20,
             fg: isSel ? palette.accent : palette.textMuted,
             bg: palette.bg,
@@ -486,7 +598,7 @@ export default function ArchDiagram({
           markerEnd: { type: MarkerType.ArrowClosed, color: stroke, width: 16, height: 16 },
         };
       }),
-    [diagram, palette, sel, lit, boxRects],
+    [diagram, palette, sel, lit, labelPos],
   );
 
   const onNodeClick = useCallback((_e: unknown, n: Node) => {
@@ -522,7 +634,7 @@ export default function ArchDiagram({
         onEdgeClick={onEdgeClick}
         onPaneClick={() => setSel(null)}
         fitView
-        fitViewOptions={{ padding: 0.22 }}
+        fitViewOptions={{ padding: 0.4 }}
         minZoom={0.2}
         maxZoom={2.5}
         proOptions={{ hideAttribution: true }}
