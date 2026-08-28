@@ -1,5 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import type { DeckRecords, Record_ } from "./drill";
+import { loadDeck, saveDeck, type DeckRecords, type Record_ } from "./drill";
 
 /**
  * Sync Drill progress under a memorable word.
@@ -96,4 +96,52 @@ export function mergeRecords(mine: DeckRecords, theirs: DeckRecords): DeckRecord
     if (!t || v.at >= t.at) out[k] = v;
   }
   return out;
+}
+
+/**
+ * Deck ids held locally, read from storage rather than the manifest so a deck
+ * whose source has since been renamed or dropped still syncs instead of being
+ * silently left behind. One getAllKeys on an explicit refresh is fine; the
+ * per-card-key version this avoids is what would make it expensive.
+ */
+async function localDeckIds(): Promise<string[]> {
+  const keys = await AsyncStorage.getAllKeys();
+  return keys
+    .filter((k) => k.startsWith("drill:") && k !== WORD_KEY && k !== SYNCED_KEY)
+    .map((k) => k.slice("drill:".length));
+}
+
+/**
+ * Two-way sync: pull, merge per card, then write the merged result to BOTH
+ * sides. This is what the refresh button runs.
+ *
+ * It is deliberately not a bare push. Push alone is last-write-wins per
+ * *device*: grade on the laptop, then refresh on the phone, and the phone's
+ * copy — which never saw those cards — would overwrite every one of them.
+ * Merging first means the two converge, which is the whole point of the
+ * timestamp already stored on each label.
+ *
+ * Returns null when no word is set. Drill is ephemeral by default and must not
+ * touch the network in that state.
+ */
+export async function syncAll(): Promise<{ cards: number } | null> {
+  const word = await getWord();
+  if (!word) return null;
+
+  const remote = await lookup(word);
+  const theirs = explode((remote.data ?? {}) as Record<string, Record_>);
+
+  const ids = new Set([...(await localDeckIds()), ...Object.keys(theirs)]);
+  const merged: Record<string, DeckRecords> = {};
+  let cards = 0;
+  for (const id of ids) {
+    const next = mergeRecords(await loadDeck(id), theirs[id] ?? {});
+    const n = Object.keys(next).length;
+    if (!n) continue;
+    merged[id] = next;
+    cards += n;
+    await saveDeck(id, next);
+  }
+  await push(word, merged);
+  return { cards };
 }

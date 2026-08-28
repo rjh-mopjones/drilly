@@ -20,7 +20,7 @@
  * CACHE_VERSION — the old cache is deleted on activate.
  */
 
-const CACHE_VERSION = "v30";
+const CACHE_VERSION = "v31";
 const CACHE = `drilly-${CACHE_VERSION}`;
 
 const MERMAID_CDN =
@@ -127,6 +127,16 @@ self.addEventListener("fetch", (event) => {
   if (req.method !== "GET") return;
 
   const url = new URL(req.url);
+
+  // The API is never cached. It is same-origin and has no file extension, so
+  // without this it falls through to cacheFirst below: a device's first sync
+  // lookup gets stored, and every later sync on that device re-reads its own
+  // stale answer instead of the network — so it silently pulls nothing and the
+  // two devices never converge. Offline, letting this reject is correct; the
+  // caller treats a failed sync as a failed sync.
+  if (url.origin === self.location.origin && url.pathname.startsWith("/api/")) {
+    return;
+  }
 
   // SPA navigations → network-first, cached shell offline. But a real
   // standalone HTML file (e.g. the printable cheat sheet) must serve ITSELF,

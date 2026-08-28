@@ -16,6 +16,7 @@ import {
   setLastFullRefresh,
   setLastRefreshed,
 } from "../lib/storage";
+import { syncAll } from "../lib/drillSync";
 import { useTheme, type Palette } from "../lib/theme";
 
 /**
@@ -23,10 +24,15 @@ import { useTheme, type Palette } from "../lib/theme";
  * in parallel. Shows a "Updated {relative}" label below the spinning icon
  * so the user can see at a glance when the library last reloaded.
  *
+ * Also runs a two-way Drill sync when a sync word is set, so "refresh" means
+ * everything the library holds, not just its markdown. No-op when Drill is
+ * ephemeral.
+ *
  * Each per-source `refreshSource` is wrapped in `.catch(() => {})` so a
  * single failing source (e.g. a 404 on a stale manifest entry) doesn't
  * abort the others. The final timestamp is only written once the whole
- * sweep settles.
+ * sweep settles. The sync is the one failure NOT swallowed silently: a user
+ * who believes their progress is backed up when it is not has been misled.
  */
 export function RefreshAllButton() {
   const palette = useTheme();
@@ -34,6 +40,7 @@ export function RefreshAllButton() {
   const { sources, refresh: refreshManifest } = useManifest();
   const [busy, setBusy] = useState(false);
   const [label, setLabel] = useState<string | null>(null);
+  const [syncFailed, setSyncFailed] = useState(false);
   const spin = useRef(new Animated.Value(0)).current;
   const loopRef = useRef<Animated.CompositeAnimation | null>(null);
 
@@ -68,12 +75,17 @@ export function RefreshAllButton() {
     );
     loopRef.current.start();
 
+    let syncOk = true;
     try {
       await Promise.all([
         refreshManifest().catch(() => {}),
         ...sources.map((s) => refreshSource(s).catch(() => {})),
         warmExternalCaches(),
+        syncAll().catch(() => {
+          syncOk = false;
+        }),
       ]);
+      setSyncFailed(!syncOk);
       const now = Date.now();
       await setLastFullRefresh(now);
       // Bring per-source labels in sync so the SourceCards' "updated Xh ago"
@@ -99,7 +111,7 @@ export function RefreshAllButton() {
       onPress={onPress}
       disabled={busy}
       style={({ pressed }) => [styles.wrapper, pressed && styles.pressed]}
-      accessibilityLabel="Refresh all sources"
+      accessibilityLabel="Refresh all sources and sync Drill progress"
       accessibilityHint={
         label
           ? `Library was last refreshed ${label}. Tap to refresh now.`
@@ -111,7 +123,13 @@ export function RefreshAllButton() {
       </Animated.Text>
       <View style={styles.labelWrap}>
         <Text style={styles.label} numberOfLines={1}>
-          {busy ? "Refreshing…" : label ? `Updated ${label}` : "Never refreshed"}
+          {busy
+            ? "Refreshing…"
+            : syncFailed
+              ? "Sync failed"
+              : label
+                ? `Updated ${label}`
+                : "Never refreshed"}
         </Text>
       </View>
     </Pressable>

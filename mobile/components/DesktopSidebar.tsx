@@ -18,6 +18,7 @@ import {
 } from "../lib/storage";
 import type { SourceConfig } from "../lib/parser";
 import { invalidateSourceItemsCache, useSourceItems } from "../lib/useSourceItems";
+import { syncAll } from "../lib/drillSync";
 import { useTheme, type Palette } from "../lib/theme";
 
 const SIDEBAR_WIDTH = 300;
@@ -71,6 +72,7 @@ export function DesktopSidebar() {
   const pathname = usePathname();
   const [busy, setBusy] = useState(false);
   const [refreshedLabel, setRefreshedLabel] = useState<string | null>(null);
+  const [syncFailed, setSyncFailed] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   /**
    * Collapsed category names. Every category starts collapsed on first load
@@ -162,12 +164,19 @@ export function DesktopSidebar() {
   const onRefresh = useCallback(async () => {
     if (busy) return;
     setBusy(true);
+    let syncOk = true;
     try {
       await Promise.all([
         refresh().catch(() => {}),
         ...sources.map((s) => refreshSource(s).catch(() => {})),
         warmExternalCaches(),
+        // Refresh means everything the library holds, Drill progress included.
+        // No-op when no sync word is set.
+        syncAll().catch(() => {
+          syncOk = false;
+        }),
       ]);
+      setSyncFailed(!syncOk);
       invalidateSourceItemsCache(); // re-parse on next expand
       const now = Date.now();
       await setLastFullRefresh(now);
@@ -189,7 +198,11 @@ export function DesktopSidebar() {
           <Text style={styles.brand}>DRILLY</Text>
           <Text style={styles.brandSub}>
             {sources.length} {sources.length === 1 ? "source" : "sources"}
-            {refreshedLabel ? ` · Updated ${refreshedLabel}` : ""}
+            {syncFailed
+              ? " · Sync failed"
+              : refreshedLabel
+                ? ` · Updated ${refreshedLabel}`
+                : ""}
           </Text>
         </Pressable>
         <View style={styles.headerActions}>
@@ -204,7 +217,7 @@ export function DesktopSidebar() {
             onPress={onRefresh}
             disabled={busy}
             style={styles.iconButton}
-            accessibilityLabel="Refresh all sources"
+            accessibilityLabel="Refresh all sources and sync Drill progress"
           >
             {busy ? (
               <ActivityIndicator color={palette.textMuted} size="small" />
