@@ -9,7 +9,6 @@ import {
   Handle,
   Position,
   MarkerType,
-  getSmoothStepPath,
   type Edge,
   type EdgeProps,
   type Node,
@@ -26,18 +25,13 @@ import type {
 } from "../lib/diagrams";
 import { isFrame } from "../lib/diagrams";
 import {
-  DEFAULT_H,
-  LABEL_CHAR_W,
-  LABEL_H,
-  MIN_GUTTER,
-  MIN_ROW_GAP,
-  anchor,
-  assignLanes,
-  corridorPath,
-  nodeH,
-  placeLabels,
-  spaceColumns,
-  type Lane,
+  layoutDiagram,
+  routePath,
+  tierOf,
+  type Layout,
+  type PipelineStage,
+  type Point,
+  type Rect,
 } from "../lib/diagrams/layout";
 import { MONO_FONT, UI_FONT, type Palette } from "../lib/theme";
 
@@ -46,8 +40,15 @@ import { MONO_FONT, UI_FONT, type Palette } from "../lib/theme";
  * over the web build, so this renders on every surface; ArchDiagram.tsx is a
  * compile-time stub for the native bundle.
  *
- * Everything is clickable: boxes, the grouping zone, and every arrow. The
- * picture is the index; the panel is the content.
+ * Everything on the canvas comes from layoutDiagram() in lib/diagrams/layout:
+ * which boxes are drawn (groups collapse), where they sit (grid cells), the
+ * exact polyline of every arrow, and where hot-path labels go. This component
+ * only paints and handles clicks. The gate uses the same function, so what
+ * it measures is what you see.
+ *
+ * Reading hierarchy: hot edges are bold, accent and always labelled; data and
+ * control edges are thin and unlabelled until you hover them or select one of
+ * their endpoints. The picture is the index; the panel is the content.
  */
 
 const SIDE: Record<string, Position> = {
@@ -62,26 +63,14 @@ type Selection =
   | { kind: "edge"; id: string }
   | { kind: "overview" };
 
-/**
- * What each kind looks like. A kind is a claim about what the thing IS, so it
- * drives three signals at once: the hue, a motif drawn inside the box, and the
- * type tag in the top-right corner. Together they let a reader tell a queue
- * from a database without reading a word.
- *
- * `hue` is a function of the palette so the same table serves light and dark.
- */
+/** What each kind looks like: hue, motif inside the box, and the type tag. */
 type KindStyle = {
   tag: string;
   hue: (p: Palette) => string;
-  /** Cylinder rim across the top: stores. */
   rim?: boolean;
-  /** Dashed strokes: you are allowed to lose it, or you do not own it. */
   dashed?: boolean;
-  /** Motif drawn against the leading edge, and the padding it needs. */
   motif?: "bars" | "layers" | "chevron";
-  /** Fully rounded: the only pill in the language. */
   pill?: boolean;
-  /** A stage inside a service, drawn lighter and with no fill of its own. */
   faint?: boolean;
 };
 
@@ -95,17 +84,10 @@ const KIND: Record<NodeKind, KindStyle> = {
   gateway: { tag: "GATEWAY", hue: (p) => (p.scheme === "dark" ? "#5eead4" : "#0f766e"), motif: "chevron" },
   client: { tag: "CLIENT", hue: (p) => (p.scheme === "dark" ? "#94a3b8" : "#475569"), pill: true },
   external: { tag: "EXTERNAL", hue: (p) => (p.scheme === "dark" ? "#fda4af" : "#be123c"), dashed: true },
-  // Frames render through their own components; these entries exist so the
-  // record is total and a missing kind is a type error rather than a crash.
   serviceGroup: { tag: "SERVICE", hue: (p) => p.accent },
   zone: { tag: "", hue: (p) => p.border },
 };
 
-function kindColor(kind: NodeKind, p: Palette): string {
-  return KIND[kind].hue(p);
-}
-
-/** Tint used for a box fill; stronger in dark, where a 7% wash vanishes. */
 function tint(p: Palette): string {
   return p.scheme === "dark" ? "24" : "12";
 }
@@ -118,7 +100,7 @@ function Rim({ color, dashed }: { color: string; dashed?: boolean }) {
       height="12"
       viewBox="0 0 100 12"
       preserveAspectRatio="none"
-      style={{ position: "absolute", left: 0, top: 3, pointerEvents: "none" }}
+      style={{ position: "absolute", left: 0, top: 2, pointerEvents: "none" }}
       aria-hidden
     >
       <path
@@ -133,41 +115,20 @@ function Rim({ color, dashed }: { color: string; dashed?: boolean }) {
   );
 }
 
-/** Leading-edge motif. Queue = messages in line, blob = stacked layers. */
 function Motif({ kind, color }: { kind: "bars" | "layers" | "chevron"; color: string }) {
-  const base: React.CSSProperties = {
-    position: "absolute",
-    left: 13,
-    pointerEvents: "none",
-  };
+  const base: React.CSSProperties = { position: "absolute", left: 11, pointerEvents: "none" };
   if (kind === "chevron") {
     return (
-      <svg width="15" height="20" viewBox="0 0 15 20" style={{ ...base, bottom: 13 }} aria-hidden>
-        <path d="M1 1 L13 10 L1 19" fill="none" stroke={color} strokeWidth={1.4} />
+      <svg width="12" height="22" viewBox="0 0 12 22" style={{ ...base, top: 20 }} aria-hidden>
+        <path d="M1 1 L11 11 L1 21" fill="none" stroke={color} strokeWidth={1.4} />
       </svg>
     );
   }
   const bars = kind === "bars";
   return (
-    <div
-      style={{
-        ...base,
-        bottom: 12,
-        display: "flex",
-        flexDirection: bars ? "row" : "column",
-        gap: 3.5,
-      }}
-      aria-hidden
-    >
+    <div style={{ ...base, top: 20, display: "flex", flexDirection: bars ? "row" : "column", gap: 3.5 }} aria-hidden>
       {[0, 1, 2].map((i) => (
-        <div
-          key={i}
-          style={{
-            width: bars ? 1.4 : 17,
-            height: bars ? 24 : 1.4,
-            background: color,
-          }}
-        />
+        <div key={i} style={{ width: bars ? 1.4 : 15, height: bars ? 22 : 1.4, background: color }} />
       ))}
     </div>
   );
@@ -175,87 +136,97 @@ function Motif({ kind, color }: { kind: "bars" | "layers" | "chevron"; color: st
 
 type NodeData = {
   node: DiagramNode;
+  rect: Rect;
   palette: Palette;
   selected: boolean;
   dimmed: boolean;
+  stages?: number;
 };
 
-function BoxNode({ data }: NodeProps) {
-  const { node, palette: p, selected, dimmed } = data as unknown as NodeData;
-  const k = KIND[node.kind];
-  const color = k.hue(p);
+function Handles() {
   const handles = ["top", "right", "bottom", "left"] as const;
-  // A left-edge motif needs the text moved out of its way; nothing else does.
-  const textPad = k.motif === "chevron" ? 20 : k.motif ? 24 : 0;
+  return (
+    <>
+      {handles.map((h) => (
+        <Handle key={`t-${h}`} type="target" id={h} position={SIDE[h]} style={{ opacity: 0, pointerEvents: "none" }} />
+      ))}
+      {handles.map((h) => (
+        <Handle key={`s-${h}`} type="source" id={h} position={SIDE[h]} style={{ opacity: 0, pointerEvents: "none" }} />
+      ))}
+    </>
+  );
+}
+
+function BoxNode({ data }: NodeProps) {
+  const { node, rect, palette: p, selected, dimmed, stages } = data as unknown as NodeData;
+  const k = KIND[node.kind === "serviceGroup" ? "service" : node.kind];
+  const color = k.hue(p);
+  const textPad = k.motif === "chevron" ? 16 : k.motif ? 20 : 0;
+  const tag = stages ? `${stages} STAGES · ${k.tag}` : k.tag;
 
   return (
     <div
       style={{
         position: "relative",
-        width: node.w ?? 240,
+        width: rect.w,
+        height: rect.h,
         boxSizing: "border-box",
-        padding: "9px 14px 12px",
-        borderRadius: k.pill ? 999 : 10,
-        border: `${k.faint ? 1.2 : 1.5}px ${k.dashed ? "dashed" : "solid"} ${
-          selected ? p.accent : color
-        }`,
-        background: selected
-          ? p.surfacePressed
-          : k.faint
-            ? "transparent"
-            : `${color}${tint(p)}`,
-        opacity: dimmed ? 0.32 : k.faint ? 0.88 : 1,
+        padding: "18px 11px 0",
+        borderRadius: k.pill ? 999 : 9,
+        border: `${k.faint ? 1.1 : 1.4}px ${k.dashed ? "dashed" : "solid"} ${selected ? p.accent : color}`,
+        background: selected ? p.surfacePressed : k.faint ? "transparent" : `${color}${tint(p)}`,
+        opacity: dimmed ? 0.32 : 1,
         transition: "opacity 140ms ease, border-color 140ms ease, background 140ms ease",
         cursor: "pointer",
         fontFamily: UI_FONT,
         boxShadow: selected ? `0 0 0 3px ${p.accent}33` : "none",
+        overflow: "hidden",
       }}
     >
-      {handles.map((h) => (
-        <Handle
-          key={`t-${h}`}
-          type="target"
-          id={h}
-          position={SIDE[h]}
-          style={{ opacity: 0, pointerEvents: "none" }}
-        />
-      ))}
-      {handles.map((h) => (
-        <Handle
-          key={`s-${h}`}
-          type="source"
-          id={h}
-          position={SIDE[h]}
-          style={{ opacity: 0, pointerEvents: "none" }}
-        />
-      ))}
-
+      <Handles />
       {k.rim ? <Rim color={color} dashed={k.dashed} /> : null}
       {k.motif ? <Motif kind={k.motif} color={color} /> : null}
-
-      {/* Type tag: its own row, so a rim or a long label never collides with it. */}
       <div
         style={{
-          height: 12,
-          marginBottom: 5,
-          textAlign: "right",
+          position: "absolute",
+          top: 5,
+          right: 9,
           fontFamily: MONO_FONT,
-          fontSize: 8.5,
+          fontSize: 8,
           letterSpacing: "0.1em",
-          lineHeight: "12px",
+          lineHeight: "10px",
           color,
-          opacity: k.faint ? 0.75 : 1,
+          opacity: k.faint ? 0.8 : 1,
         }}
       >
-        {k.tag}
+        {tag}
       </div>
-
-      <div style={{ paddingLeft: textPad }}>
-        <div style={{ color: p.textStrong, fontSize: 14.5, fontWeight: 600, lineHeight: 1.25 }}>
+      <div style={{ paddingLeft: textPad + (k.pill ? 6 : 0) }}>
+        <div
+          style={{
+            color: p.textStrong,
+            fontSize: 15,
+            fontWeight: 600,
+            lineHeight: "18px",
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+          }}
+        >
           {node.label}
         </div>
         {node.sub ? (
-          <div style={{ color: p.textMuted, fontSize: 12, marginTop: 3, lineHeight: 1.3 }}>
+          <div
+            style={{
+              color: p.textMuted,
+              fontSize: 12,
+              marginTop: 1,
+              lineHeight: "15px",
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            }}
+          >
             {node.sub}
           </div>
         ) : null}
@@ -264,39 +235,32 @@ function BoxNode({ data }: NodeProps) {
   );
 }
 
-/**
- * A service that is made of several processes. Unlike a zone this is a claim
- * about deployment: one thing you ship, several stages inside it. It is what
- * stops four stages of one request path being drawn as four peer services.
- */
+/** An expanded service: one deployable made of several stages. */
 function ServiceGroupNode({ data }: NodeProps) {
-  const { node, palette: p, selected, dimmed } = data as unknown as NodeData;
-  const color = selected ? p.accent : p.accent;
+  const { node, rect, palette: p, selected, dimmed } = data as unknown as NodeData;
   return (
     <div
       style={{
-        width: node.w ?? 300,
-        height: node.h ?? 300,
+        width: rect.w,
+        height: rect.h,
         boxSizing: "border-box",
-        border: `1.5px solid ${color}`,
-        borderRadius: 14,
-        background: `${p.accent}${p.scheme === "dark" ? "14" : "0a"}`,
+        border: `1.4px solid ${p.accent}`,
+        borderRadius: 12,
+        background: `${p.accent}${p.scheme === "dark" ? "12" : "08"}`,
         opacity: dimmed ? 0.4 : 1,
-        // Click-through body so the processes inside stay reachable; the header
-        // strip is what selects the service itself.
         pointerEvents: "none",
         fontFamily: UI_FONT,
         transition: "opacity 140ms ease, border-color 140ms ease",
       }}
     >
+      <Handles />
       <div
         style={{
           display: "flex",
           alignItems: "baseline",
           justifyContent: "space-between",
           gap: 12,
-          padding: "9px 14px 8px",
-          borderBottom: `1px solid ${p.accent}44`,
+          padding: "8px 14px 6px",
           cursor: "pointer",
           pointerEvents: "all",
         }}
@@ -308,33 +272,29 @@ function ServiceGroupNode({ data }: NodeProps) {
             fontWeight: 700,
             letterSpacing: "0.09em",
             color: selected ? p.accent : p.textStrong,
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
           }}
         >
           {node.label.toUpperCase()}
         </span>
-        <span
-          style={{
-            fontFamily: MONO_FONT,
-            fontSize: 8.5,
-            letterSpacing: "0.1em",
-            color: p.accent,
-          }}
-        >
-          SERVICE
+        <span style={{ fontFamily: MONO_FONT, fontSize: 8, letterSpacing: "0.1em", color: p.accent }}>
+          {node.sub ? node.sub.toUpperCase() : "SERVICE"}
         </span>
       </div>
     </div>
   );
 }
 
-/** Grouping box. Clickable via its label chip; the body stays click-through. */
+/** A boundary. Clickable via its label; the body stays click-through. */
 function ZoneNode({ data }: NodeProps) {
-  const { node, palette: p, selected, dimmed } = data as unknown as NodeData;
+  const { node, rect, palette: p, selected, dimmed } = data as unknown as NodeData;
   return (
     <div
       style={{
-        width: node.w ?? 300,
-        height: node.h ?? 300,
+        width: rect.w,
+        height: rect.h,
         boxSizing: "border-box",
         border: `1.2px dashed ${selected ? p.accent : p.border}`,
         borderRadius: 12,
@@ -345,11 +305,12 @@ function ZoneNode({ data }: NodeProps) {
         transition: "opacity 140ms ease, border-color 140ms ease",
       }}
     >
+      <Handles />
       <span
         style={{
           display: "inline-block",
-          margin: "-11px 0 0 14px",
-          padding: "3px 9px",
+          margin: "8px 0 0 12px",
+          padding: "2px 8px",
           borderRadius: 999,
           border: `1px solid ${selected ? p.accent : p.border}`,
           background: p.surface,
@@ -366,90 +327,62 @@ function ZoneNode({ data }: NodeProps) {
   );
 }
 
-/**
- * Edge whose label is portalled into React Flow's label layer, which sits
- * ABOVE the node layer. The default label lives in the edge SVG underneath the
- * nodes, so any edge routing across a box loses its label entirely: the text is
- * drawn, just hidden. Spacing alone cannot fix that, because the collision is
- * with a node the edge passes over rather than with the gap it sits in.
- */
-function LabelledEdge({
-  id,
-  sourceX,
-  sourceY,
-  targetX,
-  targetY,
-  sourcePosition,
-  targetPosition,
-  style,
-  markerEnd,
-  label,
-  data,
-}: EdgeProps) {
-  const d = (data ?? {}) as {
-    offset?: number;
-    fg?: string;
-    bg?: string;
-    border?: string;
-    lx?: number;
-    ly?: number;
-    pick?: () => void;
-    corridor?: number;
-    srcShift?: number;
-    dstShift?: number;
-  };
-  // Routed here rather than by getSmoothStepPath, which places its
-  // perpendicular run at the midpoint between the two nodes and ignores its
-  // own `offset` argument for a normal left-to-right pair — so every edge
-  // crossing the same gap turned at the same coordinate and they stacked.
-  const sideName = (p: Position) =>
-    p === Position.Left ? "left" : p === Position.Right ? "right" : p === Position.Top ? "top" : "bottom";
-  const fromSide = sideName(sourcePosition);
-  const toSide = sideName(targetPosition);
-  const srcH = fromSide === "left" || fromSide === "right";
-  const dstH = toSide === "left" || toSide === "right";
-  // A shift slides the attachment ALONG the face, so it moves the axis the
-  // face does not point down.
-  const sx = srcH ? sourceX : sourceX + (d.srcShift ?? 0);
-  const sy = srcH ? sourceY + (d.srcShift ?? 0) : sourceY;
-  const tx = dstH ? targetX : targetX + (d.dstShift ?? 0);
-  const ty = dstH ? targetY + (d.dstShift ?? 0) : targetY;
-  const corridor = d.corridor ?? (srcH ? (sx + tx) / 2 : (sy + ty) / 2);
-  const [path, labelX, labelY] = corridorPath(sx, sy, tx, ty, fromSide, toSide, corridor);
-  // Label placement is resolved centrally in ArchDiagram (see placeLabels) so
-  // labels can be deconflicted against boxes AND against each other; an edge
-  // cannot do that alone because it cannot see its neighbours.
-  const lx = d.lx ?? labelX;
-  const ly = d.ly ?? labelY;
+type EdgeData = {
+  points: Point[];
+  label?: string;
+  showLabel: boolean;
+  lx?: number;
+  ly?: number;
+  fg: string;
+  bg: string;
+  border: string;
+  bold: boolean;
+};
 
+/** Where a label goes when the layout did not place one (hover labels). */
+function longestRunMid(points: Point[]): Point {
+  let best = { len: -1, p: points[0] ?? [0, 0] };
+  for (let i = 0; i < points.length - 1; i++) {
+    const [x1, y1] = points[i];
+    const [x2, y2] = points[i + 1];
+    const len = Math.hypot(x2 - x1, y2 - y1);
+    if (len > best.len) best = { len, p: [(x1 + x2) / 2, (y1 + y2) / 2] };
+  }
+  return best.p;
+}
+
+/**
+ * Edge drawn from the layout's polyline. The label is portalled into React
+ * Flow's label layer, which LABEL_LAYER_CSS lifts above the nodes.
+ */
+function RoutedEdge({ id, style, markerEnd, data }: EdgeProps) {
+  const d = data as unknown as EdgeData;
+  const path = useMemo(() => routePath(d.points), [d.points]);
+  const [lx, ly] = d.lx != null && d.ly != null ? [d.lx, d.ly] : longestRunMid(d.points);
   return (
     <>
-      {/*
-        interactionWidth 0 on purpose. A 26px invisible path per edge means the
-        edge drawn last wins any overlap, regardless of which line the pointer
-        was nearest, and edges that pass under a box are unreachable entirely.
-        Dropping it lets the click fall through to the pane, where
-        nearestEdgeId() picks by distance instead of by paint order.
-      */}
+      {/* interactionWidth 0 on purpose: clicks resolve by distance in nearestEdgeId(). */}
       <BaseEdge id={id} path={path} style={style} markerEnd={markerEnd} interactionWidth={0} />
-      {label ? (
+      {d.label && d.showLabel ? (
         <EdgeLabelRenderer>
           <div
             style={{
               position: "absolute",
               transform: `translate(-50%, -50%) translate(${lx}px, ${ly}px)`,
-              padding: "2px 6px",
+              padding: "1px 6px",
               borderRadius: 4,
               background: d.bg,
               border: `1px solid ${d.border}`,
               color: d.fg,
               fontFamily: UI_FONT,
               fontSize: 11.5,
+              lineHeight: "15px",
+              fontWeight: d.bold ? 600 : 400,
               whiteSpace: "nowrap",
               pointerEvents: "none",
             }}
           >
-            {label}
+            {d.label}
           </div>
         </EdgeLabelRenderer>
       ) : null}
@@ -458,77 +391,41 @@ function LabelledEdge({
 }
 
 const NODE_TYPES = { box: BoxNode, zone: ZoneNode, serviceGroup: ServiceGroupNode };
-const EDGE_TYPES = { labelled: LabelledEdge };
+const EDGE_TYPES = { routed: RoutedEdge };
 
 /**
- * React Flow emits .react-flow__edgelabel-renderer BEFORE .react-flow__nodes in
- * the DOM and leaves both at `z-index: auto`, so paint order alone puts edge
- * labels underneath every node. Lift the label layer so a label on an edge that
- * routes across a box stays readable.
+ * React Flow emits .react-flow__edgelabel-renderer BEFORE .react-flow__nodes and
+ * leaves both at z-index auto, so labels paint under nodes unless lifted.
+ *
+ * Frames must be click-through, and React Flow's own .react-flow__node wrapper
+ * keeps pointer events regardless of the component's style; the !important is
+ * load-bearing. The title strip / chip re-enables them so a frame stays
+ * selectable.
  */
 const LABEL_LAYER_CSS = [
   ".react-flow__edgelabel-renderer { z-index: 6; }",
-  // Frames must be click-through, and setting pointerEvents on the component's
-  // own div is NOT enough: React Flow wraps every custom node in its own
-  // .react-flow__node element, and that wrapper keeps pointer events. A frame
-  // spans a large area, so the wrapper silently swallows every click aimed at a
-  // box or an arrow inside it. Measured on web-crawler, whose two service frames
-  // and one zone made 13 of its 22 arrows unclickable while none of them were
-  // actually drawn underneath anything.
-  //
-  // The header strip and the zone chip re-enable pointer events on themselves,
-  // so a frame is still selectable by its own title.
-  // !important is required: React Flow ships `.react-flow__node { pointer-events:
-  // all }` at the same specificity and its stylesheet wins on order.
   ".react-flow__node-zone, .react-flow__node-serviceGroup { pointer-events: none !important; }",
-  // ...but the title still has to be clickable, so the frame stays selectable.
   ".react-flow__node-zone > div > span, .react-flow__node-serviceGroup > div > div { pointer-events: all !important; }",
 ].join("\n");
 
 /**
- * Re-space the authored grid so edge labels have room.
- *
- * Specs are authored on a loose grid and the horizontal gutter between columns
- * is routinely too small for the label sitting on the arrow between them. Edge
- * labels render in the SVG layer BELOW nodes, so an oversized label does not
- * push anything aside, it just disappears under the next box. Rather than
- * police that per spec, widen every gutter to a fixed minimum here: columns
- * keep their order and their contents, only the spacing changes.
- *
- * Group zones are repositioned to keep enclosing whatever they enclosed before.
- */
-// MINIMUMS, not fixed spacing. Forcing a fixed gutter blows up diagrams that
-// already had several columns: the graph gets so wide that fitView shrinks the
-// text to nothing. Authored spacing is kept wherever it is already generous
-// enough for the label that sits in the gap.
-/**
- * Which edge did that click mean?
- *
- * Fat invisible hit paths do not work here. Stacked in one layer they overlap,
- * and the one drawn last wins regardless of which line the pointer was actually
- * nearest — measured on the notification system, that left 4 of 18 edges
- * unselectable anywhere along their length. Distance is unambiguous where
- * stacking is not: sample every rendered path and take the closest one.
- *
- * Runs only on a pane click (a click that hit no node), so boxes still win where
- * a box is genuinely under the pointer.
+ * Which edge did that click mean? Sample every rendered path and take the
+ * closest within HIT_RADIUS_PX. Fat invisible hit paths resolve by paint
+ * order, not proximity, which left edges under a neighbour unselectable.
  */
 const HIT_RADIUS_PX = 16;
 
 function nearestEdgeId(root: HTMLElement, cx: number, cy: number): string | null {
   let best: string | null = null;
   let bestD2 = HIT_RADIUS_PX * HIT_RADIUS_PX;
-
-  for (const el of root.querySelectorAll<SVGPathElement>(".react-flow__edge-path")) {
+  for (const el of Array.from(root.querySelectorAll<SVGPathElement>(".react-flow__edge-path"))) {
     const id = el.closest(".react-flow__edge")?.getAttribute("data-id");
     if (!id) continue;
     const ctm = el.getScreenCTM();
     const svg = el.ownerSVGElement;
     if (!ctm || !svg) continue;
-
     const len = el.getTotalLength();
     if (!len) continue;
-    // ~6px along the path is fine: we only need to beat HIT_RADIUS_PX.
     const steps = Math.min(400, Math.max(12, Math.ceil(len / 6)));
     const pt = svg.createSVGPoint();
     for (let i = 0; i <= steps; i++) {
@@ -548,8 +445,6 @@ function nearestEdgeId(root: HTMLElement, cx: number, cy: number): string | null
   return best;
 }
 
-
-/** Width of a DOM node, tracked so the detail panel can reflow. */
 function useWidth(ref: React.RefObject<HTMLDivElement | null>): number {
   const [w, setW] = useState(0);
   useEffect(() => {
@@ -563,16 +458,6 @@ function useWidth(ref: React.RefObject<HTMLDivElement | null>): number {
   return w;
 }
 
-
-/**
- * Decide where every edge label sits, in one place.
- *
- * Two collisions matter and neither can be solved by an edge on its own. A
- * label whose edge routes across a box covers that component's name, and two
- * labels landing in the same gap cover each other. Both are resolved here by
- * computing each label's rectangle up front, sliding it clear of any box, then
- * sliding it clear of labels already placed.
- */
 export default function ArchDiagram({
   diagram: authored,
   palette,
@@ -580,8 +465,10 @@ export default function ArchDiagram({
   diagram: Diagram;
   palette: Palette;
 }) {
-  const diagram = useMemo(() => spaceColumns(authored), [authored]);
+  const layout: Layout = useMemo(() => layoutDiagram(authored), [authored]);
+  const diagram = layout.diagram;
   const [sel, setSel] = useState<Selection | null>(null);
+  const [hover, setHover] = useState<string | null>(null);
 
   const selNode = useMemo(
     () => (sel?.kind === "node" ? (diagram.nodes.find((n) => n.id === sel.id) ?? null) : null),
@@ -614,102 +501,104 @@ export default function ArchDiagram({
 
   const nodes: Node[] = useMemo(
     () =>
-      diagram.nodes.map((n) => ({
-        id: n.id,
-        type:
-          n.kind === "zone" ? "zone" : n.kind === "serviceGroup" ? "serviceGroup" : "box",
-        position: { x: n.x, y: n.y },
-        draggable: false,
-        selectable: true,
-        zIndex: isFrame(n.kind) ? 0 : 1,
-        data: {
-          node: n,
-          palette,
-          selected: sel?.kind === "node" && sel.id === n.id,
-          dimmed: !!lit && !lit.has(n.id),
-        },
-      })),
-    [diagram, palette, sel, lit],
+      diagram.nodes
+        .filter((n) => layout.rects[n.id])
+        .map((n) => {
+          const collapsed = layout.collapsed.has(n.id);
+          const frame = isFrame(n.kind) && !collapsed;
+          return {
+            id: n.id,
+            type: frame ? (n.kind === "zone" ? "zone" : "serviceGroup") : "box",
+            position: { x: layout.rects[n.id].x, y: layout.rects[n.id].y },
+            draggable: false,
+            selectable: true,
+            zIndex: frame ? 0 : 1,
+            data: {
+              node: n,
+              rect: layout.rects[n.id],
+              palette,
+              selected: sel?.kind === "node" && sel.id === n.id,
+              dimmed: !!lit && !lit.has(n.id),
+              stages: collapsed ? layout.pipelines[n.id]?.length : undefined,
+            } satisfies NodeData,
+          };
+        }),
+    [diagram, layout, palette, sel, lit],
   );
 
   const selectEdge = useCallback((id: string) => {
     setSel((cur) => (cur?.kind === "edge" && cur.id === id ? null : { kind: "edge", id }));
   }, []);
 
-  const labelPos = useMemo(() => placeLabels(diagram), [diagram]);
-  const lanes = useMemo(() => assignLanes(diagram), [diagram]);
-
   const edges: Edge[] = useMemo(
     () =>
-      diagram.edges.map((e) => {
-        const isSel = sel?.kind === "edge" && sel.id === e.id;
-        const dim = !!lit && !isSel && !(lit.has(e.from) && lit.has(e.to));
-        const stroke = isSel
-          ? palette.accent
-          : dim
-            ? palette.border
-            : e.animated
-              ? palette.accent
-              : e.dashed
-                ? palette.textMuted
-                : palette.text;
-        return {
-          id: e.id,
-          type: "labelled",
-          data: {
-            ...labelPos[e.id],
-            pick: () => selectEdge(e.id),
-            ...lanes[e.id],
-            fg: isSel ? palette.accent : palette.textMuted,
-            bg: palette.bg,
-            border: palette.border,
-          },
-          source: e.from,
-          target: e.to,
-          // The router may pick a different face than the spec asked for when
-          // the authored one would drive the edge through a box.
-          sourceHandle: lanes[e.id]?.fromSide ?? e.fromSide ?? "bottom",
-          targetHandle: lanes[e.id]?.toSide ?? e.toSide ?? "top",
-          label: e.label,
-          animated: !!e.animated && !dim,
-          // Fat invisible hit area so thin arrows are still tappable.
-          interactionWidth: 26,
-          style: {
-            stroke,
-            strokeWidth: isSel ? 2.6 : 1.6,
-            strokeDasharray: e.dashed ? "5 4" : undefined,
-            opacity: dim ? 0.35 : 1,
-            cursor: "pointer",
-            transition: "opacity 140ms ease, stroke-width 140ms ease",
-          },
-          // Sized in FLOW units, which fitView then scales down: these diagrams
-          // land at 0.35-0.65 zoom, so a 9px head renders at 3-6px and reads as
-          // no arrowhead at all. That was the complaint. 20 flow units lands at
-          // roughly 7-13px on screen, which is what the mockup showed.
-          markerEnd: { type: MarkerType.ArrowClosed, color: stroke, width: 20, height: 20 },
-        };
-      }),
-    [diagram, palette, sel, lit, labelPos, lanes, selectEdge],
+      diagram.edges
+        .filter((e) => layout.routes[e.id])
+        .map((e) => {
+          const route = layout.routes[e.id];
+          const tier = tierOf(e);
+          const isSel = sel?.kind === "edge" && sel.id === e.id;
+          const isHover = hover === e.id;
+          const touchesSel = sel?.kind === "node" && (e.from === sel.id || e.to === sel.id);
+          const dim = !!lit && !isSel && !(lit.has(e.from) && lit.has(e.to));
+          const hot = tier === "hot";
+          const stroke = isSel
+            ? palette.accent
+            : dim
+              ? palette.border
+              : hot
+                ? palette.accent
+                : tier === "control"
+                  ? palette.textMuted
+                  : palette.text;
+          const width = isSel ? (hot ? 3.2 : 2.2) : isHover ? (hot ? 3 : 2) : hot ? 2.4 : 1.2;
+          const label = layout.labels[e.id];
+          return {
+            id: e.id,
+            type: "routed",
+            source: e.from,
+            target: e.to,
+            sourceHandle: route.fromSide,
+            targetHandle: route.toSide,
+            data: {
+              points: route.points,
+              label: e.label,
+              showLabel: hot || isSel || isHover || !!touchesSel,
+              lx: label?.[0],
+              ly: label?.[1],
+              fg: isSel || hot ? palette.accent : palette.textMuted,
+              bg: palette.bg,
+              border: isSel || hot ? `${palette.accent}88` : palette.border,
+              bold: hot,
+            } satisfies EdgeData,
+            animated: hot && !!e.animated && !dim,
+            style: {
+              stroke,
+              strokeWidth: width,
+              strokeDasharray: tier === "control" ? "5 4" : undefined,
+              opacity: dim ? 0.3 : hot ? 1 : 0.8,
+              cursor: "pointer",
+              transition: "opacity 140ms ease, stroke-width 140ms ease",
+            },
+            // Sized in flow units; at the 0.8+ zoom the gate guarantees this is ~11-14px.
+            markerEnd: { type: MarkerType.ArrowClosed, color: stroke, width: hot ? 16 : 14, height: hot ? 16 : 14 },
+          };
+        }),
+    [diagram, layout, palette, sel, lit, hover],
   );
 
   const onNodeClick = useCallback((_e: unknown, n: Node) => {
     setSel((cur) => (cur?.kind === "node" && cur.id === n.id ? null : { kind: "node", id: n.id }));
   }, []);
-  const onEdgeClick = useCallback(
-    (_e: unknown, ed: Edge) => selectEdge(ed.id),
-    [selectEdge],
-  );
+  const onEdgeClick = useCallback((_e: unknown, ed: Edge) => selectEdge(ed.id), [selectEdge]);
 
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const width = useWidth(wrapRef);
   const narrow = width > 0 && width < 720;
 
-  const maxX = useMemo(
-    () => Math.max(...diagram.nodes.map((n) => n.x + (n.w ?? 240))),
-    [diagram],
-  );
-  const anchorX = selNode ? selNode.x + (selNode.w ?? 240) / 2 : 0;
-  const side: "left" | "right" = selNode && anchorX > maxX / 2 ? "left" : "right";
+  const anchorX = selNode ? layout.rects[selNode.id].x + layout.rects[selNode.id].w / 2 : 0;
+  const side: "left" | "right" =
+    selNode && anchorX > layout.bounds.x + layout.bounds.w / 2 ? "left" : "right";
 
   return (
     <div
@@ -724,20 +613,16 @@ export default function ArchDiagram({
         edgeTypes={EDGE_TYPES}
         onNodeClick={onNodeClick}
         onEdgeClick={onEdgeClick}
+        onEdgeMouseEnter={(_e, ed) => setHover(ed.id)}
+        onEdgeMouseLeave={() => setHover(null)}
         onPaneClick={(ev) => {
-          // A click that reached the pane may still have been aimed at an arrow
-          // that a box is sitting on top of. Ask which line was nearest first.
           const root = wrapRef.current;
           const id = root ? nearestEdgeId(root, ev.clientX, ev.clientY) : null;
           if (id) selectEdge(id);
           else setSel(null);
         }}
         fitView
-        // 0.4 padding was covering label overhang back when labels routinely
-        // sat outside the node bounds. placeLabels keeps them close now, and
-        // 40% of the canvas spent on margin left the text too small to read on
-        // a first look — which is the whole point of the diagram.
-        fitViewOptions={{ padding: 0.14, maxZoom: 1.15 }}
+        fitViewOptions={{ padding: 0.06, maxZoom: 1.15 }}
         minZoom={0.2}
         maxZoom={2.5}
         proOptions={{ hideAttribution: true }}
@@ -776,6 +661,7 @@ export default function ArchDiagram({
           title={selNode.label}
           sub={selNode.sub}
           detail={selNode.detail}
+          pipeline={layout.pipelines[selNode.id]}
           palette={palette}
           narrow={narrow}
           side={side}
@@ -820,7 +706,7 @@ function Hint({ palette: p }: { palette: Palette }) {
         pointerEvents: "none",
       }}
     >
-      Tap any box or arrow. Start with Overview.
+      Tap any box or arrow. Bold arrows are the hot path; hover a thin one for its label.
     </div>
   );
 }
@@ -847,17 +733,7 @@ const panelChrome = (p: Palette): React.CSSProperties => ({
   boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
 });
 
-function PanelHeader({
-  p,
-  title,
-  sub,
-  onClose,
-}: {
-  p: Palette;
-  title: string;
-  sub?: string;
-  onClose: () => void;
-}) {
+function PanelHeader({ p, title, sub, onClose }: { p: Palette; title: string; sub?: string; onClose: () => void }) {
   return (
     <>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
@@ -883,10 +759,47 @@ function PanelHeader({
   );
 }
 
+/** The stages hidden inside a collapsed service, in order. */
+function Pipeline({ p, stages }: { p: Palette; stages: PipelineStage[] }) {
+  return (
+    <>
+      <Label p={p}>Pipeline</Label>
+      {stages.map((s, i) => (
+        <div key={s.id} style={{ display: "grid", gridTemplateColumns: "20px 1fr", gap: 8, marginTop: 7 }}>
+          <div
+            style={{
+              width: 20,
+              height: 20,
+              borderRadius: 999,
+              border: `1px solid ${p.border}`,
+              color: p.accent,
+              fontSize: 11,
+              fontWeight: 700,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            {i + 1}
+          </div>
+          <div style={{ fontSize: 13, lineHeight: 1.4 }}>
+            <span style={{ color: p.textStrong, fontWeight: 600 }}>{s.label}</span>
+            {s.sub ? <span style={{ color: p.textMuted }}> — {s.sub}</span> : null}
+            {s.talksTo.length ? (
+              <div style={{ color: p.textMuted, fontSize: 12 }}>{s.talksTo.join(" · ")}</div>
+            ) : null}
+          </div>
+        </div>
+      ))}
+    </>
+  );
+}
+
 function DetailPanel({
   title,
   sub,
   detail,
+  pipeline,
   palette: p,
   narrow,
   side,
@@ -895,6 +808,7 @@ function DetailPanel({
   title: string;
   sub?: string;
   detail: DiagramNodeDetail;
+  pipeline?: PipelineStage[];
   palette: Palette;
   narrow: boolean;
   side: "left" | "right";
@@ -903,6 +817,7 @@ function DetailPanel({
   return (
     <div style={{ ...panelChrome(p), ...panelPlacement(narrow, side) }}>
       <PanelHeader p={p} title={title} sub={sub} onClose={onClose} />
+      {pipeline?.length ? <Pipeline p={p} stages={pipeline} /> : null}
       <Section p={p} title="What it is" body={detail.what} />
       <Section p={p} title="Why it exists" body={detail.why} />
       {detail.numbers?.length ? <Pills p={p} items={detail.numbers} /> : null}
@@ -930,12 +845,7 @@ function OverviewPanel({
         ...panelChrome(p),
         ...(narrow
           ? { left: 10, right: 10, bottom: 10, maxHeight: "62%" }
-          : {
-              top: 62,
-              left: 12,
-              width: "min(440px, calc(100% - 24px))",
-              maxHeight: "calc(100% - 76px)",
-            }),
+          : { top: 62, left: 12, width: "min(440px, calc(100% - 24px))", maxHeight: "calc(100% - 76px)" }),
       }}
     >
       <PanelHeader p={p} title={diagram.title} sub={diagram.question} onClose={onClose} />
@@ -969,11 +879,6 @@ function OverviewPanel({
   );
 }
 
-/**
- * Technology rationale, in the same Choice / Alternative / Decider / flips
- * shape the written questions use. Boxed off so it reads as a decision rather
- * than more description.
- */
 function ChoiceBlock({ p, c }: { p: Palette; c: TechChoice }) {
   const Row = ({ k, v, tone }: { k: string; v: string; tone?: string }) => (
     <div style={{ marginTop: 8 }}>
@@ -982,24 +887,8 @@ function ChoiceBlock({ p, c }: { p: Palette; c: TechChoice }) {
     </div>
   );
   return (
-    <div
-      style={{
-        marginTop: 16,
-        padding: "12px 13px",
-        borderRadius: 10,
-        border: `1px solid ${p.border}`,
-        background: p.codeBg,
-      }}
-    >
-      <div
-        style={{
-          color: p.accent,
-          fontSize: 11,
-          textTransform: "uppercase",
-          letterSpacing: 0.6,
-          fontWeight: 700,
-        }}
-      >
+    <div style={{ marginTop: 16, padding: "12px 13px", borderRadius: 10, border: `1px solid ${p.border}`, background: p.codeBg }}>
+      <div style={{ color: p.accent, fontSize: 11, textTransform: "uppercase", letterSpacing: 0.6, fontWeight: 700 }}>
         Why this technology
       </div>
       <Row k="Choice:" v={c.pick} tone={p.textStrong} />
@@ -1037,45 +926,17 @@ function Pills({ p, items }: { p: Palette; items: string[] }) {
 
 function Label({ p, children }: { p: Palette; children: React.ReactNode }) {
   return (
-    <div
-      style={{
-        color: p.textMuted,
-        fontSize: 11,
-        textTransform: "uppercase",
-        letterSpacing: 0.6,
-        marginTop: 14,
-        fontWeight: 700,
-      }}
-    >
+    <div style={{ color: p.textMuted, fontSize: 11, textTransform: "uppercase", letterSpacing: 0.6, marginTop: 14, fontWeight: 700 }}>
       {children}
     </div>
   );
 }
 
-function Section({
-  p,
-  title,
-  body,
-  accent,
-}: {
-  p: Palette;
-  title: string;
-  body: string;
-  accent?: boolean;
-}) {
+function Section({ p, title, body, accent }: { p: Palette; title: string; body: string; accent?: boolean }) {
   return (
     <>
       <Label p={p}>{title}</Label>
-      <div
-        style={{
-          color: accent ? p.errorFg : p.text,
-          fontSize: 13.5,
-          lineHeight: 1.55,
-          marginTop: 5,
-        }}
-      >
-        {body}
-      </div>
+      <div style={{ color: accent ? p.errorFg : p.text, fontSize: 13.5, lineHeight: 1.55, marginTop: 5 }}>{body}</div>
     </>
   );
 }
