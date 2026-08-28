@@ -5,6 +5,26 @@
  */
 import type { Diagram } from "./types";
 import { WEB_CRAWLER } from "./web-crawler";
+import { FLEET_UPDATE } from "./fleet-update";
+import { ONLINE_AUCTION } from "./online-auction";
+import { CICD } from "./cicd";
+import { TRENDING_TOPICS } from "./trending-topics";
+import { AUTH_SERVICE } from "./auth-service";
+import { CDN } from "./cdn";
+import { RAG_SYSTEM } from "./rag-system";
+import { TICKETMASTER } from "./ticketmaster";
+import { ECOMMERCE } from "./ecommerce";
+import { WEB_SEARCH } from "./web-search";
+import { LLM_SERVING } from "./llm-serving";
+import { GOODREADS } from "./goodreads";
+import { STRAVA } from "./strava";
+import { MARKET_DATA_INGEST } from "./market-data-ingest";
+import { MATCHING_ENGINE } from "./matching-engine";
+import { PRICE_ALERTS } from "./price-alerts";
+import { SPOTIFY } from "./spotify";
+import { GITHUB } from "./github";
+import { TINDER } from "./tinder";
+import { COLLABORATIVE_EDITOR } from "./collaborative-editor";
 import { JOB_SCHEDULER } from "./job-scheduler";
 import { DISTRIBUTED_LOCK } from "./distributed-lock";
 import { DISTRIBUTED_CACHE } from "./distributed-cache";
@@ -45,6 +65,26 @@ export * from "./types";
 
 export const DIAGRAMS: Record<string, Diagram> = {
   "web-crawler": WEB_CRAWLER,
+  "fleet-update": FLEET_UPDATE,
+  "online-auction": ONLINE_AUCTION,
+  "cicd": CICD,
+  "trending-topics": TRENDING_TOPICS,
+  "auth-service": AUTH_SERVICE,
+  "cdn": CDN,
+  "rag-system": RAG_SYSTEM,
+  "ticketmaster": TICKETMASTER,
+  "ecommerce": ECOMMERCE,
+  "web-search": WEB_SEARCH,
+  "llm-serving": LLM_SERVING,
+  "goodreads": GOODREADS,
+  "strava": STRAVA,
+  "market-data-ingest": MARKET_DATA_INGEST,
+  "matching-engine": MATCHING_ENGINE,
+  "price-alerts": PRICE_ALERTS,
+  "spotify": SPOTIFY,
+  "github": GITHUB,
+  "tinder": TINDER,
+  "collaborative-editor": COLLABORATIVE_EDITOR,
   "job-scheduler": JOB_SCHEDULER,
   "distributed-lock": DISTRIBUTED_LOCK,
   "distributed-cache": DISTRIBUTED_CACHE,

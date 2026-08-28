@@ -16512,6 +16512,11 @@ A snapshot every thousand operations bounds replay, so a document with 800,000 o
     return ack(current_rev)
   ```
 - Presence: forward cursor updates to all other clients without persisting. Drop presence frames beyond 10 per second per client at the socket edge, before they reach the document's process.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/collaborative-editor).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 An operation is not a message. A message means the same thing whenever it is delivered. An operation means something only relative to the state it was written against, so delivering it late, against a different state, delivers something else. `insert("X", 5)` is not a fact, it is a function of a document, and by the time it arrives that document no longer exists. Every real decision in this design is about where you convert that function into one that still expresses its author's intent against the state that actually exists: on the server before broadcast, on each client on receipt, or nowhere at all, because you gave every character an identity and there is no position left to correct. A candidate who describes a persistent socket, a durable log, and fan out has described the transport and walked past the problem.
 
@@ -16971,6 +16976,11 @@ When the user right-swipes on candidate B, the Swipe Service records `(user_A, u
   return top_k(candidates, scores, k=20)
   ```
 - Swipe hot path: write to Cassandra partitioned by `swiper_id`, read the reverse index for `target_id`, and if reciprocal run `INSERT INTO matches (...) ON CONFLICT DO NOTHING` and publish a match event.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/tinder).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you notice that the candidate set is consumable, mutually exclusive and two-sided, and design for that rather than for ranking quality. Every distinctive part of the answer falls out of those three properties. The exclusion structure exists because a candidate can be spent only once, which makes it the only stage of the funnel whose selectivity gets worse every day the user keeps swiping. The exposure budget exists because the scarce resource is attention on the other side of the market, not compute. The reciprocity lookup and the privacy rule are the same mechanism, because the product's atom is agreement rather than consumption. A candidate who treats this as "recommendations, with a geo filter" will build something that ranks well on day one and is empty by month two.
 
@@ -17359,6 +17369,11 @@ Everything else hangs off that. Pull requests, issues, reviews and checks are or
   queue.publish("push_event", {repo_id, ref, old_sha, new_sha})
   ```
 - Fork networks share an object pool per visibility class. Hot repositories get 5 to 10 extra read-only replicas with fetch traffic load-balanced across them.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/github).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you notice that the thing you are storing is a database, not a payload. Almost every candidate reaches for the object-storage playbook: hash the bytes, spread the chunks, erasure-code across the fleet, make the servers stateless. That playbook is wrong here for one reason. An object store's unit of durability is a single object and a GET touches exactly one of them, so objects can be placed independently and reassembled on read. A git operation walks an arbitrary reachable subgraph, touching thousands of objects, and needs all of them present on the machine doing the walk. Spread a repository across the fleet and every clone becomes a distributed graph traversal. That is why the repository, not the object, is the unit of placement, replication, failover and capacity, and why a stateful replica set beats a shared filesystem underneath stateless servers. Everything the interviewer will push on is downstream: what a push commits and when, what a fork shares, why a hot repository cannot be sharded away, and how you migrate a stateful shard with no downtime.
 
@@ -17788,6 +17803,11 @@ Third, every qualifying play is money. Thirty seconds or more triggers a fractio
   at(track.duration - 20s): prefetch_whole(next_in_queue)
   emit(start); at(30s) emit(qualified); on_stop emit(terminal, position)
   ```
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/spotify).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you notice that repeat consumption inverts the recommender. Every recommendation system a candidate has practised assumes an item is consumed once and that serving it twice is a bug. Here serving it for the two-hundredth time is the product, and four things reverse at once. The exclusion filter becomes the candidate pool: what the listener has already played is the highest-value thing to play next. Completion stops being a usable label, because a familiar track completes at over 95% and carries almost no variance, so the target moves to a skip inside the first 30 seconds and to whether the track gets played again a week later. Retrieval shrinks out of the hot path, because for the surfaces carrying most listening the candidate set is one person's own history and playlists, under 10,000 rows. And the scarce resource in exploration stops being inventory and becomes the listener's patience.
 
@@ -18209,6 +18229,11 @@ Strip the delivery layer away and the question is how you evaluate ten million s
         alert.state = FIRED
   ```
 - On restart: restore the Flink checkpoint and replay the tick log from its offset. Cold start with no checkpoint: load rules from Postgres, then replay. RTO target under 90 seconds.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/price-alerts).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you notice that the notification is the easy half. The system's cost is set entirely by how a price change locates the rules it could trigger. A candidate who spends the first ten minutes on push tokens, provider retries, and quiet hours has answered a different question. The insight to reach for is the inversion: stop iterating rules times price lookups, start iterating ticks times rules that could fire, then make "rules that could fire" small by ordering rules along the same axis the price moves along.
 
@@ -18647,6 +18672,11 @@ There are three ways to hold the price levels, and which one is right depends on
 - Sequencer writes a durable, gap-free journal; periodic snapshots so recovery replays minutes, not days.
 - Route by `hash(instrumentId) % shards`; at the infrastructure edge, partition the Kafka ingest topic by instrument key so all events for a symbol sit on one partition and are consumed in offset order, which is the same single-writer guarantee one layer down.
 - Bounded queues everywhere with an explicit rejection policy; cross-instrument events (basket, portfolio) handled on a separate boundary, never inside a single book.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/matching-engine).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you understand that an order book is a memory-layout problem wearing a data-structures costume. Every candidate can write the match loop; it is a while loop with a `min()` in it. The signal is whether you know the access pattern (overwhelmingly at the touch, overwhelmingly cancels) and let it dictate the layout, and whether you know that the one optimisation everybody reaches for, adding threads, is a correctness bug here rather than a speed-up.
 
@@ -19207,6 +19237,11 @@ The usual answer is the third for the wire, the second inside the box, and the f
 - A single-writer LMAX Disruptor sequencer writing one ordered ring; batched consumer draining.
 - Fan-out by `hash(instrumentId) % shards`; conflation map for ticks, NACK/backpressure for order flow.
 - Shard the whole pipeline by instrument range when one sequencer hits its ceiling; keep cross-instrument events (basket, portfolio risk) on a separate coordinating boundary.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/market-data-ingest).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you classify traffic before you size buffers. Under overload the interesting decision is not how big the queue is, it is which messages are state you overwrite and which are state you accumulate. Get that split right and the system degrades; get it wrong and it either loses trades or dies of memory exhaustion, and no amount of tuning saves either. The second half of the insight is that this pipeline has no second chance: the ordering decision is made once, at the sequencer, and every downstream consumer inherits it as fact.
 
@@ -19810,6 +19845,11 @@ Storage splits in two: a ~2KB summary with a simplified polyline for the feed, a
           write_effort(s.id, athlete_id, e.elapsed)
           ZADD seg:{s.id}:alltime LT {e.elapsed} {athlete_id}
   ```
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/strava).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you size the work by the corpus rather than by the request, and whether you notice that "matched" is an ordering predicate rather than a proximity one. Everything a strong answer does here follows from those two observations. The corpus point produces the funnel and its cardinality arithmetic, because 35M candidates per upload is not a caching problem or a sharding problem, it is a problem of getting the candidate set down by four orders of magnitude with tests that are allowed to be wrong in one direction only. The ordering point produces the monotone walk with direction and gap checks, and it is the thing that separates someone who has thought about this from someone who has read about geohashing: two polylines crossing at a junction intersect, a ride on the opposite carriageway is within metres of the segment for its entire length, and neither is an effort. A candidate who says "index the segments with S2 and find the ones near the track" has done stage one of four and thinks they are finished.
 
@@ -20245,6 +20285,11 @@ In practice the second and third combine: the pipeline acts where the score is d
   state = shelf_svc.get(user_id, work_id)             -- ~5ms, never edge-cached
   return splice(shell, state)
   ```
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/goodreads).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you can tell the difference between an identifier and a judgement. `work_id` looks like a primary key and behaves like a hypothesis: it is the pipeline's current best guess about which records describe the same book, made under uncertainty, revised as evidence arrives, and sometimes wrong in a way a reader notices before you do. Every good decision in this design follows from taking that seriously. User content keys on the thing that never changes, the edition, so the guess lives in one indirection layer instead of being smeared across two billion rows. Merges write pointers and an audit log, so revision costs a few hundred writes rather than a restore. The auto-merge threshold is set by which error you would rather make, not by an F1 score, because the two errors are not commensurable. A candidate who models `books` as a table with an `id` has not noticed there is a question here, and everything downstream, including the recommender and the ratings average, quietly inherits the mistake.
 
@@ -20671,6 +20716,11 @@ Weights are 140GB, an 80GB GPU cannot hold them, so a replica is 8 GPUs tensor-p
       while kv.free_blocks() == 0:
           preempt(newest_lowest_priority(running))     swap out or drop and recompute
   ```
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/llm-serving).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you can find the binding constraint by arithmetic rather than by naming components. Almost everyone reaches for parameter count and FLOPs, concludes the problem is compute, and sizes a fleet that runs out of memory at a twentieth of the batch they planned for. The number that governs the design is bytes of key-value state per token, `2 × layers × kv_heads × head_dim × dtype`, and once you have it the architecture is forced: concurrency is a division, so the serving platform is a memory allocator with a scheduler on top of it, and every subsequent decision is about how that memory is spent. The second half of the same insight is that prefill and decode are different machines, one compute-bound and one bandwidth-bound, which is why a single blended latency SLO describes nothing and why batching helps one phase and is irrelevant to the other. A candidate who says "we'll shard the model and autoscale on GPU utilisation" has named two things that are both wrong here: the sharding is forced by weight size and is not the interesting choice, and GPU utilisation reads 100% on a batch-1 decode achieving 0.2% of peak.
 
@@ -21100,6 +21150,11 @@ The write path is entirely offline and never touches a serving node synchronousl
   return heap.items()
   ```
 - Coordinator: `cache.get(key) or fanout(mergers, deadline=40ms) -> merge -> rerank(top 500) -> snippets(top 10) -> cache.put(key, ttl=10min)`.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/web-search).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you can bound the work a single query does over a corpus you cannot enumerate per query. Everything else here is downstream of that. There is no precomputable answer for `coffee shops brooklyn`, because the space of possible queries is combinatorial, so the ten results must be produced at request time out of the ~750,000 documents in each shard that contain at least one of those words. Two mechanisms do the bounding, and a good answer names both: partitioning, which caps how much index any one machine has to look at, and early termination, which caps how many of the documents it looks at it actually scores. A candidate who describes the index layout in detail and never says how they avoid scoring every match has answered half the question. A candidate who quotes an average leaf latency as the service latency has answered the wrong half, because with a thousand shards you wait for the maximum of a thousand draws.
 
@@ -21524,6 +21579,11 @@ Then own the business call rather than hiding it in the concurrency control. An 
   if ok: return holds.put(sku, qty, cart_id, ttl = 15min)
   ```
 - Hot-lane consumer (exactly one per SKU partition): `for msg in partition: if counter[sku] >= msg.qty: counter[sku] -= msg.qty; emit(GRANTED, hold) else: emit(SOLD_OUT)`, batch-persisting the counter every 50ms and replaying the partition from the last persisted offset on consumer restart.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/ecommerce).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you can see that "how many are left" is a business question wearing a concurrency costume. Every candidate reaches for a mechanism: a lock, a compare-and-swap, a queue. The mechanism is the second half of the answer. The first half is that a catalog of 200M interchangeable, cheap, mostly replenishable units does not have one correct consistency model, it has a policy that varies by SKU class, and picking one mechanism for all of them is wrong for either the long tail or the doorbuster. The strong answer names the classifier before it names the lane, states the cost of an oversell against the cost of an undersell in money, and commits to a per-class rule. The weak answer is technically fluent and never mentions that a cancellation email is cheaper than a lost sale.
 
@@ -21959,6 +22019,11 @@ Then be honest about the terminal state. 60,000 seats go in seven minutes, so 97
     kafka.emit(HoldTaken(session, acquired))  -- write-behind durability
     return { hold_id, expires_at: now+600 }
   ```
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/ticketmaster).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you put the defence in front of the transaction or inside it. At 25 buyers per seat the seat lock is the trivial part: one conditional set, one winner, microseconds, no retry loop. The system is the read fan-out and the gate. A candidate who spends the hour on isolation levels and row locks has answered a reservations question and missed that the database in this design is never allowed to see contention it was not admitted for. The second half of the insight is that fairness here is not a UX detail but a security control: whichever ordering rule you pick is the rule the adversary optimises against, and arrival-time ordering is an auction on network latency that you would be running on the scalpers' behalf.
 
@@ -22368,6 +22433,11 @@ Abstain when the top rerank score falls below a calibrated floor. Sizing: 500M c
   return llm.stream(prompt(question, ctx), cite=True)
   ```
 - Ingest path: `cdc_event → parse → chunk → hash → skip_unchanged → embed → upsert(vector, lexical, chunk_store)`, with the chunk hash as the idempotency key so replays are free.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/rag-system).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you understand that the retriever is the product and the model is a commodity. Candidates who have only used RAG talk about prompts and context windows. Candidates who have run one in production talk about recall, reranking, and how they found out the answers were wrong. The strongest tell is whether evaluation appears in your design at all, or only as a phase before launch.
 
@@ -22786,6 +22856,11 @@ Real designs layer all three rather than choosing.
       return inflight.complete(key, resp)
   return inflight.wait(key)                                 // losers park on the winner
   ```
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/cdn).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you notice that you have made thousands of unsupervised copies of somebody else's mutable data, and that no mechanism available to you can reliably correct them. Consensus across 200 datacentres on the request path is unaffordable, acknowledgements from 13,000 servers are uncollectable, and some of those servers are unreachable right now. So the interesting move is not designing a better invalidation broadcast. It is designing so that most content never needs one: put the version in the name, serve it immutable, change the pointer. What is left over gets a broadcast whose guarantee you state honestly as "99.9% of servers within about two seconds, and a partitioned PoP replays the log when it comes back". A candidate who opens with a purge API has quietly made a best-effort, eventually-consistent, cross-planet broadcast a required step in someone's release process.
 
@@ -23208,6 +23283,11 @@ Then say the residual out loud: revocation lands in under a second when the feed
   return claims.sub, claims.scope
   ```
 - Login hot path: rate-limit by (account, IP) → look up identity → argon2id compare in the isolated pool (always, even for unknown users) → MFA → mint code → exchange for tokens → append to audit log.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/auth-service).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you recognise this as a cache invalidation problem wearing a security costume, and whether you will put a number on the invalidation window instead of claiming a revocation you do not have. A token is a cached authorization decision, copied to every verifier on the platform and to the client's device, and the whole question is what happens between the moment the underlying decision changes and the moment the last copy notices. The candidate who opens with "signed tokens, they scale, and we revoke with a denylist" has named a mechanism without noticing they just reintroduced the shared state the tokens existed to remove, and they will not survive "what happens when the feed is 30 seconds behind". The strong answer walks the spectrum from a lookup per request to a self-contained credential with no revocation at all, places itself somewhere on that spectrum deliberately, and states the resulting staleness as an SLO.
 
@@ -23629,6 +23709,11 @@ The choice is not accuracy; at equal memory the last two sit within an order of 
   scored = [(k, trend_score(estimate(window_sketch, k), baseline[k])) for k in cands]
   redis.set("trending:{geo}:{window}", top_k(scored, 50))
   ```
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/trending-topics).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you can choose a lossy structure deliberately and say precisely what the loss buys and what it costs. Nobody is checking that you can name a sketch. They are checking the order of your reasoning: cardinality of the key space, the memory that implies for a window that has to slide, the error you are willing to trade for it, and only then a structure whose dimensions fall out of that error. Opening with "Count-Min, 7 rows, 32,768 columns" skips the entire part of the question being marked, and it also skips the check that follows, which is whether you know what the error does at the place it is visible. Being 8% high on a count nobody reads is free. Being 8% high at the rank-50 cutoff makes the published list reshuffle between refreshes, and that is a product defect a user can see.
 
@@ -24034,6 +24119,11 @@ Most real systems are the first plus the third, and reach for the second only on
   return out
   ```
 - Rollout loop: pin digest → 1% canary + restarted baseline → poll analyzer every 30s → on `REGRESS` replace with previous digest and page; on `PASS` after bake, advance one rung of the ladder.
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/cicd).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you can say which half of a deploy is reversible. Shipping is not the hard part. Unshipping is, and only the code half can be unshipped. Every expensive property in this design is bought to shrink the set of actions that cannot be taken back: the artifact is immutable and pinned by digest so rollback is a lookup rather than a rebuild; the canary bounds how much traffic meets a change before you know it is bad; expand/contract keeps the schema in a state where both N and N-1 run; a feature flag turns the behaviour change into a switch instead of a fleet operation. A candidate who designs a beautiful build farm and then waves at "and if it goes wrong we roll back" has skipped the question, because rollback is a claim about state, and nothing in the build farm makes that claim true. The second thing being probed is quieter: that build throughput is a caching problem where the correctness precondition, not the hit rate, is what you should be nervous about.
 
@@ -24464,6 +24554,11 @@ Size the read path separately: 50 watchers per bidder, coalesced to four snapsho
   if not ok: retry from read                -- never silently raise the user's max
   append_bid_log(...); publish_tick(...); notify_outbid(...)
   ```
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/online-auction).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you can see that a published deadline is not an instant. `end_ts` is a single value in the database and N slightly different values across the API fleet, and the gap is larger than the thing being decided: 1 to 10ms of ordinary NTP skew against bids arriving milliseconds apart, on money that ends up with a legal owner. The answer the question wants is that acceptance stops being a comparison and becomes a position, either a `CLOSE` event ordered into the item's own stream or a fenced conditional write where the store's serialisation order *is* the order. Everything else here, proxy resolution, fan-out, settlement, is ordinary engineering once that is right. The secondary insight is that the price is a mechanism rather than a number: proxy maxima make this a second price auction, which is why the maxima must be secret and why the closing rule changes what bidders do.
 
@@ -24909,6 +25004,11 @@ The mature answer is the first as the backbone, the second as an accelerant for 
         max_attempts: 3, backoff: exponential_with_jitter
       }
   ```
+#### Interactive diagram
+The whole design as one explorable picture: [open the interactive diagram](/diagram/fleet-update).
+
+Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
+
 #### What this is really testing
 Whether you convert the headline number into bytes and then into a rate before you design anything. 500 million is meant to trigger the wrong reflex, which is to start sizing a global CDN and talking about Tbps. The candidate who is going to be useful writes 460M × 25MB = ~11.5PB on the board, divides by a duration, and notices that the same payload is either 76Gbps or 4.3Tbps depending on a number nobody has given them yet. Once you see that, the interesting question becomes what forces the duration, and the answer is not bandwidth: it is that devices only cooperate when unmetered, charged and idle, and that you need soak time between bands to detect a regression at all. The second thing being tested is whether you know that halt is not rollback. Everything about deploying software to machines you control teaches you that a bad release is a one minute restore, and that intuition is exactly wrong here. The third is restraint about the check-in path: 500M devices asking a question is a bigger load problem than 500M devices downloading an answer, and the fix is jitter and a 200 byte "no", not a bigger fleet.
 
