@@ -25,6 +25,7 @@ import type {
   TechChoice,
 } from "../lib/diagrams";
 import { isFrame } from "../lib/diagrams";
+import { elkLayout } from "../lib/diagrams/elklayout";
 import {
   DEFAULT_H,
   LABEL_CHAR_W,
@@ -580,7 +581,36 @@ export default function ArchDiagram({
   diagram: Diagram;
   palette: Palette;
 }) {
-  const diagram = useMemo(() => spaceColumns(authored), [authored]);
+  // Prototype: these two diagrams have their floorplan computed from the graph
+  // rather than read off the spec. See lib/diagrams/elklayout.ts. ELK is async,
+  // so the hand-authored layout renders first and is replaced when it resolves.
+  const AUTO = useMemo(() => new Set(["rate-limiter", "news-feed"]), []);
+  const [laidOut, setLaidOut] = useState<Diagram | null>(null);
+  useEffect(() => {
+    setLaidOut(null);
+    if (!AUTO.has(authored.id)) return;
+    let cancelled = false;
+    elkLayout(authored).then(
+      (d) => {
+        if (!cancelled) setLaidOut(d);
+      },
+      (err) => {
+        // Do not swallow this. An empty handler here hid the fact that ELK was
+        // failing outright and made it look like the layout had simply not
+        // changed anything.
+        console.error("[diagram] ELK layout failed", err);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [authored, AUTO]);
+  const diagram = useMemo(
+    // spaceColumns is a corrective for hand-authored grids; a computed layout
+    // already owns its spacing and running it would undo the packing.
+    () => laidOut ?? spaceColumns(authored),
+    [authored, laidOut],
+  );
   const [sel, setSel] = useState<Selection | null>(null);
 
   const selNode = useMemo(
