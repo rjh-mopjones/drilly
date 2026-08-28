@@ -104,7 +104,37 @@ async function checkOne(page, id) {
       if (on) labelHits.push({ text: (l.innerText || "").trim().slice(0, 28), box: on.label });
     }
 
-    return { boxCount: boxes.length, buried, labelHits };
+    // Readability: the zoom fitView settled on, and what that makes of the text.
+    const vp = document.querySelector(".react-flow__viewport");
+    const m = vp && vp.style.transform.match(/scale\(([\d.]+)\)/);
+    const zoom = m ? parseFloat(m[1]) : null;
+    const labelPx = zoom ? Math.round(11.5 * zoom * 10) / 10 : null;
+    // Crossings between rendered paths.
+    const polys = [...document.querySelectorAll(".react-flow__edge-path")].map((p) => {
+      const len = p.getTotalLength();
+      const ctm = p.getScreenCTM();
+      const svg = p.ownerSVGElement;
+      const pt = svg.createSVGPoint();
+      const pts = [];
+      const steps = Math.max(10, Math.ceil(len / 4));
+      for (let i = 0; i <= steps; i++) {
+        const q = p.getPointAtLength((len * i) / steps);
+        pt.x = q.x;
+        pt.y = q.y;
+        const s = pt.matrixTransform(ctm);
+        pts.push([s.x, s.y]);
+      }
+      return pts;
+    });
+    const ccw = (p, q, r) => (r[1] - p[1]) * (q[0] - p[0]) > (q[1] - p[1]) * (r[0] - p[0]);
+    const cross = (a, b, c, d) => ccw(a, c, d) !== ccw(b, c, d) && ccw(a, b, c) !== ccw(a, b, d);
+    let crossings = 0;
+    for (let i = 0; i < polys.length; i++)
+      for (let j = i + 1; j < polys.length; j++)
+        for (let a = 0; a < polys[i].length - 1; a++)
+          for (let b = 0; b < polys[j].length - 1; b++)
+            if (cross(polys[i][a], polys[i][a + 1], polys[j][b], polys[j][b + 1])) crossings++;
+    return { boxCount: boxes.length, buried, labelHits, zoom, labelPx, crossings };
   }, INSET);
 }
 
@@ -119,13 +149,15 @@ async function checkOne(page, id) {
 
   let failing = 0;
   for (const id of ids) {
-    const { boxCount, buried, labelHits } = await checkOne(page, id);
-    if (!buried.length && !labelHits.length) {
-      console.log(`✓ ${id.padEnd(22)} ${boxCount} boxes, no arrow runs under or along a box`);
+    const { boxCount, buried, labelHits, zoom, labelPx, crossings } = await checkOne(page, id);
+    const stats = `zoom ${zoom?.toFixed(2)} · labels ${labelPx}px · ${boxCount} boxes · ${crossings} crossings`;
+    const bad = buried.length || labelHits.length || crossings > 0 || (zoom != null && zoom < 0.78);
+    if (!bad) {
+      console.log(`✓ ${id.padEnd(22)} ${stats}`);
       continue;
     }
     failing++;
-    console.log(`\n✗ ${id}`);
+    console.log(`\n✗ ${id.padEnd(22)} ${stats}`);
     for (const b of buried) {
       console.log(`    edge ${b.id}: ${b.pct}% of its length is under/along ${b.boxes.join(", ")}`);
     }
