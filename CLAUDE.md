@@ -121,6 +121,12 @@ under the next box, so spacing is a correctness concern rather than taste.
   wider**. Do not change these to fixed spacing: forcing a fixed gutter
   over-spreads multi-column diagrams until fitView shrinks the text to nothing.
   Group zones are repositioned to keep framing the same members.
+- **Keep the whole diagram roughly the shape of the viewport (~4:3).** `fitView`
+  scales to whichever axis binds, so a wide strip shrinks the text while leaving
+  vertical space empty. google-maps at 1840x864 rendered at **0.34 scale** —
+  unreadable at a glance — while diagrams of similar size but squarer proportions
+  sat at 0.5-0.6. If a layout has run to five columns and three rows, fold the
+  rightmost columns down into more row bands rather than widening further.
 - Because spacing is corrected at render time, specs only need a sane relative
   grid: left column `x: 40`, further columns to the right, vertical steps of
   ~110, widths 240-300, and no overlapping boxes. Boxes are ~84px tall now that

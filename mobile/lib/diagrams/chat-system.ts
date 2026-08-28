@@ -11,8 +11,8 @@ export const CHAT_SYSTEM: Diagram = {
       "Chat is a store-and-forward system wearing a real-time coat: the durable write is the product, and the socket is a latency optimisation bolted on top of it.",
     beats: [
       "Every device holds one long-lived TLS connection to an edge server, because a push system needs the server able to speak first. That single decision makes the edge tier stateful, and connection count rather than requests per second becomes the number that sizes the fleet.",
-      "On send, the edge does not write. It hands the frame to a persist path that assigns a conversation-scoped Snowflake id and does a quorum write, and only then does an ack come back. The tick means stored, never that one process accepted it.",
-      "Delivery starts after the commit. The record goes onto a partitioned bus and a routing consumer expands group membership, then asks the session registry which of 60 edges currently holds each recipient's socket. That lookup is the whole reason edges never have to know about each other.",
+      "On send, the edge does not write. It hands the frame to a persist path that checks the idempotency index, assigns a conversation-scoped Snowflake id and does a quorum write, and only then does an ack come back. The tick means stored, never that one process accepted it.",
+      "Delivery starts after the commit. The record goes onto a partitioned bus and a routing consumer expands group membership, then asks the session registry which of 60 edges currently holds each recipient's socket, and republishes onto that edge's partition. That lookup is the whole reason edges never have to know about each other.",
       "If there is no live socket, nothing special happens, because the message is already durable. APNs or FCM wakes the device, the app reconnects and asks for everything after its cursor, and that one mechanism covers crashes, deploys, flaky mobile networks and users offline for months.",
       "Receipts travel back up the same pipe and are the half that actually saturates. A per-device high-water mark, debounced on five seconds, is both the delivery receipt and the sync cursor, so a burst of forty messages collapses into one write instead of forty rows.",
       "The cost of all of it is that connection ownership is now architecture. An edge is not interchangeable while it holds a million sockets, so deploys drain rather than restart, failover needs a reconnect storm plan, and capacity is planned in connections.",
@@ -26,28 +26,79 @@ export const CHAT_SYSTEM: Diagram = {
     ],
   },
   nodes: [
+    // --- frames -------------------------------------------------------------
     {
       id: "durable-path",
-      label: "Durable path (commit before ack)",
+      label: "Durable path — commit before ack",
       kind: "zone",
-      x: 24,
-      y: 194,
-      w: 672,
-      h: 208,
+      x: 376,
+      y: 250,
+      w: 664,
+      h: 438,
       detail: {
-        what: "The write path: id assignment, the idempotency check, and the quorum write into the conversation log.",
-        why: "Every hard question in this interview lives here rather than in the socket. What the sender's tick promises, what a device asks for after three weeks away, and what happens to a message written but never pushed are all decided inside this box.",
-        numbers: ["~10ms quorum write", "1TB/day raw, 3TB/day at RF=3"],
+        what: "Everything that must happen before the sender's tick: the idempotency check, id assignment, the quorum write, and the two stores they touch.",
+        why: "Every hard question in this interview lives inside this boundary rather than in the socket. What the sender's tick promises, what a device asks for after three weeks away, and what happens to a message written but never pushed are all decided here.",
+        numbers: ["~10ms quorum write", "1TB/day raw, 3TB/day at RF=3", "175k sends/s at peak"],
         breaks:
           "Move the ack outside this boundary and the whole delivery contract collapses: a tick that can be retracted is worse than a slow tick.",
+      },
+    },
+    {
+      id: "persist",
+      label: "Persist path",
+      kind: "serviceGroup",
+      x: 400,
+      y: 300,
+      w: 300,
+      h: 368,
+      detail: {
+        what: "One deployable that runs three stages in order for every send: check the idempotency index, assign the id, commit at quorum and only then ack.",
+        why: "The order is the product, so the three stages live in one process rather than three services. Drawing them as peers would invite an async hop between them, and an async hop between 'id assigned' and 'write committed' is exactly the bug the design exists to prevent.",
+        numbers: [
+          "58k sends/s average, 175k at peak",
+          "one extra read plus one quorum write per send",
+          "scales horizontally: no state between requests",
+        ],
+        breaks:
+          "It is stateless, so its failure is a retryable error on the client rather than a lost message. The dangerous failure is a code change that reorders the stages.",
+      },
+    },
+
+    // --- connect and send ---------------------------------------------------
+    {
+      id: "connect-gateway",
+      label: "Connect gateway",
+      sub: "discovery + admission control",
+      kind: "gateway",
+      x: 40,
+      y: 0,
+      w: 260,
+      detail: {
+        what: "The connect-time entry point: authenticates the handshake, picks an edge with spare connection headroom, and hands the client that address. It is not on the message path at all.",
+        why: "A stateful edge tier cannot be load balanced per request, so the placement decision happens once, at connect, and then the socket is sticky for its whole life. Something has to own that decision, and it also has to be the thing that says no when the fleet is on fire.",
+        numbers: [
+          "one decision per socket, not per message",
+          "60 edges, connection headroom is the placement signal",
+          "shed above the per-box handshake cap with Retry-After",
+        ],
+        breaks:
+          "It is the choke point during a reconnect storm. If it keeps admitting at full rate while surviving boxes are already 17 cores deep in handshakes, it converts one dead edge into a fleet outage.",
+        choice: {
+          pick: "Placement by connection headroom, with a per-box concurrent-handshake cap and Retry-After shedding above it",
+          instead: "An ordinary round-robin L4 load balancer in front of the edge fleet",
+          decider:
+            "Round robin is correct for requests and wrong for connections: it balances the arrival rate, not the resident population, so a box that comes back from a deploy with zero sockets takes the same share as one already holding a million. And a load balancer with no admission cap has no way to degrade: 17k reconnects/s per box at ~1ms of handshake CPU is 17 cores, and shedding is the only thing that turns that into slow instead of down.",
+          flips:
+            "Fleets small enough that any box can hold the whole population, where placement does not matter and a plain load balancer is one fewer service to run.",
+        },
       },
     },
     {
       id: "sender-device",
       label: "Sender device",
       sub: "WebSocket + client_msg_id",
-      kind: "external",
-      x: 40,
+      kind: "client",
+      x: 400,
       y: 0,
       w: 280,
       detail: {
@@ -56,6 +107,7 @@ export const CHAT_SYSTEM: Diagram = {
         numbers: [
           "client_msg_id generated before the first attempt",
           "one cursor per conversation per device",
+          "keepalive ~every 60s to survive carrier NAT rebinding",
         ],
         breaks:
           "Without jittered backoff a million of these reconnect inside a second after an edge dies, and the client is the only place that fix can be applied.",
@@ -74,11 +126,11 @@ export const CHAT_SYSTEM: Diagram = {
       label: "Edge server A",
       sub: "sticky WebSocket, Go or Elixir",
       kind: "service",
-      x: 40,
-      y: 110,
+      x: 400,
+      y: 130,
       w: 280,
       detail: {
-        what: "The box holding Alice's socket. Terminates TLS, frames the protocol, and hands sends to the persist path.",
+        what: "The box holding Alice's socket. Terminates TLS, frames the protocol, and hands sends to the persist path. It never writes to the log itself.",
         why: "HTTP is request-response and closes; a chat server has to push at any moment without being asked, so the connection stays open for the life of the app session. Sub-second delivery is bought with a stateful tier, and that is the trade.",
         numbers: [
           "1M sockets per box planned, 2M demonstrated by WhatsApp in 2012",
@@ -99,47 +151,78 @@ export const CHAT_SYSTEM: Diagram = {
       },
     },
     {
-      id: "persist",
-      label: "Persist path",
-      sub: "Snowflake id, then quorum write",
-      kind: "service",
-      x: 40,
-      y: 220,
-      w: 280,
+      id: "presence",
+      label: "Presence + typing",
+      sub: "ephemeral pub/sub, TTL 30s",
+      kind: "cache",
+      x: 1140,
+      y: 130,
+      w: 260,
       detail: {
-        what: "Assigns a conversation-scoped monotonic msg_id and performs the quorum write, before anything acks.",
-        why: "The sender's tick has to mean the message exists durably, not that one server process accepted it. Ordering comes from the same place, which is why one component owns both: every recipient renders the same sequence regardless of which edge delivered their copy.",
+        what: "Ephemeral fan-out for online/offline and typing state: the edge holding a socket publishes heartbeats with a TTL, and edges holding interested peers subscribe.",
+        why: "These ride the same socket as messages and are the one class of traffic that must never reach the durable path. Presence is worthless the moment it is stale, so writing it durably would buy nothing and cost 30M writes every heartbeat interval.",
         numbers: [
-          "~10ms for the quorum write",
-          "175k sends/s at peak, 58k average",
-          "id assigned before the record reaches the bus",
+          "TTL 30s, refreshed by heartbeat",
+          "typing events expire in seconds and are never retried",
+          "30M online users at one heartbeat per 30s = 1M events/s fleet-wide",
         ],
         breaks:
-          "Acking at the edge and writing asynchronously shaves 10ms and makes ticks retractable; against a 60 to 120ms mobile round trip that 10ms is invisible anyway.",
+          "Lost presence shows a stale 'online' dot for up to one TTL. That is the correct failure: it degrades to wrong-but-harmless rather than blocking a message.",
         choice: {
-          pick: "Conversation-scoped Snowflake id at the persist path, quorum write, then ack",
-          instead: "Client timestamps for ordering, or a global per-user sequencer, or ack first and write asynchronously",
+          pick: "TTL-expiring pub/sub keys, never written to the conversation log",
+          instead: "Presence rows in the durable store so the last-seen time survives a restart",
           decider:
-            "Phone clocks are wrong by seconds, so client timestamps cannot order a conversation. A global order needs a per-user sequencer, which is a write bottleneck on exactly the most active users, and nothing a client renders needs more than per-conversation order. The quorum write costs ~10ms out of a 300ms p99 budget.",
+            "Write rate against value. 30M online devices heartbeating every 30 seconds is 1M writes/s of data whose useful life is 30 seconds; the conversation log takes 58k writes/s of data kept for 30 days. Presence would be seventeen times the durable write load for state nobody can read back usefully.",
           flips:
-            "Single-replica acknowledgement is only acceptable when a node loss silently deleting acked messages is acceptable, and for chat it never is: the symptom is a conversation where one side sees a message the other never will.",
+            "Products where last-seen is a queryable history rather than a live dot, which makes it ordinary durable data with an ordinary retention policy.",
+        },
+      },
+    },
+
+    // --- persist path stages ------------------------------------------------
+    {
+      id: "p-idempotency",
+      label: "Idempotency check",
+      sub: "conditional on client_msg_id",
+      kind: "process",
+      x: 420,
+      y: 344,
+      w: 260,
+      detail: {
+        what: "The first stage of every send: look up (chat_id, client_msg_id) and, on a hit, return the msg_id already assigned instead of continuing.",
+        why: "The common mobile failure is a lost ack followed by a client retry, not an exotic one. This is the only point in the system where a retry can still be turned back into the same message, because after the next stage it has an id and after the one following it has been delivered.",
+        numbers: [
+          "one extra read on every send, including the majority that are not retries",
+          "24h window, covering the client's retry horizon",
+          "a hit short-circuits: no id, no write, no bus record",
+        ],
+        breaks:
+          "Skip it and a lost ack produces two genuinely distinct messages. No downstream dedupe can repair that, because by the time anyone notices both have valid ids and both have been delivered.",
+        choice: {
+          pick: "A conditional check before id assignment, returning the prior ack on a hit",
+          instead: "Letting both writes land and de-duplicating at delivery or on the client",
+          decider:
+            "Where the duplicate is still reversible. Before an id exists it is one row; after, it is two valid messages in two clients' render order, and nothing can merge them. The cost of getting it right is one read on 5B sends/day.",
+          flips:
+            "Never for user-visible messages. It flips only for genuinely idempotent side-effect-free traffic, such as presence, where a duplicate is invisible.",
         },
       },
     },
     {
       id: "dedupe",
-      label: "Dedupe index",
+      label: "Idempotency index",
       sub: "(chat_id, client_msg_id), TTL 24h",
       kind: "database",
-      x: 440,
-      y: 210,
-      w: 240,
+      x: 760,
+      y: 344,
+      w: 260,
       detail: {
-        what: "Maps (chat_id, client_msg_id) to the msg_id already assigned, so a retried send returns the original ack rather than writing again.",
-        why: "The common mobile failure is a lost ack followed by a client retry, not an exotic one. Without this the retry produces a second genuinely distinct message, and no downstream dedupe can undo it because by then both have valid ids and both have been delivered.",
+        what: "Maps (chat_id, client_msg_id) to the msg_id already assigned, with a 24-hour TTL, so a retried send returns the original ack rather than writing again.",
+        why: "The retry horizon on mobile is hours, not seconds: a phone that lost signal in a tunnel retries when it surfaces, and it will usually land on a different persist node than the first attempt. The window has to cover that, and the storage has to outlive any one process.",
         numbers: [
           "24h TTL, covering the client's retry horizon",
-          "one extra read on every write",
+          "5B entries/day at ~40B each, expiring continuously",
+          "one read on every write path",
         ],
         breaks:
           "Too short a window and a phone that retried after hours without signal creates a duplicate that lives forever.",
@@ -154,23 +237,51 @@ export const CHAT_SYSTEM: Diagram = {
       },
     },
     {
+      id: "p-sequencer",
+      label: "Snowflake sequencer",
+      sub: "conversation-scoped msg_id",
+      kind: "process",
+      x: 420,
+      y: 454,
+      w: 260,
+      detail: {
+        what: "Assigns a monotonic msg_id scoped to the conversation, before the record reaches the store or the bus.",
+        why: "Ordering and durability come from the same component so that every recipient renders the same sequence regardless of which edge delivered their copy or how the bus interleaved things. Assigning the id here, and not at the edge, is what makes that true across 60 edges.",
+        numbers: [
+          "monotonic per chat_id, not globally",
+          "id exists before the quorum write and before the bus",
+          "doubles as the clustering key in the conversation log",
+        ],
+        breaks:
+          "Two devices of the same user sending concurrently get their ids in the order the persist path happened to see them, which may not be the order the human experienced. Accepted, not solved.",
+        choice: {
+          pick: "Conversation-scoped Snowflake ids assigned on the write path",
+          instead: "Client timestamps for ordering, or a global per-user sequencer",
+          decider:
+            "Phone clocks are wrong by seconds, so client timestamps cannot order a conversation at all. A global order needs a per-user sequencer, which is a write bottleneck on exactly the most active users, and nothing a client renders needs more than per-conversation order.",
+          flips:
+            "Products where a user's whole timeline must be totally ordered — a unified inbox across conversations — which is where you pay for the per-user sequencer deliberately.",
+        },
+      },
+    },
+    {
       id: "conversation-log",
       label: "Conversation log",
-      sub: "Cassandra/Scylla, (chat_id, time_bucket)",
+      sub: "Cassandra/Scylla, (chat_id, bucket)",
       kind: "database",
-      x: 440,
-      y: 310,
-      w: 240,
+      x: 760,
+      y: 545,
+      w: 260,
       detail: {
-        what: "The durable store, partitioned by (chat_id, time_bucket) and clustered by msg_id, so one read returns a conversation in send order.",
+        what: "The durable store, partitioned by (chat_id, time_bucket) and clustered by msg_id, so one read returns a conversation in send order. Media never lands here; the row carries a 32B blob reference.",
         why: "This is the product; everything else is delivery. One shared log per conversation means one write per message rather than one per member, which is what stops a 1,024-member room turning a single send into 1,024 writes on whichever shards its members happen to hash to.",
         numbers: [
           "1TB/day raw, 3TB/day at RF=3 across AZs",
           "30-day hot retention: 30TB raw, 90TB replicated on SSD",
-          "partitions kept under ~100MB",
+          "partitions kept under ~100MB; ~200B per row",
         ],
         breaks:
-          "A hot room grows one partition without bound, which is why the key carries a time bucket: (chat_id, day) for busy rooms, (chat_id, year) for a two-person chat.",
+          "A hot room grows one partition without bound, which is why the key carries a time bucket: (chat_id, day) for busy rooms, (chat_id, year) for a two-person chat. JVM GC on this tier is also the source of p99 read spikes no application tuning hides.",
         choice: {
           pick: "One shared log per conversation plus a per-device cursor",
           instead: "Fan out a row into every recipient's own inbox partition at send time",
@@ -182,30 +293,88 @@ export const CHAT_SYSTEM: Diagram = {
       },
     },
     {
-      id: "bus",
-      label: "Routing bus",
-      sub: "Kafka, one partition per edge",
-      kind: "queue",
-      x: 40,
-      y: 410,
-      w: 640,
+      id: "p-commit",
+      label: "Quorum write, then ack",
+      sub: "RF=3 across AZs, ~10ms",
+      kind: "process",
+      x: 420,
+      y: 564,
+      w: 260,
       detail: {
-        what: "A partitioned durable log carrying committed records out to whichever edge holds each recipient's socket.",
-        why: "A direct mesh needs every edge to know every other edge, and it breaks during a rolling deploy, which is exactly when connections are moving. Publishing makes edge membership a subscription rather than a topology anyone has to maintain.",
+        what: "The stage that commits the record at quorum and, only afterwards, emits the ack carrying the assigned msg_id.",
+        why: "The sender's tick has to mean the message exists durably, not that one server process accepted it. This ordering, not its speed, is the delivery contract, and keeping it inside one process is what makes it an enforced invariant rather than a convention every caller is trusted to honour.",
         numbers: [
-          "one partition per edge, 60 partitions",
-          "~5ms bus hop inside the 300ms budget",
-          "435k delivered copies/s at peak",
+          "~10ms for the quorum write out of a 300ms p99 budget",
+          "RF=3 across availability zones",
+          "ack strictly after commit; bus publish strictly after ack",
         ],
         breaks:
-          "A lagging partition delays every recipient on one edge while the rest of the fleet looks healthy. Durability is untouched, because the message committed before it ever got here.",
+          "A stalled quorum surfaces to the client as a retryable failure, which is the right answer: no tick beats a wrong tick.",
         choice: {
-          pick: "Kafka, one partition per edge, consumed by the edge that owns it",
-          instead: "Direct RPC from the sending edge to the recipient's edge",
+          pick: "Quorum write, then ack, then publish",
+          instead: "Ack from the edge on receipt and write asynchronously",
           decider:
-            "Deploy behaviour and replay. With 60 edges rolling continuously, a mesh needs every edge tracking every other edge's liveness, and a dropped call loses a delivery with no way to rewind. A log lets a restarted edge replay its own partition.",
+            "Acking first shaves 10ms off a 300ms budget where 60 to 120ms is mobile radio on each leg, so the saving is invisible to the user. What it buys instead is a retractable tick: a crash in that 10ms window turns a delivered tick into a message that never existed. Single-replica acknowledgement is the same bug slowed down — a node loss silently deletes acked messages.",
           flips:
-            "A single-edge deployment, where there is no cross-edge hop at all and a broker is pure operational cost.",
+            "Systems where the message is a hint rather than a record, such as presence or typing, where losing one after acking it costs nothing.",
+        },
+      },
+    },
+
+    // --- routing ------------------------------------------------------------
+    {
+      id: "commit-topic",
+      label: "Committed messages topic",
+      sub: "Kafka, partitioned by chat_id",
+      kind: "queue",
+      x: 400,
+      y: 788,
+      w: 280,
+      detail: {
+        what: "The durable log of committed records, partitioned by chat_id so one conversation's records stay in order, consumed by the routing tier.",
+        why: "Delivery starts only after durability is settled, so this topic carries records that are already safe. That is what makes the offline branch free: when a recipient turns out to be unreachable there is nothing left to make durable.",
+        numbers: [
+          "175k records/s at peak, one per send",
+          "~5ms hop inside the 300ms budget",
+          "retention long enough for a consumer tier restart, not for history",
+        ],
+        breaks:
+          "If the bus is unavailable the message is still stored and still arrives on reconnect, so the incident is delivery latency rather than data loss.",
+        choice: {
+          pick: "A replayable log between the write path and routing",
+          instead: "Calling the routing tier synchronously from the persist path",
+          decider:
+            "What happens on a routing failure. A synchronous call makes routing's availability part of the send SLO and loses the delivery on a dropped call with no way to rewind; a log lets a restarted consumer resume from its offset and keeps the sender's latency budget independent of fan-out.",
+          flips:
+            "Deployments small enough that routing is a library call inside the persist process, where a broker is pure operational cost.",
+        },
+      },
+    },
+    {
+      id: "members",
+      label: "Group membership",
+      sub: "chat_members, cap 1,024",
+      kind: "database",
+      x: 40,
+      y: 918,
+      w: 260,
+      detail: {
+        what: "(chat_id, user_id, joined_at, role), read once per message to expand a group into its recipient list.",
+        why: "Fan-out has to be bounded by something, and the bound lives here. The cap is a design parameter rather than a product whim: it is what keeps the shared-log choice correct and worst-case delivery arithmetic rather than hope.",
+        numbers: [
+          "cap 1,024 members",
+          "15% of sends are group, averaging 12 members",
+          "recipients per send = 2.5 on the 85/15 mix",
+        ],
+        breaks:
+          "A membership read per message hammers one row for a hot group, so it wants a short-TTL cache in front, and a stale entry means a just-added member misses messages until their next reconnect.",
+        choice: {
+          pick: "A membership table read per message, behind a hard 1,024 cap",
+          instead: "Denormalising the member list onto each message, or dropping the cap",
+          decider:
+            "5,000 members at 100 messages/s is 500k delivered copies/s from one room, more than the whole fleet's 435k peak. The cap is what turns the worst case into a number you can plan against.",
+          flips:
+            "Very large public rooms, where the model changes to pull-based subscription rather than routed delivery and membership stops being read on the hot path.",
         },
       },
     },
@@ -214,15 +383,15 @@ export const CHAT_SYSTEM: Diagram = {
       label: "Routing consumer",
       sub: "membership + registry lookup",
       kind: "service",
-      x: 40,
-      y: 520,
+      x: 400,
+      y: 918,
       w: 280,
       detail: {
-        what: "Consumes committed records, expands group membership, looks each recipient up in the session registry, and republishes onto the owning edge's partition.",
+        what: "Consumes committed records, expands group membership, looks each recipient up in the session registry, and republishes onto the owning edge's partition or hands the copy to the push service.",
         why: "The registry lookup is the interesting hop: it is the only thing that knows which of 60 boxes currently holds Bob's socket. Keeping the expansion in a consumer tier rather than at the sending edge keeps fan-out off the sender's latency path entirely.",
         numbers: [
           "2.5 recipients per send on an 85% 1:1, 15% group mix",
-          "group cap 1,024 members",
+          "435k delivered copies/s at peak",
           "~45% of copies find no live socket",
         ],
         breaks:
@@ -238,41 +407,13 @@ export const CHAT_SYSTEM: Diagram = {
       },
     },
     {
-      id: "members",
-      label: "Group membership",
-      sub: "chat_members, cap 1,024",
-      kind: "database",
-      x: 440,
-      y: 500,
-      w: 240,
-      detail: {
-        what: "(chat_id, user_id, joined_at, role), read once per message to expand a group into its recipient list.",
-        why: "Fan-out has to be bounded by something, and the bound lives here. The cap is a design parameter rather than a product whim: it is what keeps the shared-log choice correct and worst-case delivery arithmetic rather than hope.",
-        numbers: [
-          "cap 1,024 members",
-          "15% of sends are group, averaging 12 members",
-          "adding someone is one write",
-        ],
-        breaks:
-          "Above the cap this stops being a group and becomes a broadcast channel, a different product: subscribers pull from a channel partition and receipts degrade to aggregate counts.",
-        choice: {
-          pick: "A membership table read per message, behind a hard 1,024 cap",
-          instead: "Denormalising the member list onto each message, or dropping the cap",
-          decider:
-            "5,000 members at 100 messages/s is 500k delivered copies/s from one room, more than the whole fleet's 435k peak. The cap is what turns the worst case into a number you can plan against.",
-          flips:
-            "Very large public rooms, where the model changes to pull-based subscription rather than routed delivery and membership stops being read on the hot path.",
-        },
-      },
-    },
-    {
       id: "session-registry",
       label: "Session registry",
       sub: "Redis, user to edge, TTL 60s",
-      kind: "database",
-      x: 440,
-      y: 600,
-      w: 240,
+      kind: "cache",
+      x: 760,
+      y: 1010,
+      w: 260,
       detail: {
         what: "An in-memory map user_id to [edge_id], written by the edge on connect with a 60-second TTL and refreshed by heartbeat every 30 seconds.",
         why: "Routing needs to know which of 60 boxes holds Bob's socket, and that answer changes every time a phone changes network. It sits deliberately off the write path, so a stale entry costs a round trip through push rather than a lost message.",
@@ -294,15 +435,103 @@ export const CHAT_SYSTEM: Diagram = {
       },
     },
     {
-      id: "edge-b",
-      label: "Edge server B",
-      sub: "holds Bob's socket, serves reconnect",
-      kind: "service",
-      x: 40,
-      y: 630,
+      id: "edge-partitions",
+      label: "Per-edge delivery partitions",
+      sub: "Kafka, 60 partitions, one per edge",
+      kind: "queue",
+      x: 400,
+      y: 1048,
       w: 280,
       detail: {
-        what: "The edge that currently owns the recipient's socket. Pushes the receive frame and serves the reconnect catch-up.",
+        what: "The routed output: one partition per edge, each consumed only by the edge that owns it, carrying the copies destined for the sockets that edge holds.",
+        why: "An edge subscribes rather than being addressed. That is what removes the mesh: no edge needs to know any other edge exists, and a rolling deploy can move sockets around without anyone recomputing a topology or tracking liveness.",
+        numbers: [
+          "60 partitions for 60 edges",
+          "435k delivered copies/s at peak",
+          "a restarted edge replays its own partition from its offset",
+        ],
+        breaks:
+          "A lagging partition delays every recipient on one edge while the rest of the fleet looks healthy. Consumer lag per partition is the metric that catches it before any user does.",
+        choice: {
+          pick: "One partition per edge, consumed by the edge that owns it",
+          instead: "Direct RPC from the routing tier to the recipient's edge",
+          decider:
+            "Deploy behaviour and replay. With 60 edges rolling continuously, direct calls need every caller tracking every edge's liveness, and a dropped call loses a delivery with no way to rewind. A log lets a restarted edge replay its own partition, which is exactly the case a deploy creates every time.",
+          flips:
+            "A single-edge deployment, where there is no cross-edge hop at all and a broker is pure operational cost.",
+        },
+      },
+    },
+
+    // --- offline branch -----------------------------------------------------
+    {
+      id: "push-service",
+      label: "Push service",
+      sub: "coalesce 30s, dedupe per device",
+      kind: "service",
+      x: 40,
+      y: 1080,
+      w: 260,
+      detail: {
+        what: "Ours, not Apple's. Takes the copies that found no live socket, coalesces them per device on a 30-second floor, de-duplicates on msg_id, holds the device tokens, and calls APNs or FCM.",
+        why: "Without this box the offline branch would send one provider call per delivered copy into services we do not control and that rate-limit us. It is also the only place that can turn a phone asleep for eight hours into one buzz instead of forty, because it is the only component that sees all of a device's pending copies at once.",
+        numbers: [
+          "5.6B push-eligible events/day in, ~2.2B/day out",
+          "coalescing removes ~60% on this traffic mix",
+          "26k/s average, ~78k/s peak to the providers",
+        ],
+        breaks:
+          "Its own failure is invisible from the message path: everything is already durable and every message still arrives on reconnect, so nothing alerts except a push send rate that quietly falls to zero while offline users go silent.",
+        choice: {
+          pick: "Coalesce per device on a 30-second floor and dedupe on msg_id before calling the provider",
+          instead: "One provider call per delivered copy, with per-message delivery tracking",
+          decider:
+            "5.6B push-eligible events/day against ~2.2B after coalescing, so 60% of the provider calls are removed for a 30-second worst-case delay on a path that is already best-effort. Per-message reliability tracking buys nothing on top, because the message is already durable and the cursor is what actually delivers it.",
+          flips:
+            "Only where there is no durable store behind the notification, so the payload genuinely is the message rather than a hint to reconnect.",
+        },
+      },
+    },
+    {
+      id: "push",
+      label: "APNs / FCM",
+      sub: "third-party, best-effort",
+      kind: "external",
+      x: 40,
+      y: 1210,
+      w: 260,
+      detail: {
+        what: "Apple and Google's notification services. Outside our trust boundary and outside our pager: we can measure their error rate and nothing else.",
+        why: "iOS suspends the app so a socket exists only in the foreground, and on Android a 60-second keepalive to survive carrier NAT rebinding keeps the radio awake and drains the battery. Push exists as much for backgrounded devices as for genuinely offline ones.",
+        numbers: [
+          "~2.2B notifications/day after coalescing",
+          "rate-limited by the provider, not by us",
+          "delivery is unacknowledged by contract",
+        ],
+        breaks:
+          "Best-effort by contract, so an APNs outage is a latency incident rather than a data incident. The failure is visible only as a rising provider error rate and a growing offline backlog.",
+        choice: {
+          pick: "Treat the notification as a wakeup whose only job is to get the app reconnected",
+          instead: "Treat it as the delivery mechanism for offline users",
+          decider:
+            "Whether a provider outage loses messages. Demoted to a wakeup, an outage delays 45% of copies until the user opens the app anyway; promoted to delivery, the same outage is data loss in a system that already had the message safely on disk.",
+          flips:
+            "Never here. It flips only for systems with no durable store behind the notification.",
+        },
+      },
+    },
+
+    // --- receive ------------------------------------------------------------
+    {
+      id: "edge-b",
+      label: "Edge server B",
+      sub: "holds Bob's socket, serves catch-up",
+      kind: "service",
+      x: 400,
+      y: 1178,
+      w: 280,
+      detail: {
+        what: "The edge that currently owns the recipient's socket. Consumes its partition, pushes the receive frame, claims the registry entry, records receipts and serves the reconnect catch-up.",
         why: "One mechanism covers crashes, deploys, flaky mobile networks and months offline: the client presents its cursors and this box streams everything after them. That backstop is precisely what lets the fast path be lossy.",
         numbers: [
           "resync marker above ~500 messages or 7 days of gap",
@@ -315,37 +544,37 @@ export const CHAT_SYSTEM: Diagram = {
           pick: "A server-side resync marker once the gap exceeds ~500 messages or 7 days",
           instead: "Always streaming the full backlog from the cursor",
           decider:
-            "A device back after three months in a busy group would take tens of thousands of messages down a socket that times out mid-stream, then retry from the same cursor and fail identically. The marker jumps the cursor forward and the client pages older history 50 at a time over REST.",
+            "A device back after three months in a busy group would take tens of thousands of messages down a socket that times out mid-stream, then retry from the same cursor and fail identically. The marker jumps the cursor forward and the client pages older history 50 at a time over REST. State the cost: those messages are never individually acked, so their senders' ticks never complete.",
           flips:
             "Low-volume conversations where the worst backlog is a few hundred messages, and full streaming is always cheaper than maintaining a second code path.",
         },
       },
     },
     {
-      id: "push",
-      label: "APNs / FCM",
-      sub: "best-effort wakeup",
-      kind: "external",
-      x: 440,
-      y: 710,
-      w: 240,
+      id: "read-coalescer",
+      label: "History read coalescer",
+      sub: "one query per hot range",
+      kind: "service",
+      x: 1140,
+      y: 1178,
+      w: 260,
       detail: {
-        what: "Apple and Google's notification services, used to wake a device that has no live socket.",
-        why: "iOS suspends the app so a socket exists only in the foreground, and on Android a 60-second keepalive to survive carrier NAT rebinding keeps the radio awake and drains the battery. Push exists as much for backgrounded devices as for genuinely offline ones.",
+        what: "Sits in front of the conversation log for catch-up and scroll-back reads, merging concurrent requests for the same (chat_id, range) into a single query and fanning the result back out.",
+        why: "The read amplification in chat is not per message, it is per device opening the same room at the same moment. A busy group's members all reconnect on the same push and all ask for the same tail, so without a merge point that is one identical range scan per device.",
         numbers: [
-          "~45% of 12.5B delivered copies find no socket: 5.6B push-eligible/day",
-          "30s coalescing removes ~60%, leaving ~2.2B/day",
-          "26k/s average, ~78k/s peak",
+          "1,000 devices opening a hot room collapse into one query",
+          "50 messages per history page on scroll-back",
+          "reads served from the 30-day hot retention window",
         ],
         breaks:
-          "Best-effort by contract and outside our control, so an APNs outage is a latency incident rather than a data incident. A duplicate push is a duplicate buzz even when the duplicate message is discarded.",
+          "It is a cache-shaped component in front of a durable store, so its failure degrades to direct reads and a storage tier that suddenly sees 1,000x the query rate on hot rooms.",
         choice: {
-          pick: "Push as a best-effort wakeup, coalesced per device on a 30-second floor",
-          instead: "Treating push as the delivery mechanism for offline users, tracked per message",
+          pick: "Request coalescing in front of the store",
+          instead: "Letting every device query the store directly and sizing the store for it",
           decider:
-            "Coalescing collapses a phone asleep for eight hours into one notification rather than forty, removing ~60% of 5.6B daily push-eligible events. Per-message reliability tracking buys nothing, because the message is already durable and the cursor delivers it.",
+            "Discord reported this layer as the larger win of its 2022 storage work, ahead of the database change itself — and the database change took node count from 177 to 72 and historical-fetch p99 from 40-125ms to 15ms, so the coalescer beat that. The read fan-out is correlated by construction: everyone in a room is woken by the same message.",
           flips:
-            "Only if there is no durable store behind the notification, so the payload genuinely is the message rather than a hint to reconnect.",
+            "Read traffic that is uncorrelated across users, where every request is for a different key and there is nothing to merge.",
         },
       },
     },
@@ -353,16 +582,17 @@ export const CHAT_SYSTEM: Diagram = {
       id: "recipient-device",
       label: "Recipient device",
       sub: "applies by msg_id, advances cursor",
-      kind: "external",
-      x: 40,
-      y: 740,
+      kind: "client",
+      x: 400,
+      y: 1320,
       w: 280,
       detail: {
-        what: "Bob's phone. Applies each frame by msg_id with an upsert, advances its per-conversation cursor, and emits receipts.",
+        what: "Bob's phone. Applies each frame by msg_id with an upsert, advances its per-conversation cursor, and emits receipts up the same socket.",
         why: "At-least-once is all the transport offers, so the idempotent apply has to live here. The cursor is simultaneously the sync state and the delivered receipt, which is why those are one write rather than two.",
         numbers: [
           "~5,000 messages and ~1MB of text per user per 30 days",
           "receipts debounced on a 5-second window",
+          "one cursor per conversation per device",
         ],
         breaks:
           "Delivered is a per-device fact, read is the maximum over a user's devices. Getting that backwards is the familiar bug where reading on a laptop leaves the phone badged forever.",
@@ -379,13 +609,13 @@ export const CHAT_SYSTEM: Diagram = {
     {
       id: "cursors",
       label: "Cursors + receipts",
-      sub: "(chat_id, device_id) to applied_msg_id",
+      sub: "(chat_id, device_id) to applied_id",
       kind: "database",
-      x: 440,
-      y: 820,
-      w: 240,
+      x: 760,
+      y: 1320,
+      w: 260,
       detail: {
-        what: "One high-water mark per device per conversation, doubling as the delivery receipt and the catch-up state.",
+        what: "One high-water mark per device per conversation, doubling as the delivery receipt and the catch-up state. Read receipts are the maximum over a user's devices; delivered is per device.",
         why: "A receipt is a message travelling the other way, and the reverse channel is where the arithmetic goes wrong. A high-water mark collapses a burst of 40 messages into one update, and it happens to be the same row the reconnect path already reads.",
         numbers: [
           "500-member group: 500 delivered plus 500 read events per message, 1,000x amplification",
@@ -409,40 +639,73 @@ export const CHAT_SYSTEM: Diagram = {
     {
       id: "e1",
       from: "sender-device",
+      to: "connect-gateway",
+      label: "connect + discover edge",
+      dashed: true,
+      fromSide: "left",
+      toSide: "right",
+      detail: {
+        what: "The connect-time request: authenticate, then ask where this device's socket should live.",
+        why: "Placement happens once per socket rather than once per message, because a stateful tier cannot be balanced per request. Everything after this point talks to one specific box.",
+        numbers: ["one round trip per socket, not per message", "JWT presented at the handshake"],
+        breaks:
+          "This is the request a million clients make simultaneously after an edge dies, which is why the answer can be a Retry-After rather than an address.",
+      },
+    },
+    {
+      id: "e2",
+      from: "connect-gateway",
+      to: "edge-a",
+      label: "assign sticky edge",
+      dashed: true,
+      fromSide: "bottom",
+      toSide: "left",
+      detail: {
+        what: "The address of the edge that will hold this socket for its whole life.",
+        why: "Stickiness is not an optimisation here, it is the model: the edge holds connection state, so the client must return to the same box until that box goes away.",
+        numbers: ["placement by connection headroom across 60 boxes"],
+        breaks:
+          "During a drain the gateway must steer new connections away from the draining box, or the deploy re-fills the box it is trying to empty.",
+      },
+    },
+    {
+      id: "e3",
+      from: "sender-device",
       to: "edge-a",
       label: "WebSocket",
       animated: true,
       detail: {
         what: "One long-lived TLS connection carrying sends, cursors, presence and typing in both directions.",
         why: "The server has to be able to speak first, which request-response cannot do. Opening a connection per message would also pay a handshake per message on a network where the handshake is the expensive part.",
-        numbers: ["auth via JWT at the handshake", "keepalive ~every 60s to survive carrier NAT rebinding"],
+        numbers: ["16KB of tuned state per socket", "keepalive ~every 60s to survive carrier NAT rebinding"],
         breaks:
           "Corporate proxies that strip the Upgrade header and captive portals that kill idle connections cost a low single-digit percentage of sessions, which is why long polling ships as a fallback on day one.",
       },
     },
     {
-      id: "e2",
+      id: "e4",
       from: "edge-a",
-      to: "persist",
+      to: "p-idempotency",
       label: "send + client_msg_id",
       animated: true,
       detail: {
-        what: "The send frame handed off the socket to the write path, carrying the client-generated idempotency key.",
+        what: "The send frame handed off the socket to the persist path, carrying the client-generated idempotency key.",
         why: "The edge deliberately does not write. Keeping persistence in one component is what makes commit-before-ack an enforced invariant rather than a convention every edge is trusted to honour.",
+        numbers: ["175k/s at peak", "~200B on the wire"],
         breaks:
           "If the edge acks here instead of waiting for the commit, a crash in the next 10ms turns a delivered tick into a message that never existed.",
       },
     },
     {
-      id: "e3",
-      from: "persist",
+      id: "e5",
+      from: "p-idempotency",
       to: "dedupe",
       label: "(chat_id, client_msg_id)",
       dashed: true,
       fromSide: "right",
       toSide: "left",
       detail: {
-        what: "The conditional check that this client_msg_id has not already been written for this conversation.",
+        what: "The conditional check that this client_msg_id has not already been written for this conversation, returning the prior msg_id on a hit.",
         why: "A lost ack plus a retry is the common case on mobile, not the exotic one, and it is the only duplicate that no downstream dedupe can repair. This read is what turns the retry into the same message.",
         numbers: ["one extra read on the write path", "24h window"],
         breaks:
@@ -450,8 +713,33 @@ export const CHAT_SYSTEM: Diagram = {
       },
     },
     {
-      id: "e4",
-      from: "persist",
+      id: "e6",
+      from: "p-idempotency",
+      to: "p-sequencer",
+      label: "not seen before",
+      detail: {
+        what: "The in-process hand-off to id assignment, taken only when the idempotency check missed.",
+        why: "A hit short-circuits here and returns the original ack, so a retry never reaches the sequencer and never produces a second id. That is the whole point of putting the check first.",
+        breaks:
+          "Reorder these two stages and every retry gets a fresh id before anything can notice it is a retry.",
+      },
+    },
+    {
+      id: "e7",
+      from: "p-sequencer",
+      to: "p-commit",
+      label: "msg_id assigned",
+      detail: {
+        what: "The record, now carrying its conversation-scoped monotonic id, handed to the commit stage.",
+        why: "The id exists before the write so that the store can cluster on it and the bus can carry it. Assigning it after the write would mean a second write to attach it.",
+        numbers: ["monotonic within chat_id"],
+        breaks:
+          "This hand-off is in-process on purpose. An async hop here would allow a gap where an id exists for a message that was never committed.",
+      },
+    },
+    {
+      id: "e8",
+      from: "p-commit",
       to: "conversation-log",
       label: "quorum write",
       fromSide: "right",
@@ -459,20 +747,20 @@ export const CHAT_SYSTEM: Diagram = {
       detail: {
         what: "The write that must commit before anything acknowledges the sender.",
         why: "The quorum matters as much as the write. A single-replica acknowledgement means a node loss silently deletes acked messages, and the symptom is a conversation where one side sees a message the other never will.",
-        numbers: ["~10ms", "RF=3 across AZs"],
+        numbers: ["~10ms", "RF=3 across AZs", "58k writes/s average, 175k at peak"],
         breaks:
           "A stalled quorum surfaces to the client as a retryable failure, which is the right answer: no tick beats a wrong tick.",
       },
     },
     {
-      id: "e5",
-      from: "persist",
+      id: "e9",
+      from: "p-commit",
       to: "edge-a",
       label: "ack, after commit",
       dashed: true,
       fromSide: "left",
       toSide: "left",
-      offset: 100,
+      offset: 90,
       detail: {
         what: "The acknowledgement carrying the assigned server msg_id, emitted only once the quorum write has committed.",
         why: "This is the invariant the whole design exists to defend. The ordering of these two operations, not their speed, is the delivery contract: the tick means stored, never that one process accepted it.",
@@ -482,7 +770,7 @@ export const CHAT_SYSTEM: Diagram = {
       },
     },
     {
-      id: "e6",
+      id: "e10",
       from: "edge-a",
       to: "sender-device",
       label: "one tick",
@@ -498,40 +786,57 @@ export const CHAT_SYSTEM: Diagram = {
       },
     },
     {
-      id: "e7",
-      from: "persist",
-      to: "bus",
+      id: "e11",
+      from: "edge-a",
+      to: "presence",
+      label: "presence + typing",
+      dashed: true,
+      fromSide: "right",
+      toSide: "left",
+      detail: {
+        what: "Heartbeats and typing events published by whichever edge holds the socket, with a TTL, and subscribed to by the edges holding interested peers.",
+        why: "These ride the same socket as messages but must never touch the durable path. Routing them through an ephemeral channel is what keeps 1M presence events/s off a store sized for 58k writes/s.",
+        numbers: ["TTL 30s", "typing events expire in seconds"],
+        breaks:
+          "Losing these shows a stale online dot for up to one TTL, which is the correct failure mode for state whose useful life is shorter than its replication lag would be.",
+      },
+    },
+    {
+      id: "e12",
+      from: "p-commit",
+      to: "commit-topic",
       label: "committed record",
       animated: true,
       detail: {
         what: "The committed record published for routing, once the id exists and the write has landed.",
         why: "Delivery only starts after durability is settled, which is what makes the offline branch free: when the recipient turns out to be unreachable there is nothing left to make durable.",
+        numbers: ["175k records/s at peak"],
         breaks:
           "If the bus is unavailable the message is still stored and still arrives on reconnect, so the incident is delivery latency rather than data loss.",
       },
     },
     {
-      id: "e8",
-      from: "bus",
+      id: "e13",
+      from: "commit-topic",
       to: "router",
-      label: "one partition per edge",
+      label: "consumer group, by chat_id",
       animated: true,
       detail: {
         what: "Routing consumers reading committed records off their partitions.",
         why: "A consumer group lets routing scale independently of both the edge tier and the write path, and a restarted consumer rewinds to its offset rather than losing whatever was in flight.",
-        numbers: ["~5ms hop", "435k delivered copies/s at peak"],
+        numbers: ["~5ms hop", "175k records/s in, 435k copies/s out"],
         breaks:
-          "Consumer lag per partition is the metric that shows cross-edge routing falling behind before any user notices anything.",
+          "Consumer lag per partition is the metric that shows routing falling behind before any user notices anything.",
       },
     },
     {
-      id: "e9",
+      id: "e14",
       from: "router",
       to: "members",
       label: "expand to recipients",
       dashed: true,
-      fromSide: "right",
-      toSide: "left",
+      fromSide: "left",
+      toSide: "right",
       detail: {
         what: "Reading chat_members to turn one chat_id into up to 1,024 recipient user_ids.",
         why: "Fan-out has to happen somewhere, and this is the cheapest place for it: after the commit, off the sender's socket, on a tier that can be scaled on its own.",
@@ -541,7 +846,7 @@ export const CHAT_SYSTEM: Diagram = {
       },
     },
     {
-      id: "e10",
+      id: "e15",
       from: "router",
       to: "session-registry",
       label: "which edge holds Bob?",
@@ -551,26 +856,41 @@ export const CHAT_SYSTEM: Diagram = {
       detail: {
         what: "The routing lookup: user_id to the edge currently holding that user's socket.",
         why: "This is the hop that makes cross-edge delivery possible without any edge knowing about any other. It is a cache read on the delivery path and deliberately not on the write path, so its staleness can never cost a message.",
-        numbers: ["8GB of entries", "TTL 60s"],
+        numbers: ["8GB of entries", "TTL 60s", "435k lookups/s at peak"],
         breaks:
           "A stale answer routes at a dead edge. Nothing is lost: the recipient falls through to push and asks for everything after their cursor when they return.",
       },
     },
     {
-      id: "e11",
+      id: "e16",
       from: "router",
-      to: "edge-b",
-      label: "publish to owning edge",
+      to: "edge-partitions",
+      label: "publish to owning partition",
       animated: true,
       detail: {
-        what: "The routed event landing on the partition that the recipient's edge consumes.",
-        why: "The edge subscribes rather than being addressed, so a rolling deploy can move sockets around without anyone recomputing a topology or tracking edge liveness.",
+        what: "The routed copy written onto the partition belonging to the edge that holds the recipient's socket.",
+        why: "Addressing an edge by partition rather than by RPC is what lets the edge subscribe instead of being called, so a rolling deploy moves sockets around without anyone maintaining a topology.",
+        numbers: ["60 partitions", "435k copies/s at peak"],
         breaks:
-          "If the recipient reconnects to a different edge mid-flight, the event lands on the old edge's partition and is dropped; cursor replay covers it.",
+          "If the recipient reconnects to a different edge mid-flight, the copy lands on the old edge's partition and is dropped; cursor replay covers it.",
       },
     },
     {
-      id: "e12",
+      id: "e17",
+      from: "edge-partitions",
+      to: "edge-b",
+      label: "edge consumes its own",
+      animated: true,
+      detail: {
+        what: "The recipient's edge consuming the partition it owns.",
+        why: "One consumer per partition means an edge only ever sees traffic for sockets it actually holds, and a restarted edge replays from its own offset rather than asking anyone to resend.",
+        numbers: ["one partition per edge", "lag per partition is the alerting signal"],
+        breaks:
+          "A lagging partition delays every recipient on one edge while the rest of the fleet looks healthy. Durability is untouched, because the message committed before it ever got here.",
+      },
+    },
+    {
+      id: "e18",
       from: "edge-b",
       to: "recipient-device",
       label: "WS push",
@@ -584,86 +904,74 @@ export const CHAT_SYSTEM: Diagram = {
       },
     },
     {
-      id: "e13",
+      id: "e19",
       from: "router",
-      to: "push",
+      to: "push-service",
       label: "no live socket",
-      dashed: true,
-      fromSide: "right",
-      toSide: "left",
-      detail: {
-        what: "The handoff to APNs or FCM when the registry has no edge for this user.",
-        why: "With no socket the message is already durable, so the only work left is waking the device. That is why the offline branch adds no durability work at all and the sender's experience is identical either way.",
-        numbers: ["~45% of delivered copies", "coalesced on a 30-second floor"],
-        breaks:
-          "Push is rate-limited and lossy by contract. Treating it as delivery is how you build a system where a provider outage loses messages.",
-      },
-    },
-    {
-      id: "e14",
-      from: "push",
-      to: "recipient-device",
-      label: "wakeup, best effort",
       dashed: true,
       fromSide: "left",
       toSide: "right",
       detail: {
-        what: "The platform notification that wakes the app so it can reconnect.",
-        why: "The notification's only job is to get the user to open the app; the app then reconnects and asks for everything after its cursor. Demoting push to a wakeup is what stops its unreliability costing a message.",
+        what: "The branch taken when the registry has no edge for this user: hand the copy to the push service instead of a partition.",
+        why: "With no socket the message is already durable, so the only work left is waking the device. That is why the offline branch adds no durability work at all and the sender's experience is identical either way.",
+        numbers: ["~45% of 12.5B delivered copies/day", "5.6B push-eligible events/day"],
         breaks:
-          "A duplicate push is a duplicate buzz even when the duplicate message is discarded, so the push service dedupes on msg_id per device with a short TTL of its own.",
+          "This branch is also taken for a stale registry entry pointing at a dead edge, which is why it must be cheap: it is the fallback for a routing miss, not only for genuinely offline users.",
       },
     },
     {
-      id: "e15",
-      from: "recipient-device",
-      to: "cursors",
-      label: "applied_msg_id",
+      id: "e20",
+      from: "push-service",
+      to: "push",
+      label: "coalesced, 30s floor",
+      dashed: true,
+      detail: {
+        what: "The provider call, after coalescing per device and de-duplicating on msg_id.",
+        why: "A phone asleep for eight hours should produce one notification, not forty. Coalescing is what makes the difference between 5.6B and 2.2B provider calls a day into services that rate-limit us.",
+        numbers: ["~60% of events removed by coalescing", "26k/s average, ~78k/s peak"],
+        breaks:
+          "A duplicate push is a duplicate buzz even when the duplicate message is discarded, so the dedupe on msg_id per device matters as much as the coalescing.",
+      },
+    },
+    {
+      id: "e21",
+      from: "push",
+      to: "recipient-device",
+      label: "wakeup, best effort",
+      dashed: true,
       fromSide: "right",
       toSide: "left",
       detail: {
-        what: "The device raising its high-water mark for a conversation, which is both the sync state and the delivered receipt.",
-        why: "One write instead of two. The reconnect path and the receipt path want exactly the same fact, so they share a row, and a burst of forty messages collapses into a single update.",
-        numbers: ["debounced on 5 seconds", "one row per (chat_id, device_id)"],
+        what: "The platform notification that wakes the app so it can reconnect.",
+        why: "The notification's only job is to get the user to open the app; the app then reconnects and asks for everything after its cursor. Demoting push to a wakeup is what stops its unreliability costing a message.",
+        numbers: ["unacknowledged by contract", "~2.2B/day"],
         breaks:
-          "Send these only on change and a lost receipt strands the sender on one tick forever; sending cursors on a heartbeat repairs it.",
+          "Rate-limited and lossy, and outside our control. Treating it as delivery is how you build a system where a provider outage loses messages.",
       },
     },
     {
-      id: "e16",
+      id: "e22",
       from: "recipient-device",
       to: "edge-b",
-      label: "reconnect + cursors",
+      label: "reconnect + cursor + receipt",
       dashed: true,
       fromSide: "left",
       toSide: "left",
       offset: 60,
       detail: {
-        what: "On reconnect the device presents its per-conversation cursors and asks for everything after them.",
-        why: "This single mechanism covers crashes, deploys, flaky mobile networks and users offline for months, and it is what demotes push notifications from delivery to wakeups.",
-        numbers: ["up to 30s of client jitter before reconnecting", "resync marker above ~500 messages or 7 days"],
+        what: "The reverse channel up the socket: on reconnect the device presents its per-conversation cursors, and in steady state it raises the same high-water mark as a receipt.",
+        why: "The reconnect path and the receipt path want exactly the same fact, so they are one message rather than two. That single mechanism covers crashes, deploys, flaky mobile networks and users offline for months, and it is what demotes push notifications from delivery to wakeups.",
+        numbers: [
+          "receipts debounced on 5 seconds",
+          "up to 30s of client jitter before reconnecting",
+          "resync marker above ~500 messages or 7 days",
+        ],
         breaks:
           "Beyond the resync bound the server jumps the cursor forward instead of streaming, so those messages are never individually acked and their senders' ticks never complete.",
       },
     },
     {
-      id: "e17",
-      from: "edge-b",
-      to: "conversation-log",
-      label: "backlog after cursor",
-      fromSide: "right",
-      toSide: "right",
-      offset: 120,
-      detail: {
-        what: "The catch-up read: everything in a conversation after the device's cursor, plus paginated scroll-back history.",
-        why: "The store is partitioned by chat_id and clustered by msg_id, so send order comes back for free and a range scan after a cursor is one query rather than a merge across partitions.",
-        numbers: ["50 messages per history page", "coalescing turns 1,000 devices opening a room into one query"],
-        breaks:
-          "Without a coalescing layer in front, 1,000 devices opening the same hot room at once is 1,000 identical range scans; Discord reported that layer as the larger win of its 2022 storage work, ahead of the database change itself.",
-      },
-    },
-    {
-      id: "e18",
+      id: "e23",
       from: "edge-b",
       to: "session-registry",
       label: "SET user:bob edge_B EX 60",
@@ -673,9 +981,54 @@ export const CHAT_SYSTEM: Diagram = {
       detail: {
         what: "The edge claiming ownership of a user's socket on connect, refreshed by heartbeat every 30 seconds.",
         why: "The registry is written by whoever holds the socket, which makes recovery self-healing: a client that lands on a new box after a crash rewrites its own routing entry as a side effect of connecting.",
-        numbers: ["TTL 60s, heartbeat every 30s"],
+        numbers: ["TTL 60s, heartbeat every 30s", "30M refreshes every 30s at peak"],
         breaks:
           "An edge that dies without expiring its entries leaves routing aiming at it for up to 60 seconds, and the TTL is the only cleanup there is.",
+      },
+    },
+    {
+      id: "e24",
+      from: "edge-b",
+      to: "cursors",
+      label: "high-water mark",
+      fromSide: "right",
+      toSide: "left",
+      detail: {
+        what: "The server-side mirror of the device's cursor: (chat_id, device_id) to applied_msg_id, written when a receipt arrives.",
+        why: "One write instead of two. The same row is the delivered receipt the sender sees as a second tick and the sync state the reconnect path needs, and a burst of forty messages collapses into a single update.",
+        numbers: ["debounced on 5 seconds", "one row per (chat_id, device_id)"],
+        breaks:
+          "Send these only on change and a lost receipt strands the sender on one tick forever; sending cursors on a heartbeat repairs it.",
+      },
+    },
+    {
+      id: "e25",
+      from: "edge-b",
+      to: "read-coalescer",
+      label: "backlog after cursor",
+      fromSide: "right",
+      toSide: "left",
+      detail: {
+        what: "The catch-up request: everything in a conversation after the device's cursor, plus paginated scroll-back history.",
+        why: "It goes through a merge point rather than straight to the store because the requests are correlated by construction: everyone in a room is woken by the same message and asks for the same range at the same moment.",
+        numbers: ["50 messages per history page", "bounded by the resync marker at ~500 messages"],
+        breaks:
+          "A reconnect storm is also a read storm. Without the merge point, 1,000 devices opening the same hot room at once is 1,000 identical range scans on top of a fleet already busy with handshakes.",
+      },
+    },
+    {
+      id: "e26",
+      from: "read-coalescer",
+      to: "conversation-log",
+      label: "coalesced range scan",
+      fromSide: "top",
+      toSide: "right",
+      detail: {
+        what: "One range query per hot (chat_id, range), served from the partition and clustering key rather than a merge across partitions.",
+        why: "The store is partitioned by chat_id and clustered by msg_id, so send order comes back for free and a range scan after a cursor is one query. That is the read shape the shared-log choice was made for.",
+        numbers: ["30-day hot window on SSD", "partitions kept under ~100MB"],
+        breaks:
+          "Beyond the hot window the read falls through to object storage at roughly 10x cheaper per GB and materially higher latency, which is acceptable for scroll-back and not for catch-up.",
       },
     },
   ],

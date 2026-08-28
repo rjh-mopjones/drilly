@@ -16,6 +16,7 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       "Compilation is what deletes the routing layer. A hashmap trie carrying those top-K payloads is about 76GB and does not fit a 64GB box, which would force sharding by first character and hand you the hot-prefix skew as a permanent tax. Minimising to an FST lands at about 12GB, so every node holds everything and there is nothing left to route.",
       "Freshness is bolted on beside the snapshot rather than expressed inside it. A streaming job rebuilds a 50 to 100MB overlay trie every 60 seconds from the live query stream and the serving node merges the two lists for about 5 microseconds, which is the only mutable thing anywhere on the request path.",
       "Publishing is the part that actually hurts. Nodes pull the 12GB snapshot from object storage rather than from the build host, because 200 nodes times 12GB is 2.4TB an hour, then verify a checksum, run about 1000 canary prefixes, and flip one atomic pointer in 10% waves with a two-minute soak between them.",
+      "Safety is two filters at two speeds, and the diagram draws both. The build-time blocklist and classifier run before anything can reach a node's top-K, which is the cheap place to do it; the serve-time filter exists because the 60 second overlay can put a term in front of a user that no build-time pass has ever seen, and because a takedown clock measured in hours cannot wait for the next build.",
     ],
     crux:
       "Prefix traffic is far more skewed than the query distribution underneath it, because every long query passes through the same short prefixes on its way. The prefix 'th' alone is roughly 60K requests per second at peak while a partition owning 'z' sits idle. You do not balance that skew, you delete it: make the structure small enough that every node holds all of it, and let the edge absorb the short prefixes before they reach a server.",
@@ -27,32 +28,16 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
   },
   nodes: [
     {
-      id: "build-zone",
-      label: "Offline build, hourly",
-      kind: "zone",
-      x: 24,
-      y: 534,
-      w: 312,
-      h: 328,
-      detail: {
-        what: "The batch half of the system: aggregate a day of query logs, roll up top-K, compile the result to an immutable artifact.",
-        why: "Everything inside this box tolerates minutes of latency because it runs once an hour, and everything outside it on the serve path has 50ms. Drawing the line is the point: all ranking and all aggregation live here so the request path is left with a walk and a read.",
-        numbers: ["hourly cadence", "minutes of tolerable latency vs 50ms on the serve path"],
-        breaks:
-          "A viral event multiplies log volume and the aggregator falls behind its hour, so the fleet keeps serving an ageing snapshot with no alarm firing on latency.",
-      },
-    },
-    {
       id: "client",
       label: "Browser client",
       sub: "150ms debounce, local history merge",
-      kind: "external",
+      kind: "client",
       x: 40,
       y: 0,
       w: 280,
       detail: {
         what: "The typing surface: it debounces keystrokes, suppresses prefixes shorter than three characters, and blends the user's own recent queries into the list before painting.",
-        why: "This is the cheapest request reduction in the system, because a request removed here never exists. It is also where personalisation has to live: the moment the origin sees a user identity the response stops being cacheable and the 95% edge hit rate evaporates.",
+        why: "This is the cheapest request reduction in the system, because a request removed here never exists. It is also where personalisation has to live: the moment the origin sees a user identity the response stops being cacheable and the 95% edge hit rate evaporates. It is a client rather than a third party because its behaviour is a load-bearing input to every capacity number below it, and it ships with the product.",
         numbers: [
           "~20 character average query, ~6 eligible keystrokes",
           "~5 suggest calls per search after debounce",
@@ -74,9 +59,9 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       id: "cdn",
       label: "CDN edge cache",
       sub: "60s TTL, ~95% hit rate",
-      kind: "database",
+      kind: "gateway",
       x: 40,
-      y: 110,
+      y: 130,
       w: 280,
       detail: {
         what: "Hundreds of edge locations caching the suggest response keyed on (prefix, locale) with Cache-Control: public, max-age=60.",
@@ -99,31 +84,107 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       },
     },
     {
-      id: "serving-node",
-      label: "Serving node",
-      sub: "walk, merge overlay, policy filter",
-      kind: "service",
+      id: "lb",
+      label: "Origin load balancer",
+      sub: "any node, readiness on canaries",
+      kind: "gateway",
       x: 40,
-      y: 220,
+      y: 260,
       w: 280,
       detail: {
-        what: "The origin tier: walk the prefix in the in-memory FST, take the base top-10, merge the trend overlay, apply the serve-time policy filter, serialise ~350B of JSON.",
-        why: "The whole latency budget is spent on the network, so nothing here may touch a database. Every ingredient of a response is either already in local RAM or already at the edge, which is why the fleet is sized by memory and geography rather than by CPU.",
+        what: "Spreads the ~5% of traffic that misses the edge across the fleet, and decides which nodes are allowed to be in the pool at all.",
+        why: "There is no prefix-to-node mapping to maintain, which is the whole prize of a 12GB structure: any node can answer any prefix, so balancing is trivial and there is no shard to become a bottleneck. What is left is admission. A node that has just booted, or has just pulled a snapshot, must not take traffic until its canary prefixes pass.",
+        numbers: [
+          "~100K origin QPS at peak spread over ~200 nodes",
+          "~25% CPU utilisation, so the fleet absorbs a lost node",
+          "a replacement warms by pulling 12GB, minutes not hours",
+        ],
+        breaks:
+          "It routes around a dead node happily and keeps feeding a node that is up but wrong. The signal that matters is empty-result rate per node, not process liveness.",
+        choice: {
+          pick: "Readiness gated on the canary prefix set passing, not on the process being up",
+          instead: "Ordinary liveness and HTTP-200 health checks.",
+          decider:
+            "The failure being defended against is a node serving an empty index, which returns 200 in ~50μs and therefore looks like the fastest, healthiest node in the fleet. The same ~1000 canary prefixes that gate the pointer flip gate readiness, so such a node removes itself instead of attracting traffic.",
+          flips:
+            "A stateless service with no loaded artifact, where process-up and answering-correctly really are the same claim and a health endpoint is not lying to you.",
+        },
+      },
+    },
+    {
+      id: "serving-node",
+      label: "Serving node",
+      kind: "serviceGroup",
+      x: 400,
+      y: 200,
+      w: 770,
+      h: 412,
+      detail: {
+        what: "One deployable unit, ~200 of them worldwide: the request path, the two in-memory structures it reads, and the loader that swaps them. Nothing inside this frame is a network hop.",
+        why: "The 50ms budget is spent almost entirely on the network, so every ingredient of a response has to already be in this process's address space. Drawing the FST and the overlay inside the box rather than beside it is the claim that matters: they are not tiers, they are memory, which is why the fleet is sized by RAM and geography rather than by CPU.",
         numbers: [
           "~50μs of CPU per origin request end to end",
           "~100K origin QPS peak, ~20 cores of real work",
-          "~200 nodes worldwide, each holding the full snapshot",
-          "serve-time policy filter costs ~0.2ms",
+          "~200 nodes, each holding the full 12GB snapshot",
+          "size the box for 24GB: both snapshots are resident during a swap",
         ],
         breaks:
-          "Anything that puts a lookup back on this path. A per-user history fetch or a shared index service would reintroduce a network hop into a 50ms budget that assumes none.",
+          "Anything that puts a lookup back on this path. A per-user history fetch or a shared index service reintroduces a network hop into a budget that assumes none.",
         choice: {
           pick: "Stateless nodes each holding the entire snapshot, sized for RAM and geography",
           instead: "Partition the structure by first character and route each request to the owning shard.",
           decider:
             "Hot-prefix skew. Partitioning by first character makes the 't' partition the bottleneck for the whole system while most of the fleet idles, since 'th' alone is ~60K requests per second at peak. At 12GB compiled, every node fits the whole structure, so there is no prefix-to-shard mapping left to skew and no fan-out to amplify a tail.",
           flips:
-            "When the structure genuinely outgrows a box, which is the question the interviewer will ask. Then you are back to routing, and the hot-prefix problem comes back with it.",
+            "When the structure genuinely outgrows a box. 10x the traffic is only 2 to 3x the distinct strings above the floor, so ~30GB, and at that point you shard on a hash of the first three characters so 'th' and 'tw' land apart, and you take the skew back.",
+        },
+      },
+    },
+    {
+      id: "suggest",
+      label: "Suggest handler",
+      sub: "walk · read · merge · serialise",
+      kind: "process",
+      x: 424,
+      y: 244,
+      w: 280,
+      detail: {
+        what: "The whole request path in one function: walk the prefix through the FST, read the finished top-10, look the same prefix up in the overlay, merge the two lists, serialise ~350B of JSON.",
+        why: "It is one stage rather than four boxes because there is nothing between the steps: no queue, no I/O, no failure that stops at one of them and not the others. The four lines of pseudocode in the answer are the deployable unit, and drawing them as peers would imply a network hop inside a 50μs path.",
+        numbers: [
+          "~50μs of CPU per request end to end",
+          "~1μs base lookup, ~5μs overlay merge",
+          "~350B response, 10 suggestions, inside one MTU",
+        ],
+        breaks:
+          "Past depth 12 there is no stored top-K, so it scans a small subtree at ~20μs instead. That is fine only while those subtrees stay small, which is a property of the corpus rather than of this code.",
+      },
+    },
+    {
+      id: "policy-filter",
+      label: "Serve-time policy filter",
+      sub: "second line, ~0.2ms",
+      kind: "process",
+      x: 424,
+      y: 374,
+      w: 280,
+      detail: {
+        what: "A last pass over the merged list against the suppression set, applied after the overlay merge and before serialisation.",
+        why: "Filtering belongs at build time because it costs nothing there, but two things outrun the build. The overlay can serve a term that was unseen 60 seconds ago and that no build-time pass has ever looked at, and jurisdictional takedowns arrive with a clock measured in hours against a cadence measured in one. This is the only place either can take effect before the next snapshot.",
+        numbers: [
+          "~0.2ms, against a ~50ms server budget",
+          "takedown clock in hours vs an hourly build cadence",
+          "a suppression is still served from the edge for up to 60s",
+        ],
+        breaks:
+          "It is the last line, so its own failure is silent: a rule that fails open lets through exactly the thing it was written for, and nothing about latency or error rate moves. The detector is a blocklist-match canary, not a metric.",
+        choice: {
+          pick: "A second-line filter at serve time on top of the build-time blocklist",
+          instead: "Trust the build-time filter and keep the request path free of policy logic.",
+          decider:
+            "The 60 second overlay. A term can go from unseen to served in one minute, which is faster than any build and far faster than any human review, so build-time filtering structurally cannot cover it. The price is ~0.2ms of a 50ms budget, which is 0.4% of the thing you are protecting.",
+          flips:
+            "No real-time path at all. If the served structure only ever changes at build time, the serve-time pass is duplicated work on every one of 100K requests per second for a set that cannot have changed.",
         },
       },
     },
@@ -131,13 +192,13 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       id: "fst-index",
       label: "FST snapshot in RAM",
       sub: "12GB, mmapped from local NVMe",
-      kind: "database",
-      x: 440,
-      y: 220,
-      w: 260,
+      kind: "cache",
+      x: 800,
+      y: 244,
+      w: 280,
       detail: {
         what: "The served artifact: a minimised automaton mapping each prefix to a byte offset, with that prefix's precomputed top-10 stored inline at the offset.",
-        why: "Precomputing the top-K at every node is what makes serving cost independent of how many completions a prefix covers. A three-character prefix sits above the order of 100,000 completions; reading the finished list is ~1μs, while gathering and heap-selecting them would be 1 to 3ms.",
+        why: "Precomputing the top-K at every node is what makes serving cost independent of how many completions a prefix covers. A three-character prefix sits above the order of 100,000 completions; reading the finished list is ~1μs, while gathering and heap-selecting them would be 1 to 3ms. It is a cache rather than a system of record: the copy in object storage is authoritative, and a node that loses this rebuilds it by pulling the file again.",
         numbers: [
           "~100M queries, ~1B trie nodes",
           "12GB compiled, top-10 stored to depth 12",
@@ -147,7 +208,7 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
         breaks:
           "Immutability. Nothing can be edited in place, so every correction, including a policy suppression, waits for the next build or gets handled by the filter in front of it.",
         choice: {
-          pick: "Compile the finished trie to an FST, which shares suffixes as well as prefixes",
+          pick: "Serve a compiled FST, which shares suffixes as well as prefixes",
           instead: "Serve the pointer-and-hashmap trie the build already has in memory.",
           decider:
             "Bytes per node against the size of a serving box. 1B nodes at ~60B each is ~60GB, plus ~16GB of top-K payload, so ~76GB, which does not fit 64GB and therefore forces sharding. The FST amortises to ~10B per node and lands at 8 to 16GB. The prize is not lookup speed, both are O(prefix length); it is that every node holds everything and routing disappears.",
@@ -157,16 +218,44 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       },
     },
     {
+      id: "loader",
+      label: "Snapshot loader",
+      sub: "checksum · canaries · pointer flip",
+      kind: "process",
+      x: 800,
+      y: 504,
+      w: 280,
+      detail: {
+        what: "The activation path on each node: pull the new snapshot to a temp path on local NVMe, verify the checksum, run ~1000 canary prefixes against expected results, then mmap the file and flip one atomic pointer.",
+        why: "It is a stage of the serving node rather than a service of its own because nothing about it is central: every node does this to itself, within its wave, and a node that fails a canary simply does not activate and does not become ready. The failure being defended against is a bad build rather than a bad download, and a bad build passes its checksum perfectly.",
+        numbers: [
+          "~1000 canary prefixes before the flip",
+          "10% waves with a two-minute soak between them",
+          "previous two snapshots kept on disk, rollback in seconds",
+        ],
+        breaks:
+          "Both snapshots are resident during the overlap, so a box sized for 12GB rather than 24GB runs out of memory precisely during the roll. And after a rollback the edge keeps serving the bad answers for up to the 60 second TTL, so purge-by-tag has to have been tested before the incident.",
+        choice: {
+          pick: "Canary-verified atomic pointer flip, rolled in 10% waves",
+          instead: "Checksum, swap, and restart the process on every node at once.",
+          decider:
+            "A checksum only proves the bytes arrived. It says nothing about a semantically empty snapshot, which is why the gate is ~1000 known prefixes diffed against expected results, and why the rollout is staged so a bad build reaches at most 10% of ~200 nodes before the soak halts it. Rollback is then a pointer flip against a file already on disk, seconds and no network.",
+          flips:
+            "A single-node deployment, or one where a few seconds of downtime per roll is acceptable. Then restart-with-the-new-file is simpler than refcounted mappings and a wave schedule.",
+        },
+      },
+    },
+    {
       id: "overlay",
       label: "Trend overlay trie",
       sub: "rebuilt every 60s, 50-100MB",
-      kind: "database",
-      x: 440,
-      y: 330,
-      w: 260,
+      kind: "cache",
+      x: 800,
+      y: 374,
+      w: 280,
       detail: {
         what: "A small mutable trie of the same node shape, rebuilt every 60 seconds from the recent query stream and merged with the base result at request time.",
-        why: "The base snapshot is up to an hour old, and popularity moves faster than that. If a term starts trending at 2:47pm it will not appear until the 3pm snapshot, so freshness shorter than the build cadence has to sit beside the snapshot rather than inside it.",
+        why: "The base snapshot is up to an hour old, and popularity moves faster than that. If a term starts trending at 2:47pm it will not appear until the 3pm snapshot, so freshness shorter than the build cadence has to sit beside the snapshot rather than inside it. It is drawn as a cache because dropping it is a supported operating mode: the node then serves from the base alone.",
         numbers: ["50 to 100MB per serving node", "adds ~5μs to a lookup", "60 second rebuild cadence"],
         breaks:
           "It is the only mutable thing on the serving path and therefore the least tested. A term can go from unseen to served in 60 seconds, which no human review process can match, so this is the path that leaks something.",
@@ -186,7 +275,7 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       sub: "Kafka, ~10B searches/day",
       kind: "queue",
       x: 40,
-      y: 440,
+      y: 470,
       w: 280,
       detail: {
         what: "The durable log of submitted searches, read twice: by the hourly batch job over a 24 hour window, and by the streaming aggregator over 60 second windows.",
@@ -201,39 +290,43 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       },
     },
     {
-      id: "stream-agg",
-      label: "Streaming aggregator",
-      sub: "Flink, 60 second windows",
-      kind: "service",
-      x: 440,
-      y: 440,
-      w: 260,
+      id: "build-job",
+      label: "Hourly build job",
+      kind: "serviceGroup",
+      x: 24,
+      y: 620,
+      w: 328,
+      h: 542,
       detail: {
-        what: "A streaming job that counts the recent query stream in 60 second windows and publishes the small overlay trie the serving nodes merge.",
-        why: "The hourly batch cadence is the right cost tradeoff for the bulk of the index but it cannot express breaking news. This job exists purely to close that one-hour window, and it is deliberately small so it can be switched off without taking the product down.",
-        numbers: ["60 second windows", "produces 50 to 100MB per publish", "closes an up-to-one-hour freshness gap"],
+        what: "One offline job in four stages: aggregate a rolling day of logs, drop what policy forbids, roll up top-10 over a trie, compile the result to an immutable artifact.",
+        why: "They are stages rather than services because a run passes through all four or produces nothing. They share one schedule and one host sized for the ~76GB intermediate structure, they fail together, and none of them can be scaled without the others. The frame is also where the design's central line is drawn: everything inside it tolerates minutes, everything on the serve path has 50ms.",
+        numbers: [
+          "hourly cadence, tens of minutes of work",
+          "~417M queries arrive per hour",
+          "build host sized for the ~76GB intermediate trie",
+        ],
         breaks:
-          "It stalls or gets poisoned by a coordinated flood, and the symptom is suggestions with no history at all in the base snapshot. The mitigation is to serve from the base alone until it recovers.",
+          "A viral event multiplies log volume and the job slips its hour, so the fleet keeps serving an ageing snapshot while every latency metric stays green. Snapshot age has to be its own alarm because nothing else moves.",
         choice: {
-          pick: "A streaming job producing a merge-time overlay",
-          instead: "Shortening the batch cadence to every few minutes.",
+          pick: "One hourly batch rebuild of the whole structure",
+          instead: "Maintain the served index incrementally as counts arrive.",
           decider:
-            "The build is ~100M strings compiled into a 12GB artifact that then has to reach 200 nodes at ~670MB/s. That does not run every few minutes at any sane cost, whereas counting a 60 second window and publishing 50 to 100MB does. The two paths are different jobs because they are three orders of magnitude apart in output size.",
+            "The served artifact is a minimised FST and minimisation is global, so a single insert can invalidate a large shared-suffix region: there is no incremental path into it. What the cadence costs is bounded by how fast ranking actually moves, and the head of the query distribution barely changes between weekdays, so an hour plus a 60 second overlay for what does move loses very little.",
           flips:
-            "A corpus small enough that a full rebuild takes seconds. Then rebuild whole and delete the overlay, along with the merge logic and the extra safety filter it drags in.",
+            "A corpus small enough to serve from a mutable trie, under ~10M entries, where you insert in place and this entire frame disappears along with the publish and swap machinery below it.",
         },
       },
     },
     {
-      id: "aggregator",
-      label: "Frequency aggregator",
-      sub: "Spark, 24h rolling window",
-      kind: "service",
-      x: 40,
-      y: 550,
+      id: "aggregate",
+      label: "Frequency aggregation",
+      sub: "Spark, 24h window, floor 5/day",
+      kind: "process",
+      x: 48,
+      y: 664,
       w: 280,
       detail: {
-        what: "The hourly batch job: read a rolling 24 hours of logs, count each distinct query string with recency decay, and drop everything under the frequency floor.",
+        what: "Reads a rolling 24 hours of logs, counts each distinct query string with recency decay, and drops everything under the frequency floor.",
         why: "A rolling day rather than the last hour is what makes counts stable enough to rank on, and the exponential decay is what stops yesterday outvoting today. The floor is not an optimisation but a safety property: below it a count is indistinguishable from one motivated bot.",
         numbers: [
           "24 hour window, ~6 hour half-life decay",
@@ -253,12 +346,40 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       },
     },
     {
-      id: "topk-build",
+      id: "safety",
+      label: "Build-time policy filter",
+      sub: "blocklist + classifier",
+      kind: "process",
+      x: 48,
+      y: 794,
+      w: 280,
+      detail: {
+        what: "A blocklist and a classifier pass over the surviving query strings, run before any of them can reach a node's top-10.",
+        why: "This is the cheap place to enforce suppression: it costs nothing at request time and it applies to every prefix that would ever have surfaced the string. It runs before the roll-up rather than after it because of how the roll-up works, not because of where it happens to be convenient.",
+        numbers: [
+          "runs over ~100M strings, once an hour",
+          "zero cost on a path that serves ~100K QPS",
+          "jurisdictional suppression maintained as per-region overlays",
+        ],
+        breaks:
+          "It is string matching against people who are deliberately working around string matching, and offensive or defamatory combinations are composed continuously. A blocklist is a snapshot of yesterday's adversary.",
+        choice: {
+          pick: "Filter the candidate strings before the top-K roll-up",
+          instead: "Let the build finish and strip blocked strings out of the finished top-10 lists.",
+          decider:
+            "The roll-up's own invariant. A parent's top-10 is selected from the union of its children's top-10 lists, so a blocked string that survives into a child's list has already displaced a legitimate completion from every ancestor's candidate set. Removing it afterwards leaves you a nine-item list, not a corrected one, and the tenth entry no longer exists anywhere to promote.",
+          flips:
+            "A suppression set that is genuinely per-request, such as one that varies by user age or account setting. Then it cannot be applied at build time at all and has to run over the finished list at serve time.",
+        },
+      },
+    },
+    {
+      id: "topk",
       label: "Trie + top-K roll-up",
       sub: "post-order, top-10 to depth 12",
-      kind: "service",
-      x: 40,
-      y: 660,
+      kind: "process",
+      x: 48,
+      y: 924,
       w: 280,
       detail: {
         what: "Builds the trie in one streaming pass over lexicographically sorted strings, then walks it post-order attaching each node's finished top-10.",
@@ -281,12 +402,12 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       },
     },
     {
-      id: "fst-compile",
+      id: "compile",
       label: "FST compile",
       sub: "minimise, 5-10x smaller",
-      kind: "service",
-      x: 40,
-      y: 770,
+      kind: "process",
+      x: 48,
+      y: 1054,
       w: 280,
       detail: {
         what: "Minimises the finished trie into an immutable automaton that shares common suffixes as well as prefixes, then checksums the artifact.",
@@ -297,42 +418,14 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
           "compile takes tens of minutes, entirely offline",
         ],
         breaks:
-          "Minimisation is global, so the output is read-only. Any per-user or continuously mutating entry is impossible here and has to be handled somewhere else entirely.",
+          "Minimisation is global, so the output is read-only and the step is all-or-nothing: there is no partial artifact to publish and no way to patch the one you have.",
         choice: {
-          pick: "Compile to an FST with a mature builder, for example Lucene's",
-          instead: "Ship the build structure as-is and shard it across nodes.",
+          pick: "Build with a plain trie and compile to an FST as a separate stage, using a mature builder such as Lucene's",
+          instead: "Construct the FST directly as strings arrive, skipping the intermediate trie.",
           decider:
-            "A 5 to 10x size reduction is the difference between 76GB, which forces first-character sharding and its hot-prefix skew, and 12GB, which fits whole on a 64GB box beside the OS page cache and the overlay. Lucene has used FSTs for term dictionaries since 2011 for exactly this memory reason.",
+            "Debuggability against build-host memory. FST construction is a real algorithm while trie insertion is trivial, so keeping the trie stage means there is always a structure you can query directly to answer 'is the compiler wrong or is the data wrong' at 3am. The cost is a build host sized for the ~76GB intermediate, which is a real and easily forgotten capacity requirement.",
           flips:
-            "Under ~10M entries, where the uncompressed structure is about 5GB and fits anywhere. You have then avoided a tens-of-minutes compile and a library whose internals are hard to debug at 3am.",
-        },
-      },
-    },
-    {
-      id: "swap",
-      label: "Canary + atomic swap",
-      sub: "~1000 prefixes, 10% waves",
-      kind: "service",
-      x: 440,
-      y: 660,
-      w: 260,
-      detail: {
-        what: "The activation step on each node: verify the checksum, run a canary set of known prefixes against expected results, then mmap the new file and flip one atomic pointer.",
-        why: "The failure you are defending against is a bad build, not a bad download, and a bad build passes its checksum perfectly. The canary set is what catches 'the aggregation job read an empty partition and every top-K is now empty', which is the outage that actually happens.",
-        numbers: [
-          "~1000 canary prefixes before the flip",
-          "10% waves with a two-minute soak between them",
-          "previous two snapshots kept resident, rollback in seconds",
-        ],
-        breaks:
-          "Both snapshots are resident during the overlap, so a box sized for 12GB rather than 24GB runs out of memory precisely during the roll. And after a rollback the edge keeps serving the bad answers for up to the 60 second TTL, so purge-by-tag has to have been tested before the incident.",
-        choice: {
-          pick: "Canary-verified atomic pointer flip, rolled in 10% waves",
-          instead: "Checksum, swap, and restart the process on every node at once.",
-          decider:
-            "A checksum only proves the bytes arrived. It says nothing about a semantically empty snapshot, which is why the gate is ~1000 known prefixes diffed against expected results, and why the rollout is staged so a bad build reaches at most 10% of ~200 nodes before the soak halts it. Rollback is then a pointer flip against a file already on disk, seconds and no network.",
-          flips:
-            "A single-node deployment, or one where a few seconds of downtime per roll is acceptable. Then restart-with-the-new-file is simpler than refcounted mappings and a wave schedule.",
+            "A corpus too large for the intermediate to be resident at all. Then you stream into the compiler and give up the reference structure, and you find out about compiler bugs from serving.",
         },
       },
     },
@@ -340,10 +433,10 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       id: "object-store",
       label: "Snapshot store",
       sub: "S3, 12GB immutable artifact",
-      kind: "database",
+      kind: "blob",
       x: 440,
-      y: 770,
-      w: 260,
+      y: 1054,
+      w: 280,
       detail: {
         what: "Object storage holding the published FST snapshots, from which every serving node pulls independently.",
         why: "Distribution, not replication. The served artifact is read-only, so every region holds an identical copy per locale and there is no replication protocol to run, only a fan-out job. It is also the entire disaster recovery story: recovery is 'pull the current snapshot and pass the canaries'.",
@@ -361,6 +454,30 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
             "Egress. 200 nodes times 12GB is 2.4TB per hour, about 670MB/s sustained, and a single build host would be the bottleneck for the entire rollout. Retaining 24 hours costs ~870GB, which is noise next to the traffic it protects.",
           flips:
             "A handful of serving nodes on the same network as the builder, where a direct push saves an entire storage dependency and the egress never binds.",
+        },
+      },
+    },
+    {
+      id: "stream-agg",
+      label: "Streaming aggregator",
+      sub: "Flink, 60 second windows",
+      kind: "service",
+      x: 840,
+      y: 900,
+      w: 280,
+      detail: {
+        what: "A streaming job that counts the recent query stream in 60 second windows and publishes the small overlay trie the serving nodes merge.",
+        why: "It is deployed apart from the hourly build rather than folded into it because the two fail on different schedules and one of them is optional: this job can be switched off, and the product degrades to hourly freshness instead of going down. It also emits 50 to 100MB where the build emits 12GB, so nothing about their capacity or cadence is shared.",
+        numbers: ["60 second windows", "produces 50 to 100MB per publish", "closes an up-to-one-hour freshness gap"],
+        breaks:
+          "It stalls or gets poisoned by a coordinated flood, and the symptom is suggestions with no history at all in the base snapshot. The mitigation is to serve from the base alone until it recovers.",
+        choice: {
+          pick: "A separate streaming job producing a merge-time overlay",
+          instead: "Shortening the batch cadence to every few minutes.",
+          decider:
+            "The build is ~100M strings compiled into a 12GB artifact that then has to reach 200 nodes at ~670MB/s. That does not run every few minutes at any sane cost, whereas counting a 60 second window and publishing 50 to 100MB does. The two paths are different jobs because they are three orders of magnitude apart in output size.",
+          flips:
+            "A corpus small enough that a full rebuild takes seconds. Then rebuild whole and delete the overlay, along with the merge logic and the extra safety filter it drags in.",
         },
       },
     },
@@ -399,7 +516,7 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
     {
       id: "e-miss",
       from: "cdn",
-      to: "serving-node",
+      to: "lb",
       label: "miss, ~5% of traffic",
       animated: true,
       detail: {
@@ -411,23 +528,24 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       },
     },
     {
-      id: "e-fill",
-      from: "serving-node",
-      to: "cdn",
-      label: "350B, max-age 60",
-      fromSide: "left",
+      id: "e-route",
+      from: "lb",
+      to: "suggest",
+      label: "any node will do",
+      fromSide: "right",
       toSide: "left",
+      animated: true,
       detail: {
-        what: "The origin response travelling back to the edge to be cached for 60 seconds under the (prefix, locale) key.",
-        why: "The TTL is chosen to match the streaming overlay cadence: caching longer would cache away exactly the freshness the overlay exists to provide, and caching shorter erodes the hit rate that holds the origin at ~100K QPS.",
-        numbers: ["Cache-Control: public, max-age=60", "Vary: none"],
+        what: "The miss handed to whichever node is in the ready pool, with no prefix-to-node mapping consulted.",
+        why: "This arrow is deliberately boring, and that is the payoff of the 12GB compile: because every node holds the whole snapshot, there is no routing decision to make, no shard to be hot and no fan-out whose slowest leaf becomes the p99 of the service.",
+        numbers: ["~100K origin QPS over ~200 nodes", "~25% CPU utilisation, so a lost node is absorbed"],
         breaks:
-          "If a policy suppression ships while a bad answer is cached, that answer keeps being served for up to 60 seconds unless purge-by-tag works, and the first time you use purge is during an incident.",
+          "It sends traffic to any node that says it is ready, so readiness has to mean the canary prefixes pass. A node with an empty index answers faster than a healthy one and will attract traffic, not shed it.",
       },
     },
     {
       id: "e-lookup",
-      from: "serving-node",
+      from: "suggest",
       to: "fst-index",
       label: "walk prefix, read top-10",
       fromSide: "right",
@@ -443,7 +561,7 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
     },
     {
       id: "e-merge",
-      from: "serving-node",
+      from: "suggest",
       to: "overlay",
       label: "merge trending entries",
       fromSide: "right",
@@ -457,9 +575,37 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       },
     },
     {
+      id: "e-filter",
+      from: "suggest",
+      to: "policy-filter",
+      label: "10 merged candidates",
+      detail: {
+        what: "The merged list handed to the suppression pass before it is serialised.",
+        why: "Second-line defence, in-process, on a list of ten strings. It is drawn as its own step because it is the only point where a suppression newer than the last build, or one that applies to this jurisdiction and not the global index, can take effect.",
+        numbers: ["~0.2ms of a ~50ms budget", "10 candidates in, at most 10 out"],
+        breaks:
+          "A filter that fails open is invisible: the response is the right size, the right shape and the right latency, and the only thing wrong with it is the content.",
+      },
+    },
+    {
+      id: "e-fill",
+      from: "policy-filter",
+      to: "cdn",
+      label: "350B, max-age 60",
+      fromSide: "left",
+      toSide: "right",
+      detail: {
+        what: "The filtered response travelling back through the load balancer to the edge, to be cached for 60 seconds under the (prefix, locale) key.",
+        why: "The TTL is chosen to match the streaming overlay cadence: caching longer would cache away exactly the freshness the overlay exists to provide, and caching shorter erodes the hit rate that holds the origin at ~100K QPS.",
+        numbers: ["Cache-Control: public, max-age=60", "Vary: none"],
+        breaks:
+          "If a policy suppression ships while a bad answer is cached, that answer keeps being served for up to 60 seconds unless purge-by-tag works, and the first time you use purge is during an incident.",
+      },
+    },
+    {
       id: "e-logs-agg",
       from: "query-logs",
-      to: "aggregator",
+      to: "aggregate",
       label: "24h rolling window",
       detail: {
         what: "A full rolling day of submitted queries read once an hour, not just the hour that has just passed.",
@@ -470,22 +616,35 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       },
     },
     {
-      id: "e-agg-topk",
-      from: "aggregator",
-      to: "topk-build",
+      id: "e-agg-safety",
+      from: "aggregate",
+      to: "safety",
       label: "~100M queries kept",
       detail: {
-        what: "The surviving distinct query strings with their decayed scores, sorted lexicographically for the build.",
-        why: "Sorted input is what lets the trie be built in one streaming pass holding only a single root-to-leaf path in memory, so the builder never needs the whole structure resident while constructing it.",
-        numbers: ["~100M strings after the floor of 5/day", "~1B trie nodes at ~20 chars each"],
+        what: "The surviving distinct query strings with their decayed scores, handed to the suppression pass.",
+        why: "Everything below the frequency floor is already gone, so this is the smallest set the policy pass could possibly run over, and running it here means the roll-up below never sees a string it is not allowed to rank.",
+        numbers: ["~100M strings after the floor of 5/day", "~200M distinct strings arrived"],
         breaks:
           "Roughly 15% of searches are ones nobody has run before, and the floor removes a much wider band than that, so whatever does not survive here is a prefix the system will have nothing to say about.",
       },
     },
     {
+      id: "e-safety-topk",
+      from: "safety",
+      to: "topk",
+      label: "blocked strings dropped",
+      detail: {
+        what: "The permitted strings, sorted lexicographically, streamed into the trie builder.",
+        why: "Sorted input is what lets the trie be built in one streaming pass holding only a single root-to-leaf path in memory, so the builder never needs the whole structure resident while constructing it. Filtering before this point is what keeps the roll-up's candidate sets honest.",
+        numbers: ["~1B trie nodes at ~20 chars each", "one streaming pass, one root-to-leaf path resident"],
+        breaks:
+          "A blocklist that runs after this stage cannot repair anything: the blocked string has already displaced a legitimate completion out of every ancestor's top-10.",
+      },
+    },
+    {
       id: "e-topk-fst",
-      from: "topk-build",
-      to: "fst-compile",
+      from: "topk",
+      to: "compile",
       label: "~76GB trie with top-K",
       detail: {
         what: "The finished in-memory trie, every node down to depth 12 carrying its top-10, handed to the minimiser.",
@@ -497,7 +656,7 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
     },
     {
       id: "e-publish",
-      from: "fst-compile",
+      from: "compile",
       to: "object-store",
       label: "12GB immutable snapshot",
       fromSide: "right",
@@ -513,9 +672,9 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
     {
       id: "e-pull",
       from: "object-store",
-      to: "swap",
+      to: "loader",
       label: "each node pulls 12GB",
-      fromSide: "top",
+      fromSide: "right",
       toSide: "bottom",
       detail: {
         what: "Every serving node downloading the new snapshot to a temp path on local NVMe, in parallel with all the others.",
@@ -527,12 +686,12 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
     },
     {
       id: "e-swap",
-      from: "swap",
+      from: "loader",
       to: "fst-index",
       label: "atomic pointer flip",
       dashed: true,
-      fromSide: "top",
-      toSide: "bottom",
+      fromSide: "right",
+      toSide: "right",
       detail: {
         what: "The activation itself: mmap the verified file and flip one pointer from the old FST to the new one, in 10% waves across the fleet.",
         why: "Requests already holding the old pointer finish against the old mapping, which is unmapped when its refcount hits zero, so no request ever sees a half-swapped structure. Waves exist so a build that passes its canaries on one node but is wrong in general cannot take the whole fleet.",
@@ -563,7 +722,7 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       to: "overlay",
       label: "rebuild every 60s",
       fromSide: "top",
-      toSide: "bottom",
+      toSide: "left",
       detail: {
         what: "The freshly counted trending entries published as a small trie for every serving node to hold alongside the base snapshot.",
         why: "It is published rather than merged into the index because the base artifact is immutable, and it is small so a node can drop it and serve from the base alone the moment the overlay looks wrong.",
