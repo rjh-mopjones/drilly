@@ -47,8 +47,6 @@ export const AUTH_SERVICE: Diagram = {
       col: 0,
       row: 0,
       parent: "verify-zone",
-      col: 0,
-      row: 0,
       detail: {
         what: "The public client that holds the tokens: a browser SPA, a native app, or a third-party OAuth client we do not control.",
         why: "It is drawn explicitly because it is the copy of the credential we can never reach. Revocation propagates to our verifiers over a feed we own; it does not propagate to the attacker's machine, which is the copy we would most like back.",
@@ -63,7 +61,7 @@ export const AUTH_SERVICE: Diagram = {
       sub: "/authorize · /token · /revoke",
       kind: "service",
       col: 0,
-      row: 1,
+      row: 0,
       detail: {
         what: "The only component that can mint tokens: authorization-code with PKCE, consent, MFA orchestration and revocation endpoints.",
         why: "Request handling is stateless and all state lives in the identity DB and session store, so it scales horizontally with logins rather than with verifications. Kept small and boring because it is a single point of compromise for the entire platform.",
@@ -88,8 +86,6 @@ export const AUTH_SERVICE: Diagram = {
       col: 0,
       row: 0,
       parent: "verify-zone",
-      col: 0,
-      row: 2,
       detail: {
         what: "An isolated worker pool with bounded concurrency that does nothing but memory-hard password hashing.",
         why: "One cheap HTTP request buys 75ms of CPU and 64MB of RAM, roughly a 1000x amplification, so the hash cannot share a thread pool with anything else and rate limiting has to sit in front of it rather than behind it.",
@@ -114,8 +110,6 @@ export const AUTH_SERVICE: Diagram = {
       col: 0,
       row: 0,
       parent: "verify-zone",
-      col: 0,
-      row: 3,
       detail: {
         what: "The second factor: a WebAuthn assertion or a TOTP code, with step-up required on login from an unrecognised device even when the password is correct.",
         why: "The password is assumed breached. Step-up on device mismatch, rather than the failure counter, is the real defence against credential stuffing, because an attack spread over 10,000 IPs barely engages per-pair throttling.",
@@ -140,8 +134,6 @@ export const AUTH_SERVICE: Diagram = {
       col: 0,
       row: 0,
       parent: "verify-zone",
-      col: 0,
-      row: 4,
       detail: {
         what: "The /token exchange: verifies SHA-256(code_verifier) against the stored challenge, burns the code, and signs a short-lived access JWT, an OIDC id_token and an opaque rotating refresh token.",
         why: "This is where the long-lived authority is moved off the request path. Every use of a refresh token invalidates it and issues a successor in the same family, so a second presentation of a superseded token proves two parties hold the lineage and the safe response is to kill the whole family.",
@@ -166,8 +158,6 @@ export const AUTH_SERVICE: Diagram = {
       col: 0,
       row: 0,
       parent: "verify-zone",
-      col: 0,
-      row: 5,
       detail: {
         what: "An append-only stream of every authentication event: logins, refreshes, logouts, consent grants and permission changes.",
         why: "It is a compliance requirement and the forensic record, and at this volume it cannot go through the transactional database without swamping the store that logins depend on. It is also how a lost denylist shard is rebuilt, by replaying the last TTL window.",
@@ -192,8 +182,6 @@ export const AUTH_SERVICE: Diagram = {
       col: 0,
       row: 0,
       parent: "verify-zone",
-      col: 1,
-      row: 1,
       detail: {
         what: "Users, credential hashes, kdf_params, MFA enrolments, account status and the per-user tokens_valid_after timestamp.",
         why: "The constraints matter more than the throughput: a unique index on email_hash, foreign keys to MFA factors, and a transactional password change. The write rate is trivially small, so the interesting property is correctness rather than scale.",
@@ -218,8 +206,6 @@ export const AUTH_SERVICE: Diagram = {
       col: 0,
       row: 0,
       parent: "verify-zone",
-      col: 1,
-      row: 3,
       detail: {
         what: "Hashed refresh tokens keyed by family with a rotation counter and device fingerprint, the 60s authorization codes, and the revoked-jti denylist.",
         why: "Every access pattern here is a point lookup with a TTL, which is exactly what an in-memory store is good at. The denylist entry only has to outlive an unexpired access token, so the whole set stays tiny and disposable.",
@@ -244,8 +230,6 @@ export const AUTH_SERVICE: Diagram = {
       col: 0,
       row: 0,
       parent: "verify-zone",
-      col: 1,
-      row: 4,
       detail: {
         what: "The custody boundary for the signing keys. The auth service asks the KMS to sign, or holds a short-lived unwrapped key in memory; the private half never lands on a disk we operate.",
         why: "A stolen signing key mints valid tokens for any user at any service and nothing on the verification path can tell. That is the only single compromise in this design with unbounded blast radius, so it gets hardware custody and an access log.",
@@ -270,8 +254,6 @@ export const AUTH_SERVICE: Diagram = {
       col: 0,
       row: 0,
       parent: "verify-zone",
-      col: 1,
-      row: 5,
       detail: {
         what: "The public halves of the signing keys, indexed by kid, served from a CDN and cached in-process by every verifier.",
         why: "This is what makes local verification possible at all: the verifier holds the key rather than asking for a decision. It is also the hidden single point of failure for the whole platform, because a verifier that cannot resolve a kid rejects every request.",
@@ -296,8 +278,6 @@ export const AUTH_SERVICE: Diagram = {
       col: 0,
       row: 0,
       parent: "verify-zone",
-      col: 1,
-      row: 6,
       detail: {
         what: "A pub/sub topic carrying revoked jti values and per-user tokens_valid_after bumps into every verifier's in-process set.",
         why: "This is revocation bought as a push rather than a lookup. It is the only mechanism that closes the window between a revocation and the access token's expiry, and it exists precisely because the alternative costs a network call on all 500k verifications a second.",
@@ -322,9 +302,6 @@ export const AUTH_SERVICE: Diagram = {
       col: 0,
       row: 0,
       parent: "verify-zone",
-      col: 1,
-      row: 7,
-      parent: "verify-zone",
       detail: {
         what: "Every service on the platform, verifying the bearer token locally: signature by cached public key, then exp, iss, aud, jti against the pushed denylist and iat against tokens_valid_after.",
         why: "The verification path has no miss. Unlike a CDN edge, there is no origin to fall back to, because the fallback would be exactly the 500k/s call the design exists to avoid, so everything it needs must already be in memory.",
@@ -348,9 +325,6 @@ export const AUTH_SERVICE: Diagram = {
       kind: "service",
       col: 0,
       row: 0,
-      parent: "verify-zone",
-      col: 1,
-      row: 8,
       parent: "verify-zone",
       detail: {
         what: "Evaluates whether this subject may perform this action on this resource, at the resource service, against a cached role and permission set.",

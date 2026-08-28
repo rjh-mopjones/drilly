@@ -80,7 +80,7 @@ function rewrite(file: string, d: Diagram): number {
     let block = out.slice(start, endGuess);
     const before = block;
     // Strip geometry lines (only at this indent).
-    block = block.replace(new RegExp(`^${indent}(x|y|w|h): [^\\n]*\\n`, "gm"), "");
+    block = block.replace(new RegExp(`^${indent}(x|y|w|h|col|row|parent): [^\\n]*\\n`, "gm"), "");
     const lines: string[] = [];
     if (cell.col != null) lines.push(`${indent}col: ${cell.col},`);
     if (cell.row != null) lines.push(`${indent}row: ${cell.row},`);
