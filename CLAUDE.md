@@ -66,8 +66,14 @@ a spec file in `mobile/lib/diagrams/`, never hand-authored SVG.
   because stacked transparent strokes resolve by paint order rather than by which
   line the pointer was actually nearest, and an edge passing under a box is
   unreachable regardless of how wide its hit area is.
-- Arrowheads are 9px. A 16px head on an 84px box reads as a blob and swallows the
-  border it lands on.
+- **Arrowheads are 20 FLOW units, not screen pixels.** `fitView` scales the whole
+  canvas and these diagrams land at 0.35-0.65 zoom, so the 9px head that looked
+  right in a full-scale mockup rendered at 3-6px and read as no arrowhead at all.
+  Size arrowheads for the zoom the app actually uses, not for the mockup.
+- **Routing keeps 16 units of CLEARANCE around every box, and the checker uses 12.**
+  A corridor that merely misses a box's interior still runs along its border, which
+  reads as a line glued to the side of every box in a column. An earlier checker
+  *inset* boxes instead of inflating them and called that clean.
 - **Edges are routed by `assignLanes()` + `corridorPath()`, not by
   `getSmoothStepPath`.** That function places its perpendicular run at the
   midpoint between the two nodes and **ignores its own `offset` argument** for a
@@ -185,7 +191,16 @@ The route check approximates `getSmoothStepPath` as an L (out along the dominant
 axis, then across). Fix failures by moving boxes apart or by setting `fromSide` /
 `toSide` so the edge leaves and enters faces that are actually clear.
 
-**That approximation is not the truth, and it has already given false confidence.**
+`check-diagrams.ts` is now **exact**: the pure layout maths lives in
+`mobile/lib/diagrams/layout.ts` (`spaceColumns`, `assignLanes`, `corridorPath`,
+`placeLabels`, `nodeH`, `anchor`) with no React or DOM, and both the renderer and
+the checker import it. Keep it that way. Every time the two were allowed to drift
+the gate lied — twice in one session.
+
+The browser checker remains useful for what the spec cannot express (rendered
+text metrics, actual paint), but it is no longer the only source of truth.
+
+**A route model that only approximates will give false confidence.**
 web-crawler passed the static check while arrows were still rendering across boxes,
 because the real curve and its lane offset put the corners somewhere else. So there
 is a second, slower checker that measures what is actually on screen:

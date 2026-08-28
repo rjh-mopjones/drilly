@@ -22,6 +22,7 @@ declare const process: { argv: string[]; exit(code: number): never };
 
 import { DIAGRAMS } from "../mobile/lib/diagrams";
 import { isFrame, type Diagram, type DiagramNode } from "../mobile/lib/diagrams/types";
+import { anchor, assignLanes, nodeH, spaceColumns } from "../mobile/lib/diagrams/layout";
 
 const MAX_LABEL = 28;
 /** Matches nodeH() in ArchDiagram.web.tsx: box + type-tag row, with a sub-label. */
@@ -74,44 +75,71 @@ function anchor(r: Rect, side?: string): { x: number; y: number } {
 }
 
 /**
- * Does the orthogonal route from a to b pass through `box`?
+ * Clearance an edge must keep from any box it is not attached to.
  *
- * Approximates getSmoothStepPath as an L: out along the dominant axis, then
- * across. That is not the exact curve, but a spec whose straight-line L crosses
- * a box will route across it under any step router, so it is the right thing to
- * fail on.
+ * Not zero: a route that merely misses a box's interior still runs along its
+ * border, which reads as a line glued to the side of every box in a column.
+ * That is what "the arrows are on top of everything" actually looks like, and
+ * an earlier version of this checker inset boxes instead of inflating them and
+ * so called it clean.
  */
-function routeCrosses(
-  a: { x: number; y: number },
-  b: { x: number; y: number },
-  box: Rect,
-): boolean {
-  const midX = (a.x + b.x) / 2;
-  const midY = (a.y + b.y) / 2;
-  const horizontal = Math.abs(b.x - a.x) > Math.abs(b.y - a.y);
-  const segs: [number, number, number, number][] = horizontal
+const CLEARANCE = 12;
+
+/**
+ * The three segments of the route that will actually be drawn.
+ *
+ * Computed from the same assignLanes() and layout the renderer uses, rather
+ * than approximated. Every time this was approximated the gate lied.
+ */
+function segmentsFor(
+  a: Rect,
+  b: Rect,
+  fromSide: string | undefined,
+  toSide: string | undefined,
+  lane: { corridor: number; srcShift: number; dstShift: number } | undefined,
+): [number, number, number, number][] {
+  const from = anchor(a as never, fromSide ?? "bottom");
+  const to = anchor(b as never, toSide ?? "top");
+  const side = fromSide ?? "bottom";
+  const horizontal = side === "left" || side === "right";
+  const sx = horizontal ? from.x : from.x + (lane?.srcShift ?? 0);
+  const sy = horizontal ? from.y + (lane?.srcShift ?? 0) : from.y;
+  const tx = horizontal ? to.x : to.x + (lane?.dstShift ?? 0);
+  const ty = horizontal ? to.y + (lane?.dstShift ?? 0) : to.y;
+  const c = lane?.corridor ?? (horizontal ? (sx + tx) / 2 : (sy + ty) / 2);
+  return horizontal
     ? [
-        [a.x, a.y, midX, a.y],
-        [midX, a.y, midX, b.y],
-        [midX, b.y, b.x, b.y],
+        [sx, sy, c, sy],
+        [c, sy, c, ty],
+        [c, ty, tx, ty],
       ]
     : [
-        [a.x, a.y, a.x, midY],
-        [a.x, midY, b.x, midY],
-        [b.x, midY, b.x, b.y],
+        [sx, sy, sx, c],
+        [sx, c, tx, c],
+        [tx, c, tx, ty],
       ];
-  // Shrink the box slightly: a segment that only grazes the border is where the
-  // edge legitimately attaches.
-  const pad = 4;
-  const r = { x: box.x + pad, y: box.y + pad, w: box.w - 2 * pad, h: box.h - 2 * pad };
-  return segs.some(([x1, y1, x2, y2]) => {
-    const lo = { x: Math.min(x1, x2), y: Math.min(y1, y2) };
-    const hi = { x: Math.max(x1, x2), y: Math.max(y1, y2) };
-    return lo.x < r.x + r.w && hi.x > r.x && lo.y < r.y + r.h && hi.y > r.y;
-  });
 }
 
-function check(d: Diagram): { errors: string[]; warnings: string[] } {
+function segHitsBox(seg: [number, number, number, number], box: Rect): boolean {
+  const [x1, y1, x2, y2] = seg;
+  const r = {
+    x: box.x - CLEARANCE,
+    y: box.y - CLEARANCE,
+    w: box.w + CLEARANCE * 2,
+    h: box.h + CLEARANCE * 2,
+  };
+  const loX = Math.min(x1, x2);
+  const hiX = Math.max(x1, x2);
+  const loY = Math.min(y1, y2);
+  const hiY = Math.max(y1, y2);
+  return loX < r.x + r.w && hiX > r.x && loY < r.y + r.h && hiY > r.y;
+}
+
+function check(authored: Diagram): { errors: string[]; warnings: string[] } {
+  // spaceColumns runs before render, so the checker has to see the same
+  // coordinates the renderer will.
+  const d = spaceColumns(authored);
+  const lanes = assignLanes(d);
   const errors: string[] = [];
   const warnings: string[] = [];
   const byId = new Map(d.nodes.map((n) => [n.id, n]));
@@ -187,12 +215,15 @@ function check(d: Diagram): { errors: string[]; warnings: string[] } {
     }
     if (!e.detail) warnings.push(`edge ${e.id} has no detail; a click on it shows nothing`);
 
-    const from = anchor(rectOf(a), e.fromSide ?? "bottom");
-    const to = anchor(rectOf(b), e.toSide ?? "top");
+    const segs = segmentsFor(rectOf(a), rectOf(b), e.fromSide, e.toSide, lanes[e.id]);
     for (const box of boxes) {
       if (box.id === e.from || box.id === e.to) continue;
-      if (routeCrosses(from, to, rectOf(box))) {
-        errors.push(`edge ${e.id} (${a.label} → ${b.label}) routes across "${box.label}"`);
+      // The first and last segments leave and enter their own endpoints, so a
+      // neighbour sitting right beside an endpoint is not a routing fault.
+      if (segs.some((s) => segHitsBox(s, rectOf(box)))) {
+        errors.push(
+          `edge ${e.id} (${a.label} → ${b.label}) runs under or along "${box.label}"`,
+        );
       }
     }
   }

@@ -222,7 +222,7 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       label: "Snapshot loader",
       sub: "checksum · canaries · pointer flip",
       kind: "process",
-      x: 800,
+      x: 424,
       y: 504,
       w: 280,
       detail: {

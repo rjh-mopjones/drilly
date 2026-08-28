@@ -22,7 +22,10 @@ const { chromium } = require("playwright");
 const BASE = process.env.DIAGRAM_BASE || "http://localhost:8099";
 // A sample this far inside a box is genuinely covered, not just meeting the
 // border where the edge legitimately attaches.
-const INSET = 6;
+// NEGATIVE inset: an edge running along a box's border is as bad as one
+// running through it — it reads as a line glued to the side of the box. This
+// checker used to inset by +6 and so reported those as clean.
+const INSET = -10;
 
 async function checkOne(page, id) {
   await page.goto(`${BASE}/diagram/${id}`, { waitUntil: "networkidle" });
@@ -118,13 +121,13 @@ async function checkOne(page, id) {
   for (const id of ids) {
     const { boxCount, buried, labelHits } = await checkOne(page, id);
     if (!buried.length && !labelHits.length) {
-      console.log(`✓ ${id.padEnd(22)} ${boxCount} boxes, no arrow runs under a box`);
+      console.log(`✓ ${id.padEnd(22)} ${boxCount} boxes, no arrow runs under or along a box`);
       continue;
     }
     failing++;
     console.log(`\n✗ ${id}`);
     for (const b of buried) {
-      console.log(`    edge ${b.id}: ${b.pct}% of its length is under ${b.boxes.join(", ")}`);
+      console.log(`    edge ${b.id}: ${b.pct}% of its length is under/along ${b.boxes.join(", ")}`);
     }
     for (const l of labelHits) {
       console.log(`    label "${l.text}" sits on box "${l.box}"`);

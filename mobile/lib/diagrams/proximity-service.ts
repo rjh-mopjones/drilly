@@ -420,7 +420,7 @@ export const PROXIMITY_SERVICE: Diagram = {
       label: "Business catalogue",
       sub: "transactional, ~2KB rows, 400GB",
       kind: "database",
-      x: 1940,
+      x: 1560,
       y: 680,
       w: 260,
       detail: {
@@ -444,7 +444,7 @@ export const PROXIMITY_SERVICE: Diagram = {
       label: "Catalogue ingest",
       sub: "coordinate sanity at write",
       kind: "service",
-      x: 1940,
+      x: 1560,
       y: 810,
       w: 260,
       detail: {
