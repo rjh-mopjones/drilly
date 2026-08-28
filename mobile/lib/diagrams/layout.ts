@@ -1227,3 +1227,95 @@ export function routePath(points: Point[], radius = 9): string {
   d += ` L ${end[0]},${end[1]}`;
   return d;
 }
+
+// --- precomputed layouts -------------------------------------------------------
+
+/** Hash of everything that affects geometry, so a precomputed layout can be trusted. */
+export function specHash(d: Diagram): string {
+  const geom = JSON.stringify({
+    n: d.nodes.map((n) => [n.id, n.kind, n.col, n.row, n.parent, n.expanded, n.label, n.sub, n.x, n.y, n.w, n.h]),
+    e: d.edges.map((e) => [e.id, e.from, e.to, e.label, tierOf(e), e.fromSide, e.toSide]),
+  });
+  let h = 2166136261;
+  for (let i = 0; i < geom.length; i++) {
+    h ^= geom.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(16);
+}
+
+/**
+ * JSON-safe, geometry-only form of a Layout. The prose (details, pipelines'
+ * text) is re-attached from the authored spec on load, so the file stays small
+ * enough to ship in the bundle.
+ */
+export type SerializedLayout = {
+  rects: Record<string, Rect>;
+  routes: Record<string, Route>;
+  labels: Record<string, Point>;
+  collapsed: string[];
+  /** Drawn edges after collapsing: id, endpoints, label, tier only. */
+  edges: { id: string; from: string; to: string; label?: string; tier: EdgeTier }[];
+  bounds: Rect;
+  zoom: number;
+  crossings: number;
+  boxHits: number;
+  onGrid: boolean;
+};
+
+const r1 = (v: number) => Math.round(v * 10) / 10;
+
+export function serializeLayout(L: Layout): SerializedLayout {
+  const rects: Record<string, Rect> = {};
+  for (const [k, r] of Object.entries(L.rects)) rects[k] = { x: r1(r.x), y: r1(r.y), w: r1(r.w), h: r1(r.h) };
+  const routes: Record<string, Route> = {};
+  for (const [k, r] of Object.entries(L.routes)) routes[k] = { ...r, points: r.points.map(([x, y]) => [r1(x), r1(y)]) };
+  const labels: Record<string, Point> = {};
+  for (const [k, p] of Object.entries(L.labels)) labels[k] = [r1(p[0]), r1(p[1])];
+  return {
+    rects,
+    routes,
+    labels,
+    collapsed: [...L.collapsed],
+    edges: L.diagram.edges.map((e) => ({ id: e.id, from: e.from, to: e.to, label: e.label, tier: tierOf(e) })),
+    bounds: { x: r1(L.bounds.x), y: r1(L.bounds.y), w: r1(L.bounds.w), h: r1(L.bounds.h) },
+    zoom: r1(L.zoom * 10) / 10,
+    crossings: L.crossings,
+    boxHits: L.boxHits,
+    onGrid: L.onGrid,
+  };
+}
+
+/** Rebuild a Layout from its serialized form and the authored spec. */
+export function deserializeLayout(authored: Diagram, s: SerializedLayout): Layout {
+  const { diagram: collapsedDiagram, pipelines } = collapseGroups(authored);
+  const byId = new Map(collapsedDiagram.edges.map((e) => [e.id, e] as const));
+  const authoredById = new Map(authored.edges.map((e) => [e.id, e] as const));
+  const edges: DiagramEdge[] = s.edges.map((e) => ({
+    ...(byId.get(e.id) ?? authoredById.get(e.id) ?? { id: e.id, from: e.from, to: e.to }),
+    from: e.from,
+    to: e.to,
+    label: e.label,
+    tier: e.tier,
+  }));
+  return {
+    diagram: { ...collapsedDiagram, edges },
+    crossingPairs: [],
+    rects: s.rects,
+    routes: s.routes,
+    labels: s.labels,
+    pipelines,
+    collapsed: new Set(s.collapsed),
+    bounds: s.bounds,
+    zoom: s.zoom,
+    crossings: s.crossings,
+    boxHits: s.boxHits,
+    onGrid: s.onGrid,
+  };
+}
+
+/** Use a precomputed layout when its hash matches the spec, else compute. */
+export function layoutFor(authored: Diagram, precomputed?: { hash: string; layout: SerializedLayout }): Layout {
+  if (precomputed && precomputed.hash === specHash(authored)) return deserializeLayout(authored, precomputed.layout);
+  return layoutDiagram(authored);
+}

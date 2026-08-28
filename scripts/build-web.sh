@@ -114,6 +114,10 @@ MOBILE="$ROOT/mobile"
 WEB_PUBLIC="$ROOT/web/public"
 OUT="$MOBILE/dist"
 
+echo "→ Precomputing diagram layouts"
+cd "$ROOT"
+bunx tsx scripts/build-diagram-layouts.ts
+
 echo "→ Exporting Expo Web SPA"
 cd "$MOBILE"
 bunx expo export --platform web --clear

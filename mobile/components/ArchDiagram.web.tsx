@@ -24,12 +24,14 @@ import type {
   TechChoice,
 } from "../lib/diagrams";
 import { isFrame } from "../lib/diagrams";
+import LAYOUTS from "../lib/diagrams/layouts.json";
 import {
-  layoutDiagram,
+  layoutFor,
   routePath,
   tierOf,
   type Layout,
   type PipelineStage,
+  type SerializedLayout,
   type Point,
   type Rect,
 } from "../lib/diagrams/layout";
@@ -467,7 +469,10 @@ export default function ArchDiagram({
   diagram: Diagram;
   palette: Palette;
 }) {
-  const layout: Layout = useMemo(() => layoutDiagram(authored), [authored]);
+  const layout: Layout = useMemo(
+    () => layoutFor(authored, (LAYOUTS as unknown as Record<string, { hash: string; layout: SerializedLayout }>)[authored.id]),
+    [authored],
+  );
   const diagram = layout.diagram;
   const [sel, setSel] = useState<Selection | null>(null);
   const [hover, setHover] = useState<string | null>(null);
