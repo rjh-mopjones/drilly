@@ -310,9 +310,20 @@ function Grade({
 function makeMarkdownStyles(p: Palette, scale: number) {
   return {
     body: { color: p.text, fontSize: 14 * scale, fontFamily: UI_FONT },
+    // paddingVertical is not optional here. react-native-markdown-display's
+    // default code_inline carries `padding: 10`, and overriding only
+    // paddingHorizontal leaves the vertical 10 in place — a 57px-tall inline
+    // span inside a 14px line, which spills over the lines above and below and
+    // covers the prose. Matches ItemView, which sets it for the same reason.
     code_inline: {
       color: p.codeFg, backgroundColor: p.codeBg, fontFamily: MONO_FONT,
-      fontSize: 12.5 * scale, paddingHorizontal: 4, borderRadius: 4,
+      fontSize: 12.5 * scale, paddingHorizontal: 4, paddingVertical: 1,
+      borderRadius: 4,
+      // Both of these override library defaults rather than being decoration.
+      // The default border colour is a hardcoded light-theme #CCC that glares
+      // on a dark card, and it is drawn on every fragment when the span wraps,
+      // so it reads as a stray rule across the line above.
+      borderWidth: 1, borderColor: p.border,
     },
     fence: { backgroundColor: p.codeBg, borderRadius: 8, padding: 10 },
     strong: { color: p.textStrong, fontWeight: "700" as const },
