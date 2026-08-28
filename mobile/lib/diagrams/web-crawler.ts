@@ -386,7 +386,7 @@ export const WEB_CRAWLER: Diagram = {
     {
       id: "p-normalise",
       label: "URL normalise",
-      sub: "canonical form for the seen index",
+      sub: "canonical form for dedup",
       kind: "process",
       col: 3,
       row: 4,
@@ -475,7 +475,7 @@ export const WEB_CRAWLER: Diagram = {
     {
       id: "render",
       label: "Headless render pool",
-      sub: "escalation only, per-domain verdict",
+      sub: "escalation only, verdict cached",
       kind: "service",
       col: 2,
       row: 4,

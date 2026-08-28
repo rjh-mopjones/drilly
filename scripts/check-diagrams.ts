@@ -23,6 +23,7 @@
  */
 declare const process: { argv: string[]; exit(code: number): never };
 
+import { readFileSync } from "node:fs";
 import { DIAGRAMS } from "../mobile/lib/diagrams";
 import { isFrame, type Diagram } from "../mobile/lib/diagrams/types";
 import {
@@ -35,7 +36,16 @@ import {
   MAX_NODE_LABEL,
   MAX_NODE_SUB,
   MIN_ZOOM,
+  specHash,
 } from "../mobile/lib/diagrams/layout";
+
+/** Precomputed layouts ship in the bundle; a stale one means the app recomputes at runtime (slow), never wrong. */
+let precomputed: Record<string, { hash: string }> = {};
+try {
+  precomputed = JSON.parse(readFileSync("mobile/lib/diagrams/layouts.json", "utf8"));
+} catch {
+  precomputed = {};
+}
 
 type Report = { errors: string[]; warnings: string[]; line: string };
 
@@ -107,6 +117,8 @@ function check(authored: Diagram): Report {
   if (L.boxHits > 0) errors.push(`${L.boxHits} arrow(s) run under or along a box`);
   if (routed < L.diagram.edges.length) errors.push(`${L.diagram.edges.length - routed} edge(s) could not be routed`);
   if (textItems > 40) warnings.push(`${textItems} text items on screen`);
+  if (precomputed[authored.id]?.hash !== specHash(authored))
+    warnings.push("precomputed layout is stale: run `bunx tsx scripts/build-diagram-layouts.ts` (build-web.sh does)");
 
   const line =
     `zoom ${L.zoom.toFixed(2).padStart(4)}  boxes ${String(boxes.length).padStart(2)}  edges ${String(L.diagram.edges.length).padStart(2)}` +
