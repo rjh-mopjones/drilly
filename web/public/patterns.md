@@ -4185,14 +4185,14 @@ An index on score makes top-100 trivial in almost any database. It does nothing 
     text{dominant-baseline:middle;text-anchor:middle}
   </style>
   <text class="lbl" x="8" y="14" style="text-anchor:start">Level 3</text>
-  <rect class="box" x="40" y="6" width="352" height="22" rx="4"/><text class="sub" x="216" y="18">span 40 → target</text>
+  <rect class="box" x="62" y="6" width="352" height="22" rx="4"/><text class="sub" x="238" y="18">span 40 → target</text>
   <text class="lbl" x="8" y="58" style="text-anchor:start">Level 2</text>
-  <rect class="box" x="40" y="50" width="170" height="22" rx="4"/><text class="sub" x="125" y="62">span 12</text>
-  <rect class="box" x="222" y="50" width="170" height="22" rx="4"/><text class="sub" x="307" y="62">span 20</text>
+  <rect class="box" x="62" y="50" width="170" height="22" rx="4"/><text class="sub" x="147" y="62">span 12</text>
+  <rect class="box" x="244" y="50" width="170" height="22" rx="4"/><text class="sub" x="329" y="62">span 20</text>
   <text class="lbl" x="8" y="102" style="text-anchor:start">Level 1</text>
-  <rect class="box" x="40" y="94" width="80" height="22" rx="4"/><text class="sub" x="80" y="106">4</text>
-  <rect class="box" x="128" y="94" width="80" height="22" rx="4"/><text class="sub" x="168" y="106">3</text>
-  <rect class="box acc" x="222" y="94" width="170" height="22" rx="4"/><text class="sub" x="307" y="106" fill="var(--accent)">span 5 → player</text>
+  <rect class="box" x="62" y="94" width="80" height="22" rx="4"/><text class="sub" x="102" y="106">4</text>
+  <rect class="box" x="150" y="94" width="80" height="22" rx="4"/><text class="sub" x="190" y="106">3</text>
+  <rect class="box acc" x="244" y="94" width="170" height="22" rx="4"/><text class="sub" x="329" y="106" fill="var(--accent)">span 5 → player</text>
   <text class="sub" x="8" y="150" style="text-anchor:start">rank = 12 (level 2) + 5 (level 1)</text>
   <text class="sub" x="8" y="166" style="text-anchor:start">= 17th, no scan of everyone above</text>
 </svg>
@@ -7538,7 +7538,7 @@ The single decision the rest of this design depends on is whether repositories l
 Worked example: a diff, blame or merge on a large, busy repository can touch roughly 50,000 objects scattered through a packfile. On local NVMe that is about 4 seconds of I/O; on a network filesystem at 500 microseconds to a millisecond per read, the identical operation costs 25 to 50 seconds, a gap that stays roughly constant regardless of how much caching sits in front of it, because the working set of a genuinely busy repository does not fit in any shared cache tier that also has to serve everyone else's repositories.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="-164 -7 507 214" role="img" aria-label="50,000 random reads for one git operation cost about 4 seconds on local NVMe against 25 to 50 seconds on a network filesystem, a gap caching cannot close">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 214" role="img" aria-label="50,000 random reads for one git operation cost about 4 seconds on local NVMe against 25 to 50 seconds on a network filesystem, a gap caching cannot close">
   <style>
     .fast{fill:var(--accent);fill-opacity:.32;stroke:var(--accent);stroke-width:1.5}
     .slow{fill:currentColor;fill-opacity:.14;stroke:currentColor;stroke-opacity:.5;stroke-width:1.5}
