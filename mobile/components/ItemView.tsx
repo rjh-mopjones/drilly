@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   Platform,
   View,
@@ -17,6 +17,9 @@ import {
 import { useSettings } from "../lib/settings";
 import { useTheme, MONO_FONT, type Palette } from "../lib/theme";
 import { markdownRules } from "./CodeBlock";
+import { getDiagram, getDiagramForItem, itemRoute } from "../lib/diagrams";
+import { GlossedText, type Terms } from "./GlossedText";
+import ArchDiagram from "./ArchDiagram";
 import { CopyButton } from "./CopyButton";
 
 interface Props {
@@ -70,6 +73,25 @@ export function ItemView({ source, item, onNeighbourItem }: Props) {
     [item, source],
   );
 
+  // The item's diagram lends its box labels to the glossary ("Sketch workers"
+  // is defined by its own "what it is") and its picture to focus embeds.
+  const diagram = useMemo(() => getDiagramForItem(source.id, item.id), [source.id, item.id]);
+  const terms = useMemo<Terms | undefined>(() => {
+    if (!diagram) return undefined;
+    const out: Terms = {};
+    for (const n of diagram.nodes) {
+      if (!n.detail) continue;
+      out[n.label] = n.detail.what;
+      const short = n.label.replace(/\s*\(.*\)$/, "");
+      if (short !== n.label) out[short] = n.detail.what;
+    }
+    return out;
+  }, [diagram]);
+  const rules = useMemo(
+    () => makeRules(palette, terms, (url) => router.push(url as never)),
+    [palette, terms, router],
+  );
+
   // revealed = set of section names currently expanded. Hydrated from
   // AsyncStorage on mount; falls back to source.defaultRevealedSections.
   const [revealed, setRevealed] = useState<Set<string>>(new Set());
@@ -82,6 +104,9 @@ export function ItemView({ source, item, onNeighbourItem }: Props) {
       if (cancelled) return;
       if (saved.length > 0) {
         setRevealed(new Set(saved));
+      } else if (source.defaultRevealedSections.includes("*")) {
+        // A write-up, not a quiz: everything open from the start.
+        setRevealed(new Set(sortedSections.map((s) => s.name)));
       } else {
         // No saved state — seed from manifest defaults, plus the Summary
         // card if the user has the auto-reveal setting on AND this item
@@ -183,7 +208,7 @@ export function ItemView({ source, item, onNeighbourItem }: Props) {
     <View style={styles.container}>
       <View style={styles.header}>
         <Pressable
-          onPress={() => router.push(`/source/${source.id}`)}
+          onPress={() => router.push((getDiagramForItem(source.id, item.id) ? itemRoute(source.id, item.id) : `/source/${source.id}`) as never)}
           style={styles.backButton}
           accessibilityLabel={`Back to ${source.title}`}
         >
@@ -246,7 +271,7 @@ export function ItemView({ source, item, onNeighbourItem }: Props) {
                 <View style={styles.sectionBody}>
                   <Markdown
                     style={markdownStyles}
-                    rules={markdownRules}
+                    rules={rules}
                     onLinkPress={handleLinkPress}
                   >
                     {section.content}
@@ -511,5 +536,127 @@ function makeMarkdownStyles(p: Palette, scale: number) {
     },
     td: { padding: 6, color: p.text },
     hr: { backgroundColor: p.border, height: 1, marginVertical: 12 },
+  };
+}
+
+
+// --- write-up conventions -------------------------------------------------
+//
+// Plain markdown shapes that the reader draws as teaching furniture, so the
+// content files stay ordinary markdown and the parser stays untouched:
+//   - a paragraph opening **Bad:** / **Good:** / **Great:** is a tiered answer card
+//   - a blockquote is a callout
+//   - a paragraph that is only a link to /diagram/<id>?focus=a,b,c embeds the
+//     diagram cropped and lit to those ids, captioned with the link text
+//   - every text run goes through the glossary (plus the diagram's box labels)
+
+type MdNode = {
+  key?: string;
+  type?: string;
+  content?: string;
+  children?: MdNode[];
+  attributes?: Record<string, string>;
+};
+
+function firstStrongText(node: MdNode): string | null {
+  const first = node.children?.[0];
+  if (!first) return null;
+  if (first.type === "strong") return (first.children ?? []).map((c) => c.content ?? "").join("");
+  return firstStrongText(first);
+}
+
+function soleLink(node: MdNode): MdNode | null {
+  let cur: MdNode | undefined = node;
+  while (cur && cur.children?.length === 1 && cur.type !== "link") cur = cur.children[0];
+  return cur?.type === "link" ? cur : null;
+}
+
+const TIERS: Record<string, { fg: string; bg: string }> = {
+  Bad: { fg: "#b23a3a", bg: "rgba(178,58,58,0.10)" },
+  Good: { fg: "#946200", bg: "rgba(148,98,0,0.10)" },
+  Great: { fg: "#1f7a4d", bg: "rgba(31,122,77,0.10)" },
+};
+
+function makeRules(p: Palette, terms: Terms | undefined, push: (url: string) => void) {
+  return {
+    ...markdownRules,
+    text: (node: MdNode, _c: unknown, _p: unknown, styles: Record<string, object>, inherited: object = {}) => (
+      <GlossedText
+        key={node.key}
+        text={node.content ?? ""}
+        extra={terms}
+        style={[inherited, styles.text]}
+        accent={p.accent}
+        muted={p.textMuted}
+      />
+    ),
+    blockquote: (node: MdNode, children: ReactNode) => (
+      <View
+        key={node.key}
+        style={{
+          borderLeftWidth: 3,
+          borderLeftColor: p.accent,
+          backgroundColor: `${p.accent}14`,
+          paddingHorizontal: 12,
+          paddingVertical: 4,
+          borderRadius: 8,
+          marginVertical: 8,
+        }}
+      >
+        {children}
+      </View>
+    ),
+    paragraph: (node: MdNode, children: ReactNode, _parent: unknown, styles: Record<string, object>) => {
+      const strong = firstStrongText(node);
+      const tier = strong ? Object.keys(TIERS).find((k) => strong.startsWith(`${k}:`)) : undefined;
+      if (tier) {
+        const c = TIERS[tier];
+        return (
+          <View
+            key={node.key}
+            style={{
+              borderLeftWidth: 4,
+              borderLeftColor: c.fg,
+              backgroundColor: c.bg,
+              paddingHorizontal: 12,
+              paddingVertical: 8,
+              borderRadius: 8,
+              marginVertical: 6,
+            }}
+          >
+            <Text style={{ color: c.fg, fontSize: 11, fontWeight: "700", letterSpacing: 1, textTransform: "uppercase", marginBottom: 4 }}>
+              {tier}
+            </Text>
+            {children}
+          </View>
+        );
+      }
+      const link = soleLink(node);
+      const href = link?.attributes?.href ?? "";
+      const m = href.match(/^\/diagram\/([^/?]+)\?focus=([^&]+)/);
+      const d = m ? getDiagram(m[1]) : undefined;
+      if (m && d) {
+        const caption = (link?.children ?? []).map((c) => c.content ?? "").join("");
+        return (
+          <View key={node.key} style={{ marginVertical: 10 }}>
+            <View style={{ height: 320, borderWidth: 1, borderColor: p.border, borderRadius: 10, overflow: "hidden", backgroundColor: p.surface }}>
+              <ArchDiagram diagram={d} palette={p} focus={m[2].split(",")} embedded />
+            </View>
+            <Text style={{ color: p.textMuted, fontSize: 12.5, marginTop: 6 }}>
+              {caption}
+              {caption ? " · " : ""}
+              <Text style={{ color: p.accent }} onPress={() => push(`/diagram/${d.id}`)}>
+                open the full diagram
+              </Text>
+            </Text>
+          </View>
+        );
+      }
+      return (
+        <View key={node.key} style={styles._VIEW_SAFE_paragraph}>
+          {children}
+        </View>
+      );
+    },
   };
 }

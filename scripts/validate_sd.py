@@ -81,6 +81,64 @@ LEGACY_SECTIONS = [
     "Talking Points for the Interview",
 ]
 
+# The breakdown format: the write-up behind a diagram's Deep dive button. The
+# named sections are fixed; between "High-level design" and "Where it breaks"
+# sit any number of deep dives with descriptive headings of the author's own.
+BREAKDOWN_HEAD = [
+    "Understanding the problem",
+    "Requirements and the numbers",
+    "Two problems in one pipeline",
+    "High-level design",
+]
+BREAKDOWN_TAIL = [
+    "Where it breaks",
+    "What this design does not solve",
+    "Final design",
+    "Check your understanding",
+]
+BREAKDOWN_OPTIONAL = {"Two problems in one pipeline"}
+TIER_RE = re.compile(r"^\*\*(Bad|Good|Great):", re.M)
+FOCUS_RE = re.compile(r"^\[[^\]]+\]\(/diagram/[^)?]+\?focus=[^)]+\)$", re.M)
+COACHING_RE = re.compile(r"\b(interview\w*|whiteboard|the prose|the write-up)\b", re.I)
+
+
+def check_breakdown(rid: int, secs: list[tuple[str, str]], rep: Report) -> None:
+    names = [n for n, _ in secs]
+    body = "\n".join(c for _, c in secs)
+    dupes = {n for n in names if names.count(n) > 1}
+    if dupes:
+        rep.err("B2", f"Q{rid}: duplicate section names {sorted(dupes)}")
+    missing = [s for s in BREAKDOWN_HEAD + BREAKDOWN_TAIL if s not in names and s not in BREAKDOWN_OPTIONAL]
+    if missing:
+        rep.err("B3", f"Q{rid}: missing sections {missing}")
+        return
+    head = [n for n in names if n in BREAKDOWN_HEAD]
+    if head != [s for s in BREAKDOWN_HEAD if s in head]:
+        rep.err("B5", f"Q{rid}: opening sections out of order")
+    tail = [n for n in names if n in BREAKDOWN_TAIL]
+    if tail != BREAKDOWN_TAIL:
+        rep.err("B5", f"Q{rid}: closing sections out of order")
+    hi = names.index("High-level design")
+    wb = names.index("Where it breaks")
+    dives = names[hi + 1 : wb]
+    if len(dives) < 3:
+        rep.err("B6", f"Q{rid}: only {len(dives)} deep dives between High-level design and Where it breaks; expect 3+")
+    for n in dives:
+        if re.match(r"^deep dive\b", n, re.I):
+            rep.err("B7", f"Q{rid}: deep dive heading {n!r} is a number, not a description")
+    tiers = TIER_RE.findall(body)
+    if tiers.count("Great") < 3:
+        rep.err("B8", f"Q{rid}: {tiers.count('Great')} Great tiers; each deep dive carries Bad/Good/Great")
+    if not FOCUS_RE.search(body):
+        rep.err("B9", f"Q{rid}: no focus embed ([caption](/diagram/<id>?focus=...))")
+    for n, c in secs:
+        for m in COACHING_RE.finditer(strip_fences(c)):
+            rep.err("B10", f"Q{rid}: {n}: coaching word {m.group(0)!r}")
+            break
+    if re.search(r"(^|[^\w])#\d+\b|\bQ\d+\b", strip_fences(body)):
+        rep.err("B11", f"Q{rid}: cross-reference (#n / Qn) in a breakdown")
+
+
 # Sections that must open with a must-say / if-there-is-time marker.
 MARKED = {"High-level design", "Deep dive", "Where it breaks"}
 MARKER_RE = re.compile(r"^\*\*(must-say|if there is time)\*\*$")
@@ -346,12 +404,12 @@ def check_manifests(rep: Report, strict: bool) -> None:
             "S6", f"manifest 'patterns' entries differ between web and mobile on {diff}"
         )
     for name in we.get("defaultRevealedSections", []):
-        if name not in SECTIONS and name not in LEGACY_SECTIONS:
+        if name != "*" and name not in SECTIONS and name not in LEGACY_SECTIONS:
             rep.err(
                 "S7",
                 f"defaultRevealedSections names {name!r}, which is not a real section",
             )
-    if strict and we.get("sectionOrder") != SECTIONS:
+    if strict and we.get("sectionOrder") not in ([], SECTIONS):
         rep.err(
             "S6",
             "sectionOrder is not the canonical section array (required under --strict)",
@@ -397,7 +455,8 @@ def main() -> int:
     for rid, title, body in items:
         secs = split_sections(body)
         names = [n for n, _ in secs]
-        is_migrated = "Core" in names or "Key decisions" in names
+        is_breakdown = "Understanding the problem" in names
+        is_migrated = not is_breakdown and ("Core" in names or "Key decisions" in names)
 
         check_fences(rid, body, rep)
         check_svgs(rid, body, rep, hashes, collected)
@@ -409,7 +468,10 @@ def main() -> int:
             (migrated if is_migrated else legacy).append(rid)
             continue
 
-        if is_migrated:
+        if is_breakdown:
+            migrated.append(rid)
+            check_breakdown(rid, secs, rep)
+        elif is_migrated:
             migrated.append(rid)
             check_migrated(rid, secs, rep, args.allow_stub and not args.strict)
             # The em-dash rule applies to authored prose, not to text the

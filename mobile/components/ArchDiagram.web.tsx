@@ -502,9 +502,18 @@ function useWidth(ref: React.RefObject<HTMLDivElement | null>): number {
 export default function ArchDiagram({
   diagram: authored,
   palette,
+  onDeepDive,
+  focus,
+  embedded,
 }: {
   diagram: Diagram;
   palette: Palette;
+  /** Opens the long-form write-up; drawn as a button beside Overview when given. */
+  onDeepDive?: () => void;
+  /** Node and edge ids to light and frame: a write-up cropping the picture to the part it is explaining. */
+  focus?: string[];
+  /** Inside a page rather than full-screen: no buttons, controls or hint. */
+  embedded?: boolean;
 }) {
   const layout: Layout = useMemo(
     () => layoutFor(authored, (LAYOUTS as unknown as Record<string, { hash: string; layout: SerializedLayout }>)[authored.id]),
@@ -535,12 +544,32 @@ export default function ArchDiagram({
     return m;
   }, [layout]);
 
+  const focusKey = (focus ?? []).join(",");
+  /** A cropped embed lights its focus set while nothing is selected. */
+  const focusNodes = useMemo(() => {
+    if (!focusKey) return null;
+    const s = new Set<string>();
+    for (const id of focusKey.split(",")) {
+      const e = diagram.edges.find((x) => x.id === id);
+      if (e) {
+        s.add(groupOf.get(e.from) ?? e.from);
+        s.add(groupOf.get(e.to) ?? e.to);
+      } else s.add(groupOf.get(id) ?? id);
+    }
+    return s;
+  }, [diagram, focusKey, groupOf]);
+  const focusEdges = useMemo(
+    () => (focusKey ? new Set(focusKey.split(",").filter((id) => diagram.edges.some((e) => e.id === id))) : null),
+    [diagram, focusKey],
+  );
+
   /** Edges a walked beat names outright (as opposed to lit through both endpoints). */
   const litEdges = useMemo(() => {
+    if (!sel && focusEdges) return focusEdges;
     if (sel?.kind !== "overview" || walk == null) return null;
     const ids = walkLights(diagram.overview, walk);
     return new Set(ids.filter((id) => diagram.edges.some((e) => e.id === id)));
-  }, [diagram, sel, walk]);
+  }, [diagram, sel, walk, focusEdges]);
 
   /** What stays lit: the selection and whatever it touches, or a walked beat. */
   const lit = useMemo(() => {
@@ -556,7 +585,7 @@ export default function ArchDiagram({
       }
       return s.size ? s : null;
     }
-    if (!sel) return null;
+    if (!sel) return focusNodes;
     const s = new Set<string>();
     if (sel.kind === "node") {
       s.add(sel.id);
@@ -572,7 +601,7 @@ export default function ArchDiagram({
       }
     }
     return s;
-  }, [diagram, sel, walk, groupOf]);
+  }, [diagram, sel, walk, groupOf, focusNodes]);
 
   const nodes: Node[] = useMemo(
     () =>
@@ -684,7 +713,17 @@ export default function ArchDiagram({
     const inst = rfRef.current;
     const el = wrapRef.current;
     if (!inst || !el) return;
-    const b = layout.bounds;
+    let b = layout.bounds;
+    if (focusNodes?.size) {
+      const rs = [...focusNodes].map((id) => layout.rects[id]).filter(Boolean);
+      if (rs.length) {
+        const x = Math.min(...rs.map((r) => r.x)) - 40;
+        const y = Math.min(...rs.map((r) => r.y)) - 40;
+        const x2 = Math.max(...rs.map((r) => r.x + r.w)) + 40;
+        const y2 = Math.max(...rs.map((r) => r.y + r.h)) + 40;
+        b = { x, y, w: x2 - x, h: y2 - y };
+      }
+    }
     const W = el.clientWidth;
     const H = el.clientHeight;
     if (!W || !H) {
@@ -705,7 +744,7 @@ export default function ArchDiagram({
       },
       { duration: 200 },
     );
-  }, [layout, narrow, overviewOpen]);
+  }, [layout, narrow, overviewOpen, focusNodes]);
   useEffect(() => {
     fit();
   }, [fit, width]);
@@ -748,15 +787,14 @@ export default function ArchDiagram({
       >
         <Background variant={BackgroundVariant.Dots} gap={22} size={1} color={palette.border} />
         {/* Phones pinch; the +/- chrome and the hint only cover the picture there. */}
-        {narrow ? null : <Controls showInteractive={false} />}
+        {narrow || embedded ? null : <Controls showInteractive={false} />}
       </ReactFlow>
 
+      {embedded ? null : (
+      <div style={{ position: "absolute", top: 12, left: 12, display: "flex", gap: 8 }}>
       <button
         onClick={() => setSel((c) => (c?.kind === "overview" ? null : { kind: "overview" }))}
         style={{
-          position: "absolute",
-          top: 12,
-          left: 12,
           padding: "8px 14px",
           borderRadius: 999,
           border: `1px solid ${sel?.kind === "overview" ? palette.accent : palette.border}`,
@@ -770,6 +808,26 @@ export default function ArchDiagram({
       >
         Overview
       </button>
+      {onDeepDive ? (
+        <button
+          onClick={onDeepDive}
+          style={{
+            padding: "8px 14px",
+            borderRadius: 999,
+            border: `1px solid ${palette.border}`,
+            background: palette.surface,
+            color: palette.textStrong,
+            fontFamily: UI_FONT,
+            fontSize: 13,
+            fontWeight: 600,
+            cursor: "pointer",
+          }}
+        >
+          Deep dive
+        </button>
+      ) : null}
+      </div>
+      )}
 
       {sel?.kind === "overview" ? (
         <OverviewPanel
@@ -801,7 +859,7 @@ export default function ArchDiagram({
           side="right"
           onClose={() => setSel(null)}
         />
-      ) : narrow ? null : (
+      ) : narrow || embedded ? null : (
         <Hint palette={palette} />
       )}
     </div>

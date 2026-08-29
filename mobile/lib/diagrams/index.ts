@@ -128,6 +128,16 @@ export function getDiagram(id: string): Diagram | undefined {
 }
 
 /** The diagram belonging to a reader item, if one exists. */
+/**
+ * Where a tap on an item goes. A question with a diagram opens on the diagram
+ * (the picture is the answer; the write-up sits behind its Deep dive button);
+ * everything else opens the reader.
+ */
+export function itemRoute(sourceId: string, itemId: number): string {
+  const d = getDiagramForItem(sourceId, itemId);
+  return d ? `/diagram/${d.id}` : `/reader/${sourceId}/${itemId}`;
+}
+
 export function getDiagramForItem(sourceId: string, itemId: number): Diagram | undefined {
   return Object.values(DIAGRAMS).find(
     (d) => d.sourceId === sourceId && d.itemId === itemId,

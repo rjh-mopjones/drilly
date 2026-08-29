@@ -27,25 +27,9 @@
       "itemsPlural": "example questions",
       "storagePrefix": "sdf:patterns",
       "defaultRevealedSections": [
-        "Problem"
+        "*"
       ],
-      "sectionOrder": [
-        "Problem",
-        "Core",
-        "Summary",
-        "Interactive diagram",
-        "What this is really testing",
-        "Clarifying questions and how each answer forks the design",
-        "Requirements and scale, derived out loud",
-        "Key decisions",
-        "High-level design",
-        "Deep dive",
-        "Where it breaks",
-        "Drill questions",
-        "Answers to drill questions",
-        "Whiteboard script",
-        "Appendix"
-      ],
+      "sectionOrder": [],
       "itemCount": 56
     },
     {

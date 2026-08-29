@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useMemo } from "react";
+import { itemRoute } from "../lib/diagrams";
 import {
   Platform,
   ScrollView,
@@ -134,7 +135,7 @@ export function ItemList({ source }: Props) {
         <Pressable
           key={item.id}
           style={({ pressed }) => [styles.item, pressed && styles.itemPressed]}
-          onPress={() => router.push(`/reader/${source.id}/${item.id}`)}
+          onPress={() => router.push(itemRoute(source.id, item.id) as never)}
         >
           <Text style={styles.itemNumber}>{item.id}</Text>
           <Text style={styles.itemTitle} numberOfLines={2}>

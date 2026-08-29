@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { getDiagram, itemRoute } from "../lib/diagrams";
 import {
   View,
   Text,
@@ -97,8 +98,12 @@ export function DesktopSidebar() {
     };
   }, []);
 
-  // URL parsing: matches both /source/[id] and /reader/[source]/[itemId].
+  // URL parsing: /source/[id], /reader/[source]/[itemId], and /diagram/[id]
+  // (a diagram page is the page of the question it belongs to).
   const { activeSourceId, activeItemId } = useMemo(() => {
+    const dm = pathname.match(/^\/diagram\/([^/]+)/);
+    const d = dm ? getDiagram(dm[1]) : undefined;
+    if (d) return { activeSourceId: d.sourceId, activeItemId: d.itemId };
     const m = pathname.match(/^\/(?:source|reader)\/([^/]+)(?:\/(\d+))?/);
     return {
       activeSourceId: m ? m[1] : null,
@@ -356,7 +361,7 @@ function SourceTreeNode({
               return (
                 <Pressable
                   key={it.id}
-                  onPress={() => router.push(`/reader/${source.id}/${it.id}`)}
+                  onPress={() => router.push(itemRoute(source.id, it.id) as never)}
                   style={(s) => [
                     styles.itemRow,
                     isHot(s) && styles.sourceRowPressed,

@@ -8,7 +8,15 @@ import type { Palette } from "../lib/theme";
  * this exists only so the native bundle compiles without pulling in the
  * DOM-only React Flow dependency.
  */
-export default function ArchDiagram({ palette }: { diagram: Diagram; palette: Palette }) {
+export default function ArchDiagram({
+  palette,
+}: {
+  diagram: Diagram;
+  palette: Palette;
+  onDeepDive?: () => void;
+  focus?: string[];
+  embedded?: boolean;
+}) {
   return (
     <View style={[styles.box, { backgroundColor: palette.codeBg }]}>
       <Text style={{ color: palette.textMuted, fontSize: 12 }}>Interactive diagram</Text>

@@ -23646,424 +23646,281 @@ GET  /.well-known/openid-configuration                           → discovery d
 - **Cross-region cost:** identity replication is small (~900GB total, low change rate). The audit log dominates at ~75GB/day raw, so keep it region-local and aggregate to a central lake asynchronously rather than replicating synchronously. JWKS and the revocation feed are kilobytes. None of this is a meaningful egress driver; the expensive thing is capacity headroom, since every region must be able to absorb another region's login load.
 
 ### 53. Design Trending Topics / Top-K in a Stream
-#### Problem
-From a firehose of keyed events, continuously maintain the approximate top K keys over 5-minute, 1-hour and 24-hour sliding windows, globally and per geography. The keys are arbitrary strings discovered from the traffic rather than a registered list, so whatever counts them has to be sized by the error you accept, not by how many keys exist. Rank by how unusual a key's current rate is against its own history, because a volume ranking returns the same famous terms every day.
-#### Core
-Two problems share one name: counting a key space you cannot enumerate, and deciding which counts are interesting.
+#### Understanding the problem
+Every social product has a box somewhere that says "trending". Behind it is a stream of events, a million a second at peak, each carrying a *key*: a hashtag, a phrase, a link. The job is to keep, continuously, the top 50 keys for the last 5 minutes, the last hour and the last day. For the world, and for each of about 200 geographies.
 
-Counting first, and a memory number settles it. Roughly 100M distinct keys arrive per day, most seen once, and a sliding window needs each minute's deltas resident so you know what to subtract when a minute ages out. That is ~1.4M keys per minute at ~106B per map entry over 1,440 minutes, so ~216GB per geography. Exact counting is gone before you have chosen anything. What fits is a fixed grid of counters, each key addressed by several hash functions, sized from the error you are willing to accept. It stores no keys, so memory is independent of cardinality, and collisions only ever add, so an estimate is never below the truth. It also cannot list its own keys, so each worker keeps a bounded heap of strings it has seen: the heap supplies candidates, the counters rank them.
+Two things make it harder than it sounds.
 
-Everything rests on those grids adding cell by cell exactly. Sixty minute grids sum to an hour, 64 shard grids sum to the global one, and a region ships 917KB a minute instead of its events. Merge the grids, never the shards' local top lists, because a key ranked eleventh on every shard can be globally first.
+First, nobody registered the keys. A new hashtag is a string somebody typed a second ago. About 100 million distinct keys show up every day, and most are seen exactly once.
 
-Then ranking, which is the actual product. Score each key against its own baseline, an exponentially weighted rate and variance, and publish deviation rather than volume. That creates one hard failure mode, a key with no history, handled by an absolute floor, a prior and an age damper.
+Second, "trending" does not mean "most". A term that runs at 10,000 mentions a minute every day is wallpaper. A term that usually runs at 10 a minute and just hit 500 is the story. So the answer has to be ranked by *surprise*, against each key's own normal.
 
-All expensive work runs once a minute for everyone. The read is a single cache GET.
-#### Summary
-**The picture in your head:** a newsroom with a wall of radio scanners tuned to every frequency in the country. Nobody can transcribe every broadcast, because there are millions of them and most are one person talking to themselves. What the editor actually needs is a wall of needles that twitch when a frequency gets *louder than it normally is*. A station that always blares at full volume is background noise; a station that was silent an hour ago and is now shouting is the story. You keep a rough loudness meter per frequency, not a transcript, and you keep a memory of what "normal" sounds like for each one.
+> **What this is not.** It looks like ad-click aggregation, and the pipelines are cousins. The difference is the key space. Ads are ~5M ids that exist in a database before the first click, and the counts are billed, so that design is built around exactness. Here the keys are discovered from the data, nobody is invoiced, and there is no ground truth anywhere to reconcile against. That absence is what buys us the freedom to choose an error.
 
-**The approaches people actually take:**
+#### Requirements and the numbers
+**Functional.** Ingest keyed events. Keep an approximate top 50 per (window, geo). Rank by deviation from each key's baseline. One vote per user per key. Resist coordinated inflation. Serve a precomputed list and a per-key drill-down.
 
-*Keep a counter per key.* A map from key to count, one map per minute so the window can slide. Exact, and what you would write first. It fails on the tail, not the head: keys are discovered from the traffic and most are seen once, so a sliding day means holding every minute's map at once, hundreds of gigabytes per geography. It wins when the key set is small or can be made small, which is why the first question is whether the keys are registered anywhere.
+**Non-functional.** 1M events/s peak. Published list at most ~10 s stale. Read p99 under 20 ms. Counting error at most 0.01% of window volume, 99.9% of the time. No per-key memory growth, because the key space is unbounded.
 
-*Keep only as many keys as you have room for.* Fix a number of slots, each holding a key and a count. A monitored key increments; an unmonitored one takes the weakest slot, inherits its count as a starting bid, and records how much of that count might not be its own. Memory is a constant you choose, the ranking falls out with no separate index, and the error is total volume over slots. The strongest single-machine answer.
+The whole design is decided by three numbers, so derive them before drawing anything.
 
-*Throw the keys away and keep only counters.* A fixed grid, each key addressed by several hashes, one counter incremented per row, the estimate read back as the smallest addressed counter. Memory now depends on the error you accept rather than on how many keys exist, and two grids of the same shape add together exactly. You lose the ability to name a key, so a small candidate list travels alongside.
+**How many distinct keys per minute?** ~100M distinct keys a day, each active for about 20 minutes of it on average. 100M × 20 ÷ 1,440 ≈ **1.4M distinct keys per minute**.
 
-The choice is not accuracy; at equal memory the last two sit within an order of magnitude. It is how many times a partial result must be combined with another.
+**What would an exact map cost?** A hash-map entry is ~106 bytes once you count the string, the header, the count, the pointers and a 0.75 load factor. 1.4M × 106B ≈ 150MB per minute. A window that slides has to remember every minute's counts, so it knows what to subtract when a minute falls off the tail. A day therefore needs all 1,440 minute-maps resident: **~216GB per geography, ~40TB across 200**. Exact counting is not a tuning problem. It is off the table before we have chosen anything.
 
-**The single-request walkthrough (write path):** at 14:32:07 a user in London posts something containing `#eclipse`. The ingest tier normalises the key (lowercase, strip punctuation, collapse unicode confusables) and emits `{key:"#eclipse", user_id, ts, geo:"GB-LND"}` onto the event stream, partitioned by `hash(key)` (see #16). A sketch worker consumes it. First it checks a rotating Bloom filter for the tuple `(user_id, key)` in the current 5-minute generation, and if this account already counted for `#eclipse` this window the event is dropped. Otherwise the worker hashes `#eclipse` once per row of its current-minute counter grid and increments the addressed counter in each row: 7 memory writes, ~50ns total. The grid's shape, 7 rows of 32,768 counters, is derived from the error target under *Requirements and scale* rather than picked; nothing above depends on the specific numbers. The worker also probes those same cells, takes the minimum as the running estimate, and offers `("#eclipse", 41,207)` to a local min-heap of the shard's top 500. At the minute boundary it seals the grid, ships ~917KB to the merger, and starts a fresh one.
+**What is the read load?** ~500M daily users opening the panel ~3 times. 1.5B loads a day ≈ 17k/s average, ~60k/s at peak. The read path has to be a single cache lookup.
 
-**The single-request walkthrough (read path):** a client opens the trending panel and issues `GET /trending?window=1h&geo=GB`. This does not touch a sketch. The merger has already, at the last minute boundary, summed the 64 shard sketches cell-wise, added the result to the 60-minute ring, unioned the 64 local heaps into ~32,000 candidate keys, re-estimated each against the merged 1-hour sketch, joined the top 500 against the baseline store, computed a z-score per key, and written a 50-entry JSON blob to `trending:GB:1h` in Redis. The API is one `GET` against that key: ~2ms p99, no computation. The list is at most ~10s stale.
+> **The numbers to carry.** ~1.4M distinct keys/min · ~216GB per geo for an exact map · 1M events/s peak · ~60k reads/s peak against a 20 ms p99 · list ≤ 10 s stale.
 
-**The pieces (and what each one is for):**
-- **Event stream (Kafka, partitioned by `hash(key)`).** Durable, replayable transport at 1M events/s (see #16). Partitioning by key hash means all occurrences of one key land on one shard, so a shard's counts for that key are complete without a network shuffle. 24-hour retention covers the longest window plus recovery.
-- **Count-Min sketch** (the counter grid above; introduced by Cormode and Muthukrishnan in 2005). A `d × w` array of integer counters plus `d` independent hash functions. To count key K, increment `cell[i][h_i(K) mod w]` for every row `i`; to read K, probe the same `d` cells and take the **minimum**. It never stores K itself, so memory is fixed regardless of how many distinct keys arrive, which is the whole point when the key space is unbounded.
-- **Per-shard min-heap of the local top ~500.** The sketch answers "how many of K?" but cannot enumerate keys, because it threw them away. The heap is the only place actual key strings live. Capped at 10× K per shard so the merge has slack.
-- **Sketch ring (60 minute tiles + 24 hour tiles per geo).** Sliding windows are built by summing consecutive tiles and dropping the tail. This works only because Count-Min sketches are **linearly mergeable**: `sketch(A ∪ B) = sketch(A) + sketch(B)` cell by cell, exactly, with no loss. The same property makes shard-then-merge work.
-- **Baseline store (Redis/KV, keyed by `hash(key)`).** Per key, an EWMA of its rate, an EWMA of its variance, and a 1440-slot minute-of-day profile for the top keys. This is what converts "high" into "unusually high".
-- **Abuse scorer.** Per-user de-duplication, per-ASN and per-account-age concentration checks, and follower-graph clustering. Without it, 10,000 cheap accounts posting in lockstep is indistinguishable from a real event.
-- **Top-K cache (Redis).** 3 windows × ~200 geo partitions × ~5KB = ~3MB total, rewritten every 5s. The read path must be a single `GET`; anything else and the trending panel becomes the most expensive query in the product.
+#### Two problems in one pipeline
+It helps to name the fact that this is two problems wearing one name. **Counting** a key space we cannot enumerate, and **deciding which counts are interesting**. They have different answers and different cost profiles. Counting has to survive a million events a second. Ranking runs once a minute over a few thousand candidates, where a database join is affordable.
 
-**The thing that makes it hard:** the key set is not known in advance and does not fit in memory. This is precisely where it diverges from #18 (Ad Click Event Aggregation), which looks superficially identical, since both aggregate a huge event stream into windowed counts. But #18 counts a **bounded, enumerable** universe of ~5M ad IDs that exist in a database before the first click arrives, and its counts are **billable**, so exactness and T+1 reconciliation are the design centre. Here the keys are arbitrary strings *discovered from the data*, new hashtags, misspellings, phrases nobody has typed before, ~100M distinct per day and dominated by a long tail seen exactly once. There is no reconciliation target and nobody is invoiced. Derive the exact map: ~1.4M distinct keys per minute × ~106B per hash-map entry ≈ ~150MB *per minute*, and a 24-hour sliding window needs all 1,440 of those minute-deltas resident so you know what to subtract when a minute falls off the tail, so ~216GB per geo in RAM. Multiply by ~200 geo partitions and you are at ~40TB of hot memory to answer "what's trending". Exact counting is not a tuning problem; it is off the table.
+The entities are simple:
 
-**Why this design and what it costs:** you stop trying to count everything and accept a bounded, one-sided error. The Count-Min guarantee is `est(K) ≥ true(K)` always, and `est(K) ≤ true(K) + ε·N` with probability `1 − δ`, where `N` is the total volume in the sketch. Every hash collision only ever *adds* another key's increments to a cell, so no cell can be too low, and the minimum across `d` rows is the least contaminated of the `d` estimates. Since the error is absolute (`ε·N`) while heavy hitters are enormous under Zipf skew, the sketch is precise where you care and worthless in the tail, which is exactly the shape of the problem. The costs: you can never prove a count, you cannot enumerate keys from the sketch (hence the heap), and you must resist the "conservative update" optimisation, which tightens estimates but destroys linear mergeability and therefore breaks both the window ring and the shard merge.
+- **Event** `{key, user_id, ts, geo}`, ~72 bytes.
+- **Key**: the normalised string we count. Normalisation (lowercase, strip punctuation, collapse look-alike unicode) defines the key space, so it runs first.
+- **Window**: 5m, 1h, 24h. Sliding, not tumbling.
+- **Baseline**: what "normal" looks like for one key.
+- **Trending list**: 50 entries per (geo, window), each with an estimated count and an error bound.
 
-**If you were building it tomorrow:**
-- Kafka (partition by `hash(key)`, 24h retention) → Flink or a bespoke Rust/Java consumer holding sketches on heap → merger service → Redis for baselines and the served top-K → Parquet on object store for the audit trail of every published list.
-- Per-event hot path:
-  ```
-  key = normalise(raw_key)
-  if dedupe_bloom.test_and_set(user_id, key): return   /* already counted this window */
-  est = INF
-  for i in 0..d-1:
-      c = hash_i(key) & (w - 1)
-      sketch[i][c] += 1
-      est = min(est, sketch[i][c])
-  heap.offer(key, est)                                 /* cap at 10 * K */
-  ```
-- Per-minute merge and publish:
-  ```
-  merged = sum_cellwise(shard_sketches)                /* linear mergeability */
-  ring.push(merged); window_sketch += merged; window_sketch -= ring.evict_tail()
-  cands = union(shard_heaps)                           /* ~32k keys */
-  scored = [(k, trend_score(estimate(window_sketch, k), baseline[k])) for k in cands]
-  redis.set("trending:{geo}:{window}", top_k(scored, 50))
-  ```
-#### Interactive diagram
-The whole design as one explorable picture: [open the interactive diagram](/diagram/trending-topics).
-
-Every box and every arrow is clickable. Selecting one dims everything it does not touch and opens what it is, why it exists, the numbers worth quoting, the failure it owns, and why that technology rather than the obvious alternative. Start with the Overview button.
-
-#### What this is really testing
-Whether you can choose a lossy structure deliberately and say precisely what the loss buys and what it costs. Nobody is checking that you can name a sketch. They are checking the order of your reasoning: cardinality of the key space, the memory that implies for a window that has to slide, the error you are willing to trade for it, and only then a structure whose dimensions fall out of that error. Opening with "Count-Min, 7 rows, 32,768 columns" skips the entire part of the question being marked, and it also skips the check that follows, which is whether you know what the error does at the place it is visible. Being 8% high on a count nobody reads is free. Being 8% high at the rank-50 cutoff makes the published list reshuffle between refreshes, and that is a product defect a user can see.
-
-The contrast is with ad click aggregation. Both aggregate a huge event stream into windowed counts and the pipelines look alike on a whiteboard, and almost everything else is inverted. There the key space is registered before the first event arrives, roughly 5M ad IDs sitting in a database, so exact per-key state is affordable and the design centre is exactly-once: idempotent event ids, late clicks against a watermark, and a T+1 batch recomputation the streaming numbers must reconcile against, because the output is an invoice and a wrong number is a refund. Here nobody is billed, and more importantly there is nothing to reconcile against: a key that appeared four minutes ago has no ground truth anywhere except the stream itself, so there is no batch job that could tell you your streaming answer was wrong. That absence is what buys the freedom to pick the error first. The mirror image of the freedom is the concession: the ad system can tell an advertiser exactly how many clicks it charged for, and this system can never tell a newsroom exactly how many people said a word.
-
-Closest question: Q18
-#### Clarifying questions and how each answer forks the design
-- Must counts be exact, or is a bounded approximation acceptable for a ranked list?
-- Is the key space known in advance, or discovered from the events themselves?
-- Does "trending" mean highest volume, or fastest-rising relative to normal?
-- Which windows, and which geo granularity: country, metro, both?
-- Do we need per-user de-duplication and bot resistance?
-- How stale may the served list be?
-
-**How the answers shape the design**
-
-| If the answer is… | Then the design… |
-|---|---|
-| Approximation acceptable | probabilistic sketches with a bounded one-sided error, not exact hash maps |
-| Key space discovered from data | no pre-registered key list; sketches sized by error target, not by cardinality |
-| Trending means rate-of-change | a baseline store per key and z-score/ratio scoring on top of the counts |
-| Multiple windows and geos | a ring of per-minute sketches per geo, summed on demand via linear merge |
-| Bot resistance required | per-(user, key) de-duplication at ingest plus ASN/account-age concentration checks |
-| List may be ~10s stale | precomputed top-K in a cache, refreshed on a timer; read path is a single GET |
-#### Requirements and scale, derived out loud
-**Requirements**
-
-- **FR:** ingest keyed events; maintain approximate top-K per `(window, geo)`; score by deviation from a per-key baseline; de-duplicate per user; suppress coordinated inflation; serve precomputed lists and per-key drill-down.
-- **NFR:** 1M events/s peak; published list ≤10s stale; read p99 <20ms; counting error ≤0.01% of window volume at 99.9% confidence; ≤2GB sketch state per aggregator; no unbounded per-key memory growth.
-
-**Scale**
-
-- **Event volume:** assume ~1M events/s peak. Peak-to-average ~3× (US evening overlapping EU evening) → avg ≈ 333k/s → 333k × 86,400 ≈ **~29B events/day**.
-- **Event size:** ~72B (key string ~24B + user_id 8B + ts 8B + geo_id 4B + event_type 1B + lang 2B + framing/padding ~25B). 29B × 72B ≈ ~2.1TB/day raw; RF=3 → ~6.3TB/day on the stream; 24h retention → ~6.3TB hot (see #16).
-- **Distinct keys:** assume ~100M distinct keys/day with Zipf skew `s ≈ 1`. Average key is active in ~20 minutes of the day → distinct keys per minute ≈ 100M × 20 ÷ 1440 ≈ **~1.4M/min**.
-- **Exact-map cost (the number that kills the naive design):** per entry = key bytes ~24B + string header 16B + count 8B + last_seen 8B + bucket pointer 8B + cached hash 8B + chain pointer 8B = 80B, × 1.33 at a 0.75 load factor ≈ **~106B/key**. A single 24h map: 100M × 106B ≈ ~10.6GB, already too large per geo, and it cannot *slide*. Proper sliding needs the per-minute deltas resident: 1,440 × 1.4M × 106B ≈ **~216GB per geo**, ×~200 geo partitions ≈ ~40TB RAM.
-- **Count-Min dimensions:** target ε = 0.01% = 1×10⁻⁴, δ = 0.001. `w = ⌈e/ε⌉ = ⌈2.71828 × 10⁴⌉ = 27,183` → round up to **32,768 (2¹⁵)** so the modulo is a bit-mask; actual ε = e/w = 8.3×10⁻⁵, slightly better than target. `d = ⌈ln(1/δ)⌉ = ⌈ln 1000⌉ = ⌈6.908⌉ = **7**`.
-- **Sketch footprint:** 32,768 × 7 = 229,376 cells. Minute tiles use 4B counters (max per-minute count ≈4M < 2³²) → **~917KB**; hour/day tiers use 8B → **~1.8MB**.
-- **Ring per geo:** 60 minute-sketches + 24 hour-sketches ≈ 84 sketches × ~1.8MB ≈ **~150MB**, and that one ring serves all three windows (5m = sum of 5, 1h = sum of 60, 24h = sum of 24 hour-tiles). Fleet: ~200 geos × ~150MB ≈ ~30GB, ~150MB resident per aggregator.
-- **The contrast:** **~150MB of sketch versus ~216GB of exact map** for identical window coverage, a **~1,400× reduction**, in exchange for an estimate that is never low and at most ~0.008% of window volume high.
-- **What that error means at rank K:** under Zipf, `count(rank K) ≈ N / (K · H(D))`, so relative error at rank K ≈ `e·K·H(D)/w`, *independent of N*. Minute window: `2.718 × 50 × 14.7 / 32,768 ≈ 6.1%`. Day window: `2.718 × 50 × 19.0 / 32,768 ≈ 7.9%`. Enough to shuffle ranks 45 to 55; nowhere near enough to promote a tail key at ~50 counts into the top 50. Widening the day tier to `w = 2¹⁸` cuts it to ~1.0% at ~14.7MB per sketch.
-- **Heap and HLL:** 500 entries × (key ~36B + count 8B + slot 8B) ≈ ~26KB per `(geo, window)`; unique-user HLLs run only on those 500 candidates at 3KB each (p=12, ~1.6% error) ≈ 1.5MB per `(geo, window)`, ~900MB fleet-wide.
-- **De-dup filter:** 5-min generation at 1M/s = 300M `(user, key)` tuples; 1% FPR → 9.6 bits/element → ~360MB, ×2 rotating generations ≈ ~720MB, spread over 64 shards ≈ **~11MB/shard**.
-- **Serving:** 3 windows × ~200 geos × ~5KB ≈ ~3MB in Redis, 600 writes per 5s = 120 writes/s. Reads: assume ~500M DAU × 3 panel loads/day ≈ 1.5B/day ≈ ~17k/s avg, ~60k/s peak, which is one Redis cluster, or a CDN with a 5s TTL.
-#### Key decisions
-**Counter grid plus a candidate heap, or Space-Saving**
-- Choice: a Count-Min sketch per `(shard, minute, geo)` at `d = 7, w = 32,768`, with a bounded min-heap of the shard's top 500 key strings beside it. Merge the sketches cell-wise, then re-estimate every candidate against the merged sketch before sorting.
-- Alternative: Space-Saving over a Stream-Summary (Metwally, Agrawal and El Abbadi, 2005). Keep `m` monitored counters; a monitored key increments, an unmonitored key evicts the current minimum, inherits its count as a starting bid, and records that inherited count as its own maximum overestimate. Top-K falls straight out of the structure, with no heap and no re-estimation pass.
-- Decider: how many times a partial result is combined before it is published. One published 1-hour list is the sum of 64 shard summaries across 60 minute tiles, so 3,840 combining operations. Count-Min adds exactly, so all 3,840 are lossless. Space-Saving summaries do not add; each merge is a heuristic that can drop a key sitting just below the monitored set on every input but above the cutoff in the union, and 3,840 of those compound with no error signal anywhere. Accuracy at equal memory is not what separates them: at `m = 10,000` counters Space-Saving's `N/m` bound over a 60M-event minute is 6,000 counts against Count-Min's `ε·N` of 4,980 at 917KB, the same order.
-- Alternative wins when: the answer is produced on one machine, or per shard with no cross-shard merge, which covers per-tenant trending and roughly anything under 100k events/s. It also wins when you need only the top K and never a count for a named key, because Space-Saving carries the strings and a per-key error bound for free, whereas the sketch needs a heap that can only ever contain keys some worker already believed were heavy. If our deployment shrank to a single aggregator, Space-Saving would be the better structure and the heap would be dead weight.
-
-**A ring of per-minute sketches, or one exponentially decayed sketch**
-- Choice: 60 minute tiles plus 24 hour tiles per geo, ~150MB, with each window maintained by adding the new tile and subtracting the one that fell off the tail.
-- Alternative: one sketch per geo whose cells are all multiplied by `λ = 0.98` every minute, giving a `ln 0.5 / ln 0.98 ≈ 34`-minute half-life and no ring at all.
-- Decider: 84 tiles × 1.8MB ≈ 150MB per geo against 1.8MB for the decayed sketch, an 83× difference, measured against a stated budget of 2GB per aggregator. The ring uses 7.5% of that budget, so memory is not scarce enough to pay for it with a structure that cannot answer "the last 5 minutes" as a defined interval. The product ships three named windows and a `rank_delta` between consecutive refreshes, and both need crisp boundaries.
-- Alternative wins when: the dimension you multiply by is large. 200 geographies is comfortable; 50,000 tenants, or one sketch per `(geo, language, platform)`, is not, and there 1.8MB against 150MB decides it immediately. Decay is also the better model where no window is defined at all and the question is only "what is hot now", and it has no boundary artefact, since a key decays away instead of dropping off a cliff when a minute ages out. Its costs are real but narrow: a past window cannot be recomputed after the fact, and two decayed sketches merge only if they were decayed on the same tick schedule.
-
-**Score against a per-key baseline, or against the key's own long window**
-- Choice: per-key EWMA of rate and variance at a 7-day half-life, plus a 1,440-slot minute-of-day profile for the top ~100k keys, scored `z = (r_short − μ) / max(σ, σ_floor)`. A steady celebrity term at `μ = 10,000/min, σ = 1,500` reading 10,500 this minute scores `z = 0.33` and is ignored; a term at `μ = 10/min, σ = 4` reading 500/min scores `z = 122`.
-- Alternative: pure sketch arithmetic, `(count_5m / 5) ÷ (count_24h / 1440)`, which is two probes per candidate, no baseline store, no state to keep warm and nothing to rebuild after an outage.
-- Decider: what the ratio does to a key born inside the window. Its 24-hour count equals its 5-minute count, so the ratio is `1440 / 5 = 288` exactly, the arithmetic maximum, for every new key regardless of size. A key with 500 counts and a key with 500,000 tie at the top of the list, and the expression has nowhere to put a prior that would separate them. The baseline form has an explicit slot for one (`μ₀ = 1/min, σ₀ = 2`). The price is a store of ~100k profiled keys × ~2.9KB ≈ 290MB plus an EWMA row for every key that has ever cleared the floor.
-- Alternative wins when: the baselines would be mostly empty anyway. Inside a live event, or in a market launched last week, most candidates are hours old, their stored baselines are the prior rather than a measurement, and you are paying 290MB and a join to read back a constant. Ship the ratio with the absolute floor and the age damper, which do most of the cold-start work in either design, and add baselines when the key population is old enough to have a history worth reading. The scorer needs the ratio as a fallback for baseline-store outages regardless, so it is code you write either way.
-#### High-level design
-**must-say**
-
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 700" role="img" aria-label="Trending top-K architecture: stream, sketch workers, merger ring, trend scorer, cache">
-  <defs>
-    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
-    </marker>
-  </defs>
-  <style>
-    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
-    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
-    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
-    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
-    .dash{ stroke-dasharray:5 4; }
-    .acc{ stroke:var(--accent); }
-    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
-    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
-    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
-    text{ dominant-baseline:middle; text-anchor:middle; }
-  </style>
-
-  <rect class="box" x="260" y="16" width="240" height="46" rx="9"/>
-  <text class="lbl" x="380" y="39">Producers · 1M events/s</text>
-
-  <rect class="box" x="240" y="94" width="280" height="56" rx="9"/>
-  <text class="lbl" x="380" y="112">Ingest · normalise key</text>
-  <text class="sub" x="380" y="133">per-(user, key) dedupe Bloom</text>
-  <rect class="box acc" x="220" y="182" width="320" height="56" rx="9"/>
-  <text class="lbl" x="380" y="200">Event Stream (see #16)</text>
-  <text class="sub" x="380" y="221">partitioned by hash(key)</text>
-  <rect class="box acc" x="20" y="282" width="220" height="86" rx="9"/>
-  <text class="lbl" x="130" y="302">Sketch Workers × 64</text>
-  <text class="sub" x="130" y="324">per-minute CM sketch</text>
-  <text class="sub" x="130" y="343">d=7 · w=32768 · ~917KB</text>
-  <text class="sub" x="130" y="360">local top-500 heap</text>
-  <rect class="box" x="270" y="282" width="200" height="86" rx="9"/>
-  <text class="lbl" x="370" y="306">Abuse Scorer</text>
-  <text class="sub" x="370" y="331">ASN concentration</text>
-  <text class="sub" x="370" y="351">account age · graph density</text>
-  <ellipse class="store" cx="640" cy="292" rx="90" ry="10"/>
-  <path class="store" d="M550,292 v40 a90,10 0 0 0 180,0 v-40"/>
-  <text class="sub" x="640" y="316">Raw archive · replay · audit</text>
-  <rect class="box acc" x="20" y="412" width="360" height="76" rx="9"/>
-  <text class="lbl" x="200" y="432">Merger · cell-wise sketch sum</text>
-  <text class="sub" x="200" y="454">ring: 60 min-tiles + 24 hour-tiles</text>
-  <text class="sub" x="200" y="472">union 64 heaps → ~32k candidates</text>
-  <ellipse class="store" cx="620" cy="422" rx="88" ry="10"/>
-  <path class="store" d="M532,422 v40 a88,10 0 0 0 176,0 v-40"/>
-  <text class="sub" x="620" y="444">Baselines · EWMA rate/var</text>
-  <rect class="box" x="180" y="530" width="330" height="66" rx="9"/>
-  <text class="lbl" x="345" y="550">Trend Scorer</text>
-  <text class="sub" x="345" y="572">z vs baseline · cold-start prior</text>
-  <text class="sub" x="345" y="589">unique-user HLL re-rank</text>
-  <ellipse class="store" cx="345" cy="636" rx="115" ry="10"/>
-  <path class="store" d="M230,636 v30 a115,10 0 0 0 230,0 v-30"/>
-  <text class="sub" x="345" y="657">Top-K cache · trending:{geo}:{window}</text>
-  <rect class="box" x="560" y="608" width="180" height="46" rx="9"/>
-  <text class="lbl" x="650" y="631">Trending API</text>
-  <path class="flow" d="M380,62 L380,94"/>
-  <path class="flow" d="M380,150 L380,182"/>
-  <path class="flow acc" d="M380,238 L380,262 L130,262 L130,282"/>
-  <path class="flow" d="M380,238 L380,282"/>
-  <path class="flow" d="M380,238 L380,262 L640,262 L640,288"/>
-  <text class="edge" x="440" y="254" text-anchor="start">replay / audit</text>
-  <path class="flow acc" d="M130,368 L130,412"/>
-  <text class="edge" x="138" y="392" text-anchor="start">sealed sketch + heap, every 60s</text>
-  <path class="flow dash" d="M370,368 L370,392 L340,392 L340,412"/>
-  <text class="edge" x="378" y="386" text-anchor="start">suppression flags</text>
-  <path class="flow" d="M200,488 L200,530"/>
-  <path class="flow" d="M532,452 L345,530"/>
-  <text class="edge" x="470" y="492" text-anchor="start">baseline join</text>
-  <path class="flow acc" d="M345,596 L345,626"/>
-  <path class="flow" d="M460,646 L560,634"/>
-  <text class="edge" x="500" y="660" text-anchor="middle">single GET</text>
-</svg>
-```
-
-**How to read the diagram:** the write path runs top to bottom and never touches the read path. Events are counted into fixed-size sketches by sharded workers, sealed once a minute, merged cell-wise into a ring, scored against baselines, and finally *materialised* as a small list in a cache. The API reads only that list.
-
-**Why the flow is shaped this way:** counting and ranking are different problems with different cost profiles. Counting must survive 1M events/s and an unbounded key space, so it uses fixed-memory sketches. Ranking needs actual key strings and historical context, so it runs once a minute over ~32k candidates where a database join is affordable.
-
-**What this layout buys you:** the expensive work happens once per minute for everyone, not once per request. Two things are traded for it. The published list lags reality by up to ~10s, and the serving tier loses any ability to answer "exactly how many".
-#### Deep dive
-**must-say**
-
-**The counting structure, end to end.** This is the mechanism that gets drilled, so it is the one worth taking apart. Everything else in the question is scoring on top of it or plumbing around it.
-
-**Why the minimum, and why the error is one-sided.** A cell `sketch[i][c]` holds the sum of increments from *every* key that hashes to `c` in row `i`, so it contains your key's true count plus zero or more foreign contributions, never less. Each of the `d` rows gives an independent over-estimate, and the minimum is the row where fewest other keys happened to collide with yours. `est(K) ≥ true(K)` holds unconditionally, and that is what makes the structure safe for ranking: you cannot *miss* a heavy hitter by under-counting it, you can only occasionally over-promote a light one. Worked example: `#eclipse` truly occurred 41,000 times this minute and its 7 cells read `[41,207 · 43,880 · 41,940 · 52,110 · 41,033 · 46,720 · 44,201]`. The estimate is 41,033, which is 33 counts high against a guaranteed bound of `ε·N = 8.3×10⁻⁵ × 60M = 4,980`. Mean (44,441) and median (43,880) are both *worse*, because every sample is biased upward in the same direction; only the minimum is an extremum of the contamination rather than an average of it.
-
-**Linear mergeability is the crux.** Two sketches built with the same `(d, w)` and the same hash functions satisfy `sketch(A) + sketch(B) = sketch(A ∪ B)` cell by cell, **exactly**. Merging introduces no approximation at all, because each cell is a plain sum and addition is associative. Three things in this design are consequences of that one fact and nothing else. Sliding windows: keep one sketch per minute and the 1-hour window is the cell-wise sum of the last 60. Shard-then-merge: 64 workers each count a disjoint slice and the global sketch is their sum. Expiry: maintain a running `window_sketch`, and when minute `m−60` falls off the tail, subtract its sketch cell-wise. Subtraction is safe because you are only ever removing increments you previously added, so no cell can go negative. It is also why the tempting **conservative-update** optimisation, incrementing only the cells currently equal to the row minimum, is off the table despite measurably tightening estimates: it makes counters path-dependent, so two conservatively-updated sketches no longer sum to the sketch of the union. Pick one, and mergeability is worth more than the constant.
-
-**The sketch cannot enumerate, hence sketch plus heap.** Ask it "what are the top 50 keys?" and it has no answer: it holds counters, not keys, and a hash cannot be inverted to recover candidate strings. So every worker keeps a bounded min-heap of `(key, current_estimate)` and offers each key it processes. The heap is the only place a string exists anywhere in the counting tier. Cap it at 10× K, so 500 per shard rather than 50, so the merge has slack. The structural consequence is that the candidate set and the counts are produced by two different mechanisms with different failure modes, which sets up the next trap.
-
-**Merge the sketches, not the lists.** Partitioning by `hash(key)` gives each shard complete counts for its keys, which is what makes local estimates meaningful. Merge only the 64 *local top-50 lists*, though, and you lose keys. A shard that happens to own three globally enormous keys pushes a 900k-count key down to rank 51 locally, while a shard owning only mid-weight traffic promotes a 40k-count key into its local top 50. Merge the lists and the 900k key vanishes from the global answer with no error signal anywhere. Two fixes used together: `c·K` per shard with `c ≈ 10` so the local cutoff sits far below the global one, and, the real fix, **merge the sketches and re-estimate every candidate against the merged sketch** before the global sort. The candidate set is allowed to be lossy, because a key outside the top 500 on every shard cannot plausibly be globally top-50 under Zipf skew. The counts used to rank that set are not allowed to be lossy. Note that key-hash partitioning brings its own problem: one viral key at 200k events/s pins a single worker. Mergeability pays for that too. Fall the sketch path back to round-robin partitioning and the cell-wise merge reassembles the counts, at the cost of local heaps becoming advisory rather than authoritative, since no shard now holds a complete count for anything.
-
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 470" role="img" aria-label="Count-Min sketch mechanics: seven hashes increment seven cells, estimate is the minimum, and per-minute sketches merge cell-wise into a window">
-  <defs>
-    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
-    </marker>
-  </defs>
-  <style>
-    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
-    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
-    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
-    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
-    .dash{ stroke-dasharray:5 4; }
-    .acc{ stroke:var(--accent); }
-    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
-    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
-    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
-    text{ dominant-baseline:middle; text-anchor:middle; }
-  </style>
-
-  <rect class="box" x="12" y="34" width="190" height="48" rx="9"/>
-  <text class="sub" x="107" y="50">one event</text>
-  <text class="sub" x="107" y="68">key = a hashtag</text>
-
-  <rect class="box acc" x="12" y="122" width="190" height="66" rx="9"/>
-  <text class="sub" x="107" y="140">7 independent hashes</text>
-  <text class="sub" x="107" y="158">h_i(key) &amp; 0x7FFF</text>
-  <text class="sub" x="107" y="176">7 writes · ~50ns</text>
-  <path class="flow" d="M107,82 L107,122"/>
-  <path class="flow" d="M202,155 L232,155"/>
-  <rect class="box" x="232" y="30" width="500" height="24" rx="4"/>
-  <rect class="box acc" x="300" y="30" width="16" height="24" rx="3"/>
-  <rect class="box" x="232" y="62" width="500" height="24" rx="4"/>
-  <rect class="box acc" x="452" y="62" width="16" height="24" rx="3"/>
-  <rect class="box" x="232" y="94" width="500" height="24" rx="4"/>
-  <rect class="box acc" x="368" y="94" width="16" height="24" rx="3"/>
-  <rect class="box" x="232" y="126" width="500" height="24" rx="4"/>
-  <rect class="box acc" x="644" y="126" width="16" height="24" rx="3"/>
-  <rect class="box" x="232" y="158" width="500" height="24" rx="4"/>
-  <rect class="box acc" x="520" y="158" width="16" height="24" rx="3"/>
-  <rect class="box" x="232" y="190" width="500" height="24" rx="4"/>
-  <rect class="box acc" x="266" y="190" width="16" height="24" rx="3"/>
-  <rect class="box" x="232" y="222" width="500" height="24" rx="4"/>
-  <rect class="box acc" x="600" y="222" width="16" height="24" rx="3"/>
-  <text class="edge" x="482" y="264">d = 7 rows · w = 32,768 counters per row · ~917KB total</text>
-  <rect class="box acc" x="232" y="290" width="500" height="52" rx="9"/>
-  <text class="sub" x="482" y="308">estimate = min of the 7 marked cells</text>
-  <text class="sub" x="482" y="326">collisions only ever inflate → never under-counts</text>
-  <path class="flow" d="M482,246 L482,290"/>
-  <rect class="box" x="12" y="392" width="104" height="46" rx="9"/>
-  <text class="sub" x="64" y="415">minute m</text>
-  <rect class="box" x="128" y="392" width="104" height="46" rx="9"/>
-  <text class="sub" x="180" y="415">m − 1</text>
-  <rect class="box" x="244" y="392" width="104" height="46" rx="9"/>
-  <text class="sub" x="296" y="415">m − 2</text>
-  <rect class="box dash" x="360" y="392" width="104" height="46" rx="9"/>
-  <text class="sub" x="412" y="415">…</text>
-  <rect class="box" x="476" y="392" width="104" height="46" rx="9"/>
-  <text class="sub" x="528" y="415">m − 59</text>
-  <rect class="box acc" x="606" y="386" width="142" height="58" rx="9"/>
-  <text class="sub" x="677" y="406">Σ cell-wise</text>
-  <text class="sub" x="677" y="426">= 1h window</text>
-  <path class="flow" d="M116,415 L128,415"/>
-  <path class="flow" d="M232,415 L244,415"/>
-  <path class="flow" d="M348,415 L360,415"/>
-  <path class="flow" d="M464,415 L476,415"/>
-  <path class="flow" d="M580,415 L606,415"/>
-  <path class="flow dash" d="M528,392 L528,366 L64,366 L64,388"/>
-  <text class="edge" x="300" y="358">tail evicted: subtract cell-wise, never goes negative</text>
-</svg>
-```
-
-**The per-minute cycle, with a latency budget.** 1M events/s ÷ 64 shards = ~15.6k events/s per shard, ×7 rows = ~110k counter writes/s/shard, which stays inside L2. At the minute boundary each shard seals and ships ~917KB, so 64 × 917KB ≈ 59MB/min ≈ ~1MB/s of merge traffic. The merger sums 64 × 229,376 cells = ~14.7M integer adds (~20ms), unions 64 heaps into ~32,000 candidates, re-estimates each against the merged window sketch (32,000 × 7 = 224k probes, ~2ms), sorts, truncates to the top 500, joins those against the baseline store (500 KV gets, ~5ms pipelined), scores, and writes 50 entries to Redis (~10ms). Minute boundary to published list: seal 200ms + ship 300ms + merge 20ms + re-estimate 2ms + baseline 5ms + score 10ms + write 10ms ≈ **~550ms** against a 10s staleness SLO. Note where the budget actually goes: 500ms of the 550ms is sealing and shipping, and none of it is arithmetic. If the cycle ever needs to be faster, the answer is staggered seals and incremental merging, not a faster merge.
-#### Where it breaks
-**must-say**
-
-**Bottlenecks**
-
-- **Hot key pins one shard.** Key-hash partitioning sends a viral term's 200k events/s to a single worker, whose CPU saturates while 63 idle. Switch that key, or the whole sketch path, to round-robin partitioning and rely on cell-wise merge to reassemble the counts; the cost is that per-shard estimates are no longer complete, so local heaps become advisory and the merged sketch must do all the ranking.
-- **Sketch memory × geo cardinality.** 200 geos × 84 tiles is fine, but adding language and platform dimensions multiplies combinatorially and 30GB becomes 3TB. Materialise only the dimension combinations that are actually served, and compute rarer slices on demand from the raw archive with a minutes-latency SLA rather than keeping them hot.
-- **Merge fan-in at the minute boundary.** All 64 shards ship ~917KB simultaneously, a 59MB burst into one merger every 60s, with the whole publish cycle blocked on the slowest shard. Stagger shard seal times across the minute and merge incrementally as sketches arrive; the trade is that the window boundary becomes fuzzy by a few hundred milliseconds.
-- **Baseline store lookups.** Joining 32k candidates against the baseline store every minute would be 32k KV gets/minute per geo, ~100k/s fleet-wide. Join only after truncating to the top 500, and cache the baselines for keys that have trended recently; the trade is that a key rising from deep in the tail waits one extra cycle for its baseline.
-- **De-dup Bloom saturation.** A traffic spike pushes the 5-minute generation past its sized element count, the false-positive rate climbs above 1%, and real users get silently dropped. Size for 2× peak and monitor the fill ratio, rotating a generation early when it crosses 80%; the trade is a slightly shorter effective de-dup window during spikes.
-- **Ranking instability near the cutoff.** With ~6% relative error at rank 50, keys near the boundary flicker in and out between refreshes, which reads as a broken product. Apply hysteresis: a key must beat the rank-50 score by 10% to enter and fall 10% below to leave. The trade is a slightly slower reaction to genuinely new entrants.
-
-**Failure modes**
-
-| Layer | Failure | Detection | Mitigation |
-|---|---|---|---|
-| Ingest | Key normalisation regression splits one term into variants (`#Eclipse` vs `#eclipse`), halving both counts | Sudden drop in top-50 count magnitudes with no traffic change; normalisation unit-test canary | Version the normaliser and shadow-run the new version for an hour comparing top-50 overlap before cutover; roll back on <90% overlap |
-| Event stream | Partition lag on one shard; its keys are under-counted in the merged sketch | Per-partition consumer lag; shard-contribution ratio deviates >2× from median | Publish the list with a `partial: true` flag and exclude the lagging shard's geo slices; backfill on catch-up since sketches are mergeable after the fact |
-| Sketch worker | Process restart loses the in-flight minute sketch entirely | Missing shard sketch at merge time; sketch-arrival count < expected | Merge with the remaining shards and mark the minute degraded; replay the lost minute from the stream into a catch-up worker and merge it in late |
-| Merger | Sketches with mismatched `(d, w)` or hash seeds after a rolling deploy are summed together, producing garbage | Sketch header version mismatch check at merge; sudden top-50 churn spike | Embed `(d, w, seed_version)` in every sketch header and refuse to merge across versions; run both versions in parallel through a full window before cutover |
-| Baseline store | Store unavailable; no z-scores can be computed | Baseline join error rate; scorer falls back | Fall back to the short/long rate-ratio score, which needs only sketch probes; serve with a `degraded_scoring` flag |
-| Abuse pipeline | Suppression model misfires and demotes a genuine breaking-news term | Suppressed-term review queue depth; manual-override rate spike | Suppression is soft (demote, not delete) with a human review queue and a fast override path; every decision written to the audit trail |
-| Top-K cache | Redis eviction or failover leaves `trending:{geo}:{window}` empty | Cache hit rate; empty-payload counter | Serve the last known good list from a local in-process copy with an `as_of` timestamp; the UI shows staleness rather than an empty panel |
-| Sparse geo | A geo partition has too little traffic for any key to clear the absolute floor | Empty-list rate per geo | Static fallback chain resolved at write time (`metro → country → region → global`) so every geo key is always populated |
-
-**Unresolved**
-
-**Nothing this system publishes can be proved, and the obvious fix produces two numbers for one thing.** The sketch returns an upper bound; the heap returns candidates some worker already thought were heavy. Neither supports the question every serious consumer eventually asks, which is "how many, exactly". The partial fix is real: the ~500 published candidates are a bounded key set by construction, so an exact recount over just those keys off the raw archive is affordable, and that is what we would build for a newsroom or an advertiser. It does not close the gap. The recount lands minutes after the list it describes, it counts a slightly different event set because it runs after late arrivals have landed, and it will disagree with the published estimate often enough to notice. We would then be shipping an estimate that ranks and an exact number that does not, for the same key at the same timestamp, with no principled story about which one is "the" count. The same hole affects appeals: a user asking why their term was demoted cannot be given the counts behind the decision, only the decision.
-
-**De-duplication undercounts, the sketch overcounts, and the two errors do not compose into a bound.** The whole error story rests on `est ≥ true`, but the Bloom filter sits upstream of the sketch and deletes events: at a 1% false-positive rate roughly 1% of genuine `(user, key)` pairs never reach a counter, and the loss is not uniform, since it concentrates late in a generation when the filter is fullest and on keys whose users overlap with already-counted keys. So the published estimate is an upper bound on a quantity that is itself a lossy sample of reality, and the clean one-sided guarantee we sell in the deep dive does not survive contact with the filter. Nothing cheap fixes this. Exact per-user sets are unaffordable at 300M tuples per generation, and shrinking the false-positive rate to 0.1% costs 50% more memory for a bias we cannot measure anyway. We monitor fill ratio, we state the guarantee as holding over de-duplicated events rather than over reality, and we accept that the distinction is invisible to everyone downstream.
-
-**Coordinated inflation by real accounts is made expensive, not prevented.** ASN concentration, account age and follow-graph density catch cheap botnets, which is the attack from ten years ago. They do not catch 10,000 aged, geographically spread, genuinely human accounts organised somewhere this system cannot see. Worse, the signals we do have are the same signals a real grassroots event produces: contributors in one region, dense follow clustering, a burst of accounts created *because* of the event. Every threshold that catches the first case also catches the second, and we have no content signal and no off-platform signal in this pipeline to separate them. The operational answer is soft suppression plus a human review queue plus a full audit trail, which converts a detection problem into a staffing problem and a measurable override rate. It leaves a false-negative rate we cannot estimate, because a manipulation we did not catch produces no artifact anywhere.
-#### Drill questions
-1. Why the minimum across rows, and not the mean or median?
-2. A key is 11th in every shard's local top-10. Do you lose it?
-3. How do you expire the tail of a 1-hour window without corrupting counters?
-4. A brand-new hashtag appears with no baseline. What score does it get?
-5. 10,000 bot accounts each post a term once. What stops it trending?
-6. Why not just use a Redis sorted set, like the leaderboard in #22?
-7. This looks like #18. Why not run the same Flink tumbling-window aggregation?
-8. An advertiser or newsroom asks for the exact count behind a trending entry.
-9. Why is the grid 7 rows of 32,768 and not 3 rows of 1,000,000, which is far more memory?
-10. Two regions each count their own traffic. How do you produce one global list without shipping the events?
-11. Partitioning by `hash(key)` guarantees a hot shard on a viral term. Why do it at all?
-12. Between two consecutive refreshes the published list changes almost completely. Bug or not?
-#### Answers to drill questions
-1. Every row's cell contains the true count plus non-negative contamination from colliding keys, so every one of the `d` samples is biased upward. Averaging averages the noise in; the minimum picks the row with the least collision, which is the only estimator that preserves the one-sided `est ≥ true` guarantee. *If pushed:* the Count-Mean-Min variant subtracts each row's estimated noise floor (`(row_sum − cell) / (w − 1)`) before taking the median, which reduces the bias on light keys, but it can now under-estimate, which is unacceptable if downstream logic assumes counts are upper bounds.
-
-2. Yes, if you merge only the local lists, and this is the classic bug. Keep `10×K` per shard so the local cutoff is far below the global one, and merge the *sketches*, then re-estimate all ~32k candidates against the merged sketch before the global sort. *If pushed:* the candidate set is allowed to be lossy because a key that is outside the top 500 on every shard cannot plausibly be globally top-50 under Zipf; the counts used to rank the candidates are not allowed to be lossy, which is why re-estimation is mandatory.
-
-3. Ring of per-minute sketches; maintain a running window sketch, add the new minute, subtract the sketch that fell off. Cell-wise, exactly, no negatives possible. *If pushed:* the cheaper alternative is exponentially decayed counters, multiplying every cell by `λ = 0.98` each tick, which is one pass over 229k cells and no ring at all. It has no crisp window boundary, so you cannot answer "top 50 in exactly the last 5 minutes", a past window cannot be recomputed, and decayed counts merge only with counts decayed on the same schedule.
-
-4. Not infinity. It must clear an absolute floor (≥500 counts in 5 minutes) to be eligible, is scored against a global prior for new keys (`μ₀ = 1/min, σ₀ = 2`), and its score is damped by `min(1, age_minutes / 15)` so it must sustain the rate for a quarter of an hour before taking the top slot. *If pushed:* the floor also does statistical work. It keeps every ranked key well above the sketch's `ε·N` error band of ~4,980 counts per minute-window, so ranking noise never dominates the signal.
-
-5. Per-`(user, key)` de-duplication caps each account at one count, so raw volume already means distinct participants, but 10,000 real distinct accounts is exactly the attack that survives it. The unique-user HLL re-rank does not help either, since the users genuinely are unique. What is left is ASN concentration, median account age and follow-graph density. *If pushed:* suppression is soft, meaning demote and queue for review rather than delete, because a false positive silently kills a genuine grassroots story; every decision goes to the audit trail so it is reviewable. Note this is the third Unresolved item: the heuristics catch cheap botnets and not organised humans.
-
-6. A sorted set stores every member. #22 works because the player universe is bounded and enumerable; here it is 100M new keys a day with a long tail seen once, so `ZINCRBY` per event at 1M/s builds a structure that does not fit in memory and cannot be windowed. *If pushed:* a sorted set is still the right tool *downstream*, over the ~500 candidates, where the key set is tiny and you want exact ordering with cheap rank queries.
-
-7. Because #18 keys by `ad_id` from a bounded, pre-registered universe of ~5M ads, and its counts are billable, so it pays for exact state plus a T+1 batch reconciliation. Here the key set is discovered from the data and unbounded, so `keyBy(key)` allocates managed state per distinct key: 100M keyed states per day, most touched once. *If pushed:* the shapes converge if you first *restrict* the key space. Some deployments run a cheap pass that promotes keys crossing a floor into a registered set, then aggregate those exactly with #18's machinery, using sketches only as the admission filter.
-
-8. Not from the sketch. It returns an upper bound with a stated error band, which the API exposes as `error_bound`. *If pushed:* for the ~500 published candidates exact counting is affordable, so run a narrow second aggregation over just those keys off the raw archive; it is a bounded key set by construction, which is #18's problem again. Be honest about what that buys: the recount lands minutes later, over a slightly different event set, and will sometimes disagree with the published estimate, so you end up with two numbers for one key.
-
-9. They buy different things. `w` sets the size of the error (`ε = e/w`); `d` sets the probability the bound holds (`δ = e^−d`). Three rows of 1,000,000 gives a beautiful `ε = 2.7×10⁻⁶` and a `δ = e⁻³ ≈ 0.05`, so one estimate in twenty is outside the bound entirely. Re-estimating ~32,000 candidates per cycle, that is ~1,600 keys a minute with no guarantee at all, some of which land in the top 50. It also costs 3 × 10⁶ × 8B = 24MB against 1.8MB, so it is 13× the memory for a worse answer where it matters. *If pushed:* `d` is not free either. Each row is an independent random memory access on every increment, so 7 rows is 7 likely cache misses per event; past ~10 rows the update cost starts to show at 1M events/s and the confidence gain is `e⁻ᵈ`, already negligible.
-
-10. Ship sketches, not events. Each region seals its own minute tile built with identical `(d, w, seed)` and sends ~917KB/min to a designated aggregator, which sums cell-wise. Because the sum is exact, the global list is not an approximation stitched from regional lists, it is the true sketch of the union. Regions also ship their 500-entry candidate heaps (~26KB) and the union of those is re-estimated against the merged global sketch. Cost: ~917KB × 60 × 24 × 6 regions ≈ 8GB/day, against ~2.1TB/day if you replicated raw events. *If pushed:* the hash seeds and dimensions must be pinned to a version in every sketch header and the merger must refuse to sum across versions. Sketches with mismatched seeds still add arithmetically and produce a plausible-looking, entirely meaningless result, and there is no symptom except rankings that quietly stop making sense.
-
-11. Not for the counts. The merge would fix those under any partitioning, because cell addresses depend on the key and not on which worker incremented them. It is for candidate discovery. The heap is the only place key strings exist, and a shard can only nominate a key it believes is heavy, which requires seeing enough of it to know. Under round robin a key's traffic is split 64 ways, every shard's local estimate is 1/64th of the truth, and nomination gets much weaker in the mid-range where the cutoff actually sits. *If pushed:* the right answer is hybrid. Hash-partition by default, and when the skew monitor sees hottest-shard rate over median above 2×, round-robin just that key. A key hot enough to trigger it is still enormous at 1/64th of its volume, so it is nominated by whichever shard sees it, and nothing about the counts changes.
-
-12. Almost certainly a bug, and the metric is Jaccard distance between consecutive published lists: expect 5-15% churn per refresh, and treat a sustained figure above 40% as ranking noise dominating. Three causes in order of likelihood: hysteresis is off, so with ~6% relative error at rank 50 the boundary keys flicker; a shard failed to deliver its tile and the merged sketch is missing a slice of traffic; or a rolling deploy summed sketches with mismatched dimensions or seeds. *If pushed:* high churn in the 5-minute window during breaking news is correct behaviour, not a fault, so the alert has to fire on churn relative to that geo's own baseline rather than an absolute threshold. Otherwise the system pages you during precisely the event it exists to surface.
-#### Whiteboard script
-**0-5, split the problem before touching a structure.** First sentence: "this is two problems, counting a key space I cannot enumerate and deciding which counts are interesting, and they have different answers." Then the three questions that actually fork the design: are the keys registered anywhere or discovered from the traffic, does trending mean volume or rate of change, and how stale may the list be. State your assumptions out loud: ~1M events/s, ~100M distinct keys/day, three windows, ~200 geos, 10s staleness. Draw nothing yet, and do not say "Count-Min" in this band even if you know it is where you are going.
-
-**5-15, derive the number, then draw the spine.** Put the arithmetic on the board before any box: ~1.4M distinct keys per minute × ~106B per map entry ≈ ~150MB per minute, a sliding day needs all 1,440 minute-deltas resident so you know what to subtract, so ~216GB per geo, and ~40TB across ~200 geos. That derivation earns everything that follows; naming a sketch without it does not. Then walk the three plain options in one line each (exact map, a fixed set of monitored slots, a fixed grid of counters) and say the choice is about how many times results get combined, not about accuracy. Now draw: producers, stream partitioned by key hash, sketch workers each holding a grid plus a small heap, merger with a ring of minute tiles, scorer joined to a baseline store, cache, API. Say "sketch plus heap" and immediately say why the heap exists: the grid stores no keys and cannot enumerate.
-
-**15-35, the drill, and protect this time.** Go deep on the counting structure. Why the minimum and not the mean, with the seven-cell worked example, and why that makes the error one-sided. Then linear mergeability as the crux, naming all three things it buys: sliding windows, shard-then-merge, and 8GB/day of cross-region sketch traffic instead of 2.1TB/day of events. Then the trap, that merging the shards' top-50 lists silently loses a key ranked 51st everywhere, and the fix, merge the grids and re-estimate the candidates. Volunteer what the error costs where it is visible: ~6% relative at rank 50, enough to reshuffle ranks 45 to 55, which is why hysteresis exists. Then pivot deliberately to ranking, because a candidate who only counts has answered half: a steady term at 10,000/min scores `z = 0.33` while 10/min going to 500/min scores `z = 122`. Follow that yourself with cold start, since it is the next question anyway, and give all three guards: floor, prior, age damper. Keep Space-Saving and decayed counters as one-liners in reserve.
-
-**35-45, concede and close.** Give the gaps before they are found: no published number can be proved and the exact-recount fix produces two numbers for one key; the de-dup filter undercounts upstream of a structure that overcounts, so the clean one-sided guarantee does not survive end to end; coordinated inflation by real accounts is made expensive rather than prevented, because the signals that catch it also catch genuine grassroots events. Then two minutes of operations: the metrics you would page on (publish lag, list churn as Jaccard distance, hottest-shard skew, de-dup fill ratio, suppression override rate), and the multi-region story, which is the design's best property, since only sealed sketches cross regions.
-
-Cut first: the geo fallback chain and the dimension explosion into language and platform, then the unique-user HLL re-rank, then the API and WebSocket surface. All three are real and none changes the architecture. Never cut: the memory derivation, linear mergeability, and trending as rate of change with its cold-start guards. Those three are the question.
-#### Appendix
-**Data model**
-
-- **events** (log, partition by `hash(key)`, 24h retention): `(key, user_id, ts, geo_id, source, lang)`, see #16
-- **sketch_ring** (in-process memory, snapshotted to object store), key `(geo_id, tier, bucket_ts)`: a `7 × 32768` counter array
-- **local_topk** (in-process min-heap, per `(shard, geo_id, window)`): `(key, est_count)`, capped at 500
-- **baselines** (KV store, partition by `hash(key)`): `(key, ewma_rate, ewma_var, minute_of_day[1440], first_seen, last_seen)`
-- **dedupe_filter** (in-process rotating Bloom, partition by `hash(key)`): `(user_id, key)` per 5-min generation
-- **candidate_hll** (KV, partition by `key`): HLL per `(key, window, geo)` for the ~500 candidates only
-- **trending_cache** (Redis, key `trending:{geo}:{window}`): serialised top-50 + `as_of`; every published list is also appended to an object-store Parquet audit table partitioned by day
-
-**API contract**
+And the API is two reads and one internal write:
 
 ```
 GET  /trending?window=5m|1h|24h&geo=GB-LND&limit=50
-       → { as_of, window, geo, items:[{ key, count_est, error_bound, rate_per_min, score, rank_delta }] }
+       → { as_of, items:[{ key, count_est, error_bound, rate_per_min, score, rank_delta }] }
 GET  /trending/key/{key}?window=1h
-       → { count_est, error_bound, baseline_rate, z_score, unique_users_est, first_seen }
-POST /events          (internal) body: { key, user_id, ts, geo, source }
-WS   /trending/stream?geo=GB-LND   ← top-K deltas pushed every 5s
+       → { count_est, error_bound, baseline_rate, z_score, first_seen }
+POST /events   (internal)  { key, user_id, ts, geo }
 ```
 
-**Observability**
+#### High-level design
+Follow the numbered arrows. The write path runs from Ingest + normalise to the Top-K cache and never touches the read path.
 
-- **Publish lag** (minute boundary → list written to cache). SLO p99 < 3s against a 10s staleness budget; the merge fan-in and the baseline join are the two components that move it.
-- **Top-K churn rate** (Jaccard distance between consecutive published lists). Expect 5-15% per refresh; a sustained jump above 40% means ranking noise is dominating and the sketch is under-sized or hysteresis is off.
-- **Estimated relative error at rank K** (`e·K·H(D)/w`, recomputed from observed distinct-key cardinality). SLO ≤ 8%; rising `H(D)` from a cardinality explosion silently degrades accuracy with no other symptom.
-- **Shard contribution skew** (hottest shard's event rate ÷ median). Alert above 2×; this is the leading indicator that a viral key is pinning one worker before its CPU alerts fire.
-- **De-dup filter fill ratio.** Alert above 80% of sized capacity; past that the false-positive rate climbs and real events are silently discarded.
-- **Suppression rate and override rate.** Suppressed terms as a fraction of candidates (expect ~1-3%) and the fraction later overridden by review (target <5%); a rising override rate means the abuse model is eating real stories.
-- **Read path.** SLO p99 < 20ms and cache hit rate > 99.9%; any miss means the write path stopped, so alert on the miss, not the latency.
+[The hot path, ① to ⑦](/diagram/trending-topics?focus=e1,e2,e6,e7,e10,e13,e14)
 
-**Multi-region and DR**
+1. **Ingest + normalise** turns a post into a key and appends it to the **Event stream**, partitioned by `hash(key)` so every occurrence of one key lands on the same shard.
+2. One of 64 **Sketch workers** consumes its partition. It drops repeat `(user, key)` pairs through a Bloom filter, then counts the key in a fixed grid of counters.
+3. The worker also offers the key to its **Per-shard top-500 heap**, the only place key strings are kept.
+4. Once a minute the worker seals its grid into a 917KB tile and ships it to the **Merger**. The Merger adds the 64 tiles cell by cell and unions the heaps into ~32,000 candidates.
+5. The Merger re-estimates every candidate against the merged grid, keeps the 500 largest, and hands them to the **Trend scorer**, which scores each against its **Baseline store** entry.
+6. The scorer writes a 50-entry list per (geo, window) into the **Top-K cache** every 5 seconds.
+7. The **Trending API** answers a panel load with one GET, ~2 ms.
 
-- **Replication mode:** active-active ingest, so events land in the nearest region and are counted into region-local sketches. Because sketches are linearly mergeable, the *global* list is produced by shipping sealed regional sketches (~917KB/min/region) to a designated aggregator and summing them; only the small sketches cross regions, never the 2.1TB/day event stream. Per-geo lists are computed entirely in-region.
-- **RTO:** ~2 minutes. A region losing its aggregator publishes stale lists from cache while a peer region's aggregator takes over its geo slices; sketches are already replicated as part of the global merge, so there is nothing to rebuild.
-- **RPO:** up to one minute of counts, the in-flight unsealed sketch. Recoverable by replaying that minute from the stream, which is worth doing for the audit trail but usually not worth delaying publication for.
-- **Failover cadence:** monthly aggregator failover drill per region; quarterly full-region evacuation exercise including a global-merge cutover to a secondary aggregator.
-- **Cross-region cost:** trivially small, and this is the design's best property. ~917KB × 60 min × 24h × ~6 regions ≈ ~8GB/day of sketch traffic, versus ~2.1TB/day if you replicated raw events. Baselines (~140MB) replicate hourly; the raw archive stays region-local with a single cross-region copy for DR.
+> **Why the flow is shaped this way.** All the expensive work happens once a minute for everyone, not once per request. Two things are traded for that: the list lags reality by up to ~10 s, and nothing in the serving tier can answer "exactly how many".
+
+#### Counting without a map
+This is the mechanism everything else sits on, so take it apart properly. How do you count 1.4M distinct keys a minute, over a sliding day, in a fixed amount of memory?
+
+[Where counting happens: the stream feeds the Sketch workers, which feed the heap](/diagram/trending-topics?focus=stream,sketch-worker,heap,e2,e6)
+
+**Bad: a hash map per minute.** Exact, and what you would write first. It dies on the tail, not the head. Keys are discovered from the traffic and most are seen once, so a sliding day means holding 1,440 maps at once: ~216GB per geo. It only works when the key set is small or registered, which is the first question to ask.
+
+**Good: Space-Saving, keep only as many keys as you have room for.** Fix *m* slots, each holding a key and a count. A monitored key increments. An unmonitored one evicts the smallest slot, inherits its count as a starting bid, and records how much of that count might not be its own. Memory is a constant you choose, the top-K falls out of the structure, and the error is total volume over slots. It is the strongest single-machine answer. Its weakness shows up in the next section: two Space-Saving summaries do not add together exactly.
+
+**Great: a count-min sketch, plus a small heap of names.** Throw the keys away and keep only counters. A count-min sketch is a grid of *d* rows by *w* columns. To count a key, hash it once per row and add 1 to the cell that comes out in each row. To read a key, look at the same cells and take the *minimum*. Two grids of the same shape add together cell by cell, exactly, which is the property the rest of the design is built on.
+
+**Why the minimum, and why the error is one-sided.** A cell holds the sum of increments from *every* key that hashed to it. So it contains your key's true count plus zero or more foreign contributions, and it can never be too low. Each row is an independent over-estimate. The minimum is the row where fewest other keys collided with yours.
+
+Worked example. `#eclipse` truly occurred 41,000 times this minute, and its seven cells read `41,207 · 43,880 · 41,940 · 52,110 · 41,033 · 46,720 · 44,201`. The estimate is 41,033: 33 high, against a guaranteed bound of ~4,980. The mean (44,441) and the median (43,880) are both worse, because every sample is biased the same way. Only the minimum is an extremum of the contamination rather than an average of it.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 300" role="img" aria-label="Seven rows of counters; one key hashes to one cell per row; the estimate is the minimum">
+  <style>
+    .r{fill:none;stroke:currentColor;stroke-opacity:.35;stroke-width:1.2}
+    .c{fill:var(--accent)}
+    .m{fill:currentColor;fill-opacity:.85}
+    .t{font:12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.75}
+    .b{font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
+  </style>
+  <text class="b" x="20" y="28">#eclipse → 7 hashes → 7 cells</text>
+  <g transform="translate(20,44)">
+    <rect class="r" x="0" y="0" width="560" height="22" rx="4"/><rect class="c" x="88" y="0" width="14" height="22" rx="3"/><text class="t" x="580" y="16">41,207</text>
+    <rect class="r" x="0" y="30" width="560" height="22" rx="4"/><rect class="c" x="301" y="30" width="14" height="22" rx="3"/><text class="t" x="580" y="46">43,880</text>
+    <rect class="r" x="0" y="60" width="560" height="22" rx="4"/><rect class="c" x="196" y="60" width="14" height="22" rx="3"/><text class="t" x="580" y="76">41,940</text>
+    <rect class="r" x="0" y="90" width="560" height="22" rx="4"/><rect class="c" x="470" y="90" width="14" height="22" rx="3"/><text class="t" x="580" y="106">52,110</text>
+    <rect class="r" x="0" y="120" width="560" height="22" rx="4"/><rect class="m" x="358" y="120" width="14" height="22" rx="3"/><text class="b" x="580" y="136">41,033 ← min</text>
+    <rect class="r" x="0" y="150" width="560" height="22" rx="4"/><rect class="c" x="41" y="150" width="14" height="22" rx="3"/><text class="t" x="580" y="166">46,720</text>
+    <rect class="r" x="0" y="180" width="560" height="22" rx="4"/><rect class="c" x="512" y="180" width="14" height="22" rx="3"/><text class="t" x="580" y="196">44,201</text>
+  </g>
+  <text class="t" x="20" y="270">d = 7 rows · w = 32,768 counters per row · 7 × 32,768 × 4 bytes = 917KB, whatever the number of keys</text>
+  <text class="t" x="20" y="290">true count 41,000 · every cell ≥ truth · estimate = min = 41,033 · bound ε·N ≈ 4,980</text>
+</svg>
+```
+
+**Where the dimensions come from.** They are derived, not picked. *w* sets the size of the error: ε = e ÷ w. *d* sets the probability the bound holds: δ = e^−d. For ε = 0.01% we need w ≥ 27,183; round up to 32,768 so the modulo is a bit-mask, giving ε ≈ 8.3×10⁻⁵. For δ = 0.001, d = ⌈ln 1000⌉ = 7. On a 60M-event minute the bound is ε × N ≈ 4,980 counts, one-sided.
+
+What does that mean where it is visible? The 50th key in a busy geo runs at roughly 82k a minute, so ~4,980 is about **6% relative error at rank 50**. Enough to reshuffle ranks 45 to 55 between refreshes, which is why the cache write applies hysteresis. Nowhere near enough to promote a tail key into the top 50.
+
+> **The heap.** The grid can answer "how many times did #eclipse appear?" but not "which keys are big?", because a hash does not reverse. So each Sketch worker also keeps a bounded min-heap of the 500 largest keys it has seen, as strings, with their current estimates. The heap supplies names; the grid supplies counts. Why 500 and not 50 is the next section.
+
+#### One list from 64 shards
+Sixty-four workers each hold a grid and a heap. How do we get one global top 50 out of them without shipping the events?
+
+[The merge: 64 tiles and 64 heaps become one grid and one candidate set](/diagram/trending-topics?focus=sketch-worker,heap,merger,e7,e8,e10)
+
+**Bad: merge the shards' local top-50 lists.** The classic bug. A shard that happens to own three enormous keys pushes a 900k-count key down to rank 51 locally. A shard with only mid-weight traffic promotes a 40k key into its top 50. Merge the lists and the 900k key vanishes from the global answer with no error signal anywhere.
+
+**Good: keep 10× K per shard.** Nominate 500 keys per shard rather than 50. The local cutoff is now far below the global one, so a globally big key is nominated somewhere. This is necessary, and it is why the heap is the size it is. On its own the ranking would still use per-shard counts.
+
+**Great: merge the grids, then re-estimate every candidate.** Add the 64 tiles cell by cell: 64 × 229,376 ≈ 14.7M integer adds, ~20 ms. Union the heaps into ~32,000 candidate strings. Then read every candidate from the *merged* grid (32,000 × 7 = 224k probes, ~2 ms) and sort on those numbers. The candidate set is allowed to be lossy, because a key outside the top 500 on every one of 64 shards cannot plausibly be globally top 50 under a heavy-tailed distribution. The counts used to rank it are not allowed to be lossy, which is why the re-estimation is mandatory.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 250" role="img" aria-label="64 tiles sum cell-wise into one grid; 64 heaps union into candidates; candidates are re-estimated against the merged grid">
+  <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <style>
+    .box{fill:none;stroke:currentColor;stroke-width:1.5}
+    .acc{stroke:var(--accent)}
+    .flow{fill:none;stroke:currentColor;stroke-width:1.5;marker-end:url(#ah)}
+    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    text{dominant-baseline:middle;text-anchor:middle}
+  </style>
+  <rect class="box" x="20" y="30" width="150" height="50" rx="8"/><text class="lbl" x="95" y="48">64 tiles</text><text class="sub" x="95" y="66">917KB each, exact counts</text>
+  <rect class="box" x="20" y="150" width="150" height="50" rx="8"/><text class="lbl" x="95" y="168">64 heaps</text><text class="sub" x="95" y="186">500 strings each</text>
+  <rect class="box acc" x="280" y="30" width="170" height="50" rx="8"/><text class="lbl" x="365" y="48">Σ cell by cell</text><text class="sub" x="365" y="66">14.7M adds, ~20ms, exact</text>
+  <rect class="box" x="280" y="150" width="170" height="50" rx="8"/><text class="lbl" x="365" y="168">∪ candidates</text><text class="sub" x="365" y="186">~32,000 keys, lossy is fine</text>
+  <rect class="box acc" x="560" y="90" width="180" height="60" rx="8"/><text class="lbl" x="650" y="110">re-estimate each</text><text class="sub" x="650" y="130">224k probes, ~2ms → top 500</text>
+  <path class="flow" d="M170,55 L280,55"/>
+  <path class="flow" d="M170,175 L280,175"/>
+  <path class="flow" d="M450,55 L520,55 L520,110 L560,110"/>
+  <path class="flow" d="M450,175 L520,175 L520,130 L560,130"/>
+  <text class="sub" x="380" y="230">names come from the heaps · counts come from the merged grid · never from the heaps' own numbers</text>
+</svg>
+```
+
+This is also why the stream is partitioned by `hash(key)`. Not for the counts, which merge correctly under any partitioning, but for *nomination*: a shard can only put a key in its heap if it has seen enough of it to believe it is heavy. The price is that a viral key at 200k events/s pins one worker. A skew monitor switches just that key to round-robin above 2× the median shard rate. At 1/64th of its volume it is still the biggest thing on every shard, so it is nominated everywhere.
+
+> **The property everything rests on.** sketch(A) + sketch(B) = sketch(A ∪ B), cell by cell, exactly. Merging introduces no approximation because each cell is a plain sum. It is why 64 shards can be summed, why 60 minute tiles make an hour, and why a region can ship 917KB a minute instead of its 2.1TB a day of events. It is also why the tempting "conservative update" optimisation is banned: it makes cells path-dependent, and two such grids no longer sum to the grid of the union.
+
+#### Windows that slide
+The product ships three named windows. How do we maintain "the last hour" as the hour moves?
+
+[The Merger pushes each minute tile into the Sketch ring](/diagram/trending-topics?focus=merger,ring,e9)
+
+**Bad: recount the window every minute.** Replaying 60 minutes of events per geo per minute is 60× the ingest cost, and it needs the events resident. Nothing about it scales.
+
+**Good: one exponentially decayed grid.** Multiply every cell by 0.98 each minute: a 34-minute half-life, one pass over 229k cells, no ring at all, 1.8MB per geo. It is the right answer when the dimension you multiply by is large (50,000 tenants), or when nobody needs a window with edges. Its cost here: it cannot answer "exactly the last 5 minutes", a past window cannot be recomputed, and the product's `rank_delta` needs crisp boundaries.
+
+**Great: a ring of tiles, add the newest and subtract the oldest.** Keep the last 60 minute tiles and 24 hour tiles per geo. A 5-minute window is the sum of 5 tiles, an hour is 60, a day is 24 hour tiles. To slide, add the newest tile to the running window grid and subtract the one that just fell off the tail. Subtraction is safe because you are only ever removing increments you previously added, so no cell can go negative. 84 tiles × ~1.8MB ≈ 150MB per geo, 7.5% of a 2GB aggregator, against the 216GB an exact map would need.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 170" role="img" aria-label="A ring of minute tiles; the window is their sum; the tail tile is subtracted as it expires">
+  <defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <style>
+    .box{fill:none;stroke:currentColor;stroke-width:1.5}
+    .acc{stroke:var(--accent)}
+    .dash{stroke-dasharray:5 4}
+    .flow{fill:none;stroke:currentColor;stroke-width:1.5;marker-end:url(#ah2)}
+    .sub{fill:currentColor;font:12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .edge{fill:currentColor;opacity:.72;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    text{dominant-baseline:middle;text-anchor:middle}
+  </style>
+  <rect class="box acc" x="12" y="70" width="104" height="46" rx="9"/><text class="sub" x="64" y="93">minute m</text>
+  <rect class="box" x="128" y="70" width="104" height="46" rx="9"/><text class="sub" x="180" y="93">m − 1</text>
+  <rect class="box" x="244" y="70" width="104" height="46" rx="9"/><text class="sub" x="296" y="93">m − 2</text>
+  <rect class="box dash" x="360" y="70" width="104" height="46" rx="9"/><text class="sub" x="412" y="93">…</text>
+  <rect class="box" x="476" y="70" width="104" height="46" rx="9"/><text class="sub" x="528" y="93">m − 59</text>
+  <rect class="box acc" x="606" y="64" width="142" height="58" rx="9"/><text class="sub" x="677" y="84">Σ cell-wise</text><text class="sub" x="677" y="104">= 1h window</text>
+  <path class="flow" d="M116,93 L128,93"/><path class="flow" d="M232,93 L244,93"/><path class="flow" d="M348,93 L360,93"/><path class="flow" d="M464,93 L476,93"/><path class="flow" d="M580,93 L606,93"/>
+  <path class="flow dash" d="M528,70 L528,40 L64,40 L64,66"/>
+  <text class="edge" x="300" y="30">tail evicted: subtract cell-wise, never goes negative</text>
+  <text class="edge" x="380" y="150">5m = sum of 5 tiles · 1h = 60 · 24h = 24 hour tiles · ~150MB per geo</text>
+</svg>
+```
+
+#### Trending, not popular
+We now have accurate-enough counts for ~500 candidates a minute. Which of them are *trending*?
+
+[Scoring: the Trend scorer joins the Baseline store and applies the Abuse scorer's flags](/diagram/trending-topics?focus=scorer,baselines,abuse,e11,e12)
+
+**Bad: rank by volume.** The same famous terms win every day. A term that is always enormous is background, not news. This is the entire difference between a trending panel and a leaderboard.
+
+**Good: short window over long window.** Score = (count_5m ÷ 5) ÷ (count_24h ÷ 1,440). Two probes per candidate, no extra state, nothing to rebuild after an outage. It has one hole. A key born inside the window has a 24h count equal to its 5-minute count, so its ratio is exactly 288 whatever its size. A 500-count key ties a 500,000-count key at the top, and there is nowhere to put a prior. Keep it as the fallback for when the baseline store is down.
+
+**Great: score against each key's own baseline.** The Baseline store keeps, per key, an EWMA of its rate and of its variance at a 7-day half-life. An EWMA is a running average that forgets the past on a half-life, so one spike does not become the new normal. For the top ~100k keys it also keeps a minute-of-day profile, because "coffee" is normal at 8am and strange at 3am. The score is z = (rate now − usual rate) ÷ usual spread.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 210" role="img" aria-label="Two keys: a famous one slightly above its normal scores low; a small one far above its normal scores high">
+  <style>
+    .bar{fill:var(--accent);fill-opacity:.25;stroke:var(--accent);stroke-width:1.5}
+    .bar2{fill:currentColor;fill-opacity:.12;stroke:currentColor;stroke-opacity:.5;stroke-width:1.5}
+    .line{stroke:currentColor;stroke-width:1.5;stroke-dasharray:4 3}
+    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    text{dominant-baseline:middle}
+  </style>
+  <text class="lbl" x="20" y="24">#monday · usually 10,000/min, spread 1,500</text>
+  <rect class="bar2" x="20" y="40" width="300" height="22" rx="4"/><rect class="bar" x="20" y="68" width="315" height="22" rx="4"/>
+  <line class="line" x1="320" y1="34" x2="320" y2="96"/>
+  <text class="sub" x="345" y="51">normal 10,000</text><text class="sub" x="345" y="79">now 10,500 → z = (10,500 − 10,000) ÷ 1,500 = 0.33 · ignored</text>
+  <text class="lbl" x="20" y="130">#eclipse · usually 10/min, spread 4</text>
+  <rect class="bar2" x="20" y="146" width="3" height="22" rx="2"/><rect class="bar" x="20" y="174" width="150" height="22" rx="4"/>
+  <line class="line" x1="23" y1="140" x2="23" y2="202"/>
+  <text class="sub" x="40" y="157">normal 10</text><text class="sub" x="180" y="185">now 500 → z = (500 − 10) ÷ 4 = 122 · top of the list</text>
+</svg>
+```
+
+**Cold start: the failure the great answer creates.** A brand-new key has no μ and no σ, so without guards anything new takes the top slot on a few hundred counts and holds it for one refresh. Three guards, used together. An absolute **floor** of 500 counts in 5 minutes to be eligible at all, which also keeps every ranked key well above the sketch's ~4,980 error band. A **prior** of μ₀ = 1/min, σ₀ = 2 so the score is finite. And an **age damper** of min(1, age_min ÷ 15), so a key must sustain its rate for a quarter of an hour before it can win. A genuinely explosive new key still reaches the top; it takes a few refreshes instead of one.
+
+The Abuse scorer's flags are applied here, last, as a multiplier between 0 and 1. Never a deletion, so an override restores a key without touching any counts.
+
+#### Keeping the read path cheap
+~60k panel loads a second at peak, and the panel is on the first screen of every session. If it computed anything it would immediately be the most expensive query in the product.
+
+[The materialised answer: the scorer writes the Top-K cache; the Trending API does one GET](/diagram/trending-topics?focus=scorer,cache,api,e13,e14)
+
+So the scorer materialises the answer. 50 entries plus an `as_of` per (geo, window), rewritten every 5 seconds into the Top-K cache. 3 windows × 200 geos × ~5KB is ~3MB in total, 120 writes a second. The Trending API is a single GET, ~2 ms p99 against a 20 ms budget. It keeps a last-known-good copy of every list in process, so a Redis failover shows a slightly stale panel rather than an empty one. The geo fallback chain (metro → country → region → global) is resolved at write time, so a sparse metro never returns an empty list.
+
+Two details live at this write. **Hysteresis**: a key must beat the rank-50 score by 10% to enter and fall 10% below it to leave, so the ~6% counting error cannot flicker the boundary. And every entry carries `count_est` with an `error_bound`, never a bare count, because a bare count would be a lie.
+
+**The latency budget.** Seal and ship 64 tiles ~500 ms, merge ~20 ms, re-estimate ~2 ms, join 500 baselines ~5 ms, write ~1 ms. That is **~550 ms** from minute boundary to a fresh list, against a 10 s staleness target. Note where it goes: 500 of the 550 ms is sealing and shipping, none of it arithmetic. If the cycle ever had to be faster the answer would be staggered seals and incremental merging, not a faster merge.
+
+#### Bots and brigades
+Anything publicly ranked is a target. Three layers, each cheaper than the next attack it does not stop.
+
+- **One vote per user per key.** A rotating 5-minute Bloom filter of `(user_id, key)` pairs in front of the counters, ~11MB per shard. Raw volume now means distinct participants. It prices out the single scripted account for the cost of a few memory probes. It also deletes ~1% of genuine pairs at a 1% false-positive rate, a loss that is uniform across keys and so leaves ranks alone.
+- **Concentration signals.** The Abuse scorer reads the same stream off the counting path and scores candidates on network origin, account age and follow-graph density. It emits a multiplier between 0 and 1, never a deletion.
+- **Soft suppression with a review queue.** A wrongly demoted key is still in the candidate set, so a human override restores it within minutes. Every decision writes an audit row. The override rate (target under 5%) is the only calibration signal there is, because there is no ground truth.
+
+What this does not catch is in the "does not solve" section below.
+
+#### Where it breaks
+| Layer | Failure | How the design handles it |
+|---|---|---|
+| Ingest | A normalisation change splits `#Eclipse` from `#eclipse`; both halves fall off the list, no error anywhere | New normaliser shadow-runs for an hour; cutover only above 90% top-50 overlap |
+| Stream | A viral key at 200k events/s pins one shard while 63 idle | Skew monitor round-robins just that key above 2× median; counts still merge, nomination survives |
+| Sketch worker | Restart loses the in-flight minute | Merger publishes with the tiles it has, marked partial; the minute is replayed from the stream and merged late, because addition is order-independent |
+| Merger | Tiles with different dimensions or hash seeds are summed after a rolling deploy: plausible, meaningless numbers | Every tile carries a version header; the Merger refuses to add across versions |
+| Baseline store | Unavailable: no notion of normal | Fall back to the short/long ratio, serve with `degraded_scoring` |
+| Cache | Eviction or failover empties a key | API serves its in-process last-known-good with `as_of`; the next 5 s tick refills |
+| Ranking | ~6% error flickers keys 45–55 between refreshes | Hysteresis at the cache write, ±10% around the rank-50 score |
+
+#### What this design does not solve
+Three things stay open, and it is worth being able to say each one plainly.
+
+**Nothing it publishes can be proved.** The grid returns an upper bound; the heap returns candidates some worker already believed were heavy. The honest fix, an exact recount over the ~500 published candidates from the Raw archive, is affordable and we would build it for a newsroom. It does not close the gap. It lands minutes later, over a slightly different event set, and it will disagree with the published estimate often enough to notice. So the design labels the two numbers instead of reconciling them.
+
+**De-dup undercounts upstream of a structure that overcounts.** The clean one-sided guarantee holds over de-duplicated events, not over reality, and the ~1% the filter drops is not something we can measure. We state the guarantee that way and accept that the distinction is invisible downstream.
+
+**Coordinated inflation by real accounts is made expensive, not prevented.** 10,000 aged, spread-out, human accounts look exactly like a grassroots event: regional concentration, dense follow clustering, a burst of new accounts created *because* of the event. Every threshold that catches one catches the other. The design makes the wrong decision cheap (soft demotion, minutes to override) rather than pretending it can tell them apart.
+
+#### Final design
+Read it back through the three numbers. 1.4M distinct keys a minute and a day that has to slide rule out the map and force the grid. 64 shards and one answer per geo force tiles and a Merger, and the Merger's exact addition is what makes windows, shards and regions all the same operation. Famous terms at 10,000 a minute every day force ranking by surprise against a baseline. And 60k reads a second force a precomputed list behind a single GET.
+
+[The whole design](/diagram/trending-topics?focus=ingest,stream,sketch-worker,heap,merger,ring,scorer,baselines,abuse,cache,api,archive)
+
+> **The numbers to remember.** 917KB per minute tile · ≤ ~5,000 over-count on a 60M-event minute · ~6.1% relative error at rank 50 · ~150MB ring vs ~216GB map · ~550 ms publish cycle vs 10 s SLO.
+
+#### Check your understanding
+**Why the minimum across rows, and not the mean or the median?** Every row's cell holds the true count plus non-negative contamination, so every sample is biased upward. Averaging averages the noise in. The minimum picks the least-collided row and is the only estimator that keeps est ≥ true.
+
+**A key is 51st on every one of 64 shards. Do you lose it?** Only if you merge lists. Nominate 500 per shard, merge the grids, re-estimate every candidate against the merged grid, then sort. The candidate set may be lossy; the counts that rank it may not.
+
+**A brand-new hashtag appears with no baseline. What score does it get?** Not infinity. It must clear 500 counts in 5 minutes, it is scored against the prior μ₀ = 1/min, σ₀ = 2, and its score is damped by min(1, age ÷ 15 min).
+
+**Why is the grid 7 × 32,768 and not 3 × 1,000,000, which is more memory?** *w* sets the error size, *d* sets the probability the bound holds. Three rows gives δ = e⁻³ ≈ 5%: one estimate in twenty is outside the bound entirely, ~1,600 candidates a minute with no guarantee. And it costs 13× the memory.
+
+**Two regions each count their own traffic. How do you produce one global list without shipping events?** Ship sealed tiles built with identical (d, w, seed) and sum them. ~917KB × 60 × 24 × 6 regions ≈ 8GB a day, against 2.1TB a day of events. Pin the seed and dimensions in every tile header; mismatched tiles still add and produce plausible garbage.
 
 ### 54. Design a CI/CD & Code Deployment System
 #### Problem

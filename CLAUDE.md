@@ -26,6 +26,36 @@ Every `## Topic` must open with a `### Summary` card (~700-900 words, 6 subsecti
 - Match Core Java's depth (~930 words) and tone (senior engineer briefing, opinionated, concrete examples — not a glossary).
 - If the primer ships in the native bundle (Java, Kotlin, NeetCode, Patterns), `cp web/public/<file>.md mobile/assets/content/<file>.md` after editing. Other primers are remote-only.
 
+### System Design Questions: diagram first, Deep dive behind it
+
+A `patterns` question opens on its diagram (`itemRoute()` in
+`mobile/lib/diagrams/index.ts` sends item taps to `/diagram/<id>` when one
+exists). The diagram page has **Overview** (the learning walk) and **Deep dive**
+(the write-up at `/reader/patterns/<n>`) top-left, and Prev / Next in the bar.
+The write-up is the **breakdown format** (`scripts/validate_sd.py`
+`check_breakdown`; `web/public/patterns.md` Q53 Trending Topics is the pattern):
+
+`Understanding the problem` · `Requirements and the numbers` · `Two problems in
+one pipeline` (optional) · `High-level design` · **3+ deep dives with
+descriptive headings** ("Counting without a map", never "Deep dive 2") ·
+`Where it breaks` · `What this design does not solve` · `Final design` ·
+`Check your understanding`. No interview coaching, no `#n`/`Qn` cross-refs.
+
+Plain-markdown conventions the reader draws (`makeRules` in `ItemView.tsx`):
+- a paragraph opening `**Bad: …**` / `**Good: …**` / `**Great: …**` is a tiered
+  answer card; every deep dive has all three.
+- a blockquote whose first line is bold is a callout.
+- a paragraph that is only `[caption](/diagram/<id>?focus=a,b,e3)` embeds the
+  diagram cropped and lit to those node/edge ids. Crop the picture to the part
+  being explained; draw new figures as ```svg fences (currentColor,
+  `var(--accent)`).
+- every text run goes through the glossary plus the diagram's box labels, so
+  "Sketch workers" is tappable and defined by its own `what`.
+- `patterns` has `sectionOrder: []` (file order) and
+  `defaultRevealedSections: ["*"]` (a write-up opens fully revealed).
+- `patterns.md` ships in the native bundle: mirror to
+  `mobile/assets/content/patterns.md` after editing.
+
 ## Interactive diagrams
 
 Whole-solution architecture diagrams for System Design Questions, rendered with
