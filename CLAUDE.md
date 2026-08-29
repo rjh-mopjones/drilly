@@ -97,11 +97,28 @@ interview; the user rejected "things to say" outright. `rate-limiter.ts` is the
 finished pattern. `bunx tsx scripts/check-diagrams.ts <id>` fails on the errors
 below and warns on the rest; a diagram ships with 0 of either.
 
+- **The Overview is a learning path, in this order.** `shape` (the design's
+  one idea) → `forces` (3–5 rows `{ constraint, decision, lights }`: a number
+  of the problem and the decision it forced, naming the box) → `naive`
+  (`{ text, lights }`: the design a reader arrives with and the number at which
+  it breaks) → `beats` (the walk) → `numbers` → `crux`. Every row lights the
+  boxes it is about; box labels named in the text render bold.
 - **Beats light the picture.** `overview.beats` are `{ text, lights: [ids] }`:
   each names boxes by their *labels* and lists the node and edge ids it is
   about; tapping it lights them and dims the rest. Stages hidden in a collapsed
   group light the group. A beat that lights nothing warns. Where the file has
-  stage latencies, one beat sums the budget against the SLO.
+  stage latencies, one beat sums the budget against the SLO. Say what a thing
+  *is* before what it does; define a term in the sentence that first uses it.
+- **The hot path is numbered on the canvas.** Every `tier: "hot"` edge has
+  `step: n`, 1..n in request order; the label carries the badge.
+- **Figures explain themselves.** `numbers` entries are `{ value, explain }`
+  — the derivation and what the number means. `breaks` and `crux` are
+  `{ failure | problem, handled }`: what the design does about it, or what
+  would have to change. A bare string warns; a rule with a digit bolted on to
+  pass the lint is worse than deleting the entry.
+- **Sentences ≤ 25 words**, one idea each; the gate warns above 30 and fails
+  above 45. Paragraph length is not a defect — this is read by learners.
+  `trending-topics.ts` is the finished pattern.
 - **No cross-references.** Never `#12`, `Q7`, "question 3", "the prose", "the
   write-up", "pseudocode", "other diagrams" — the panel reader has none of
   them. Say the idea in a clause instead. Error.
