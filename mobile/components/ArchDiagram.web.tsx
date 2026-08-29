@@ -640,10 +640,36 @@ export default function ArchDiagram({
   // margins fall outside that and get clipped on a phone. Frame the layout's
   // own bounds instead, and again whenever the container resizes.
   const rfRef = useRef<ReactFlowInstance | null>(null);
+  // While the Overview is open the walk lights boxes, so the picture has to fit
+  // the part of the canvas the panel leaves free: to its right on a desktop,
+  // above it on a phone. Otherwise beat 1 lights the left column behind the panel.
+  const overviewOpen = sel?.kind === "overview";
   const fit = useCallback(() => {
+    const inst = rfRef.current;
+    const el = wrapRef.current;
+    if (!inst || !el) return;
     const b = layout.bounds;
-    rfRef.current?.fitBounds({ x: b.x, y: b.y, width: b.w, height: b.h }, { padding: 0.04, duration: 0 });
-  }, [layout]);
+    const W = el.clientWidth;
+    const H = el.clientHeight;
+    if (!W || !H) {
+      inst.fitBounds({ x: b.x, y: b.y, width: b.w, height: b.h }, { padding: 0.04, duration: 0 });
+      return;
+    }
+    const free = !overviewOpen
+      ? { x: 0, y: 0, w: W, h: H }
+      : narrow
+        ? { x: 0, y: 0, w: W, h: H * (1 - PHONE_PANEL_FRACTION) - 12 }
+        : { x: DESKTOP_OVERVIEW_W + 12, y: 0, w: W - DESKTOP_OVERVIEW_W - 12, h: H };
+    const zoom = Math.min((free.w * 0.92) / b.w, (free.h * 0.92) / b.h, 2.5);
+    inst.setViewport(
+      {
+        x: free.x + (free.w - b.w * zoom) / 2 - b.x * zoom,
+        y: free.y + (free.h - b.h * zoom) / 2 - b.y * zoom,
+        zoom,
+      },
+      { duration: 200 },
+    );
+  }, [layout, narrow, overviewOpen]);
   useEffect(() => {
     fit();
   }, [fit, width]);
@@ -892,6 +918,10 @@ function DetailPanel({
   );
 }
 
+/** Overview panel geometry; fit() keeps the picture out from under it. */
+const PHONE_PANEL_FRACTION = 0.62;
+const DESKTOP_OVERVIEW_W = 440;
+
 function OverviewPanel({
   diagram,
   palette: p,
@@ -913,8 +943,13 @@ function OverviewPanel({
       style={{
         ...panelChrome(p),
         ...(narrow
-          ? { left: 10, right: 10, bottom: 10, maxHeight: "62%" }
-          : { top: 62, left: 12, width: "min(440px, calc(100% - 24px))", maxHeight: "calc(100% - 76px)" }),
+          ? { left: 10, right: 10, bottom: 10, maxHeight: `${PHONE_PANEL_FRACTION * 100}%` }
+          : {
+              top: 62,
+              left: 12,
+              width: `min(${DESKTOP_OVERVIEW_W}px, calc(100% - 24px))`,
+              maxHeight: "calc(100% - 76px)",
+            }),
       }}
     >
       <PanelHeader p={p} title={diagram.title} sub={diagram.question} onClose={onClose} />

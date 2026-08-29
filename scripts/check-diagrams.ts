@@ -66,8 +66,9 @@ const KNOWN = new Set(["HTTP", "HTTPS", "URL", "URLS", "API", "APIS", "SQL", "JS
 const UNIT = /^(\d|[KMGTPE]?B|MS|US|NS|GB|TB|PB|KB|MB|GBPS|MBPS|KBPS|GHZ|MHZ|X\d*|\d+[KMGT]?B?)$/;
 const GLOSS_UPPER = new Set(Object.keys(GLOSSARY).map((k) => k.toUpperCase()));
 
+/** A figure: a digit, or a number word standing where a digit would ("one fetch per host"). */
 function hasDigit(s: string): boolean {
-  return /\d/.test(s);
+  return /\d/.test(s) || /\b(zero|one|two|three|four|five|six|seven|eight|nine|ten|dozen|half|single|once|twice|hundreds?|thousands?|millions?|billions?)\b/i.test(s);
 }
 
 function textLint(d: Diagram): { errors: string[]; warnings: string[] } {
