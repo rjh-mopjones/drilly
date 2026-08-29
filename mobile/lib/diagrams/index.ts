@@ -3,7 +3,7 @@
  * question touches a new file plus this one line, and parallel authoring never
  * collides. Types live in ./types.
  */
-import type { Diagram } from "./types";
+import { beatLights, beatText, isFrame, type Diagram } from "./types";
 import { parentOf, tierOf } from "./layout";
 import { WEB_CRAWLER } from "./web-crawler";
 import { FLEET_UPDATE } from "./fleet-update";
@@ -140,23 +140,44 @@ export function getDiagramForItem(sourceId: string, itemId: number): Diagram | u
  * up here, in reading order.
  */
 export function diagramToMarkdown(d: Diagram): string {
-  const out: string[] = [`## Interactive diagram: ${d.title}`, ""];
+  const out: string[] = [`## Interactive diagram: ${d.title}`, "", `*${d.question}*`, ""];
   const o = d.overview;
+  const byId = (id: string) => d.nodes.find((n) => n.id === id)?.label ?? id;
+  const edgeName = (id: string) => {
+    const e = d.edges.find((x) => x.id === id);
+    return e ? `${byId(e.from)} → ${byId(e.to)}` : id;
+  };
   out.push("### Overview", "", `**The shape of it.** ${o.shape}`, "");
   out.push("**How it works.**", "");
-  o.beats.forEach((b, i) => out.push(`${i + 1}. ${b}`));
+  o.beats.forEach((b, i) => {
+    const lights = beatLights(b).map((id) => (d.nodes.some((n) => n.id === id) ? byId(id) : edgeName(id)));
+    out.push(`${i + 1}. ${beatText(b)}${lights.length ? ` _(${lights.join(", ")})_` : ""}`);
+  });
   out.push("");
   if (o.numbers?.length) out.push(`**Numbers.** ${o.numbers.join(" · ")}`, "");
   out.push(`**The hard part.** ${o.crux}`, "");
 
-  const byId = (id: string) => d.nodes.find((n) => n.id === id)?.label ?? id;
-
   out.push("### Components", "");
-  for (const n of d.nodes) {
+  // Frames first, then their members, so the note keeps the containment the picture shows.
+  const parent = (n: (typeof d.nodes)[number]) => parentOf(n, d);
+  const order: typeof d.nodes = [];
+  const place = (n: (typeof d.nodes)[number]) => {
+    if (order.includes(n)) return;
+    order.push(n);
+    for (const c of d.nodes) if (parent(c) === n.id) place(c);
+  };
+  for (const n of d.nodes) if (!parent(n)) place(n);
+  for (const n of order) {
     if (!n.detail) continue;
-    const stageOf = n.kind === "process" ? parentOf(n, d) : undefined;
-    const home = stageOf ? d.nodes.find((x) => x.id === stageOf)?.label : undefined;
-    out.push(`#### ${n.label}${n.sub ? ` (${n.sub})` : ""}${home ? ` — stage of ${home}` : ""}`, "");
+    const home = parent(n) ? d.nodes.find((x) => x.id === parent(n))?.label : undefined;
+    const role = isFrame(n.kind)
+      ? n.kind === "serviceGroup"
+        ? ` — one service; stages: ${d.nodes.filter((c) => parent(c) === n.id).map((c) => c.label).join(", ")}`
+        : ` — boundary around ${d.nodes.filter((c) => parent(c) === n.id).map((c) => c.label).join(", ")}`
+      : home
+        ? ` — ${n.kind === "process" ? "stage of" : "inside"} ${home}`
+        : "";
+    out.push(`#### ${n.label}${n.sub ? ` (${n.sub})` : ""}${role}`, "");
     out.push(`- **What it is.** ${n.detail.what}`);
     out.push(`- **Why it exists.** ${n.detail.why}`);
     if (n.detail.numbers?.length)
@@ -184,6 +205,14 @@ export function diagramToMarkdown(d: Diagram): string {
     if (e.detail.numbers?.length)
       out.push(`- **Numbers.** ${e.detail.numbers.join(" · ")}`);
     if (e.detail.breaks) out.push(`- **What breaks.** ${e.detail.breaks}`);
+    const c = e.detail.choice;
+    if (c) {
+      out.push(`- **Why this way.**`);
+      out.push(`  - Choice: ${c.pick}`);
+      out.push(`  - Instead of: ${c.instead}`);
+      out.push(`  - Decider: ${c.decider}`);
+      out.push(`  - Alternative wins when: ${c.flips}`);
+    }
     out.push("");
   }
   return out.join("\n").trim() + "\n";

@@ -24,7 +24,8 @@ import type {
   NodeKind,
   TechChoice,
 } from "../lib/diagrams";
-import { isFrame } from "../lib/diagrams";
+import { beatLights, beatText, isFrame } from "../lib/diagrams";
+import { GLOSSARY } from "../lib/diagrams/glossary";
 import LAYOUTS from "../lib/diagrams/layouts.json";
 import {
   layoutFor,
@@ -477,6 +478,11 @@ export default function ArchDiagram({
   const diagram = layout.diagram;
   const [sel, setSel] = useState<Selection | null>(null);
   const [hover, setHover] = useState<string | null>(null);
+  /** Which overview beat is being walked; lights what that beat is about. */
+  const [walk, setWalk] = useState<number | null>(null);
+  useEffect(() => {
+    if (sel?.kind !== "overview") setWalk(null);
+  }, [sel]);
 
   const selNode = useMemo(
     () => (sel?.kind === "node" ? (diagram.nodes.find((n) => n.id === sel.id) ?? null) : null),
@@ -487,9 +493,35 @@ export default function ArchDiagram({
     [diagram, sel],
   );
 
-  /** What stays lit: the selection and whatever it touches. */
+  /** Stages hidden inside a collapsed group light the group instead. */
+  const groupOf = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const [g, stages] of Object.entries(layout.pipelines)) for (const s of stages) m.set(s.id, g);
+    return m;
+  }, [layout]);
+
+  /** Edges a walked beat names outright (as opposed to lit through both endpoints). */
+  const litEdges = useMemo(() => {
+    if (sel?.kind !== "overview" || walk == null) return null;
+    const ids = beatLights(diagram.overview.beats[walk] ?? "");
+    return new Set(ids.filter((id) => diagram.edges.some((e) => e.id === id)));
+  }, [diagram, sel, walk]);
+
+  /** What stays lit: the selection and whatever it touches, or a walked beat. */
   const lit = useMemo(() => {
-    if (!sel || sel.kind === "overview") return null;
+    if (sel?.kind === "overview") {
+      if (walk == null) return null;
+      const s = new Set<string>();
+      for (const id of beatLights(diagram.overview.beats[walk] ?? "")) {
+        const e = diagram.edges.find((x) => x.id === id);
+        if (e) {
+          s.add(groupOf.get(e.from) ?? e.from);
+          s.add(groupOf.get(e.to) ?? e.to);
+        } else s.add(groupOf.get(id) ?? id);
+      }
+      return s.size ? s : null;
+    }
+    if (!sel) return null;
     const s = new Set<string>();
     if (sel.kind === "node") {
       s.add(sel.id);
@@ -505,7 +537,7 @@ export default function ArchDiagram({
       }
     }
     return s;
-  }, [diagram, sel]);
+  }, [diagram, sel, walk, groupOf]);
 
   const nodes: Node[] = useMemo(
     () =>
@@ -548,7 +580,7 @@ export default function ArchDiagram({
           const isSel = sel?.kind === "edge" && sel.id === e.id;
           const isHover = hover === e.id;
           const touchesSel = sel?.kind === "node" && (e.from === sel.id || e.to === sel.id);
-          const dim = !!lit && !isSel && !(lit.has(e.from) && lit.has(e.to));
+          const dim = !!lit && !isSel && !litEdges?.has(e.id) && !(lit.has(e.from) && lit.has(e.to));
           const hot = tier === "hot";
           const stroke = isSel
             ? palette.accent
@@ -592,7 +624,7 @@ export default function ArchDiagram({
             markerEnd: { type: MarkerType.ArrowClosed, color: stroke, width: hot ? 16 : 14, height: hot ? 16 : 14 },
           };
         }),
-    [diagram, layout, palette, sel, lit, hover],
+    [diagram, layout, palette, sel, lit, litEdges, hover],
   );
 
   const onNodeClick = useCallback((_e: unknown, n: Node) => {
@@ -678,7 +710,14 @@ export default function ArchDiagram({
       </button>
 
       {sel?.kind === "overview" ? (
-        <OverviewPanel diagram={diagram} palette={palette} narrow={narrow} onClose={() => setSel(null)} />
+        <OverviewPanel
+          diagram={diagram}
+          palette={palette}
+          narrow={narrow}
+          walk={walk}
+          onWalk={(i) => setWalk((cur) => (cur === i ? null : i))}
+          onClose={() => setSel(null)}
+        />
       ) : selNode?.detail ? (
         <DetailPanel
           title={selNode.label}
@@ -857,11 +896,15 @@ function OverviewPanel({
   diagram,
   palette: p,
   narrow,
+  walk,
+  onWalk,
   onClose,
 }: {
   diagram: Diagram;
   palette: Palette;
   narrow: boolean;
+  walk: number | null;
+  onWalk: (i: number) => void;
   onClose: () => void;
 }) {
   const o = diagram.overview;
@@ -877,28 +920,55 @@ function OverviewPanel({
       <PanelHeader p={p} title={diagram.title} sub={diagram.question} onClose={onClose} />
       <Section p={p} title="The shape of it" body={o.shape} />
       <Label p={p}>How it works</Label>
-      {o.beats.map((b, i) => (
-        <div key={i} style={{ display: "flex", gap: 10, marginTop: 9 }}>
+      <div style={{ color: p.textMuted, fontSize: 11.5, marginTop: 4 }}>
+        Tap a step to light the parts of the picture it is about.
+      </div>
+      {o.beats.map((b, i) => {
+        const active = walk === i;
+        const walkable = beatLights(b).length > 0;
+        return (
           <div
+            key={i}
+            role={walkable ? "button" : undefined}
+            onClick={walkable ? () => onWalk(i) : undefined}
             style={{
-              flex: "0 0 auto",
-              width: 20,
-              height: 20,
-              borderRadius: 999,
-              border: `1px solid ${p.border}`,
-              color: p.accent,
-              fontSize: 11,
-              fontWeight: 700,
               display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
+              gap: 10,
+              marginTop: 8,
+              padding: "6px 8px",
+              marginLeft: -8,
+              marginRight: -8,
+              borderRadius: 8,
+              cursor: walkable ? "pointer" : "default",
+              background: active ? `${p.accent}18` : "transparent",
+              border: `1px solid ${active ? `${p.accent}66` : "transparent"}`,
+              transition: "background 120ms ease",
             }}
           >
-            {i + 1}
+            <div
+              style={{
+                flex: "0 0 auto",
+                width: 20,
+                height: 20,
+                borderRadius: 999,
+                border: `1px solid ${active ? p.accent : p.border}`,
+                background: active ? p.accent : "transparent",
+                color: active ? p.bg : p.accent,
+                fontSize: 11,
+                fontWeight: 700,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              {i + 1}
+            </div>
+            <div style={{ color: p.text, fontSize: 13.5, lineHeight: 1.55 }}>
+              <Glossed p={p} text={beatText(b)} />
+            </div>
           </div>
-          <div style={{ color: p.text, fontSize: 13.5, lineHeight: 1.55 }}>{b}</div>
-        </div>
-      ))}
+        );
+      })}
       {o.numbers?.length ? <Pills p={p} items={o.numbers} /> : null}
       <Section p={p} title="The hard part" body={o.crux} accent />
     </div>
@@ -909,7 +979,9 @@ function ChoiceBlock({ p, c }: { p: Palette; c: TechChoice }) {
   const Row = ({ k, v, tone }: { k: string; v: string; tone?: string }) => (
     <div style={{ marginTop: 8 }}>
       <span style={{ color: p.textMuted, fontSize: 11.5, fontWeight: 700 }}>{k} </span>
-      <span style={{ color: tone ?? p.text, fontSize: 13, lineHeight: 1.5 }}>{v}</span>
+      <span style={{ color: tone ?? p.text, fontSize: 13, lineHeight: 1.5 }}>
+        <Glossed p={p} text={v} />
+      </span>
     </div>
   );
   return (
@@ -962,7 +1034,81 @@ function Section({ p, title, body, accent }: { p: Palette; title: string; body: 
   return (
     <>
       <Label p={p}>{title}</Label>
-      <div style={{ color: accent ? p.errorFg : p.text, fontSize: 13.5, lineHeight: 1.55, marginTop: 5 }}>{body}</div>
+      <div style={{ color: accent ? p.errorFg : p.text, fontSize: 13.5, lineHeight: 1.55, marginTop: 5 }}>
+        <Glossed p={p} text={body} />
+      </div>
+    </>
+  );
+}
+
+/**
+ * Panel text with the glossary applied: every term in GLOSSARY is underlined,
+ * and hovering or tapping it reveals the one-line definition inline (inline,
+ * not a floating tooltip, so it works the same on a phone). Vocabulary is kept
+ * because it is the language the solution is described in; it is never assumed.
+ */
+const GLOSS_KEYS = Object.keys(GLOSSARY).sort((a, b) => b.length - a.length);
+const GLOSS_RE = new RegExp(
+  `(?<![\\w-])(${GLOSS_KEYS.map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})(?![\\w-])`,
+  "gi",
+);
+/** Words match case-insensitively; acronyms and product names only as written. */
+function lookup(raw: string): string | undefined {
+  if (GLOSSARY[raw]) return GLOSSARY[raw];
+  const lower = raw.toLowerCase();
+  const key = GLOSS_KEYS.find((k) => k === lower && k === k.toLowerCase());
+  return key ? GLOSSARY[key] : undefined;
+}
+
+function Glossed({ p, text }: { p: Palette; text: string }) {
+  const [open, setOpen] = useState<Set<number>>(() => new Set());
+  const parts = useMemo(() => {
+    const out: { text: string; def?: string }[] = [];
+    let last = 0;
+    for (const m of text.matchAll(GLOSS_RE)) {
+      const def = lookup(m[0]);
+      if (!def) continue;
+      if (m.index! > last) out.push({ text: text.slice(last, m.index) });
+      out.push({ text: m[0], def });
+      last = m.index! + m[0].length;
+    }
+    if (last < text.length) out.push({ text: text.slice(last) });
+    return out;
+  }, [text]);
+  return (
+    <>
+      {parts.map((part, i) =>
+        part.def ? (
+          <span key={i}>
+            <span
+              onClick={(ev) => {
+                ev.stopPropagation();
+                setOpen((s) => {
+                  const n = new Set(s);
+                  if (n.has(i)) n.delete(i);
+                  else n.add(i);
+                  return n;
+                });
+              }}
+              title={part.def}
+              style={{
+                textDecoration: "underline dotted",
+                textDecorationColor: p.accent,
+                textUnderlineOffset: 3,
+                cursor: "help",
+                color: open.has(i) ? p.accent : "inherit",
+              }}
+            >
+              {part.text}
+            </span>
+            {open.has(i) ? (
+              <span style={{ color: p.textMuted, fontStyle: "italic" }}> ({part.def})</span>
+            ) : null}
+          </span>
+        ) : (
+          <span key={i}>{part.text}</span>
+        ),
+      )}
     </>
   );
 }
