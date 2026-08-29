@@ -70,8 +70,8 @@ export const SPOTIFY: Diagram = {
       label: "Play API",
       sub: "catalogue read + entitlement, per play",
       kind: "service",
-      col: 0,
-      row: 1,
+      col: 2,
+      row: 0,
       detail: {
         what: "GET /track/{id}: returns metadata, the entitlement decision for this account, and signed edge URLs for every rung the account may use.",
         why: "Entitlement is per account and changes on billing events while metadata changes on content events, so the decision has to be taken per play rather than baked into a manifest or an edge config that outlives it.",
@@ -93,8 +93,8 @@ export const SPOTIFY: Diagram = {
       label: "Edge audio cache",
       sub: "top 10M tracks x 2 rungs, 144TB",
       kind: "database",
-      col: 0,
-      row: 2,
+      col: 1,
+      row: 1,
       detail: {
         what: "Whole encoded objects pinned at each edge, with a pin API and a pre-push hook wired into the release calendar.",
         why: "The catalogue is small enough that residency stops being a forecasting problem: the two mainstream rungs of the top 10M tracks are one storage node and cover the overwhelming majority of plays, so you choose what to hold rather than predict it.",
@@ -122,7 +122,7 @@ export const SPOTIFY: Diagram = {
       sub: "partitioned by user_id, ~500k/s peak",
       kind: "queue",
       col: 0,
-      row: 3,
+      row: 1,
       detail: {
         what: "An append-only partitioned log carrying start at t=0, the qualified marker at 30s, and a terminal event with the stop position.",
         why: "Three consumers with incompatible requirements read the same events: the ledger may not lose one, the training pipeline may lose thousands, and the dashboard wants them now. A shared immutable log lets each pick its own delivery semantics instead of the loosest consumer paying the ledger's correctness cost.",
@@ -150,7 +150,7 @@ export const SPOTIFY: Diagram = {
       sub: "columnar, ~340GB/day, 7 years",
       kind: "database",
       col: 0,
-      row: 4,
+      row: 2,
       parent: "ledger-group",
       detail: {
         what: "The same events in columnar form on object storage, dictionary-encoded on track_id, country and device, kept for the contractual audit window.",
@@ -173,8 +173,8 @@ export const SPOTIFY: Diagram = {
       label: "Royalty batch",
       sub: "event time, 30s rule, dedup key",
       kind: "service",
-      col: 0,
-      row: 5,
+      col: 1,
+      row: 2,
       parent: "ledger-group",
       detail: {
         what: "A nightly and then monthly deterministic batch that applies the 30-second rule on event time, the per-country rate and the fractional split, emitting one statement row per rights holder per period.",
@@ -229,8 +229,8 @@ export const SPOTIFY: Diagram = {
       label: "Catalogue + rights",
       sub: "~450GB, whole replica per region",
       kind: "database",
-      col: 1,
-      row: 1,
+      col: 3,
+      row: 0,
       detail: {
         what: "Track metadata, ISRC codes, per-rung object keys, audio features, and the effective-dated rights map naming holders, roles and shares.",
         why: "It is read on every play and almost entirely cacheable, so a whole replica per region removes a cross-region hop from the play path; and it is the same table the ledger keys on, which is why it is versioned rather than mutable.",
@@ -256,8 +256,8 @@ export const SPOTIFY: Diagram = {
       label: "Audio origin",
       sub: "four rungs per track, ~4.4PB",
       kind: "database",
-      col: 1,
-      row: 2,
+      col: 2,
+      row: 1,
       detail: {
         what: "S3-compatible object store holding each track as whole encoded objects at 96, 160 and 320kbps plus lossless.",
         why: "The edge serves the overwhelming majority of plays, so origin is sized from the miss rate rather than the play rate, and it exists to fill edges and to hold the long tail nobody would ever pin.",
@@ -283,8 +283,8 @@ export const SPOTIFY: Diagram = {
       label: "Library + playlists",
       sub: "play_count, last_played_at",
       kind: "database",
-      col: 1,
-      row: 3,
+      col: 3,
+      row: 1,
       detail: {
         what: "Per-listener saved tracks, albums and follows, playlists with fractional position keys, and (track_id, play_count, last_played_at) per listener.",
         why: "This is simultaneously the candidate pool for most plays and the only place the feature that separates 'exhausted' from 'due for revival' lives, because no embedding encodes time-since-last-play crossed with lifetime count.",
@@ -309,8 +309,8 @@ export const SPOTIFY: Diagram = {
       label: "Label builder",
       sub: "skip<30s negative, repeat-7d positive",
       kind: "service",
-      col: 1,
-      row: 4,
+      col: 2,
+      row: 2,
       detail: {
         what: "Turns the same play events into training labels on event time: a skip inside 30 seconds is the negative, a repeat play within 7 days is the positive, and completion is recorded but is not the target.",
         why: "When most impressions are familiar, completion measures familiarity rather than satisfaction, and the listener's own history already tells you that for free. The chosen negative is also the royalty threshold, so it is already computed exactly on the money path.",
@@ -334,10 +334,10 @@ export const SPOTIFY: Diagram = {
     {
       id: "discovery",
       label: "Discovery precompute",
-      sub: "3-source retrieval + ranker, weekly",
       kind: "service",
-      col: 1,
-      row: 5,
+      col: 3,
+      row: 2,
+      sub: "weekly; 30 cached per listener",
       detail: {
         what: "A weekly batch: collaborative-filtering, audio-encoder and text retrieval merge into a ~500-track pool, a deep ranker scores it, diversification spreads genre and freshness, and 30 tracks are written per listener.",
         why: "Three sources because no single one covers every data regime: CF is strongest where a track already has plays, the audio encoder gives a track uploaded four minutes ago a vector at all, and text carries the cultural context neither can see.",
@@ -356,32 +356,6 @@ export const SPOTIFY: Diagram = {
             "Memory. 100M x 256 dims x float32 is 100GB, ~140GB with graph overhead across 8 shards of ~18GB, which fits in RAM. The fork that binds at 10B vectors and 10TB does not bind two orders of magnitude smaller.",
           flips:
             "A corpus 100x larger, as in the short-video case, where the index no longer fits and quantisation stops being optional. Incremental inserts also matter here: 60k uploads a day must be retrievable within minutes or release radar misses Friday.",
-        },
-      },
-    },
-    {
-      id: "disc-cache",
-      label: "Discovery cache",
-      sub: "~400GB, 30 entries per listener",
-      kind: "database",
-      col: 1,
-      row: 6,
-      detail: {
-        what: "A replicated key-value cache holding each listener's precomputed surface lists as (track_id, score, reason), read once when the surface opens.",
-        why: "No model runs on the request path, and URLs and metadata are hydrated from the catalogue at read time rather than stored per listener, which is what keeps this at hundreds of gigabytes instead of tens of terabytes.",
-        numbers: [
-          "400M weekly actives x ~1KB = ~400GB",
-          "SLO 99.9% present on Monday morning, payload age under 7 days",
-        ],
-        breaks:
-          "A cold cache on Monday morning, when the whole wave arrives at once. Precompute on Sunday and replicate to every regional cache before it, and on a miss serve last week's list, because a stale mix beats an empty surface.",
-        choice: {
-          pick: "Precompute a fixed list per listener and serve it as one key read",
-          instead: "Rank candidates at request time when the surface opens.",
-          decider:
-            "400M weekly actives reading an answer that changes once every 7 days. Online ranking spends model cost per request recomputing something stable for a week, and a weekly mix that changes on refresh stops being a thing you can talk to a friend about.",
-          flips:
-            "Within-session reactivity, which a Sunday list cannot have: a small on-device model reorders the next few tracks from the last five plays, with the cached list as its fallback.",
         },
       },
     },
@@ -407,8 +381,6 @@ export const SPOTIFY: Diagram = {
       to: "catalogue",
       label: "metadata + rung keys",
       dashed: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "Reading the track row: title, artists, duration, ISRC and the object key for each rung.",
         why: "The catalogue is 450GB replicated whole into every region precisely so this read never leaves the region, which is what keeps a play start inside its latency budget.",
@@ -423,8 +395,6 @@ export const SPOTIFY: Diagram = {
       to: "client",
       label: "entitlement + signed URLs",
       dashed: true,
-      fromSide: "right",
-      toSide: "right",
       offset: 40,
       detail: {
         what: "The response: which rungs this account may use, and a signed edge URL for each of them.",
@@ -454,8 +424,6 @@ export const SPOTIFY: Diagram = {
       to: "client",
       label: "4.8MB, first audio ~120ms",
       animated: true,
-      fromSide: "left",
-      toSide: "left",
       offset: 70,
       detail: {
         what: "The object bytes streaming back, with playback starting from the first bytes rather than waiting for the file.",
@@ -470,8 +438,6 @@ export const SPOTIFY: Diagram = {
       from: "origin",
       to: "edge",
       label: "miss fill + release pre-push",
-      fromSide: "left",
-      toSide: "right",
       detail: {
         what: "Origin fetches on a cold miss, and scheduled pre-pushes of new releases before they go live.",
         why: "Origin capacity is sized from this arrow rather than from play volume, and pre-push turns a scheduled launch from a cold-start event into a routine part of the release process.",
@@ -486,8 +452,6 @@ export const SPOTIFY: Diagram = {
       to: "events",
       label: "start / qualified / stop",
       animated: true,
-      fromSide: "left",
-      toSide: "left",
       offset: 150,
       detail: {
         what: "Three events per play: start at t=0, qualified at 30 seconds, and a terminal event carrying the stop position, batched by POST /events.",
@@ -529,8 +493,6 @@ export const SPOTIFY: Diagram = {
       to: "catalogue",
       label: "effective-dated rates",
       dashed: true,
-      fromSide: "right",
-      toSide: "right",
       offset: 200,
       detail: {
         what: "The batch reading the rights map and per-country rate table as of the period being computed, passed in as an explicit version.",
@@ -546,8 +508,6 @@ export const SPOTIFY: Diagram = {
       to: "labels",
       label: "same log, ranker labels",
       dashed: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The second consumer of the log, reading the same events the ledger reads and turning them into training labels.",
         why: "One log, two consumers, opposite tolerances: this one may drop thousands of events without anyone noticing, which is exactly why it must not share a pipeline with the one that may drop none.",
@@ -589,8 +549,6 @@ export const SPOTIFY: Diagram = {
       from: "queue",
       to: "library",
       label: "scan <10,000 own tracks",
-      fromSide: "right",
-      toSide: "right",
       offset: 60,
       detail: {
         what: "The hot path for the majority of plays: read the listener's saved tracks and playlists and score them on recency, play count, time of day and current queue.",
@@ -601,26 +559,11 @@ export const SPOTIFY: Diagram = {
       },
     },
     {
-      id: "e15",
-      from: "discovery",
-      to: "disc-cache",
-      label: "30 tracks per listener",
-      detail: {
-        what: "The batch's output written per listener per surface as (track_id, score, reason), replicated to every regional cache.",
-        why: "Writing the answer rather than the inputs is what takes model cost off the request path entirely, and it is what makes the weekly mix a stable object people can return to and argue with.",
-        numbers: ["~1KB per listener per surface", "~400GB total, written Sunday"],
-        breaks:
-          "If replication does not finish before the Monday wave, the surface is cold exactly when everyone opens it.",
-      },
-    },
-    {
       id: "e16",
-      from: "disc-cache",
       to: "queue",
+      from: "discovery",
       label: "Monday key read",
       dashed: true,
-      fromSide: "right",
-      toSide: "right",
       offset: 140,
       detail: {
         what: "One key read when a discovery surface opens, hydrated with metadata and edge URLs from the catalogue.",
@@ -636,8 +579,6 @@ export const SPOTIFY: Diagram = {
       to: "queue",
       label: "GET /queue/next",
       dashed: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The client asking what plays after the current track, given the context it is playing from.",
         why: "The answer has to come far enough ahead that the client can prefetch the whole next object 20 seconds before the current one ends, so this call leads playback rather than following it.",
@@ -652,8 +593,6 @@ export const SPOTIFY: Diagram = {
       to: "client",
       label: "next N + shuffle order",
       dashed: true,
-      fromSide: "top",
-      toSide: "top",
       offset: 40,
       detail: {
         what: "The resolved queue, including the shuffle permutation for the next N tracks rather than a promise to randomise later.",

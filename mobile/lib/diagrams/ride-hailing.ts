@@ -45,7 +45,7 @@ export const RIDE_HAILING: Diagram = {
       sub: "WebSocket, 4 s ping, taps Accept",
       kind: "external",
       col: 0,
-      row: 0,
+      row: 1,
       detail: {
         what: "The driver's phone: one long-lived socket carrying a position up every 4 seconds and dispatch offers back down.",
         why: "It is external because it is the one participant that can refuse. A driver may decline, go silent, background the app or take a fare from a competing platform, and every mechanism downstream exists to make those outcomes cheap rather than to prevent them.",
@@ -59,8 +59,8 @@ export const RIDE_HAILING: Diagram = {
       label: "Location ingest",
       sub: "stateful WS edge, 250k pings/s",
       kind: "service",
-      col: 0,
-      row: 1,
+      col: 1,
+      row: 0,
       detail: {
         what: "The socket tier that terminates driver connections and forks each ping into two independent sinks.",
         why: "Positions are high volume, low value and disposable while history is durable and cheap to lag, so the two paths are split at the earliest possible point. A broker outage then degrades reporting and cannot touch dispatch.",
@@ -82,8 +82,8 @@ export const RIDE_HAILING: Diagram = {
       label: "Rider app",
       sub: "POST /ride/request, quoted token",
       kind: "external",
-      col: 0,
-      row: 2,
+      col: 3,
+      row: 1,
       detail: {
         what: "The rider's phone: submits pickup, dropoff, vehicle type and the price token it was quoted, then watches the trip.",
         why: "It is drawn apart from the driver side because the two populations are asymmetric. The rider initiates and waits, and nothing about a rider is scarce, so no part of this side ever needs an exclusive hold.",
@@ -95,11 +95,11 @@ export const RIDE_HAILING: Diagram = {
     {
       id: "matcher",
       label: "Matching Service",
-      sub: "radius, filter, score by ETA tile",
       kind: "service",
-      col: 0,
-      row: 3,
+      col: 2,
+      row: 1,
       parent: "dispatch-worker",
+      sub: "radius, filter, ETA tiles score",
       detail: {
         what: "Stateless workers, one pool per city, turning a request into a ranked candidate list.",
         why: "Ranking by predicted arrival time rather than straight-line distance is the difference between a car 500 m away across a river and one 1.5 km away on the same road. Holding nothing durable means a worker can die mid-request without anyone reconciling anything.",
@@ -121,8 +121,8 @@ export const RIDE_HAILING: Diagram = {
       label: "Offer + cascade",
       sub: "5 attempts, 15 s lease, 2 s backoff",
       kind: "service",
-      col: 0,
-      row: 4,
+      col: 1,
+      row: 1,
       parent: "dispatch-worker",
       detail: {
         what: "The lease-then-offer loop: attempt a conditional hold on the top candidate, push the offer only if that write wins, move to the next candidate if it does not.",
@@ -145,8 +145,8 @@ export const RIDE_HAILING: Diagram = {
       label: "Trip Service",
       sub: "CAS gated on prior status",
       kind: "service",
-      col: 0,
-      row: 5,
+      col: 1,
+      row: 2,
       detail: {
         what: "The state machine moving a trip forward through REQUESTED, MATCHED, DRIVER_ENROUTE, ARRIVED, ON_TRIP, COMPLETED and PAID.",
         why: "It is also the second half of exclusivity. The request is itself a claimable resource, so when two drivers accept within milliseconds exactly one wins the trip row and the loser is released and shown an expired offer, which is what it looked like from their side anyway.",
@@ -168,8 +168,8 @@ export const RIDE_HAILING: Diagram = {
       label: "Payment saga",
       sub: "async, idempotency key, retries",
       kind: "service",
-      col: 0,
-      row: 6,
+      col: 1,
+      row: 3,
       detail: {
         what: "The settlement path that runs after COMPLETED: authorise, capture, retry with backoff, and fall back to settling on the rider's next session.",
         why: "Completion never waits on payment. A gateway timeout inside the completion transition would hold the state machine open and strand a driver who has already stopped the car, turning a card problem into a supply outage.",
@@ -191,8 +191,8 @@ export const RIDE_HAILING: Diagram = {
       label: "History stream",
       sub: "Kafka, pings + transitions",
       kind: "queue",
-      col: 1,
-      row: 1,
+      col: 3,
+      row: 0,
       detail: {
         what: "An append-only log carrying every location ping and every trip transition to analytics, fraud detection, route replay and the surge job.",
         why: "The live path and the history path deliberately share nothing. Reporting is allowed to lag or break and dispatch is not, so coupling them would put a broker's availability directly onto the match path.",
@@ -214,8 +214,8 @@ export const RIDE_HAILING: Diagram = {
       label: "Live geo index",
       sub: "Redis Cluster by city, 10 s TTL",
       kind: "database",
-      col: 1,
-      row: 2,
+      col: 2,
+      row: 0,
       detail: {
         what: "One current position per on-shift driver, keyed by city, answering everyone within radius r.",
         why: "It nominates and it never adjudicates. Being deliberately approximate and deliberately not durable is what lets it run 4 seconds stale without that mattering to correctness, and what lets it absorb the ping rate in memory.",
@@ -233,35 +233,12 @@ export const RIDE_HAILING: Diagram = {
       },
     },
     {
-      id: "eta-tiles",
-      label: "ETA tile service",
-      sub: "precomputed cell-to-cell times",
-      kind: "external",
-      col: 1,
-      row: 3,
-      detail: {
-        what: "A lookup of expected travel time between two cells, consumed here rather than built here.",
-        why: "Scoring 50 candidates with 50 live routing calls does not fit a sub 2 second budget, and a tile gets the ranking right to within the noise of traffic anyway. Q15 owns the routing engine behind it.",
-        numbers: ["~50 lookups per request", "one memory read instead of a routing call"],
-        breaks:
-          "A tile timeout during scoring drops the ranking back to haversine, which produces worse pickups rather than an error anyone notices at request time.",
-        choice: {
-          pick: "Precomputed cell-to-cell travel-time tiles read at score time",
-          instead: "A live routing call per candidate.",
-          decider:
-            "Latency budget against candidate count. Fifty routing calls inside a sub 2 s time-to-first-offer target leaves nothing for the lease and the push, and the ranking only has to separate candidates by tens of seconds, which a tile does.",
-          flips:
-            "Small candidate sets or high-value assignments, freight and scheduled pickups, where a handful of exact routes is affordable and the accuracy difference is worth paying for.",
-        },
-      },
-    },
-    {
       id: "driver-record",
       label: "Driver record",
       sub: "state + lease, per-key linearizable",
       kind: "database",
-      col: 1,
-      row: 4,
+      col: 2,
+      row: 2,
       detail: {
         what: "One row per driver holding state in offline, available, offered or assigned, plus the request id when offered and a lease expiry.",
         why: "It is the only thing in the system that decides whether a driver is free. Splitting it from the geo index is the central move of the whole design: the index may be 4 seconds stale because it only nominates, and this record adjudicates.",
@@ -283,8 +260,8 @@ export const RIDE_HAILING: Diagram = {
       label: "Surge pricing",
       sub: "60 s tumbling window per cell",
       kind: "service",
-      col: 1,
-      row: 5,
+      col: 3,
+      row: 3,
       detail: {
         what: "A streaming job computing a multiplier per cell from the ratio of requests to available drivers, written to a cache the pricing path reads at quote time.",
         why: "It is the fast lever on imbalance: price rations demand inside a minute where repositioning bonuses take five to fifteen. Neither creates supply, which is why the arena case still ends in a twenty minute wait.",
@@ -306,8 +283,8 @@ export const RIDE_HAILING: Diagram = {
       label: "Trips + history",
       sub: "~2 KB/trip, 7 year retention",
       kind: "database",
-      col: 1,
-      row: 6,
+      col: 2,
+      row: 3,
       detail: {
         what: "The durable trip row and its archive: status, both parties, the polyline, the locked surge, the fare and six timestamps.",
         why: "This is the money record, so it is the one thing that pays for consistency and retention. Fare disputes, tax and driver payouts all read it years after the car stopped.",
@@ -346,8 +323,6 @@ export const RIDE_HAILING: Diagram = {
       to: "geo-index",
       label: "GEOADD, 10 s TTL",
       animated: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "Overwriting the driver's single current position in the city's in-memory index.",
         why: "One entry per driver rather than an append, because only the newest position can ever nominate a candidate. Writing it with a TTL means a phone that dies removes itself from candidacy with nothing sweeping anything.",
@@ -362,8 +337,6 @@ export const RIDE_HAILING: Diagram = {
       to: "history-bus",
       label: "every ping, async",
       dashed: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The same ping, forked onto the durable log for analytics, fraud detection and route replay.",
         why: "The fork happens as early as possible so the two paths share no component downstream. Reporting is allowed to lag and dispatch is not, and this edge is what makes that separation structural rather than a promise.",
@@ -392,30 +365,12 @@ export const RIDE_HAILING: Diagram = {
       to: "geo-index",
       label: "radius query, 2 km",
       animated: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "A bounded radius scan of the city's geo index around the pickup point.",
         why: "It is deliberately a hint. Both the position and the cached status it returns are up to 4 seconds old, which is long enough for somebody else to have taken the driver, so nothing it says is treated as an availability answer.",
         numbers: ["~137 ids inside 2 km", "~50 after filtering", "a couple of hundred microseconds"],
         breaks:
           "Widening the radius during a shortage returns more candidates who are equally unavailable, so the scan is not the lever it looks like.",
-      },
-    },
-    {
-      id: "e6",
-      from: "matcher",
-      to: "eta-tiles",
-      label: "cell-to-cell travel time",
-      dashed: true,
-      fromSide: "right",
-      toSide: "left",
-      detail: {
-        what: "Fifty travel-time lookups, one per surviving candidate, from precomputed tiles.",
-        why: "Ranking by arrival time rather than distance is what stops the scorer picking a car 500 m away on the far side of a river. Tiles rather than live routing because 50 routing calls do not fit inside the budget.",
-        numbers: ["~50 lookups per request", "sub 2 s budget for the whole match"],
-        breaks:
-          "On a tile timeout the ranking falls back to haversine and pickups quietly get worse, which is the right trade but shows up only in pickup-time metrics.",
       },
     },
     {
@@ -438,8 +393,6 @@ export const RIDE_HAILING: Diagram = {
       to: "driver-record",
       label: "CAS available to offered",
       animated: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The conditional write that takes the exclusive hold: available to offered, carrying the request id and an expiry 15 seconds out.",
         why: "This is the arrow the whole question is about. It happens before the offer is sent, so two dispatchers racing for the same car resolve it in the store rather than on the road, and the loser simply moves to its next candidate.",
@@ -455,8 +408,6 @@ export const RIDE_HAILING: Diagram = {
       label: "offer via WS, 15 s lease",
       dashed: true,
       animated: true,
-      fromSide: "left",
-      toSide: "left",
       offset: 100,
       detail: {
         what: "The offer pushed down the driver's existing socket: pickup, fare, ETA and the expiry timestamp.",
@@ -471,8 +422,6 @@ export const RIDE_HAILING: Diagram = {
       from: "driver-app",
       to: "trip-fsm",
       label: "accept: claim trip row",
-      fromSide: "right",
-      toSide: "right",
       offset: 150,
       detail: {
         what: "The accept, which claims the trip row from REQUESTED to MATCHED with the driver attached.",
@@ -487,8 +436,6 @@ export const RIDE_HAILING: Diagram = {
       from: "trip-fsm",
       to: "driver-record",
       label: "then lease to assigned",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The second write of the accept path, converting that driver's lease from offered to assigned.",
         why: "It is strictly second. Only once the trip is claimed is it safe to commit the driver, and that ordering is what turns a simultaneous double accept into a clean loss for one side rather than a state to reconcile.",
@@ -502,8 +449,6 @@ export const RIDE_HAILING: Diagram = {
       from: "trip-fsm",
       to: "trips",
       label: "CAS on prior status",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "Each transition written as a compare-and-swap gated on the expected prior status.",
         why: "It puts rejection of duplicates in the store rather than in application code, so a retried client call trying to move a completed trip back to on-trip is refused atomically instead of by a check with a race in the middle.",
@@ -518,8 +463,6 @@ export const RIDE_HAILING: Diagram = {
       to: "surge",
       label: "surge locked on the trip",
       dashed: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "Reading the cell's current multiplier and copying it onto the trip at request time.",
         why: "The multiplier is copied rather than referenced so the price cannot move during the 90 seconds before the car arrives. The rider accepted a number, and the surge job recomputing 30 seconds later must not change it.",
@@ -547,8 +490,6 @@ export const RIDE_HAILING: Diagram = {
       to: "history-bus",
       label: "state transitions",
       dashed: true,
-      fromSide: "right",
-      toSide: "right",
       offset: 90,
       detail: {
         what: "Every trip transition also appended to the history log.",
@@ -564,8 +505,6 @@ export const RIDE_HAILING: Diagram = {
       to: "surge",
       label: "requests/cell, 60 s window",
       dashed: true,
-      fromSide: "left",
-      toSide: "left",
       offset: 60,
       detail: {
         what: "The surge job consuming the request stream, keyed by cell on a 60 second tumbling window.",

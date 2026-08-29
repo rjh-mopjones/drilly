@@ -49,8 +49,8 @@ export const NEWS_FEED: Diagram = {
       label: "Post service",
       sub: "ack on durable quorum",
       kind: "service",
-      col: 0,
-      row: 1,
+      col: 1,
+      row: 0,
       detail: {
         what: "Writes the post to the posts store, waits for a durable quorum, returns the post id, then publishes a fan-out event.",
         why: "The ordering is the whole point. Acking after the durable write and before delivery means a post is never lost and never blocks on 500 cache writes, so a celebrity and an ordinary user get the same posting latency.",
@@ -72,8 +72,8 @@ export const NEWS_FEED: Diagram = {
       label: "Fan-out bus",
       sub: "Kafka, partitioned by author_id",
       kind: "queue",
-      col: 0,
-      row: 2,
+      col: 1,
+      row: 1,
       detail: {
         what: "A partitioned durable log carrying one delivery event per post to the fan-out fleet.",
         why: "It absorbs the 5x event burst that the cache cluster cannot, and the partition key is the design's only ordering guarantee: two posts by the same author land on the same consumer in the order they were written, so a follower never sees a reply above the thing it replies to from the same account.",
@@ -96,8 +96,9 @@ export const NEWS_FEED: Diagram = {
       id: "fanout-fleet",
       label: "Fan-out worker fleet",
       kind: "serviceGroup",
-      col: 0,
-      row: 3,
+      col: 2,
+      row: 1,
+      sub: "classify · push · backfill",
       detail: {
         what: "The async delivery tier: classify the author, and for a small one page and push. The same fleet also drains follow-backfill jobs at lower priority. ~50 workers at ~50k inserts/s each.",
         why: "One deployable, not three services. The stages share the Redis connection pool, the shard map and the pipelining buffer, and splitting them would put a network hop in the middle of a loop whose whole economy is batching ~500 writes per round trip.",
@@ -122,8 +123,8 @@ export const NEWS_FEED: Diagram = {
       label: "Classify author",
       sub: "read is_large, compare to 10k",
       kind: "process",
-      col: 0,
-      row: 3,
+      col: 2,
+      row: 1,
       parent: "fanout-fleet",
       detail: {
         what: "The first stage of the worker: read the author's classification record and take the fork. Under the threshold, hand off to the paging stage. Over it, do the one thing a large author needs — append the post id to their own recent-posts list — and finish.",
@@ -150,8 +151,8 @@ export const NEWS_FEED: Diagram = {
       label: "Push fan-out",
       sub: "page, drop dormant, pipeline",
       kind: "process",
-      col: 0,
-      row: 4,
+      col: 2,
+      row: 2,
       parent: "fanout-fleet",
       detail: {
         what: "The stage a large author skips: page the follower list in blocks of 10,000, drop anyone with no session in 30 days, group survivors by cache shard, and issue pipelined ZADD plus ZREMRANGEBYRANK pairs ~500 to a round trip.",
@@ -178,8 +179,8 @@ export const NEWS_FEED: Diagram = {
       label: "Follow backfill",
       sub: "author's last 100 on follow",
       kind: "process",
-      col: 0,
-      row: 5,
+      col: 2,
+      row: 3,
       parent: "fanout-fleet",
       detail: {
         what: "The other job this fleet drains: when someone follows an account, read that account's last 100 posts and insert them into the new follower's timeline.",
@@ -204,62 +205,12 @@ export const NEWS_FEED: Diagram = {
 
     // -------------------------------------------------- write-side stores
     {
-      id: "last-active",
-      label: "Last-active tier",
-      sub: "2.5B user_id → last session",
-      kind: "cache",
-      col: 1,
-      row: 4,
-      detail: {
-        what: "A separate key-value tier holding one last-session timestamp per registered account, read during fan-out to decide whether a follower is worth writing to.",
-        why: "It exists to delete work. With 500M DAU against 2.5B registered accounts, roughly 60% of an average follower list has not opened the app in 30 days, so three in five pushes are written and never read — and wasted writes are the entire cost of the push path.",
-        numbers: [
-          "~20GB for 2.5B accounts",
-          "cuts fan-out from ~5.8M writes/s to ~2.3M/s",
-          "30-day active fraction ~40%, same-day ~20%",
-        ],
-        breaks:
-          "It creates the returning user: a dormant account comes back to an empty timeline and its first load runs entirely on the pull path at ~300ms. Above roughly 5% of sessions that stops being an edge case and becomes a second read path you have to make fast.",
-        choice: {
-          pick: "Filter fan-out on 30-day activity, from a separate KV tier",
-          instead: "A static threshold on total followers, pushing to everyone regardless of activity.",
-          decider:
-            "The share of pushes that are written and never read: ~60%. Filtering removes them and most of the 12TB of cache held for people who will not read it. The price is this tier plus a counter pipeline to keep it fresh, and the rebuild path for returning users.",
-          flips:
-            "A registered-to-active ratio near 1 — a young product, an internal tool. There is nothing to filter and a static number is one config value instead of a tier plus a pipeline.",
-        },
-      },
-    },
-    {
-      id: "author-stats",
-      label: "Author classification",
-      sub: "follower_count, is_large, crossed_at",
-      kind: "database",
-      col: 1,
-      row: 3,
-      detail: {
-        what: "One row per author holding total and active follower counts, the large/small classification, and when it last crossed the threshold.",
-        why: "It exists so that exactly one place answers 'is this author pushed or pulled'. The write path reads it directly and the read path reads it through the reader's materialised pull set, so both sides descend from the same number. Two independently derived answers would eventually disagree, and an author both paths consider the other's responsibility is delivered by neither.",
-        numbers: ["recomputed on a daily batch", "24h dual-mode window on crossing"],
-        breaks:
-          "It is always stale, because follows arrive continuously and the number moves nightly. Stale towards 'already large' on the write side is the silent failure the dual-mode window exists to cover.",
-        choice: {
-          pick: "One classification record, plus a 24h dual-mode window on crossing",
-          instead: "Each path computing author size independently from the follow graph at request time.",
-          decider:
-            "Disagreement rate. Counting 100 million edges per decision is not affordable on either path, so both read a cached number, and two independently cached numbers diverge. One record makes the staleness shared rather than divergent, and the window costs one day of double writes for the handful of accounts crossing daily.",
-          flips:
-            "Graphs small enough to count exactly per request, where a live count removes the counter pipeline, the batch job and the crossing transition entirely.",
-        },
-      },
-    },
-    {
       id: "follow-graph",
       label: "Follow graph",
-      sub: "wide-column, indexed both ways",
       kind: "database",
-      col: 1,
-      row: 5,
+      col: 3,
+      row: 1,
+      sub: "wide-column + big_follows pull set",
       detail: {
         what: "The (follower_id, followee_id) edge set, indexed forwards for fan-out and backwards for building a reader's large-account set.",
         why: "Both directions are hot for different reasons: the worker needs 'who follows this author' to deliver, and the follow service and the nightly batch need 'which of this reader's follows are large' to maintain the pull set. One direction indexed means the other is a scan.",
@@ -281,8 +232,8 @@ export const NEWS_FEED: Diagram = {
       label: "Follow service",
       sub: "POST /follow",
       kind: "service",
-      col: 1,
-      row: 6,
+      col: 0,
+      row: 1,
       detail: {
         what: "The other write path. It records the edge, adds the followee to the reader's large-account set if it is above the threshold, and enqueues a backfill job.",
         why: "Follow is where the read path's cheap lookups are paid for. Deciding at follow time which of your follows are large is what lets a feed load skip scanning 200 follows and checking each one's size, and it is the moment the reader is willing to wait a few milliseconds.",
@@ -319,7 +270,7 @@ export const NEWS_FEED: Diagram = {
       sub: "Redis ZSET tl:{user}, cap 1000",
       kind: "cache",
       col: 1,
-      row: 7,
+      row: 2,
       parent: "delivery",
       detail: {
         what: "One sorted set per active user holding post ids scored by timestamp, trimmed to 1000 entries.",
@@ -346,8 +297,8 @@ export const NEWS_FEED: Diagram = {
       label: "Author recent posts",
       sub: "Redis ZSET ar:{author}, cap 200",
       kind: "cache",
-      col: 1,
-      row: 8,
+      col: 2,
+      row: 2,
       parent: "delivery",
       detail: {
         what: "One sorted set per large account holding its last ~200 post ids, written once per post regardless of follower count.",
@@ -370,8 +321,8 @@ export const NEWS_FEED: Diagram = {
       label: "Posts store",
       sub: "Cassandra, partitioned by author_id",
       kind: "database",
-      col: 1,
-      row: 10,
+      col: 0,
+      row: 2,
       detail: {
         what: "The source of truth: post_id, author_id, content, media refs, timestamp and deleted_at, partitioned by author.",
         why: "Every other store in the diagram is derived from this one and can be thrown away. It is partitioned by author because both backfill-on-follow and the pull-path fallback ask the same question, give me this author's recent posts.",
@@ -393,10 +344,10 @@ export const NEWS_FEED: Diagram = {
     {
       id: "classifier",
       label: "Classification batch",
-      sub: "nightly: is_large + pull sets",
       kind: "service",
-      col: 2,
-      row: 4,
+      col: 3,
+      row: 0,
+      sub: "nightly is_large + author stats",
       detail: {
         what: "The daily job that counts each author's 30-day-active followers, sets is_large, stamps crossed_at, and refreshes the pull set of every reader affected by a flip.",
         why: "It is drawn because it owns the design's nastiest failure. Nothing on either request path is allowed to count 100 billion edges, so the classification has to be produced somewhere off the hot path, and whatever produces it is the single point where the write path's view and the read path's view of an author can diverge.",
@@ -417,29 +368,6 @@ export const NEWS_FEED: Diagram = {
         },
       },
     },
-    {
-      id: "big-follows",
-      label: "Reader's pull set",
-      sub: "Redis set big_follows, cap 25",
-      kind: "cache",
-      col: 2,
-      row: 6,
-      detail: {
-        what: "One small set per reader listing the large accounts they follow, maintained on follow and unfollow and refreshed when the nightly batch flips an author.",
-        why: "It is the read path's copy of the classification decision, materialised so a feed load does not have to scan 200 follows and check each one's size. It is also where the 25-source cap is applied, ranked by predicted engagement.",
-        numbers: ["~8 entries at p50, hard cap 25", "p99 reader follows 60+ large accounts"],
-        breaks:
-          "The cap truncates rather than deprioritises: a reader following 80 large accounts gets nothing at all from 55 of them. That reader is disproportionately a new user, because onboarding suggests popular accounts, so the worst feed in the product belongs to the newest account.",
-        choice: {
-          pick: "Materialise the pull set per reader, capped at 25 by predicted engagement",
-          instead: "Derive it per request from the follow graph and the classification record.",
-          decider:
-            "Cost per feed load against cost per follow. Deriving means reading ~200 edges and 200 classification rows on a path budgeted at 30ms for the whole merge; materialising means one set read, paid for by a little extra work on a follow, which happens orders of magnitude less often than a feed load.",
-          flips:
-            "If the cap were removed, the set stops being small and bounded and the merge cost stops being predictable, at which point deriving it per request is no worse and at least cannot go stale.",
-        },
-      },
-    },
 
     // ----------------------------------------------------------- read path
     {
@@ -447,7 +375,8 @@ export const NEWS_FEED: Diagram = {
       label: "Feed service",
       kind: "serviceGroup",
       col: 2,
-      row: 7,
+      row: 3,
+      sub: "merge · rank · hydrate",
       detail: {
         what: "One deployable that serves GET /feed: merge the two delivery routes into a candidate set, call the ranker, then hydrate what came back and return it.",
         why: "Merging and hydrating are two stages of one request, sharing the reader's context, the connection pools and the 200ms budget; a network hop between them would buy nothing. Ranking is deliberately not in this frame: it needs different hardware, has its own timeout, and has a fallback (chronological order) that this service implements when the ranker misses.",
@@ -470,7 +399,7 @@ export const NEWS_FEED: Diagram = {
       sub: "by score, then by post id",
       kind: "process",
       col: 2,
-      row: 7,
+      row: 3,
       parent: "feed-service",
       detail: {
         what: "Reads the pushed timeline and the pull sources concurrently, merges by score, deduplicates by post id, and truncates to 500 candidates.",
@@ -498,7 +427,7 @@ export const NEWS_FEED: Diagram = {
       sub: "ids to posts, deletes and blocks",
       kind: "process",
       col: 2,
-      row: 8,
+      row: 5,
       parent: "feed-service",
       detail: {
         what: "Batch-fetches the top-ranked ids from the posts store and drops anything deleted, blocked, suspended or region-restricted for this reader.",
@@ -518,11 +447,12 @@ export const NEWS_FEED: Diagram = {
     },
     {
       id: "ranker",
+      kind: "process",
+      col: 2,
+      row: 4,
+      parent: "feed-service",
       label: "Ranking service",
       sub: "two-stage, 5 min per-user cache",
-      kind: "service",
-      col: 3,
-      row: 6,
       detail: {
         what: "Scores the 500 candidates: a cheap first stage trims to 100, a deep model scores the survivors against a feature store.",
         why: "Separate from the feed service because it is the one stage that can be abandoned. It runs on different hardware, it is the first thing to degrade under load, and the feed service is expected to give up on it and serve chronological order rather than a blank feed. Ranking also cannot move to write time: the signals that decide the order, engagement in the last hour, do not exist when the post is written, and the same post ranks differently for two readers.",
@@ -545,7 +475,7 @@ export const NEWS_FEED: Diagram = {
       sub: "GET /feed?cursor",
       kind: "client",
       col: 3,
-      row: 9,
+      row: 3,
       detail: {
         what: "The app requesting a page of feed, 20 posts at a time, with an opaque cursor for the next page.",
         why: "Drawn explicitly because reads are the workload: 12.5 feed loads per post written and ~250 impressions per post, which is the whole justification for paying on the write path. Cursor pagination rather than offsets because the underlying list is being written to while the reader scrolls.",
@@ -577,8 +507,6 @@ export const NEWS_FEED: Diagram = {
       from: "post-service",
       to: "posts-db",
       label: "durable quorum write",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The quorum write of the post row, which is what the author's success response actually means.",
         why: "The ack is deliberately tied to this and not to delivery, so posting latency is independent of follower count and no post can be delivered as an id that resolves to nothing.",
@@ -616,12 +544,10 @@ export const NEWS_FEED: Diagram = {
     },
     {
       id: "e5",
+      to: "classifier",
+      tier: "data",
       from: "p-classify",
-      to: "author-stats",
       label: "followers > 10,000?",
-      dashed: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The classification read that decides push or pull for this post.",
         why: "It is a cached, batch-computed number rather than a live count because counting a 100 million edge follower list per post is not affordable, and the staleness that buys is exactly what the dual-mode window covers.",
@@ -649,8 +575,6 @@ export const NEWS_FEED: Diagram = {
       from: "p-classify",
       to: "author-recent",
       label: "over 10k: one append",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The pull branch: for an author over the threshold, a single append to their own recent-posts list, and the worker is done.",
         why: "One write instead of F writes is the point. The delivery work does not disappear, it moves to the read path where it becomes one hot key shared by every follower rather than a burst of 100 million writes on one cluster in one moment.",
@@ -664,8 +588,6 @@ export const NEWS_FEED: Diagram = {
       from: "p-push",
       to: "follow-graph",
       label: "follower pages of 10,000",
-      fromSide: "bottom",
-      toSide: "top",
       detail: {
         what: "Paging the author's follower list forwards, in blocks of 10,000, and grouping survivors by cache shard.",
         why: "Paging and shard-grouping exist so the writes can be pipelined ~500 to a round trip; issued one at a time the same work would need twenty times the worker fleet.",
@@ -675,29 +597,11 @@ export const NEWS_FEED: Diagram = {
       },
     },
     {
-      id: "e9",
-      from: "p-push",
-      to: "last-active",
-      label: "skip 30-day dormant",
-      dashed: true,
-      fromSide: "right",
-      toSide: "left",
-      detail: {
-        what: "A lookup per follower in the page: has this account had a session in the last 30 days?",
-        why: "It is the largest single saving on the write path. Around 60% of an average follower list fails this check, so filtering here cuts sustained fan-out from ~5.8M writes/s to ~2.3M/s and frees most of the cache held for people who will not read it.",
-        numbers: ["~60% filtered out", "5.8M/s to 2.3M/s sustained"],
-        breaks:
-          "The dormant filter creates the returning user, whose timeline is empty and whose first load runs entirely on the pull path at ~300ms — the slowest feed load in the product.",
-      },
-    },
-    {
       id: "e10",
       from: "p-push",
       to: "timeline-cache",
       label: "ZADD + trim to 1000",
       animated: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The push itself: one ZADD plus ZREMRANGEBYRANK per active follower, pipelined in batches of ~500.",
         why: "This edge is the entire cost of the push half of the hybrid, and it is the number that caps how high the threshold can go: every tier you move onto this path multiplies sustained cache write rate.",
@@ -711,8 +615,6 @@ export const NEWS_FEED: Diagram = {
       from: "client-write",
       to: "follow-service",
       label: "follow / unfollow",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The other write the product supports, and the one that changes what a feed is made of.",
         why: "Drawn because a follow has three consequences, not one: an edge, a possible pull-set entry, and a backfill job. Answers that draw only the posting path leave the reader's first load after a follow undefined.",
@@ -726,8 +628,6 @@ export const NEWS_FEED: Diagram = {
       from: "follow-service",
       to: "follow-graph",
       label: "edge, indexed both ways",
-      fromSide: "top",
-      toSide: "bottom",
       detail: {
         what: "The durable record of the follow, written so it is readable forwards (who follows this author) and backwards (who does this reader follow).",
         why: "This is the only durable effect of a follow. Everything else the follow service touches — the pull set, the backfill — is derived from this edge and can be rebuilt from it.",
@@ -737,27 +637,10 @@ export const NEWS_FEED: Diagram = {
       },
     },
     {
-      id: "e13",
-      from: "follow-service",
-      to: "big-follows",
-      label: "add if large, cap 25",
-      fromSide: "right",
-      toSide: "left",
-      detail: {
-        what: "If the new followee is above the threshold, add it to the reader's pull set, evicting the lowest-ranked entry if the set is already at 25.",
-        why: "Doing it here is what keeps the merge cheap: the read path never has to ask 'which of my 200 follows are large', it just reads a set of at most 25.",
-        numbers: ["~4% of follows land here", "set capped at 25 by predicted engagement"],
-        breaks:
-          "This write and the edge write are not one transaction, so a crash between them leaves a reader following a large account that is absent from their pull set until the nightly batch rebuilds it.",
-      },
-    },
-    {
       id: "e14",
       from: "follow-service",
       to: "p-backfill",
       label: "backfill job, low priority",
-      fromSide: "left",
-      toSide: "right",
       detail: {
         what: "The asynchronous job: fetch the followee's last 100 posts and insert them into this reader's timeline.",
         why: "It rides the same worker pool as live fan-out at lower priority, because backfill is bursty and rare while delivery is continuous — a dedicated fleet would sit idle almost always and still need sizing for the signup spike.",
@@ -771,8 +654,6 @@ export const NEWS_FEED: Diagram = {
       from: "p-backfill",
       to: "posts-db",
       label: "author's last 100 posts",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "A single-partition read of the followee's recent posts, which is exactly the query the store is partitioned for.",
         why: "It is the second consumer of author-partitioning, alongside the pull-path fallback, and it is why the partition key is author_id rather than post_id or time.",
@@ -786,8 +667,6 @@ export const NEWS_FEED: Diagram = {
       from: "p-backfill",
       to: "timeline-cache",
       label: "insert 100, cap 1000",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "Inserting the fetched ids into the new follower's timeline, scored by their original timestamps so they land in the right place rather than at the top.",
         why: "Scoring by original timestamp is what stops a follow from looking like a burst of new posts. The reader wanted history, not a notification storm.",
@@ -797,28 +676,11 @@ export const NEWS_FEED: Diagram = {
       },
     },
     {
-      id: "e17",
-      from: "classifier",
-      to: "author-stats",
-      label: "is_large, crossed_at",
-      fromSide: "left",
-      toSide: "right",
-      detail: {
-        what: "The nightly write of the classification: active follower count, the large/small flag, and the timestamp of the last crossing.",
-        why: "It is the only writer of this record. One writer is what makes 'both paths read the same classification' a true statement rather than an aspiration.",
-        numbers: ["one row per author", "handful of crossings per day"],
-        breaks:
-          "A failed run leaves yesterday's classification in place. Nothing fails, and the only visible symptom is the classification-disagreement metric drifting above zero.",
-      },
-    },
-    {
       id: "e18",
       from: "classifier",
       to: "follow-graph",
       label: "count edges nightly",
       dashed: true,
-      fromSide: "left",
-      toSide: "right",
       detail: {
         what: "The batch scan that counts each author's followers, reading the graph in the forward direction.",
         why: "It is the reason the classification is a batch product at all: counting 100 billion edges is affordable once a day off the request path and affordable nowhere else.",
@@ -828,41 +690,10 @@ export const NEWS_FEED: Diagram = {
       },
     },
     {
-      id: "e19",
-      from: "classifier",
-      to: "last-active",
-      label: "30-day active count",
-      dashed: true,
-      fromSide: "left",
-      toSide: "right",
-      detail: {
-        what: "The join that turns a raw follower count into an active follower count, which is the number the threshold is actually applied to.",
-        why: "Classifying on total followers would put accounts on the push path whose followers are mostly dormant, which is precisely the population the fan-out filter then throws away. Counting the same way delivery counts keeps the threshold honest.",
-        numbers: ["30-day active fraction ~40%", "threshold applied to active, not total"],
-        breaks:
-          "The two definitions can drift: if this tier's freshness lags, an account is classified on an activity picture that no longer matches what fan-out will actually write.",
-      },
-    },
-    {
-      id: "e20",
-      from: "classifier",
-      to: "big-follows",
-      label: "refresh pull sets",
-      detail: {
-        what: "When an author's flag flips, update the pull set of every reader who follows them.",
-        why: "This edge is what keeps one classification record from becoming two. Without it the write path would switch an author to pull while every reader's pull set still omitted them, which is the 'delivered by neither path' failure the whole design fears.",
-        numbers: ["opens a 24h dual-mode window per crossing", "disagreement rate should be zero outside it"],
-        breaks:
-          "For a newly crossed celebrity this is a fan-out in its own right: flipping one account can mean touching millions of reader sets, which is why the dual-mode window has to outlast the update rather than assume it is instant.",
-      },
-    },
-    {
       id: "e21",
       from: "client-read",
       to: "p-merge",
       label: "GET /feed?cursor",
-      fromSide: "left",
-      toSide: "right",
       detail: {
         what: "A feed request for the next 20 posts, carrying an opaque cursor rather than an offset.",
         why: "Cursors because the underlying timeline is being appended to and trimmed while the reader scrolls, so an offset would skip and repeat posts across pages.",
@@ -877,8 +708,6 @@ export const NEWS_FEED: Diagram = {
       to: "p-merge",
       label: "pushed ids, ~2ms",
       animated: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "One ZREVRANGE returning up to 1000 prebuilt post ids for this reader.",
         why: "This is what the whole write path was for: the ordinary reader's feed is one round trip against an already-ordered list, with no join and no merge.",
@@ -893,8 +722,6 @@ export const NEWS_FEED: Diagram = {
       to: "p-merge",
       label: "large-account ids, ~2ms",
       animated: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "A pipelined read of ~20 recent ids from each large account in the reader's pull set, issued concurrently with the timeline read.",
         why: "This is the read-time half of the hybrid. The two reads are issued together rather than in sequence because the pushed timeline gates nothing, so the merge waits on both and costs one round trip, not two.",
@@ -905,8 +732,8 @@ export const NEWS_FEED: Diagram = {
     },
     {
       id: "e24",
-      from: "big-follows",
       to: "p-merge",
+      from: "follow-graph",
       label: "pull set, ~8 of 25",
       detail: {
         what: "The reader's large-account set, read first because it is what says which recent-posts keys to pipeline.",
@@ -922,8 +749,6 @@ export const NEWS_FEED: Diagram = {
       to: "ranker",
       label: "500 candidates",
       animated: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The merged, deduplicated, time-truncated candidate set handed to ranking.",
         why: "It is bounded at 500 deliberately: ranking cost is linear in candidates and the first stage costs ~5ms per 500, so the candidate cap and the pull-source cap are the same constraint seen from two ends.",
@@ -937,8 +762,6 @@ export const NEWS_FEED: Diagram = {
       from: "ranker",
       to: "p-hydrate",
       label: "100 ranked, hydrate 50",
-      fromSide: "left",
-      toSide: "right",
       detail: {
         what: "The ranked survivors, trimmed by the first stage and scored by the deep model, passed on for content resolution.",
         why: "Ranking runs before hydration because hydration is the expensive step and there is no point paying ~60ms to resolve posts that will not be shown.",
@@ -952,8 +775,6 @@ export const NEWS_FEED: Diagram = {
       from: "p-hydrate",
       to: "posts-db",
       label: "batch get + visibility",
-      fromSide: "left",
-      toSide: "right",
       detail: {
         what: "A batch get of the ranked post ids against the source of truth, with a per-post visibility check for this reader.",
         why: "It is the second hop that the ids-not-bodies rule buys, and it is where deletes, blocks, suspensions and regional restrictions actually take effect, which is why derived timelines never need rewriting.",
@@ -968,8 +789,6 @@ export const NEWS_FEED: Diagram = {
       to: "client-read",
       label: "50 posts, next_cursor",
       animated: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The assembled page of ranked, visible posts plus the cursor for the following page.",
         why: "Everything upstream is budgeted against this one response: ~2ms timeline, ~2ms pull, ~1ms merge, ~35ms ranking, ~60ms hydration, ~40ms network.",

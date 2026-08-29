@@ -50,7 +50,7 @@ export const PRICE_ALERTS: Diagram = {
       label: "Exchanges and vendors",
       sub: "two feeds, exchange_seq numbers",
       kind: "external",
-      col: 1,
+      col: 0,
       row: 0,
       detail: {
         what: "The primary and secondary market-data vendors. The only part of this diagram nobody here operates.",
@@ -65,7 +65,7 @@ export const PRICE_ALERTS: Diagram = {
       label: "Market data gateway",
       sub: "dedupe on seq, binary encode, stamp ts",
       kind: "service",
-      col: 0,
+      col: 1,
       row: 0,
       detail: {
         what: "Receives raw vendor feeds, deduplicates on (instrument_id, exchange_seq_no), normalises to one compact binary tick, stamps ingest time and publishes.",
@@ -88,7 +88,7 @@ export const PRICE_ALERTS: Diagram = {
       label: "Partitioned tick log",
       sub: "Kafka, key = instrument_id, 24h",
       kind: "queue",
-      col: 0,
+      col: 1,
       row: 1,
       detail: {
         what: "A durable append-only stream keyed by instrument, so every tick for an instrument lands on one partition and therefore one evaluator.",
@@ -111,7 +111,7 @@ export const PRICE_ALERTS: Diagram = {
       label: "Rule evaluator",
       sub: "Flink + RocksDB, last_price, gap guard",
       kind: "service",
-      col: 0,
+      col: 1,
       row: 2,
       parent: "shard",
       detail: {
@@ -135,8 +135,8 @@ export const PRICE_ALERTS: Diagram = {
       label: "Threshold index",
       sub: "skip list per instrument, sorted by price",
       kind: "database",
-      col: 0,
-      row: 3,
+      col: 2,
+      row: 2,
       parent: "shard",
       detail: {
         what: "Per instrument, the fixed-trigger rules held in a skip list ordered by trigger price. A tick range-scans [min(prev, now), max(prev, now)] and touches nothing else.",
@@ -160,7 +160,7 @@ export const PRICE_ALERTS: Diagram = {
       sub: "ring buffer of (ts, price), full scan",
       kind: "service",
       col: 0,
-      row: 4,
+      row: 2,
       detail: {
         what: "Percent-change and volume-spike rules, scanned in full on every tick against one ring buffer of (ts, price) per instrument sized to the longest active window on it.",
         why: "'BTC drops 5% in 1h' has a trigger price that moves every second as the reference window rolls, so it has no fixed point on the price axis to sort by. One shared buffer per instrument rather than one per rule is what keeps the memory bounded.",
@@ -182,8 +182,8 @@ export const PRICE_ALERTS: Diagram = {
       label: "Alerts store",
       sub: "Postgres, source of truth, quotas",
       kind: "database",
-      col: 1,
-      row: 1,
+      col: 2,
+      row: 0,
       detail: {
         what: "The transactional record of every rule: (alert_id, user_id, instrument_id, rule_type, rule_value, window_sec, state, arm_epoch, cooldown_sec, last_fired_at), indexed on user_id and on (instrument_id, state).",
         why: "The evaluator's copy is derived state that a crash can throw away, so something has to be authoritative for what the user asked for. The (instrument_id, state) index is what makes a cold bulk load by shard possible at all.",
@@ -205,8 +205,8 @@ export const PRICE_ALERTS: Diagram = {
       label: "Rule change stream",
       sub: "Debezium, co-partitioned by instrument",
       kind: "queue",
-      col: 1,
-      row: 2,
+      col: 2,
+      row: 1,
       detail: {
         what: "A change-data-capture topic carrying rule creates, deletes and re-arms, keyed by the same instrument_id as the tick log.",
         why: "Co-partitioning is the whole trick: a new AAPL alert has to land on the shard that already consumes AAPL ticks, or the evaluator would need a lookup it does not have. Same key, same partition, no coordination.",
@@ -228,8 +228,8 @@ export const PRICE_ALERTS: Diagram = {
       label: "Fired-alerts stream",
       sub: "alerts.fired, at-least-once",
       kind: "queue",
-      col: 0,
-      row: 5,
+      col: 1,
+      row: 3,
       detail: {
         what: "The event emitted on a confirmed crossing: {alert_id, arm_epoch, user_id, instrument_id, triggered_at, trigger_price, exchange_seq_no, rule_snapshot}.",
         why: "It decouples evaluation from delivery so a provider outage cannot apply back pressure to the tick path. The arm_epoch rides on the event because that is what lets the dispatcher tell a replay from a genuine second crossing.",
@@ -249,10 +249,10 @@ export const PRICE_ALERTS: Diagram = {
     {
       id: "dispatcher",
       label: "Alert dispatcher",
-      sub: "dedupe, prefs, quiet hours, state",
       kind: "service",
-      col: 0,
-      row: 6,
+      col: 2,
+      row: 3,
+      sub: "idempotency, prefs, quiet hours",
       detail: {
         what: "Consumes fired events, checks the idempotency key, applies user preferences and quiet hours, writes the audit record, moves the rule to FIRED or COOLDOWN, then hands off to the notification service.",
         why: "It is the seam between a market-data decision and a user-facing action. Everything that depends on the person rather than the price belongs here, which is why market hours are applied upstream by instrument and quiet hours are applied down here by user.",
@@ -270,35 +270,12 @@ export const PRICE_ALERTS: Diagram = {
       },
     },
     {
-      id: "idem",
-      label: "Idempotency cache",
-      sub: "Redis, idem:{alert_id}:{arm_epoch}",
-      kind: "database",
-      col: 1,
-      row: 6,
-      detail: {
-        what: "A short-TTL key-value store holding one key per specific arming of a specific rule, checked before the notification service is called.",
-        why: "At-least-once through the pipeline means a replayed tick will re-emit a fire. This is the one place that difference gets collapsed, and it is cheap enough to sit on every fire.",
-        numbers: ["TTL 1h", "17 GETs/s average, 10k/s at burst"],
-        breaks:
-          "If it is down, the choice is fail closed on push and email while still writing the in-app record, or accept duplicate sends. Failing closed and replaying afterwards is the right way round for a broker.",
-        choice: {
-          pick: "Redis with a 1h TTL keyed on {alert_id, arm_epoch}",
-          instead: "A uniqueness constraint in the transactional store, or no dedupe at all.",
-          decider:
-            "The key is worthless an hour after the fire and is read on every dispatch, including a 10k/s burst. That is cache-shaped state; a durable unique index buys persistence nobody needs and adds a write to the fire path.",
-          flips:
-            "When the audit obligation extends to proving no duplicate was ever sent, where the suppression record itself becomes evidence and belongs in the durable audit rather than a cache.",
-        },
-      },
-    },
-    {
       id: "notify",
       label: "Notification service",
       sub: "reused, see Q7 for fan-out",
       kind: "service",
-      col: 0,
-      row: 7,
+      col: 3,
+      row: 3,
       detail: {
         what: "The existing per-channel delivery tier: push, email and SMS lanes with their own worker pools, retries and provider rate limits. Designed in question 7, consumed here.",
         why: "Ten million rules produce roughly 17 notifications a second in normal markets, which is an order of magnitude under what a general notification system is already built for. Redesigning it here is the classic way to answer the wrong question.",
@@ -320,8 +297,8 @@ export const PRICE_ALERTS: Diagram = {
       label: "Fired-alert audit",
       sub: "columnar archive, 7 years",
       kind: "database",
-      col: 1,
-      row: 7,
+      col: 3,
+      row: 2,
       detail: {
         what: "An append-only record per fire: (alert_id, user_id, instrument_id, trigger_price, rule_snapshot, exchange_seq_no, triggered_at, delivered_at), partitioned by date.",
         why: "A regulator asks whether an alert correctly fired or correctly did not. The exchange sequence number lets them cross-reference the exchange's own feed, and the rule snapshot proves what the rule said then rather than what it says now.",
@@ -345,8 +322,6 @@ export const PRICE_ALERTS: Diagram = {
       from: "exchanges",
       to: "gateway",
       label: "two vendor feeds",
-      fromSide: "left",
-      toSide: "right",
       detail: {
         what: "Raw market data arriving from the primary and secondary vendors, each carrying the exchange's own sequence number.",
         why: "Two feeds exist so a disconnect on one does not blind the system, and so a wrong price on one can be caught by comparison rather than believed. The cost is that everything after this point has to reconcile them.",
@@ -402,8 +377,6 @@ export const PRICE_ALERTS: Diagram = {
       from: "evaluator",
       to: "windowed",
       label: "full scan, no index",
-      fromSide: "right",
-      toSide: "right",
       offset: 60,
       detail: {
         what: "The same tick passed over every windowed rule on the instrument, because none of them has a fixed threshold to look up.",
@@ -418,8 +391,6 @@ export const PRICE_ALERTS: Diagram = {
       from: "threshold-idx",
       to: "fired-stream",
       label: "crossing fires",
-      fromSide: "left",
-      toSide: "left",
       offset: 60,
       detail: {
         what: "A matched rule that passed prev < value <= now, emitted as a fired event carrying its alert_id, arm_epoch and the triggering price and sequence number.",
@@ -461,7 +432,6 @@ export const PRICE_ALERTS: Diagram = {
       to: "threshold-idx",
       label: "create / delete / re-arm",
       dashed: true,
-      toSide: "right",
       detail: {
         what: "Rule changes applied incrementally to the shard's in-memory index and windowed list.",
         why: "Because the topic is keyed by instrument_id, a new AAPL alert arrives at the shard already consuming AAPL ticks with no routing decision to make. Same key, same partition, no coordination.",
@@ -485,28 +455,11 @@ export const PRICE_ALERTS: Diagram = {
       },
     },
     {
-      id: "e11",
-      from: "dispatcher",
-      to: "idem",
-      label: "idem:{alert_id}:{epoch}",
-      fromSide: "right",
-      toSide: "left",
-      detail: {
-        what: "A check-and-set against the dedupe key before anything user-visible happens, dropping on hit.",
-        why: "A pipeline that is at-least-once has to collapse duplicates somewhere, and this is the last point before an action that cannot be recalled. One GET is a cheap price for never double-paging a user.",
-        numbers: ["one GET per fire", "TTL 1h"],
-        breaks:
-          "It must be a conditional insert rather than a read followed by a write, or two replayed events arriving in parallel both miss and both send.",
-      },
-    },
-    {
       id: "e12",
       from: "dispatcher",
       to: "rule-store",
       label: "ARMED to FIRED",
       dashed: true,
-      fromSide: "right",
-      toSide: "right",
       offset: 110,
       detail: {
         what: "The durable state transition for the rule, and on a cooldown rule the later re-arm that increments arm_epoch.",
@@ -534,8 +487,6 @@ export const PRICE_ALERTS: Diagram = {
       from: "dispatcher",
       to: "audit",
       label: "fire + exchange_seq",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The compliance record written for every fire, including the rule as it stood at trigger time and the exchange sequence number that caused it.",
         why: "A broker has to be able to reconstruct the decision years later against the exchange's own audit feed. Recording the rule snapshot rather than a rule id is what makes that possible after the user edits or deletes the alert.",
